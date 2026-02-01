@@ -3,10 +3,12 @@ from __future__ import annotations
 import sys
 import typer
 
+from . import basin as basin_cmd
 from . import periscope as periscope_cmd
 
 app = typer.Typer(help="Duckstring CLI", no_args_is_help=True, add_completion=True)
 
+app.add_typer(basin_cmd.app, name="basin", invoke_without_command=True)
 app.add_typer(periscope_cmd.app, name="periscope", invoke_without_command=True)
 
 
