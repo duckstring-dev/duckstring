@@ -14,8 +14,8 @@ app = typer.Typer(
     help="Inspect a catchment parquet table.",
     add_completion=False,
     invoke_without_command=True,
+    context_settings={"allow_interspersed_args": True},
 )
-
 _VERSION_DIR_RE = re.compile(r"^(?P<pond>[A-Za-z0-9_\-]+)@(?P<maj>\d+)\.(?P<min>\d+)\.(?P<pat>\d+)$")
 _SEMVER_DIR_RE = re.compile(r"^(?P<maj>\d+)\.(?P<min>\d+)\.(?P<pat>\d+)$")
 
@@ -213,22 +213,40 @@ def _iter_pond_names(root_dir: Path) -> Iterable[str]:
             continue
         m = _VERSION_DIR_RE.match(entry.name)
         if m:
-            pond = m.group("pond")
-            out.add(pond)
-            out.add(f"{pond}@{m.group('maj')}.{m.group('min')}.{m.group('pat')}")
+            out.add(m.group("pond"))
             continue
         if _SEMVER_DIR_RE.match(entry.name):
             continue
 
         pond = entry.name
         out.add(pond)
-        for vdir in entry.iterdir():
+
+    return sorted(out)
+
+
+def _iter_pond_versions(root_dir: Path, pond: str) -> Iterable[str]:
+    data_dir = root_dir / "data"
+    if not data_dir.exists():
+        return []
+
+    out: set[str] = set()
+    pond_dir = data_dir / pond
+    if pond_dir.exists():
+        for vdir in pond_dir.iterdir():
             if not vdir.is_dir():
                 continue
-            m2 = _SEMVER_DIR_RE.match(vdir.name)
-            if not m2:
+            m = _SEMVER_DIR_RE.match(vdir.name)
+            if not m:
                 continue
-            out.add(f"{pond}@{m2.group('maj')}.{m2.group('min')}.{m2.group('pat')}")
+            out.add(f"{m.group('maj')}.{m.group('min')}.{m.group('pat')}")
+
+    for entry in data_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        m2 = _VERSION_DIR_RE.match(entry.name)
+        if not m2 or m2.group("pond") != pond:
+            continue
+        out.add(f"{m2.group('maj')}.{m2.group('min')}.{m2.group('pat')}")
 
     return sorted(out)
 
@@ -245,13 +263,27 @@ def _complete_ponds(ctx: typer.Context, param: typer.CallbackParam, incomplete: 
     return [c for c in candidates if c.startswith(incomplete)]
 
 
+def _complete_versions(ctx: typer.Context, param: typer.CallbackParam, incomplete: str) -> list[str]:
+    pond = _extract_pond_arg(ctx)
+    if not pond:
+        return []
+    root_dir = _infer_root_dir(Path.cwd().resolve())
+    candidates = ["latest", *_iter_pond_versions(root_dir, pond)]
+    return [c for c in candidates if c.startswith(incomplete)]
+
+
 def _complete_tables(ctx: typer.Context, param: typer.CallbackParam, incomplete: str) -> list[str]:
-    pond_ref = _extract_pond_arg(ctx)
-    if not pond_ref:
+    pond_name = _extract_pond_arg(ctx)
+    if not pond_name:
         return []
 
     try:
-        pond_name, prefix = SemVer.parse_prefix(pond_ref)
+        version_prefix = ctx.params.get("version")
+        prefix: tuple[int, ...] | None
+        if version_prefix:
+            _, prefix = SemVer.parse_prefix(f"{pond_name}@{version_prefix}")
+        else:
+            prefix = None
         pond_dir, _ = _resolve_pond_dir(_infer_root_dir(Path.cwd().resolve()), pond_name, prefix)
     except Exception:
         return []
@@ -263,15 +295,33 @@ def _complete_tables(ctx: typer.Context, param: typer.CallbackParam, incomplete:
 def periscope(
     pond: str = typer.Argument(
         ...,
-        help="Pond ref: base, base@0, base@0.1, or base@0.1.0",
+        help="Pond name (e.g. base). Use --version to select a specific version.",
         shell_complete=_complete_ponds,
+    ),
+    version: Optional[str] = typer.Option(
+        None,
+        "--version",
+        "-v",
+        help="Version prefix: 0, 0.1, or 0.1.0 (defaults to latest). Use 'latest' to force newest.",
+        shell_complete=_complete_versions,
     ),
     table: Optional[str] = typer.Argument(
         None,
         help="Table name (omit to list available tables)",
         shell_complete=_complete_tables,
     ),
-    limit: int = typer.Option(20, help="Number of rows to show (default: 20)"),
+    list_versions: bool = typer.Option(
+        False,
+        "--list-versions",
+        help="List available versions for the pond and exit (shorthand: -v with no value).",
+        is_eager=True,
+    ),
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        "-l",
+        help="Number of rows to show (default: 20). Only valid when a table is provided.",
+    ),
     no_head: bool = typer.Option(False, "--no-head", help="Do not print row preview"),
 ) -> None:
     """
@@ -280,14 +330,47 @@ def periscope(
     repo_root = Path.cwd().resolve()
     root_dir = _infer_root_dir(repo_root)
 
+    if "@" in pond:
+        typer.echo("Error: use --version instead of pond@version.", err=True)
+        raise typer.Exit(code=2)
+
     try:
-        pond_name, prefix = SemVer.parse_prefix(pond)
+        pond_name = pond.strip()
+        if not pond_name:
+            raise ValueError("Pond must be non-empty.")
+        if pond_name.startswith("-"):
+            raise ValueError("Pond must not start with '-'.")
+        prefix: tuple[int, ...] | None
+        if version and version.lower() != "latest":
+            _, prefix = SemVer.parse_prefix(f"{pond_name}@{version}")
+        else:
+            prefix = None
         table_name = table.strip() if table else None
         if table_name is not None and not table_name:
             raise ValueError("Table must be non-empty.")
+        if table_name is not None and table_name.startswith("-"):
+            raise ValueError("Table must not start with '-'.")
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
+
+    if list_versions:
+        if table_name is not None:
+            typer.echo("Error: --list-versions cannot be used with a table name.", err=True)
+            raise typer.Exit(code=2)
+        root_dir = _infer_root_dir(Path.cwd().resolve())
+        versions = _iter_pond_versions(root_dir, pond_name)
+        if versions:
+            typer.echo(f"Available versions for {pond_name}:")
+            for v in versions:
+                typer.echo(f"  - {v}")
+        else:
+            typer.echo(f"No versions found for {pond_name}.")
+        return
+
+    if limit is not None and table_name is None:
+        typer.echo("Error: --limit/-l requires a table name.", err=True)
+        raise typer.Exit(code=2)
 
     try:
         pond_dir, resolved_version = _resolve_pond_dir(root_dir, pond_name, prefix)
@@ -332,7 +415,7 @@ def periscope(
             typer.echo(f"  - {col}: {typ}")
 
         if not no_head:
-            lim = max(0, int(limit))
+            lim = 20 if limit is None else max(0, int(limit))
             if lim == 0:
                 return
             df = con.execute(f"SELECT * FROM rel LIMIT {lim}").df()

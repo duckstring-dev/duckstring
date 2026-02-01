@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from .cli import app
+from .cli import main as cli_main
 
 
 def main() -> None:
-    app()
+    cli_main()
 
 
 if __name__ == "__main__":

@@ -52,8 +52,8 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [project.scripts]
-duckstring = "duckstring.cli:app"
-ds = "duckstring.cli:app"
+duckstring = "duckstring.cli:main"
+ds = "duckstring.cli:main"
 
 [tool.ruff]
 line-length = 128
