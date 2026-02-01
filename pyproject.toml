@@ -23,6 +23,7 @@ dependencies = [
 
   # UX / diagnostics
   "rich>=13.7",
+  "typer>=0.12",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +50,10 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.scripts]
+duckstring = "duckstring.cli:app"
+ds = "duckstring.cli:app"
 
 [tool.ruff]
 line-length = 128
