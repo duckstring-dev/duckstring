@@ -738,6 +738,7 @@ class Catchment:
     def __init__(self, *, root_dir: str = ".duckstring"):
         self.root_dir = root_dir
         self.ponds: Dict[str, Any] = {}
+        self.pond_sources: List[Dict[str, Any]] = []
 
         self.species: Dict[str, Species] = {}
         self.default_species: Optional[str] = None
@@ -775,6 +776,7 @@ class Catchment:
             "spec_version": self.SPEC_VERSION,
             "root_dir": self.root_dir,
             "ponds": dict(self.ponds),
+            "pond_sources": [dict(entry) for entry in self.pond_sources],
             "species": {k: asdict(v) for k, v in self.species.items()},
             "default_species": self.default_species,
             "pond_species": dict(self.pond_species),
@@ -789,6 +791,7 @@ class Catchment:
 
         c = Catchment(root_dir=str(d.get("root_dir", "catchment")))
         c.ponds = dict(d.get("ponds", {}))
+        c.pond_sources = [dict(entry) for entry in list(d.get("pond_sources", [])) if isinstance(entry, dict)]
         c.species = {k: Species(**v) for k, v in dict(d.get("species", {})).items()}
         c.default_species = d.get("default_species")
         c.pond_species = dict(d.get("pond_species", {}))
