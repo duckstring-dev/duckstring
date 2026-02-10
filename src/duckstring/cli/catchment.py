@@ -224,7 +224,14 @@ def _complete_pond_names(ctx: typer.Context, param: typer.CallbackParam, incompl
     catchment = _load_for_completion(ctx)
     if catchment is None:
         return []
-    return sorted([name for name in catchment.ponds if name.startswith(incomplete)])
+    names: set[str] = set(catchment.ponds.keys())
+    for source in catchment.pond_sources:
+        if not isinstance(source, dict):
+            continue
+        pond = source.get("pond")
+        if isinstance(pond, str) and pond:
+            names.add(pond)
+    return sorted([name for name in names if name.startswith(incomplete)])
 
 
 @app.command()
@@ -521,33 +528,145 @@ def ponds_list_cmd(
         typer.echo("Pond sources: <none>")
 
 
-def _set_pond_entry(
-    catchment: Catchment,
+def _build_source_from_direct_args(
     *,
-    name: str,
-    pond_path: str,
-    version: str,
-    overwrite: bool,
-) -> None:
-    existing = catchment.ponds.get(name)
-    if not version.strip():
-        raise ValueError("version must be non-empty.")
-    if not _SEMVER_RE.match(version):
-        raise ValueError("version must use x.y.z semver format.")
-    if existing is None:
-        catchment.ponds[name] = {version: pond_path}
-        return
-    if isinstance(existing, str):
-        if not overwrite:
-            raise ValueError(f"Pond {name!r} already exists as an unversioned entry. Use --overwrite to replace it.")
-        catchment.ponds[name] = {version: pond_path}
-        return
-    if isinstance(existing, dict):
-        if version in existing and not overwrite and existing[version] != pond_path:
-            raise ValueError(f"Pond {name!r}@{version} already exists with a different path.")
-        existing[version] = pond_path
-        return
-    raise ValueError(f"Unsupported existing pond entry type for {name!r}: {type(existing).__name__}")
+    legacy_name: Optional[str],
+    source_type: Optional[str],
+    scope: Optional[str],
+    pond: Optional[str],
+    version: Optional[str],
+    pond_path: Optional[str],
+    root: Optional[str],
+    repo: Optional[str],
+    ref_type: Optional[str],
+    ref: Optional[str],
+    ref_pattern: Optional[str],
+    repo_structure: str,
+) -> dict[str, Any]:
+    selected_source = (source_type or "").strip().lower() or None
+    selected_scope = (scope or "").strip().lower() or None
+    pond_name = (pond or legacy_name or "").strip() or None
+    version_value = (version or "").strip() or None
+    path_value = (pond_path or "").strip() or None
+    root_value = (root or "").strip() or None
+    repo_value = (repo or "").strip() or None
+    ref_type_value = (ref_type or "").strip().lower() or None
+    ref_value = (ref or "").strip() or None
+    ref_pattern_value = (ref_pattern or "").strip() or None
+    repo_structure_value = (repo_structure or "versioned").strip().lower()
+
+    # Backwards-compatible shorthand: `ponds add <name> -p <path> -v <version>`
+    if selected_source is None and selected_scope is None and pond_name and path_value and version_value:
+        selected_source = "local"
+        selected_scope = "single"
+
+    if selected_source not in ("local", "git"):
+        raise ValueError("Provide --source-type as 'local' or 'git'.")
+    if selected_scope not in ("single", "catalog"):
+        raise ValueError("Provide --scope as 'single' or 'catalog'.")
+
+    if selected_source == "local" and selected_scope == "single":
+        if not pond_name:
+            raise ValueError("local/single requires --pond (or legacy pond name argument).")
+        if not version_value:
+            raise ValueError("local/single requires --version/-v.")
+        if not _SEMVER_RE.match(version_value):
+            raise ValueError("version must use x.y.z semver format.")
+        if not path_value:
+            raise ValueError("local/single requires --path/-p.")
+        return {
+            "type": "local",
+            "structure": "single",
+            "pond": pond_name,
+            "version": version_value,
+            "path": path_value,
+            "entrypoint": "pond.py",
+        }
+
+    if selected_source == "local" and selected_scope == "catalog":
+        if root_value is None:
+            root_value = "./ponds" if (Path.cwd() / "ponds").exists() else None
+        if not root_value:
+            raise ValueError("local/catalog requires --root (or a ./ponds directory).")
+        return {
+            "type": "local",
+            "structure": "catalog",
+            "root": root_value,
+            "entrypoint": "pond.py",
+        }
+
+    if selected_source == "git" and selected_scope == "single":
+        if not pond_name:
+            raise ValueError("git/single requires --pond.")
+        if not version_value:
+            raise ValueError("git/single requires --version/-v.")
+        if not _SEMVER_RE.match(version_value):
+            raise ValueError("version must use x.y.z semver format.")
+        if not repo_value:
+            raise ValueError("git/single requires --repo.")
+        if not _is_valid_url(repo_value):
+            raise ValueError("git/single requires a valid --repo URL.")
+        if ref_type_value is None:
+            ref_type_value = "branch"
+        if ref_type_value not in ("branch", "tag", "commit"):
+            raise ValueError("git/single --ref-type must be branch, tag, or commit.")
+        if not ref_value:
+            if ref_type_value == "branch":
+                ref_value = f"release/{version_value}"
+            elif ref_type_value == "tag":
+                ref_value = version_value
+        if not ref_value:
+            raise ValueError("git/single requires --ref for ref_type=commit.")
+        return {
+            "type": "git",
+            "structure": "single",
+            "repo": repo_value,
+            "ref_type": ref_type_value,
+            "ref": ref_value,
+            "pond": pond_name,
+            "version": version_value,
+            "entrypoint": "pond.py",
+        }
+
+    # git/catalog
+    if not repo_value:
+        raise ValueError("git/catalog requires --repo.")
+    if not _is_valid_url(repo_value):
+        raise ValueError("git/catalog requires a valid --repo URL.")
+    if repo_structure_value not in ("versioned", "monorepo"):
+        raise ValueError("--repo-structure must be versioned or monorepo.")
+
+    if repo_structure_value == "versioned":
+        if not pond_name:
+            raise ValueError("git/catalog versioned requires --pond.")
+        if ref_type_value is None:
+            ref_type_value = "branch"
+        if ref_type_value not in ("branch", "tag"):
+            raise ValueError("git/catalog versioned --ref-type must be branch or tag.")
+        if not ref_pattern_value:
+            if ref_value:
+                ref_pattern_value = ref_value
+            else:
+                ref_pattern_value = "release/{version}" if ref_type_value == "branch" else "{version}"
+    else:
+        if ref_type_value is None:
+            ref_type_value = "branch"
+        if ref_type_value not in ("branch", "tag", "commit"):
+            raise ValueError("git/catalog monorepo --ref-type must be branch, tag, or commit.")
+        if not ref_pattern_value:
+            ref_pattern_value = ref_value or "main"
+        pond_name = None
+
+    return {
+        "type": "git",
+        "structure": "catalog",
+        "repo_structure": repo_structure_value,
+        "repo": repo_value,
+        "ref_type": ref_type_value,
+        "pond": pond_name,
+        "ref_pattern": ref_pattern_value,
+        "entrypoint": "pond.py",
+    }
 
 
 def _prompt_choice(
@@ -646,7 +765,220 @@ def _preview_local_catalog(catchment: Catchment, root_value: str) -> list[str]:
     return discovered
 
 
-def _interactive_add(catchment: Catchment) -> str:
+def _source_signature(source: dict[str, Any]) -> str:
+    return json.dumps(source, sort_keys=True, separators=(",", ":"))
+
+
+def _source_label(source: dict[str, Any]) -> str:
+    source_type = source.get("type")
+    structure = source.get("structure")
+    if source_type == "local" and structure == "single":
+        return f"local/single {source.get('pond')}@{source.get('version')}"
+    if source_type == "local" and structure == "catalog":
+        return f"local/catalog root={source.get('root')}"
+    if source_type == "git" and structure == "single":
+        return f"git/single {source.get('pond')}@{source.get('version')}"
+    if source_type == "git" and structure == "catalog":
+        repo_structure = source.get("repo_structure", "versioned")
+        if repo_structure == "versioned":
+            return f"git/catalog versioned pond={source.get('pond')}"
+        return f"git/catalog monorepo repo={source.get('repo')}"
+    return f"{source_type}/{structure}"
+
+
+def _single_key(source: dict[str, Any]) -> Optional[tuple[str, str]]:
+    source_type = source.get("type")
+    structure = source.get("structure")
+    if structure != "single":
+        return None
+    pond = source.get("pond")
+    version = source.get("version")
+    if isinstance(pond, str) and isinstance(version, str) and pond.strip() and version.strip():
+        return pond.strip(), version.strip()
+    return None
+
+
+def _catalog_pond_names(catchment: Catchment, source: dict[str, Any]) -> set[str]:
+    source_type = source.get("type")
+    structure = source.get("structure")
+    if structure != "catalog":
+        return set()
+    if source_type == "git":
+        if source.get("repo_structure", "versioned") == "versioned":
+            pond = source.get("pond")
+            if isinstance(pond, str) and pond.strip():
+                return {pond.strip()}
+        return set()
+    if source_type == "local":
+        root = source.get("root")
+        if isinstance(root, str) and root.strip():
+            discovered = _preview_local_catalog(catchment, root)
+            return {item.split("@", 1)[0] for item in discovered if "@" in item}
+    return set()
+
+
+def _has_monorepo_source(sources: list[dict[str, Any]]) -> bool:
+    for source in sources:
+        if source.get("type") == "git" and source.get("structure") == "catalog":
+            if source.get("repo_structure", "versioned") == "monorepo":
+                return True
+    return False
+
+
+def _catalog_versions(catchment: Catchment, source: dict[str, Any]) -> set[str]:
+    if source.get("type") == "local" and source.get("structure") == "catalog":
+        root = source.get("root")
+        if isinstance(root, str) and root.strip():
+            return set(_preview_local_catalog(catchment, root))
+    return set()
+
+
+def _analyze_new_source(catchment: Catchment, new_source: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    conflicts: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    sources = [entry for entry in catchment.pond_sources if isinstance(entry, dict)]
+
+    new_sig = _source_signature(new_source)
+    duplicate_idxs = [idx for idx, existing in enumerate(sources) if _source_signature(existing) == new_sig]
+    if duplicate_idxs:
+        conflicts.append(
+            {
+                "kind": "duplicate",
+                "message": "Source already exists.",
+                "indexes": duplicate_idxs,
+            }
+        )
+
+    existing_single_map: dict[tuple[str, str], list[int]] = {}
+    for idx, source in enumerate(sources):
+        key = _single_key(source)
+        if key is not None:
+            existing_single_map.setdefault(key, []).append(idx)
+
+    new_single = _single_key(new_source)
+    if new_single is not None and new_single in existing_single_map:
+        conflicts.append(
+            {
+                "kind": "single_key",
+                "message": f"Single source for {new_single[0]}@{new_single[1]} already exists.",
+                "indexes": existing_single_map[new_single],
+            }
+        )
+
+    existing_catalog_names: dict[str, list[str]] = {}
+    existing_catalog_indexes: dict[str, list[int]] = {}
+    for idx, source in enumerate(sources):
+        try:
+            names = _catalog_pond_names(catchment, source)
+        except Exception as exc:
+            warnings.append({"title": "Catalog inspection warning", "message": f"Could not inspect pond_sources[{idx}]: {exc}"})
+            continue
+        for pond in sorted(names):
+            existing_catalog_names.setdefault(pond, []).append(f"pond_sources[{idx}]")
+            existing_catalog_indexes.setdefault(pond, []).append(idx)
+
+    try:
+        new_catalog_names = _catalog_pond_names(catchment, new_source)
+    except Exception as exc:
+        conflicts.append({"kind": "invalid_catalog", "message": f"Could not inspect new catalog source: {exc}", "indexes": []})
+        return conflicts, warnings
+
+    if new_single is not None:
+        pond_name = new_single[0]
+        if pond_name in existing_catalog_names:
+            idxs = sorted(set(existing_catalog_indexes.get(pond_name, [])))
+            warnings.append(
+                {
+                    "title": "Single source may override catalog entries",
+                    "sources": [sources[i] for i in idxs],
+                    "ponds": [pond_name],
+                    "versions": [f"{pond_name}@{new_single[1]}"],
+                }
+            )
+    elif new_source.get("structure") == "catalog":
+        overlapping_ponds = sorted([pond for pond in new_catalog_names if pond in existing_catalog_names])
+        if overlapping_ponds:
+            idxs: set[int] = set()
+            for pond in overlapping_ponds:
+                for idx in existing_catalog_indexes.get(pond, []):
+                    idxs.add(idx)
+            new_versions = _catalog_versions(catchment, new_source)
+            warnings.append(
+                {
+                    "title": "Catalog contains potentially conflicting pond sources",
+                    "sources": [sources[i] for i in sorted(idxs)],
+                    "ponds": overlapping_ponds,
+                    "versions": sorted([v for v in new_versions if v.split("@", 1)[0] in overlapping_ponds]),
+                }
+            )
+        for pond in sorted(new_catalog_names):
+            matching_singles = sorted(
+                [f"{p}@{v}" for (p, v) in existing_single_map.keys() if p == pond]
+            )
+            if matching_singles:
+                warnings.append(
+                    {
+                        "title": "Catalog includes pond with single-source overrides",
+                        "ponds": [pond],
+                        "versions": matching_singles,
+                    }
+                )
+
+    combined_sources = sources + [new_source]
+    if _has_monorepo_source(combined_sources):
+        warnings.append(
+            {
+                "title": "Monorepo catalog warning",
+                "message": "A git monorepo source exists; overlaps can only be detected during basin hydration.",
+            }
+        )
+
+    return conflicts, warnings
+
+
+def _print_warning(warning: dict[str, Any]) -> None:
+    title = warning.get("title", "Warning")
+    typer.echo(f"Warning: {title}", err=True)
+    message = warning.get("message")
+    if isinstance(message, str) and message.strip():
+        typer.echo(f"  {message}", err=True)
+    sources = warning.get("sources")
+    if isinstance(sources, list) and sources:
+        typer.echo("  Sources:", err=True)
+        for source in sources:
+            typer.echo("    ---", err=True)
+            typer.echo(json.dumps(source, indent=6, sort_keys=True), err=True)
+            typer.echo("    ---", err=True)
+    ponds = warning.get("ponds")
+    if isinstance(ponds, list) and ponds:
+        typer.echo("  Ponds:", err=True)
+        for pond in ponds:
+            typer.echo(f"    {pond}", err=True)
+    versions = warning.get("versions")
+    if isinstance(versions, list) and versions:
+        typer.echo("  Versions:", err=True)
+        for version in versions:
+            typer.echo(f"    {version}", err=True)
+
+
+def _resolve_conflicts(catchment: Catchment, conflicts: list[dict[str, Any]]) -> None:
+    if not conflicts:
+        return
+    typer.echo("Conflicts detected with existing pond sources:", err=True)
+    remove_indexes: set[int] = set()
+    for conflict in conflicts:
+        typer.echo(f"  - {conflict.get('message', 'Conflict')}", err=True)
+        for idx in conflict.get("indexes", []):
+            remove_indexes.add(int(idx))
+    if not _prompt_bool("Overwrite conflicting source(s)", default=False):
+        raise ValueError("Cancelled due to conflicts.")
+    if remove_indexes:
+        catchment.pond_sources = [
+            src for idx, src in enumerate(catchment.pond_sources) if idx not in remove_indexes
+        ]
+
+
+def _interactive_add(catchment: Catchment) -> tuple[str, dict[str, Any]]:
     typer.echo("-- Ponds: Interactive Add --")
     typer.echo("This flow writes either explicit pond entries or pond source definitions to catchment.json.")
 
@@ -699,22 +1031,15 @@ def _interactive_add(catchment: Catchment) -> str:
                 f"Note: path implies version {resolved_dir.name!r}; using explicit version {version!r}.",
             )
 
-        if not _prompt_bool(
-            f"Confirm write explicit entry {pond_name}@{version} -> {pond_dir}",
-            default=True,
-        ):
-            raise ValueError("Cancelled by user.")
-        catchment.pond_sources.append(
-            {
-                "type": "local",
-                "structure": "single",
-                "pond": pond_name.strip(),
-                "version": version.strip(),
-                "path": pond_dir.strip(),
-                "entrypoint": "pond.py",
-            }
-        )
-        return f"Added local single source for {pond_name}@{version}"
+        source = {
+            "type": "local",
+            "structure": "single",
+            "pond": pond_name.strip(),
+            "version": version.strip(),
+            "path": pond_dir.strip(),
+            "entrypoint": "pond.py",
+        }
+        return f"Add local single source for {pond_name}@{version}", source
 
     if source_type == "local" and scope == "catalog":
         typer.echo("")
@@ -730,20 +1055,13 @@ def _interactive_add(catchment: Catchment) -> str:
                 typer.echo(f"  - {item}")
         else:
             typer.echo("  <none>")
-        if not _prompt_bool(
-            f"Confirm write local/catalog source root={root_value!r}",
-            default=True,
-        ):
-            raise ValueError("Cancelled by user.")
-        catchment.pond_sources.append(
-            {
-                "type": "local",
-                "structure": "catalog",
-                "root": root_value,
-                "entrypoint": "pond.py",
-            }
-        )
-        return f"Added local catalog source root={root_value!r}"
+        source = {
+            "type": "local",
+            "structure": "catalog",
+            "root": root_value,
+            "entrypoint": "pond.py",
+        }
+        return f"Add local catalog source root={root_value!r}", source
 
     if source_type == "git" and scope == "single":
         typer.echo("")
@@ -757,31 +1075,24 @@ def _interactive_add(catchment: Catchment) -> str:
             "branch",
             aliases={"b": "branch", "t": "tag", "c": "commit"},
         )
-        repo = _prompt_non_empty("Git repo URL")
+        repo = _prompt_url("Git repo URL")
         ref_default = None
         if ref_type == "branch":
             ref_default = f"release/{version}"
         elif ref_type == "tag":
             ref_default = version
         ref = _prompt_non_empty("Git ref value", default=ref_default)
-        if not _prompt_bool(
-            f"Confirm write git/single source for {pond_name}@{version} ({ref_type}:{ref})",
-            default=True,
-        ):
-            raise ValueError("Cancelled by user.")
-        catchment.pond_sources.append(
-            {
-                "type": "git",
-                "structure": "single",
-                "repo": repo,
-                "ref_type": ref_type,
-                "ref": ref,
-                "pond": pond_name,
-                "version": version,
-                "entrypoint": "pond.py",
-            }
-        )
-        return f"Added git single source for {pond_name}@{version}"
+        source = {
+            "type": "git",
+            "structure": "single",
+            "repo": repo,
+            "ref_type": ref_type,
+            "ref": ref,
+            "pond": pond_name,
+            "version": version,
+            "entrypoint": "pond.py",
+        }
+        return f"Add git single source for {pond_name}@{version}", source
 
     repo_structure = _prompt_choice(
         """
@@ -818,45 +1129,63 @@ def _interactive_add(catchment: Catchment) -> str:
         ref_pattern = _prompt_non_empty("Git ref pattern", default=pattern_default)
         repo = _prompt_url("Git repo URL")
         pond_name = _prompt_non_empty("Pond name")
-    if repo_structure == "versioned":
-        confirm_message = (
-            f"Confirm write git/catalog source structure=versioned repo={repo!r} "
-            f"pond={pond_name!r} ref_type={ref_type} pattern={ref_pattern!r}"
-        )
-    else:
-        confirm_message = (
-            f"Confirm write git/catalog source structure=monorepo repo={repo!r} "
-            f"ref_type={ref_type} ref={ref_pattern!r}"
-        )
-    if not _prompt_bool(confirm_message, default=True):
-        raise ValueError("Cancelled by user.")
-    catchment.pond_sources.append(
-        {
-            "type": "git",
-            "structure": "catalog",
-            "repo_structure": repo_structure,
-            "repo": repo,
-            "ref_type": ref_type,
-            "pond": pond_name,
-            "ref_pattern": ref_pattern,
-            "entrypoint": "pond.py",
-        }
-    )
-    return f"Added git catalog source repo={repo!r}"
+    source = {
+        "type": "git",
+        "structure": "catalog",
+        "repo_structure": repo_structure,
+        "repo": repo,
+        "ref_type": ref_type,
+        "pond": pond_name,
+        "ref_pattern": ref_pattern,
+        "entrypoint": "pond.py",
+    }
+    return f"Add git catalog source repo={repo!r}", source
 
 
 @ponds_app.command("add")
 def ponds_add_cmd(
-    name: Optional[str] = typer.Argument(None, help="Pond name (required for non-interactive mode)."),
+    name: Optional[str] = typer.Argument(None, help="Legacy pond name argument (maps to --pond)."),
+    source_type: Optional[str] = typer.Option(
+        None,
+        "--source-type",
+        help="Source type for direct mode: local or git.",
+    ),
+    scope: Optional[str] = typer.Option(
+        None,
+        "--scope",
+        help="Scope for direct mode: single or catalog.",
+    ),
+    pond: Optional[str] = typer.Option(
+        None,
+        "--pond",
+        help="Pond name (required for single sources; for git/versioned catalog).",
+    ),
     pond_path: Optional[str] = typer.Option(None, "--path", "-p", help="Local pond path."),
+    root: Optional[str] = typer.Option(None, "--root", help="Local catalog root path."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Required pond version."),
+    repo: Optional[str] = typer.Option(None, "--repo", help="Git repository URL."),
+    repo_structure: str = typer.Option(
+        "versioned",
+        "--repo-structure",
+        help="Git catalog repository structure: versioned or monorepo.",
+    ),
+    ref_type: Optional[str] = typer.Option(
+        None,
+        "--ref-type",
+        help="Git ref type. single: branch/tag/commit; versioned catalog: branch/tag; monorepo catalog: branch/tag/commit.",
+    ),
+    ref: Optional[str] = typer.Option(None, "--ref", help="Git ref value (single sources)."),
+    ref_pattern: Optional[str] = typer.Option(
+        None,
+        "--ref-pattern",
+        help="Git ref pattern or fixed ref value for monorepo catalogs.",
+    ),
     interactive: bool = typer.Option(
         False,
         "--interactive",
         "-i",
         help="Guided prompts for local/git and single/catalog pond source setup.",
     ),
-    overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite existing entry if present."),
     path: Path = typer.Option(
         Path("catchment.json"),
         "--file",
@@ -870,33 +1199,49 @@ def ponds_add_cmd(
 
     if interactive:
         try:
-            summary = _interactive_add(catchment)
+            summary, source = _interactive_add(catchment)
         except Exception as exc:
             typer.echo(f"Interactive add failed: {exc}", err=True)
             raise typer.Exit(code=2) from exc
-        _save_catchment(catchment, resolved)
-        typer.echo(f"{summary} in {resolved}")
-        return
-
-    if not name or pond_path is None or version is None:
-        typer.echo("Non-interactive add requires <name>, --path/-p, and --version/-v.", err=True)
-        raise typer.Exit(code=2)
+    else:
+        try:
+            source = _build_source_from_direct_args(
+                legacy_name=name,
+                source_type=source_type,
+                scope=scope,
+                pond=pond,
+                version=version,
+                pond_path=pond_path,
+                root=root,
+                repo=repo,
+                ref_type=ref_type,
+                ref=ref,
+                ref_pattern=ref_pattern,
+                repo_structure=repo_structure,
+            )
+            summary = f"Add pond source {_source_label(source)!r}"
+        except Exception as exc:
+            typer.echo(f"Failed to add pond source: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
 
     try:
-        _set_pond_entry(
-            catchment,
-            name=name.strip(),
-            pond_path=pond_path.strip(),
-            version=version.strip(),
-            overwrite=overwrite,
-        )
+        conflicts, warnings = _analyze_new_source(catchment, source)
+        if conflicts:
+            _resolve_conflicts(catchment, conflicts)
+            conflicts, warnings = _analyze_new_source(catchment, source)
+            if conflicts:
+                raise ValueError("Conflicts remain after overwrite attempt.")
+        for warning in warnings:
+            _print_warning(warning)
+        if not _prompt_bool(f"Confirm: {summary}", default=True):
+            raise ValueError("Cancelled by user.")
     except Exception as exc:
-        typer.echo(f"Failed to add pond entry: {exc}", err=True)
+        typer.echo(f"Failed to add pond source: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
+    catchment.pond_sources.append(source)
     _save_catchment(catchment, resolved)
-    label = f"{name}@{version}"
-    typer.echo(f"Added pond {label!r} to {resolved}")
+    typer.echo(f"Added pond source {_source_label(source)!r} to {resolved}")
 
 
 @ponds_app.command("remove")
@@ -913,22 +1258,32 @@ def ponds_remove_cmd(
 ) -> None:
     resolved = _resolve_path(path)
     catchment = _load_catchment(resolved)
-    if name not in catchment.ponds:
-        typer.echo(f"Unknown pond {name!r}.", err=True)
-        raise typer.Exit(code=2)
+    removed_sources = 0
+    remaining: list[dict[str, Any]] = []
+    for source in catchment.pond_sources:
+        if not isinstance(source, dict):
+            remaining.append(source)
+            continue
+        key = _single_key(source)
+        if key == (name, version):
+            removed_sources += 1
+            continue
+        remaining.append(source)
+
+    if removed_sources:
+        catchment.pond_sources = remaining
+        _save_catchment(catchment, resolved)
+        typer.echo(f"Removed {removed_sources} pond source(s) for {name}@{version} from {resolved}")
+        return
 
     entry = catchment.ponds.get(name)
-    if not isinstance(entry, dict):
-        typer.echo(f"Pond {name!r} is not stored as versioned entry.", err=True)
+    if not isinstance(entry, dict) or version not in entry:
+        typer.echo(f"No pond source or legacy pond entry found for {name}@{version}.", err=True)
         raise typer.Exit(code=2)
-    if version not in entry:
-        typer.echo(f"Pond {name!r} has no version {version!r}.", err=True)
-        raise typer.Exit(code=2)
+
     entry.pop(version, None)
     if not entry:
         catchment.ponds.pop(name, None)
         catchment.pond_species.pop(name, None)
-
     _save_catchment(catchment, resolved)
-    label = f"{name}@{version}"
-    typer.echo(f"Removed pond {label!r} from {resolved}")
+    typer.echo(f"Removed legacy pond entry {name}@{version} from {resolved}")
