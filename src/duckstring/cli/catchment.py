@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 from textwrap import dedent
+from urllib.parse import urlparse
 
 import typer
 
@@ -147,9 +148,33 @@ def _validate_catchment(catchment: Catchment) -> list[str]:
                 if source.get("entrypoint", "pond.py") != "pond.py":
                     errors.append(f"pond_sources[{idx}] git/single entrypoint must be 'pond.py'.")
             elif source_type == "git" and structure == "catalog":
-                for field in ("repo", "catalog_path", "ref_pattern"):
-                    if not isinstance(source.get(field), str) or not str(source.get(field)).strip():
-                        errors.append(f"pond_sources[{idx}] git/catalog requires non-empty {field}.")
+                repo = source.get("repo")
+                if not isinstance(repo, str) or not repo.strip():
+                    errors.append(f"pond_sources[{idx}] git/catalog requires non-empty repo.")
+                repo_structure = str(source.get("repo_structure", "versioned"))
+                if repo_structure not in ("versioned", "monorepo"):
+                    errors.append(
+                        f"pond_sources[{idx}] git/catalog repo_structure must be 'versioned' or 'monorepo'."
+                    )
+                ref_type = str(source.get("ref_type", "branch"))
+                if repo_structure == "versioned":
+                    if ref_type not in ("branch", "tag"):
+                        errors.append(
+                            f"pond_sources[{idx}] git/catalog with repo_structure=versioned requires ref_type branch or tag."
+                        )
+                    if not isinstance(source.get("ref_pattern"), str) or not str(source.get("ref_pattern")).strip():
+                        errors.append(f"pond_sources[{idx}] git/catalog requires non-empty ref_pattern for versioned.")
+                else:
+                    if ref_type not in ("branch", "tag", "commit"):
+                        errors.append(
+                            f"pond_sources[{idx}] git/catalog with repo_structure=monorepo requires ref_type branch, tag, or commit."
+                        )
+                    if not isinstance(source.get("ref"), str) or not str(source.get("ref")).strip():
+                        errors.append(f"pond_sources[{idx}] git/catalog requires non-empty ref for monorepo.")
+                    if not isinstance(source.get("catalog_path"), str) or not str(source.get("catalog_path")).strip():
+                        errors.append(
+                            f"pond_sources[{idx}] git/catalog requires non-empty catalog_path for monorepo."
+                        )
                 if source.get("entrypoint", "pond.py") != "pond.py":
                     errors.append(f"pond_sources[{idx}] git/catalog entrypoint must be 'pond.py'.")
             else:
@@ -472,9 +497,16 @@ def ponds_list_cmd(
                     f"  - [{idx}] git_single pond={source.get('pond')} version={source.get('version')} repo={source.get('repo')}"
                 )
             elif source_type == "git" and structure == "catalog":
-                typer.echo(
-                    f"  - [{idx}] git_catalog repo={source.get('repo')} pattern={source.get('ref_pattern')}"
-                )
+                ref_type = source.get("ref_type", "branch")
+                repo_structure = source.get("repo_structure", "versioned")
+                if repo_structure == "versioned":
+                    typer.echo(
+                        f"  - [{idx}] git_catalog/versioned repo={source.get('repo')} ref_type={ref_type} pattern={source.get('ref_pattern')}"
+                    )
+                else:
+                    typer.echo(
+                        f"  - [{idx}] git_catalog/monorepo repo={source.get('repo')} ref_type={ref_type} ref={source.get('ref')} catalog_path={source.get('catalog_path')}"
+                    )
             else:
                 typer.echo(f"  - [{idx}] {source_type}/{structure}")
     else:
@@ -548,6 +580,35 @@ def _prompt_non_empty(message: str, *, default: Optional[str] = None) -> str:
         typer.echo("Value must be non-empty.", err=True)
 
 
+def _prompt_bool(message: str, *, default: bool) -> bool:
+    default_choice = "yes" if default else "no"
+    return (
+        _prompt_choice(
+            message,
+            ("yes", "no"),
+            default_choice,
+            aliases={"y": "yes", "n": "no"},
+        )
+        == "yes"
+    )
+
+
+def _is_valid_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return False
+    return bool(parsed.scheme and parsed.netloc)
+
+
+def _prompt_url(message: str, *, default: Optional[str] = None) -> str:
+    while True:
+        value = _prompt_non_empty(message, default=default)
+        if _is_valid_url(value):
+            return value
+        typer.echo("Please enter a valid URL (e.g. https://example.com/repo.git).", err=True)
+
+
 def _resolve_for_preview(catchment: Catchment, path_value: str) -> Path:
     p = Path(path_value).expanduser()
     if p.is_absolute():
@@ -579,24 +640,34 @@ def _preview_local_catalog(catchment: Catchment, root_value: str) -> list[str]:
 
 def _interactive_add(catchment: Catchment) -> str:
     typer.echo("-- Ponds: Interactive Add --")
+    typer.echo("This flow writes either explicit pond entries or pond source definitions to catchment.json.")
 
     source_type = _prompt_choice(
         """
         - Source Type -
-        May be 'local' using a file system path, or 'git' using a git repository.
+        local:     Pond code is sourced from a local filesystem path.
+        git:       Pond code is sourced from a git repository.
         """,
         ("local", "git"),
         "local",
         aliases={"l": "local", "g": "git"},
         multiline=True,
     )
-    scope = _prompt_choice(
+    if source_type == "local":
+        scope_prompt = """
+        - Scope (local) -
+        single:    Specify a single explicit pond + version by a directory path.
+        catalog:   Specify a location containing ponds and versions with structure {root}/{pond}/{version}.
         """
-        - Scope -
-        May be 'single' for an explicit pond + version, or 'catalog' for multiple ponds under a specified structure.
-        Local catalogs follow a strict layout of {root}/{pond}/{version}/pond.py.
-        Git catalogs accept a ref selector pattern (e.g. release/{version}).
-        """,
+    else:
+        scope_prompt = """
+        - Scope (git) -
+        single:    Specify a single explicit pond + version by a fixed git ref.
+        catalog:   Specify a collection of ponds and versions in a git repository, e.g. by a ref pattern.
+        """
+
+    scope = _prompt_choice(
+        scope_prompt,
         ("single", "catalog"),
         "single",
         aliases={"s": "single", "c": "catalog"},
@@ -604,19 +675,25 @@ def _interactive_add(catchment: Catchment) -> str:
     )
 
     if source_type == "local" and scope == "single":
-        pond_dir = _prompt_non_empty("\nPond + Version directory path")
-        resolved_dir = _resolve_for_preview(catchment, pond_dir)
-        name_default = resolved_dir.parent.name if resolved_dir.parent.name else None
-        version_default = resolved_dir.name if resolved_dir.name else None
-        pond_name = _prompt_non_empty("\nPond Name", default=name_default)
-        version = _prompt_non_empty("\nPond Version (x.y.z)", default=version_default)
+        typer.echo("")
+        pond_name = _prompt_non_empty("Pond name")
+        version = _prompt_non_empty("Pond version (x.y.z)")
         if not _SEMVER_RE.match(version):
             raise ValueError("Version must use x.y.z semver format.")
+        pond_dir = _prompt_non_empty("Pond version directory path")
+        resolved_dir = _resolve_for_preview(catchment, pond_dir)
+        if resolved_dir.parent.name and resolved_dir.parent.name != pond_name:
+            typer.echo(
+                f"Note: path implies pond {resolved_dir.parent.name!r}; using explicit name {pond_name!r}.",
+            )
+        if resolved_dir.name and resolved_dir.name != version:
+            typer.echo(
+                f"Note: path implies version {resolved_dir.name!r}; using explicit version {version!r}.",
+            )
 
-        if not typer.confirm(
-            f"Write explicit pond entry {pond_name}@{version} -> {pond_dir}?",
+        if not _prompt_bool(
+            f"Confirm write explicit entry {pond_name}@{version} -> {pond_dir}",
             default=True,
-            show_default=True,
         ):
             raise ValueError("Cancelled by user.")
 
@@ -630,27 +707,23 @@ def _interactive_add(catchment: Catchment) -> str:
         return f"Added local pond {pond_name}@{version}"
 
     if source_type == "local" and scope == "catalog":
+        typer.echo("")
         ponds_default = "./ponds" if (Path.cwd() / "ponds").exists() else None
         if ponds_default is None:
-            root_value = _prompt_non_empty("\nCatalog Root")
+            root_value = _prompt_non_empty("Catalog root path")
         else:
-            root_value = _prompt_non_empty("\nCatalog Root", default=ponds_default)
-        strict = typer.confirm(
-            f"\nRun in strict mode, failing if expected layout not met?",
-            default=True,
-            show_default=True,
-        )
+            root_value = _prompt_non_empty("Catalog root path", default=ponds_default)
+        strict = _prompt_bool("Strict layout validation", default=True)
         discovered = _preview_local_catalog(catchment, root_value)
-        typer.echo("\nCatalog Preview:")
+        typer.echo("\nDiscovery preview:")
         if discovered:
             for item in discovered:
                 typer.echo(f"  - {item}")
         else:
             typer.echo("  <none>")
-        if not typer.confirm(
-            f"\nWrite local catalog source root={root_value!r} strict={strict}?",
+        if not _prompt_bool(
+            f"Confirm write local/catalog source root={root_value!r} strict={strict}",
             default=True,
-            show_default=True,
         ):
             raise ValueError("Cancelled by user.")
         catchment.pond_sources.append(
@@ -666,22 +739,27 @@ def _interactive_add(catchment: Catchment) -> str:
         return f"Added local catalog source root={root_value!r}"
 
     if source_type == "git" and scope == "single":
-        repo = _prompt_non_empty("\nGit Repo URL")
+        typer.echo("")
+        pond_name = _prompt_non_empty("Pond name")
+        version = _prompt_non_empty("Pond version (x.y.z)")
+        if not _SEMVER_RE.match(version):
+            raise ValueError("Version must use x.y.z semver format.")
         ref_type = _prompt_choice(
-            "\nGit Ref Type",
+            "Git ref type",
             ("branch", "tag", "commit"),
             "branch",
             aliases={"b": "branch", "t": "tag", "c": "commit"},
         )
-        ref = _prompt_non_empty("\nGit Ref Value")
-        pond_name = _prompt_non_empty("\nPond Name")
-        version = _prompt_non_empty("\nPond Version (x.y.z)")
-        if not _SEMVER_RE.match(version):
-            raise ValueError("Version must use x.y.z semver format.")
-        if not typer.confirm(
-            f"\nWrite git single source for {pond_name}@{version} ({ref_type}:{ref})?",
+        repo = _prompt_non_empty("Git repo URL")
+        ref_default = None
+        if ref_type == "branch":
+            ref_default = f"release/{version}"
+        elif ref_type == "tag":
+            ref_default = version
+        ref = _prompt_non_empty("Git ref value", default=ref_default)
+        if not _prompt_bool(
+            f"Confirm write git/single source for {pond_name}@{version} ({ref_type}:{ref})",
             default=True,
-            show_default=True,
         ):
             raise ValueError("Cancelled by user.")
         catchment.pond_sources.append(
@@ -698,27 +776,64 @@ def _interactive_add(catchment: Catchment) -> str:
         )
         return f"Added git single source for {pond_name}@{version}"
 
-    typer.echo("Git catalog: stores metadata only; no clone/pull or preview discovery is performed.")
-    repo = _prompt_non_empty("Git repo URL")
-    catalog_path = _prompt_non_empty("Catalog path in repo", default=".")
-    ref_pattern = _prompt_non_empty("Ref selector pattern", default="release/{version}")
-    strict = _prompt_choice(
-        "Strict layout validation",
-        ("yes", "no"),
-        "no",
-        aliases={"y": "yes", "n": "no"},
-    ) == "yes"
-    if not typer.confirm(
-        f"Write git catalog source repo={repo!r} path={catalog_path!r} pattern={ref_pattern!r} strict={strict}?",
-        default=True,
-        show_default=True,
-    ):
+    repo_structure = _prompt_choice(
+        """
+        - Repository Structure -
+        versioned: (Recommended) Repo contains one pond with versions implied by a ref pattern (e.g. branch: release/{version})
+        monorepo:  Repo at a fixed ref contains a catalog of ponds in the structure {root}/{pond}/{version}
+        """,
+        ("versioned", "monorepo"),
+        "versioned",
+        aliases={"v": "versioned", "m": "monorepo"},
+        multiline=True,
+    )
+    if repo_structure == "monorepo":
+        typer.echo(
+            "Note: Monorepo layout must use {root}/{pond}/{version} even if only one pond is included."
+        )
+        catalog_path = _prompt_non_empty("Root path in repo:", default="ponds/")
+        ref_type = _prompt_choice(
+            "Git ref type",
+            ("branch", "tag", "commit"),
+            "branch",
+            aliases={"b": "branch", "t": "tag", "c": "commit"},
+        )
+        ref = _prompt_non_empty("Git ref value", default="main")
+        repo = _prompt_url("Git repo URL")
+        ref_pattern = None
+    else:
+        ref_type = _prompt_choice(
+            "Git ref type",
+            ("branch", "tag"),
+            "branch",
+            aliases={"b": "branch", "t": "tag"},
+        )
+        pattern_default = "release/{version}" if ref_type == "branch" else "{version}"
+        ref_pattern = _prompt_non_empty("Git ref pattern", default=pattern_default)
+        repo = _prompt_url("Git repo URL")
+        catalog_path = None
+        ref = None
+    strict = _prompt_bool("Strict layout validation", default=False)
+    if repo_structure == "versioned":
+        confirm_message = (
+            f"Confirm write git/catalog source structure=versioned repo={repo!r} "
+            f"ref_type={ref_type} pattern={ref_pattern!r} strict={strict}"
+        )
+    else:
+        confirm_message = (
+            f"Confirm write git/catalog source structure=monorepo repo={repo!r} "
+            f"ref_type={ref_type} ref={ref!r} catalog_path={catalog_path!r} strict={strict}"
+        )
+    if not _prompt_bool(confirm_message, default=True):
         raise ValueError("Cancelled by user.")
     catchment.pond_sources.append(
         {
             "type": "git",
             "structure": "catalog",
+            "repo_structure": repo_structure,
             "repo": repo,
+            "ref_type": ref_type,
+            "ref": ref,
             "catalog_path": catalog_path,
             "ref_pattern": ref_pattern,
             "layout": "{pond}/{version}",
