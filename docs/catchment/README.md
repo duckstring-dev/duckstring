@@ -13,6 +13,7 @@ This document describes the `duckstring catchment ...` command group.
 - `duckstring catchment ponds ...`
 
 Default catchment file path for commands that use `--file` is `catchment.json`.
+`catchment.json` should define `pond_sources`; `ponds` is not part of the catchment spec.
 
 ## catchment create
 

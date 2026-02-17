@@ -54,9 +54,6 @@ from .utils import (
     select_and_alias as _select_and_alias,
 )
 from .utils import (
-    split_pond_ref as _split_pond_ref,
-)
-from .utils import (
     toposort as _toposort,
 )
 
@@ -737,7 +734,8 @@ class Catchment:
 
     def __init__(self, *, root_dir: str = ".duckstring"):
         self.root_dir = root_dir
-        self.ponds: Dict[str, Any] = {}
+        # Runtime-only pond catalog, populated during basin hydration/resolve flows.
+        self._pond_catalog: Dict[str, Any] = {}
         self.pond_sources: List[Dict[str, Any]] = []
 
         self.species: Dict[str, Species] = {}
@@ -764,18 +762,10 @@ class Catchment:
         c._loaded_from = str(p)
         return c
 
-    def save(self, path: Optional[str | os.PathLike[str]] = None) -> None:
-        out = Path(path) if path is not None else (Path(self._loaded_from) if self._loaded_from else None)
-        if out is None:
-            raise ValueError("No save path provided and Catchment was not loaded from a file.")
-        out.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
-        self._loaded_from = str(out)
-
     def to_dict(self) -> Dict[str, Any]:
         return {
             "spec_version": self.SPEC_VERSION,
             "root_dir": self.root_dir,
-            "ponds": dict(self.ponds),
             "pond_sources": [dict(entry) for entry in self.pond_sources],
             "species": {k: asdict(v) for k, v in self.species.items()},
             "default_species": self.default_species,
@@ -788,9 +778,10 @@ class Catchment:
         spec_version = int(d.get("spec_version", 1))
         if spec_version != Catchment.SPEC_VERSION:
             raise ValueError(f"Unsupported catchment spec_version={spec_version}. Expected {Catchment.SPEC_VERSION}.")
+        if "ponds" in d:
+            raise ValueError("Unsupported catchment field 'ponds'; use pond_sources and basin hydration.")
 
         c = Catchment(root_dir=str(d.get("root_dir", "catchment")))
-        c.ponds = dict(d.get("ponds", {}))
         c.pond_sources = [dict(entry) for entry in list(d.get("pond_sources", [])) if isinstance(entry, dict)]
         c.species = {k: Species(**v) for k, v in dict(d.get("species", {})).items()}
         c.default_species = d.get("default_species")
@@ -798,8 +789,20 @@ class Catchment:
         c.modes = dict(d.get("modes", {"pulse": {"type": "pulse"}}))
         return c
 
-    def set_root_dir(self, root_dir: str) -> None:
-        self.root_dir = root_dir
+    def set_runtime_pond_catalog(self, catalog: Mapping[str, Any]) -> None:
+        self._pond_catalog = {
+            str(name): (dict(value) if isinstance(value, Mapping) else value)
+            for name, value in dict(catalog).items()
+        }
+
+    def runtime_pond_catalog(self) -> Dict[str, Any]:
+        return {
+            name: (dict(value) if isinstance(value, Mapping) else value)
+            for name, value in self._pond_catalog.items()
+        }
+
+    def has_pond(self, pond_name: str) -> bool:
+        return pond_name in self._pond_catalog
 
     def _resolve_local_path(self, path: str) -> Path:
         p = Path(path)
@@ -809,56 +812,11 @@ class Catchment:
             return (Path(self._loaded_from).parent / p).resolve()
         return p.resolve()
 
-    def _set_pond_path(
-        self,
-        pond_name: str,
-        version: Optional[str],
-        path: str,
-        *,
-        overwrite: bool,
-    ) -> None:
-        def _paths_match(a: str, b: str) -> bool:
-            try:
-                return self._resolve_local_path(a) == self._resolve_local_path(b)
-            except Exception:
-                return a == b
-
-        existing = self.ponds.get(pond_name)
-
-        if version is None:
-            if existing is None or overwrite:
-                self.ponds[pond_name] = path
-                return
-            if isinstance(existing, str):
-                if not _paths_match(existing, path):
-                    raise ValueError(f"Conflict while loading ponds: {pond_name!r} already set to a different path.")
-                return
-            if isinstance(existing, dict):
-                if len(existing) == 1 and _paths_match(next(iter(existing.values())), path):
-                    return
-                raise ValueError(f"Conflict while loading ponds: {pond_name!r} already set to versioned paths.")
-            raise ValueError(f"Unsupported pond catalog entry for {pond_name!r}.")
-
-        if existing is None or isinstance(existing, str):
-            if isinstance(existing, str) and not overwrite and not _paths_match(existing, path):
-                raise ValueError(f"Conflict while loading ponds: {pond_name!r} already set to a different path.")
-            self.ponds[pond_name] = {version: path}
-            return
-
-        if isinstance(existing, dict):
-            if version in existing and not overwrite and not _paths_match(existing[version], path):
-                raise ValueError(
-                    f"Conflict while loading ponds: {pond_name!r}@{version} already set to a different path."
-                )
-            existing[version] = path
-            return
-
-        raise ValueError(f"Unsupported pond catalog entry for {pond_name!r}.")
-
     def get_pond_path(self, pond_name: str, version: Optional[str] = None) -> Path:
-        if pond_name not in self.ponds:
-            raise KeyError(f"Unknown pond {pond_name!r}. Available: {', '.join(sorted(self.ponds.keys()))}")
-        entry = self.ponds[pond_name]
+        if pond_name not in self._pond_catalog:
+            available = ", ".join(sorted(self._pond_catalog.keys()))
+            raise KeyError(f"Unknown pond {pond_name!r}. Available: {available}")
+        entry = self._pond_catalog[pond_name]
         if isinstance(entry, str):
             return self._resolve_local_path(entry)
         if isinstance(entry, dict):
@@ -873,139 +831,15 @@ class Catchment:
             return self._resolve_local_path(str(entry[version]))
         raise ValueError(f"Unsupported pond catalog entry for {pond_name!r}.")
 
-    def load_ponds(self, ponds_json_path: str | os.PathLike[str], *, overwrite: bool = False) -> None:
-        p = Path(ponds_json_path)
-        ponds = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(ponds, dict):
-            raise ValueError("ponds.json must be a JSON object")
-
-        data_entries = ponds.get("data")
-        if isinstance(data_entries, list):
-            for entry in data_entries:
-                if not isinstance(entry, dict):
-                    raise ValueError("ponds.json data entries must be objects")
-                entry_ponds = entry.get("ponds") or {}
-                if not isinstance(entry_ponds, dict):
-                    raise ValueError("ponds.json data entry ponds must be a mapping")
-                ref_type = entry.get("reference_type", "local")
-                version_by = entry.get("version_by") or {"type": "directory", "template": "{pond}/{version}"}
-                self.set_ponds(
-                    reference_type=str(ref_type),
-                    version_by=dict(version_by),
-                    ponds=entry_ponds,
-                    overwrite=overwrite,
-                )
-            return
-
-        ponds_map = ponds.get("ponds") if isinstance(ponds.get("ponds"), dict) else ponds
-        if not isinstance(ponds_map, dict):
-            raise ValueError("ponds.json must be a mapping of pond_name -> local_path")
-
-        for name, path in ponds_map.items():
-            if not isinstance(name, str) or not isinstance(path, str):
-                raise ValueError("ponds.json keys/values must be strings")
-            pond_name, version = _split_pond_ref(name)
-            self._set_pond_path(pond_name, version, path, overwrite=overwrite)
-
-    def set_ponds(
-        self,
-        *,
-        reference_type: str,
-        version_by: Mapping[str, Any],
-        ponds: Mapping[str, str],
-        overwrite: bool = False,
-    ) -> None:
-        reference_type = str(reference_type)
-        if reference_type != "local":
-            raise ValueError(f"Only reference_type='local' is supported right now. Got: {reference_type!r}")
-
-        version_by = dict(version_by or {})
-        version_type = str(version_by.get("type", "directory"))
-        template = str(version_by.get("template", "{pond}/{version}"))
-        if version_type != "directory":
-            raise ValueError(f"Only version_by.type='directory' is supported right now. Got: {version_type!r}")
-        if "{version}" not in template:
-            raise ValueError("version_by.template must include '{version}' for directory-based versioning.")
-
-        for ref, path in ponds.items():
-            if not isinstance(ref, str) or not isinstance(path, str):
-                raise ValueError("ponds keys/values must be strings")
-            pond_name, version = _split_pond_ref(ref)
-            base = Path(path)
-            if version is not None:
-                self._set_pond_path(pond_name, version, path, overwrite=overwrite)
-                continue
-
-            if not base.exists():
-                raise FileNotFoundError(f"Pond path not found for {pond_name!r}: {base}")
-            if not base.is_dir():
-                raise ValueError(f"Pond path for {pond_name!r} must be a directory: {base}")
-
-            versions = sorted([p.name for p in base.iterdir() if p.is_dir()])
-            if not versions:
-                raise ValueError(
-                    f"No versions found for {pond_name!r} in {base}. "
-                    "Expected subdirectories named by version."
-                )
-            for ver in versions:
-                resolved = str(base / ver)
-                self._set_pond_path(pond_name, ver, resolved, overwrite=overwrite)
-
-    def set_species(self, species: Mapping[str, Species], *, overwrite: bool = False) -> None:
-        for name, sp in species.items():
-            if name in self.species and not overwrite and self.species[name] != sp:
-                raise ValueError(f"Conflict while setting species: {name!r} already exists with a different value.")
-            sp.validate()
-            self.species[name] = sp
-
-    def set_default_species(self, name: str) -> None:
-        if name not in self.species:
-            raise KeyError(f"Unknown species {name!r}. Available: {', '.join(sorted(self.species.keys()))}")
-        self.default_species = name
-
-    def set_pond_species(self, mapping: Mapping[str, str], *, overwrite: bool = False) -> None:
-        for pond_name, sp_name in mapping.items():
-            if sp_name not in self.species:
-                raise KeyError(f"Unknown species {sp_name!r} for pond {pond_name!r}")
-            if not overwrite and pond_name in self.pond_species and self.pond_species[pond_name] != sp_name:
-                raise ValueError(f"Conflict: pond {pond_name!r} already assigned to a different species.")
-            self.pond_species[pond_name] = sp_name
-
-    def set_modes(self, modes: Mapping[str, Mapping[str, Any]], *, overwrite: bool = False) -> None:
-        for name, spec in modes.items():
-            spec = dict(spec or {})
-            t = str(spec.get("type", "pulse"))
-            if t != "pulse":
-                raise ValueError(f"Only mode type='pulse' is supported for now. Got: {t!r}")
-            if name in self.modes and not overwrite and self.modes[name] != spec:
-                raise ValueError(f"Conflict while setting modes: {name!r} already exists with a different value.")
-            self.modes[name] = spec
-
-    def basin(
-        self,
-        *,
-        outlets: Optional[Mapping[str, str]] = None,
-        mode: str = "pulse",
-        pond_species: Optional[Mapping[str, str]] = None,
-        name: Optional[str] = None,
-    ) -> "Basin":
-        return Basin(
-            catchment=self,
-            outlets=dict(outlets or {}),
-            mode=mode,
-            pond_species=dict(pond_species or {}),
-            name=name,
-        )
-
     def validate(self) -> None:
-        if not self.ponds:
-            warnings.warn("Catchment has an empty pond catalog.", RuntimeWarning, stacklevel=2)
+        if not self._pond_catalog:
+            warnings.warn("Catchment runtime pond catalog is empty.", RuntimeWarning, stacklevel=2)
 
         for sp in self.species.values():
             sp.validate()
 
         if self.default_species is None:
-            raise ValueError("Catchment.default_species is not set. Call set_default_species(...).")
+            raise ValueError("Catchment.default_species is not set.")
 
         if self.default_species not in self.species:
             raise ValueError(f"default_species {self.default_species!r} is not present in species registry.")
@@ -1066,14 +900,7 @@ class Basin(ContractResolver):
         self._reset_resolution()
 
     def set_outlets(self, outlets: Mapping[str, str]) -> None:
-        outlets = dict(outlets)
-        if self.catchment is not None:
-            missing = [name for name in outlets.keys() if name not in self.catchment.ponds]
-            if missing:
-                raise KeyError(
-                    f"Outlet pond(s) not present in catchment pond catalog: {', '.join(sorted(missing))}"
-                )
-        self.outlets = outlets
+        self.outlets = dict(outlets)
         self._reset_resolution()
 
     def set_ducks(self, instances: Mapping[str, Mapping[str, Any]]) -> None:
@@ -1314,7 +1141,7 @@ class Basin(ContractResolver):
             raise ValueError("v1 only supports pulse mode.")
 
         for pond_name in self.outlets.keys():
-            if pond_name not in catchment.ponds:
+            if not catchment.has_pond(pond_name):
                 raise KeyError(f"Outlet pond {pond_name!r} is not present in catchment pond catalog.")
 
         self._auto_upgrade = auto_upgrade
@@ -1325,7 +1152,7 @@ class Basin(ContractResolver):
             mf = self._build_manifest(pond_name, resolved_constraint)
 
             for up_name, up_constraint in mf.sources.items():
-                if up_name not in catchment.ponds:
+                if not catchment.has_pond(up_name):
                     raise KeyError(
                         f"Pond {pond_name!r} depends on {up_name!r}, but it is not in the catchment pond catalog."
                     )
@@ -1418,7 +1245,7 @@ class Basin(ContractResolver):
                     catalog[pond_dir.name] = versions
             return catalog
 
-        original_ponds = catchment.ponds
+        original_pond_catalog = catchment.runtime_pond_catalog()
         root = Path(catchment.root_dir)
         hydrated_catalog = _build_hydrated_catalog(root)
         for pond_name, info in hydrated.items():
@@ -1429,7 +1256,7 @@ class Basin(ContractResolver):
                 raise RuntimeError(
                     f"Hydrated pond {pond_name!r}@{version!r} not found in {root / 'ponds'}."
                 )
-        catchment.ponds = hydrated_catalog
+        catchment.set_runtime_pond_catalog(hydrated_catalog)
 
         self._reset_resolution()
         self.resolve(auto_upgrade=True)
@@ -1585,7 +1412,7 @@ class Basin(ContractResolver):
                 except Exception:
                     pass
             con.close()
-            catchment.ponds = original_ponds
+            catchment.set_runtime_pond_catalog(original_pond_catalog)
 
         ended_at = float(time.time())
         return PulseResult(
@@ -1994,7 +1821,11 @@ class Snapshot(ContractResolver):
         root.mkdir(parents=True, exist_ok=True)
         catchment_path = root / "catchment.json"
         if not catchment_path.exists():
-            self.sink_catchment.save(catchment_path)
+            catchment_path.write_text(
+                json.dumps(self.sink_catchment.to_dict(), indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            self.sink_catchment._loaded_from = str(catchment_path)
 
     def materialize(self, *, registry_path: str, activate: bool = True, verbose: bool = False) -> None:
         if not _HAVE_DUCKDB or not _HAVE_IBIS:

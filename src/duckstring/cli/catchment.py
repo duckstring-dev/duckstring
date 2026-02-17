@@ -71,10 +71,29 @@ def _load_catchment(path: Path) -> Catchment:
 
 def _save_catchment(catchment: Catchment, path: Path) -> None:
     try:
-        catchment.save(str(path))
+        path.write_text(
+            json.dumps(catchment.to_dict(), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        catchment._loaded_from = str(path)
     except Exception as exc:
         typer.echo(f"Failed to save catchment {path}: {exc}", err=True)
         raise typer.Exit(code=2) from exc
+
+
+def _upsert_species(catchment: Catchment, name: str, species: Species, *, overwrite: bool) -> None:
+    existing = catchment.species.get(name)
+    if existing is not None and not overwrite and existing != species:
+        raise ValueError(f"Conflict while setting species: {name!r} already exists with a different value.")
+    species.validate()
+    catchment.species[name] = species
+
+
+def _set_default_species(catchment: Catchment, name: str) -> None:
+    if name not in catchment.species:
+        available = ", ".join(sorted(catchment.species.keys()))
+        raise KeyError(f"Unknown species {name!r}. Available: {available}")
+    catchment.default_species = name
 
 
 def _complete_json_paths(ctx: typer.Context, param: typer.CallbackParam, incomplete: str) -> list[str]:
@@ -127,15 +146,8 @@ def _validate_catchment(catchment: Catchment) -> list[str]:
         )
 
     for pond_name, species_name in sorted(catchment.pond_species.items()):
-        if pond_name not in catchment.ponds:
-            errors.append(f"pond_species entry {pond_name!r} references unknown pond.")
         if species_name not in catchment.species:
             errors.append(f"pond_species entry {pond_name!r} references unknown species {species_name!r}.")
-
-    if catchment.ponds:
-        errors.append(
-            "catchment.ponds is no longer supported; define sources under catchment.pond_sources only."
-        )
 
     for mode_name, mode_spec in sorted(catchment.modes.items()):
         if not isinstance(mode_spec, dict):
@@ -293,8 +305,9 @@ def create(
         if not name:
             typer.echo("default species name must be non-empty.", err=True)
             raise typer.Exit(code=2)
-        catchment.set_species({name: Species(kind="local", engine="duckdb")})
-        catchment.set_default_species(name)
+        species = Species(kind="local", engine="duckdb")
+        _upsert_species(catchment, name, species, overwrite=False)
+        _set_default_species(catchment, name)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _save_catchment(catchment, out_path)
@@ -367,7 +380,7 @@ def set_root_cmd(
 ) -> None:
     resolved = _resolve_path(path)
     catchment = _load_catchment(resolved)
-    catchment.set_root_dir(root_dir)
+    catchment.root_dir = root_dir
     _save_catchment(catchment, resolved)
     typer.echo(f"Updated root_dir in {resolved}")
 
@@ -420,7 +433,7 @@ def species_add_cmd(
     try:
         options = _parse_options(option)
         species = Species(kind=kind, engine=engine, options=options)
-        catchment.set_species({name: species}, overwrite=overwrite)
+        _upsert_species(catchment, name, species, overwrite=overwrite)
     except Exception as exc:
         typer.echo(f"Failed to add species {name!r}: {exc}", err=True)
         raise typer.Exit(code=2) from exc
@@ -490,7 +503,7 @@ def species_set_default_cmd(
     resolved = _resolve_path(path)
     catchment = _load_catchment(resolved)
     try:
-        catchment.set_default_species(name)
+        _set_default_species(catchment, name)
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
