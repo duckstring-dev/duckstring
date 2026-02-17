@@ -12,13 +12,17 @@ All commands accept `-f|--file <path>` (default: `catchment.json`) where applica
 
 ## ponds list
 
-Show both:
-
-- legacy `ponds` entries (if any), and
-- `pond_sources` entries (the current preferred model).
+Show all `pond_sources` entries with source `id`.
 
 ```bash
 duckstring catchment ponds list [-f|--file <path>]
+```
+
+Example output:
+
+```text
+1  -- git_catalog/versioned pond=ingest repo=https://git.com ref_type=branch pattern=release/{version}
+2  -- git_catalog/versioned pond=enriched repo=https://git.com ref_type=branch pattern=release/{version}
 ```
 
 ## ponds add
@@ -60,7 +64,7 @@ Notes:
 ### Direct mode
 
 ```bash
-duckstring catchment ponds add [legacy_name] [options]
+duckstring catchment ponds add [options]
 ```
 
 Direct options:
@@ -79,14 +83,6 @@ Direct options:
 - `-i|--interactive`
 - `-f|--file <path>`
 
-Backwards-compatible shorthand:
-
-```bash
-duckstring catchment ponds add <name> -p <path> -v <version>
-```
-
-This maps to `local/single`.
-
 ### Conflict / warning behavior on add
 
 Before writing:
@@ -102,13 +98,13 @@ Warnings are printed before final confirmation.
 
 ## ponds remove
 
-Remove by `pond@version`.
+Remove by pond source `id`.
 
 ```bash
-duckstring catchment ponds remove <name> -v|--version <version> [-f|--file <path>]
+duckstring catchment ponds remove <source_id> [-f|--file <path>]
 ```
 
 Behavior:
 
-- Removes matching `pond_sources` single entries first.
-- Falls back to removing legacy `ponds` entry if present.
+- Removes matching `pond_sources` entry with the given `id`.
+- Tab completion on `<source_id>` includes source details to help selection.
