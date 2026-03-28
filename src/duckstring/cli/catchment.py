@@ -511,8 +511,8 @@ def species_set_default_cmd(
     typer.echo(f"Set default species to {name!r} in {resolved}")
 
 
-@ponds_app.command("list")
-def ponds_list_cmd(
+@ponds_app.command("list-sources")
+def ponds_list_sources_cmd(
     path: Path = typer.Option(
         Path("catchment.json"),
         "--file",
@@ -530,6 +530,71 @@ def ponds_list_cmd(
             typer.echo(f"{source_id}  -- {_source_list_description(source)}")
     else:
         typer.echo("Pond sources: <none>")
+
+
+@ponds_app.command("list-pulled")
+def ponds_list_pulled_cmd(
+    path: Path = typer.Option(
+        Path("catchment.json"),
+        "--file",
+        "-f",
+        help="Path to catchment spec.",
+        shell_complete=_complete_json_paths,
+    ),
+) -> None:
+    resolved = _resolve_path(path)
+    catchment = _load_catchment(resolved)
+    ponds_root = (Path(catchment.root_dir) / "ponds").resolve()
+    catchment_root = Path(catchment.root_dir).resolve()
+    typer.echo(f"Catchment Root: {catchment_root.as_posix()}/")
+    typer.echo("")
+    if not ponds_root.exists() or not ponds_root.is_dir():
+        typer.echo("Pulled ponds: <none>")
+        return
+
+    found = False
+    for pond_dir in sorted(ponds_root.iterdir()):
+        if not pond_dir.is_dir():
+            continue
+        pond_name = pond_dir.name
+        for version_dir in sorted(pond_dir.iterdir()):
+            if not version_dir.is_dir():
+                continue
+            version = version_dir.name
+            if not _SEMVER_RE.match(version):
+                continue
+            entrypoint = version_dir / "pond.py"
+            if not entrypoint.exists():
+                continue
+            found = True
+            typer.echo(f"{pond_name}@{version}")
+
+    if not found:
+        typer.echo("Pulled ponds: <none>")
+
+
+@ponds_app.command("pull")
+def ponds_pull_cmd(
+    path: Path = typer.Option(
+        Path("catchment.json"),
+        "--file",
+        "-f",
+        help="Path to catchment spec.",
+        shell_complete=_complete_json_paths,
+    ),
+) -> None:
+    resolved = _resolve_path(path)
+    catchment = _load_catchment(resolved)
+    try:
+        catalog = catchment.pull_pond_sources()
+    except Exception as exc:
+        typer.echo(f"Failed to pull pond sources: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    pond_count = len(catalog)
+    version_count = sum(len(versions) for versions in catalog.values() if isinstance(versions, dict))
+    ponds_root = Path(catchment.root_dir) / "ponds"
+    typer.echo(f"Pulled {version_count} pond version(s) across {pond_count} pond(s) into {ponds_root.resolve()}")
 
 
 def _build_source_from_direct_args(

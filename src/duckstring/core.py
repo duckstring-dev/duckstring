@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
+import subprocess
+import tempfile
 import time
 import warnings
 from contextlib import contextmanager
@@ -812,6 +815,295 @@ class Catchment:
             return (Path(self._loaded_from).parent / p).resolve()
         return p.resolve()
 
+    @staticmethod
+    def _is_semver(value: str) -> bool:
+        try:
+            _parse_semver(value)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _semver_sort_key(value: str) -> tuple[int, int, int]:
+        return _parse_semver(value)
+
+    def _run_git(self, args: Sequence[str], *, cwd: Optional[Path] = None) -> str:
+        cmd = ["git", *args]
+        try:
+            completed = subprocess.run(
+                cmd,
+                cwd=str(cwd) if cwd is not None else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("git is required to pull git pond sources.") from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            details = stderr or stdout or "unknown git error"
+            raise RuntimeError(f"git {' '.join(args)} failed: {details}") from exc
+        return completed.stdout
+
+    def _iter_local_catalog_versions(
+        self,
+        root: Path,
+        *,
+        entrypoint: str,
+    ) -> list[tuple[str, str, Path]]:
+        if not root.exists() or not root.is_dir():
+            raise FileNotFoundError(f"Catalog root is not a directory: {root}")
+        out: list[tuple[str, str, Path]] = []
+        for pond_dir in sorted(root.iterdir()):
+            if not pond_dir.is_dir():
+                continue
+            pond_name = pond_dir.name
+            for version_dir in sorted(pond_dir.iterdir()):
+                if not version_dir.is_dir():
+                    continue
+                version = version_dir.name
+                if not self._is_semver(version):
+                    continue
+                if not (version_dir / entrypoint).exists():
+                    continue
+                out.append((pond_name, version, version_dir.resolve()))
+        out.sort(key=lambda item: (item[0], self._semver_sort_key(item[1])))
+        return out
+
+    def _stage_pond_version(
+        self,
+        *,
+        source_dir: Path,
+        pond_name: str,
+        version: str,
+        entrypoint: str,
+        ponds_root: Path,
+    ) -> Path:
+        if not source_dir.exists() or not source_dir.is_dir():
+            raise FileNotFoundError(f"Pond source directory does not exist: {source_dir}")
+        if not (source_dir / entrypoint).exists():
+            raise FileNotFoundError(
+                f"Pond source {source_dir} is missing expected entrypoint {entrypoint!r}."
+            )
+        target = ponds_root / pond_name / version
+        source_resolved = source_dir.resolve()
+        if target.exists():
+            try:
+                if target.resolve() == source_resolved:
+                    return target.resolve()
+            except Exception:
+                pass
+            shutil.rmtree(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_resolved, target, ignore=shutil.ignore_patterns(".git"))
+        return target.resolve()
+
+    def _discover_runtime_catalog(self, ponds_root: Path) -> Dict[str, Dict[str, str]]:
+        if not ponds_root.exists():
+            return {}
+        catalog: Dict[str, Dict[str, str]] = {}
+        for pond_dir in sorted(ponds_root.iterdir()):
+            if not pond_dir.is_dir():
+                continue
+            versions: Dict[str, str] = {}
+            for version_dir in sorted(pond_dir.iterdir()):
+                if not version_dir.is_dir():
+                    continue
+                version = version_dir.name
+                if not self._is_semver(version):
+                    continue
+                if not (version_dir / self.DEFAULT_POND_ENTRYPOINT).exists():
+                    continue
+                versions[version] = str(version_dir.resolve())
+            if versions:
+                catalog[pond_dir.name] = versions
+        return catalog
+
+    def _git_checkout_to_temp(self, repo: str, ref: str, target_dir: Path) -> None:
+        self._run_git(["clone", "--quiet", repo, str(target_dir)])
+        self._run_git(["checkout", "--quiet", ref], cwd=target_dir)
+
+    def _git_versioned_ref_map(self, *, repo: str, ref_type: str, ref_pattern: str) -> Dict[str, str]:
+        if "{version}" not in ref_pattern:
+            raise ValueError(
+                "git/catalog with repo_structure=versioned requires ref_pattern containing '{version}'."
+            )
+        if ref_type == "branch":
+            raw = self._run_git(["ls-remote", "--heads", repo])
+            prefix = "refs/heads/"
+        elif ref_type == "tag":
+            raw = self._run_git(["ls-remote", "--tags", repo])
+            prefix = "refs/tags/"
+        else:
+            raise ValueError(
+                f"git/catalog with repo_structure=versioned requires ref_type 'branch' or 'tag'; got {ref_type!r}."
+            )
+
+        escaped = re.escape(ref_pattern).replace(r"\{version\}", r"(?P<version>\d+\.\d+\.\d+)")
+        matcher = re.compile(rf"^{escaped}$")
+        out: Dict[str, str] = {}
+        for line in raw.splitlines():
+            if "\t" not in line:
+                continue
+            _, full_ref = line.split("\t", 1)
+            if not full_ref.startswith(prefix):
+                continue
+            if full_ref.endswith("^{}"):
+                continue
+            short_ref = full_ref[len(prefix):]
+            match = matcher.match(short_ref)
+            if match is None:
+                continue
+            version = match.group("version")
+            if not self._is_semver(version):
+                continue
+            out[version] = short_ref
+        return out
+
+    def pull_pond_sources(self) -> Dict[str, Any]:
+        root = Path(self.root_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        ponds_root = root / "ponds"
+        ponds_root.mkdir(parents=True, exist_ok=True)
+
+        catalog = self._discover_runtime_catalog(ponds_root)
+
+        for idx, raw_source in enumerate(self.pond_sources):
+            if not isinstance(raw_source, dict):
+                continue
+            source = dict(raw_source)
+            source_type = str(source.get("type", "")).strip()
+            structure = str(source.get("structure", "")).strip()
+            entrypoint = str(source.get("entrypoint", self.DEFAULT_POND_ENTRYPOINT)).strip() or self.DEFAULT_POND_ENTRYPOINT
+
+            if source_type == "local" and structure == "catalog":
+                root_value = source.get("root")
+                if not isinstance(root_value, str) or not root_value.strip():
+                    raise ValueError(f"pond_sources[{idx}] local/catalog requires non-empty root.")
+                local_root = self._resolve_local_path(root_value)
+                for pond_name, version, source_dir in self._iter_local_catalog_versions(local_root, entrypoint=entrypoint):
+                    staged = self._stage_pond_version(
+                        source_dir=source_dir,
+                        pond_name=pond_name,
+                        version=version,
+                        entrypoint=entrypoint,
+                        ponds_root=ponds_root,
+                    )
+                    catalog.setdefault(pond_name, {})[version] = str(staged)
+                continue
+
+            if source_type == "local" and structure == "single":
+                pond_name = str(source.get("pond", "")).strip()
+                version = str(source.get("version", "")).strip()
+                path_value = source.get("path")
+                if not pond_name or not version:
+                    raise ValueError(f"pond_sources[{idx}] local/single requires pond and version.")
+                if not isinstance(path_value, str) or not path_value.strip():
+                    raise ValueError(f"pond_sources[{idx}] local/single requires non-empty path.")
+                if not self._is_semver(version):
+                    raise ValueError(f"pond_sources[{idx}] local/single version must be semver x.y.z.")
+                source_dir = self._resolve_local_path(path_value)
+                staged = self._stage_pond_version(
+                    source_dir=source_dir,
+                    pond_name=pond_name,
+                    version=version,
+                    entrypoint=entrypoint,
+                    ponds_root=ponds_root,
+                )
+                catalog.setdefault(pond_name, {})[version] = str(staged)
+                continue
+
+            if source_type == "git" and structure == "single":
+                pond_name = str(source.get("pond", "")).strip()
+                version = str(source.get("version", "")).strip()
+                repo = str(source.get("repo", "")).strip()
+                ref = str(source.get("ref", "")).strip()
+                if not pond_name or not version:
+                    raise ValueError(f"pond_sources[{idx}] git/single requires pond and version.")
+                if not repo or not ref:
+                    raise ValueError(f"pond_sources[{idx}] git/single requires repo and ref.")
+                if not self._is_semver(version):
+                    raise ValueError(f"pond_sources[{idx}] git/single version must be semver x.y.z.")
+                with tempfile.TemporaryDirectory(prefix="duckstring-pond-pull-") as tmp_dir:
+                    checkout_dir = Path(tmp_dir) / "checkout"
+                    self._git_checkout_to_temp(repo, ref, checkout_dir)
+                    staged = self._stage_pond_version(
+                        source_dir=checkout_dir,
+                        pond_name=pond_name,
+                        version=version,
+                        entrypoint=entrypoint,
+                        ponds_root=ponds_root,
+                    )
+                catalog.setdefault(pond_name, {})[version] = str(staged)
+                continue
+
+            if source_type == "git" and structure == "catalog":
+                repo = str(source.get("repo", "")).strip()
+                ref_type = str(source.get("ref_type", "branch")).strip()
+                repo_structure = str(source.get("repo_structure", "versioned")).strip()
+                if not repo:
+                    raise ValueError(f"pond_sources[{idx}] git/catalog requires repo.")
+
+                if repo_structure == "versioned":
+                    pond_name = str(source.get("pond", "")).strip()
+                    ref_pattern = str(source.get("ref_pattern", "")).strip()
+                    if not pond_name:
+                        raise ValueError(f"pond_sources[{idx}] git/catalog versioned requires pond.")
+                    if not ref_pattern:
+                        raise ValueError(f"pond_sources[{idx}] git/catalog versioned requires ref_pattern.")
+                    ref_map = self._git_versioned_ref_map(repo=repo, ref_type=ref_type, ref_pattern=ref_pattern)
+                    for version in sorted(ref_map.keys(), key=self._semver_sort_key):
+                        ref_name = ref_map[version]
+                        with tempfile.TemporaryDirectory(prefix="duckstring-pond-pull-") as tmp_dir:
+                            checkout_dir = Path(tmp_dir) / "checkout"
+                            self._git_checkout_to_temp(repo, ref_name, checkout_dir)
+                            staged = self._stage_pond_version(
+                                source_dir=checkout_dir,
+                                pond_name=pond_name,
+                                version=version,
+                                entrypoint=entrypoint,
+                                ponds_root=ponds_root,
+                            )
+                        catalog.setdefault(pond_name, {})[version] = str(staged)
+                    continue
+
+                if repo_structure == "monorepo":
+                    ref = str(source.get("ref_pattern", "")).strip()
+                    if not ref:
+                        raise ValueError(f"pond_sources[{idx}] git/catalog monorepo requires ref_pattern.")
+                    monorepo_root_value = str(source.get("root", ".")).strip() or "."
+                    with tempfile.TemporaryDirectory(prefix="duckstring-pond-pull-") as tmp_dir:
+                        checkout_dir = Path(tmp_dir) / "checkout"
+                        self._git_checkout_to_temp(repo, ref, checkout_dir)
+                        local_root = (checkout_dir / monorepo_root_value).resolve()
+                        for pond_name, version, source_dir in self._iter_local_catalog_versions(
+                            local_root,
+                            entrypoint=entrypoint,
+                        ):
+                            staged = self._stage_pond_version(
+                                source_dir=source_dir,
+                                pond_name=pond_name,
+                                version=version,
+                                entrypoint=entrypoint,
+                                ponds_root=ponds_root,
+                            )
+                            catalog.setdefault(pond_name, {})[version] = str(staged)
+                    continue
+
+                raise ValueError(
+                    f"pond_sources[{idx}] git/catalog repo_structure must be 'versioned' or 'monorepo'."
+                )
+
+            raise ValueError(
+                f"pond_sources[{idx}] has unsupported type/structure combination "
+                f"{source_type!r}/{structure!r}."
+            )
+
+        self.set_runtime_pond_catalog(catalog)
+        return self.runtime_pond_catalog()
+
     def get_pond_path(self, pond_name: str, version: Optional[str] = None) -> Path:
         if pond_name not in self._pond_catalog:
             available = ", ".join(sorted(self._pond_catalog.keys()))
@@ -1170,8 +1462,10 @@ class Basin(ContractResolver):
         finally:
             self._resolving = False
 
-    def hydrate(self, *, auto_upgrade: bool = False) -> None:
+    def hydrate(self, *, auto_upgrade: bool = False, pull_sources: bool = True) -> None:
         catchment = self._ensure_catchment()
+        if pull_sources:
+            catchment.pull_pond_sources()
         self.resolve(auto_upgrade=auto_upgrade)
         self._ensure_ducks()
 
