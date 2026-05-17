@@ -167,7 +167,7 @@ duckstring get dev outlet daily --path ./daily_output
 
 #### SQL Query
 
-If the target is an SQL-compatible table (e.g. DuckDB or Parquet), an SQL statement may be sent directly:
+If the target is an SQL-compatible table (e.g. DuckDB or Parquet), an SQL statement may be sent directly, outputting the result to the command line:
 
 ```bash
 duckstring query dev outlet --sql "SELECT * FROM daily WHERE id=1;"
@@ -179,7 +179,15 @@ Alternatively, include a file path:
 duckstring query dev outlet --sql @path/to/query.sql
 ```
 
-This will print the result to the command line. To output to a file, include a flag for the file format, followed by the file name:
+Omitting the `--sql` statement queries with a default SELECT * LIMIT 10 on the specified table:
+
+```bash
+duckstring query dev outlet daily
+```
+
+##### Write to file
+
+To output to a file, include a flag for the file format, followed by the file name:
 
 `--csv`: Comma-separated values
 `--json`: JSON records
