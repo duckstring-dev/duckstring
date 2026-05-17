@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Optional
 from textwrap import dedent
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import typer
@@ -12,14 +12,16 @@ from click.shell_completion import CompletionItem
 
 from duckstring import Catchment, Species
 
-
 app = typer.Typer(help="Work with catchment specs.", add_completion=False, no_args_is_help=True)
 species_app = typer.Typer(help="Manage catchment species.", add_completion=False, no_args_is_help=True)
 ponds_app = typer.Typer(help="Manage catchment pond catalog.", add_completion=False, no_args_is_help=True)
+inlets_app = typer.Typer(help="Manage catchment inlet landing locations.", add_completion=False, no_args_is_help=True)
 app.add_typer(species_app, name="species")
 app.add_typer(ponds_app, name="ponds")
+app.add_typer(inlets_app, name="inlets")
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+_GIT_SCP_RE = re.compile(r"^[^@\s]+@[^:\s]+:[^\s]+$")
 
 
 def _ensure_source_ids(catchment: Catchment) -> bool:
@@ -156,6 +158,26 @@ def _validate_catchment(catchment: Catchment) -> list[str]:
         if str(mode_spec.get("type", "pulse")) != "pulse":
             errors.append(f"mode {mode_name!r} has unsupported type {mode_spec.get('type')!r}.")
 
+    if not isinstance(catchment.inlet_locations, dict):
+        errors.append("inlet_locations must be an object when present.")
+    else:
+        for inlet_name, inlet_spec in sorted(catchment.inlet_locations.items()):
+            if not isinstance(inlet_spec, dict):
+                errors.append(f"inlet_locations.{inlet_name}: value must be an object.")
+                continue
+            kind = str(inlet_spec.get("kind", "local")).strip()
+            if kind != "local":
+                errors.append(f"inlet_locations.{inlet_name}: only kind='local' is supported in v1.")
+            path_value = inlet_spec.get("path")
+            if not isinstance(path_value, str) or not path_value.strip():
+                errors.append(f"inlet_locations.{inlet_name}: path must be non-empty.")
+            fmt = str(inlet_spec.get("format", "parquet")).strip().lower()
+            if fmt != "parquet":
+                errors.append(f"inlet_locations.{inlet_name}: only format='parquet' is supported in v1.")
+            glob = inlet_spec.get("glob")
+            if glob is not None and (not isinstance(glob, str) or not glob.strip()):
+                errors.append(f"inlet_locations.{inlet_name}: glob must be a non-empty string when set.")
+
     if not isinstance(catchment.pond_sources, list):
         errors.append("pond_sources must be a list when present.")
     else:
@@ -223,10 +245,14 @@ def _validate_catchment(catchment: Catchment) -> list[str]:
                 else:
                     if ref_type not in ("branch", "tag", "commit"):
                         errors.append(
-                            f"pond_sources[{idx}] git/catalog with repo_structure=monorepo requires ref_type branch, tag, or commit."
+                            f"pond_sources[{idx}] git/catalog with repo_structure=monorepo "
+                            "requires ref_type branch, tag, or commit."
                         )
                     if not isinstance(source.get("ref_pattern"), str) or not str(source.get("ref_pattern")).strip():
                         errors.append(f"pond_sources[{idx}] git/catalog requires non-empty ref_pattern for monorepo.")
+                    root = source.get("root")
+                    if root is not None and (not isinstance(root, str) or not root.strip()):
+                        errors.append(f"pond_sources[{idx}] git/catalog monorepo root must be non-empty when set.")
                 if source.get("entrypoint", "pond.py") != "pond.py":
                     errors.append(f"pond_sources[{idx}] git/catalog entrypoint must be 'pond.py'.")
             else:
@@ -276,6 +302,13 @@ def _complete_species_names(ctx: typer.Context, param: typer.CallbackParam, inco
     if catchment is None:
         return []
     return sorted([name for name in catchment.species if name.startswith(incomplete)])
+
+
+def _complete_inlet_names(ctx: typer.Context, param: typer.CallbackParam, incomplete: str) -> list[str]:
+    catchment = _load_for_completion(ctx)
+    if catchment is None:
+        return []
+    return sorted([name for name in catchment.inlet_locations if name.startswith(incomplete)])
 
 
 @app.command()
@@ -511,6 +544,117 @@ def species_set_default_cmd(
     typer.echo(f"Set default species to {name!r} in {resolved}")
 
 
+@inlets_app.command("list")
+def inlets_list_cmd(
+    path: Path = typer.Option(
+        Path("catchment.json"),
+        "--file",
+        "-f",
+        help="Path to catchment spec.",
+        shell_complete=_complete_json_paths,
+    ),
+) -> None:
+    resolved = _resolve_path(path)
+    catchment = _load_catchment(resolved)
+    if not catchment.inlet_locations:
+        typer.echo("No inlet locations configured.")
+        return
+
+    typer.echo("Inlet Locations:")
+    for name, inlet in sorted(catchment.inlet_locations.items()):
+        kind = inlet.get("kind", "local")
+        fmt = inlet.get("format", "parquet")
+        source_path = inlet.get("path", "<missing>")
+        glob = inlet.get("glob")
+        glob_suffix = f" glob={glob}" if isinstance(glob, str) and glob.strip() else ""
+        typer.echo(f"  - {name}: kind={kind} format={fmt} path={source_path}{glob_suffix}")
+
+
+@inlets_app.command("show")
+def inlets_show_cmd(
+    name: str = typer.Argument(..., help="Inlet location name.", shell_complete=_complete_inlet_names),
+    path: Path = typer.Option(
+        Path("catchment.json"),
+        "--file",
+        "-f",
+        help="Path to catchment spec.",
+        shell_complete=_complete_json_paths,
+    ),
+) -> None:
+    resolved = _resolve_path(path)
+    catchment = _load_catchment(resolved)
+    if name not in catchment.inlet_locations:
+        typer.echo(f"Unknown inlet location {name!r}.", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(json.dumps(catchment.inlet_locations[name], indent=2, sort_keys=True))
+
+
+@inlets_app.command("add")
+def inlets_add_cmd(
+    name: str = typer.Argument(..., help="Inlet location name."),
+    source_path: str = typer.Option(..., "--path", "-p", help="Local landing path (dir/file/glob root)."),
+    format: str = typer.Option("parquet", "--format", help="Landing file format (v1 supports parquet only)."),
+    glob: Optional[str] = typer.Option(None, "--glob", help="Optional glob pattern under --path."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite an existing inlet location."),
+    path: Path = typer.Option(
+        Path("catchment.json"),
+        "--file",
+        "-f",
+        help="Path to catchment spec.",
+        shell_complete=_complete_json_paths,
+    ),
+) -> None:
+    resolved = _resolve_path(path)
+    catchment = _load_catchment(resolved)
+
+    if name in catchment.inlet_locations and not overwrite:
+        typer.echo(f"Inlet location {name!r} already exists (use --overwrite).", err=True)
+        raise typer.Exit(code=2)
+
+    fmt = format.strip().lower()
+    if fmt != "parquet":
+        typer.echo("Only --format parquet is supported in v1.", err=True)
+        raise typer.Exit(code=2)
+    if not source_path.strip():
+        typer.echo("--path must be non-empty.", err=True)
+        raise typer.Exit(code=2)
+    if glob is not None and not glob.strip():
+        typer.echo("--glob must be non-empty when provided.", err=True)
+        raise typer.Exit(code=2)
+
+    inlet_spec: dict[str, Any] = {
+        "kind": "local",
+        "path": source_path.strip(),
+        "format": "parquet",
+    }
+    if glob is not None:
+        inlet_spec["glob"] = glob.strip()
+    catchment.inlet_locations[name] = inlet_spec
+    _save_catchment(catchment, resolved)
+    typer.echo(f"Added inlet location {name!r} to {resolved}")
+
+
+@inlets_app.command("remove")
+def inlets_remove_cmd(
+    name: str = typer.Argument(..., help="Inlet location name.", shell_complete=_complete_inlet_names),
+    path: Path = typer.Option(
+        Path("catchment.json"),
+        "--file",
+        "-f",
+        help="Path to catchment spec.",
+        shell_complete=_complete_json_paths,
+    ),
+) -> None:
+    resolved = _resolve_path(path)
+    catchment = _load_catchment(resolved)
+    if name not in catchment.inlet_locations:
+        typer.echo(f"Unknown inlet location {name!r}.", err=True)
+        raise typer.Exit(code=2)
+    catchment.inlet_locations.pop(name, None)
+    _save_catchment(catchment, resolved)
+    typer.echo(f"Removed inlet location {name!r} from {resolved}")
+
+
 @ponds_app.command("list-sources")
 def ponds_list_sources_cmd(
     path: Path = typer.Option(
@@ -732,8 +876,6 @@ def _build_source_from_direct_args(
         raise ValueError("git/catalog does not accept --version.")
     if path_value:
         raise ValueError("git/catalog does not accept --path.")
-    if root_value:
-        raise ValueError("git/catalog does not accept --root.")
     if ref_value:
         raise ValueError("git/catalog does not accept --ref; use --ref-pattern.")
     if not repo_value:
@@ -744,6 +886,8 @@ def _build_source_from_direct_args(
         raise ValueError("--repo-structure must be versioned or monorepo.")
 
     if repo_structure_value == "versioned":
+        if root_value:
+            raise ValueError("git/catalog versioned does not accept --root.")
         if not pond_name:
             raise ValueError("git/catalog versioned requires --pond.")
         if ref_type_value is None:
@@ -765,8 +909,12 @@ def _build_source_from_direct_args(
         if not ref_pattern_value:
             ref_pattern_value = ref_value or "main"
         pond_name = None
+        if root_value is None:
+            root_value = "."
+        if not root_value:
+            raise ValueError("git/catalog monorepo --root must be non-empty.")
 
-    return {
+    source: dict[str, Any] = {
         "type": "git",
         "structure": "catalog",
         "repo_structure": repo_structure_value,
@@ -776,6 +924,9 @@ def _build_source_from_direct_args(
         "ref_pattern": ref_pattern_value,
         "entrypoint": "pond.py",
     }
+    if repo_structure_value == "monorepo":
+        source["root"] = root_value
+    return source
 
 
 def _prompt_choice(
@@ -830,8 +981,13 @@ def _prompt_bool(message: str, *, default: bool) -> bool:
 
 
 def _is_valid_url(value: str) -> bool:
+    raw = (value or "").strip()
+    if not raw:
+        return False
+    if _GIT_SCP_RE.match(raw):
+        return True
     try:
-        parsed = urlparse(value)
+        parsed = urlparse(raw)
     except Exception:
         return False
     return bool(parsed.scheme and parsed.netloc)
@@ -920,7 +1076,6 @@ def _source_list_description(source: dict[str, Any]) -> str:
 
 
 def _single_key(source: dict[str, Any]) -> Optional[tuple[str, str]]:
-    source_type = source.get("type")
     structure = source.get("structure")
     if structure != "single":
         return None
@@ -1094,7 +1249,7 @@ def _print_warning(warning: dict[str, Any]) -> None:
             typer.echo(f"    {version}", err=True)
 
 
-def _resolve_conflicts(catchment: Catchment, conflicts: list[dict[str, Any]]) -> None:
+def _resolve_conflicts(catchment: Catchment, conflicts: list[dict[str, Any]], *, force: bool) -> None:
     if not conflicts:
         return
     typer.echo("Conflicts detected with existing pond sources:", err=True)
@@ -1103,7 +1258,7 @@ def _resolve_conflicts(catchment: Catchment, conflicts: list[dict[str, Any]]) ->
         typer.echo(f"  - {conflict.get('message', 'Conflict')}", err=True)
         for idx in conflict.get("indexes", []):
             remove_indexes.add(int(idx))
-    if not _prompt_bool("Overwrite conflicting source(s)", default=False):
+    if not force and not _prompt_bool("Overwrite conflicting source(s)", default=False):
         raise ValueError("Cancelled due to conflicts.")
     if remove_indexes:
         catchment.pond_sources = [
@@ -1250,6 +1405,7 @@ def _interactive_add(catchment: Catchment) -> tuple[str, dict[str, Any]]:
         )
         ref_pattern = _prompt_non_empty("Git ref value", default="main")
         repo = _prompt_url("Git repo URL")
+        root_value = _prompt_non_empty("Monorepo root path", default=".")
         pond_name = None
     else:
         ref_type = _prompt_choice(
@@ -1262,6 +1418,7 @@ def _interactive_add(catchment: Catchment) -> tuple[str, dict[str, Any]]:
         ref_pattern = _prompt_non_empty("Git ref pattern", default=pattern_default)
         repo = _prompt_url("Git repo URL")
         pond_name = _prompt_non_empty("Pond name")
+        root_value = None
     source = {
         "type": "git",
         "structure": "catalog",
@@ -1272,6 +1429,8 @@ def _interactive_add(catchment: Catchment) -> tuple[str, dict[str, Any]]:
         "ref_pattern": ref_pattern,
         "entrypoint": "pond.py",
     }
+    if repo_structure == "monorepo":
+        source["root"] = root_value
     return f"Add git catalog source repo={repo!r}", source
 
 
@@ -1318,6 +1477,11 @@ def ponds_add_cmd(
         "-i",
         help="Guided prompts for local/git and single/catalog pond source setup.",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Non-interactive mode: auto-resolve conflicts and skip confirmation prompts.",
+    ),
     path: Path = typer.Option(
         Path("catchment.json"),
         "--file",
@@ -1358,13 +1522,13 @@ def ponds_add_cmd(
     try:
         conflicts, warnings = _analyze_new_source(catchment, source)
         if conflicts:
-            _resolve_conflicts(catchment, conflicts)
+            _resolve_conflicts(catchment, conflicts, force=force)
             conflicts, warnings = _analyze_new_source(catchment, source)
             if conflicts:
                 raise ValueError("Conflicts remain after overwrite attempt.")
         for warning in warnings:
             _print_warning(warning)
-        if not _prompt_bool(f"Confirm: {summary}", default=True):
+        if not force and not _prompt_bool(f"Confirm: {summary}", default=True):
             raise ValueError("Cancelled by user.")
     except Exception as exc:
         typer.echo(f"Failed to add pond source: {exc}", err=True)

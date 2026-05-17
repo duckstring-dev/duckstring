@@ -2,6 +2,12 @@
 
 This document describes the `duckstring basin ...` command group.
 
+## V1 Constraints
+
+- Pulse mode only
+- Local execution only
+- DuckDB engine only
+
 ## Command Group
 
 - `duckstring basin`
@@ -10,6 +16,7 @@ This document describes the `duckstring basin ...` command group.
 - `duckstring basin create [BASIN_NAME]`
 - `duckstring basin hydrate <BASIN_NAME>`
 - `duckstring basin pulse <BASIN_NAME>`
+- `duckstring basin run <BASIN_NAME>`
 
 `duckstring basin` with no subcommand lists basin directories in `./basins`.
 
@@ -19,8 +26,7 @@ Basin commands use command-first ordering:
 
 - `duckstring basin hydrate <BASIN_NAME>`
 - `duckstring basin pulse <BASIN_NAME>`
-
-This replaces the old basin-first form (`duckstring basin <BASIN_NAME> hydrate`).
+- `duckstring basin run <BASIN_NAME>`
 
 ## basin create
 
@@ -38,20 +44,6 @@ Options:
 - `--interactive|-i`
 - `--force`
 
-### Interactive mode
-
-```bash
-duckstring basin create -i
-```
-
-Interactive flow:
-
-1. Basin name
-2. Catchment path
-3. Basin mode
-4. Optional outlet pond targets (`pond` + semver `x.y.z`)
-5. Confirmation
-
 ## basin show
 
 Print a summary of basin name, mode, catchment path, hydration state, and outlets.
@@ -59,8 +51,6 @@ Print a summary of basin name, mode, catchment path, hydration state, and outlet
 ```bash
 duckstring basin show <BASIN_NAME> [-s|--spec <path>]
 ```
-
-`--spec` defaults to `basins/<name>/basin.json` and is resolved relative to the basin directory when not absolute.
 
 ## basin hydrate
 
@@ -76,8 +66,22 @@ Options:
 
 ## basin pulse
 
-Run a pulse for a hydrated basin.
+Run a pulse for an already hydrated basin.
 
 ```bash
 duckstring basin pulse <BASIN_NAME> [-s|--spec <path>]
 ```
+
+## basin run
+
+Convenience command to run a basin end-to-end.
+By default, it hydrates first (including source pull), saves hydration metadata, and then pulses.
+
+```bash
+duckstring basin run <BASIN_NAME> [-s|--spec <path>] [options]
+```
+
+Options:
+
+- `--no-hydrate` to skip auto-hydration
+- `--no-pull` to skip pulling sources during hydration

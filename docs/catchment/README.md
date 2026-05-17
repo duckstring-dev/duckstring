@@ -2,6 +2,13 @@
 
 This document describes the `duckstring catchment ...` command group.
 
+## V1 Constraints
+
+- Local execution only
+- DuckDB species engine only
+- Pulse mode only
+- Inlet locations: local parquet paths only
+
 ## Command Group
 
 - `duckstring catchment create [PATH]`
@@ -11,9 +18,10 @@ This document describes the `duckstring catchment ...` command group.
 - `duckstring catchment set-root <ROOT_DIR> [-f|--file <PATH>]`
 - `duckstring catchment species ...`
 - `duckstring catchment ponds ...`
+- `duckstring catchment inlets ...`
 
 Default catchment file path for commands that use `--file` is `catchment.json`.
-`catchment.json` should define `pond_sources`; `ponds` is not part of the catchment spec.
+`catchment.json` should define `pond_sources`; `ponds` is not part of the persisted catchment spec.
 
 ## catchment create
 
@@ -40,7 +48,7 @@ duckstring catchment show [path]
 
 ## catchment validate
 
-Validate catchment structure and pond source metadata.
+Validate catchment structure and metadata.
 
 ```bash
 duckstring catchment validate [path]
@@ -68,4 +76,8 @@ See `docs/catchment/species/README.md`.
 
 ## catchment ponds
 
-See detailed pond source docs in `docs/catchment/ponds/README.md`.
+See `docs/catchment/ponds/README.md`.
+
+## catchment inlets
+
+See `docs/catchment/inlets/README.md`.

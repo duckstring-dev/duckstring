@@ -25,6 +25,9 @@ class _FakeResolver(ContractResolver):
             raise ValueError("constraint mismatch")
         return c
 
+    def resolve_inlet_location(self, inlet_name: str):
+        raise KeyError(inlet_name)
+
 
 
 def test_pond_source_rejects_self():
@@ -125,6 +128,21 @@ def test_catchment_mode_rejects_non_pulse():
 
     with pytest.raises(ValueError):
         c.set_modes({"weekly": {"type": "scheduled", "schedule": "* * * * *"}})
+
+
+def test_catchment_inlet_location_roundtrip_and_resolution(tmp_path: Path):
+    spec = tmp_path / "catchment.json"
+    c = Catchment(root_dir=".duckstring")
+    c.set_inlet_location("landing_orders", path="./landing/orders", glob="*.parquet")
+    c.save(spec)
+
+    c2 = Catchment.load(spec)
+    resolved = c2.get_inlet_location("landing_orders")
+
+    assert resolved["kind"] == "local"
+    assert resolved["format"] == "parquet"
+    assert resolved["glob"] == "*.parquet"
+    assert resolved["path"] == str((tmp_path / "landing" / "orders").resolve())
 
 
 def test_basin_plan_toposort_from_manifests(tmp_path: Path):

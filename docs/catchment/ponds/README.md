@@ -2,6 +2,12 @@
 
 This document describes `duckstring catchment ponds ...`.
 
+## V1 Constraints
+
+- Local execution only
+- Pond code sources may be local filesystem or git
+- Runtime staging target is always `<root_dir>/ponds/<pond>/<version>`
+
 ## Command Group
 
 - `duckstring catchment ponds list-sources`
@@ -20,27 +26,12 @@ Show all `pond_sources` entries with source `id`.
 duckstring catchment ponds list-sources [-f|--file <path>]
 ```
 
-Example output:
-
-```text
-1  -- git_catalog/versioned pond=ingest repo=https://git.com ref_type=branch pattern=release/{version}
-2  -- git_catalog/versioned pond=enriched repo=https://git.com ref_type=branch pattern=release/{version}
-```
-
 ## ponds list-pulled
 
 Show all pulled pond versions currently present under `<root_dir>/ponds`.
 
 ```bash
 duckstring catchment ponds list-pulled [-f|--file <path>]
-```
-
-Example output:
-
-```text
-Catchment Root: /abs/path/to/.duckstring/
-
-aggregated@1.0.0
 ```
 
 ## ponds add
@@ -64,21 +55,6 @@ Interactive flow:
 4. Conflict checks / warnings
 5. Final confirmation
 
-Interactive branches:
-
-- Local single: writes `pond_sources` entry `{type: local, structure: single, pond, version, path, entrypoint}`
-- Local catalog: writes `{type: local, structure: catalog, root, entrypoint}`
-- Git single: writes `{type: git, structure: single, repo, ref_type, ref, pond, version, entrypoint}`
-- Git catalog:
-  - Versioned: `{type: git, structure: catalog, repo_structure: versioned, repo, ref_type, ref_pattern, pond, entrypoint}`
-  - Monorepo: `{type: git, structure: catalog, repo_structure: monorepo, repo, ref_type, ref_pattern, pond: null, entrypoint}`
-
-Notes:
-
-- `pond.py` is fixed as entrypoint.
-- URL prompts require valid URLs.
-- For git catalog monorepo, `ref_pattern` stores the fixed ref value.
-
 ### Direct mode
 
 ```bash
@@ -98,21 +74,29 @@ Direct options:
 - `--ref-type <branch|tag|commit>` (allowed values depend on source/scope)
 - `--ref <value>`
 - `--ref-pattern <value>`
+- `--force` (skip confirmations and auto-overwrite conflicts)
 - `-i|--interactive`
 - `-f|--file <path>`
+
+Git repo values accept HTTPS URLs and SSH scp-style addresses (for example `git@github.com:org/repo.git`).
+
+Monorepo notes:
+
+- `git/catalog` with `--repo-structure monorepo` accepts `--root` (default `.`).
+- Monorepo layout must be `{root}/{pond}/{version}` with semver version directories.
 
 ### Conflict / warning behavior on add
 
 Before writing:
 
-- exact duplicate source => conflict
-- duplicate single `pond@version` => conflict
-- catalog/single overlaps => warnings
-- catalog/catalog overlaps => warnings
-- monorepo source present => warning
+- exact duplicate source entries may be detected as conflicts
+- duplicate single `pond@version` entries are conflicts
+- catalog/single overlaps emit warnings
+- catalog/catalog overlaps emit warnings
+- presence of monorepo catalog sources emits warnings
 
-If conflicts are found, CLI prompts to overwrite conflicting sources.
-Warnings are printed before final confirmation.
+Without `--force`, conflicts and final writes are confirmed interactively.
+With `--force`, conflicts are auto-overwritten and confirmation prompts are skipped.
 
 ## ponds pull
 
@@ -125,34 +109,21 @@ duckstring catchment ponds pull [-f|--file <path>]
 Behavior:
 
 - Materializes local and git sources into `<root_dir>/ponds/<pond>/<version>`.
+- Updates the runtime catalog used by basin hydration and resolution.
 - Prints a summary count of pulled pond versions.
 
-Resolution policy (conflicts, precedence, populate/skip):
+Selection behavior:
 
-1. Sources are evaluated in `pond_sources` order.
-2. Each discovered pond candidate is keyed by `pond@version`.
-3. Priority by source scope:
-   - `single` entries have higher priority than `catalog` entries.
-   - `catalog` entries are lower priority than any `single` for the same `pond@version`.
-4. Populate/skip rules:
-   - If a `single` discovers a `pond@version` not yet selected, populate it.
-   - If a `single` discovers a `pond@version` already selected from a `catalog`, replace it with the `single`.
-   - If a `catalog` discovers a `pond@version` already selected, skip it.
-5. Same-priority ties:
-   - `single` vs `single`: keep the earlier `pond_sources` entry and skip later duplicates.
-   - `catalog` vs `catalog`: keep the earlier `pond_sources` entry and skip later duplicates.
-6. This precedence model matches `ponds add` semantics:
-   - duplicate explicit `single pond@version` is treated as a conflict at add time.
-   - `single` can override catalog content.
-   - overlapping catalogs are allowed, with ordering determining which source is selected.
+- Sources are processed in `pond_sources` order.
+- For the same `pond@version`, later discovered entries overwrite earlier ones.
 
 Source-specific discovery:
 
 - `local/catalog`: discovers `<root>/<pond>/<version>` where `<version>` is semver and `pond.py` exists.
 - `local/single`: uses explicit `pond`, `version`, `path`.
 - `git/single`: checks out `repo@ref`, then uses explicit `pond`, `version`.
-- `git/catalog` (versioned): for matching refs from `ref_pattern`, maps to `<pond>@<version>`.
-- `git/catalog` (monorepo): checks out fixed ref, then discovers `<root>/<pond>/<version>` like local catalog.
+- `git/catalog` (versioned): maps matching refs from `ref_pattern` to `<pond>@<version>`.
+- `git/catalog` (monorepo): checks out fixed `ref_pattern`, then discovers `<root>/<pond>/<version>`.
 
 ## ponds remove
 

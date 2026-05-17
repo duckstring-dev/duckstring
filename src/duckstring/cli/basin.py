@@ -507,3 +507,43 @@ def pulse(
     basin = Basin.load(str(spec_path))
     pulse_result = basin.pulse(verbose=True)
     typer.echo(f"Completed pulse {pulse_result} in {pulse_result.duration} seconds")
+
+
+@app.command()
+def run(
+    basin_name: str = typer.Argument(
+        ...,
+        help="Basin name",
+        shell_complete=_complete_basin_names,
+    ),
+    spec: Optional[str] = typer.Option(
+        None,
+        "--spec",
+        "-s",
+        help="Path to basin spec (default: basin.json; relative to basin dir if not absolute).",
+        shell_complete=_complete_spec_path,
+    ),
+    no_hydrate: bool = typer.Option(
+        False,
+        "--no-hydrate",
+        help="Skip auto-hydration and run pulse against existing hydrated state.",
+    ),
+    no_pull: bool = typer.Option(
+        False,
+        "--no-pull",
+        help="When hydrating, skip pulling catchment pond sources first.",
+    ),
+) -> None:
+    root = _repo_root()
+    basin_dir = _require_basin_dir(root, basin_name)
+    spec_path = _resolve_spec_path(basin_dir, spec)
+    if not spec_path.exists():
+        typer.echo(f"Spec not found: {spec_path}", err=True)
+        raise typer.Exit(code=2)
+
+    basin = Basin.load(str(spec_path))
+    if not no_hydrate:
+        basin.hydrate(pull_sources=not no_pull)
+        basin.save(str(spec_path))
+    pulse_result = basin.pulse(verbose=True)
+    typer.echo(f"Completed pulse {pulse_result} in {pulse_result.duration} seconds")

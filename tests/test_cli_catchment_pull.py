@@ -7,7 +7,6 @@ from typer.testing import CliRunner
 
 from duckstring.cli import app
 
-
 runner = CliRunner()
 
 
@@ -157,3 +156,113 @@ def test_basin_hydrate_no_pull_keeps_old_failure_mode(tmp_path: Path, monkeypatc
     assert result.exit_code != 0
     assert isinstance(result.exception, KeyError)
     assert "Outlet pond 'aggregated' is not present in catchment pond catalog." in str(result.exception)
+
+
+def test_catchment_ponds_add_force_non_interactive(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_local_pond_catalog(tmp_path)
+    _write_catchment_json(tmp_path / "catchment.json")
+
+    result = runner.invoke(
+        app,
+        [
+            "catchment",
+            "ponds",
+            "add",
+            "--source-type",
+            "local",
+            "--scope",
+            "catalog",
+            "--root",
+            "./ponds",
+            "--force",
+            "-f",
+            "catchment.json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads((tmp_path / "catchment.json").read_text(encoding="utf-8"))
+    assert len(data["pond_sources"]) == 2
+    assert data["pond_sources"][-1]["type"] == "local"
+    assert data["pond_sources"][-1]["structure"] == "catalog"
+    assert data["pond_sources"][-1]["root"] == "./ponds"
+
+
+def test_catchment_ponds_add_git_monorepo_accepts_root_and_ssh_repo_url(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_catchment_json(tmp_path / "catchment.json")
+
+    result = runner.invoke(
+        app,
+        [
+            "catchment",
+            "ponds",
+            "add",
+            "--source-type",
+            "git",
+            "--scope",
+            "catalog",
+            "--repo-structure",
+            "monorepo",
+            "--repo",
+            "git@github.com:acme/duckstring-ponds.git",
+            "--ref-type",
+            "branch",
+            "--ref-pattern",
+            "main",
+            "--root",
+            "catalog",
+            "--force",
+            "-f",
+            "catchment.json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads((tmp_path / "catchment.json").read_text(encoding="utf-8"))
+    git_sources = [s for s in data["pond_sources"] if s.get("type") == "git" and s.get("structure") == "catalog"]
+    assert git_sources
+    source = git_sources[-1]
+    assert source["repo"] == "git@github.com:acme/duckstring-ponds.git"
+    assert source["repo_structure"] == "monorepo"
+    assert source["root"] == "catalog"
+
+
+def test_catchment_inlets_cli_lifecycle(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_catchment_json(tmp_path / "catchment.json")
+
+    add_result = runner.invoke(
+        app,
+        [
+            "catchment",
+            "inlets",
+            "add",
+            "landing_orders",
+            "--path",
+            "./landing/orders",
+            "--glob",
+            "*.parquet",
+            "-f",
+            "catchment.json",
+        ],
+    )
+    assert add_result.exit_code == 0, add_result.output
+
+    list_result = runner.invoke(app, ["catchment", "inlets", "list", "-f", "catchment.json"])
+    assert list_result.exit_code == 0, list_result.output
+    assert "landing_orders" in list_result.output
+    assert "path=./landing/orders" in list_result.output
+
+    show_result = runner.invoke(app, ["catchment", "inlets", "show", "landing_orders", "-f", "catchment.json"])
+    assert show_result.exit_code == 0, show_result.output
+    assert "\"format\": \"parquet\"" in show_result.output
+    assert "\"glob\": \"*.parquet\"" in show_result.output
+
+    remove_result = runner.invoke(app, ["catchment", "inlets", "remove", "landing_orders", "-f", "catchment.json"])
+    assert remove_result.exit_code == 0, remove_result.output
+
+    post_list = runner.invoke(app, ["catchment", "inlets", "list", "-f", "catchment.json"])
+    assert post_list.exit_code == 0, post_list.output
+    assert "No inlet locations configured." in post_list.output

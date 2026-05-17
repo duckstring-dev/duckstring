@@ -212,6 +212,7 @@ class PondManifest:
 
 class ContractResolver(Protocol):
     def resolve_contract(self, pond_name: str, constraint: str) -> PondContract: ...
+    def resolve_inlet_location(self, inlet_name: str) -> Dict[str, Any]: ...
 
 
 # ----------------------------
@@ -326,6 +327,42 @@ class Pond:
                 raise ValueError(f"Invalid source declaration: {pond_name!r}: {constraint!r}")
             self._sources[pond_name] = constraint
         self._resolve_upstream_contracts()
+
+    def inlet(self, inlet_name: str, *, glob: Optional[str] = None, format: Optional[str] = None) -> Any:
+        if self._resolver is None:
+            raise RuntimeError(
+                "Pond inlet() requires an active resolver. Run via Basin/Snapshot context."
+            )
+        if not _HAVE_IBIS:
+            raise RuntimeError("ibis is required for Pond.inlet(). Install 'ibis-framework'.")
+
+        inlet = self._resolver.resolve_inlet_location(inlet_name)
+        kind = str(inlet.get("kind", "local")).strip()
+        if kind != "local":
+            raise ValueError(f"Only local inlet locations are supported in v1. Got kind={kind!r}.")
+
+        fmt = str(format or inlet.get("format", "parquet")).strip().lower()
+        if fmt != "parquet":
+            raise ValueError(f"Only parquet inlet format is supported in v1. Got format={fmt!r}.")
+
+        path_value = inlet.get("path")
+        if not isinstance(path_value, str) or not path_value.strip():
+            raise ValueError(f"Inlet location {inlet_name!r} has invalid path: {path_value!r}")
+        path_value = path_value.strip()
+
+        if any(ch in path_value for ch in "*?[]"):
+            target = path_value
+        else:
+            base = Path(path_value)
+            pattern = (glob or str(inlet.get("glob", "")).strip()) or None
+            if pattern:
+                target = (base / pattern).as_posix()
+            elif base.suffix.lower() == ".parquet":
+                target = base.as_posix()
+            else:
+                target = (base / "*.parquet").as_posix()
+
+        return ibis.read_parquet(target)
 
     def attach_resolver(self, resolver: ContractResolver) -> None:
         self._resolver = resolver
@@ -740,6 +777,7 @@ class Catchment:
         # Runtime-only pond catalog, populated during basin hydration/resolve flows.
         self._pond_catalog: Dict[str, Any] = {}
         self.pond_sources: List[Dict[str, Any]] = []
+        self.inlet_locations: Dict[str, Dict[str, Any]] = {}
 
         self.species: Dict[str, Species] = {}
         self.default_species: Optional[str] = None
@@ -770,6 +808,7 @@ class Catchment:
             "spec_version": self.SPEC_VERSION,
             "root_dir": self.root_dir,
             "pond_sources": [dict(entry) for entry in self.pond_sources],
+            "inlet_locations": {k: dict(v) for k, v in self.inlet_locations.items()},
             "species": {k: asdict(v) for k, v in self.species.items()},
             "default_species": self.default_species,
             "pond_species": dict(self.pond_species),
@@ -784,13 +823,115 @@ class Catchment:
         if "ponds" in d:
             raise ValueError("Unsupported catchment field 'ponds'; use pond_sources and basin hydration.")
 
-        c = Catchment(root_dir=str(d.get("root_dir", "catchment")))
+        c = Catchment(root_dir=str(d.get("root_dir", ".duckstring")))
         c.pond_sources = [dict(entry) for entry in list(d.get("pond_sources", [])) if isinstance(entry, dict)]
+        c.inlet_locations = {
+            str(name): dict(info)
+            for name, info in dict(d.get("inlet_locations", {})).items()
+            if isinstance(info, Mapping)
+        }
         c.species = {k: Species(**v) for k, v in dict(d.get("species", {})).items()}
         c.default_species = d.get("default_species")
         c.pond_species = dict(d.get("pond_species", {}))
         c.modes = dict(d.get("modes", {"pulse": {"type": "pulse"}}))
         return c
+
+    @property
+    def ponds(self) -> Dict[str, Any]:
+        return self.runtime_pond_catalog()
+
+    @ponds.setter
+    def ponds(self, catalog: Mapping[str, Any]) -> None:
+        self.set_runtime_pond_catalog(catalog)
+
+    def save(self, path: str | os.PathLike[str]) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+        self._loaded_from = str(p)
+
+    def set_species(self, species: Mapping[str, Species | Mapping[str, Any]]) -> None:
+        out: Dict[str, Species] = {}
+        for name, value in dict(species).items():
+            sp = value if isinstance(value, Species) else Species(**dict(value))
+            sp.validate()
+            out[str(name)] = sp
+        self.species = out
+
+    def set_default_species(self, name: str) -> None:
+        if name not in self.species:
+            available = ", ".join(sorted(self.species.keys()))
+            raise KeyError(f"Unknown species {name!r}. Available: {available}")
+        self.default_species = name
+
+    def set_modes(self, modes: Mapping[str, Mapping[str, Any]]) -> None:
+        out = {str(name): dict(spec) for name, spec in dict(modes).items()}
+        for mode_name, mode_spec in out.items():
+            mode_type = str(mode_spec.get("type", "pulse"))
+            if mode_type != "pulse":
+                raise ValueError(f"Only mode type='pulse' is supported for now. Got: {mode_type!r} (mode {mode_name!r})")
+        self.modes = out
+
+    def basin(
+        self,
+        *,
+        outlets: Optional[Mapping[str, str]] = None,
+        mode: str = "pulse",
+        name: Optional[str] = None,
+    ) -> "Basin":
+        return Basin(catchment=self, outlets=dict(outlets or {}), mode=mode, name=name)
+
+    def set_inlet_locations(self, locations: Mapping[str, Mapping[str, Any]]) -> None:
+        self.inlet_locations = {str(name): dict(spec) for name, spec in dict(locations).items()}
+
+    def set_inlet_location(
+        self,
+        name: str,
+        *,
+        path: str,
+        kind: str = "local",
+        format: str = "parquet",
+        glob: Optional[str] = None,
+    ) -> None:
+        spec: Dict[str, Any] = {
+            "kind": str(kind),
+            "path": str(path),
+            "format": str(format),
+        }
+        if glob is not None:
+            spec["glob"] = str(glob)
+        self.inlet_locations[str(name)] = spec
+
+    def remove_inlet_location(self, name: str) -> None:
+        self.inlet_locations.pop(name, None)
+
+    def get_inlet_location(self, name: str) -> Dict[str, Any]:
+        if name not in self.inlet_locations:
+            available = ", ".join(sorted(self.inlet_locations.keys())) or "<none>"
+            raise KeyError(f"Unknown inlet location {name!r}. Available: {available}")
+
+        raw = dict(self.inlet_locations[name])
+        kind = str(raw.get("kind", "local")).strip()
+        if kind != "local":
+            raise ValueError(f"Only local inlet locations are supported in v1. Got kind={kind!r}.")
+
+        path_value = raw.get("path")
+        if not isinstance(path_value, str) or not path_value.strip():
+            raise ValueError(f"Inlet location {name!r} must define a non-empty path.")
+
+        fmt = str(raw.get("format", "parquet")).strip().lower()
+        if fmt != "parquet":
+            raise ValueError(f"Only parquet inlet format is supported in v1. Got format={fmt!r}.")
+
+        out: Dict[str, Any] = {
+            "kind": kind,
+            "path": str(self._resolve_local_path(path_value)),
+            "format": fmt,
+        }
+        glob_value = raw.get("glob")
+        if isinstance(glob_value, str) and glob_value.strip():
+            out["glob"] = glob_value.strip()
+        return out
 
     def set_runtime_pond_catalog(self, catalog: Mapping[str, Any]) -> None:
         self._pond_catalog = {
@@ -967,8 +1108,23 @@ class Catchment:
         root.mkdir(parents=True, exist_ok=True)
         ponds_root = root / "ponds"
         ponds_root.mkdir(parents=True, exist_ok=True)
+        catalog = self.runtime_pond_catalog()
+        discovered_catalog = self._discover_runtime_catalog(ponds_root)
+        for pond_name, versions in discovered_catalog.items():
+            existing = catalog.get(pond_name)
+            if isinstance(existing, dict):
+                merged = dict(existing)
+                merged.update(versions)
+                catalog[pond_name] = merged
+            elif existing is None:
+                catalog[pond_name] = dict(versions)
 
-        catalog = self._discover_runtime_catalog(ponds_root)
+        def _set_catalog_version(pond_name: str, version: str, path: Path) -> None:
+            existing = catalog.get(pond_name)
+            if isinstance(existing, dict):
+                existing[version] = str(path)
+                return
+            catalog[pond_name] = {version: str(path)}
 
         for idx, raw_source in enumerate(self.pond_sources):
             if not isinstance(raw_source, dict):
@@ -991,7 +1147,7 @@ class Catchment:
                         entrypoint=entrypoint,
                         ponds_root=ponds_root,
                     )
-                    catalog.setdefault(pond_name, {})[version] = str(staged)
+                    _set_catalog_version(pond_name, version, staged)
                 continue
 
             if source_type == "local" and structure == "single":
@@ -1012,7 +1168,7 @@ class Catchment:
                     entrypoint=entrypoint,
                     ponds_root=ponds_root,
                 )
-                catalog.setdefault(pond_name, {})[version] = str(staged)
+                _set_catalog_version(pond_name, version, staged)
                 continue
 
             if source_type == "git" and structure == "single":
@@ -1036,7 +1192,7 @@ class Catchment:
                         entrypoint=entrypoint,
                         ponds_root=ponds_root,
                     )
-                catalog.setdefault(pond_name, {})[version] = str(staged)
+                _set_catalog_version(pond_name, version, staged)
                 continue
 
             if source_type == "git" and structure == "catalog":
@@ -1066,7 +1222,7 @@ class Catchment:
                                 entrypoint=entrypoint,
                                 ponds_root=ponds_root,
                             )
-                        catalog.setdefault(pond_name, {})[version] = str(staged)
+                        _set_catalog_version(pond_name, version, staged)
                     continue
 
                 if repo_structure == "monorepo":
@@ -1089,7 +1245,7 @@ class Catchment:
                                 entrypoint=entrypoint,
                                 ponds_root=ponds_root,
                             )
-                            catalog.setdefault(pond_name, {})[version] = str(staged)
+                            _set_catalog_version(pond_name, version, staged)
                     continue
 
                 raise ValueError(
@@ -1135,6 +1291,22 @@ class Catchment:
 
         if self.default_species not in self.species:
             raise ValueError(f"default_species {self.default_species!r} is not present in species registry.")
+
+        for inlet_name, inlet in sorted(self.inlet_locations.items()):
+            if not isinstance(inlet, Mapping):
+                raise ValueError(f"inlet_locations.{inlet_name}: value must be an object.")
+            kind = str(inlet.get("kind", "local")).strip()
+            if kind != "local":
+                raise ValueError(f"inlet_locations.{inlet_name}: only kind='local' is supported in v1.")
+            path_value = inlet.get("path")
+            if not isinstance(path_value, str) or not path_value.strip():
+                raise ValueError(f"inlet_locations.{inlet_name}: path must be non-empty.")
+            fmt = str(inlet.get("format", "parquet")).strip().lower()
+            if fmt != "parquet":
+                raise ValueError(f"inlet_locations.{inlet_name}: only format='parquet' is supported in v1.")
+            glob_value = inlet.get("glob")
+            if glob_value is not None and (not isinstance(glob_value, str) or not glob_value.strip()):
+                raise ValueError(f"inlet_locations.{inlet_name}: glob must be a non-empty string when set.")
 
         for name, spec in self.modes.items():
             t = str(dict(spec).get("type", "pulse"))
@@ -1318,6 +1490,10 @@ class Basin(ContractResolver):
                     f"Constraint mismatch for pond {pond_name!r}: basin expected {expected!r}, got {constraint!r}"
                 )
         return self._contracts[pond_name]
+
+    def resolve_inlet_location(self, inlet_name: str) -> Dict[str, Any]:
+        catchment = self._ensure_catchment()
+        return catchment.get_inlet_location(inlet_name)
 
     def _resolve_dependency_version(self, pond_name: str, constraint: str) -> str:
         if not self._auto_upgrade:
@@ -2103,6 +2279,9 @@ class Snapshot(ContractResolver):
             description=None,
             tables=tables,
         )
+
+    def resolve_inlet_location(self, inlet_name: str) -> Dict[str, Any]:
+        return self.source_catchment.get_inlet_location(inlet_name)
 
     def sink(self, expr: Any) -> None:
         ref = self._find_ref(expr)
