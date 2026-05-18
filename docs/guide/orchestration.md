@@ -4,7 +4,7 @@ Duckstring orchestration uses a pull-based system modelled after Kanban. This al
 
 The unit operations (nodes) in the DAG are **Ripples**, existing in a versioned **Pond**. Often there might be only one Ripple to a Pond, but there could be many more.
 
-## Basic Summary
+## Overview
 
 ### Parents and Versioning
 
@@ -24,20 +24,21 @@ Sources can be listed as *required* or not. Any required Source will cause the P
 
 When the state of a Pond or its Sources changes, the Pond follows the process:
 
-- If I have Demand from any Sink
--- If I have no Sources (i.e. I am an Inlet)
---- Execute
--- If I have any required Sources
---- If all required Sources have updated
----- Send Demand to each Source
----- Execute
--- If any Source has updated
---- Send Demand to each Source
---- Execute
+- If I have **Demand** from any Sink
+    - If I have no Sources (i.e. I am an Inlet)
+        - Execute
+        - Clear all Demand
+    - If I have any required Sources
+        - If all required Sources have updated
+            - Send Demand to each Source
+            - Execute
+            - Clear all Demand
+    - If any Source has updated
+        - Send Demand to each Source
+        - Execute
+        - Clear all Demand
 
 Note that Demand is sent *before* execution starts, which may be counterintuitive. This allows the Sources to execute their next generation while the Pond executes, minimising latency.
-
-Executing also clears Demand from all Sinks.
 
 ### Initiating Demand
 
@@ -51,3 +52,16 @@ If a new Pond is attached as a Source, or if any Pond has recently upgraded its 
 
 ### Stops
 
+The DAG will naturally stop if no new Demand is triggered. However, each prior level executes for one further generation before stopping, meaning a Pond *n* levels prior could execute *n* additional times unnecessarily.
+
+Instead, a **Stop** can be emitted against an Outlet. This causes it to delete its Demand in each Source (if it exists). If any Pond has its Demand from all its Sinks (apart from when clearing that Demand itself), it also sends a Stop upstream.
+
+Consequently, if all Outlets have Stopped, no further execution begins upstream.
+
+A Pulse in fact sends a Stop when it begins execution, so that the upstream processes execute only once.
+
+### Ripples
+
+Within a Pond, each Ripple behaves as its own Pond, just without the version resolution. A Pond will therefore in truth execute at the Ripple level, with Demand received to leaf Ripples and sent to Sources from root Ripples.
+
+Specific detail on this process is covered in the Pond guide.
