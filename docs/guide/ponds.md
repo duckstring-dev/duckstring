@@ -73,11 +73,13 @@ version = "1.0.0"
 type = "outlet"
 
 [sources]
-pond = "2.0.0"
+pond = "1.0.0"
+another_inlet = "1.0.0"
 
 [catchment.dev]
     [catchment.dev.sources]
-        pond = "2.0.0?"
+        pond = "1.0.0?"
+        another_inlet = "1.0.0"
 
 [catchment.qa]
     # Inherit defaults
@@ -88,4 +90,8 @@ pond = "2.0.0"
 
 This demonstrates the ability to specify different details for each named Catchment. This should be rare and is generally discouraged, but it is possible that a given Pond name may not be globally unique in a specific Catchment, necessitating a rename.
 
-Note the "?" in [catchment.dev.sources]. This flags the Source as "not required", meaning the Pond will execute even if 
+Note the "?" in [catchment.dev.sources] for `pond`. This flags the Source as "not required", meaning the Pond will not wait for it to have updated before proceeding. In this example, it is only not required in the 'dev' Catchment, which might be useful for testing processing upon change to only the other Pond `another_inlet`.
+
+### `src`
+
+TODO
