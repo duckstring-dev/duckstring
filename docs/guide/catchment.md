@@ -1,6 +1,10 @@
 # Catchment
 
-A **Catchment** is the runtime environment that activates Ponds. It is a long-running FastAPI application that owns:
+A **Catchment** is the long-running process that hosts your Ponds. The same `duckstring catchment` command runs at every scale: on a laptop during development, on a shared VM or container when more developers join, and (eventually) hosted at `duckstring.com`. The artifact moves; the interface doesn't.
+
+Keeping it as a daemon — rather than a script invoked per task — is what makes Wave, Tide, Demand/Stop, and the live UI possible: each needs somewhere with a heartbeat. For cron-style workflows, a Catchment can still be started, run once via Pulse, and shut down; the daemon path is just the headline.
+
+The Catchment owns:
 
 - **Storage** — deployed Pond sources, per-run working directories, the table registry, and Catchment-level state.
 - **The Pond registry** — which Ponds have been deployed, in which versions, and their declared Sources.

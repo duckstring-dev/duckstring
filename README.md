@@ -1,14 +1,17 @@
 # Duckstring
 
-Duckstring is a data pipeline framework built around modular, versioned nodes called **Ponds**. Each Pond specifies its immediate parents (with version), allowing for the formation of a DAG much like one would install packages. 
-Pond execution is orchestrated within an environment - a **Catchment** - that controls storage and other global settings. It uses a pull-based system modelled after Kanban, with **Outlets**  (terminal Ponds) sending demand upstream. This allows each Pond to be modified and deployed independently, with any paths in the DAG that are not attached to any Outlet automatically skipped. 
-Duckstring is built on the philosophy that most data pipelines are not truly "big data" and with good design can execute on a single compute node. It is primarily designed for batch and incremental workloads for tables on the order of tens of millions of rows (e.g. <50M).
-The default engine is DuckDB, though this is configurable. Duckstring is however an independent project and is not affiliated with, endorsed by, or maintained by the DuckDB project.
+Duckstring is a data pipeline framework that scales unchanged from your laptop to a shared server to a hosted cloud — the same `duckstring catchment` command runs in all three places. It's built for the "medium data" case (tens of millions of rows) where one compute node is enough, with DuckDB as the default engine.
+
+Pipelines are composed of **Ponds**: modular units assembled into a DAG the way you'd install packages. Each Pond has its own SemVer'd release history, deploys independently, and can run alongside its other major versions. Execution is pull-based — terminal Ponds (**Outlets**) send Demand upstream, and any DAG path not attached to an Outlet is automatically skipped.
+
+A **Catchment** is the long-running process that hosts your Ponds. Start one on your laptop with `duckstring catchment dev`; leave it on for continuous runs. When more than one developer is involved, run the same command on a Linux box or container. The artifact you developed against doesn't change — only where it lives.
+
+(Duckstring is an independent project and is not affiliated with, endorsed by, or maintained by the DuckDB project.)
 
 ## Core Concepts
 
-- **Catchment**: Control environment - a FastAPI application
-- **Pond**: Versioned transformation unit with declared upstream dependencies - the main element of version control
+- **Catchment**: Long-running process that hosts Ponds — same `duckstring catchment` command from laptop to cloud
+- **Pond**: Versioned transformation unit with declared upstream dependencies — the main element of version control
 - **Inlet**: Pond with external dependencies and no upstream Ponds
 - **Outlet**: Pond with no downstream Ponds (e.g. outputs final data products)
 - **Ripple**: Unit operation within a Pond (e.g. a single transformation producing a table)
