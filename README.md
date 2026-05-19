@@ -1,28 +1,17 @@
 # Duckstring
 
-Duckstring is a local-first data pipeline framework built around modular, versioned nodes called **Ponds**.
-A **Basin** is a dependency-resolved DAG of ponds with one or more target outputs (outlets), and a **Catchment** is the runtime boundary where ponds, state, and data are stored.
-
-## V1 Scope
-
-Duckstring v1 is intentionally narrow:
-
-- Local execution only
-- DuckDB engine only
-- Pulse execution mode only
-- Local parquet inlet locations only
-- Pond code can be sourced from local catalogs or git repositories
-
-The codebase keeps structure for future expansion, but v1 should be treated as a strict, stable baseline.
+Duckstring is a data pipeline framework built around modular, versioned nodes called **Ponds**. Each Pond specifies its immediate parents (with version), allowing for the formation of a DAG much like one would install packages. 
+Pond execution is orchestrated within an environment - a **Catchment** - that controls storage and other global settings. It uses a pull-based system modelled after Kanban, with **Outlets**  (terminal Ponds) sending demand upstream. This allows each Pond to be modified and deployed independently, with any paths in the DAG that are not attached to any Outlet automatically skipped. 
+Duckstring is built on the philosophy that most data pipelines are not truly "big data" and with good design can execute on a single compute node. It is primarily designed for batch and incremental workloads for tables on the order of tens of millions of rows (e.g. <50M).
+The default engine is DuckDB, though this is configurable. Duckstring is however an independent project and is not affiliated with, endorsed by, or maintained by the DuckDB project.
 
 ## Core Concepts
 
-- **Catchment**: runtime root plus configuration (species, modes, pond sources, inlet locations)
-- **Pond**: versioned transformation unit that declares upstream dependencies and output tables
-- **Basin**: dependency-resolved plan built from outlet targets
-- **Hydration**: materialize pond code + manifests into the catchment runtime
-- **Pulse**: one full execution pass over a hydrated basin in topological order
-- **Inlet Location**: named landing location (typically parquet files) that inlet ponds can read from
+- **Catchment**: Control environment - a FastAPI application
+- **Pond**: Versioned transformation unit with declared upstream dependencies - the main element of version control
+- **Inlet**: Pond with external dependencies and no upstream Ponds
+- **Outlet**: Pond with no downstream Ponds (e.g. outputs final data products)
+- **Ripple**: Unit operation within a Pond (e.g. a single transformation producing a table)
 
 ## Installation
 
@@ -30,117 +19,189 @@ The codebase keeps structure for future expansion, but v1 should be treated as a
 pip install duckstring
 ```
 
-## CLI Quickstart
+## Quickstart
 
-### 1) Create a catchment
-
-```bash
-duckstring catchment create catchment.json
-```
-
-### 2) Register pond code sources
-
-Local catalog example:
+### 1) Start a Catchment Server
 
 ```bash
-duckstring catchment ponds add \
-  --source-type local \
-  --scope catalog \
-  --root ./ponds \
-  --force \
-  -f catchment.json
+duckstring catchment dev --port 5000 --root ~/.duckstring/dev
 ```
 
-Git monorepo catalog example:
+This will start a server with name 'dev' at port 5000 (the default, if none specified) and store Catchment details at `~/.duckstring/dev` (default is `~/.duckstring/{name}`). 
+
+### 2) Define Pond(s)
+
+#### Demo Ponds
+
+If you want to see an example sequence of Ponds in action immediately, create three project directories and run one of these commands in each:
 
 ```bash
-duckstring catchment ponds add \
-  --source-type git \
-  --scope catalog \
-  --repo-structure monorepo \
-  --repo git@github.com:your-org/ponds.git \
-  --ref-type branch \
-  --ref-pattern main \
-  --root catalog \
-  --force \
-  -f catchment.json
+duckstring pond demo inlet
+duckstring pond demo pond
+duckstring pond demo outlet
 ```
 
-### 3) Register inlet landing locations (optional)
+It's recommended to do this before attempting to make your own so that you can get a feel for the structure.
+
+#### Custom Pond
+
+Create a project directory and run:
 
 ```bash
-duckstring catchment inlets add landing_orders \
-  --path ./landing/orders \
-  --glob "*.parquet" \
-  -f catchment.json
+duckstring pond init example_pond
 ```
 
-### 4) Pull pond sources into the runtime
+This will create a duckstring pond structure:
+
+```text
+root/
+|-- src/
+|   |-- pond.py
+|-- pond.toml
+|-- __main__.py
+|-- .gitignore
+|-- README.md
+```
+
+Here `pond.py` contains the code for a single Ripple operation (currently blank), and `pond.toml` specifies the Pond name "example_pond" and version (defaulting to "0.1.0").
+
+### 3) Deploy to Catchment
+
+#### From Local
+
+From a Pond's project root run:
 
 ```bash
-duckstring catchment ponds pull -f catchment.json
+duckstring deploy dev
 ```
 
-### 5) Create a basin
+This will read the pond name, version and type (Inlet, Pond, Outlet) from `pond.toml` and deploy the project contents to the Catchment.
+
+Alternatively, you can import the Pond using the Catchment UI.
+
+#### From Git
+
+If you are using git with a remote, you can deploy with:
 
 ```bash
-duckstring basin create analytics \
-  --catchment-path catchment.json \
-  --outlet marts_orders=1.0.0
+duckstring deploy dev --git {branch|commit|tag}
 ```
 
-### 6) Run the basin
+This will use the current branch/commit/tag to define the Pond. Upon each execution the Catchment will clone the repository and run it.
 
-`run` auto-hydrates by default, then pulses:
+This can also be specified using the Catchment UI.
+
+### 3) Execute
+
+Ponds are executed by sending a Demand signal from an Outlet. This propagates backwards through the DAG until it reaches each upstream Inlet, causing them to execute, with children beginning upon completion of all of their parents.
+
+These examples will use the Pond `outlet`, version `1.0.0`, as the execution reference. All examples may also be alternatively executed using the Catchment UI.
+
+#### Pulse
+
+To initiate a single run:
 
 ```bash
-duckstring basin run analytics
+duckstring pulse dev outlet
 ```
 
-### 7) Inspect materialized outputs
+The `pulse` mode emits a Demand signal from `outlet`, and when it begins execution, sends a Stop signal. This causes it to execute exactly once.
+
+This will automatically run against the maximum version available for that Pond. To use a specific version:
 
 ```bash
-duckstring periscope marts_orders --version 1.0 --list-versions
-duckstring periscope marts_orders --version 1.0.0 out
+duckstring pulse dev outlet --version 1
 ```
 
-## Pond Authoring Example
+#### Wave
 
-```python
-import ibis
-from duckstring import Pond
+To continuously run:
 
-
-def pond():
-    p = Pond(name="marts_orders", description="Orders mart", version="1.0.0")
-
-    # Read landed parquet files from a named inlet location in catchment.json
-    landed = p.inlet("landing_orders")
-
-    # Optionally read from upstream pond contracts
-    # p.source({"stg_orders": "1.0.0"})
-    # stg = p.upstream["stg_orders"].get("orders", {"order_id": "order_id"})
-
-    out = landed.select("order_id", "customer_id", "order_total")
-
-    p.sink({"out": out})
-    p.flow([None])
-    return p
+```bash
+duckstring wave dev outlet
 ```
 
-## Documentation
+The `wave` mode emits a Demand signal from `outlet`, and when it begins execution, sends *another* Demand signal. This causes it to execute continuously, as frequently as the DAG allows (i.e. at a period equal to the execution time of the slowest Ripple in any Pond).
 
-- Basin CLI: `docs/basin/README.md`
-- Catchment CLI: `docs/catchment/README.md`
-- Catchment ponds: `docs/catchment/ponds/README.md`
-- Catchment species: `docs/catchment/species/README.md`
-- Catchment inlets: `docs/catchment/inlets/README.md`
-- Periscope CLI: `docs/periscope/README.md`
-- End-to-end demo: `docs/demo/README.md`
+#### Tide
 
-## Not In V1
+To run at a scheduled frequency:
 
-- Non-local compute
-- Non-DuckDB engines
-- Non-pulse scheduling modes
-- Managed ingestion/orchestration for landing locations (landing is expected to be populated by an external process)
+```bash
+duckstring tide dev outlet 15 2 * * * --local
+```
+
+This would run at 2:15am every day local time, using cron syntax. Omitting the `--local` flag defaults to UTC.
+
+### 4) Monitor
+
+To print out a summary of current processes in the Catchment:
+
+```bash
+duckstring status dev
+```
+
+This will print to CLI a summary for each Pond that is either currently executing or has Demand.
+
+To include all Ponds:
+
+```bash
+duckstring status dev --all
+```
+
+### 5) Retrieve Data
+
+#### Get
+
+The simplest way to retrieve data is to load by the Ripple name. This returns the entire contents of the directory, and does not require that the data be in a tabular format (e.g. SQL-compatible).
+
+```bash
+duckstring get dev outlet daily
+```
+
+This writes a directory `./ponds/outlet/daily` with the 'daily' Ripple's contents. You may also override the default location:
+
+```bash
+duckstring get dev outlet daily --path ./daily_output
+```
+
+#### SQL Query
+
+If the target is an SQL-compatible table (e.g. DuckDB or Parquet), an SQL statement may be sent directly, outputting the result to the command line:
+
+```bash
+duckstring query dev outlet --sql "SELECT * FROM daily WHERE id=1;"
+```
+
+Alternatively, include a file path:
+
+```bash
+duckstring query dev outlet --sql @path/to/query.sql
+```
+
+Omitting the `--sql` statement queries with a default SELECT * LIMIT 10 on the specified table:
+
+```bash
+duckstring query dev outlet daily
+```
+
+##### Write to file
+
+To output to a file, include a flag for the file format, followed by the file name:
+
+`--csv`: Comma-separated values
+`--json`: JSON records
+`--parquet`: Parquet file
+
+This writes by default to `./ponds/outlet/daily/{filename}`. To overrite the default location you may use the `--path` flag.
+
+For example, to execute an sql statement from file `query.sql` and write the result to CSV at the current directory:
+
+```bash
+duckstring query dev outlet --sql @query.sql --csv daily.csv --path .
+```
+
+## Further Reading
+
+For more detail on each component, please read the corresponding documentation in `docs/`.
+
