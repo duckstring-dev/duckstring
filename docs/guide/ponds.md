@@ -94,4 +94,52 @@ Note the "?" in [catchment.dev.sources] for `pond`. This flags the Source as "no
 
 ### `src`
 
-TODO
+The `src/` directory holds the Pond's Python source. The single required file is `src/pond.py` — the **registration surface**. The Catchment loads this file when the Pond is deployed (to validate it) and again at runtime (in a subprocess), and any Ripple defined or imported at module level is what the Catchment sees.
+
+A minimal Pond defines its Ripples directly in `src/pond.py`:
+
+```python
+# src/pond.py
+from duckstring import ripple
+
+@ripple
+def load(pond):
+    pond.write_table("raw", pond.read_table("inlet.daily"))
+
+@ripple(parents=[load])
+def clean(pond):
+    pond.write_table(
+        "clean",
+        pond.con.sql("SELECT * FROM raw WHERE value IS NOT NULL"),
+    )
+```
+
+This Pond has two Ripples: `load` reads a table from a Source Pond (`inlet`) and writes it as `raw`; `clean` declares `load` as its parent, reads `raw`, and writes `clean`. The Catchment introspects these declarations to build the intra-Pond DAG before execution — see `docs/guide/ripples.md`.
+
+For larger Ponds, split Ripples into modules under `src/` and import them into `src/pond.py` so registration happens at load time:
+
+```
+root/
+|-- src/
+|   |-- pond.py        # imports from the modules below
+|   |-- ingest.py
+|   |-- transform.py
+|   |-- publish.py
+|-- pond.toml
+|-- __main__.py
+|-- .gitignore
+|-- README.md
+```
+
+```python
+# src/pond.py
+from .ingest import load, validate
+from .transform import clean, enrich
+from .publish import daily
+```
+
+The file is just the surface — what gets imported is what gets registered.
+
+### `__main__.py`
+
+`__main__.py` is provided for local invocation of the Pond outside a Catchment (useful for smoke-testing against a temp directory). It is not required for normal operation; deployment and execution always go through a Catchment.
