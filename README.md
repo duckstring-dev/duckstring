@@ -21,13 +21,33 @@ pip install duckstring
 
 ## Quickstart
 
-### 1) Start a Catchment Server
+### 1) Connect to a Catchment
+
+A Catchment is the execution environment, receiving Ponds and managing runs. It runs either as a local daemon or as a remote server, allowing you to start locally and seamlessly upgrade to a hosted/cloud server if you need to later.
+
+#### Start a Catchment Server
+
+To run a Catchment locally, run:
 
 ```bash
-duckstring catchment dev --port 5000 --root ~/.duckstring/dev
+duckstring catchment start --name dev --port 5000 --root ~/.duckstring/dev
 ```
 
-This will start a server with name 'dev' at port 5000 (the default, if none specified) and store Catchment details at `~/.duckstring/dev` (default is `~/.duckstring/{name}`). 
+This will start a server with name 'dev' at port 5000 (the default, if none specified) and store Catchment details at `~/.duckstring/dev` (default is `~/.duckstring/{name}`). If any of these options are omitted you will be prompted on start.
+
+#### Connect to a Remote Server
+
+Alternatively, you can connect to a server running a Catchment:
+
+```bash
+duckstring catchment connect --name dev --path https://path.to.catchment
+```
+
+This will prompt for any necessary auth, and will add the Catchment under the specified name.
+
+#### Connect to *duckstring.com*
+
+There are future plans for a dedicated Catchment service at https://duckstring.com. If you're interested, please [contact me](mailto:dev@isaacharvey.com).
 
 ### 2) Define Pond(s)
 
@@ -75,7 +95,7 @@ From a Pond's project root run:
 duckstring deploy dev
 ```
 
-This will read the pond name, version and type (Inlet, Pond, Outlet) from `pond.toml` and deploy the project contents to the Catchment.
+This will read the pond name, version and type (Inlet, Pond, Outlet) from `pond.toml` and deploy the project contents to the Catchment specified by name (here `dev`).
 
 Alternatively, you can import the Pond using the Catchment UI.
 
