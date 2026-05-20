@@ -6,14 +6,14 @@ Start the production server (serves built Next.js files from `static/`):
 uvicorn duckstring.catchment.app:app --reload
 ```
 
-For development, run the Next.js dev server alongside FastAPI and set `NEXT_DEV_URL` to proxy frontend requests through FastAPI:
+For development, run both servers and access the app on the Next.js port. The Next.js dev server proxies `/api/*` requests to FastAPI:
 
 ```bash
 # Terminal 1
-cd frontend && npm run dev
+uvicorn duckstring.catchment.app:app --reload
 
 # Terminal 2
-NEXT_DEV_URL=http://localhost:3000 uvicorn duckstring.catchment.app:app --reload
+cd frontend && npm run dev
 ```
 
-When `NEXT_DEV_URL` is set, FastAPI proxies all requests to the Next.js dev server instead of serving static files.
+Open `http://localhost:3000`. API calls to `/api/*` are forwarded to `http://localhost:8000` automatically. Set `FASTAPI_URL` in the frontend environment to override the backend URL.
