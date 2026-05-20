@@ -215,3 +215,6 @@ frontend/node_modules/
 
 # Frontend build output (CI-generated, not committed)
 src/duckstring/catchment/static/
+
+# MacOS
+.DS_Store
