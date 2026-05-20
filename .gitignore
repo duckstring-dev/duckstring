@@ -208,3 +208,10 @@ __marimo__/
 
 # VSCode Workspace Settings
 *.code-workspace
+
+# Next.js
+frontend/.next/
+frontend/node_modules/
+
+# Frontend build output (CI-generated, not committed)
+src/duckstring/catchment/static/
