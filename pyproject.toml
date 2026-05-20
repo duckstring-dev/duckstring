@@ -1,12 +1,12 @@
 [project]
 name = "duckstring"
 version = "0.1.0"
-description = "Duckstring is a Python-native data-mesh orchestration framework built on DuckDB as a default engine that composes local and remote datasets into reproducible, dependency-aware analytical pipelines."
+description = "Duckstring is a Python-native data-mesh orchestration framework designed to be as naturally extensible as installing packages."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
-  { name = "Isaac Harvey", email = "dev@isaacharvey.com" }
+  { name = "Duckstring", email = "dev@duckstring.com" }
 ]
 
 dependencies = [
