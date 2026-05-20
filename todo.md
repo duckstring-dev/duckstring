@@ -4,11 +4,15 @@ Run from this directory.
 
 ## Add FastAPI dependencies
 
-Add a `catchment` optional-deps group to `pyproject.toml`:
+Add fastapi and uvicorn as hard dependencies (not optional extras) so that
+`pip install duckstring` always works out of the box. Optional extras only make
+sense for heavy or narrow-use deps — fastapi/uvicorn are lightweight and central
+to the package's purpose.
 
 ```toml
-[project.optional-dependencies]
-catchment = [
+[project]
+dependencies = [
+  # ... existing deps ...
   "fastapi>=0.111",
   "uvicorn[standard]>=0.29",
 ]
@@ -17,7 +21,7 @@ catchment = [
 Then install:
 
 ```bash
-pip install -e ".[catchment,dev]"
+pip install -e ".[dev]"
 ```
 
 ## Include static files in the wheel (if distributing)
