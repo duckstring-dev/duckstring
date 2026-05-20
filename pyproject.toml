@@ -15,6 +15,9 @@ dependencies = [
   "typer>=0.12",
   "fastapi>=0.111",
   "uvicorn[standard]>=0.29",
+  "httpx>=0.25",
+  "tomli>=2.0; python_version < '3.11'",
+  "tomli-w>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +40,9 @@ where = ["src"]
 duckstring = "duckstring.cli:main"
 ds = "duckstring.cli:main"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 128
 target-version = "py310"
@@ -44,3 +50,4 @@ extend-exclude = ["experiment"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
+ignore = ["B008"]  # typer.Option/Argument in defaults is intentional

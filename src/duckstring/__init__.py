@@ -3,6 +3,7 @@ from .core import (
     Pond,
     Ripple,
     Trickle,
+    ripple,
 )
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "Pond",
     "Ripple",
     "Trickle",
+    "ripple",
 ]
