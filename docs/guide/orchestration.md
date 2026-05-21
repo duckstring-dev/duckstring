@@ -22,7 +22,7 @@ Sources can be listed as *required* or not. Any required Source will cause the P
 
 ### Trigger Process
 
-When the state of a Pond or its Sources changes, the Pond follows the process:
+Orchestration executes at the **Ripple level** — the Pond is the organisational and versioning unit, but the Ripple is the execution unit. The process below applies to each Ripple individually.
 
 - If I have **Demand** from any Sink
     - If I have no Sources (i.e. I am an Inlet)
@@ -62,6 +62,12 @@ A Pulse in fact sends a Stop when it begins execution, so that the upstream proc
 
 ### Ripples
 
-Within a Pond, each Ripple behaves as its own Pond, just without the version resolution. A Pond will therefore in truth execute at the Ripple level, with Demand received to leaf Ripples and sent to Sources from root Ripples.
+Within a Pond, each Ripple behaves as its own Pond, just without the version resolution. Demand is received by leaf Ripples (those with no intra-Pond children) and sent to Sources from root Ripples (those with no intra-Pond parents).
 
-Specific detail on this process is covered in the Pond guide.
+Intra-Pond Ripple ordering uses the **same pull-based Demand mechanism** as inter-Pond orchestration — not push. This is what enables pipelining. When Ripple B2 is ready to execute on generation *N*, it writes Demand to its parent B1 for generation *N+1* before starting. B1 can therefore begin its next generation in parallel with B2's current execution. The effective bottleneck through the chain is the slowest individual Ripple, not the sum of a Pond's Ripples.
+
+All intra-Pond parent edges are implicitly required — there is no optional parent concept within a Pond. The optional/required distinction only applies to inter-Pond source declarations in `pond.toml`.
+
+Intra-Pond change monitoring (watermarks) is not needed — all Ripples within a Pond run at the same generation within a `pond_run`. Watermarks only apply at the inter-Pond boundary.
+
+Specific detail on Ripple declaration and the `pond` handle is covered in the Ripples guide.
