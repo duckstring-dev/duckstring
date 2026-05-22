@@ -6,8 +6,16 @@ import typer
 def request(method: str, url: str, **kwargs):
     import httpx
 
+    raw_timeout = kwargs.pop("timeout", None)
+    if raw_timeout is None:
+        timeout = httpx.Timeout(60.0, connect=5.0)
+    elif isinstance(raw_timeout, (int, float)):
+        timeout = httpx.Timeout(float(raw_timeout), connect=5.0)
+    else:
+        timeout = raw_timeout
+
     try:
-        resp = httpx.request(method, url, timeout=httpx.Timeout(60.0, connect=5.0), **kwargs)
+        resp = httpx.request(method, url, timeout=timeout, **kwargs)
         resp.raise_for_status()
         return resp
     except httpx.ConnectError:

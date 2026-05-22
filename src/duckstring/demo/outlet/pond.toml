@@ -1,0 +1,7 @@
+[pond]
+name = "outlet"
+version = "1.0.0"
+type = "outlet"
+
+[sources]
+pond = "1.0.0"

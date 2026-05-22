@@ -1,0 +1,6 @@
+[pond]
+name = "pond"
+version = "1.0.0"
+
+[sources]
+inlet = "1.0.0"

@@ -1,3 +1,12 @@
-from .catchment import router
+from fastapi import APIRouter
+
+from .catchment import router as catchment_router
+from .data import router as data_router
+from .deploy import router as deploy_router
+
+router = APIRouter()
+router.include_router(catchment_router)
+router.include_router(deploy_router)
+router.include_router(data_router)
 
 __all__ = ["router"]

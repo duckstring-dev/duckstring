@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 
 from duckstring.cli import app
 
 EXPECTED_FILES = {"pond.toml", "src/pond.py", "__main__.py", ".gitignore", "README.md"}
+
+_DEMO_DIR = Path(__file__).parent.parent / "src" / "duckstring" / "demo"
 
 
 def _file_names(path):
@@ -49,18 +52,39 @@ def test_init_fails_if_pond_toml_exists(runner, tmp_path, monkeypatch):
 # ── pond demo ────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("demo_type", ["inlet", "pond", "outlet"])
-def test_demo_creates_all_files(runner, tmp_path, monkeypatch, demo_type):
+def test_demo_creates_all_three_subdirs(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["pond", "demo", demo_type])
+    result = runner.invoke(app, ["pond", "demo"], input="y\n")
     assert result.exit_code == 0
-    assert EXPECTED_FILES.issubset(_file_names(tmp_path))
+    for name in ("inlet", "pond", "outlet"):
+        assert EXPECTED_FILES.issubset(_file_names(tmp_path / name)), f"Missing files in {name}/"
+
+
+def test_demo_copies_gitignore(runner, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["pond", "demo"], input="y\n")
+    for name in ("inlet", "pond", "outlet"):
+        assert (tmp_path / name / ".gitignore").exists(), f".gitignore missing in {name}/"
+
+
+def test_demo_aborts_on_no(runner, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["pond", "demo"], input="n\n")
+    assert result.exit_code != 0
+    assert not (tmp_path / "inlet").exists()
+
+
+def test_demo_fails_if_subdir_exists(runner, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "inlet").mkdir()
+    result = runner.invoke(app, ["pond", "demo"], input="y\n")
+    assert result.exit_code != 0
 
 
 def test_demo_inlet_toml(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    runner.invoke(app, ["pond", "demo", "inlet"])
-    content = (tmp_path / "pond.toml").read_text()
+    runner.invoke(app, ["pond", "demo"], input="y\n")
+    content = (tmp_path / "inlet" / "pond.toml").read_text()
     assert 'name = "inlet"' in content
     assert 'type = "inlet"' in content
     assert "sources" not in content
@@ -68,8 +92,8 @@ def test_demo_inlet_toml(runner, tmp_path, monkeypatch):
 
 def test_demo_pond_toml(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    runner.invoke(app, ["pond", "demo", "pond"])
-    content = (tmp_path / "pond.toml").read_text()
+    runner.invoke(app, ["pond", "demo"], input="y\n")
+    content = (tmp_path / "pond" / "pond.toml").read_text()
     assert 'name = "pond"' in content
     assert "[sources]" in content
     assert "inlet" in content
@@ -77,32 +101,20 @@ def test_demo_pond_toml(runner, tmp_path, monkeypatch):
 
 def test_demo_outlet_toml(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    runner.invoke(app, ["pond", "demo", "outlet"])
-    content = (tmp_path / "pond.toml").read_text()
+    runner.invoke(app, ["pond", "demo"], input="y\n")
+    content = (tmp_path / "outlet" / "pond.toml").read_text()
     assert 'name = "outlet"' in content
     assert 'type = "outlet"' in content
     assert "[sources]" in content
     assert "pond" in content
 
 
-def test_demo_fails_if_pond_toml_exists(runner, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "pond.toml").write_text("[pond]\n")
-    result = runner.invoke(app, ["pond", "demo", "inlet"])
-    assert result.exit_code != 0
-
-
-def test_demo_invalid_type(runner, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["pond", "demo", "bogus"])
-    assert result.exit_code != 0
-
-
 def test_demo_pond_py_imports_ripple(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    runner.invoke(app, ["pond", "demo", "inlet"])
-    content = (tmp_path / "src" / "pond.py").read_text()
-    assert "from duckstring import ripple" in content
+    runner.invoke(app, ["pond", "demo"], input="y\n")
+    for name in ("inlet", "pond", "outlet"):
+        content = (tmp_path / name / "src" / "pond.py").read_text()
+        assert "from duckstring import ripple" in content, f"Missing import in {name}/src/pond.py"
 
 
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib stdlib only in 3.11+")
@@ -110,8 +122,27 @@ def test_demo_pond_toml_valid_toml(runner, tmp_path, monkeypatch):
     import tomllib
 
     monkeypatch.chdir(tmp_path)
-    runner.invoke(app, ["pond", "demo", "outlet"])
-    parsed = tomllib.loads((tmp_path / "pond.toml").read_text())
+    runner.invoke(app, ["pond", "demo"], input="y\n")
+    parsed = tomllib.loads((tmp_path / "outlet" / "pond.toml").read_text())
     assert parsed["pond"]["name"] == "outlet"
     assert parsed["pond"]["type"] == "outlet"
     assert parsed["sources"]["pond"] == "1.0.0"
+
+
+# ── demo source files (direct, no CLI) ───────────────────────────────────────
+# These tests verify the source files in src/duckstring/demo/ directly,
+# so deployment tests can reference them without going through the CLI.
+
+
+@pytest.mark.parametrize("name", ["inlet", "pond", "outlet"])
+def test_demo_source_files_complete(name):
+    pond_dir = _DEMO_DIR / name
+    for rel in ("pond.toml", "src/pond.py", "__main__.py", ".gitignore", "README.md"):
+        assert (pond_dir / rel).exists(), f"{name}/{rel} missing from demo source"
+
+
+@pytest.mark.parametrize("name", ["inlet", "pond", "outlet"])
+def test_demo_source_pond_py_imports_ripple(name):
+    content = (_DEMO_DIR / name / "src" / "pond.py").read_text()
+    assert "from duckstring import ripple" in content
+    assert "@ripple" in content

@@ -221,3 +221,6 @@ src/duckstring/catchment/static/
 
 # MacOS
 .DS_Store
+
+# Sandbox
+.sandbox/

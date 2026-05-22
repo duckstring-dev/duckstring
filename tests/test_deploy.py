@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from unittest.mock import MagicMock, patch
 
 from duckstring.cli import app
 from duckstring.cli.deploy import _zip_pond
@@ -115,3 +116,25 @@ def test_deploy_git_fails_without_remote(runner, tmp_path, monkeypatch, dev_catc
     result = runner.invoke(app, ["deploy", "dev", "--git", "main"])
     assert result.exit_code != 0
     assert mock_post.call_count == 0
+
+
+def test_deploy_local_passes_timeout_to_httpx(runner, tmp_path, monkeypatch, dev_catchment):
+    """Caller-supplied timeout must not collide with the default timeout in _http.request."""
+    monkeypatch.chdir(tmp_path)
+    _make_pond(tmp_path, name="my_pond", version="1.0.0")
+
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        mock = MagicMock()
+        mock.raise_for_status = lambda: None
+        return mock
+
+    with patch("httpx.request", side_effect=fake_request):
+        result = runner.invoke(app, ["deploy", "dev"])
+
+    assert result.exit_code == 0, result.output
+    import httpx
+    assert isinstance(captured.get("timeout"), httpx.Timeout)
+    assert captured["timeout"].read == 120.0

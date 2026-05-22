@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from . import registry as reg
 from .db import connect, migrate
 from .routes import router
 
@@ -17,6 +18,7 @@ def create_app(root: Path) -> FastAPI:
     app = FastAPI(title="Duckstring Catchment")
     app.state.root = root
     app.state.db = con
+    app.state.registry = reg.connect(root / "registry.duckdb")
 
     app.include_router(router, prefix="/api")
 
