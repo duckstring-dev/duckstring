@@ -28,13 +28,42 @@ def save_config(config: dict[str, Any]) -> None:
     CONFIG_FILE.write_text(tomli_w.dumps(config), encoding="utf-8")
 
 
+class CatchmentConflict(Exception):
+    """Raised when a URL or root path is already registered under a different name."""
+
+    def __init__(self, value: str, existing_name: str) -> None:
+        self.value = value
+        self.existing_name = existing_name
+        super().__init__(f"'{value}' is already registered as catchment '{existing_name}'")
+
+
 def register_catchment(name: str, url: str, kind: str = "local", root: str | None = None) -> None:
     config = load_config()
-    config.setdefault("catchments", {})[name] = {
+    catchments = config.setdefault("catchments", {})
+
+    for existing_name, cfg in catchments.items():
+        if existing_name == name:
+            continue
+        # For local catchments the port can be shared (servers don't always run simultaneously).
+        # Only URL conflicts between remote catchments are meaningful.
+        if kind == "remote" and cfg.get("type") == "remote" and cfg.get("url") == url:
+            raise CatchmentConflict(url, existing_name)
+        if root and cfg.get("root") == root:
+            raise CatchmentConflict(root, existing_name)
+
+    catchments[name] = {
         "url": url,
         "type": kind,
         **({"root": root} if root else {}),
     }
+    save_config(config)
+
+
+def unregister_catchment(name: str) -> None:
+    config = load_config()
+    config.get("catchments", {}).pop(name, None)
+    if config.get("default_catchment") == name:
+        del config["default_catchment"]
     save_config(config)
 
 

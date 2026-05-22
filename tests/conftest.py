@@ -35,6 +35,12 @@ def dev_catchment():
 
 
 @pytest.fixture
+def mock_uvicorn(monkeypatch):
+    """Prevent uvicorn.run from actually starting a server in unit tests."""
+    monkeypatch.setattr("uvicorn.run", lambda *a, **kw: None)
+
+
+@pytest.fixture
 def mock_post(monkeypatch):
     mock = MagicMock()
     monkeypatch.setattr("duckstring.cli._http.post", mock)

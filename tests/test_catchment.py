@@ -105,9 +105,176 @@ def test_list_marks_default(runner):
     assert "●" in result.output
 
 
-def test_start_help(runner):
-    result = runner.invoke(app, ["catchment", "start", "--help"])
+# ── init ─────────────────────────────────────────────────────────────────────
+
+
+def test_init_help(runner):
+    result = runner.invoke(app, ["catchment", "init", "--help"])
     assert result.exit_code == 0
     assert "--name" in result.output
     assert "--port" in result.output
     assert "--root" in result.output
+
+
+def test_init_registers_catchment(runner, tmp_path, mock_uvicorn):
+    result = runner.invoke(app, ["catchment", "init", "--name", "local", "--root", str(tmp_path), "--yes"])
+    assert result.exit_code == 0
+    items = dict(list_catchments())
+    assert "local" in items
+    assert items["local"]["type"] == "local"
+    assert items["local"]["root"] == str(tmp_path)
+
+
+def test_init_already_registered_same_root(runner, tmp_path, mock_uvicorn):
+    runner.invoke(app, ["catchment", "init", "--name", "dev", "--root", str(tmp_path), "--yes"])
+    result = runner.invoke(app, ["catchment", "init", "--name", "dev", "--root", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "already registered" in result.output.lower()
+
+
+def test_init_already_registered_different_root_confirm(runner, tmp_path, mock_uvicorn):
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    runner.invoke(app, ["catchment", "init", "--name", "dev", "--root", str(root_a), "--yes"])
+    result = runner.invoke(app, ["catchment", "init", "--name", "dev", "--root", str(root_b)], input="y\n")
+    assert result.exit_code == 0
+    assert dict(list_catchments())["dev"]["root"] == str(root_b)
+
+
+def test_init_already_registered_different_root_decline(runner, tmp_path):
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    from duckstring.cli.config import register_catchment
+    register_catchment("dev", url="http://localhost:7474", kind="local", root=str(root_a))
+    runner.invoke(app, ["catchment", "init", "--name", "dev", "--root", str(root_b)], input="n\n")
+    assert dict(list_catchments())["dev"]["root"] == str(root_a)  # unchanged
+
+
+def test_init_root_conflict_with_other_catchment(runner, tmp_path, mock_uvicorn):
+    runner.invoke(app, ["catchment", "init", "--name", "dev", "--root", str(tmp_path), "--yes"])
+    result = runner.invoke(app, ["catchment", "init", "--name", "staging", "--root", str(tmp_path)], input="n\n")
+    assert result.exit_code != 0
+    assert "already registered" in result.output.lower() or "already registered" in (result.stderr or "").lower()
+
+
+def test_local_catchments_can_share_port(runner, tmp_path, mock_uvicorn):
+    """Two local catchments with the same port are allowed (they won't run simultaneously)."""
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    runner.invoke(app, ["catchment", "init", "--name", "dev", "--port", "7474", "--root", str(root_a), "--yes"])
+    result = runner.invoke(app, ["catchment", "init", "--name", "staging", "--port", "7474", "--root", str(root_b)], input="n\n")
+    assert result.exit_code == 0
+
+
+# ── start ─────────────────────────────────────────────────────────────────────
+
+
+def test_start_help(runner):
+    result = runner.invoke(app, ["catchment", "start", "--help"])
+    assert result.exit_code == 0
+    assert "NAME" in result.output
+
+
+def test_start_unknown_catchment_exits(runner):
+    result = runner.invoke(app, ["catchment", "start", "nonexistent"])
+    assert result.exit_code != 0
+
+
+def test_start_remote_catchment_exits(runner):
+    runner.invoke(app, ["catchment", "connect", "--name", "prod", "--path", "https://example.com", "--yes"])
+    result = runner.invoke(app, ["catchment", "start", "prod"])
+    assert result.exit_code != 0
+
+
+# ── disconnect ────────────────────────────────────────────────────────────────
+
+
+def test_disconnect_removes_catchment(runner):
+    runner.invoke(app, ["catchment", "connect", "--name", "dev", "--path", "http://localhost:7474", "--yes"])
+    result = runner.invoke(app, ["catchment", "disconnect", "dev"])
+    assert result.exit_code == 0
+    items = dict(list_catchments())
+    assert "dev" not in items
+
+
+def test_disconnect_clears_default(runner):
+    runner.invoke(app, ["catchment", "connect", "--name", "dev", "--path", "http://localhost:7474", "--yes"])
+    result = runner.invoke(app, ["catchment", "disconnect", "dev"])
+    assert result.exit_code == 0
+    assert get_default_catchment() is None
+
+
+def test_disconnect_unknown_exits(runner):
+    result = runner.invoke(app, ["catchment", "disconnect", "nonexistent"])
+    assert result.exit_code != 0
+
+
+def test_disconnect_prompts_for_purge(runner, tmp_path):
+    from duckstring.cli.config import register_catchment
+    root = tmp_path / "data"
+    root.mkdir()
+    register_catchment("local", url="http://localhost:7474", kind="local", root=str(root))
+    result = runner.invoke(app, ["catchment", "disconnect", "local"], input="n\n")
+    assert result.exit_code == 0
+    assert root.exists()
+    assert "retained" in result.output
+
+
+def test_disconnect_purge_via_prompt(runner, tmp_path):
+    from duckstring.cli.config import register_catchment
+    root = tmp_path / "data"
+    root.mkdir()
+    register_catchment("local", url="http://localhost:7474", kind="local", root=str(root))
+    result = runner.invoke(app, ["catchment", "disconnect", "local"], input="y\n")
+    assert result.exit_code == 0
+    assert not root.exists()
+
+
+def test_disconnect_purge_flag_deletes_without_prompt(runner, tmp_path):
+    from duckstring.cli.config import register_catchment
+    root = tmp_path / "data"
+    root.mkdir()
+    register_catchment("local", url="http://localhost:7474", kind="local", root=str(root))
+    result = runner.invoke(app, ["catchment", "disconnect", "local", "--purge"])
+    assert result.exit_code == 0
+    assert not root.exists()
+
+
+def test_disconnect_purge_missing_dir_is_ok(runner, tmp_path):
+    from duckstring.cli.config import register_catchment
+    root = tmp_path / "nonexistent"
+    register_catchment("local", url="http://localhost:7474", kind="local", root=str(root))
+    result = runner.invoke(app, ["catchment", "disconnect", "local", "--purge"])
+    assert result.exit_code == 0
+
+
+def test_disconnect_remote_no_purge_prompt(runner):
+    """Remote catchments have no data directory — no purge prompt should appear."""
+    runner.invoke(app, ["catchment", "connect", "--name", "prod", "--path", "https://example.com", "--yes"])
+    result = runner.invoke(app, ["catchment", "disconnect", "prod"])
+    assert result.exit_code == 0
+    assert "retained" not in result.output
+    assert "Delete data" not in result.output
+
+
+# ── URL / path conflict detection ─────────────────────────────────────────────
+
+
+def test_connect_rejects_duplicate_url(runner):
+    runner.invoke(app, ["catchment", "connect", "--name", "dev", "--path", "http://localhost:7474", "--yes"])
+    result = runner.invoke(app, ["catchment", "connect", "--name", "dev2", "--path", "http://localhost:7474"])
+    assert result.exit_code != 0
+    assert "already registered" in result.output.lower() or "already registered" in (result.stderr or "").lower()
+
+
+def test_connect_allows_same_name_update(runner):
+    """Re-connecting the same name with same URL is an update, not a conflict."""
+    runner.invoke(app, ["catchment", "connect", "--name", "dev", "--path", "http://localhost:7474", "--yes"])
+    result = runner.invoke(app, ["catchment", "connect", "--name", "dev", "--path", "http://localhost:7474"], input="n\n")
+    assert result.exit_code == 0
