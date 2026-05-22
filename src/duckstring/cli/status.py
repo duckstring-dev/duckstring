@@ -16,7 +16,7 @@ def status(
     from . import _http
     from .config import resolve_catchment
 
-    cfg = resolve_catchment(catchment)
+    _, cfg = resolve_catchment(catchment)
     url = cfg["url"]
 
     params = {"all": "true"} if all else {}

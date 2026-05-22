@@ -20,7 +20,7 @@ def get(
     from . import _http
     from .config import resolve_catchment
 
-    cfg = resolve_catchment(catchment)
+    _, cfg = resolve_catchment(catchment)
     url = cfg["url"]
 
     out_dir = path or (Path("ponds") / outlet / ripple)
@@ -57,7 +57,7 @@ def query(
     from . import _http
     from .config import resolve_catchment
 
-    cfg = resolve_catchment(catchment)
+    _, cfg = resolve_catchment(catchment)
     url = cfg["url"]
     console = Console()
 

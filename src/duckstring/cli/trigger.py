@@ -16,7 +16,7 @@ def pulse(
     from . import _http
     from .config import resolve_catchment
 
-    cfg = resolve_catchment(catchment)
+    _, cfg = resolve_catchment(catchment)
     url = cfg["url"]
 
     payload: dict = {}
@@ -39,7 +39,7 @@ def wave(
     from . import _http
     from .config import resolve_catchment
 
-    cfg = resolve_catchment(catchment)
+    _, cfg = resolve_catchment(catchment)
     url = cfg["url"]
 
     console = Console()
@@ -60,7 +60,7 @@ def tide(
     from . import _http
     from .config import resolve_catchment
 
-    cfg = resolve_catchment(catchment)
+    _, cfg = resolve_catchment(catchment)
     url = cfg["url"]
 
     tz_label = "local time" if local else "UTC"

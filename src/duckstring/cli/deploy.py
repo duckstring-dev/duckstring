@@ -59,7 +59,7 @@ def deploy(
 
     console = Console()
     cwd = Path.cwd()
-    cfg = resolve_catchment(catchment)
+    catchment_name, cfg = resolve_catchment(catchment)
     url = cfg["url"]
 
     info = _read_pond_toml(cwd)
@@ -82,7 +82,7 @@ def deploy(
         version_exists = None
 
     mode = f"git:{git}" if git else "local"
-    console.print(f"Deploying [bold]{name}[/bold] v[bold]{version}[/bold] ([dim]{mode}[/dim]) → [bold]{catchment}[/bold]")
+    console.print(f"Deploying [bold]{name}[/bold] v[bold]{version}[/bold] ([dim]{mode}[/dim]) → [bold]{catchment_name}[/bold]")
     if version_exists is True:
         console.print("[yellow]A Pond with the same name and version currently exists and will be overwritten.[/yellow]")
     elif version_exists is False:
@@ -117,4 +117,4 @@ def deploy(
             timeout=120,
         )
 
-    console.print(f"[green]Deployed[/green] [bold]{name}@{version}[/bold] to [bold]{catchment}[/bold].")
+    console.print(f"[green]Deployed[/green] [bold]{name}@{version}[/bold] to [bold]{catchment_name}[/bold].")

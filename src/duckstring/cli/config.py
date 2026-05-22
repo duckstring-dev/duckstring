@@ -77,7 +77,7 @@ def set_default_catchment(name: str) -> None:
     save_config(config)
 
 
-def resolve_catchment(name: str | None) -> dict[str, Any]:
+def resolve_catchment(name: str | None) -> tuple[str, dict[str, Any]]:
     import typer
 
     config = load_config()
@@ -95,10 +95,10 @@ def resolve_catchment(name: str | None) -> dict[str, Any]:
         raise typer.Exit(1)
     if effective not in catchments:
         typer.echo(f"Error: no catchment '{effective}' registered.", err=True)
-        typer.echo(f"  duckstring catchment start --name {effective}", err=True)
+        typer.echo(f"  duckstring catchment init --name {effective}", err=True)
         typer.echo(f"  duckstring catchment connect --name {effective} --path <url>", err=True)
         raise typer.Exit(1)
-    return catchments[effective]
+    return effective, catchments[effective]
 
 
 def list_catchments() -> list[tuple[str, dict[str, Any]]]:

@@ -13,20 +13,20 @@ from duckstring.cli.config import (
 
 def test_register_and_resolve():
     register_catchment("dev", url="http://localhost:7474", kind="local")
-    cfg = resolve_catchment("dev")
+    _, cfg = resolve_catchment("dev")
     assert cfg["url"] == "http://localhost:7474"
     assert cfg["type"] == "local"
 
 
 def test_register_with_root(tmp_path):
     register_catchment("dev", url="http://localhost:7474", kind="local", root=str(tmp_path))
-    cfg = resolve_catchment("dev")
+    _, cfg = resolve_catchment("dev")
     assert cfg["root"] == str(tmp_path)
 
 
 def test_register_remote():
     register_catchment("prod", url="https://example.com", kind="remote")
-    cfg = resolve_catchment("prod")
+    _, cfg = resolve_catchment("prod")
     assert cfg["type"] == "remote"
     assert "root" not in cfg
 
@@ -54,7 +54,7 @@ def test_list_multiple():
 def test_register_overwrites():
     register_catchment("dev", url="http://localhost:7474", kind="local")
     register_catchment("dev", url="http://localhost:9000", kind="local")
-    cfg = resolve_catchment("dev")
+    _, cfg = resolve_catchment("dev")
     assert cfg["url"] == "http://localhost:9000"
 
 
