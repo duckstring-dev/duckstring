@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import io
 import zipfile
-from unittest.mock import MagicMock, patch
+
+import httpx
 
 from duckstring.cli import app
 from duckstring.cli.deploy import _zip_pond
@@ -73,68 +74,73 @@ def test_zip_includes_gitignore(tmp_path):
 # ── CLI integration ───────────────────────────────────────────────────────────
 
 
-def test_deploy_fails_without_pond_toml(runner, tmp_path, monkeypatch, dev_catchment, mock_post):
+def test_deploy_fails_without_pond_toml(runner, tmp_path, monkeypatch, dev_catchment):
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["deploy", "dev"])
+    result = runner.invoke(app, ["deploy", "-c", "dev"])
     assert result.exit_code != 0
     assert "pond.toml" in result.output
 
 
-def test_deploy_fails_unknown_catchment(runner, tmp_path, monkeypatch, mock_post):
+def test_deploy_fails_unknown_catchment(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _make_pond(tmp_path)
-    result = runner.invoke(app, ["deploy", "nonexistent"])
+    result = runner.invoke(app, ["deploy", "-c", "nonexistent"])
     assert result.exit_code != 0
-    assert mock_post.call_count == 0
 
 
-def test_deploy_local_calls_api(runner, tmp_path, monkeypatch, dev_catchment, mock_post):
+def test_deploy_no_catchment_no_default_exits(runner, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _make_pond(tmp_path)
+    result = runner.invoke(app, ["deploy", "--yes"])
+    assert result.exit_code != 0
+
+
+def test_deploy_local_registers_pond(runner, tmp_path, monkeypatch, live_catchment):
     monkeypatch.chdir(tmp_path)
     _make_pond(tmp_path, name="my_pond", version="1.2.3")
-    result = runner.invoke(app, ["deploy", "dev"])
-    assert result.exit_code == 0
-    mock_post.assert_called_once()
-    call_url = mock_post.call_args.args[0]
-    assert "/api/deploy" in call_url
-    files = mock_post.call_args.kwargs["files"]
-    assert "pond" in files
+    result = runner.invoke(app, ["deploy", "--yes"])
+    assert result.exit_code == 0, result.output
+    r = httpx.get(f"{live_catchment}/api/ponds/my_pond/versions/1.2.3")
+    assert r.status_code == 200
+    assert r.json()["version"] == "1.2.3"
 
 
-def test_deploy_local_sends_pond_metadata(runner, tmp_path, monkeypatch, dev_catchment, mock_post):
+def test_deploy_explicit_catchment_overrides_default(runner, tmp_path, monkeypatch, live_catchment):
     monkeypatch.chdir(tmp_path)
     _make_pond(tmp_path, name="my_pond", version="2.0.0")
-    runner.invoke(app, ["deploy", "dev"])
-    data = mock_post.call_args.kwargs["data"]
-    assert data["name"] == "my_pond"
-    assert data["version"] == "2.0.0"
+    result = runner.invoke(app, ["deploy", "-c", "dev", "--yes"])
+    assert result.exit_code == 0, result.output
+    r = httpx.get(f"{live_catchment}/api/ponds/my_pond/versions/2.0.0")
+    assert r.status_code == 200
 
 
-def test_deploy_git_fails_without_remote(runner, tmp_path, monkeypatch, dev_catchment, mock_post):
-    monkeypatch.chdir(tmp_path)
-    _make_pond(tmp_path)
-    # No git repo → subprocess will fail
-    result = runner.invoke(app, ["deploy", "dev", "--git", "main"])
-    assert result.exit_code != 0
-    assert mock_post.call_count == 0
-
-
-def test_deploy_local_passes_timeout_to_httpx(runner, tmp_path, monkeypatch, dev_catchment):
-    """Caller-supplied timeout must not collide with the default timeout in _http.request."""
+def test_deploy_aborts_on_no(runner, tmp_path, monkeypatch, live_catchment):
     monkeypatch.chdir(tmp_path)
     _make_pond(tmp_path, name="my_pond", version="1.0.0")
+    result = runner.invoke(app, ["deploy"], input="n\n")
+    assert result.exit_code != 0
+    r = httpx.get(f"{live_catchment}/api/ponds/my_pond/versions/1.0.0")
+    assert r.status_code == 404
 
-    captured = {}
 
-    def fake_request(method, url, **kwargs):
-        captured.update(kwargs)
-        mock = MagicMock()
-        mock.raise_for_status = lambda: None
-        return mock
-
-    with patch("httpx.request", side_effect=fake_request):
-        result = runner.invoke(app, ["deploy", "dev"])
-
+def test_deploy_shows_overwrite_warning(runner, tmp_path, monkeypatch, live_catchment):
+    monkeypatch.chdir(tmp_path)
+    _make_pond(tmp_path, name="my_pond", version="1.0.0")
+    runner.invoke(app, ["deploy", "--yes"])
+    result = runner.invoke(app, ["deploy"], input="y\n")
     assert result.exit_code == 0, result.output
-    import httpx
-    assert isinstance(captured.get("timeout"), httpx.Timeout)
-    assert captured["timeout"].read == 120.0
+    assert "overwritten" in result.output
+
+
+def test_deploy_yes_flag_skips_prompt(runner, tmp_path, monkeypatch, live_catchment):
+    monkeypatch.chdir(tmp_path)
+    _make_pond(tmp_path, name="my_pond", version="3.0.0")
+    result = runner.invoke(app, ["deploy", "-y"])
+    assert result.exit_code == 0, result.output
+
+
+def test_deploy_git_fails_without_remote(runner, tmp_path, monkeypatch, live_catchment):
+    monkeypatch.chdir(tmp_path)
+    _make_pond(tmp_path)
+    result = runner.invoke(app, ["deploy", "--yes", "--git", "main"])
+    assert result.exit_code != 0

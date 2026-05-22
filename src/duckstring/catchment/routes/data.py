@@ -13,6 +13,20 @@ from pydantic import BaseModel
 router = APIRouter()
 
 
+@router.get("/ponds/{name}/versions/{version}")
+def get_pond_version(name: str, version: str, request: Request):
+    db = request.app.state.db
+    row = db.execute(
+        """SELECT pv.is_active FROM pond_version pv
+           JOIN pond p ON p.id = pv.pond_id
+           WHERE p.name = ? AND pv.version = ?""",
+        (name, version),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No version {version} of pond '{name}'")
+    return {"name": name, "version": version, "is_active": bool(row[0])}
+
+
 class QueryRequest(BaseModel):
     pond: str
     ripple: Optional[str] = None
@@ -76,6 +90,8 @@ def query(body: QueryRequest, request: Request):
 
     try:
         rel = registry.execute(sql)
+        if rel.description is None:
+            return []
         cols = [d[0] for d in rel.description]
         return [dict(zip(cols, row)) for row in rel.fetchall()]
     except Exception as exc:

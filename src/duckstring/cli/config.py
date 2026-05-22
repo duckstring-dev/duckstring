@@ -38,15 +38,38 @@ def register_catchment(name: str, url: str, kind: str = "local", root: str | Non
     save_config(config)
 
 
-def resolve_catchment(name: str) -> dict[str, Any]:
-    catchments = load_config().get("catchments", {})
-    if name not in catchments:
-        import typer
-        typer.echo(f"Error: no catchment '{name}' registered.", err=True)
-        typer.echo(f"  duckstring catchment start --name {name}", err=True)
-        typer.echo(f"  duckstring catchment connect --name {name} --path <url>", err=True)
+def get_default_catchment() -> str | None:
+    return load_config().get("default_catchment")
+
+
+def set_default_catchment(name: str) -> None:
+    config = load_config()
+    config["default_catchment"] = name
+    save_config(config)
+
+
+def resolve_catchment(name: str | None) -> dict[str, Any]:
+    import typer
+
+    config = load_config()
+    catchments = config.get("catchments", {})
+    effective = name or config.get("default_catchment")
+
+    # Auto-select when there is exactly one registered catchment.
+    if not effective and len(catchments) == 1:
+        effective = next(iter(catchments))
+
+    if not effective:
+        typer.echo("Error: no catchment specified and no default set.", err=True)
+        typer.echo("  Pass one explicitly: duckstring deploy -c <name>", err=True)
+        typer.echo("  Or set a default:    duckstring catchment set-default <name>", err=True)
         raise typer.Exit(1)
-    return catchments[name]
+    if effective not in catchments:
+        typer.echo(f"Error: no catchment '{effective}' registered.", err=True)
+        typer.echo(f"  duckstring catchment start --name {effective}", err=True)
+        typer.echo(f"  duckstring catchment connect --name {effective} --path <url>", err=True)
+        raise typer.Exit(1)
+    return catchments[effective]
 
 
 def list_catchments() -> list[tuple[str, dict[str, Any]]]:

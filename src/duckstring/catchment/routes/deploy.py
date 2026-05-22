@@ -67,17 +67,41 @@ def _register(db, name: str, version: str, kind: str, source_path: str, sources:
         db.execute("INSERT OR IGNORE INTO pond (name, kind) VALUES (?, ?)", (name, kind))
         (pond_id,) = db.execute("SELECT id FROM pond WHERE name = ?", (name,)).fetchone()
 
+        # Deactivate any other active version in this major line.
         db.execute(
             "UPDATE pond_version SET is_active = 0 WHERE pond_id = ? AND major = ? AND is_active = 1",
             (pond_id, major),
         )
-        db.execute(
-            "INSERT INTO pond_version (pond_id, version, major, is_active, source_path) VALUES (?, ?, ?, 1, ?)",
-            (pond_id, version, major, source_path),
-        )
-        (version_id,) = db.execute(
-            "SELECT id FROM pond_version WHERE pond_id = ? AND version = ?", (pond_id, version)
+
+        existing = db.execute(
+            "SELECT id FROM pond_version WHERE pond_id = ? AND version = ?",
+            (pond_id, version),
         ).fetchone()
+
+        if existing:
+            # Re-deploy: refresh source data and re-activate the existing row.
+            version_id = existing[0]
+            ripple_ids = [r[0] for r in db.execute(
+                "SELECT id FROM ripple WHERE pond_version_id = ?", (version_id,)
+            ).fetchall()]
+            if ripple_ids:
+                marks = ",".join("?" * len(ripple_ids))
+                db.execute(f"DELETE FROM ripple_to_ripple WHERE sink_id IN ({marks}) OR source_id IN ({marks})", ripple_ids * 2)
+                db.execute(f"DELETE FROM demand WHERE ripple_id IN ({marks})", ripple_ids)
+                db.execute("DELETE FROM ripple WHERE pond_version_id = ?", (version_id,))
+            db.execute("DELETE FROM pond_to_pond WHERE pond_version_id = ?", (version_id,))
+            db.execute(
+                "UPDATE pond_version SET is_active = 1, source_path = ?, deployed_at = datetime('now') WHERE id = ?",
+                (source_path, version_id),
+            )
+        else:
+            db.execute(
+                "INSERT INTO pond_version (pond_id, version, major, is_active, source_path) VALUES (?, ?, ?, 1, ?)",
+                (pond_id, version, major, source_path),
+            )
+            (version_id,) = db.execute(
+                "SELECT id FROM pond_version WHERE pond_id = ? AND version = ?", (pond_id, version)
+            ).fetchone()
 
         for src_name, ver_str in sources.items():
             src_major, src_min, src_required = _parse_version(ver_str)

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import typer
 
 
 def status(
-    catchment: str = typer.Argument(..., help="Name of the registered Catchment."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to query (uses default if omitted)."),
     all: bool = typer.Option(False, "--all", "-a", help="Include all Ponds, not just active ones."),
 ) -> None:
     """Print a summary of Pond activity in the Catchment."""

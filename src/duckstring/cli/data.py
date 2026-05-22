@@ -9,9 +9,9 @@ import typer
 
 
 def get(
-    catchment: str = typer.Argument(..., help="Name of the registered Catchment."),
     outlet: str = typer.Argument(..., help="Pond name."),
     ripple: str = typer.Argument(..., help="Ripple name within the Pond."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
     path: Optional[Path] = typer.Option(None, "--path", help="Output directory (default: ./ponds/{outlet}/{ripple})."),
 ) -> None:
     """Download a Ripple's output directory from a Catchment."""
@@ -27,7 +27,7 @@ def get(
     out_dir = Path(out_dir)
 
     console = Console()
-    console.print(f"Fetching [bold]{outlet}.{ripple}[/bold] from [bold]{catchment}[/bold]...")
+    console.print(f"Fetching [bold]{outlet}.{ripple}[/bold]...")
     resp = _http.get(f"{url}/api/ponds/{outlet}/ripples/{ripple}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -35,16 +35,15 @@ def get(
         with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
             zf.extractall(out_dir)
     except zipfile.BadZipFile:
-        # Fall back to writing raw bytes if not a zip archive
         (out_dir / "output.bin").write_bytes(resp.content)
 
     console.print(f"[green]Written to[/green] {out_dir}")
 
 
 def query(
-    catchment: str = typer.Argument(..., help="Name of the registered Catchment."),
     outlet: str = typer.Argument(..., help="Pond name."),
     ripple: Optional[str] = typer.Argument(None, help="Ripple name (default query: SELECT * LIMIT 10)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
     sql: Optional[str] = typer.Option(None, "--sql", help="SQL statement, or @path/to/file.sql to read from a file."),
     csv_out: Optional[str] = typer.Option(None, "--csv", metavar="FILENAME", help="Write result as CSV."),
     json_out: Optional[str] = typer.Option(None, "--json", metavar="FILENAME", help="Write result as JSON records."),
@@ -62,7 +61,6 @@ def query(
     url = cfg["url"]
     console = Console()
 
-    # Resolve SQL text
     sql_stmt = sql
     if sql_stmt and sql_stmt.startswith("@"):
         sql_file = Path(sql_stmt[1:])
@@ -91,7 +89,6 @@ def query(
     resp = _http.post(f"{url}/api/query", json=payload)
 
     if not output_filename:
-        # Print to terminal as a Rich table
         try:
             rows = resp.json()
         except Exception:
@@ -113,7 +110,6 @@ def query(
             import json
             console.print(json.dumps(rows, indent=2))
     else:
-        # Write to file
         if path:
             out_path = Path(path) / output_filename
         elif ripple:

@@ -47,8 +47,9 @@ def _zip_pond(cwd: Path) -> bytes:
 
 
 def deploy(
-    catchment: str = typer.Argument(..., help="Name of the registered Catchment to deploy to."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to deploy to (uses default if omitted)."),
     git: Optional[str] = typer.Option(None, "--git", help="Deploy from a git ref (branch, commit, or tag)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
 ) -> None:
     """Deploy the current Pond project to a Catchment."""
     from rich.console import Console
@@ -67,6 +68,31 @@ def deploy(
     version = pond_section.get("version", "0.0.0")
     pond_type = pond_section.get("type", "pond")
 
+    # Pre-deploy: check whether this version already exists on the catchment.
+    try:
+        import httpx as _httpx
+        _r = _httpx.get(f"{url}/api/ponds/{name}/versions/{version}", timeout=5.0)
+        if _r.status_code == 200:
+            version_exists: bool | None = True
+        elif _r.status_code == 404:
+            version_exists = False
+        else:
+            version_exists = None
+    except Exception:
+        version_exists = None
+
+    mode = f"git:{git}" if git else "local"
+    console.print(f"Deploying [bold]{name}[/bold] v[bold]{version}[/bold] ([dim]{mode}[/dim]) → [bold]{catchment}[/bold]")
+    if version_exists is True:
+        console.print("[yellow]A Pond with the same name and version currently exists and will be overwritten.[/yellow]")
+    elif version_exists is False:
+        console.print("[dim]New version — no conflicts.[/dim]")
+    else:
+        console.print("[dim]Could not check for conflicts — proceed with care.[/dim]")
+
+    if not yes:
+        typer.confirm("Do you wish to proceed?", default=True, abort=True)
+
     if git:
         import subprocess
 
@@ -78,13 +104,11 @@ def deploy(
             typer.echo("Error: could not read git remote 'origin'. Is this a git repo with a remote?", err=True)
             raise typer.Exit(1) from None
 
-        console.print(f"Deploying [bold]{name}@{version}[/bold] ([dim]git:{git}[/dim]) → [bold]{catchment}[/bold]...")
         _http.post(
             f"{url}/api/deploy",
             json={"name": name, "version": version, "type": pond_type, "git_ref": git, "repo_url": repo_url},
         )
     else:
-        console.print(f"Deploying [bold]{name}@{version}[/bold] ([dim]local[/dim]) → [bold]{catchment}[/bold]...")
         archive = _zip_pond(cwd)
         _http.post(
             f"{url}/api/deploy",
