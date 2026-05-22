@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 
@@ -40,3 +41,11 @@ def mock_get(monkeypatch):
     mock = MagicMock()
     monkeypatch.setattr("duckstring.cli._http.get", mock)
     return mock
+
+
+@pytest.fixture
+def catchment_client(tmp_path):
+    from duckstring.catchment.app import create_app
+
+    with TestClient(create_app(tmp_path)) as client:
+        yield client

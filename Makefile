@@ -1,7 +1,10 @@
 STATIC_DIR := src/duckstring/catchment/static
 FRONTEND_OUT := frontend/out
 
-.PHONY: build-frontend clean-frontend
+.PHONY: dev build-frontend clean-frontend
+
+dev:
+	duckstring catchment start --name dev --root .dev --port 8000
 
 build-frontend: clean-frontend
 	cd frontend && NEXT_STATIC_EXPORT=true npx next build

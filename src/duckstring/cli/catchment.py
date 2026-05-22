@@ -39,13 +39,9 @@ def start(
             padding=(1, 2),
         )
     )
-    uvicorn.run(
-        "duckstring.catchment.app:app",
-        host=host,
-        port=port,
-        reload=False,
-        log_level="warning",
-    )
+    from duckstring.catchment.app import create_app
+
+    uvicorn.run(create_app(root_dir), host=host, port=port, reload=False, log_level="warning")
 
 
 @app.command()

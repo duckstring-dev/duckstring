@@ -6,7 +6,7 @@ _SCHEMA_DIR = Path(__file__).parent / "schema"
 
 
 def connect(path: Path) -> sqlite3.Connection:
-    con = sqlite3.connect(path)
+    con = sqlite3.connect(path, check_same_thread=False)
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA journal_mode = WAL")
     return con
