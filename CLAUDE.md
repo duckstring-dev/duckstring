@@ -1,8 +1,18 @@
 # Duckstring
 
-A data pipeline orchestration framework built around versioned **Ponds** (Python packages) executing in a **Catchment** (FastAPI server). Ponds declare source dependencies in `pond.toml`; **Ripples** are the execution units within a Pond.
+A packaging standard for data transforms. Each transform is a versioned **Pond** (Python package) that declares its parent Ponds in `pond.toml`. The pipeline is implicit in the package graph. **Ripples** are the execution units within a Pond. The **Catchment** (FastAPI server) is the reference runtime — a convenience, not the product.
+
+See `brand/strategy.md` for positioning rationale and `brand/copy.md` for settled copy.
 
 Read `docs/guide/` before touching orchestration logic. `catchment.md`, `orchestration.md`, `ponds.md`, and `ripples.md` are the design spec.
+
+## Brand & Positioning
+
+- **Never describe Duckstring as an orchestration framework.** That positions it against Airflow/Prefect/Dagster. The differentiation is the package model, not the execution model.
+- **The Catchment is not the product.** Don't lead with it in copy or docs introductions. It's the batteries-included runtime for teams that want the full stack.
+- **Target audience**: data engineers who have hit the coordination and ownership walls of large transform pipelines — specifically those who've adopted or considered a mesh pattern and found that breaking changes still require organisation-wide coordination. They've reasoned their way to needing versioned package boundaries; they just don't have SemVer or concurrent version execution yet.
+- **Tagline**: "There is no DAG." — the DAG exists but is implicit in the package graph. You don't build or govern it.
+- **dbt Mesh users** are the warmest possible first audience. See `brand/strategy.md` for migration path and gaps.
 
 ## Structure
 
