@@ -39,8 +39,23 @@ class Catchment:
 
 
 class Pond:
-    # TODO: runtime handle passed to Ripple functions — path, con (DuckDB), write_table, read_table, log, run
-    pass
+    def __init__(self, name: str, version: str, con, root) -> None:
+        self.name = name
+        self.version = version
+        self.con = con
+        self.root = root
+
+    def write_table(self, name: str, relation) -> None:
+        self.con.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.name}"')
+        self.con.execute(f'DROP TABLE IF EXISTS "{self.name}"."{name}"')
+        relation.create(f'"{self.name}"."{name}"')
+
+    def read_table(self, ref: str):
+        if "." in ref:
+            schema, table = ref.split(".", 1)
+        else:
+            schema, table = self.name, ref
+        return self.con.table(f'"{schema}"."{table}"')
 
 
 class Ripple:

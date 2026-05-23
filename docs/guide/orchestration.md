@@ -62,12 +62,14 @@ A Pulse in fact sends a Stop when it begins execution, so that the upstream proc
 
 ### Ripples
 
-Within a Pond, each Ripple behaves as its own Pond, just without the version resolution. Demand is received by leaf Ripples (those with no intra-Pond children) and sent to Sources from root Ripples (those with no intra-Pond parents).
+Within a Pond, Ripples execute in **push-style topological order**. When a `pond_run` starts, the runtime dispatches root Ripples (those with no intra-Pond parents) first; each Ripple dispatches its children once it completes. All Ripples within a `pond_run` share the same generation number.
 
-Intra-Pond Ripple ordering uses the **same pull-based Demand mechanism** as inter-Pond orchestration — not push. This is what enables pipelining. When Ripple B2 is ready to execute on generation *N*, it writes Demand to its parent B1 for generation *N+1* before starting. B1 can therefore begin its next generation in parallel with B2's current execution. The effective bottleneck through the chain is the slowest individual Ripple, not the sum of a Pond's Ripples.
+Pipelining still emerges naturally. A root Ripple may only begin generation *N+1* once it has been **consumed** — all its immediate intra-Pond children have been dispatched in generation *N*. This limits pipeline depth to one generation ahead and prevents a fast root Ripple from overwriting its shared output table while a slower child is still reading it. The effective throughput bottleneck through the chain is the slowest individual Ripple, not the sum of all Ripples.
+
+For a Pond with B1(1 unit)→B2(2 units): in steady state both run with a period of 2 units. B1 gen=*N+1* starts the moment B2 gen=*N* is dispatched (the consumed condition is satisfied), so B1 and B2 execute concurrently in a rolling pipeline.
 
 All intra-Pond parent edges are implicitly required — there is no optional parent concept within a Pond. The optional/required distinction only applies to inter-Pond source declarations in `pond.toml`.
 
-Intra-Pond change monitoring (watermarks) is not needed — all Ripples within a Pond run at the same generation within a `pond_run`. Watermarks only apply at the inter-Pond boundary.
+Intra-Pond change monitoring (watermarks) is not needed — all Ripples within a Pond share the same `pond_run` generation. Watermarks only apply at the inter-Pond boundary.
 
 Specific detail on Ripple declaration and the `pond` handle is covered in the Ripples guide.

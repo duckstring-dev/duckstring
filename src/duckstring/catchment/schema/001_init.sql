@@ -62,11 +62,11 @@ CREATE TABLE pond_trigger (
 );
 
 -- Active demand records. Rows are deleted (not flagged) when demand is cleared.
--- sink_id: the downstream Ripple that wrote this demand (null if trigger-sourced).
+-- sink_id: the downstream pond_version that created this demand (null if trigger-sourced).
 CREATE TABLE demand (
     id              INTEGER PRIMARY KEY,
-    ripple_id       INTEGER NOT NULL REFERENCES ripple(id),
-    sink_id         INTEGER          REFERENCES ripple(id),
+    pond_version_id INTEGER NOT NULL REFERENCES pond_version(id),
+    sink_id         INTEGER          REFERENCES pond_version(id),
     created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -106,7 +106,7 @@ CREATE TABLE ripple_run (
 
 CREATE INDEX idx_pond_version_pond   ON pond_version(pond_id);
 CREATE INDEX idx_ripple_version      ON ripple(pond_version_id);
-CREATE INDEX idx_demand_ripple       ON demand(ripple_id);
+CREATE INDEX idx_demand_pvid         ON demand(pond_version_id);
 CREATE INDEX idx_watermark_sink      ON watermark(sink_pond_id);
 CREATE INDEX idx_pond_run_version    ON pond_run(pond_version_id);
 CREATE INDEX idx_ripple_run_pond_run ON ripple_run(pond_run_id);
