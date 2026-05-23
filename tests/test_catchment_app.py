@@ -87,15 +87,16 @@ def _db(catchment_client):
     return catchment_client.app.state.db
 
 
-def _registry(catchment_client):
-    return catchment_client.app.state.registry
-
-
 def _seed(catchment_client, pond: str, ripple: str):
     """Seed a DuckDB table with two rows for testing data endpoints."""
-    reg = _registry(catchment_client)
+    import duckdb
+    root = catchment_client.app.state.root
+    reg_path = root / "ponds" / pond / "registry.duckdb"
+    reg_path.parent.mkdir(parents=True, exist_ok=True)
+    reg = duckdb.connect(str(reg_path))
     reg.execute(f'CREATE SCHEMA IF NOT EXISTS "{pond}"')
     reg.execute(f'CREATE OR REPLACE TABLE "{pond}"."{ripple}" AS SELECT 1 AS id, \'a\' AS val UNION ALL SELECT 2, \'b\'')
+    reg.close()
 
 
 # ---------------------------------------------------------------------------

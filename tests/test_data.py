@@ -7,9 +7,9 @@ from duckstring.cli import app
 
 def _seed(url: str, schema: str, table: str):
     """Create a DuckDB schema and table via the query endpoint."""
-    httpx.post(f"{url}/api/query", json={"pond": "_", "sql": f'CREATE SCHEMA IF NOT EXISTS "{schema}"'})
+    httpx.post(f"{url}/api/query", json={"pond": schema, "sql": f'CREATE SCHEMA IF NOT EXISTS "{schema}"'})
     httpx.post(f"{url}/api/query", json={
-        "pond": "_",
+        "pond": schema,
         "sql": (
             f'CREATE OR REPLACE TABLE "{schema}"."{table}" AS '
             "SELECT 1 AS id, 'a' AS val UNION ALL SELECT 2, 'b'"

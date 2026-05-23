@@ -197,7 +197,7 @@ def test_pulse_outlet_data(orch_catchment):
     _wait_idle(root / "duck.db")
 
     import duckdb
-    reg = duckdb.connect(str(root / "registry.duckdb"))
+    reg = duckdb.connect(str(root / "ponds" / "outlet" / "registry.duckdb"))
     count = reg.execute('SELECT count(*) FROM "outlet"."daily"').fetchone()[0]
     reg.close()
     assert count == 10

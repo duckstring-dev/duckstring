@@ -13,6 +13,11 @@ from pydantic import BaseModel
 router = APIRouter()
 
 
+def _registry(request: Request, pond_name: str):
+    from .. import registry as reg
+    return reg.pond_connect(request.app.state.root, pond_name)
+
+
 @router.get("/ponds/{name}/versions/{version}")
 def get_pond_version(name: str, version: str, request: Request):
     db = request.app.state.db
@@ -36,30 +41,29 @@ class QueryRequest(BaseModel):
 
 @router.get("/ponds/{outlet}/ripples/{ripple_name}")
 def get_ripple(outlet: str, ripple_name: str, request: Request):
-    registry = request.app.state.registry
-
+    registry = _registry(request, outlet)
     with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
         tmp_path = f.name
-
     try:
         registry.execute(
             f"COPY \"{outlet}\".\"{ripple_name}\" TO '{tmp_path}' (FORMAT PARQUET)"
         )
     except Exception as exc:
         Path(tmp_path).unlink(missing_ok=True)
+        registry.close()
         raise HTTPException(status_code=404, detail=f"No data for {outlet}.{ripple_name}") from exc
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(tmp_path, f"{ripple_name}.parquet")
     Path(tmp_path).unlink(missing_ok=True)
-
+    registry.close()
     return Response(content=buf.getvalue(), media_type="application/zip")
 
 
 @router.post("/query")
 def query(body: QueryRequest, request: Request):
-    registry = request.app.state.registry
+    registry = _registry(request, body.pond)
 
     sql = body.sql
     if not sql:
@@ -86,13 +90,18 @@ def query(body: QueryRequest, request: Request):
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
             Path(tmp_path).unlink(missing_ok=True)
+            registry.close()
         return Response(content=data, media_type=media_map.get(fmt, "application/octet-stream"))
 
     try:
         rel = registry.execute(sql)
         if rel.description is None:
+            registry.close()
             return []
         cols = [d[0] for d in rel.description]
-        return [dict(zip(cols, row)) for row in rel.fetchall()]
+        rows = [dict(zip(cols, row)) for row in rel.fetchall()]
+        registry.close()
+        return rows
     except Exception as exc:
+        registry.close()
         raise HTTPException(status_code=400, detail=str(exc)) from exc

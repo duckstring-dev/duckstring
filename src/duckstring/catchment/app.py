@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from . import registry as reg
 from .db import connect, migrate
 from .routes import router
 
@@ -20,15 +19,13 @@ async def _lifespan(app: FastAPI):
     from .orchestrator import sentinel_loop
 
     app.state.db_path = app.state.root / "duck.db"
-    app.state.registry_path = app.state.root / "registry.duckdb"
     app.state.sentinel_queue = asyncio.Queue()
-    app.state.executor = ThreadPoolExecutor(max_workers=8)
+    app.state.executor = ProcessPoolExecutor(max_workers=8)
 
     task = asyncio.create_task(
         sentinel_loop(
             app.state.sentinel_queue,
             app.state.db_path,
-            app.state.registry_path,
             app.state.root,
             app.state.executor,
         )
@@ -46,7 +43,6 @@ def create_app(root: Path) -> FastAPI:
     app = FastAPI(title="Duckstring Catchment", lifespan=_lifespan)
     app.state.root = root
     app.state.db = con
-    app.state.registry = reg.connect(root / "registry.duckdb")
 
     app.include_router(router, prefix="/api")
 
