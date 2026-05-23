@@ -1,7 +1,7 @@
 [project]
 name = "duckstring"
 version = "0.1.0"
-description = "Duckstring is a Python-native data-mesh orchestration framework designed to be as naturally extensible as installing packages."
+description = "Build data pipelines the way you build software: version each transform, declare its dependencies, and Duckstring resolves the execution DAG automatically."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

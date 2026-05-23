@@ -1,12 +1,9 @@
 # Duckstring
+*There is no DAG.*
 
-Duckstring is a data pipeline framework built around modular, versioned nodes called **Ponds**. Each Pond specifies its immediate parents (with version), allowing for the formation of a DAG much like one would install packages. 
+Duckstring is built on a single observation: data transformations have the same dependency structure as software packages. If you version each transform and let it declare its parents — the same way `pyproject.toml` declares dependencies — the execution DAG forms itself. What you get is independent deployment, automatic version compatibility routing, and a pipeline that runs at optimal parallelism without a scheduler you have to think about.
 
-Pond execution is orchestrated within an environment - a **Catchment** - that controls storage and other global settings. It uses a pull-based system modelled after Kanban, with **Outlets**  (terminal Ponds) sending demand upstream. This allows each Pond to be modified and deployed independently, with any paths in the DAG that are not attached to any Outlet automatically skipped. 
-
-Duckstring is built on the philosophy that most data pipelines are not truly "big data" and with good design can execute on a single compute node. It is primarily designed for batch and incremental workloads for tables on the order of tens of millions of rows (e.g. <50M).
-
-The default engine is DuckDB, though this is configurable. Duckstring is however an independent project and is not affiliated with, endorsed by, or maintained by the DuckDB project.
+The default engine is DuckDB, though this is configurable. Duckstring is an independent project and is not affiliated with, endorsed by, or maintained by the DuckDB project.
 
 -- **Note**: As the project is in development, most of the notes below should be read as *indended functionality*, and most features are not yet implemented.
 
