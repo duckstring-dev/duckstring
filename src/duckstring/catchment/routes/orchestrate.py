@@ -48,14 +48,22 @@ def status(request: Request, all: str = "false"):
             ), 0) AS last_gen,
             (
                 SELECT pr.finished_at FROM pond_run pr
-                WHERE pr.pond_version_id = pv.id AND pr.finished_at IS NOT NULL
+                JOIN pond_version pv2 ON pv2.id = pr.pond_version_id
+                WHERE pv2.pond_id = p.id AND pr.finished_at IS NOT NULL
                 ORDER BY pr.finished_at DESC LIMIT 1
             ) AS last_run_at,
             (
                 SELECT pr.status FROM pond_run pr
-                WHERE pr.pond_version_id = pv.id AND pr.finished_at IS NOT NULL
+                JOIN pond_version pv2 ON pv2.id = pr.pond_version_id
+                WHERE pv2.pond_id = p.id AND pr.finished_at IS NOT NULL
                 ORDER BY pr.finished_at DESC LIMIT 1
-            ) AS last_run_status
+            ) AS last_run_status,
+            (
+                SELECT pv2.version FROM pond_run pr
+                JOIN pond_version pv2 ON pv2.id = pr.pond_version_id
+                WHERE pv2.pond_id = p.id AND pr.finished_at IS NOT NULL
+                ORDER BY pr.finished_at DESC LIMIT 1
+            ) AS last_run_version
         FROM pond_version pv
         JOIN pond p ON p.id = pv.pond_id
         {where}
@@ -73,7 +81,7 @@ def status(request: Request, all: str = "false"):
             {
                 "name": r[0], "version": r[1], "kind": r[2],
                 "status": r[3], "gen": r[4],
-                "last_run_at": r[5], "last_run_status": r[6],
+                "last_run_at": r[5], "last_run_status": r[6], "last_run_version": r[7],
             }
             for r in rows
         ],

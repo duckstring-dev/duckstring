@@ -79,6 +79,7 @@ def _make_table(component_ponds: list[dict]) -> object:
     table.add_column("Version")
     table.add_column("Status")
     table.add_column("Gen", justify="right")
+    table.add_column("Last ver", style="dim")
     table.add_column("Last run")
 
     for pond in component_ponds:
@@ -97,12 +98,15 @@ def _make_table(component_ponds: list[dict]) -> object:
         else:
             last_run_str = "[dim]—[/dim]"
 
+        last_run_version = pond.get("last_run_version") or "—"
+
         table.add_row(
             pond.get("name", "?"),
             pond.get("kind", "?"),
             pond.get("version", "?"),
             status_str,
             gen_str,
+            last_run_version,
             last_run_str,
         )
 
