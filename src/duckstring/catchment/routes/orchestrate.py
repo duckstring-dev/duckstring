@@ -20,20 +20,65 @@ class _TideBody(BaseModel):
 @router.get("/status")
 def status(request: Request, all: str = "false"):
     db = request.app.state.db
-    if all.lower() == "true":
-        rows = db.execute(
-            """SELECT p.name, pv.version, p.kind
-               FROM pond_version pv JOIN pond p ON p.id = pv.pond_id
-               ORDER BY p.name, pv.major"""
-        ).fetchall()
-    else:
-        rows = db.execute(
-            """SELECT p.name, pv.version, p.kind
-               FROM pond_version pv JOIN pond p ON p.id = pv.pond_id
-               WHERE pv.is_active = 1
-               ORDER BY p.name, pv.major"""
-        ).fetchall()
-    return {"ponds": [{"name": r[0], "version": r[1], "kind": r[2]} for r in rows]}
+    where = "" if all.lower() == "true" else "WHERE pv.is_active = 1"
+    rows = db.execute(f"""
+        SELECT
+            p.name,
+            pv.version,
+            p.kind,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1 FROM pond_run pr
+                    WHERE pr.pond_version_id = pv.id AND pr.status = 'running'
+                ) THEN 'running'
+                WHEN EXISTS (
+                    SELECT 1 FROM demand d WHERE d.pond_version_id = pv.id
+                ) THEN 'queued'
+                WHEN (
+                    SELECT pr.status FROM pond_run pr
+                    WHERE pr.pond_version_id = pv.id AND pr.finished_at IS NOT NULL
+                    ORDER BY pr.finished_at DESC LIMIT 1
+                ) = 'failed' THEN 'failed'
+                ELSE 'idle'
+            END AS status,
+            COALESCE((
+                SELECT MAX(pr.generation) FROM pond_run pr
+                JOIN pond_version pv2 ON pv2.id = pr.pond_version_id
+                WHERE pv2.pond_id = p.id AND pv2.major = pv.major AND pr.status = 'success'
+            ), 0) AS last_gen,
+            (
+                SELECT pr.finished_at FROM pond_run pr
+                WHERE pr.pond_version_id = pv.id AND pr.finished_at IS NOT NULL
+                ORDER BY pr.finished_at DESC LIMIT 1
+            ) AS last_run_at,
+            (
+                SELECT pr.status FROM pond_run pr
+                WHERE pr.pond_version_id = pv.id AND pr.finished_at IS NOT NULL
+                ORDER BY pr.finished_at DESC LIMIT 1
+            ) AS last_run_status
+        FROM pond_version pv
+        JOIN pond p ON p.id = pv.pond_id
+        {where}
+        ORDER BY p.name, pv.major
+    """).fetchall()
+    edge_rows = db.execute("""
+        SELECT p_src.name, p_sink.name
+        FROM pond_to_pond e
+        JOIN pond_version pv ON pv.id = e.pond_version_id AND pv.is_active = 1
+        JOIN pond p_sink ON p_sink.id = pv.pond_id
+        JOIN pond p_src ON p_src.id = e.source_pond_id
+    """).fetchall()
+    return {
+        "ponds": [
+            {
+                "name": r[0], "version": r[1], "kind": r[2],
+                "status": r[3], "gen": r[4],
+                "last_run_at": r[5], "last_run_status": r[6],
+            }
+            for r in rows
+        ],
+        "edges": [[r[0], r[1]] for r in edge_rows],
+    }
 
 
 @router.post("/outlets/{name}/pulse")

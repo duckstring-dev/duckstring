@@ -263,6 +263,23 @@ def test_deploy_bad_zip_returns_422(catchment_client):
     assert r.status_code == 422
 
 
+def test_deploy_cycle_returns_422(catchment_client):
+    # a → b → a is a cycle; deploy of b (which declares a as source) should be rejected
+    # if a already declares b as its source.
+    _deploy(catchment_client, name="a", version="1.0.0", kind="pond",
+            toml_text='[pond]\nname="a"\nversion="1.0.0"\n\n[sources]\nb="1.0.0"\n')
+    r = _deploy(catchment_client, name="b", version="1.0.0", kind="pond",
+                toml_text='[pond]\nname="b"\nversion="1.0.0"\n\n[sources]\na="1.0.0"\n')
+    assert r.status_code == 422
+    assert "Cycle" in r.json()["detail"]
+
+    # b's version must not have been registered (transaction rolled back)
+    db = _db(catchment_client)
+    assert db.execute(
+        "SELECT COUNT(*) FROM pond_version pv JOIN pond p ON p.id = pv.pond_id WHERE p.name = 'b'"
+    ).fetchone()[0] == 0
+
+
 # ---------------------------------------------------------------------------
 # Data — query tests
 # ---------------------------------------------------------------------------

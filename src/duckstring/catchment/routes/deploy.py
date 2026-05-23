@@ -137,6 +137,9 @@ def _register(db, name: str, version: str, kind: str, source_path: str, sources:
                         (sink_id, name_to_id[parent_name]),
                     )
 
+        from ..dag import assert_no_cycles
+        assert_no_cycles(db)
+
 
 class _GitBody(BaseModel):
     name: str
@@ -210,6 +213,9 @@ async def deploy(request: Request):
 
     ripples = _discover_ripples(dest)
     source_path = f"ponds/{name}/{version}"
-    _register(db, name, version, kind, source_path, sources, ripples)
+    try:
+        _register(db, name, version, kind, source_path, sources, ripples)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return {"ok": True}
