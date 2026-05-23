@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+
+def _worker_init():
+    # Workers inherit the terminal's process group and receive SIGINT on Ctrl+C.
+    # Ignoring it here lets workers finish cleanly while the main process handles shutdown.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +27,7 @@ async def _lifespan(app: FastAPI):
 
     app.state.db_path = app.state.root / "duck.db"
     app.state.sentinel_queue = asyncio.Queue()
-    app.state.executor = ProcessPoolExecutor(max_workers=8)
+    app.state.executor = ProcessPoolExecutor(max_workers=8, initializer=_worker_init)
 
     task = asyncio.create_task(
         sentinel_loop(
@@ -32,7 +39,11 @@ async def _lifespan(app: FastAPI):
     )
     yield
     task.cancel()
-    app.state.executor.shutdown(wait=False)
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    app.state.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def create_app(root: Path) -> FastAPI:

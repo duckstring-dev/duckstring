@@ -27,30 +27,33 @@ def notify(app) -> None:
 
 
 async def sentinel_loop(queue, db_path, root, executor):
-    while True:
-        await queue.get()
-        while not queue.empty():
-            queue.get_nowait()
+    try:
+        while True:
+            await queue.get()
+            while not queue.empty():
+                queue.get_nowait()
 
-        db = _connect(db_path)
-        try:
-            changed = True
-            while changed:
-                changed = False
+            db = _connect(db_path)
+            try:
+                changed = True
+                while changed:
+                    changed = False
 
-                for pond_info in _find_startable_ponds(db):
-                    _create_pond_run(db, pond_info)
-                    _write_pipeline_demand(db, pond_info)
-                    db.commit()
-                    _log("queued", f"{pond_info.pond_name} v{pond_info.version}", gen=pond_info.next_gen)
-                    asyncio.ensure_future(_dispatch(pond_info, db_path, root, executor, queue))
-                    changed = True
+                    for pond_info in _find_startable_ponds(db):
+                        _create_pond_run(db, pond_info)
+                        _write_pipeline_demand(db, pond_info)
+                        db.commit()
+                        _log("queued", f"{pond_info.pond_name} v{pond_info.version}", gen=pond_info.next_gen)
+                        asyncio.ensure_future(_dispatch(pond_info, db_path, root, executor, queue))
+                        changed = True
 
-                if _propagate_blocked(db):
-                    db.commit()
-                    changed = True
-        finally:
-            db.close()
+                    if _propagate_blocked(db):
+                        db.commit()
+                        changed = True
+            finally:
+                db.close()
+    except asyncio.CancelledError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -220,5 +223,10 @@ async def _dispatch(pond_info: _PondInfo, db_path, root, executor, queue) -> Non
             str(root),
             pond_info.next_gen,
         )
+    except (asyncio.CancelledError, Exception):
+        pass
     finally:
-        queue.put_nowait(None)
+        try:
+            queue.put_nowait(None)
+        except Exception:
+            pass
