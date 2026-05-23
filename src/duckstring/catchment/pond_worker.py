@@ -4,9 +4,21 @@ import importlib
 import sqlite3
 import sys
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
+
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _log(event: str, name: str, gen: int | None = None, duration: float | None = None) -> None:
+    gen_col = f"gen={gen}" if gen is not None else ""
+    dur_col = f"{duration:.2f}s" if duration is not None else ""
+    print(f"[{_ts()}] {event:<8} {gen_col:<8} {dur_col:<7} {name}", flush=True)
 
 _import_lock = threading.Lock()
 
@@ -23,10 +35,18 @@ def execute_pond_run(
     source_path: str,
     db_path_str: str,
     root_str: str,
+    gen: int = 0,
 ) -> None:
+    name_ver = f"{pond_name} v{version}"
+    _log("start", name_ver, gen=gen)
+    t0 = time.monotonic()
     executor = ThreadPoolExecutor(max_workers=8)
     try:
         _execute_run(run_id, pv_id, pond_name, version, source_path, db_path_str, root_str, executor)
+        _log("done", name_ver, gen=gen, duration=time.monotonic() - t0)
+    except Exception:
+        _log("failed", name_ver, gen=gen, duration=time.monotonic() - t0)
+        raise
     finally:
         executor.shutdown(wait=True)
 

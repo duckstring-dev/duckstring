@@ -4,7 +4,18 @@ import asyncio
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _log(event: str, name: str, gen: int | None = None, duration: float | None = None) -> None:
+    gen_col = f"gen={gen}" if gen is not None else ""
+    dur_col = f"{duration:.2f}s" if duration is not None else ""
+    print(f"[{_ts()}] {event:<8} {gen_col:<8} {dur_col:<7} {name}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +42,7 @@ async def sentinel_loop(queue, db_path, root, executor):
                     _create_pond_run(db, pond_info)
                     _write_pipeline_demand(db, pond_info)
                     db.commit()
+                    _log("queued", f"{pond_info.pond_name} v{pond_info.version}", gen=pond_info.next_gen)
                     asyncio.ensure_future(_dispatch(pond_info, db_path, root, executor, queue))
                     changed = True
 
@@ -140,17 +152,20 @@ def _create_pond_run(db: sqlite3.Connection, pond_info: _PondInfo) -> None:
 
 def _write_pipeline_demand(db: sqlite3.Connection, pond_info: _PondInfo) -> None:
     sources = db.execute("""
-        SELECT pv.id FROM pond_to_pond p2p
+        SELECT pv.id, p.name, pv.version FROM pond_to_pond p2p
         JOIN pond_version pv ON pv.pond_id = p2p.source_pond_id
             AND pv.major = p2p.source_major AND pv.is_active = 1
+        JOIN pond p ON p.id = pv.pond_id
         WHERE p2p.pond_version_id = ?
     """, (pond_info.pond_version_id,)).fetchall()
-    for (src_pv_id,) in sources:
-        db.execute("""
+    for src_pv_id, src_name, src_ver in sources:
+        rows = db.execute("""
             INSERT INTO demand (pond_version_id, sink_id)
             SELECT ?, ?
             WHERE NOT EXISTS (SELECT 1 FROM demand WHERE pond_version_id = ?)
-        """, (src_pv_id, pond_info.pond_version_id, src_pv_id))
+        """, (src_pv_id, pond_info.pond_version_id, src_pv_id)).rowcount
+        if rows:
+            _log("demand", f"{src_name} v{src_ver}")
 
 
 def _propagate_blocked(db: sqlite3.Connection) -> bool:
@@ -166,18 +181,20 @@ def _propagate_blocked(db: sqlite3.Connection) -> bool:
         if _inter_pond_ready(db, pv_id, pond_id):
             continue
         sources = db.execute("""
-            SELECT pv2.id FROM pond_to_pond p2p
+            SELECT pv2.id, p2.name, pv2.version FROM pond_to_pond p2p
             JOIN pond_version pv2 ON pv2.pond_id = p2p.source_pond_id
                 AND pv2.major = p2p.source_major AND pv2.is_active = 1
+            JOIN pond p2 ON p2.id = pv2.pond_id
             WHERE p2p.pond_version_id = ?
         """, (pv_id,)).fetchall()
-        for (src_pv_id,) in sources:
+        for src_pv_id, src_name, src_ver in sources:
             rows = db.execute("""
                 INSERT INTO demand (pond_version_id, sink_id)
                 SELECT ?, ?
                 WHERE NOT EXISTS (SELECT 1 FROM demand WHERE pond_version_id = ?)
             """, (src_pv_id, pv_id, src_pv_id)).rowcount
             if rows:
+                _log("demand", f"{src_name} v{src_ver}")
                 inserted = True
     return inserted
 
@@ -201,6 +218,7 @@ async def _dispatch(pond_info: _PondInfo, db_path, root, executor, queue) -> Non
             pond_info.source_path,
             str(db_path),
             str(root),
+            pond_info.next_gen,
         )
     finally:
         queue.put_nowait(None)

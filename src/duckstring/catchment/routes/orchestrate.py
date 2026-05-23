@@ -42,13 +42,13 @@ def pulse(name: str, body: _PulseBody = _PulseBody(), request: Request = None):
     major = body.version if body.version is not None else 1
 
     row = db.execute("""
-        SELECT pv.id FROM pond_version pv JOIN pond p ON p.id = pv.pond_id
+        SELECT pv.id, pv.version FROM pond_version pv JOIN pond p ON p.id = pv.pond_id
         WHERE p.name = ? AND p.kind = 'outlet' AND pv.major = ? AND pv.is_active = 1
     """, (name, major)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail=f"Outlet '{name}' not found")
 
-    pv_id = row[0]
+    pv_id, version = row
     db.execute(
         "INSERT INTO demand (pond_version_id, sink_id) "
         "SELECT ?, NULL WHERE NOT EXISTS (SELECT 1 FROM demand WHERE pond_version_id = ?)",
@@ -56,7 +56,8 @@ def pulse(name: str, body: _PulseBody = _PulseBody(), request: Request = None):
     )
     db.commit()
 
-    from ..orchestrator import notify
+    from ..orchestrator import notify, _log
+    _log("demand", f"{name} v{version}")
     notify(request.app)
     return {"ok": True}
 
