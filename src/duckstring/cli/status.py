@@ -215,26 +215,32 @@ def _run_monitor(
     from rich.live import Live
     from rich.text import Text
 
-    def _build() -> object:
+    def _build() -> tuple[object, bool]:
         try:
             ponds, edges = _fetch_status(url, all_versions)
             if pond_name:
                 ponds, edges = _filter_for_pond(ponds, edges, pond_name, major, version_str)
             if not ponds:
                 body = Text("No active Ponds.", style="dim")
+                done = False
             else:
                 body = _build_renderable(ponds, edges)
+                done = pond_name is not None and all(p.get("status") == "stopped" for p in ponds)
             ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-            header = Text(f"Updated {ts} · Ctrl+C to stop", style="dim")
-            return Group(header, body)
+            footer = " · stopped" if done else " · Ctrl+C to stop"
+            header = Text(f"Updated {ts}{footer}", style="dim")
+            return Group(header, body), done
         except Exception as exc:
-            return Text(f"Error fetching status: {exc}", style="red")
+            return Text(f"Error fetching status: {exc}", style="red"), False
 
     try:
         with Live(auto_refresh=False, screen=False) as live:
             while True:
-                live.update(_build())
+                renderable, done = _build()
+                live.update(renderable)
                 live.refresh()
+                if done:
+                    break
                 time.sleep(1)
     except KeyboardInterrupt:
         pass
