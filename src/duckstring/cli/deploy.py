@@ -47,7 +47,9 @@ def _zip_pond(cwd: Path) -> bytes:
 
 
 def deploy(
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to deploy to (uses default if omitted)."),
+    catchment: Optional[str] = typer.Option(
+        None, "--catchment", "-c", help="Catchment to deploy to (uses default if omitted)."
+    ),
     git: Optional[str] = typer.Option(None, "--git", help="Deploy from a git ref (branch, commit, or tag)."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
 ) -> None:

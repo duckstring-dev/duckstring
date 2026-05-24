@@ -20,9 +20,9 @@ def _offer_default(name: str, yes: bool) -> None:
 
 
 def _launch(name: str, url: str, root: Path) -> None:
-    import uvicorn
     from urllib.parse import urlparse
 
+    import uvicorn
     from rich.console import Console
     from rich.panel import Panel
 
@@ -54,7 +54,7 @@ def _register_or_abort(name: str, url: str, kind: str, root: str | None = None) 
         register_catchment(name, url=url, kind=kind, root=root)
     except CatchmentConflict as exc:
         typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from exc
 
 
 @app.command()

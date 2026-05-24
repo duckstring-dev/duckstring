@@ -99,7 +99,7 @@ def query(body: QueryRequest, request: Request):
             registry.close()
             return []
         cols = [d[0] for d in rel.description]
-        rows = [dict(zip(cols, row)) for row in rel.fetchall()]
+        rows = [dict(zip(cols, row, strict=False)) for row in rel.fetchall()]
         registry.close()
         return rows
     except Exception as exc:

@@ -4,7 +4,6 @@ import io
 import zipfile
 
 import httpx
-import pytest
 
 from duckstring.cli import app
 from duckstring.cli.status import _ancestors, _filter_for_pond

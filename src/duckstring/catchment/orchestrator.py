@@ -5,7 +5,6 @@ import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 
 def _ts() -> str:

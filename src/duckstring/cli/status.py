@@ -241,8 +241,12 @@ def status(
     pond: Optional[str] = typer.Argument(None, help="Filter to this Pond and its upstream sources."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to query (uses default if omitted)."),
     all: bool = typer.Option(False, "--all", "-a", help="Include all Ponds, not just active ones."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version of the selected Pond (requires pond argument)."),
-    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver of the selected Pond, e.g. 1.2.3 (requires pond argument)."),
+    major: Optional[int] = typer.Option(
+        None, "--major", "-m", help="Major version of the selected Pond (requires pond argument)."
+    ),
+    version: Optional[str] = typer.Option(
+        None, "--version", "-v", help="Specific semver of the selected Pond, e.g. 1.2.3 (requires pond argument)."
+    ),
     monitor: bool = typer.Option(False, "--monitor", help="Poll and refresh the display continuously until Ctrl+C."),
 ) -> None:
     """Print a summary of Pond activity in the Catchment."""

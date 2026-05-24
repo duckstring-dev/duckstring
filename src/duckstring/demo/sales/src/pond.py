@@ -6,7 +6,7 @@ from duckstring import ripple
 @ripple
 def daily_sales(pond):
     time.sleep(2)
-    raw = pond.read_table("transactions.transaction")
+    raw = pond.read_table("transactions.transaction")  # noqa: F841
     agg = pond.con.sql("""
         SELECT
             product_id,
@@ -24,7 +24,7 @@ def daily_sales(pond):
 @ripple
 def price_tiers(pond):
     time.sleep(1)
-    raw = pond.read_table("products.product")
+    raw = pond.read_table("products.product")  # noqa: F841
     tiered = pond.con.sql("""
         SELECT
             id              AS product_id,
@@ -44,8 +44,8 @@ def price_tiers(pond):
 @ripple(parents=[daily_sales, price_tiers])
 def join_lines(pond):
     time.sleep(3)
-    sales = pond.read_table("daily_sales")
-    tiers = pond.read_table("price_tiers")
+    sales = pond.read_table("daily_sales")  # noqa: F841
+    tiers = pond.read_table("price_tiers")  # noqa: F841
     lines = pond.con.sql("""
         SELECT
             s.sale_date,

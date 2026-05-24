@@ -168,7 +168,9 @@ def test_local_catchments_can_share_port(runner, tmp_path, mock_uvicorn):
     root_a.mkdir()
     root_b.mkdir()
     runner.invoke(app, ["catchment", "init", "--name", "dev", "--port", "7474", "--root", str(root_a), "--yes"])
-    result = runner.invoke(app, ["catchment", "init", "--name", "staging", "--port", "7474", "--root", str(root_b)], input="n\n")
+    result = runner.invoke(
+        app, ["catchment", "init", "--name", "staging", "--port", "7474", "--root", str(root_b)], input="n\n"
+    )
     assert result.exit_code == 0
 
 

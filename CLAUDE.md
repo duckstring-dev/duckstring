@@ -76,6 +76,10 @@ A Ripple begins execution when all of the following hold:
 
 **Cold start:** A source Pond at generation 0 (never run) is treated as not yet having produced output. Demand propagates upstream toward it so it runs before the consumer can satisfy its readiness check.
 
+## Before finishing any code change
+
+Run `ruff check .` and fix all errors before considering the task done.
+
 ## Conventions
 
 - Table names: **singular** (`pond`, not `ponds`).

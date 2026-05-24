@@ -6,17 +6,17 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-
-def _worker_init():
-    # Workers inherit the terminal's process group and receive SIGINT on Ctrl+C.
-    # Ignoring it here lets workers finish cleanly while the main process handles shutdown.
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .db import connect, migrate
 from .routes import router
+
+
+def _worker_init():
+    # Workers inherit the terminal's process group and receive SIGINT on Ctrl+C.
+    # Ignoring it here lets workers finish cleanly while the main process handles shutdown.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 

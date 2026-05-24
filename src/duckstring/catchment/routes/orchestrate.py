@@ -5,6 +5,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from ..orchestrator import _log, notify
+
 router = APIRouter()
 
 
@@ -109,7 +111,6 @@ def pulse(name: str, body: _PulseBody = _PulseBody(), request: Request = None):
     )
     db.commit()
 
-    from ..orchestrator import notify, _log
     _log("demand", f"{name} v{version}")
     notify(request.app)
     return {"ok": True}

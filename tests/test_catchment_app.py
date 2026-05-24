@@ -167,7 +167,8 @@ def test_deploy_local_registers_sources(catchment_client):
     (pond_id,) = db.execute("SELECT id FROM pond WHERE name = 'mypond'").fetchone()
     (version_id,) = db.execute("SELECT id FROM pond_version WHERE pond_id = ?", (pond_id,)).fetchone()
     edges = db.execute(
-        "SELECT p.name, e.source_major, e.min_version, e.required FROM pond_to_pond e JOIN pond p ON p.id = e.source_pond_id WHERE e.pond_version_id = ?",
+        "SELECT p.name, e.source_major, e.min_version, e.required "
+        "FROM pond_to_pond e JOIN pond p ON p.id = e.source_pond_id WHERE e.pond_version_id = ?",
         (version_id,),
     ).fetchall()
     assert len(edges) == 1

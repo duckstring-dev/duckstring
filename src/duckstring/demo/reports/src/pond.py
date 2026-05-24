@@ -6,7 +6,7 @@ from duckstring import ripple
 @ripple
 def monthly_summary(pond):
     time.sleep(1)
-    lines = pond.read_table("sales.sale_line")
+    lines = pond.read_table("sales.sale_line")  # noqa: F841
     summary = pond.con.sql("""
         SELECT
             YEAR(sale_date)                 AS year,

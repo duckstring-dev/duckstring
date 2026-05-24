@@ -176,6 +176,7 @@ def _run_ripple(
     func, pond_name: str, version: str, registry_path_str: str, root_str: str
 ) -> None:
     import duckdb
+
     from duckstring.core import Pond
 
     registry = duckdb.connect(registry_path_str)
