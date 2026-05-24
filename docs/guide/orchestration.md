@@ -44,7 +44,7 @@ Note that Demand is sent *before* execution starts, which may be counterintuitiv
 
 Demand is initiated at Outlets, and could be triggered by a few different mechanisms:
 
-- *Pulse*: A single Demand is sent upstream, with no repeat. Intended to execute the DAG once.
+- *Pulse*: Emits a single Demand and a Stop simultaneously. The chain runs exactly once — each Pond enters stopped state after its run completes.
 - *Wave*: A Demand is sent upstream and a new Demand is sent whenever the Pond executes. This causes continuous operation at the maximum frequency the Pond allows, and is functionally identical to a non-Outlet Pond executing with persistent Demand.
 - *Tide*: A Demand is sent upstream according to a schedule (e.g. daily). This is functionally the same as executing a Pulse periodically.
 
@@ -52,13 +52,34 @@ If a new Pond is attached as a Source, or if any Pond has recently upgraded its 
 
 ### Stops
 
-The DAG will naturally stop if no new Demand is triggered. However, each prior level executes for one further generation before stopping, meaning a Pond *n* levels prior could execute *n* additional times unnecessarily.
+A **Stop** is a signal orthogonal to Demand. Stops live in a dedicated table; a Pond can hold Demand only, Stop only, or both simultaneously.
 
-Instead, a **Stop** can be emitted against an Outlet. This causes it to delete its Demand in each Source (if it exists). If any Pond has its Demand from all its Sinks (apart from when clearing that Demand itself), it also sends a Stop upstream.
+A Pond **acknowledges stop** when every Demand row it holds has a corresponding Stop row from the same Sink. When the orchestrator detects a Pond acknowledging stop, it immediately propagates Stop records upstream — before any Demand propagation in the same cycle. A Stop is only forwarded to a Source if *all* active Sinks of that Source also acknowledge stop (the **unanimous-sinks rule**). This prevents one stopped branch from silencing a Source that is still needed by another live Sink.
 
-Consequently, if all Outlets have Stopped, no further execution begins upstream.
+A Pond enters **stopped state** when:
+- It acknowledges stop and its run completes successfully.
+- It holds no Demand and receives a Stop-only record (the orchestrator marks it stopped immediately, without waiting for a run).
+- Its retries are exhausted (see *Retries* below).
 
-A Pulse in fact sends a Stop when it begins execution, so that the upstream processes execute only once.
+A stopped Pond that receives new Demand is **activated**: the orchestrator propagates the new Demand upstream and clears the stopped flag, allowing the chain to restart.
+
+Pulse emits both a Demand record and a Stop record at the moment it is issued. This ensures the chain executes exactly once and every Pond returns to stopped state when complete.
+
+### Retries
+
+By default (`immediate_retries = 0`, `source_retries = 0`) a failed Pond does not retry — it goes silent immediately. Both limits are configured per Pond in `pond.toml` (see the *Ponds* guide).
+
+After a failure the Catchment derives the **fail count**: the number of consecutive failed runs for the Pond's `(name, major)` pair since the last success.
+
+| Condition | Behaviour |
+|---|---|
+| `fail_count ≤ immediate_retries` | Demand is kept; the Pond retries immediately on the next orchestrator cycle. |
+| `immediate_retries < fail_count ≤ immediate_retries + source_retries` | A **retry watermark** is recorded at the current source generation. The Pond waits until a Source produces a new generation before retrying. |
+| `fail_count > immediate_retries + source_retries` | Retries exhausted. Pond enters stopped state, Demand is deleted, and a Stop is sent upstream (unanimous-sinks rule applies). |
+
+The retry watermark is stored separately from the normal progress watermark and cleared on every successful run. This ensures a new source generation genuinely re-triggers the Pond rather than being skipped because the progress watermark already recorded that generation.
+
+Inlet Ponds (no Sources) skip the `source_retries` phase — there is no upstream data change to wait for — and go silent after `immediate_retries` attempts.
 
 ### Ripples
 

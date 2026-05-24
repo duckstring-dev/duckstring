@@ -106,7 +106,14 @@ def pulse(name: str, body: _PulseBody = _PulseBody(), request: Request = None):
     pv_id, version = row
     db.execute(
         "INSERT INTO demand (pond_version_id, sink_id) "
-        "SELECT ?, NULL WHERE NOT EXISTS (SELECT 1 FROM demand WHERE pond_version_id = ?)",
+        "SELECT ?, NULL WHERE NOT EXISTS "
+        "(SELECT 1 FROM demand WHERE pond_version_id = ? AND sink_id IS NULL)",
+        (pv_id, pv_id),
+    )
+    db.execute(
+        "INSERT INTO stop (pond_version_id, sink_id) "
+        "SELECT ?, NULL WHERE NOT EXISTS "
+        "(SELECT 1 FROM stop WHERE pond_version_id = ? AND sink_id IS NULL)",
         (pv_id, pv_id),
     )
     db.commit()

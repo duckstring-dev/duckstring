@@ -9,14 +9,18 @@ CREATE TABLE pond (
 
 -- A specific deployed version of a Pond. source_path holds the materialised snapshot.
 -- At most one is_active per (pond_id, major), enforced by the partial index below.
+-- is_stopped=1 by default: a newly deployed pond waits for an explicit trigger.
 CREATE TABLE pond_version (
-    id          INTEGER PRIMARY KEY,
-    pond_id     INTEGER NOT NULL REFERENCES pond(id),
-    version     TEXT    NOT NULL,  -- full semver e.g. "1.2.3"
-    major       INTEGER NOT NULL,
-    is_active   INTEGER NOT NULL DEFAULT 0,
-    source_path TEXT    NOT NULL,  -- relative to catchment root, under ponds/{name}/{version}/
-    deployed_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    id                INTEGER PRIMARY KEY,
+    pond_id           INTEGER NOT NULL REFERENCES pond(id),
+    version           TEXT    NOT NULL,  -- full semver e.g. "1.2.3"
+    major             INTEGER NOT NULL,
+    is_active         INTEGER NOT NULL DEFAULT 0,
+    is_stopped        INTEGER NOT NULL DEFAULT 1,
+    immediate_retries INTEGER NOT NULL DEFAULT 0,
+    source_retries    INTEGER NOT NULL DEFAULT 0,
+    source_path       TEXT    NOT NULL,  -- relative to catchment root, under ponds/{name}/{version}/
+    deployed_at       TEXT    NOT NULL DEFAULT (datetime('now')),
     UNIQUE (pond_id, version)
 );
 
@@ -63,12 +67,29 @@ CREATE TABLE pond_trigger (
 
 -- Active demand records. Rows are deleted (not flagged) when demand is cleared.
 -- sink_id: the downstream pond_version that created this demand (null if trigger-sourced).
+-- At most one row per (pond_version_id, non-null sink_id); idx_demand_trigger covers null.
 CREATE TABLE demand (
+    id              INTEGER PRIMARY KEY,
+    pond_version_id INTEGER NOT NULL REFERENCES pond_version(id),
+    sink_id         INTEGER          REFERENCES pond_version(id),
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (pond_version_id, sink_id)
+);
+-- UNIQUE above doesn't enforce uniqueness for NULL sink_id (SQLite treats NULLs as distinct).
+-- This partial index enforces at most one trigger-sourced demand per pond_version.
+CREATE UNIQUE INDEX idx_demand_trigger ON demand(pond_version_id) WHERE sink_id IS NULL;
+
+-- Stop signals, orthogonal to demand. A pond acknowledges stop when every demand row has
+-- a corresponding stop row from the same sink (matched via IS for NULL-safe equality).
+-- Same NULL uniqueness pattern as demand.
+CREATE TABLE stop (
     id              INTEGER PRIMARY KEY,
     pond_version_id INTEGER NOT NULL REFERENCES pond_version(id),
     sink_id         INTEGER          REFERENCES pond_version(id),
     created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
+CREATE UNIQUE INDEX idx_stop_unique  ON stop(pond_version_id, sink_id);
+CREATE UNIQUE INDEX idx_stop_trigger ON stop(pond_version_id) WHERE sink_id IS NULL;
 
 -- Last generation of each source Pond major consumed by each sink Pond.
 -- References pond (abstract) so watermarks survive version upgrades within a major.
@@ -81,6 +102,18 @@ CREATE TABLE watermark (
     generation     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (sink_pond_id, source_pond_id, source_major)
 );
+
+-- Tracks the source generation at the time of the last failure. Prevents a pond in
+-- source_retries mode from re-triggering on the same source data that already caused
+-- a failure. Cleared on every successful run.
+CREATE TABLE retry_watermark (
+    sink_pond_id   INTEGER NOT NULL REFERENCES pond(id),
+    source_pond_id INTEGER NOT NULL REFERENCES pond(id),
+    source_major   INTEGER NOT NULL,
+    generation     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (sink_pond_id, source_pond_id, source_major)
+);
+CREATE INDEX idx_retry_watermark_sink ON retry_watermark(sink_pond_id);
 
 -- A Pond execution. generation is per (pond, major) and is continuous across
 -- version upgrades within the same major.

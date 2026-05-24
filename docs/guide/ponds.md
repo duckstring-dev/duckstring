@@ -65,6 +65,18 @@ As a general Pond, `type` does not need to be specified.
 Sources are listed by name with their minimum SemVer. This will always resolve to use the maximum available version within the same *major*.
 
 
+#### Retry settings
+
+```toml
+[pond]
+name = "pond"
+version = "1.0.0"
+immediate_retries = 1   # retry immediately after failure, up to this many times
+source_retries    = 2   # after immediate retries exhaust, retry this many more times once a source produces new data
+```
+
+Both default to `0` if omitted — no retries, the Pond goes silent on the first failure. See the *Orchestration* guide for the full retry sequence.
+
 #### `outlet`
 ```toml
 [pond]

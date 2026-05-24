@@ -74,6 +74,10 @@ def _execute_run(
 
     db = _connect(db_path_str)
 
+    pond_id, major = db.execute(
+        "SELECT pond_id, major FROM pond_version WHERE id = ?", (pv_id,)
+    ).fetchone()
+
     # Load ripple topology from SQLite.
     ripple_names: dict[int, str] = {
         r[0]: r[1]
@@ -147,6 +151,52 @@ def _execute_run(
             "UPDATE pond_run SET status='failed', finished_at=datetime('now') WHERE id=?",
             (run_id,),
         )
+
+        immediate_retries, source_retries = db.execute(
+            "SELECT immediate_retries, source_retries FROM pond_version WHERE id = ?", (pv_id,)
+        ).fetchone()
+
+        fail_count = db.execute("""
+            SELECT COUNT(*) FROM pond_run pr
+            JOIN pond_version pv ON pv.id = pr.pond_version_id
+            WHERE pv.pond_id = ? AND pv.major = ? AND pr.status = 'failed'
+            AND pr.started_at > COALESCE((
+                SELECT MAX(pr2.finished_at) FROM pond_run pr2
+                JOIN pond_version pv2 ON pv2.id = pr2.pond_version_id
+                WHERE pv2.pond_id = ? AND pv2.major = ? AND pr2.status = 'success'
+            ), '1900-01-01')
+        """, (pond_id, major, pond_id, major)).fetchone()[0]
+
+        has_sources = db.execute(
+            "SELECT COUNT(*) FROM pond_to_pond WHERE pond_version_id = ?", (pv_id,)
+        ).fetchone()[0] > 0
+
+        if fail_count <= immediate_retries:
+            pass  # keep demand, retry immediately on next sentinel cycle
+        elif has_sources and fail_count <= immediate_retries + source_retries:
+            # Advance retry_watermark to current source generation; pond waits for new data.
+            for src_pond_id, src_major in db.execute(
+                "SELECT source_pond_id, source_major FROM pond_to_pond WHERE pond_version_id = ?",
+                (pv_id,),
+            ).fetchall():
+                latest = db.execute("""
+                    SELECT COALESCE(MAX(pr.generation), 0)
+                    FROM pond_run pr JOIN pond_version pv ON pv.id = pr.pond_version_id
+                    WHERE pv.pond_id = ? AND pv.major = ? AND pr.status = 'success'
+                """, (src_pond_id, src_major)).fetchone()[0]
+                db.execute("""
+                    INSERT INTO retry_watermark (sink_pond_id, source_pond_id, source_major, generation)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT (sink_pond_id, source_pond_id, source_major)
+                    DO UPDATE SET generation = excluded.generation
+                """, (pond_id, src_pond_id, src_major, latest))
+        else:
+            # Retries exhausted — go silent and send stop upstream.
+            db.execute("UPDATE pond_version SET is_stopped = 1 WHERE id = ?", (pv_id,))
+            db.execute("DELETE FROM demand WHERE pond_version_id = ?", (pv_id,))
+            _send_stop_upstream(db, pv_id, pond_id)
+            _log("blocked", f"{pond_name} v{version}")
+
         db.commit()
         db.close()
         raise failed[0]
@@ -158,9 +208,16 @@ def _execute_run(
         "UPDATE pond_run SET status='success', finished_at=datetime('now') WHERE id=?",
         (run_id,),
     )
-    pond_id = db.execute(
-        "SELECT pond_id FROM pond_version WHERE id = ?", (pv_id,)
-    ).fetchone()[0]
+
+    # Re-check stop acknowledgment at completion time (stop-only records may have
+    # arrived mid-run). Clear retry history and stop records, then re-enter stopped
+    # state if this was a stop-acknowledged run.
+    is_stop_run = _acknowledges_stop(db, pv_id)
+    db.execute("DELETE FROM retry_watermark WHERE sink_pond_id = ?", (pond_id,))
+    db.execute("DELETE FROM stop WHERE pond_version_id = ?", (pv_id,))
+    if is_stop_run:
+        db.execute("UPDATE pond_version SET is_stopped = 1 WHERE id = ?", (pv_id,))
+
     for src_pond_id, src_major in db.execute(
         "SELECT source_pond_id, source_major FROM pond_to_pond WHERE pond_version_id = ?",
         (pv_id,),
@@ -194,6 +251,57 @@ def _run_ripple(
         func(pond_handle)
     finally:
         registry.close()
+
+
+# ---------------------------------------------------------------------------
+# Stop helpers (duplicated from orchestrator — pond_worker runs in a separate process)
+# ---------------------------------------------------------------------------
+
+def _acknowledges_stop(db: sqlite3.Connection, pv_id: int) -> bool:
+    """True if the pond has demand and every demand row has a matching stop row."""
+    has_demand = db.execute(
+        "SELECT 1 FROM demand WHERE pond_version_id = ?", (pv_id,)
+    ).fetchone()
+    if not has_demand:
+        return False
+    unmatched = db.execute("""
+        SELECT 1 FROM demand d WHERE d.pond_version_id = ?
+        AND NOT EXISTS (
+            SELECT 1 FROM stop s
+            WHERE s.pond_version_id = d.pond_version_id AND s.sink_id IS d.sink_id
+        )
+    """, (pv_id,)).fetchone()
+    return unmatched is None
+
+
+def _send_stop_upstream(db: sqlite3.Connection, pv_id: int, pond_id: int) -> None:
+    """Send stop-only records to sources when retries are exhausted.
+
+    Subject to the unanimous-sinks rule: stop is only forwarded to a source if
+    all active sinks of that source are stopped.
+    """
+    sources = db.execute("""
+        SELECT pv2.id, p2.name, pv2.version, p2.id AS src_pond_id
+        FROM pond_to_pond p2p
+        JOIN pond_version pv2 ON pv2.pond_id = p2p.source_pond_id
+            AND pv2.major = p2p.source_major AND pv2.is_active = 1
+        JOIN pond p2 ON p2.id = pv2.pond_id
+        WHERE p2p.pond_version_id = ?
+    """, (pv_id,)).fetchall()
+    for src_pv_id, src_name, src_ver, src_pond_id in sources:
+        unstopped_sink = db.execute("""
+            SELECT 1 FROM pond_to_pond p2p2
+            JOIN pond_version pv3 ON pv3.id = p2p2.pond_version_id AND pv3.is_active = 1
+            WHERE p2p2.source_pond_id = ? AND pv3.is_stopped = 0
+        """, (src_pond_id,)).fetchone()
+        if unstopped_sink:
+            continue
+        db.execute("""
+            INSERT INTO stop (pond_version_id, sink_id)
+            SELECT ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM stop WHERE pond_version_id = ? AND sink_id IS ?)
+        """, (src_pv_id, pv_id, src_pv_id, pv_id))
+        _log("stop", f"{src_name} v{src_ver}")
 
 
 # ---------------------------------------------------------------------------

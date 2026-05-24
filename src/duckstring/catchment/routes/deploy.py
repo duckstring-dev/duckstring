@@ -61,7 +61,17 @@ def _discover_ripples(source_dir: Path) -> list[dict]:
                 sys.modules.pop(key, None)
 
 
-def _register(db, name: str, version: str, kind: str, source_path: str, sources: dict, ripples: list[dict]) -> None:
+def _register(
+    db,
+    name: str,
+    version: str,
+    kind: str,
+    source_path: str,
+    sources: dict,
+    ripples: list[dict],
+    immediate_retries: int = 0,
+    source_retries: int = 0,
+) -> None:
     major = int(version.split(".")[0])
     with db:
         db.execute("INSERT OR IGNORE INTO pond (name, kind) VALUES (?, ?)", (name, kind))
@@ -79,7 +89,7 @@ def _register(db, name: str, version: str, kind: str, source_path: str, sources:
         ).fetchone()
 
         if existing:
-            # Re-deploy: refresh source data and re-activate the existing row.
+            # Re-deploy: clear stale state and re-activate the existing row.
             version_id = existing[0]
             ripple_ids = [r[0] for r in db.execute(
                 "SELECT id FROM ripple WHERE pond_version_id = ?", (version_id,)
@@ -87,17 +97,21 @@ def _register(db, name: str, version: str, kind: str, source_path: str, sources:
             if ripple_ids:
                 marks = ",".join("?" * len(ripple_ids))
                 db.execute(f"DELETE FROM ripple_to_ripple WHERE sink_id IN ({marks}) OR source_id IN ({marks})", ripple_ids * 2)
-                db.execute(f"DELETE FROM demand WHERE ripple_id IN ({marks})", ripple_ids)
                 db.execute("DELETE FROM ripple WHERE pond_version_id = ?", (version_id,))
             db.execute("DELETE FROM pond_to_pond WHERE pond_version_id = ?", (version_id,))
+            db.execute("DELETE FROM demand WHERE pond_version_id = ?", (version_id,))
+            db.execute("DELETE FROM stop WHERE pond_version_id = ?", (version_id,))
             db.execute(
-                "UPDATE pond_version SET is_active = 1, source_path = ?, deployed_at = datetime('now') WHERE id = ?",
-                (source_path, version_id),
+                "UPDATE pond_version SET is_active = 1, is_stopped = 1, source_path = ?, "
+                "deployed_at = datetime('now'), immediate_retries = ?, source_retries = ? WHERE id = ?",
+                (source_path, immediate_retries, source_retries, version_id),
             )
         else:
             db.execute(
-                "INSERT INTO pond_version (pond_id, version, major, is_active, source_path) VALUES (?, ?, ?, 1, ?)",
-                (pond_id, version, major, source_path),
+                "INSERT INTO pond_version "
+                "(pond_id, version, major, is_active, source_path, immediate_retries, source_retries) "
+                "VALUES (?, ?, ?, 1, ?, ?, ?)",
+                (pond_id, version, major, source_path, immediate_retries, source_retries),
             )
             (version_id,) = db.execute(
                 "SELECT id FROM pond_version WHERE pond_id = ? AND version = ?", (pond_id, version)
@@ -179,9 +193,13 @@ async def deploy(request: Request):
 
         toml_path = dest / "pond.toml"
         sources: dict = {}
+        immediate_retries = 0
+        source_retries = 0
         if toml_path.exists():
             info = _read_toml(toml_path.read_text(encoding="utf-8"))
             sources = info.get("sources", {})
+            immediate_retries = info.get("pond", {}).get("immediate_retries", 0)
+            source_retries = info.get("pond", {}).get("source_retries", 0)
 
     else:
         body = _GitBody(**(await request.json()))
@@ -207,14 +225,18 @@ async def deploy(request: Request):
 
         toml_path = dest / "pond.toml"
         sources: dict = {}
+        immediate_retries = 0
+        source_retries = 0
         if toml_path.exists():
             info = _read_toml(toml_path.read_text(encoding="utf-8"))
             sources = info.get("sources", {})
+            immediate_retries = info.get("pond", {}).get("immediate_retries", 0)
+            source_retries = info.get("pond", {}).get("source_retries", 0)
 
     ripples = _discover_ripples(dest)
     source_path = f"ponds/{name}/{version}"
     try:
-        _register(db, name, version, kind, source_path, sources, ripples)
+        _register(db, name, version, kind, source_path, sources, ripples, immediate_retries, source_retries)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
