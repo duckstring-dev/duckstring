@@ -235,7 +235,7 @@ def _propagate_stops(db: sqlite3.Connection) -> bool:
             SELECT pv2.id, p2.name, pv2.version, p2.id AS src_pond_id
             FROM pond_to_pond p2p
             JOIN pond_version pv2 ON pv2.pond_id = p2p.source_pond_id
-                AND pv2.major = p2p.source_major AND pv2.is_active = 1
+                AND pv2.major = p2p.source_major AND pv2.is_active = 1 AND pv2.is_stopped = 0
             JOIN pond p2 ON p2.id = pv2.pond_id
             WHERE p2p.pond_version_id = ?
         """, (pv_id,)).fetchall()

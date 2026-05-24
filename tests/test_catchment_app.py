@@ -373,20 +373,20 @@ def _deploy_demo(client, name: str):
 
 
 def test_deploy_demo_ponds(catchment_client):
-    for name in ("inlet", "pond", "outlet"):
+    for name in ("transactions", "products", "sales", "reports"):
         r = _deploy_demo(catchment_client, name)
         assert r.status_code == 200, f"Deploy of {name} failed: {r.text}"
 
     db = _db(catchment_client)
 
-    # All three ponds registered and active
+    # All four ponds registered and active
     active = {
         row[0]
         for row in db.execute(
             "SELECT p.name FROM pond_version pv JOIN pond p ON p.id = pv.pond_id WHERE pv.is_active = 1"
         ).fetchall()
     }
-    assert active == {"inlet", "pond", "outlet"}
+    assert active == {"transactions", "products", "sales", "reports"}
 
     # Inter-pond source edges
     edges = {
@@ -399,11 +399,17 @@ def test_deploy_demo_ponds(catchment_client):
                JOIN pond src  ON src.id  = e.source_pond_id"""
         ).fetchall()
     }
-    assert ("pond", "inlet") in edges
-    assert ("outlet", "pond") in edges
+    assert ("sales", "transactions") in edges
+    assert ("sales", "products") in edges
+    assert ("reports", "sales") in edges
 
     # Ripples registered for each pond
-    for pond_name, expected in [("inlet", {"daily"}), ("pond", {"clean"}), ("outlet", {"daily"})]:
+    for pond_name, expected in [
+        ("transactions", {"ingest"}),
+        ("products", {"ingest"}),
+        ("sales", {"daily_sales", "price_tiers", "join_lines"}),
+        ("reports", {"monthly_summary"}),
+    ]:
         ripples = {
             row[0]
             for row in db.execute(

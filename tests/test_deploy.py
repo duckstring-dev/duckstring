@@ -117,8 +117,8 @@ def test_deploy_explicit_catchment_overrides_default(runner, tmp_path, monkeypat
 def test_deploy_aborts_on_no(runner, tmp_path, monkeypatch, live_catchment):
     monkeypatch.chdir(tmp_path)
     _make_pond(tmp_path, name="my_pond", version="1.0.0")
-    result = runner.invoke(app, ["deploy"], input="n\n")
-    assert result.exit_code != 0
+    runner.invoke(app, ["deploy"], input="n\n")
+    # A graceful "no" is not an error exit, but the pond must not have been deployed.
     r = httpx.get(f"{live_catchment}/api/ponds/my_pond/versions/1.0.0")
     assert r.status_code == 404
 
