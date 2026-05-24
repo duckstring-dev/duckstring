@@ -71,6 +71,7 @@ def _make_table(component_ponds: list[dict]) -> object:
         "running": "[bold green]running[/bold green]",
         "queued":  "[yellow]queued[/yellow]",
         "failed":  "[bold red]failed[/bold red]",
+        "stopped": "[dim]stopped[/dim]",
         "idle":    "[dim]idle[/dim]",
     }
 
@@ -92,10 +93,12 @@ def _make_table(component_ponds: list[dict]) -> object:
         last_run_at = pond.get("last_run_at")
         if last_run_at:
             rel = _rel_time(last_run_at)
+            dur = pond.get("last_run_duration")
+            dur_str = f" ({dur}s)" if dur is not None else ""
             if pond.get("last_run_status") == "success":
-                last_run_str = f"[green]{rel} ✓[/green]"
+                last_run_str = f"[green]{rel}{dur_str} ✓[/green]"
             else:
-                last_run_str = f"[red]{rel} ✗[/red]"
+                last_run_str = f"[red]{rel}{dur_str} ✗[/red]"
         else:
             last_run_str = "[dim]—[/dim]"
 

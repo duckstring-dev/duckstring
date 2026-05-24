@@ -41,6 +41,7 @@ def status(request: Request, all: str = "false"):
                     WHERE pr.pond_version_id = pv.id AND pr.finished_at IS NOT NULL
                     ORDER BY pr.finished_at DESC LIMIT 1
                 ) = 'failed' THEN 'failed'
+                WHEN pv.is_stopped = 1 THEN 'stopped'
                 ELSE 'idle'
             END AS status,
             COALESCE((
@@ -65,7 +66,14 @@ def status(request: Request, all: str = "false"):
                 JOIN pond_version pv2 ON pv2.id = pr.pond_version_id
                 WHERE pv2.pond_id = p.id AND pr.finished_at IS NOT NULL
                 ORDER BY pr.finished_at DESC LIMIT 1
-            ) AS last_run_version
+            ) AS last_run_version,
+            (
+                SELECT ROUND((julianday(pr.finished_at) - julianday(pr.started_at)) * 86400, 1)
+                FROM pond_run pr
+                JOIN pond_version pv2 ON pv2.id = pr.pond_version_id
+                WHERE pv2.pond_id = p.id AND pr.finished_at IS NOT NULL
+                ORDER BY pr.finished_at DESC LIMIT 1
+            ) AS last_run_duration
         FROM pond_version pv
         JOIN pond p ON p.id = pv.pond_id
         {where}
@@ -84,6 +92,7 @@ def status(request: Request, all: str = "false"):
                 "name": r[0], "version": r[1], "kind": r[2],
                 "status": r[3], "gen": r[4],
                 "last_run_at": r[5], "last_run_status": r[6], "last_run_version": r[7],
+                "last_run_duration": r[8],
             }
             for r in rows
         ],
