@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections import defaultdict, deque
 from typing import Optional
 
@@ -113,39 +114,57 @@ def _make_table(component_ponds: list[dict]) -> object:
     return table
 
 
-def status(
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to query (uses default if omitted)."),
-    all: bool = typer.Option(False, "--all", "-a", help="Include all Ponds, not just active ones."),
-) -> None:
-    """Print a summary of Pond activity in the Catchment."""
-    from rich.console import Console
+def _ancestors(name: str, edges: list[tuple[str, str]]) -> set[str]:
+    """Return name and all upstream pond names reachable from name (BFS)."""
+    upstream: dict[str, list[str]] = defaultdict(list)
+    for src, snk in edges:
+        upstream[snk].append(src)
+    visited: set[str] = {name}
+    queue: deque[str] = deque([name])
+    while queue:
+        n = queue.popleft()
+        for src in upstream.get(n, []):
+            if src not in visited:
+                visited.add(src)
+                queue.append(src)
+    return visited
+
+
+def _filter_for_pond(
+    ponds: list[dict],
+    edges: list[tuple[str, str]],
+    pond_name: str,
+    major: Optional[int],
+    version_str: Optional[str],
+) -> tuple[list[dict], list[tuple[str, str]]]:
+    """Filter ponds and edges to pond_name and its upstream sources."""
+    ancestor_names = _ancestors(pond_name, edges)
+
+    filtered: list[dict] = []
+    for p in ponds:
+        if p["name"] not in ancestor_names:
+            continue
+        if p["name"] == pond_name:
+            if version_str is not None and p["version"] != version_str:
+                continue
+            if major is not None and int(p["version"].split(".")[0]) != major:
+                continue
+        filtered.append(p)
+
+    included = {p["name"] for p in filtered}
+    filtered_edges = [e for e in edges if e[0] in included and e[1] in included]
+    return filtered, filtered_edges
+
+
+def _build_renderable(ponds: list[dict], edges: list[tuple[str, str]]) -> object:
+    """Build a Rich renderable (Table or Group of Panels) from pond status data."""
+    from rich.console import Group
     from rich.panel import Panel
 
-    from . import _http
-    from .config import resolve_catchment
-
-    _, cfg = resolve_catchment(catchment)
-    url = cfg["url"]
-
-    params = {"all": "true"} if all else {}
-    resp = _http.get(f"{url}/api/status", params=params)
-
-    data = resp.json()
-    ponds = data.get("ponds", [])
-
-    console = Console()
-    if not ponds:
-        console.print(f"[dim]No active Ponds in [bold]{catchment}[/bold].[/dim]")
-        return
-
-    edges = [tuple(e) for e in data.get("edges", [])]
-
-    # Topo sort on unique pond names — multiple versions sit at the same DAG position.
     unique_names = list(dict.fromkeys(p["name"] for p in ponds))
     sorted_names = _topo_sort(unique_names, edges)
     components = _connected_components(sorted_names, edges)
 
-    # Expand each component's name list to all matching pond dicts (sorted by version).
     def _expand(names: list[str]) -> list[dict]:
         by_name: dict[str, list[dict]] = {}
         for p in ponds:
@@ -156,11 +175,104 @@ def status(
         return result
 
     if len(components) == 1:
-        console.print(_make_table(_expand(components[0])))
-    else:
-        for component in components:
-            comp_set = set(component)
-            sinks_in_comp = {b for a, b in edges if a in comp_set and b in comp_set}
-            roots = [n for n in component if n not in sinks_in_comp]
-            title = "  →  ".join(roots) if roots else component[0]
-            console.print(Panel(_make_table(_expand(component)), title=title, border_style="dim"))
+        return _make_table(_expand(components[0]))
+
+    panels = []
+    for component in components:
+        comp_set = set(component)
+        sinks_in_comp = {b for a, b in edges if a in comp_set and b in comp_set}
+        roots = [n for n in component if n not in sinks_in_comp]
+        title = "  →  ".join(roots) if roots else component[0]
+        panels.append(Panel(_make_table(_expand(component)), title=title, border_style="dim"))
+    return Group(*panels)
+
+
+def _fetch_status(url: str, all_versions: bool) -> tuple[list[dict], list[tuple[str, str]]]:
+    from . import _http
+
+    params = {"all": "true"} if all_versions else {}
+    resp = _http.get(f"{url}/api/status", params=params)
+    data = resp.json()
+    ponds = data.get("ponds", [])
+    edges = [tuple(e) for e in data.get("edges", [])]
+    return ponds, edges
+
+
+def _run_monitor(
+    url: str,
+    all_versions: bool,
+    pond_name: Optional[str],
+    major: Optional[int],
+    version_str: Optional[str],
+) -> None:
+    """Poll status and refresh display in-place until Ctrl+C."""
+    from datetime import datetime, timezone
+
+    from rich.console import Group
+    from rich.live import Live
+    from rich.text import Text
+
+    def _build() -> object:
+        try:
+            ponds, edges = _fetch_status(url, all_versions)
+            if pond_name:
+                ponds, edges = _filter_for_pond(ponds, edges, pond_name, major, version_str)
+            if not ponds:
+                body = Text("No active Ponds.", style="dim")
+            else:
+                body = _build_renderable(ponds, edges)
+            ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+            header = Text(f"Updated {ts} · Ctrl+C to stop", style="dim")
+            return Group(header, body)
+        except Exception as exc:
+            return Text(f"Error fetching status: {exc}", style="red")
+
+    try:
+        with Live(auto_refresh=False, screen=False) as live:
+            while True:
+                live.update(_build())
+                live.refresh()
+                time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
+
+def status(
+    pond: Optional[str] = typer.Argument(None, help="Filter to this Pond and its upstream sources."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to query (uses default if omitted)."),
+    all: bool = typer.Option(False, "--all", "-a", help="Include all Ponds, not just active ones."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version of the selected Pond (requires pond argument)."),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver of the selected Pond, e.g. 1.2.3 (requires pond argument)."),
+    monitor: bool = typer.Option(False, "--monitor", help="Poll and refresh the display continuously until Ctrl+C."),
+) -> None:
+    """Print a summary of Pond activity in the Catchment."""
+    from rich.console import Console
+
+    from .config import resolve_catchment
+
+    _, cfg = resolve_catchment(catchment)
+    url = cfg["url"]
+
+    if monitor:
+        _run_monitor(url, all, pond, major, version)
+        return
+
+    ponds, edges = _fetch_status(url, all)
+
+    console = Console()
+
+    if pond is not None:
+        pond_names = {p["name"] for p in ponds}
+        if pond not in pond_names and not any(True for src, snk in edges if src == pond or snk == pond):
+            console.print(f"[red]Pond [bold]{pond}[/bold] not found.[/red]")
+            raise typer.Exit(1)
+        ponds, edges = _filter_for_pond(ponds, edges, pond, major, version)
+        if not ponds:
+            console.print(f"[dim]No matching versions for [bold]{pond}[/bold].[/dim]")
+            return
+
+    if not ponds:
+        console.print(f"[dim]No active Ponds in [bold]{catchment}[/bold].[/dim]")
+        return
+
+    console.print(_build_renderable(ponds, edges))
