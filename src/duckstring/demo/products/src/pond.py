@@ -37,9 +37,9 @@ def _to_values(rows):
 def ingest(pond):
     time.sleep(2)
     try:
-        existing = pond.con.sql('SELECT * FROM "products"."product"')
+        existing = pond.con.sql('SELECT * FROM "product"')
         current_max = pond.con.execute(
-            'SELECT MAX(id) FROM "products"."product"'
+            'SELECT MAX(id) FROM "product"'
         ).fetchone()[0]
     except Exception:
         existing = None

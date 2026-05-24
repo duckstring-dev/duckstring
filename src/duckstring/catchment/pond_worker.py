@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import threading
 import time
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -46,6 +47,7 @@ def execute_pond_run(
         _log("done", name_ver, gen=gen, duration=time.monotonic() - t0)
     except Exception:
         _log("failed", name_ver, gen=gen, duration=time.monotonic() - t0)
+        traceback.print_exc()
         raise
     finally:
         executor.shutdown(wait=True)
@@ -102,6 +104,7 @@ def _execute_run(
             if exc:
                 failed.append(exc)
                 _mark_ripple(db, ripple_id, run_id, "failed")
+                traceback.print_exception(type(exc), exc, exc.__traceback__)
             else:
                 completed.add(ripple_id)
                 _mark_ripple(db, ripple_id, run_id, "success")
@@ -111,13 +114,17 @@ def _execute_run(
                         p in completed for p in parents[child_id]
                     ):
                         _dispatch(child_id)
-            db.commit()
+            db.commit()  # commit mark + any dispatched ripple_run inserts together
             if len(completed) + len(failed) == total:
                 done_event.set()
 
     def _dispatch(ripple_id: int) -> None:
         # Always called with lock held.
         _create_ripple_run(db, ripple_id, run_id)
+        # Load the ripple function before releasing the lock, but the write
+        # transaction must be committed first — module loading involves file I/O
+        # and can take long enough to hit the SQLite busy timeout in other processes.
+        db.commit()
         func = _load_ripple_func(source_path, root_str, ripple_names[ripple_id])
         fut = executor.submit(
             _run_ripple, func, pond_name, version, str(registry_path), root_str
@@ -144,7 +151,9 @@ def _execute_run(
         db.close()
         raise failed[0]
 
-    # All ripples succeeded — finalise pond_run and advance watermarks.
+    # All ripples succeeded — export tables to Parquet for cross-pond consumption,
+    # then finalise pond_run and advance watermarks.
+    _export_parquet(registry_path)
     db.execute(
         "UPDATE pond_run SET status='success', finished_at=datetime('now') WHERE id=?",
         (run_id,),
@@ -185,6 +194,27 @@ def _run_ripple(
         func(pond_handle)
     finally:
         registry.close()
+
+
+# ---------------------------------------------------------------------------
+# Parquet export
+# ---------------------------------------------------------------------------
+
+def _export_parquet(registry_path: Path) -> None:
+    import duckdb
+
+    data_dir = registry_path.parent / "data"
+    data_dir.mkdir(exist_ok=True)
+    con = duckdb.connect(str(registry_path), read_only=True)
+    try:
+        tables = [row[0] for row in con.execute("SHOW TABLES").fetchall()]
+        for table in tables:
+            dest = data_dir / f"{table}.parquet"
+            tmp = data_dir / f"{table}.parquet.tmp"
+            con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')
+            tmp.replace(dest)
+    finally:
+        con.close()
 
 
 # ---------------------------------------------------------------------------

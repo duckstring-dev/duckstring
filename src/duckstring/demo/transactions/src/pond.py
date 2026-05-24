@@ -14,9 +14,9 @@ def ingest(pond):
     time.sleep(1)
     try:
         (next_id,) = pond.con.execute(
-            'SELECT COALESCE(MAX(id), -1) + 1 FROM "transactions"."transaction"'
+            'SELECT COALESCE(MAX(id), -1) + 1 FROM "transaction"'
         ).fetchone()
-        existing = pond.con.sql('SELECT * FROM "transactions"."transaction"')
+        existing = pond.con.sql('SELECT * FROM "transaction"')
     except Exception:
         next_id = 0
         existing = None

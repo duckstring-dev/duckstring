@@ -46,10 +46,12 @@ class Pond:
         self.root = root
 
     def write_table(self, name: str, relation) -> None:
-        self.con.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.name}"')
+        tmp = f"__tmp_{name}"
         self.con.execute("BEGIN TRANSACTION")
-        self.con.execute(f'DROP TABLE IF EXISTS "{self.name}"."{name}"')
-        relation.create(f'"{self.name}"."{name}"')
+        self.con.execute(f'DROP TABLE IF EXISTS "{tmp}"')
+        relation.create(f'"{tmp}"')
+        self.con.execute(f'DROP TABLE IF EXISTS "{name}"')
+        self.con.execute(f'ALTER TABLE "{tmp}" RENAME TO "{name}"')
         self.con.execute("COMMIT")
 
     def read_table(self, ref: str):
@@ -57,14 +59,15 @@ class Pond:
             source_pond, table = ref.split(".", 1)
             if source_pond != self.name:
                 from pathlib import Path as _Path
-                source_db = _Path(self.root) / "ponds" / source_pond / "registry.duckdb"
-                self.con.execute(
-                    f"ATTACH IF NOT EXISTS '{source_db}' AS \"{source_pond}\" (READ_ONLY)"
-                )
-                # 3-part: catalog (attach alias) . schema (pond name) . table
-                return self.con.sql(f'SELECT * FROM "{source_pond}"."{source_pond}"."{table}"')
-            return self.con.sql(f'SELECT * FROM "{self.name}"."{table}"')
-        return self.con.sql(f'SELECT * FROM "{self.name}"."{ref}"')
+                parquet = _Path(self.root) / "ponds" / source_pond / "data" / f"{table}.parquet"
+                if not parquet.exists():
+                    raise FileNotFoundError(
+                        f"No exported data found for '{source_pond}.{table}' — "
+                        f"has {source_pond} completed a successful run?"
+                    )
+                return self.con.sql(f"SELECT * FROM read_parquet('{parquet}')")
+            return self.con.sql(f'SELECT * FROM "{table}"')
+        return self.con.sql(f'SELECT * FROM "{ref}"')
 
 
 class Ripple:
