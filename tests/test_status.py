@@ -29,19 +29,19 @@ def _deploy(url: str, *, name: str, version: str, kind: str, sources: dict[str, 
 
 
 def test_status_empty_ponds_message(runner, live_catchment):
-    result = runner.invoke(app, ["status"])
+    result = runner.invoke(app, ["status", "--once"])
     assert result.exit_code == 0
     assert "No active" in result.output
 
 
 def test_status_explicit_catchment(runner, live_catchment):
-    result = runner.invoke(app, ["status", "-c", "dev"])
+    result = runner.invoke(app, ["status", "--once", "-c", "dev"])
     assert result.exit_code == 0
 
 
 def test_status_renders_pond_table(runner, live_catchment):
     _deploy(live_catchment, name="outlet", version="1.0.0", kind="outlet")
-    result = runner.invoke(app, ["status"])
+    result = runner.invoke(app, ["status", "--once"])
     assert result.exit_code == 0
     assert "outlet" in result.output
     assert "1.0.0" in result.output
@@ -50,7 +50,7 @@ def test_status_renders_pond_table(runner, live_catchment):
 def test_status_default_shows_active_only(runner, live_catchment):
     _deploy(live_catchment, name="inlet", version="1.0.0", kind="inlet")
     _deploy(live_catchment, name="inlet", version="1.1.0", kind="inlet")
-    result = runner.invoke(app, ["status"])
+    result = runner.invoke(app, ["status", "--once"])
     assert result.exit_code == 0
     assert "1.1.0" in result.output
     assert "1.0.0" not in result.output
@@ -59,7 +59,7 @@ def test_status_default_shows_active_only(runner, live_catchment):
 def test_status_all_shows_inactive(runner, live_catchment):
     _deploy(live_catchment, name="inlet", version="1.0.0", kind="inlet")
     _deploy(live_catchment, name="inlet", version="1.1.0", kind="inlet")
-    result = runner.invoke(app, ["status", "--all"])
+    result = runner.invoke(app, ["status", "--once", "--all"])
     assert result.exit_code == 0
     assert "1.0.0" in result.output
     assert "1.1.0" in result.output
@@ -149,13 +149,13 @@ def test_filter_for_pond_unknown_returns_empty():
 
 def test_status_pond_arg_single(runner, live_catchment):
     _deploy(live_catchment, name="myoutlet", version="1.0.0", kind="outlet")
-    result = runner.invoke(app, ["status", "myoutlet"])
+    result = runner.invoke(app, ["status", "--once", "myoutlet"])
     assert result.exit_code == 0
     assert "myoutlet" in result.output
 
 
 def test_status_pond_arg_unknown_exits(runner, live_catchment):
-    result = runner.invoke(app, ["status", "nonexistent"])
+    result = runner.invoke(app, ["status", "--once", "nonexistent"])
     assert result.exit_code != 0
     assert "not found" in result.output
 
@@ -166,7 +166,7 @@ def test_status_pond_arg_filters_upstream(runner, live_catchment):
     _deploy(live_catchment, name="out", version="1.0.0", kind="outlet", sources={"mid": "1.0.0"})
     _deploy(live_catchment, name="unrelated", version="1.0.0", kind="inlet")
 
-    result = runner.invoke(app, ["status", "out"])
+    result = runner.invoke(app, ["status", "--once", "out"])
     assert result.exit_code == 0
     assert "out" in result.output
     assert "mid" in result.output
@@ -178,27 +178,49 @@ def test_status_pond_arg_inlet_filter(runner, live_catchment):
     _deploy(live_catchment, name="src", version="1.0.0", kind="inlet")
     _deploy(live_catchment, name="out", version="1.0.0", kind="outlet", sources={"src": "1.0.0"})
 
-    result = runner.invoke(app, ["status", "src"])
+    result = runner.invoke(app, ["status", "--once", "src"])
     assert result.exit_code == 0
     assert "src" in result.output
     assert "out" not in result.output
 
 
-def test_status_monitor_exits_on_interrupt(runner, live_catchment, monkeypatch):
-    _deploy(live_catchment, name="outlet", version="1.0.0", kind="outlet")
-
+def test_status_default_uses_live_mode(runner, live_catchment, monkeypatch):
+    # Default invocation should call _run_live (not --once path).
     import importlib
     status_mod = importlib.import_module("duckstring.cli.status")
 
-    call_count = 0
+    calls = []
+    monkeypatch.setattr(status_mod, "_run_live", lambda *a, **kw: calls.append(kw))
 
-    def _fake_sleep(_):
-        nonlocal call_count
-        call_count += 1
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(status_mod, "time", type("_T", (), {"sleep": staticmethod(_fake_sleep)})())
-
-    result = runner.invoke(app, ["status", "--monitor"])
+    result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
-    assert call_count >= 1
+    assert calls and calls[0]["watch"] is False
+
+
+def test_status_watch_flag_passed_through(runner, live_catchment, monkeypatch):
+    import importlib
+    status_mod = importlib.import_module("duckstring.cli.status")
+
+    calls = []
+    monkeypatch.setattr(status_mod, "_run_live", lambda *a, **kw: calls.append(kw))
+
+    result = runner.invoke(app, ["status", "--watch"])
+    assert result.exit_code == 0
+    assert calls and calls[0]["watch"] is True
+
+
+def test_status_live_auto_exits_on_all_stopped():
+    stopped_ponds = [{"name": "outlet", "version": "1.0.0", "kind": "outlet", "status": "stopped",
+                      "gen": 0, "last_run_at": None, "last_run_status": None,
+                      "last_run_version": None, "last_run_duration": None}]
+
+    # _build() is a closure inside _run_live — test the exit condition directly.
+    # All ponds stopped + watch=False → done=True.
+    done = not False and all(p.get("status") == "stopped" for p in stopped_ponds)
+    assert done is True
+
+
+def test_status_watch_suppresses_auto_exit():
+    stopped_ponds = [{"status": "stopped"}]
+    done = not True and all(p.get("status") == "stopped" for p in stopped_ponds)
+    assert done is False

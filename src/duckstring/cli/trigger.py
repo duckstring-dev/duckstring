@@ -4,35 +4,42 @@ from typing import Optional
 
 import typer
 
+_SILENT_HELP = "Submit the trigger without showing status output."
+_WATCH_HELP  = "Live status after triggering; never auto-exits (implies live mode)."
+
+
+def _post_trigger(
+    url: str, outlet: str, major: Optional[int], version: Optional[str],
+    silent: bool, watch: bool, endpoint: str, payload: dict,
+) -> None:
+    from rich.console import Console
+
+    from . import _http
+
+    _http.post(f"{url}/api/outlets/{outlet}/{endpoint}", json=payload)
+
+    if not silent:
+        from .status import _run_live
+        _run_live(url, all_versions=False, pond_name=outlet, major=major, version_str=version, watch=watch)
+    else:
+        Console().print("[green]Done.[/green]")
+
 
 def pulse(
     outlet: str = typer.Argument(..., help="Name of the Outlet Pond to trigger."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to run (default: latest active)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
-    monitor: bool = typer.Option(False, "--monitor", help="Watch the triggered Pond run to completion."),
+    silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
+    watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
 ) -> None:
-    """Emit a single Demand signal from an Outlet (executes the DAG once)."""
-    from rich.console import Console
-
-    from . import _http
+    """Emit a single Demand signal from an Outlet (executes the pipeline once)."""
     from .config import resolve_catchment
-
     _, cfg = resolve_catchment(catchment)
-    url = cfg["url"]
-
     payload: dict = {}
     if major is not None:
         payload["version"] = major
-
-    console = Console()
-    console.print(f"Pulsing [bold]{outlet}[/bold]...")
-    _http.post(f"{url}/api/outlets/{outlet}/pulse", json=payload)
-    console.print("[green]Pulse sent.[/green]")
-
-    if monitor:
-        from .status import _run_monitor
-        _run_monitor(url, all_versions=False, pond_name=outlet, major=major, version_str=version)
+    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "pulse", payload)
 
 
 def wave(
@@ -40,25 +47,13 @@ def wave(
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
-    monitor: bool = typer.Option(False, "--monitor", help="Watch the triggered Pond run to completion."),
+    silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
+    watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
 ) -> None:
     """Start continuous Demand from an Outlet (runs at maximum frequency)."""
-    from rich.console import Console
-
-    from . import _http
     from .config import resolve_catchment
-
     _, cfg = resolve_catchment(catchment)
-    url = cfg["url"]
-
-    console = Console()
-    console.print(f"Starting wave on [bold]{outlet}[/bold]...")
-    _http.post(f"{url}/api/outlets/{outlet}/wave")
-    console.print("[green]Wave started.[/green]")
-
-    if monitor:
-        from .status import _run_monitor
-        _run_monitor(url, all_versions=False, pond_name=outlet, major=major, version_str=version)
+    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "wave", {})
 
 
 def tide(
@@ -68,23 +63,10 @@ def tide(
     local: bool = typer.Option(False, "--local", help="Interpret the schedule in local time (default: UTC)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
-    monitor: bool = typer.Option(False, "--monitor", help="Watch the triggered Pond run to completion."),
+    silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
+    watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
 ) -> None:
     """Schedule an Outlet to emit Demand on a cron schedule."""
-    from rich.console import Console
-
-    from . import _http
     from .config import resolve_catchment
-
     _, cfg = resolve_catchment(catchment)
-    url = cfg["url"]
-
-    tz_label = "local time" if local else "UTC"
-    console = Console()
-    console.print(f"Scheduling tide on [bold]{outlet}[/bold] ([dim]{cron}[/dim], {tz_label})...")
-    _http.post(f"{url}/api/outlets/{outlet}/tide", json={"cron": cron, "local": local})
-    console.print("[green]Tide scheduled.[/green]")
-
-    if monitor:
-        from .status import _run_monitor
-        _run_monitor(url, all_versions=False, pond_name=outlet, major=major, version_str=version)
+    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "tide", {"cron": cron, "local": local})

@@ -201,14 +201,14 @@ def _fetch_status(url: str, all_versions: bool) -> tuple[list[dict], list[tuple[
     return ponds, edges
 
 
-def _run_monitor(
+def _run_live(
     url: str,
     all_versions: bool,
     pond_name: Optional[str],
     major: Optional[int],
     version_str: Optional[str],
+    watch: bool,
 ) -> None:
-    """Poll status and refresh display in-place until Ctrl+C."""
     from datetime import datetime, timezone
 
     from rich.console import Group
@@ -225,7 +225,7 @@ def _run_monitor(
                 done = False
             else:
                 body = _build_renderable(ponds, edges)
-                done = pond_name is not None and all(p.get("status") == "stopped" for p in ponds)
+                done = not watch and all(p.get("status") == "stopped" for p in ponds)
             ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
             footer = " · stopped" if done else " · Ctrl+C to stop"
             header = Text(f"Updated {ts}{footer}", style="dim")
@@ -256,9 +256,10 @@ def status(
     version: Optional[str] = typer.Option(
         None, "--version", "-v", help="Specific semver of the selected Pond, e.g. 1.2.3 (requires pond argument)."
     ),
-    monitor: bool = typer.Option(False, "--monitor", help="Poll and refresh the display continuously until Ctrl+C."),
+    once: bool = typer.Option(False, "--once", help="Print a single snapshot and exit without live updates."),
+    watch: bool = typer.Option(False, "--watch", help="Live updates; never auto-exit even when all Ponds are stopped."),
 ) -> None:
-    """Print a summary of Pond activity in the Catchment."""
+    """Show Pond activity in the Catchment. Live by default; exits when all Ponds are stopped."""
     from rich.console import Console
 
     from .config import resolve_catchment
@@ -266,8 +267,8 @@ def status(
     _, cfg = resolve_catchment(catchment)
     url = cfg["url"]
 
-    if monitor:
-        _run_monitor(url, all, pond, major, version)
+    if not once:
+        _run_live(url, all, pond, major, version, watch=watch)
         return
 
     ponds, edges = _fetch_status(url, all)
