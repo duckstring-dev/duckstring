@@ -72,9 +72,12 @@ def init(
     console.print("  [dim]pond.toml[/dim]     — Pond name, version, and Sources")
 
 
+_DEMO_PONDS = ("transactions", "products", "sales", "reports")
+
+
 @app.command()
 def demo() -> None:
-    """Create the inlet, pond, and outlet demo projects as subdirectories."""
+    """Create the transactions, products, sales, and reports demo projects as subdirectories."""
     import shutil
 
     from rich.console import Console
@@ -82,19 +85,21 @@ def demo() -> None:
     console = Console()
     cwd = Path.cwd()
 
-    existing = [name for name in ("inlet", "pond", "outlet") if (cwd / name).exists()]
+    existing = [name for name in _DEMO_PONDS if (cwd / name).exists()]
     if existing:
         for name in existing:
             typer.echo(f"Error: '{name}' already exists in this directory.", err=True)
         raise typer.Exit(1)
 
-    console.print(f"Will create [bold]inlet/[/bold], [bold]pond/[/bold], [bold]outlet/[/bold] in {cwd}")
+    pond_list = ", ".join(f"[bold]{p}/[/bold]" for p in _DEMO_PONDS)
+    console.print(f"Will create {pond_list} in {cwd}")
     typer.confirm("Continue?", default=True, abort=True)
 
-    for name in ("inlet", "pond", "outlet"):
+    for name in _DEMO_PONDS:
         shutil.copytree(_DEMO_DIR / name, cwd / name)
 
     console.print("[green]Created[/green] demo pipeline:")
-    console.print("  [bold]inlet/[/bold]   — deploy first")
-    console.print("  [bold]pond/[/bold]    — deploy second")
-    console.print("  [bold]outlet/[/bold]  — deploy third, then: [dim]duckstring pulse <catchment> outlet[/dim]")
+    console.print("  [bold]transactions/[/bold]  — deploy first  (POS event log, grows each run)")
+    console.print("  [bold]products/[/bold]      — deploy second (product catalogue, grows each run)")
+    console.print("  [bold]sales/[/bold]         — deploy third  (3 Ripples: daily_sales → price_tiers → join_lines)")
+    console.print("  [bold]reports/[/bold]       — deploy fourth, then: [dim]duckstring pulse <catchment> reports[/dim]")

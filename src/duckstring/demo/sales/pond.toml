@@ -1,0 +1,7 @@
+[pond]
+name = "sales"
+version = "1.0.0"
+
+[sources]
+transactions = "1.0.0"
+products = "1.0.0"
