@@ -38,9 +38,9 @@ def test_pulse_explicit_catchment(runner, live_catchment):
     assert result.exit_code == 0, result.output
 
 
-def test_pulse_with_version(runner, live_catchment):
+def test_pulse_with_major(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "pulse", "outlet", "--version", "1"])
+    result = runner.invoke(app, ["trigger", "pulse", "outlet", "--major", "1"])
     assert result.exit_code == 0, result.output
 
 
