@@ -101,5 +101,5 @@ def demo() -> None:
     console.print("[green]Created[/green] demo pipeline:")
     console.print("  [bold]transactions/[/bold]  — deploy first  (POS event log, grows each run)")
     console.print("  [bold]products/[/bold]      — deploy second (product catalogue, grows each run)")
-    console.print("  [bold]sales/[/bold]         — deploy third  (3 Ripples: stage → stage → join)")
+    console.print("  [bold]sales/[/bold]         — deploy third  (3 Ripples: daily_sales → price_tiers → join_lines)")
     console.print("  [bold]reports/[/bold]       — deploy fourth, then: [dim]duckstring pulse <catchment> reports[/dim]")
