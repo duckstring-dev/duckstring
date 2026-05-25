@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -10,6 +11,18 @@ import pytest
 import uvicorn
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
+
+
+@pytest.fixture(autouse=True, scope="session")
+def fast_demo_sleep():
+    """Set DUCKSTRING_SLEEP_MULTIPLIER=0.01 so demo-pond sleeps are negligible in tests."""
+    orig = os.environ.get("DUCKSTRING_SLEEP_MULTIPLIER")
+    os.environ["DUCKSTRING_SLEEP_MULTIPLIER"] = "0.01"
+    yield
+    if orig is None:
+        os.environ.pop("DUCKSTRING_SLEEP_MULTIPLIER", None)
+    else:
+        os.environ["DUCKSTRING_SLEEP_MULTIPLIER"] = orig
 
 
 @pytest.fixture

@@ -13,6 +13,8 @@ import httpx
 import pytest
 import uvicorn
 
+pytestmark = pytest.mark.timeout(30)
+
 _DEMO_DIR = Path(__file__).parent.parent / "src" / "duckstring" / "demo"
 
 

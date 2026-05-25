@@ -25,6 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  "pytest-timeout>=0.5",
   "ruff>=0.3",
   "mypy>=1.8",
 ]
@@ -45,6 +46,7 @@ ds = "duckstring.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+timeout = 1
 
 [tool.ruff]
 line-length = 128
