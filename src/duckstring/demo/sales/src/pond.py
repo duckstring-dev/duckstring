@@ -1,11 +1,16 @@
+import os
 import time
 
 from duckstring import ripple
 
 
+def _mul() -> float:
+    return float(os.environ.get("DUCKSTRING_SLEEP_MULTIPLIER", "1.0"))
+
+
 @ripple
 def daily_sales(pond):
-    time.sleep(2)
+    time.sleep(2 * _mul())
     raw = pond.read_table("transactions.transaction")  # noqa: F841
     agg = pond.con.sql("""
         SELECT
@@ -23,7 +28,7 @@ def daily_sales(pond):
 
 @ripple
 def price_tiers(pond):
-    time.sleep(1)
+    time.sleep(1 * _mul())
     raw = pond.read_table("products.product")  # noqa: F841
     tiered = pond.con.sql("""
         SELECT
@@ -43,7 +48,7 @@ def price_tiers(pond):
 
 @ripple(parents=[daily_sales, price_tiers])
 def join_lines(pond):
-    time.sleep(3)
+    time.sleep(3 * _mul())
     sales = pond.read_table("daily_sales")  # noqa: F841
     tiers = pond.read_table("price_tiers")  # noqa: F841
     lines = pond.con.sql("""

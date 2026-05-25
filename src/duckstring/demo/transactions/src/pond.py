@@ -1,3 +1,4 @@
+import os
 import random
 import time
 from datetime import date, timedelta
@@ -11,7 +12,7 @@ _BATCH = 5
 
 @ripple
 def ingest(pond):
-    time.sleep(1)
+    time.sleep(1 * float(os.environ.get("DUCKSTRING_SLEEP_MULTIPLIER", "1.0")))
     try:
         (next_id,) = pond.con.execute(
             'SELECT COALESCE(MAX(id), -1) + 1 FROM "transaction"'

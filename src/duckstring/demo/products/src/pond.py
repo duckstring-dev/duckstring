@@ -1,3 +1,4 @@
+import os
 import time
 
 from duckstring import ripple
@@ -35,7 +36,7 @@ def _to_values(rows):
 
 @ripple
 def ingest(pond):
-    time.sleep(2)
+    time.sleep(2 * float(os.environ.get("DUCKSTRING_SLEEP_MULTIPLIER", "1.0")))
     try:
         existing = pond.con.sql('SELECT * FROM "product"')
         current_max = pond.con.execute(

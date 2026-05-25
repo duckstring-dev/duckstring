@@ -4,8 +4,11 @@ import io
 import zipfile
 
 import httpx
+import pytest
 
 from duckstring.cli import app
+
+pytestmark = pytest.mark.timeout(30)
 
 _OUTLET_TOML = b"[pond]\nname = \"outlet\"\nversion = \"1.0.0\"\ntype = \"outlet\"\n"
 

@@ -1,3 +1,4 @@
+import os
 import time
 
 from duckstring import ripple
@@ -5,7 +6,7 @@ from duckstring import ripple
 
 @ripple
 def monthly_summary(pond):
-    time.sleep(1)
+    time.sleep(1 * float(os.environ.get("DUCKSTRING_SLEEP_MULTIPLIER", "1.0")))
     lines = pond.read_table("sales.sale_line")  # noqa: F841
     summary = pond.con.sql("""
         SELECT
