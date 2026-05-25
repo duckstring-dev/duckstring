@@ -10,6 +10,8 @@ import pytest
 
 from duckstring.catchment.db import connect, migrate
 
+pytestmark = pytest.mark.timeout(5)
+
 _DEMO_DIR = Path(__file__).parent.parent / "src" / "duckstring" / "demo"
 
 
