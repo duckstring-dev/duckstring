@@ -10,19 +10,18 @@ _WATCH_HELP  = "Live status after triggering; never auto-exits (implies live mod
 
 def _post_trigger(
     url: str, outlet: str, major: Optional[int], version: Optional[str],
-    silent: bool, watch: bool, endpoint: str, payload: dict,
+    silent: bool, watch: bool, endpoint: str, payload: dict, success_msg: str,
 ) -> None:
-    from rich.console import Console
-
     from . import _http
 
     _http.post(f"{url}/api/outlets/{outlet}/{endpoint}", json=payload)
 
     if not silent:
+        import typer
+        typer.echo(success_msg)
+    if watch:
         from .status import _run_live
         _run_live(url, all_versions=False, pond_name=outlet, major=major, version_str=version, watch=watch)
-    else:
-        Console().print("[green]Done.[/green]")
 
 
 def pulse(
@@ -39,7 +38,7 @@ def pulse(
     payload: dict = {}
     if major is not None:
         payload["version"] = major
-    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "pulse", payload)
+    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "pulse", payload, "Pulse sent.")
 
 
 def wave(
@@ -53,7 +52,7 @@ def wave(
     """Start continuous Demand from an Outlet (runs at maximum frequency)."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "wave", {})
+    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "wave", {}, "Wave started.")
 
 
 def tide(
@@ -69,4 +68,4 @@ def tide(
     """Schedule an Outlet to emit Demand on a cron schedule."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "tide", {"cron": cron, "local": local})
+    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "tide", {"cron": cron, "local": local}, "Tide scheduled.")

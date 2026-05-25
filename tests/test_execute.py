@@ -61,6 +61,7 @@ def test_pulse_no_default_exits(runner):
 
 
 def test_wave_succeeds(runner, live_catchment):
+    _deploy_outlet(live_catchment)
     result = runner.invoke(app, ["trigger", "wave", "outlet"])
     assert result.exit_code == 0, result.output
     assert "Wave started" in result.output
@@ -75,12 +76,14 @@ def test_wave_unknown_catchment_exits(runner):
 
 
 def test_tide_succeeds(runner, live_catchment):
+    _deploy_outlet(live_catchment)
     result = runner.invoke(app, ["trigger", "tide", "outlet", "--cron", "15 2 * * *"])
     assert result.exit_code == 0, result.output
     assert "Tide scheduled" in result.output
 
 
 def test_tide_local_flag(runner, live_catchment):
+    _deploy_outlet(live_catchment)
     result = runner.invoke(app, ["trigger", "tide", "outlet", "--cron", "0 8 * * 1", "--local"])
     assert result.exit_code == 0, result.output
 

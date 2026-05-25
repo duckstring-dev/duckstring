@@ -58,7 +58,7 @@ def test_single_catchment_is_implicit_default(runner, tmp_path, monkeypatch):
 
     register_catchment("solo", url="http://localhost:7474", kind="local")
     # No set_default_catchment call — solo should still resolve
-    result = runner.invoke(cli_app, ["status"])
+    result = runner.invoke(cli_app, ["status", "--once"])
     # Will fail (no server), but must NOT fail with "no catchment" error
     assert "no catchment" not in result.output.lower()
 
