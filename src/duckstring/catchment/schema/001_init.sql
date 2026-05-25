@@ -56,22 +56,28 @@ CREATE TABLE ripple_to_ripple (
 
 -- Demand initiation configuration for Outlet Ponds.
 -- References pond (abstract): trigger config persists across version upgrades.
+-- One active tide per (pond_id, major); upsert on re-POST.
 CREATE TABLE pond_trigger (
     id         INTEGER PRIMARY KEY,
     pond_id    INTEGER NOT NULL REFERENCES pond(id),
-    kind       TEXT    NOT NULL CHECK (kind IN ('pulse', 'wave', 'tide')),
-    schedule   TEXT,              -- cron expression; only for 'tide'
-    status     TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'stopped')),
-    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+    kind       TEXT    NOT NULL CHECK (kind IN ('tide')),
+    major      INTEGER NOT NULL DEFAULT 1,
+    schedule   TEXT    NOT NULL,
+    local      INTEGER NOT NULL DEFAULT 0,  -- 1 = interpret schedule in local server time
+    status     TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused')),
+    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (pond_id, major)
 );
 
 -- Active demand records. Rows are deleted (not flagged) when demand is cleared.
 -- sink_id: the downstream pond_version that created this demand (null if trigger-sourced).
+-- persistent=1: demand survives run completion (used by wave triggers).
 -- At most one row per (pond_version_id, non-null sink_id); idx_demand_trigger covers null.
 CREATE TABLE demand (
     id              INTEGER PRIMARY KEY,
     pond_version_id INTEGER NOT NULL REFERENCES pond_version(id),
     sink_id         INTEGER          REFERENCES pond_version(id),
+    persistent      INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
     UNIQUE (pond_version_id, sink_id)
 );

@@ -23,13 +23,14 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    from .orchestrator import sentinel_loop
+    from .orchestrator import sentinel_loop, tide_loop
 
     app.state.db_path = app.state.root / "duck.db"
     app.state.sentinel_queue = asyncio.Queue()
+    app.state.tide_queue = asyncio.Queue()
     app.state.executor = ProcessPoolExecutor(max_workers=8, initializer=_worker_init)
 
-    task = asyncio.create_task(
+    sentinel_task = asyncio.create_task(
         sentinel_loop(
             app.state.sentinel_queue,
             app.state.db_path,
@@ -37,12 +38,21 @@ async def _lifespan(app: FastAPI):
             app.state.executor,
         )
     )
+    tide_task = asyncio.create_task(
+        tide_loop(
+            app.state.tide_queue,
+            app.state.db_path,
+            app.state.sentinel_queue,
+        )
+    )
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    sentinel_task.cancel()
+    tide_task.cancel()
+    for task in (sentinel_task, tide_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     app.state.executor.shutdown(wait=False, cancel_futures=True)
 
 

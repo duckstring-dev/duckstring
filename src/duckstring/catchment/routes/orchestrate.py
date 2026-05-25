@@ -17,6 +17,7 @@ class _PulseBody(BaseModel):
 class _TideBody(BaseModel):
     cron: str
     local: bool = False
+    major: int = 1
 
 
 @router.get("/status")
@@ -133,10 +134,58 @@ def pulse(name: str, body: _PulseBody = _PulseBody(), request: Request = None):
 
 
 @router.post("/outlets/{name}/wave")
-def wave(name: str):
+def wave(name: str, body: _PulseBody = _PulseBody(), request: Request = None):
+    db = request.app.state.db
+    major = body.version if body.version is not None else 1
+
+    row = db.execute("""
+        SELECT pv.id, pv.version FROM pond_version pv JOIN pond p ON p.id = pv.pond_id
+        WHERE p.name = ? AND p.kind = 'outlet' AND pv.major = ? AND pv.is_active = 1
+    """, (name, major)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Outlet '{name}' not found")
+
+    pv_id, version = row
+    db.execute(
+        "INSERT INTO demand (pond_version_id, sink_id, persistent) "
+        "SELECT ?, NULL, 1 WHERE NOT EXISTS "
+        "(SELECT 1 FROM demand WHERE pond_version_id = ? AND sink_id IS NULL)",
+        (pv_id, pv_id),
+    )
+    db.commit()
+
+    _log("wave", f"{name} v{version}")
+    notify(request.app)
     return {"ok": True}
 
 
 @router.post("/outlets/{name}/tide")
-def tide(name: str, body: _TideBody):
+def tide(name: str, body: _TideBody, request: Request = None):
+    from croniter import CroniterBadCronError, croniter
+
+    try:
+        croniter(body.cron)
+    except (CroniterBadCronError, KeyError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid cron expression: {exc}") from exc
+
+    db = request.app.state.db
+    row = db.execute(
+        "SELECT p.id FROM pond p WHERE p.name = ? AND p.kind = 'outlet'", (name,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Outlet '{name}' not found")
+
+    pond_id = row[0]
+    db.execute("""
+        INSERT INTO pond_trigger (pond_id, kind, major, schedule, local)
+        VALUES (?, 'tide', ?, ?, ?)
+        ON CONFLICT (pond_id, major) DO UPDATE SET
+            schedule = excluded.schedule,
+            local    = excluded.local,
+            status   = 'active'
+    """, (pond_id, body.major, body.cron, 1 if body.local else 0))
+    db.commit()
+
+    _log("tide", f"{name} v{body.major} {body.cron}")
+    request.app.state.tide_queue.put_nowait(None)
     return {"ok": True}

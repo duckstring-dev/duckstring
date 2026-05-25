@@ -50,6 +50,10 @@ async def sentinel_loop(queue, db_path, root, executor):
                         db.commit()
                         changed = True
 
+                    if _propagate_pipeline_demand(db):
+                        db.commit()
+                        changed = True
+
                     for pond_info in _find_startable_ponds(db):
                         _create_pond_run(db, pond_info)
                         if not pond_info.is_stop_run:
@@ -307,9 +311,127 @@ def _process_pending_stops(db: sqlite3.Connection) -> bool:
     return changed
 
 
+def _propagate_pipeline_demand(db: sqlite3.Connection) -> bool:
+    """Write pipeline demand upstream for active ponds that are blocked on inter-pond readiness.
+
+    Enables continuous wave operation: when a pond has demand but sources haven't yet produced
+    a new generation, signal those sources so they start the next generation. No-op for ponds
+    that are already startable (handled by _find_startable_ponds) or stopped (is_stopped=1).
+    """
+    rows = db.execute("""
+        SELECT DISTINCT pv.id, pv.pond_id FROM demand d
+        JOIN pond_version pv ON pv.id = d.pond_version_id
+        WHERE pv.is_active = 1 AND pv.is_stopped = 0
+          AND NOT EXISTS (
+              SELECT 1 FROM pond_run pr
+              WHERE pr.pond_version_id = pv.id AND pr.status = 'running'
+          )
+    """).fetchall()
+    changed = False
+    for pv_id, pond_id in rows:
+        if _inter_pond_ready(db, pv_id, pond_id):
+            continue
+        sources = db.execute("""
+            SELECT pv2.id, p2.name, pv2.version FROM pond_to_pond p2p
+            JOIN pond_version pv2 ON pv2.pond_id = p2p.source_pond_id
+                AND pv2.major = p2p.source_major AND pv2.is_active = 1 AND pv2.is_stopped = 0
+            JOIN pond p2 ON p2.id = pv2.pond_id
+            WHERE p2p.pond_version_id = ?
+        """, (pv_id,)).fetchall()
+        for src_pv_id, src_name, src_ver in sources:
+            inserted = db.execute("""
+                INSERT INTO demand (pond_version_id, sink_id)
+                SELECT ?, ?
+                WHERE NOT EXISTS (SELECT 1 FROM demand WHERE pond_version_id = ? AND sink_id = ?)
+            """, (src_pv_id, pv_id, src_pv_id, pv_id)).rowcount
+            if inserted:
+                _log("demand", f"{src_name} v{src_ver}")
+                changed = True
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
+
+async def tide_loop(queue, db_path, sentinel_queue) -> None:
+    from datetime import datetime, timezone
+
+    from croniter import croniter
+
+    def _now(local: bool) -> datetime:
+        return datetime.now() if local else datetime.now(timezone.utc).replace(tzinfo=None)
+
+    def _next_fire(schedule: str, local: bool) -> datetime:
+        return croniter(schedule, _now(local)).get_next(datetime)
+
+    def _secs_until(fire: datetime, local: bool) -> float:
+        return max(0.0, (fire - _now(local)).total_seconds())
+
+    try:
+        while True:
+            while not queue.empty():
+                queue.get_nowait()
+
+            db = _connect(db_path)
+            try:
+                tides = db.execute("""
+                    SELECT pt.pond_id, p.name, pt.major, pt.schedule, pt.local
+                    FROM pond_trigger pt JOIN pond p ON p.id = pt.pond_id
+                    WHERE pt.status = 'active'
+                """).fetchall()
+            finally:
+                db.close()
+
+            if not tides:
+                await queue.get()
+                continue
+
+            tides_with_fire = [(t, _next_fire(t[3], bool(t[4]))) for t in tides]
+            wait = min(_secs_until(nf, bool(t[4])) for t, nf in tides_with_fire)
+
+            try:
+                await asyncio.wait_for(queue.get(), timeout=wait)
+                continue  # schedule changed — recalculate
+            except asyncio.TimeoutError:
+                pass
+
+            db = _connect(db_path)
+            try:
+                fired = False
+                for (pond_id, name, major, _schedule, local), fire_time in tides_with_fire:
+                    if _secs_until(fire_time, bool(local)) > 1.0:
+                        continue
+                    row = db.execute("""
+                        SELECT pv.id, pv.version FROM pond_version pv
+                        WHERE pv.pond_id = ? AND pv.major = ? AND pv.is_active = 1
+                          AND pv.is_stopped = 1
+                    """, (pond_id, major)).fetchone()
+                    if not row:
+                        _log("skip", f"{name} (not stopped)")
+                        continue
+                    pv_id, ver = row
+                    db.execute(
+                        "INSERT INTO demand (pond_version_id, sink_id) SELECT ?, NULL "
+                        "WHERE NOT EXISTS (SELECT 1 FROM demand WHERE pond_version_id = ? AND sink_id IS NULL)",
+                        (pv_id, pv_id),
+                    )
+                    db.execute(
+                        "INSERT INTO stop (pond_version_id, sink_id) SELECT ?, NULL "
+                        "WHERE NOT EXISTS (SELECT 1 FROM stop WHERE pond_version_id = ? AND sink_id IS NULL)",
+                        (pv_id, pv_id),
+                    )
+                    _log("tide", f"{name} v{ver}")
+                    fired = True
+                db.commit()
+            finally:
+                db.close()
+
+            if fired:
+                sentinel_queue.put_nowait(None)
+    except asyncio.CancelledError:
+        pass
+
 
 async def _dispatch(pond_info: _PondInfo, db_path, root, executor, queue) -> None:
     from .pond_worker import execute_pond_run

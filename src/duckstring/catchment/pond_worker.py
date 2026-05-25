@@ -233,7 +233,7 @@ def _execute_run(
             ON CONFLICT (sink_pond_id, source_pond_id, source_major)
             DO UPDATE SET generation = excluded.generation
         """, (pond_id, src_pond_id, src_major, latest))
-    db.execute("DELETE FROM demand WHERE pond_version_id = ?", (pv_id,))
+    db.execute("DELETE FROM demand WHERE pond_version_id = ? AND persistent = 0", (pv_id,))
     db.commit()
     db.close()
 

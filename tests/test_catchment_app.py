@@ -421,3 +421,112 @@ def test_deploy_demo_ponds(catchment_client):
             ).fetchall()
         }
         assert ripples == expected, f"Wrong ripples for {pond_name}: {ripples}"
+
+
+# ---------------------------------------------------------------------------
+# Wave tests
+# ---------------------------------------------------------------------------
+
+def test_wave_unknown_outlet_404(catchment_client):
+    r = catchment_client.post("/api/outlets/nonexistent/wave")
+    assert r.status_code == 404
+
+
+def test_wave_inserts_persistent_demand(catchment_client):
+    _deploy(catchment_client, name="outlet", version="1.0.0", kind="outlet", toml_text=OUTLET_TOML.split("[sources]")[0])
+    r = catchment_client.post("/api/outlets/outlet/wave")
+    assert r.status_code == 200
+
+    db = _db(catchment_client)
+    row = db.execute("""
+        SELECT d.persistent FROM demand d
+        JOIN pond_version pv ON pv.id = d.pond_version_id
+        JOIN pond p ON p.id = pv.pond_id
+        WHERE p.name = 'outlet' AND d.sink_id IS NULL
+    """).fetchone()
+    assert row is not None
+    assert row[0] == 1  # persistent flag set
+
+
+def test_wave_no_stop_record(catchment_client):
+    _deploy(catchment_client, name="outlet", version="1.0.0", kind="outlet", toml_text=OUTLET_TOML.split("[sources]")[0])
+    catchment_client.post("/api/outlets/outlet/wave")
+
+    db = _db(catchment_client)
+    stop_count = db.execute("""
+        SELECT COUNT(*) FROM stop s
+        JOIN pond_version pv ON pv.id = s.pond_version_id
+        JOIN pond p ON p.id = pv.pond_id
+        WHERE p.name = 'outlet'
+    """).fetchone()[0]
+    assert stop_count == 0
+
+
+def test_wave_idempotent(catchment_client):
+    _deploy(catchment_client, name="outlet", version="1.0.0", kind="outlet", toml_text=OUTLET_TOML.split("[sources]")[0])
+    catchment_client.post("/api/outlets/outlet/wave")
+    catchment_client.post("/api/outlets/outlet/wave")
+
+    db = _db(catchment_client)
+    count = db.execute("""
+        SELECT COUNT(*) FROM demand d
+        JOIN pond_version pv ON pv.id = d.pond_version_id
+        JOIN pond p ON p.id = pv.pond_id
+        WHERE p.name = 'outlet' AND d.sink_id IS NULL
+    """).fetchone()[0]
+    assert count == 1  # no duplicate demand rows
+
+
+# ---------------------------------------------------------------------------
+# Tide tests
+# ---------------------------------------------------------------------------
+
+OUTLET_ONLY_TOML = """\
+[pond]
+name = "outlet"
+version = "2.0.0"
+type = "outlet"
+"""
+
+
+def test_tide_unknown_outlet_404(catchment_client):
+    r = catchment_client.post("/api/outlets/nonexistent/tide", json={"cron": "0 * * * *"})
+    assert r.status_code == 404
+
+
+def test_tide_invalid_cron_422(catchment_client):
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
+    r = catchment_client.post("/api/outlets/outlet/tide", json={"cron": "not a cron"})
+    assert r.status_code == 422
+
+
+def test_tide_registers_schedule(catchment_client):
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
+    r = catchment_client.post("/api/outlets/outlet/tide", json={"cron": "0 6 * * *"})
+    assert r.status_code == 200
+
+    db = _db(catchment_client)
+    row = db.execute("""
+        SELECT pt.schedule, pt.local, pt.major, pt.status FROM pond_trigger pt
+        JOIN pond p ON p.id = pt.pond_id WHERE p.name = 'outlet'
+    """).fetchone()
+    assert row is not None
+    assert row[0] == "0 6 * * *"
+    assert row[1] == 0   # UTC
+    assert row[2] == 1   # major 1
+    assert row[3] == "active"
+
+
+def test_tide_updates_existing_schedule(catchment_client):
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
+    catchment_client.post("/api/outlets/outlet/tide", json={"cron": "0 6 * * *"})
+    catchment_client.post("/api/outlets/outlet/tide", json={"cron": "0 8 * * *", "local": True})
+
+    db = _db(catchment_client)
+    rows = db.execute("""
+        SELECT pt.schedule, pt.local FROM pond_trigger pt
+        JOIN pond p ON p.id = pt.pond_id WHERE p.name = 'outlet'
+    """).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "0 8 * * *"
+    assert rows[0][1] == 1
