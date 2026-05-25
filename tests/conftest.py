@@ -15,14 +15,20 @@ from typer.testing import CliRunner
 
 @pytest.fixture(autouse=True, scope="session")
 def fast_demo_sleep():
-    """Set DUCKSTRING_SLEEP_MULTIPLIER=0.01 so demo-pond sleeps are negligible in tests."""
-    orig = os.environ.get("DUCKSTRING_SLEEP_MULTIPLIER")
-    os.environ["DUCKSTRING_SLEEP_MULTIPLIER"] = "0.01"
+    """Set env vars for the test session:
+    - DUCKSTRING_SLEEP_MULTIPLIER=0.01: demo-pond sleeps become negligible
+    - NO_COLOR=1: prevent Rich/Typer from emitting ANSI codes in captured output
+    """
+    to_restore = {}
+    for key, val in [("DUCKSTRING_SLEEP_MULTIPLIER", "0.01"), ("NO_COLOR", "1")]:
+        to_restore[key] = os.environ.get(key)
+        os.environ[key] = val
     yield
-    if orig is None:
-        os.environ.pop("DUCKSTRING_SLEEP_MULTIPLIER", None)
-    else:
-        os.environ["DUCKSTRING_SLEEP_MULTIPLIER"] = orig
+    for key, prev in to_restore.items():
+        if prev is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = prev
 
 
 @pytest.fixture

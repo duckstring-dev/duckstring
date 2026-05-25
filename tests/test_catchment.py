@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import re
+
 from duckstring.cli import app
 from duckstring.cli.config import get_default_catchment, list_catchments
+
+
+def _strip_ansi(s: str) -> str:
+    return re.sub(r'\x1b\[[0-9;]*m', '', s)
 
 
 def test_connect_registers(runner):
@@ -58,7 +64,7 @@ def test_single_catchment_is_implicit_default(runner, tmp_path, monkeypatch):
 
     register_catchment("solo", url="http://localhost:7474", kind="local")
     # No set_default_catchment call — solo should still resolve
-    result = runner.invoke(cli_app, ["status"])
+    result = runner.invoke(cli_app, ["status", "--once"])
     # Will fail (no server), but must NOT fail with "no catchment" error
     assert "no catchment" not in result.output.lower()
 
@@ -111,9 +117,10 @@ def test_list_marks_default(runner):
 def test_init_help(runner):
     result = runner.invoke(app, ["catchment", "init", "--help"])
     assert result.exit_code == 0
-    assert "--name" in result.output
-    assert "--port" in result.output
-    assert "--root" in result.output
+    out = _strip_ansi(result.output)
+    assert "--name" in out
+    assert "--port" in out
+    assert "--root" in out
 
 
 def test_init_registers_catchment(runner, tmp_path, mock_uvicorn):
