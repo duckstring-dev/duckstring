@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import re
+
 from duckstring.cli import app
 from duckstring.cli.config import get_default_catchment, list_catchments
+
+
+def _strip_ansi(s: str) -> str:
+    return re.sub(r'\x1b\[[0-9;]*m', '', s)
 
 
 def test_connect_registers(runner):
@@ -111,9 +117,10 @@ def test_list_marks_default(runner):
 def test_init_help(runner):
     result = runner.invoke(app, ["catchment", "init", "--help"])
     assert result.exit_code == 0
-    assert "--name" in result.output
-    assert "--port" in result.output
-    assert "--root" in result.output
+    out = _strip_ansi(result.output)
+    assert "--name" in out
+    assert "--port" in out
+    assert "--root" in out
 
 
 def test_init_registers_catchment(runner, tmp_path, mock_uvicorn):
