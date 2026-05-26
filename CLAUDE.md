@@ -4,7 +4,7 @@ A packaging standard for data transforms. Each transform is a versioned **Pond**
 
 See `brand/strategy.md` for positioning rationale and `brand/copy.md` for settled copy.
 
-Read `docs/guide/` before touching orchestration logic. `catchment.md`, `orchestration.md`, `ponds.md`, and `ripples.md` are the design spec.
+Read `docs/guide/` before touching orchestration logic. `catchment.md`, `ponds.md`, and `ripples.md` are the design spec. **`orchestration.md` is outdated** — the authoritative rules are in the Orchestration section below.
 
 ## Brand & Positioning
 
@@ -41,40 +41,79 @@ SQLite file at the catchment root. Schema in `catchment/schema/001_init.sql`, ap
 - `generation` belongs to `pond_run`, not `ripple`.
 - `demand.sink_id` is null for trigger-sourced demand (no `pond_trigger_id` FK needed on `demand`).
 
+**Note:** the schema and `pond_run`/`demand` tables are pending a refactor to match the new Ripple-level Kanban design described in the Orchestration section below. The above reflects current code, not the target design.
+
 ## Orchestration
 
-Orchestration runs at the **Ripple level**. The Pond is the organisational/versioning unit; the Ripple is the execution unit. See `docs/guide/orchestration.md` for the full execution conditions.
+**This design is not yet reflected in the code — a refactor of `demand`, `pond_run`, watermarks, and the orchestration logic is needed before implementation.**
 
-Key points not obvious from a quick read:
+The Pond is a versioned boundary around Ripples — it is the unit of packaging and version management. The Ripple is the execution unit. The Pond-level Kanban framework applies directly at the Ripple level; the Pond is just a boundary around its Ripples.
 
-- Intra-pond uses **pull-based demand** (same mechanism as inter-pond, not push). This enables pipelining: B2 writes demand to B1 *before* executing, so B1 starts its next generation in parallel with B2's current run. The bottleneck is the slowest single Ripple, not the sum of a Pond's Ripples.
-- Watermarks are **Pond-level**, not Ripple-level. Intra-pond Ripples always execute together within a `pond_run`; no intra-pond watermarks are needed.
-- A failed run does **not** retry until a source Pond produces a new generation — prevents infinite loops.
+A **Pond run** is not an explicit record — it is the set of Ripple executions forming a connected chain, derivable from Ripple run history.
 
-### Trigger Process
+### Demand record (per Ripple, per sink)
 
-Orchestration executes at the **Ripple level** — the Pond is the organisational and versioning unit, but the Ripple is the execution unit. The process below applies to each Ripple individually.
+`(sink_id, is_stop, is_persistent)` — upserted, one record per sink.
 
-A Ripple begins execution when all of the following hold:
+- `is_stop=false` — active demand
+- `is_stop=true` — stop veto from this sink
+- No record — idle/no relationship
 
-1. **It has Demand from at least one Sink.** A Sink is any downstream Ripple (whether in the same Pond or a downstream Pond) that has written a Demand record targeting this Ripple.
-2. **Source readiness is satisfied.** One of:
-    - No inter-Pond sources (i.e. this is a root Ripple with no upstream Ponds): unconditionally ready.
-    - Has inter-Pond sources, none marked required: at least one source Pond has *unconsumed changes* — its current generation exceeds the watermark this Pond holds for it.
-    - Has one or more required inter-Pond sources: *all* required source Ponds have unconsumed changes.
-3. **No run is currently in progress** for this Ripple.
+Ripple state: **Active** (any `is_stop=false`) / **Stopped** (all `is_stop=true`) / **Idle** (no records).
 
-"Unconsumed changes" means the source Pond's latest `pond_run.generation` is strictly greater than the generation recorded in the consumer Pond's `watermark` row for that source.
+### Starting conditions
 
-**On execution:** Demand is sent to source Ripples *before* the Ripple begins executing. This allows sources to start their next generation in parallel with the current execution, minimising end-to-end latency through the chain.
+A Ripple starts when ALL hold:
 
-**Demand during a run** is held. On completion, if Demand remains and source readiness is still satisfied, execution begins immediately.
+1. **Active** — or pulse-mode exception: a non-root Ripple whose parent(s) have updated with no downstream pull runs in **pulse mode** (no upstream demand propagation) to ensure initiated chains always complete.
+2. **Source readiness:**
+   - Non-root Ripples: all parent Ripples have `generation > watermark` (intra-pond parents are always required).
+   - Root Ripples inherit the Pond's inter-pond source conditions: no sources → always ready; required sources → all must have `generation > watermark`; no required sources → at least one must have `generation > watermark`.
+3. **Not currently running.**
 
-**On success:** Generation increments, watermarks advance, and all Demand for this Ripple is cleared (regardless of how many distinct Sinks wrote it).
+### On start (before executing)
 
-**On failure:** Generation is not incremented, watermarks are not advanced, and Demand is not cleared. The Ripple will not retry until at least one source Pond has produced a new generation — this prevents infinite retry loops while allowing natural recovery when upstream data is refreshed.
+Propagate demand upstream before executing:
+- Non-root, demand-driven: send demand to each parent Ripple.
+- Root, demand-driven: upsert demand to each source Pond's leaf Ripples.
+- **Type:** wave if any active demand is `is_persistent=true`; pulse if all pulse or cold-starting a stopped/idle source.
+- Pulse-mode exception: no upstream propagation.
 
-**Cold start:** A source Pond at generation 0 (never run) is treated as not yet having produced output. Demand propagates upstream toward it so it runs before the consumer can satisfy its readiness check.
+### Stop signals
+
+**Eager:** the moment the last `is_stop=false` record flips, immediately propagate `is_stop=true` upstream — to parent Ripples (non-root) or source Pond leaf Ripples (root). Current run completes normally. All demand records (including stop records) cleared on run completion.
+
+**Stop vs cancel:** stop = drain current run, propagate upstream, no new runs. Cancel = immediate halt (separate concept).
+
+### On completion
+
+1. Clear all demand records (including stop records).
+2. Increment Ripple generation.
+3. Advance watermarks.
+
+Demand is cleared **before** generation increments — prevents new demand triggered by the increment from being spuriously cleared.
+
+### On failure
+
+Generation not incremented, demand not cleared, watermarks not advanced. Will not retry until parent Ripples (non-root) or source Pond leaf Ripples (root) produce a new generation.
+
+### Cold start
+
+A Ripple at generation 0 blocks all consumers regardless of required/non-required status. Demand propagates upstream until it produces its first generation.
+
+### Inter-pond connections
+
+A downstream Pond's dependency on an upstream Pond resolves to dependencies on the upstream Pond's **leaf Ripples**:
+- Required → all leaf Ripples must have `generation > watermark`.
+- Non-required → at least one leaf Ripple must have `generation > watermark`.
+
+Demand arrives at leaf Ripples of the upstream Pond; demand is sent from root Ripples of the downstream Pond. Watermarks are tracked between these root/leaf Ripple pairs.
+
+### Wave and pulse
+
+- **Wave** (`is_persistent=true`): continuous updates; source keeps running as upstream produces new data.
+- **Pulse** (`is_persistent=false`): one run; source idles after completion.
+- Propagation: wave if any active demand is wave; pulse if all pulse.
 
 ## Before finishing any code change
 
