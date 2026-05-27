@@ -45,7 +45,7 @@ On change to self.demand:
 
 -- Handle generations --
 On change to any ripples.generation:
-  Set self.generation_started to max(ripples.generation_started)
+  // Set self.generation_started to max(ripples.generation_started) // Generation starts are managed by the pond, so this line shouldn't be included
   Set self.generation_completed to min(ripples.generation_completed)
   If self.generation_started > self.generation_completed:
     Set self.isRunning=true // Mostly for state tracking
@@ -60,13 +60,6 @@ On change to self.hasDemand or any source.generation_completed or self.isStopped
   self.isReady=false
   if !self.isStopped:
     If self.hasDemand:
-      -- Propagate to stopped sources --
-      For each source where source.isStopped=true:
-        If self.isWave:
-          Set source.demand='wave'
-        Else:
-          Set source.demand='pulse'
-
       -- Check for changes --
       If there are no sources (inlet):
         self.isReady=true
@@ -75,6 +68,17 @@ On change to self.hasDemand or any source.generation_completed or self.isStopped
           self.isReady=true
       Else if all isRequired sources have updated (generation > watermark):
         self.isReady=true
+  
+  If self.isReady:
+    Set self.generation_started=self.generation_started+1 // Ensure that this is executed before any root ripple is triggered to start
+
+    // Waves propagate when a Pond becomes ready
+    If self.isWave:
+      For each source:
+        Set source.demand='wave'
+
+    Set self.hasDemand=false // Clear demand on start
+    Set self.isWave=false // Clear wave mode to allow pulse demotion on next run
 
 -- Set state --
 // Mostly for use in UI, not logic
@@ -94,7 +98,7 @@ On change to self.isStopped or self.isReady or self.hasDemand or self.isRunning:
 // Ripple Sentinel pseudocode:
 /*
 -- Handle starts --
-On change to self.hasDemand or any parent.generation_completed or self.isRunning:
+On change to self.hasDemand or any parent.generation_completed or self.isRunning or pond.isReady:
   self.isReady=false
 
   -- Check for completion --
@@ -108,6 +112,8 @@ On change to self.hasDemand or any parent.generation_completed or self.isRunning
   -- Start run --
   if self.isReady and !self.isRunning:
     Set self.isRunning=true
+    If there are no parents (root):
+      Set self.generation_started=pond.generation_started
     Set self.generation_started to min(parents.generation_completed)
     If self.isWave:
       If !pond.isStopped: // Wave is demoted to Pulse if the pond is stopped to clear queue
@@ -115,7 +121,6 @@ On change to self.hasDemand or any parent.generation_completed or self.isRunning
           Set parent.hasDemand=true
           Set parent.isWave=true
     Set self.hasDemand=false // Clear demand on start
-    Set self.isWave=false // Clear wave mode to allow pulse demotion on next run
     Start task
 
 -- Handle completions --
@@ -136,95 +141,6 @@ On change to self.isReady or self.hasDemand or self.isRunning or pond.isStopped:
     Set self.state='stopped'
   Else:
     Set self.state='idle'
-*/
-
-
-// ---------------------
-// Pond Sentinel pseudocode:
-/*
--- Handle demand -- 
-If any demand:
-  -- Check for stops --
-  If all demand has isStop=true:
-    Send isStop demand to all sources
-    Set self.isStopped=true (enter stop state)
-    Clear demand
-    Exit
-
-  -- Determine if in Pulse or Wave mode --
-  If all demand isPulse where !isStop:
-    Set self.isPulse=true
-  Else:
-    Set self.isPulse=false
-
-  -- Immediate demand propagation --
-  For each source with isStopped=true:
-    Send demand to source: (sinkId=self.id, isPulse=self.isPulse, isStop=false)
-
-  -- Become active --
-  If self.isStopped:
-    Set self.isTriggered=true (cold start)
-    Set self.isStopped=false
-
--- Check for changes --
-self.isReady=false
-If there are no sources (inlet):
-  self.isReady=true
-Else if there are no isRequired sources (execute on any change):
-  If any source has updated (generation > watermark):
-    self.isReady=true
-Else if all isRequired sources have updated (generation > watermark):
-  self.isReady=true
-
--- Check for triggers --
-If self.isTriggered (set by root Ripples):
-  If isReady:
-    -- Start run --
-    Increment self.generation_started
-    Update watermarks for all sources (watermark=source.generation_completed)
-    For all Ripples in this Pond:
-      Create a Ripple Task for that Ripple with generation=self.generation_started and isPulse=self.isPulse
-*/
-
-// Ripple Task pseudocode:
-/*
--- Determine Ripple type --
-If no parents:
-  self.isRoot=true
-If no children:
-  self.isLeaf=true
-
--- Check for parent completion --
-self.isReady=false
-If self.isRoot:
-  self.isReady=true
-Else if all parents (in this generation) have isCompleted=true:
-  self.isReady=true
-
--- Run
-If !self.isRunning and self.isReady:
-  Start run
-
--- Event handling --
-On run start:
-  Set self.isRunning=true
-
-  -- Trigger a new Pond run --
-  If self.isRoot:
-    If !self.isPulse:
-      Set pond.isTriggered=true
-  
-  -- Clear Pond demand --
-  If self.isLeaf:
-    Clear all demand records for owning Pond
-
-On run complete:
-  Set self.isRunning=false
-  Set self.isCompleted=true
-
-  -- Update generation_completed --
-  If all Ripple Tasks in this generation have completed:
-    Set pond.generation_completed=self.generation
 */
 
 
