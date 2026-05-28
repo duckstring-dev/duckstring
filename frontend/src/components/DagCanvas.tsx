@@ -16,7 +16,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { usePlaygroundStore, getRippleVisualState, getDemandVisualState, DEMAND_COLORS, STATE_COLORS } from '@/lib/store';
+import { usePlaygroundStore, getRippleVisualState, getPondEdgeVisualState, EDGE_COLORS, STATE_COLORS } from '@/lib/store';
 import { computeLayout } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
@@ -27,12 +27,8 @@ import { TriggerNode } from './TriggerNode';
 function RippleEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const sourceRippleId = (data as { sourceRippleId: string }).sourceRippleId;
   const rs = usePlaygroundStore((s) => s.rippleStates[sourceRippleId]);
-  const ps = usePlaygroundStore((s) => {
-    const ripple = s.ripples[sourceRippleId];
-    return ripple ? s.pondStates[ripple.pondId] : undefined;
-  });
 
-  const color = rs && ps ? STATE_COLORS[getRippleVisualState(rs, ps)] : DEMAND_COLORS.none;
+  const color = rs ? STATE_COLORS[getRippleVisualState(rs)] : EDGE_COLORS.idle;
 
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
@@ -40,15 +36,9 @@ function RippleEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps)
 
 function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const sourcePondId = (data as { sourcePondId: string }).sourcePondId;
-  const sinkPondId = (data as { sinkPondId: string }).sinkPondId;
-
   const sourcePondState = usePlaygroundStore((s) => s.pondStates[sourcePondId]);
 
-  const color = useMemo(() => {
-    if (!sourcePondState) return DEMAND_COLORS.none;
-    const relevantDemand = sourcePondState.demand.filter((d) => d.sinkId === sinkPondId);
-    return DEMAND_COLORS[getDemandVisualState(relevantDemand)];
-  }, [sourcePondState, sinkPondId]);
+  const color = EDGE_COLORS[getPondEdgeVisualState(sourcePondState)];
 
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;

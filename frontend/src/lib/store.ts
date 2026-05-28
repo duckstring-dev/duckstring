@@ -9,11 +9,18 @@ import type {
   WatermarkMap,
   ActiveTrigger,
 } from './types';
-import { hasCyclePond, hasCycleRipple } from './graph';
-import { tick as orchTick, receivePondDemand, type OrchestrState } from './orchestration';
+import { hasCyclePond, hasCycleRipple, isPondDownstreamOf } from './graph';
+import {
+  tick as orchTick,
+  receivePulseAtEnd,
+  receiveWaveAtEnd,
+  receiveStopAtEnd,
+  receiveStart,
+  type OrchestrState,
+} from './orchestration';
 
 let pondCounter = 0;
-let rippleCounters: Record<PondId, number> = {};
+const rippleCounters: Record<PondId, number> = {};
 
 function newPondId(): PondId {
   return `pond-${++pondCounter}`;
@@ -34,12 +41,10 @@ function newRippleName(pondId: PondId): string {
 
 function initialPondState(): PondRunState {
   return {
-    isStopped: true,
-    demand: [],
-    hasDemand: false,
-    isWave: false,
     generationStarted: 0,
     generationCompleted: 0,
+    hasDemand: false,
+    isWave: false,
   };
 }
 
@@ -50,7 +55,6 @@ function initialRippleState(): RippleRunState {
     isRunning: false,
     runStartedAt: null,
     hasDemand: false,
-    isWave: false,
   };
 }
 
@@ -118,7 +122,6 @@ export interface PlaygroundState {
   triggers: Record<PondId, ActiveTrigger>;
   tideIntervals: Record<PondId, ReturnType<typeof setInterval>>;
 
-  // Graph mutations
   addPond(): void;
   addRipple(pondId: PondId): void;
   setRippleDuration(rippleId: RippleId, ms: number): void;
@@ -129,13 +132,11 @@ export interface PlaygroundState {
   linkRipples(parentId: RippleId, childId: RippleId): boolean;
   unlinkRipples(parentId: RippleId, childId: RippleId): void;
 
-  // Selection
   selectPond(pondId: PondId | null): void;
   selectRipple(rippleId: RippleId | null): void;
   selectTrigger(pondId: PondId | null): void;
   clearSelection(): void;
 
-  // Triggers
   triggerPulse(pondId: PondId): void;
   triggerWave(pondId: PondId): void;
   triggerTide(pondId: PondId, periodMs: number): void;
@@ -143,7 +144,6 @@ export interface PlaygroundState {
   triggerStart(pondId: PondId): void;
   removeTrigger(pondId: PondId): void;
 
-  // Simulation
   tick(now: number): void;
 }
 
@@ -158,20 +158,17 @@ function toOrchestrState(state: PlaygroundState): OrchestrState {
   };
 }
 
-function fromOrchestrState(
-  orch: OrchestrState,
-  prev: PlaygroundState
-): Partial<PlaygroundState> {
-  const changed =
-    orch.pondStates !== prev.pondStates ||
-    orch.rippleStates !== prev.rippleStates ||
-    orch.watermarks !== prev.watermarks;
-  if (!changed) return {};
+function applyOrch(_prev: PlaygroundState, orch: OrchestrState): Partial<PlaygroundState> {
   return {
     pondStates: orch.pondStates,
     rippleStates: orch.rippleStates,
     watermarks: orch.watermarks,
+    triggers: orch.triggers,
   };
+}
+
+function isOutlet(ponds: Record<PondId, Pond>, pondId: PondId): boolean {
+  return !Object.values(ponds).some((p) => isPondDownstreamOf(ponds, p.id, pondId) && p.id !== pondId);
 }
 
 export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
@@ -364,25 +361,20 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   },
 
   triggerPulse(pondId) {
-    set((s) => {
-      const newOrch = receivePondDemand(pondId, null, false, false, toOrchestrState(s));
-      return fromOrchestrState(newOrch, s);
-    });
+    set((s) => applyOrch(s, receivePulseAtEnd(pondId, toOrchestrState(s))));
   },
 
   triggerWave(pondId) {
-    get().removeTrigger(pondId);
+    const state = get();
+    if (!isOutlet(state.ponds, pondId)) return;
+    state.removeTrigger(pondId);
     const trigger: ActiveTrigger = { pondId, kind: 'wave' };
     set((s) => {
       const orchWithTrigger: OrchestrState = {
         ...toOrchestrState(s),
         triggers: { ...s.triggers, [pondId]: trigger },
       };
-      const newOrch = receivePondDemand(pondId, 'wave-trigger', false, true, orchWithTrigger);
-      return {
-        triggers: { ...s.triggers, [pondId]: trigger },
-        ...fromOrchestrState(newOrch, s),
-      };
+      return applyOrch(s, receiveWaveAtEnd(pondId, orchWithTrigger));
     });
   },
 
@@ -390,38 +382,23 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     get().removeTrigger(pondId);
     const trigger: ActiveTrigger = { pondId, kind: 'tide', periodMs };
     const pulse = () => {
-      set((s) => {
-        const newOrch = receivePondDemand(
-          pondId,
-          `tide-${Date.now()}`,
-          false,
-          false,
-          toOrchestrState(s)
-        );
-        return fromOrchestrState(newOrch, s);
-      });
+      set((s) => applyOrch(s, receivePulseAtEnd(pondId, toOrchestrState(s))));
     };
     const intervalId = setInterval(pulse, periodMs);
-    pulse();
     set((s) => ({
       triggers: { ...s.triggers, [pondId]: trigger },
       tideIntervals: { ...s.tideIntervals, [pondId]: intervalId },
     }));
+    pulse();
   },
 
   triggerStop(pondId) {
     get().removeTrigger(pondId);
-    set((s) => {
-      const newOrch = receivePondDemand(pondId, 'user-stop', true, false, toOrchestrState(s));
-      return fromOrchestrState(newOrch, s);
-    });
+    set((s) => applyOrch(s, receiveStopAtEnd(pondId, toOrchestrState(s))));
   },
 
   triggerStart(pondId) {
-    set((s) => {
-      const newOrch = receivePondDemand(pondId, 'user-start', false, false, toOrchestrState(s));
-      return fromOrchestrState(newOrch, s);
-    });
+    set((s) => applyOrch(s, receiveStart(pondId, toOrchestrState(s))));
   },
 
   removeTrigger(pondId) {
@@ -437,54 +414,41 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   },
 
   tick(now) {
-    set((s) => {
-      const orch = toOrchestrState(s);
-      const newOrch = orchTick(now, orch);
-      return fromOrchestrState(newOrch, s);
-    });
+    set((s) => applyOrch(s, orchTick(now, toOrchestrState(s))));
   },
 }));
 
 // ─── Visual state helpers ────────────────────────────────────────────────────
 
-export function getRippleVisualState(
-  rs: RippleRunState,
-  ps: PondRunState
-): 'running' | 'stopped' | 'queued' | 'idle' {
+export function getRippleVisualState(rs: RippleRunState): 'running' | 'queued' | 'idle' {
   if (rs.isRunning) return 'running';
-  if (ps.isStopped) return 'stopped';
   if (rs.hasDemand) return 'queued';
   return 'idle';
 }
 
-export function getPondVisualState(
-  ps: PondRunState
-): 'running' | 'stopped' | 'queued' | 'idle' {
-  if (ps.isStopped) return 'stopped';
+export function getPondVisualState(ps: PondRunState): 'running' | 'queued' | 'wave' | 'idle' {
   if (ps.generationStarted > ps.generationCompleted) return 'running';
   if (ps.hasDemand) return 'queued';
+  if (ps.isWave) return 'wave';
   return 'idle';
 }
 
-export function getDemandVisualState(
-  demand: import('./types').DemandRecord[]
-): 'stop' | 'wave' | 'pulse' | 'none' {
-  if (demand.length === 0) return 'none';
-  if (demand.some((d) => d.isStop)) return 'stop';
-  if (demand.some((d) => d.isPersistent)) return 'wave';
-  return 'pulse';
+export function getPondEdgeVisualState(sourcePs: PondRunState | undefined): 'wave' | 'pulse' | 'idle' {
+  if (!sourcePs) return 'idle';
+  if (sourcePs.isWave) return 'wave';
+  if (sourcePs.hasDemand) return 'pulse';
+  return 'idle';
 }
 
 export const STATE_COLORS: Record<string, string> = {
   running: '#22c55e',
-  stopped: '#ef4444',
   queued: '#f97316',
+  wave: '#22c55e',
   idle: '#71717a',
 };
 
-export const DEMAND_COLORS: Record<string, string> = {
+export const EDGE_COLORS: Record<string, string> = {
   wave: '#22c55e',
   pulse: '#3b82f6',
-  stop: '#ef4444',
-  none: '#3f3f46',
+  idle: '#3f3f46',
 };
