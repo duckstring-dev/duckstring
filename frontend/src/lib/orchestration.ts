@@ -190,7 +190,7 @@ function tryStartPond(pondId: PondId, state: OrchestrState): OrchestrState {
 function canRippleStart(rippleId: RippleId, state: OrchestrState): boolean {
   const rs = state.rippleStates[rippleId];
   const ripple = state.ripples[rippleId];
-  if (!rs || !ripple || rs.isRunning) return false;
+  if (!rs || !ripple || rs.isRunning || !rs.hasDemand) return false;
 
   const ps = state.pondStates[ripple.pondId];
   if (!ps || ps.isStopped) return false;
@@ -245,20 +245,35 @@ function startRipple(rippleId: RippleId, now: number, state: OrchestrState): Orc
     },
   };
 
-  // Wave propagation to intra-pond parents on start.
-  if (wasWave && !ps.isStopped && !isRoot(ripple, state.ripples)) {
-    for (const pid of ripple.parents) {
-      const parent = state.ripples[pid];
-      if (!parent || parent.pondId !== ripple.pondId) continue;
-      const parentRs = newState.rippleStates[pid];
-      if (parentRs) {
+  if (wasWave && !ps.isStopped) {
+    if (isRoot(ripple, state.ripples)) {
+      // Root ripple starting in wave mode pulls its pond — the pond is a zero-duration parent
+      // to all root ripples with the pond's sources as its own parents.
+      const pondPs = newState.pondStates[ripple.pondId];
+      if (pondPs) {
         newState = {
           ...newState,
-          rippleStates: {
-            ...newState.rippleStates,
-            [pid]: { ...parentRs, hasDemand: true, isWave: true },
+          pondStates: {
+            ...newState.pondStates,
+            [ripple.pondId]: { ...pondPs, hasDemand: true, isWave: true },
           },
         };
+      }
+    } else {
+      // Non-root ripple propagates wave demand to its intra-pond parents.
+      for (const pid of ripple.parents) {
+        const parent = state.ripples[pid];
+        if (!parent || parent.pondId !== ripple.pondId) continue;
+        const parentRs = newState.rippleStates[pid];
+        if (parentRs) {
+          newState = {
+            ...newState,
+            rippleStates: {
+              ...newState.rippleStates,
+              [pid]: { ...parentRs, hasDemand: true, isWave: true },
+            },
+          };
+        }
       }
     }
   }
@@ -306,14 +321,17 @@ function updatePondGenerationCompleted(pondId: PondId, state: OrchestrState): Or
     pondStates: { ...state.pondStates, [pondId]: newPs },
   };
 
-  // After a generation completes: if all demand is stop, transition to stopped.
-  const hasActiveDemand = newPs.demand.some((d) => !d.isStop);
-  if (!hasActiveDemand && newPs.demand.length > 0) {
-    newPs = { ...newPs, isStopped: true, demand: [] };
+  // After a generation completes: return to stopped unless there is persistent active demand.
+  // - Stop demand, pulse demand, or no demand → isStopped=true, clear demand.
+  // - Persistent active demand (wave) → stay active.
+  const hasPersistentActive = newPs.demand.some((d) => d.isPersistent && !d.isStop);
+  if (!hasPersistentActive) {
+    newPs = { ...newPs, isStopped: true, demand: [], hasDemand: false, isWave: false };
     newState = { ...newState, pondStates: { ...newState.pondStates, [pondId]: newPs } };
   }
 
-  // Re-arm wave trigger if pond is still active.
+  // Re-arm wave trigger if pond is still active (triggerStop removes the trigger first, so this
+  // won't fire after an explicit stop).
   const trigger = state.triggers[pondId];
   if (trigger?.kind === 'wave' && !newPs.isStopped) {
     newState = receivePondDemand(pondId, 'wave-trigger', false, true, newState);
