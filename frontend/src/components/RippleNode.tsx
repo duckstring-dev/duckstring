@@ -8,15 +8,16 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
   const rippleId = data.rippleId as string;
   const ripple = usePlaygroundStore((s) => s.ripples[rippleId]);
   const rs = usePlaygroundStore((s) => s.rippleStates[rippleId]);
+  const ps = usePlaygroundStore((s) => s.pondStates[ripple?.pondId ?? '']);
   const selectedRippleId = usePlaygroundStore((s) => s.selectedRippleId);
   const selectRipple = usePlaygroundStore((s) => s.selectRipple);
 
-  if (!ripple || !rs) return null;
+  if (!ripple || !rs || !ps) return null;
 
-  const visualState = getRippleVisualState(rs);
+  const visualState = getRippleVisualState(rs, ps);
   const borderColor = STATE_COLORS[visualState];
   const isSelected = selectedRippleId === rippleId;
-  const displayGen = rs.isRunning ? rs.generation + 1 : rs.generation;
+  const displayGen = rs.isRunning ? rs.generationStarted : rs.generationCompleted;
 
   return (
     <div

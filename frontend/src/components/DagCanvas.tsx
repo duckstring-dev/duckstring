@@ -16,8 +16,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { usePlaygroundStore, getDemandVisualState, DEMAND_COLORS } from '@/lib/store';
-import { getLeaves, getRoots } from '@/lib/graph';
+import { usePlaygroundStore, getRippleVisualState, getDemandVisualState, DEMAND_COLORS, STATE_COLORS } from '@/lib/store';
 import { computeLayout } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
@@ -27,14 +26,13 @@ import { TriggerNode } from './TriggerNode';
 
 function RippleEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const sourceRippleId = (data as { sourceRippleId: string }).sourceRippleId;
-  const sinkRippleId = (data as { sinkRippleId: string }).sinkRippleId;
+  const rs = usePlaygroundStore((s) => s.rippleStates[sourceRippleId]);
+  const ps = usePlaygroundStore((s) => {
+    const ripple = s.ripples[sourceRippleId];
+    return ripple ? s.pondStates[ripple.pondId] : undefined;
+  });
 
-  const rippleState = usePlaygroundStore((s) => s.rippleStates[sourceRippleId]);
-  const demandOnSource = rippleState
-    ? rippleState.demand.filter((d) => d.sinkId === sinkRippleId)
-    : [];
-  const demandState = getDemandVisualState(demandOnSource);
-  const color = DEMAND_COLORS[demandState];
+  const color = rs && ps ? STATE_COLORS[getRippleVisualState(rs, ps)] : DEMAND_COLORS.none;
 
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
@@ -44,22 +42,13 @@ function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const sourcePondId = (data as { sourcePondId: string }).sourcePondId;
   const sinkPondId = (data as { sinkPondId: string }).sinkPondId;
 
-  const ripples = usePlaygroundStore((s) => s.ripples);
-  const rippleStates = usePlaygroundStore((s) => s.rippleStates);
+  const sourcePondState = usePlaygroundStore((s) => s.pondStates[sourcePondId]);
 
   const color = useMemo(() => {
-    const sourceLeaves = getLeaves(sourcePondId, ripples);
-    const sinkRoots = getRoots(sinkPondId, ripples);
-    const sinkRootIds = new Set(sinkRoots.map((r) => r.id));
-
-    const relevantDemand = sourceLeaves.flatMap((leaf) => {
-      const rs = rippleStates[leaf.id];
-      if (!rs) return [];
-      return rs.demand.filter((d) => d.sinkId !== null && sinkRootIds.has(d.sinkId as string));
-    });
-
+    if (!sourcePondState) return DEMAND_COLORS.none;
+    const relevantDemand = sourcePondState.demand.filter((d) => d.sinkId === sinkPondId);
     return DEMAND_COLORS[getDemandVisualState(relevantDemand)];
-  }, [sourcePondId, sinkPondId, ripples, rippleStates]);
+  }, [sourcePondState, sinkPondId]);
 
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;

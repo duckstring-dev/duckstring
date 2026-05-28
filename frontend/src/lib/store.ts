@@ -4,21 +4,57 @@ import type {
   RippleId,
   Pond,
   Ripple,
+  PondRunState,
   RippleRunState,
   WatermarkMap,
   ActiveTrigger,
 } from './types';
-import { hasCyclePond, hasCycleRipple, getLeaves } from './graph';
-import {
-  tick as orchTick,
-  addDemandToLeaves,
-  type OrchestrState,
-} from './orchestration';
+import { hasCyclePond, hasCycleRipple } from './graph';
+import { tick as orchTick, receivePondDemand, type OrchestrState } from './orchestration';
 
 let pondCounter = 0;
 let rippleCounters: Record<PondId, number> = {};
 
-function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'ripples' | 'rippleStates'> {
+function newPondId(): PondId {
+  return `pond-${++pondCounter}`;
+}
+
+function newPondName(): string {
+  return `p${pondCounter}`;
+}
+
+function newRippleId(): RippleId {
+  return `ripple-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function newRippleName(pondId: PondId): string {
+  rippleCounters[pondId] = (rippleCounters[pondId] ?? 0) + 1;
+  return `r${rippleCounters[pondId]}`;
+}
+
+function initialPondState(): PondRunState {
+  return {
+    isStopped: true,
+    demand: [],
+    hasDemand: false,
+    isWave: false,
+    generationStarted: 0,
+    generationCompleted: 0,
+  };
+}
+
+function initialRippleState(): RippleRunState {
+  return {
+    generationStarted: 0,
+    generationCompleted: 0,
+    isRunning: false,
+    runStartedAt: null,
+    hasDemand: false,
+    isWave: false,
+  };
+}
+
+function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'pondStates' | 'ripples' | 'rippleStates'> {
   const txId = newPondId();
   const prodId = newPondId();
   const salesId = newPondId();
@@ -43,6 +79,12 @@ function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'ripples' | 'rippleSt
       [salesId]: { id: salesId, name: 'sales', sources: [txId, prodId] },
       [reportsId]: { id: reportsId, name: 'reports', sources: [salesId] },
     },
+    pondStates: {
+      [txId]: initialPondState(),
+      [prodId]: initialPondState(),
+      [salesId]: initialPondState(),
+      [reportsId]: initialPondState(),
+    },
     ripples: {
       [txIngestId]: { id: txIngestId, pondId: txId, name: 'ingest', parents: [], durationMs: 1000 },
       [prodIngestId]: { id: prodIngestId, pondId: prodId, name: 'ingest', parents: [], durationMs: 2000 },
@@ -64,29 +106,9 @@ function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'ripples' | 'rippleSt
 
 const demoState = buildDemoState();
 
-function newPondId(): PondId {
-  return `pond-${++pondCounter}`;
-}
-
-function newPondName(): string {
-  return `p${pondCounter}`;
-}
-
-function newRippleId(): RippleId {
-  return `ripple-${Math.random().toString(36).slice(2, 9)}`;
-}
-
-function newRippleName(pondId: PondId): string {
-  rippleCounters[pondId] = (rippleCounters[pondId] ?? 0) + 1;
-  return `r${rippleCounters[pondId]}`;
-}
-
-function initialRippleState(): RippleRunState {
-  return { generation: 0, isRunning: false, runStartedAt: null, demand: [] };
-}
-
 export interface PlaygroundState {
   ponds: Record<PondId, Pond>;
+  pondStates: Record<PondId, PondRunState>;
   ripples: Record<RippleId, Ripple>;
   rippleStates: Record<RippleId, RippleRunState>;
   watermarks: WatermarkMap;
@@ -128,6 +150,7 @@ export interface PlaygroundState {
 function toOrchestrState(state: PlaygroundState): OrchestrState {
   return {
     ponds: state.ponds,
+    pondStates: state.pondStates,
     ripples: state.ripples,
     rippleStates: state.rippleStates,
     watermarks: state.watermarks,
@@ -135,8 +158,25 @@ function toOrchestrState(state: PlaygroundState): OrchestrState {
   };
 }
 
+function fromOrchestrState(
+  orch: OrchestrState,
+  prev: PlaygroundState
+): Partial<PlaygroundState> {
+  const changed =
+    orch.pondStates !== prev.pondStates ||
+    orch.rippleStates !== prev.rippleStates ||
+    orch.watermarks !== prev.watermarks;
+  if (!changed) return {};
+  return {
+    pondStates: orch.pondStates,
+    rippleStates: orch.rippleStates,
+    watermarks: orch.watermarks,
+  };
+}
+
 export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   ponds: demoState.ponds,
+  pondStates: demoState.pondStates,
   ripples: demoState.ripples,
   rippleStates: demoState.rippleStates,
   watermarks: {},
@@ -160,6 +200,7 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     };
     set((s) => ({
       ponds: { ...s.ponds, [id]: pond },
+      pondStates: { ...s.pondStates, [id]: initialPondState() },
       ripples: { ...s.ripples, [rippleId]: ripple },
       rippleStates: { ...s.rippleStates, [rippleId]: initialRippleState() },
       selectedPondId: id,
@@ -185,10 +226,7 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
 
   setRippleDuration(rippleId, ms) {
     set((s) => ({
-      ripples: {
-        ...s.ripples,
-        [rippleId]: { ...s.ripples[rippleId], durationMs: ms },
-      },
+      ripples: { ...s.ripples, [rippleId]: { ...s.ripples[rippleId], durationMs: ms } },
     }));
   },
 
@@ -205,6 +243,8 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
           ? { ...p, sources: p.sources.filter((sid) => sid !== pondId) }
           : p;
       }
+      const newPondStates = { ...s.pondStates };
+      delete newPondStates[pondId];
       const newRipples: typeof s.ripples = {};
       const newRippleStates: typeof s.rippleStates = {};
       for (const [id, r] of Object.entries(s.ripples)) {
@@ -215,6 +255,7 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
       }
       return {
         ponds: newPonds,
+        pondStates: newPondStates,
         ripples: newRipples,
         rippleStates: newRippleStates,
         selectedPondId: s.selectedPondId === pondId ? null : s.selectedPondId,
@@ -324,8 +365,8 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
 
   triggerPulse(pondId) {
     set((s) => {
-      const newOrch = addDemandToLeaves(pondId, null, false, false, toOrchestrState(s));
-      return { rippleStates: newOrch.rippleStates, watermarks: newOrch.watermarks };
+      const newOrch = receivePondDemand(pondId, null, false, false, toOrchestrState(s));
+      return fromOrchestrState(newOrch, s);
     });
   },
 
@@ -333,11 +374,14 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     get().removeTrigger(pondId);
     const trigger: ActiveTrigger = { pondId, kind: 'wave' };
     set((s) => {
-      const newOrch = addDemandToLeaves(pondId, 'wave-trigger', false, true, toOrchestrState(s));
+      const orchWithTrigger: OrchestrState = {
+        ...toOrchestrState(s),
+        triggers: { ...s.triggers, [pondId]: trigger },
+      };
+      const newOrch = receivePondDemand(pondId, 'wave-trigger', false, true, orchWithTrigger);
       return {
         triggers: { ...s.triggers, [pondId]: trigger },
-        rippleStates: newOrch.rippleStates,
-        watermarks: newOrch.watermarks,
+        ...fromOrchestrState(newOrch, s),
       };
     });
   },
@@ -347,12 +391,18 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     const trigger: ActiveTrigger = { pondId, kind: 'tide', periodMs };
     const pulse = () => {
       set((s) => {
-        const newOrch = addDemandToLeaves(pondId, `tide-${Date.now()}`, false, false, toOrchestrState(s));
-        return { rippleStates: newOrch.rippleStates, watermarks: newOrch.watermarks };
+        const newOrch = receivePondDemand(
+          pondId,
+          `tide-${Date.now()}`,
+          false,
+          false,
+          toOrchestrState(s)
+        );
+        return fromOrchestrState(newOrch, s);
       });
     };
     const intervalId = setInterval(pulse, periodMs);
-    pulse(); // fire immediately
+    pulse();
     set((s) => ({
       triggers: { ...s.triggers, [pondId]: trigger },
       tideIntervals: { ...s.tideIntervals, [pondId]: intervalId },
@@ -360,34 +410,17 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   },
 
   triggerStop(pondId) {
-    // Remove any active wave/tide trigger first
     get().removeTrigger(pondId);
     set((s) => {
-      // Flip ALL existing active demand records on every ripple in this Pond to isStop=true.
-      // This ensures wave/tide/start demand records don't block the stop signal.
-      const pondRippleIds = Object.values(s.ripples)
-        .filter((r) => r.pondId === pondId)
-        .map((r) => r.id);
-      const flippedStates = { ...s.rippleStates };
-      for (const rid of pondRippleIds) {
-        const rs = flippedStates[rid];
-        if (!rs || rs.demand.length === 0) continue;
-        flippedStates[rid] = {
-          ...rs,
-          demand: rs.demand.map((d) => (d.isStop ? d : { ...d, isStop: true })),
-        };
-      }
-      // Now add explicit user-stop record to leaf ripples to trigger eager upstream propagation
-      const orch = toOrchestrState({ ...s, rippleStates: flippedStates });
-      const newOrch = addDemandToLeaves(pondId, 'user-stop', true, false, orch);
-      return { rippleStates: newOrch.rippleStates, watermarks: newOrch.watermarks };
+      const newOrch = receivePondDemand(pondId, 'user-stop', true, false, toOrchestrState(s));
+      return fromOrchestrState(newOrch, s);
     });
   },
 
   triggerStart(pondId) {
     set((s) => {
-      const newOrch = addDemandToLeaves(pondId, 'user-start', false, false, toOrchestrState(s));
-      return { rippleStates: newOrch.rippleStates, watermarks: newOrch.watermarks };
+      const newOrch = receivePondDemand(pondId, 'user-start', false, false, toOrchestrState(s));
+      return fromOrchestrState(newOrch, s);
     });
   },
 
@@ -404,26 +437,32 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   },
 
   tick(now) {
-    const s = get();
-    const orch = toOrchestrState(s);
-    const newOrch = orchTick(now, orch);
-    // Bail out if nothing changed to avoid spurious React re-renders
-    if (newOrch.rippleStates === orch.rippleStates && newOrch.watermarks === orch.watermarks) return;
-    set({
-      rippleStates: newOrch.rippleStates,
-      watermarks: newOrch.watermarks,
+    set((s) => {
+      const orch = toOrchestrState(s);
+      const newOrch = orchTick(now, orch);
+      return fromOrchestrState(newOrch, s);
     });
   },
 }));
 
-// Derived helpers (used by components)
+// ─── Visual state helpers ────────────────────────────────────────────────────
 
 export function getRippleVisualState(
-  rs: RippleRunState
+  rs: RippleRunState,
+  ps: PondRunState
 ): 'running' | 'stopped' | 'queued' | 'idle' {
   if (rs.isRunning) return 'running';
-  if (rs.demand.length > 0 && rs.demand.every((d) => d.isStop)) return 'stopped';
-  if (rs.demand.some((d) => !d.isStop)) return 'queued';
+  if (ps.isStopped) return 'stopped';
+  if (rs.hasDemand) return 'queued';
+  return 'idle';
+}
+
+export function getPondVisualState(
+  ps: PondRunState
+): 'running' | 'stopped' | 'queued' | 'idle' {
+  if (ps.isStopped) return 'stopped';
+  if (ps.generationStarted > ps.generationCompleted) return 'running';
+  if (ps.hasDemand) return 'queued';
   return 'idle';
 }
 

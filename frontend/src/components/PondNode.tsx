@@ -2,43 +2,19 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useShallow } from 'zustand/shallow';
-import { usePlaygroundStore, getRippleVisualState, STATE_COLORS } from '@/lib/store';
+import { usePlaygroundStore, getPondVisualState, STATE_COLORS } from '@/lib/store';
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
   const pond = usePlaygroundStore((s) => s.ponds[pondId]);
-
-  // useShallow prevents infinite-loop from new array on every call
-  const rippleIds = usePlaygroundStore(
-    useShallow((s) =>
-      Object.values(s.ripples)
-        .filter((r) => r.pondId === pondId)
-        .map((r) => r.id)
-    )
-  );
-  const rippleStates = usePlaygroundStore((s) => s.rippleStates);
+  const ps = usePlaygroundStore((s) => s.pondStates[pondId]);
   const selectedPondId = usePlaygroundStore((s) => s.selectedPondId);
   const selectPond = usePlaygroundStore((s) => s.selectPond);
 
-  if (!pond) return null;
+  if (!pond || !ps) return null;
 
-  const STATE_PRIORITY = { running: 3, stopped: 2, queued: 1, idle: 0 };
-  let worstState: 'running' | 'stopped' | 'queued' | 'idle' = 'idle';
-  let startedGen = 0;
-  let completedGen = 0;
-
-  for (const rid of rippleIds) {
-    const rs = rippleStates[rid];
-    if (!rs) continue;
-    const vs = getRippleVisualState(rs);
-    if (STATE_PRIORITY[vs] > STATE_PRIORITY[worstState]) worstState = vs;
-    completedGen = Math.max(completedGen, rs.generation);
-    if (rs.isRunning) startedGen = Math.max(startedGen, rs.generation + 1);
-    else startedGen = Math.max(startedGen, rs.generation);
-  }
-
-  const borderColor = STATE_COLORS[worstState];
+  const visualState = getPondVisualState(ps);
+  const borderColor = STATE_COLORS[visualState];
   const isSelected = selectedPondId === pondId;
 
   return (
@@ -86,8 +62,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           {pond.name}
         </span>
         <span style={{ fontSize: 11, color: '#71717a', display: 'flex', gap: 6 }}>
-          <span style={{ color: '#a1a1aa' }}>↑{startedGen}</span>
-          <span>✓{completedGen}</span>
+          <span style={{ color: '#a1a1aa' }}>↑{ps.generationStarted}</span>
+          <span>✓{ps.generationCompleted}</span>
         </span>
       </div>
 
