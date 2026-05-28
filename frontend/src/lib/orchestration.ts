@@ -38,6 +38,25 @@ function wmKey(parentId: string, childId: string): string {
   return `${parentId}::${childId}`;
 }
 
+// ─── Logging ────────────────────────────────────────────────────────────────
+
+let LOG_START = 0;
+function lt(): string {
+  if (LOG_START === 0) LOG_START = Date.now();
+  const ms = Date.now() - LOG_START;
+  return `t=${(ms / 1000).toFixed(2)}s`;
+}
+function pname(state: OrchestrState, id: PondId): string {
+  return state.ponds[id]?.name ?? id;
+}
+function rname(state: OrchestrState, id: RippleId): string {
+  const r = state.ripples[id];
+  return r ? `${state.ponds[r.pondId]?.name ?? '?'}.${r.name}` : id;
+}
+function log(...args: unknown[]) {
+  console.log(lt(), ...args);
+}
+
 function isRoot(ripple: Ripple, ripples: Record<RippleId, Ripple>): boolean {
   return !ripple.parents.some((pid) => ripples[pid]?.pondId === ripple.pondId);
 }
@@ -107,7 +126,7 @@ function receivePulseRipple(rippleId: RippleId, state: OrchestrState): OrchestrS
 function receiveWaveRipple(rippleId: RippleId, state: OrchestrState): OrchestrState {
   const r = state.ripples[rippleId];
   if (!r) return state;
-  let newState = setRipple(state, rippleId, { hasDemand: true });
+  let newState = setRipple(state, rippleId, { hasDemand: true, isWave: true });
   if (isRoot(r, state.ripples)) {
     newState = receiveWaveAtStart(r.pondId, newState);
   } else {
@@ -124,7 +143,7 @@ function receiveWaveRipple(rippleId: RippleId, state: OrchestrState): OrchestrSt
 function receiveStopRipple(rippleId: RippleId, state: OrchestrState): OrchestrState {
   const r = state.ripples[rippleId];
   if (!r) return state;
-  let newState = setRipple(state, rippleId, { hasDemand: false });
+  let newState = setRipple(state, rippleId, { hasDemand: false, isWave: false });
   if (isRoot(r, state.ripples)) {
     newState = receiveStopAtStart(r.pondId, newState);
   } else {
@@ -136,6 +155,7 @@ function receiveStopRipple(rippleId: RippleId, state: OrchestrState): OrchestrSt
 }
 
 export function receivePulseAtEnd(pondId: PondId, state: OrchestrState): OrchestrState {
+  log(`recvPulse@end ${pname(state, pondId)}`);
   let newState = state;
   for (const leaf of getLeaves(pondId, state.ripples)) {
     newState = receivePulseRipple(leaf.id, newState);
@@ -144,6 +164,7 @@ export function receivePulseAtEnd(pondId: PondId, state: OrchestrState): Orchest
 }
 
 export function receiveWaveAtEnd(pondId: PondId, state: OrchestrState): OrchestrState {
+  log(`recvWave@end ${pname(state, pondId)}`);
   let newState = state;
   for (const leaf of getLeaves(pondId, state.ripples)) {
     const rs = newState.rippleStates[leaf.id];
@@ -155,6 +176,7 @@ export function receiveWaveAtEnd(pondId: PondId, state: OrchestrState): Orchestr
 }
 
 export function receiveStopAtEnd(pondId: PondId, state: OrchestrState): OrchestrState {
+  log(`recvStop@end ${pname(state, pondId)}`);
   let newState = setPond(state, pondId, { isWave: false, hasDemand: false });
   for (const leaf of getLeaves(pondId, state.ripples)) {
     newState = receiveStopRipple(leaf.id, newState);
@@ -165,6 +187,7 @@ export function receiveStopAtEnd(pondId: PondId, state: OrchestrState): Orchestr
 function receivePulseAtStart(pondId: PondId, state: OrchestrState): OrchestrState {
   const pond = state.ponds[pondId];
   if (!pond) return state;
+  log(`recvPulse@start ${pname(state, pondId)} → hasDemand=true; propagating to sources [${pond.sources.map((s) => pname(state, s)).join(',')}]`);
   let newState = setPond(state, pondId, { hasDemand: true });
   for (const sP of pond.sources) {
     newState = receivePulseAtEnd(sP, newState);
@@ -177,6 +200,7 @@ function receiveWaveAtStart(pondId: PondId, state: OrchestrState): OrchestrState
   const pond = state.ponds[pondId];
   if (!ps || !pond) return state;
   const wasWave = ps.isWave;
+  log(`recvWave@start ${pname(state, pondId)} wasWave=${wasWave} → hasDemand=true,isWave=true${!wasWave ? `; propagating to sources [${pond.sources.map((s) => pname(state, s)).join(',')}]` : ' (no further propagation, already wave)'}`);
   let newState = setPond(state, pondId, { isWave: true, hasDemand: true });
   if (!wasWave) {
     for (const sP of pond.sources) {
@@ -245,7 +269,10 @@ function startRipple(rippleId: RippleId, now: number, state: OrchestrState): Orc
     }
   }
 
-  return {
+  const rootFlag = isRoot(r, state.ripples);
+  log(`startRipple ${rname(state, rippleId)} gen=${newGenStarted} ${rootFlag ? '(root)' : '(non-root)'}${isLeaf(r, state.ripples) ? ' (leaf)' : ''} isWave=${rs.isWave}`);
+
+  let newState: OrchestrState = {
     ...state,
     watermarks: newWatermarks,
     rippleStates: {
@@ -259,12 +286,38 @@ function startRipple(rippleId: RippleId, now: number, state: OrchestrState): Orc
       },
     },
   };
+
+  // On start, if in wave mode, propagate wave outward.
+  // Root: propagate DIRECTLY to source ponds — do NOT go via receiveWaveAtStart, since that
+  // would re-set this pond's own hasDemand and cause it to loop. The pond's hasDemand is only
+  // set by wave arriving from below (cold-start cascade or non-root → root within this pond).
+  // Non-root: propagate to intra-pond parents (normal cascade).
+  if (rs.isWave) {
+    if (rootFlag) {
+      const pond = state.ponds[r.pondId];
+      if (pond) {
+        log(`  ↑ propagate wave from ${rname(state, rippleId)} to sources [${pond.sources.map((s) => pname(state, s)).join(',')}]`);
+        for (const sP of pond.sources) {
+          newState = receiveWaveAtEnd(sP, newState);
+        }
+      }
+    } else {
+      for (const parent of intraPondParents(r, state.ripples)) {
+        newState = receiveWaveRipple(parent.id, newState);
+      }
+    }
+  }
+
+  return newState;
 }
 
 function completeRipple(rippleId: RippleId, state: OrchestrState): OrchestrState {
   const r = state.ripples[rippleId];
   const rs = state.rippleStates[rippleId];
   if (!r || !rs) return state;
+
+  const children = intraPondChildren(rippleId, r.pondId, state.ripples);
+  log(`completeRipple ${rname(state, rippleId)} gen=${rs.generationStarted}${children.length > 0 ? ` → baton hasDemand to [${children.map((c) => rname(state, c.id)).join(',')}]` : ''}${isLeaf(r, state.ripples) ? ' (leaf)' : ''}`);
 
   const newRippleStates = { ...state.rippleStates };
   newRippleStates[rippleId] = {
@@ -274,8 +327,7 @@ function completeRipple(rippleId: RippleId, state: OrchestrState): OrchestrState
     runStartedAt: null,
   };
 
-  // Baton-pass within pond: enable intra-pond children to run this gen
-  for (const child of intraPondChildren(rippleId, r.pondId, state.ripples)) {
+  for (const child of children) {
     const childRs = newRippleStates[child.id];
     if (childRs) {
       newRippleStates[child.id] = { ...childRs, hasDemand: true };
@@ -301,11 +353,13 @@ function updatePondCompleted(pondId: PondId, state: OrchestrState): OrchestrStat
   );
   if (newCompleted <= ps.generationCompleted) return state;
 
+  log(`pondCompleted ${pname(state, pondId)} gen=${newCompleted}`);
+
   let newState = setPond(state, pondId, { generationCompleted: newCompleted });
 
-  // Wave trigger lives on outlets — re-fire on each pond gen completion.
   const trigger = state.triggers[pondId];
   if (trigger?.kind === 'wave') {
+    log(`  ↻ wave trigger re-fire on ${pname(state, pondId)}`);
     newState = receiveWaveAtEnd(pondId, newState);
   }
 
@@ -316,6 +370,13 @@ function canAdvancePond(pondId: PondId, state: OrchestrState): boolean {
   const ps = state.pondStates[pondId];
   const pond = state.ponds[pondId];
   if (!ps || !pond || !ps.hasDemand) return false;
+  // Roots must have started the current generation before pond can admit the next one,
+  // otherwise pond.generationStarted would race ahead of what ripples can consume.
+  for (const root of getRoots(pondId, state.ripples)) {
+    const rootRs = state.rippleStates[root.id];
+    if (!rootRs) return false;
+    if (rootRs.generationStarted < ps.generationStarted) return false;
+  }
   for (const sP of pond.sources) {
     const sourcePs = state.pondStates[sP];
     if (!sourcePs) return false;
@@ -330,6 +391,10 @@ function advancePond(pondId: PondId, state: OrchestrState): OrchestrState {
   if (!ps || !pond) return state;
 
   const wasWave = ps.isWave;
+  const newGen = ps.generationStarted + 1;
+  const roots = getRoots(pondId, state.ripples);
+  log(`advancePond ${pname(state, pondId)} gen=${newGen} wasWave=${wasWave} sources=[${pond.sources.map((s) => `${pname(state, s)}.gen=${state.pondStates[s]?.generationCompleted}`).join(',')}] roots=[${roots.map((r) => rname(state, r.id)).join(',')}]`);
+
   const newWatermarks = { ...state.watermarks };
   for (const sP of pond.sources) {
     const sourcePs = state.pondStates[sP];
@@ -337,7 +402,7 @@ function advancePond(pondId: PondId, state: OrchestrState): OrchestrState {
   }
 
   const newRippleStates = { ...state.rippleStates };
-  for (const root of getRoots(pondId, state.ripples)) {
+  for (const root of roots) {
     const rootRs = newRippleStates[root.id];
     if (rootRs) {
       newRippleStates[root.id] = { ...rootRs, hasDemand: true };
@@ -352,7 +417,7 @@ function advancePond(pondId: PondId, state: OrchestrState): OrchestrState {
       ...state.pondStates,
       [pondId]: {
         ...ps,
-        generationStarted: ps.generationStarted + 1,
+        generationStarted: newGen,
         hasDemand: false,
         isWave: false,
       },

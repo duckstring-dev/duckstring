@@ -28,6 +28,7 @@ export interface RippleRunState {
   isRunning: boolean;
   runStartedAt: number | null;
   hasDemand: boolean;
+  isWave: boolean;
 }
 
 // Watermark keys:
