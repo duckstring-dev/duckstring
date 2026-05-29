@@ -15,11 +15,21 @@ export interface Ripple {
   durationMs: number;
 }
 
+// One run of a Pond. isWave is captured from pond.isWave when the generation is
+// armed (in advancePond) and is the source of truth for whether ripples in this
+// run execute as wave — pond.isWave itself clears immediately on advance.
+export interface PondGeneration {
+  number: number;
+  isWave: boolean;
+}
+
 export interface PondRunState {
   generationStarted: number;
   generationCompleted: number;
   hasDemand: boolean;
+  // Pending wave intent: set by a wave reaching P.start, cleared by advancePond.
   isWave: boolean;
+  generations: Record<number, PondGeneration>;
 }
 
 export interface RippleRunState {
@@ -28,7 +38,6 @@ export interface RippleRunState {
   isRunning: boolean;
   runStartedAt: number | null;
   hasDemand: boolean;
-  isWave: boolean;
 }
 
 // Watermark keys:

@@ -17,10 +17,13 @@ import { getLeaves, getRoots } from './graph';
 //   P.start — where signals exit toward source ponds
 //
 // State stored on P:
-//   isWave    — latched only by wave reaching P.start (not P.end), cleared by stop or advancePond
-//   hasDemand — set only by pulse, start, or wave reaching P.start; cleared in advancePond
+//   isWave    — *pending* wave intent: set by a wave reaching P.start, cleared by advancePond.
+//   hasDemand — set only by pulse, start, or wave reaching P.start; cleared in advancePond.
 //
-// Ripples have no isWave — they read pond.isWave (and propagation happens via advancePond, not at ripple start).
+// Wave-ness of an actual run lives on the PondGeneration record (pond.generations[n].isWave),
+// captured from pond.isWave when advancePond arms the generation. Ripples have no wave flag —
+// a ripple reads its generation's isWave to decide whether to execute as wave. Stop flips
+// in-flight generations' isWave to false so re-saturation halts while the run drains.
 //
 // Maintenance: a WaveTrigger lives on an outlet pond and re-fires receiveWave_at_end on each pond gen
 // completion. No node ever rearms itself.
@@ -107,6 +110,19 @@ function setPond(
   };
 }
 
+// Stop a pond: clear pending wave/demand and flip every in-flight generation's
+// isWave to false so ripples stop re-saturating. The hasDemand baton still drains
+// each started run to completion; only cancel halts a run mid-flight.
+function stopPond(state: OrchestrState, pondId: PondId): OrchestrState {
+  const ps = state.pondStates[pondId];
+  if (!ps) return state;
+  const generations = { ...ps.generations };
+  for (let g = ps.generationCompleted + 1; g <= ps.generationStarted; g++) {
+    if (generations[g]) generations[g] = { ...generations[g], isWave: false };
+  }
+  return setPond(state, pondId, { isWave: false, hasDemand: false, generations });
+}
+
 // ─── Signal handlers ────────────────────────────────────────────────────────
 
 function receivePulseRipple(rippleId: RippleId, state: OrchestrState): OrchestrState {
@@ -126,7 +142,7 @@ function receivePulseRipple(rippleId: RippleId, state: OrchestrState): OrchestrS
 function receiveWaveRipple(rippleId: RippleId, state: OrchestrState): OrchestrState {
   const r = state.ripples[rippleId];
   if (!r) return state;
-  let newState = setRipple(state, rippleId, { hasDemand: true, isWave: true });
+  let newState = setRipple(state, rippleId, { hasDemand: true });
   if (isRoot(r, state.ripples)) {
     newState = receiveWaveAtStart(r.pondId, newState);
   } else {
@@ -143,7 +159,7 @@ function receiveWaveRipple(rippleId: RippleId, state: OrchestrState): OrchestrSt
 function receiveStopRipple(rippleId: RippleId, state: OrchestrState): OrchestrState {
   const r = state.ripples[rippleId];
   if (!r) return state;
-  let newState = setRipple(state, rippleId, { hasDemand: false, isWave: false });
+  let newState = setRipple(state, rippleId, { hasDemand: false });
   if (isRoot(r, state.ripples)) {
     newState = receiveStopAtStart(r.pondId, newState);
   } else {
@@ -177,7 +193,7 @@ export function receiveWaveAtEnd(pondId: PondId, state: OrchestrState): Orchestr
 
 export function receiveStopAtEnd(pondId: PondId, state: OrchestrState): OrchestrState {
   log(`recvStop@end ${pname(state, pondId)}`);
-  let newState = setPond(state, pondId, { isWave: false, hasDemand: false });
+  let newState = stopPond(state, pondId);
   for (const leaf of getLeaves(pondId, state.ripples)) {
     newState = receiveStopRipple(leaf.id, newState);
   }
@@ -213,7 +229,7 @@ function receiveWaveAtStart(pondId: PondId, state: OrchestrState): OrchestrState
 function receiveStopAtStart(pondId: PondId, state: OrchestrState): OrchestrState {
   const pond = state.ponds[pondId];
   if (!pond) return state;
-  let newState = setPond(state, pondId, { isWave: false, hasDemand: false });
+  let newState = stopPond(state, pondId);
   for (const sP of pond.sources) {
     newState = receiveStopAtEnd(sP, newState);
   }
@@ -270,7 +286,8 @@ function startRipple(rippleId: RippleId, now: number, state: OrchestrState): Orc
   }
 
   const rootFlag = isRoot(r, state.ripples);
-  log(`startRipple ${rname(state, rippleId)} gen=${newGenStarted} ${rootFlag ? '(root)' : '(non-root)'}${isLeaf(r, state.ripples) ? ' (leaf)' : ''} isWave=${rs.isWave}`);
+  const runIsWave = state.pondStates[r.pondId]?.generations[newGenStarted]?.isWave ?? false;
+  log(`startRipple ${rname(state, rippleId)} gen=${newGenStarted} ${rootFlag ? '(root)' : '(non-root)'}${isLeaf(r, state.ripples) ? ' (leaf)' : ''} runIsWave=${runIsWave}`);
 
   let newState: OrchestrState = {
     ...state,
@@ -292,7 +309,7 @@ function startRipple(rippleId: RippleId, now: number, state: OrchestrState): Orc
   // would re-set this pond's own hasDemand and cause it to loop. The pond's hasDemand is only
   // set by wave arriving from below (cold-start cascade or non-root → root within this pond).
   // Non-root: propagate to intra-pond parents (normal cascade).
-  if (rs.isWave) {
+  if (runIsWave) {
     if (rootFlag) {
       const pond = state.ponds[r.pondId];
       if (pond) {
@@ -420,6 +437,7 @@ function advancePond(pondId: PondId, state: OrchestrState): OrchestrState {
         generationStarted: newGen,
         hasDemand: false,
         isWave: false,
+        generations: { ...ps.generations, [newGen]: { number: newGen, isWave: wasWave } },
       },
     },
   };

@@ -45,6 +45,7 @@ function initialPondState(): PondRunState {
     generationCompleted: 0,
     hasDemand: false,
     isWave: false,
+    generations: {},
   };
 }
 
@@ -55,7 +56,6 @@ function initialRippleState(): RippleRunState {
     isRunning: false,
     runStartedAt: null,
     hasDemand: false,
-    isWave: false,
   };
 }
 
@@ -295,6 +295,12 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
         [sinkPondId]: { ...s.ponds[sinkPondId], sources: [...s.ponds[sinkPondId].sources, sourcePondId] },
       },
     }));
+    // Triggers live only on outlets. Linking can demote a pond to non-outlet;
+    // drop its trigger so its wave peters out naturally (no stop signal sent).
+    const ponds = get().ponds;
+    for (const pid of Object.keys(get().triggers)) {
+      if (!isOutlet(ponds, pid)) get().removeTrigger(pid);
+    }
     return true;
   },
 
