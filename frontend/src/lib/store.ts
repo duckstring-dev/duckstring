@@ -43,7 +43,8 @@ function initialPondState(): PondRunState {
   return {
     generationStarted: 0,
     generationCompleted: 0,
-    hasDemand: false,
+    hasRootDemand: false,
+    hasLeafDemand: false,
     isWave: false,
     generations: {},
   };
@@ -435,16 +436,16 @@ export function getRippleVisualState(rs: RippleRunState): 'running' | 'queued' |
 
 export function getPondVisualState(ps: PondRunState): 'running' | 'queued' | 'wave' | 'idle' {
   if (ps.generationStarted > ps.generationCompleted) return 'running';
-  if (ps.hasDemand) return 'queued';
-  if (ps.isWave) return 'wave';
+  // Gate on leaf demand: hasRootDemand/isWave can linger after a wave peters out, but
+  // without downstream demand the pond is quiescent and should read idle.
+  if (ps.hasLeafDemand) return ps.isWave ? 'wave' : 'queued';
   return 'idle';
 }
 
 export function getPondEdgeVisualState(sourcePs: PondRunState | undefined): 'wave' | 'pulse' | 'idle' {
   if (!sourcePs) return 'idle';
-  if (sourcePs.isWave) return 'wave';
-  if (sourcePs.hasDemand) return 'pulse';
-  return 'idle';
+  if (!sourcePs.hasLeafDemand) return 'idle';
+  return sourcePs.isWave ? 'wave' : 'pulse';
 }
 
 export const STATE_COLORS: Record<string, string> = {

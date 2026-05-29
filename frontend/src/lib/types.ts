@@ -26,7 +26,11 @@ export interface PondGeneration {
 export interface PondRunState {
   generationStarted: number;
   generationCompleted: number;
-  hasDemand: boolean;
+  // Demand reaching P.start via a root ripple (the chain wants to produce).
+  hasRootDemand: boolean;
+  // Demand received from a downstream sink at P.end (someone wants the output).
+  // Both are required to advance the pond; advancePond clears both.
+  hasLeafDemand: boolean;
   // Pending wave intent: set by a wave reaching P.start, cleared by advancePond.
   isWave: boolean;
   generations: Record<number, PondGeneration>;
