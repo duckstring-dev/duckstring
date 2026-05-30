@@ -41,10 +41,6 @@ function wmKey(parentId: string, childId: string): string {
   return `${parentId}::${childId}`;
 }
 
-// How many generations a pond's leaves may run ahead of a live downstream consumer before
-// back-pressure stalls them. 1 = tight (one buffered generation, the natural pipeline depth).
-const INTER_POND_BUFFER = 1;
-
 // ─── Logging ────────────────────────────────────────────────────────────────
 
 let LOG_START = 0;
@@ -195,6 +191,25 @@ export function receiveWaveAtEnd(pondId: PondId, state: OrchestrState, quiet = f
   return newState;
 }
 
+// Consumer-side back-pressure. A pond asks a source for another generation only once it has
+// consumed everything that source has produced — i.e. its watermark has caught up to the
+// source's completed generation. While it still holds an unconsumed generation from a source it
+// stays quiet, and that silence is what paces the source to this consumer's rate. Demand only
+// ever flows upward, held by the consumer; nothing here reads a sink's state.
+function demandSources(pondId: PondId, state: OrchestrState): OrchestrState {
+  const pond = state.ponds[pondId];
+  if (!pond) return state;
+  let newState = state;
+  for (const sP of pond.sources) {
+    const sps = newState.pondStates[sP];
+    if (!sps) continue;
+    if ((newState.watermarks[wmKey(sP, pondId)] ?? 0) >= sps.generationCompleted) {
+      newState = receiveWaveAtEnd(sP, newState);
+    }
+  }
+  return newState;
+}
+
 export function receiveStopAtEnd(pondId: PondId, state: OrchestrState): OrchestrState {
   log(`recvStop@end ${pname(state, pondId)}`);
   let newState = stopPond(state, pondId);
@@ -223,9 +238,7 @@ function receiveWaveAtStart(pondId: PondId, state: OrchestrState): OrchestrState
   log(`recvWave@start ${pname(state, pondId)} wasWave=${wasWave} → hasRootDemand=true,isWave=true${!wasWave ? `; propagating to sources [${pond.sources.map((s) => pname(state, s)).join(',')}]` : ' (no further propagation, already wave)'}`);
   let newState = setPond(state, pondId, { isWave: true, hasRootDemand: true });
   if (!wasWave) {
-    for (const sP of pond.sources) {
-      newState = receiveWaveAtEnd(sP, newState);
-    }
+    newState = demandSources(pondId, newState);
   }
   return newState;
 }
@@ -261,23 +274,7 @@ function canStartRipple(rippleId: RippleId, state: OrchestrState): boolean {
   if (isLeaf(r, state.ripples)) {
     const ps = state.pondStates[r.pondId];
     if (!ps) return false;
-    // Local back-pressure: don't run ahead of this pond's own P.end consumption.
     if (rs.generationCompleted > ps.generationCompleted) return false;
-    // Inter-pond back-pressure: don't run ahead of a downstream pond that is still actively
-    // consuming. Each consumer D records what it has taken in watermark[P::D]; producing a
-    // generation a live consumer hasn't taken lets this pond race at its own cadence and the
-    // backlog grows unbounded. A leaf may stay at most INTER_POND_BUFFER generations ahead of
-    // the slowest live consumer. Idle/stopped consumers (no demand, not mid-run) impose no
-    // back-pressure — otherwise stopping one fork would starve the others.
-    for (const d of Object.values(state.ponds)) {
-      if (!d.sources.includes(r.pondId)) continue;
-      const dps = state.pondStates[d.id];
-      if (!dps) continue;
-      const live = dps.hasRootDemand || dps.hasLeafDemand || dps.generationStarted > dps.generationCompleted;
-      if (!live) continue;
-      const consumed = state.watermarks[wmKey(r.pondId, d.id)] ?? 0;
-      if (rs.generationCompleted - consumed >= INTER_POND_BUFFER) return false;
-    }
   }
   if (isRoot(r, state.ripples)) {
     const ps = state.pondStates[r.pondId];
@@ -346,10 +343,8 @@ function startRipple(rippleId: RippleId, now: number, state: OrchestrState): Orc
     if (rootFlag) {
       const pond = state.ponds[r.pondId];
       if (pond) {
-        log(`  ↑ propagate wave from ${rname(state, rippleId)} to sources [${pond.sources.map((s) => pname(state, s)).join(',')}]`);
-        for (const sP of pond.sources) {
-          newState = receiveWaveAtEnd(sP, newState);
-        }
+        log(`  ↑ propagate wave from ${rname(state, rippleId)} to ready sources [${pond.sources.map((s) => pname(state, s)).join(',')}]`);
+        newState = demandSources(r.pondId, newState);
       }
     } else {
       newState = receiveWaveAtStart(r.pondId, newState);
@@ -469,9 +464,7 @@ function advancePond(pondId: PondId, state: OrchestrState): OrchestrState {
   };
 
   if (wasWave) {
-    for (const sP of pond.sources) {
-      newState = receiveWaveAtEnd(sP, newState);
-    }
+    newState = demandSources(pondId, newState);
   }
 
   return newState;
