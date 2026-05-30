@@ -92,8 +92,9 @@ export function DagCanvas() {
   const layoutKey = useMemo(
     () =>
       JSON.stringify({
-        ponds: Object.values(ponds).map((p) => ({ id: p.id, sources: p.sources })),
-        ripples: Object.values(ripples).map((r) => ({ id: r.id, parents: r.parents, pondId: r.pondId })),
+        ponds: Object.values(ponds).map((p) => ({ id: p.id, sources: p.sources, name: p.name })),
+        // name affects ripple width, so reflow on rename too
+        ripples: Object.values(ripples).map((r) => ({ id: r.id, parents: r.parents, pondId: r.pondId, name: r.name })),
         triggers: Object.keys(triggers),
       }),
     [ponds, ripples, triggers]

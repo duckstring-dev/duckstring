@@ -69,7 +69,9 @@ export function Sidebar() {
 
   const addPond = usePlaygroundStore((s) => s.addPond);
   const addRipple = usePlaygroundStore((s) => s.addRipple);
+  const renamePond = usePlaygroundStore((s) => s.renamePond);
   const setRippleDuration = usePlaygroundStore((s) => s.setRippleDuration);
+  const renameRipple = usePlaygroundStore((s) => s.renameRipple);
   const setRippleVariability = usePlaygroundStore((s) => s.setRippleVariability);
   const setAllVariability = usePlaygroundStore((s) => s.setAllVariability);
   const linkPonds = usePlaygroundStore((s) => s.linkPonds);
@@ -156,6 +158,12 @@ export function Sidebar() {
         <>
           <Section>
             <Label>Pond: {selectedPond.name}</Label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+              <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Name</span>
+              <input type="text" defaultValue={selectedPond.name} key={`pn-${selectedPond.id}`}
+                onChange={(e) => { const v = e.target.value.trim(); if (v) renamePond(selectedPond.id, v); }}
+                style={{ ...numInput, width: 140 }} />
+            </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               <Btn onClick={() => addRipple(selectedPond.id)} color="#6366f1">+ Add Ripple</Btn>
               <Btn onClick={() => deletePond(selectedPond.id)} color="#ef4444">Delete Pond</Btn>
@@ -234,7 +242,10 @@ export function Sidebar() {
           </Section>
 
           <Section>
-            <TraceChart times={pondStates[selectedPond.id]?.completionTimes ?? []} />
+            <TraceChart
+              times={pondStates[selectedPond.id]?.completionTimes ?? []}
+              durations={pondStates[selectedPond.id]?.durations ?? []}
+            />
           </Section>
         </>
       )}
@@ -246,6 +257,13 @@ export function Sidebar() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
               <Label>Ripple: {selectedRipple.name}</Label>
               <Btn small onClick={() => deleteRipple(selectedRippleId!)} color="#ef4444">Delete</Btn>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+              <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Name</span>
+              <input type="text" defaultValue={selectedRipple.name} key={`n-${selectedRippleId}`}
+                onChange={(e) => { const v = e.target.value.trim(); if (v) renameRipple(selectedRippleId!, v); }}
+                style={{ ...numInput, width: 140 }} />
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
@@ -303,7 +321,10 @@ export function Sidebar() {
           </Section>
 
           <Section>
-            <TraceChart times={rippleStates[selectedRippleId!]?.completionTimes ?? []} />
+            <TraceChart
+              times={rippleStates[selectedRippleId!]?.completionTimes ?? []}
+              durations={rippleStates[selectedRippleId!]?.durations ?? []}
+            />
           </Section>
         </>
       )}

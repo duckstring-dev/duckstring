@@ -415,6 +415,7 @@ function completeRipple(rippleId: RippleId, now: number, state: OrchestrState): 
     lastDurationMs: rs.currentRunDurationMs ?? rs.lastDurationMs,
     currentRunDurationMs: null,
     completionTimes: pushCompletion(rs.completionTimes, now),
+    durations: pushCompletion(rs.durations, rs.currentRunDurationMs ?? rs.lastDurationMs ?? 0),
   };
 
   for (const child of children) {
@@ -445,11 +446,22 @@ function updatePondCompleted(pondId: PondId, now: number, state: OrchestrState):
 
   log(`pondCompleted ${pname(state, pondId)} gen=${newCompleted}`);
 
+  // Generation latency: completion time − the time the generation was armed. Drop armed
+  // timestamps for every generation now consumed.
+  const genStartTimes = { ...ps.genStartTimes };
+  const armed = genStartTimes[newCompleted];
+  for (const g of Object.keys(genStartTimes)) {
+    if (Number(g) <= newCompleted) delete genStartTimes[Number(g)];
+  }
+  const durations = armed != null ? pushCompletion(ps.durations, now - armed) : ps.durations;
+
   // Wave re-supply is handled per-tick in tick() (the trigger acts as a continuous sink),
   // so completion only needs to record the new completed generation and its timestamp here.
   return setPond(state, pondId, {
     generationCompleted: newCompleted,
     completionTimes: pushCompletion(ps.completionTimes, now),
+    durations,
+    genStartTimes,
   });
 }
 
@@ -472,7 +484,7 @@ function canAdvancePond(pondId: PondId, state: OrchestrState): boolean {
   return true;
 }
 
-function advancePond(pondId: PondId, state: OrchestrState): OrchestrState {
+function advancePond(pondId: PondId, now: number, state: OrchestrState): OrchestrState {
   const ps = state.pondStates[pondId];
   const pond = state.ponds[pondId];
   if (!ps || !pond) return state;
@@ -509,6 +521,7 @@ function advancePond(pondId: PondId, state: OrchestrState): OrchestrState {
         hasLeafDemand: false,
         isWave: false,
         generations: { ...ps.generations, [newGen]: { number: newGen, isWave: wasWave } },
+        genStartTimes: { ...ps.genStartTimes, [newGen]: now },
       },
     },
   };
@@ -545,7 +558,7 @@ export function tick(now: number, state: OrchestrState): OrchestrState {
 
   for (const pondId of Object.keys(newState.pondStates)) {
     if (canAdvancePond(pondId, newState)) {
-      newState = advancePond(pondId, newState);
+      newState = advancePond(pondId, now, newState);
     }
   }
 

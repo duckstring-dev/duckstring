@@ -39,6 +39,10 @@ export interface PondRunState {
   generations: Record<number, PondGeneration>;
   // Timestamps (ms) at which the pond completed a generation — for the run-cadence trace.
   completionTimes: number[];
+  // Latency (ms) of each completed generation (completion time − arm time) — duration trace.
+  durations: number[];
+  // gen number → timestamp the generation was armed (advancePond), to compute its latency.
+  genStartTimes: Record<number, number>;
 }
 
 export interface RippleRunState {
@@ -53,6 +57,8 @@ export interface RippleRunState {
   lastDurationMs: number | null;
   // Timestamps (ms) at which this ripple completed a run — for the run-cadence trace.
   completionTimes: number[];
+  // Sampled duration (ms) of each completed run — for the run-duration trace.
+  durations: number[];
 }
 
 // Watermark keys:

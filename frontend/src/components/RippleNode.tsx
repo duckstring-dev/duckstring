@@ -31,8 +31,9 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
         padding: '6px 10px',
         background: '#1a1a1f',
         cursor: 'pointer',
-        width: 140,
+        width: '100%',
         height: 60,
+        boxSizing: 'border-box',
         display: 'flex',
         flexDirection: 'column',
         justifyContent: 'center',
@@ -41,13 +42,18 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
       }}
     >
       <Handle type="target" position={Position.Left} style={{ background: '#52525b' }} />
-      <div style={{ fontSize: 12, fontWeight: 600, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {ripple.name}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {ripple.name}
+        </span>
+        <span style={{ fontSize: 11, color: '#a1a1aa', flexShrink: 0 }}>↑{displayGen}</span>
       </div>
-      <div style={{ fontSize: 11, color: borderColor, display: 'flex', gap: 6 }}>
-        <span>gen {displayGen}</span>
-        <span style={{ color: '#52525b' }}>·</span>
-        <span style={{ color: '#71717a' }}>{(ripple.durationMs / 1000).toFixed(1)}s</span>
+      <div style={{ fontSize: 11, color: borderColor, display: 'flex', gap: 6, whiteSpace: 'nowrap' }}>
+        <span style={{ color: '#a1a1aa' }}>
+          {rs.lastDurationMs != null ? `${(rs.lastDurationMs / 1000).toFixed(1)}s` : '—'}
+        </span>
+        <span style={{ color: '#52525b' }}>|</span>
+        <span style={{ color: '#71717a' }}>~{(ripple.durationMs / 1000).toFixed(1)}s</span>
       </div>
       <Handle type="source" position={Position.Right} style={{ background: '#52525b' }} />
     </div>

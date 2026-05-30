@@ -2,8 +2,22 @@ import dagre from '@dagrejs/dagre';
 import type { Node, Edge } from '@xyflow/react';
 import type { PondId, RippleId, Pond, Ripple, ActiveTrigger } from './types';
 
-const RIPPLE_W = 140;
+const MIN_RIPPLE_W = 120;
 const RIPPLE_H = 60;
+
+// Width sized to fit the ripple name plus the generation counter on the top row.
+function rippleWidth(r: Ripple): number {
+  const nameW = r.name.length * 7.2; // ~13px monospace
+  const genW = 34; // "↑NN"
+  return Math.max(MIN_RIPPLE_W, Math.ceil(nameW + genW + 20 /* padding */));
+}
+
+// Minimum pond width needed for its header: name (bold) + the ↑started ✓completed counter.
+function pondHeaderWidth(name: string): number {
+  const nameW = name.length * 8.2; // ~13px bold monospace
+  const genW = 76; // "↑NN ✓NN"
+  return Math.ceil(nameW + genW + 24 /* padding */);
+}
 const POND_PAD_TOP = 48;
 const POND_PAD_SIDE = 24;
 const POND_PAD_BOTTOM = 24;
@@ -21,19 +35,27 @@ interface LayoutResult {
 function buildRippleLayout(
   pondId: PondId,
   ripples: Record<RippleId, Ripple>
-): { positions: Record<RippleId, { x: number; y: number }>; width: number; height: number } {
+): {
+  positions: Record<RippleId, { x: number; y: number }>;
+  widths: Record<RippleId, number>;
+  width: number;
+  height: number;
+} {
   const pondRipples = Object.values(ripples).filter((r) => r.pondId === pondId);
 
   if (pondRipples.length === 0) {
-    return { positions: {}, width: MIN_POND_W, height: MIN_POND_H };
+    return { positions: {}, widths: {}, width: MIN_POND_W, height: MIN_POND_H };
   }
+
+  const widths: Record<RippleId, number> = {};
+  for (const r of pondRipples) widths[r.id] = rippleWidth(r);
 
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: 'LR', ranksep: 60, nodesep: 40, marginx: 0, marginy: 0 });
   g.setDefaultEdgeLabel(() => ({}));
 
   for (const r of pondRipples) {
-    g.setNode(r.id, { width: RIPPLE_W, height: RIPPLE_H });
+    g.setNode(r.id, { width: widths[r.id], height: RIPPLE_H });
   }
   for (const r of pondRipples) {
     for (const pid of r.parents) {
@@ -51,11 +73,12 @@ function buildRippleLayout(
 
   for (const r of pondRipples) {
     const n = g.node(r.id);
+    const w = widths[r.id];
     // dagre gives center position; convert to top-left
-    const x = n.x - RIPPLE_W / 2;
+    const x = n.x - w / 2;
     const y = n.y - RIPPLE_H / 2;
     positions[r.id] = { x, y };
-    maxX = Math.max(maxX, n.x + RIPPLE_W / 2);
+    maxX = Math.max(maxX, n.x + w / 2);
     maxY = Math.max(maxY, n.y + RIPPLE_H / 2);
   }
 
@@ -64,6 +87,7 @@ function buildRippleLayout(
 
   return {
     positions,
+    widths,
     width: Math.max(contentW + POND_PAD_SIDE * 2, MIN_POND_W),
     height: Math.max(contentH + POND_PAD_TOP + POND_PAD_BOTTOM, MIN_POND_H),
   };
@@ -79,10 +103,18 @@ export function computeLayout(
   // Step 1: compute internal ripple layout per pond
   const pondLayouts: Record<
     PondId,
-    { positions: Record<RippleId, { x: number; y: number }>; width: number; height: number }
+    {
+      positions: Record<RippleId, { x: number; y: number }>;
+      widths: Record<RippleId, number>;
+      width: number;
+      height: number;
+    }
   > = {};
   for (const pond of pondList) {
-    pondLayouts[pond.id] = buildRippleLayout(pond.id, ripples);
+    const layout = buildRippleLayout(pond.id, ripples);
+    // Floor the pond width so a long name still fits in the header.
+    layout.width = Math.max(layout.width, pondHeaderWidth(pond.name));
+    pondLayouts[pond.id] = layout;
   }
 
   // Step 2: compute pond-level layout
@@ -123,7 +155,7 @@ export function computeLayout(
     });
 
     // Ripple nodes inside this pond (positions relative to pond)
-    const { positions } = pondLayouts[pond.id];
+    const { positions, widths } = pondLayouts[pond.id];
     const pondRipples = Object.values(ripples).filter((r) => r.pondId === pond.id);
     for (const r of pondRipples) {
       const pos = positions[r.id] ?? { x: POND_PAD_SIDE, y: POND_PAD_TOP };
@@ -135,6 +167,7 @@ export function computeLayout(
         data: { rippleId: r.id },
         extent: 'parent',
         draggable: false,
+        style: { width: widths[r.id] ?? MIN_RIPPLE_W, height: RIPPLE_H },
       });
     }
 

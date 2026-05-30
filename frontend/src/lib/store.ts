@@ -50,6 +50,8 @@ function initialPondState(): PondRunState {
     isWave: false,
     generations: {},
     completionTimes: [],
+    durations: [],
+    genStartTimes: {},
   };
 }
 
@@ -63,6 +65,7 @@ function initialRippleState(): RippleRunState {
     currentRunDurationMs: null,
     lastDurationMs: null,
     completionTimes: [],
+    durations: [],
   };
 }
 
@@ -134,7 +137,9 @@ export interface PlaygroundState {
 
   addPond(): void;
   addRipple(pondId: PondId, parentId?: RippleId): void;
+  renamePond(pondId: PondId, name: string): void;
   setRippleDuration(rippleId: RippleId, ms: number): void;
+  renameRipple(rippleId: RippleId, name: string): void;
   setRippleVariability(rippleId: RippleId, variability: number): void;
   setAllVariability(variability: number): void;
   deletePond(pondId: PondId): void;
@@ -250,6 +255,18 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   setRippleDuration(rippleId, ms) {
     set((s) => ({
       ripples: { ...s.ripples, [rippleId]: { ...s.ripples[rippleId], durationMs: ms } },
+    }));
+  },
+
+  renamePond(pondId, name) {
+    set((s) => ({
+      ponds: { ...s.ponds, [pondId]: { ...s.ponds[pondId], name } },
+    }));
+  },
+
+  renameRipple(rippleId, name) {
+    set((s) => ({
+      ripples: { ...s.ripples, [rippleId]: { ...s.ripples[rippleId], name } },
     }));
   },
 
