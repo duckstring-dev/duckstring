@@ -73,13 +73,35 @@ The alternative is *pull*, where scheduling is *demand-driven*. Under this appro
 
 ### Kanban
 
-Kanban is a famously simple pull-based scheduling process, pioneered by Japanese manufacturing (especially Toyota). It involves sending tokens (classically, physical cards) back to a supplier when a product is consumed, allowing the supplier to keep track of how much stock has been consumed. Typically 
+Kanban is a famously simple pull-based scheduling process, pioneered by Japanese manufacturing (especially Toyota). It involves sending tokens (classically, physical cards) back to a supplier when a product is consumed, allowing the supplier to keep track of how much stock has been consumed. Crucially, the tokens are delivered at the *start* of their being used for the downstream process, allowing the supplier to begin production immediately so that stock is available the next time it is needed.
 
-Toyota has formulated six rules for the application of kanban:
+Typically, the supplier will then log these tokens against a range:
 
-- Each process issues requests (kanban) to its suppliers when it consumes its supplies.
-- Each process produces according to the quantity and sequence of incoming requests.
-- No items are made or transported without a request.
-- The request associated with an item is always attached to it.
-- Processes must not send out defective items, to ensure that the finished products will be defect-free.
-- Limiting the number of pending requests makes the process more sensitive and reveals inefficiencies.
+- Red: High tokens, indicating high consumption and low stock -> accelerate production
+- Yellow: Moderate tokens, standard consumption and stock -> standard production
+- Green: Low tokens, low consumption and high stock -> stop production
+
+Unlike manufacturing, where the number of units is meaningful, data pipelines are binary - either updated or not. Consequently, a Kanban-like process need only track the presence of *any* demand, where the Red/Green boundary is simple one:
+
+- Has demand: Start production
+- Has no demand: Stop production
+
+### Demand-Based Orchestration
+
+Consider each unit operation a node in a directed graph (the DAG). Each node is aware of its parents, and can notify the parents of their demand or otherwise send signals upstream. A node does *not* necessarily have awareness of its children - only the capability to receive signals from them.
+
+Each node follows the simple rules:
+
+- Have my parents updated?
+    - Change gating
+    - Emulates a consumer being unable to proceed if there is no stock from a supplier
+- Have I received demand from anyone downstream?
+    - Demand gating
+    - Emulates a consumer sending a Kanban token to its supplier
+- If both:
+    - Send demand to all my parents
+    - Clear my own demand
+    - Start processing
+- When my processing completes:
+    - Indicate I have updated, so that processes waiting on me can begin
+
