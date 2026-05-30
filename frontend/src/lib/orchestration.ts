@@ -41,6 +41,10 @@ function wmKey(parentId: string, childId: string): string {
   return `${parentId}::${childId}`;
 }
 
+// How many generations a pond's leaves may run ahead of a live downstream consumer before
+// back-pressure stalls them. 1 = tight (one buffered generation, the natural pipeline depth).
+const INTER_POND_BUFFER = 1;
+
 // ─── Logging ────────────────────────────────────────────────────────────────
 
 let LOG_START = 0;
@@ -249,6 +253,32 @@ function canStartRipple(rippleId: RippleId, state: OrchestrState): boolean {
   const rs = state.rippleStates[rippleId];
   if (!r || !rs) return false;
   if (rs.isRunning || !rs.hasDemand) return false;
+  // Leaf gate: a leaf feeds P.end, which "consumes" a generation only when the whole pond
+  // completes it. A leaf must not run ahead of that consumption — it can start its next
+  // generation only once the pond has completed (consumed) its previous output. This bounds
+  // concurrent in-flight generations to the topological depth of the ripple DAG: a single
+  // layer of leaves runs in lockstep (1 in flight), deeper chains pipeline one per layer.
+  if (isLeaf(r, state.ripples)) {
+    const ps = state.pondStates[r.pondId];
+    if (!ps) return false;
+    // Local back-pressure: don't run ahead of this pond's own P.end consumption.
+    if (rs.generationCompleted > ps.generationCompleted) return false;
+    // Inter-pond back-pressure: don't run ahead of a downstream pond that is still actively
+    // consuming. Each consumer D records what it has taken in watermark[P::D]; producing a
+    // generation a live consumer hasn't taken lets this pond race at its own cadence and the
+    // backlog grows unbounded. A leaf may stay at most INTER_POND_BUFFER generations ahead of
+    // the slowest live consumer. Idle/stopped consumers (no demand, not mid-run) impose no
+    // back-pressure — otherwise stopping one fork would starve the others.
+    for (const d of Object.values(state.ponds)) {
+      if (!d.sources.includes(r.pondId)) continue;
+      const dps = state.pondStates[d.id];
+      if (!dps) continue;
+      const live = dps.hasRootDemand || dps.hasLeafDemand || dps.generationStarted > dps.generationCompleted;
+      if (!live) continue;
+      const consumed = state.watermarks[wmKey(r.pondId, d.id)] ?? 0;
+      if (rs.generationCompleted - consumed >= INTER_POND_BUFFER) return false;
+    }
+  }
   if (isRoot(r, state.ripples)) {
     const ps = state.pondStates[r.pondId];
     if (!ps) return false;
