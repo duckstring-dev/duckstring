@@ -6,6 +6,8 @@ import type {
   PondRunState,
   RippleRunState,
   WatermarkMap,
+  EdgeKindMap,
+  EdgeDemandKind,
   ActiveTrigger,
 } from './types';
 import { getLeaves, getRoots } from './graph';
@@ -34,11 +36,39 @@ export interface OrchestrState {
   ripples: Record<RippleId, Ripple>;
   rippleStates: Record<RippleId, RippleRunState>;
   watermarks: WatermarkMap;
+  edgeKinds: EdgeKindMap;
   triggers: Record<PondId, ActiveTrigger>;
 }
 
 function wmKey(parentId: string, childId: string): string {
   return `${parentId}::${childId}`;
+}
+
+// Record the kind of demand most recently sent across an edge (same keying as watermarks).
+function setEdge(state: OrchestrState, key: string, kind: EdgeDemandKind): OrchestrState {
+  if (state.edgeKinds[key] === kind) return state;
+  return { ...state, edgeKinds: { ...state.edgeKinds, [key]: kind } };
+}
+
+// Standard normal via Box–Muller.
+function gaussian(): number {
+  let u = 0;
+  let v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+// Sample a run duration: log-normal around the base, with variability as the log-scale SD.
+function sampleDuration(baseMs: number, variability: number): number {
+  if (!variability) return baseMs;
+  return baseMs * Math.exp(variability * gaussian());
+}
+
+const MAX_COMPLETION_HISTORY = 500;
+function pushCompletion(times: number[], now: number): number[] {
+  const next = [...times, now];
+  return next.length > MAX_COMPLETION_HISTORY ? next.slice(next.length - MAX_COMPLETION_HISTORY) : next;
 }
 
 // ─── Logging ────────────────────────────────────────────────────────────────
@@ -129,6 +159,9 @@ function receivePulseRipple(rippleId: RippleId, state: OrchestrState): OrchestrS
   const r = state.ripples[rippleId];
   if (!r) return state;
   let newState = setRipple(state, rippleId, { hasDemand: true });
+  for (const parent of intraPondParents(r, state.ripples)) {
+    newState = setEdge(newState, wmKey(parent.id, rippleId), 'pulse');
+  }
   if (isRoot(r, state.ripples)) {
     newState = receivePulseAtStart(r.pondId, newState);
   } else {
@@ -143,6 +176,9 @@ function receiveWaveRipple(rippleId: RippleId, state: OrchestrState): OrchestrSt
   const r = state.ripples[rippleId];
   if (!r) return state;
   let newState = setRipple(state, rippleId, { hasDemand: true });
+  for (const parent of intraPondParents(r, state.ripples)) {
+    newState = setEdge(newState, wmKey(parent.id, rippleId), 'wave');
+  }
   if (isRoot(r, state.ripples)) {
     newState = receiveWaveAtStart(r.pondId, newState);
   } else {
@@ -160,6 +196,9 @@ function receiveStopRipple(rippleId: RippleId, state: OrchestrState): OrchestrSt
   const r = state.ripples[rippleId];
   if (!r) return state;
   let newState = setRipple(state, rippleId, { hasDemand: false });
+  for (const parent of intraPondParents(r, state.ripples)) {
+    newState = setEdge(newState, wmKey(parent.id, rippleId), 'stop');
+  }
   if (isRoot(r, state.ripples)) {
     newState = receiveStopAtStart(r.pondId, newState);
   } else {
@@ -204,6 +243,7 @@ function demandSources(pondId: PondId, state: OrchestrState): OrchestrState {
     const sps = newState.pondStates[sP];
     if (!sps) continue;
     if ((newState.watermarks[wmKey(sP, pondId)] ?? 0) >= sps.generationCompleted) {
+      newState = setEdge(newState, wmKey(sP, pondId), 'wave');
       newState = receiveWaveAtEnd(sP, newState);
     }
   }
@@ -225,6 +265,7 @@ function receivePulseAtStart(pondId: PondId, state: OrchestrState): OrchestrStat
   log(`recvPulse@start ${pname(state, pondId)} → hasRootDemand=true; propagating to sources [${pond.sources.map((s) => pname(state, s)).join(',')}]`);
   let newState = setPond(state, pondId, { hasRootDemand: true });
   for (const sP of pond.sources) {
+    newState = setEdge(newState, wmKey(sP, pondId), 'pulse');
     newState = receivePulseAtEnd(sP, newState);
   }
   return newState;
@@ -248,6 +289,7 @@ function receiveStopAtStart(pondId: PondId, state: OrchestrState): OrchestrState
   if (!pond) return state;
   let newState = stopPond(state, pondId);
   for (const sP of pond.sources) {
+    newState = setEdge(newState, wmKey(sP, pondId), 'stop');
     newState = receiveStopAtEnd(sP, newState);
   }
   return newState;
@@ -315,7 +357,8 @@ function startRipple(rippleId: RippleId, now: number, state: OrchestrState): Orc
 
   const rootFlag = isRoot(r, state.ripples);
   const runIsWave = state.pondStates[r.pondId]?.generations[newGenStarted]?.isWave ?? false;
-  log(`startRipple ${rname(state, rippleId)} gen=${newGenStarted} ${rootFlag ? '(root)' : '(non-root)'}${isLeaf(r, state.ripples) ? ' (leaf)' : ''} runIsWave=${runIsWave}`);
+  const runDurationMs = sampleDuration(r.durationMs, r.variability);
+  log(`startRipple ${rname(state, rippleId)} gen=${newGenStarted} ${rootFlag ? '(root)' : '(non-root)'}${isLeaf(r, state.ripples) ? ' (leaf)' : ''} runIsWave=${runIsWave} dur=${(runDurationMs / 1000).toFixed(2)}s`);
 
   let newState: OrchestrState = {
     ...state,
@@ -327,6 +370,7 @@ function startRipple(rippleId: RippleId, now: number, state: OrchestrState): Orc
         generationStarted: newGenStarted,
         isRunning: true,
         runStartedAt: now,
+        currentRunDurationMs: runDurationMs,
         hasDemand: false,
       },
     },
@@ -354,7 +398,7 @@ function startRipple(rippleId: RippleId, now: number, state: OrchestrState): Orc
   return newState;
 }
 
-function completeRipple(rippleId: RippleId, state: OrchestrState): OrchestrState {
+function completeRipple(rippleId: RippleId, now: number, state: OrchestrState): OrchestrState {
   const r = state.ripples[rippleId];
   const rs = state.rippleStates[rippleId];
   if (!r || !rs) return state;
@@ -368,6 +412,9 @@ function completeRipple(rippleId: RippleId, state: OrchestrState): OrchestrState
     generationCompleted: rs.generationStarted,
     isRunning: false,
     runStartedAt: null,
+    lastDurationMs: rs.currentRunDurationMs ?? rs.lastDurationMs,
+    currentRunDurationMs: null,
+    completionTimes: pushCompletion(rs.completionTimes, now),
   };
 
   for (const child of children) {
@@ -380,13 +427,13 @@ function completeRipple(rippleId: RippleId, state: OrchestrState): OrchestrState
   let newState: OrchestrState = { ...state, rippleStates: newRippleStates };
 
   if (isLeaf(r, state.ripples)) {
-    newState = updatePondCompleted(r.pondId, newState);
+    newState = updatePondCompleted(r.pondId, now, newState);
   }
 
   return newState;
 }
 
-function updatePondCompleted(pondId: PondId, state: OrchestrState): OrchestrState {
+function updatePondCompleted(pondId: PondId, now: number, state: OrchestrState): OrchestrState {
   const ps = state.pondStates[pondId];
   if (!ps) return state;
   const leaves = getLeaves(pondId, state.ripples);
@@ -399,8 +446,11 @@ function updatePondCompleted(pondId: PondId, state: OrchestrState): OrchestrStat
   log(`pondCompleted ${pname(state, pondId)} gen=${newCompleted}`);
 
   // Wave re-supply is handled per-tick in tick() (the trigger acts as a continuous sink),
-  // so completion only needs to record the new completed generation here.
-  return setPond(state, pondId, { generationCompleted: newCompleted });
+  // so completion only needs to record the new completed generation and its timestamp here.
+  return setPond(state, pondId, {
+    generationCompleted: newCompleted,
+    completionTimes: pushCompletion(ps.completionTimes, now),
+  });
 }
 
 function canAdvancePond(pondId: PondId, state: OrchestrState): boolean {
@@ -476,8 +526,9 @@ export function tick(now: number, state: OrchestrState): OrchestrState {
   for (const [id, rs] of Object.entries(newState.rippleStates)) {
     if (rs.isRunning && rs.runStartedAt !== null) {
       const r = newState.ripples[id];
-      if (r && now - rs.runStartedAt >= r.durationMs) {
-        newState = completeRipple(id, newState);
+      const dur = rs.currentRunDurationMs ?? r?.durationMs ?? 0;
+      if (r && now - rs.runStartedAt >= dur) {
+        newState = completeRipple(id, now, newState);
       }
     }
   }

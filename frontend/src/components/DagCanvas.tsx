@@ -16,7 +16,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { usePlaygroundStore, getRippleVisualState, getPondEdgeVisualState, EDGE_COLORS, STATE_COLORS } from '@/lib/store';
+import { usePlaygroundStore, getEdgeColor, pondIsIdle, rippleIsIdle } from '@/lib/store';
 import { computeLayout } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
@@ -26,9 +26,12 @@ import { TriggerNode } from './TriggerNode';
 
 function RippleEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const sourceRippleId = (data as { sourceRippleId: string }).sourceRippleId;
-  const rs = usePlaygroundStore((s) => s.rippleStates[sourceRippleId]);
+  const sinkRippleId = (data as { sinkRippleId: string }).sinkRippleId;
+  const kind = usePlaygroundStore((s) => s.edgeKinds[`${sourceRippleId}::${sinkRippleId}`]);
+  const sourceIdle = usePlaygroundStore((s) => rippleIsIdle(s.rippleStates[sourceRippleId]));
+  const sinkIdle = usePlaygroundStore((s) => rippleIsIdle(s.rippleStates[sinkRippleId]));
 
-  const color = rs ? STATE_COLORS[getRippleVisualState(rs)] : EDGE_COLORS.idle;
+  const color = getEdgeColor(kind, sourceIdle, sinkIdle);
 
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
@@ -36,9 +39,12 @@ function RippleEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps)
 
 function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const sourcePondId = (data as { sourcePondId: string }).sourcePondId;
-  const sourcePondState = usePlaygroundStore((s) => s.pondStates[sourcePondId]);
+  const sinkPondId = (data as { sinkPondId: string }).sinkPondId;
+  const kind = usePlaygroundStore((s) => s.edgeKinds[`${sourcePondId}::${sinkPondId}`]);
+  const sourceIdle = usePlaygroundStore((s) => pondIsIdle(s.pondStates[sourcePondId]));
+  const sinkIdle = usePlaygroundStore((s) => pondIsIdle(s.pondStates[sinkPondId]));
 
-  const color = EDGE_COLORS[getPondEdgeVisualState(sourcePondState)];
+  const color = getEdgeColor(kind, sourceIdle, sinkIdle);
 
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;

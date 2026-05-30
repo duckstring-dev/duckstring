@@ -10,12 +10,14 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const ps = usePlaygroundStore((s) => s.pondStates[pondId]);
   const selectedPondId = usePlaygroundStore((s) => s.selectedPondId);
   const selectPond = usePlaygroundStore((s) => s.selectPond);
+  const pulseTagGen = usePlaygroundStore((s) => s.pulseTags[pondId]);
 
   if (!pond || !ps) return null;
 
   const visualState = getPondVisualState(ps);
   const borderColor = STATE_COLORS[visualState];
   const isSelected = selectedPondId === pondId;
+  const showPulseTag = pulseTagGen !== undefined && ps.generationCompleted <= pulseTagGen;
 
   return (
     <div
@@ -66,6 +68,25 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           <span>✓{ps.generationCompleted}</span>
         </span>
       </div>
+
+      {showPulseTag && (
+        <div
+          style={{
+            position: 'absolute',
+            top: -10,
+            right: 8,
+            fontSize: 10,
+            fontWeight: 700,
+            color: '#3b82f6',
+            border: '1px solid #3b82f6',
+            borderRadius: 10,
+            padding: '1px 7px',
+            background: '#0f0f14',
+          }}
+        >
+          Pulse
+        </div>
+      )}
 
       <Handle id="out" type="source" position={Position.Right} style={{ background: '#52525b' }} />
     </div>

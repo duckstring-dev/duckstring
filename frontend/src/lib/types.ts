@@ -13,6 +13,9 @@ export interface Ripple {
   name: string;
   parents: RippleId[];
   durationMs: number;
+  // Standard deviation applied on a log transform of durationMs: a run takes
+  // durationMs * exp(variability * Z), Z ~ N(0,1). 0 = deterministic.
+  variability: number;
 }
 
 // One run of a Pond. isWave is captured from pond.isWave when the generation is
@@ -34,6 +37,8 @@ export interface PondRunState {
   // Pending wave intent: set by a wave reaching P.start, cleared by advancePond.
   isWave: boolean;
   generations: Record<number, PondGeneration>;
+  // Timestamps (ms) at which the pond completed a generation — for the run-cadence trace.
+  completionTimes: number[];
 }
 
 export interface RippleRunState {
@@ -42,12 +47,22 @@ export interface RippleRunState {
   isRunning: boolean;
   runStartedAt: number | null;
   hasDemand: boolean;
+  // Sampled duration of the in-flight run (base * exp(variability*Z)); null when idle.
+  currentRunDurationMs: number | null;
+  // Sampled duration of the most recently completed run.
+  lastDurationMs: number | null;
+  // Timestamps (ms) at which this ripple completed a run — for the run-cadence trace.
+  completionTimes: number[];
 }
 
 // Watermark keys:
 //   `${parentRippleId}::${childRippleId}` — intra-pond ripple parent → child
 //   `${sourcePondId}::${sinkPondId}`      — pond-level (held by sink against source)
 export type WatermarkMap = Record<string, number>;
+
+// Kind of demand most recently sent across an edge (keyed like WatermarkMap).
+export type EdgeDemandKind = 'wave' | 'pulse' | 'stop';
+export type EdgeKindMap = Record<string, EdgeDemandKind>;
 
 export type TriggerKind = 'wave' | 'tide';
 

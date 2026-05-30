@@ -7,6 +7,8 @@ import type {
   PondRunState,
   RippleRunState,
   WatermarkMap,
+  EdgeKindMap,
+  EdgeDemandKind,
   ActiveTrigger,
 } from './types';
 import { hasCyclePond, hasCycleRipple, isPondDownstreamOf } from './graph';
@@ -47,6 +49,7 @@ function initialPondState(): PondRunState {
     hasLeafDemand: false,
     isWave: false,
     generations: {},
+    completionTimes: [],
   };
 }
 
@@ -57,6 +60,9 @@ function initialRippleState(): RippleRunState {
     isRunning: false,
     runStartedAt: null,
     hasDemand: false,
+    currentRunDurationMs: null,
+    lastDurationMs: null,
+    completionTimes: [],
   };
 }
 
@@ -92,12 +98,12 @@ function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'pondStates' | 'rippl
       [reportsId]: initialPondState(),
     },
     ripples: {
-      [txIngestId]: { id: txIngestId, pondId: txId, name: 'ingest', parents: [], durationMs: 1000 },
-      [prodIngestId]: { id: prodIngestId, pondId: prodId, name: 'ingest', parents: [], durationMs: 2000 },
-      [dailySalesId]: { id: dailySalesId, pondId: salesId, name: 'daily_sales', parents: [], durationMs: 2000 },
-      [priceTiersId]: { id: priceTiersId, pondId: salesId, name: 'price_tiers', parents: [], durationMs: 1000 },
-      [joinLinesId]: { id: joinLinesId, pondId: salesId, name: 'join_lines', parents: [dailySalesId, priceTiersId], durationMs: 3000 },
-      [monthlySummaryId]: { id: monthlySummaryId, pondId: reportsId, name: 'monthly_summary', parents: [], durationMs: 1000 },
+      [txIngestId]: { id: txIngestId, pondId: txId, name: 'ingest', parents: [], durationMs: 1000, variability: 0 },
+      [prodIngestId]: { id: prodIngestId, pondId: prodId, name: 'ingest', parents: [], durationMs: 2000, variability: 0 },
+      [dailySalesId]: { id: dailySalesId, pondId: salesId, name: 'daily_sales', parents: [], durationMs: 2000, variability: 0 },
+      [priceTiersId]: { id: priceTiersId, pondId: salesId, name: 'price_tiers', parents: [], durationMs: 1000, variability: 0 },
+      [joinLinesId]: { id: joinLinesId, pondId: salesId, name: 'join_lines', parents: [dailySalesId, priceTiersId], durationMs: 3000, variability: 0 },
+      [monthlySummaryId]: { id: monthlySummaryId, pondId: reportsId, name: 'monthly_summary', parents: [], durationMs: 1000, variability: 0 },
     },
     rippleStates: {
       [txIngestId]: initialRippleState(),
@@ -118,15 +124,19 @@ export interface PlaygroundState {
   ripples: Record<RippleId, Ripple>;
   rippleStates: Record<RippleId, RippleRunState>;
   watermarks: WatermarkMap;
+  edgeKinds: EdgeKindMap;
   selectedPondId: PondId | null;
   selectedRippleId: RippleId | null;
   selectedTriggerId: PondId | null;
   triggers: Record<PondId, ActiveTrigger>;
   tideIntervals: Record<PondId, ReturnType<typeof setInterval>>;
+  pulseTags: Record<PondId, number>;
 
   addPond(): void;
-  addRipple(pondId: PondId): void;
+  addRipple(pondId: PondId, parentId?: RippleId): void;
   setRippleDuration(rippleId: RippleId, ms: number): void;
+  setRippleVariability(rippleId: RippleId, variability: number): void;
+  setAllVariability(variability: number): void;
   deletePond(pondId: PondId): void;
   deleteRipple(rippleId: RippleId): void;
   linkPonds(sourcePondId: PondId, sinkPondId: PondId): boolean;
@@ -156,6 +166,7 @@ function toOrchestrState(state: PlaygroundState): OrchestrState {
     ripples: state.ripples,
     rippleStates: state.rippleStates,
     watermarks: state.watermarks,
+    edgeKinds: state.edgeKinds,
     triggers: state.triggers,
   };
 }
@@ -165,6 +176,7 @@ function applyOrch(_prev: PlaygroundState, orch: OrchestrState): Partial<Playgro
     pondStates: orch.pondStates,
     rippleStates: orch.rippleStates,
     watermarks: orch.watermarks,
+    edgeKinds: orch.edgeKinds,
     triggers: orch.triggers,
   };
 }
@@ -179,13 +191,17 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   ripples: demoState.ripples,
   rippleStates: demoState.rippleStates,
   watermarks: {},
+  edgeKinds: {},
   selectedPondId: null,
   selectedRippleId: null,
   selectedTriggerId: null,
   triggers: {},
   tideIntervals: {},
+  pulseTags: {},
 
   addPond() {
+    // If a pond is selected, link the new pond as its sink.
+    const sourcePondId = get().selectedPondId;
     const id = newPondId();
     const pond: Pond = { id, name: newPondName(), sources: [] };
     rippleCounters[id] = 0;
@@ -196,6 +212,7 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
       name: newRippleName(id),
       parents: [],
       durationMs: 1000,
+      variability: 0,
     };
     set((s) => ({
       ponds: { ...s.ponds, [id]: pond },
@@ -206,9 +223,12 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
       selectedRippleId: null,
       selectedTriggerId: null,
     }));
+    if (sourcePondId && get().ponds[sourcePondId]) {
+      get().linkPonds(sourcePondId, id);
+    }
   },
 
-  addRipple(pondId) {
+  addRipple(pondId, parentId) {
     const rippleId = newRippleId();
     const ripple: Ripple = {
       id: rippleId,
@@ -216,17 +236,35 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
       name: newRippleName(pondId),
       parents: [],
       durationMs: 1000,
+      variability: 0,
     };
     set((s) => ({
       ripples: { ...s.ripples, [rippleId]: ripple },
       rippleStates: { ...s.rippleStates, [rippleId]: initialRippleState() },
     }));
+    if (parentId && get().ripples[parentId]?.pondId === pondId) {
+      get().linkRipples(parentId, rippleId);
+    }
   },
 
   setRippleDuration(rippleId, ms) {
     set((s) => ({
       ripples: { ...s.ripples, [rippleId]: { ...s.ripples[rippleId], durationMs: ms } },
     }));
+  },
+
+  setRippleVariability(rippleId, variability) {
+    set((s) => ({
+      ripples: { ...s.ripples, [rippleId]: { ...s.ripples[rippleId], variability } },
+    }));
+  },
+
+  setAllVariability(variability) {
+    set((s) => {
+      const ripples: Record<RippleId, Ripple> = {};
+      for (const [id, r] of Object.entries(s.ripples)) ripples[id] = { ...r, variability };
+      return { ripples };
+    });
   },
 
   deletePond(pondId) {
@@ -369,7 +407,10 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   },
 
   triggerPulse(pondId) {
-    set((s) => applyOrch(s, receivePulseAtEnd(pondId, toOrchestrState(s))));
+    set((s) => ({
+      ...applyOrch(s, receivePulseAtEnd(pondId, toOrchestrState(s))),
+      pulseTags: { ...s.pulseTags, [pondId]: s.pondStates[pondId]?.generationCompleted ?? 0 },
+    }));
   },
 
   triggerWave(pondId) {
@@ -448,6 +489,22 @@ export function getPondEdgeVisualState(sourcePs: PondRunState | undefined): 'wav
   return sourcePs.isWave ? 'wave' : 'pulse';
 }
 
+export function pondIsIdle(ps: PondRunState | undefined): boolean {
+  if (!ps) return true;
+  return ps.generationStarted <= ps.generationCompleted && !ps.hasRootDemand && !ps.hasLeafDemand;
+}
+
+export function rippleIsIdle(rs: RippleRunState | undefined): boolean {
+  if (!rs) return true;
+  return !rs.isRunning && !rs.hasDemand;
+}
+
+// Edge colour = most-recent demand kind, but cleared to grey once both endpoints are idle.
+export function getEdgeColor(kind: EdgeDemandKind | undefined, sourceIdle: boolean, sinkIdle: boolean): string {
+  if (!kind || (sourceIdle && sinkIdle)) return EDGE_COLORS.idle;
+  return EDGE_COLORS[kind];
+}
+
 export const STATE_COLORS: Record<string, string> = {
   running: '#22c55e',
   queued: '#f97316',
@@ -458,5 +515,6 @@ export const STATE_COLORS: Record<string, string> = {
 export const EDGE_COLORS: Record<string, string> = {
   wave: '#22c55e',
   pulse: '#3b82f6',
+  stop: '#ef4444',
   idle: '#3f3f46',
 };
