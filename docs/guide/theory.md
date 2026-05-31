@@ -92,7 +92,7 @@ It is helpful to imagine a unit operation as a node in a directed graph (the DAG
 
 Each node follows the simple rules:
 
-- Have my parents updated?
+- Am I waiting on my parents?
     - Change gating
     - Emulates a consumer being unable to proceed if there is no stock from a supplier
 - Have I received demand from anyone downstream?
@@ -104,6 +104,8 @@ Each node follows the simple rules:
     - Start processing
 - When my processing completes:
     - Indicate I have updated, so that processes waiting on me can begin
+
+To handle starts from an idle state, when demand is received it is immediately sent to any parent that is idle (not running and has no demand).
 
 #### Examples
 
@@ -133,7 +135,190 @@ flowchart LR
 
 We will denote the number of times a node has updated (its *generation*) with a colon, such that "A:3" indicates A has run 3 times. If a node is ahead of its child, the edge between them will be solid - otherwise, it will be dotted.
 
-1) All start idle, with each node one generation ahead of the one after it:
+##### Cold Start
+
+1) All start idle, with each node starting at generation 0:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:0] .-> B[B:0]
+        B .-> C[C:0]
+    ```
+
+2) C is given demand and enters the queued state:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:0] .-> B[B:0]
+        B .-> C[C:0]:::queued
+        C <.- D((Demand)):::queued
+    ```
+
+    1) As its parent is idle, C immediately sends demand to B, putting it into the queued state also:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:0] .-> B[B:0]:::queued
+        B .-> C[C:0]:::queued
+    ```
+
+    2) B then does the same to A:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:0]:::queued .-> B[B:0]:::queued
+        B .-> C[C:0]:::queued
+    ```
+
+    3) A has no parents, so there's nothing to wait for - it begins its run. Demand is cleared and the node starts, putting it in the running state:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:0]:::running .-> B[B:0]:::queued
+        B .-> C[C:0]:::queued
+    ```
+
+4) A completes, meaning it has updated relative to B and B can start:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:1] --> B[B:0]:::queued
+        B .-> C[C:0]:::queued
+    ```
+
+    1) Demand is sent to its parent A, putting it in the queued state:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:1]:::queued --> B[B:0]:::queued
+        B .-> C[C:0]:::queued
+    ```
+
+    2) Demand is cleared and B starts, putting it in the running state:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:1]:::queued --> B[B:0]:::running
+        B .-> C[C:0]:::queued
+    ```
+
+    2) A has demand and begins its run simultaneously:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:1]:::running --> B[B:0]:::running
+        B .-> C[C:0]:::queued
+    ```
+
+5) A completes before B and sits idle:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:2] --> B[B:0]:::running
+        B .-> C[C:0]:::queued
+    ```
+
+6) B completes, meaning it has updated relative to C and C can start:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:2] --> B[B:1]
+        B --> C[C:0]:::queued
+    ```
+
+    1) Demand is sent to its parent C, putting it in the queued state:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:2] --> B[B:1]:::queued
+        B --> C[C:0]:::queued
+    ```
+
+    2) Demand is cleared and C starts, putting it in the running state:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:2] --> B[B:1]:::queued
+        B --> C[C:0]:::running
+    ```
+
+    3) B has demand and begins its run simultaneously, sending demand back to A:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:2]:::queued --> B[B:1]:::running
+        B --> C[C:0]:::running
+    ```
+
+    4) A has demand and begins its run simultaneously:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:2]:::running --> B[B:1]:::running
+        B --> C[C:0]:::running
+    ```
+
+6) A, B and C each eventually complete their run:
 
     ```mermaid
     flowchart LR
@@ -145,7 +330,11 @@ We will denote the number of times a node has updated (its *generation*) with a 
         B --> C[C:1]
     ```
 
-2) C is given demand and enters the queued state:
+This is generally the outcome of a pull-based execution: each node runs the same number of times as the distance from the end of the DAG.
+
+##### Continued Run
+
+1) C is given demand and enters the queued state:
 
     ```mermaid
     flowchart LR
@@ -155,9 +344,10 @@ We will denote the number of times a node has updated (its *generation*) with a 
 
         A[A:3] --> B[B:2]
         B --> C[C:1]:::queued
+        C <.- D((Demand)):::queued
     ```
 
-3) As its parent is a generation ahead, it starts a run:
+2) As its parent is a generation ahead, it starts a run:
 
     1) Demand is sent to its parent, putting it in the queued state:
 
@@ -183,7 +373,7 @@ We will denote the number of times a node has updated (its *generation*) with a 
         B --> C[C:1]:::running
     ```
 
-4) B repeats the same, sending demand upstream and starting:
+3) B repeats the same, sending demand upstream and starting:
 
     ```mermaid
     flowchart LR
@@ -195,7 +385,7 @@ We will denote the number of times a node has updated (its *generation*) with a 
         B --> C[C:1]:::running
     ```
 
-5) A has no parents, so can start as soon as it receives demand:
+4) A has no parents, so can start as soon as it receives demand:
 
     ```mermaid
     flowchart LR
@@ -207,9 +397,36 @@ We will denote the number of times a node has updated (its *generation*) with a 
         B --> C[C:1]:::running
     ```
 
-6) All nodes run simultaneously
+5) A, B and C each eventually complete their run:
 
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:4] --> B[B:3]
+        B --> C[C:2]
+    ```
+
+Each subsequent run on a previously-executed pull advances each node by one generation, without waiting for the updates to propagate from start to finish.
 
 TODO:
 - Outline behaviour with branching, e.g. with A -> C, B -> C, B -> D, to demonstrate that parents of less frequent pathways can be left stale while others execute
-- 
+    - Deliberate on demand being *any*, so if there is existing demand, it has no additional effect
+- Describe the other mode - push - that can also be executed
+    - Nodes can have either pull or push tokens or both
+- Freshness concept in place of generations, and conditions under which push and pull execute
+- Introduce the encapsulation of nodes into Ponds and Ripples:
+    - A Ripple is a node as has been discussed so far
+    - A Pond is a sequence of Ripples but with a zero-duration pseudo-node parent to all root Ripples, and a similar pseudo-node child to all leaf Ripples
+- Summarise simplifications that can be made under this framing:
+    - All auto-propagating condtions affect both head and tail pseudo-nodes, meaning they can be tracked as an overall state variable against the pond itself, or hop directly from tail to head
+        - Push tokens
+        - Pull tokens when idle
+    - Ponds can be triggered as a "pond run"
+        - Pull tokens always jump straight to the head when idle
+        - All ripples must have also been idle
+        - Each ripple gets a push token to ensure all in the pond are executed to the same freshness
+        - If the pond has pull demand, each ripple also gets a pull token
+    - New pond runs are initiated if a root ripple restarts
