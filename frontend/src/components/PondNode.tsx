@@ -17,7 +17,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const visualState = getPondVisualState(ps);
   const borderColor = STATE_COLORS[visualState];
   const isSelected = selectedPondId === pondId;
-  const showPulseTag = pulseTagGen !== undefined && ps.generationCompleted <= pulseTagGen;
+  const showPulseTag = pulseTagGen !== undefined && ps.runsCompleted <= pulseTagGen;
 
   return (
     <div
@@ -64,8 +64,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           {pond.name}
         </span>
         <span style={{ fontSize: 11, color: '#71717a', display: 'flex', gap: 6 }}>
-          <span style={{ color: '#a1a1aa' }}>↑{ps.generationStarted}</span>
-          <span>✓{ps.generationCompleted}</span>
+          <span style={{ color: '#a1a1aa' }}>↑{ps.runsStarted}</span>
+          <span>✓{ps.runsCompleted}</span>
         </span>
       </div>
 

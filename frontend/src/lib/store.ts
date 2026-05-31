@@ -6,7 +6,6 @@ import type {
   Ripple,
   PondRunState,
   RippleRunState,
-  WatermarkMap,
   EdgeKindMap,
   EdgeDemandKind,
   ActiveTrigger,
@@ -14,10 +13,9 @@ import type {
 import { hasCyclePond, hasCycleRipple, isPondDownstreamOf } from './graph';
 import {
   tick as orchTick,
-  receivePulseAtEnd,
-  receiveWaveAtEnd,
-  receiveStopAtEnd,
-  receiveStart,
+  pullPond,
+  pushPond,
+  stopPond,
   type OrchestrState,
 } from './orchestration';
 
@@ -43,29 +41,31 @@ function newRippleName(pondId: PondId): string {
 
 function initialPondState(): PondRunState {
   return {
-    generationStarted: 0,
-    generationCompleted: 0,
-    hasRootDemand: false,
-    hasLeafDemand: false,
-    isWave: false,
-    generations: {},
+    F: 0,
+    hasPull: false,
+    hasPush: null,
+    runsStarted: 0,
+    runsCompleted: 0,
+    genStart: null,
     completionTimes: [],
     durations: [],
-    genStartTimes: {},
   };
 }
 
 function initialRippleState(): RippleRunState {
   return {
-    generationStarted: 0,
-    generationCompleted: 0,
+    F: 0,
+    hasPull: false,
+    hasPush: null,
+    runFreshness: null,
     isRunning: false,
     runStartedAt: null,
-    hasDemand: false,
     currentRunDurationMs: null,
     lastDurationMs: null,
     completionTimes: [],
     durations: [],
+    runsStarted: 0,
+    runsCompleted: 0,
   };
 }
 
@@ -154,11 +154,11 @@ export interface PlaygroundState {
   selectTrigger(pondId: PondId | null): void;
   clearSelection(): void;
 
+  triggerTap(pondId: PondId): void;
   triggerPulse(pondId: PondId): void;
   triggerWave(pondId: PondId): void;
   triggerTide(pondId: PondId, periodMs: number): void;
   triggerStop(pondId: PondId): void;
-  triggerStart(pondId: PondId): void;
   removeTrigger(pondId: PondId): void;
 
   tick(now: number): void;
@@ -170,7 +170,6 @@ function toOrchestrState(state: PlaygroundState): OrchestrState {
     pondStates: state.pondStates,
     ripples: state.ripples,
     rippleStates: state.rippleStates,
-    watermarks: state.watermarks,
     edgeKinds: state.edgeKinds,
     triggers: state.triggers,
   };
@@ -180,7 +179,6 @@ function applyOrch(_prev: PlaygroundState, orch: OrchestrState): Partial<Playgro
   return {
     pondStates: orch.pondStates,
     rippleStates: orch.rippleStates,
-    watermarks: orch.watermarks,
     edgeKinds: orch.edgeKinds,
     triggers: orch.triggers,
   };
@@ -195,7 +193,6 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   pondStates: demoState.pondStates,
   ripples: demoState.ripples,
   rippleStates: demoState.rippleStates,
-  watermarks: {},
   edgeKinds: {},
   selectedPondId: null,
   selectedRippleId: null,
@@ -423,48 +420,48 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     set({ selectedPondId: null, selectedRippleId: null, selectedTriggerId: null });
   },
 
+  // Tap: one-shot resupply (pull).
+  triggerTap(pondId) {
+    set((s) => applyOrch(s, pullPond(pondId, toOrchestrState(s))));
+  },
+
+  // Pulse: one-shot priority freshness target (push to now).
   triggerPulse(pondId) {
     set((s) => ({
-      ...applyOrch(s, receivePulseAtEnd(pondId, toOrchestrState(s))),
-      pulseTags: { ...s.pulseTags, [pondId]: s.pondStates[pondId]?.generationCompleted ?? 0 },
+      ...applyOrch(s, pushPond(pondId, Date.now(), toOrchestrState(s))),
+      pulseTags: { ...s.pulseTags, [pondId]: s.pondStates[pondId]?.runsCompleted ?? 0 },
     }));
   },
 
+  // Wave: continuous Tap — the per-tick pull is driven by the trigger in orchestration.tick.
   triggerWave(pondId) {
     const state = get();
     if (!isOutlet(state.ponds, pondId)) return;
     state.removeTrigger(pondId);
     const trigger: ActiveTrigger = { pondId, kind: 'wave' };
-    set((s) => {
-      const orchWithTrigger: OrchestrState = {
-        ...toOrchestrState(s),
-        triggers: { ...s.triggers, [pondId]: trigger },
-      };
-      return applyOrch(s, receiveWaveAtEnd(pondId, orchWithTrigger));
-    });
+    set((s) => ({
+      ...applyOrch(s, pullPond(pondId, { ...toOrchestrState(s), triggers: { ...s.triggers, [pondId]: trigger } })),
+    }));
   },
 
+  // Tide: scheduled Pulse — a fresh push target each period.
   triggerTide(pondId, periodMs) {
     get().removeTrigger(pondId);
     const trigger: ActiveTrigger = { pondId, kind: 'tide', periodMs };
-    const pulse = () => {
-      set((s) => applyOrch(s, receivePulseAtEnd(pondId, toOrchestrState(s))));
+    const fire = () => {
+      set((s) => applyOrch(s, pushPond(pondId, Date.now(), toOrchestrState(s))));
     };
-    const intervalId = setInterval(pulse, periodMs);
+    const intervalId = setInterval(fire, periodMs);
     set((s) => ({
       triggers: { ...s.triggers, [pondId]: trigger },
       tideIntervals: { ...s.tideIntervals, [pondId]: intervalId },
     }));
-    pulse();
+    fire();
   },
 
   triggerStop(pondId) {
     get().removeTrigger(pondId);
-    set((s) => applyOrch(s, receiveStopAtEnd(pondId, toOrchestrState(s))));
-  },
-
-  triggerStart(pondId) {
-    set((s) => applyOrch(s, receiveStart(pondId, toOrchestrState(s))));
+    set((s) => applyOrch(s, stopPond(pondId, toOrchestrState(s))));
   },
 
   removeTrigger(pondId) {

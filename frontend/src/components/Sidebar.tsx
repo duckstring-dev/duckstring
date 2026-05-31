@@ -84,7 +84,7 @@ export function Sidebar() {
   const triggerWave = usePlaygroundStore((s) => s.triggerWave);
   const triggerTide = usePlaygroundStore((s) => s.triggerTide);
   const triggerStop = usePlaygroundStore((s) => s.triggerStop);
-  const triggerStart = usePlaygroundStore((s) => s.triggerStart);
+  const triggerTap = usePlaygroundStore((s) => s.triggerTap);
   const removeTrigger = usePlaygroundStore((s) => s.removeTrigger);
 
   const [tidePeriod, setTidePeriod] = useState('2');
@@ -205,8 +205,9 @@ export function Sidebar() {
             {isOutlet ? (
               <>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  <Btn onClick={() => triggerPulse(selectedPond.id)} color="#3b82f6">Pulse</Btn>
+                  <Btn onClick={() => triggerTap(selectedPond.id)} color="#22c55e">Tap</Btn>
                   <Btn onClick={() => triggerWave(selectedPond.id)} color="#22c55e">Wave</Btn>
+                  <Btn onClick={() => triggerPulse(selectedPond.id)} color="#3b82f6">Pulse</Btn>
                   <Btn onClick={() => setShowTideInput((v) => !v)} color="#3b82f6">Tide</Btn>
                 </div>
                 {showTideInput && (
@@ -227,12 +228,6 @@ export function Sidebar() {
                 </Btn>
               </div>
             )}
-          </Section>
-
-          {/* Start section */}
-          <Section>
-            <Label>Start</Label>
-            <Btn onClick={() => triggerStart(selectedPond.id)} color="#22c55e">Start</Btn>
           </Section>
 
           {/* Stop section */}

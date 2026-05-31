@@ -16,7 +16,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
   const visualState = getRippleVisualState(rs);
   const borderColor = STATE_COLORS[visualState];
   const isSelected = selectedRippleId === rippleId;
-  const displayGen = rs.isRunning ? rs.generationStarted : rs.generationCompleted;
+  const displayGen = rs.isRunning ? rs.runsStarted : rs.runsCompleted;
 
   return (
     <div
