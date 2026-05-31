@@ -116,8 +116,11 @@ function parentsFreshness(ripple: Ripple, state: OrchestrState, now: number): nu
 
 // ─── Demand: pull (Tap/Wave) ────────────────────────────────────────────────
 
-// Cold-start KICK: arm this ripple and recurse to idle parents, so an idle chain wakes all the
-// way to its inlets. Used only when demand first arrives (trigger / Tap).
+// Cold-start KICK: arm this ripple, and recurse only into parents that are NOT already fresher
+// than me. A parent that's already ahead doesn't need waking — I'm ready to run against it now,
+// and my run-start re-arm (armPull) will request its next resupply. This is what prevents a
+// parent double-executing (once on receipt, once on my start). Cold start (all F=0) recurses
+// because 0 <= 0. Used only when demand first arrives (trigger / Tap / Wave outlet).
 function kickPull(rippleId: RippleId, state: OrchestrState): OrchestrState {
   const rs = state.rippleStates[rippleId];
   const r = state.ripples[rippleId];
@@ -127,7 +130,7 @@ function kickPull(rippleId: RippleId, state: OrchestrState): OrchestrState {
   for (const pid of [...required, ...optional]) {
     ns = markEdge(ns, pid, rippleId, 'pull');
     const prs = ns.rippleStates[pid];
-    if (prs && !prs.isRunning && !prs.hasPull) ns = kickPull(pid, ns);
+    if (prs && !prs.isRunning && !prs.hasPull && prs.F <= rs.F) ns = kickPull(pid, ns);
   }
   return ns;
 }
@@ -281,6 +284,12 @@ function recomputePonds(state: OrchestrState, now: number): OrchestrState {
     const runsStarted = roots.length ? Math.max(...roots.map((r) => state.rippleStates[r.id]?.runsStarted ?? 0)) : 0;
     const runsCompleted = leaves.length ? Math.min(...leaves.map((l) => state.rippleStates[l.id]?.runsCompleted ?? 0)) : 0;
     const F = leaves.length ? Math.min(...leaves.map((l) => state.rippleStates[l.id]?.F ?? 0)) : 0;
+    const startedF = leaves.length
+      ? Math.min(...leaves.map((l) => {
+          const lrs = state.rippleStates[l.id];
+          return (lrs?.isRunning ? lrs.runFreshness : lrs?.F) ?? 0;
+        }))
+      : 0;
     const hasPull = leaves.some((l) => state.rippleStates[l.id]?.hasPull);
     const pushes = leaves.map((l) => state.rippleStates[l.id]?.hasPush ?? 0).filter((v) => v > 0);
     const hasPush = pushes.length ? Math.max(...pushes) : null;
@@ -293,7 +302,7 @@ function recomputePonds(state: OrchestrState, now: number): OrchestrState {
       completionTimes = pushHistory(prev.completionTimes, now);
       if (genStart != null) durations = pushHistory(prev.durations, now - genStart);
     }
-    pondStates[pond.id] = { F, hasPull, hasPush, runsStarted, runsCompleted, genStart, completionTimes, durations };
+    pondStates[pond.id] = { F, startedF, hasPull, hasPush, runsStarted, runsCompleted, genStart, completionTimes, durations };
   }
   return { ...state, pondStates };
 }

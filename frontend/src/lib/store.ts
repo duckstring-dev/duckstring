@@ -42,6 +42,7 @@ function newRippleName(pondId: PondId): string {
 function initialPondState(): PondRunState {
   return {
     F: 0,
+    startedF: 0,
     hasPull: false,
     hasPush: null,
     runsStarted: 0,
@@ -126,8 +127,8 @@ export interface PlaygroundState {
   pondStates: Record<PondId, PondRunState>;
   ripples: Record<RippleId, Ripple>;
   rippleStates: Record<RippleId, RippleRunState>;
-  watermarks: WatermarkMap;
   edgeKinds: EdgeKindMap;
+  now: number;
   selectedPondId: PondId | null;
   selectedRippleId: RippleId | null;
   selectedTriggerId: PondId | null;
@@ -189,6 +190,7 @@ function isOutlet(ponds: Record<PondId, Pond>, pondId: PondId): boolean {
 }
 
 export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
+  now: Date.now(),
   ponds: demoState.ponds,
   pondStates: demoState.pondStates,
   ripples: demoState.ripples,
@@ -477,40 +479,38 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   },
 
   tick(now) {
-    set((s) => applyOrch(s, orchTick(now, toOrchestrState(s))));
+    set((s) => ({ ...applyOrch(s, orchTick(now, toOrchestrState(s))), now }));
   },
 }));
 
 // ─── Visual state helpers ────────────────────────────────────────────────────
 
+// Age (seconds, 1dp) of a freshness timestamp relative to now. F=0 (never run) → '—'.
+export function formatAge(F: number, now: number): string {
+  if (!F) return '—';
+  return `${Math.max(0, (now - F) / 1000).toFixed(1)}s`;
+}
+
 export function getRippleVisualState(rs: RippleRunState): 'running' | 'queued' | 'idle' {
   if (rs.isRunning) return 'running';
-  if (rs.hasDemand) return 'queued';
+  if (rs.hasPull || rs.hasPush !== null) return 'queued';
   return 'idle';
 }
 
-export function getPondVisualState(ps: PondRunState): 'running' | 'queued' | 'wave' | 'idle' {
-  if (ps.generationStarted > ps.generationCompleted) return 'running';
-  // Gate on leaf demand: hasRootDemand/isWave can linger after a wave peters out, but
-  // without downstream demand the pond is quiescent and should read idle.
-  if (ps.hasLeafDemand) return ps.isWave ? 'wave' : 'queued';
+export function getPondVisualState(ps: PondRunState): 'running' | 'queued' | 'idle' {
+  if (ps.runsStarted > ps.runsCompleted) return 'running';
+  if (ps.hasPull || ps.hasPush !== null) return 'queued';
   return 'idle';
-}
-
-export function getPondEdgeVisualState(sourcePs: PondRunState | undefined): 'wave' | 'pulse' | 'idle' {
-  if (!sourcePs) return 'idle';
-  if (!sourcePs.hasLeafDemand) return 'idle';
-  return sourcePs.isWave ? 'wave' : 'pulse';
 }
 
 export function pondIsIdle(ps: PondRunState | undefined): boolean {
   if (!ps) return true;
-  return ps.generationStarted <= ps.generationCompleted && !ps.hasRootDemand && !ps.hasLeafDemand;
+  return ps.runsStarted <= ps.runsCompleted && !ps.hasPull && ps.hasPush === null;
 }
 
 export function rippleIsIdle(rs: RippleRunState | undefined): boolean {
   if (!rs) return true;
-  return !rs.isRunning && !rs.hasDemand;
+  return !rs.isRunning && !rs.hasPull && rs.hasPush === null;
 }
 
 // Edge colour = most-recent demand kind, but cleared to grey once both endpoints are idle.
@@ -522,13 +522,13 @@ export function getEdgeColor(kind: EdgeDemandKind | undefined, sourceIdle: boole
 export const STATE_COLORS: Record<string, string> = {
   running: '#22c55e',
   queued: '#f97316',
-  wave: '#22c55e',
   idle: '#71717a',
 };
 
+// pull (Tap/Wave) keeps green; push (Pulse/Tide) blue; stop red.
 export const EDGE_COLORS: Record<string, string> = {
-  wave: '#22c55e',
-  pulse: '#3b82f6',
+  pull: '#22c55e',
+  push: '#3b82f6',
   stop: '#ef4444',
   idle: '#3f3f46',
 };

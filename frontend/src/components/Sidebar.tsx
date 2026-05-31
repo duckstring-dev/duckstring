@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { usePlaygroundStore } from '@/lib/store';
+import { usePlaygroundStore, formatAge } from '@/lib/store';
 import { TraceChart } from './TraceChart';
 
 function Btn({
@@ -61,6 +61,7 @@ export function Sidebar() {
   const ponds = usePlaygroundStore((s) => s.ponds);
   const ripples = usePlaygroundStore((s) => s.ripples);
   const pondStates = usePlaygroundStore((s) => s.pondStates);
+  const now = usePlaygroundStore((s) => s.now);
   const rippleStates = usePlaygroundStore((s) => s.rippleStates);
   const selectedPondId = usePlaygroundStore((s) => s.selectedPondId);
   const selectedRippleId = usePlaygroundStore((s) => s.selectedRippleId);
@@ -163,6 +164,11 @@ export function Sidebar() {
               <input type="text" defaultValue={selectedPond.name} key={`pn-${selectedPond.id}`}
                 onChange={(e) => { const v = e.target.value.trim(); if (v) renamePond(selectedPond.id, v); }}
                 style={{ ...numInput, width: 140 }} />
+            </div>
+            <div style={{ fontSize: 11, color: '#71717a', marginBottom: 10 }}>
+              Runs: <span style={{ color: '#a1a1aa' }}>{pondStates[selectedPond.id]?.runsCompleted ?? 0}</span>
+              <span style={{ color: '#52525b' }}> · </span>
+              freshness <span style={{ color: '#a1a1aa' }}>{formatAge(pondStates[selectedPond.id]?.F ?? 0, now)}</span> old
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               <Btn onClick={() => addRipple(selectedPond.id)} color="#6366f1">+ Add Ripple</Btn>
@@ -277,13 +283,20 @@ export function Sidebar() {
               <span style={{ fontSize: 11, color: '#71717a' }}>σ(ln)</span>
             </div>
 
-            <div style={{ fontSize: 11, color: '#71717a', marginBottom: 10 }}>
-              Last run:{' '}
-              <span style={{ color: '#a1a1aa' }}>
-                {rippleStates[selectedRippleId!]?.lastDurationMs != null
-                  ? `${(rippleStates[selectedRippleId!]!.lastDurationMs! / 1000).toFixed(2)}s`
-                  : '—'}
-              </span>
+            <div style={{ fontSize: 11, color: '#71717a', marginBottom: 10, lineHeight: 1.6 }}>
+              <div>
+                Runs: <span style={{ color: '#a1a1aa' }}>{rippleStates[selectedRippleId!]?.runsCompleted ?? 0}</span>
+                <span style={{ color: '#52525b' }}> · </span>
+                freshness <span style={{ color: '#a1a1aa' }}>{formatAge(rippleStates[selectedRippleId!]?.F ?? 0, now)}</span> old
+              </div>
+              <div>
+                Last run:{' '}
+                <span style={{ color: '#a1a1aa' }}>
+                  {rippleStates[selectedRippleId!]?.lastDurationMs != null
+                    ? `${(rippleStates[selectedRippleId!]!.lastDurationMs! / 1000).toFixed(2)}s`
+                    : '—'}
+                </span>
+              </div>
             </div>
 
             {selectedRipple.parents.length > 0 && (

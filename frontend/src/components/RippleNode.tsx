@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { usePlaygroundStore, getRippleVisualState, STATE_COLORS } from '@/lib/store';
+import { usePlaygroundStore, getRippleVisualState, formatAge, STATE_COLORS } from '@/lib/store';
 
 export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
   const rippleId = data.rippleId as string;
@@ -10,13 +10,15 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
   const rs = usePlaygroundStore((s) => s.rippleStates[rippleId]);
   const selectedRippleId = usePlaygroundStore((s) => s.selectedRippleId);
   const selectRipple = usePlaygroundStore((s) => s.selectRipple);
+  const now = usePlaygroundStore((s) => s.now);
 
   if (!ripple || !rs) return null;
 
   const visualState = getRippleVisualState(rs);
   const borderColor = STATE_COLORS[visualState];
   const isSelected = selectedRippleId === rippleId;
-  const displayGen = rs.isRunning ? rs.runsStarted : rs.runsCompleted;
+  // Age of the started run: in-flight freshness while running, else last output freshness.
+  const runFresh = rs.isRunning ? rs.runFreshness ?? 0 : rs.F;
 
   return (
     <div
@@ -46,7 +48,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
         <span style={{ fontSize: 12, fontWeight: 600, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {ripple.name}
         </span>
-        <span style={{ fontSize: 11, color: '#a1a1aa', flexShrink: 0 }}>↑{displayGen}</span>
+        <span style={{ fontSize: 11, color: '#a1a1aa', flexShrink: 0 }}>↑{formatAge(runFresh, now)}</span>
       </div>
       <div style={{ fontSize: 11, color: borderColor, display: 'flex', gap: 6, whiteSpace: 'nowrap' }}>
         <span style={{ color: '#a1a1aa' }}>

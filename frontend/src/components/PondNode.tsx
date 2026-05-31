@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { usePlaygroundStore, getPondVisualState, STATE_COLORS } from '@/lib/store';
+import { usePlaygroundStore, getPondVisualState, formatAge, STATE_COLORS } from '@/lib/store';
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
@@ -10,6 +10,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const ps = usePlaygroundStore((s) => s.pondStates[pondId]);
   const selectedPondId = usePlaygroundStore((s) => s.selectedPondId);
   const selectPond = usePlaygroundStore((s) => s.selectPond);
+  const now = usePlaygroundStore((s) => s.now);
   const pulseTagGen = usePlaygroundStore((s) => s.pulseTags[pondId]);
 
   if (!pond || !ps) return null;
@@ -64,8 +65,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           {pond.name}
         </span>
         <span style={{ fontSize: 11, color: '#71717a', display: 'flex', gap: 6 }}>
-          <span style={{ color: '#a1a1aa' }}>↑{ps.runsStarted}</span>
-          <span>✓{ps.runsCompleted}</span>
+          <span style={{ color: '#a1a1aa' }}>↑{formatAge(ps.startedF, now)}</span>
+          <span>✓{formatAge(ps.F, now)}</span>
         </span>
       </div>
 

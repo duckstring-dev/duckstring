@@ -41,7 +41,8 @@ export interface RippleRunState {
 
 // Derived-each-tick pond rollup for display.
 export interface PondRunState {
-  F: number; // min over leaf ripples' F
+  F: number; // completed-run freshness: min over leaf ripples' F
+  startedF: number; // started-run freshness: min over leaves of (in-flight runFreshness else F)
   hasPull: boolean; // any leaf pulling
   hasPush: number | null; // max leaf push target
   runsStarted: number; // max over root ripples
