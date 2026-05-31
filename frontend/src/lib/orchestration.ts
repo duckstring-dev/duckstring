@@ -85,6 +85,30 @@ function markEdge(state: OrchestrState, parentId: RippleId, childId: RippleId, k
   return setEdge(state, key, kind);
 }
 
+// A pond root has no intra-pond parents (its inputs, if any, are source-pond leaves).
+function isPondRoot(ripple: Ripple, state: OrchestrState): boolean {
+  return !ripple.parents.some((pid) => state.ripples[pid]?.pondId === ripple.pondId);
+}
+
+// Is this ripple's pond the trigger pond, or upstream of one (so a standing trigger's demand
+// flows through it)? Used to gate pipelining to standing-demand chains only.
+function feedsActiveTrigger(ripple: Ripple, state: OrchestrState): boolean {
+  const start = ripple.pondId;
+  const seen = new Set<PondId>();
+  const stack = [start];
+  while (stack.length) {
+    const pid = stack.pop()!;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    if (state.triggers[pid]) return true;
+    // walk to ponds that have this pond as a source (downstream)
+    for (const p of Object.values(state.ponds)) {
+      if (p.sources.includes(pid)) stack.push(p.id);
+    }
+  }
+  return false;
+}
+
 // Flattened parents of a ripple, split required/optional. Intra-pond parents if any; otherwise
 // (a pond root) the leaf ripples of the pond's source ponds.
 function parentsOf(ripple: Ripple, state: OrchestrState): { required: RippleId[]; optional: RippleId[] } {
@@ -116,32 +140,35 @@ function parentsFreshness(ripple: Ripple, state: OrchestrState, now: number): nu
 
 // ─── Demand: pull (Tap/Wave) ────────────────────────────────────────────────
 
-// Cold-start KICK: arm this ripple, and recurse only into parents that are NOT already fresher
-// than me. A parent that's already ahead doesn't need waking — I'm ready to run against it now,
-// and my run-start re-arm (armPull) will request its next resupply. This is what prevents a
-// parent double-executing (once on receipt, once on my start). Cold start (all F=0) recurses
-// because 0 <= 0. Used only when demand first arrives (trigger / Tap / Wave outlet).
-function kickPull(rippleId: RippleId, state: OrchestrState): OrchestrState {
+// Arm a ripple with pull, then propagate upward only as far as needed to keep a producer working:
+//   - If this node is IDLE and CAN run now (a parent fresher than it), stop — it will run and
+//     re-arm its own parents on start. This is the back-pressure: a ready node isn't re-kicked,
+//     and upstream is paced by it running, not by repeated demand.
+//   - If this node CANNOT run yet (no parent fresher than it), it needs fresher input → recurse
+//     into stale parents to wake a producer. Without this, demand dies at a node that can't
+//     satisfy it (deadlock).
+//   - If this node is RUNNING, it can't consume the pull now, but its NEXT run will need fresh
+//     input → propagate up so parents pipeline the next generation while this node is busy.
+//     Without this, a slow leaf (the bottleneck) finishes and finds its inputs stale, stalling
+//     a beat each cycle instead of running back-to-back.
+// Cold start (all F=0) recurses to the inlets because 0 <= 0. Used everywhere pull is asserted:
+// trigger/Tap, run-start re-arm, and the per-tick Wave.
+function armPull(rippleId: RippleId, now: number, state: OrchestrState): OrchestrState {
   const rs = state.rippleStates[rippleId];
   const r = state.ripples[rippleId];
   if (!rs || !r) return state;
   let ns = rs.hasPull ? state : setRipple(state, rippleId, { hasPull: true });
-  const { required, optional } = parentsOf(r, ns);
-  for (const pid of [...required, ...optional]) {
-    ns = markEdge(ns, pid, rippleId, 'pull');
-    const prs = ns.rippleStates[pid];
-    if (prs && !prs.isRunning && !prs.hasPull && prs.F <= rs.F) ns = kickPull(pid, ns);
+  const pf = parentsFreshness(r, ns, now);
+  if (pf <= rs.F) {
+    // Can't run yet — wake stale parents (those at or behind my freshness).
+    const { required, optional } = parentsOf(r, ns);
+    for (const pid of [...required, ...optional]) {
+      ns = markEdge(ns, pid, rippleId, 'pull');
+      const prs = ns.rippleStates[pid];
+      if (prs && !prs.isRunning && !prs.hasPull && prs.F <= rs.F) ns = armPull(pid, now, ns);
+    }
   }
   return ns;
-}
-
-// Shallow ARM: set hasPull on one ripple, no recursion. This is the back-pressure path —
-// a node is re-armed only by its direct child running (and the outlet by its Wave each tick),
-// so upstream is paced by downstream consumption, not re-kicked every cycle.
-function armPull(rippleId: RippleId, state: OrchestrState): OrchestrState {
-  const rs = state.rippleStates[rippleId];
-  if (!rs || rs.hasPull) return state;
-  return setRipple(state, rippleId, { hasPull: true });
 }
 
 // ─── Demand: push (Pulse/Tide) ──────────────────────────────────────────────
@@ -191,10 +218,10 @@ function stopFrom(startIds: RippleId[], state: OrchestrState): OrchestrState {
 
 // ─── Pond-level trigger entry points (target a pond's leaf ripples) ──────────
 
-// Tap / Wave cold-start: kick the leaves (recurses up idle chains).
-export function pullPond(pondId: PondId, state: OrchestrState): OrchestrState {
+// Tap / Wave: arm the leaves (recurses up any chain that can't yet run).
+export function pullPond(pondId: PondId, now: number, state: OrchestrState): OrchestrState {
   let ns = state;
-  for (const leaf of getLeaves(pondId, state.ripples)) ns = kickPull(leaf.id, ns);
+  for (const leaf of getLeaves(pondId, state.ripples)) ns = armPull(leaf.id, now, ns);
   return ns;
 }
 
@@ -240,13 +267,29 @@ function startRipple(rippleId: RippleId, now: number, state: OrchestrState): Orc
     runsStarted: rs.runsStarted + 1,
   });
 
-  // Resupply order: re-arm DIRECT parents only (shallow) so each layer is paced by its own
-  // child running — this is the back-pressure. No recursion (that's cold-start's job).
+  // Resupply order: re-arm parents so the pull keeps flowing one layer up. armPull is shallow
+  // when the parent can run (back-pressure), but propagates further when the parent needs fresher
+  // input — so demand never dies at a node that can't currently produce.
   if (wasPull) {
     const { required, optional } = parentsOf(r, ns);
     for (const pid of [...required, ...optional]) {
       ns = markEdge(ns, pid, rippleId, 'pull');
-      ns = armPull(pid, ns);
+      ns = armPull(pid, now, ns);
+    }
+  }
+
+  // "A started pond run must complete." When a pond ROOT begins a run, stamp the OTHER ripples
+  // in the pond (its intra-pond descendants) with a push target = this run's freshness. The
+  // pulls still pace things normally, but once they stop being refreshed the push forces the
+  // rest of the pond's ripples to run through to this freshness — so an initiated pond run
+  // always drains to its leaves rather than stalling part-way. Crucially we do NOT stamp the
+  // root itself: for an inlet pond (single ripple) pf = now, and a self-push would always be
+  // satisfiable → the inlet would run forever. The root's own demand is governed by pull only.
+  if (isPondRoot(r, state)) {
+    for (const other of Object.values(ns.ripples)) {
+      if (other.pondId !== r.pondId || other.id === rippleId) continue;
+      const ors = ns.rippleStates[other.id];
+      if (ors && (ors.hasPush ?? 0) < pf) ns = setRipple(ns, other.id, { hasPush: pf });
     }
   }
   return ns;
@@ -294,15 +337,26 @@ function recomputePonds(state: OrchestrState, now: number): OrchestrState {
     const pushes = leaves.map((l) => state.rippleStates[l.id]?.hasPush ?? 0).filter((v) => v > 0);
     const hasPush = pushes.length ? Math.max(...pushes) : null;
 
-    let genStart = prev.genStart;
+    let genStartTimes = prev.genStartTimes;
     let completionTimes = prev.completionTimes;
     let durations = prev.durations;
-    if (runsStarted > prev.runsStarted) genStart = now;
+    // Stamp the start time of any newly-started generation(s) (keyed by gen number).
+    if (runsStarted > prev.runsStarted) {
+      genStartTimes = { ...genStartTimes };
+      for (let g = prev.runsStarted + 1; g <= runsStarted; g++) genStartTimes[g] = now;
+    }
+    // On completion, measure latency against THIS generation's own start (not the latest start —
+    // they differ once the pond pipelines). Then drop start stamps for consumed generations.
     if (runsCompleted > prev.runsCompleted) {
       completionTimes = pushHistory(prev.completionTimes, now);
-      if (genStart != null) durations = pushHistory(prev.durations, now - genStart);
+      const startedAt = genStartTimes[runsCompleted];
+      if (startedAt != null) durations = pushHistory(prev.durations, now - startedAt);
+      genStartTimes = { ...genStartTimes };
+      for (const g of Object.keys(genStartTimes)) {
+        if (Number(g) <= runsCompleted) delete genStartTimes[Number(g)];
+      }
     }
-    pondStates[pond.id] = { F, startedF, hasPull, hasPush, runsStarted, runsCompleted, genStart, completionTimes, durations };
+    pondStates[pond.id] = { F, startedF, hasPull, hasPush, runsStarted, runsCompleted, genStartTimes, completionTimes, durations };
   }
   return { ...state, pondStates };
 }
@@ -320,20 +374,78 @@ export function tick(now: number, state: OrchestrState): OrchestrState {
     }
   }
 
-  // 2. Wave continuously re-arms its outlet leaves (shallow — the outlet is the leaf's standing
-  //    consumer). Upstream is paced by re-arm-on-run, not by re-kicking here each tick.
+  // 2. Wave = a zero-duration pseudo-ripple consuming the pond's leaves, permanently demanding.
+  //    Modelling it as ONE consumer (not re-arming each leaf independently) is what throttles
+  //    parallel leaves together: the pseudo-ripple "runs" only when ALL leaves are fresher than
+  //    what it last consumed (min over leaves > consumedF), and on each consume it advances its
+  //    freshness and re-arms every leaf in lockstep. A fast leaf therefore can't get ahead — its
+  //    next pull doesn't arrive until the slowest leaf has also produced and the consumer advances.
   for (const [pondId, trig] of Object.entries(ns.triggers)) {
-    if (trig.kind === 'wave') {
-      for (const leaf of getLeaves(pondId, ns.ripples)) ns = armPull(leaf.id, ns);
+    if (trig.kind !== 'wave') continue;
+    const leaves = getLeaves(pondId, ns.ripples);
+    if (leaves.length === 0) continue;
+    const consumedF = trig.consumedF ?? -1;
+    const leavesF = Math.min(...leaves.map((l) => ns.rippleStates[l.id]?.F ?? 0));
+    // Initial kick (consumer has never consumed) OR all leaves advanced past the last consume →
+    // the pseudo-ripple consumes this generation and re-arms the leaves for the next.
+    if (trig.consumedF === undefined || leavesF > consumedF) {
+      ns = { ...ns, triggers: { ...ns.triggers, [pondId]: { ...trig, consumedF: leavesF } } };
+      for (const leaf of leaves) ns = armPull(leaf.id, now, ns);
     }
   }
 
-  // 3. start everything runnable (push targets were propagated eagerly at receive time)
+  // 3. Pipelining (standing-demand only): a ripple that is RUNNING and still has standing pull
+  //    will need fresh input for its NEXT run. While it's busy it can't re-arm its parents (that
+  //    happens on start), so a slow bottleneck leaf would finish and find stale inputs, stalling
+  //    a beat each cycle. Re-arm such parents so they produce the next generation in parallel —
+  //    but only ONE generation ahead (parent's output no newer than what the busy child is
+  //    currently consuming) to bound the buffer and keep back-pressure. This only fires under a
+  //    standing trigger (Wave/Tide): a one-shot Tap must NOT pipeline (no standing consumer), or
+  //    it would keep producing forever. Gate: the running ripple feeds an active trigger pond.
+  if (Object.keys(ns.triggers).length > 0) {
+    for (const [id, rs] of Object.entries(ns.rippleStates)) {
+      if (!rs.isRunning || !rs.hasPull) continue;
+      const r = ns.ripples[id];
+      if (!r || !feedsActiveTrigger(r, ns)) continue;
+      const consuming = rs.runFreshness ?? rs.F; // freshness this child's current run is built on
+      const { required, optional } = parentsOf(r, ns);
+      for (const pid of [...required, ...optional]) {
+        const prs = ns.rippleStates[pid];
+        if (prs && !prs.isRunning && !prs.hasPull && prs.F <= consuming) {
+          ns = markEdge(ns, pid, id, 'pull');
+          ns = armPull(pid, now, ns);
+        }
+      }
+    }
+  }
+
+  // 4. start everything runnable (push targets were propagated eagerly at receive time)
   for (const id of Object.keys(ns.rippleStates)) {
     if (canRun(id, ns, now)) ns = startRipple(id, now, ns);
   }
 
-  // 4. refresh derived pond rollups
+  // 5. Clear DEAD pull. A ripple can be left holding hasPull it can never act on: it's idle, can't
+  //    run (no fresher input), and no parent is running or armed to ever make it fresher. This
+  //    happens when a child re-arms a parent that has already caught up to its own inputs (the
+  //    resupply is satisfied in place). Drop it, else the pond shows "queued" forever. Inlets are
+  //    never dead (their input is always `now`), so they're implicitly excluded by the can-run
+  //    check (parentsFreshness = now > F).
+  for (const [id, rs] of Object.entries(ns.rippleStates)) {
+    if (!rs.hasPull || rs.isRunning) continue;
+    const r = ns.ripples[id];
+    if (!r) continue;
+    if (parentsFreshness(r, ns, now) > rs.F) continue; // can still run — keep
+    const { required, optional } = parentsOf(r, ns);
+    const parents = [...required, ...optional];
+    if (parents.length === 0) continue; // inlet — never dead
+    const producerComing = parents.some((pid) => {
+      const prs = ns.rippleStates[pid];
+      return prs && (prs.isRunning || prs.hasPull);
+    });
+    if (!producerComing) ns = setRipple(ns, id, { hasPull: false });
+  }
+
+  // 6. refresh derived pond rollups
   ns = recomputePonds(ns, now);
   return ns;
 }

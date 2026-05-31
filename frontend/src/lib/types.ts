@@ -47,9 +47,11 @@ export interface PondRunState {
   hasPush: number | null; // max leaf push target
   runsStarted: number; // max over root ripples
   runsCompleted: number; // min over leaf ripples
-  genStart: number | null; // timestamp the current pond generation started
+  // Start timestamp per pond generation number (keyed by runsStarted), so a generation's latency
+  // is measured against ITS OWN start, not the latest start (which differs under pipelining).
+  genStartTimes: Record<number, number>;
   completionTimes: number[]; // when runsCompleted advanced — cadence trace
-  durations: number[]; // generation latency (completion − genStart) — duration trace
+  durations: number[]; // generation latency (completion − that generation's start) — duration trace
 }
 
 // Kind of demand most recently sent across an edge. Keyed `${parent}::${child}` /
@@ -64,6 +66,10 @@ export interface ActiveTrigger {
   pondId: PondId;
   kind: TriggerKind;
   periodMs?: number;
+  // Wave is modelled as a zero-duration pseudo-ripple consuming the pond's leaves: it holds the
+  // freshness it has last "consumed", so the leaves are gated together by ONE consumer (throttled
+  // to the slowest) rather than each being re-armed independently. Undefined until first consume.
+  consumedF?: number;
 }
 
 export type RippleVisualState = 'running' | 'queued' | 'idle';

@@ -47,7 +47,7 @@ function initialPondState(): PondRunState {
     hasPush: null,
     runsStarted: 0,
     runsCompleted: 0,
-    genStart: null,
+    genStartTimes: {},
     completionTimes: [],
     durations: [],
   };
@@ -424,7 +424,7 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
 
   // Tap: one-shot resupply (pull).
   triggerTap(pondId) {
-    set((s) => applyOrch(s, pullPond(pondId, toOrchestrState(s))));
+    set((s) => applyOrch(s, pullPond(pondId, Date.now(), toOrchestrState(s))));
   },
 
   // Pulse: one-shot priority freshness target (push to now).
@@ -442,7 +442,7 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     state.removeTrigger(pondId);
     const trigger: ActiveTrigger = { pondId, kind: 'wave' };
     set((s) => ({
-      ...applyOrch(s, pullPond(pondId, { ...toOrchestrState(s), triggers: { ...s.triggers, [pondId]: trigger } })),
+      ...applyOrch(s, pullPond(pondId, Date.now(), { ...toOrchestrState(s), triggers: { ...s.triggers, [pondId]: trigger } })),
     }));
   },
 
@@ -485,10 +485,16 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
 
 // ─── Visual state helpers ────────────────────────────────────────────────────
 
-// Age (seconds, 1dp) of a freshness timestamp relative to now. F=0 (never run) → '—'.
+// Age of a freshness timestamp relative to now, no decimals, unit-scaled. F=0 → '—'.
 export function formatAge(F: number, now: number): string {
   if (!F) return '—';
-  return `${Math.max(0, (now - F) / 1000).toFixed(1)}s`;
+  const secs = Math.max(0, (now - F) / 1000);
+  if (secs < 60) return `${Math.round(secs)}s`;
+  const mins = secs / 60;
+  if (mins < 60) return `${Math.floor(mins)}m`;
+  const hrs = mins / 60;
+  if (hrs < 24) return `${Math.floor(hrs)}h`;
+  return `${Math.floor(hrs / 24)}d`;
 }
 
 export function getRippleVisualState(rs: RippleRunState): 'running' | 'queued' | 'idle' {

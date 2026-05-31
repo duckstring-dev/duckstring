@@ -81,14 +81,14 @@ Typically, the supplier will then log these tokens against a range:
 - Yellow: Moderate tokens, standard consumption and stock -> standard production
 - Green: Low tokens, low consumption and high stock -> stop production
 
-Unlike manufacturing, where the number of units is meaningful, data pipelines are binary - either updated or not. Consequently, a Kanban-like process need only track the presence of *any* demand, where the Red/Green boundary is simple one:
+Unlike manufacturing, where the number of units is meaningful, data pipelines are binary - either updated or not. Consequently, a Kanban-like process need only track the presence of *any* demand, where the Red/Green boundary is simply one:
 
 - Has demand: Start production
 - Has no demand: Stop production
 
 ### Demand-Based Orchestration
 
-Consider each unit operation a node in a directed graph (the DAG). Each node is aware of its parents, and can notify the parents of their demand or otherwise send signals upstream. A node does *not* necessarily have awareness of its children - only the capability to receive signals from them.
+It is helpful to imagine a unit operation as a node in a directed graph (the DAG). Each node is aware of its parents, and can notify the parents of their demand or otherwise send signals upstream. A node does *not* necessarily have awareness of its children - only the capability to receive signals from them.
 
 Each node follows the simple rules:
 
@@ -98,10 +98,118 @@ Each node follows the simple rules:
 - Have I received demand from anyone downstream?
     - Demand gating
     - Emulates a consumer sending a Kanban token to its supplier
-- If both:
+- If both (and I'm not already processing):
     - Send demand to all my parents
     - Clear my own demand
     - Start processing
 - When my processing completes:
     - Indicate I have updated, so that processes waiting on me can begin
 
+#### Examples
+
+Consider a simple chain of nodes:
+
+```mermaid
+flowchart LR
+    classDef running fill:#4CAF50,stroke:#388E3C,stroke-width:2px,color:#fff;
+    classDef queued fill:#2196F3,stroke:#1976D2,stroke-width:1px,color:#fff;
+
+    A .-> B
+    B .-> C
+```
+
+Nodes without demand are no colour, nodes with demand but no changes upstream (queued) are orange, nodes that are running are blue, and those that are running *and have demand* (demanded) are green:
+
+```mermaid
+flowchart LR
+    classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+    classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+    classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+    A[Idle] .-> B[Queued]:::queued
+    B .-> C[Running]:::running
+    C .-> D[Demanded]:::demanded
+```
+
+We will denote the number of times a node has updated (its *generation*) with a colon, such that "A:3" indicates A has run 3 times. If a node is ahead of its child, the edge between them will be solid - otherwise, it will be dotted.
+
+1) All start idle, with each node one generation ahead of the one after it:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:3] --> B[B:2]
+        B --> C[C:1]
+    ```
+
+2) C is given demand and enters the queued state:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:3] --> B[B:2]
+        B --> C[C:1]:::queued
+    ```
+
+3) As its parent is a generation ahead, it starts a run:
+
+    1) Demand is sent to its parent, putting it in the queued state:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:3] --> B[B:2]:::queued
+        B --> C[C:1]:::queued
+    ```
+
+    2) Demand is cleared and the node started, putting it in the running state:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:3] --> B[B:2]:::queued
+        B --> C[C:1]:::running
+    ```
+
+4) B repeats the same, sending demand upstream and starting:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:3] --> B[B:2]:::running
+        B --> C[C:1]:::running
+    ```
+
+5) A has no parents, so can start as soon as it receives demand:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:3]:::running --> B[B:2]:::running
+        B --> C[C:1]:::running
+    ```
+
+6) All nodes run simultaneously
+
+
+TODO:
+- Outline behaviour with branching, e.g. with A -> C, B -> C, B -> D, to demonstrate that parents of less frequent pathways can be left stale while others execute
+- 
