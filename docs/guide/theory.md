@@ -495,7 +495,30 @@ Here `B` is *shared*: it supplies two consumers, `C` and `D`, which may run at d
 
 The shared node `B` runs at the rate of its *fastest* consumer (`D`), and the slower consumer `C` takes the latest result available whenever it happens to run.
 
-TODO: Continuous run demo (reset demand on leaf when it finishes), including demonstration of a chain throttling to the bottleneck for a longest-running node in the middle of the chain
+##### Continuous Demand
+
+A single demand advances each node once and then settles. To keep a pipeline continuously fresh, the demand is simply *re-asserted* each time the demanded node completes its run. Every completion issues a fresh pull, and the pipeline runs back-to-back at its fastest sustainable rate.
+
+The instructive case is a bottleneck in the *middle* of the chain. Consider `A` (1s) → `B` (3s) → `C` (1s), with `C` continuously demanded:
+
+```mermaid
+flowchart LR
+    A["A (1s)"] --> B["B (3s)"]
+    B --> C["C (1s)"]
+```
+
+`B` is the bottleneck. A naive parallel scheme would run the 1-second `A` three times for every run of `B`, discarding two of its results. Under pull this does not happen: `A` is re-armed only when `B` actually consumes its output, so `A` is throttled to `B`'s period despite being far quicker. Following the steady-state cycle (times in seconds):
+
+| t | A | B | C | event |
+|---|---|---|---|---|
+| 0 | runs | — | — | `A` produces the first result |
+| 1 | runs | runs | — | `B` starts consuming `A`, and re-arms it; `A` produces one result ahead |
+| 2 | idle | running | — | `A` has a result buffered, so it waits |
+| 4 | runs | runs | runs | `B` finishes, consumes the buffered `A`, re-arms it; `C` runs |
+| 5 | running | running | done | `C` completes and re-asserts its demand |
+| 7 | … | runs | runs | the cycle repeats with period 3s |
+
+`A` runs exactly once per cycle, matching `B`'s 3-second period — neither over- nor under-producing. The bottleneck sets the rhythm for the *entire* chain, both upstream and down. The mechanism that achieves this is that a node holding standing demand re-arms its parent only *one generation ahead*: enough to keep the bottleneck fed without it ever idling, but never enough to pile up unconsumed work.
 
 ### Push (To Meet Demand)
 
@@ -522,7 +545,68 @@ Under *push*, each node follows the simple rules:
 
 ##### Cold Start
 
-TODO: Simple A -> B -> C, like in pull
+Consider the same chain, all idle at generation 0. A push always carries a *target* freshness — the request "produce data at least this fresh". We will write the target as a generation for illustration (in reality it is a timestamp), so a push for generation 1 asks every node to reach generation 1.
+
+1) All start idle at generation 0:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:0] .-> B[B:0]
+        B .-> C[C:0]
+    ```
+
+2) `C` receives a push for generation 1. Unlike a pull, the target is forwarded *eagerly* to every ancestor that isn't already that fresh — it does not wait for runs to complete. The push reaches `B`, then `A`, in a single step:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:0]:::pushed .-> B[B:0]:::pushed
+        B .-> C[C:0]:::pushed
+    ```
+
+3) `A` has no parents, so its inputs trivially satisfy the target and it runs. `B` and `C` hold their push, waiting on their parents:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:1]:::running .-> B[B:0]:::pushed
+        B .-> C[C:0]:::pushed
+    ```
+
+4) `A` completes. `B`'s input now meets the target, so `B` runs. When `B` completes, `C` runs in turn:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:1] --> B[B:1]:::running
+        B .-> C[C:0]:::pushed
+    ```
+
+5) `C` completes, having reached the target. The push is satisfied and cleared at each node, leaving the whole chain current and idle:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:1] --> B[B:1] --> C[C:1]
+    ```
+
+Unlike pull, no node is left trailing its parent — every node reaches the same target generation. The result is exactly that of triggering a conventional DAG run, but initiated from the *consumer* rather than pushed from the source, so paths with no demand are still never run.
 
 ##### Starting After Pull
 
@@ -609,7 +693,52 @@ The entire sequence is brought up-to-date with a single push, with no additional
 
 ##### Branching
 
-TODO: Same example as for pull, to show that stale paths are also not triggered.
+Push shares pull's most valuable property: it only ever drives the paths it actually needs. Take the same branching graph, where `C` consumes both `A` and `B`, and `D` consumes only `B`:
+
+```mermaid
+flowchart LR
+    A .-> C
+    B .-> C
+    B .-> D
+```
+
+1) All idle at generation 0. `D` receives a push for generation 1:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:0] .-> C[C:0]
+        B[B:0] .-> C
+        B .-> D[D:0]:::pushed
+    ```
+
+2) `D`'s only parent is `B`, so the target propagates to `B` alone. `A` and `C` are not ancestors of `D` and are never touched:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:0] .-> C[C:0]
+        B[B:0]:::pushed .-> C
+        B .-> D[D:0]:::pushed
+    ```
+
+3) `B` runs and completes, then `D` runs against it and reaches the target. The push is satisfied, leaving `A` and `C` untouched at generation 0:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:0] .-> C[C:0]
+        B[B:1] --> D[D:1]
+        B .-> C
+    ```
+
+Just as with pull, the unconsumed path (`A` and the join `C`) is left stale and no compute is spent on it. The difference between push and pull is *how much* of a demanded path runs — push brings it fully current, pull advances it one step — not *which* paths run. Both are triggered from the point of demand, so both leave low-demand sub-graphs quiet.
 
 ### Which Should You Use?
 
@@ -662,9 +791,41 @@ These are intentionally water-themed, to extend the natural fluid-oriented nomen
 
 ## Eager vs Gated
 
-TODO: Explain the concept of required and not required parents and how it affects pull and push
+So far every parent has been treated as essential — a node waits for *all* of them before running, i.e. every parent **gates** the run. In practice a node often has parents it would *like* to incorporate but need not wait for, and which it can therefore run **eagerly** without. We distinguish two kinds of parent:
 
-TODO: Example of Wave process on a sequence with a bottleneck on the required path, and an optional node with a duration longer than that, to demonstrate that both run back to back.
+- **Required** (gating): the node must not run until this parent is fresh enough. The node is only as fresh as the *stalest* required parent. Conventional dependencies are required.
+- **Optional** (eager): the node incorporates this parent if it happens to be ready, but never waits on it. An optional parent that lags behind simply contributes its latest available result; it never gates a run.
+
+The distinction changes both gating rules:
+
+- A node runs when its **required** parents satisfy the condition (fresher than itself for pull, at-or-past the target for push). Optional parents are ignored when deciding *whether* to run.
+- A push target propagates upward only to **required** parents. There is no point forcing an optional parent to a target the node will not wait for; it is taken on a best-effort basis at whatever freshness it has reached.
+
+This means an optional path is never on the critical path. A slow optional parent does not hold up its child, and is itself only run as often as some *other*, demanded path happens to pull it.
+
+##### Example: an optional node slower than the bottleneck
+
+Consider a node `C` with a required parent `A` (1s) and an optional parent `B` (4s), under a continuous Wave on `C`:
+
+```mermaid
+flowchart LR
+    A["A (1s, required)"] --> C
+    B["B (4s, optional)"] -.->|optional| C
+```
+
+Because `B` is optional, `C` never waits for it. `C` is gated only by `A`, so the chain `A → C` runs back-to-back at `A`'s 1-second period. `B`, meanwhile, runs at its own pace — and `C` simply picks up whatever the latest `B` result is each time it runs:
+
+| t | A | C | B | note |
+|---|---|---|---|---|
+| 0 | runs | — | runs | both `A` and `B` (optional) begin |
+| 1 | runs | runs | running | `C` runs against `A`; `B` is still working, so `C` uses no `B` yet |
+| 2 | runs | runs | running | `C` runs again — still gated only by `A`, not waiting on `B` |
+| 4 | runs | runs | done | `B` finally completes; the *next* `C` will incorporate it |
+| 5 | runs | runs | runs | `C` now includes the latest `B`; `B` starts its next run |
+
+`C` (and `A`) run every second throughout, never throttled to `B`'s 4-second duration. Had `B` been *required*, `C` would have been forced down to a 4-second period to wait for it. Marking it optional keeps the demanded path fast while still folding in `B`'s slower updates whenever they land.
+
+This is what makes optional parents useful for enrichment-style inputs — a large, slowly-rebuilt reference table feeding a fast main path, for example — where stalling the main path to wait on the slow input would be far worse than occasionally using a slightly older copy of it.
 
 ## Freshness
 
@@ -789,8 +950,6 @@ flowchart LR
 
 ### Pond State Variables
 
-TODO: Check that all the statements made in this section are valid according to what is implemented in the playground application.
-
 As the boundary nodes are zero-duration, this framing is theoretically identical to setting all root Ripples of the child Pond to have all leaf ripples of the parent Pond:
 
 ```mermaid
@@ -848,8 +1007,9 @@ This lets a Pond be triggered as a single unit - a **Pond Run**. This allows the
     - Set `Pond.startF` = `Pond.parentFreshness`
         - Pond won't start again in pull until `Pond.parentFreshness` advances
     - If `Pond.hasPull`, set `Source.hasPull` = true for all Sources
-    - Set `Ripple.pushTarget` = `Pond.startF` for all Ripples
+    - Set `Ripple.pushTarget` = `Pond.startF` for all *non-root* Ripples
         - This ensures the Ripples will always complete to a given freshness
+        - The roots are excluded: a root's parent freshness in an Inlet Pond is `now`, so a push against itself would always be satisfiable and the root would run perpetually. The roots are instead governed by pull alone
     - Set `Ripple.hasPull` = `Pond.hasPull`
         - Sets Ripples to run as pull if the Pond is in a pull state
     - Set `Ripple.parentFreshness` for each root Ripple to `Pond.startF`
@@ -875,4 +1035,15 @@ Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundar
 
 ## Summary
 
-TODO: Write this to match the tone of the rest of the document
+Conventional pipelines are triggered from the *point of supply* — a schedule or a completed upstream run pushes work downstream. This forces a choice between running too often (wasting compute and producing results nobody consumes) and running too rarely (accepting stale data), and it demands central governance to decide the rate of every path.
+
+Duckstring instead triggers from the *point of demand*. Two complementary methods drive a graph of unit operations:
+
+- **Pull** is demand-driven resupply, borrowed from Kanban. A node runs when something downstream has asked for its output *and* it has fresher input to consume, re-arming its own parents as it goes. This throttles every path to its actual consumption rate — both upstream *and* downstream of any bottleneck — and leaves unused paths idle at no cost.
+- **Push** is a demand-driven *priority order*. A target freshness propagates eagerly from the consumer up through its ancestors, bringing the whole demanded path current in a single coordinated run — the familiar behaviour of triggering a DAG, but still initiated by the consumer so unused paths stay quiet.
+
+Both reduce to a single quantity, **freshness**: a timestamp describing how current a node's output is, inherited from its parents (the stalest of the required ones). Demand is a simple boolean — *is there any?* — so shared and branching paths need no per-consumer accounting, and a slow *optional* parent never holds up a fast required path.
+
+Each method has a one-shot and a continuous form, giving the four triggers — **Tap** and **Wave** for pull, **Pulse** and **Tide** for push — with **Stop** to calm a graph.
+
+Finally, unit operations (**Ripples**) are grouped into versioned, independently-owned **Ponds**. Modelling a Pond as its Ripples book-ended by zero-duration boundary nodes lets dependency management, version control, and triggering be lifted to the Pond level without changing any of the underlying node rules — the boundary nodes are real participants in the graph, not merely a conceptual device. The result is a scheduler that approaches the optimal trade of compute against staleness, while pushing governance of the pipeline down to the owners of each Pond rather than a central authority.
