@@ -4,7 +4,7 @@ This document outlines the theory governing the orchestration mechanics.
 
 ## Motivation
 
-Most of the time when running a sequence of data transformations (a pipeline), the process is set to run either on a schedule (e.g. cron job) or continuously (new run triggered immediately upon completion of previous). This certainly satisfies many purposes, but can often be wasteful - in currency (data freshness), compute, or both.
+Most of the time when running a sequence of data transformations (a pipeline), the process is set to run either on a schedule (e.g. cron job) or continuously (new run triggered immediately upon completion of previous). This certainly satisfies many purposes, but can often be wasteful - in staleness (data age), compute, or both.
 
 ### General Constraints
 
@@ -29,7 +29,7 @@ $$
 T(t) = L + (t \bmod C)
 $$
 
-In general, the worst case currency is $L + C$, equal to $2L$ in the case of back-to-back execution.
+In general, the worst case staleness is $L + C$, equal to $2L$ in the case of back-to-back execution.
 
 ### Continuous Parallel Execution
 
@@ -86,7 +86,7 @@ Unlike manufacturing, where the number of units is meaningful, data pipelines ar
 - Has demand: Start production
 - Has no demand: Stop production
 
-### Demand-Based Orchestration
+### Pull
 
 It is helpful to imagine a unit operation as a node in a directed graph (the DAG). Each node is aware of its parents, and can notify the parents of their demand or otherwise send signals upstream. A node does *not* necessarily have awareness of its children - only the capability to receive signals from them.
 
@@ -159,7 +159,7 @@ We will denote the number of times a node has updated (its *generation*) with a 
 
         A[A:0] .-> B[B:0]
         B .-> C[C:0]:::queued
-        C <.- D((Demand)):::queued
+        C <.- D([Demand]):::queued
     ```
 
     1) As its parent is idle, C immediately sends demand to B, putting it into the queued state also:
@@ -330,7 +330,7 @@ We will denote the number of times a node has updated (its *generation*) with a 
         B --> C[C:1]
     ```
 
-This is generally the outcome of a pull-based execution: each node runs the same number of times as the distance from the end of the DAG.
+This is generally the outcome of a pull-based execution: each node runs the same number of times as the distance from the end of the DAG, with upstream nodes slightly less stale than downstream.
 
 ##### Continued Run
 
@@ -344,7 +344,7 @@ This is generally the outcome of a pull-based execution: each node runs the same
 
         A[A:3] --> B[B:2]
         B --> C[C:1]:::queued
-        C <.- D((Demand)):::queued
+        C <.- D([Demand]):::queued
     ```
 
 2) As its parent is a generation ahead, it starts a run:
@@ -411,22 +411,468 @@ This is generally the outcome of a pull-based execution: each node runs the same
 
 Each subsequent run on a previously-executed pull advances each node by one generation, without waiting for the updates to propagate from start to finish.
 
-TODO:
-- Outline behaviour with branching, e.g. with A -> C, B -> C, B -> D, to demonstrate that parents of less frequent pathways can be left stale while others execute
-    - Deliberate on demand being *any*, so if there is existing demand, it has no additional effect
-- Describe the other mode - push - that can also be executed
-    - Nodes can have either pull or push tokens or both
-- Freshness concept in place of generations, and conditions under which push and pull execute
-- Introduce the encapsulation of nodes into Ponds and Ripples:
-    - A Ripple is a node as has been discussed so far
-    - A Pond is a sequence of Ripples but with a zero-duration pseudo-node parent to all root Ripples, and a similar pseudo-node child to all leaf Ripples
-- Summarise simplifications that can be made under this framing:
-    - All auto-propagating condtions affect both head and tail pseudo-nodes, meaning they can be tracked as an overall state variable against the pond itself, or hop directly from tail to head
-        - Push tokens
-        - Pull tokens when idle
-    - Ponds can be triggered as a "pond run"
-        - Pull tokens always jump straight to the head when idle
-        - All ripples must have also been idle
-        - Each ripple gets a push token to ensure all in the pond are executed to the same freshness
-        - If the pond has pull demand, each ripple also gets a pull token
-    - New pond runs are initiated if a root ripple restarts
+##### Branching
+
+The chain above is the simplest case. The advantages of demand-driven scheduling become clearer when paths branch and merge. Consider a graph where `C` consumes both `A` and `B`, while `D` consumes only `B`:
+
+```mermaid
+flowchart LR
+    A .-> C
+    B .-> C
+    B .-> D
+```
+
+Here `B` is *shared*: it supplies two consumers, `C` and `D`, which may run at different rates. We will follow what happens when `D` is placed under continuous demand but `C` is not.
+
+1) All nodes start idle at generation 0:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:0] .-> C[C:0]
+        B[B:0] .-> C
+        B .-> D[D:0]
+    ```
+
+2) `D` is given continuous demand. As its parent `B` is idle, the demand jumps straight to `B`, which is a source and can begin immediately:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:0] .-> C[C:0]
+        B[B:0]:::running .-> C
+        B .-> D[D:0]:::queued
+    ```
+
+3) `B` and `D` settle into a steady cycle — `B` producing, `D` consuming and re-arming `B` — while `A` and `C` are never touched and remain at generation 0:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:0] .-> C[C:0]
+        B[B:6]:::running --> D[D:5]:::running
+        B --> C
+    ```
+
+    `A` and `C` are left *stale* — and crucially, no compute is wasted producing results nobody consumes. This is the property absent from naive continuous-parallel execution: throttling applies to the *entire sub-graph upstream of the actual demand*, not merely downstream of a bottleneck.
+
+4) Now `C` is given demand. Its parents are `A` (idle) and `B` (running). The demand jumps to the idle `A`, waking it. No demand is sent to `B` because it is not idle:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:0]:::running .-> C[C:0]:::queued
+        B[B:6]:::running --> D[D:5]:::running
+        B --> C
+    ```
+
+    `B` does not run twice to serve two consumers — it continues its single cycle, and both `C` and `D` consume whatever it produces.
+
+5) Once `A` and `B` are both ahead of `C`, `C` runs, taking the freshest result available from each:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+
+        A[A:1] --> C[C:0]:::running
+        B[B:7]:::running --> D[D:6]:::running
+        B --> C
+    ```
+
+The shared node `B` runs at the rate of its *fastest* consumer (`D`), and the slower consumer `C` takes the latest result available whenever it happens to run.
+
+TODO: Continuous run demo (reset demand on leaf when it finishes), including demonstration of a chain throttling to the bottleneck for a longest-running node in the middle of the chain
+
+### Push (To Meet Demand)
+
+When continuously demanded, **pull** orchestration maintains low staleness effectively and returns updates as frequently as possible. However, executing demand against a node will only ever take data as fresh as its immediate parents - if there is a requirement for the result of the run to produce data that results from sources *at the time of the request*, the more familiar **push** orchestration is needed. 
+
+Additionally, if data is only required to update at a period far longer than the bottleneck process (e.g. weekly or daily, as is common), **pull** would either be consistently behind or would require executing upstream nodes more than would be expected to be consumed.
+
+Under *push*, an initiated run from upstream is followed by runs from each of its children until the end of the DAG is reached. However, unlike most orchestration approaches, the request is made from the *leaves* of the DAG rather than pushed down from the roots. This maintains most of the advantages of the pull-based approach (paths with no demand are not executed) without the attempt to minimise staleness by executing the path as often as possible.
+
+Under *push*, each node follows the simple rules:
+
+- If I get demand for a given freshness from downstream:
+    - Set this demand against each parent, unless they already have a request for something fresher
+- Am I waiting on my parents to meet my required freshness?
+    - Change gating
+    - Emulates a consumer being unable to proceed if there is no stock for this *priority order* from a supplier
+- If not (and I'm not already processing):
+    - Clear my own demand
+    - Start processing
+- When my processing completes:
+    - Set my freshness to that of my parents
+
+#### Examples
+
+##### Cold Start
+
+TODO: Simple A -> B -> C, like in pull
+
+##### Starting After Pull
+
+Recall the staggered state a pull leaves behind, where each node trails its parent by one generation. Suppose the chain has been idle in exactly that state — `A` is two generations ahead of `C`:
+
+```mermaid
+flowchart LR
+    classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+    classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+    classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+    classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+    A[A:3] --> B[B:2]
+    B --> C[C:1]
+```
+
+A *single pull* on `C` would advance it to `C:2`, consuming `B:2` — still one behind `A`. To make `C` fully current we issue a **push**. Unlike a pull, it does not wait for runs to complete before moving upstream; it propagates eagerly to every ancestor that is not yet at the target (shown in purple):
+
+1) `C` receives a push, demanding data at current freshness (we will denote this as a generation 4, though in reality it would be a timestamp). `C` is not current, so the push is forwarded to `B`; `B` is not current, so it is forwarded to `A`:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:3]:::pushed --> B[B:2]:::pushed
+        B --> C[C:1]:::pushed
+    ```
+
+2) `A` has no parents so runs immediately:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:4]:::running --> B[B:2]:::pushed
+        B --> C[C:1]:::pushed
+    ```
+
+2) When `A` finishes, `B`'s parents satisfy its required freshness, so it runs:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:4] --> B[B:2]:::running
+        B --> C[C:1]:::pushed
+    ```
+
+3) `B` completes, updating to generation 4, skipping generation 3. This enables C to run:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:4] --> B[B:4]
+        B --> C[C:1]:::running
+    ```
+
+3) `C` completes, leaving all in the idle state at the same generation and freshness:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
+        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+
+        A[A:4] --> B[B:4] --> C[C:4]
+    ```
+
+The entire sequence is brought up-to-date with a single push, with no additional unconsumed work done upstream.
+
+##### Branching
+
+TODO: Same example as for pull, to show that stale paths are also not triggered.
+
+### Which Should You Use?
+
+For simple pipelines, especially those that run with a period much less than the pipeline duration (e.g. daily for a 1 hour process), *push* is the most appropriate. It is intuitive and has no unusual side effects, guaranteeing in these conditions:
+
+- At the end of the process, all data will be no older than when the request was made
+- No unnecessary execution will occur
+
+Its key disadvantage is that if requests are made more frequently than the bottleneck process can supply, nodes upstream of the process will run faster than the bottleneck can use them.
+
+In the case where requests are likely to be made at similar (or faster) period as the bottleneck duration, *pull* is recommended. In these conditions it assures:
+
+- No node anywhere in the sequence will execute more frequently than it can be consumed
+- No node will be more stale than minimum possible
+
+Pull and push are not mutually exclusive. A node may hold pull, push, or *both at once*. There's no great need therefore to be too careful about which to use.
+
+If both tokens are active on a node:
+
+- The node will execute any time the parents are fresher than itself, and apply pull upstream when it does so
+- When the freshness eventually reaches the push target, the push is satisfied and it is cleared
+
+The main take away is that triggering from the *point of supply*, as is common in most orchestration, inherently necessitates estimating what demand will be downstream. Triggering instead from the *point of demand* (as both pull and push methods here do) naturally leaves low-demand paths stale, and dramatically reduces the need for good governance over the DAG.
+
+## Triggers
+
+The **pull** and **push** methods can both be executed either once (e.g. linked to a single notification from a consumer) or continuously (e.g. executed back-to-back or on a schedule). Duckstring names each of these four trigger types explicitly:
+
+| | Once | Continuously |
+|---|---|---|
+| **Pull** | Tap | Wave |
+| **Push** | Pulse | Tide |
+
+These are intentionally water-themed, to extend the natural fluid-oriented nomenclature that is common in data engineering (lake, streaming etc.). 
+
+- **Tap**
+    - A single resupply, like taking goods off a shelf at a supermarket
+    - Pulls data at a given freshness from parents
+    - Demand propagates upstream to replenish
+- **Wave**
+    - Executes a new Tap every time the target node completes
+    - Every node updates as frequently as it can, without wasted effort
+- **Pulse**
+    - A single priority order, like requesting a custom product
+    - Causes data at the specified freshness to flow from the roots to the target node
+- **Tide**
+    - A Pulse sent on a schedule
+    - Data will update according to the specified period, unless bottlenecked by a process upstream
+    - If bottlenecked, race conditions are avoided and supply is simply throttled to that bottleneck period
+
+## Eager vs Gated
+
+TODO: Explain the concept of required and not required parents and how it affects pull and push
+
+TODO: Example of Wave process on a sequence with a bottleneck on the required path, and an optional node with a duration longer than that, to demonstrate that both run back to back.
+
+## Freshness
+
+In the examples above, **pull** used a generation number for demonstration purposes, while **push** referred to a request for data resulting from root nodes executing after a given timestamp. 
+
+These concepts are unified by a node's **freshness** `F`, which tracks the run start time of the oldest root used to supply that node. The difference between now and the freshness of a node is approximately its staleness or age. Note that it is distinctly *not* the time at which the run finished, as a recent transformation using stale data is still stale.
+
+Freshness has the advantage of being independent of the specific DAG under which nodes were executed, unlike alternatives like run IDs. 
+
+At completion of a run, a node will adopt the freshness of its parents. This is calculated by:
+
+$$
+F_{parents} =
+\begin{cases}
+\min_r F_r & \text{Any required parents } r \text{ exist} \\
+\max_k F_k & \text{Only optional parents } k \text{ exist} \\
+now & \text{No parents exist (root node)}
+\end{cases}
+$$
+
+Where there are required parents, a node is only as fresh as the stalest of the set it was waiting on. Where there are only optional parents, a node is as fresh as the freshest, as it was not waiting on any of the others. If there aren't any parents at all, it is the time at the start of the run (roots mint new freshness).
+
+Using **freshness**, the change gating rules for *push* and *pull* are:
+
+- **Pull**: $F_{parents} > F_{self}$
+- **Push**: $F_{parents} \ge F_{demand}$
+
+### Example: Diamond Dependency
+
+We will denote a node's freshness with `@`, so `A@9` means `A`'s output is as-of time 9. Consider a diamond where `X` consumes two intermediate nodes drawing on a common source `S`:
+
+```mermaid
+flowchart LR
+    S --> A
+    S --> B
+    A --> X
+    B --> X
+```
+
+Suppose at time 12 the state is `S@12`, with `A` and `B` having last run against different snapshots of `S`:
+
+```mermaid
+flowchart LR
+    classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+
+    S["S@12"] --> A["A@10"]
+    S --> B["B@8"]
+    A --> X["X@8"]
+    B --> X
+```
+
+`A` was built from `S` as-of 10, `B` from `S` as-of 8. When `X` runs (both parents required), it can be no fresher than its stalest input: `F_X = min(10, 8) = 8`. The diamond therefore stays internally consistent — `X` reflects a single, coherent point in time across both paths, never a splice of `A` at 10 with `B` at 8. If instead `B` were an *optional* parent, `X` would take the minimum over its required parents alone (`A@10`), using whatever `B` it had on a best-effort basis.
+
+## Ponds and Ripples
+
+The model so far is a flat graph of nodes. In practice it is useful to group nodes into versioned, independently-owned units. We call a single node a **Ripple** — a unit operation exactly as discussed. A **Pond** is a group of Ripples, where all Ripples in that Pond will always execute to completion (push-style) when the Pond is triggered to start. A parent Ripple in a Pond is always treated as required for freshness purposes.
+
+To continue the water-based nomenclature, we introduce the terms:
+
+- **Source**: A parent of a Pond
+- **Sink**: A child of a Pond
+- **Inlet**: A Pond with no Sources
+- **Outlet**: A Pond with no Sinks
+
+The advantage of this grouping is to allow dependency management and version control to be pulled up to the level of the Pond. The Pond keeps track of the Ponds on which it depends and performs a macroscopic transformation - the Ripples are simply the irreducible components of that process.
+
+Consider a Pond `p1` with a DAG of Ripples `r1`, `r2`, `r3` inside it:
+
+```mermaid
+flowchart LR
+    subgraph Pond [p1]
+        direction LR
+        r1 --> r3
+        r2 --> r3
+    end
+```
+
+The simplest conceptual framing is to imagine the Pond as two zero-duration boundary nodes, `p1.start` and `p1.end`, before and after the Ripples within it. The head is parent to all root Ripples and the tail child to all leaf Ripples:
+
+```mermaid
+flowchart LR
+    p1s([p1.start]) --> R1[p1.r1]
+    p1s --> R2[p1.r2]
+    R1 --> R3[p1.r3]
+    R2 --> R3
+    R3 --> p1e([p1.end])
+```
+
+These boundary nodes are not merely conceptual — they sit in the graph as real (if instantaneous) nodes, and the ordinary demand and freshness rules apply to them unchanged. 
+
+Pond relationships are between these boundary nodes. Consider a pond p2 with one Ripple, with p2 depending on p1:
+
+```mermaid
+flowchart LR
+    subgraph p1 [p1]
+        direction LR
+        p1.r1 --> p1.r3
+        p1.r2 --> p1.r3
+    end
+
+    subgraph p2 [p2]
+        direction LR
+        p2.r1
+    end
+
+    p1 --> p2
+```
+
+This is in practice the set of nodes:
+
+```mermaid
+flowchart LR
+    p1s([p1.start]) --> p1.r1
+    p1s --> p1.r2
+    p1.r1 --> p1.r3
+    p1.r2 --> p1.r3
+    p1.r3 --> p1e([p1.end])
+    p1e --> p2s([p2.start])
+    p2s --> p2.r1
+    p2.r1 --> p2e([p2.end])
+```
+
+### Pond State Variables
+
+TODO: Check that all the statements made in this section are valid according to what is implemented in the playground application.
+
+As the boundary nodes are zero-duration, this framing is theoretically identical to setting all root Ripples of the child Pond to have all leaf ripples of the parent Pond:
+
+```mermaid
+flowchart
+    subgraph Expanded [Expanded]
+        direction LR
+        p1s([p1.start]) --> p1.r1
+        p1s --> p1.r2
+        p1.r1 --> p1.r3
+        p1.r2 --> p1.r3
+        p1.r3 --> p1e([p1.end])
+        p1e --> p2s([p2.start])
+        p2s --> p2.r1
+        p2.r1 --> p2e([p2.end])
+    end
+
+    subgraph Collapsed [Collapsed]
+        direction LR
+        xp1.r1[p1.r1] --> xp1.r3[p1.r3]
+        xp1.r2[p1.r2] --> xp1.r3
+        xp1.r3 --> xp2.r1[p2.r1]
+    end
+
+    Expanded --- identical([Identical To])
+    identical --> Collapsed
+```
+
+However, including the boundary nodes confers a few simplification advantages.
+
+A Pond start node is always upstream of a Pond end node, and all its Ripples are between them. This implies:
+
+- All events that immediately propagate to all parents are guaranteed to transfer from the end to the start
+    - **push** tokens 
+    - **pull** tokens, if the start is idle
+- Immediately transferred information is shared between the start and end nodes, meaning these can be held as state variables against the Pond
+
+This lets a Pond be triggered as a single unit - a **Pond Run**. This allows the further simplificatinos and abstractions:
+
+- A Pond's freshness is held as both `Pond.startF` and `Pond.endF`
+    - Both are required as they are used for different purposes
+    - `Pond.startF` is conceptually against the start node, and is used for comparing with the Sources' freshness for change gating
+    - `Pond.endF` is conceptually against the end node, and is used for informing Sinks of the Pond's *completed* freshness
+- A pull arriving at an idle Pond sets the variable `Pond.hasPull`
+    - The *pull* state can only be cleared at the end of a Pond Run, so can be held as a single state variable against the Pond
+- A push arriving at a Pond sets the variable `Pond.pushTarget` = now
+    - When a Pond Run starts all Ripples inherit this `pushTarget`
+- The freshness of a Pond's Sources are held as `Pond.parentFreshness`
+    - References the completed freshness of each Source `Source.endF`
+    - This is held conceptually against the Pond's start node
+    - As the end node has no parents apart from internal Ripples, there's no need to track this value
+- A Pond Run can't start unless at least one of its root Ripples is not running
+    - This emulates the roots following the Pond start node
+    - Demand is only sent to the start node upon a root Ripple starting
+- When starting a Pond Run:
+    - Set `Pond.startF` = `Pond.parentFreshness`
+        - Pond won't start again in pull until `Pond.parentFreshness` advances
+    - If `Pond.hasPull`, set `Source.hasPull` = true for all Sources
+    - Set `Ripple.pushTarget` = `Pond.startF` for all Ripples
+        - This ensures the Ripples will always complete to a given freshness
+    - Set `Ripple.hasPull` = `Pond.hasPull`
+        - Sets Ripples to run as pull if the Pond is in a pull state
+    - Set `Ripple.parentFreshness` for each root Ripple to `Pond.startF`
+        - The root Ripples will then begin executing, starting the run
+- A Pond Run completes when all leaf `Ripple.F` > `Pond.endF`:
+    - Set `Pond.hasPull` = false
+        - Sinks will need to reassert pull to sustain pull execution on the next run
+    - Set `Pond.endF` = min(`Ripple.F`) for all Ripples
+        - This notifies Sinks that the Pond has updated
+
+Under *pull*, a Pond will continuously initiate new Pond Runs any time its parentFreshness advances. This could mean multiple Pond Runs are in operation simultaneously, which is intentional.
+
+Every Ripple in a Pond Run will *eventually* reach the `Pond.startF` freshness, as `Ripple.pushTarget` is set to this at run start. The Pond Runs may therefore be identified (and logged) by their `Pond.startF` freshness.
+
+### Triggers
+
+Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundary nodes) attached as child to the Pond. These each have special properties:
+
+- **Tap**: Sets `Source.hasPull = true`, then deletes itself
+- **Wave**: Sets `Source.hasPull = true` every time the pseudo-node runs
+- **Pulse**: Sets `Source.pushTarget = now`, then deletes itself
+- **Tide**: Sets `Source.pushTarget = now` on a set schedule
+
+## Summary
+
+TODO: Write this to match the tone of the rest of the document
