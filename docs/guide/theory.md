@@ -992,8 +992,10 @@ This lets a Pond be triggered as a single unit - a **Pond Run**. This allows the
     - Both are required as they are used for different purposes
     - `Pond.startF` is conceptually against the start node, and is used for comparing with the Sources' freshness for change gating
     - `Pond.endF` is conceptually against the end node, and is used for informing Sinks of the Pond's *completed* freshness
-- A pull arriving at an idle Pond sets the variable `Pond.hasPull`
-    - The *pull* state can only be cleared at the end of a Pond Run, so can be held as a single state variable against the Pond
+- The *pull* state is likewise held as two variables, one against each boundary node
+    - `Pond.hasEndPull` is conceptually against the end node. It is the Pond's **inbox**: it is *only ever set by downstream* — a Sink, or a Tap/Wave trigger — and is never cleared except by the Pond consuming it at the start of a run
+    - `Pond.hasStartPull` is conceptually against the start node. It is internal to a run: set when a run begins (from `hasEndPull`), and cleared by the Pond itself when the run completes
+    - Splitting the two is what keeps a Pond **divorced from its neighbours**. A Sink writes only to `hasEndPull`; the Pond clears only `hasStartPull` (on completion) and consumes `hasEndPull` at the single, well-defined moment a run starts. Because the variable a neighbour writes is never the variable the Pond is busy clearing during a run, a downstream pull may land at *any* point in a tick without being lost to a race — it is simply picked up by the next run. A single shared flag would instead force the replenishment to occur in a particular order within the clearing of the Pond's run, which is fragile
 - A push arriving at a Pond sets the variable `Pond.pushTarget` = now
     - When a Pond Run starts all Ripples inherit this `pushTarget`
 - The freshness of a Pond's Sources are held as `Pond.parentFreshness`
@@ -1004,19 +1006,22 @@ This lets a Pond be triggered as a single unit - a **Pond Run**. This allows the
     - This emulates the roots following the Pond start node
     - Demand is only sent to the start node upon a root Ripple starting
 - When starting a Pond Run:
+    - Consume the inbox: set `Pond.hasStartPull` = `Pond.hasEndPull`, then set `Pond.hasEndPull` = false
+        - This is the only point at which `hasEndPull` is read or cleared. Any Sink re-asserting after this moment writes a fresh `hasEndPull` for the *next* run, never disturbing the run now starting
     - Set `Pond.startF` = `Pond.parentFreshness`
         - Pond won't start again in pull until `Pond.parentFreshness` advances
-    - If `Pond.hasPull`, set `Source.hasPull` = true for all Sources
+    - If `Pond.hasStartPull`, set `Source.hasEndPull` = true for all Sources
+        - The Pond pulls from its own Sources by writing *their* inboxes, exactly as a Sink does to it
     - Set `Ripple.pushTarget` = `Pond.startF` for all *non-root* Ripples
         - This ensures the Ripples will always complete to a given freshness
         - The roots are excluded: a root's parent freshness in an Inlet Pond is `now`, so a push against itself would always be satisfiable and the root would run perpetually. The roots are instead governed by pull alone
-    - Set `Ripple.hasPull` = `Pond.hasPull`
+    - Set `Ripple.hasPull` = `Pond.hasStartPull`
         - Sets Ripples to run as pull if the Pond is in a pull state
     - Set `Ripple.parentFreshness` for each root Ripple to `Pond.startF`
         - The root Ripples will then begin executing, starting the run
 - A Pond Run completes when all leaf `Ripple.F` > `Pond.endF`:
-    - Set `Pond.hasPull` = false
-        - Sinks will need to reassert pull to sustain pull execution on the next run
+    - Set `Pond.hasStartPull` = false
+        - `hasEndPull` is left untouched — if a Sink re-asserted during the run it is already waiting there to drive the next run
     - Set `Pond.endF` = min(`Ripple.F`) for all Ripples
         - This notifies Sinks that the Pond has updated
 
@@ -1028,10 +1033,169 @@ Every Ripple in a Pond Run will *eventually* reach the `Pond.startF` freshness, 
 
 Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundary nodes) attached as child to the Pond. These each have special properties:
 
-- **Tap**: Sets `Source.hasPull = true`, then deletes itself
-- **Wave**: Sets `Source.hasPull = true` every time the pseudo-node runs
+- **Tap**: Sets `Source.hasEndPull = true`, then deletes itself
+- **Wave**: Sets `Source.hasEndPull = true` every time the pseudo-node runs
 - **Pulse**: Sets `Source.pushTarget = now`, then deletes itself
 - **Tide**: Sets `Source.pushTarget = now` on a set schedule
+
+A trigger therefore writes only to the target Pond's inbox (`hasEndPull` for pull triggers, `pushTarget` for push), exactly as a downstream Sink would. The trigger is, in effect, just another Sink.
+
+### Example: Tapping Across Two Ponds
+
+To see the state variables in motion, we trace a single **Tap** on the two-Pond example from above. `p1` holds `r1`, `r2` → `r3`; `p2` holds a single Ripple `s1`. Every Ripple takes one second to run, so a freshness of, say, 2 corresponds to a run that began at time 2s.
+
+We track each Ripple's state — idle, *queued* (orange, holds demand but waiting), or *running* (blue) — alongside its freshness `F`. The Pond's two freshness variables are shown in its label: `startF` (the freshness of the run currently entering the Pond) and `endF` (the completed freshness its Sinks can see). Demand edges are dotted; an edge is solid once its parent is ahead of its child.
+
+1) All idle at freshness 0:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        subgraph p1 ["p1 — startF 0 / endF 0"]
+            direction LR
+            r1["r1 @0"] -.-> r3["r3 @0"]
+            r2["r2 @0"] -.-> r3
+        end
+        subgraph p2 ["p2 — startF 0 / endF 0"]
+            direction LR
+            s1["s1 @0"]
+        end
+        p1 -.-> p2
+    ```
+
+2) A Tap hits `p2`, writing its inbox: `p2.hasEndPull = true`. As `p2` is idle, the pull jumps straight through to its Source `p1`, setting `p1.hasEndPull`. Every Ripple in both Ponds is now queued:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        subgraph p1 ["p1 — startF 0 / endF 0 · hasEndPull"]
+            direction LR
+            r1["r1 @0"]:::queued -.-> r3["r3 @0"]:::queued
+            r2["r2 @0"]:::queued -.-> r3
+        end
+        subgraph p2 ["p2 — startF 0 / endF 0 · hasEndPull"]
+            direction LR
+            s1["s1 @0"]:::queued
+        end
+        p1 -.-> p2
+        p2 <-.- T([Tap]):::queued
+    ```
+
+3) `p1` is an Inlet, so its roots' inputs are always *now*. A **Pond Run** begins: it consumes its inbox (`hasStartPull` ← `hasEndPull`, then `hasEndPull` ← false), advances `p1.startF` to 1, stamps the non-root Ripple `r3` with `pushTarget = 1`, and the roots `r1`, `r2` start. `p2` stays queued, its roots gated on `p1.endF`:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        subgraph p1 ["p1 — startF 1 / endF 0"]
+            direction LR
+            r1["r1 @1"]:::running -.-> r3["r3 @0"]:::queued
+            r2["r2 @1"]:::running -.-> r3
+        end
+        subgraph p2 ["p2 — startF 0 / endF 0 · hasEndPull"]
+            direction LR
+            s1["s1 @0"]:::queued
+        end
+        p1 -.-> p2
+    ```
+
+4) `r1` and `r2` complete at freshness 1, so `r3` may start. As `r3` is a leaf, its run is the last of `p1`'s first Pond Run:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        subgraph p1 ["p1 — startF 1 / endF 0"]
+            direction LR
+            r1["r1 @1"] --> r3["r3 @1"]:::running
+            r2["r2 @1"] --> r3
+        end
+        subgraph p2 ["p2 — startF 0 / endF 0 · hasEndPull"]
+            direction LR
+            s1["s1 @0"]:::queued
+        end
+        p1 -.-> p2
+    ```
+
+5) `r3` completes, so `p1.endF` advances to 1, notifying `p2`. `p2`'s root `s1` is now behind its Source and consumes `p2`'s inbox to start a Pond Run at `p2.startF = 1`. Because `p2.hasStartPull` is now set, starting writes its Source's inbox — `p1.hasEndPull = true` once more:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        subgraph p1 ["p1 — startF 1 / endF 1 · hasEndPull"]
+            direction LR
+            r1["r1 @1"] --> r3["r3 @1"]
+            r2["r2 @1"] --> r3
+        end
+        subgraph p2 ["p2 — startF 1 / endF 0"]
+            direction LR
+            s1["s1 @1"]:::running
+        end
+        p1 --> p2
+    ```
+
+6) `p1` is idle with a pending inbox, so it immediately consumes `hasEndPull` and begins its **second** Pond Run: `startF` advances to 2 and `r1`, `r2` restart — they begin the next run as soon as `r3` freed them, rather than waiting for `p2`. Two Pond Runs are now in flight at once. `s1` is still running its first:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        subgraph p1 ["p1 — startF 2 / endF 1"]
+            direction LR
+            r1["r1 @2"]:::running -.-> r3["r3 @1"]:::queued
+            r2["r2 @2"]:::running -.-> r3
+        end
+        subgraph p2 ["p2 — startF 1 / endF 0"]
+            direction LR
+            s1["s1 @1"]:::running
+        end
+        p1 --> p2
+    ```
+
+7) `s1` completes at freshness 1, so `p2.endF` advances to 1 and `p2` falls idle — the Tap was a single resupply, so its inbox is empty and nothing re-asserts. Inside `p1`, `r1`/`r2` complete at freshness 2 and `r3` runs its second generation:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        subgraph p1 ["p1 — startF 2 / endF 1"]
+            direction LR
+            r1["r1 @2"] --> r3["r3 @2"]:::running
+            r2["r2 @2"] --> r3
+        end
+        subgraph p2 ["p2 — startF 1 / endF 1"]
+            direction LR
+            s1["s1 @1"]
+        end
+        p1 --> p2
+    ```
+
+8) `p1`'s `hasStartPull` was cleared as that second run completes, its inbox is empty, and `p2` is no longer demanding — so there is nothing to re-arm `r1`/`r2`. `p1` settles at `endF` 2 and the system is quiescent:
+
+    ```mermaid
+    flowchart LR
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+        subgraph p1 ["p1 — startF 2 / endF 2"]
+            direction LR
+            r1["r1 @2"] --> r3["r3 @2"]
+            r2["r2 @2"] --> r3
+        end
+        subgraph p2 ["p2 — startF 1 / endF 1"]
+            direction LR
+            s1["s1 @1"]
+        end
+        p1 --> p2
+    ```
+
+`p1` ends two Pond Runs ahead of `p2` (freshness 2 versus 1). This is one *more* than the single-Ripple chain's "one behind" staggering, because of step 6: starting `p2`'s Run re-armed `p1`'s inbox, *and* `p1`'s roots restart the instant `r3` frees them — so `p1` gets a full extra run in before its demand lapses. Had the trigger been a **Wave** rather than a Tap, `p2` would re-assert pull on every completion and the two Ponds would settle into a continuous, bottleneck-throttled cycle instead of falling quiet.
+
+#### Why the inbox is kept separate
+
+The split between `hasEndPull` (the inbox, written only by downstream) and `hasStartPull` (cleared only by the Pond's own run) is what makes the trace above robust regardless of the order in which Ponds are evaluated within a tick. Consider step 5, where `p2` starts a run and re-asserts pull on `p1` exactly as `p1`'s own first run is finishing. With a *single* shared flag, the outcome would depend on a fragile ordering: if `p1` cleared the flag after `p2` set it, `p2`'s demand would be lost and the pipeline could stall. By writing only `p1.hasEndPull`, a Sink can re-assert at *any* point in the tick — before, during, or after `p1`'s run — and the demand is simply picked up the next time `p1` consumes its inbox. A Pond is thereby fully divorced from the timing of its neighbours: it reads its inbox at one well-defined moment (run start) and never has its internal run state disturbed by an external write. This is the property that lets each Pond be reasoned about, scheduled, and even executed in isolation.
 
 ## Summary
 
