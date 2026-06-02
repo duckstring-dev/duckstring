@@ -6,6 +6,8 @@ This document outlines the theory governing the orchestration mechanics.
 
 Most of the time when running a sequence of data transformations (a pipeline), the process is set to run either on a schedule (e.g. cron job) or continuously (new run triggered immediately upon completion of previous). This certainly satisfies many purposes, but can often be wasteful - in staleness (data age), compute, or both.
 
+TODO: Include the goal that a unit of version control should be possible to deploy without editing the DAG greatly, even if it's new, like package installation, as a primary motivator for a different type of orchestrator
+
 ### General Constraints
 
 Consider a process consisting of three transformations - call them "unit operations" - in series, each taking 10 minutes to complete. The total time from start to end of the pipeline (the *lead time*) is the sume of these durations: 30 minutes. More generally, where some operations run in parallel, the total lead time is the sum duration of the unit operations on the *critical path* - the longest route through the process.
@@ -785,9 +787,9 @@ These are intentionally water-themed, to extend the natural fluid-oriented nomen
     - A single priority order, like requesting a custom product
     - Causes data at the specified freshness to flow from the roots to the target node
 - **Tide**
-    - A Pulse sent on a schedule
-    - Data will update according to the specified period, unless bottlenecked by a process upstream
-    - If bottlenecked, race conditions are avoided and supply is simply throttled to that bottleneck period
+    - Executes a new Pulse every time the target node exceeds a maximum *staleness*
+    - Has the effect of executing the DAG with a period equal to this "maximum staleness" (e.g. staleness of 1 day creates a daily execution)
+    - If an upstream bottleneck is longer than this duration the process, the DAG naturally throttles to that bottleneck with no accumulation of Pulses
 
 ## Eager vs Gated
 
@@ -878,6 +880,71 @@ flowchart LR
 ```
 
 `A` was built from `S` as-of 10, `B` from `S` as-of 8. When `X` runs (both parents required), it can be no fresher than its stalest input: `F_X = min(10, 8) = 8`. The diamond therefore stays internally consistent — `X` reflects a single, coherent point in time across both paths, never a splice of `A` at 10 with `B` at 8. If instead `B` were an *optional* parent, `X` would take the minimum over its required parents alone (`A@10`), using whatever `B` it had on a best-effort basis.
+
+## Batch-Updating Data Sources
+
+Many foreign data sources update in **batches** - for example, updating every morning at 2am. If this is known, it's wasted effort for a root node to execute (or check for updates) more frequently than the expected update frequency of the source. 
+
+To address this, a window (or collection of windows) can be set against a root node - for example, "2am to 2am the following day". This defines the window in which a node can run *at most once*. 
+
+Data consumed during a window is considered "fresh" until the end of the window - a node running during a window takes the window end time as its freshness, not the time of the run. This subtly modifies the meaning of **freshness** to mean "fresh until". When windows are not present on a node there's no change to behaviour as discussed so far (the node is simply considered fresh until `now`), but it does lead to the potentially unexpected result that freshness can be *in the future*. 
+
+The behaviour of both *pull* and *push* is unchanged in this framing. The first time a node is demanded during a window, it simply runs. The second time, it sees that `now` is not greater than the node's freshness (the end of the window), so it doesn't run and instead queues until the start of the *next* window.
+
+It's worth noting that windows can be either contiguous (window end is the start of the next window) or have gaps, but may never overlap. During gaps the node can't run and instead queues until the next window. Gaps like this are useful if there is a period in which the source can't reliably be consumed, for example during a scheduled table write.
+
+### Staleness
+
+Prior to this adjustment to the meaning of **freshness**, the **staleness** (the age of the data consumed at the root nodes) was simply determined by the difference between `now` and a node's **freshness** `F`:
+
+$$
+staleness = now - F
+$$
+
+This is no longer correct, as for a window with a 1 day duration for example, at the start of the window the staleness is *-1 day*, despite really being not stale at all. This creates a problem for Tide especially, which executes against a staleness maximum. A Tide of 1 day would execute every *2 days*.
+
+Consequently, each node tracks a delay `D`. This is normally zero, but for root nodes it is equal to the duration of the window it ran against. Downstream nodes inherit `D` by taking the largest `D` from the set of parents with `F` equal to the the overall parent freshness:
+
+$$
+D = max(D_k) \text{ where } F_k = F_{parents} \text{ for all parents } k
+$$
+
+**Staleness** is then the difference between `now` and the **freshness** `F` *minus the delay* `D`:
+
+$$
+staleness = now - (F - D) = now + D - F
+$$
+
+This corrects Tide behaviour. A run against a window with a 1 day duration has `D = 1d`, and `F = now + 1d`. The staleness correctly produces the expected 0 in this case:
+
+$$
+staleness = now + D - F = now + 1d - (now + 1d) = 0
+$$
+
+### Example: Wave with Window
+
+Consider `A → B → C`, where `A` is a root node with a 1-day window, and `C` is held under a continuous Wave, first applied at the beginning of A's window:
+
+```mermaid
+flowchart LR
+    A["A (1d window)"] --> B --> C  <.- D([Wave]):::queued
+```
+
+1) Upon the first Tap emitted by the wave, the demand propagates back to `A`, which runs to `F = +1d`.
+
+2) `B` then starts, sending demand back to `A`.
+
+3) As `A`'s `F` is already equal to the end of the window, it does not run, and sits queued.
+
+4) When `B` completes, `C` starts, sending demand back to `B`, which cannot run because `A` has not updated - it sits queued also.
+
+5) When `C` completes, its Wave renews its demand, but it cannot run because `B` has not updated - it sits queued also.
+
+6) When a day passes, `A` enters a new window and can start, allowing `B` and `C` to run after it, again with each entering the queued state.
+
+The Wave throttles itself to once per day, with no superfluous runs anywhere in the chain — purely because `A`'s freshness only advances daily. When a root node has a window, Wave execution naturally throttles to that window's period. 
+
+This is a convenient result. Any pipeline requiring periodic execution due to supply limitations can be managed at the *root* through windows, with downstream consuming eagerly, and the DAG will naturally throttle to avoid wasted runs. This allows the choice of execution mode (Wave/Tide, or Tap/Pulse on upon request) to be explicitly about the *service requirements*, with no care needed about the *supply conditions*.
 
 ## Ponds and Ripples
 
@@ -988,6 +1055,8 @@ A Pond start node is always upstream of a Pond end node, and all its Ripples are
 
 This lets a Pond be triggered as a single unit - a **Pond Run**. This allows the further simplificatinos and abstractions:
 
+TODO: This section got mangled by the separation of hasStartPull and hasEndPull - needs an edit
+
 - A Pond's freshness is held as both `Pond.startF` and `Pond.endF`
     - Both are required as they are used for different purposes
     - `Pond.startF` is conceptually against the start node, and is used for comparing with the Sources' freshness for change gating
@@ -1036,7 +1105,7 @@ Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundar
 - **Tap**: Sets `Source.hasEndPull = true`, then deletes itself
 - **Wave**: Sets `Source.hasEndPull = true` every time the pseudo-node runs
 - **Pulse**: Sets `Source.pushTarget = now`, then deletes itself
-- **Tide**: Sets `Source.pushTarget = now` on a set schedule
+- **Tide**: Sets `Source.pushTarget = now` whenever the Pond's staleness exceeds the set bound
 
 A trigger therefore writes only to the target Pond's inbox (`hasEndPull` for pull triggers, `pushTarget` for push), exactly as a downstream Sink would. The trigger is, in effect, just another Sink.
 
