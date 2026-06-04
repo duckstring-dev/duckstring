@@ -192,7 +192,7 @@ We denote a node's *generation* as `· gN`, so `A · g3` indicates A has run thr
         B .-> C["C · g0 •"]:::queued
     ```
 
-4) A completes, meaning it has updated relative to B and B can start:
+3) A completes, meaning it has updated relative to B and B can start:
 
     ```mermaid
     flowchart LR
@@ -225,7 +225,7 @@ We denote a node's *generation* as `· gN`, so `A · g3` indicates A has run thr
         B .-> C["C · g0 •"]:::queued
     ```
 
-    2) A has demand and begins its run simultaneously:
+    3) A has demand and begins its run simultaneously:
 
     ```mermaid
     flowchart LR
@@ -236,7 +236,7 @@ We denote a node's *generation* as `· gN`, so `A · g3` indicates A has run thr
         B .-> C["C · g0 •"]:::queued
     ```
 
-5) A completes before B and sits idle:
+4) A completes before B and sits idle:
 
     ```mermaid
     flowchart LR
@@ -247,7 +247,7 @@ We denote a node's *generation* as `· gN`, so `A · g3` indicates A has run thr
         B .-> C["C · g0 •"]:::queued
     ```
 
-6) B completes, meaning it has updated relative to C and C can start:
+5) B completes, meaning it has updated relative to C and C can start:
 
     ```mermaid
     flowchart LR
@@ -302,7 +302,7 @@ We denote a node's *generation* as `· gN`, so `A · g3` indicates A has run thr
         B --> C["C · g0"]:::running
     ```
 
-7) A, B and C each eventually complete their run:
+6) A, B and C each eventually complete their run:
 
     ```mermaid
     flowchart LR
@@ -692,29 +692,6 @@ flowchart LR
 
 Just as with pull, the unconsumed path (`A` and the join `C`) is left stale and no compute is spent on it. The difference between push and pull is *how much* of a demanded path runs — push brings it fully current, pull advances it one step — not *which* paths run. Both are triggered from the point of demand, so both leave low-demand sub-graphs quiet.
 
-### Which Should You Use?
-
-For simple pipelines, especially those that run with a period much less than the pipeline duration (e.g. daily for a 1 hour process), *push* is the most appropriate. It is intuitive and has no unusual side effects, guaranteeing in these conditions:
-
-- At the end of the process, all data will be no older than when the request was made
-- No unnecessary execution will occur
-
-Its key disadvantage is that if requests are made more frequently than the bottleneck process can supply, nodes upstream of the process will run faster than the bottleneck can use them.
-
-In the case where requests are likely to be made at similar (or faster) period as the bottleneck duration, *pull* is recommended. In these conditions it assures:
-
-- No node anywhere in the sequence will execute more frequently than it can be consumed
-- No node will be more stale than minimum possible
-
-Pull and push are not mutually exclusive. A node may hold pull, push, or *both at once*. There's no great need therefore to be too careful about which to use.
-
-If both tokens are active on a node:
-
-- The node will execute any time the parents are fresher than itself, and apply pull upstream when it does so
-- When the freshness eventually reaches the push target, the push is satisfied and it is cleared
-
-The main take away is that triggering from the *point of supply*, as is common in most orchestration, inherently necessitates estimating what demand will be downstream. Triggering instead from the *point of demand* (as both pull and push methods here do) naturally leaves low-demand paths stale, and dramatically reduces the need for good governance over the DAG.
-
 ## Triggers
 
 The **pull** and **push** methods can both be executed either once (e.g. linked to a single notification from a consumer) or continuously (e.g. executed back-to-back or on a schedule). Duckstring names each of these four trigger types explicitly:
@@ -740,6 +717,16 @@ These are intentionally water-themed, to extend the natural fluid-oriented nomen
     - Executes a new Pulse every time the target node exceeds a maximum *staleness*
     - Has the effect of executing the DAG with a period equal to this "maximum staleness" (e.g. staleness of 1 day creates a daily execution)
     - If an upstream bottleneck is longer than this duration, the DAG naturally throttles to that bottleneck with no accumulation of Pulses
+
+### Which Should You Use?
+
+The two families answer different questions, and the right choice follows from how often an Outlet is consumed relative to how long its pipeline takes to run.
+
+**Reach for push (Pulse/Tide) when consumption is infrequent** — a daily report over an hour-long pipeline, or anything updated far less often than it takes to produce. Push is the intuitive, conventional behaviour: it guarantees that on completion the result is no older than the request, and runs nothing unnecessary. Its only weakness is that if requests arrive faster than the bottleneck can supply, upstream nodes outpace it — but a Tide avoids even this, throttling to the bottleneck with no accumulation.
+
+**Reach for pull (Tap/Wave) when consumption is frequent** — at or above the bottleneck's rate. Pull guarantees that no node ever runs faster than it is consumed, and that nothing is more stale than strictly necessary. A Wave on an Outlet keeps it as fresh as the slowest required input allows, with no wasted runs anywhere upstream.
+
+In practice the choice need not be agonised over, because **the two compose freely**: a node may hold pull and push demand at once. It runs whenever its parents are fresher than itself (servicing the pull and re-arming upstream), and separately clears its push once the target freshness is reached. A common arrangement is a Tide setting a freshness floor on an Outlet, with ad-hoc Taps from queries layered on top to pull it fresher on demand — the two never conflict, since demand is simply *any*.
 
 ## Eager vs Gated
 
@@ -807,7 +794,7 @@ Using **freshness**, the change gating rules for *push* and *pull* are:
 
 ### Example: Diamond Dependency
 
-We will denote a node's freshness with `@`, so `A@9` means `A`'s output is as-of time 9. Consider a diamond where `X` consumes two intermediate nodes drawing on a common source `S`:
+Consider a diamond where `X` consumes two intermediate nodes drawing on a common source `S`:
 
 ```mermaid
 flowchart LR
@@ -817,19 +804,19 @@ flowchart LR
     B --> X
 ```
 
-Suppose at time 12 the state is `S@12`, with `A` and `B` having last run against different snapshots of `S`:
+Suppose `S` has reached generation 12, with `A` and `B` having last run against different generations of `S`:
 
 ```mermaid
 flowchart LR
     classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-    S["S@12"] --> A["A@10"]
-    S --> B["B@8"]
-    A --> X["X@8"]
+    S["S · g12"] --> A["A · g10"]
+    S --> B["B · g8"]
+    A --> X["X · g8"]
     B --> X
 ```
 
-`A` was built from `S` as-of 10, `B` from `S` as-of 8. When `X` runs (both parents required), it can be no fresher than its stalest input: `F_X = min(10, 8) = 8`. The diamond therefore stays internally consistent — `X` reflects a single, coherent point in time across both paths, never a splice of `A` at 10 with `B` at 8. If instead `B` were an *optional* parent, `X` would take the minimum over its required parents alone (`A@10`), using whatever `B` it had on a best-effort basis.
+`A` was built from `S` at generation 10, `B` from `S` at generation 8. When `X` runs (both parents required), it can be no fresher than its stalest input: `F_X = min(10, 8) = 8`. The diamond therefore stays internally consistent — `X` reflects a single, coherent point across both paths, never a splice of `A` at 10 with `B` at 8. If instead `B` were an *optional* parent, `X` would take the minimum over its required parents alone (`A · g10`), using whatever `B` it had on a best-effort basis.
 
 ## Batch-Updating Data Sources
 
@@ -1010,89 +997,100 @@ A Pond start node is always upstream of a Pond end node, and all its Ripples are
     - **pull** tokens, if the start is idle
 - Immediately transferred information is shared between the start and end nodes, meaning these can be held as state variables against the Pond
 
-This lets a Pond be triggered as a single unit - a **Pond Run**. This allows the further simplifications and abstractions.
+This lets a Pond be triggered as a single unit - a **Pond Run**. The complete behaviour is given by the pseudocode below: a Pond and a Ripple each carry a little state, and react to a handful of events (demand arriving, a run starting, a run completing). The aim is to capture *every* rule exhaustively in one place; the worked example that follows traces them step by step.
 
-A Pond follows the rules:
-- The freshness of the most recently started Pond Run is held as `Pond.startF`
-- The freshness of the most recently completed Pond Run is held as `Pond.endF`
-- The freshness of a Pond's Sources are held as `Pond.sourceF`, evaluated by:
-    - If an Inlet (no Sources):
-        - If any Windows exist:
-            - Set `Pond.currentWindow = (Window where Window.start <= now and Window.end > now)`
-            - If `Pond.currentWindow`:
-                - Set `Pond.sourceF = Pond.currentWindow.end`
-                    - This considers the result of an update to be *fresh until* the Window end
-                - Set `Pond.D = Pond.currentWindow.end - Pond.currentWindow.start`
-                    - The Window Delay is the duration of the Window
-            - Else: 
-                - Set `Pond.sourceF = null`
-                    - If there is no current Window, `Pond.sourceF = null`, and the Pond cannot start until a Window starts
-        - Else:
-            - Set `Pond.sourceF = now`
-            - Set `Pond.D = 0`
-    - If any Source is Required:
-        - Set `Pond.sourceF = min(Source.endF)` for all Required Sources
-            - Blocks if at least one Required Source has not updated
-    - Else:
-        - Set `Pond.sourceF = max(Source.endF)` for all Sources
-            - Allows a start if any Source has updated
-- A Sink starting as pull sets the variable `Pond.hasReceivedPull = true`
-- When `Pond.hasReceivedPull` changes to true:
-    - If `Pond.startF == Pond.endF`, set `Pond.hasPull = true`, set `Ripple.hasPull = true` for all Ripples in the Pond
-        - This handles cold starts for a Pond
-    - Otherwise, set `Ripple.hasPull = true` for all leaf Ripples
-        - Sustain pull at end of chain
-    - Finally, set `Pond.hasReceivedPull = false`
-- When `Pond.hasPull` changes to true:
-    - For all Sources, if `Source.endF == Pond.startF`, set `Source.hasPull = true`
-        - This handles cold starts between Ponds
-- When `Pond.targetF` changes (e.g. set by a Pulse or a Sink):
-    - For all Sources, if `Source.targetF is null` or `Source.targetF < Pond.targetF`, set `Source.targetF = Pond.targetF`
-        - This propagates a push signal upstream immediately
-- A Pond Run starts if:
-    - `Pond.sourceF >= Pond.targetF` or
-    - `Pond.hasPull = true` and `Pond.sourceF > Pond.startF`
-- When starting a Pond Run:
-    - Set `Pond.startF = Pond.sourceF`
-        - Pond won't start again in pull until `Pond.sourceF` advances
-    - Set `Pond.hasPull = false`
-        - Pond won't start again in pull until `Pond.hasPull` is renewed
-    - If `Pond.targetF <= Pond.startF`, set `Pond.targetF = null`
-        - Pond won't start again in push until `Pond.targetF` is set
-    - Set `Pond.D = max(Parent.D)` for all Parents where `Parent.endF = Pond.startF`
-        - Tracks the worst case Window Delay for the set of Parents that determined the freshness of this Pond Run
-    - Set `Ripple.targetF = Pond.startF` for all Ripples
-        - This ensures the Ripples will always complete a run of a given freshness once it starts, and initiates the run
+```
+Pond:
+    state:
+        startF          # freshness of the most recently started Pond Run
+        endF            # freshness of the most recently completed Pond Run
+        sourceF         # freshness available from this Pond's Sources (derived, below)
+        D               # window delay (see Staleness); 0 unless fed by a window
+        hasReceivedPull # a Sink (or trigger) has asked for resupply
+        hasPull         # a Pond Run is wanted in pull
+        targetF         # push target freshness, or null
 
-A Ripple follows the rules:
-- The freshness of the most recently started Ripple Run is held as `Ripple.startF`
-- The freshness of the most recently completed Ripple Run is held as `Ripple.endF`
-- The freshness of a Ripple's parents are held as `Ripple.sourceF`, evaluated by:
-    - If root (no parents), `Ripple.sourceF = Pond.startF`
-    - Otherwise, `Ripple.sourceF = min(Parent.endF)` over all parents
-        - There are no optional parent Ripples, so this is sufficient
-- When `Ripple.hasPull` changes to true (e.g. by a child or a Pond's `Pond.hasReceivedPull` mechanism):
-    - If root (no parents), set `Pond.hasPull`
-        - This allows a Pond to start a Pond Run as pull
-    - Otherwise, for all parents, if `Parent.endF == Ripple.startF`, set `Parent.hasPull = true`
-        - This handles cold starts between Ripples
-- A Ripple Run starts if:
-    - `Ripple.sourceF >= Ripple.targetF` or
-    - `Ripple.hasPull = true` and `Ripple.sourceF > Ripple.startF`
-- When starting a Ripple Run:
-    - Set `Ripple.startF = Ripple.sourceF`
-    - If `Ripple.hasPull = true`
-        - If not root (has parents), set `Parent.hasPull = true` for all parents (skip if a root)
-            - Pull propagation, to enable the starting of concurrent Pond Runs
-        - Finally, set `Ripple.hasPull = false`
-            - This clears the pull, requiring it to be renewed before the next run can start
-    - If `Ripple.targetF <= Ripple.sourceF`, set `Ripple.targetF = null`
-        - Ripple won't start again in push until `Ripple.targetF` is set
-- When completing a Ripple Run:
-    - Set `Ripple.endF = Ripple.startF`
-        - This notifies children that the Pond has updated
-    - Set `Pond.endF = min(Ripple.endF)` over all Ripples
-        - This completes a Pond Run, notifying Sinks that the Pond has updated
+    # sourceF is recomputed from the Sources (or window, for an Inlet):
+    derive sourceF:
+        if Inlet (no Sources):
+            if any windows exist:
+                currentWindow = window where start <= now < end, if any
+                if currentWindow:
+                    sourceF = currentWindow.end     # "fresh until" the window end
+                    D       = currentWindow.end - currentWindow.start
+                else:
+                    sourceF = null                  # between windows: cannot run
+            else:
+                sourceF = now ; D = 0               # live source
+        else if any Source is Required:
+            sourceF = min(Source.endF over Required Sources)   # blocks on the stalest
+        else:
+            sourceF = max(Source.endF over all Sources)        # any optional Source suffices
+
+    on hasReceivedPull becomes true:
+        if startF == endF:                          # cold start: wake the whole Pond
+            hasPull = true
+            Ripple.hasPull = true for all Ripples
+        else:                                       # running: only sustain the leaves
+            Ripple.hasPull = true for all leaf Ripples
+        hasReceivedPull = false
+
+    on hasPull becomes true:
+        for each Source where Source.endF == startF:    # cold-start propagation upstream
+            Source.hasReceivedPull = true
+
+    on targetF changes (set by a Pulse, Tide, or Sink):
+        for each Source where Source.targetF is null or < targetF:
+            Source.targetF = targetF                # push propagates eagerly upstream
+
+    start a Pond Run when:
+        sourceF >= targetF                          # push satisfied, OR
+        or (hasPull and sourceF > startF)           # pull with fresher input
+
+    on starting a Pond Run:
+        if hasPull and not Inlet (no Sources): 
+            for each Source: 
+                Source.hasReceivedPull = true       # propagate pull
+        startF  = sourceF                           # won't restart in pull until sourceF advances
+        hasPull = false                             # won't restart in pull until renewed
+        if targetF <= startF: targetF = null        # push satisfied
+        D = max(Parent.D over Parents where Parent.endF == startF)   # carry worst-case delay
+        Ripple.targetF = startF for all Ripples     # every Ripple must reach this freshness;
+                                                    # this also initiates the run
+
+Ripple:
+    state:
+        startF, endF        # freshness of most recently started / completed Ripple Run
+        sourceF             # freshness available from this Ripple's parents (derived)
+        hasPull, targetF
+
+    derive sourceF:
+        if root (no parent Ripples): sourceF = Pond.startF
+        else:                        sourceF = min(Parent.endF over all parents)
+                                     # there are no optional parent Ripples, so min suffices
+
+    on hasPull becomes true (set by a child, or the Pond's hasReceivedPull handler):
+        if root (no parents):
+            Pond.hasPull = true                     # lets the Pond start a Run as pull
+        else:
+            for each parent where Parent.endF == startF:
+                Parent.hasPull = true               # cold-start propagation between Ripples
+
+    start a Ripple Run when:
+        sourceF >= targetF
+        or (hasPull and sourceF > startF)
+
+    on starting a Ripple Run:
+        startF = sourceF
+        if hasPull:
+            if not root: Parent.hasPull = true for all parents   # pull propagation upstream
+            hasPull = false                         # cleared; must be renewed before next run
+        if targetF <= sourceF: targetF = null
+
+    on completing a Ripple Run:
+        endF = startF                               # notify children
+        Pond.endF = min(Ripple.endF over all Ripples)   # if advanced, the Pond Run completed
+```
 
 Under *pull*, a Pond will continuously initiate new Pond Runs any time its `sourceF` advances, or until the pull demand is cleared without renewal from a Sink. This could mean multiple Pond Runs are in operation simultaneously, which is intentional.
 
@@ -1111,7 +1109,7 @@ The trigger is, in effect, just another Sink.
 
 ### Example: Tap
 
-To see the Pond rules in motion, we trace a single **Tap** on the two-Pond example: `p1` (an Inlet, with `r1`, `r2` → `r3`) feeding `p2` (a single Ripple `s1`). Every Ripple takes the same fixed time to run. We label each Ripple with the generation it is currently producing (`gN`), colour running Ripples blue, and mark a held pull token with `•`. A Pond's title shows its `startF / endF` as generations; a Pond holding demand but unable to run yet is *queued*, shown with an orange title. As `p1` is an Inlet, each of its runs mints the next generation.
+To see the Pond rules in motion, we trace a single **Tap** on the two-Pond example: `p1` (an Inlet, with `r1`, `r2` → `r3`) feeding `p2` (a single Ripple `s1`). Every Ripple takes the same fixed time to run. We label each Ripple with the generation it is currently producing (`gN`), colour running Ripples green and queued ones orange, and mark a held pull token with `•`. A Pond's title shows its `startF / endF` as generations, tinted green while running and orange while queued. As `p1` is an Inlet, each of its runs mints the next generation.
 
 1) **Idle.** Both Ponds rest at generation 0, holding no demand:
 
@@ -1334,6 +1332,6 @@ Duckstring instead triggers from the *point of demand*. Two complementary method
 
 Both reduce to a single quantity, **freshness**: a timestamp describing how current a node's output is, inherited from its parents (the stalest of the required ones). Demand is a simple boolean — *is there any?* — so shared and branching paths need no per-consumer accounting, and a slow *optional* parent never holds up a fast required path.
 
-Each method has a one-shot and a continuous form, giving the four triggers — **Tap** and **Wave** for pull, **Pulse** and **Tide** for push — with **Stop** to calm a graph.
+Each method has a one-shot and a continuous form, giving the four triggers — **Tap** and **Wave** for pull, **Pulse** and **Tide** for push.
 
 Finally, unit operations (**Ripples**) are grouped into versioned, independently-owned **Ponds**. Modelling a Pond as its Ripples book-ended by zero-duration boundary nodes lets dependency management, version control, and triggering be lifted to the Pond level without changing any of the underlying node rules — the boundary nodes are real participants in the graph, not merely a conceptual device. The result is a scheduler that approaches the optimal trade of compute against staleness, while pushing governance of the pipeline down to the owners of each Pond rather than a central authority.
