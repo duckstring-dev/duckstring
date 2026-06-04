@@ -12,7 +12,7 @@ The core objective of the scheduling system discussed here is to define each tra
 
 ### General Constraints
 
-Consider a process consisting of three transformations - call them "unit operations" - in series, each taking 10 minutes to complete. The total time from start to end of the pipeline (the *lead time*) is the sume of these durations: 30 minutes. More generally, where some operations run in parallel, the total lead time is the sum duration of the unit operations on the *critical path* - the longest route through the process.
+Consider a process consisting of three transformations - call them "unit operations" - in series, each taking 10 minutes to complete. The total time from start to end of the pipeline (the *lead time*) is the sum of these durations: 30 minutes. More generally, where some operations run in parallel, the total lead time is the sum duration of the unit operations on the *critical path* - the longest route through the process.
 
 For:
 
@@ -49,7 +49,7 @@ If every unit operation is approximately the same duration, this optimally trade
 
 Unnecessary runs can be avoided by setting each unit operation to only execute if there have been changes upstream, e.g. by watermarking rows or runs and keeping track of the most recently consumed results from upstream. This is very common and effective, as it causes every unit operation to run at a minimum period equal to the maximum period of all operations upstream - that is, operations downstream are throttled by the upstream bottleneck.
 
-There is, however, no such throttling for operations *upstream* of the bottleneck. If a bottleneck much longer than the other operations occurs late in the sequence of, most of the effort upstream is wasted.
+There is, however, no such throttling for operations *upstream* of the bottleneck. If a bottleneck much longer than the other operations occurs late in the sequence, most of the effort upstream is wasted.
 
 ### Globally-Defined Pipelines
 
@@ -302,7 +302,7 @@ We denote a node's *generation* as `· gN`, so `A · g3` indicates A has run thr
         B --> C["C · g0"]:::running
     ```
 
-6) A, B and C each eventually complete their run:
+7) A, B and C each eventually complete their run:
 
     ```mermaid
     flowchart LR
@@ -612,7 +612,7 @@ A *single pull* on `C` would advance it to `C · g2`, consuming `B · g2` — st
         B --> C["C · g1 •"]:::queued
     ```
 
-2) When `A` finishes, `B`'s parents satisfy its required freshness, so it runs:
+3) When `A` finishes, `B`'s parents satisfy its required freshness, so it runs:
 
     ```mermaid
     flowchart LR
@@ -623,7 +623,7 @@ A *single pull* on `C` would advance it to `C · g2`, consuming `B · g2` — st
         B --> C["C · g1 •"]:::queued
     ```
 
-3) `B` completes, updating to generation 4, skipping generation 3. This enables C to run:
+4) `B` completes, adopting its parents' freshness `g4` directly — it never produces the intermediate `g3`. This enables `C` to run:
 
     ```mermaid
     flowchart LR
@@ -634,7 +634,7 @@ A *single pull* on `C` would advance it to `C · g2`, consuming `B · g2` — st
         B --> C["C · g1"]:::running
     ```
 
-3) `C` completes, leaving all in the idle state at the same generation and freshness:
+5) `C` completes, leaving all in the idle state at the same generation and freshness:
 
     ```mermaid
     flowchart LR
@@ -739,7 +739,7 @@ These are intentionally water-themed, to extend the natural fluid-oriented nomen
 - **Tide**
     - Executes a new Pulse every time the target node exceeds a maximum *staleness*
     - Has the effect of executing the DAG with a period equal to this "maximum staleness" (e.g. staleness of 1 day creates a daily execution)
-    - If an upstream bottleneck is longer than this duration the process, the DAG naturally throttles to that bottleneck with no accumulation of Pulses
+    - If an upstream bottleneck is longer than this duration, the DAG naturally throttles to that bottleneck with no accumulation of Pulses
 
 ## Eager vs Gated
 
@@ -859,7 +859,7 @@ $$
 
 This is no longer correct, as for a window with a 1 day duration for example, at the start of the window the staleness is *-1 day*, despite really being not stale at all. This creates a problem for Tide especially, which executes against a staleness maximum. A Tide of 1 day would execute every *2 days*.
 
-Consequently, each node tracks a delay `D`. This is normally zero, but for root nodes it is equal to the duration of the window it ran against. Downstream nodes inherit `D` by taking the largest `D` from the set of parents with `F` equal to the the overall parent freshness:
+Consequently, each node tracks a delay `D`. This is normally zero, but for root nodes it is equal to the duration of the window it ran against. Downstream nodes inherit `D` by taking the largest `D` from the set of parents with `F` equal to the overall parent freshness:
 
 $$
 D = max(D_p) \text{ where } F_p = F_{parents} \text{ for all parents } p
@@ -901,7 +901,7 @@ flowchart LR
 
 The Wave throttles itself to once per day, with no superfluous runs anywhere in the chain — purely because `A`'s freshness only advances daily. When a root node has a window, Wave execution naturally throttles to that window's period. 
 
-This is a convenient result. Any pipeline requiring periodic execution due to supply limitations can be managed at the *root* through windows, with downstream consuming eagerly, and the DAG will naturally throttle to avoid wasted runs. This allows the choice of execution mode (Wave/Tide, or Tap/Pulse on upon request) to be explicitly about the *service requirements*, with no care needed about the *supply conditions*.
+This is a convenient result. Any pipeline requiring periodic execution due to supply limitations can be managed at the *root* through windows, with downstream consuming eagerly, and the DAG will naturally throttle to avoid wasted runs. This allows the choice of execution mode (Wave/Tide, or Tap/Pulse upon request) to be explicitly about the *service requirements*, with no care needed about the *supply conditions*.
 
 ## Ponds and Ripples
 
@@ -1133,9 +1133,9 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
 
     1) A Tap on `p2` sets `p2.hasReceivedPull`
     2) As `p2` is at a cold start (`startF == endF`), the pull is taken up by `p2.hasPull` and `p2.r1.hasPull`, and `p2.hasReceivedPull` clears
-    3) As `p2.hasPull` has been set, and `p1.endF == p2.startF`, `p2` sets `p1.hasReceivedPull` (cold start propagation to Soruces)
+    3) As `p2.hasPull` has been set, and `p1.endF == p2.startF`, `p2` sets `p1.hasReceivedPull` (cold start propagation to Sources)
     4) With `p1` also a cold start, `p1` and all its Ripples receive `hasPull`, and `p1.hasReceivedPull` clears
-    4) The result is all Ponds and Ripples having pull demand, with `p1` and `p2` in a queued state:
+    5) The result is all Ponds and Ripples having pull demand, with `p1` and `p2` in a queued state:
 
     ```mermaid
     flowchart LR
@@ -1234,10 +1234,10 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
         style p2 fill:#16301a,stroke:#388E3C
     ```
     
-6) **`p1.r1` and `p2.r2` finish, allowing `p1.r3` to start, sending demand to roots, and `p1` starts Run #3**:
+6) **`p1.r1` and `p1.r2` finish, allowing `p1.r3` to start, sending demand to roots, and `p1` starts Run #3**:
     1) `p1.r1` and `p1.r2` finish, setting `p1.r1.endF = g2` and `p1.r2.endF = g2`
     2) `p1.r3` has demand and `p1.r3.sourceF (g2) > p1.r3.startF (g1)`, so it starts
-    3) `p1.r3` sets `p1.r1.hasDemand` and `p1.r2.hasDemand`
+    3) `p1.r3` sets `p1.r1.hasPull` and `p1.r2.hasPull`
     4) On receiving pull, as they are roots, `p1.r1` and `p1.r2` both set `p1.hasPull`
     5) As `p1.hasPull` and `p1.sourceF (now) > p1.F`, it starts a new **Pond Run**: `startF` → g3
     6) On each Ripple `targetF = g3` is set, and the roots `p1.r1`, `p1.r2` start, each clearing their own pull token
@@ -1278,7 +1278,7 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
         style p1 fill:#16301a,stroke:#388E3C
     ```
 
-7) **`p1.r3` runs to satisfy push demand**
+8) **`p1.r3` runs to satisfy push demand**
     1) `p1.r3.sourceF (g3) >= p1.r3.targetF (g3)`, so it runs (to complete the started Pond Run):
 
     ```mermaid
@@ -1297,7 +1297,7 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
         style p1 fill:#16301a,stroke:#388E3C
     ```
 
-8) **Quiescent.** Run #3 drains through `r3` and `p1` settles at g3; `p2` rests at g1:
+9) **Quiescent.** Run #3 drains through `r3` and `p1` settles at g3; `p2` rests at g1:
 
     ```mermaid
     flowchart LR
