@@ -117,27 +117,22 @@ Consider a simple chain of nodes:
 
 ```mermaid
 flowchart LR
-    classDef running fill:#4CAF50,stroke:#388E3C,stroke-width:2px,color:#fff;
-    classDef queued fill:#2196F3,stroke:#1976D2,stroke-width:1px,color:#fff;
-
     A .-> B
     B .-> C
 ```
 
-Nodes without demand are no colour, nodes with demand but no changes upstream (queued) are orange, nodes that are running are blue, and those that are running *and have demand* (demanded) are green:
+Nodes without demand have no fill; nodes with demand that cannot yet run (queued) are orange; running nodes are green. A held demand token is marked with a trailing `•`:
 
 ```mermaid
 flowchart LR
-    classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+    classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
     classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-    classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-    A[Idle] .-> B[Queued]:::queued
+    A[Idle] .-> B["Queued •"]:::queued
     B .-> C[Running]:::running
-    C .-> D[Demanded]:::demanded
 ```
 
-We will denote the number of times a node has updated (its *generation*) with a colon, such that "A:3" indicates A has run 3 times. If a node is ahead of its child, the edge between them will be solid - otherwise, it will be dotted.
+We denote a node's *generation* as `· gN`, so `A · g3` indicates A has run three times. A held demand token is shown with a trailing `•`. If a node is ahead of its child, the edge between them is solid; otherwise it is dashed.
 
 ##### Cold Start
 
@@ -145,24 +140,22 @@ We will denote the number of times a node has updated (its *generation*) with a 
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0] .-> B[B:0]
-        B .-> C[C:0]
+        A["A · g0"] .-> B["B · g0"]
+        B .-> C["C · g0"]
     ```
 
 2) C is given demand and enters the queued state:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0] .-> B[B:0]
-        B .-> C[C:0]:::queued
+        A["A · g0"] .-> B["B · g0"]
+        B .-> C["C · g0 •"]:::queued
         C <.- D([Demand]):::queued
     ```
 
@@ -170,168 +163,154 @@ We will denote the number of times a node has updated (its *generation*) with a 
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0] .-> B[B:0]:::queued
-        B .-> C[C:0]:::queued
+        A["A · g0"] .-> B["B · g0 •"]:::queued
+        B .-> C["C · g0 •"]:::queued
     ```
 
     2) B then does the same to A:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0]:::queued .-> B[B:0]:::queued
-        B .-> C[C:0]:::queued
+        A["A · g0 •"]:::queued .-> B["B · g0 •"]:::queued
+        B .-> C["C · g0 •"]:::queued
     ```
 
     3) A has no parents, so there's nothing to wait for - it begins its run. Demand is cleared and the node starts, putting it in the running state:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0]:::running .-> B[B:0]:::queued
-        B .-> C[C:0]:::queued
+        A["A · g0"]:::running .-> B["B · g0 •"]:::queued
+        B .-> C["C · g0 •"]:::queued
     ```
 
 4) A completes, meaning it has updated relative to B and B can start:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:1] --> B[B:0]:::queued
-        B .-> C[C:0]:::queued
+        A["A · g1"] --> B["B · g0 •"]:::queued
+        B .-> C["C · g0 •"]:::queued
     ```
 
     1) Demand is sent to its parent A, putting it in the queued state:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:1]:::queued --> B[B:0]:::queued
-        B .-> C[C:0]:::queued
+        A["A · g1 •"]:::queued --> B["B · g0 •"]:::queued
+        B .-> C["C · g0 •"]:::queued
     ```
 
     2) Demand is cleared and B starts, putting it in the running state:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:1]:::queued --> B[B:0]:::running
-        B .-> C[C:0]:::queued
+        A["A · g1 •"]:::queued --> B["B · g0"]:::running
+        B .-> C["C · g0 •"]:::queued
     ```
 
     2) A has demand and begins its run simultaneously:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:1]:::running --> B[B:0]:::running
-        B .-> C[C:0]:::queued
+        A["A · g1"]:::running --> B["B · g0"]:::running
+        B .-> C["C · g0 •"]:::queued
     ```
 
 5) A completes before B and sits idle:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:2] --> B[B:0]:::running
-        B .-> C[C:0]:::queued
+        A["A · g2"] --> B["B · g0"]:::running
+        B .-> C["C · g0 •"]:::queued
     ```
 
 6) B completes, meaning it has updated relative to C and C can start:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:2] --> B[B:1]
-        B --> C[C:0]:::queued
+        A["A · g2"] --> B["B · g1"]
+        B --> C["C · g0 •"]:::queued
     ```
 
     1) Demand is sent to its parent C, putting it in the queued state:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:2] --> B[B:1]:::queued
-        B --> C[C:0]:::queued
+        A["A · g2"] --> B["B · g1 •"]:::queued
+        B --> C["C · g0 •"]:::queued
     ```
 
     2) Demand is cleared and C starts, putting it in the running state:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:2] --> B[B:1]:::queued
-        B --> C[C:0]:::running
+        A["A · g2"] --> B["B · g1 •"]:::queued
+        B --> C["C · g0"]:::running
     ```
 
     3) B has demand and begins its run simultaneously, sending demand back to A:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:2]:::queued --> B[B:1]:::running
-        B --> C[C:0]:::running
+        A["A · g2 •"]:::queued --> B["B · g1"]:::running
+        B --> C["C · g0"]:::running
     ```
 
     4) A has demand and begins its run simultaneously:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:2]:::running --> B[B:1]:::running
-        B --> C[C:0]:::running
+        A["A · g2"]:::running --> B["B · g1"]:::running
+        B --> C["C · g0"]:::running
     ```
 
 6) A, B and C each eventually complete their run:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:3] --> B[B:2]
-        B --> C[C:1]
+        A["A · g3"] --> B["B · g2"]
+        B --> C["C · g1"]
     ```
 
 This is generally the outcome of a pull-based execution: each node runs the same number of times as the distance from the end of the DAG, with upstream nodes slightly less stale than downstream.
@@ -342,12 +321,11 @@ This is generally the outcome of a pull-based execution: each node runs the same
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:3] --> B[B:2]
-        B --> C[C:1]:::queued
+        A["A · g3"] --> B["B · g2"]
+        B --> C["C · g1 •"]:::queued
         C <.- D([Demand]):::queued
     ```
 
@@ -357,60 +335,55 @@ This is generally the outcome of a pull-based execution: each node runs the same
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:3] --> B[B:2]:::queued
-        B --> C[C:1]:::queued
+        A["A · g3"] --> B["B · g2 •"]:::queued
+        B --> C["C · g1 •"]:::queued
     ```
 
     2) Demand is cleared and the node started, putting it in the running state:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:3] --> B[B:2]:::queued
-        B --> C[C:1]:::running
+        A["A · g3"] --> B["B · g2 •"]:::queued
+        B --> C["C · g1"]:::running
     ```
 
 3) B repeats the same, sending demand upstream and starting:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:3] --> B[B:2]:::running
-        B --> C[C:1]:::running
+        A["A · g3"] --> B["B · g2"]:::running
+        B --> C["C · g1"]:::running
     ```
 
 4) A has no parents, so can start as soon as it receives demand:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:3]:::running --> B[B:2]:::running
-        B --> C[C:1]:::running
+        A["A · g3"]:::running --> B["B · g2"]:::running
+        B --> C["C · g1"]:::running
     ```
 
 5) A, B and C each eventually complete their run:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:4] --> B[B:3]
-        B --> C[C:2]
+        A["A · g4"] --> B["B · g3"]
+        B --> C["C · g2"]
     ```
 
 Each subsequent run on a previously-executed pull advances each node by one generation, without waiting for the updates to propagate from start to finish.
@@ -432,38 +405,35 @@ Here `B` is *shared*: it supplies two consumers, `C` and `D`, which may run at d
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0] .-> C[C:0]
-        B[B:0] .-> C
-        B .-> D[D:0]
+        A["A · g0"] .-> C["C · g0"]
+        B["B · g0"] .-> C
+        B .-> D["D · g0"]
     ```
 
 2) `D` is given continuous demand. As its parent `B` is idle, the demand jumps straight to `B`, which is a source and can begin immediately:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0] .-> C[C:0]
-        B[B:0]:::running .-> C
-        B .-> D[D:0]:::queued
+        A["A · g0"] .-> C["C · g0"]
+        B["B · g0"]:::running .-> C
+        B .-> D["D · g0 •"]:::queued
     ```
 
 3) `B` and `D` settle into a steady cycle — `B` producing, `D` consuming and re-arming `B` — while `A` and `C` are never touched and remain at generation 0:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0] .-> C[C:0]
-        B[B:6]:::running --> D[D:5]:::running
+        A["A · g0"] .-> C["C · g0"]
+        B["B · g6"]:::running --> D["D · g5"]:::running
         B --> C
     ```
 
@@ -473,12 +443,11 @@ Here `B` is *shared*: it supplies two consumers, `C` and `D`, which may run at d
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0]:::running .-> C[C:0]:::queued
-        B[B:6]:::running --> D[D:5]:::running
+        A["A · g0"]:::running .-> C["C · g0 •"]:::queued
+        B["B · g6"]:::running --> D["D · g5"]:::running
         B --> C
     ```
 
@@ -488,12 +457,11 @@ Here `B` is *shared*: it supplies two consumers, `C` and `D`, which may run at d
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:1] --> C[C:0]:::running
-        B[B:7]:::running --> D[D:6]:::running
+        A["A · g1"] --> C["C · g0"]:::running
+        B["B · g7"]:::running --> D["D · g6"]:::running
         B --> C
     ```
 
@@ -555,59 +523,54 @@ Consider the same chain, all idle at generation 0. A push always carries a *targ
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
 
-        A[A:0] .-> B[B:0]
-        B .-> C[C:0]
+        A["A · g0"] .-> B["B · g0"]
+        B .-> C["C · g0"]
     ```
 
 2) `C` receives a push for generation 1. Unlike a pull, the target is forwarded *eagerly* to every ancestor that isn't already that fresh — it does not wait for runs to complete. The push reaches `B`, then `A`, in a single step:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
 
-        A[A:0]:::pushed .-> B[B:0]:::pushed
-        B .-> C[C:0]:::pushed
+        A["A · g0 •"]:::queued .-> B["B · g0 •"]:::queued
+        B .-> C["C · g0 •"]:::queued
     ```
 
 3) `A` has no parents, so its inputs trivially satisfy the target and it runs. `B` and `C` hold their push, waiting on their parents:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
 
-        A[A:1]:::running .-> B[B:0]:::pushed
-        B .-> C[C:0]:::pushed
+        A["A · g1"]:::running .-> B["B · g0 •"]:::queued
+        B .-> C["C · g0 •"]:::queued
     ```
 
 4) `A` completes. `B`'s input now meets the target, so `B` runs. When `B` completes, `C` runs in turn:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
 
-        A[A:1] --> B[B:1]:::running
-        B .-> C[C:0]:::pushed
+        A["A · g1"] --> B["B · g1"]:::running
+        B .-> C["C · g0 •"]:::queued
     ```
 
 5) `C` completes, having reached the target. The push is satisfied and cleared at each node, leaving the whole chain current and idle:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
 
-        A[A:1] --> B[B:1] --> C[C:1]
+        A["A · g1"] --> B["B · g1"] --> C["C · g1"]
     ```
 
 Unlike pull, no node is left trailing its parent — every node reaches the same target generation. The result is exactly that of triggering a conventional DAG run, but initiated from the *consumer* rather than pushed from the source, so paths with no demand are still never run.
@@ -618,79 +581,67 @@ Recall the staggered state a pull leaves behind, where each node trails its pare
 
 ```mermaid
 flowchart LR
-    classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+    classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
     classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-    classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
-    classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
 
-    A[A:3] --> B[B:2]
-    B --> C[C:1]
+    A["A · g3"] --> B["B · g2"]
+    B --> C["C · g1"]
 ```
 
-A *single pull* on `C` would advance it to `C:2`, consuming `B:2` — still one behind `A`. To make `C` fully current we issue a **push**. Unlike a pull, it does not wait for runs to complete before moving upstream; it propagates eagerly to every ancestor that is not yet at the target (shown in purple):
+A *single pull* on `C` would advance it to `C · g2`, consuming `B · g2` — still one behind `A`. To make `C` fully current we issue a **push**. Unlike a pull, it does not wait for runs to complete before moving upstream; it propagates eagerly to every ancestor that is not yet at the target (a node holding a push token is queued, shown orange with a `•`):
 
 1) `C` receives a push, demanding data at current freshness (we will denote this as a generation 4, though in reality it would be a timestamp). `C` is not current, so the push is forwarded to `B`; `B` is not current, so it is forwarded to `A`:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
 
-        A[A:3]:::pushed --> B[B:2]:::pushed
-        B --> C[C:1]:::pushed
+        A["A · g3 •"]:::queued --> B["B · g2 •"]:::queued
+        B --> C["C · g1 •"]:::queued
     ```
 
 2) `A` has no parents so runs immediately:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
 
-        A[A:4]:::running --> B[B:2]:::pushed
-        B --> C[C:1]:::pushed
+        A["A · g4"]:::running --> B["B · g2 •"]:::queued
+        B --> C["C · g1 •"]:::queued
     ```
 
 2) When `A` finishes, `B`'s parents satisfy its required freshness, so it runs:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
 
-        A[A:4] --> B[B:2]:::running
-        B --> C[C:1]:::pushed
+        A["A · g4"] --> B["B · g2"]:::running
+        B --> C["C · g1 •"]:::queued
     ```
 
 3) `B` completes, updating to generation 4, skipping generation 3. This enables C to run:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
 
-        A[A:4] --> B[B:4]
-        B --> C[C:1]:::running
+        A["A · g4"] --> B["B · g4"]
+        B --> C["C · g1"]:::running
     ```
 
 3) `C` completes, leaving all in the idle state at the same generation and freshness:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
-        classDef demanded fill:#4CAF50,stroke:#388E3C,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
 
-        A[A:4] --> B[B:4] --> C[C:4]
+        A["A · g4"] --> B["B · g4"] --> C["C · g4"]
     ```
 
 The entire sequence is brought up-to-date with a single push, with no additional unconsumed work done upstream.
@@ -710,35 +661,32 @@ flowchart LR
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0] .-> C[C:0]
-        B[B:0] .-> C
-        B .-> D[D:0]:::pushed
+        A["A · g0"] .-> C["C · g0"]
+        B["B · g0"] .-> C
+        B .-> D["D · g0 •"]:::queued
     ```
 
 2) `D`'s only parent is `B`, so the target propagates to `B` alone. `A` and `C` are not ancestors of `D` and are never touched:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0] .-> C[C:0]
-        B[B:0]:::pushed .-> C
-        B .-> D[D:0]:::pushed
+        A["A · g0"] .-> C["C · g0"]
+        B["B · g0 •"]:::queued .-> C
+        B .-> D["D · g0 •"]:::queued
     ```
 
 3) `B` runs and completes, then `D` runs against it and reaches the target. The push is satisfied, leaving `A` and `C` untouched at generation 0:
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
-        classDef pushed fill:#9C27B0,stroke:#7B1FA2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
 
-        A[A:0] .-> C[C:0]
-        B[B:1] --> D[D:1]
+        A["A · g0"] .-> C["C · g0"]
+        B["B · g1"] --> D["D · g1"]
         B .-> C
     ```
 
@@ -873,7 +821,7 @@ Suppose at time 12 the state is `S@12`, with `A` and `B` having last run against
 
 ```mermaid
 flowchart LR
-    classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+    classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
 
     S["S@12"] --> A["A@10"]
     S --> B["B@8"]
@@ -935,7 +883,8 @@ Consider `A → B → C`, where `A` is a root node with a 1-day window, and `C` 
 
 ```mermaid
 flowchart LR
-    A["A (1d window)"] --> B --> C  <.- D([Wave]):::queued
+    classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
+    A["A (1d window)"] --> B --> C  <-.- D([Wave]):::queued
 ```
 
 1) Upon the first Tap emitted by the wave, the demand propagates back to `A`, which runs to `F = +1d`.
@@ -1170,14 +1119,14 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
     flowchart LR
         subgraph p1 ["p1 — 0 / 0"]
             direction LR
-            r1["r1 · g0"] --> r3["r3 · g0"]
-            r2["r2 · g0"] --> r3
+            r1["r1 · g0"] -.-> r3["r3 · g0"]
+            r2["r2 · g0"] -.-> r3
         end
         subgraph p2 ["p2 — 0 / 0"]
             direction LR
             s1["s1 · g0"]
         end
-        p1 --> p2
+        p1 -.-> p2
     ```
 
 2) **Tap on `p2`** 
@@ -1190,17 +1139,18 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
 
     ```mermaid
     flowchart LR
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
         subgraph p1 ["p1 — 0 / 0 · pull"]
             direction LR
-            r1["r1 · g0 •"] --> r3["r3 · g0 •"]
-            r2["r2 · g0 •"] --> r3
+            r1["r1 · g0 •"]:::queued -.-> r3["r3 · g0 •"]:::queued
+            r2["r2 · g0 •"]:::queued -.-> r3
         end
         subgraph p2 ["p2 — 0 / 0 · pull"]
             direction LR
-            s1["s1 · g0 •"]
+            s1["s1 · g0 •"]:::queued
         end
-        p1 --> p2
-        p2 <.- T([Tap])
+        p1 -.-> p2
+        p2 <-.- T([Tap])
 
         style p1 fill:#3a2e12,stroke:#F57C00
         style p2 fill:#3a2e12,stroke:#F57C00
@@ -1216,17 +1166,19 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
         subgraph p1 ["p1 — 1 / 0"]
             direction LR
-            r1["r1 · g1"]:::running --> r3["r3 · g0 •"]
+            r1["r1 · g1"]:::running --> r3["r3 · g0 •"]:::queued
             r2["r2 · g1"]:::running --> r3
         end
         subgraph p2 ["p2 — 0 / 0 · pull"]
             direction LR
-            s1["s1 · g0 •"]
+            s1["s1 · g0 •"]:::queued
         end
-        p1 --> p2
+        p1 -.-> p2
+        style p1 fill:#16301a,stroke:#388E3C
         style p2 fill:#3a2e12,stroke:#F57C00
     ```
 
@@ -1240,7 +1192,8 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
         subgraph p1 ["p1 — 2 / 0"]
             direction LR
             r1["r1 · g2"]:::running --> r3["r3 · g1"]:::running
@@ -1248,9 +1201,10 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
         end
         subgraph p2 ["p2 — 0 / 0 · pull"]
             direction LR
-            s1["s1 · g0 •"]
+            s1["s1 · g0 •"]:::queued
         end
-        p1 --> p2
+        p1 -.-> p2
+        style p1 fill:#16301a,stroke:#388E3C
         style p2 fill:#3a2e12,stroke:#F57C00
     ```
 
@@ -1264,17 +1218,20 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
+        classDef queued fill:#FF9800,stroke:#F57C00,color:#fff;
         subgraph p1 ["p1 — 2 / 1"]
             direction LR
-            r1["r1 · g2"]:::running --> r3["r3 · g1 •"]
+            r1["r1 · g2"]:::running --> r3["r3 · g1 •"]:::queued
             r2["r2 · g2"]:::running --> r3
         end
         subgraph p2 ["p2 — 1 / 0"]
             direction LR
             s1["s1 · g1"]:::running
         end
-        p1 --> p2
+        p1 -.-> p2
+        style p1 fill:#16301a,stroke:#388E3C
+        style p2 fill:#16301a,stroke:#388E3C
     ```
     
 6) **`p1.r1` and `p2.r2` finish, allowing `p1.r3` to start, sending demand to roots, and `p1` starts Run #3**:
@@ -1288,7 +1245,7 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         subgraph p1 ["p1 — 3 / 1"]
             direction LR
             r1["r1 · g3"]:::running --> r3["r3 · g2"]:::running
@@ -1298,7 +1255,9 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
             direction LR
             s1["s1 · g1"]:::running
         end
-        p1 --> p2
+        p1 -.-> p2
+        style p1 fill:#16301a,stroke:#388E3C
+        style p2 fill:#16301a,stroke:#388E3C
     ```
 
 7) **All complete, exhausting pull demand** 
@@ -1306,7 +1265,6 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
         subgraph p1 ["p1 — 3 / 2"]
             direction LR
             r1["r1 · g3"] --> r3["r3 · g2"]
@@ -1317,6 +1275,7 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
             s1["s1 · g1"]
         end
         p1 --> p2
+        style p1 fill:#16301a,stroke:#388E3C
     ```
 
 7) **`p1.r3` runs to satisfy push demand**
@@ -1324,17 +1283,18 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
 
     ```mermaid
     flowchart LR
-        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        classDef running fill:#4CAF50,stroke:#388E3C,color:#fff;
         subgraph p1 ["p1 — 3 / 2"]
             direction LR
-            r1["r1 · g3"] --> r3["r3 · g3"]:::running
-            r2["r2 · g3"] --> r3
+            r1["r1 · g3"] -.-> r3["r3 · g3"]:::running
+            r2["r2 · g3"] -.-> r3
         end
         subgraph p2 ["p2 — 1 / 1"]
             direction LR
             s1["s1 · g1"]
         end
         p1 --> p2
+        style p1 fill:#16301a,stroke:#388E3C
     ```
 
 8) **Quiescent.** Run #3 drains through `r3` and `p1` settles at g3; `p2` rests at g1:
@@ -1343,8 +1303,8 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
     flowchart LR
         subgraph p1 ["p1 — 3 / 3"]
             direction LR
-            r1["r1 · g3"] --> r3["r3 · g3"]
-            r2["r2 · g3"] --> r3
+            r1["r1 · g3"] -.-> r3["r3 · g3"]
+            r2["r2 · g3"] -.-> r3
         end
         subgraph p2 ["p2 — 1 / 1"]
             direction LR
