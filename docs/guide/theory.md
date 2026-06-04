@@ -1127,7 +1127,7 @@ A Ripple follows the rules:
 - When `Ripple.hasPull` changes to true (e.g. by a child or a Pond's `Pond.hasReceivedPull` mechanism):
     - If root (no parents), set `Pond.hasPull`
         - This allows a Pond to start a Pond Run as pull
-    - Otherwise, for all parents, if `Parent.endF == Ripple.startF`, set `Ripple.hasPull = true`
+    - Otherwise, for all parents, if `Parent.endF == Ripple.startF`, set `Parent.hasPull = true`
         - This handles cold starts between Ripples
 - A Ripple Run starts if:
     - `Ripple.sourceF >= Ripple.targetF` or
@@ -1155,20 +1155,16 @@ Every Ripple in a Pond Run will *eventually* reach the `Pond.startF` freshness, 
 
 Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundary nodes) attached as child to the Pond. These each have special properties:
 
-TODO: Update to use `D`
-
 - **Tap**: Sets `Source.hasReceivedPull = true`, then deletes itself
-- **Wave**: Sets `Source.haseceivedPull = true` every time the pseudo-node runs
+- **Wave**: Sets `Source.hasReceivedPull = true` every time the pseudo-node runs
 - **Pulse**: Sets `Source.targetF = now`, then deletes itself
-- **Tide**: Sets `Source.targetF = now` whenever the Pond's staleness exceeds the set bound
+- **Tide**: Sets `Source.targetF = now` whenever the Source's `Source.staleness = now + Source.D - Source.endF` exceeds the set bound
 
-A trigger therefore writes only to the target Pond's inbox (`hasReceivedPull` for pull triggers, `targetF` for push), exactly as a downstream Sink would. The trigger is, in effect, just another Sink.
+The trigger is, in effect, just another Sink.
 
 ### Example: Tap
 
 To see the Pond rules in motion, we trace a single **Tap** on the two-Pond example: `p1` (an Inlet, with `r1`, `r2` → `r3`) feeding `p2` (a single Ripple `s1`). Every Ripple takes the same fixed time to run. We label each Ripple with the generation it is currently producing (`gN`), colour running Ripples blue, and mark a held pull token with `•`. A Pond's title shows its `startF / endF` as generations; a Pond holding demand but unable to run yet is *queued*, shown with an orange title. As `p1` is an Inlet, each of its runs mints the next generation.
-
-This trace illustrates an important and perhaps surprising property: a single Tap on `p2` causes **`p1` to run four times**, not once. Two distinct re-arming effects compound — `p1`'s own roots re-arm as `r3` consumes them (internal pipelining), and `p2` drawing from `p1` signals it to replenish (Kanban, across the boundary). The extra runs are bounded and the surplus simply goes unconsumed; this is the supplier keeping its shelf stocked after a draw.
 
 1) **Idle.** Both Ponds rest at generation 0, holding no demand:
 
@@ -1186,27 +1182,39 @@ This trace illustrates an important and perhaps surprising property: a single Ta
         p1 --> p2
     ```
 
-2) **Tap.** A Tap on `p2` sets `p2.hasReceivedPull` and `p2.hasPull`. `p2` cannot run yet (its Source has produced nothing), so the pull passes straight through to its Source, setting `p1.hasReceivedPull` and `p1.hasPull`. Both Ponds are queued:
+2) **Tap on `p2`** 
+
+    1) A Tap on `p2` sets `p2.hasReceivedPull`
+    2) As `p2` is at a cold start (`startF == endF`), the pull is taken up by `p2.hasPull` and `p2.r1.hasPull`, and `p2.hasReceivedPull` clears
+    3) As `p2.hasPull` has been set, and `p1.endF == p2.startF`, `p2` sets `p1.hasReceivedPull` (cold start propagation to Soruces)
+    4) With `p1` also a cold start, `p1` and all its Ripples receive `hasPull`, and `p1.hasReceivedPull` clears
+    4) The result is all Ponds and Ripples having pull demand, with `p1` and `p2` in a queued state:
 
     ```mermaid
     flowchart LR
         subgraph p1 ["p1 — 0 / 0 · pull"]
             direction LR
-            r1["r1 · g0"] --> r3["r3 · g0"]
-            r2["r2 · g0"] --> r3
+            r1["r1 · g0 •"] --> r3["r3 · g0 •"]
+            r2["r2 · g0 •"] --> r3
         end
         subgraph p2 ["p2 — 0 / 0 · pull"]
             direction LR
-            s1["s1 · g0"]
+            s1["s1 · g0 •"]
         end
         p1 --> p2
-        T([Tap]) -. pull .-> p2
+        p2 <.- T([Tap])
+
         style p1 fill:#3a2e12,stroke:#F57C00
         style p2 fill:#3a2e12,stroke:#F57C00
         style T fill:#3a2e12,stroke:#F57C00
     ```
 
-3) **`p1` Run #1 (g1).** `p1` is an Inlet — its `sourceF` is always *now*, ahead of its `startF`. With `hasPull` set it starts a **Pond Run**: `startF` → g1, `hasReceivedPull` is consumed so every Ripple gets a pull token (`•`) and `targetF = g1`, and the roots `r1`, `r2` start. `r3` holds its token, gated on its parents. `p2` stays queued:
+3) **`p1` Run #1 (g1)** 
+    1) `p1` is an Inlet with no Windows, so `p1.sourceF = now`
+    2) It has pull demand, and `p1.sourceF > p1.F` (where `p1.F` starts at `g0`), so it starts a **Pond Run**: `startF` → g1
+    3) On each Ripple `targetF = g1` is set, and the roots `p1.r1`, `p1.r2` start, each clearing their own pull token
+    4) As it is waiting on its parents, `p1.r3` keeps its token and stays queued, along with `p2`
+    5) The result is `p1` in a running state (`p1.startF > p1.endF`), its first layer of Ripples running while downstream waits:
 
     ```mermaid
     flowchart LR
@@ -1218,13 +1226,19 @@ This trace illustrates an important and perhaps surprising property: a single Ta
         end
         subgraph p2 ["p2 — 0 / 0 · pull"]
             direction LR
-            s1["s1 · g0"]
+            s1["s1 · g0 •"]
         end
         p1 --> p2
         style p2 fill:#3a2e12,stroke:#F57C00
     ```
 
-4) **`r3` starts, re-arming the roots → `p1` Run #2 (g2).** `r1`, `r2` finish g1, so `r3` starts (consuming their output, producing g1). As `r3` starts it holds a pull token, so it re-arms its parents `r1`, `r2`; they are roots, so this sets `p1.hasPull`. `p1`, an always-fresh Inlet, immediately begins **Run #2** (`startF` → g2), restarting `r1`, `r2`. Two Pond Runs are now in flight — `r3` still producing g1 while the roots produce g2:
+4) **`p1.r1` and `p1.r2` end, allowing `r3` and `p1` Run #2 (g2) to start** 
+    1) `p1.r1`, `p1.r2` finish g1, so `p1.r3` starts
+    2) `p1.r3` has pull, so it sets `p1.r1.hasPull` and `p1.r2.hasPull` and then clears its own `p1.r3.hasPull`
+    3) On receiving pull, as they are roots, `p1.r1` and `p1.r2` both set `p1.hasPull`
+    4) As `p1.hasPull` and `p1.sourceF (now) > p1.F`, it starts a new **Pond Run**: `startF` → g2
+    5) On each Ripple `targetF = g2` is set, and the roots `p1.r1`, `p1.r2` start, each clearing their own pull token
+    6) The result is a simultaneous start of (`p1.r1`, `p1.r2`) at `g2` and (`p1.r3`) at `g1`, with `p2` continuing to wait:
 
     ```mermaid
     flowchart LR
@@ -1236,21 +1250,27 @@ This trace illustrates an important and perhaps surprising property: a single Ta
         end
         subgraph p2 ["p2 — 0 / 0 · pull"]
             direction LR
-            s1["s1 · g0"]
+            s1["s1 · g0 •"]
         end
         p1 --> p2
         style p2 fill:#3a2e12,stroke:#F57C00
     ```
 
-5) **`r3` finishes g1 → `p2` Run #1, and `p2` replenishes `p1`.** `r3` completes, so `p1.endF` → g1, notifying `p2`. `p2`'s `sourceF` (= g1) now exceeds its `startF`, so `p2` begins **its** Pond Run with `s1` producing g1. Per the rules, `p2` starting with `hasReceivedPull` writes its Source's inbox — re-arming `p1.hasReceivedPull` and `p1.hasPull` (the Kanban draw-then-replenish). Meanwhile `p1`'s roots have finished g2 and `r3` has started g2, re-arming the roots once more:
+5) **`p1.r3` finishes g1 and `p2` starts Run #1** 
+    1) `p1.r3` completes and is the last leaf Ripple in `p1` to finish `g1`, so sets `p1.endF = g1`
+    2) As `p2.hasPull` and `p2.sourceF (g1) > p2.startF (g0)`, it starts a new **Pond Run**: `startF` → g1
+    3) `p2` sets `p1.hasReceivedPull` then clears `p2.hasPull`
+    4) As `p1.startF != p1.endF` (not cold start), `p1` only sets its root's pull demand, `p1.r3.hasPull`, then clears `p1.hasReceivedPull`
+    5) `p2.r1.targetF = g1` is set, and the root `p2.r1` starts, clearing its pull
+    6) The result is `p2` in a running state, with `p1.r3` having pull demand
 
     ```mermaid
     flowchart LR
         classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
-        subgraph p1 ["p1 — 2 / 1 · pull"]
+        subgraph p1 ["p1 — 2 / 1"]
             direction LR
-            r1["r1 · g2"] --> r3["r3 · g2"]:::running
-            r2["r2 · g2"] --> r3
+            r1["r1 · g2"]:::running --> r3["r3 · g1 •"]
+            r2["r2 · g2"]:::running --> r3
         end
         subgraph p2 ["p2 — 1 / 0"]
             direction LR
@@ -1258,16 +1278,23 @@ This trace illustrates an important and perhaps surprising property: a single Ta
         end
         p1 --> p2
     ```
-
-6) **`p1` Run #3 (g3).** Both re-arms from the previous step land: `p1` begins **Run #3** (`startF` → g3), restarting `r1`, `r2`, while `r3` is still producing g2 and `s1` still producing g1. Because this run consumed the replenished `hasReceivedPull`, its Ripples again receive pull tokens — so the cascade has one more generation left in it:
+    
+6) **`p1.r1` and `p2.r2` finish, allowing `p1.r3` to start, sending demand to roots, and `p1` starts Run #3**:
+    1) `p1.r1` and `p1.r2` finish, setting `p1.r1.endF = g2` and `p1.r2.endF = g2`
+    2) `p1.r3` has demand and `p1.r3.sourceF (g2) > p1.r3.startF (g1)`, so it starts
+    3) `p1.r3` sets `p1.r1.hasDemand` and `p1.r2.hasDemand`
+    4) On receiving pull, as they are roots, `p1.r1` and `p1.r2` both set `p1.hasPull`
+    5) As `p1.hasPull` and `p1.sourceF (now) > p1.F`, it starts a new **Pond Run**: `startF` → g3
+    6) On each Ripple `targetF = g3` is set, and the roots `p1.r1`, `p1.r2` start, each clearing their own pull token
+    7) The result is a simultaneous start of (`p1.r1`, `p1.r2`) at `g3` and (`p1.r3`) at `g2`, with `p2` running at `g1`:
 
     ```mermaid
     flowchart LR
         classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
         subgraph p1 ["p1 — 3 / 1"]
             direction LR
-            r1["r1 · g3 •"]:::running --> r3["r3 · g2"]:::running
-            r2["r2 · g3 •"]:::running --> r3
+            r1["r1 · g3"]:::running --> r3["r3 · g2"]:::running
+            r2["r2 · g3"]:::running --> r3
         end
         subgraph p2 ["p2 — 1 / 0"]
             direction LR
@@ -1276,15 +1303,16 @@ This trace illustrates an important and perhaps surprising property: a single Ta
         p1 --> p2
     ```
 
-7) **`p2` drains; `p1` Run #4 (g4).** `s1` completes (`p2.endF` → g1) and, the Tap being a single resupply with nothing to renew it, `p2` falls idle for good. Inside `p1`, `r3` finishing g2 re-armed the roots a final time (from the tokens of Run #3), so `p1` begins **Run #4** (`startF` → g4). This run carries no fresh `hasReceivedPull`, so its Ripples get **no** pull tokens — the cascade ends here:
+7) **All complete, exhausting pull demand** 
+    1) Every Ripple completes, leaving no pull demand, `p2` idle but `p1` still running as `p2.startF != p2.endF`:
 
     ```mermaid
     flowchart LR
         classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
-        subgraph p1 ["p1 — 4 / 2"]
+        subgraph p1 ["p1 — 3 / 2"]
             direction LR
-            r1["r1 · g4"]:::running --> r3["r3 · g3"]:::running
-            r2["r2 · g4"]:::running --> r3
+            r1["r1 · g3"] --> r3["r3 · g2"]
+            r2["r2 · g3"] --> r3
         end
         subgraph p2 ["p2 — 1 / 1"]
             direction LR
@@ -1293,14 +1321,32 @@ This trace illustrates an important and perhaps surprising property: a single Ta
         p1 --> p2
     ```
 
-8) **Quiescent.** With no pull tokens left in flight, `p1`'s roots are not re-armed again. Run #4 drains through `r3` and `p1` settles at g4; `p2` rests at g1:
+7) **`p1.r3` runs to satisfy push demand**
+    1) `p1.r3.sourceF (g3) >= p1.r3.targetF (g3)`, so it runs (to complete the started Pond Run):
 
     ```mermaid
     flowchart LR
-        subgraph p1 ["p1 — 4 / 4"]
+        classDef running fill:#2196F3,stroke:#1976D2,color:#fff;
+        subgraph p1 ["p1 — 3 / 2"]
             direction LR
-            r1["r1 · g4"] --> r3["r3 · g4"]
-            r2["r2 · g4"] --> r3
+            r1["r1 · g3"] --> r3["r3 · g3"]:::running
+            r2["r2 · g3"] --> r3
+        end
+        subgraph p2 ["p2 — 1 / 1"]
+            direction LR
+            s1["s1 · g1"]
+        end
+        p1 --> p2
+    ```
+
+8) **Quiescent.** Run #3 drains through `r3` and `p1` settles at g3; `p2` rests at g1:
+
+    ```mermaid
+    flowchart LR
+        subgraph p1 ["p1 — 3 / 3"]
+            direction LR
+            r1["r1 · g3"] --> r3["r3 · g3"]
+            r2["r2 · g3"] --> r3
         end
         subgraph p2 ["p2 — 1 / 1"]
             direction LR
@@ -1313,10 +1359,11 @@ A single Tap thus settles with:
 
 | | `p1` | `p2` |
 |---|---|---|
-| Pond Runs | 4 | 1 |
-| final `endF` | g4 | g1 |
+| Pond Runs | 3 | 1 |
+| Final `endF` | g3 | g1 |
+| Max Ripple Depth | 3 | 1 |
 
-`p2` ends one generation behind its Source — the familiar staggering of a single pull, now at the granularity of whole Ponds. `p1` runs further ahead for two compounding reasons: its roots restart the instant `r3` frees them (internal pipelining, always possible for an Inlet), and `p2`'s draw signals it to replenish. The surplus generations are simply not consumed by the one-shot Tap; under a continuous **Wave**, `p2` would re-assert its pull on every completion and the two Ponds would settle into a steady bottleneck-throttled cycle instead of falling quiet — and if `p1` carried an update window, that cycle would naturally throttle to the window's period, as shown earlier.
+This is the general result for a single Tap from a cold start on a sequence of Ponds - each Pond runs for the same number of generations as the maximum Ripple depth from the initiating Tap. Note that all tasks (apart from the concluding *push* runs) finish at approximately the same time, ready to supply any new Taps (or Wave) immediately.
 
 ## Summary
 
