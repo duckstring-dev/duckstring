@@ -714,9 +714,9 @@ These are intentionally water-themed, to extend the natural fluid-oriented nomen
     - A single priority order, like requesting a custom product
     - Causes data at the specified freshness to flow from the roots to the target node
 - **Tide**
-    - Executes a new Pulse every time the target node exceeds a maximum *staleness*
+    - Executes a new Pulse every time the staleness, or the last Pulse time, exceeds a maximum, to keep the data no more stale than that (if possible)
     - Has the effect of executing the DAG with a period equal to this "maximum staleness" (e.g. staleness of 1 day creates a daily execution)
-    - If an upstream bottleneck is longer than this duration, the DAG naturally throttles to that bottleneck with no accumulation of Pulses
+    - If an upstream **bottleneck** (the slowest unit operation) is longer than the bound, the DAG naturally throttles to that bottleneck with no accumulation of Pulses
 
 ### Which Should You Use?
 
@@ -1044,8 +1044,8 @@ Pond:
             Source.targetF = targetF                # push propagates eagerly upstream
 
     start a Pond Run when:
-        sourceF >= targetF                          # push satisfied, OR
-        or (hasPull and sourceF > startF)           # pull with fresher input
+        (targetF exists and sourceF > startF)       # has push and fresher input
+        or (hasPull and sourceF > startF)           # has pull and fresher input
 
     on starting a Pond Run:
         if hasPull and not Inlet (no Sources): 
@@ -1077,8 +1077,8 @@ Ripple:
                 Parent.hasPull = true               # cold-start propagation between Ripples
 
     start a Ripple Run when:
-        sourceF >= targetF
-        or (hasPull and sourceF > startF)
+        (targetF set and sourceF > startF)          # has push and fresher input
+        or (hasPull and sourceF > startF)           # has pull and fresher input
 
     on starting a Ripple Run:
         startF = sourceF
@@ -1096,6 +1096,8 @@ Under *pull*, a Pond will continuously initiate new Pond Runs any time its `sour
 
 Every Ripple in a Pond Run will *eventually* reach the `Pond.startF` freshness, as `Ripple.targetF` is set to this at run start. The Pond Runs may therefore be identified (and logged) by their `Pond.startF` freshness.
 
+Under *push*, a Pond Run will start any time there is change in its Source (like *pull*), until the *push* target freshness is satisfied. This is potentially wasteful (e.g. a fork operating in Wave or on a separate timeline). To correct this would require each Pond to track the *set* of unsatisfied *push* targets, which is intended in a future update.
+
 ### Triggers
 
 Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundary nodes) attached as child to the Pond. These each have special properties:
@@ -1103,7 +1105,7 @@ Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundar
 - **Tap**: Sets `Source.hasReceivedPull = true`, then deletes itself
 - **Wave**: Sets `Source.hasReceivedPull = true` every time the pseudo-node runs
 - **Pulse**: Sets `Source.targetF = now`, then deletes itself
-- **Tide**: Sets `Source.targetF = now` whenever the Source's `Source.staleness = now + Source.D - Source.endF` exceeds the set bound
+- **Tide**: Sets `Source.targetF = now` whenever `now + Source.D - (Source.targetF ?? Source.startF) >= limit`, using the staleness of either the most recently started run or the most recent *push* target
 
 The trigger is, in effect, just another Sink.
 

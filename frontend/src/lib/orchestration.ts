@@ -231,7 +231,10 @@ function canStartPond(s: OrchestrState, pid: PondId, now: number): boolean {
   const ps = s.pondStates[pid];
   const { F } = pondSourceF(s, pid, now);
   if (F == null) return false;
-  if (ps.targetF != null && F >= ps.targetF) return true; // push satisfied
+  // Push: run when the target is reached, OR (target pending) when fresher input has arrived — so an
+  // outlet whose source can't reach the absolute target still consumes each delivered generation,
+  // taking the freshest. Without the latter clause a Tide's moving target starves the outlet.
+  if (ps.targetF != null && (F >= ps.targetF || F > ps.startF)) return true;
   return ps.hasPull && F > ps.startF; // pull with fresher input
 }
 
@@ -280,7 +283,7 @@ function canStartRipple(s: OrchestrState, rid: RippleId): boolean {
   const rs = s.rippleStates[rid];
   if (rs.isRunning) return false;
   const sourceF = rippleSourceF(s, rid);
-  if (rs.targetF != null && sourceF >= rs.targetF) return true;
+  if (rs.targetF != null && (sourceF >= rs.targetF || sourceF > rs.startF)) return true;
   return rs.hasPull && sourceF > rs.startF;
 }
 
@@ -410,12 +413,17 @@ export function tick(now: number, stateIn: OrchestrState): OrchestrState {
       const idle = ps.startF === ps.endF && !ps.hasPull && ps.targetF == null && !anyRippleBusy(s, pid);
       if (completedPonds.has(pid) || idle) pondReceivePull(s, pid, now);
     } else {
-      // Tide: maintain a maximum staleness by issuing a Pulse to `now` when it is exceeded — but
-      // only once no Pulse is already in flight (targetF == null), so the target doesn't outrun
-      // supply by being re-bumped every tick. The pending push runs to completion, then the next
-      // staleness breach issues a fresh one.
-      const staleness = now + ps.D - ps.endF;
-      if (ps.targetF == null && (ps.endF === 0 || staleness > (trig.stalenessMs ?? 0))) {
+      // Tide: a clock. It issues a fresh Pulse to `now` every time the freshness it last *requested*
+      // has itself aged past `limit`. That reference is `targetF` while a push is still pending, and
+      // `startF` once a run has begun against it — startF is set to sourceF *before* targetF clears,
+      // so it preserves the satisfied target. (Reading endF instead would mistime the clock, since it
+      // lags by the lead.) Pulses pipeline freely: a limit below the chain's lead time just means
+      // several runs are in flight, with completions still landing every `limit` (down to the
+      // bottleneck). Each consumer takes the freshest generation via canStart's push clause, so the
+      // moving target never starves the chain.
+      const limit = trig.stalenessMs ?? 0;
+      const ref = ps.targetF ?? ps.startF;
+      if (now + ps.D - ref >= limit) {
         pondSetTarget(s, pid, now);
       }
     }

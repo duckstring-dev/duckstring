@@ -148,11 +148,26 @@ export function Sidebar() {
       {selectedTriggerId && (
         <Section>
           <Label>Trigger</Label>
-          <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 10 }}>
-            {triggers[selectedTriggerId]?.kind === 'wave'
-              ? 'Wave trigger'
-              : `Tide trigger (max staleness ${((triggers[selectedTriggerId]?.stalenessMs ?? 1000) / 1000).toFixed(1)}s)`}
-          </div>
+          {triggers[selectedTriggerId]?.kind === 'wave' ? (
+            <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 10 }}>Wave trigger</div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+              <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
+              <input
+                type="number"
+                min="0.1"
+                step="0.5"
+                defaultValue={((triggers[selectedTriggerId]?.stalenessMs ?? 1000) / 1000).toFixed(1)}
+                key={`tide-${selectedTriggerId}`}
+                onChange={(e) => {
+                  const ms = parseFloat(e.target.value) * 1000;
+                  if (!isNaN(ms) && ms > 0) triggerTide(selectedTriggerId, Math.max(100, ms));
+                }}
+                style={numInput}
+              />
+              <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
+            </div>
+          )}
           <Btn onClick={() => removeTrigger(selectedTriggerId)} color="#ef4444">Delete Trigger</Btn>
         </Section>
       )}
