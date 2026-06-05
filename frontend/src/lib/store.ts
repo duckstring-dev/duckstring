@@ -497,7 +497,25 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   },
 
   tick(now) {
-    set((s) => ({ ...applyOrch(s, orchTick(now, toOrchestrState(s))), now }));
+    set((s) => {
+      // Advance the engine in fixed SIM_STEP sub-ticks so the simulation's time resolution is the
+      // same at every playback speed. At 10x the driver hands us a ~1000ms jump; stepping it as one
+      // tick would snap run starts/completions onto a coarse grid and jitter the cadence (3↔4s).
+      // MAX_STEPS caps a catch-up after the tab was backgrounded (the remainder collapses into the
+      // final tick rather than freezing the UI).
+      const SIM_STEP = 100;
+      const MAX_STEPS = 256;
+      let cur = s.now;
+      let orch = toOrchestrState(s);
+      let n = 0;
+      while (now - cur > SIM_STEP && n < MAX_STEPS) {
+        cur += SIM_STEP;
+        orch = orchTick(cur, orch);
+        n += 1;
+      }
+      orch = orchTick(now, orch);
+      return { ...applyOrch(s, orch), now };
+    });
   },
 }));
 

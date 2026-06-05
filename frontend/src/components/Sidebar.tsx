@@ -155,8 +155,8 @@ export function Sidebar() {
               <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
               <input
                 type="number"
-                min="0.1"
-                step="0.5"
+                min="1"
+                step="1"
                 defaultValue={((triggers[selectedTriggerId]?.stalenessMs ?? 1000) / 1000).toFixed(1)}
                 key={`tide-${selectedTriggerId}`}
                 onChange={(e) => {
@@ -269,7 +269,7 @@ export function Sidebar() {
                 {showTideInput && (
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
                     <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
-                    <input type="number" min="0.1" step="0.5" value={tidePeriod} onChange={(e) => setTidePeriod(e.target.value)} style={numInput} />
+                    <input type="number" min="1" step="1" value={tidePeriod} onChange={(e) => setTidePeriod(e.target.value)} style={numInput} />
                     <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
                     <Btn small onClick={() => { triggerTide(selectedPond.id, Math.max(100, parseFloat(tidePeriod) * 1000)); setShowTideInput(false); }} color="#3b82f6">Set</Btn>
                   </div>
@@ -320,7 +320,7 @@ export function Sidebar() {
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
               <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Duration</span>
-              <input type="number" min="0.1" step="0.5" defaultValue={(selectedRipple.durationMs / 1000).toFixed(1)} key={`d-${selectedRippleId}`}
+              <input type="number" min="1" step="1" defaultValue={(selectedRipple.durationMs / 1000).toFixed(1)} key={`d-${selectedRippleId}`}
                 onChange={(e) => { const ms = Math.max(100, parseFloat(e.target.value) * 1000); if (!isNaN(ms)) setRippleDuration(selectedRippleId!, ms); }}
                 style={numInput} />
               <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
