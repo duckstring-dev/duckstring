@@ -3,6 +3,7 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { usePlaygroundStore, getPondVisualState, formatAge, STATE_COLORS } from '@/lib/store';
+import { DemandIndicators } from './DemandIndicators';
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
@@ -53,20 +54,22 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           top: 0,
           left: 0,
           right: 0,
-          height: 44,
-          padding: '8px 12px',
+          height: 64,
+          padding: '6px 12px',
           display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
+          flexDirection: 'column',
+          justifyContent: 'center',
+          gap: 5,
           borderBottom: `1px solid ${borderColor}30`,
         }}
       >
-        <span style={{ fontSize: 13, fontWeight: 700, color: '#e4e4e7', letterSpacing: '0.04em' }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: '#e4e4e7', letterSpacing: '0.04em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {pond.name}
         </span>
-        <span style={{ fontSize: 11, color: '#71717a', display: 'flex', gap: 6 }}>
-          <span style={{ color: '#a1a1aa' }}>↑{formatAge(ps.startedF, now)}</span>
-          <span>✓{formatAge(ps.F, now)}</span>
+        <span style={{ fontSize: 11, color: '#71717a', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <DemandIndicators hasPull={ps.hasPull || ps.hasReceivedPull} targetF={ps.targetF} now={now} />
+          <span style={{ color: '#a1a1aa' }}>↑{formatAge(ps.startF, now)} ({ps.runsStarted})</span>
+          <span>✓{formatAge(ps.endF, now)} ({ps.runsCompleted})</span>
         </span>
       </div>
 

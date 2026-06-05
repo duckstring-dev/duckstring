@@ -3,6 +3,7 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { usePlaygroundStore, getRippleVisualState, formatAge, STATE_COLORS } from '@/lib/store';
+import { DemandIndicators } from './DemandIndicators';
 
 export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
   const rippleId = data.rippleId as string;
@@ -17,8 +18,8 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
   const visualState = getRippleVisualState(rs);
   const borderColor = STATE_COLORS[visualState];
   const isSelected = selectedRippleId === rippleId;
-  // Age of the started run: in-flight freshness while running, else last output freshness.
-  const runFresh = rs.isRunning ? rs.runFreshness ?? 0 : rs.F;
+  // Started-run freshness: in-flight start while running, else last completed freshness.
+  const startedF = rs.isRunning ? rs.startF : rs.endF;
 
   return (
     <div
@@ -34,22 +35,24 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
         background: '#1a1a1f',
         cursor: 'pointer',
         width: '100%',
-        height: 60,
+        height: 80,
         boxSizing: 'border-box',
         display: 'flex',
         flexDirection: 'column',
         justifyContent: 'center',
-        gap: 2,
+        gap: 4,
         userSelect: 'none',
       }}
     >
       <Handle type="target" position={Position.Left} style={{ background: '#52525b' }} />
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {ripple.name}
-        </span>
-        <span style={{ fontSize: 11, color: '#a1a1aa', flexShrink: 0 }}>↑{formatAge(runFresh, now)}</span>
-      </div>
+      <span style={{ fontSize: 12, fontWeight: 600, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {ripple.name}
+      </span>
+      <span style={{ fontSize: 11, color: '#71717a', display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+        <DemandIndicators hasPull={rs.hasPull} targetF={rs.targetF} now={now} />
+        <span style={{ color: '#a1a1aa' }}>↑{formatAge(startedF, now)} ({rs.runsStarted})</span>
+        <span>✓{formatAge(rs.endF, now)} ({rs.runsCompleted})</span>
+      </span>
       <div style={{ fontSize: 11, color: borderColor, display: 'flex', gap: 6, whiteSpace: 'nowrap' }}>
         <span style={{ color: '#a1a1aa' }}>
           {rs.lastDurationMs != null ? `${(rs.lastDurationMs / 1000).toFixed(1)}s` : '—'}

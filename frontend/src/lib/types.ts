@@ -1,12 +1,22 @@
 export type PondId = string;
 export type RippleId = string;
 
+// A repeating window within each minute, in seconds [startSec, endSec). Only meaningful on an
+// Inlet Pond (no Sources): it models a batch source that becomes available at startSec and is
+// "fresh until" endSec. Non-overlapping; gaps allowed.
+export interface Window {
+  startSec: number;
+  endSec: number;
+}
+
 export interface Pond {
   id: PondId;
   name: string;
   sources: PondId[];
   // Source ponds that are optional (don't gate / don't define freshness). Default: all required.
   optionalSources?: PondId[];
+  // Batch-update windows (Inlet only). Empty/undefined ⇒ live source (fresh = now).
+  windows?: Window[];
 }
 
 export interface Ripple {
@@ -22,36 +32,38 @@ export interface Ripple {
   variability: number;
 }
 
-// Freshness-based run state. `F` is output freshness (a timestamp); demand is `hasPull`
-// (resupply, Tap/Wave) and `hasPush` (priority target T, Pulse/Tide). See orchestration.ts.
+// First-class Ripple state, named exactly as in theory.md.
 export interface RippleRunState {
-  F: number; // output freshness timestamp (0 = never run)
-  hasPull: boolean; // resupply demand (Tap/Wave)
-  hasPush: number | null; // priority freshness target T (Pulse/Tide), else null
-  runFreshness: number | null; // parentsFreshness captured at the in-flight run's start
+  startF: number; // freshness of the most recently started run (0 = never)
+  endF: number; // freshness of the most recently completed run (0 = never)
+  hasPull: boolean; // pull token
+  targetF: number | null; // push target freshness, or null
+  // Run bookkeeping (the simulation of an actual run taking time):
   isRunning: boolean;
   runStartedAt: number | null;
-  currentRunDurationMs: number | null; // sampled duration of the in-flight run
-  lastDurationMs: number | null; // sampled duration of the most recent completed run
-  completionTimes: number[]; // ms timestamps of completions — cadence trace
-  durations: number[]; // sampled run durations (ms) — duration trace
+  currentRunDurationMs: number | null;
+  lastDurationMs: number | null;
+  // Trace data for the sidebar charts:
   runsStarted: number;
   runsCompleted: number;
+  completionTimes: number[];
+  durations: number[];
 }
 
-// Derived-each-tick pond rollup for display.
+// First-class Pond state, named exactly as in theory.md.
 export interface PondRunState {
-  F: number; // completed-run freshness: min over leaf ripples' F
-  startedF: number; // started-run freshness: min over leaves of (in-flight runFreshness else F)
-  hasPull: boolean; // any leaf pulling
-  hasPush: number | null; // max leaf push target
-  runsStarted: number; // max over root ripples
-  runsCompleted: number; // min over leaf ripples
-  // Start timestamp per pond generation number (keyed by runsStarted), so a generation's latency
-  // is measured against ITS OWN start, not the latest start (which differs under pipelining).
+  startF: number; // freshness of the most recently started Pond Run
+  endF: number; // freshness of the most recently completed Pond Run
+  D: number; // window delay carried by the current freshness (0 unless fed by a window)
+  hasReceivedPull: boolean; // inbox: a Sink/trigger has asked for resupply
+  hasPull: boolean; // a Pond Run is wanted in pull
+  targetF: number | null; // push target freshness, or null
+  // Trace data for the sidebar charts:
+  runsStarted: number;
+  runsCompleted: number;
   genStartTimes: Record<number, number>;
-  completionTimes: number[]; // when runsCompleted advanced — cadence trace
-  durations: number[]; // generation latency (completion − that generation's start) — duration trace
+  completionTimes: number[];
+  durations: number[];
 }
 
 // Kind of demand most recently sent across an edge. Keyed `${parent}::${child}` /
@@ -65,13 +77,17 @@ export type TriggerKind = 'wave' | 'tide';
 export interface ActiveTrigger {
   pondId: PondId;
   kind: TriggerKind;
-  periodMs?: number;
-  // Wave is modelled as a zero-duration pseudo-ripple consuming the pond's leaves: it holds the
-  // freshness it has last "consumed", so the leaves are gated together by ONE consumer (throttled
-  // to the slowest) rather than each being re-armed independently. Undefined until first consume.
-  consumedF?: number;
+  // Tide only: maximum staleness in ms. A push to `now` fires whenever staleness exceeds this.
+  stalenessMs?: number;
 }
 
 export type RippleVisualState = 'running' | 'queued' | 'idle';
-export type PondVisualState = 'running' | 'queued' | 'wave' | 'idle';
+export type PondVisualState = 'running' | 'queued' | 'idle';
 export type EdgeVisualState = 'push' | 'pull' | 'stop' | 'idle';
+
+// A single logged orchestration event, for the console panel.
+export interface LogEntry {
+  t: number; // wall-clock ms of the event
+  kind: string; // short category, e.g. 'tap', 'pond-start', 'ripple-done'
+  msg: string; // human-readable description
+}

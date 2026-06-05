@@ -2,14 +2,14 @@ import dagre from '@dagrejs/dagre';
 import type { Node, Edge } from '@xyflow/react';
 import type { PondId, RippleId, Pond, Ripple, ActiveTrigger } from './types';
 
-const MIN_RIPPLE_W = 120;
-const RIPPLE_H = 60;
+// Floor wide enough for the stats line: demand dot + ≤box + ↑Xs (N) + ✓Xs (N).
+const MIN_RIPPLE_W = 160;
+const RIPPLE_H = 80;
 
-// Width sized to fit the ripple name plus the generation counter on the top row.
+// Width sized to fit the ripple name on its own line; floored to the stats line.
 function rippleWidth(r: Ripple): number {
   const nameW = r.name.length * 7.2; // ~13px monospace
-  const genW = 34; // "↑NN"
-  return Math.max(MIN_RIPPLE_W, Math.ceil(nameW + genW + 20 /* padding */));
+  return Math.max(MIN_RIPPLE_W, Math.ceil(nameW + 20 /* padding */));
 }
 
 // Minimum pond width needed for its header: name (bold) + the ↑started ✓completed counter.
@@ -18,7 +18,7 @@ function pondHeaderWidth(name: string): number {
   const genW = 76; // "↑NN ✓NN"
   return Math.ceil(nameW + genW + 24 /* padding */);
 }
-const POND_PAD_TOP = 48;
+const POND_PAD_TOP = 68;
 const POND_PAD_SIDE = 24;
 const POND_PAD_BOTTOM = 24;
 const MIN_POND_W = 160;

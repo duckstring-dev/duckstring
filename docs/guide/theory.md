@@ -1036,8 +1036,8 @@ Pond:
         hasReceivedPull = false
 
     on hasPull becomes true:
-        for each Source where Source.endF == startF:    # cold-start propagation upstream
-            Source.hasReceivedPull = true
+        for each Source where Source.startF <>= startF:    # any Source that has not started work ahead of this Pond
+            Source.hasReceivedPull = true           # cold-start propagation between Ponds
 
     on targetF changes (set by a Pulse, Tide, or Sink):
         for each Source where Source.targetF is null or < targetF:
@@ -1073,7 +1073,7 @@ Ripple:
         if root (no parents):
             Pond.hasPull = true                     # lets the Pond start a Run as pull
         else:
-            for each parent where Parent.endF == startF:
+            for each parent where Parent.startF <= startF: # any parent that has not started work ahead of this Ripple
                 Parent.hasPull = true               # cold-start propagation between Ripples
 
     start a Ripple Run when:

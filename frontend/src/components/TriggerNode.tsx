@@ -16,7 +16,7 @@ export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
   const color = isWave ? '#22c55e' : '#3b82f6';
   const label = isWave
     ? 'Wave'
-    : `Tide (${((trigger.periodMs ?? 1000) / 1000).toFixed(1)}s)`;
+    : `Tide (≤${((trigger.stalenessMs ?? 1000) / 1000).toFixed(1)}s)`;
 
   const isSelected = selectedTriggerId === pondId;
 

@@ -10,14 +10,18 @@ import type {
   EdgeDemandKind,
   ActiveTrigger,
 } from './types';
+import type { Window, LogEntry } from './types';
 import { hasCyclePond, hasCycleRipple, isPondDownstreamOf } from './graph';
 import {
   tick as orchTick,
-  pullPond,
-  pushPond,
-  stopPond,
+  tapPond,
+  pulsePond,
+  stopPond as orchStopPond,
+  drainLog,
   type OrchestrState,
 } from './orchestration';
+
+const MAX_LOGS = 2000;
 
 let pondCounter = 0;
 const rippleCounters: Record<PondId, number> = {};
@@ -41,10 +45,12 @@ function newRippleName(pondId: PondId): string {
 
 function initialPondState(): PondRunState {
   return {
-    F: 0,
-    startedF: 0,
+    startF: 0,
+    endF: 0,
+    D: 0,
+    hasReceivedPull: false,
     hasPull: false,
-    hasPush: null,
+    targetF: null,
     runsStarted: 0,
     runsCompleted: 0,
     genStartTimes: {},
@@ -55,18 +61,18 @@ function initialPondState(): PondRunState {
 
 function initialRippleState(): RippleRunState {
   return {
-    F: 0,
+    startF: 0,
+    endF: 0,
     hasPull: false,
-    hasPush: null,
-    runFreshness: null,
+    targetF: null,
     isRunning: false,
     runStartedAt: null,
     currentRunDurationMs: null,
     lastDurationMs: null,
-    completionTimes: [],
-    durations: [],
     runsStarted: 0,
     runsCompleted: 0,
+    completionTimes: [],
+    durations: [],
   };
 }
 
@@ -129,16 +135,19 @@ export interface PlaygroundState {
   rippleStates: Record<RippleId, RippleRunState>;
   edgeKinds: EdgeKindMap;
   now: number;
+  speed: number;
+  paused: boolean;
+  logs: LogEntry[];
   selectedPondId: PondId | null;
   selectedRippleId: RippleId | null;
   selectedTriggerId: PondId | null;
   triggers: Record<PondId, ActiveTrigger>;
-  tideIntervals: Record<PondId, ReturnType<typeof setInterval>>;
   pulseTags: Record<PondId, number>;
 
   addPond(): void;
   addRipple(pondId: PondId, parentId?: RippleId): void;
   renamePond(pondId: PondId, name: string): void;
+  setPondWindows(pondId: PondId, windows: Window[]): void;
   setRippleDuration(rippleId: RippleId, ms: number): void;
   renameRipple(rippleId: RippleId, name: string): void;
   setRippleVariability(rippleId: RippleId, variability: number): void;
@@ -158,10 +167,13 @@ export interface PlaygroundState {
   triggerTap(pondId: PondId): void;
   triggerPulse(pondId: PondId): void;
   triggerWave(pondId: PondId): void;
-  triggerTide(pondId: PondId, periodMs: number): void;
+  triggerTide(pondId: PondId, stalenessMs: number): void;
   triggerStop(pondId: PondId): void;
   removeTrigger(pondId: PondId): void;
+  clearLogs(): void;
 
+  setSpeed(speed: number): void;
+  togglePause(): void;
   tick(now: number): void;
 }
 
@@ -176,12 +188,17 @@ function toOrchestrState(state: PlaygroundState): OrchestrState {
   };
 }
 
-function applyOrch(_prev: PlaygroundState, orch: OrchestrState): Partial<PlaygroundState> {
+function applyOrch(prev: PlaygroundState, orch: OrchestrState): Partial<PlaygroundState> {
+  const drained = drainLog();
+  const logs = drained.length
+    ? [...prev.logs, ...drained].slice(-MAX_LOGS)
+    : prev.logs;
   return {
     pondStates: orch.pondStates,
     rippleStates: orch.rippleStates,
     edgeKinds: orch.edgeKinds,
     triggers: orch.triggers,
+    logs,
   };
 }
 
@@ -191,16 +208,18 @@ function isOutlet(ponds: Record<PondId, Pond>, pondId: PondId): boolean {
 
 export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   now: Date.now(),
+  speed: 1,
+  paused: false,
   ponds: demoState.ponds,
   pondStates: demoState.pondStates,
   ripples: demoState.ripples,
   rippleStates: demoState.rippleStates,
   edgeKinds: {},
+  logs: [],
   selectedPondId: null,
   selectedRippleId: null,
   selectedTriggerId: null,
   triggers: {},
-  tideIntervals: {},
   pulseTags: {},
 
   addPond() {
@@ -260,6 +279,12 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   renamePond(pondId, name) {
     set((s) => ({
       ponds: { ...s.ponds, [pondId]: { ...s.ponds[pondId], name } },
+    }));
+  },
+
+  setPondWindows(pondId, windows) {
+    set((s) => ({
+      ponds: { ...s.ponds, [pondId]: { ...s.ponds[pondId], windows: windows.length ? windows : undefined } },
     }));
   },
 
@@ -422,60 +447,53 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     set({ selectedPondId: null, selectedRippleId: null, selectedTriggerId: null });
   },
 
-  // Tap: one-shot resupply (pull).
+  // Tap: one-shot resupply (pull). Cascades synchronously. Stamped from the sim clock.
   triggerTap(pondId) {
-    set((s) => applyOrch(s, pullPond(pondId, Date.now(), toOrchestrState(s))));
+    set((s) => applyOrch(s, tapPond(toOrchestrState(s), pondId, s.now)));
   },
 
-  // Pulse: one-shot priority freshness target (push to now).
+  // Pulse: one-shot priority freshness target (push to sim-now). Cascades synchronously.
   triggerPulse(pondId) {
     set((s) => ({
-      ...applyOrch(s, pushPond(pondId, Date.now(), toOrchestrState(s))),
+      ...applyOrch(s, pulsePond(toOrchestrState(s), pondId, s.now)),
       pulseTags: { ...s.pulseTags, [pondId]: s.pondStates[pondId]?.runsCompleted ?? 0 },
     }));
   },
 
-  // Wave: continuous Tap — the per-tick pull is driven by the trigger in orchestration.tick.
+  // Wave: a standing pull, re-asserted by orchestration.tick on each Pond completion.
   triggerWave(pondId) {
-    const state = get();
-    if (!isOutlet(state.ponds, pondId)) return;
-    state.removeTrigger(pondId);
-    const trigger: ActiveTrigger = { pondId, kind: 'wave' };
-    set((s) => ({
-      ...applyOrch(s, pullPond(pondId, Date.now(), { ...toOrchestrState(s), triggers: { ...s.triggers, [pondId]: trigger } })),
-    }));
+    if (!isOutlet(get().ponds, pondId)) return;
+    set((s) => ({ triggers: { ...s.triggers, [pondId]: { pondId, kind: 'wave' } } }));
   },
 
-  // Tide: scheduled Pulse — a fresh push target each period.
-  triggerTide(pondId, periodMs) {
-    get().removeTrigger(pondId);
-    const trigger: ActiveTrigger = { pondId, kind: 'tide', periodMs };
-    const fire = () => {
-      set((s) => applyOrch(s, pushPond(pondId, Date.now(), toOrchestrState(s))));
-    };
-    const intervalId = setInterval(fire, periodMs);
-    set((s) => ({
-      triggers: { ...s.triggers, [pondId]: trigger },
-      tideIntervals: { ...s.tideIntervals, [pondId]: intervalId },
-    }));
-    fire();
+  // Tide: maintain a maximum staleness, evaluated by orchestration.tick.
+  triggerTide(pondId, stalenessMs) {
+    set((s) => ({ triggers: { ...s.triggers, [pondId]: { pondId, kind: 'tide', stalenessMs } } }));
   },
 
   triggerStop(pondId) {
     get().removeTrigger(pondId);
-    set((s) => applyOrch(s, stopPond(pondId, toOrchestrState(s))));
+    set((s) => applyOrch(s, orchStopPond(toOrchestrState(s), pondId, s.now)));
   },
 
   removeTrigger(pondId) {
     set((s) => {
-      const intervalId = s.tideIntervals[pondId];
-      if (intervalId !== undefined) clearInterval(intervalId);
-      const newIntervals = { ...s.tideIntervals };
-      delete newIntervals[pondId];
       const newTriggers = { ...s.triggers };
       delete newTriggers[pondId];
-      return { triggers: newTriggers, tideIntervals: newIntervals };
+      return { triggers: newTriggers };
     });
+  },
+
+  clearLogs() {
+    set({ logs: [] });
+  },
+
+  setSpeed(speed) {
+    set({ speed });
+  },
+
+  togglePause() {
+    set((s) => ({ paused: !s.paused }));
   },
 
   tick(now) {
@@ -499,24 +517,35 @@ export function formatAge(F: number, now: number): string {
 
 export function getRippleVisualState(rs: RippleRunState): 'running' | 'queued' | 'idle' {
   if (rs.isRunning) return 'running';
-  if (rs.hasPull || rs.hasPush !== null) return 'queued';
+  if (rs.hasPull || rs.targetF !== null) return 'queued';
   return 'idle';
 }
 
 export function getPondVisualState(ps: PondRunState): 'running' | 'queued' | 'idle' {
   if (ps.runsStarted > ps.runsCompleted) return 'running';
-  if (ps.hasPull || ps.hasPush !== null) return 'queued';
+  if (ps.hasPull || ps.hasReceivedPull || ps.targetF !== null) return 'queued';
   return 'idle';
 }
 
 export function pondIsIdle(ps: PondRunState | undefined): boolean {
   if (!ps) return true;
-  return ps.runsStarted <= ps.runsCompleted && !ps.hasPull && ps.hasPush === null;
+  return ps.runsStarted <= ps.runsCompleted && !ps.hasPull && !ps.hasReceivedPull && ps.targetF === null;
 }
 
 export function rippleIsIdle(rs: RippleRunState | undefined): boolean {
   if (!rs) return true;
-  return !rs.isRunning && !rs.hasPull && rs.hasPush === null;
+  return !rs.isRunning && !rs.hasPull && rs.targetF === null;
+}
+
+// Edge colour reflects what the SINK is currently demanding of this source:
+//   blue  — the sink holds a push target (this source is feeding a push)
+//   green — the sink holds pull demand (this source is feeding a resupply)
+//   grey  — the sink has no demand on this edge
+// `sinkPush` is the sink's push target (or null); `sinkPull` whether it holds a pull token.
+export function getDemandEdgeColor(sinkPull: boolean, sinkPush: number | null): string {
+  if (sinkPush !== null) return EDGE_COLORS.push;
+  if (sinkPull) return EDGE_COLORS.pull;
+  return EDGE_COLORS.idle;
 }
 
 // Edge colour = most-recent demand kind, but cleared to grey once both endpoints are idle.

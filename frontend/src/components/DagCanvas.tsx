@@ -5,6 +5,7 @@ import {
   ReactFlow,
   Background,
   Controls,
+  Panel,
   BaseEdge,
   getStraightPath,
   type NodeTypes,
@@ -16,35 +17,37 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { usePlaygroundStore, getEdgeColor, pondIsIdle, rippleIsIdle } from '@/lib/store';
+import { usePlaygroundStore, getDemandEdgeColor } from '@/lib/store';
 import { computeLayout } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
 import { TriggerNode } from './TriggerNode';
+import { SimControls } from './SimControls';
 
 // ─── Custom edges ────────────────────────────────────────────────────────────
 
+// Edge colour reflects the SINK's demand on this edge: blue=push, green=pull, grey=none.
 function RippleEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
-  const sourceRippleId = (data as { sourceRippleId: string }).sourceRippleId;
   const sinkRippleId = (data as { sinkRippleId: string }).sinkRippleId;
-  const kind = usePlaygroundStore((s) => s.edgeKinds[`${sourceRippleId}::${sinkRippleId}`]);
-  const sourceIdle = usePlaygroundStore((s) => rippleIsIdle(s.rippleStates[sourceRippleId]));
-  const sinkIdle = usePlaygroundStore((s) => rippleIsIdle(s.rippleStates[sinkRippleId]));
+  const sinkPull = usePlaygroundStore((s) => s.rippleStates[sinkRippleId]?.hasPull ?? false);
+  const sinkPush = usePlaygroundStore((s) => s.rippleStates[sinkRippleId]?.targetF ?? null);
 
-  const color = getEdgeColor(kind, sourceIdle, sinkIdle);
+  const color = getDemandEdgeColor(sinkPull, sinkPush);
 
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
 }
 
 function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
-  const sourcePondId = (data as { sourcePondId: string }).sourcePondId;
   const sinkPondId = (data as { sinkPondId: string }).sinkPondId;
-  const kind = usePlaygroundStore((s) => s.edgeKinds[`${sourcePondId}::${sinkPondId}`]);
-  const sourceIdle = usePlaygroundStore((s) => pondIsIdle(s.pondStates[sourcePondId]));
-  const sinkIdle = usePlaygroundStore((s) => pondIsIdle(s.pondStates[sinkPondId]));
+  // A Pond's inbound demand on a Source is captured by the Pond's own pull/push state.
+  const sinkPull = usePlaygroundStore((s) => {
+    const ps = s.pondStates[sinkPondId];
+    return (ps?.hasPull ?? false) || (ps?.hasReceivedPull ?? false);
+  });
+  const sinkPush = usePlaygroundStore((s) => s.pondStates[sinkPondId]?.targetF ?? null);
 
-  const color = getEdgeColor(kind, sourceIdle, sinkIdle);
+  const color = getDemandEdgeColor(sinkPull, sinkPush);
 
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
@@ -145,6 +148,9 @@ export function DagCanvas() {
         style={{ background: '#0f0f14' }}
       >
         <Background color="#2a2a35" gap={24} size={1} />
+        <Panel position="top-left">
+          <SimControls />
+        </Panel>
         <Controls
           style={{
             background: '#1a1a1f',
