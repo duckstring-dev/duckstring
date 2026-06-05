@@ -2,21 +2,43 @@ import dagre from '@dagrejs/dagre';
 import type { Node, Edge } from '@xyflow/react';
 import type { PondId, RippleId, Pond, Ripple, ActiveTrigger } from './types';
 
-// Floor wide enough for the stats line: demand dot + ≤box + ↑Xs (N) + ✓Xs (N).
-const MIN_RIPPLE_W = 160;
+const MIN_RIPPLE_W = 200;
 const RIPPLE_H = 80;
 
-// Width sized to fit the ripple name on its own line; floored to the stats line.
-function rippleWidth(r: Ripple): number {
-  const nameW = r.name.length * 7.2; // ~13px monospace
-  return Math.max(MIN_RIPPLE_W, Math.ceil(nameW + 20 /* padding */));
+// Width of the demand + freshness stats line, estimated from its live contents so the box can grow
+// as run counts and ages get longer. Mirrors the layout of PondNode/RippleNode's second line:
+//   [● dot][≤box]  ↑{startAge} ({startCount})  ✓{endAge} ({endCount})
+// `pushAge` is the formatted push-target age, or null for the "≤—" placeholder. `pad` is the node's
+// horizontal padding. Rounded up to a multiple of 8 so small age changes don't jitter the layout.
+export function statsLineWidth(opts: {
+  pushAge: string | null;
+  startAge: string;
+  startCount: number;
+  endAge: string;
+  endCount: number;
+  pad: number;
+}): number {
+  const CH11 = 6.7; // monospace char px at fontSize 11
+  const CH9 = 5.5; // at fontSize 9 (the ≤ box)
+  const dot = 9; // 7px dot + 1px border
+  const boxText = opts.pushAge != null ? `≤${opts.pushAge}` : '≤—';
+  const box = boxText.length * CH9 + 8; // padding 3*2 + border 1*2
+  const demand = dot + 4 /* gap */ + box;
+  const start = `↑${opts.startAge} (${opts.startCount})`.length * CH11;
+  const end = `✓${opts.endAge} (${opts.endCount})`.length * CH11;
+  const total = demand + 6 /* gap */ + start + 6 /* gap */ + end + opts.pad + 4 /* slack */;
+  return Math.ceil(total / 8) * 8;
 }
 
-// Minimum pond width needed for its header: name (bold) + the ↑started ✓completed counter.
-function pondHeaderWidth(name: string): number {
-  const nameW = name.length * 8.2; // ~13px bold monospace
-  const genW = 76; // "↑NN ✓NN"
-  return Math.ceil(nameW + genW + 24 /* padding */);
+// Width sized to fit the ripple name on its own line; floored to its live stats line.
+function rippleWidth(r: Ripple, floor = 0): number {
+  const nameW = r.name.length * 7.2; // ~13px monospace
+  return Math.max(MIN_RIPPLE_W, floor, Math.ceil(nameW + 20 /* padding */));
+}
+
+// Minimum pond width to fit its name on the title line (the stats line is floored separately).
+function pondNameWidth(name: string): number {
+  return Math.ceil(name.length * 8.2 + 24 /* padding */); // ~13px bold monospace
 }
 const POND_PAD_TOP = 68;
 const POND_PAD_SIDE = 24;
@@ -32,9 +54,17 @@ interface LayoutResult {
   edges: Edge[];
 }
 
+// Per-node minimum content widths (px), derived from live state in DagCanvas so boxes grow to fit
+// their stats line. Both maps are optional/sparse; missing entries fall back to name-based sizing.
+export interface ContentFloors {
+  ripples?: Record<RippleId, number>;
+  ponds?: Record<PondId, number>;
+}
+
 function buildRippleLayout(
   pondId: PondId,
-  ripples: Record<RippleId, Ripple>
+  ripples: Record<RippleId, Ripple>,
+  rippleFloors?: Record<RippleId, number>
 ): {
   positions: Record<RippleId, { x: number; y: number }>;
   widths: Record<RippleId, number>;
@@ -48,7 +78,7 @@ function buildRippleLayout(
   }
 
   const widths: Record<RippleId, number> = {};
-  for (const r of pondRipples) widths[r.id] = rippleWidth(r);
+  for (const r of pondRipples) widths[r.id] = rippleWidth(r, rippleFloors?.[r.id] ?? 0);
 
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: 'LR', ranksep: 60, nodesep: 40, marginx: 0, marginy: 0 });
@@ -96,7 +126,8 @@ function buildRippleLayout(
 export function computeLayout(
   ponds: Record<PondId, Pond>,
   ripples: Record<RippleId, Ripple>,
-  triggers: Record<PondId, ActiveTrigger>
+  triggers: Record<PondId, ActiveTrigger>,
+  floors?: ContentFloors
 ): LayoutResult {
   const pondList = Object.values(ponds);
 
@@ -111,9 +142,9 @@ export function computeLayout(
     }
   > = {};
   for (const pond of pondList) {
-    const layout = buildRippleLayout(pond.id, ripples);
-    // Floor the pond width so a long name still fits in the header.
-    layout.width = Math.max(layout.width, pondHeaderWidth(pond.name));
+    const layout = buildRippleLayout(pond.id, ripples, floors?.ripples);
+    // Floor the pond width to fit its title line and its (live) stats line.
+    layout.width = Math.max(layout.width, pondNameWidth(pond.name), floors?.ponds?.[pond.id] ?? 0);
     pondLayouts[pond.id] = layout;
   }
 

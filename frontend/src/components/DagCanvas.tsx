@@ -17,8 +17,8 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { usePlaygroundStore, getDemandEdgeColor } from '@/lib/store';
-import { computeLayout } from '@/lib/layout';
+import { usePlaygroundStore, getDemandEdgeColor, formatAge } from '@/lib/store';
+import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
 import { TriggerNode } from './TriggerNode';
@@ -87,6 +87,9 @@ export function DagCanvas() {
   const ponds = usePlaygroundStore((s) => s.ponds);
   const ripples = usePlaygroundStore((s) => s.ripples);
   const triggers = usePlaygroundStore((s) => s.triggers);
+  const pondStates = usePlaygroundStore((s) => s.pondStates);
+  const rippleStates = usePlaygroundStore((s) => s.rippleStates);
+  const now = usePlaygroundStore((s) => s.now);
   const linkPonds = usePlaygroundStore((s) => s.linkPonds);
   const linkRipples = usePlaygroundStore((s) => s.linkRipples);
   const clearSelection = usePlaygroundStore((s) => s.clearSelection);
@@ -103,10 +106,53 @@ export function DagCanvas() {
     [ponds, ripples, triggers]
   );
 
+  // Each box's minimum width to fit its live stats line (grows with run counts / longer ages).
+  const floors = useMemo<ContentFloors>(() => {
+    const r: Record<string, number> = {};
+    for (const rp of Object.values(ripples)) {
+      const rs = rippleStates[rp.id];
+      if (!rs) continue;
+      const startedF = rs.isRunning ? rs.startF : rs.endF;
+      r[rp.id] = statsLineWidth({
+        pushAge: rs.targetF != null ? formatAge(rs.targetF, now) : null,
+        startAge: formatAge(startedF, now),
+        startCount: rs.runsStarted,
+        endAge: formatAge(rs.endF, now),
+        endCount: rs.runsCompleted,
+        pad: 20,
+      });
+    }
+    const p: Record<string, number> = {};
+    for (const pd of Object.values(ponds)) {
+      const ps = pondStates[pd.id];
+      if (!ps) continue;
+      p[pd.id] = statsLineWidth({
+        pushAge: ps.targetF != null ? formatAge(ps.targetF, now) : null,
+        startAge: formatAge(ps.startF, now),
+        startCount: ps.runsStarted,
+        endAge: formatAge(ps.endF, now),
+        endCount: ps.runsCompleted,
+        pad: 24,
+      });
+    }
+    return { ripples: r, ponds: p };
+  }, [ponds, ripples, pondStates, rippleStates, now]);
+
+  // statsLineWidth buckets to 8px, so this key only changes when a box actually needs resizing —
+  // keeping the (expensive, position-shifting) dagre relayout off the per-tick path.
+  const widthKey = useMemo(() => {
+    const enc = (m: Record<string, number>) =>
+      Object.entries(m)
+        .map(([k, v]) => `${k}:${v}`)
+        .sort()
+        .join(',');
+    return `${enc(floors.ripples ?? {})}|${enc(floors.ponds ?? {})}`;
+  }, [floors]);
+
   const { nodes, edges } = useMemo(
-    () => computeLayout(ponds, ripples, triggers),
+    () => computeLayout(ponds, ripples, triggers, floors),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [layoutKey]
+    [layoutKey, widthKey]
   );
 
   const onConnect = useCallback(

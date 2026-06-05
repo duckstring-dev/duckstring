@@ -39,7 +39,7 @@ export function DemandIndicators({
           whiteSpace: 'nowrap',
         }}
       >
-        ≤{targetF !== null ? formatAge(targetF, now) : '—'}
+        ≤{targetF !== null ? formatAge(targetF, now) : '---'}
       </span>
     </span>
   );

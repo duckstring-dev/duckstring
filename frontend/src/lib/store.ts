@@ -503,16 +503,23 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
 
 // ─── Visual state helpers ────────────────────────────────────────────────────
 
-// Age of a freshness timestamp relative to now, no decimals, unit-scaled. F=0 → '—'.
+// Age of a freshness timestamp relative to now, unit-scaled. F=0 → '—'. The numeric part is always
+// two digits (e.g. "02s", "47m") so the width never jitters as a value crosses 9↔10; each unit rolls
+// to the next before it would exceed 99. Caps at ">1y" — finer resolution past a year isn't useful.
 export function formatAge(F: number, now: number): string {
   if (!F) return '—';
+  const pad = (n: number) => String(Math.floor(n)).padStart(2, '0');
   const secs = Math.max(0, (now - F) / 1000);
-  if (secs < 60) return `${Math.round(secs)}s`;
+  if (secs < 60) return `${pad(secs)}s`;
   const mins = secs / 60;
-  if (mins < 60) return `${Math.floor(mins)}m`;
+  if (mins < 60) return `${pad(mins)}m`;
   const hrs = mins / 60;
-  if (hrs < 24) return `${Math.floor(hrs)}h`;
-  return `${Math.floor(hrs / 24)}d`;
+  if (hrs < 24) return `${pad(hrs)}h`;
+  const days = hrs / 24;
+  if (days < 30) return `${pad(days)}d`;
+  const months = days / 30;
+  if (months < 12) return `${pad(months)}mo`;
+  return '>1y';
 }
 
 export function getRippleVisualState(rs: RippleRunState): 'running' | 'queued' | 'idle' {
