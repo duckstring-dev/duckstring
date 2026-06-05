@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { usePlaygroundStore, getRippleVisualState, formatAge, STATE_COLORS } from '@/lib/store';
+import { usePlaygroundStore, getRippleVisualState, formatAge, pushTargetF, STATE_COLORS } from '@/lib/store';
 import { DemandIndicators } from './DemandIndicators';
 
 export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
@@ -49,7 +49,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
         {ripple.name}
       </span>
       <span style={{ fontSize: 11, color: '#71717a', display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
-        <DemandIndicators hasPull={rs.hasPull} targetF={rs.targetF} now={now} />
+        <DemandIndicators hasPull={rs.hasPull} targetF={pushTargetF(rs.targets)} now={now} />
         <span style={{ color: '#a1a1aa' }}>↑{formatAge(startedF, now)} ({rs.runsStarted})</span>
         <span>✓{formatAge(rs.endF, now)} ({rs.runsCompleted})</span>
       </span>

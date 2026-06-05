@@ -1008,7 +1008,7 @@ Pond:
         D               # window delay (see Staleness); 0 unless fed by a window
         hasReceivedPull # a Sink (or trigger) has asked for resupply
         hasPull         # a Pond Run is wanted in pull
-        targetF         # push target freshness, or null
+        targets         # set of unsatisfied push target freshnesses (empty if none)
 
     # sourceF is recomputed from the Sources (or window, for an Inlet):
     derive sourceF:
@@ -1039,13 +1039,15 @@ Pond:
         for each Source where Source.startF <= startF:    # any Source that has not started work ahead of this Pond
             Source.hasReceivedPull = true           # cold-start propagation between Ponds
 
-    on targetF changes (set by a Pulse, Tide, or Sink):
-        for each Source where Source.targetF is null or < targetF:
-            Source.targetF = targetF                # push propagates eagerly upstream
+    on receiving a push target T (from a Pulse, Tide, or Sink):
+        if T <= endF or T in targets: return        # already satisfied, or already requested
+        add T to targets                            # keep every outstanding request, not just the latest
+        for each required Source:
+            send push target T to Source            # push propagates eagerly upstream
 
     start a Pond Run when:
-        (targetF exists and sourceF > startF)       # has push and fresher input
-        or (hasPull and sourceF > startF)           # has pull and fresher input
+        (targets nonempty and sourceF >= min(targets))   # inputs can satisfy the oldest request, OR
+        or (hasPull and sourceF > startF)                # pull with fresher input
 
     on starting a Pond Run:
         if hasPull and not Inlet (no Sources): 
@@ -1053,16 +1055,16 @@ Pond:
                 Source.hasReceivedPull = true       # propagate pull
         startF  = sourceF                           # won't restart in pull until sourceF advances
         hasPull = false                             # won't restart in pull until renewed
-        if targetF <= startF: targetF = null        # push satisfied
+        remove every T <= startF from targets       # this Run takes the freshest input, satisfying them all
         D = max(Parent.D over Parents where Parent.endF == startF)   # carry worst-case delay
-        Ripple.targetF = startF for all Ripples     # every Ripple must reach this freshness;
-                                                    # this also initiates the run
+        for each Ripple: send push target startF to Ripple   # every Ripple must reach startF; initiates the run
 
 Ripple:
     state:
         startF, endF        # freshness of most recently started / completed Ripple Run
         sourceF             # freshness available from this Ripple's parents (derived)
-        hasPull, targetF
+        hasPull
+        targets
 
     derive sourceF:
         if root (no parent Ripples): sourceF = Pond.startF
@@ -1076,16 +1078,20 @@ Ripple:
             for each parent where Parent.startF <= startF: # any parent that has not started work ahead of this Ripple
                 Parent.hasPull = true               # cold-start propagation between Ripples
 
+    on receiving a push target T (from the Pond's run-start stamp):
+        if T <= endF or T in targets: return        # the Pond stamps every Ripple, so no further propagation
+        add T to targets
+
     start a Ripple Run when:
-        (targetF set and sourceF > startF)          # has push and fresher input
-        or (hasPull and sourceF > startF)           # has pull and fresher input
+        (targets nonempty and sourceF >= min(targets))   # inputs can satisfy the oldest request, OR
+        or (hasPull and sourceF > startF)                # pull with fresher input
 
     on starting a Ripple Run:
         startF = sourceF
         if hasPull:
             if not root: Parent.hasPull = true for all parents   # pull propagation upstream
             hasPull = false                         # cleared; must be renewed before next run
-        if targetF <= sourceF: targetF = null
+        remove every T <= startF from targets       # this Run takes the freshest input, satisfying them all
 
     on completing a Ripple Run:
         endF = startF                               # notify children
@@ -1094,9 +1100,9 @@ Ripple:
 
 Under *pull*, a Pond will continuously initiate new Pond Runs any time its `sourceF` advances, or until the pull demand is cleared without renewal from a Sink. This could mean multiple Pond Runs are in operation simultaneously, which is intentional.
 
-Every Ripple in a Pond Run will *eventually* reach the `Pond.startF` freshness, as `Ripple.targetF` is set to this at run start. The Pond Runs may therefore be identified (and logged) by their `Pond.startF` freshness.
+Under *push*, a Pond Run will start any time there is change in its Source if that change satisfies a target, until all targets are satisfied. Consequently, there can be many concurrent push runs in the pipeline simultaneously.
 
-Under *push*, a Pond Run will start any time there is change in its Source (like *pull*), until the *push* target freshness is satisfied. This is potentially wasteful (e.g. a fork operating in Wave or on a separate timeline). To correct this would require each Pond to track the *set* of unsatisfied *push* targets, which is intended in a future update.
+Every Ripple in a Pond Run will *eventually* reach the `Pond.startF` freshness, as `Ripple.targetF` is set to this at run start. The Pond Runs may therefore be identified (and logged) by their `Pond.startF` freshness.
 
 ### Triggers
 

@@ -17,7 +17,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { usePlaygroundStore, getDemandEdgeColor, formatAge } from '@/lib/store';
+import { usePlaygroundStore, getDemandEdgeColor, formatAge, pushTargetF } from '@/lib/store';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
@@ -30,7 +30,7 @@ import { SimControls } from './SimControls';
 function RippleEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const sinkRippleId = (data as { sinkRippleId: string }).sinkRippleId;
   const sinkPull = usePlaygroundStore((s) => s.rippleStates[sinkRippleId]?.hasPull ?? false);
-  const sinkPush = usePlaygroundStore((s) => s.rippleStates[sinkRippleId]?.targetF ?? null);
+  const sinkPush = usePlaygroundStore((s) => pushTargetF(s.rippleStates[sinkRippleId]?.targets ?? []));
 
   const color = getDemandEdgeColor(sinkPull, sinkPush);
 
@@ -45,7 +45,7 @@ function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
     const ps = s.pondStates[sinkPondId];
     return (ps?.hasPull ?? false) || (ps?.hasReceivedPull ?? false);
   });
-  const sinkPush = usePlaygroundStore((s) => s.pondStates[sinkPondId]?.targetF ?? null);
+  const sinkPush = usePlaygroundStore((s) => pushTargetF(s.pondStates[sinkPondId]?.targets ?? []));
 
   const color = getDemandEdgeColor(sinkPull, sinkPush);
 
@@ -114,7 +114,7 @@ export function DagCanvas() {
       if (!rs) continue;
       const startedF = rs.isRunning ? rs.startF : rs.endF;
       r[rp.id] = statsLineWidth({
-        pushAge: rs.targetF != null ? formatAge(rs.targetF, now) : null,
+        pushAge: pushTargetF(rs.targets) != null ? formatAge(pushTargetF(rs.targets)!, now) : null,
         startAge: formatAge(startedF, now),
         startCount: rs.runsStarted,
         endAge: formatAge(rs.endF, now),
@@ -127,7 +127,7 @@ export function DagCanvas() {
       const ps = pondStates[pd.id];
       if (!ps) continue;
       p[pd.id] = statsLineWidth({
-        pushAge: ps.targetF != null ? formatAge(ps.targetF, now) : null,
+        pushAge: pushTargetF(ps.targets) != null ? formatAge(pushTargetF(ps.targets)!, now) : null,
         startAge: formatAge(ps.startF, now),
         startCount: ps.runsStarted,
         endAge: formatAge(ps.endF, now),

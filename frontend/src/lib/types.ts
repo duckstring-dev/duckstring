@@ -37,7 +37,7 @@ export interface RippleRunState {
   startF: number; // freshness of the most recently started run (0 = never)
   endF: number; // freshness of the most recently completed run (0 = never)
   hasPull: boolean; // pull token
-  targetF: number | null; // push target freshness, or null
+  targets: number[]; // set of unsatisfied push target freshnesses (empty = none)
   // Run bookkeeping (the simulation of an actual run taking time):
   isRunning: boolean;
   runStartedAt: number | null;
@@ -57,7 +57,7 @@ export interface PondRunState {
   D: number; // window delay carried by the current freshness (0 unless fed by a window)
   hasReceivedPull: boolean; // inbox: a Sink/trigger has asked for resupply
   hasPull: boolean; // a Pond Run is wanted in pull
-  targetF: number | null; // push target freshness, or null
+  targets: number[]; // set of unsatisfied push target freshnesses (empty = none)
   // Trace data for the sidebar charts:
   runsStarted: number;
   runsCompleted: number;

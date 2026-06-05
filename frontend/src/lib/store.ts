@@ -50,7 +50,7 @@ function initialPondState(): PondRunState {
     D: 0,
     hasReceivedPull: false,
     hasPull: false,
-    targetF: null,
+    targets: [],
     runsStarted: 0,
     runsCompleted: 0,
     genStartTimes: {},
@@ -64,7 +64,7 @@ function initialRippleState(): RippleRunState {
     startF: 0,
     endF: 0,
     hasPull: false,
-    targetF: null,
+    targets: [],
     isRunning: false,
     runStartedAt: null,
     currentRunDurationMs: null,
@@ -540,26 +540,31 @@ export function formatAge(F: number, now: number): string {
   return '>1y';
 }
 
+// The freshest pending push target (for the ≤ box / edge colour), or null if none are outstanding.
+export function pushTargetF(targets: number[]): number | null {
+  return targets.length ? Math.max(...targets) : null;
+}
+
 export function getRippleVisualState(rs: RippleRunState): 'running' | 'queued' | 'idle' {
   if (rs.isRunning) return 'running';
-  if (rs.hasPull || rs.targetF !== null) return 'queued';
+  if (rs.hasPull || rs.targets.length > 0) return 'queued';
   return 'idle';
 }
 
 export function getPondVisualState(ps: PondRunState): 'running' | 'queued' | 'idle' {
   if (ps.runsStarted > ps.runsCompleted) return 'running';
-  if (ps.hasPull || ps.hasReceivedPull || ps.targetF !== null) return 'queued';
+  if (ps.hasPull || ps.hasReceivedPull || ps.targets.length > 0) return 'queued';
   return 'idle';
 }
 
 export function pondIsIdle(ps: PondRunState | undefined): boolean {
   if (!ps) return true;
-  return ps.runsStarted <= ps.runsCompleted && !ps.hasPull && !ps.hasReceivedPull && ps.targetF === null;
+  return ps.runsStarted <= ps.runsCompleted && !ps.hasPull && !ps.hasReceivedPull && ps.targets.length === 0;
 }
 
 export function rippleIsIdle(rs: RippleRunState | undefined): boolean {
   if (!rs) return true;
-  return !rs.isRunning && !rs.hasPull && rs.targetF === null;
+  return !rs.isRunning && !rs.hasPull && rs.targets.length === 0;
 }
 
 // Edge colour reflects what the SINK is currently demanding of this source:

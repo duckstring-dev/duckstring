@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { usePlaygroundStore, getPondVisualState, formatAge, STATE_COLORS } from '@/lib/store';
+import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, STATE_COLORS } from '@/lib/store';
 import { DemandIndicators } from './DemandIndicators';
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
@@ -67,7 +67,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           {pond.name}
         </span>
         <span style={{ fontSize: 11, color: '#71717a', display: 'flex', alignItems: 'center', gap: 6 }}>
-          <DemandIndicators hasPull={ps.hasPull || ps.hasReceivedPull} targetF={ps.targetF} now={now} />
+          <DemandIndicators hasPull={ps.hasPull || ps.hasReceivedPull} targetF={pushTargetF(ps.targets)} now={now} />
           <span style={{ color: '#a1a1aa' }}>↑{formatAge(ps.startF, now)} ({ps.runsStarted})</span>
           <span>✓{formatAge(ps.endF, now)} ({ps.runsCompleted})</span>
         </span>
