@@ -498,17 +498,17 @@ When continuously demanded, **pull** orchestration maintains low staleness effec
 
 Additionally, if data is only required to update at a period far longer than the bottleneck process (e.g. weekly or daily, as is common), **pull** would either be consistently behind or would require executing upstream nodes more than would be expected to be consumed.
 
-Under *push*, an initiated run from upstream is followed by runs from each of its children until the end of the DAG is reached. However, unlike most orchestration approaches, the request is made from the *leaves* of the DAG rather than pushed down from the roots. This maintains most of the advantages of the pull-based approach (paths with no demand are not executed) without the attempt to minimise staleness by executing the path as often as possible.
+Under *push*, an initiated run from upstream is followed by runs from each of its children until the end of the DAG is reached. However, unlike most orchestration approaches, the request is made from the *leaves* of the DAG rather than pushed down from the roots. This maintains most of the advantages of the pull-based approach (paths with no demand are not executed) without the attempt to minimise staleness by executing the path as often as possible. Unlike *pull*, *push* demand can stack - work should begin on previous requests if their freshness is satisfied, otherwise it's possible that a node would never run if its demand updates faster than it can be supplied.
 
 Under *push*, each node follows the simple rules:
 
 - If I get demand for a given freshness from downstream:
-    - Set this demand against each parent, unless they already have a request for something fresher
+    - Set this demand against each parent, on top of any other demand they have
 - Am I waiting on my parents to meet my required freshness?
     - Change gating
     - Emulates a consumer being unable to proceed if there is no stock for this *priority order* from a supplier
 - If not (and I'm not already processing):
-    - Clear my own demand
+    - Clear any demand that has been satisfied
     - Start processing
 - When my processing completes:
     - Set my freshness to that of my parents
@@ -1102,7 +1102,7 @@ Under *pull*, a Pond will continuously initiate new Pond Runs any time its `sour
 
 Under *push*, a Pond Run will start any time there is change in its Source if that change satisfies a target, until all targets are satisfied. Consequently, there can be many concurrent push runs in the pipeline simultaneously.
 
-Every Ripple in a Pond Run will *eventually* reach the `Pond.startF` freshness, as `Ripple.targetF` is set to this at run start. The Pond Runs may therefore be identified (and logged) by their `Pond.startF` freshness.
+Every Ripple in a Pond Run will *eventually* reach the `Pond.startF` freshness, as this is added to the Ripple's target set at run start. The Pond Runs may therefore be identified (and logged) by their `Pond.startF` freshness.
 
 ### Triggers
 
@@ -1110,8 +1110,8 @@ Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundar
 
 - **Tap**: Sets `Source.hasReceivedPull = true`, then deletes itself
 - **Wave**: Sets `Source.hasReceivedPull = true` every time the pseudo-node runs
-- **Pulse**: Sets `Source.targetF = now`, then deletes itself
-- **Tide**: Sets `Source.targetF = now` whenever `now + Source.D - (Source.targetF ?? Source.startF) >= limit`, using the staleness of either the most recently started run or the most recent *push* target
+- **Pulse**: Adds `now` to the Source's targets, then deletes itself
+- **Tide**: Adds `now` to the Source's targets whenever `now + Source.D - (max(Source.targets) ?? Source.startF) >= limit`, using the staleness of either the most recently started run or the most recent *push* target
 
 The trigger is, in effect, just another Sink.
 
@@ -1165,8 +1165,8 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
 
 3) **`p1` Run #1 (g1)** 
     1) `p1` is an Inlet with no Windows, so `p1.sourceF = now`
-    2) It has pull demand, and `p1.sourceF > p1.F` (where `p1.F` starts at `g0`), so it starts a **Pond Run**: `startF` → g1
-    3) On each Ripple `targetF = g1` is set, and the roots `p1.r1`, `p1.r2` start, each clearing their own pull token
+    2) It has pull demand, and `p1.sourceF > p1.F` (where `p1.F` starts at `g0`), so it starts a **Pond Run**: `startF` → `g1`
+    3) On each Ripple `g1` is added to the Ripple's targets, and the roots `p1.r1`, `p1.r2` start, each clearing their own pull token
     4) As it is waiting on its parents, `p1.r3` keeps its token and stays queued, along with `p2`
     5) The result is `p1` in a running state (`p1.startF > p1.endF`), its first layer of Ripples running while downstream waits:
 
@@ -1192,8 +1192,8 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
     1) `p1.r1`, `p1.r2` finish g1, so `p1.r3` starts
     2) `p1.r3` has pull, so it sets `p1.r1.hasPull` and `p1.r2.hasPull` and then clears its own `p1.r3.hasPull`
     3) On receiving pull, as they are roots, `p1.r1` and `p1.r2` both set `p1.hasPull`
-    4) As `p1.hasPull` and `p1.sourceF (now) > p1.F`, it starts a new **Pond Run**: `startF` → g2
-    5) On each Ripple `targetF = g2` is set, and the roots `p1.r1`, `p1.r2` start, each clearing their own pull token
+    4) As `p1.hasPull` and `p1.sourceF (now) > p1.F`, it starts a new **Pond Run**: `startF` → `g2`
+    5) On each Ripple `g2` is added to the Ripple's targets, and the roots `p1.r1`, `p1.r2` start, each clearing their own pull token
     6) The result is a simultaneous start of (`p1.r1`, `p1.r2`) at `g2` and (`p1.r3`) at `g1`, with `p2` continuing to wait:
 
     ```mermaid
@@ -1216,7 +1216,7 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
 
 5) **`p1.r3` finishes g1 and `p2` starts Run #1** 
     1) `p1.r3` completes and is the last leaf Ripple in `p1` to finish `g1`, so sets `p1.endF = g1`
-    2) As `p2.hasPull` and `p2.sourceF (g1) > p2.startF (g0)`, it starts a new **Pond Run**: `startF` → g1
+    2) As `p2.hasPull` and `p2.sourceF (g1) > p2.startF (g0)`, it starts a new **Pond Run**: `startF` → `g1`
     3) `p2` sets `p1.hasReceivedPull` then clears `p2.hasPull`
     4) As `p1.startF != p1.endF` (not cold start), `p1` only sets its leaf's pull demand, `p1.r3.hasPull`, then clears `p1.hasReceivedPull`
     5) `p2.r1.targetF = g1` is set, and the root `p2.r1` starts, clearing its pull
@@ -1245,8 +1245,8 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
     2) `p1.r3` has demand and `p1.r3.sourceF (g2) > p1.r3.startF (g1)`, so it starts
     3) `p1.r3` sets `p1.r1.hasPull` and `p1.r2.hasPull`
     4) On receiving pull, as they are roots, `p1.r1` and `p1.r2` both set `p1.hasPull`
-    5) As `p1.hasPull` and `p1.sourceF (now) > p1.F`, it starts a new **Pond Run**: `startF` → g3
-    6) On each Ripple `targetF = g3` is set, and the roots `p1.r1`, `p1.r2` start, each clearing their own pull token
+    5) As `p1.hasPull` and `p1.sourceF (now) > p1.F`, it starts a new **Pond Run**: `startF` → `g3`
+    6) On each Ripple `g3` is added to the Ripple's targets, and the roots `p1.r1`, `p1.r2` start, each clearing their own pull token
     7) The result is a simultaneous start of (`p1.r1`, `p1.r2`) at `g3` and (`p1.r3`) at `g2`, with `p2` running at `g1`:
 
     ```mermaid
@@ -1303,7 +1303,7 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
         style p1 fill:#16301a,stroke:#388E3C
     ```
 
-9) **Quiescent.** Run #3 drains through `r3` and `p1` settles at g3; `p2` rests at g1:
+9) **Quiescent.** Run #3 drains through `r3` and `p1` settles at `g3`; `p2` rests at `g1`:
 
     ```mermaid
     flowchart LR
