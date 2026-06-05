@@ -101,9 +101,6 @@ function leavesOf(s: OrchestrState, pid: PondId): RippleId[] {
   for (const id of inPond) for (const p of intraParents(s, id)) childIds.add(p);
   return inPond.filter((id) => !childIds.has(id));
 }
-function rootsOf(s: OrchestrState, pid: PondId): RippleId[] {
-  return ripplesOf(s, pid).filter((id) => intraParents(s, id).length === 0);
-}
 function anyRippleBusy(s: OrchestrState, pid: PondId): boolean {
   return ripplesOf(s, pid).some((id) => s.rippleStates[id].isRunning);
 }
@@ -178,13 +175,13 @@ function pondSetHasPull(s: OrchestrState, pid: PondId, now: number): void {
   ps.hasPull = true;
   emit('pond-pull', `${pname(s, pid)} pond gained pull`);
   for (const sp of s.ponds[pid].sources) {
-    // Cold-start propagation upstream: wake a Source only when its *startF* equals ours. When the
-    // Source is idle, startF == endF, so this is the "caught up to us" case. When it is running,
-    // startF > endF >= ours, so the comparison fails — its in-flight Run will deliver fresh output
-    // and satisfy this demand, so re-arming it now (a redundant extra generation) is suppressed.
-    // This single comparison folds in the "not already producing" check (it leaked a downstream
-    // Wave's re-tap into a Pond mid-cycle → inlet over-pull).
-    if (s.pondStates[sp].startF === ps.startF) {
+    // Cold-start propagation upstream: wake any Source that has not started work ahead of us
+    // (Source.startF <= our startF). An idle Source has startF == endF, so this covers both the
+    // caught-up case (==) and a lagging Source that is behind (<). A Source already running ahead
+    // has startF > our startF, so it is skipped — its in-flight Run will deliver fresh output and
+    // satisfy this demand, so re-arming it (a redundant extra generation) is suppressed. (That
+    // skip is what stopped a downstream Wave's re-tap leaking into a Pond mid-cycle → over-pull.)
+    if (s.pondStates[sp].startF <= ps.startF) {
       markPondEdge(s, sp, pid, 'pull');
       pondReceivePull(s, sp, now);
     }
@@ -199,18 +196,14 @@ function rippleSetHasPull(s: OrchestrState, rid: RippleId, now: number): void {
   emit('ripple-pull', `${rfullname(s, rid)} gained pull`);
   const intra = intraParents(s, rid);
   if (intra.length === 0) {
-    // Root: transfer the pull to the Pond, then drop it from self. The Pond accumulates pull
-    // from every root before committing a Run (see canStartPond) — so a Run can't start off
-    // the first root's pull and miss a sibling root that registers later in the cascade.
-    pondSetHasPull(s, s.ripples[rid].pondId, now);
-    rs.hasPull = false;
+    pondSetHasPull(s, s.ripples[rid].pondId, now); // root → lets the Pond start a Run as pull
   } else {
     for (const p of intra) {
-      // Same rule between Ripples: a parent's startF equals ours only when it is idle (startF==endF)
-      // and started on the same work we did — never while it is running (startF > endF). So this
-      // both does the cold-start propagation and suppresses re-arming an already-running parent.
-      if (s.rippleStates[p].startF === rs.startF) {
-        markRippleEdge(s, p, rid, 'pull'); // cold-start propagation between Ripples
+      // Cold-start propagation between Ripples: wake any parent that has not started work ahead of
+      // us (Parent.startF <= our startF). Idle → startF == endF (caught up or behind); a parent
+      // running ahead has startF > ours and is skipped, its in-flight Run satisfying the demand.
+      if (s.rippleStates[p].startF <= rs.startF) {
+        markRippleEdge(s, p, rid, 'pull');
         rippleSetHasPull(s, p, now);
       }
     }
@@ -238,11 +231,8 @@ function canStartPond(s: OrchestrState, pid: PondId, now: number): boolean {
   const ps = s.pondStates[pid];
   const { F } = pondSourceF(s, pid, now);
   if (F == null) return false;
-  // Wait until every root has transferred its pull to the Pond (none still holding) — otherwise
-  // a Run could commit off one root's pull and leave a sibling root's demand for the next gen.
-  if (rootsOf(s, pid).some((r) => s.rippleStates[r].hasPull)) return false;
-  if (ps.targetF != null && F >= ps.targetF) return true;
-  return ps.hasPull && F > ps.startF;
+  if (ps.targetF != null && F >= ps.targetF) return true; // push satisfied
+  return ps.hasPull && F > ps.startF; // pull with fresher input
 }
 
 function startPondRun(s: OrchestrState, pid: PondId, now: number): void {
@@ -250,8 +240,16 @@ function startPondRun(s: OrchestrState, pid: PondId, now: number): void {
   const { F, D: windowD } = pondSourceF(s, pid, now);
   const sourceF = F as number;
   const startedAsPull = ps.hasPull;
-  // Did push trigger this run (target now met)? Only then do we stamp the Ripples' targetF.
   const startedAsPush = ps.targetF != null && sourceF >= ps.targetF;
+
+  // A Sink starting as pull replenishes all its Sources (Kanban draw → restock); no-op for an
+  // Inlet. Done before clearing hasPull, matching "if hasPull and not Inlet" in theory.
+  if (startedAsPull) {
+    for (const sp of s.ponds[pid].sources) {
+      markPondEdge(s, sp, pid, 'pull');
+      pondReceivePull(s, sp, now);
+    }
+  }
 
   ps.startF = sourceF;
   ps.hasPull = false;
@@ -268,29 +266,14 @@ function startPondRun(s: OrchestrState, pid: PondId, now: number): void {
     if (ds.length) ps.D = Math.max(...ds);
   }
 
-  // Stamp every Ripple's targetF ONLY on a push run (drives the whole Pond to the target).
-  // Dropped for pull runs for now (diagnostic) — pull runs are governed by pull tokens alone.
-  if (startedAsPush) {
-    for (const r of ripplesOf(s, pid)) s.rippleStates[r].targetF = ps.startF;
-  }
+  // Every Ripple in the Pond Run must reach this freshness — set on ALL Ripples on every Run (pull
+  // or push), so the whole Pond always executes to completion (push-style). This also initiates the
+  // run: roots have sourceF == startF >= targetF, so they start. (theory.md "Ripple.targetF = startF")
+  for (const r of ripplesOf(s, pid)) s.rippleStates[r].targetF = ps.startF;
 
   ps.runsStarted += 1;
   ps.genStartTimes = { ...ps.genStartTimes, [ps.runsStarted]: now };
   emit('pond-start', `${pname(s, pid)} pond run #${ps.runsStarted} started (${startedAsPush ? 'push' : 'pull'}, freshness age ${ageStr(ps.startF, now)})`);
-
-  // Roots transferred their pull to the Pond (rippleSetHasPull) and cleared self; now that the
-  // Pond has committed this generation, hand the pull back so every root executes it.
-  if (startedAsPull) {
-    for (const r of rootsOf(s, pid)) s.rippleStates[r].hasPull = true;
-  }
-
-  // A Sink starting as pull replenishes its Sources (Kanban draw → restock).
-  if (startedAsPull) {
-    for (const sp of s.ponds[pid].sources) {
-      markPondEdge(s, sp, pid, 'pull');
-      pondReceivePull(s, sp, now);
-    }
-  }
 }
 
 function canStartRipple(s: OrchestrState, rid: RippleId): boolean {

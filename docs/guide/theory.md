@@ -1036,7 +1036,7 @@ Pond:
         hasReceivedPull = false
 
     on hasPull becomes true:
-        for each Source where Source.startF <>= startF:    # any Source that has not started work ahead of this Pond
+        for each Source where Source.startF <= startF:    # any Source that has not started work ahead of this Pond
             Source.hasReceivedPull = true           # cold-start propagation between Ponds
 
     on targetF changes (set by a Pulse, Tide, or Sink):
@@ -1131,7 +1131,7 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
 
     1) A Tap on `p2` sets `p2.hasReceivedPull`
     2) As `p2` is at a cold start (`startF == endF`), the pull is taken up by `p2.hasPull` and `p2.r1.hasPull`, and `p2.hasReceivedPull` clears
-    3) As `p2.hasPull` has been set, and `p1.endF == p2.startF`, `p2` sets `p1.hasReceivedPull` (cold start propagation to Sources)
+    3) As `p2.hasPull` has been set, and `p1.startF <= p2.startF` (`p1` has not started work ahead of `p2`), `p2` sets `p1.hasReceivedPull` (cold-start propagation to Sources)
     4) With `p1` also a cold start, `p1` and all its Ripples receive `hasPull`, and `p1.hasReceivedPull` clears
     5) The result is all Ponds and Ripples having pull demand, with `p1` and `p2` in a queued state:
 
@@ -1210,7 +1210,7 @@ To see the Pond rules in motion, we trace a single **Tap** on the two-Pond examp
     1) `p1.r3` completes and is the last leaf Ripple in `p1` to finish `g1`, so sets `p1.endF = g1`
     2) As `p2.hasPull` and `p2.sourceF (g1) > p2.startF (g0)`, it starts a new **Pond Run**: `startF` → g1
     3) `p2` sets `p1.hasReceivedPull` then clears `p2.hasPull`
-    4) As `p1.startF != p1.endF` (not cold start), `p1` only sets its root's pull demand, `p1.r3.hasPull`, then clears `p1.hasReceivedPull`
+    4) As `p1.startF != p1.endF` (not cold start), `p1` only sets its leaf's pull demand, `p1.r3.hasPull`, then clears `p1.hasReceivedPull`
     5) `p2.r1.targetF = g1` is set, and the root `p2.r1` starts, clearing its pull
     6) The result is `p2` in a running state, with `p1.r3` having pull demand
 
