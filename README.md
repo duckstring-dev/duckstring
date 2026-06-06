@@ -1,19 +1,19 @@
 # Duckstring
 *There is no DAG.*
 
-Duckstring is built on a single observation: data transformations have the same dependency structure as software packages. If you version each transform and let it declare its parents — the same way `pyproject.toml` declares dependencies — the execution DAG forms itself. What you get is independent deployment, automatic version compatibility routing, and a pipeline that runs at optimal parallelism without a scheduler you have to think about.
+Duckstring treats data transformations as software packages. Upstream dependencies are declared per Pond (unit operation), defining the DAG without the need for its direct management. 
 
-The default engine is DuckDB, though this is configurable. Duckstring is an independent project and is not affiliated with, endorsed by, or maintained by the DuckDB project.
+Ponds are upgraded and deployed to Duckstring's pull-based Catchment (orchestrator) atomically - like upgrading a package - with the earlier version continuing to execute until there are no consumers dependent on it. Upstream defines constraints on what it can consume, downstream defines when it's needed, and the Catchment optimally executes the sequence of Ponds supplying it with the best currency and frequency as possible.
 
--- **Note**: As the project is in development, most of the notes below should be read as *indended functionality*, and most features are not yet implemented.
+You should not need to manage the DAG. You should not need global governance. You should know yourself and your suppliers and trust that you'll get what you need when you need it.
 
 ## Core Concepts
 
-- **Catchment**: Control environment - a FastAPI application
-- **Pond**: Versioned transformation unit with declared upstream dependencies - the main element of version control
+- **Catchment**: Control environment (FastAPI + UI + CLI)
+- **Pond**: Versioned container with declared upstream dependencies
+- **Ripple**: Unit operation within a Pond (e.g. a single transformation producing a table)
 - **Inlet**: Pond with external dependencies and no upstream Ponds
 - **Outlet**: Pond with no downstream Ponds (e.g. outputs final data products)
-- **Ripple**: Unit operation within a Pond (e.g. a single transformation producing a table)
 
 ## Installation
 
@@ -25,7 +25,7 @@ pip install duckstring
 
 ### 1) Connect to a Catchment
 
-A Catchment is the execution environment, receiving Ponds and managing runs. It runs either as a local daemon or as a remote server, allowing you to start locally and seamlessly upgrade to a hosted/cloud server if you need to later.
+A Catchment is the execution environment and orchestrator, receiving Ponds and managing runs. It runs either as a local daemon or as a remote server, allowing you to start locally and seamlessly upgrade to a hosted/cloud server if you need to later.
 
 #### Start a Catchment Server
 
@@ -50,6 +50,16 @@ This will prompt for any necessary auth, and will add the Catchment under the sp
 #### Connect to *duckstring.com*
 
 There are future plans for a dedicated Catchment service at https://duckstring.com. If you're interested, please [contact me](mailto:dev@duckstring.com).
+
+#### Experiment in the Playground
+
+Shipped with Duckstring is a Playground web app to demonstrate how the Catchment orchestrator behaves. Start it with:
+
+```bash
+duckstring catchment playground
+```
+
+You may also visit https://playground.duckstring.com
 
 ### 2) Define Pond(s)
 

@@ -1,0 +1,79 @@
+"""Duckstring orchestration engine (freshness/push-token model; see ``docs/guide/theory.md``).
+
+Two deployable engines share a core:
+
+- :mod:`.catchment` — the full state machine (Ponds + Ripples, pull + push) the Catchment runs. Its
+  public functions are re-exported here, so ``duckstring.engine`` is the composed engine used by the
+  validated simulation in ``tests/test_engine.py`` and by the Catchment runtime.
+- :mod:`.worker` — the push-only engine each Duck runs to execute a Pond Run to completion.
+- :mod:`.pond` — the per-Pond run ledger (``ponds/{base_pond}/pond.db``).
+
+Pure: no FastAPI/DB/HTTP imports here.
+"""
+
+from __future__ import annotations
+
+from . import pond, worker
+from .catchment import (
+    EngineState,
+    complete_ripple,
+    drain_begin_runs,
+    next_wake,
+    pond_add_target,
+    pond_receive_pull,
+    pond_set_has_pull,
+    pond_source_f,
+    pulse_pond,
+    ripple_add_target,
+    ripple_set_has_pull,
+    ripple_source_f,
+    sentinel,
+    stop_pond,
+    tap_pond,
+    tick,
+)
+from .core import (
+    NEVER,
+    ZERO,
+    BeginRun,
+    Pond,
+    PondState,
+    Ripple,
+    RippleState,
+    Trigger,
+    Window,
+    max_target,
+    min_target,
+)
+
+__all__ = [
+    "NEVER",
+    "ZERO",
+    "BeginRun",
+    "Pond",
+    "PondState",
+    "Ripple",
+    "RippleState",
+    "Trigger",
+    "Window",
+    "EngineState",
+    "min_target",
+    "max_target",
+    "pond_source_f",
+    "ripple_source_f",
+    "pond_receive_pull",
+    "pond_set_has_pull",
+    "ripple_set_has_pull",
+    "pond_add_target",
+    "ripple_add_target",
+    "complete_ripple",
+    "tap_pond",
+    "pulse_pond",
+    "stop_pond",
+    "sentinel",
+    "tick",
+    "next_wake",
+    "drain_begin_runs",
+    "worker",
+    "pond",
+]

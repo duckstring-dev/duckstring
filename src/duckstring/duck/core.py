@@ -1,0 +1,87 @@
+"""DuckCore — the transport-free heart of a Duck.
+
+Wires the push-only :class:`~duckstring.engine.worker.WorkerState` to the run ledger and an outgoing
+event buffer. It is driven by two inputs — ``begin_run(F)`` from the Catchment and ``ripple_completed``
+from the executor — and produces two outputs — the list of Ripple **names to launch** and buffered
+**events** to report. Threads, the executor, and HTTP live in :mod:`.executor` / :mod:`.client` /
+``__main__`` so this stays deterministically testable.
+
+Resilience: every state change is persisted to the ledger before it is reported, and events are
+buffered until the Catchment acknowledges them — so a Pond Run completes (and is recoverable) with no
+Catchment involvement.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+
+from ..engine import pond as ledger
+from ..engine import worker
+
+
+@dataclass
+class Event:
+    """A buffered report to the Catchment. ``kind`` is ``"ripple"`` or ``"run_completed"``; idempotent
+    on ``(kind, ripple, f)`` so replay after a reconnect is safe."""
+
+    kind: str
+    f: datetime
+    ripple: str | None = None
+    status: str = "success"
+
+    def payload(self) -> dict:
+        d = {"kind": self.kind, "f": self.f.isoformat(), "status": self.status}
+        if self.ripple is not None:
+            d["ripple"] = self.ripple
+        return d
+
+
+class DuckCore:
+    def __init__(self, pond_name: str, con, parents: dict[str, list[str]], optional=None):
+        self.pond_name = pond_name
+        self.con = con
+        self.state = ledger.load_state(con, parents, optional)
+        self.events: list[Event] = []  # buffered, awaiting delivery to the Catchment
+
+    def begin_run(self, f: datetime, now: datetime) -> list[str]:
+        """Start a Pond Run at freshness ``f`` (idempotent — completed Ripples are not re-stamped).
+        Returns the Ripple names the caller must launch."""
+        self.state = worker.begin_run(self.state, f)
+        ledger.record_pond_run_start(self.con, f, now)
+        return self._advance(now)
+
+    def ripple_completed(self, name: str, now: datetime, export=None) -> list[str]:
+        """Record a finished Ripple, buffer a report, and (if a Pond Run just completed) export +
+        buffer the run completion. Returns any newly launchable Ripple names."""
+        end_f = self.state.states[name].start_f
+        ledger.record_ripple_complete(self.con, name, end_f)
+        self.state, rc = worker.complete_ripple(self.state, name, now)
+        self.events.append(Event(kind="ripple", ripple=name, f=end_f))
+        if rc is not None:
+            if export is not None:
+                export()  # materialise outputs (parquet) before announcing completion
+            ledger.record_pond_run_finish(self.con, rc.f, now)
+            self.events.append(Event(kind="run_completed", f=rc.f))
+        return self._advance(now)
+
+    def _advance(self, now: datetime) -> list[str]:
+        self.state, launched = worker.sentinel(now, self.state)
+        for name in launched:
+            ledger.record_ripple_start(self.con, name, self.state.states[name].start_f)
+        return launched
+
+    def idle(self) -> bool:
+        """True when no Ripple is running and no target is outstanding — the Pond has quiesced and the
+        Duck may shut down (once its event buffer has drained)."""
+        return all(not s.is_running and not s.targets for s in self.state.states.values())
+
+    def flush(self, send) -> None:
+        """Try to deliver buffered events in order via ``send(payload) -> bool``, **stopping at the
+        first failure** so causal order is preserved (ripples before their run completion). A failure
+        usually means the Catchment is unreachable, so the rest would fail too. Safe to call
+        repeatedly; events are idempotent on the Catchment side."""
+        while self.events:
+            if not send(self.events[0].payload()):
+                return
+            self.events.pop(0)
