@@ -51,17 +51,29 @@ def _connected_components(sorted_nodes: list[str], edges: list[tuple[str, str]])
     return components
 
 
-def _rel_time(dt_str: str) -> str:
+def _fmt_ts(iso: Optional[str]) -> str:
+    """Render a freshness as a compact relative age (e.g. ``3s``, ``5m``, ``2h``, ``4d``), ``now`` at
+    the current instant, or a ``-`` prefix when the freshness is in the future ("fresh until", from
+    windows). ``—`` when absent."""
+    if not iso:
+        return "[dim]—[/dim]"
     from datetime import datetime, timezone
-    dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    diff = (datetime.now(timezone.utc) - dt).total_seconds()
-    if diff < 60:
-        return f"{int(diff)}s ago"
-    if diff < 3600:
-        return f"{int(diff / 60)}m ago"
-    if diff < 86400:
-        return f"{int(diff / 3600)}h ago"
-    return f"{int(diff / 86400)}d ago"
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return iso
+    secs = (datetime.now(timezone.utc) - dt).total_seconds()
+    sign = "-" if secs < 0 else ""
+    s = abs(secs)
+    if s < 1:
+        return "now"
+    if s < 60:
+        return f"{sign}{int(s)}s"
+    if s < 3600:
+        return f"{sign}{int(s // 60)}m"
+    if s < 86400:
+        return f"{sign}{int(s // 3600)}h"
+    return f"{sign}{int(s // 86400)}d"
 
 
 def _make_table(component_ponds: list[dict]) -> object:
@@ -70,8 +82,6 @@ def _make_table(component_ponds: list[dict]) -> object:
     _status_fmt = {
         "running": "[bold green]running[/bold green]",
         "queued":  "[yellow]queued[/yellow]",
-        "failed":  "[bold red]failed[/bold red]",
-        "stopped": "[dim]stopped[/dim]",
         "idle":    "[dim]idle[/dim]",
     }
 
@@ -81,28 +91,18 @@ def _make_table(component_ponds: list[dict]) -> object:
     table.add_column("Version")
     table.add_column("Status")
     table.add_column("Gen", justify="right")
-    table.add_column("Last ver", style="dim")
-    table.add_column("Last run")
+    table.add_column("Pull", justify="center")
+    table.add_column("TargetF")
+    table.add_column("StartF")
+    table.add_column("EndF")
 
     for pond in component_ponds:
         status_str = _status_fmt.get(pond.get("status", ""), pond.get("status", "?"))
-
         gen = pond.get("gen", 0)
         gen_str = str(gen) if gen else "[dim]—[/dim]"
-
-        last_run_at = pond.get("last_run_at")
-        if last_run_at:
-            rel = _rel_time(last_run_at)
-            dur = pond.get("last_run_duration")
-            dur_str = f" ({dur}s)" if dur is not None else ""
-            if pond.get("last_run_status") == "success":
-                last_run_str = f"[green]{rel}{dur_str} ✓[/green]"
-            else:
-                last_run_str = f"[red]{rel}{dur_str} ✗[/red]"
-        else:
-            last_run_str = "[dim]—[/dim]"
-
-        last_run_version = pond.get("last_run_version") or "—"
+        pull_str = "[orange3]●[/orange3]" if pond.get("has_pull") else ""
+        target = pond.get("target_f")
+        target_str = f"[orange3]{_fmt_ts(target)}[/orange3]" if target else "[dim]—[/dim]"
 
         table.add_row(
             pond.get("name", "?"),
@@ -110,8 +110,10 @@ def _make_table(component_ponds: list[dict]) -> object:
             pond.get("version", "?"),
             status_str,
             gen_str,
-            last_run_version,
-            last_run_str,
+            pull_str,
+            target_str,
+            _fmt_ts(pond.get("start_f")),
+            _fmt_ts(pond.get("end_f")),
         )
 
     return table
@@ -208,6 +210,7 @@ def _run_live(
     major: Optional[int],
     version_str: Optional[str],
     watch: bool,
+    until_idle_pond: Optional[str] = None,
 ) -> None:
     from datetime import datetime, timezone
 
@@ -220,14 +223,17 @@ def _run_live(
             ponds, edges = _fetch_status(url, all_versions)
             if pond_name:
                 ponds, edges = _filter_for_pond(ponds, edges, pond_name, major, version_str)
+            done = False
             if not ponds:
                 body = Text("No active Ponds.", style="dim")
-                done = False
             else:
                 body = _build_renderable(ponds, edges)
-                done = not watch and all(p.get("status") == "stopped" for p in ponds)
+                if not watch and until_idle_pond:
+                    # One-shot trigger (Tap/Pulse): close once the target Pond settles back to idle.
+                    tgt = next((p for p in ponds if p["name"] == until_idle_pond), None)
+                    done = tgt is not None and tgt.get("status") == "idle"
             ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-            footer = " · stopped" if done else " · Ctrl+C to stop"
+            footer = " · settled" if done else " · Ctrl+C to stop"
             header = Text(f"Updated {ts}{footer}", style="dim")
             return Group(header, body), done
         except Exception as exc:

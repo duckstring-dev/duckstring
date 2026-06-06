@@ -73,17 +73,17 @@ class Driver:
 
             name_by_pnid = {r[0]: r[1] for r in db.execute("SELECT id, name FROM pond_name")}
             rows = db.execute("""
-                SELECT pn.name, p.id, p.pond_version_id, pv.version, pv.source_path
+                SELECT pn.name, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind
                 FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id
                 JOIN pond_version pv ON pv.id = p.pond_version_id
             """).fetchall()
             deployed = {name for name, *_ in rows}
             pondid_to_name = {pid: nm for nm, pid, *_ in rows}
-            for name, pond_id, pv_id, version, source_path in rows:
+            for name, pond_id, pv_id, version, source_path, kind in rows:
                 self.meta[name] = {"version_id": pv_id, "version": version, "source_path": source_path,
-                                   "pond_id": pond_id, "ripple_ids": {}}
+                                   "pond_id": pond_id, "kind": kind, "ripple_ids": {}}
 
-            for name, pond_id, pv_id, _version, _source_path in rows:
+            for name, pond_id, pv_id, _version, _source_path, _kind in rows:
                 sources, optional = [], set()
                 for snid, required in db.execute(
                     "SELECT source_pond_name_id, required FROM pond_to_pond WHERE pond_id = ?", (pond_id,)
@@ -315,8 +315,8 @@ class Driver:
 
     def status(self) -> dict:
         with self.lock:
-            now = _now()
-            from ..engine import NEVER
+            from ..engine import NEVER, min_target
+            ts = lambda dt: _iso(dt) if dt is not None and dt != NEVER else None  # noqa: E731
             ponds = []
             for name in self.state.ponds:
                 ps = self.state.pond_states[name]
@@ -329,19 +329,18 @@ class Driver:
                     st = "running"
                 elif ps.has_pull or ps.targets:
                     st = "queued"
-                elif ps.end_f != NEVER:
-                    st = "idle"
                 else:
-                    st = "fresh"
-                staleness = None
-                if ps.end_f != NEVER:
-                    staleness = round((now + ps.d - ps.end_f).total_seconds(), 1)
+                    st = "idle"
                 ponds.append({
                     "name": name,
+                    "kind": self.meta[name]["kind"],
                     "version": self.meta[name]["version"],
                     "status": st,
-                    "freshness": _iso(ps.end_f) if ps.end_f != NEVER else None,
-                    "staleness": staleness,
+                    "gen": ps.runs_started,
+                    "has_pull": ps.has_pull,
+                    "target_f": ts(min_target(ps.targets)),
+                    "start_f": ts(ps.start_f),
+                    "end_f": ts(ps.end_f),
                 })
             edges = [[s, name] for name, pond in self.state.ponds.items() for s in pond.sources]
             return {"ponds": ponds, "edges": edges}

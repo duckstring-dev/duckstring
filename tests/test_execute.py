@@ -30,21 +30,28 @@ def _deploy_outlet(url: str) -> None:
 
 def test_pulse_succeeds(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "pulse", "outlet"])
+    result = runner.invoke(app, ["trigger", "pulse", "outlet", "--silent"])
     assert result.exit_code == 0, result.output
     assert "Pulse sent" in result.output
 
 
 def test_pulse_explicit_catchment(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "pulse", "outlet", "-c", "dev"])
+    result = runner.invoke(app, ["trigger", "pulse", "outlet", "-c", "dev", "--silent"])
     assert result.exit_code == 0, result.output
 
 
 def test_pulse_with_major(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "pulse", "outlet", "--major", "1"])
+    result = runner.invoke(app, ["trigger", "pulse", "outlet", "--major", "1", "--silent"])
     assert result.exit_code == 0, result.output
+
+
+def test_tap_succeeds(runner, live_catchment):
+    _deploy_outlet(live_catchment)
+    result = runner.invoke(app, ["trigger", "tap", "outlet", "--silent"])
+    assert result.exit_code == 0, result.output
+    assert "Tap sent" in result.output
 
 
 def test_pulse_unknown_catchment_exits(runner):
@@ -62,7 +69,7 @@ def test_pulse_no_default_exits(runner):
 
 def test_wave_succeeds(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "wave", "outlet"])
+    result = runner.invoke(app, ["trigger", "wave", "outlet", "--silent"])
     assert result.exit_code == 0, result.output
     assert "Wave started" in result.output
 
@@ -77,7 +84,7 @@ def test_wave_unknown_catchment_exits(runner):
 
 def test_tide_succeeds(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "tide", "outlet", "--bound", "3600"])
+    result = runner.invoke(app, ["trigger", "tide", "outlet", "--bound", "3600", "--silent"])
     assert result.exit_code == 0, result.output
     assert "Tide started" in result.output
 

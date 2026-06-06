@@ -176,32 +176,96 @@ This can also be specified using the Catchment UI.
 
 Ponds are executed by sending a demand signal from an Outlet. This propagates backwards through the DAG until it reaches each upstream Inlet, causing them to execute, with children beginning upon completion of all of their parents.
 
+Demand comes in two types:
 
+- **push**: Executes in sequence from start to end, bringing all Ponds upstream of the target to a given freshness
+- **pull**: Executes whenever Sources update, passing demand upstream
+
+If running irregularly, **push** is simple and preferred.
+If running frequently (~speed of slowest Ripple), **pull** is preferred, as it naturally throttles the entire sequence to the rate of the bottleneck Ripple.
+
+These are triggered either once or continuously (**push** on a schedule, **pull** back-to-back):
+
+| | Once | Continuously |
+|---|---|---|
+| **Push** | Pulse | Tide |
+| **Pull** | Tap | Wave |
 
 These examples will use the example Pond `reports`, version `1.0.0`, as the execution reference. All examples may also be alternatively executed using the Catchment UI.
 
+Each of these triggers starts a status monitor that polls the Catchment, hanging up on complete for Pulse and Tap and remaining open until closed (Ctrl+C) for Tide and Wave. 
+
 #### Pulse
 
-To initiate a single run:
-
 ```bash
-duckstring trigger pulse outlet --watch
+duckstring trigger pulse reports
 ```
 
-The `pulse` mode emits a Demand signal from `outlet`, and when it begins execution, sends a Stop signal. This causes it to execute exactly once.
+This emits a **push** on `reports`, running each Pond in its lineage once.
 
-This will automatically run against the maximum version available for that Pond. To use a specific version:
+#### Tide
 
 ```bash
-duckstring pulse outlet --version 1
+duckstring trigger tide reports 4
 ```
+
+This executes a Pulse on `reports` any time its staleness (or time since last Pulse) exceeds 4 seconds, causing it to update every 4 seconds. The pipeline takes 7 seconds to execute, so multiple Pulses will be active simultaneously.
+
+You can set the unit for the staleness limit with `--unit {seconds|minutes|hours|days|months|years}`.
+
+Cancel the Tide with:
+
+```bash
+duckstring trigger stop reports
+```
+
+#### Tap
+
+```bash
+duckstring trigger tap reports
+```
+
+This emits a **pull** on `reports`, which propagates upstream on idle. Whenever a Pond starts, it sends the **pull** to its Sources, often causing them to start their next generation at the same time. This prepares each Pond for a subsequent Tap to be supplied immediately.
+
+It can be useful to trigger a Tap whenever an application queries an Outlet, so that it updates at a frequency matching its consumption.
 
 #### Wave
 
-To continuously run:
+```bash
+duckstring trigger wave reports
+```
+
+This executes a Tap on `reports` any time it starts, causing it to update as frequently as the longest-running Ripple (bottleneck) upstream. The pipeline takes 7 seconds to execute, and the bottleneck is 3s, so multiple Taps will be active simultaneously.
+
+Use Wave whenever data should be supplied as fresh as possible. No Pond (or Ripple) will execute more frequently than the bottleneck process can consume it.
+
+Cancel the Wave with:
 
 ```bash
-duckstring wave dev outlet
+duckstring trigger stop reports
+```
+
+#### Windows
+
+Windows set an allowed period in which an Inlet can start, with data considered 'fresh' until the end of that period. They are especially useful in cases where a foreign data source that the Inlet consumes from is known to update only at some frequency (e.g. daily).
+
+It is particularly useful to couple Windows with Wave. A one-day Window with a Wave consumer downstream will run the sequence of Ponds between them *once* daily, matching a Tide with a one-day staleness limit. Unlike Tide, however, the time of the Window can be set for the Inlet explicitly, so that consumption only occurs when the foreign source is known to have updated. Periods of "do not consume" (e.g. during writes) can also be specified this way.
+
+Set Windows against `products` with:
+
+```bash
+duckstring window products --for 4 --every 10 --offset 2 --unit seconds
+```
+
+This sets a 4s duration Window every 10s at a 2s offset. At 2:15pm, that means the next active Window would be at 2:15:02pm, lasting to 2:15:06pm.
+
+
+
+
+#### Wave
+
+```bash
+duckstring trigger wave reports
 ```
 
 The `wave` mode emits a Demand signal from `outlet`, and when it begins execution, sends *another* Demand signal. This causes it to execute continuously, as frequently as the DAG allows (i.e. at a period equal to the execution time of the slowest Ripple in any Pond).

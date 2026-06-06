@@ -111,8 +111,8 @@ def test_pulse_runs_chain_end_to_end(runtime):
 
     httpx.post(f"{url}/api/outlets/reports/pulse", timeout=5.0)
 
-    # The whole chain runs and reports reaches a freshness.
-    assert _wait(lambda: (_pond_status(url, "reports") or {}).get("freshness") is not None), \
+    # The whole chain runs and reports reaches a freshness (end_f).
+    assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None), \
         "reports never became fresh"
 
     # Every pond produced a run ledger recording a successful Pond Run.
@@ -124,10 +124,10 @@ def test_pulse_runs_chain_end_to_end(runtime):
         assert ledger.read_pond_end_f(con) is not None, f"{name} recorded no completed run"
         con.close()
 
-    # Coherent: under a Pulse the outlet is no fresher than its source.
+    # Coherent: under a Pulse the outlet and its source both reach a freshness.
     reports = _pond_status(url, "reports")
     sales = _pond_status(url, "sales")
-    assert reports["freshness"] is not None and sales["freshness"] is not None
+    assert reports["end_f"] is not None and sales["end_f"] is not None
 
 
 def test_wave_then_stop(runtime):

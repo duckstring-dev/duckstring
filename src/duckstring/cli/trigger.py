@@ -4,24 +4,44 @@ from typing import Optional
 
 import typer
 
-_SILENT_HELP = "Submit the trigger without showing status output."
-_WATCH_HELP  = "Live status after triggering; never auto-exits (implies live mode)."
+_SILENT_HELP = "Submit the trigger without opening the live status view."
+_WATCH_HELP  = "Keep the status view open even for one-shot triggers (never auto-close)."
 
 
 def _post_trigger(
     url: str, outlet: str, major: Optional[int], version: Optional[str],
-    silent: bool, watch: bool, endpoint: str, payload: dict, success_msg: str,
+    silent: bool, watch: bool, endpoint: str, payload: dict, success_msg: str, one_shot: bool,
 ) -> None:
     from . import _http
 
     _http.post(f"{url}/api/outlets/{outlet}/{endpoint}", json=payload)
 
-    if not silent:
-        import typer
+    if silent:
         typer.echo(success_msg)
-    if watch:
-        from .status import _run_live
-        _run_live(url, all_versions=False, pond_name=outlet, major=major, version_str=version, watch=watch)
+        return
+
+    # Open the live status focused on the target Pond. One-shot triggers (Tap/Pulse) close once it
+    # settles back to idle; standing triggers (Wave/Tide) stay open until Ctrl+C.
+    from .status import _run_live
+    stay = watch or not one_shot
+    _run_live(
+        url, all_versions=False, pond_name=outlet, major=major, version_str=version,
+        watch=stay, until_idle_pond=None if stay else outlet,
+    )
+
+
+def tap(
+    outlet: str = typer.Argument(..., help="Name of the Outlet Pond to resupply once."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to run (default: latest active)."),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
+    silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
+    watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
+) -> None:
+    """Pull an Outlet once (a single resupply from its sources)."""
+    from .config import resolve_catchment
+    _, cfg = resolve_catchment(catchment)
+    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "tap", {}, "Tap sent.", one_shot=True)
 
 
 def pulse(
@@ -32,13 +52,10 @@ def pulse(
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
 ) -> None:
-    """Emit a single Demand signal from an Outlet (executes the pipeline once)."""
+    """Push an Outlet once to current freshness (runs the pipeline through to it)."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    payload: dict = {}
-    if major is not None:
-        payload["version"] = major
-    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "pulse", payload, "Pulse sent.")
+    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "pulse", {}, "Pulse sent.", one_shot=True)
 
 
 def wave(
@@ -52,7 +69,7 @@ def wave(
     """Start continuous Demand from an Outlet (runs at maximum frequency)."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "wave", {}, "Wave started.")
+    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "wave", {}, "Wave started.", one_shot=False)
 
 
 def tide(
@@ -67,4 +84,7 @@ def tide(
     """Keep an Outlet no more stale than a bound (a staleness-clocked Pulse)."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "tide", {"bound_seconds": bound}, "Tide started.")
+    _post_trigger(
+        cfg["url"], outlet, major, version, silent, watch, "tide",
+        {"bound_seconds": bound}, "Tide started.", one_shot=False,
+    )
