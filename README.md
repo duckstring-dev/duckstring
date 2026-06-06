@@ -216,7 +216,7 @@ You can set the unit for the staleness limit with `--unit {seconds|minutes|hours
 Cancel the Tide with:
 
 ```bash
-duckstring trigger stop reports
+duckstring trigger remove reports
 ```
 
 #### Tap
@@ -242,7 +242,7 @@ Use Wave whenever data should be supplied as fresh as possible. No Pond (or Ripp
 Cancel the Wave with:
 
 ```bash
-duckstring trigger stop reports
+duckstring trigger remove reports
 ```
 
 #### Windows

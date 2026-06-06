@@ -70,6 +70,7 @@ class Driver:
             ripple_states: dict[str, RippleState] = {}
             triggers: dict[str, Trigger] = {}
             self.meta = {}
+            self._incomplete: list[tuple[str, datetime]] = []  # (pond, F) runs to resume
 
             name_by_pnid = {r[0]: r[1] for r in db.execute("SELECT id, name FROM pond_name")}
             rows = db.execute("""
@@ -114,6 +115,29 @@ class Driver:
                     parents = [f"{name}.{rid_to_rname[p]}" for p in parent_rids if p in rid_to_rname]
                     ripples[eid] = Ripple(id=eid, pond_id=name, name=rname, parents=parents)
                     ripple_states[eid] = RippleState()
+
+                # Restore execution state from run history: gen (run counts), per-Ripple freshness, and
+                # any Pond Run that was still 'running' when the Catchment stopped (resumed below).
+                ps = pond_states[name]
+                ps.runs_started = db.execute(
+                    "SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ?", (pv_id,)
+                ).fetchone()[0]
+                ps.runs_completed = db.execute(
+                    "SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ? AND status = 'success'", (pv_id,)
+                ).fetchone()[0]
+                for rid, rname in rip_rows:
+                    row = db.execute(
+                        "SELECT MAX(f) FROM ripple_run WHERE pond_version_id = ? AND ripple_id = ? "
+                        "AND status = 'success'", (pv_id, rid),
+                    ).fetchone()
+                    if row and row[0]:
+                        ef = datetime.fromisoformat(row[0])
+                        ripple_states[f"{name}.{rname}"].start_f = ef
+                        ripple_states[f"{name}.{rname}"].end_f = ef
+                for (incf,) in db.execute(
+                    "SELECT f FROM pond_run WHERE pond_version_id = ? AND status = 'running'", (pv_id,)
+                ):
+                    self._incomplete.append((name, datetime.fromisoformat(incf)))
 
             for pond_id, kind, bound_ms in db.execute(
                 "SELECT pond_id, kind, bound_ms FROM pond_trigger WHERE status = 'active'"
@@ -194,12 +218,27 @@ class Driver:
                 rname = payload["ripple"]
                 eid = f"{pond}.{rname}"
                 if eid in self.state.ripple_states:
+                    # Trust the Duck's run freshness: stamp start_f from the event so the completion is
+                    # recorded correctly even for a resumed run the Catchment didn't model the start of.
+                    if f:
+                        self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
                     self.state = complete_ripple(self.state, eid, now)
                     self._record_ripple_run(pond, rname, f, "success", now)
                     self._process(now)
             elif kind == "run_completed":
                 self._finish_pond_run(pond, f, now)
                 self._process(now)
+
+    def resume_incomplete(self) -> None:
+        """Re-dispatch Pond Runs that were in flight when the Catchment stopped, and service any
+        restored demand. The Duck reconciles each run against its ledger (re-running only the
+        incomplete Ripples) and replays the completions the Catchment missed. Call once at startup."""
+        with self.lock:
+            now = _now()
+            for name, f in self._incomplete:
+                self._dispatch_begin_run(name, f, now)
+            self._incomplete = []
+            self._process(now)
 
     def take_jobs(self, pond: str) -> list[dict]:
         with self.lock:

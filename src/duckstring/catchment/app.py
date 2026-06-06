@@ -41,6 +41,9 @@ async def _lifespan(app: FastAPI):
     app.state.driver = driver
     app.state.launcher = launcher
 
+    # Restore: resume any Pond Runs that were in flight when the Catchment last stopped.
+    driver.resume_incomplete()
+
     scheduler = asyncio.create_task(_scheduler(driver))
     try:
         yield

@@ -45,24 +45,15 @@ def _read_toml(path: Path) -> dict:
     return tomli.loads(path.read_text())
 
 
-@pytest.fixture
-def runtime(tmp_path_factory, monkeypatch):
-    """A real uvicorn Catchment with Duck spawning ENABLED, reachable by the spawned subprocesses."""
+def _serve(root, port):
+    """Start a Catchment uvicorn server on (root, port); return (server, thread) once healthy."""
     from duckstring.catchment.app import create_app
-
-    root = tmp_path_factory.mktemp("runtime_root")
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    url = f"http://127.0.0.1:{port}"
-
-    monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)  # enable real Ducks
-    monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
 
     config = uvicorn.Config(create_app(root), host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
+    url = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         try:
@@ -72,9 +63,26 @@ def runtime(tmp_path_factory, monkeypatch):
             time.sleep(0.05)
     else:
         raise RuntimeError("Catchment did not start")
+    return server, thread
 
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def runtime(tmp_path_factory, monkeypatch):
+    """A real uvicorn Catchment with Duck spawning ENABLED, reachable by the spawned subprocesses."""
+    root = tmp_path_factory.mktemp("runtime_root")
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}"
+    monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)  # enable real Ducks
+    monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
+
+    server, thread = _serve(root, port)
     yield url, root
-
     server.should_exit = True
     thread.join(timeout=5)
 
@@ -156,3 +164,33 @@ def test_wave_then_stop(runtime):
     time.sleep(1.5)
     # After stop, no significant new runs start (in-flight may drain by at most ~1).
     assert completed_runs() <= settled + 1
+
+
+def test_restart_restores_state_e2e(tmp_path_factory, monkeypatch):
+    root = tmp_path_factory.mktemp("restart_root")
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}"
+    monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)
+    monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
+
+    # First Catchment: deploy + pulse the chain to completion.
+    server, thread = _serve(root, port)
+    try:
+        _deploy_demo(url)
+        httpx.post(f"{url}/api/outlets/reports/pulse", timeout=5.0)
+        assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None)
+        before = _pond_status(url, "reports")
+        assert before["gen"] >= 1
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+    # Restart on the SAME root + DB: state must be restored, not fresh.
+    server2, thread2 = _serve(root, port)
+    try:
+        after = _pond_status(url, "reports")
+        assert after["gen"] == before["gen"], "gen reset on restart"
+        assert after["end_f"] is not None, "freshness lost on restart"
+    finally:
+        server2.should_exit = True
+        thread2.join(timeout=5)
