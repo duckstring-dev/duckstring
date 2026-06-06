@@ -1,59 +1,56 @@
 from __future__ import annotations
 
 import asyncio
-import signal
-from concurrent.futures import ProcessPoolExecutor
+import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .db import connect, migrate
+from .driver import Driver
+from .launcher import NoopLauncher, SubprocessLauncher
 from .routes import router
-
-
-def _worker_init():
-    # Workers inherit the terminal's process group and receive SIGINT on Ctrl+C.
-    # Ignoring it here lets workers finish cleanly while the main process handles shutdown.
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
+async def _scheduler(driver: Driver) -> None:
+    """Drive clock processes (Tide deadlines, window boundaries, Wave-on-idle) at next_wake."""
+    while True:
+        nw = driver.next_wake()
+        now = datetime.now(timezone.utc)
+        delay = (nw - now).total_seconds() if nw else 1.0
+        await asyncio.sleep(max(0.05, min(delay, 5.0)))
+        try:
+            driver.scheduler_tick()
+        except Exception as exc:  # keep the loop alive
+            print(f"[catchment] scheduler error: {exc}", flush=True)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    from .orchestrator import sentinel_loop, tide_loop
+    base_url = os.environ.get("DUCKSTRING_CATCHMENT_URL", "http://127.0.0.1:7474")
+    if os.environ.get("DUCKSTRING_DISABLE_DUCKS"):
+        launcher = NoopLauncher()
+    else:
+        launcher = SubprocessLauncher(app.state.root, base_url)
+    driver = Driver(app.state.db, app.state.root, base_url, launcher)
+    app.state.driver = driver
+    app.state.launcher = launcher
 
-    app.state.db_path = app.state.root / "duck.db"
-    app.state.sentinel_queue = asyncio.Queue()
-    app.state.tide_queue = asyncio.Queue()
-    app.state.executor = ProcessPoolExecutor(max_workers=8, initializer=_worker_init)
-
-    sentinel_task = asyncio.create_task(
-        sentinel_loop(
-            app.state.sentinel_queue,
-            app.state.db_path,
-            app.state.root,
-            app.state.executor,
-        )
-    )
-    tide_task = asyncio.create_task(
-        tide_loop(
-            app.state.tide_queue,
-            app.state.db_path,
-            app.state.sentinel_queue,
-        )
-    )
-    yield
-    sentinel_task.cancel()
-    tide_task.cancel()
-    for task in (sentinel_task, tide_task):
+    scheduler = asyncio.create_task(_scheduler(driver))
+    try:
+        yield
+    finally:
+        scheduler.cancel()
         try:
-            await task
+            await scheduler
         except asyncio.CancelledError:
             pass
-    app.state.executor.shutdown(wait=False, cancel_futures=True)
+        launcher.shutdown_all()
 
 
 def create_app(root: Path) -> FastAPI:

@@ -9,11 +9,18 @@ You should not need to manage the DAG. You should not need global governance. Yo
 
 ## Core Concepts
 
+The main elements:
+
 - **Catchment**: Control environment (FastAPI + UI + CLI)
 - **Pond**: Versioned container with declared upstream dependencies
 - **Ripple**: Unit operation within a Pond (e.g. a single transformation producing a table)
-- **Inlet**: Pond with external dependencies and no upstream Ponds
-- **Outlet**: Pond with no downstream Ponds (e.g. outputs final data products)
+
+Ponds are typed or referred to in context:
+
+- **Source**: A parent Pond
+- **Sink**: A child Pond
+- **Inlet**: A Pond with xternal dependencies and no Sources
+- **Outlet**: A Pond with no Sinks (e.g. outputs final data products)
 
 ## Installation
 
@@ -27,15 +34,23 @@ pip install duckstring
 
 A Catchment is the execution environment and orchestrator, receiving Ponds and managing runs. It runs either as a local daemon or as a remote server, allowing you to start locally and seamlessly upgrade to a hosted/cloud server if you need to later.
 
+Starting or connecting to a Catchment selects it as the default target of later commands - other connected Catchments can be referred to with the `-c {catchment name}` option where relevant.
+
 #### Start a Catchment Server
 
-To run a Catchment locally, run:
+To initiate a Catchment locally, run:
 
 ```bash
-duckstring catchment start --name dev --port 5000 --root ~/.duckstring/dev
+duckstring catchment init --name dev --port 5000 --root ~/.duckstring/dev
 ```
 
-This will start a server with name 'dev' at port 5000 (the default, if none specified) and store Catchment details at `~/.duckstring/dev` (default is `~/.duckstring/{name}`). If any of these options are omitted you will be prompted on start.
+This will start a server with name 'dev' (prompted if none specified) at port 5000 and store Catchment details at `~/.duckstring/dev` (default is `~/.duckstring/{name}`). 
+
+This can later be restarted with:
+
+```bash
+duckstring catchment start dev
+```
 
 #### Connect to a Remote Server
 
@@ -53,7 +68,7 @@ There are future plans for a dedicated Catchment service at https://duckstring.c
 
 #### Experiment in the Playground
 
-Shipped with Duckstring is a Playground web app to demonstrate how the Catchment orchestrator behaves. Start it with:
+Shipped with Duckstring is a standalone web app to demonstrate how the Catchment orchestrator behaves. Start it with:
 
 ```bash
 duckstring catchment playground
@@ -65,15 +80,43 @@ You may also visit https://playground.duckstring.com
 
 #### Demo Ponds
 
-If you want to see an example sequence of Ponds in action immediately, create three project directories and run one of these commands in each:
+It's recommended to look at an example before attempting to make your own Ponds so that you can get a feel for the structure. 
+
+To do so, cd to a target directory for the demo Ponds and run:
 
 ```bash
-duckstring pond demo inlet
-duckstring pond demo pond
-duckstring pond demo outlet
+duckstring pond demo
 ```
 
-It's recommended to do this before attempting to make your own so that you can get a feel for the structure.
+This will create a sequence of Ponds:
+
+```mermaid
+flowchart LR
+    subgraph products [products]
+        direction LR
+        products.ingest[ingest: 2s]
+    end
+
+    subgraph transactions [transactions]
+        direction LR
+        transactions.ingest[ingest: 1s]
+    end
+
+    subgraph sales [sales]
+        direction LR
+        sales.price_tiers[price_tiers: 1s] --> sales.join_lines[join_lines: 3s]
+        sales.daily_sales[daily_sales: 2s] --> sales.join_lines
+    end
+
+    subgraph reports [reports]
+        direction LR
+        reports.monthly_summary[monthly_summary: 1s]
+    end
+
+    products --> sales
+    transactions --> sales
+    sales --> reports
+```
 
 #### Custom Pond
 
@@ -104,19 +147,25 @@ Here `pond.py` contains the code for a single Ripple operation (currently blank)
 From a Pond's project root run:
 
 ```bash
-duckstring deploy dev
+duckstring deploy 
 ```
 
-This will read the pond name, version and type (Inlet, Pond, Outlet) from `pond.toml` and deploy the project contents to the Catchment specified by name (here `dev`).
+This will read the Pond name, version and type (Inlet, Pond, Outlet) from `pond.toml` and deploy the project contents to the Catchment.
 
 Alternatively, you can import the Pond using the Catchment UI.
+
+To upload from all Ponds within a directory, use:
+
+```bash
+duckstring deploy --all
+```
 
 #### From Git
 
 If you are using git with a remote, you can deploy with:
 
 ```bash
-duckstring deploy dev --git {branch|commit|tag}
+duckstring deploy --git {branch|commit|tag}
 ```
 
 This will use the current branch/commit/tag to define the Pond. Upon each execution the Catchment will clone the repository and run it.
@@ -125,16 +174,18 @@ This can also be specified using the Catchment UI.
 
 ### 3) Execute
 
-Ponds are executed by sending a Demand signal from an Outlet. This propagates backwards through the DAG until it reaches each upstream Inlet, causing them to execute, with children beginning upon completion of all of their parents.
+Ponds are executed by sending a demand signal from an Outlet. This propagates backwards through the DAG until it reaches each upstream Inlet, causing them to execute, with children beginning upon completion of all of their parents.
 
-These examples will use the Pond `outlet`, version `1.0.0`, as the execution reference. All examples may also be alternatively executed using the Catchment UI.
+
+
+These examples will use the example Pond `reports`, version `1.0.0`, as the execution reference. All examples may also be alternatively executed using the Catchment UI.
 
 #### Pulse
 
 To initiate a single run:
 
 ```bash
-duckstring pulse dev outlet
+duckstring trigger pulse outlet --watch
 ```
 
 The `pulse` mode emits a Demand signal from `outlet`, and when it begins execution, sends a Stop signal. This causes it to execute exactly once.
@@ -142,7 +193,7 @@ The `pulse` mode emits a Demand signal from `outlet`, and when it begins executi
 This will automatically run against the maximum version available for that Pond. To use a specific version:
 
 ```bash
-duckstring pulse dev outlet --version 1
+duckstring pulse outlet --version 1
 ```
 
 #### Wave

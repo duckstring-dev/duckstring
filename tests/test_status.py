@@ -56,13 +56,15 @@ def test_status_default_shows_active_only(runner, live_catchment):
     assert "1.0.0" not in result.output
 
 
-def test_status_all_shows_inactive(runner, live_catchment):
+def test_status_all_shows_selected_only(runner, live_catchment):
+    # Status reflects live engine state (the selected version per major), not version history —
+    # a superseded version within a major is no longer surfaced, even with --all.
     _deploy(live_catchment, name="inlet", version="1.0.0", kind="inlet")
     _deploy(live_catchment, name="inlet", version="1.1.0", kind="inlet")
     result = runner.invoke(app, ["status", "--once", "--all"])
     assert result.exit_code == 0
-    assert "1.0.0" in result.output
     assert "1.1.0" in result.output
+    assert "1.0.0" not in result.output
 
 
 def test_status_unknown_catchment_exits(runner):

@@ -23,8 +23,8 @@ def test_migrate_creates_tables(tmp_path):
     con = connect(tmp_path / "duck.db")
     migrate(con)
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"pond", "pond_version", "ripple", "ripple_to_ripple", "pond_to_pond",
-            "pond_trigger", "demand", "watermark", "pond_run", "ripple_run"} <= tables
+    assert {"pond_name", "pond", "pond_version", "ripple", "ripple_to_ripple", "pond_to_pond",
+            "pond_state", "pond_target", "pond_window", "pond_trigger", "pond_run", "ripple_run"} <= tables
 
 
 def test_migrate_is_idempotent(tmp_path):
@@ -39,7 +39,7 @@ def test_foreign_keys_enforced(tmp_path):
     con = connect(tmp_path / "duck.db")
     migrate(con)
     with pytest.raises(sqlite3.IntegrityError):
-        con.execute("INSERT INTO pond_version (pond_id, version, major, source_path) VALUES (999, '1.0.0', 1, 'x')")
+        con.execute("INSERT INTO pond_version (pond_name_id, version, major, source_path) VALUES (999, '1.0.0', 1, 'x')")
         con.commit()
 
 
@@ -143,38 +143,45 @@ def clean(pond): ...
 """
 
 
+def _selected_version(db, name):
+    row = db.execute(
+        "SELECT pv.version FROM pond p JOIN pond_version pv ON pv.id = p.pond_version_id "
+        "JOIN pond_name pn ON pn.id = p.pond_name_id WHERE pn.name = ?", (name,)
+    ).fetchall()
+    return {r[0] for r in row}
+
+
 def test_deploy_local_registers_pond(catchment_client):
     r = _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet", toml_text=INLET_TOML)
     assert r.status_code == 200
-    row = _db(catchment_client).execute("SELECT name, kind FROM pond WHERE name = 'inlet'").fetchone()
+    row = _db(catchment_client).execute("SELECT name, kind FROM pond_name WHERE name = 'inlet'").fetchone()
     assert row == ("inlet", "inlet")
 
 
 def test_deploy_local_registers_version(catchment_client):
     r = _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet", toml_text=INLET_TOML)
     assert r.status_code == 200
-    row = _db(catchment_client).execute(
-        "SELECT version, major, is_active, source_path FROM pond_version WHERE version = '1.0.0'"
-    ).fetchone()
-    assert row == ("1.0.0", 1, 1, "ponds/inlet/1.0.0")
+    db = _db(catchment_client)
+    row = db.execute("SELECT version, major, source_path FROM pond_version WHERE version = '1.0.0'").fetchone()
+    assert row == ("1.0.0", 1, "ponds/inlet/1.0.0")
+    assert _selected_version(db, "inlet") == {"1.0.0"}  # the pond pointer selects it
 
 
 def test_deploy_local_registers_sources(catchment_client):
-    # Deploy inlet first so it exists as a pond
     _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet", toml_text=INLET_TOML)
     r = _deploy(catchment_client, name="mypond", version="1.0.0", kind="pond", toml_text=POND_TOML)
     assert r.status_code == 200
 
     db = _db(catchment_client)
-    (pond_id,) = db.execute("SELECT id FROM pond WHERE name = 'mypond'").fetchone()
-    (version_id,) = db.execute("SELECT id FROM pond_version WHERE pond_id = ?", (pond_id,)).fetchone()
+    (pond_id,) = db.execute(
+        "SELECT p.id FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id WHERE pn.name = 'mypond'"
+    ).fetchone()
     edges = db.execute(
-        "SELECT p.name, e.source_major, e.min_version, e.required "
-        "FROM pond_to_pond e JOIN pond p ON p.id = e.source_pond_id WHERE e.pond_version_id = ?",
-        (version_id,),
+        "SELECT src.name, e.source_major, e.min_version, e.required "
+        "FROM pond_to_pond e JOIN pond_name src ON src.id = e.source_pond_name_id WHERE e.pond_id = ?",
+        (pond_id,),
     ).fetchall()
-    assert len(edges) == 1
-    assert edges[0] == ("inlet", 1, "1.0.0", 1)
+    assert edges == [("inlet", 1, "1.0.0", 1)]
 
 
 def test_deploy_local_required_and_optional_sources(catchment_client):
@@ -182,17 +189,19 @@ def test_deploy_local_required_and_optional_sources(catchment_client):
     assert r.status_code == 200
 
     db = _db(catchment_client)
-    (pond_id,) = db.execute("SELECT id FROM pond WHERE name = 'outlet'").fetchone()
-    (version_id,) = db.execute("SELECT id FROM pond_version WHERE pond_id = ?", (pond_id,)).fetchone()
+    (pond_id,) = db.execute(
+        "SELECT p.id FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id WHERE pn.name = 'outlet'"
+    ).fetchone()
     edges = {
-        row[0]: row
+        row[0]: row[1]
         for row in db.execute(
-            "SELECT p.name, e.required FROM pond_to_pond e JOIN pond p ON p.id = e.source_pond_id WHERE e.pond_version_id = ?",
-            (version_id,),
+            "SELECT src.name, e.required FROM pond_to_pond e "
+            "JOIN pond_name src ON src.id = e.source_pond_name_id WHERE e.pond_id = ?",
+            (pond_id,),
         ).fetchall()
     }
-    assert edges["mypond"][1] == 1    # required
-    assert edges["upstream"][1] == 0  # optional (?)
+    assert edges["mypond"] == 1    # required
+    assert edges["upstream"] == 0  # optional (?)
 
 
 def test_deploy_local_registers_ripples(catchment_client):
@@ -205,7 +214,7 @@ def test_deploy_local_registers_ripples(catchment_client):
 
     db = _db(catchment_client)
     (version_id,) = db.execute(
-        "SELECT pv.id FROM pond_version pv JOIN pond p ON p.id = pv.pond_id WHERE p.name = 'inlet'"
+        "SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'inlet'"
     ).fetchone()
     ripples = {r[0] for r in db.execute("SELECT name FROM ripple WHERE pond_version_id = ?", (version_id,)).fetchall()}
     assert ripples == {"load", "clean"}
@@ -221,7 +230,7 @@ def test_deploy_local_registers_ripple_edges(catchment_client):
 
     db = _db(catchment_client)
     (version_id,) = db.execute(
-        "SELECT pv.id FROM pond_version pv JOIN pond p ON p.id = pv.pond_id WHERE p.name = 'inlet'"
+        "SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'inlet'"
     ).fetchone()
     edges = db.execute(
         """SELECT sink.name, src.name FROM ripple_to_ripple e
@@ -233,28 +242,24 @@ def test_deploy_local_registers_ripple_edges(catchment_client):
     assert edges == [("clean", "load")]
 
 
-def test_deploy_activates_new_version(catchment_client):
+def test_deploy_selects_new_version(catchment_client):
     _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet", toml_text=INLET_TOML)
     new_toml = INLET_TOML.replace("1.0.0", "1.1.0")
     _deploy(catchment_client, name="inlet", version="1.1.0", kind="inlet", toml_text=new_toml)
 
     db = _db(catchment_client)
-    rows = db.execute(
-        "SELECT version, is_active FROM pond_version ORDER BY version"
-    ).fetchall()
-    assert dict(rows) == {"1.0.0": 0, "1.1.0": 1}
+    assert _selected_version(db, "inlet") == {"1.1.0"}  # pointer now selects the new version
+    assert {r[0] for r in db.execute("SELECT version FROM pond_version")} == {"1.0.0", "1.1.0"}
 
 
-def test_deploy_two_majors_both_active(catchment_client):
+def test_deploy_two_majors_both_selected(catchment_client):
     _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet", toml_text=INLET_TOML)
     v2_toml = INLET_TOML.replace("1.0.0", "2.0.0")
     _deploy(catchment_client, name="inlet", version="2.0.0", kind="inlet", toml_text=v2_toml)
 
     db = _db(catchment_client)
-    rows = db.execute(
-        "SELECT version, is_active FROM pond_version ORDER BY version"
-    ).fetchall()
-    assert dict(rows) == {"1.0.0": 1, "2.0.0": 1}
+    # One selected Pond per major line — both majors are selected.
+    assert _selected_version(db, "inlet") == {"1.0.0", "2.0.0"}
 
 
 def test_deploy_bad_zip_returns_422(catchment_client):
@@ -279,7 +284,7 @@ def test_deploy_cycle_returns_422(catchment_client):
     # b's version must not have been registered (transaction rolled back)
     db = _db(catchment_client)
     assert db.execute(
-        "SELECT COUNT(*) FROM pond_version pv JOIN pond p ON p.id = pv.pond_id WHERE p.name = 'b'"
+        "SELECT COUNT(*) FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'b'"
     ).fetchone()[0] == 0
 
 
@@ -381,24 +386,24 @@ def test_deploy_demo_ponds(catchment_client):
 
     db = _db(catchment_client)
 
-    # All four ponds registered and active
-    active = {
+    # All four ponds registered and selected
+    selected = {
         row[0]
         for row in db.execute(
-            "SELECT p.name FROM pond_version pv JOIN pond p ON p.id = pv.pond_id WHERE pv.is_active = 1"
+            "SELECT pn.name FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id"
         ).fetchall()
     }
-    assert active == {"transactions", "products", "sales", "reports"}
+    assert selected == {"transactions", "products", "sales", "reports"}
 
     # Inter-pond source edges
     edges = {
         (row[0], row[1])
         for row in db.execute(
-            """SELECT sink.name, src.name
+            """SELECT snk.name, src.name
                FROM pond_to_pond e
-               JOIN pond_version pv ON pv.id = e.pond_version_id
-               JOIN pond sink ON sink.id = pv.pond_id
-               JOIN pond src  ON src.id  = e.source_pond_id"""
+               JOIN pond p ON p.id = e.pond_id
+               JOIN pond_name snk ON snk.id = p.pond_name_id
+               JOIN pond_name src ON src.id = e.source_pond_name_id"""
         ).fetchall()
     }
     assert ("sales", "transactions") in edges
@@ -417,8 +422,8 @@ def test_deploy_demo_ponds(catchment_client):
             for row in db.execute(
                 """SELECT r.name FROM ripple r
                    JOIN pond_version pv ON pv.id = r.pond_version_id
-                   JOIN pond p ON p.id = pv.pond_id
-                   WHERE p.name = ?""",
+                   JOIN pond_name pn ON pn.id = pv.pond_name_id
+                   WHERE pn.name = ?""",
                 (pond_name,),
             ).fetchall()
         }
@@ -434,53 +439,31 @@ def test_wave_unknown_outlet_404(catchment_client):
     assert r.status_code == 404
 
 
-def test_wave_inserts_persistent_demand(catchment_client):
+def _trigger_row(db, name):
+    return db.execute(
+        "SELECT pt.kind, pt.bound_ms, pt.status FROM pond_trigger pt "
+        "JOIN pond_name pn ON pn.id = (SELECT pond_name_id FROM pond WHERE id = pt.pond_id) "
+        "WHERE pn.name = ?", (name,)
+    ).fetchall()
+
+
+def test_wave_registers_trigger(catchment_client):
     _deploy(catchment_client, name="outlet", version="1.0.0", kind="outlet", toml_text=OUTLET_TOML.split("[sources]")[0])
     r = catchment_client.post("/api/outlets/outlet/wave")
     assert r.status_code == 200
-
-    db = _db(catchment_client)
-    row = db.execute("""
-        SELECT d.persistent FROM demand d
-        JOIN pond_version pv ON pv.id = d.pond_version_id
-        JOIN pond p ON p.id = pv.pond_id
-        WHERE p.name = 'outlet' AND d.sink_id IS NULL
-    """).fetchone()
-    assert row is not None
-    assert row[0] == 1  # persistent flag set
-
-
-def test_wave_no_stop_record(catchment_client):
-    _deploy(catchment_client, name="outlet", version="1.0.0", kind="outlet", toml_text=OUTLET_TOML.split("[sources]")[0])
-    catchment_client.post("/api/outlets/outlet/wave")
-
-    db = _db(catchment_client)
-    stop_count = db.execute("""
-        SELECT COUNT(*) FROM stop s
-        JOIN pond_version pv ON pv.id = s.pond_version_id
-        JOIN pond p ON p.id = pv.pond_id
-        WHERE p.name = 'outlet'
-    """).fetchone()[0]
-    assert stop_count == 0
+    rows = _trigger_row(_db(catchment_client), "outlet")
+    assert rows == [("wave", None, "active")]
 
 
 def test_wave_idempotent(catchment_client):
     _deploy(catchment_client, name="outlet", version="1.0.0", kind="outlet", toml_text=OUTLET_TOML.split("[sources]")[0])
     catchment_client.post("/api/outlets/outlet/wave")
     catchment_client.post("/api/outlets/outlet/wave")
-
-    db = _db(catchment_client)
-    count = db.execute("""
-        SELECT COUNT(*) FROM demand d
-        JOIN pond_version pv ON pv.id = d.pond_version_id
-        JOIN pond p ON p.id = pv.pond_id
-        WHERE p.name = 'outlet' AND d.sink_id IS NULL
-    """).fetchone()[0]
-    assert count == 1  # no duplicate demand rows
+    assert len(_trigger_row(_db(catchment_client), "outlet")) == 1  # single upserted trigger
 
 
 # ---------------------------------------------------------------------------
-# Tide tests
+# Tide tests (staleness bound, not cron)
 # ---------------------------------------------------------------------------
 
 OUTLET_ONLY_TOML = """\
@@ -492,43 +475,25 @@ type = "outlet"
 
 
 def test_tide_unknown_outlet_404(catchment_client):
-    r = catchment_client.post("/api/outlets/nonexistent/tide", json={"cron": "0 * * * *"})
+    r = catchment_client.post("/api/outlets/nonexistent/tide", json={"bound_seconds": 60})
     assert r.status_code == 404
 
 
-def test_tide_invalid_cron_422(catchment_client):
+def test_tide_invalid_bound_422(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    r = catchment_client.post("/api/outlets/outlet/tide", json={"cron": "not a cron"})
+    r = catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 0})
     assert r.status_code == 422
 
 
-def test_tide_registers_schedule(catchment_client):
+def test_tide_registers_bound(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    r = catchment_client.post("/api/outlets/outlet/tide", json={"cron": "0 6 * * *"})
+    r = catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 3600})
     assert r.status_code == 200
-
-    db = _db(catchment_client)
-    row = db.execute("""
-        SELECT pt.schedule, pt.local, pt.major, pt.status FROM pond_trigger pt
-        JOIN pond p ON p.id = pt.pond_id WHERE p.name = 'outlet'
-    """).fetchone()
-    assert row is not None
-    assert row[0] == "0 6 * * *"
-    assert row[1] == 0   # UTC
-    assert row[2] == 1   # major 1
-    assert row[3] == "active"
+    assert _trigger_row(_db(catchment_client), "outlet") == [("tide", 3_600_000, "active")]
 
 
-def test_tide_updates_existing_schedule(catchment_client):
+def test_tide_updates_existing_bound(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    catchment_client.post("/api/outlets/outlet/tide", json={"cron": "0 6 * * *"})
-    catchment_client.post("/api/outlets/outlet/tide", json={"cron": "0 8 * * *", "local": True})
-
-    db = _db(catchment_client)
-    rows = db.execute("""
-        SELECT pt.schedule, pt.local FROM pond_trigger pt
-        JOIN pond p ON p.id = pt.pond_id WHERE p.name = 'outlet'
-    """).fetchall()
-    assert len(rows) == 1
-    assert rows[0][0] == "0 8 * * *"
-    assert rows[0][1] == 1
+    catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 3600})
+    catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 30})
+    assert _trigger_row(_db(catchment_client), "outlet") == [("tide", 30_000, "active")]

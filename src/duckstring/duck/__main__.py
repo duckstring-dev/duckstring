@@ -30,8 +30,11 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
 
     def _poll_loop():
         while not stop.is_set():
-            for job in client.poll_jobs():
+            jobs = client.poll_jobs()
+            for job in jobs:
                 q.put(("job", job))
+            if not jobs:
+                stop.wait(0.1)  # short poll interval; avoids busy-spinning the Catchment
 
     def _launch(names):
         for name in names:

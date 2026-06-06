@@ -64,19 +64,19 @@ def connected_components(sorted_nodes: list[str], edges: list[tuple[str, str]]) 
 
 
 def assert_no_cycles(db) -> None:
-    """Query the active inter-pond graph and raise ValueError if a cycle exists."""
+    """Query the selected inter-pond graph and raise ValueError if a cycle exists."""
     nodes = [
         r[0] for r in db.execute(
-            "SELECT p.name FROM pond_version pv JOIN pond p ON p.id = pv.pond_id WHERE pv.is_active = 1"
+            "SELECT pn.name FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id"
         ).fetchall()
     ]
     edges = [
         (r[0], r[1]) for r in db.execute("""
-            SELECT p_src.name, p_sink.name
+            SELECT src.name, snk.name
             FROM pond_to_pond e
-            JOIN pond_version pv ON pv.id = e.pond_version_id AND pv.is_active = 1
-            JOIN pond p_sink ON p_sink.id = pv.pond_id
-            JOIN pond p_src ON p_src.id = e.source_pond_id
+            JOIN pond p ON p.id = e.pond_id
+            JOIN pond_name snk ON snk.id = p.pond_name_id
+            JOIN pond_name src ON src.id = e.source_pond_name_id
         """).fetchall()
     ]
     topo_sort(nodes, edges)

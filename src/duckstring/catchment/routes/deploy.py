@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import io
 import shutil
 import subprocess
 import sys
@@ -29,19 +30,29 @@ def _parse_version(s: str) -> tuple[int, str, bool]:
     return major, ver, required
 
 
-def _discover_ripples(source_dir: Path) -> list[dict]:
-    """Import src/pond.py from source_dir and collect registered ripples.
+def _pond_config(toml_path: Path) -> dict:
+    """Extract the deploy-relevant config from pond.toml: sources, retries, windows, kind."""
+    cfg = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "windows": [], "kind": None}
+    if not toml_path.exists():
+        return cfg
+    info = _read_toml(toml_path.read_text(encoding="utf-8"))
+    cfg["sources"] = info.get("sources", {})
+    pond = info.get("pond", {})
+    cfg["immediate_retries"] = pond.get("immediate_retries", 0)
+    cfg["source_retries"] = pond.get("source_retries", 0)
+    cfg["kind"] = pond.get("type")
+    # Windows: a list of {cron, duration_seconds} (batch availability on inlets).
+    for w in info.get("window", []) or info.get("windows", []):
+        cfg["windows"].append({"cron": w["cron"], "duration_ms": int(float(w["duration_seconds"]) * 1000)})
+    return cfg
 
-    Returns an empty list if the file is missing or fails to import — the
-    catchment can still store the source files; ripple registration can be
-    retried or handled at execution time.
-    """
+
+def _discover_ripples(source_dir: Path) -> list[dict]:
     from duckstring.core import collect_ripples
 
     pond_py = source_dir / "src" / "pond.py"
     if not pond_py.exists():
         return []
-
     src_path = str(source_dir / "src")
     before = set(sys.modules.keys())
     sys.path.insert(0, src_path)
@@ -51,7 +62,7 @@ def _discover_ripples(source_dir: Path) -> list[dict]:
         importlib.import_module("pond")
         return collect_ripples()
     except Exception:
-        collect_ripples()  # drain any partial registrations
+        collect_ripples()
         return []
     finally:
         if src_path in sys.path:
@@ -61,95 +72,86 @@ def _discover_ripples(source_dir: Path) -> list[dict]:
                 sys.modules.pop(key, None)
 
 
-def _register(
-    db,
-    name: str,
-    version: str,
-    kind: str,
-    source_path: str,
-    sources: dict,
-    ripples: list[dict],
-    immediate_retries: int = 0,
-    source_retries: int = 0,
-) -> None:
+def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
     major = int(version.split(".")[0])
     with db:
-        db.execute("INSERT OR IGNORE INTO pond (name, kind) VALUES (?, ?)", (name, kind))
-        (pond_id,) = db.execute("SELECT id FROM pond WHERE name = ?", (name,)).fetchone()
-
-        # Deactivate any other active version in this major line.
-        db.execute(
-            "UPDATE pond_version SET is_active = 0 WHERE pond_id = ? AND major = ? AND is_active = 1",
-            (pond_id, major),
-        )
+        db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, ?)", (name, kind))
+        db.execute("UPDATE pond_name SET kind = ? WHERE name = ?", (kind, name))
+        (pn_id,) = db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)).fetchone()
 
         existing = db.execute(
-            "SELECT id FROM pond_version WHERE pond_id = ? AND version = ?",
-            (pond_id, version),
+            "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
         ).fetchone()
-
         if existing:
-            # Re-deploy: clear stale state and re-activate the existing row.
-            version_id = existing[0]
-            ripple_ids = [r[0] for r in db.execute(
-                "SELECT id FROM ripple WHERE pond_version_id = ?", (version_id,)
-            ).fetchall()]
+            pv_id = existing[0]
+            ripple_ids = [r[0] for r in db.execute("SELECT id FROM ripple WHERE pond_version_id = ?", (pv_id,))]
             if ripple_ids:
                 marks = ",".join("?" * len(ripple_ids))
-                db.execute(f"DELETE FROM ripple_to_ripple WHERE sink_id IN ({marks}) OR source_id IN ({marks})", ripple_ids * 2)
-                db.execute("DELETE FROM ripple WHERE pond_version_id = ?", (version_id,))
-            db.execute("DELETE FROM pond_to_pond WHERE pond_version_id = ?", (version_id,))
-            db.execute("DELETE FROM demand WHERE pond_version_id = ?", (version_id,))
-            db.execute("DELETE FROM stop WHERE pond_version_id = ?", (version_id,))
+                db.execute(
+                    f"DELETE FROM ripple_to_ripple WHERE sink_id IN ({marks}) OR source_id IN ({marks})",
+                    ripple_ids * 2,
+                )
+                db.execute("DELETE FROM ripple WHERE pond_version_id = ?", (pv_id,))
             db.execute(
-                "UPDATE pond_version SET is_active = 1, is_stopped = 1, source_path = ?, "
-                "deployed_at = datetime('now'), immediate_retries = ?, source_retries = ? WHERE id = ?",
-                (source_path, immediate_retries, source_retries, version_id),
+                "UPDATE pond_version SET source_path = ?, major = ?, immediate_retries = ?, "
+                "source_retries = ?, deployed_at = datetime('now') WHERE id = ?",
+                (source_path, major, cfg["immediate_retries"], cfg["source_retries"], pv_id),
             )
         else:
             db.execute(
-                "INSERT INTO pond_version "
-                "(pond_id, version, major, is_active, source_path, immediate_retries, source_retries) "
-                "VALUES (?, ?, ?, 1, ?, ?, ?)",
-                (pond_id, version, major, source_path, immediate_retries, source_retries),
+                "INSERT INTO pond_version (pond_name_id, version, major, source_path, "
+                "immediate_retries, source_retries) VALUES (?, ?, ?, ?, ?, ?)",
+                (pn_id, version, major, source_path, cfg["immediate_retries"], cfg["source_retries"]),
             )
-            (version_id,) = db.execute(
-                "SELECT id FROM pond_version WHERE pond_id = ? AND version = ?", (pond_id, version)
+            (pv_id,) = db.execute(
+                "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
             ).fetchone()
 
-        for src_name, ver_str in sources.items():
-            src_major, src_min, src_required = _parse_version(ver_str)
-            db.execute("INSERT OR IGNORE INTO pond (name, kind) VALUES (?, 'pond')", (src_name,))
-            (src_pond_id,) = db.execute("SELECT id FROM pond WHERE name = ?", (src_name,)).fetchone()
-            db.execute(
-                """INSERT OR REPLACE INTO pond_to_pond
-                   (pond_version_id, source_pond_id, source_major, min_version, required)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (version_id, src_pond_id, src_major, src_min, int(src_required)),
-            )
+        # Select this version for (pond_name, major) — the `pond` pointer.
+        db.execute(
+            "INSERT INTO pond (pond_name_id, major, pond_version_id) VALUES (?, ?, ?) "
+            "ON CONFLICT(pond_name_id, major) DO UPDATE SET pond_version_id = excluded.pond_version_id",
+            (pn_id, major, pv_id),
+        )
+        (pond_id,) = db.execute(
+            "SELECT id FROM pond WHERE pond_name_id = ? AND major = ?", (pn_id, major)
+        ).fetchone()
 
-        func_to_name = {r["func"]: r["name"] for r in ripples}
         name_to_id: dict[str, int] = {}
         for r in ripples:
-            db.execute(
-                "INSERT OR IGNORE INTO ripple (pond_version_id, name) VALUES (?, ?)",
-                (version_id, r["name"]),
-            )
-            (ripple_id,) = db.execute(
-                "SELECT id FROM ripple WHERE pond_version_id = ? AND name = ?",
-                (version_id, r["name"]),
+            db.execute("INSERT OR IGNORE INTO ripple (pond_version_id, name) VALUES (?, ?)", (pv_id, r["name"]))
+            (rid,) = db.execute(
+                "SELECT id FROM ripple WHERE pond_version_id = ? AND name = ?", (pv_id, r["name"])
             ).fetchone()
-            name_to_id[r["name"]] = ripple_id
-
+            name_to_id[r["name"]] = rid
+        func_to_name = {r["func"]: r["name"] for r in ripples}
         for r in ripples:
-            sink_id = name_to_id[r["name"]]
+            sink = name_to_id[r["name"]]
             for parent_func in r["parents"]:
-                parent_name = func_to_name.get(parent_func, getattr(parent_func, "__name__", None))
-                if parent_name and parent_name in name_to_id:
+                pn = func_to_name.get(parent_func, getattr(parent_func, "__name__", None))
+                if pn and pn in name_to_id:
                     db.execute(
                         "INSERT OR IGNORE INTO ripple_to_ripple (sink_id, source_id) VALUES (?, ?)",
-                        (sink_id, name_to_id[parent_name]),
+                        (sink, name_to_id[pn]),
                     )
+
+        db.execute("DELETE FROM pond_to_pond WHERE pond_id = ?", (pond_id,))
+        for src_name, ver_str in cfg["sources"].items():
+            src_major, src_min, src_required = _parse_version(ver_str)
+            db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, 'pond')", (src_name,))
+            (src_pn_id,) = db.execute("SELECT id FROM pond_name WHERE name = ?", (src_name,)).fetchone()
+            db.execute(
+                "INSERT OR REPLACE INTO pond_to_pond "
+                "(pond_id, source_pond_name_id, source_major, required, min_version) VALUES (?, ?, ?, ?, ?)",
+                (pond_id, src_pn_id, src_major, int(src_required), src_min),
+            )
+
+        db.execute("DELETE FROM pond_window WHERE pond_id = ?", (pond_id,))
+        for w in cfg["windows"]:
+            db.execute(
+                "INSERT INTO pond_window (pond_id, cron, duration_ms) VALUES (?, ?, ?)",
+                (pond_id, w["cron"], w["duration_ms"]),
+            )
 
         from ..dag import assert_no_cycles
         assert_no_cycles(db)
@@ -180,64 +182,36 @@ async def deploy(request: Request):
         if dest.exists():
             shutil.rmtree(dest)
         dest.mkdir(parents=True)
-
         try:
-            with zipfile.ZipFile(dest / "_upload.zip", "w") as _:
-                pass  # placeholder; extract directly below
-            import io
             with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
                 zf.extractall(dest)
         except zipfile.BadZipFile as exc:
             shutil.rmtree(dest, ignore_errors=True)
             raise HTTPException(status_code=422, detail="Uploaded file is not a valid zip archive") from exc
-
-        toml_path = dest / "pond.toml"
-        sources: dict = {}
-        immediate_retries = 0
-        source_retries = 0
-        if toml_path.exists():
-            info = _read_toml(toml_path.read_text(encoding="utf-8"))
-            sources = info.get("sources", {})
-            immediate_retries = info.get("pond", {}).get("immediate_retries", 0)
-            source_retries = info.get("pond", {}).get("source_retries", 0)
-
     else:
         body = _GitBody(**(await request.json()))
         name, version, kind = body.name, body.version, body.type
-
         dest = root / "ponds" / name / version
         if dest.exists():
             shutil.rmtree(dest)
         dest.mkdir(parents=True)
-
         try:
-            subprocess.run(
-                ["git", "clone", body.repo_url, str(dest)],
-                check=True, capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(dest), "checkout", body.git_ref],
-                check=True, capture_output=True,
-            )
+            subprocess.run(["git", "clone", body.repo_url, str(dest)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(dest), "checkout", body.git_ref], check=True, capture_output=True)
         except subprocess.CalledProcessError as exc:
             shutil.rmtree(dest, ignore_errors=True)
             raise HTTPException(status_code=422, detail=f"git clone failed: {exc.stderr.decode()}") from exc
 
-        toml_path = dest / "pond.toml"
-        sources: dict = {}
-        immediate_retries = 0
-        source_retries = 0
-        if toml_path.exists():
-            info = _read_toml(toml_path.read_text(encoding="utf-8"))
-            sources = info.get("sources", {})
-            immediate_retries = info.get("pond", {}).get("immediate_retries", 0)
-            source_retries = info.get("pond", {}).get("source_retries", 0)
-
+    cfg = _pond_config(dest / "pond.toml")
+    if cfg["kind"]:
+        kind = cfg["kind"]
     ripples = _discover_ripples(dest)
     source_path = f"ponds/{name}/{version}"
     try:
-        _register(db, name, version, kind, source_path, sources, ripples, immediate_retries, source_retries)
+        _register(db, name, version, kind, source_path, cfg, ripples)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    if getattr(request.app.state, "driver", None) is not None:
+        request.app.state.driver.reload()
     return {"ok": True}

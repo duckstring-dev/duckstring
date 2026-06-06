@@ -22,14 +22,18 @@ def _registry(request: Request, pond_name: str):
 def get_pond_version(name: str, version: str, request: Request):
     db = request.app.state.db
     row = db.execute(
-        """SELECT pv.is_active FROM pond_version pv
-           JOIN pond p ON p.id = pv.pond_id
-           WHERE p.name = ? AND pv.version = ?""",
+        """SELECT pv.id FROM pond_version pv
+           JOIN pond_name pn ON pn.id = pv.pond_name_id
+           WHERE pn.name = ? AND pv.version = ?""",
         (name, version),
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No version {version} of pond '{name}'")
-    return {"name": name, "version": version, "is_active": bool(row[0])}
+    # "active" = this version is the one the pond pointer currently selects.
+    selected = db.execute(
+        "SELECT 1 FROM pond WHERE pond_version_id = ?", (row[0],)
+    ).fetchone()
+    return {"name": name, "version": version, "is_active": bool(selected)}
 
 
 class QueryRequest(BaseModel):

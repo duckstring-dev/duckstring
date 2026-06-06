@@ -20,7 +20,8 @@ def fast_demo_sleep():
     - NO_COLOR=1: prevent Rich/Typer from emitting ANSI codes in captured output
     """
     to_restore = {}
-    for key, val in [("DUCKSTRING_SLEEP_MULTIPLIER", "0.01"), ("NO_COLOR", "1")]:
+    for key, val in [("DUCKSTRING_SLEEP_MULTIPLIER", "0.01"), ("NO_COLOR", "1"),
+                     ("DUCKSTRING_DISABLE_DUCKS", "1")]:
         to_restore[key] = os.environ.get(key)
         os.environ[key] = val
     yield

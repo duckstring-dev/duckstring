@@ -56,16 +56,15 @@ def wave(
 
 
 def tide(
-    outlet: str = typer.Argument(..., help="Name of the Outlet Pond to schedule."),
+    outlet: str = typer.Argument(..., help="Name of the Outlet Pond to keep fresh."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
-    cron: str = typer.Option(..., "--cron", help="Cron expression, e.g. '15 2 * * *'."),
-    local: bool = typer.Option(False, "--local", help="Interpret the schedule in local time (default: UTC)."),
+    bound: float = typer.Option(..., "--bound", help="Maximum staleness in seconds; the Outlet is kept no older than this."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
 ) -> None:
-    """Schedule an Outlet to emit Demand on a cron schedule."""
+    """Keep an Outlet no more stale than a bound (a staleness-clocked Pulse)."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "tide", {"cron": cron, "local": local}, "Tide scheduled.")
+    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "tide", {"bound_seconds": bound}, "Tide started.")
