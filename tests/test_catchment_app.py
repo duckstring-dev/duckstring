@@ -497,3 +497,17 @@ def test_tide_updates_existing_bound(catchment_client):
     catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 3600})
     catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 30})
     assert _trigger_row(_db(catchment_client), "outlet") == [("tide", 30_000, "active")]
+
+
+def test_untrigger_removes_standing_trigger(catchment_client):
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
+    catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 3600})
+    assert _trigger_row(_db(catchment_client), "outlet") == [("tide", 3_600_000, "active")]
+    r = catchment_client.post("/api/outlets/outlet/untrigger")
+    assert r.status_code == 200
+    assert _trigger_row(_db(catchment_client), "outlet") == []
+
+
+def test_untrigger_unknown_outlet_404(catchment_client):
+    r = catchment_client.post("/api/outlets/nonexistent/untrigger")
+    assert r.status_code == 404

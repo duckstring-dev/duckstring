@@ -7,7 +7,7 @@ from . import pond as pond_cmd
 from .data import get, query
 from .deploy import deploy
 from .status import status
-from .trigger import pulse, tap, tide, wave
+from .trigger import pulse, remove, tap, tide, wave
 
 app = typer.Typer(help="Duckstring CLI", no_args_is_help=True, add_completion=True)
 
@@ -19,6 +19,7 @@ trigger_app.command("tap")(tap)
 trigger_app.command("pulse")(pulse)
 trigger_app.command("wave")(wave)
 trigger_app.command("tide")(tide)
+trigger_app.command("remove")(remove)
 
 app.add_typer(catchment_cmd.app, name="catchment")
 app.add_typer(pond_cmd.app, name="pond")

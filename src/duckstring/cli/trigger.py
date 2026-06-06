@@ -30,6 +30,20 @@ def _post_trigger(
     )
 
 
+def remove(
+    outlet: str = typer.Argument(..., help="Name of the Outlet Pond whose standing trigger to remove."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active)."),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
+) -> None:
+    """Remove the standing Wave/Tide trigger from an Outlet (existing work drains)."""
+    from . import _http
+    from .config import resolve_catchment
+    _, cfg = resolve_catchment(catchment)
+    _http.post(f"{cfg['url']}/api/outlets/{outlet}/untrigger", json={})
+    typer.echo("Trigger removed.")
+
+
 def tap(
     outlet: str = typer.Argument(..., help="Name of the Outlet Pond to resupply once."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),

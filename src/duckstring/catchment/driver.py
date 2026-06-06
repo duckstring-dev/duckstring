@@ -207,6 +207,17 @@ class Driver:
             self.db.commit()
             self._process(_now())
 
+    def remove_trigger(self, pond: str) -> None:
+        """Remove the standing Wave/Tide trigger from a Pond. Unlike stop, this leaves existing demand
+        to drain naturally — it just stops new runs from being re-tapped/clocked."""
+        with self.lock:
+            self.state.triggers.pop(pond, None)
+            self.db.execute(
+                "DELETE FROM pond_trigger WHERE pond_id = ?", (self.meta[pond]["pond_id"],)
+            )
+            self.db.commit()
+            self._process(_now())
+
     # ─── Duck events ──────────────────────────────────────────────────────────
 
     def on_event(self, pond: str, payload: dict) -> None:

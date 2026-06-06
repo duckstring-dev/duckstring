@@ -94,6 +94,22 @@ def test_tide_requires_bound(runner, live_catchment):
     assert result.exit_code != 0
 
 
+# ── remove ──────────────────────────────────────────────────────────────────────
+
+
+def test_remove_succeeds(runner, live_catchment):
+    _deploy_outlet(live_catchment)
+    runner.invoke(app, ["trigger", "wave", "outlet", "--silent"])
+    result = runner.invoke(app, ["trigger", "remove", "outlet"])
+    assert result.exit_code == 0, result.output
+    assert "Trigger removed" in result.output
+
+
+def test_remove_unknown_catchment_exits(runner):
+    result = runner.invoke(app, ["trigger", "remove", "outlet", "-c", "nonexistent"])
+    assert result.exit_code != 0
+
+
 def test_tide_unknown_catchment_exits(runner):
     result = runner.invoke(app, ["trigger", "tide", "outlet", "-c", "nonexistent", "--bound", "60"])
     assert result.exit_code != 0

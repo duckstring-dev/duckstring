@@ -72,3 +72,11 @@ def stop(name: str, request: Request, body: _StopBody = _StopBody()):
     _require_pond(request, name)
     _driver(request).stop(name)
     return {"ok": True}
+
+
+@router.post("/outlets/{name}/untrigger")
+def untrigger(name: str, request: Request):
+    """Remove the standing Wave/Tide trigger from a Pond (existing work drains)."""
+    _require_pond(request, name)
+    _driver(request).remove_trigger(name)
+    return {"ok": True}
