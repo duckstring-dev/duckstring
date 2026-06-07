@@ -91,9 +91,9 @@ def _main(ctx: typer.Context, pond: str = typer.Argument(..., help="The Pond who
 def add(
     ctx: typer.Context,
     name: str = typer.Option(..., "--name", "-n", help="Unique identifier for the window rule."),
-    start: str = typer.Option(..., "--start", "-s", help="First window start (ISO 8601 or HH:MM)."),
-    duration: str = typer.Option(..., "--duration", "-d", help="Active window length, e.g. 3h, 45m, 1h30m."),
     every: str = typer.Option(..., "--every", "-e", help="Recurrence interval (single unit), e.g. 1d, 12h, 10s."),
+    start: Optional[str] = typer.Option(None, "--start", "-s", help="Window start (ISO 8601 or HH:MM); default 00:00 today."),
+    duration: Optional[str] = typer.Option(None, "--duration", "-d", help="Window length; default = --every (back-to-back)."),
     on: Optional[str] = typer.Option(None, "--on", "-o", help="Restrict to weekdays, e.g. MON,WED,FRI."),
     until: Optional[str] = typer.Option(None, "--until", "-u", help="Expiration (ISO 8601)."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
@@ -106,8 +106,8 @@ def add(
     unit, interval = _parse_every(every)
     payload = {
         "name": name,
-        "start_anchor": _parse_dt(start, allow_hhmm=True),
-        "duration_seconds": _parse_duration(duration),
+        "start_anchor": _parse_dt(start or "00:00", allow_hhmm=True),
+        "duration_seconds": _parse_duration(duration) if duration else _parse_duration(every),
         "freq_unit": unit,
         "freq_interval": interval,
         "valid_days": _parse_days(on),

@@ -176,3 +176,18 @@ def test_window_cli_roundtrip(runner, live_catchment):
 
     r = runner.invoke(app, ["trigger", "window", "tx", "list"])
     assert "No windows" in r.output
+
+
+@pytest.mark.timeout(30)
+def test_window_cli_defaults(runner, live_catchment):
+    # Only --name and --every required: --start defaults to 00:00 today, --duration to --every.
+    _deploy_inlet(live_catchment)
+    r = runner.invoke(app, ["trigger", "window", "tx", "add", "-n", "back2back", "-e", "1h"])
+    assert r.exit_code == 0, r.output
+
+    windows = httpx.get(f"{live_catchment}/api/outlets/tx/windows").json()["windows"]
+    assert len(windows) == 1
+    w = windows[0]
+    assert w["duration_seconds"] == 3600        # defaulted to the --every (1h) interval
+    assert w["freq_unit"] == "HOUR" and w["freq_interval"] == 1
+    assert w["start_anchor"].endswith("T00:00:00+00:00")  # midnight today UTC

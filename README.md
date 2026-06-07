@@ -28,6 +28,11 @@ Ponds are typed or referred to in context:
 pip install duckstring
 ```
 
+To enable CLI completions:
+```bash
+duckstring --install-completion
+```
+
 ## Quickstart
 
 ### 1) Connect to a Catchment
@@ -251,49 +256,29 @@ Windows set an allowed period in which an Inlet can start, with data considered 
 
 It is particularly useful to couple Windows with Wave. A one-day Window with a Wave consumer downstream will run the sequence of Ponds between them *once* daily, matching a Tide with a one-day staleness limit. Unlike Tide, however, the time of the Window can be set for the Inlet explicitly, so that consumption only occurs when the foreign source is known to have updated. Periods of "do not consume" (e.g. during writes) can also be specified this way.
 
-Set Windows against `products` with:
+Set a Window against `products` and `transactions` with:
 
 ```bash
-duckstring window products --for 4 --every 10 --offset 2 --unit seconds
+duckstring trigger window products add --name ten-seconds --every 10s --duration 4s
+duckstring trigger window transactions add --name ten-seconds --every 10s
 ```
 
-This sets a 4s duration Window every 10s at a 2s offset. At 2:15pm, that means the next active Window would be at 2:15:02pm, lasting to 2:15:06pm.
+This sets a 10s repeating Window on both, with `products` only active for 4s of that Window. A triggered Wave on `reports` will now be throttled to run every 10s (generally, the minimum of any Window).
 
-
-
-
-#### Wave
-
-```bash
-duckstring trigger wave reports
-```
-
-The `wave` mode emits a Demand signal from `outlet`, and when it begins execution, sends *another* Demand signal. This causes it to execute continuously, as frequently as the DAG allows (i.e. at a period equal to the execution time of the slowest Ripple in any Pond).
-
-#### Tide
-
-To run at a scheduled frequency:
-
-```bash
-duckstring tide dev outlet 15 2 * * * --local
-```
-
-This would run at 2:15am every day local time, using cron syntax. Omitting the `--local` flag defaults to UTC.
+The Window format is RFC 5545-like. Bounds may be set with `--start` (default today midnight) and `--until`, and `--on` to specify weekdays.  
 
 ### 4) Monitor
 
-To print out a summary of current processes in the Catchment:
+To open the status monitor again:
 
 ```bash
-duckstring status dev
+duckstring status
 ```
 
-This will print to CLI a summary for each Pond that is either currently executing or has Demand.
-
-To include all Ponds:
+You may also target a particular Pond, showing only its lineage:
 
 ```bash
-duckstring status dev --all
+duckstring status {pond_name}
 ```
 
 ### 5) Retrieve Data
@@ -303,13 +288,13 @@ duckstring status dev --all
 The simplest way to retrieve data is to load by the Ripple name. This returns the entire contents of the directory, and does not require that the data be in a tabular format (e.g. SQL-compatible).
 
 ```bash
-duckstring get dev outlet daily
+duckstring get reports monthly_summary
 ```
 
-This writes a directory `./ponds/outlet/daily` with the 'daily' Ripple's contents. You may also override the default location:
+This writes a directory `./ponds/reports/monthly_summary` with the 'monthly_summary' Ripple's contents. You may also override the default location:
 
 ```bash
-duckstring get dev outlet daily --path ./daily_output
+duckstring get reports monthly_summary --path ./monthly_summary
 ```
 
 #### SQL Query
@@ -317,19 +302,19 @@ duckstring get dev outlet daily --path ./daily_output
 If the target is an SQL-compatible table (e.g. DuckDB or Parquet), an SQL statement may be sent directly, outputting the result to the command line:
 
 ```bash
-duckstring query dev outlet --sql "SELECT * FROM daily WHERE id=1;"
+duckstring query reports --sql "SELECT * FROM monthly_summary WHERE id=1;"
 ```
 
 Alternatively, include a file path:
 
 ```bash
-duckstring query dev outlet --sql @path/to/query.sql
+duckstring query reports --sql @path/to/query.sql
 ```
 
-Omitting the `--sql` statement queries with a default SELECT * LIMIT 10 on the specified table:
+Using `--table` queries with a default SELECT * FROM {table} LIMIT 10, useful for glimpsing:
 
 ```bash
-duckstring query dev outlet daily
+duckstring query reports --table monthly_summary 
 ```
 
 ##### Write to file
@@ -340,15 +325,15 @@ To output to a file, include a flag for the file format, followed by the file na
 `--json`: JSON records
 `--parquet`: Parquet file
 
-This writes by default to `./ponds/outlet/daily/{filename}`. To overrite the default location you may use the `--path` flag.
+This writes by default to `./ponds/reports/monthly_summary/{filename}`. To overrite the default location you may use the `--path` flag.
 
 For example, to execute an sql statement from file `query.sql` and write the result to CSV at the current directory:
 
 ```bash
-duckstring query dev outlet --sql @query.sql --csv daily.csv --path .
+duckstring query reports --sql @query.sql --csv monthly_summary.csv --path .
 ```
 
 ## Further Reading
 
-For more detail on each component, please read the corresponding documentation in `docs/`.
+For more detail on each component, please read the corresponding documentation in `docs/`. The document `docs/guide/theory.md` is a particularly good start for understanding the details of the orchestrator.
 
