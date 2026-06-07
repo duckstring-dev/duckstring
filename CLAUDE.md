@@ -4,7 +4,7 @@ A packaging standard for data transforms. Each transform is a versioned **Pond**
 
 See `brand/strategy.md` for positioning rationale and `brand/copy.md` for settled copy.
 
-Read `docs/guide/` before touching orchestration logic. `catchment.md`, `ponds.md`, and `ripples.md` are the design spec. **`docs/guide/theory.md` is the authoritative orchestration spec** — its "Pond State Variables" pseudocode is the exact state machine. The reference implementation is the playground engine at `frontend/src/lib/orchestration.ts` (a well-tested TypeScript simulation; the Python engine should be a faithful port). **`orchestration.md` and the Orchestration section below are outdated** — superseded by theory.md.
+`docs/guide/theory.md` is the **authoritative orchestration spec** — its "Pond State Variables" pseudocode is the exact state machine. `frontend/src/lib/orchestration.ts` is a well-tested TypeScript *simulation* (the playground); the Python engine is a faithful, behaviour-for-behaviour port of it. The other `docs/guide/` files (`catchment.md`, `ponds.md`, `ripples.md`) are design background; `docs/guide/orchestration.md` is outdated (superseded by theory.md).
 
 ## Brand & Positioning
 
@@ -14,56 +14,102 @@ Read `docs/guide/` before touching orchestration logic. `catchment.md`, `ponds.m
 - **Tagline**: "There is no DAG." — the DAG exists but is implicit in the package graph. You don't build or govern it.
 - **dbt Mesh users** are the warmest possible first audience. See `brand/strategy.md` for migration path and gaps.
 
+## Current state (2026-06)
+
+The freshness/push-token runtime is **implemented and tested** (the old generation/watermark/demand model and `frontend/src/lib/orchestration.ts`-only era are gone from the backend). The backend + CLI are near-complete. Known next steps: **failure/retry handling** (see Fault tolerance below) and the **UI**.
+
 ## Structure
 
 ```
 src/duckstring/
-  core.py                    # Pond, Ripple, Trickle base classes (mostly stubs)
-  catchment/
-    app.py                   # FastAPI app
-    db.py                    # SQLite connection + migration runner
-    schema/001_init.sql      # Database schema
-docs/guide/                  # Design documentation
-frontend/                    # Next.js UI (built output served as FastAPI static)
+  core.py                  # Pond/Ripple runtime handles + @ripple decorator (used by deployed pond code)
+  engine/                  # PURE orchestration engine (no FastAPI/DB/HTTP). The state machine.
+    core.py                #   shared dataclasses: NEVER, Window, Pond, Ripple, Trigger, BeginRun, Pond/RippleState
+    catchment.py           #   the FULL engine (Ponds + Ripples, pull + push) — the Catchment's brain
+    worker.py              #   push-only WorkerEngine — the Duck's engine (executes a Pond Run to completion)
+    pond.py                #   the per-Pond run LEDGER (SQLite at ponds/{base_pond}/pond.db)
+    __init__.py            #   re-exports the composed API; tests/test_engine.py is the behaviour gate
+  duck/                    # The Duck: per-Pond worker process (intra-Pond push execution)
+    core.py                #   DuckCore: WorkerEngine + ledger + outgoing event buffer (transport-free)
+    executor.py            #   RippleExecutor (thread pool; ripple loading + parquet export) + load_topology
+    client.py              #   CatchmentClient (HTTP: poll jobs, post events)
+    __main__.py            #   `python -m duckstring.duck ...` serve loop
+  catchment/               # The Catchment: FastAPI runtime
+    app.py                 #   create_app + lifespan (starts Driver, scheduler, resume_incomplete)
+    driver.py              #   Driver: engine brain + Duck coordinator + persistence + trigger/window CRUD + restart restore
+    launcher.py            #   SubprocessLauncher (spawns Ducks) / NoopLauncher (tests)
+    db.py                  #   SQLite connect + migration runner
+    schema/001_init.sql    #   Database schema (see below)
+    routes/                #   deploy, orchestrate (triggers/status/windows), duck (jobs/events), data, catchment (health)
+    registry.py, dag.py    #   pond DuckDB registry paths; inter-pond cycle check
+  cli/                     # Typer CLI (`duckstring` / `ds`)
+    trigger.py, window.py  #   tap/pulse/wave/tide/start/stop/remove ; trigger window add/list/remove
+    status.py, deploy.py, data.py, pond.py, catchment.py, config.py, _http.py
+docs/guide/                # Design documentation (theory.md is authoritative)
+frontend/                  # Next.js UI (built output served as FastAPI static at catchment/static)
 ```
+
+## Runtime architecture (two-tier: Catchment + Ducks)
+
+- **The Catchment owns pull.** It runs the **full** engine (`engine/catchment.py`: Ponds *and* Ripples, pull + push), holds triggers/windows, and decides Pond Runs. Modelling ripples is required — the Tap-3/1 result and the bottleneck cadence come from *ripple-level* pull. `start_pond_run` records a `BeginRun(pond, F)` on `state.pending_begin_runs`; `Driver` drains these and dispatches them.
+- **Each executing Pond runs a "Duck"** (`duck/`, one subprocess per Pond, `SubprocessLauncher`). Given `begin_run(F)` it pushes every Ripple to `F` (push-only, `engine/worker.py`), executes ripple functions, and reports `ripple`/`run_completed` events. It is spawned on the first run, killed when the Pond is idle (kept warm while a standing trigger is active), and **survives Catchment downtime** (finishes in-flight runs from its ledger + engine, buffers events, replays idempotently on reconnect).
+- **No cap** on concurrent Pond Runs — completions clock the pull cascade; that is the flow control.
+- **Transport**: Duck→Catchment is REST POST (`/api/duck/{pond}/events`); Catchment→Duck is a short-poll the Duck holds (`/api/duck/{pond}/jobs`). The Duck always dials back, so the same code works local and (future) remote — remote is just a different launcher. `DUCKSTRING_CATCHMENT_URL` tells Ducks where to dial; `DUCKSTRING_DISABLE_DUCKS=1` swaps in `NoopLauncher` (tests exercise the engine + persistence without spawning processes).
+- Cross-Pond data: each Pond writes its tables to `ponds/{name}/data/{table}.parquet` (atomic tmp+replace); sinks read those parquet files. Per-Pond DuckDB registry at `ponds/{name}/registry.duckdb`.
+
+## Triggers & demand control (CLI → `/api/outlets/{name}/…` → Driver)
+
+- **tap** (one pull), **wave** (standing pull), **pulse** (push `now`, propagates upstream), **tide** (standing push; a **staleness bound in seconds**, not cron).
+- **start** — inject demand on the Pond alone: a push target of `NEVER` ("-Inf"), so it runs once against current inputs with **no** upstream propagation (`engine.start_pond`).
+- **stop** — clear the Pond's push+pull and its Ripples' **pull**, but KEEP Ripple push so started runs complete; also cancels the standing trigger. `--upstream` propagates to all ancestors.
+- **remove** — drop only the standing Wave/Tide trigger (existing work drains).
+- One-shot CLI commands (tap/pulse/start) open the live status until the target settles to idle; standing ones stay open.
+
+## Windows (batch availability on Inlets)
+
+RFC-5545-flavoured recurrence (no cron anywhere — `croniter` is gone). `engine.core.Window(start_anchor, duration, freq_unit ∈ {SECOND,MINUTE,HOUR,DAY,WEEK}, freq_interval, valid_days ⊆ {MON..SUN}|None, until)`. Occurrences are `start_anchor + k·delta` filtered by valid_days/until; a Pond is "fresh until" the active window's end, with `D` = window duration. `Window.active_end`/`next_boundary` are O(1) (used per-tick in `pond_source_f`/`next_wake`); `Window.occurrences` (bounded) is used only for add-time overlap validation. Managed via `duckstring trigger window {pond} add|list|remove` (`cli/window.py`); operational config (CLI/API, survives redeploys), not declared in `pond.toml`. `add` requires only `--name`/`--every` (`--start` defaults to 00:00 today; `--duration` defaults to `--every` = back-to-back).
+
+## Fault tolerance (current state — relevant to the next session)
+
+- **Duck**: in-flight Pond Runs complete without the Catchment; events buffer and replay (idempotent on freshness `F`); on (re)start the Duck reconciles against its ledger and re-runs **only incomplete Ripples**.
+- **Catchment restart**: `Driver.reload` rebuilds engine state from SQLite (demand/freshness from `pond_state`/`pond_target`, `gen` from `pond_run` counts, per-Ripple `end_f` from successful `ripple_run` rows), and `resume_incomplete` (called from the lifespan) re-dispatches any `pond_run` left `status='running'`. `on_event` stamps a Ripple's `start_f` from the event freshness so replayed/resumed completions record correctly.
+- **Known gap (next session)**: ripple/run **failure handling** is not implemented in the new runtime. The Duck logs a ripple error but does not report failure status, and the Catchment does not retry. The `immediate_retries`/`source_retries` columns on `pond_version` (and `retry` on `pond_run`/`ripple_run`) exist but are not yet acted upon.
 
 ## Catchment database
 
-SQLite file at the catchment root. Schema in `catchment/schema/001_init.sql`, applied by `catchment/db.py:migrate()`. New migrations are numbered SQL files (`002_*.sql`, etc.). All file paths stored in the database are **relative to the catchment root**.
+SQLite `duck.db` at the catchment root. Schema in `catchment/schema/001_init.sql`, applied by `catchment/db.py:migrate()`. New migrations are numbered SQL files (`002_*.sql`, …). All file paths stored in the DB are **relative to the catchment root**. Freshness/targets are stored as UTC ISO-8601 text.
 
-### Schema decisions
+### Schema (identity is a three-table split)
 
-- `pond` (abstract named entity) / `pond_version` (specific deployed snapshot) — no `pond_major` table; the major version line is expressed as `(pond_id, major)` inline where needed.
-- `is_active` on `pond_version` with a partial unique index: at most one active version per `(pond_id, major)`.
-- `git_branch` on `pond` (abstract) — it's a configuration against the entity, not a version. `source_path` on `pond_version` — the materialised snapshot.
-- `pond_to_pond` = inter-pond declared sources (from `pond.toml`). `ripple_to_ripple` = intra-pond parent edges only. These are strictly separate; never mix inter- and intra-pond edges in the same table.
-- `watermark` is at Pond level `(sink_pond, source_pond, source_major)` — change monitoring only applies at the inter-Pond boundary, and watermarks must survive version upgrades within a major.
-- `generation` belongs to `pond_run`, not `ripple`.
-- `demand.sink_id` is null for trigger-sourced demand (no `pond_trigger_id` FK needed on `demand`).
+- **`pond_name`** — the abstract named entity (`name`, `kind` ∈ inlet/pond/outlet, `git_branch`).
+- **`pond_version`** — a specific deployed snapshot (`pond_name_id`, `version`, `major`, `source_path`, retry config). Immutable artifact; topology + run history key off this.
+- **`pond`** — the **selected** version, one per `(pond_name, major)` → `pond_version` (upserted on deploy). This is "the Pond" and the FK target for all live demand/freshness/graph tables.
+- Topology (keyed on `pond_version`): `ripple`, `ripple_to_ripple` (intra-pond edges, all required).
+- Live state (keyed on `pond`): `pond_to_pond` (sink `pond_id` → source `pond_name_id` + `source_major`, so a sink can deploy before its source), `pond_state` (start_f/end_f/d_ms/has_pull/has_received_pull), `pond_target` (push target set), `pond_window` (PK `(pond_id, name)`), `pond_trigger` (PK `pond_id`; kind wave/tide, bound_ms).
+- History (keyed on `pond_version` + freshness `f`): `pond_run`, `ripple_run`.
+- The **per-Pond run ledger is NOT in `duck.db`** — it lives at `ponds/{base_pond}/pond.db` (owned by `engine/pond.py`): the Duck's operational/recovery record (`ripple_run_state`, `pond_run`). The Catchment's `pond_run`/`ripple_run` are the canonical history.
 
-**Note:** the schema reflects current code, not the target design. The `watermark`, `generation`, `pond_run`, and `demand` tables encode the *superseded* generation/watermark model (see Orchestration below) and need a redesign to the freshness/push-token model in `theory.md`. The versioning tables (`pond`, `pond_version`, `pond_to_pond`, `ripple_to_ripple`) are unaffected.
+## Orchestration model (theory.md is authoritative)
 
-## Orchestration
+Freshness-based Kanban. The Pond is a packaging/versioning boundary; its `start`/`end` are zero-duration boundary nodes carried as Pond state, so Pond and Ripple share the same rules.
 
-**Authoritative spec: `docs/guide/theory.md`** (the "Pond State Variables" pseudocode is the exact state machine). **Reference implementation: `frontend/src/lib/orchestration.ts`** — a well-tested TypeScript simulation; the Python engine should be a faithful port.
+- **Freshness `F`** — a UTC timestamp per node: the run-start time of the oldest root feeding it (with windows, the "fresh until" window end). `NEVER` (`datetime.min`) is the sentinel for never-run. Staleness = `now + D - F`.
+- **Pull** (Tap/Wave) — a `hasPull` token; a node runs when a parent is fresher (`sourceF > startF`) and re-arms parents on start. Cold-start guards use **startF** (`source.startF <= this.startF`).
+- **Push** (Pulse/Tide/start) — a **set** of unsatisfied target freshnesses; run when `sourceF >= min(targets)`, clearing every target reached. Pond run start stamps every Ripple with `Pond.startF`.
+- The four hard-won landmines (startF cold-start guards, push target *set*, Tide `max(targets) ?? startF` clock ref, the run-start ripple stamp) are encoded in `engine/` and guarded by `tests/test_engine.py` — preserve them.
 
-Freshness-based Kanban at the Ripple level. The Pond is a packaging/versioning boundary; its `start`/`end` are zero-duration boundary nodes carried as Pond state, so Pond and Ripple share the same rules.
+## Testing
 
-- **Freshness `F`** — a timestamp per node: the run-start time of the oldest root feeding it (with windows, the "fresh until" window end). Staleness = `now + D - F`. This replaces generations.
-- **Pull** (Tap/Wave) — a `hasPull` token. A node runs when a parent is fresher than it (`sourceF > startF`) and re-arms its parents on start; cold-start demand propagates up to idle/behind ancestors.
-- **Push** (Pulse/Tide) — a **set** of unsatisfied target freshnesses per node (not a single value). A node runs when `sourceF >= min(targets)`, taking the freshest input and clearing every target it reaches; targets propagate eagerly to required parents.
-- **Triggers** — Tap (one pull), Wave (re-pull on completion/idle), Pulse (one push to `now`), Tide (a clock: push `now` whenever the last requested freshness ages past the staleness bound).
-- **Required vs optional** parents/sources, and **Windows** on Inlets (batch sources), behave as in theory.md.
-
-**Superseded — do not build:** the generation-counter + per-edge watermark + `demand(sink_id, is_stop, is_persistent)` design that previously filled this section. The freshness/push-token model replaces all of it.
+`pytest` (budgets via `pytest-timeout`; `timeout = 1` default in `pyproject.toml`, sim/integration tests override). Pure-engine tests are behavioural simulations driving `sentinel`/`tick` over sim-time (100 ms step, **never sleep**). Session env in `tests/conftest.py`: `DUCKSTRING_SLEEP_MULTIPLIER=0.01`, `DUCKSTRING_DISABLE_DUCKS=1`. Notable suites: `test_engine` (validated engine), `test_engine_split`, `test_duck` (buffer/replay/recovery), `test_restart` (restart restore), `test_window`, `test_runtime` (**e2e: real subprocess Ducks** on the demo ponds; enables Ducks + a live server). Demo ponds in `src/duckstring/demo/` (transactions, products → sales → reports; bottleneck = sales.join 3 s).
 
 ## Before finishing any code change
 
-Run `ruff check .` and fix all errors before considering the task done.
+Run `ruff check .` and fix all errors (line-length 128; E/F/I/B).
 
 ## Conventions
 
 - Table names: **singular** (`pond`, not `ponds`).
-- Association tables: **`{parent}_to_{child}`** for many-to-many; `{child}_in_{parent}` for nesting/hierarchy.
-- FK columns: **`{table}_id`**; use a qualifier (`sink_id`, `source_id`) when two FKs reference the same table.
-- Inter-pond and intra-pond concerns are kept in separate tables — do not unify them.
+- Association tables: **`{parent}_to_{child}`** for many-to-many; `{child}_in_{parent}` for nesting.
+- FK columns: **`{table}_id`**; qualify (`sink_id`, `source_id`) when two FKs reference the same table.
+- Inter-pond and intra-pond concerns stay in separate tables — do not unify them.
+- Freshness/demand state is keyed on `pond` (the selected version); topology and run history on `pond_version`.
