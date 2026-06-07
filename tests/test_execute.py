@@ -110,6 +110,35 @@ def test_remove_unknown_catchment_exits(runner):
     assert result.exit_code != 0
 
 
+# ── start / stop ─────────────────────────────────────────────────────────────────
+
+
+def test_start_succeeds(runner, live_catchment):
+    _deploy_outlet(live_catchment)
+    result = runner.invoke(app, ["trigger", "start", "outlet", "--silent"])
+    assert result.exit_code == 0, result.output
+    assert "Started" in result.output
+
+
+def test_stop_succeeds(runner, live_catchment):
+    _deploy_outlet(live_catchment)
+    result = runner.invoke(app, ["trigger", "stop", "outlet"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "Stopped."
+
+
+def test_stop_upstream(runner, live_catchment):
+    _deploy_outlet(live_catchment)
+    result = runner.invoke(app, ["trigger", "stop", "outlet", "--upstream"])
+    assert result.exit_code == 0, result.output
+    assert "upstream" in result.output
+
+
+def test_stop_unknown_catchment_exits(runner):
+    result = runner.invoke(app, ["trigger", "stop", "outlet", "-c", "nonexistent"])
+    assert result.exit_code != 0
+
+
 def test_tide_unknown_catchment_exits(runner):
     result = runner.invoke(app, ["trigger", "tide", "outlet", "-c", "nonexistent", "--bound", "60"])
     assert result.exit_code != 0

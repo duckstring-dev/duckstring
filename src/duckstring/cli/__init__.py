@@ -7,7 +7,7 @@ from . import pond as pond_cmd
 from .data import get, query
 from .deploy import deploy
 from .status import status
-from .trigger import pulse, remove, tap, tide, wave
+from .trigger import pulse, remove, start, stop, tap, tide, wave
 
 app = typer.Typer(help="Duckstring CLI", no_args_is_help=True, add_completion=True)
 
@@ -15,6 +15,8 @@ trigger_app = typer.Typer(
     help="Send execution signals to Outlet Ponds.",
     no_args_is_help=True,
 )
+trigger_app.command("start")(start)
+trigger_app.command("stop")(stop)
 trigger_app.command("tap")(tap)
 trigger_app.command("pulse")(pulse)
 trigger_app.command("wave")(wave)

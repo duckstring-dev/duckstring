@@ -7,7 +7,6 @@ cron. Status reports freshness/staleness from the engine, not generations.
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -63,14 +62,24 @@ def tide(name: str, body: _TideBody, request: Request):
     return {"ok": True}
 
 
+@router.post("/outlets/{name}/start")
+def start(name: str, request: Request):
+    """Inject demand directly into a Pond — one run against current inputs, no upstream propagation."""
+    _require_pond(request, name)
+    _driver(request).start(name)
+    return {"ok": True}
+
+
 class _StopBody(BaseModel):
-    version: Optional[int] = None
+    upstream: bool = False
 
 
 @router.post("/outlets/{name}/stop")
 def stop(name: str, request: Request, body: _StopBody = _StopBody()):
+    """Clear a Pond's demand (push+pull) + its Ripples' pull; keep started runs completing.
+    ``upstream`` also stops every ancestor."""
     _require_pond(request, name)
-    _driver(request).stop(name)
+    _driver(request).stop(name, upstream=body.upstream)
     return {"ok": True}
 
 

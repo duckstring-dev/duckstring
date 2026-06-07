@@ -4,6 +4,8 @@ resume Pond Runs that were in flight when it stopped — not come up as if fresh
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from duckstring.catchment.db import connect, migrate
@@ -69,3 +71,28 @@ def test_restart_resumes_incomplete_run(tmp_path):
     d2.resume_incomplete()
     # The incomplete run is re-dispatched to the (would-be) Duck as a begin_run job.
     assert any(j["kind"] == "begin_run" and j["f"] == f for j in d2.jobs.get("p", []))
+
+
+# ─── start / stop demand controls ───────────────────────────────────────────────
+
+
+def test_start_injects_direct_run(tmp_path):
+    d = _driver(tmp_path)
+    d.start("p")
+    # One direct Pond Run is dispatched, with no upstream propagation (p is an Inlet anyway).
+    assert any(j["kind"] == "begin_run" for j in d.jobs.get("p", []))
+    assert d.db.execute("SELECT COUNT(*) FROM pond_run").fetchone()[0] == 1
+    assert d.state.pond_states["p"].runs_started == 1
+
+
+def test_stop_clears_demand_keeps_ripple_push(tmp_path):
+    d = _driver(tmp_path)
+    far = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    d.state.pond_states["p"].has_pull = True
+    d.state.ripple_states["p.r2"].has_pull = True
+    d.state.ripple_states["p.r2"].targets = [far]  # in-flight push
+    d.stop("p")
+    ps = d.state.pond_states["p"]
+    assert not ps.has_pull and not ps.targets
+    assert not d.state.ripple_states["p.r2"].has_pull       # pull cleared
+    assert d.state.ripple_states["p.r2"].targets == [far]   # push kept so the run completes

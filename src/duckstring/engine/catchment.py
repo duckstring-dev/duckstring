@@ -57,6 +57,7 @@ __all__ = [
     "tap_pond",
     "pulse_pond",
     "stop_pond",
+    "start_pond",
     "sentinel",
     "tick",
     "next_wake",
@@ -324,8 +325,10 @@ def pulse_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
     return s
 
 
-def stop_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
-    """Greedy stop: clear all pull/push demand up the whole ancestry. In-flight runs drain."""
+def stop_pond(state: EngineState, pid: PondId, now: datetime, upstream: bool = False) -> EngineState:
+    """Stop a Pond: clear its push+pull demand and its Ripples' **pull** demand, but KEEP Ripple push
+    targets so any already-started Pond Run completes. With ``upstream=True`` the stop propagates to
+    every ancestor (a hasStop token following the source edges), clearing each one's demand too."""
     s = state.clone()
     seen: set[PondId] = set()
     queue = [pid]
@@ -339,11 +342,23 @@ def stop_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
         ps.has_received_pull = False
         ps.targets = []
         for rid in ripples_of(s, cur):
-            s.ripple_states[rid].has_pull = False
-            s.ripple_states[rid].targets = []
-        for sp in s.ponds[cur].sources:
-            if sp not in seen:
-                queue.append(sp)
+            s.ripple_states[rid].has_pull = False  # keep targets (push) so started runs complete
+        if upstream:
+            for sp in s.ponds[cur].sources:
+                if sp not in seen:
+                    queue.append(sp)
+    return s
+
+
+def start_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
+    """Inject demand directly into a Pond: a push target of NEVER (an "-Inf" freshness) on the Pond
+    alone, with **no upstream propagation**. The Pond runs once against whatever input it currently
+    has (``sourceF >= NEVER`` always holds), then the target clears. Distinct from a Pulse, which
+    targets ``now`` and propagates upstream to force a full refresh."""
+    s = state.clone()
+    ps = s.pond_states[pid]
+    if NEVER not in ps.targets:
+        ps.targets.append(NEVER)
     return s
 
 

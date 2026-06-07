@@ -32,6 +32,7 @@ from ..engine import (
     next_wake,
     pulse_pond,
     sentinel,
+    start_pond,
     stop_pond,
     tap_pond,
     tick,
@@ -197,15 +198,33 @@ class Driver:
             self._persist_trigger(pond, "tide", int(bound.total_seconds() * 1000))
             self._tick_process(_now())
 
-    def stop(self, pond: str) -> None:
+    def start(self, pond: str) -> None:
         with self.lock:
-            self.state = stop_pond(self.state, pond, _now())
-            self.state.triggers.pop(pond, None)
-            self.db.execute(
-                "DELETE FROM pond_trigger WHERE pond_id = ?", (self.meta[pond]["pond_id"],)
-            )
+            self.state = start_pond(self.state, pond, _now())
+            self._process(_now())
+
+    def stop(self, pond: str, upstream: bool = False) -> None:
+        with self.lock:
+            self.state = stop_pond(self.state, pond, _now(), upstream=upstream)
+            # Cancel any standing Wave/Tide trigger on every Pond the stop reached, so it can't re-tap.
+            for name in self._stop_set(pond, upstream):
+                if self.state.triggers.pop(name, None) is not None:
+                    self.db.execute("DELETE FROM pond_trigger WHERE pond_id = ?", (self.meta[name]["pond_id"],))
             self.db.commit()
             self._process(_now())
+
+    def _stop_set(self, pond: str, upstream: bool) -> set[str]:
+        """The Ponds a stop reaches: just the target, or the whole upstream ancestry."""
+        seen: set[str] = set()
+        queue = [pond]
+        while queue:
+            cur = queue.pop(0)
+            if cur in seen:
+                continue
+            seen.add(cur)
+            if upstream:
+                queue.extend(sp for sp in self.state.ponds[cur].sources if sp not in seen)
+        return seen
 
     def remove_trigger(self, pond: str) -> None:
         """Remove the standing Wave/Tide trigger from a Pond. Unlike stop, this leaves existing demand

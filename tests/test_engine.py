@@ -135,9 +135,9 @@ class Driver:
         self.state = pulse_pond(self.state, pid, self.now)
         self._react()
 
-    def stop(self, pid: str) -> None:
-        self.state = stop_pond(self.state, pid, self.now)
-        # A real stop also cancels any standing trigger on the path.
+    def stop(self, pid: str, upstream: bool = False) -> None:
+        self.state = stop_pond(self.state, pid, self.now, upstream=upstream)
+        # Halt for the test: also drop any standing trigger so it can't re-tap.
         self.state.triggers = {k: v for k, v in self.state.triggers.items() if k != pid}
         self._react()
 
@@ -335,22 +335,43 @@ def test_windowed_inlet_throttles_chain():
     assert d.state.pond_states["w"].runs_completed <= 3
 
 
+@pytest.mark.timeout(1)
+def test_stop_local_clears_demand_keeps_ripple_push():
+    # stop_pond on the target Pond only: clears its push+pull and its Ripples' pull, KEEPS Ripple
+    # push targets, and does not touch upstream.
+    s, _ = chain_topology()
+    far = T0 + secs(99)
+    s.pond_states["p2"].has_pull = True
+    s.pond_states["p2"].targets = [far]
+    s.ripple_states["s1"].has_pull = True
+    s.ripple_states["s1"].targets = [far]
+    s.pond_states["p1"].has_pull = True  # upstream demand
+    out = stop_pond(s, "p2", T0)
+    assert not out.pond_states["p2"].has_pull and not out.pond_states["p2"].targets
+    assert not out.ripple_states["s1"].has_pull          # ripple pull cleared
+    assert out.ripple_states["s1"].targets == [far]      # ripple push kept (started run completes)
+    assert out.pond_states["p1"].has_pull                # upstream untouched (no --upstream)
+
+
+@pytest.mark.timeout(1)
+def test_stop_upstream_propagates():
+    s, _ = chain_topology()
+    s.pond_states["p1"].has_pull = True
+    s.pond_states["p2"].has_pull = True
+    out = stop_pond(s, "p2", T0, upstream=True)
+    assert not out.pond_states["p2"].has_pull
+    assert not out.pond_states["p1"].has_pull            # propagated to the source
+
+
 @pytest.mark.timeout(5)
-def test_stop_clears_demand_and_drains():
+def test_stop_drains_then_halts():
     s, dur = chain_topology()
     d = Driver(s, dur)
     d.state.triggers = {"p2": Trigger("p2", "wave")}
     d.run(10)  # run a few cycles
     assert d.state.pond_states["p2"].runs_completed > 1
-    d.stop("p2")
-    # Demand cleared everywhere up the ancestry.
-    for pid in ("p1", "p2"):
-        ps = d.state.pond_states[pid]
-        assert not ps.has_pull and not ps.has_received_pull and not ps.targets
-    for rid in ("r1", "r2", "r3", "s1"):
-        rs = d.state.ripple_states[rid]
-        assert not rs.has_pull and not rs.targets
-    # In-flight runs drain, then nothing new starts.
+    d.stop("p2", upstream=True)
+    # In-flight runs drain (ripple push kept), then nothing new starts.
     d.run(5)
     settled = d.state.pond_states["p2"].runs_completed
     d.run(10)

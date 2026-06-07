@@ -138,7 +138,7 @@ def test_pulse_runs_chain_end_to_end(runtime):
     assert reports["end_f"] is not None and sales["end_f"] is not None
 
 
-def test_wave_then_stop(runtime):
+def test_wave_then_remove(runtime):
     url, root = runtime
     _deploy_demo(url)
 
@@ -158,12 +158,12 @@ def test_wave_then_stop(runtime):
 
     assert _wait(lambda: completed_runs() >= 2), "wave did not produce repeated runs"
 
-    httpx.post(f"{url}/api/outlets/reports/stop", timeout=5.0)
-    time.sleep(1.0)
+    # Removing the standing trigger halts the Wave; in-flight runs drain, then it stabilises.
+    httpx.post(f"{url}/api/outlets/reports/untrigger", timeout=5.0)
+    time.sleep(2.0)
     settled = completed_runs()
-    time.sleep(1.5)
-    # After stop, no significant new runs start (in-flight may drain by at most ~1).
-    assert completed_runs() <= settled + 1
+    time.sleep(2.0)
+    assert completed_runs() == settled
 
 
 def test_restart_restores_state_e2e(tmp_path_factory, monkeypatch):
