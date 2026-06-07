@@ -85,12 +85,19 @@ CREATE TABLE pond_target (
     PRIMARY KEY (pond_id, target_f)
 );
 
--- Batch-availability windows on Inlets: a cron start + a duration ("fresh until" the end).
+-- Batch-availability windows on Inlets (RFC-5545-flavoured recurrence). The first window opens at
+-- start_anchor for duration_seconds, recurring every freq_interval x freq_unit; valid_days restricts
+-- weekdays (CSV of MON..SUN, NULL=all); until_time ends the recurrence. Timestamps are UTC ISO-8601.
 CREATE TABLE pond_window (
-    id          INTEGER PRIMARY KEY,
-    pond_id     INTEGER NOT NULL REFERENCES pond(id),
-    cron        TEXT    NOT NULL,
-    duration_ms INTEGER NOT NULL
+    pond_id          INTEGER NOT NULL REFERENCES pond(id),
+    name             TEXT    NOT NULL,
+    start_anchor     TEXT    NOT NULL,
+    duration_seconds INTEGER NOT NULL,
+    freq_unit        TEXT    NOT NULL CHECK (freq_unit IN ('SECOND', 'MINUTE', 'HOUR', 'DAY', 'WEEK')),
+    freq_interval    INTEGER NOT NULL DEFAULT 1,
+    valid_days       TEXT,
+    until_time       TEXT,
+    PRIMARY KEY (pond_id, name)
 );
 
 -- Standing triggers. Tap/Pulse are one-shot (no row). Tide carries a staleness bound.

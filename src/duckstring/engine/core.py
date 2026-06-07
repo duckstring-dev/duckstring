@@ -26,13 +26,91 @@ ZERO = timedelta(0)
 # ─── Topology (immutable inputs) ──────────────────────────────────────────────
 
 
+_DAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+_UNIT_SECONDS = {"SECOND": 1, "MINUTE": 60, "HOUR": 3600, "DAY": 86400, "WEEK": 604800}
+
+
 @dataclass(frozen=True)
 class Window:
-    """A recurring batch-availability window on an Inlet: opens on every ``cron`` fire and stays
-    open (data "fresh until" the end) for ``duration``."""
+    """A recurring batch-availability window on an Inlet (RFC-5545-flavoured): the first window opens
+    at ``start_anchor`` and stays open ("fresh until" the end) for ``duration``; it then recurs every
+    ``freq_interval`` × ``freq_unit``. ``valid_days`` (a set of MON..SUN, or None) restricts which
+    weekdays an occurrence is kept; ``until`` ends the recurrence. Occurrences are the grid
+    ``start_anchor + k·delta`` (k ≥ 0), filtered by ``valid_days``/``until``."""
 
-    cron: str
+    start_anchor: datetime
     duration: timedelta
+    freq_unit: str  # SECOND | MINUTE | HOUR | DAY | WEEK
+    freq_interval: int = 1
+    valid_days: frozenset[str] | None = None
+    until: datetime | None = None
+
+    def _delta(self) -> timedelta:
+        return timedelta(seconds=_UNIT_SECONDS[self.freq_unit] * self.freq_interval)
+
+    def _kept(self, t: datetime) -> bool:
+        if self.until is not None and t > self.until:
+            return False
+        return self.valid_days is None or _DAYS[t.weekday()] in self.valid_days
+
+    def active_end(self, now: datetime) -> datetime | None:
+        """If ``now`` falls inside an occurrence, return that window's end ("fresh until"); else None.
+        O(1): the most-recent grid point at/before ``now`` (windows are assumed non-overlapping)."""
+        delta = self._delta()
+        if now < self.start_anchor or delta.total_seconds() <= 0:
+            return None
+        c = self.start_anchor + ((now - self.start_anchor) // delta) * delta
+        if not self._kept(c):
+            return None
+        end = c + self.duration
+        return end if now < end else None
+
+    def next_open(self, now: datetime, cap: int = 10000) -> datetime | None:
+        """The next occurrence start strictly after ``now`` (bounded scan for ``valid_days``)."""
+        delta = self._delta()
+        if delta.total_seconds() <= 0:
+            return None
+        k = 0 if now < self.start_anchor else (now - self.start_anchor) // delta + 1
+        for i in range(cap):
+            t = self.start_anchor + (k + i) * delta
+            if self.until is not None and t > self.until:
+                return None
+            if self.valid_days is None or _DAYS[t.weekday()] in self.valid_days:
+                return t
+        return None
+
+    def next_boundary(self, now: datetime) -> datetime | None:
+        """The soonest future instant the window's active-state changes (its close if active, or the
+        next open) — used to schedule a tick."""
+        cands = []
+        end = self.active_end(now)
+        if end is not None and end > now:
+            cands.append(end)
+        nxt = self.next_open(now)
+        if nxt is not None and nxt > now:
+            cands.append(nxt)
+        return min(cands) if cands else None
+
+    def occurrences(self, hstart: datetime, hend: datetime, cap: int = 2000) -> list[tuple[datetime, datetime]]:
+        """Expand to explicit (start, end) windows intersecting [hstart, hend). Bounded by ``cap``;
+        used only for the overlap check on add, not the per-tick hot path."""
+        delta = self._delta()
+        if delta.total_seconds() <= 0:
+            return []
+        if hstart <= self.start_anchor:
+            k = 0
+        else:
+            k = max(0, (hstart - self.start_anchor) // delta - 1)  # back up one to catch a straddling window
+        out: list[tuple[datetime, datetime]] = []
+        for i in range(cap):
+            t = self.start_anchor + (k + i) * delta
+            if t >= hend or (self.until is not None and t > self.until):
+                break
+            if (self.valid_days is None or _DAYS[t.weekday()] in self.valid_days):
+                te = t + self.duration
+                if te > hstart:
+                    out.append((t, te))
+        return out
 
 
 @dataclass

@@ -31,8 +31,9 @@ def _parse_version(s: str) -> tuple[int, str, bool]:
 
 
 def _pond_config(toml_path: Path) -> dict:
-    """Extract the deploy-relevant config from pond.toml: sources, retries, windows, kind."""
-    cfg = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "windows": [], "kind": None}
+    """Extract the deploy-relevant config from pond.toml: sources, retries, kind. (Windows are
+    operational config managed via `duckstring trigger window`, not declared at deploy time.)"""
+    cfg = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": None}
     if not toml_path.exists():
         return cfg
     info = _read_toml(toml_path.read_text(encoding="utf-8"))
@@ -41,9 +42,6 @@ def _pond_config(toml_path: Path) -> dict:
     cfg["immediate_retries"] = pond.get("immediate_retries", 0)
     cfg["source_retries"] = pond.get("source_retries", 0)
     cfg["kind"] = pond.get("type")
-    # Windows: a list of {cron, duration_seconds} (batch availability on inlets).
-    for w in info.get("window", []) or info.get("windows", []):
-        cfg["windows"].append({"cron": w["cron"], "duration_ms": int(float(w["duration_seconds"]) * 1000)})
     return cfg
 
 
@@ -144,13 +142,6 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
                 "INSERT OR REPLACE INTO pond_to_pond "
                 "(pond_id, source_pond_name_id, source_major, required, min_version) VALUES (?, ?, ?, ?, ?)",
                 (pond_id, src_pn_id, src_major, int(src_required), src_min),
-            )
-
-        db.execute("DELETE FROM pond_window WHERE pond_id = ?", (pond_id,))
-        for w in cfg["windows"]:
-            db.execute(
-                "INSERT INTO pond_window (pond_id, cron, duration_ms) VALUES (?, ?, ?)",
-                (pond_id, w["cron"], w["duration_ms"]),
             )
 
         from ..dag import assert_no_cycles

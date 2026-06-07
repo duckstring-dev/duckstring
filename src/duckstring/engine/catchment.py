@@ -17,8 +17,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from croniter import croniter
-
 from .core import (
     NEVER,
     ZERO,
@@ -121,23 +119,18 @@ def any_ripple_busy(s: EngineState, pid: PondId) -> bool:
 # ─── Freshness derivation ─────────────────────────────────────────────────────
 
 
-def _window_instance(w: Window, now: datetime) -> tuple[datetime, datetime]:
-    start = croniter(w.cron, now).get_prev(datetime)
-    return start, start + w.duration
-
-
 def pond_source_f(s: EngineState, pid: PondId, now: datetime) -> tuple[datetime | None, timedelta]:
     pond = s.ponds[pid]
     if not pond.sources:
         if pond.windows:
             best: tuple[datetime, timedelta] | None = None
             for w in pond.windows:
-                _, end = _window_instance(w, now)
-                if now < end and (best is None or end < best[0]):
+                end = w.active_end(now)
+                if end is not None and (best is None or end < best[0]):
                     best = (end, w.duration)
             if best is not None:
                 return best
-            return None, ZERO
+            return None, ZERO  # between windows: cannot run
         return now, ZERO
     required = [sp for sp in pond.sources if sp not in pond.optional_sources]
     if required:
@@ -409,10 +402,9 @@ def next_wake(now: datetime, state: EngineState) -> datetime | None:
         if pond.sources or not pond.windows:
             continue
         for w in pond.windows:
-            _, end = _window_instance(w, now)
-            if now < end:
-                candidates.append(end)
-            candidates.append(croniter(w.cron, now).get_next(datetime))
+            b = w.next_boundary(now)
+            if b is not None:
+                candidates.append(b)
     for pid, trig in state.triggers.items():
         if trig.kind != "tide":
             continue

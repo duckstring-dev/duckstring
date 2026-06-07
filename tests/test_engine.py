@@ -177,7 +177,7 @@ def test_pond_source_f_live_inlet():
 
 @pytest.mark.timeout(1)
 def test_pond_source_f_windowed():
-    pond = Pond("w", "w", windows=[Window("* * * * *", secs(20))])
+    pond = Pond("w", "w", windows=[Window(start_anchor=T0, duration=secs(20), freq_unit="MINUTE", freq_interval=1)])
     s = build([pond], [Ripple("wr", "w", "wr")])
     # Inside the window [00:00:00, 00:00:20): F = window end, D = duration.
     f, d = pond_source_f(s, "w", T0 + secs(5))
@@ -227,7 +227,7 @@ def test_startf_propagation_guard():
 
 @pytest.mark.timeout(1)
 def test_next_wake_window_and_tide():
-    pond = Pond("w", "w", windows=[Window("* * * * *", secs(20))])
+    pond = Pond("w", "w", windows=[Window(start_anchor=T0, duration=secs(20), freq_unit="MINUTE", freq_interval=1)])
     s = build([pond], [Ripple("wr", "w", "wr")])
     # Inside the window → next wake is its close at 00:00:20.
     assert next_wake(T0 + secs(5), s) == T0 + secs(20)
@@ -322,7 +322,7 @@ def test_push_precision_diamond():
 
 @pytest.mark.timeout(5)
 def test_windowed_inlet_throttles_chain():
-    inlet = Pond("w", "w", windows=[Window("* * * * *", secs(20))])
+    inlet = Pond("w", "w", windows=[Window(start_anchor=T0, duration=secs(20), freq_unit="MINUTE", freq_interval=1)])
     child = Pond("c", "c", sources=["w"])
     state = build([inlet, child], [Ripple("wr", "w", "wr"), Ripple("cr", "c", "cr")], [Trigger("c", "wave")])
     d = Driver(state, {"wr": secs(1), "cr": secs(1)})

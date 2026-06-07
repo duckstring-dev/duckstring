@@ -95,12 +95,10 @@ class Driver:
                         sources.append(sname)
                         if not required:
                             optional.add(sname)
-                windows = [
-                    Window(cron, timedelta(milliseconds=dur))
-                    for cron, dur in db.execute(
-                        "SELECT cron, duration_ms FROM pond_window WHERE pond_id = ?", (pond_id,)
-                    )
-                ]
+                windows = [self._row_to_window(r) for r in db.execute(
+                    "SELECT start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time "
+                    "FROM pond_window WHERE pond_id = ?", (pond_id,)
+                )]
                 ponds[name] = Pond(id=name, name=name, sources=sources, optional_sources=optional, windows=windows)
                 pond_states[name] = self._load_pond_state(pond_id)
 
@@ -236,6 +234,78 @@ class Driver:
             )
             self.db.commit()
             self._process(_now())
+
+    # ─── Windows (batch-availability on Inlets) ─────────────────────────────────
+
+    def _row_to_window(self, row) -> Window:
+        sa, dur, unit, interval, days, until = row
+        return Window(
+            start_anchor=datetime.fromisoformat(sa),
+            duration=timedelta(seconds=dur),
+            freq_unit=unit,
+            freq_interval=interval,
+            valid_days=frozenset(days.split(",")) if days else None,
+            until=datetime.fromisoformat(until) if until else None,
+        )
+
+    def add_window(self, pond: str, name: str, start_anchor: str, duration_seconds: int,
+                   freq_unit: str, freq_interval: int, valid_days: str | None = None,
+                   until_time: str | None = None) -> None:
+        """Add a recurring window to a Pond. Raises ValueError on a duplicate name or an overlap with
+        an existing window (windows on a Pond must form a non-overlapping supply timeline)."""
+        with self.lock:
+            pond_id = self.meta[pond]["pond_id"]
+            if self.db.execute(
+                "SELECT 1 FROM pond_window WHERE pond_id = ? AND name = ?", (pond_id, name)
+            ).fetchone():
+                raise ValueError(f"A window named '{name}' already exists on '{pond}'")
+            new_w = self._row_to_window(
+                (start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time)
+            )
+            self._assert_no_overlap(pond, name, new_w)
+            self.db.execute(
+                "INSERT INTO pond_window (pond_id, name, start_anchor, duration_seconds, freq_unit, "
+                "freq_interval, valid_days, until_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (pond_id, name, start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time),
+            )
+            self.db.commit()
+            self.reload()
+
+    def _assert_no_overlap(self, pond: str, name: str, new_w: Window) -> None:
+        h0 = new_w.start_anchor
+        h1 = h0 + timedelta(days=366)
+        new_wins = new_w.occurrences(h0, h1, cap=500)
+        for ew in self.state.ponds[pond].windows:
+            for es, ee in ew.occurrences(h0, h1, cap=500):
+                for ns, ne in new_wins:
+                    if max(ns, es) < min(ne, ee):
+                        raise ValueError(
+                            f"Window '{name}' overlaps an existing window on '{pond}' "
+                            f"({ns.isoformat()} – {ne.isoformat()})"
+                        )
+
+    def list_windows(self, pond: str) -> list[dict]:
+        with self.lock:
+            pond_id = self.meta[pond]["pond_id"]
+            rows = self.db.execute(
+                "SELECT name, start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, "
+                "until_time FROM pond_window WHERE pond_id = ? ORDER BY name", (pond_id,)
+            ).fetchall()
+            return [
+                {"name": n, "start_anchor": sa, "duration_seconds": d, "freq_unit": u,
+                 "freq_interval": i, "valid_days": vd, "until_time": ut}
+                for (n, sa, d, u, i, vd, ut) in rows
+            ]
+
+    def remove_window(self, pond: str, name: str) -> bool:
+        with self.lock:
+            pond_id = self.meta[pond]["pond_id"]
+            cur = self.db.execute(
+                "DELETE FROM pond_window WHERE pond_id = ? AND name = ?", (pond_id, name)
+            )
+            self.db.commit()
+            self.reload()
+            return cur.rowcount > 0
 
     # ─── Duck events ──────────────────────────────────────────────────────────
 

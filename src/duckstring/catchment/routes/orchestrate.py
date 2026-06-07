@@ -89,3 +89,43 @@ def untrigger(name: str, request: Request):
     _require_pond(request, name)
     _driver(request).remove_trigger(name)
     return {"ok": True}
+
+
+# ─── Windows (batch-availability on Inlets) ──────────────────────────────────────
+
+
+class _WindowBody(BaseModel):
+    name: str
+    start_anchor: str
+    duration_seconds: int
+    freq_unit: str
+    freq_interval: int = 1
+    valid_days: str | None = None
+    until_time: str | None = None
+
+
+@router.post("/outlets/{name}/windows")
+def add_window(name: str, body: _WindowBody, request: Request):
+    _require_pond(request, name)
+    try:
+        _driver(request).add_window(
+            name, body.name, body.start_anchor, body.duration_seconds,
+            body.freq_unit, body.freq_interval, body.valid_days, body.until_time,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.get("/outlets/{name}/windows")
+def list_windows(name: str, request: Request):
+    _require_pond(request, name)
+    return {"windows": _driver(request).list_windows(name)}
+
+
+@router.post("/outlets/{name}/windows/{window_name}/remove")
+def remove_window(name: str, window_name: str, request: Request):
+    _require_pond(request, name)
+    if not _driver(request).remove_window(name, window_name):
+        raise HTTPException(status_code=404, detail=f"No window '{window_name}' on '{name}'")
+    return {"ok": True}
