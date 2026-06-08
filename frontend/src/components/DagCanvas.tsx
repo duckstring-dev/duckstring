@@ -62,6 +62,8 @@ const edgeTypes: EdgeTypes = {
 
 // ─── Status / legend panel ───────────────────────────────────────────────────
 
+// Top-left panel: the Duckstring brand mark (and natural home for catchment navigation later),
+// over the live connection status.
 function StatusPanel() {
   const connected = useLiveStore((s) => s.connected);
   const error = useLiveStore((s) => s.error);
@@ -72,29 +74,44 @@ function StatusPanel() {
         background: '#15151a',
         border: '1px solid #27272a',
         borderRadius: 8,
-        padding: '8px 12px',
+        padding: '9px 12px',
         fontFamily: 'ui-monospace, SFMono-Regular, monospace',
         fontSize: 11,
         color: '#a1a1aa',
         display: 'flex',
         flexDirection: 'column',
-        gap: 4,
-        minWidth: 150,
+        gap: 7,
+        minWidth: 168,
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
         <span
+          aria-label="Duckstring"
           style={{
-            width: 8,
-            height: 8,
-            borderRadius: '50%',
-            background: connected ? '#22c55e' : '#ef4444',
+            width: 22,
+            height: 22,
+            flexShrink: 0,
+            backgroundImage: 'url(/logo.svg)',
+            backgroundSize: 'contain',
+            backgroundRepeat: 'no-repeat',
+            backgroundPosition: 'center',
           }}
         />
-        <span style={{ fontWeight: 700, color: '#e4e4e7', letterSpacing: '0.06em' }}>CATCHMENT</span>
+        <span style={{ fontSize: 15, fontWeight: 700, color: '#f4f4f5', letterSpacing: '0.01em' }}>
+          Duckstring
+        </span>
       </div>
-      <div style={{ color: '#52525b' }}>
-        {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
+      <div style={{ height: 1, background: '#27272a' }} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        <span
+          title={connected ? 'connected' : error ? 'unreachable' : 'connecting'}
+          style={{ width: 8, height: 8, flexShrink: 0, borderRadius: '50%', background: connected ? '#22c55e' : '#ef4444' }}
+        />
+        <span style={{ color: '#71717a' }}>
+          Catchment
+          <span style={{ color: '#3f3f46' }}> · </span>
+          {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
+        </span>
       </div>
     </div>
   );

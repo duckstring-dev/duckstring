@@ -142,10 +142,6 @@ export function Sidebar() {
         fontFamily: 'inherit',
       }}
     >
-      <div style={{ fontSize: 11, fontWeight: 700, color: '#52525b', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 8 }}>
-        Duckstring
-      </div>
-
       {!selectedPond && !selectedRipple && !selectedTriggerId && (
         <div style={{ fontSize: 12, color: '#71717a', lineHeight: 1.6 }}>
           Select a Pond or Ripple to inspect its freshness and run history, or to send a Tap, Pulse,
