@@ -141,12 +141,16 @@ export interface LiveState extends StatusSlice {
 
   runs: PondRun[]; // run-history feed (filtered by selection + filters)
   runFilters: RunFilters;
+  runLimit: number; // size of the live window the feed fetches; grows as the user scrolls
+  runsAtEnd: boolean; // the window reached the oldest available run (fewer rows than asked)
+  loadingMore: boolean; // a scroll-triggered window growth is in flight
   selectedPondRuns: PondRun[]; // the selected Pond's own runs (with ripples), for the trace charts
   windowsByPond: Record<PondId, WindowRow[]>;
 
   refresh(): Promise<void>;
   refreshWindows(pond: PondId): Promise<void>;
   setRunFilter(key: keyof RunFilters, value: boolean): void;
+  loadMoreRuns(): void;
 
   selectPond(id: PondId | null): void;
   selectRipple(id: RippleId | null): void;
@@ -164,6 +168,12 @@ export interface LiveState extends StatusSlice {
   addWindow(pond: PondId, body: AddWindowBody): Promise<void>;
   removeWindow(pond: PondId, name: string): Promise<void>;
 }
+
+// Run-history feed window: starts at one page, grows by a page per scroll-to-bottom, hard-capped
+// (matches the backend /api/runs clamp). The poll always fetches the current window, so payloads
+// stay small until the user scrolls deep.
+const RUN_PAGE = 100;
+const RUN_MAX = 1000;
 
 // The Pond a run-history / chart query should focus on: an explicitly selected Pond, or the Pond
 // owning a selected Ripple.
@@ -190,6 +200,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   runs: [],
   runFilters: { lineage: true, ripples: false },
+  runLimit: RUN_PAGE,
+  runsAtEnd: false,
+  loadingMore: false,
   selectedPondRuns: [],
   windowsByPond: {},
 
@@ -204,12 +217,18 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
     const s = get();
     const pond = focusPond(s);
+    const limit = s.runLimit;
     try {
       const [feed, ownRuns] = await Promise.all([
-        fetchRuns({ pond, lineage: s.runFilters.lineage, ripples: s.runFilters.ripples, limit: 200 }),
+        fetchRuns({ pond, lineage: s.runFilters.lineage, ripples: s.runFilters.ripples, limit }),
         pond ? fetchRuns({ pond, lineage: false, ripples: true, limit: 60 }) : Promise.resolve([]),
       ]);
-      set({ runs: feed.map(mapRun), selectedPondRuns: ownRuns.map(mapRun) });
+      // Fewer rows than the window means we've reached the oldest run (also true once at the cap).
+      set({
+        runs: feed.map(mapRun),
+        selectedPondRuns: ownRuns.map(mapRun),
+        runsAtEnd: feed.length < limit || limit >= RUN_MAX,
+      });
     } catch {
       /* history is non-critical; leave the last good feed in place */
     }
@@ -225,25 +244,33 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   setRunFilter(key, value) {
-    set((s) => ({ runFilters: { ...s.runFilters, [key]: value } }));
+    // Changing the feed resets the scroll window to the first page.
+    set((s) => ({ runFilters: { ...s.runFilters, [key]: value }, runLimit: RUN_PAGE, runsAtEnd: false }));
     get().refresh();
   },
 
+  loadMoreRuns() {
+    const s = get();
+    if (s.loadingMore || s.runsAtEnd || s.runLimit >= RUN_MAX) return;
+    set({ loadingMore: true, runLimit: Math.min(s.runLimit + RUN_PAGE, RUN_MAX) });
+    get().refresh().finally(() => set({ loadingMore: false }));
+  },
+
   selectPond(id) {
-    set({ selectedPondId: id, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [] });
+    set({ selectedPondId: id, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
     if (id && get().ponds[id]?.sources.length === 0) get().refreshWindows(id);
     get().refresh();
   },
   selectRipple(id) {
     const pondId = id ? get().ripples[id]?.pondId ?? null : null;
-    set({ selectedRippleId: id, selectedPondId: pondId, selectedTriggerId: null, selectedPondRuns: [] });
+    set({ selectedRippleId: id, selectedPondId: pondId, selectedTriggerId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
     get().refresh();
   },
   selectTrigger(id) {
     set({ selectedTriggerId: id, selectedPondId: null, selectedRippleId: null });
   },
   clearSelection() {
-    set({ selectedPondId: null, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [] });
+    set({ selectedPondId: null, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
   },
 
   tap: (pond) => act(get, set, () => postTrigger(pond, 'tap')),
