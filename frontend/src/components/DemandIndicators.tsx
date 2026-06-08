@@ -1,6 +1,6 @@
 'use client';
 
-import { formatAge, ORANGE } from '@/lib/store';
+import { formatAge, THEME_PULL, THEME_PUSH } from '@/lib/store';
 
 // Demand indicators shown to the left of a node's freshness readouts:
 //   • green dot  — holds pull demand
@@ -22,8 +22,8 @@ export function DemandIndicators({
           width: 7,
           height: 7,
           borderRadius: '50%',
-          background: hasPull ? ORANGE : 'transparent',
-          border: `1px solid ${hasPull ? ORANGE : '#3f3f46'}`,
+          background: hasPull ? THEME_PULL : 'transparent',
+          border: `1px solid ${hasPull ? THEME_PULL : '#3f3f46'}`,
           flexShrink: 0,
         }}
       />
@@ -34,8 +34,8 @@ export function DemandIndicators({
           lineHeight: 1,
           padding: '1px 3px',
           borderRadius: 3,
-          border: `1px solid ${targetF !== null ? '#3b82f6' : '#3f3f46'}`,
-          color: targetF !== null ? '#3b82f6' : '#52525b',
+          border: `1px solid ${targetF !== null ? THEME_PUSH : '#3f3f46'}`,
+          color: targetF !== null ? THEME_PUSH : '#52525b',
           whiteSpace: 'nowrap',
         }}
       >

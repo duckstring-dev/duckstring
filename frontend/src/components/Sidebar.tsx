@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useLiveStore, formatAge, formatDuration, parseTs, ORANGE, GREEN } from '@/lib/store';
+import { useLiveStore, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER } from '@/lib/store';
 import type { FreqUnit, PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
@@ -9,7 +9,7 @@ import { WindowEditor } from './WindowEditor';
 function Btn({
   onClick,
   children,
-  color = '#3b82f6',
+  color = THEME_PUSH,
   small = false,
 }: {
   onClick: () => void;
@@ -160,7 +160,7 @@ export function Sidebar() {
               Tide — max staleness ≤ {formatDuration(triggers[selectedTriggerId].boundMs ?? 1000)}.
             </div>
           )}
-          <Btn onClick={() => removeTrigger(selectedTriggerId)} color="#ef4444">Remove Trigger</Btn>
+          <Btn onClick={() => removeTrigger(selectedTriggerId)} color={THEME_DANGER}>Remove Trigger</Btn>
         </Section>
       )}
 
@@ -204,10 +204,10 @@ export function Sidebar() {
           <Section>
             <Label>Triggers</Label>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn onClick={() => tap(selectedPond.id)} color={ORANGE}>Tap</Btn>
-              <Btn onClick={() => wave(selectedPond.id)} color={ORANGE}>Wave</Btn>
-              <Btn onClick={() => pulse(selectedPond.id)} color="#3b82f6">Pulse</Btn>
-              <Btn onClick={() => setShowTideInput((v) => !v)} color="#3b82f6">Tide</Btn>
+              <Btn onClick={() => tap(selectedPond.id)} color={THEME_PULL}>Tap</Btn>
+              <Btn onClick={() => wave(selectedPond.id)} color={THEME_PULL}>Wave</Btn>
+              <Btn onClick={() => pulse(selectedPond.id)} color={THEME_PUSH}>Pulse</Btn>
+              <Btn onClick={() => setShowTideInput((v) => !v)} color={THEME_PUSH}>Tide</Btn>
             </div>
             {showTideInput && (
               <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
@@ -225,7 +225,7 @@ export function Sidebar() {
                     tide(selectedPond.id, Math.max(0.1, parseFloat(tideBound) * secs));
                     setShowTideInput(false);
                   }}
-                  color="#3b82f6"
+                  color={THEME_PUSH}
                 >
                   Set
                 </Btn>
@@ -233,7 +233,7 @@ export function Sidebar() {
             )}
             {trigger && (
               <div style={{ marginTop: 8 }}>
-                <Btn small onClick={() => removeTrigger(selectedPond.id)} color="#ef4444">
+                <Btn small onClick={() => removeTrigger(selectedPond.id)} color={THEME_DANGER}>
                   Remove {trigger.kind === 'wave' ? 'Wave' : 'Tide'} Trigger
                 </Btn>
               </div>
@@ -244,9 +244,9 @@ export function Sidebar() {
           <Section>
             <Label>Control</Label>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn onClick={() => start(selectedPond.id)} color={GREEN}>Start</Btn>
-              <Btn onClick={() => stop(selectedPond.id)} color="#ef4444">Stop</Btn>
-              <Btn onClick={() => stop(selectedPond.id, true)} color="#ef4444">Stop Lineage</Btn>
+              <Btn onClick={() => start(selectedPond.id)} color={THEME_SUCCESS}>Start</Btn>
+              <Btn onClick={() => stop(selectedPond.id)} color={THEME_DANGER}>Stop</Btn>
+              <Btn onClick={() => stop(selectedPond.id, true)} color={THEME_DANGER}>Stop Lineage</Btn>
             </div>
             <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
               Start: one run on this Pond, no upstream. Stop: clear this Pond&apos;s demand. Stop Lineage: also clear all upstream sources.

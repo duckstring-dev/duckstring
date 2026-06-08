@@ -1,13 +1,13 @@
 'use client';
 
 import { Fragment, useState } from 'react';
-import { useLiveStore, parseTs, GREEN, TEAL, RED } from '@/lib/store';
+import { useLiveStore, parseTs, THEME_SUCCESS, THEME_RUNNING, THEME_DANGER, THEME_BRAND } from '@/lib/store';
 import type { RippleRun } from '@/lib/types';
 
 const STATUS_COLOR: Record<string, string> = {
-  success: GREEN,
-  running: TEAL,
-  failed: RED,
+  success: THEME_SUCCESS,
+  running: THEME_RUNNING,
+  failed: THEME_DANGER,
 };
 
 // Fixed column widths (px) so the duration lands at the same x on Pond and (indented) Ripple rows.
@@ -74,9 +74,9 @@ function Toggle({ on, onClick, children }: { on: boolean; onClick: () => void; c
     <button
       onClick={(e) => { e.stopPropagation(); onClick(); }}
       style={{
-        background: on ? `${TEAL}20` : 'transparent',
-        border: `1px solid ${on ? TEAL : '#3f3f46'}`,
-        color: on ? TEAL : '#71717a',
+        background: on ? `${THEME_BRAND}20` : 'transparent',
+        border: `1px solid ${on ? THEME_BRAND : '#3f3f46'}`,
+        color: on ? THEME_BRAND : '#71717a',
         borderRadius: 4,
         padding: '2px 8px',
         fontSize: 10,

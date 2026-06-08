@@ -14,7 +14,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { useLiveStore, getDemandEdgeColor, formatAge, ORANGE, BLUE, GREEN, RED } from '@/lib/store';
+import { useLiveStore, getDemandEdgeColor, formatAge, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER } from '@/lib/store';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
@@ -41,7 +41,7 @@ function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
 function TriggerEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const pondId = (data as { pondId: string }).pondId;
   const trigger = useLiveStore((s) => s.triggers[pondId]);
-  const color = trigger?.kind === 'wave' ? ORANGE : BLUE;
+  const color = trigger?.kind === 'wave' ? THEME_PULL : THEME_PUSH;
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return (
     <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2, strokeDasharray: '6 3' }} />
@@ -105,7 +105,7 @@ function StatusPanel() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
         <span
           title={connected ? 'connected' : error ? 'unreachable' : 'connecting'}
-          style={{ width: 8, height: 8, flexShrink: 0, borderRadius: '50%', background: connected ? GREEN : RED }}
+          style={{ width: 8, height: 8, flexShrink: 0, borderRadius: '50%', background: connected ? THEME_SUCCESS : THEME_DANGER }}
         />
         <span style={{ color: '#71717a' }}>
           Catchment

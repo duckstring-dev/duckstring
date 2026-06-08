@@ -343,29 +343,32 @@ export function formatDuration(ms: number): string {
 }
 
 // ─── Semantic palette ────────────────────────────────────────────────────────
-// Teal is the brand accent and doubles as "active/running"; orange is the pull/Wave/demand family;
-// blue is push; red is stop/failed; green is success/healthy. Grey is idle/structural.
-export const TEAL = '#17d7c2'; // brand · running · generic highlight
-export const ORANGE = '#f97316'; // pull (Tap/Wave) · queued · run interval
-export const BLUE = '#3b82f6'; // push (Pulse/Tide)
-export const RED = '#ef4444'; // stop · failed
-export const GREEN = '#22c55e'; // success · healthy/connected
+// Named by role, not hue, so the values can move without the names lying. pull / push / running form
+// a roughly-even triad (they are routinely co-visible and must mutually contrast); success/danger are
+// the fixed green/red conventions. THEME_BRAND (the Duckstring colour) IS the running colour and also
+// the generic accent.
+export const THEME_BRAND = '#06c4e6'; // a pond on a bright day — full-saturation water cyan
+export const THEME_RUNNING = THEME_BRAND; // active execution + brand accent
+export const THEME_PULL = '#f0a830'; // pull (Tap/Wave) · queued · run interval — amber/gold
+export const THEME_PUSH = '#a855f7'; // push (Pulse/Tide) — violet
+export const THEME_SUCCESS = '#22c55e'; // success · connected · start (green)
+export const THEME_DANGER = '#ef4444'; // stop · failed (red)
 
 // Node/Ripple demand state → border colour.
 export const STATE_COLORS: Record<string, string> = {
-  running: TEAL,
-  queued: ORANGE,
+  running: THEME_RUNNING,
+  queued: THEME_PULL,
   idle: '#71717a',
 };
 
-// pull (Tap/Wave) orange; push (Pulse/Tide) blue; idle grey.
+// pull (Tap/Wave) amber; push (Pulse/Tide) violet; idle grey.
 export const EDGE_COLORS: Record<string, string> = {
-  pull: ORANGE,
-  push: BLUE,
+  pull: THEME_PULL,
+  push: THEME_PUSH,
   idle: '#3f3f46',
 };
 
-// Edge colour reflects the SINK's demand on this edge: push (blue) > pull (orange) > none (grey).
+// Edge colour reflects the SINK's demand on this edge: push > pull > none (idle).
 export function getDemandEdgeColor(sinkPull: boolean, sinkPush: number | null): string {
   if (sinkPush !== null) return EDGE_COLORS.push;
   if (sinkPull) return EDGE_COLORS.pull;

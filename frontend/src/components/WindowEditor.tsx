@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { useLiveStore } from '@/lib/store';
+import { useLiveStore, THEME_BRAND } from '@/lib/store';
 import type { FreqUnit, Pond, Weekday, WindowRow } from '@/lib/types';
 
 // Batch-availability windows on an Inlet Pond — the UI for `duckstring trigger window {pond}
@@ -156,7 +156,7 @@ export function WindowEditor({ pond }: { pond: Pond }) {
       <div style={{ marginTop: 8 }}>
         <button
           onClick={() => setShowOptions((v) => !v)}
-          style={{ background: 'none', border: 'none', color: '#17d7c2', cursor: 'pointer', fontSize: 11, padding: 0 }}
+          style={{ background: 'none', border: 'none', color: THEME_BRAND, cursor: 'pointer', fontSize: 11, padding: 0 }}
         >
           {showOptions ? '▾ Options' : '▸ Options'}
         </button>
@@ -185,7 +185,7 @@ export function WindowEditor({ pond }: { pond: Pond }) {
                   key={d}
                   onClick={() => toggleDay(d)}
                   style={{
-                    background: days.has(d) ? '#17d7c2' : '#1e1e26',
+                    background: days.has(d) ? THEME_BRAND : '#1e1e26',
                     border: '1px solid #3f3f46',
                     borderRadius: 4,
                     color: days.has(d) ? '#fff' : '#a1a1aa',
@@ -214,8 +214,8 @@ export function WindowEditor({ pond }: { pond: Pond }) {
           onClick={add}
           style={{
             background: 'transparent',
-            border: '1px solid #17d7c2',
-            color: '#17d7c2',
+            border: `1px solid ${THEME_BRAND}`,
+            color: THEME_BRAND,
             borderRadius: 5,
             padding: '4px 12px',
             fontSize: 12,

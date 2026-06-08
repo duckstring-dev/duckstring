@@ -1,11 +1,13 @@
 'use client';
 
+import { THEME_PULL, THEME_RUNNING } from '@/lib/store';
+
 // Run-cadence + run-duration trace. Two lines share one y-axis so the run duration can be
 // read against the cadence (≈ the bottleneck): well below it ⇒ this node isn't the bottleneck;
 // close to it ⇒ it is. The y-axis is clipped near the 75th percentile (plus a margin
 // proportional to the mean) so aberrant gaps — e.g. after a stop — don't squash the rest.
-const INTERVAL_COLOR = '#f97316'; // orange — run cadence, tied to Wave/pull (≈ bottleneck under a Wave)
-const DURATION_COLOR = '#17d7c2'; // teal — run duration, tied to the running state
+const INTERVAL_COLOR = THEME_PULL; // run cadence, tied to Wave/pull (≈ bottleneck under a Wave)
+const DURATION_COLOR = THEME_RUNNING; // run duration, tied to the running state
 
 function quantile(sortedAsc: number[], q: number): number {
   if (sortedAsc.length === 0) return 0;
