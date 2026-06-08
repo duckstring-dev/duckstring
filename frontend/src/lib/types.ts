@@ -1,12 +1,22 @@
 export type PondId = string;
 export type RippleId = string;
 
-// A repeating window within each minute, in seconds [startSec, endSec). Only meaningful on an
-// Inlet Pond (no Sources): it models a batch source that becomes available at startSec and is
-// "fresh until" endSec. Non-overlapping; gaps allowed.
+export type FreqUnit = 'SECOND' | 'MINUTE' | 'HOUR' | 'DAY' | 'WEEK';
+export type Weekday = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI' | 'SAT' | 'SUN';
+
+// A recurring batch-availability window on an Inlet Pond (no Sources), mirroring the backend's
+// RFC-5545-flavoured Window (engine/core.py). The first occurrence opens at `startAnchor` and stays
+// "fresh until" startAnchor + durationMs; it then recurs every `freqInterval × freqUnit`. `validDays`
+// restricts which weekdays are kept (undefined = every day); `until` ends the recurrence.
+// Occurrences are the grid `startAnchor + k·delta` (k ≥ 0), filtered by validDays/until.
 export interface Window {
-  startSec: number;
-  endSec: number;
+  name: string;
+  startAnchor: number; // ms epoch: first occurrence start
+  durationMs: number; // window length ("fresh until" startAnchor + durationMs)
+  freqUnit: FreqUnit;
+  freqInterval: number;
+  validDays?: Weekday[]; // undefined / empty = every day
+  until?: number; // ms epoch: end of recurrence (undefined = forever)
 }
 
 export interface Pond {

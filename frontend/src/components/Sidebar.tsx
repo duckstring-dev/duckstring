@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { usePlaygroundStore, formatAge } from '@/lib/store';
 import { TraceChart } from './TraceChart';
+import { WindowEditor } from './WindowEditor';
 
 function Btn({
   onClick,
@@ -71,7 +72,6 @@ export function Sidebar() {
   const addPond = usePlaygroundStore((s) => s.addPond);
   const addRipple = usePlaygroundStore((s) => s.addRipple);
   const renamePond = usePlaygroundStore((s) => s.renamePond);
-  const setPondWindows = usePlaygroundStore((s) => s.setPondWindows);
   const setRippleDuration = usePlaygroundStore((s) => s.setRippleDuration);
   const renameRipple = usePlaygroundStore((s) => s.renameRipple);
   const setRippleVariability = usePlaygroundStore((s) => s.setRippleVariability);
@@ -86,6 +86,7 @@ export function Sidebar() {
   const triggerWave = usePlaygroundStore((s) => s.triggerWave);
   const triggerTide = usePlaygroundStore((s) => s.triggerTide);
   const triggerStop = usePlaygroundStore((s) => s.triggerStop);
+  const triggerStart = usePlaygroundStore((s) => s.triggerStart);
   const triggerTap = usePlaygroundStore((s) => s.triggerTap);
   const removeTrigger = usePlaygroundStore((s) => s.removeTrigger);
 
@@ -94,8 +95,6 @@ export function Sidebar() {
   const [showAddSourcePond, setShowAddSourcePond] = useState(false);
   const [showAddParentRipple, setShowAddParentRipple] = useState(false);
   const [allVar, setAllVar] = useState('0');
-  const [winStart, setWinStart] = useState('10');
-  const [winEnd, setWinEnd] = useState('40');
 
   const selectedPond = selectedPondId ? ponds[selectedPondId] : null;
   const selectedRipple = selectedRippleId ? ripples[selectedRippleId] : null;
@@ -227,31 +226,7 @@ export function Sidebar() {
           {selectedPond.sources.length === 0 && (
             <Section>
               <Label>Windows (batch source)</Label>
-              <div style={{ fontSize: 10, color: '#52525b', marginBottom: 8, lineHeight: 1.5 }}>
-                Seconds within each minute when fresh data is available. Empty ⇒ live (always fresh).
-              </div>
-              {(selectedPond.windows ?? []).map((w, i) => (
-                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                  <span style={{ fontSize: 12, color: '#a1a1aa' }}>:{w.startSec.toString().padStart(2, '0')} → :{w.endSec.toString().padStart(2, '0')}</span>
-                  <button onClick={() => setPondWindows(selectedPond.id, (selectedPond.windows ?? []).filter((_, j) => j !== i))}
-                    style={{ background: 'none', border: 'none', color: '#52525b', cursor: 'pointer', fontSize: 14 }}>✕</button>
-                </div>
-              ))}
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
-                <span style={{ fontSize: 11, color: '#71717a' }}>:</span>
-                <input type="number" min="0" max="59" value={winStart} onChange={(e) => setWinStart(e.target.value)} style={{ ...numInput, width: 48 }} />
-                <span style={{ fontSize: 11, color: '#71717a' }}>→ :</span>
-                <input type="number" min="0" max="60" value={winEnd} onChange={(e) => setWinEnd(e.target.value)} style={{ ...numInput, width: 48 }} />
-                <Btn small color="#6366f1" onClick={() => {
-                  const a = Math.max(0, Math.min(59, parseInt(winStart, 10)));
-                  const b = Math.max(a + 1, Math.min(60, parseInt(winEnd, 10)));
-                  if (isNaN(a) || isNaN(b)) return;
-                  const next = [...(selectedPond.windows ?? []), { startSec: a, endSec: b }]
-                    .sort((x, y) => x.startSec - y.startSec)
-                    .filter((w, i, arr) => i === 0 || w.startSec >= arr[i - 1].endSec); // drop overlaps
-                  setPondWindows(selectedPond.id, next);
-                }}>Add</Btn>
-              </div>
+              <WindowEditor pond={selectedPond} />
             </Section>
           )}
 
@@ -287,10 +262,17 @@ export function Sidebar() {
             )}
           </Section>
 
-          {/* Stop section */}
+          {/* Control: start a one-off run, or clear demand (this Pond, or its whole lineage) */}
           <Section>
-            <Label>Stop</Label>
-            <Btn onClick={() => triggerStop(selectedPond.id)} color="#ef4444">Stop</Btn>
+            <Label>Control</Label>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              <Btn onClick={() => triggerStart(selectedPond.id)} color="#22c55e">Start</Btn>
+              <Btn onClick={() => triggerStop(selectedPond.id)} color="#ef4444">Stop</Btn>
+              <Btn onClick={() => triggerStop(selectedPond.id, true)} color="#ef4444">Stop Lineage</Btn>
+            </div>
+            <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
+              Start: one run on this Pond, no upstream. Stop: clear this Pond&apos;s demand. Stop Lineage: also clear all upstream sources.
+            </div>
           </Section>
 
           <Section>

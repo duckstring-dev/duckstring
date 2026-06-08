@@ -9,7 +9,14 @@ import type {
   EdgeDemandKind,
   ActiveTrigger,
   LogEntry,
+  Window,
+  Weekday,
 } from './types';
+
+// "-Inf" freshness sentinel: a push target below every real timestamp (and below the 0 "never run"
+// freshness). Used by `start` — a target that is always satisfiable, so the Pond runs once against
+// whatever input it currently has. Mirrors the backend's NEVER (datetime.min).
+export const NEVER = -Infinity;
 
 // ─── Freshness orchestrator (faithful port of docs/guide/theory.md) ───────────
 //
@@ -126,21 +133,50 @@ function markPondEdge(s: OrchestrState, src: PondId, sink: PondId, kind: EdgeDem
   setEdge(s, `${src}::${sink}`, kind);
 }
 
+// ─── Windows (RFC-5545-flavoured recurrence; faithful port of engine/core.py Window) ──────────
+
+const UNIT_MS: Record<string, number> = { SECOND: 1000, MINUTE: 60000, HOUR: 3600000, DAY: 86400000, WEEK: 604800000 };
+const WEEKDAYS: Weekday[] = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+
+// The recurrence step in ms.
+export function windowDelta(w: Window): number {
+  return UNIT_MS[w.freqUnit] * w.freqInterval;
+}
+// Weekday index with Monday = 0 (matches Python's datetime.weekday()); JS getDay() has Sunday = 0.
+function weekdayMon0(ms: number): number {
+  return (new Date(ms).getDay() + 6) % 7;
+}
+function windowKept(w: Window, t: number): boolean {
+  if (w.until != null && t > w.until) return false;
+  return !w.validDays || w.validDays.length === 0 || w.validDays.includes(WEEKDAYS[weekdayMon0(t)]);
+}
+// If `now` falls inside an occurrence, return that window's end ("fresh until"); else null. O(1):
+// the most-recent grid point at/before `now` (windows are assumed non-overlapping).
+function windowActiveEnd(w: Window, now: number): number | null {
+  const delta = windowDelta(w);
+  if (now < w.startAnchor || delta <= 0) return null;
+  const c = w.startAnchor + Math.floor((now - w.startAnchor) / delta) * delta;
+  if (!windowKept(w, c)) return null;
+  const end = c + w.durationMs;
+  return now < end ? end : null;
+}
+
 // ─── Freshness derivation ─────────────────────────────────────────────────────
 
 // A Pond's source freshness, with the window delay it carries. `F` is null for an Inlet that
-// is between windows (cannot run). For a windowed Inlet, F = the current window's end ("fresh
-// until") and D = the window's duration. Windows repeat every minute, in seconds [start, end).
+// is between windows (cannot run). For a windowed Inlet, F = the soonest-ending active window's end
+// ("fresh until") and D = that window's duration.
 function pondSourceF(s: OrchestrState, pid: PondId, now: number): { F: number | null; D: number } {
   const pond = s.ponds[pid];
   if (pond.sources.length === 0) {
     const windows = pond.windows ?? [];
     if (windows.length > 0) {
-      const minuteStart = now - (now % 60000);
-      const sec = (now % 60000) / 1000;
-      const w = windows.find((win) => win.startSec <= sec && sec < win.endSec);
-      if (w) return { F: minuteStart + w.endSec * 1000, D: (w.endSec - w.startSec) * 1000 };
-      return { F: null, D: 0 };
+      let best: { F: number; D: number } | null = null;
+      for (const w of windows) {
+        const end = windowActiveEnd(w, now);
+        if (end != null && (best == null || end < best.F)) best = { F: end, D: w.durationMs };
+      }
+      return best ?? { F: null, D: 0 };
     }
     return { F: now, D: 0 }; // live source
   }
@@ -371,12 +407,14 @@ export function pulsePond(state: OrchestrState, pid: PondId, now: number): Orche
   return s;
 }
 
-// Greedy stop (simple for now): clear all pull/push demand up the whole ancestry. In-flight
-// runs are left to drain. Stops all upstream paths even where other consumers are still queued.
-export function stopPond(state: OrchestrState, pid: PondId, now: number): OrchestrState {
+// Stop a Pond: clear its push+pull demand and its Ripples' **pull** demand, but KEEP Ripple push
+// targets so any already-started Pond Run completes. With `upstream=true` the stop propagates to
+// every ancestor (a hasStop token following the source edges), clearing each one's demand too.
+// Faithful port of engine/catchment.py:stop_pond.
+export function stopPond(state: OrchestrState, pid: PondId, now: number, upstream = false): OrchestrState {
   logNow = now;
   const s = clone(state);
-  emit('stop', `Stop on ${pname(s, pid)} (greedy upstream)`);
+  emit('stop', `Stop on ${pname(s, pid)}${upstream ? ' (upstream)' : ''}`);
   const seen = new Set<PondId>();
   const queue = [pid];
   while (queue.length) {
@@ -388,14 +426,28 @@ export function stopPond(state: OrchestrState, pid: PondId, now: number): Orches
     ps.hasReceivedPull = false;
     ps.targets = [];
     for (const r of ripplesOf(s, cur)) {
-      s.rippleStates[r].hasPull = false;
-      s.rippleStates[r].targets = [];
+      s.rippleStates[r].hasPull = false; // keep targets (push) so started runs complete
     }
-    for (const sp of s.ponds[cur].sources) {
-      markPondEdge(s, sp, cur, 'stop');
-      if (!seen.has(sp)) queue.push(sp);
+    if (upstream) {
+      for (const sp of s.ponds[cur].sources) {
+        markPondEdge(s, sp, cur, 'stop');
+        if (!seen.has(sp)) queue.push(sp);
+      }
     }
   }
+  return s;
+}
+
+// Inject demand directly into a Pond: a push target of NEVER (an "-Inf" freshness) on the Pond
+// alone, with **no** upstream propagation. The Pond runs once against whatever input it currently
+// has (sourceF >= NEVER always holds), then the target clears. Distinct from a Pulse, which targets
+// `now` and propagates upstream to force a full refresh. Port of engine/catchment.py:start_pond.
+export function startPond(state: OrchestrState, pid: PondId, now: number): OrchestrState {
+  logNow = now;
+  const s = clone(state);
+  emit('start', `Start on ${pname(s, pid)} (one run, no upstream)`);
+  const ps = s.pondStates[pid];
+  if (!ps.targets.includes(NEVER)) ps.targets.push(NEVER);
   return s;
 }
 

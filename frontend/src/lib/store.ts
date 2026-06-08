@@ -17,6 +17,7 @@ import {
   tapPond,
   pulsePond,
   stopPond as orchStopPond,
+  startPond as orchStartPond,
   drainLog,
   type OrchestrState,
 } from './orchestration';
@@ -168,7 +169,8 @@ export interface PlaygroundState {
   triggerPulse(pondId: PondId): void;
   triggerWave(pondId: PondId): void;
   triggerTide(pondId: PondId, stalenessMs: number): void;
-  triggerStop(pondId: PondId): void;
+  triggerStart(pondId: PondId): void;
+  triggerStop(pondId: PondId, upstream?: boolean): void;
   removeTrigger(pondId: PondId): void;
   clearLogs(): void;
 
@@ -471,9 +473,14 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     set((s) => ({ triggers: { ...s.triggers, [pondId]: { pondId, kind: 'tide', stalenessMs } } }));
   },
 
-  triggerStop(pondId) {
+  // Start: inject a one-off run on the Pond alone (push target NEVER), no upstream propagation.
+  triggerStart(pondId) {
+    set((s) => applyOrch(s, orchStartPond(toOrchestrState(s), pondId, s.now)));
+  },
+
+  triggerStop(pondId, upstream = false) {
     get().removeTrigger(pondId);
-    set((s) => applyOrch(s, orchStopPond(toOrchestrState(s), pondId, s.now)));
+    set((s) => applyOrch(s, orchStopPond(toOrchestrState(s), pondId, s.now, upstream)));
   },
 
   removeTrigger(pondId) {
@@ -541,8 +548,10 @@ export function formatAge(F: number, now: number): string {
 }
 
 // The freshest pending push target (for the ≤ box / edge colour), or null if none are outstanding.
+// NEVER (-Inf) targets from `start` are non-finite and excluded — they carry no displayable age.
 export function pushTargetF(targets: number[]): number | null {
-  return targets.length ? Math.max(...targets) : null;
+  const finite = targets.filter((t) => Number.isFinite(t));
+  return finite.length ? Math.max(...finite) : null;
 }
 
 export function getRippleVisualState(rs: RippleRunState): 'running' | 'queued' | 'idle' {
