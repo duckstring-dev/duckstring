@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore, formatAge, STATE_COLORS } from '@/lib/store';
+import { useLiveStore, formatAge, STATE_COLORS, nodeFill } from '@/lib/store';
 import { DemandIndicators } from './DemandIndicators';
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
@@ -31,7 +31,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
         border: `2px solid ${borderColor}`,
         boxShadow: isSelected ? `0 0 0 3px ${borderColor}40` : undefined,
         borderRadius: 10,
-        background: '#15151a',
+        background: nodeFill(borderColor),
         cursor: 'pointer',
         position: 'relative',
         boxSizing: 'border-box',

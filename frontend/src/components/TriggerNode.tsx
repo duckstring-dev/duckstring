@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore, formatDuration, THEME_PULL, THEME_PUSH } from '@/lib/store';
+import { useLiveStore, formatDuration, THEME_PULL, THEME_PUSH, nodeFill } from '@/lib/store';
 
 export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
@@ -29,7 +29,7 @@ export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
         boxShadow: isSelected ? `0 0 0 2px ${color}` : undefined,
         borderRadius: 20,
         padding: '4px 12px',
-        background: `${color}18`,
+        background: nodeFill(color),
         cursor: 'pointer',
         display: 'inline-flex',
         alignItems: 'center',

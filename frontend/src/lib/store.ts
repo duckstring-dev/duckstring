@@ -349,8 +349,8 @@ export function formatDuration(ms: number): string {
 // the generic accent.
 export const THEME_BRAND = '#06c4e6'; // a pond on a bright day — full-saturation water cyan
 export const THEME_RUNNING = THEME_BRAND; // active execution + brand accent
-export const THEME_PULL = '#f0a830'; // pull (Tap/Wave) · queued · run interval — amber/gold
-export const THEME_PUSH = '#a855f7'; // push (Pulse/Tide) — violet
+export const THEME_PULL = '#ee9333'; // pull (Tap/Wave) · queued · run interval — warm amber-orange
+export const THEME_PUSH = '#a3e635'; // push (Pulse/Tide) — green-yellow
 export const THEME_SUCCESS = '#22c55e'; // success · connected · start (green)
 export const THEME_DANGER = '#ef4444'; // stop · failed (red)
 
@@ -373,4 +373,11 @@ export function getDemandEdgeColor(sinkPull: boolean, sinkPush: number | null): 
   if (sinkPush !== null) return EDGE_COLORS.push;
   if (sinkPull) return EDGE_COLORS.pull;
   return EDGE_COLORS.idle;
+}
+
+// Internal fill of a node/pill: its rim colour washed in at low alpha over the dark canvas, so the
+// interior is a dark shade of the rim. Shared by Ponds, Ripples, and the trigger pills so they match.
+const FILL_ALPHA = '17'; // ~9% — tune to taste
+export function nodeFill(rim: string): string {
+  return `${rim}${FILL_ALPHA}`;
 }

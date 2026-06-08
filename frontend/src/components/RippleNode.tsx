@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore, formatAge, STATE_COLORS } from '@/lib/store';
+import { useLiveStore, formatAge, STATE_COLORS, nodeFill } from '@/lib/store';
 import { DemandIndicators } from './DemandIndicators';
 
 export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
@@ -31,7 +31,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
         boxShadow: isSelected ? `0 0 0 2px ${borderColor}` : undefined,
         borderRadius: 6,
         padding: '6px 10px',
-        background: '#1a1a1f',
+        background: nodeFill(borderColor),
         cursor: 'pointer',
         width: '100%',
         height: 80,
