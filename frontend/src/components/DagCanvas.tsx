@@ -14,7 +14,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { useLiveStore, getDemandEdgeColor, formatAge, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER } from '@/lib/store';
+import { useLiveStore, consumeEdgeColor, formatAge, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER } from '@/lib/store';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
@@ -23,17 +23,21 @@ import { TriggerNode } from './TriggerNode';
 // ─── Custom edges (read-only; colour reflects the sink's demand) ─────────────
 
 function RippleEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
-  const sinkRippleId = (data as { sinkRippleId: string }).sinkRippleId;
-  const view = useLiveStore((s) => s.rippleViews[sinkRippleId]);
-  const color = getDemandEdgeColor(view?.hasPull ?? false, view?.targetF ?? null);
+  const { sourceRippleId, sinkRippleId } = data as { sourceRippleId: string; sinkRippleId: string };
+  const parentEndF = useLiveStore((s) => s.rippleViews[sourceRippleId]?.endF ?? 0);
+  const childStartF = useLiveStore((s) => s.rippleViews[sinkRippleId]?.startF ?? 0);
+  const childTargetF = useLiveStore((s) => s.rippleViews[sinkRippleId]?.targetF ?? null);
+  const color = consumeEdgeColor(parentEndF, childStartF, childTargetF);
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
 }
 
 function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
-  const sinkPondId = (data as { sinkPondId: string }).sinkPondId;
-  const view = useLiveStore((s) => s.pondViews[sinkPondId]);
-  const color = getDemandEdgeColor(view?.hasPull ?? false, view?.targetF ?? null);
+  const { sourcePondId, sinkPondId } = data as { sourcePondId: string; sinkPondId: string };
+  const parentEndF = useLiveStore((s) => s.pondViews[sourcePondId]?.endF ?? 0);
+  const childStartF = useLiveStore((s) => s.pondViews[sinkPondId]?.startF ?? 0);
+  const childTargetF = useLiveStore((s) => s.pondViews[sinkPondId]?.targetF ?? null);
+  const color = consumeEdgeColor(parentEndF, childStartF, childTargetF);
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
 }

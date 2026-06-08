@@ -362,29 +362,31 @@ export const STATE_COLORS: Record<string, string> = {
 };
 
 // Border colour for a node. Running is always the brand cyan and idle is grey; a *queued* node is
-// coloured by its demand — pull if it holds any pull token, else push. (A node can hold both; pull is
-// the looser demand since any run, push-triggered or not, satisfies it, so it wins the colour.)
+// coloured by its demand — push if it holds any push target, else pull. (Push is the more specific
+// demand, so it wins the colour when a node holds both.)
 export function stateColor(view: NodeView): string {
   if (view.status === 'queued') {
-    if (view.hasPull) return THEME_PULL;
     if (view.targetF !== null) return THEME_PUSH;
+    if (view.hasPull) return THEME_PULL;
   }
   return STATE_COLORS[view.status] ?? STATE_COLORS.idle;
 }
 
-// pull (Tap/Wave) amber; push (Pulse/Tide) violet; idle grey.
+// pull amber; push green-yellow; idle grey.
 export const EDGE_COLORS: Record<string, string> = {
   pull: THEME_PULL,
   push: THEME_PUSH,
   idle: '#3f3f46',
 };
 
-// Edge colour reflects the SINK's demand on this edge: pull > push > none (idle), matching the
-// queued-node rule (pull is the looser demand, so it wins the colour when both are present).
-export function getDemandEdgeColor(sinkPull: boolean, sinkPush: number | null): string {
-  if (sinkPull) return EDGE_COLORS.pull;
-  if (sinkPush !== null) return EDGE_COLORS.push;
-  return EDGE_COLORS.idle;
+// Edge colour = whether the child can consume the parent. Coloured when the parent's output is
+// fresher than the child's last run start (parent.endF > child.startF); push if consuming it would
+// also meet a push target the child holds (parent.endF >= child.targetF), else pull. Freshnesses are
+// ms-epoch (0 = never); childTargetF is null when there is no push target.
+export function consumeEdgeColor(parentEndF: number, childStartF: number, childTargetF: number | null): string {
+  if (parentEndF <= childStartF) return EDGE_COLORS.idle;
+  if (childTargetF !== null && parentEndF >= childTargetF) return EDGE_COLORS.push;
+  return EDGE_COLORS.pull;
 }
 
 // Internal fill of a node/pill: its rim colour washed in at low alpha over the dark canvas, so the
