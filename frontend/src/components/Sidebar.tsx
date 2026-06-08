@@ -73,15 +73,17 @@ function pondTrace(runs: PondRun[]): { times: number[]; durations: number[] } {
   return { times, durations };
 }
 
-// Ripple completion times (asc, ms) for cadence. Ripple Runs don't record a start, so no durations.
+// Ripple completion times (asc, ms) and per-run durations (ms) from the selected Pond's run history.
 function rippleTrace(runs: PondRun[], rippleName: string): { times: number[]; durations: number[] } {
   const asc = [...runs].reverse();
   const times: number[] = [];
+  const durations: number[] = [];
   for (const r of asc) {
     const rr = r.ripples?.find((x) => x.ripple === rippleName);
     if (rr?.finishedAt) times.push(ms(rr.finishedAt));
+    if (rr?.startedAt && rr?.finishedAt) durations.push(ms(rr.finishedAt) - ms(rr.startedAt));
   }
-  return { times, durations: [] };
+  return { times, durations };
 }
 
 export function Sidebar() {

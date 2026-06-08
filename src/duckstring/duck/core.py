@@ -23,17 +23,24 @@ from ..engine import worker
 @dataclass
 class Event:
     """A buffered report to the Catchment. ``kind`` is ``"ripple"`` or ``"run_completed"``; idempotent
-    on ``(kind, ripple, f)`` so replay after a reconnect is safe."""
+    on ``(kind, ripple, f)`` so replay after a reconnect is safe. ``started_at``/``finished_at`` are
+    the Ripple's wall-clock execution span (telemetry for the run-history duration)."""
 
     kind: str
     f: datetime
     ripple: str | None = None
     status: str = "success"
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
     def payload(self) -> dict:
         d = {"kind": self.kind, "f": self.f.isoformat(), "status": self.status}
         if self.ripple is not None:
             d["ripple"] = self.ripple
+        if self.started_at is not None:
+            d["started_at"] = self.started_at.isoformat()
+        if self.finished_at is not None:
+            d["finished_at"] = self.finished_at.isoformat()
         return d
 
 
@@ -51,13 +58,18 @@ class DuckCore:
         ledger.record_pond_run_start(self.con, f, now)
         return self._advance(now)
 
-    def ripple_completed(self, name: str, now: datetime, export=None) -> list[str]:
+    def ripple_completed(
+        self, name: str, now: datetime, started_at=None, finished_at=None, export=None
+    ) -> list[str]:
         """Record a finished Ripple, buffer a report, and (if a Pond Run just completed) export +
-        buffer the run completion. Returns any newly launchable Ripple names."""
+        buffer the run completion. ``started_at``/``finished_at`` are the Ripple's wall-clock span
+        (run-history duration telemetry). Returns any newly launchable Ripple names."""
         end_f = self.state.states[name].start_f
         ledger.record_ripple_complete(self.con, name, end_f)
         self.state, rc = worker.complete_ripple(self.state, name, now)
-        self.events.append(Event(kind="ripple", ripple=name, f=end_f))
+        self.events.append(
+            Event(kind="ripple", ripple=name, f=end_f, started_at=started_at, finished_at=finished_at)
+        )
         if rc is not None:
             if export is not None:
                 export()  # materialise outputs (parquet) before announcing completion

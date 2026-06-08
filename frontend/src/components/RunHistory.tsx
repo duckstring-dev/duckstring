@@ -2,13 +2,31 @@
 
 import { useState } from 'react';
 import { useLiveStore, parseTs } from '@/lib/store';
-import type { PondRun, RippleRun } from '@/lib/types';
+import type { RippleRun } from '@/lib/types';
 
 const STATUS_COLOR: Record<string, string> = {
   success: '#22c55e',
   running: '#f59e0b',
   failed: '#ef4444',
 };
+
+// Fixed column widths (px) so the duration lands at the same x on Pond and (indented) Ripple rows.
+// Both rows share clock + status; a Pond row then has name + version, a Ripple row a single wider
+// name + its indent. Aligning the duration requires: RIPPLE_NAME = NAME + VERSION + gap − INDENT.
+const GAP = 8;
+const STATUS_W = 64;
+const NAME_W = 104;
+const VERSION_W = 48;
+const RIPPLE_INDENT = 24;
+const RIPPLE_NAME_W = NAME_W + VERSION_W + GAP - RIPPLE_INDENT;
+
+const col = (w: number): React.CSSProperties => ({
+  width: w,
+  display: 'inline-block',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+});
 
 function clock(iso: string | null): string {
   if (!iso) return '—';
@@ -17,10 +35,9 @@ function clock(iso: string | null): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function duration(run: PondRun): string {
-  if (!run.startedAt || !run.finishedAt) return '';
-  const s = (parseTs(run.finishedAt) - parseTs(run.startedAt)) / 1000;
-  return `${s.toFixed(1)}s`;
+function durationOf(startedAt: string | null, finishedAt: string | null): string {
+  if (!startedAt || !finishedAt) return '';
+  return `${((parseTs(finishedAt) - parseTs(startedAt)) / 1000).toFixed(1)}s`;
 }
 
 function Toggle({ on, onClick, children }: { on: boolean; onClick: () => void; children: React.ReactNode }) {
@@ -46,10 +63,11 @@ function Toggle({ on, onClick, children }: { on: boolean; onClick: () => void; c
 
 function RippleRow({ r }: { r: RippleRun }) {
   return (
-    <div style={{ display: 'flex', gap: 8, whiteSpace: 'pre', paddingLeft: 28 }}>
+    <div style={{ display: 'flex', gap: GAP, whiteSpace: 'pre', paddingLeft: RIPPLE_INDENT }}>
       <span style={{ color: '#3f3f46' }}>{clock(r.finishedAt)}</span>
-      <span style={{ color: STATUS_COLOR[r.status] ?? '#71717a', minWidth: 60, display: 'inline-block' }}>{r.status}</span>
-      <span style={{ color: '#a1a1aa' }}>{r.ripple}</span>
+      <span style={{ ...col(STATUS_W), color: STATUS_COLOR[r.status] ?? '#71717a' }}>{r.status}</span>
+      <span style={{ ...col(RIPPLE_NAME_W), color: '#a1a1aa' }}>{r.ripple}</span>
+      <span style={{ color: '#71717a' }}>{durationOf(r.startedAt, r.finishedAt)}</span>
     </div>
   );
 }
@@ -91,12 +109,12 @@ export function RunHistory() {
           ) : (
             runs.map((run) => (
               <div key={`${run.pond}-${run.version}-${run.f}`}>
-                <div style={{ display: 'flex', gap: 8, whiteSpace: 'pre' }}>
+                <div style={{ display: 'flex', gap: GAP, whiteSpace: 'pre' }}>
                   <span style={{ color: '#3f3f46' }}>{clock(run.finishedAt ?? run.startedAt)}</span>
-                  <span style={{ color: STATUS_COLOR[run.status] ?? '#71717a', minWidth: 60, display: 'inline-block' }}>{run.status}</span>
-                  <span style={{ color: '#d4d4d8', minWidth: 96, display: 'inline-block' }}>{run.pond}</span>
-                  <span style={{ color: '#52525b' }}>v{run.version}</span>
-                  <span style={{ color: '#71717a' }}>{duration(run)}</span>
+                  <span style={{ ...col(STATUS_W), color: STATUS_COLOR[run.status] ?? '#71717a' }}>{run.status}</span>
+                  <span style={{ ...col(NAME_W), color: '#d4d4d8' }}>{run.pond}</span>
+                  <span style={{ ...col(VERSION_W), color: '#52525b' }}>v{run.version}</span>
+                  <span style={{ color: '#71717a' }}>{durationOf(run.startedAt, run.finishedAt)}</span>
                 </div>
                 {filters.ripples && run.ripples?.map((r) => <RippleRow key={r.ripple} r={r} />)}
               </div>

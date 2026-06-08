@@ -323,7 +323,11 @@ class Driver:
                     if f:
                         self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
                     self.state = complete_ripple(self.state, eid, now)
-                    self._record_ripple_run(pond, rname, f, "success", now)
+                    self._record_ripple_run(
+                        pond, rname, f, "success",
+                        started_at=payload.get("started_at"),
+                        finished_at=payload.get("finished_at") or _iso(now),
+                    )
                     self._process(now)
             elif kind == "run_completed":
                 self._finish_pond_run(pond, f, now)
@@ -399,15 +403,17 @@ class Driver:
 
     # ─── History + persistence ────────────────────────────────────────────────
 
-    def _record_ripple_run(self, pond: str, rname: str, f: str, status: str, now: datetime) -> None:
+    def _record_ripple_run(
+        self, pond: str, rname: str, f: str, status: str, started_at: str | None, finished_at: str
+    ) -> None:
         meta = self.meta[pond]
         rid = meta["ripple_ids"].get(rname)
         if rid is None:
             return
         self.db.execute(
-            "INSERT OR REPLACE INTO ripple_run (pond_version_id, f, ripple_id, finished_at, status) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (meta["version_id"], f, rid, _iso(now), status),
+            "INSERT OR REPLACE INTO ripple_run (pond_version_id, f, ripple_id, started_at, finished_at, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (meta["version_id"], f, rid, started_at, finished_at, status),
         )
         self.db.commit()
 

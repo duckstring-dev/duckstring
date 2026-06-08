@@ -220,6 +220,10 @@ def test_status_and_runs_feed_live(runtime):
     rep_run = next(r for r in runs if r["pond"] == "reports")
     assert rep_run["status"] == "success"
     assert any(rr["status"] == "success" for rr in rep_run["ripples"])
+    # Ripple Runs carry a real execution span (started_at + finished_at) → a duration for the UI.
+    rr = rep_run["ripples"][0]
+    assert rr["started_at"] is not None and rr["finished_at"] is not None
+    assert rr["finished_at"] >= rr["started_at"]
 
     # Lineage filter: reports + its upstream sources (sales, transactions, products) — not just reports.
     feed = httpx.get(f"{url}/api/runs", params={"pond": "reports", "lineage": True}, timeout=5.0).json()["runs"]

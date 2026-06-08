@@ -40,7 +40,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
         for name in names:
             executor.submit(
                 name,
-                on_done=lambda n: q.put(("done", n)),
+                on_done=lambda n, started, finished: q.put(("done", (n, started, finished))),
                 on_error=lambda n, exc: q.put(("error", (n, exc))),
             )
 
@@ -61,7 +61,10 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                 elif data.get("kind") == "begin_run":
                     _launch(core.begin_run(datetime.fromisoformat(data["f"]), _now()))
             elif kind == "done":
-                _launch(core.ripple_completed(data, _now(), export=executor.export))
+                name, started, finished = data
+                _launch(core.ripple_completed(
+                    name, _now(), started_at=started, finished_at=finished, export=executor.export
+                ))
             elif kind == "error":
                 name, exc = data
                 print(f"[duck:{core.pond_name}] ripple {name} failed: {exc}", flush=True)

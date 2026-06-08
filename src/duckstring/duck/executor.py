@@ -12,6 +12,7 @@ import importlib
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..catchment.registry import pond_registry_path
@@ -109,10 +110,13 @@ class RippleExecutor:
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
 
     def submit(self, ripple_name: str, on_done, on_error):
-        """Load and run ``ripple_name``; call ``on_done(name)`` on success, ``on_error(name, exc)`` on
-        failure (both on a pool thread)."""
+        """Load and run ``ripple_name``; call ``on_done(name, started_at, finished_at)`` on success
+        (both wall-clock UTC, for the run-history duration), ``on_error(name, exc)`` on failure (both
+        on a pool thread)."""
+        timing: dict[str, datetime] = {}
 
         def _task():
+            timing["started"] = datetime.now(timezone.utc)
             func = _load_ripple_func(self.source_path, str(self.root), ripple_name)
             _run_ripple(func, self.pond_name, self.version, str(self.registry_path), str(self.root))
 
@@ -120,7 +124,11 @@ class RippleExecutor:
 
         def _cb(f):
             exc = f.exception()
-            (on_error(ripple_name, exc) if exc else on_done(ripple_name))
+            if exc:
+                on_error(ripple_name, exc)
+            else:
+                finished = datetime.now(timezone.utc)
+                on_done(ripple_name, timing.get("started", finished), finished)
 
         fut.add_done_callback(_cb)
         return fut
