@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore, formatAge, STATE_COLORS, nodeFill } from '@/lib/store';
+import { useLiveStore, formatAge, stateColor, nodeFill } from '@/lib/store';
 import { DemandIndicators } from './DemandIndicators';
 
 export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
@@ -15,7 +15,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
 
   if (!ripple || !view) return null;
 
-  const borderColor = STATE_COLORS[view.status];
+  const borderColor = stateColor(view);
   const isSelected = selectedRippleId === rippleId;
   // Started-run freshness: in-flight start while running, else last completed freshness.
   const startedF = view.status === 'running' ? view.startF : view.endF;

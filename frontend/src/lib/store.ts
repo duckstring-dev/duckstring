@@ -361,6 +361,17 @@ export const STATE_COLORS: Record<string, string> = {
   idle: '#71717a',
 };
 
+// Border colour for a node. Running is always the brand cyan and idle is grey; a *queued* node is
+// coloured by its demand — pull if it holds any pull token, else push. (A node can hold both; pull is
+// the looser demand since any run, push-triggered or not, satisfies it, so it wins the colour.)
+export function stateColor(view: NodeView): string {
+  if (view.status === 'queued') {
+    if (view.hasPull) return THEME_PULL;
+    if (view.targetF !== null) return THEME_PUSH;
+  }
+  return STATE_COLORS[view.status] ?? STATE_COLORS.idle;
+}
+
 // pull (Tap/Wave) amber; push (Pulse/Tide) violet; idle grey.
 export const EDGE_COLORS: Record<string, string> = {
   pull: THEME_PULL,
@@ -368,10 +379,11 @@ export const EDGE_COLORS: Record<string, string> = {
   idle: '#3f3f46',
 };
 
-// Edge colour reflects the SINK's demand on this edge: push > pull > none (idle).
+// Edge colour reflects the SINK's demand on this edge: pull > push > none (idle), matching the
+// queued-node rule (pull is the looser demand, so it wins the colour when both are present).
 export function getDemandEdgeColor(sinkPull: boolean, sinkPush: number | null): string {
-  if (sinkPush !== null) return EDGE_COLORS.push;
   if (sinkPull) return EDGE_COLORS.pull;
+  if (sinkPush !== null) return EDGE_COLORS.push;
   return EDGE_COLORS.idle;
 }
 

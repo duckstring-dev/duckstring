@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore, formatAge, STATE_COLORS, nodeFill } from '@/lib/store';
+import { useLiveStore, formatAge, stateColor, nodeFill } from '@/lib/store';
 import { DemandIndicators } from './DemandIndicators';
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
@@ -16,7 +16,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
 
   if (!pond || !view) return null;
 
-  const borderColor = STATE_COLORS[view.status];
+  const borderColor = stateColor(view);
   const isSelected = selectedPondId === pondId;
 
   return (
