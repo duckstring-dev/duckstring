@@ -14,7 +14,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { useLiveStore, getDemandEdgeColor, formatAge } from '@/lib/store';
+import { useLiveStore, getDemandEdgeColor, formatAge, ORANGE, BLUE, GREEN, RED } from '@/lib/store';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
@@ -41,7 +41,7 @@ function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
 function TriggerEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const pondId = (data as { pondId: string }).pondId;
   const trigger = useLiveStore((s) => s.triggers[pondId]);
-  const color = trigger?.kind === 'wave' ? '#22c55e' : '#3b82f6';
+  const color = trigger?.kind === 'wave' ? ORANGE : BLUE;
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return (
     <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2, strokeDasharray: '6 3' }} />
@@ -84,20 +84,20 @@ function StatusPanel() {
         minWidth: 168,
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
         <span
           aria-label="Duckstring"
           style={{
-            width: 22,
-            height: 22,
+            width: 39,
+            height: 39,
             flexShrink: 0,
-            backgroundImage: 'url(/logo.svg)',
+            backgroundImage: 'url(/logo-mark.svg)',
             backgroundSize: 'contain',
             backgroundRepeat: 'no-repeat',
             backgroundPosition: 'center',
           }}
         />
-        <span style={{ fontSize: 15, fontWeight: 700, color: '#f4f4f5', letterSpacing: '0.01em' }}>
+        <span style={{ fontSize: 17, fontWeight: 700, lineHeight: 1, color: '#f4f4f5', letterSpacing: '0.01em' }}>
           Duckstring
         </span>
       </div>
@@ -105,7 +105,7 @@ function StatusPanel() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
         <span
           title={connected ? 'connected' : error ? 'unreachable' : 'connecting'}
-          style={{ width: 8, height: 8, flexShrink: 0, borderRadius: '50%', background: connected ? '#22c55e' : '#ef4444' }}
+          style={{ width: 8, height: 8, flexShrink: 0, borderRadius: '50%', background: connected ? GREEN : RED }}
         />
         <span style={{ color: '#71717a' }}>
           Catchment

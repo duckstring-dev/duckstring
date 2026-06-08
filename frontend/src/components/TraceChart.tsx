@@ -4,9 +4,8 @@
 // read against the cadence (≈ the bottleneck): well below it ⇒ this node isn't the bottleneck;
 // close to it ⇒ it is. The y-axis is clipped near the 75th percentile (plus a margin
 // proportional to the mean) so aberrant gaps — e.g. after a stop — don't squash the rest.
-const INTERVAL_COLOR = '#22c55e';
-const DURATION_COLOR = '#38bdf8';
-const MEAN_COLOR = '#f59e0b';
+const INTERVAL_COLOR = '#f97316'; // orange — run cadence, tied to Wave/pull (≈ bottleneck under a Wave)
+const DURATION_COLOR = '#17d7c2'; // teal — run duration, tied to the running state
 
 function quantile(sortedAsc: number[], q: number): number {
   if (sortedAsc.length === 0) return 0;
@@ -90,7 +89,7 @@ export function TraceChart({ times, durations }: { times: number[]; durations: n
       {header}
       <svg width={W} height={H} style={{ display: 'block' }}>
         <line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="#27272a" strokeWidth={1} />
-        {meanLine(intMean, MEAN_COLOR)}
+        {meanLine(intMean, INTERVAL_COLOR)}
         {meanLine(durMean, DURATION_COLOR)}
         {line(durs, DURATION_COLOR)}
         {line(intervals, INTERVAL_COLOR)}

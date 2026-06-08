@@ -342,20 +342,30 @@ export function formatDuration(ms: number): string {
   return `${s}s`;
 }
 
+// ─── Semantic palette ────────────────────────────────────────────────────────
+// Teal is the brand accent and doubles as "active/running"; orange is the pull/Wave/demand family;
+// blue is push; red is stop/failed; green is success/healthy. Grey is idle/structural.
+export const TEAL = '#17d7c2'; // brand · running · generic highlight
+export const ORANGE = '#f97316'; // pull (Tap/Wave) · queued · run interval
+export const BLUE = '#3b82f6'; // push (Pulse/Tide)
+export const RED = '#ef4444'; // stop · failed
+export const GREEN = '#22c55e'; // success · healthy/connected
+
+// Node/Ripple demand state → border colour.
 export const STATE_COLORS: Record<string, string> = {
-  running: '#22c55e',
-  queued: '#f97316',
+  running: TEAL,
+  queued: ORANGE,
   idle: '#71717a',
 };
 
-// pull (Tap/Wave) green; push (Pulse/Tide) blue; idle grey.
+// pull (Tap/Wave) orange; push (Pulse/Tide) blue; idle grey.
 export const EDGE_COLORS: Record<string, string> = {
-  pull: '#22c55e',
-  push: '#3b82f6',
+  pull: ORANGE,
+  push: BLUE,
   idle: '#3f3f46',
 };
 
-// Edge colour reflects the SINK's demand on this edge: push (blue) > pull (green) > none (grey).
+// Edge colour reflects the SINK's demand on this edge: push (blue) > pull (orange) > none (grey).
 export function getDemandEdgeColor(sinkPull: boolean, sinkPush: number | null): string {
   if (sinkPush !== null) return EDGE_COLORS.push;
   if (sinkPull) return EDGE_COLORS.pull;

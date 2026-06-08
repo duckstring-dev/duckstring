@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "duckstring",
+  title: "Duckstring",
   description: "Python-native data-mesh orchestration built on DuckDB.",
   icons: {
     icon: '/favicon.svg',

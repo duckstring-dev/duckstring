@@ -156,7 +156,7 @@ export function WindowEditor({ pond }: { pond: Pond }) {
       <div style={{ marginTop: 8 }}>
         <button
           onClick={() => setShowOptions((v) => !v)}
-          style={{ background: 'none', border: 'none', color: '#6366f1', cursor: 'pointer', fontSize: 11, padding: 0 }}
+          style={{ background: 'none', border: 'none', color: '#17d7c2', cursor: 'pointer', fontSize: 11, padding: 0 }}
         >
           {showOptions ? '▾ Options' : '▸ Options'}
         </button>
@@ -185,7 +185,7 @@ export function WindowEditor({ pond }: { pond: Pond }) {
                   key={d}
                   onClick={() => toggleDay(d)}
                   style={{
-                    background: days.has(d) ? '#6366f1' : '#1e1e26',
+                    background: days.has(d) ? '#17d7c2' : '#1e1e26',
                     border: '1px solid #3f3f46',
                     borderRadius: 4,
                     color: days.has(d) ? '#fff' : '#a1a1aa',
@@ -214,8 +214,8 @@ export function WindowEditor({ pond }: { pond: Pond }) {
           onClick={add}
           style={{
             background: 'transparent',
-            border: '1px solid #6366f1',
-            color: '#6366f1',
+            border: '1px solid #17d7c2',
+            color: '#17d7c2',
             borderRadius: 5,
             padding: '4px 12px',
             fontSize: 12,

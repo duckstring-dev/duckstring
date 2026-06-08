@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useLiveStore, formatAge, formatDuration, parseTs } from '@/lib/store';
+import { useLiveStore, formatAge, formatDuration, parseTs, ORANGE, GREEN } from '@/lib/store';
 import type { FreqUnit, PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
@@ -204,8 +204,8 @@ export function Sidebar() {
           <Section>
             <Label>Triggers</Label>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn onClick={() => tap(selectedPond.id)} color="#22c55e">Tap</Btn>
-              <Btn onClick={() => wave(selectedPond.id)} color="#22c55e">Wave</Btn>
+              <Btn onClick={() => tap(selectedPond.id)} color={ORANGE}>Tap</Btn>
+              <Btn onClick={() => wave(selectedPond.id)} color={ORANGE}>Wave</Btn>
               <Btn onClick={() => pulse(selectedPond.id)} color="#3b82f6">Pulse</Btn>
               <Btn onClick={() => setShowTideInput((v) => !v)} color="#3b82f6">Tide</Btn>
             </div>
@@ -244,7 +244,7 @@ export function Sidebar() {
           <Section>
             <Label>Control</Label>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn onClick={() => start(selectedPond.id)} color="#22c55e">Start</Btn>
+              <Btn onClick={() => start(selectedPond.id)} color={GREEN}>Start</Btn>
               <Btn onClick={() => stop(selectedPond.id)} color="#ef4444">Stop</Btn>
               <Btn onClick={() => stop(selectedPond.id, true)} color="#ef4444">Stop Lineage</Btn>
             </div>

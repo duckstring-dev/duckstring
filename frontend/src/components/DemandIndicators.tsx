@@ -1,6 +1,6 @@
 'use client';
 
-import { formatAge } from '@/lib/store';
+import { formatAge, ORANGE } from '@/lib/store';
 
 // Demand indicators shown to the left of a node's freshness readouts:
 //   • green dot  — holds pull demand
@@ -22,8 +22,8 @@ export function DemandIndicators({
           width: 7,
           height: 7,
           borderRadius: '50%',
-          background: hasPull ? '#22c55e' : 'transparent',
-          border: `1px solid ${hasPull ? '#22c55e' : '#3f3f46'}`,
+          background: hasPull ? ORANGE : 'transparent',
+          border: `1px solid ${hasPull ? ORANGE : '#3f3f46'}`,
           flexShrink: 0,
         }}
       />
