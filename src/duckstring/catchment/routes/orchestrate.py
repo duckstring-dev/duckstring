@@ -28,6 +28,22 @@ def status(request: Request):
     return _driver(request).status()
 
 
+@router.get("/runs")
+def runs(
+    request: Request,
+    pond: str | None = None,
+    lineage: bool = True,
+    ripples: bool = False,
+    limit: int = 100,
+):
+    """Recent Pond Run history (newest first). ``pond`` filters to that Pond and, when ``lineage``,
+    its upstream sources; ``ripples`` nests each run's Ripple Runs. ``limit`` is clamped to [1, 1000]."""
+    if pond is not None:
+        _require_pond(request, pond)
+    limit = max(1, min(limit, 1000))
+    return {"runs": _driver(request).run_history(pond, lineage, ripples, limit)}
+
+
 @router.post("/outlets/{name}/tap")
 def tap(name: str, request: Request):
     _require_pond(request, name)

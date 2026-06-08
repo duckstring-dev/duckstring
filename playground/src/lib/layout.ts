@@ -1,6 +1,6 @@
 import dagre from '@dagrejs/dagre';
 import type { Node, Edge } from '@xyflow/react';
-import type { PondId, RippleId, Pond, Ripple, TriggerView } from './types';
+import type { PondId, RippleId, Pond, Ripple, ActiveTrigger } from './types';
 
 const MIN_RIPPLE_W = 200;
 const RIPPLE_H = 80;
@@ -126,7 +126,7 @@ function buildRippleLayout(
 export function computeLayout(
   ponds: Record<PondId, Pond>,
   ripples: Record<RippleId, Ripple>,
-  triggers: Record<PondId, TriggerView>,
+  triggers: Record<PondId, ActiveTrigger>,
   floors?: ContentFloors
 ): LayoutResult {
   const pondList = Object.values(ponds);

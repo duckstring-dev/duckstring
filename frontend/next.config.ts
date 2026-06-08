@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 
-const FASTAPI_URL = process.env.FASTAPI_URL ?? "http://localhost:8000";
+// Dev-only: where `npm run dev` proxies /api/* (a running Catchment). Default matches the
+// Catchment's default port (7474); override with FASTAPI_URL for a Catchment on another port.
+const FASTAPI_URL = process.env.FASTAPI_URL ?? "http://localhost:7474";
 const isStaticExport = process.env.NEXT_STATIC_EXPORT === "true";
 
 // Static export (used when building for FastAPI to serve) is incompatible with rewrites.

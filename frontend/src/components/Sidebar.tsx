@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { usePlaygroundStore, formatAge } from '@/lib/store';
+import { useLiveStore, formatAge } from '@/lib/store';
+import type { PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
 
@@ -58,66 +59,60 @@ const numInput: React.CSSProperties = {
   fontSize: 12,
 };
 
+const ms = (iso: string | null): number => (iso ? Date.parse(iso) : 0);
+
+// Completion times (asc, ms) and per-run durations (ms) for a set of Pond Runs.
+function pondTrace(runs: PondRun[]): { times: number[]; durations: number[] } {
+  const asc = [...runs].reverse(); // store holds newest-first
+  const times: number[] = [];
+  const durations: number[] = [];
+  for (const r of asc) {
+    if (r.finishedAt) times.push(ms(r.finishedAt));
+    if (r.startedAt && r.finishedAt) durations.push(ms(r.finishedAt) - ms(r.startedAt));
+  }
+  return { times, durations };
+}
+
+// Ripple completion times (asc, ms) for cadence. Ripple Runs don't record a start, so no durations.
+function rippleTrace(runs: PondRun[], rippleName: string): { times: number[]; durations: number[] } {
+  const asc = [...runs].reverse();
+  const times: number[] = [];
+  for (const r of asc) {
+    const rr = r.ripples?.find((x) => x.ripple === rippleName);
+    if (rr?.finishedAt) times.push(ms(rr.finishedAt));
+  }
+  return { times, durations: [] };
+}
+
 export function Sidebar() {
-  const ponds = usePlaygroundStore((s) => s.ponds);
-  const ripples = usePlaygroundStore((s) => s.ripples);
-  const pondStates = usePlaygroundStore((s) => s.pondStates);
-  const now = usePlaygroundStore((s) => s.now);
-  const rippleStates = usePlaygroundStore((s) => s.rippleStates);
-  const selectedPondId = usePlaygroundStore((s) => s.selectedPondId);
-  const selectedRippleId = usePlaygroundStore((s) => s.selectedRippleId);
-  const selectedTriggerId = usePlaygroundStore((s) => s.selectedTriggerId);
-  const triggers = usePlaygroundStore((s) => s.triggers);
+  const ponds = useLiveStore((s) => s.ponds);
+  const ripples = useLiveStore((s) => s.ripples);
+  const pondViews = useLiveStore((s) => s.pondViews);
+  const rippleViews = useLiveStore((s) => s.rippleViews);
+  const pondInfo = useLiveStore((s) => s.pondInfo);
+  const triggers = useLiveStore((s) => s.triggers);
+  const now = useLiveStore((s) => s.now);
+  const selectedPondRuns = useLiveStore((s) => s.selectedPondRuns);
 
-  const addPond = usePlaygroundStore((s) => s.addPond);
-  const addRipple = usePlaygroundStore((s) => s.addRipple);
-  const renamePond = usePlaygroundStore((s) => s.renamePond);
-  const setRippleDuration = usePlaygroundStore((s) => s.setRippleDuration);
-  const renameRipple = usePlaygroundStore((s) => s.renameRipple);
-  const setRippleVariability = usePlaygroundStore((s) => s.setRippleVariability);
-  const setAllVariability = usePlaygroundStore((s) => s.setAllVariability);
-  const linkPonds = usePlaygroundStore((s) => s.linkPonds);
-  const unlinkPonds = usePlaygroundStore((s) => s.unlinkPonds);
-  const linkRipples = usePlaygroundStore((s) => s.linkRipples);
+  const selectedPondId = useLiveStore((s) => s.selectedPondId);
+  const selectedRippleId = useLiveStore((s) => s.selectedRippleId);
+  const selectedTriggerId = useLiveStore((s) => s.selectedTriggerId);
 
-  const deletePond = usePlaygroundStore((s) => s.deletePond);
-  const deleteRipple = usePlaygroundStore((s) => s.deleteRipple);
-  const triggerPulse = usePlaygroundStore((s) => s.triggerPulse);
-  const triggerWave = usePlaygroundStore((s) => s.triggerWave);
-  const triggerTide = usePlaygroundStore((s) => s.triggerTide);
-  const triggerStop = usePlaygroundStore((s) => s.triggerStop);
-  const triggerStart = usePlaygroundStore((s) => s.triggerStart);
-  const triggerTap = usePlaygroundStore((s) => s.triggerTap);
-  const removeTrigger = usePlaygroundStore((s) => s.removeTrigger);
+  const tap = useLiveStore((s) => s.tap);
+  const pulse = useLiveStore((s) => s.pulse);
+  const wave = useLiveStore((s) => s.wave);
+  const tide = useLiveStore((s) => s.tide);
+  const start = useLiveStore((s) => s.start);
+  const stop = useLiveStore((s) => s.stop);
+  const removeTrigger = useLiveStore((s) => s.removeTrigger);
 
-  const [tidePeriod, setTidePeriod] = useState('2');
+  const [tideBound, setTideBound] = useState('2');
   const [showTideInput, setShowTideInput] = useState(false);
-  const [showAddSourcePond, setShowAddSourcePond] = useState(false);
-  const [showAddParentRipple, setShowAddParentRipple] = useState(false);
-  const [allVar, setAllVar] = useState('0');
 
   const selectedPond = selectedPondId ? ponds[selectedPondId] : null;
   const selectedRipple = selectedRippleId ? ripples[selectedRippleId] : null;
-
-  const isOutlet = selectedPondId
-    ? !Object.values(ponds).some((p) => p.sources.includes(selectedPondId))
-    : false;
   const trigger = selectedPondId ? triggers[selectedPondId] : undefined;
-
-  const availableSourcePonds = selectedPondId
-    ? Object.values(ponds).filter(
-        (p) => p.id !== selectedPondId && !selectedPond?.sources.includes(p.id)
-      )
-    : [];
-
-  const availableParentRipples = selectedRippleId && selectedRipple
-    ? Object.values(ripples).filter(
-        (r) =>
-          r.pondId === selectedRipple.pondId &&
-          r.id !== selectedRippleId &&
-          !selectedRipple.parents.includes(r.id)
-      )
-    : [];
+  const isInlet = selectedPond ? selectedPond.sources.length === 0 : false;
 
   return (
     <div
@@ -134,40 +129,29 @@ export function Sidebar() {
         fontFamily: 'inherit',
       }}
     >
-      <div style={{ fontSize: 11, fontWeight: 700, color: '#52525b', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 16 }}>
-        Playground
+      <div style={{ fontSize: 11, fontWeight: 700, color: '#52525b', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 8 }}>
+        Duckstring
       </div>
 
-      <Btn onClick={addPond} color="#6366f1">+ Add Pond</Btn>
-      {selectedPond && !selectedRipple && (
-        <div style={{ fontSize: 10, color: '#52525b', marginTop: 4 }}>links as a sink of {selectedPond.name}</div>
+      {!selectedPond && !selectedRipple && !selectedTriggerId && (
+        <div style={{ fontSize: 12, color: '#71717a', lineHeight: 1.6 }}>
+          Select a Pond or Ripple to inspect its freshness and run history, or to send a Tap, Pulse,
+          Wave, or Tide. Ponds are established by deploying code — not from here.
+        </div>
       )}
 
       {/* Trigger node selected */}
-      {selectedTriggerId && (
+      {selectedTriggerId && triggers[selectedTriggerId] && (
         <Section>
-          <Label>Trigger</Label>
-          {triggers[selectedTriggerId]?.kind === 'wave' ? (
-            <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 10 }}>Wave trigger</div>
+          <Label>Trigger · {selectedTriggerId}</Label>
+          {triggers[selectedTriggerId].kind === 'wave' ? (
+            <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 10 }}>Wave — standing pull.</div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-              <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
-              <input
-                type="number"
-                min="1"
-                step="1"
-                defaultValue={((triggers[selectedTriggerId]?.stalenessMs ?? 1000) / 1000).toFixed(1)}
-                key={`tide-${selectedTriggerId}`}
-                onChange={(e) => {
-                  const ms = parseFloat(e.target.value) * 1000;
-                  if (!isNaN(ms) && ms > 0) triggerTide(selectedTriggerId, Math.max(100, ms));
-                }}
-                style={numInput}
-              />
-              <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
+            <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 10 }}>
+              Tide — max staleness ≤ {((triggers[selectedTriggerId].boundMs ?? 1000) / 1000).toFixed(1)}s.
             </div>
           )}
-          <Btn onClick={() => removeTrigger(selectedTriggerId)} color="#ef4444">Delete Trigger</Btn>
+          <Btn onClick={() => removeTrigger(selectedTriggerId)} color="#ef4444">Remove Trigger</Btn>
         </Section>
       )}
 
@@ -176,87 +160,58 @@ export function Sidebar() {
         <>
           <Section>
             <Label>Pond: {selectedPond.name}</Label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-              <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Name</span>
-              <input type="text" defaultValue={selectedPond.name} key={`pn-${selectedPond.id}`}
-                onChange={(e) => { const v = e.target.value.trim(); if (v) renamePond(selectedPond.id, v); }}
-                style={{ ...numInput, width: 140 }} />
-            </div>
-            <div style={{ fontSize: 11, color: '#71717a', marginBottom: 10 }}>
-              Runs: <span style={{ color: '#a1a1aa' }}>{pondStates[selectedPond.id]?.runsCompleted ?? 0}</span>
-              <span style={{ color: '#52525b' }}> · </span>
-              freshness <span style={{ color: '#a1a1aa' }}>{formatAge(pondStates[selectedPond.id]?.endF ?? 0, now)}</span> old
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn onClick={() => addRipple(selectedPond.id)} color="#6366f1">+ Add Ripple</Btn>
-              <Btn onClick={() => deletePond(selectedPond.id)} color="#ef4444">Delete Pond</Btn>
+            <div style={{ fontSize: 11, color: '#71717a', marginBottom: 8, lineHeight: 1.7 }}>
+              <div>
+                {pondInfo[selectedPond.id]?.kind ?? 'pond'}
+                <span style={{ color: '#52525b' }}> · </span>
+                v<span style={{ color: '#a1a1aa' }}>{pondInfo[selectedPond.id]?.version ?? '—'}</span>
+              </div>
+              <div>
+                Runs: <span style={{ color: '#a1a1aa' }}>{pondViews[selectedPond.id]?.runsCompleted ?? 0}</span>
+                <span style={{ color: '#52525b' }}> · </span>
+                fresh <span style={{ color: '#a1a1aa' }}>{formatAge(pondViews[selectedPond.id]?.endF ?? 0, now)}</span> old
+              </div>
             </div>
 
             {selectedPond.sources.length > 0 && (
-              <div style={{ marginTop: 12 }}>
+              <div style={{ marginTop: 8 }}>
                 <Label>Sources</Label>
                 {selectedPond.sources.map((sid) => (
-                  <div key={sid} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                    <span style={{ fontSize: 12, color: '#a1a1aa' }}>{ponds[sid]?.name ?? sid}</span>
-                    <button onClick={() => unlinkPonds(sid, selectedPond.id)} style={{ background: 'none', border: 'none', color: '#52525b', cursor: 'pointer', fontSize: 14 }}>✕</button>
-                  </div>
+                  <div key={sid} style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 3 }}>{ponds[sid]?.name ?? sid}</div>
                 ))}
               </div>
             )}
-            <div style={{ marginTop: 8 }}>
-              <Btn small onClick={() => setShowAddSourcePond((v) => !v)} color="#6366f1">+ Add Source Pond</Btn>
-              {showAddSourcePond && (
-                <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  {availableSourcePonds.length === 0 ? (
-                    <span style={{ fontSize: 11, color: '#52525b' }}>No eligible ponds</span>
-                  ) : (
-                    availableSourcePonds.map((p) => (
-                      <button key={p.id} onClick={() => { linkPonds(p.id, selectedPond.id); setShowAddSourcePond(false); }}
-                        style={{ background: '#1e1e26', border: '1px solid #3f3f46', borderRadius: 4, color: '#a1a1aa', padding: '3px 8px', fontSize: 12, cursor: 'pointer', textAlign: 'left' }}>
-                        {p.name}
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
           </Section>
 
           {/* Windows (Inlet ponds only) */}
-          {selectedPond.sources.length === 0 && (
+          {isInlet && (
             <Section>
               <Label>Windows (batch source)</Label>
               <WindowEditor pond={selectedPond} />
             </Section>
           )}
 
-          {/* Trigger section */}
+          {/* Triggers */}
           <Section>
             <Label>Triggers</Label>
-            {isOutlet ? (
-              <>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  <Btn onClick={() => triggerTap(selectedPond.id)} color="#22c55e">Tap</Btn>
-                  <Btn onClick={() => triggerWave(selectedPond.id)} color="#22c55e">Wave</Btn>
-                  <Btn onClick={() => triggerPulse(selectedPond.id)} color="#3b82f6">Pulse</Btn>
-                  <Btn onClick={() => setShowTideInput((v) => !v)} color="#3b82f6">Tide</Btn>
-                </div>
-                {showTideInput && (
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
-                    <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
-                    <input type="number" min="1" step="1" value={tidePeriod} onChange={(e) => setTidePeriod(e.target.value)} style={numInput} />
-                    <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
-                    <Btn small onClick={() => { triggerTide(selectedPond.id, Math.max(100, parseFloat(tidePeriod) * 1000)); setShowTideInput(false); }} color="#3b82f6">Set</Btn>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div style={{ fontSize: 11, color: '#52525b' }}>Not an outlet — triggers live on outlet ponds.</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              <Btn onClick={() => tap(selectedPond.id)} color="#22c55e">Tap</Btn>
+              <Btn onClick={() => wave(selectedPond.id)} color="#22c55e">Wave</Btn>
+              <Btn onClick={() => pulse(selectedPond.id)} color="#3b82f6">Pulse</Btn>
+              <Btn onClick={() => setShowTideInput((v) => !v)} color="#3b82f6">Tide</Btn>
+            </div>
+            {showTideInput && (
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
+                <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
+                <input type="number" min="1" step="1" value={tideBound} onChange={(e) => setTideBound(e.target.value)} style={numInput} />
+                <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
+                <Btn small onClick={() => { tide(selectedPond.id, Math.max(0.1, parseFloat(tideBound))); setShowTideInput(false); }} color="#3b82f6">Set</Btn>
+              </div>
             )}
             {trigger && (
               <div style={{ marginTop: 8 }}>
                 <Btn small onClick={() => removeTrigger(selectedPond.id)} color="#ef4444">
-                  Delete {trigger.kind === 'wave' ? 'Wave' : 'Tide'} Trigger
+                  Remove {trigger.kind === 'wave' ? 'Wave' : 'Tide'} Trigger
                 </Btn>
               </div>
             )}
@@ -266,9 +221,9 @@ export function Sidebar() {
           <Section>
             <Label>Control</Label>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn onClick={() => triggerStart(selectedPond.id)} color="#22c55e">Start</Btn>
-              <Btn onClick={() => triggerStop(selectedPond.id)} color="#ef4444">Stop</Btn>
-              <Btn onClick={() => triggerStop(selectedPond.id, true)} color="#ef4444">Stop Lineage</Btn>
+              <Btn onClick={() => start(selectedPond.id)} color="#22c55e">Start</Btn>
+              <Btn onClick={() => stop(selectedPond.id)} color="#ef4444">Stop</Btn>
+              <Btn onClick={() => stop(selectedPond.id, true)} color="#ef4444">Stop Lineage</Btn>
             </div>
             <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
               Start: one run on this Pond, no upstream. Stop: clear this Pond&apos;s demand. Stop Lineage: also clear all upstream sources.
@@ -276,10 +231,7 @@ export function Sidebar() {
           </Section>
 
           <Section>
-            <TraceChart
-              times={pondStates[selectedPond.id]?.completionTimes ?? []}
-              durations={pondStates[selectedPond.id]?.durations ?? []}
-            />
+            <TraceChart {...pondTrace(selectedPondRuns)} />
           </Section>
         </>
       )}
@@ -288,101 +240,30 @@ export function Sidebar() {
       {selectedRipple && (
         <>
           <Section>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <Label>Ripple: {selectedRipple.name}</Label>
-              <Btn small onClick={() => deleteRipple(selectedRippleId!)} color="#ef4444">Delete</Btn>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-              <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Name</span>
-              <input type="text" defaultValue={selectedRipple.name} key={`n-${selectedRippleId}`}
-                onChange={(e) => { const v = e.target.value.trim(); if (v) renameRipple(selectedRippleId!, v); }}
-                style={{ ...numInput, width: 140 }} />
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-              <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Duration</span>
-              <input type="number" min="1" step="1" defaultValue={(selectedRipple.durationMs / 1000).toFixed(1)} key={`d-${selectedRippleId}`}
-                onChange={(e) => { const ms = Math.max(100, parseFloat(e.target.value) * 1000); if (!isNaN(ms)) setRippleDuration(selectedRippleId!, ms); }}
-                style={numInput} />
-              <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-              <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Variability</span>
-              <input type="number" min="0" step="0.1" defaultValue={selectedRipple.variability.toFixed(1)} key={`v-${selectedRippleId}`}
-                onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v >= 0) setRippleVariability(selectedRippleId!, v); }}
-                style={numInput} />
-              <span style={{ fontSize: 11, color: '#71717a' }}>σ(ln)</span>
-            </div>
-
-            <div style={{ fontSize: 11, color: '#71717a', marginBottom: 10, lineHeight: 1.6 }}>
+            <Label>Ripple: {selectedRipple.name}</Label>
+            <div style={{ fontSize: 11, color: '#71717a', marginBottom: 8, lineHeight: 1.7 }}>
+              <div>in <span style={{ color: '#a1a1aa' }}>{ponds[selectedRipple.pondId]?.name ?? selectedRipple.pondId}</span></div>
               <div>
-                Runs: <span style={{ color: '#a1a1aa' }}>{rippleStates[selectedRippleId!]?.runsCompleted ?? 0}</span>
+                Runs: <span style={{ color: '#a1a1aa' }}>{rippleViews[selectedRipple.id]?.runsCompleted ?? 0}</span>
                 <span style={{ color: '#52525b' }}> · </span>
-                freshness <span style={{ color: '#a1a1aa' }}>{formatAge(rippleStates[selectedRippleId!]?.endF ?? 0, now)}</span> old
-              </div>
-              <div>
-                Last run:{' '}
-                <span style={{ color: '#a1a1aa' }}>
-                  {rippleStates[selectedRippleId!]?.lastDurationMs != null
-                    ? `${(rippleStates[selectedRippleId!]!.lastDurationMs! / 1000).toFixed(2)}s`
-                    : '—'}
-                </span>
+                fresh <span style={{ color: '#a1a1aa' }}>{formatAge(rippleViews[selectedRipple.id]?.endF ?? 0, now)}</span> old
               </div>
             </div>
 
             {selectedRipple.parents.length > 0 && (
-              <div style={{ marginBottom: 8 }}>
+              <div style={{ marginBottom: 4 }}>
                 <Label>Parents</Label>
                 {selectedRipple.parents.map((pid) => (
                   <div key={pid} style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 3 }}>{ripples[pid]?.name ?? pid}</div>
                 ))}
               </div>
             )}
-
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn small onClick={() => addRipple(selectedRipple.pondId, selectedRippleId!)} color="#6366f1">+ Add Ripple</Btn>
-              <Btn small onClick={() => setShowAddParentRipple((v) => !v)} color="#6366f1">+ Add Parent</Btn>
-            </div>
-            {showAddParentRipple && (
-              <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 3 }}>
-                {availableParentRipples.length === 0 ? (
-                  <span style={{ fontSize: 11, color: '#52525b' }}>No eligible ripples</span>
-                ) : (
-                  availableParentRipples.map((r) => (
-                    <button key={r.id} onClick={() => { if (linkRipples(r.id, selectedRippleId!)) setShowAddParentRipple(false); }}
-                      style={{ background: '#1e1e26', border: '1px solid #3f3f46', borderRadius: 4, color: '#a1a1aa', padding: '3px 8px', fontSize: 12, cursor: 'pointer', textAlign: 'left' }}>
-                      {r.name}
-                    </button>
-                  ))
-                )}
-              </div>
-            )}
           </Section>
 
           <Section>
-            <TraceChart
-              times={rippleStates[selectedRippleId!]?.completionTimes ?? []}
-              durations={rippleStates[selectedRippleId!]?.durations ?? []}
-            />
+            <TraceChart {...rippleTrace(selectedPondRuns, selectedRipple.name)} />
           </Section>
         </>
-      )}
-
-      {/* Nothing selected: global variability */}
-      {!selectedPond && !selectedRipple && !selectedTriggerId && (
-        <Section>
-          <Label>Variability (all ripples)</Label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input type="number" min="0" step="0.1" value={allVar} onChange={(e) => setAllVar(e.target.value)} style={numInput} />
-            <span style={{ fontSize: 11, color: '#71717a' }}>σ(ln)</span>
-            <Btn small onClick={() => { const v = parseFloat(allVar); if (!isNaN(v) && v >= 0) setAllVariability(v); }} color="#6366f1">Set</Btn>
-          </div>
-          <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
-            Overwrites variability on every ripple. Each run takes duration·exp(σ·Z).
-          </div>
-        </Section>
       )}
     </div>
   );

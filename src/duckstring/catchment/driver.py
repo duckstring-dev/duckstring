@@ -456,30 +456,120 @@ class Driver:
         with self.lock:
             from ..engine import NEVER, min_target
             ts = lambda dt: _iso(dt) if dt is not None and dt != NEVER else None  # noqa: E731
+
+            def _demand_status(rs, running: bool) -> str:
+                if running:
+                    return "running"
+                if rs.has_pull or rs.targets:
+                    return "queued"
+                return "idle"
+
             ponds = []
             for name in self.state.ponds:
                 ps = self.state.pond_states[name]
-                busy = any(
-                    self.state.ripple_states[rid].is_running
-                    for rid in self.state.ripples
-                    if self.state.ripples[rid].pond_id == name
-                )
-                if busy:
-                    st = "running"
-                elif ps.has_pull or ps.targets:
-                    st = "queued"
-                else:
-                    st = "idle"
+                # Ripples belonging to this Pond, with their live per-Ripple state and intra-Pond edges.
+                ripples = []
+                ripple_edges = []
+                for rid, rip in self.state.ripples.items():
+                    if rip.pond_id != name:
+                        continue
+                    rs = self.state.ripple_states[rid]
+                    ripples.append({
+                        "name": rip.name,
+                        "status": _demand_status(rs, rs.is_running),
+                        "gen": rs.runs_started,
+                        "runs_completed": rs.runs_completed,
+                        "has_pull": rs.has_pull,
+                        "target_f": ts(min_target(rs.targets)),
+                        "start_f": ts(rs.start_f),
+                        "end_f": ts(rs.end_f),
+                    })
+                    for parent in rip.parents:
+                        psrc = self.state.ripples.get(parent)
+                        if psrc is not None and psrc.pond_id == name:
+                            ripple_edges.append([psrc.name, rip.name])
+
+                busy = any(r["status"] == "running" for r in ripples)
+                st = _demand_status(ps, busy)
+
+                trig = self.state.triggers.get(name)
+                trigger = None
+                if trig is not None:
+                    trigger = {
+                        "kind": trig.kind,
+                        "bound_ms": int(trig.bound.total_seconds() * 1000) if trig.bound is not None else None,
+                    }
+
                 ponds.append({
                     "name": name,
                     "kind": self.meta[name]["kind"],
                     "version": self.meta[name]["version"],
                     "status": st,
                     "gen": ps.runs_started,
+                    "runs_completed": ps.runs_completed,
                     "has_pull": ps.has_pull,
                     "target_f": ts(min_target(ps.targets)),
                     "start_f": ts(ps.start_f),
                     "end_f": ts(ps.end_f),
+                    "d_ms": int(ps.d.total_seconds() * 1000),
+                    "trigger": trigger,
+                    "ripples": ripples,
+                    "ripple_edges": ripple_edges,
                 })
             edges = [[s, name] for name, pond in self.state.ponds.items() for s in pond.sources]
             return {"ponds": ponds, "edges": edges}
+
+    def _ancestors(self, name: str) -> set[str]:
+        """``name`` plus all upstream (source) Pond names reachable from it (BFS over engine sources)."""
+        seen = {name}
+        queue = [name]
+        while queue:
+            n = queue.pop()
+            pond = self.state.ponds.get(n)
+            if pond is None:
+                continue
+            for src in pond.sources:
+                if src not in seen:
+                    seen.add(src)
+                    queue.append(src)
+        return seen
+
+    def run_history(self, pond: str | None, lineage: bool, ripples: bool, limit: int) -> list[dict]:
+        """Recent Pond Runs (newest first), optionally filtered to ``pond`` and — when ``lineage`` —
+        its upstream sources. Ripple Runs are nested under each Pond Run only when ``ripples`` is set."""
+        with self.lock:
+            params: list = []
+            where = ""
+            if pond is not None:
+                names = self._ancestors(pond) if lineage else {pond}
+                where = f"WHERE pn.name IN ({','.join('?' * len(names))})"
+                params.extend(sorted(names))
+            rows = self.db.execute(
+                "SELECT pn.name, pv.version, pr.pond_version_id, pr.f, pr.started_at, pr.finished_at, pr.status "
+                "FROM pond_run pr "
+                "JOIN pond_version pv ON pv.id = pr.pond_version_id "
+                "JOIN pond_name pn ON pn.id = pv.pond_name_id "
+                f"{where} ORDER BY pr.started_at DESC, pr.f DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+
+            runs = []
+            for pname, version, pv_id, f, started_at, finished_at, status in rows:
+                run = {
+                    "pond": pname, "version": version, "f": f,
+                    "started_at": started_at, "finished_at": finished_at, "status": status,
+                }
+                if ripples:
+                    rrows = self.db.execute(
+                        "SELECT r.name, rr.started_at, rr.finished_at, rr.status "
+                        "FROM ripple_run rr JOIN ripple r ON r.id = rr.ripple_id "
+                        "WHERE rr.pond_version_id = ? AND rr.f = ? "
+                        "ORDER BY COALESCE(rr.finished_at, rr.started_at)",
+                        (pv_id, f),
+                    ).fetchall()
+                    run["ripples"] = [
+                        {"ripple": rn, "started_at": rsa, "finished_at": rfa, "status": rst}
+                        for (rn, rsa, rfa, rst) in rrows
+                    ]
+                runs.append(run)
+            return runs

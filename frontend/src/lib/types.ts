@@ -1,32 +1,22 @@
-export type PondId = string;
-export type RippleId = string;
+// Live Catchment UI types. The DAG topology mirrors the playground's shape (Ponds keyed by name,
+// Ripples keyed by `${pond}.${ripple}`) so the layout engine (lib/layout.ts) is reused unchanged.
+// Per-node live state is carried in a NodeView, fed from the enriched /api/status payload.
 
+export type PondId = string; // the Pond name
+export type RippleId = string; // `${pond}.${ripple}`
+
+export type DemandStatus = 'running' | 'queued' | 'idle';
 export type FreqUnit = 'SECOND' | 'MINUTE' | 'HOUR' | 'DAY' | 'WEEK';
 export type Weekday = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI' | 'SAT' | 'SUN';
+export type TriggerKind = 'wave' | 'tide';
 
-// A recurring batch-availability window on an Inlet Pond (no Sources), mirroring the backend's
-// RFC-5545-flavoured Window (engine/core.py). The first occurrence opens at `startAnchor` and stays
-// "fresh until" startAnchor + durationMs; it then recurs every `freqInterval × freqUnit`. `validDays`
-// restricts which weekdays are kept (undefined = every day); `until` ends the recurrence.
-// Occurrences are the grid `startAnchor + k·delta` (k ≥ 0), filtered by validDays/until.
-export interface Window {
-  name: string;
-  startAnchor: number; // ms epoch: first occurrence start
-  durationMs: number; // window length ("fresh until" startAnchor + durationMs)
-  freqUnit: FreqUnit;
-  freqInterval: number;
-  validDays?: Weekday[]; // undefined / empty = every day
-  until?: number; // ms epoch: end of recurrence (undefined = forever)
-}
+// ─── Topology (drives layout) ────────────────────────────────────────────────
 
 export interface Pond {
   id: PondId;
   name: string;
+  kind: string; // inlet | pond | outlet
   sources: PondId[];
-  // Source ponds that are optional (don't gate / don't define freshness). Default: all required.
-  optionalSources?: PondId[];
-  // Batch-update windows (Inlet only). Empty/undefined ⇒ live source (fresh = now).
-  windows?: Window[];
 }
 
 export interface Ripple {
@@ -34,70 +24,62 @@ export interface Ripple {
   pondId: PondId;
   name: string;
   parents: RippleId[];
-  // Intra-pond parents that are optional. Default: all required.
-  optionalParents?: RippleId[];
-  durationMs: number;
-  // Standard deviation applied on a log transform of durationMs: a run takes
-  // durationMs * exp(variability * Z), Z ~ N(0,1). 0 = deterministic.
-  variability: number;
 }
 
-// First-class Ripple state, named exactly as in theory.md.
-export interface RippleRunState {
-  startF: number; // freshness of the most recently started run (0 = never)
-  endF: number; // freshness of the most recently completed run (0 = never)
-  hasPull: boolean; // pull token
-  targets: number[]; // set of unsatisfied push target freshnesses (empty = none)
-  // Run bookkeeping (the simulation of an actual run taking time):
-  isRunning: boolean;
-  runStartedAt: number | null;
-  currentRunDurationMs: number | null;
-  lastDurationMs: number | null;
-  // Trace data for the sidebar charts:
+// ─── Live per-node state ─────────────────────────────────────────────────────
+
+// Freshness is a ms-epoch (0 = NEVER, so formatAge renders "—"); targetF is null when there is no
+// outstanding push target (vs. 0, which would be a real timestamp).
+export interface NodeView {
+  status: DemandStatus;
+  startF: number;
+  endF: number;
+  targetF: number | null;
+  hasPull: boolean;
   runsStarted: number;
   runsCompleted: number;
-  completionTimes: number[];
-  durations: number[];
+  dMs: number; // window delay carried by the current freshness (Pond only; 0 for Ripples)
 }
 
-// First-class Pond state, named exactly as in theory.md.
-export interface PondRunState {
-  startF: number; // freshness of the most recently started Pond Run
-  endF: number; // freshness of the most recently completed Pond Run
-  D: number; // window delay carried by the current freshness (0 unless fed by a window)
-  hasReceivedPull: boolean; // inbox: a Sink/trigger has asked for resupply
-  hasPull: boolean; // a Pond Run is wanted in pull
-  targets: number[]; // set of unsatisfied push target freshnesses (empty = none)
-  // Trace data for the sidebar charts:
-  runsStarted: number;
-  runsCompleted: number;
-  genStartTimes: Record<number, number>;
-  completionTimes: number[];
-  durations: number[];
-}
-
-// Kind of demand most recently sent across an edge. Keyed `${parent}::${child}` /
-// `${sourcePond}::${sinkPond}`.
-export type EdgeDemandKind = 'push' | 'pull' | 'stop';
-export type EdgeKindMap = Record<string, EdgeDemandKind>;
-
-// Persistent triggers only (Tap and Pulse are one-shot, no entity).
-export type TriggerKind = 'wave' | 'tide';
-
-export interface ActiveTrigger {
-  pondId: PondId;
+export interface TriggerView {
   kind: TriggerKind;
-  // Tide only: maximum staleness in ms. A push to `now` fires whenever staleness exceeds this.
-  stalenessMs?: number;
+  boundMs: number | null; // Tide only: the staleness bound
 }
 
-export type RippleVisualState = 'running' | 'queued' | 'idle';
-export type PondVisualState = 'running' | 'queued' | 'idle';
-export type EdgeVisualState = 'push' | 'pull' | 'stop' | 'idle';
+export interface PondInfo {
+  version: string;
+  kind: string;
+}
 
-// A single logged orchestration event, for the console panel.
-export interface LogEntry {
-  t: number; // wall-clock ms of the event
-  kind: string; // short category, e.g. 'tap', 'pond-start', 'ripple-done'
-  msg: string; // human-readable description
+// ─── Run history ─────────────────────────────────────────────────────────────
+
+export interface RippleRun {
+  ripple: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  status: string;
+}
+
+export interface PondRun {
+  pond: string;
+  version: string;
+  f: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  status: string;
+  ripples?: RippleRun[];
+}
+
+// ─── Windows ─────────────────────────────────────────────────────────────────
+
+// Matches the backend list_windows shape (ISO start/until, seconds duration). Operational config
+// managed via the API, not declared in pond.toml.
+export interface WindowRow {
+  name: string;
+  startAnchor: string;
+  durationSeconds: number;
+  freqUnit: FreqUnit;
+  freqInterval: number;
+  validDays: string | null;
+  untilTime: string | null;
 }

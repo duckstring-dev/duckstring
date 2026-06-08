@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+body {
+  background: #201e21;
+  color: #fff;
+}
+
+/* React Flow zoom/fit controls — make icons visible on the dark panel.
+   The library stylesheet loads after this file, so force with !important and
+   also set the v12 CSS variables. */
+.react-flow {
+  --xy-controls-button-background-color: #1a1a1f;
+  --xy-controls-button-background-color-hover: #27272a;
+  --xy-controls-button-color: #e4e4e7;
+  --xy-controls-button-color-hover: #ffffff;
+  --xy-controls-button-border-color: #3f3f46;
+}
+.react-flow__controls-button {
+  background-color: #1a1a1f !important;
+  border-bottom: 1px solid #3f3f46 !important;
+  color: #e4e4e7 !important;
+}
+.react-flow__controls-button:hover {
+  background-color: #27272a !important;
+}
+.react-flow__controls-button svg {
+  fill: #e4e4e7 !important;
+  color: #e4e4e7 !important;
+  max-width: 14px;
+  max-height: 14px;
+}

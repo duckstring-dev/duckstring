@@ -1,5 +1,5 @@
-import { Playground } from '@/components/Playground';
+import { App } from '@/components/App';
 
 export default function Home() {
-  return <Playground />;
+  return <App />;
 }

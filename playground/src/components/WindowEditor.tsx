@@ -1,13 +1,14 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { useLiveStore } from '@/lib/store';
-import type { FreqUnit, Pond, Weekday } from '@/lib/types';
+import { usePlaygroundStore } from '@/lib/store';
+import { windowDelta } from '@/lib/orchestration';
+import type { FreqUnit, Pond, Weekday, Window } from '@/lib/types';
 
-// Batch-availability windows on an Inlet Pond — the UI for `duckstring trigger window {pond}
-// add|list|remove`. Required fields (every + name) are always shown; the optionals (start, duration,
-// valid days, until) hide behind "Options" with the same CLI defaults (start 00:00 today,
-// duration = every / back-to-back, all days, no expiry).
+// Batch-availability windows on an Inlet Pond — the playground mirror of
+// `duckstring trigger window {pond} add|list|remove`. Required fields (every + name) are always
+// shown; the optionals (start, duration, valid days, until) hide behind "Options" with the same
+// CLI defaults (start 00:00 today, duration = every / back-to-back, all days, no expiry).
 
 const UNITS: { value: FreqUnit; label: string }[] = [
   { value: 'SECOND', label: 'sec' },
@@ -18,13 +19,18 @@ const UNITS: { value: FreqUnit; label: string }[] = [
 ];
 const ALL_DAYS: Weekday[] = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 
-const UNIT_SECONDS: Record<FreqUnit, number> = {
-  SECOND: 1,
-  MINUTE: 60,
-  HOUR: 3600,
-  DAY: 86400,
-  WEEK: 604800,
+const UNIT_MS: Record<FreqUnit, number> = {
+  SECOND: 1000,
+  MINUTE: 60000,
+  HOUR: 3600000,
+  DAY: 86400000,
+  WEEK: 604800000,
 };
+
+function hhmm(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 
 function titleCase(d: Weekday): string {
   return d[0] + d.slice(1).toLowerCase();
@@ -38,12 +44,20 @@ function freqLabel(interval: number, unit: FreqUnit): string {
   return `Every ${interval} ${plural}`;
 }
 
-// HH:MM today (local) → ISO 8601. Empty / malformed falls back to 00:00 today.
-function todayAtISO(text: string): string {
+// The auto-suggested name: the cadence, plus the time range when not back-to-back, plus the days.
+function suggestName(w: Window): string {
+  const parts = [freqLabel(w.freqInterval, w.freqUnit)];
+  if (w.durationMs !== windowDelta(w)) parts.push(`${hhmm(w.startAnchor)}–${hhmm(w.startAnchor + w.durationMs)}`);
+  if (w.validDays?.length && w.validDays.length < 7) parts.push(`(${w.validDays.map(titleCase).join(', ')})`);
+  return parts.join(' ');
+}
+
+// HH:MM (today, local) → ms epoch. Empty / malformed falls back to 00:00 today.
+function todayAt(text: string): number {
   const m = /^(\d{1,2}):(\d{2})$/.exec(text.trim());
   const d = new Date();
   d.setHours(m ? Math.min(23, +m[1]) : 0, m ? Math.min(59, +m[2]) : 0, 0, 0);
-  return d.toISOString();
+  return d.getTime();
 }
 
 const numInput: React.CSSProperties = {
@@ -58,9 +72,8 @@ const numInput: React.CSSProperties = {
 const selectInput: React.CSSProperties = { ...numInput, width: 'auto' };
 
 export function WindowEditor({ pond }: { pond: Pond }) {
-  const windows = useLiveStore((s) => s.windowsByPond[pond.id] ?? []);
-  const addWindow = useLiveStore((s) => s.addWindow);
-  const removeWindow = useLiveStore((s) => s.removeWindow);
+  const setPondWindows = usePlaygroundStore((s) => s.setPondWindows);
+  const windows = pond.windows ?? [];
 
   const [everyInterval, setEveryInterval] = useState('10');
   const [everyUnit, setEveryUnit] = useState<FreqUnit>('SECOND');
@@ -74,19 +87,24 @@ export function WindowEditor({ pond }: { pond: Pond }) {
   const [days, setDays] = useState<Set<Weekday>>(new Set());
   const [until, setUntil] = useState(''); // datetime-local value; empty ⇒ no expiry
 
-  const interval = Math.max(1, parseInt(everyInterval, 10) || 1);
-  const durRaw = parseInt(durInterval, 10);
-  const durationSeconds =
-    durInterval && durRaw > 0 ? durRaw * UNIT_SECONDS[durUnit] : interval * UNIT_SECONDS[everyUnit];
-  const selectedDays = ALL_DAYS.filter((d) => days.has(d));
+  // The Window the form currently describes (used for the live name suggestion and on Add).
+  const draft = useMemo<Window>(() => {
+    const interval = Math.max(1, parseInt(everyInterval, 10) || 1);
+    const delta = (UNIT_MS[everyUnit] ?? 0) * interval;
+    const durRaw = parseInt(durInterval, 10);
+    const durationMs = durInterval && durRaw > 0 ? durRaw * UNIT_MS[durUnit] : delta;
+    return {
+      name: '',
+      startAnchor: todayAt(startStr),
+      durationMs,
+      freqUnit: everyUnit,
+      freqInterval: interval,
+      validDays: days.size ? ALL_DAYS.filter((d) => days.has(d)) : undefined,
+      until: until ? new Date(until).getTime() : undefined,
+    };
+  }, [everyInterval, everyUnit, startStr, durInterval, durUnit, days, until]);
 
-  const suggested = useMemo(() => {
-    const parts = [freqLabel(interval, everyUnit)];
-    if (durInterval && durRaw > 0) parts.push(`${startStr} +${durRaw}${durUnit[0].toLowerCase()}`);
-    if (selectedDays.length && selectedDays.length < 7) parts.push(`(${selectedDays.map(titleCase).join(', ')})`);
-    return parts.join(' ');
-  }, [interval, everyUnit, durInterval, durRaw, durUnit, startStr, selectedDays]);
-
+  const suggested = suggestName(draft);
   const effectiveName = nameDirty && name.trim() ? name.trim() : suggested;
 
   const toggleDay = (d: Weekday) =>
@@ -98,15 +116,7 @@ export function WindowEditor({ pond }: { pond: Pond }) {
     });
 
   const add = () => {
-    addWindow(pond.id, {
-      name: effectiveName,
-      start_anchor: todayAtISO(startStr),
-      duration_seconds: durationSeconds,
-      freq_unit: everyUnit,
-      freq_interval: interval,
-      valid_days: selectedDays.length && selectedDays.length < 7 ? selectedDays.join(',') : null,
-      until_time: until ? new Date(until).toISOString() : null,
-    });
+    setPondWindows(pond.id, [...windows, { ...draft, name: effectiveName }]);
     setNameDirty(false);
     setName('');
   };
@@ -114,14 +124,14 @@ export function WindowEditor({ pond }: { pond: Pond }) {
   return (
     <>
       <div style={{ fontSize: 10, color: '#52525b', marginBottom: 8, lineHeight: 1.5 }}>
-        When this batch source is available. None ⇒ live (always fresh).
+        When this batch source is available. Empty ⇒ live (always fresh).
       </div>
 
-      {windows.map((w) => (
-        <div key={w.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+      {windows.map((w, i) => (
+        <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
           <span style={{ fontSize: 12, color: '#a1a1aa' }}>{w.name}</span>
           <button
-            onClick={() => removeWindow(pond.id, w.name)}
+            onClick={() => setPondWindows(pond.id, windows.filter((_, j) => j !== i))}
             style={{ background: 'none', border: 'none', color: '#52525b', cursor: 'pointer', fontSize: 14 }}
           >
             ✕

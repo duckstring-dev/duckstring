@@ -194,3 +194,36 @@ def test_restart_restores_state_e2e(tmp_path_factory, monkeypatch):
     finally:
         server2.should_exit = True
         thread2.join(timeout=5)
+
+
+def test_status_and_runs_feed_live(runtime):
+    """The UI's read surface against a real run: the enriched /api/status (ripple-level state +
+    intra-Pond edges, d_ms, trigger) and the /api/runs history (lineage filter + nested Ripple Runs).
+    """
+    url, root = runtime
+    _deploy_demo(url)
+
+    httpx.post(f"{url}/api/outlets/reports/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None)
+
+    # Enriched status: every Pond carries d_ms + a ripple list; sales has intra-Pond edges
+    # (join_lines depends on daily_sales + price_tiers).
+    reports = _pond_status(url, "reports")
+    assert isinstance(reports["d_ms"], int) and reports["trigger"] is None
+    assert {r["name"] for r in reports["ripples"]}  # non-empty
+    sales = _pond_status(url, "sales")
+    assert ["daily_sales", "join_lines"] in sales["ripple_edges"]
+    assert ["price_tiers", "join_lines"] in sales["ripple_edges"]
+
+    # Global run feed includes reports; nested Ripple Runs appear only when requested.
+    runs = httpx.get(f"{url}/api/runs", params={"ripples": True}, timeout=5.0).json()["runs"]
+    rep_run = next(r for r in runs if r["pond"] == "reports")
+    assert rep_run["status"] == "success"
+    assert any(rr["status"] == "success" for rr in rep_run["ripples"])
+
+    # Lineage filter: reports + its upstream sources (sales, transactions, products) — not just reports.
+    feed = httpx.get(f"{url}/api/runs", params={"pond": "reports", "lineage": True}, timeout=5.0).json()["runs"]
+    ponds_seen = {r["pond"] for r in feed}
+    assert "sales" in ponds_seen and "transactions" in ponds_seen
+    only = httpx.get(f"{url}/api/runs", params={"pond": "reports", "lineage": False}, timeout=5.0).json()["runs"]
+    assert {r["pond"] for r in only} == {"reports"}

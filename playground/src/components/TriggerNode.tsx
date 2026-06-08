@@ -2,19 +2,21 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore } from '@/lib/store';
+import { usePlaygroundStore } from '@/lib/store';
 
 export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
-  const trigger = useLiveStore((s) => s.triggers[pondId]);
-  const selectedTriggerId = useLiveStore((s) => s.selectedTriggerId);
-  const selectTrigger = useLiveStore((s) => s.selectTrigger);
+  const trigger = usePlaygroundStore((s) => s.triggers[pondId]);
+  const selectedTriggerId = usePlaygroundStore((s) => s.selectedTriggerId);
+  const selectTrigger = usePlaygroundStore((s) => s.selectTrigger);
 
   if (!trigger) return null;
 
   const isWave = trigger.kind === 'wave';
   const color = isWave ? '#22c55e' : '#3b82f6';
-  const label = isWave ? 'Wave' : `Tide (≤${((trigger.boundMs ?? 1000) / 1000).toFixed(1)}s)`;
+  const label = isWave
+    ? 'Wave'
+    : `Tide (≤${((trigger.stalenessMs ?? 1000) / 1000).toFixed(1)}s)`;
 
   const isSelected = selectedTriggerId === pondId;
 
@@ -38,7 +40,11 @@ export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
         userSelect: 'none',
       }}
     >
-      <Handle type="source" position={Position.Left} style={{ background: color }} />
+      <Handle
+        type="source"
+        position={Position.Left}
+        style={{ background: color }}
+      />
       <span style={{ fontSize: 12, fontWeight: 600, color }}>{label}</span>
     </div>
   );

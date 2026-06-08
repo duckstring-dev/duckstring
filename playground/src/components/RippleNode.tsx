@@ -2,23 +2,24 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore, formatAge, STATE_COLORS } from '@/lib/store';
+import { usePlaygroundStore, getRippleVisualState, formatAge, pushTargetF, STATE_COLORS } from '@/lib/store';
 import { DemandIndicators } from './DemandIndicators';
 
 export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
   const rippleId = data.rippleId as string;
-  const ripple = useLiveStore((s) => s.ripples[rippleId]);
-  const view = useLiveStore((s) => s.rippleViews[rippleId]);
-  const selectedRippleId = useLiveStore((s) => s.selectedRippleId);
-  const selectRipple = useLiveStore((s) => s.selectRipple);
-  const now = useLiveStore((s) => s.now);
+  const ripple = usePlaygroundStore((s) => s.ripples[rippleId]);
+  const rs = usePlaygroundStore((s) => s.rippleStates[rippleId]);
+  const selectedRippleId = usePlaygroundStore((s) => s.selectedRippleId);
+  const selectRipple = usePlaygroundStore((s) => s.selectRipple);
+  const now = usePlaygroundStore((s) => s.now);
 
-  if (!ripple || !view) return null;
+  if (!ripple || !rs) return null;
 
-  const borderColor = STATE_COLORS[view.status];
+  const visualState = getRippleVisualState(rs);
+  const borderColor = STATE_COLORS[visualState];
   const isSelected = selectedRippleId === rippleId;
   // Started-run freshness: in-flight start while running, else last completed freshness.
-  const startedF = view.status === 'running' ? view.startF : view.endF;
+  const startedF = rs.isRunning ? rs.startF : rs.endF;
 
   return (
     <div
@@ -48,10 +49,17 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
         {ripple.name}
       </span>
       <span style={{ fontSize: 11, color: '#71717a', display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
-        <DemandIndicators hasPull={view.hasPull} targetF={view.targetF} now={now} />
-        <span style={{ color: '#a1a1aa' }}>↑{formatAge(startedF, now)} ({view.runsStarted})</span>
-        <span>✓{formatAge(view.endF, now)} ({view.runsCompleted})</span>
+        <DemandIndicators hasPull={rs.hasPull} targetF={pushTargetF(rs.targets)} now={now} />
+        <span style={{ color: '#a1a1aa' }}>↑{formatAge(startedF, now)} ({rs.runsStarted})</span>
+        <span>✓{formatAge(rs.endF, now)} ({rs.runsCompleted})</span>
       </span>
+      <div style={{ fontSize: 11, color: borderColor, display: 'flex', gap: 6, whiteSpace: 'nowrap' }}>
+        <span style={{ color: '#a1a1aa' }}>
+          {rs.lastDurationMs != null ? `${(rs.lastDurationMs / 1000).toFixed(1)}s` : '—'}
+        </span>
+        <span style={{ color: '#52525b' }}>|</span>
+        <span style={{ color: '#71717a' }}>~{(ripple.durationMs / 1000).toFixed(1)}s</span>
+      </div>
       <Handle type="source" position={Position.Right} style={{ background: '#52525b' }} />
     </div>
   );

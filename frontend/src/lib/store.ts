@@ -4,533 +4,278 @@ import type {
   RippleId,
   Pond,
   Ripple,
-  PondRunState,
-  RippleRunState,
-  EdgeKindMap,
-  EdgeDemandKind,
-  ActiveTrigger,
+  NodeView,
+  TriggerView,
+  PondInfo,
+  PondRun,
+  WindowRow,
 } from './types';
-import type { Window, LogEntry } from './types';
-import { hasCyclePond, hasCycleRipple, isPondDownstreamOf } from './graph';
 import {
-  tick as orchTick,
-  tapPond,
-  pulsePond,
-  stopPond as orchStopPond,
-  startPond as orchStartPond,
-  drainLog,
-  type OrchestrState,
-} from './orchestration';
+  fetchStatus,
+  fetchRuns,
+  fetchWindows,
+  postTrigger,
+  addWindow,
+  removeWindow,
+  type StatusPayload,
+  type RawPond,
+  type RawRipple,
+  type RawPondRun,
+  type RawWindow,
+  type AddWindowBody,
+} from './api';
 
-const MAX_LOGS = 2000;
+// ─── Payload → view-model transforms ─────────────────────────────────────────
 
-let pondCounter = 0;
-const rippleCounters: Record<PondId, number> = {};
+const isoToMs = (iso: string | null): number => (iso ? Date.parse(iso) : 0);
+const isoToMsOrNull = (iso: string | null): number | null => (iso ? Date.parse(iso) : null);
 
-function newPondId(): PondId {
-  return `pond-${++pondCounter}`;
-}
-
-function newPondName(): string {
-  return `p${pondCounter}`;
-}
-
-function newRippleId(): RippleId {
-  return `ripple-${Math.random().toString(36).slice(2, 9)}`;
-}
-
-function newRippleName(pondId: PondId): string {
-  rippleCounters[pondId] = (rippleCounters[pondId] ?? 0) + 1;
-  return `r${rippleCounters[pondId]}`;
-}
-
-function initialPondState(): PondRunState {
+function nodeView(n: RawPond | RawRipple, dMs: number): NodeView {
   return {
-    startF: 0,
-    endF: 0,
-    D: 0,
-    hasReceivedPull: false,
-    hasPull: false,
-    targets: [],
-    runsStarted: 0,
-    runsCompleted: 0,
-    genStartTimes: {},
-    completionTimes: [],
-    durations: [],
+    status: n.status,
+    startF: isoToMs(n.start_f),
+    endF: isoToMs(n.end_f),
+    targetF: isoToMsOrNull(n.target_f),
+    hasPull: n.has_pull,
+    runsStarted: n.gen,
+    runsCompleted: n.runs_completed,
+    dMs,
   };
 }
 
-function initialRippleState(): RippleRunState {
+function mapRun(r: RawPondRun): PondRun {
   return {
-    startF: 0,
-    endF: 0,
-    hasPull: false,
-    targets: [],
-    isRunning: false,
-    runStartedAt: null,
-    currentRunDurationMs: null,
-    lastDurationMs: null,
-    runsStarted: 0,
-    runsCompleted: 0,
-    completionTimes: [],
-    durations: [],
+    pond: r.pond,
+    version: r.version,
+    f: r.f,
+    startedAt: r.started_at,
+    finishedAt: r.finished_at,
+    status: r.status,
+    ripples: r.ripples?.map((rr) => ({
+      ripple: rr.ripple,
+      startedAt: rr.started_at,
+      finishedAt: rr.finished_at,
+      status: rr.status,
+    })),
   };
 }
 
-function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'pondStates' | 'ripples' | 'rippleStates'> {
-  const txId = newPondId();
-  const prodId = newPondId();
-  const salesId = newPondId();
-  const reportsId = newPondId();
-
-  const txIngestId = newRippleId();
-  const prodIngestId = newRippleId();
-  const dailySalesId = newRippleId();
-  const priceTiersId = newRippleId();
-  const joinLinesId = newRippleId();
-  const monthlySummaryId = newRippleId();
-
-  rippleCounters[txId] = 1;
-  rippleCounters[prodId] = 1;
-  rippleCounters[salesId] = 3;
-  rippleCounters[reportsId] = 1;
-
+function mapWindow(w: RawWindow): WindowRow {
   return {
-    ponds: {
-      [txId]: { id: txId, name: 'transactions', sources: [] },
-      [prodId]: { id: prodId, name: 'products', sources: [] },
-      [salesId]: { id: salesId, name: 'sales', sources: [txId, prodId] },
-      [reportsId]: { id: reportsId, name: 'reports', sources: [salesId] },
-    },
-    pondStates: {
-      [txId]: initialPondState(),
-      [prodId]: initialPondState(),
-      [salesId]: initialPondState(),
-      [reportsId]: initialPondState(),
-    },
-    ripples: {
-      [txIngestId]: { id: txIngestId, pondId: txId, name: 'ingest', parents: [], durationMs: 1000, variability: 0 },
-      [prodIngestId]: { id: prodIngestId, pondId: prodId, name: 'ingest', parents: [], durationMs: 2000, variability: 0 },
-      [dailySalesId]: { id: dailySalesId, pondId: salesId, name: 'daily_sales', parents: [], durationMs: 2000, variability: 0 },
-      [priceTiersId]: { id: priceTiersId, pondId: salesId, name: 'price_tiers', parents: [], durationMs: 1000, variability: 0 },
-      [joinLinesId]: { id: joinLinesId, pondId: salesId, name: 'join_lines', parents: [dailySalesId, priceTiersId], durationMs: 3000, variability: 0 },
-      [monthlySummaryId]: { id: monthlySummaryId, pondId: reportsId, name: 'monthly_summary', parents: [], durationMs: 1000, variability: 0 },
-    },
-    rippleStates: {
-      [txIngestId]: initialRippleState(),
-      [prodIngestId]: initialRippleState(),
-      [dailySalesId]: initialRippleState(),
-      [priceTiersId]: initialRippleState(),
-      [joinLinesId]: initialRippleState(),
-      [monthlySummaryId]: initialRippleState(),
-    },
+    name: w.name,
+    startAnchor: w.start_anchor,
+    durationSeconds: w.duration_seconds,
+    freqUnit: w.freq_unit,
+    freqInterval: w.freq_interval,
+    validDays: w.valid_days,
+    untilTime: w.until_time,
   };
 }
 
-const demoState = buildDemoState();
-
-export interface PlaygroundState {
+interface StatusSlice {
   ponds: Record<PondId, Pond>;
-  pondStates: Record<PondId, PondRunState>;
   ripples: Record<RippleId, Ripple>;
-  rippleStates: Record<RippleId, RippleRunState>;
-  edgeKinds: EdgeKindMap;
+  pondViews: Record<PondId, NodeView>;
+  rippleViews: Record<RippleId, NodeView>;
+  pondInfo: Record<PondId, PondInfo>;
+  triggers: Record<PondId, TriggerView>;
+}
+
+function transformStatus(payload: StatusPayload): StatusSlice {
+  const ponds: Record<PondId, Pond> = {};
+  const ripples: Record<RippleId, Ripple> = {};
+  const pondViews: Record<PondId, NodeView> = {};
+  const rippleViews: Record<RippleId, NodeView> = {};
+  const pondInfo: Record<PondId, PondInfo> = {};
+  const triggers: Record<PondId, TriggerView> = {};
+
+  for (const p of payload.ponds) {
+    ponds[p.name] = { id: p.name, name: p.name, kind: p.kind, sources: [] };
+    pondInfo[p.name] = { version: p.version, kind: p.kind };
+    pondViews[p.name] = nodeView(p, p.d_ms);
+    if (p.trigger) triggers[p.name] = { kind: p.trigger.kind, boundMs: p.trigger.bound_ms };
+
+    for (const r of p.ripples) {
+      const eid = `${p.name}.${r.name}`;
+      ripples[eid] = { id: eid, pondId: p.name, name: r.name, parents: [] };
+      rippleViews[eid] = nodeView(r, 0);
+    }
+    // ripple_edges are [sourceName, sinkName] within the Pond → sink.parents includes source.
+    for (const [src, snk] of p.ripple_edges) {
+      ripples[`${p.name}.${snk}`]?.parents.push(`${p.name}.${src}`);
+    }
+  }
+  // Pond sources from inter-Pond edges [sourcePond, sinkPond].
+  for (const [src, snk] of payload.edges) {
+    ponds[snk]?.sources.push(src);
+  }
+
+  return { ponds, ripples, pondViews, rippleViews, pondInfo, triggers };
+}
+
+// ─── Store ───────────────────────────────────────────────────────────────────
+
+export interface RunFilters {
+  lineage: boolean; // include the selected Pond's upstream sources (default on)
+  ripples: boolean; // nest Ripple Runs under each Pond Run (default off)
+}
+
+export interface LiveState extends StatusSlice {
   now: number;
-  speed: number;
-  paused: boolean;
-  logs: LogEntry[];
+  connected: boolean;
+  error: string | null;
+
   selectedPondId: PondId | null;
   selectedRippleId: RippleId | null;
   selectedTriggerId: PondId | null;
-  triggers: Record<PondId, ActiveTrigger>;
-  pulseTags: Record<PondId, number>;
 
-  addPond(): void;
-  addRipple(pondId: PondId, parentId?: RippleId): void;
-  renamePond(pondId: PondId, name: string): void;
-  setPondWindows(pondId: PondId, windows: Window[]): void;
-  setRippleDuration(rippleId: RippleId, ms: number): void;
-  renameRipple(rippleId: RippleId, name: string): void;
-  setRippleVariability(rippleId: RippleId, variability: number): void;
-  setAllVariability(variability: number): void;
-  deletePond(pondId: PondId): void;
-  deleteRipple(rippleId: RippleId): void;
-  linkPonds(sourcePondId: PondId, sinkPondId: PondId): boolean;
-  unlinkPonds(sourcePondId: PondId, sinkPondId: PondId): void;
-  linkRipples(parentId: RippleId, childId: RippleId): boolean;
-  unlinkRipples(parentId: RippleId, childId: RippleId): void;
+  runs: PondRun[]; // run-history feed (filtered by selection + filters)
+  runFilters: RunFilters;
+  selectedPondRuns: PondRun[]; // the selected Pond's own runs (with ripples), for the trace charts
+  windowsByPond: Record<PondId, WindowRow[]>;
 
-  selectPond(pondId: PondId | null): void;
-  selectRipple(rippleId: RippleId | null): void;
-  selectTrigger(pondId: PondId | null): void;
+  refresh(): Promise<void>;
+  refreshWindows(pond: PondId): Promise<void>;
+  setRunFilter(key: keyof RunFilters, value: boolean): void;
+
+  selectPond(id: PondId | null): void;
+  selectRipple(id: RippleId | null): void;
+  selectTrigger(id: PondId | null): void;
   clearSelection(): void;
 
-  triggerTap(pondId: PondId): void;
-  triggerPulse(pondId: PondId): void;
-  triggerWave(pondId: PondId): void;
-  triggerTide(pondId: PondId, stalenessMs: number): void;
-  triggerStart(pondId: PondId): void;
-  triggerStop(pondId: PondId, upstream?: boolean): void;
-  removeTrigger(pondId: PondId): void;
-  clearLogs(): void;
+  tap(pond: PondId): Promise<void>;
+  pulse(pond: PondId): Promise<void>;
+  wave(pond: PondId): Promise<void>;
+  tide(pond: PondId, boundSeconds: number): Promise<void>;
+  start(pond: PondId): Promise<void>;
+  stop(pond: PondId, upstream?: boolean): Promise<void>;
+  removeTrigger(pond: PondId): Promise<void>;
 
-  setSpeed(speed: number): void;
-  togglePause(): void;
-  tick(now: number): void;
+  addWindow(pond: PondId, body: AddWindowBody): Promise<void>;
+  removeWindow(pond: PondId, name: string): Promise<void>;
 }
 
-function toOrchestrState(state: PlaygroundState): OrchestrState {
-  return {
-    ponds: state.ponds,
-    pondStates: state.pondStates,
-    ripples: state.ripples,
-    rippleStates: state.rippleStates,
-    edgeKinds: state.edgeKinds,
-    triggers: state.triggers,
-  };
+// The Pond a run-history / chart query should focus on: an explicitly selected Pond, or the Pond
+// owning a selected Ripple.
+function focusPond(s: LiveState): PondId | null {
+  if (s.selectedPondId) return s.selectedPondId;
+  if (s.selectedRippleId) return s.ripples[s.selectedRippleId]?.pondId ?? null;
+  return null;
 }
 
-function applyOrch(prev: PlaygroundState, orch: OrchestrState): Partial<PlaygroundState> {
-  const drained = drainLog();
-  const logs = drained.length
-    ? [...prev.logs, ...drained].slice(-MAX_LOGS)
-    : prev.logs;
-  return {
-    pondStates: orch.pondStates,
-    rippleStates: orch.rippleStates,
-    edgeKinds: orch.edgeKinds,
-    triggers: orch.triggers,
-    logs,
-  };
-}
-
-function isOutlet(ponds: Record<PondId, Pond>, pondId: PondId): boolean {
-  return !Object.values(ponds).some((p) => isPondDownstreamOf(ponds, p.id, pondId) && p.id !== pondId);
-}
-
-export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
+export const useLiveStore = create<LiveState>((set, get) => ({
+  ponds: {},
+  ripples: {},
+  pondViews: {},
+  rippleViews: {},
+  pondInfo: {},
+  triggers: {},
   now: Date.now(),
-  speed: 1,
-  paused: false,
-  ponds: demoState.ponds,
-  pondStates: demoState.pondStates,
-  ripples: demoState.ripples,
-  rippleStates: demoState.rippleStates,
-  edgeKinds: {},
-  logs: [],
+  connected: false,
+  error: null,
+
   selectedPondId: null,
   selectedRippleId: null,
   selectedTriggerId: null,
-  triggers: {},
-  pulseTags: {},
 
-  addPond() {
-    // If a pond is selected, link the new pond as its sink.
-    const sourcePondId = get().selectedPondId;
-    const id = newPondId();
-    const pond: Pond = { id, name: newPondName(), sources: [] };
-    rippleCounters[id] = 0;
-    const rippleId = newRippleId();
-    const ripple: Ripple = {
-      id: rippleId,
-      pondId: id,
-      name: newRippleName(id),
-      parents: [],
-      durationMs: 1000,
-      variability: 0,
-    };
-    set((s) => ({
-      ponds: { ...s.ponds, [id]: pond },
-      pondStates: { ...s.pondStates, [id]: initialPondState() },
-      ripples: { ...s.ripples, [rippleId]: ripple },
-      rippleStates: { ...s.rippleStates, [rippleId]: initialRippleState() },
-      selectedPondId: id,
-      selectedRippleId: null,
-      selectedTriggerId: null,
-    }));
-    if (sourcePondId && get().ponds[sourcePondId]) {
-      get().linkPonds(sourcePondId, id);
+  runs: [],
+  runFilters: { lineage: true, ripples: false },
+  selectedPondRuns: [],
+  windowsByPond: {},
+
+  async refresh() {
+    try {
+      const payload = await fetchStatus();
+      set({ ...transformStatus(payload), now: Date.now(), connected: true, error: null });
+    } catch (e) {
+      set({ connected: false, error: e instanceof Error ? e.message : String(e) });
+      return; // if the Catchment is unreachable, skip the dependent fetches this tick
+    }
+
+    const s = get();
+    const pond = focusPond(s);
+    try {
+      const [feed, ownRuns] = await Promise.all([
+        fetchRuns({ pond, lineage: s.runFilters.lineage, ripples: s.runFilters.ripples, limit: 200 }),
+        pond ? fetchRuns({ pond, lineage: false, ripples: true, limit: 60 }) : Promise.resolve([]),
+      ]);
+      set({ runs: feed.map(mapRun), selectedPondRuns: ownRuns.map(mapRun) });
+    } catch {
+      /* history is non-critical; leave the last good feed in place */
     }
   },
 
-  addRipple(pondId, parentId) {
-    const rippleId = newRippleId();
-    const ripple: Ripple = {
-      id: rippleId,
-      pondId,
-      name: newRippleName(pondId),
-      parents: [],
-      durationMs: 1000,
-      variability: 0,
-    };
-    set((s) => ({
-      ripples: { ...s.ripples, [rippleId]: ripple },
-      rippleStates: { ...s.rippleStates, [rippleId]: initialRippleState() },
-    }));
-    if (parentId && get().ripples[parentId]?.pondId === pondId) {
-      get().linkRipples(parentId, rippleId);
+  async refreshWindows(pond) {
+    try {
+      const windows = await fetchWindows(pond);
+      set((s) => ({ windowsByPond: { ...s.windowsByPond, [pond]: windows.map(mapWindow) } }));
+    } catch {
+      /* ignore */
     }
   },
 
-  setRippleDuration(rippleId, ms) {
-    set((s) => ({
-      ripples: { ...s.ripples, [rippleId]: { ...s.ripples[rippleId], durationMs: ms } },
-    }));
+  setRunFilter(key, value) {
+    set((s) => ({ runFilters: { ...s.runFilters, [key]: value } }));
+    get().refresh();
   },
 
-  renamePond(pondId, name) {
-    set((s) => ({
-      ponds: { ...s.ponds, [pondId]: { ...s.ponds[pondId], name } },
-    }));
+  selectPond(id) {
+    set({ selectedPondId: id, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [] });
+    if (id && get().ponds[id]?.sources.length === 0) get().refreshWindows(id);
+    get().refresh();
   },
-
-  setPondWindows(pondId, windows) {
-    set((s) => ({
-      ponds: { ...s.ponds, [pondId]: { ...s.ponds[pondId], windows: windows.length ? windows : undefined } },
-    }));
+  selectRipple(id) {
+    const pondId = id ? get().ripples[id]?.pondId ?? null : null;
+    set({ selectedRippleId: id, selectedPondId: pondId, selectedTriggerId: null, selectedPondRuns: [] });
+    get().refresh();
   },
-
-  renameRipple(rippleId, name) {
-    set((s) => ({
-      ripples: { ...s.ripples, [rippleId]: { ...s.ripples[rippleId], name } },
-    }));
+  selectTrigger(id) {
+    set({ selectedTriggerId: id, selectedPondId: null, selectedRippleId: null });
   },
-
-  setRippleVariability(rippleId, variability) {
-    set((s) => ({
-      ripples: { ...s.ripples, [rippleId]: { ...s.ripples[rippleId], variability } },
-    }));
-  },
-
-  setAllVariability(variability) {
-    set((s) => {
-      const ripples: Record<RippleId, Ripple> = {};
-      for (const [id, r] of Object.entries(s.ripples)) ripples[id] = { ...r, variability };
-      return { ripples };
-    });
-  },
-
-  deletePond(pondId) {
-    get().removeTrigger(pondId);
-    const pondRippleIds = new Set(
-      Object.values(get().ripples).filter((r) => r.pondId === pondId).map((r) => r.id)
-    );
-    set((s) => {
-      const newPonds: typeof s.ponds = {};
-      for (const [id, p] of Object.entries(s.ponds)) {
-        if (id === pondId) continue;
-        newPonds[id] = p.sources.includes(pondId)
-          ? { ...p, sources: p.sources.filter((sid) => sid !== pondId) }
-          : p;
-      }
-      const newPondStates = { ...s.pondStates };
-      delete newPondStates[pondId];
-      const newRipples: typeof s.ripples = {};
-      const newRippleStates: typeof s.rippleStates = {};
-      for (const [id, r] of Object.entries(s.ripples)) {
-        if (!pondRippleIds.has(id)) {
-          newRipples[id] = r;
-          newRippleStates[id] = s.rippleStates[id];
-        }
-      }
-      return {
-        ponds: newPonds,
-        pondStates: newPondStates,
-        ripples: newRipples,
-        rippleStates: newRippleStates,
-        selectedPondId: s.selectedPondId === pondId ? null : s.selectedPondId,
-        selectedRippleId: pondRippleIds.has(s.selectedRippleId ?? '') ? null : s.selectedRippleId,
-        selectedTriggerId: s.selectedTriggerId === pondId ? null : s.selectedTriggerId,
-      };
-    });
-  },
-
-  deleteRipple(rippleId) {
-    set((s) => {
-      const newRipples: typeof s.ripples = {};
-      for (const [id, r] of Object.entries(s.ripples)) {
-        if (id === rippleId) continue;
-        newRipples[id] = r.parents.includes(rippleId)
-          ? { ...r, parents: r.parents.filter((pid) => pid !== rippleId) }
-          : r;
-      }
-      const newRippleStates = { ...s.rippleStates };
-      delete newRippleStates[rippleId];
-      return {
-        ripples: newRipples,
-        rippleStates: newRippleStates,
-        selectedRippleId: s.selectedRippleId === rippleId ? null : s.selectedRippleId,
-      };
-    });
-  },
-
-  linkPonds(sourcePondId, sinkPondId) {
-    const state = get();
-    if (sourcePondId === sinkPondId) return false;
-    const sink = state.ponds[sinkPondId];
-    if (!sink) return false;
-    if (sink.sources.includes(sourcePondId)) return false;
-    if (hasCyclePond(state.ponds, sourcePondId, sinkPondId)) return false;
-    set((s) => ({
-      ponds: {
-        ...s.ponds,
-        [sinkPondId]: { ...s.ponds[sinkPondId], sources: [...s.ponds[sinkPondId].sources, sourcePondId] },
-      },
-    }));
-    // Triggers live only on outlets. Linking can demote a pond to non-outlet;
-    // drop its trigger so its wave peters out naturally (no stop signal sent).
-    const ponds = get().ponds;
-    for (const pid of Object.keys(get().triggers)) {
-      if (!isOutlet(ponds, pid)) get().removeTrigger(pid);
-    }
-    return true;
-  },
-
-  unlinkPonds(sourcePondId, sinkPondId) {
-    set((s) => ({
-      ponds: {
-        ...s.ponds,
-        [sinkPondId]: {
-          ...s.ponds[sinkPondId],
-          sources: s.ponds[sinkPondId].sources.filter((id) => id !== sourcePondId),
-        },
-      },
-    }));
-  },
-
-  linkRipples(parentId, childId) {
-    const state = get();
-    if (parentId === childId) return false;
-    const parent = state.ripples[parentId];
-    const child = state.ripples[childId];
-    if (!parent || !child) return false;
-    if (parent.pondId !== child.pondId) return false;
-    if (child.parents.includes(parentId)) return false;
-    if (hasCycleRipple(state.ripples, parentId, childId)) return false;
-    set((s) => ({
-      ripples: {
-        ...s.ripples,
-        [childId]: { ...s.ripples[childId], parents: [...s.ripples[childId].parents, parentId] },
-      },
-    }));
-    return true;
-  },
-
-  unlinkRipples(parentId, childId) {
-    set((s) => ({
-      ripples: {
-        ...s.ripples,
-        [childId]: {
-          ...s.ripples[childId],
-          parents: s.ripples[childId].parents.filter((id) => id !== parentId),
-        },
-      },
-    }));
-  },
-
-  selectPond(pondId) {
-    set({ selectedPondId: pondId, selectedRippleId: null, selectedTriggerId: null });
-  },
-
-  selectRipple(rippleId) {
-    const ripple = get().ripples[rippleId ?? ''];
-    set({
-      selectedRippleId: rippleId,
-      selectedPondId: ripple?.pondId ?? null,
-      selectedTriggerId: null,
-    });
-  },
-
-  selectTrigger(pondId) {
-    set({ selectedTriggerId: pondId, selectedRippleId: null, selectedPondId: null });
-  },
-
   clearSelection() {
-    set({ selectedPondId: null, selectedRippleId: null, selectedTriggerId: null });
+    set({ selectedPondId: null, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [] });
   },
 
-  // Tap: one-shot resupply (pull). Cascades synchronously. Stamped from the sim clock.
-  triggerTap(pondId) {
-    set((s) => applyOrch(s, tapPond(toOrchestrState(s), pondId, s.now)));
-  },
+  tap: (pond) => act(get, set, () => postTrigger(pond, 'tap')),
+  pulse: (pond) => act(get, set, () => postTrigger(pond, 'pulse')),
+  wave: (pond) => act(get, set, () => postTrigger(pond, 'wave')),
+  tide: (pond, boundSeconds) => act(get, set, () => postTrigger(pond, 'tide', { bound_seconds: boundSeconds })),
+  start: (pond) => act(get, set, () => postTrigger(pond, 'start')),
+  stop: (pond, upstream = false) => act(get, set, () => postTrigger(pond, 'stop', { upstream })),
+  removeTrigger: (pond) => act(get, set, () => postTrigger(pond, 'untrigger')),
 
-  // Pulse: one-shot priority freshness target (push to sim-now). Cascades synchronously.
-  triggerPulse(pondId) {
-    set((s) => ({
-      ...applyOrch(s, pulsePond(toOrchestrState(s), pondId, s.now)),
-      pulseTags: { ...s.pulseTags, [pondId]: s.pondStates[pondId]?.runsCompleted ?? 0 },
-    }));
-  },
-
-  // Wave: a standing pull, re-asserted by orchestration.tick on each Pond completion.
-  triggerWave(pondId) {
-    if (!isOutlet(get().ponds, pondId)) return;
-    set((s) => ({ triggers: { ...s.triggers, [pondId]: { pondId, kind: 'wave' } } }));
-  },
-
-  // Tide: maintain a maximum staleness, evaluated by orchestration.tick.
-  triggerTide(pondId, stalenessMs) {
-    set((s) => ({ triggers: { ...s.triggers, [pondId]: { pondId, kind: 'tide', stalenessMs } } }));
-  },
-
-  // Start: inject a one-off run on the Pond alone (push target NEVER), no upstream propagation.
-  triggerStart(pondId) {
-    set((s) => applyOrch(s, orchStartPond(toOrchestrState(s), pondId, s.now)));
-  },
-
-  triggerStop(pondId, upstream = false) {
-    get().removeTrigger(pondId);
-    set((s) => applyOrch(s, orchStopPond(toOrchestrState(s), pondId, s.now, upstream)));
-  },
-
-  removeTrigger(pondId) {
-    set((s) => {
-      const newTriggers = { ...s.triggers };
-      delete newTriggers[pondId];
-      return { triggers: newTriggers };
-    });
-  },
-
-  clearLogs() {
-    set({ logs: [] });
-  },
-
-  setSpeed(speed) {
-    set({ speed });
-  },
-
-  togglePause() {
-    set((s) => ({ paused: !s.paused }));
-  },
-
-  tick(now) {
-    set((s) => {
-      // Advance the engine in fixed SIM_STEP sub-ticks so the simulation's time resolution is the
-      // same at every playback speed. At 10x the driver hands us a ~1000ms jump; stepping it as one
-      // tick would snap run starts/completions onto a coarse grid and jitter the cadence (3↔4s).
-      // MAX_STEPS caps a catch-up after the tab was backgrounded (the remainder collapses into the
-      // final tick rather than freezing the UI).
-      const SIM_STEP = 100;
-      const MAX_STEPS = 256;
-      let cur = s.now;
-      let orch = toOrchestrState(s);
-      let n = 0;
-      while (now - cur > SIM_STEP && n < MAX_STEPS) {
-        cur += SIM_STEP;
-        orch = orchTick(cur, orch);
-        n += 1;
-      }
-      orch = orchTick(now, orch);
-      return { ...applyOrch(s, orch), now };
-    });
-  },
+  addWindow: (pond, body) =>
+    act(get, set, async () => {
+      await addWindow(pond, body);
+      await get().refreshWindows(pond);
+    }),
+  removeWindow: (pond, name) =>
+    act(get, set, async () => {
+      await removeWindow(pond, name);
+      await get().refreshWindows(pond);
+    }),
 }));
 
-// ─── Visual state helpers ────────────────────────────────────────────────────
+// Run a control action, surface any error, and immediately re-poll so the UI reflects the result
+// without waiting for the next tick.
+async function act(
+  get: () => LiveState,
+  set: (partial: Partial<LiveState>) => void,
+  fn: () => Promise<void>,
+): Promise<void> {
+  try {
+    await fn();
+    set({ error: null });
+    await get().refresh();
+  } catch (e) {
+    set({ error: e instanceof Error ? e.message : String(e) });
+  }
+}
 
-// Age of a freshness timestamp relative to now, unit-scaled. F=0 → '—'. The numeric part is always
-// two digits (e.g. "02s", "47m") so the width never jitters as a value crosses 9↔10; each unit rolls
-// to the next before it would exceed 99. Caps at ">1y" — finer resolution past a year isn't useful.
+// ─── Visual helpers (shared by the node components) ──────────────────────────
+
+// Age of a freshness timestamp relative to now, unit-scaled. F=0 (NEVER) → '—'. Two-digit numeric
+// part so widths don't jitter as a value crosses 9↔10.
 export function formatAge(F: number, now: number): string {
   if (!F) return '—';
   const pad = (n: number) => String(Math.floor(n)).padStart(2, '0');
@@ -547,62 +292,22 @@ export function formatAge(F: number, now: number): string {
   return '>1y';
 }
 
-// The freshest pending push target (for the ≤ box / edge colour), or null if none are outstanding.
-// NEVER (-Inf) targets from `start` are non-finite and excluded — they carry no displayable age.
-export function pushTargetF(targets: number[]): number | null {
-  const finite = targets.filter((t) => Number.isFinite(t));
-  return finite.length ? Math.max(...finite) : null;
-}
-
-export function getRippleVisualState(rs: RippleRunState): 'running' | 'queued' | 'idle' {
-  if (rs.isRunning) return 'running';
-  if (rs.hasPull || rs.targets.length > 0) return 'queued';
-  return 'idle';
-}
-
-export function getPondVisualState(ps: PondRunState): 'running' | 'queued' | 'idle' {
-  if (ps.runsStarted > ps.runsCompleted) return 'running';
-  if (ps.hasPull || ps.hasReceivedPull || ps.targets.length > 0) return 'queued';
-  return 'idle';
-}
-
-export function pondIsIdle(ps: PondRunState | undefined): boolean {
-  if (!ps) return true;
-  return ps.runsStarted <= ps.runsCompleted && !ps.hasPull && !ps.hasReceivedPull && ps.targets.length === 0;
-}
-
-export function rippleIsIdle(rs: RippleRunState | undefined): boolean {
-  if (!rs) return true;
-  return !rs.isRunning && !rs.hasPull && rs.targets.length === 0;
-}
-
-// Edge colour reflects what the SINK is currently demanding of this source:
-//   blue  — the sink holds a push target (this source is feeding a push)
-//   green — the sink holds pull demand (this source is feeding a resupply)
-//   grey  — the sink has no demand on this edge
-// `sinkPush` is the sink's push target (or null); `sinkPull` whether it holds a pull token.
-export function getDemandEdgeColor(sinkPull: boolean, sinkPush: number | null): string {
-  if (sinkPush !== null) return EDGE_COLORS.push;
-  if (sinkPull) return EDGE_COLORS.pull;
-  return EDGE_COLORS.idle;
-}
-
-// Edge colour = most-recent demand kind, but cleared to grey once both endpoints are idle.
-export function getEdgeColor(kind: EdgeDemandKind | undefined, sourceIdle: boolean, sinkIdle: boolean): string {
-  if (!kind || (sourceIdle && sinkIdle)) return EDGE_COLORS.idle;
-  return EDGE_COLORS[kind];
-}
-
 export const STATE_COLORS: Record<string, string> = {
   running: '#22c55e',
   queued: '#f97316',
   idle: '#71717a',
 };
 
-// pull (Tap/Wave) keeps green; push (Pulse/Tide) blue; stop red.
+// pull (Tap/Wave) green; push (Pulse/Tide) blue; idle grey.
 export const EDGE_COLORS: Record<string, string> = {
   pull: '#22c55e',
   push: '#3b82f6',
-  stop: '#ef4444',
   idle: '#3f3f46',
 };
+
+// Edge colour reflects the SINK's demand on this edge: push (blue) > pull (green) > none (grey).
+export function getDemandEdgeColor(sinkPull: boolean, sinkPush: number | null): string {
+  if (sinkPush !== null) return EDGE_COLORS.push;
+  if (sinkPull) return EDGE_COLORS.pull;
+  return EDGE_COLORS.idle;
+}
