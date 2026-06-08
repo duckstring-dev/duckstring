@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useLiveStore } from '@/lib/store';
+import { useLiveStore, parseTs } from '@/lib/store';
 import type { PondRun, RippleRun } from '@/lib/types';
 
 const STATUS_COLOR: Record<string, string> = {
@@ -12,14 +12,14 @@ const STATUS_COLOR: Record<string, string> = {
 
 function clock(iso: string | null): string {
   if (!iso) return '—';
-  const d = new Date(iso);
+  const d = new Date(parseTs(iso));
   const p = (n: number) => String(n).padStart(2, '0');
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 function duration(run: PondRun): string {
   if (!run.startedAt || !run.finishedAt) return '';
-  const s = (Date.parse(run.finishedAt) - Date.parse(run.startedAt)) / 1000;
+  const s = (parseTs(run.finishedAt) - parseTs(run.startedAt)) / 1000;
   return `${s.toFixed(1)}s`;
 }
 

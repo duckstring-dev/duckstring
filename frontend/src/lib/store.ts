@@ -27,8 +27,18 @@ import {
 
 // ─── Payload → view-model transforms ─────────────────────────────────────────
 
-const isoToMs = (iso: string | null): number => (iso ? Date.parse(iso) : 0);
-const isoToMsOrNull = (iso: string | null): number | null => (iso ? Date.parse(iso) : null);
+// Parse a backend timestamp to ms. Most are tz-aware ISO, but SQLite `datetime('now')` defaults are
+// naive UTC ("YYYY-MM-DD HH:MM:SS"); a bare Date.parse would read those as *local* time. Normalise:
+// space→T and append 'Z' when no offset is present, so everything is interpreted as UTC.
+export function parseTs(ts: string | null): number {
+  if (!ts) return 0;
+  const s = ts.includes('T') ? ts : ts.replace(' ', 'T');
+  const hasTz = /([zZ]|[+-]\d{2}:?\d{2})$/.test(s);
+  return Date.parse(hasTz ? s : `${s}Z`);
+}
+
+const isoToMs = (iso: string | null): number => parseTs(iso);
+const isoToMsOrNull = (iso: string | null): number | null => (iso ? parseTs(iso) : null);
 
 function nodeView(n: RawPond | RawRipple, dMs: number): NodeView {
   return {

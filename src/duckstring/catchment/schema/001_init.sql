@@ -26,7 +26,7 @@ CREATE TABLE pond_version (
     source_path       TEXT    NOT NULL,           -- relative to catchment root, ponds/{name}/{version}/
     immediate_retries INTEGER NOT NULL DEFAULT 0,
     source_retries    INTEGER NOT NULL DEFAULT 0,
-    deployed_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    deployed_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     UNIQUE (pond_name_id, version)
 );
 

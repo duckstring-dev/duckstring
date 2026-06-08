@@ -373,9 +373,11 @@ class Driver:
         meta = self.meta[pond]
         self.launcher.ensure(pond, meta["version"], meta["source_path"])
         self.jobs.setdefault(pond, []).append({"kind": "begin_run", "f": _iso(f)})
+        # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
+        # default is naive and would be misread as local time by the UI.
         self.db.execute(
-            "INSERT OR IGNORE INTO pond_run (pond_version_id, f, status) VALUES (?, ?, 'running')",
-            (meta["version_id"], _iso(f)),
+            "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status) VALUES (?, ?, ?, 'running')",
+            (meta["version_id"], _iso(f), _iso(now)),
         )
         self.db.commit()
 

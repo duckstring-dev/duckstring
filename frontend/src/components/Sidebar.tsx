@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useLiveStore, formatAge } from '@/lib/store';
+import { useLiveStore, formatAge, parseTs } from '@/lib/store';
 import type { PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
@@ -59,7 +59,7 @@ const numInput: React.CSSProperties = {
   fontSize: 12,
 };
 
-const ms = (iso: string | null): number => (iso ? Date.parse(iso) : 0);
+const ms = (iso: string | null): number => parseTs(iso);
 
 // Completion times (asc, ms) and per-run durations (ms) for a set of Pond Runs.
 function pondTrace(runs: PondRun[]): { times: number[]; durations: number[] } {

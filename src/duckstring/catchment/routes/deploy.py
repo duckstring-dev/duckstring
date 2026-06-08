@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -72,6 +73,7 @@ def _discover_ripples(source_dir: Path) -> list[dict]:
 
 def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
     major = int(version.split(".")[0])
+    deployed_at = datetime.now(timezone.utc).isoformat()
     with db:
         db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, ?)", (name, kind))
         db.execute("UPDATE pond_name SET kind = ? WHERE name = ?", (kind, name))
@@ -92,14 +94,14 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
                 db.execute("DELETE FROM ripple WHERE pond_version_id = ?", (pv_id,))
             db.execute(
                 "UPDATE pond_version SET source_path = ?, major = ?, immediate_retries = ?, "
-                "source_retries = ?, deployed_at = datetime('now') WHERE id = ?",
-                (source_path, major, cfg["immediate_retries"], cfg["source_retries"], pv_id),
+                "source_retries = ?, deployed_at = ? WHERE id = ?",
+                (source_path, major, cfg["immediate_retries"], cfg["source_retries"], deployed_at, pv_id),
             )
         else:
             db.execute(
                 "INSERT INTO pond_version (pond_name_id, version, major, source_path, "
-                "immediate_retries, source_retries) VALUES (?, ?, ?, ?, ?, ?)",
-                (pn_id, version, major, source_path, cfg["immediate_retries"], cfg["source_retries"]),
+                "immediate_retries, source_retries, deployed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (pn_id, version, major, source_path, cfg["immediate_retries"], cfg["source_retries"], deployed_at),
             )
             (pv_id,) = db.execute(
                 "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)

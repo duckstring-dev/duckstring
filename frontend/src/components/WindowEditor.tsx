@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useLiveStore } from '@/lib/store';
-import type { FreqUnit, Pond, Weekday } from '@/lib/types';
+import type { FreqUnit, Pond, Weekday, WindowRow } from '@/lib/types';
 
 // Batch-availability windows on an Inlet Pond — the UI for `duckstring trigger window {pond}
 // add|list|remove`. Required fields (every + name) are always shown; the optionals (start, duration,
@@ -57,8 +57,12 @@ const numInput: React.CSSProperties = {
 };
 const selectInput: React.CSSProperties = { ...numInput, width: 'auto' };
 
+// Stable empty reference: defaulting inside the selector (`?? []`) returns a fresh array each render,
+// which zustand's useSyncExternalStore reads as a changed snapshot → infinite loop.
+const NO_WINDOWS: WindowRow[] = [];
+
 export function WindowEditor({ pond }: { pond: Pond }) {
-  const windows = useLiveStore((s) => s.windowsByPond[pond.id] ?? []);
+  const windows = useLiveStore((s) => s.windowsByPond[pond.id]) ?? NO_WINDOWS;
   const addWindow = useLiveStore((s) => s.addWindow);
   const removeWindow = useLiveStore((s) => s.removeWindow);
 
