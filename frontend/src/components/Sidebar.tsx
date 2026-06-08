@@ -1,8 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { useLiveStore, formatAge, parseTs } from '@/lib/store';
-import type { PondRun } from '@/lib/types';
+import { useLiveStore, formatAge, formatDuration, parseTs } from '@/lib/store';
+import type { FreqUnit, PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
 
@@ -59,6 +59,16 @@ const numInput: React.CSSProperties = {
   fontSize: 12,
 };
 
+const selectInput: React.CSSProperties = { ...numInput, width: 'auto' };
+
+const TIDE_UNITS: { value: FreqUnit; label: string; secs: number }[] = [
+  { value: 'SECOND', label: 'sec', secs: 1 },
+  { value: 'MINUTE', label: 'min', secs: 60 },
+  { value: 'HOUR', label: 'hr', secs: 3600 },
+  { value: 'DAY', label: 'day', secs: 86400 },
+  { value: 'WEEK', label: 'wk', secs: 604800 },
+];
+
 const ms = (iso: string | null): number => parseTs(iso);
 
 // Completion times (asc, ms) and per-run durations (ms) for a set of Pond Runs.
@@ -109,6 +119,7 @@ export function Sidebar() {
   const removeTrigger = useLiveStore((s) => s.removeTrigger);
 
   const [tideBound, setTideBound] = useState('2');
+  const [tideUnit, setTideUnit] = useState<FreqUnit>('SECOND');
   const [showTideInput, setShowTideInput] = useState(false);
 
   const selectedPond = selectedPondId ? ponds[selectedPondId] : null;
@@ -150,7 +161,7 @@ export function Sidebar() {
             <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 10 }}>Wave — standing pull.</div>
           ) : (
             <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 10 }}>
-              Tide — max staleness ≤ {((triggers[selectedTriggerId].boundMs ?? 1000) / 1000).toFixed(1)}s.
+              Tide — max staleness ≤ {formatDuration(triggers[selectedTriggerId].boundMs ?? 1000)}.
             </div>
           )}
           <Btn onClick={() => removeTrigger(selectedTriggerId)} color="#ef4444">Remove Trigger</Btn>
@@ -204,10 +215,24 @@ export function Sidebar() {
             </div>
             {showTideInput && (
               <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
-                <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
-                <input type="number" min="1" step="1" value={tideBound} onChange={(e) => setTideBound(e.target.value)} style={numInput} />
-                <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
-                <Btn small onClick={() => { tide(selectedPond.id, Math.max(0.1, parseFloat(tideBound))); setShowTideInput(false); }} color="#3b82f6">Set</Btn>
+                <span style={{ fontSize: 11, color: '#71717a' }} title="keep no more stale than">≤</span>
+                <input type="number" min="1" step="1" value={tideBound} onChange={(e) => setTideBound(e.target.value)} style={{ ...numInput, width: 56 }} />
+                <select value={tideUnit} onChange={(e) => setTideUnit(e.target.value as FreqUnit)} style={selectInput}>
+                  {TIDE_UNITS.map((u) => (
+                    <option key={u.value} value={u.value}>{u.label}</option>
+                  ))}
+                </select>
+                <Btn
+                  small
+                  onClick={() => {
+                    const secs = TIDE_UNITS.find((u) => u.value === tideUnit)!.secs;
+                    tide(selectedPond.id, Math.max(0.1, parseFloat(tideBound) * secs));
+                    setShowTideInput(false);
+                  }}
+                  color="#3b82f6"
+                >
+                  Set
+                </Btn>
               </div>
             )}
             {trigger && (

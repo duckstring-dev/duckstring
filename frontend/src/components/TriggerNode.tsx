@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore } from '@/lib/store';
+import { useLiveStore, formatDuration } from '@/lib/store';
 
 export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
@@ -14,7 +14,7 @@ export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
 
   const isWave = trigger.kind === 'wave';
   const color = isWave ? '#22c55e' : '#3b82f6';
-  const label = isWave ? 'Wave' : `Tide (≤${((trigger.boundMs ?? 1000) / 1000).toFixed(1)}s)`;
+  const label = isWave ? 'Wave' : `Tide (≤${formatDuration(trigger.boundMs ?? 1000)})`;
 
   const isSelected = selectedTriggerId === pondId;
 

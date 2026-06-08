@@ -329,6 +329,19 @@ export function formatAge(F: number, now: number): string {
   return '>1y';
 }
 
+// A staleness bound (ms) as a compact duration in its largest whole unit: 86_400_000 → "1d",
+// 5_400_000 → "1.5h", 2_000 → "2s".
+export function formatDuration(ms: number): string {
+  const s = ms / 1000;
+  for (const [label, unit] of [['w', 604800], ['d', 86400], ['h', 3600], ['m', 60], ['s', 1]] as const) {
+    if (s >= unit) {
+      const v = s / unit;
+      return Number.isInteger(v) ? `${v}${label}` : `${v.toFixed(1)}${label}`;
+    }
+  }
+  return `${s}s`;
+}
+
 export const STATE_COLORS: Record<string, string> = {
   running: '#22c55e',
   queued: '#f97316',

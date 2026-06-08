@@ -41,6 +41,8 @@ A Catchment is the execution environment and orchestrator, receiving Ponds and m
 
 Starting or connecting to a Catchment selects it as the default target of later commands - other connected Catchments can be referred to with the `-c {catchment name}` option where relevant.
 
+If you just want to get a feel for how the orchestrator works, take a look at the (Duckstring Playground)[https://playground.duckstring.com].
+
 #### Start a Catchment Server
 
 To initiate a Catchment locally, run:
@@ -70,16 +72,6 @@ This will prompt for any necessary auth, and will add the Catchment under the sp
 #### Connect to *duckstring.com*
 
 There are future plans for a dedicated Catchment service at https://duckstring.com. If you're interested, please [contact me](mailto:dev@duckstring.com).
-
-#### Experiment in the Playground
-
-Shipped with Duckstring is a standalone web app to demonstrate how the Catchment orchestrator behaves. Start it with:
-
-```bash
-duckstring catchment playground
-```
-
-You may also visit https://playground.duckstring.com
 
 ### 2) Define Pond(s)
 
