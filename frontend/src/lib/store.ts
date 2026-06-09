@@ -15,6 +15,8 @@ import {
   fetchRuns,
   fetchWindows,
   postTrigger,
+  clearFailure,
+  setBudget,
   addWindow,
   removeWindow,
   type StatusPayload,
@@ -101,7 +103,16 @@ function transformStatus(payload: StatusPayload): StatusSlice {
 
   for (const p of payload.ponds) {
     ponds[p.name] = { id: p.name, name: p.name, kind: p.kind, sources: [] };
-    pondInfo[p.name] = { version: p.version, kind: p.kind };
+    pondInfo[p.name] = {
+      version: p.version,
+      kind: p.kind,
+      isFailed: p.is_failed,
+      isBlocked: p.is_blocked,
+      failedF: p.failed_f,
+      failures: p.failures,
+      immediateRetries: p.immediate_retries,
+      sourceRetries: p.source_retries,
+    };
     pondViews[p.name] = nodeView(p, p.d_ms);
     if (p.trigger) triggers[p.name] = { kind: p.trigger.kind, boundMs: p.trigger.bound_ms };
 
@@ -140,6 +151,7 @@ export interface LiveState extends StatusSlice {
   selectedTriggerId: PondId | null;
 
   runs: PondRun[]; // run-history feed (filtered by selection + filters)
+  selectedRun: PondRun | null; // the run open in the detail pane (enriched with ripples on select)
   runFilters: RunFilters;
   runLimit: number; // size of the live window the feed fetches; grows as the user scrolls
   runsAtEnd: boolean; // the window reached the oldest available run (fewer rows than asked)
@@ -149,8 +161,10 @@ export interface LiveState extends StatusSlice {
 
   refresh(): Promise<void>;
   refreshWindows(pond: PondId): Promise<void>;
+  refreshRunDetail(): Promise<void>;
   setRunFilter(key: keyof RunFilters, value: boolean): void;
   loadMoreRuns(): void;
+  selectRun(run: PondRun | null): void;
 
   selectPond(id: PondId | null): void;
   selectRipple(id: RippleId | null): void;
@@ -164,6 +178,9 @@ export interface LiveState extends StatusSlice {
   start(pond: PondId): Promise<void>;
   stop(pond: PondId, upstream?: boolean): Promise<void>;
   removeTrigger(pond: PondId): Promise<void>;
+
+  clearFailure(pond: PondId): Promise<void>;
+  setBudget(pond: PondId, immediateRetries: number, sourceRetries: number): Promise<void>;
 
   addWindow(pond: PondId, body: AddWindowBody): Promise<void>;
   removeWindow(pond: PondId, name: string): Promise<void>;
@@ -183,6 +200,11 @@ function focusPond(s: LiveState): PondId | null {
   return null;
 }
 
+// Identity of a Pond Run (newest history can re-fetch the same run to keep the detail pane live).
+export function runKey(r: PondRun): string {
+  return `${r.pond}::${r.version}::${r.f}`;
+}
+
 export const useLiveStore = create<LiveState>((set, get) => ({
   ponds: {},
   ripples: {},
@@ -199,6 +221,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   selectedTriggerId: null,
 
   runs: [],
+  selectedRun: null,
   runFilters: { lineage: true, ripples: false },
   runLimit: RUN_PAGE,
   runsAtEnd: false,
@@ -232,6 +255,21 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     } catch {
       /* history is non-critical; leave the last good feed in place */
     }
+    if (get().selectedRun) void get().refreshRunDetail(); // keep the open detail live as it runs/retries
+  },
+
+  async refreshRunDetail() {
+    const sel = get().selectedRun;
+    if (!sel) return;
+    try {
+      // The feed may not carry ripples; fetch this run's own Pond history (with ripples) and match it.
+      const rows = await fetchRuns({ pond: sel.pond, lineage: false, ripples: true, limit: 200 });
+      const found = rows.map(mapRun).find((r) => runKey(r) === runKey(sel));
+      const still = get().selectedRun;
+      if (found && still && runKey(still) === runKey(found)) set({ selectedRun: found });
+    } catch {
+      /* detail is non-critical */
+    }
   },
 
   async refreshWindows(pond) {
@@ -254,6 +292,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     if (s.loadingMore || s.runsAtEnd || s.runLimit >= RUN_MAX) return;
     set({ loadingMore: true, runLimit: Math.min(s.runLimit + RUN_PAGE, RUN_MAX) });
     get().refresh().finally(() => set({ loadingMore: false }));
+  },
+
+  selectRun(run) {
+    set({ selectedRun: run });
+    if (run) void get().refreshRunDetail();
   },
 
   selectPond(id) {
@@ -280,6 +323,10 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   start: (pond) => act(get, set, () => postTrigger(pond, 'start')),
   stop: (pond, upstream = false) => act(get, set, () => postTrigger(pond, 'stop', { upstream })),
   removeTrigger: (pond) => act(get, set, () => postTrigger(pond, 'untrigger')),
+
+  clearFailure: (pond) => act(get, set, () => clearFailure(pond)),
+  setBudget: (pond, immediateRetries, sourceRetries) =>
+    act(get, set, () => setBudget(pond, immediateRetries, sourceRetries)),
 
   addWindow: (pond, body) =>
     act(get, set, async () => {
@@ -351,14 +398,18 @@ export const THEME_BRAND = '#06c4e6'; // a pond on a bright day — full-saturat
 export const THEME_RUNNING = THEME_BRAND; // active execution + brand accent
 export const THEME_PULL = '#ee9333'; // pull (Tap/Wave) · queued · run interval — warm amber-orange
 export const THEME_PUSH = '#a3e635'; // push (Pulse/Tide) — green-yellow
-export const THEME_SUCCESS = '#22c55e'; // success · connected · start (green)
+export const THEME_SUCCESS = '#22c55e'; // success · connected · start · clear (green)
 export const THEME_DANGER = '#ef4444'; // stop · failed (red)
+export const THEME_BLOCKED = '#991b1b'; // blocked by an upstream failure — a darker, muted red
 
-// Node/Ripple demand state → border colour.
+// Node/Ripple demand state → border colour. Failed/blocked (Ponds) take precedence in the backend's
+// status string, so they map straight through here.
 export const STATE_COLORS: Record<string, string> = {
   running: THEME_RUNNING,
   queued: THEME_PULL,
   idle: '#71717a',
+  failed: THEME_DANGER,
+  blocked: THEME_BLOCKED,
 };
 
 // Border colour for a node. Running is always the brand cyan and idle is grey; a *queued* node is

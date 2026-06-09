@@ -23,7 +23,7 @@ export interface RawPond {
   name: string;
   kind: string;
   version: string;
-  status: 'running' | 'queued' | 'idle';
+  status: 'running' | 'queued' | 'idle' | 'failed' | 'blocked';
   gen: number;
   runs_completed: number;
   has_pull: boolean;
@@ -32,6 +32,12 @@ export interface RawPond {
   end_f: string | null;
   d_ms: number;
   trigger: { kind: 'wave' | 'tide'; bound_ms: number | null } | null;
+  is_failed: boolean;
+  is_blocked: boolean;
+  failed_f: string | null;
+  failures: number;
+  immediate_retries: number;
+  source_retries: number;
   ripples: RawRipple[];
   ripple_edges: [string, string][]; // [sourceName, sinkName] within the Pond
 }
@@ -119,6 +125,18 @@ export async function fetchRuns(q: RunsQuery = {}): Promise<RawPondRun[]> {
 // /api/ponds/{pond}/ — tap | pulse | wave | tide | start | stop | untrigger.
 export function postTrigger(pond: string, endpoint: string, body: unknown = {}): Promise<void> {
   return postJSON(`/ponds/${encodeURIComponent(pond)}/${endpoint}`, body);
+}
+
+// Failure management.
+export function clearFailure(pond: string): Promise<void> {
+  return postJSON(`/ponds/${encodeURIComponent(pond)}/clear`);
+}
+
+export function setBudget(pond: string, immediateRetries: number, sourceRetries: number): Promise<void> {
+  return postJSON(`/ponds/${encodeURIComponent(pond)}/budget`, {
+    immediate_retries: immediateRetries,
+    source_retries: sourceRetries,
+  });
 }
 
 export function fetchWindows(pond: string): Promise<RawWindow[]> {

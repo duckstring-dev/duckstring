@@ -6,6 +6,7 @@ import { useLiveStore } from '@/lib/store';
 import { DagCanvas } from './DagCanvas';
 import { Sidebar } from './Sidebar';
 import { RunHistory } from './RunHistory';
+import { RunDetail } from './RunDetail';
 
 const POLL_MS = 1000;
 
@@ -45,7 +46,14 @@ export function App() {
         </ReactFlowProvider>
         <Sidebar />
       </div>
-      <RunHistory />
+      <div style={{ display: 'flex', height: 260, minHeight: 0, borderTop: '1px solid #27272a' }}>
+        <div style={{ flex: 1, minWidth: 0, borderRight: '1px solid #27272a' }}>
+          <RunHistory />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <RunDetail />
+        </div>
+      </div>
     </div>
   );
 }

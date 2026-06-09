@@ -5,7 +5,7 @@
 export type PondId = string; // the Pond name
 export type RippleId = string; // `${pond}.${ripple}`
 
-export type DemandStatus = 'running' | 'queued' | 'idle';
+export type DemandStatus = 'running' | 'queued' | 'idle' | 'failed' | 'blocked';
 export type FreqUnit = 'SECOND' | 'MINUTE' | 'HOUR' | 'DAY' | 'WEEK';
 export type Weekday = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI' | 'SAT' | 'SUN';
 export type TriggerKind = 'wave' | 'tide';
@@ -49,6 +49,13 @@ export interface TriggerView {
 export interface PondInfo {
   version: string;
   kind: string;
+  // Fault tolerance (Ponds only).
+  isFailed: boolean;
+  isBlocked: boolean;
+  failedF: string | null; // freshness the failed Run was reaching
+  failures: number; // failed Runs this episode (vs sourceRetries)
+  immediateRetries: number; // live budget: Ripple retries within a Run
+  sourceRetries: number; // live budget: Runs retried on a Source change
 }
 
 // ─── Run history ─────────────────────────────────────────────────────────────

@@ -1,18 +1,16 @@
 'use client';
 
-import { Fragment, useState } from 'react';
-import { useLiveStore, parseTs, THEME_SUCCESS, THEME_RUNNING, THEME_DANGER, THEME_BRAND } from '@/lib/store';
+import { Fragment } from 'react';
+import { useLiveStore, runKey, parseTs, THEME_SUCCESS, THEME_RUNNING, THEME_DANGER, THEME_BRAND } from '@/lib/store';
 import type { RippleRun } from '@/lib/types';
 
-const STATUS_COLOR: Record<string, string> = {
+export const STATUS_COLOR: Record<string, string> = {
   success: THEME_SUCCESS,
   running: THEME_RUNNING,
   failed: THEME_DANGER,
 };
 
 // Fixed column widths (px) so the duration lands at the same x on Pond and (indented) Ripple rows.
-// Both rows share clock + status; a Pond row then has name + version, a Ripple row a single wider
-// name + its indent. Aligning the duration requires: RIPPLE_NAME = NAME + VERSION + gap − INDENT.
 const GAP = 8;
 const STATUS_W = 64;
 const NAME_W = 104;
@@ -28,7 +26,7 @@ const col = (w: number): React.CSSProperties => ({
   whiteSpace: 'nowrap',
 });
 
-function clock(iso: string | null): string {
+export function clock(iso: string | null): string {
   if (!iso) return '—';
   const d = new Date(parseTs(iso));
   const p = (n: number) => String(n).padStart(2, '0');
@@ -42,9 +40,7 @@ function localYMD(d: Date): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-// Local-day bucket for a Pond Run, keyed on its start. Runs are grouped under this; a Ripple that
-// finishes after midnight stays in its Pond Run's (earlier) bucket because dividers are emitted only
-// at the Pond-Run level.
+// Local-day bucket for a Pond Run, keyed on its start.
 function dayKey(iso: string | null): string {
   return iso ? localYMD(new Date(parseTs(iso))) : '';
 }
@@ -64,7 +60,7 @@ function DateDivider({ label }: { label: string }) {
   );
 }
 
-function durationOf(startedAt: string | null, finishedAt: string | null): string {
+export function durationOf(startedAt: string | null, finishedAt: string | null): string {
   if (!startedAt || !finishedAt) return '';
   return `${((parseTs(finishedAt) - parseTs(startedAt)) / 1000).toFixed(1)}s`;
 }
@@ -110,9 +106,11 @@ export function RunHistory() {
   const selectedPondId = useLiveStore((s) => s.selectedPondId);
   const selectedRippleId = useLiveStore((s) => s.selectedRippleId);
   const ripples = useLiveStore((s) => s.ripples);
-  const [open, setOpen] = useState(true);
+  const selectRun = useLiveStore((s) => s.selectRun);
+  const selectedRun = useLiveStore((s) => s.selectedRun);
 
   const focus = selectedPondId ?? (selectedRippleId ? ripples[selectedRippleId]?.pondId : null) ?? null;
+  const selectedKey = selectedRun ? runKey(selectedRun) : null;
 
   // Grow the live window when scrolled near the bottom (store guards against over-fetching).
   const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
@@ -121,13 +119,10 @@ export function RunHistory() {
   };
 
   return (
-    <div style={{ borderTop: '1px solid #27272a', background: '#0c0c10', fontFamily: 'ui-monospace, SFMono-Regular, monospace', flexShrink: 0 }}>
-      <div
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 10px', cursor: 'pointer', userSelect: 'none' }}
-        onClick={() => setOpen((v) => !v)}
-      >
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#0c0c10', fontFamily: 'ui-monospace, SFMono-Regular, monospace', minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '5px 10px', borderBottom: '1px solid #18181d' }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: '#a1a1aa', letterSpacing: '0.08em' }}>
-          {open ? '▾' : '▸'} RUN HISTORY
+          RUN HISTORY
           <span style={{ color: '#52525b', fontWeight: 400, marginLeft: 8 }}>
             {runsAtEnd ? '' : '>'}{runs.length} run{runs.length === 1 ? '' : 's'}
             {focus ? ` · ${focus}${filters.lineage ? ' + lineage' : ''}` : ' · all'}
@@ -139,40 +134,47 @@ export function RunHistory() {
         </span>
       </div>
 
-      {open && (
-        <div onScroll={onScroll} style={{ height: 200, overflowY: 'auto', padding: '4px 10px 8px', fontSize: 11, lineHeight: 1.6 }}>
-          {runs.length === 0 ? (
-            <div style={{ color: '#52525b' }}>No runs yet — send a Tap, Pulse, Wave, or Start.</div>
-          ) : (
-            (() => {
-              let prevDay = '';
-              return runs.map((run) => {
-                const day = dayKey(run.startedAt);
-                const showDivider = day !== prevDay;
-                prevDay = day;
-                return (
-                  <Fragment key={`${run.pond}-${run.version}-${run.f}`}>
-                    {showDivider && <DateDivider label={dayLabel(run.startedAt)} />}
-                    <div style={{ display: 'flex', gap: GAP, whiteSpace: 'pre' }}>
-                      <span style={{ color: '#3f3f46' }}>{clock(run.finishedAt ?? run.startedAt)}</span>
-                      <span style={{ ...col(STATUS_W), color: STATUS_COLOR[run.status] ?? '#71717a' }}>{run.status}</span>
-                      <span style={{ ...col(NAME_W), color: '#d4d4d8' }}>{run.pond}</span>
-                      <span style={{ ...col(VERSION_W), color: '#52525b' }}>v{run.version}</span>
-                      <span style={{ color: '#71717a' }}>{durationOf(run.startedAt, run.finishedAt)}</span>
-                    </div>
-                    {filters.ripples && run.ripples?.map((r) => <RippleRow key={r.ripple} r={r} />)}
-                  </Fragment>
-                );
-              });
-            })()
-          )}
-          {runs.length > 0 && (
-            <div style={{ color: '#3f3f46', fontSize: 10, textAlign: 'center', padding: '8px 0 2px' }}>
-              {runsAtEnd ? '— end of history —' : 'scroll for more…'}
-            </div>
-          )}
-        </div>
-      )}
+      <div onScroll={onScroll} style={{ flex: 1, overflowY: 'auto', padding: '4px 10px 8px', fontSize: 11, lineHeight: 1.6 }}>
+        {runs.length === 0 ? (
+          <div style={{ color: '#52525b' }}>No runs yet — send a Tap, Pulse, Wave, or Start.</div>
+        ) : (
+          (() => {
+            let prevDay = '';
+            return runs.map((run) => {
+              const day = dayKey(run.startedAt);
+              const showDivider = day !== prevDay;
+              prevDay = day;
+              const isSel = selectedKey === runKey(run);
+              return (
+                <Fragment key={runKey(run)}>
+                  {showDivider && <DateDivider label={dayLabel(run.startedAt)} />}
+                  <div
+                    onClick={() => selectRun(isSel ? null : run)}
+                    style={{
+                      display: 'flex', gap: GAP, whiteSpace: 'pre', cursor: 'pointer', borderRadius: 4,
+                      padding: '0 4px', margin: '0 -4px',
+                      background: isSel ? `${THEME_BRAND}1f` : 'transparent',
+                      boxShadow: isSel ? `inset 2px 0 0 ${THEME_BRAND}` : undefined,
+                    }}
+                  >
+                    <span style={{ color: '#3f3f46' }}>{clock(run.finishedAt ?? run.startedAt)}</span>
+                    <span style={{ ...col(STATUS_W), color: STATUS_COLOR[run.status] ?? '#71717a' }}>{run.status}</span>
+                    <span style={{ ...col(NAME_W), color: '#d4d4d8' }}>{run.pond}</span>
+                    <span style={{ ...col(VERSION_W), color: '#52525b' }}>v{run.version}</span>
+                    <span style={{ color: '#71717a' }}>{durationOf(run.startedAt, run.finishedAt)}</span>
+                  </div>
+                  {filters.ripples && run.ripples?.map((r) => <RippleRow key={r.ripple} r={r} />)}
+                </Fragment>
+              );
+            });
+          })()
+        )}
+        {runs.length > 0 && (
+          <div style={{ color: '#3f3f46', fontSize: 10, textAlign: 'center', padding: '8px 0 2px' }}>
+            {runsAtEnd ? '— end of history —' : 'scroll for more…'}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

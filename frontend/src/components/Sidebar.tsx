@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useLiveStore, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER } from '@/lib/store';
+import { useLiveStore, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED } from '@/lib/store';
 import type { FreqUnit, PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
@@ -11,15 +11,18 @@ function Btn({
   children,
   color = THEME_PUSH,
   small = false,
+  disabled = false,
 }: {
   onClick: () => void;
   children: React.ReactNode;
   color?: string;
   small?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
       style={{
         background: 'transparent',
         border: `1px solid ${color}`,
@@ -27,9 +30,10 @@ function Btn({
         borderRadius: 5,
         padding: small ? '2px 8px' : '5px 12px',
         fontSize: small ? 11 : 12,
-        cursor: 'pointer',
+        cursor: disabled ? 'not-allowed' : 'pointer',
         fontWeight: 600,
         letterSpacing: '0.04em',
+        opacity: disabled ? 0.35 : 1,
       }}
     >
       {children}
@@ -117,10 +121,24 @@ export function Sidebar() {
   const start = useLiveStore((s) => s.start);
   const stop = useLiveStore((s) => s.stop);
   const removeTrigger = useLiveStore((s) => s.removeTrigger);
+  const clearFailure = useLiveStore((s) => s.clearFailure);
+  const setBudget = useLiveStore((s) => s.setBudget);
 
   const [tideBound, setTideBound] = useState('2');
   const [tideUnit, setTideUnit] = useState<FreqUnit>('SECOND');
   const [showTideInput, setShowTideInput] = useState(false);
+
+  // Retry-budget inputs, seeded from the selected Pond's live config. Re-seed only when the selection
+  // changes (the "adjust state while rendering" pattern) so live polls don't clobber typing mid-edit.
+  const [immRetries, setImmRetries] = useState('0');
+  const [srcRetries, setSrcRetries] = useState('0');
+  const [budgetPond, setBudgetPond] = useState<string | null>(null);
+  if (selectedPondId !== budgetPond) {
+    setBudgetPond(selectedPondId);
+    const info = selectedPondId ? pondInfo[selectedPondId] : null;
+    setImmRetries(info ? String(info.immediateRetries) : '0');
+    setSrcRetries(info ? String(info.sourceRetries) : '0');
+  }
 
   const selectedPond = selectedPondId ? ponds[selectedPondId] : null;
   const selectedRipple = selectedRippleId ? ripples[selectedRippleId] : null;
@@ -250,6 +268,42 @@ export function Sidebar() {
             </div>
             <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
               Start: one run on this Pond, no upstream. Stop: clear this Pond&apos;s demand. Stop Lineage: also clear all upstream sources.
+            </div>
+          </Section>
+
+          {/* Failures: clear a failed Pond and edit its retry budgets */}
+          <Section>
+            <Label>Failures</Label>
+            {pondInfo[selectedPond.id]?.isFailed ? (
+              <div style={{ fontSize: 12, color: THEME_DANGER, marginBottom: 8, lineHeight: 1.6 }}>
+                Failed
+                <div style={{ color: '#a1a1aa', fontSize: 11 }}>
+                  {pondInfo[selectedPond.id].failures}/{pondInfo[selectedPond.id].sourceRetries} on-change retries used
+                </div>
+              </div>
+            ) : pondInfo[selectedPond.id]?.isBlocked ? (
+              <div style={{ fontSize: 12, color: THEME_BLOCKED, marginBottom: 8 }}>Blocked by an upstream failure.</div>
+            ) : (
+              <div style={{ fontSize: 12, color: '#52525b', marginBottom: 8 }}>No failure.</div>
+            )}
+            <Btn onClick={() => clearFailure(selectedPond.id)} color={THEME_SUCCESS} disabled={!pondInfo[selectedPond.id]?.isFailed}>
+              Clear
+            </Btn>
+
+            <div style={{ marginTop: 12 }}>
+              <Label>Retry budget</Label>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11, color: '#71717a' }} title="Ripple retries within one Pond Run">imm</span>
+                <input type="number" min="0" step="1" value={immRetries} onChange={(e) => setImmRetries(e.target.value)} style={{ ...numInput, width: 44 }} />
+                <span style={{ fontSize: 11, color: '#71717a' }} title="Pond Runs retried when a Source updates">chg</span>
+                <input type="number" min="0" step="1" value={srcRetries} onChange={(e) => setSrcRetries(e.target.value)} style={{ ...numInput, width: 44 }} />
+                <Btn small color={THEME_PUSH} onClick={() => setBudget(selectedPond.id, Math.max(0, parseInt(immRetries) || 0), Math.max(0, parseInt(srcRetries) || 0))}>
+                  Set
+                </Btn>
+              </div>
+              <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
+                imm: Ripple retries within a Run. chg: Runs retried when a Source updates.
+              </div>
             </div>
           </Section>
 
