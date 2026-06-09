@@ -1329,6 +1329,86 @@ A single Tap thus settles with:
 
 This is the general result for a single Tap from a cold start on a sequence of Ponds - each Pond runs for the same number of generations as the maximum Ripple depth from the initiating Tap. Note that all tasks (apart from the concluding *push* runs) finish at approximately the same time, ready to supply any new Taps (or Wave) immediately.
 
+## Fault Tolerance
+
+A failed Pond will not supply fresh data downstream, potentially breaking the entire sequence. 
+
+Failures occur at a Ripple level and cause the associated Pond Run to fail. This is recorded as `Pond.isFailed = true`, and `Pond.failedF = Ripple.startF`.
+
+Retries come in two types:
+- Immediately - retry the failed Ripple straight away, within the same Pond Run
+- On Change - retry the whole Pond Run once the Sources have moved on
+
+Each has a budget (default 0). If the *Retry Immediately* budget is 1 and the *Retry On Change* budget is 1, the failing Ripple would execute twice per Pond Run before giving up, and twice again when the Sources updated, for a total of 4.
+
+*Retry On Change* runs when its counter is non-zero, `Pond.sourceF > Pond.startF` and `Pond.isFailed = true` - in essence acting as another type of demand. A Pond is considered recovered if `Pond.endF > Pond.failedF`, resetting budgets and clearing fail states.
+
+When a Pond fails it also becomes *blocked* (`Pond.isBlocked = true`), and a Pond with any blocked *required* Source is blocked in turn, so the condition carries all the way down to the Outlets. A blocked Pond still processes any of its existing demand, but won't accept new demand, as to do so would attempt work guaranteed to fail.
+
+A Pond is unblocked by clearing the failure beneath it (e.g. by acknowledging a fix, or directly restarting the Pond):
+- `Pond.isFailed = false`
+- `Pond.failedF = null`
+- `Pond.isBlocked = false`
+
+This extends the Pond pseudocode:
+
+```
+Pond (added state):
+    retryImmediately    # number of Ripple Run retries allowed within one Pond Run (config; default 0)
+    retryOnChange       # number of extra Pond Runs allowed after a Source updates (config; default 0)
+    isFailed            # a Pond Run gave up and has not been superseded by a fresher success
+    isBlocked           # this Pond is failed, or a required Source is failed/blocked
+    failedF             # freshness of the freshest frontier that has failed (NEVER if none)
+    failures            # number of Pond Run failures since last success (counted against retryOnChange)
+    immediateLeft[F]    # number of Ripple Run retries still available in that Pond Run
+
+    on starting a Pond Run:                     # (in addition to the existing handler)
+        immediateLeft[startF] = retryImmediately    # a fresh Ripple-retry budget for this Pond Run
+        # while isBlocked, skip the existing re-arm-Sources step: a blocked Pond consumes what its
+        # Sources have already produced, but never asks them for more
+
+    start a Pond Run when:                      # (replaces the existing condition)
+        ( not isFailed and (
+            (targets nonempty and sourceF >= min(targets))      # push, OR
+            or (hasPull and sourceF > startF) ) )               # pull — runs even while blocked,
+        or                                          #   draining what a Source already produced
+        ( failedF != NEVER                          # retry on change: a failed Pond watches its
+          and failures <= retryOnChange             #   Sources like a held demand and re-runs once
+          and sourceF > startF )                    #   they move on (startF == failedF if nothing newer began)
+
+    on a Ripple Run failing (reported with the Ripple; F = Ripple.startF is the Run it was reaching):
+        if immediateLeft[F] > 0:
+            immediateLeft[F] -= 1
+            re-stamp target F on the Ripple         # retry the Ripple straight away, in the same Run
+        else:                                       # the Run gives up — this Pond has failed
+            failedF  = max(failedF, F)              # remember the freshest freshness we failed at
+            failures += 1                           # every failed Run counts, even simultaneous ones
+            isFailed = true
+            setBlocked(true)
+            drop immediateLeft[F]
+
+    on completing a Pond Run:                   # (in addition to the existing endF advance)
+        if isFailed and endF > failedF:             # a Run fresher than the failure has succeeded
+            isFailed = false ; failedF = NEVER ; failures = 0
+            setBlocked( any required Source is isFailed or isBlocked )   # may stay blocked from upstream
+
+    on receiving a pull or push demand:
+        if isBlocked: ignore                        # a blocked Pond takes no new demand, nor propagates
+        else: ...                                   # (the existing hasReceivedPull / target rules)
+
+    setBlocked(b):                              # write isBlocked; on a change, tell the Sinks
+        if b == isBlocked: return
+        isBlocked = b
+        notify each Sink                            # the one signal that travels downstream
+
+    on a Source becoming (un)failed or (un)blocked:     # a Sink reads only its own Sources
+        setBlocked( isFailed or any required Source is isFailed or isBlocked )
+
+    on unblocking (operator clear, or a `start` trigger):
+        isFailed = false ; failedF = NEVER ; failures = 0
+        setBlocked( any required Source is isFailed or isBlocked )
+```
+
 ## Summary
 
 Conventional pipelines are triggered from the *point of supply* — a schedule or a completed upstream run pushes work downstream. This forces a choice between running too often (wasting compute and producing results nobody consumes) and running too rarely (accepting stale data), and it demands central governance to decide the rate of every path.

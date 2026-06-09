@@ -41,7 +41,7 @@ A Catchment is the execution environment and orchestrator, receiving Ponds and m
 
 Starting or connecting to a Catchment selects it as the default target of later commands - other connected Catchments can be referred to with the `-c {catchment name}` option where relevant.
 
-If you just want to get a feel for how the orchestrator works, take a look at the (Duckstring Playground)[https://playground.duckstring.com].
+If you just want to get a feel for how the orchestrator works, take a look at the [Duckstring Playground](https://playground.duckstring.com).
 
 #### Start a Catchment Server
 
