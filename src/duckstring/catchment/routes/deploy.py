@@ -84,6 +84,11 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
         ).fetchone()
         if existing:
             pv_id = existing[0]
+            # Rewriting an existing version's topology: its run history (keyed on this pond_version)
+            # references the ripple rows we're about to drop, so clear it first or the ripple DELETE
+            # below violates ripple_run's FK. ripple_run before pond_run (ripple_run references both).
+            db.execute("DELETE FROM ripple_run WHERE pond_version_id = ?", (pv_id,))
+            db.execute("DELETE FROM pond_run WHERE pond_version_id = ?", (pv_id,))
             ripple_ids = [r[0] for r in db.execute("SELECT id FROM ripple WHERE pond_version_id = ?", (pv_id,))]
             if ripple_ids:
                 marks = ",".join("?" * len(ripple_ids))
@@ -214,4 +219,5 @@ async def deploy(request: Request):
 
     if getattr(request.app.state, "driver", None) is not None:
         request.app.state.driver.reload()
+        request.app.state.driver.clear_on_redeploy(name)  # a fix redeploy auto-clears the failure
     return {"ok": True}

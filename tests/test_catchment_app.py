@@ -587,3 +587,20 @@ def test_failed_event_marks_pond_then_clears(catchment_client):
     assert catchment_client.post("/api/ponds/outlet/clear").status_code == 200
     st = _pond_status(catchment_client, "outlet")
     assert not st["is_failed"] and not st["is_blocked"] and st["failures"] == 0
+
+
+def test_redeploy_same_version_after_run_history(catchment_client):
+    # A failed Run leaves ripple_run/pond_run history; redeploying the same version rewrites the
+    # topology and must clear that history first (else the ripple DELETE hits ripple_run's FK).
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
+            toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
+    catchment_client.post(
+        "/api/duck/outlet/events",
+        json={"kind": "failed", "ripple": "load", "f": "2026-01-01T00:00:00+00:00", "status": "failed"},
+    )
+    assert _pond_status(catchment_client, "outlet")["is_failed"]
+    r = _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
+                toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
+    assert r.status_code == 200
+    # Redeploying the (fixed) artifact auto-clears the failure — no manual `failure clear` needed.
+    assert not _pond_status(catchment_client, "outlet")["is_failed"]

@@ -222,6 +222,16 @@ class Driver:
             self.state = clear_pond(self.state, pond, _now())
             self._process(_now())
 
+    def clear_on_redeploy(self, pond: str) -> None:
+        """Called after a (re)deploy: if the Pond was failed, clear it — a fresh artifact presumably
+        fixes the cause — so it (and anything blocked downstream) can resume without a manual clear.
+        Only clears a Pond's *own* failure; one merely blocked by a still-failed Source stays blocked."""
+        with self.lock:
+            ps = self.state.pond_states.get(pond)
+            if ps is not None and ps.is_failed:
+                self.state = clear_pond(self.state, pond, _now())
+                self._process(_now())
+
     def set_retry(self, pond: str, immediate_retries: int, source_retries: int) -> None:
         """Set the live retry budgets on a Pond (persisted to pond_retry; owned by the operator)."""
         with self.lock:

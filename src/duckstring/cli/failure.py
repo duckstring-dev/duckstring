@@ -24,7 +24,7 @@ def clear(
 
     _, cfg = resolve_catchment(catchment)
     _http.post(f"{cfg['url']}/api/ponds/{pond}/clear", json={})
-    typer.echo(f"Cleared '{pond}'.")
+    typer.echo(f"Cleared failure from '{pond}'.")
 
 
 @app.command()
