@@ -107,27 +107,26 @@ def wave(
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
-    watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
 ) -> None:
     """Start continuous Demand from an Outlet (runs at maximum frequency)."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "wave", {}, "Wave started.", one_shot=False)
+    _post_trigger(cfg["url"], outlet, major, version, silent, False, "wave", {}, "Wave started.", one_shot=False)
 
 
 def tide(
     outlet: str = typer.Argument(..., help="Name of the Outlet Pond to keep fresh."),
+    bound: str = typer.Argument(..., help="Maximum staleness, e.g. 30s, 12h, 1d, 1h30m — kept no older than this."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
-    bound: float = typer.Option(..., "--bound", help="Maximum staleness in seconds; the Outlet is kept no older than this."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
-    watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
 ) -> None:
     """Keep an Outlet no more stale than a bound (a staleness-clocked Pulse)."""
     from .config import resolve_catchment
+    from .window import _parse_duration
     _, cfg = resolve_catchment(catchment)
     _post_trigger(
-        cfg["url"], outlet, major, version, silent, watch, "tide",
-        {"bound_seconds": bound}, "Tide started.", one_shot=False,
+        cfg["url"], outlet, major, version, silent, False, "tide",
+        {"bound_seconds": _parse_duration(bound)}, "Tide started.", one_shot=False,
     )

@@ -84,13 +84,18 @@ def test_wave_unknown_catchment_exits(runner):
 
 def test_tide_succeeds(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "tide", "outlet", "--bound", "3600", "--silent"])
+    result = runner.invoke(app, ["trigger", "tide", "outlet", "1h", "--silent"])
     assert result.exit_code == 0, result.output
     assert "Tide started" in result.output
 
 
 def test_tide_requires_bound(runner, live_catchment):
     result = runner.invoke(app, ["trigger", "tide", "outlet"])
+    assert result.exit_code != 0
+
+
+def test_tide_rejects_bad_bound(runner, live_catchment):
+    result = runner.invoke(app, ["trigger", "tide", "outlet", "soon"])
     assert result.exit_code != 0
 
 
@@ -140,5 +145,5 @@ def test_stop_unknown_catchment_exits(runner):
 
 
 def test_tide_unknown_catchment_exits(runner):
-    result = runner.invoke(app, ["trigger", "tide", "outlet", "-c", "nonexistent", "--bound", "60"])
+    result = runner.invoke(app, ["trigger", "tide", "outlet", "60s", "-c", "nonexistent"])
     assert result.exit_code != 0
