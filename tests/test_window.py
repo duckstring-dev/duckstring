@@ -185,7 +185,7 @@ def test_window_cli_defaults(runner, live_catchment):
     r = runner.invoke(app, ["trigger", "window", "tx", "add", "-n", "back2back", "-e", "1h"])
     assert r.exit_code == 0, r.output
 
-    windows = httpx.get(f"{live_catchment}/api/outlets/tx/windows").json()["windows"]
+    windows = httpx.get(f"{live_catchment}/api/ponds/tx/windows").json()["windows"]
     assert len(windows) == 1
     w = windows[0]
     assert w["duration_seconds"] == 3600        # defaulted to the --every (1h) interval

@@ -113,7 +113,7 @@ def add(
         "valid_days": _parse_days(on),
         "until_time": _parse_dt(until, allow_hhmm=False) if until else None,
     }
-    _http.post(f"{_resolve(catchment)}/api/outlets/{ctx.obj['pond']}/windows", json=payload)
+    _http.post(f"{_resolve(catchment)}/api/ponds/{ctx.obj['pond']}/windows", json=payload)
     typer.echo(f"Window '{name}' added.")
 
 
@@ -130,7 +130,7 @@ def list_(
 
     from . import _http
 
-    windows = _http.get(f"{_resolve(catchment)}/api/outlets/{ctx.obj['pond']}/windows").json().get("windows", [])
+    windows = _http.get(f"{_resolve(catchment)}/api/ponds/{ctx.obj['pond']}/windows").json().get("windows", [])
     if not windows:
         typer.echo("No windows.")
         return
@@ -162,5 +162,5 @@ def remove(
     """Remove a window from the Pond."""
     from . import _http
 
-    _http.post(f"{_resolve(catchment)}/api/outlets/{ctx.obj['pond']}/windows/{window_name}/remove", json={})
+    _http.post(f"{_resolve(catchment)}/api/ponds/{ctx.obj['pond']}/windows/{window_name}/remove", json={})
     typer.echo(f"Window '{window_name}' removed.")

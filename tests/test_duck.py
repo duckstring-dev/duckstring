@@ -64,6 +64,26 @@ def test_duck_completes_pond_run(tmp_path):
 
 
 @pytest.mark.timeout(5)
+def test_duck_immediate_retry_then_failed_event(tmp_path):
+    con = ledger.connect(tmp_path / "pond.db")
+    core = DuckCore("sales", con, SALES)
+    # Budget 1: start a Run, finish the roots, then `join` errors.
+    core.begin_run(T0, T0, retry_immediately=1)
+    core.ripple_completed("daily", T0)
+    core.ripple_completed("tiers", T0)
+    relaunch = core.ripple_failed("join", T0)
+    assert relaunch == ["join"]  # within budget → join is relaunched, the Run continues
+    assert any(e.kind == "ripple" and e.ripple == "join" and e.status == "failed" for e in core.events)
+    assert not any(e.kind == "failed" for e in core.events)
+
+    # It errors again with the budget spent → the Run gives up and a `failed` event is buffered at F.
+    assert core.ripple_failed("join", T0) == []
+    failed = [e for e in core.events if e.kind == "failed"]
+    assert len(failed) == 1 and failed[0].f == T0 and failed[0].ripple == "join"
+    assert ledger.read_pond_end_f(con) is None  # the Run never completed
+
+
+@pytest.mark.timeout(5)
 def test_duck_survives_offline_catchment_and_replays(tmp_path):
     con = ledger.connect(tmp_path / "pond.db")
     core = DuckCore("sales", con, SALES)

@@ -44,21 +44,21 @@ def runs(
     return {"runs": _driver(request).run_history(pond, lineage, ripples, limit)}
 
 
-@router.post("/outlets/{name}/tap")
+@router.post("/ponds/{name}/tap")
 def tap(name: str, request: Request):
     _require_pond(request, name)
     _driver(request).tap(name)
     return {"ok": True}
 
 
-@router.post("/outlets/{name}/pulse")
+@router.post("/ponds/{name}/pulse")
 def pulse(name: str, request: Request):
     _require_pond(request, name)
     _driver(request).pulse(name)
     return {"ok": True}
 
 
-@router.post("/outlets/{name}/wave")
+@router.post("/ponds/{name}/wave")
 def wave(name: str, request: Request):
     _require_pond(request, name)
     _driver(request).wave(name)
@@ -69,7 +69,7 @@ class _TideBody(BaseModel):
     bound_seconds: float
 
 
-@router.post("/outlets/{name}/tide")
+@router.post("/ponds/{name}/tide")
 def tide(name: str, body: _TideBody, request: Request):
     _require_pond(request, name)
     if body.bound_seconds <= 0:
@@ -78,7 +78,7 @@ def tide(name: str, body: _TideBody, request: Request):
     return {"ok": True}
 
 
-@router.post("/outlets/{name}/start")
+@router.post("/ponds/{name}/start")
 def start(name: str, request: Request):
     """Inject demand directly into a Pond — one run against current inputs, no upstream propagation."""
     _require_pond(request, name)
@@ -90,7 +90,7 @@ class _StopBody(BaseModel):
     upstream: bool = False
 
 
-@router.post("/outlets/{name}/stop")
+@router.post("/ponds/{name}/stop")
 def stop(name: str, request: Request, body: _StopBody = _StopBody()):
     """Clear a Pond's demand (push+pull) + its Ripples' pull; keep started runs completing.
     ``upstream`` also stops every ancestor."""
@@ -99,12 +99,44 @@ def stop(name: str, request: Request, body: _StopBody = _StopBody()):
     return {"ok": True}
 
 
-@router.post("/outlets/{name}/untrigger")
+@router.post("/ponds/{name}/untrigger")
 def untrigger(name: str, request: Request):
     """Remove the standing Wave/Tide trigger from a Pond (existing work drains)."""
     _require_pond(request, name)
     _driver(request).remove_trigger(name)
     return {"ok": True}
+
+
+# ─── Failure management ──────────────────────────────────────────────────────
+
+
+@router.post("/ponds/{name}/clear")
+def clear(name: str, request: Request):
+    """Clear a failed Pond (the operator okay): resets its failure and unblocks downstream. No run."""
+    _require_pond(request, name)
+    _driver(request).clear(name)
+    return {"ok": True}
+
+
+class _BudgetBody(BaseModel):
+    immediate_retries: int = 0
+    source_retries: int = 0
+
+
+@router.post("/ponds/{name}/budget")
+def set_budget(name: str, body: _BudgetBody, request: Request):
+    """Set the live retry budgets on a Pond (Ripple retries within a Run; Pond Runs retried on change)."""
+    _require_pond(request, name)
+    if body.immediate_retries < 0 or body.source_retries < 0:
+        raise HTTPException(status_code=422, detail="budgets must be non-negative")
+    _driver(request).set_retry(name, body.immediate_retries, body.source_retries)
+    return {"ok": True}
+
+
+@router.get("/ponds/{name}/budget")
+def get_budget(name: str, request: Request):
+    _require_pond(request, name)
+    return _driver(request).retry_config(name)
 
 
 # ─── Windows (batch-availability on Inlets) ──────────────────────────────────────
@@ -120,7 +152,7 @@ class _WindowBody(BaseModel):
     until_time: str | None = None
 
 
-@router.post("/outlets/{name}/windows")
+@router.post("/ponds/{name}/windows")
 def add_window(name: str, body: _WindowBody, request: Request):
     _require_pond(request, name)
     try:
@@ -133,13 +165,13 @@ def add_window(name: str, body: _WindowBody, request: Request):
     return {"ok": True}
 
 
-@router.get("/outlets/{name}/windows")
+@router.get("/ponds/{name}/windows")
 def list_windows(name: str, request: Request):
     _require_pond(request, name)
     return {"windows": _driver(request).list_windows(name)}
 
 
-@router.post("/outlets/{name}/windows/{window_name}/remove")
+@router.post("/ponds/{name}/windows/{window_name}/remove")
 def remove_window(name: str, window_name: str, request: Request):
     _require_pond(request, name)
     if not _driver(request).remove_window(name, window_name):

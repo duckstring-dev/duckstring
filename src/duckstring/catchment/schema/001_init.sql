@@ -75,7 +75,20 @@ CREATE TABLE pond_state (
     end_f             TEXT,
     d_ms              INTEGER NOT NULL DEFAULT 0,
     has_pull          INTEGER NOT NULL DEFAULT 0,
-    has_received_pull INTEGER NOT NULL DEFAULT 0
+    has_received_pull INTEGER NOT NULL DEFAULT 0,
+    -- Fault tolerance runtime (see docs/guide/theory.md "Fault Tolerance").
+    is_failed         INTEGER NOT NULL DEFAULT 0,  -- a Pond Run gave up, not yet superseded
+    is_blocked        INTEGER NOT NULL DEFAULT 0,  -- this Pond, or a required Source, is failed/blocked
+    failed_f          TEXT,                        -- freshness of the freshest failed Run (NULL if none)
+    failures          INTEGER NOT NULL DEFAULT 0   -- failed Runs this episode (counted vs source_retries)
+);
+
+-- Live retry budgets, editable against the selected Pond (operational config, like pond_window /
+-- pond_trigger). Seeded on deploy from the pond_version defaults, then owned by the operator.
+CREATE TABLE pond_retry (
+    pond_id           INTEGER PRIMARY KEY REFERENCES pond(id),
+    immediate_retries INTEGER NOT NULL DEFAULT 0,  -- Ripple-Run retries within one Pond Run
+    source_retries    INTEGER NOT NULL DEFAULT 0   -- Pond Runs to retry on a Source update
 );
 
 -- The push target set per Pond.

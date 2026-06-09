@@ -116,13 +116,13 @@ export async function fetchRuns(q: RunsQuery = {}): Promise<RawPondRun[]> {
 }
 
 // Trigger / demand actions (the CLI `trigger` surface). `endpoint` is the route segment under
-// /api/outlets/{pond}/ — tap | pulse | wave | tide | start | stop | untrigger.
+// /api/ponds/{pond}/ — tap | pulse | wave | tide | start | stop | untrigger.
 export function postTrigger(pond: string, endpoint: string, body: unknown = {}): Promise<void> {
-  return postJSON(`/outlets/${encodeURIComponent(pond)}/${endpoint}`, body);
+  return postJSON(`/ponds/${encodeURIComponent(pond)}/${endpoint}`, body);
 }
 
 export function fetchWindows(pond: string): Promise<RawWindow[]> {
-  return getJSON<{ windows: RawWindow[] }>(`/outlets/${encodeURIComponent(pond)}/windows`).then((d) => d.windows);
+  return getJSON<{ windows: RawWindow[] }>(`/ponds/${encodeURIComponent(pond)}/windows`).then((d) => d.windows);
 }
 
 export interface AddWindowBody {
@@ -136,9 +136,9 @@ export interface AddWindowBody {
 }
 
 export function addWindow(pond: string, body: AddWindowBody): Promise<void> {
-  return postJSON(`/outlets/${encodeURIComponent(pond)}/windows`, body);
+  return postJSON(`/ponds/${encodeURIComponent(pond)}/windows`, body);
 }
 
 export function removeWindow(pond: string, name: string): Promise<void> {
-  return postJSON(`/outlets/${encodeURIComponent(pond)}/windows/${encodeURIComponent(name)}/remove`);
+  return postJSON(`/ponds/${encodeURIComponent(pond)}/windows/${encodeURIComponent(name)}/remove`);
 }

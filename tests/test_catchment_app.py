@@ -435,7 +435,7 @@ def test_deploy_demo_ponds(catchment_client):
 # ---------------------------------------------------------------------------
 
 def test_wave_unknown_outlet_404(catchment_client):
-    r = catchment_client.post("/api/outlets/nonexistent/wave")
+    r = catchment_client.post("/api/ponds/nonexistent/wave")
     assert r.status_code == 404
 
 
@@ -449,7 +449,7 @@ def _trigger_row(db, name):
 
 def test_wave_registers_trigger(catchment_client):
     _deploy(catchment_client, name="outlet", version="1.0.0", kind="outlet", toml_text=OUTLET_TOML.split("[sources]")[0])
-    r = catchment_client.post("/api/outlets/outlet/wave")
+    r = catchment_client.post("/api/ponds/outlet/wave")
     assert r.status_code == 200
     rows = _trigger_row(_db(catchment_client), "outlet")
     assert rows == [("wave", None, "active")]
@@ -457,8 +457,8 @@ def test_wave_registers_trigger(catchment_client):
 
 def test_wave_idempotent(catchment_client):
     _deploy(catchment_client, name="outlet", version="1.0.0", kind="outlet", toml_text=OUTLET_TOML.split("[sources]")[0])
-    catchment_client.post("/api/outlets/outlet/wave")
-    catchment_client.post("/api/outlets/outlet/wave")
+    catchment_client.post("/api/ponds/outlet/wave")
+    catchment_client.post("/api/ponds/outlet/wave")
     assert len(_trigger_row(_db(catchment_client), "outlet")) == 1  # single upserted trigger
 
 
@@ -475,48 +475,115 @@ type = "outlet"
 
 
 def test_tide_unknown_outlet_404(catchment_client):
-    r = catchment_client.post("/api/outlets/nonexistent/tide", json={"bound_seconds": 60})
+    r = catchment_client.post("/api/ponds/nonexistent/tide", json={"bound_seconds": 60})
     assert r.status_code == 404
 
 
 def test_tide_invalid_bound_422(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    r = catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 0})
+    r = catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 0})
     assert r.status_code == 422
 
 
 def test_tide_registers_bound(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    r = catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 3600})
+    r = catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 3600})
     assert r.status_code == 200
     assert _trigger_row(_db(catchment_client), "outlet") == [("tide", 3_600_000, "active")]
 
 
 def test_tide_updates_existing_bound(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 3600})
-    catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 30})
+    catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 3600})
+    catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 30})
     assert _trigger_row(_db(catchment_client), "outlet") == [("tide", 30_000, "active")]
 
 
 def test_stop_cancels_standing_trigger(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    catchment_client.post("/api/outlets/outlet/wave")
+    catchment_client.post("/api/ponds/outlet/wave")
     assert _trigger_row(_db(catchment_client), "outlet") == [("wave", None, "active")]
-    r = catchment_client.post("/api/outlets/outlet/stop")
+    r = catchment_client.post("/api/ponds/outlet/stop")
     assert r.status_code == 200
     assert _trigger_row(_db(catchment_client), "outlet") == []
 
 
 def test_untrigger_removes_standing_trigger(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    catchment_client.post("/api/outlets/outlet/tide", json={"bound_seconds": 3600})
+    catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 3600})
     assert _trigger_row(_db(catchment_client), "outlet") == [("tide", 3_600_000, "active")]
-    r = catchment_client.post("/api/outlets/outlet/untrigger")
+    r = catchment_client.post("/api/ponds/outlet/untrigger")
     assert r.status_code == 200
     assert _trigger_row(_db(catchment_client), "outlet") == []
 
 
 def test_untrigger_unknown_outlet_404(catchment_client):
-    r = catchment_client.post("/api/outlets/nonexistent/untrigger")
+    r = catchment_client.post("/api/ponds/nonexistent/untrigger")
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Failure management: retry budgets + clear
+# ---------------------------------------------------------------------------
+
+RETRY_TOML = """\
+[pond]
+name = "outlet"
+version = "2.0.0"
+type = "outlet"
+immediate_retries = 2
+source_retries = 1
+"""
+
+
+def _pond_status(client, name):
+    ponds = client.get("/api/status").json()["ponds"]
+    return next(p for p in ponds if p["name"] == name)
+
+
+def test_deploy_seeds_retry_budget_from_toml(catchment_client):
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=RETRY_TOML)
+    got = catchment_client.get("/api/ponds/outlet/budget").json()
+    assert got == {"immediate_retries": 2, "source_retries": 1}
+
+
+def test_budget_set_and_get(catchment_client):
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
+    assert catchment_client.get("/api/ponds/outlet/budget").json() == {"immediate_retries": 0, "source_retries": 0}
+    r = catchment_client.post("/api/ponds/outlet/budget", json={"immediate_retries": 3, "source_retries": 2})
+    assert r.status_code == 200
+    assert catchment_client.get("/api/ponds/outlet/budget").json() == {"immediate_retries": 3, "source_retries": 2}
+    # status surfaces the live budgets too
+    assert _pond_status(catchment_client, "outlet")["source_retries"] == 2
+
+
+def test_budget_negative_422(catchment_client):
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
+    r = catchment_client.post("/api/ponds/outlet/budget", json={"immediate_retries": -1, "source_retries": 0})
+    assert r.status_code == 422
+
+
+def test_clear_unknown_404(catchment_client):
+    assert catchment_client.post("/api/ponds/nonexistent/clear").status_code == 404
+
+
+def test_failed_event_marks_pond_then_clears(catchment_client):
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
+            toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
+    # The Duck reports a Ripple gave up: the Pond fails (and, with no Sinks, just blocks itself).
+    r = catchment_client.post(
+        "/api/duck/outlet/events",
+        json={"kind": "failed", "ripple": "load", "f": "2026-01-01T00:00:00+00:00", "status": "failed"},
+    )
+    assert r.status_code == 200
+    st = _pond_status(catchment_client, "outlet")
+    assert st["status"] == "failed" and st["is_failed"] and st["is_blocked"] and st["failures"] == 1
+
+    # The failure survives a reload (persisted to pond_state)...
+    catchment_client.app.state.driver.reload()
+    assert _pond_status(catchment_client, "outlet")["is_failed"]
+
+    # ...and an operator clear resets it.
+    assert catchment_client.post("/api/ponds/outlet/clear").status_code == 200
+    st = _pond_status(catchment_client, "outlet")
+    assert not st["is_failed"] and not st["is_blocked"] and st["failures"] == 0

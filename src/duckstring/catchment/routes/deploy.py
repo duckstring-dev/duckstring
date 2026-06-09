@@ -117,6 +117,13 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
             "SELECT id FROM pond WHERE pond_name_id = ? AND major = ?", (pn_id, major)
         ).fetchone()
 
+        # Seed the live retry budgets from the pond.toml defaults, but only on first creation —
+        # operator edits via `duckstring failure budget` then survive redeploys.
+        db.execute(
+            "INSERT OR IGNORE INTO pond_retry (pond_id, immediate_retries, source_retries) VALUES (?, ?, ?)",
+            (pond_id, cfg["immediate_retries"], cfg["source_retries"]),
+        )
+
         name_to_id: dict[str, int] = {}
         for r in ripples:
             db.execute("INSERT OR IGNORE INTO ripple (pond_version_id, name) VALUES (?, ?)", (pv_id, r["name"]))

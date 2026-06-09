@@ -89,11 +89,13 @@ def source_f(s: WorkerState, name: str) -> datetime:
     return max(s.states[p].end_f for p in parents)
 
 
-def begin_run(state: WorkerState, f: datetime) -> WorkerState:
+def begin_run(state: WorkerState, f: datetime, retry_immediately: int | None = None) -> WorkerState:
     """Start a Pond Run at freshness ``f``: stamp every Ripple with target ``f`` (push to completion),
-    and give this Run a fresh Ripple-retry budget."""
+    and give this Run a fresh Ripple-retry budget. ``retry_immediately`` overrides the state default
+    (the Catchment passes the live budget per Run, since it is editable while the Duck is warm)."""
     s = state.clone()
-    s.immediate_left.setdefault(f, s.retry_immediately)
+    budget = s.retry_immediately if retry_immediately is None else retry_immediately
+    s.immediate_left.setdefault(f, budget)
     for rs in s.states.values():
         if f > rs.end_f and f not in rs.targets:
             rs.targets.append(f)

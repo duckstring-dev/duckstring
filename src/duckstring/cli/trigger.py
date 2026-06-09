@@ -14,7 +14,7 @@ def _post_trigger(
 ) -> None:
     from . import _http
 
-    _http.post(f"{url}/api/outlets/{outlet}/{endpoint}", json=payload)
+    _http.post(f"{url}/api/ponds/{outlet}/{endpoint}", json=payload)
 
     if silent:
         typer.echo(success_msg)
@@ -55,7 +55,7 @@ def stop(
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _http.post(f"{cfg['url']}/api/outlets/{outlet}/stop", json={"upstream": upstream})
+    _http.post(f"{cfg['url']}/api/ponds/{outlet}/stop", json={"upstream": upstream})
     typer.echo("Stopped (upstream)." if upstream else "Stopped.")
 
 
@@ -69,7 +69,7 @@ def remove(
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _http.post(f"{cfg['url']}/api/outlets/{outlet}/untrigger", json={})
+    _http.post(f"{cfg['url']}/api/ponds/{outlet}/untrigger", json={})
     typer.echo("Trigger removed.")
 
 

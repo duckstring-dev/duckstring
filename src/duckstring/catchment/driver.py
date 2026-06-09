@@ -20,6 +20,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from ..engine import (
+    NEVER,
     EngineState,
     Pond,
     PondState,
@@ -27,8 +28,10 @@ from ..engine import (
     RippleState,
     Trigger,
     Window,
+    clear_pond,
     complete_ripple,
     drain_begin_runs,
+    fail_ripple,
     next_wake,
     pulse_pond,
     sentinel,
@@ -99,7 +102,14 @@ class Driver:
                     "SELECT start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time "
                     "FROM pond_window WHERE pond_id = ?", (pond_id,)
                 )]
-                ponds[name] = Pond(id=name, name=name, sources=sources, optional_sources=optional, windows=windows)
+                retry = db.execute(
+                    "SELECT immediate_retries, source_retries FROM pond_retry WHERE pond_id = ?", (pond_id,)
+                ).fetchone()
+                imm, onc = retry if retry else (0, 0)
+                ponds[name] = Pond(
+                    id=name, name=name, sources=sources, optional_sources=optional, windows=windows,
+                    retry_immediately=imm, retry_on_change=onc,
+                )
                 pond_states[name] = self._load_pond_state(pond_id)
 
                 rip_rows = db.execute("SELECT id, name FROM ripple WHERE pond_version_id = ?", (pv_id,)).fetchall()
@@ -154,18 +164,22 @@ class Driver:
 
     def _load_pond_state(self, pond_id: int) -> PondState:
         row = self.db.execute(
-            "SELECT start_f, end_f, d_ms, has_pull, has_received_pull FROM pond_state WHERE pond_id = ?",
+            "SELECT start_f, end_f, d_ms, has_pull, has_received_pull, is_failed, is_blocked, failed_f, "
+            "failures FROM pond_state WHERE pond_id = ?",
             (pond_id,),
         ).fetchone()
         ps = PondState()
         if row:
-            sf, ef, d_ms, hp, hrp = row
-            from ..engine import NEVER
+            sf, ef, d_ms, hp, hrp, is_failed, is_blocked, failed_f, failures = row
             ps.start_f = datetime.fromisoformat(sf) if sf else NEVER
             ps.end_f = datetime.fromisoformat(ef) if ef else NEVER
             ps.d = timedelta(milliseconds=d_ms or 0)
             ps.has_pull = bool(hp)
             ps.has_received_pull = bool(hrp)
+            ps.is_failed = bool(is_failed)
+            ps.is_blocked = bool(is_blocked)
+            ps.failed_f = datetime.fromisoformat(failed_f) if failed_f else NEVER
+            ps.failures = failures or 0
             ps.targets = [
                 datetime.fromisoformat(r[0])
                 for r in self.db.execute("SELECT target_f FROM pond_target WHERE pond_id = ?", (pond_id,))
@@ -200,6 +214,32 @@ class Driver:
         with self.lock:
             self.state = start_pond(self.state, pond, _now())
             self._process(_now())
+
+    def clear(self, pond: str) -> None:
+        """Operator acknowledgement: clear a Pond's failure/block (no run). Downstream Ponds blocked
+        only by this failure re-derive and unblock on their own."""
+        with self.lock:
+            self.state = clear_pond(self.state, pond, _now())
+            self._process(_now())
+
+    def set_retry(self, pond: str, immediate_retries: int, source_retries: int) -> None:
+        """Set the live retry budgets on a Pond (persisted to pond_retry; owned by the operator)."""
+        with self.lock:
+            pond_id = self.meta[pond]["pond_id"]
+            self.db.execute(
+                "INSERT INTO pond_retry (pond_id, immediate_retries, source_retries) VALUES (?, ?, ?) "
+                "ON CONFLICT(pond_id) DO UPDATE SET immediate_retries = excluded.immediate_retries, "
+                "source_retries = excluded.source_retries",
+                (pond_id, immediate_retries, source_retries),
+            )
+            self.db.commit()
+            p = self.state.ponds[pond]
+            p.retry_immediately = immediate_retries
+            p.retry_on_change = source_retries
+
+    def retry_config(self, pond: str) -> dict:
+        p = self.state.ponds[pond]
+        return {"immediate_retries": p.retry_immediately, "source_retries": p.retry_on_change}
 
     def stop(self, pond: str, upstream: bool = False) -> None:
         with self.lock:
@@ -314,7 +354,8 @@ class Driver:
             now = _now()
             kind = payload.get("kind")
             f = payload.get("f")
-            if kind == "ripple" and payload.get("status") == "success":
+            status = payload.get("status", "success")
+            if kind == "ripple":
                 rname = payload["ripple"]
                 eid = f"{pond}.{rname}"
                 if eid in self.state.ripple_states:
@@ -322,9 +363,27 @@ class Driver:
                     # recorded correctly even for a resumed run the Catchment didn't model the start of.
                     if f:
                         self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
-                    self.state = complete_ripple(self.state, eid, now)
+                    if status == "success":
+                        self.state = complete_ripple(self.state, eid, now)
+                    # A "failed" ripple event is a within-budget immediate retry: record the attempt for
+                    # history; the engine keeps modelling the Ripple as in-flight (the Duck relaunched it).
                     self._record_ripple_run(
-                        pond, rname, f, "success",
+                        pond, rname, f, status,
+                        started_at=payload.get("started_at"),
+                        finished_at=payload.get("finished_at") or _iso(now),
+                    )
+                    self._process(now)
+            elif kind == "failed":
+                # The Pond Run gave up at this Ripple's freshness: fail the Pond (and block downstream).
+                rname = payload["ripple"]
+                eid = f"{pond}.{rname}"
+                if eid in self.state.ripple_states:
+                    if f:
+                        self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
+                    self.state = fail_ripple(self.state, eid, now)
+                    self._fail_pond_run(pond, f, now)  # upsert the pond_run row first (ripple_run FK)
+                    self._record_ripple_run(
+                        pond, rname, f, "failed",
                         started_at=payload.get("started_at"),
                         finished_at=payload.get("finished_at") or _iso(now),
                     )
@@ -376,7 +435,10 @@ class Driver:
     def _dispatch_begin_run(self, pond: str, f: datetime, now: datetime) -> None:
         meta = self.meta[pond]
         self.launcher.ensure(pond, meta["version"], meta["source_path"])
-        self.jobs.setdefault(pond, []).append({"kind": "begin_run", "f": _iso(f)})
+        self.jobs.setdefault(pond, []).append({
+            "kind": "begin_run", "f": _iso(f),
+            "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
+        })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI.
         self.db.execute(
@@ -425,6 +487,16 @@ class Driver:
         )
         self.db.commit()
 
+    def _fail_pond_run(self, pond: str, f: str, now: datetime) -> None:
+        meta = self.meta[pond]
+        self.db.execute(
+            "INSERT INTO pond_run (pond_version_id, f, started_at, finished_at, status) "
+            "VALUES (?, ?, ?, ?, 'failed') ON CONFLICT(pond_version_id, f) DO UPDATE SET "
+            "finished_at = excluded.finished_at, status = 'failed'",
+            (meta["version_id"], f, _iso(now), _iso(now)),
+        )
+        self.db.commit()
+
     def _persist_trigger(self, pond: str, kind: str, bound_ms: int | None) -> None:
         self.db.execute(
             "INSERT INTO pond_trigger (pond_id, kind, bound_ms) VALUES (?, ?, ?) "
@@ -434,14 +506,16 @@ class Driver:
         self.db.commit()
 
     def _persist_state(self) -> None:
-        from ..engine import NEVER
         for name, ps in self.state.pond_states.items():
             pond_id = self.meta[name]["pond_id"]
             self.db.execute(
-                "INSERT INTO pond_state (pond_id, start_f, end_f, d_ms, has_pull, has_received_pull) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
+                "INSERT INTO pond_state (pond_id, start_f, end_f, d_ms, has_pull, has_received_pull, "
+                "is_failed, is_blocked, failed_f, failures) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
                 "start_f = excluded.start_f, end_f = excluded.end_f, d_ms = excluded.d_ms, "
-                "has_pull = excluded.has_pull, has_received_pull = excluded.has_received_pull",
+                "has_pull = excluded.has_pull, has_received_pull = excluded.has_received_pull, "
+                "is_failed = excluded.is_failed, is_blocked = excluded.is_blocked, "
+                "failed_f = excluded.failed_f, failures = excluded.failures",
                 (
                     pond_id,
                     _iso(ps.start_f) if ps.start_f != NEVER else None,
@@ -449,6 +523,10 @@ class Driver:
                     int(ps.d.total_seconds() * 1000),
                     int(ps.has_pull),
                     int(ps.has_received_pull),
+                    int(ps.is_failed),
+                    int(ps.is_blocked),
+                    _iso(ps.failed_f) if ps.failed_f != NEVER else None,
+                    ps.failures,
                 ),
             )
             self.db.execute("DELETE FROM pond_target WHERE pond_id = ?", (pond_id,))
@@ -498,7 +576,13 @@ class Driver:
                             ripple_edges.append([psrc.name, rip.name])
 
                 busy = any(r["status"] == "running" for r in ripples)
-                st = _demand_status(ps, busy)
+                # Failure/block take precedence over demand state so a stalled Pond reads truthfully.
+                if ps.is_failed:
+                    st = "failed"
+                elif ps.is_blocked:
+                    st = "blocked"
+                else:
+                    st = _demand_status(ps, busy)
 
                 trig = self.state.triggers.get(name)
                 trigger = None
@@ -521,6 +605,12 @@ class Driver:
                     "end_f": ts(ps.end_f),
                     "d_ms": int(ps.d.total_seconds() * 1000),
                     "trigger": trigger,
+                    "is_failed": ps.is_failed,
+                    "is_blocked": ps.is_blocked,
+                    "failed_f": ts(ps.failed_f),
+                    "failures": ps.failures,
+                    "immediate_retries": self.state.ponds[name].retry_immediately,
+                    "source_retries": self.state.ponds[name].retry_on_change,
                     "ripples": ripples,
                     "ripple_edges": ripple_edges,
                 })

@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS ripple_run_state (
     ripple_name TEXT PRIMARY KEY,
     start_f     TEXT NOT NULL,
     end_f       TEXT NOT NULL,
-    is_running  INTEGER NOT NULL DEFAULT 0
+    is_running  INTEGER NOT NULL DEFAULT 0,
+    is_failed   INTEGER NOT NULL DEFAULT 0  -- last attempt errored (cleared when it next starts)
 );
 CREATE TABLE IF NOT EXISTS pond_run (
     f           TEXT PRIMARY KEY,
@@ -52,9 +53,17 @@ def connect(path) -> sqlite3.Connection:
 
 def record_ripple_start(con: sqlite3.Connection, name: str, start_f: datetime) -> None:
     con.execute(
-        "INSERT INTO ripple_run_state (ripple_name, start_f, end_f, is_running) VALUES (?, ?, ?, 1) "
-        "ON CONFLICT(ripple_name) DO UPDATE SET start_f = excluded.start_f, is_running = 1",
+        "INSERT INTO ripple_run_state (ripple_name, start_f, end_f, is_running, is_failed) VALUES (?, ?, ?, 1, 0) "
+        "ON CONFLICT(ripple_name) DO UPDATE SET start_f = excluded.start_f, is_running = 1, is_failed = 0",
         (name, _iso(start_f), _iso(NEVER)),
+    )
+    con.commit()
+
+
+def record_ripple_failed(con: sqlite3.Connection, name: str) -> None:
+    """Mark a Ripple's last attempt as errored (visibility for the immediate-retry path)."""
+    con.execute(
+        "UPDATE ripple_run_state SET is_running = 0, is_failed = 1 WHERE ripple_name = ?", (name,)
     )
     con.commit()
 

@@ -83,6 +83,8 @@ def _make_table(component_ponds: list[dict]) -> object:
         "running": "[bold green]running[/bold green]",
         "queued":  "[yellow]queued[/yellow]",
         "idle":    "[dim]idle[/dim]",
+        "failed":  "[bold red]failed[/bold red]",
+        "blocked": "[red dim]blocked[/red dim]",
     }
 
     table = Table(show_header=True, header_style="bold dim", box=None, padding=(0, 1))
@@ -97,7 +99,10 @@ def _make_table(component_ponds: list[dict]) -> object:
     table.add_column("EndF")
 
     for pond in component_ponds:
-        status_str = _status_fmt.get(pond.get("status", ""), pond.get("status", "?"))
+        status_val = pond.get("status", "")
+        status_str = _status_fmt.get(status_val, status_val or "?")
+        if status_val == "failed":  # show on-change usage against the budget, e.g. "failed 2/1"
+            status_str += f" [dim]{pond.get('failures', 0)}/{pond.get('source_retries', 0)}[/dim]"
         gen = pond.get("gen", 0)
         gen_str = str(gen) if gen else "[dim]—[/dim]"
         pull_str = "[orange3]●[/orange3]" if pond.get("has_pull") else ""
@@ -229,9 +234,10 @@ def _run_live(
             else:
                 body = _build_renderable(ponds, edges)
                 if not watch and until_idle_pond:
-                    # One-shot trigger (Tap/Pulse): close once the target Pond settles back to idle.
+                    # One-shot trigger (Tap/Pulse): close once the target Pond settles — back to idle,
+                    # or stuck failed/blocked (which never returns to idle on its own).
                     tgt = next((p for p in ponds if p["name"] == until_idle_pond), None)
-                    done = tgt is not None and tgt.get("status") == "idle"
+                    done = tgt is not None and tgt.get("status") in ("idle", "failed", "blocked")
             ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
             footer = " · settled" if done else " · Ctrl+C to stop"
             header = Text(f"Updated {ts}{footer}", style="dim")

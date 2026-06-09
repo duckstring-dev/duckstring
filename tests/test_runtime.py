@@ -117,7 +117,7 @@ def test_pulse_runs_chain_end_to_end(runtime):
     url, root = runtime
     _deploy_demo(url)
 
-    httpx.post(f"{url}/api/outlets/reports/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
 
     # The whole chain runs and reports reaches a freshness (end_f).
     assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None), \
@@ -142,7 +142,7 @@ def test_wave_then_remove(runtime):
     url, root = runtime
     _deploy_demo(url)
 
-    httpx.post(f"{url}/api/outlets/reports/wave", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/reports/wave", timeout=5.0)
 
     # A Wave keeps producing runs: reports completes several times.
     rep_db = root / "ponds" / "reports" / "pond.db"
@@ -159,7 +159,7 @@ def test_wave_then_remove(runtime):
     assert _wait(lambda: completed_runs() >= 2), "wave did not produce repeated runs"
 
     # Removing the standing trigger halts the Wave; in-flight runs drain, then it stabilises.
-    httpx.post(f"{url}/api/outlets/reports/untrigger", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/reports/untrigger", timeout=5.0)
     time.sleep(2.0)
     settled = completed_runs()
     time.sleep(2.0)
@@ -177,7 +177,7 @@ def test_restart_restores_state_e2e(tmp_path_factory, monkeypatch):
     server, thread = _serve(root, port)
     try:
         _deploy_demo(url)
-        httpx.post(f"{url}/api/outlets/reports/pulse", timeout=5.0)
+        httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
         assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None)
         before = _pond_status(url, "reports")
         assert before["gen"] >= 1
@@ -203,7 +203,7 @@ def test_status_and_runs_feed_live(runtime):
     url, root = runtime
     _deploy_demo(url)
 
-    httpx.post(f"{url}/api/outlets/reports/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None)
 
     # Enriched status: every Pond carries d_ms + a ripple list; sales has intra-Pond edges

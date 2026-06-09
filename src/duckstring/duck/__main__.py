@@ -41,7 +41,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
             executor.submit(
                 name,
                 on_done=lambda n, started, finished: q.put(("done", (n, started, finished))),
-                on_error=lambda n, exc: q.put(("error", (n, exc))),
+                on_error=lambda n, exc, started, finished: q.put(("error", (n, exc, started, finished))),
             )
 
     poller = threading.Thread(target=_poll_loop, daemon=True)
@@ -59,15 +59,19 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                 if data.get("kind") == "shutdown":
                     shutdown_requested = True
                 elif data.get("kind") == "begin_run":
-                    _launch(core.begin_run(datetime.fromisoformat(data["f"]), _now()))
+                    _launch(core.begin_run(
+                        datetime.fromisoformat(data["f"]), _now(),
+                        retry_immediately=data.get("immediate_retries", 0),
+                    ))
             elif kind == "done":
                 name, started, finished = data
                 _launch(core.ripple_completed(
                     name, _now(), started_at=started, finished_at=finished, export=executor.export
                 ))
             elif kind == "error":
-                name, exc = data
+                name, exc, started, finished = data
                 print(f"[duck:{core.pond_name}] ripple {name} failed: {exc}", flush=True)
+                _launch(core.ripple_failed(name, _now(), started_at=started, finished_at=finished))
 
             core.flush(client.post_event)
 

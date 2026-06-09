@@ -110,9 +110,9 @@ class RippleExecutor:
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
 
     def submit(self, ripple_name: str, on_done, on_error):
-        """Load and run ``ripple_name``; call ``on_done(name, started_at, finished_at)`` on success
-        (both wall-clock UTC, for the run-history duration), ``on_error(name, exc)`` on failure (both
-        on a pool thread)."""
+        """Load and run ``ripple_name``; call ``on_done(name, started_at, finished_at)`` on success and
+        ``on_error(name, exc, started_at, finished_at)`` on failure (timings wall-clock UTC, for the
+        run-history duration; both fire on a pool thread)."""
         timing: dict[str, datetime] = {}
 
         def _task():
@@ -124,11 +124,12 @@ class RippleExecutor:
 
         def _cb(f):
             exc = f.exception()
+            finished = datetime.now(timezone.utc)
+            started = timing.get("started", finished)
             if exc:
-                on_error(ripple_name, exc)
+                on_error(ripple_name, exc, started, finished)
             else:
-                finished = datetime.now(timezone.utc)
-                on_done(ripple_name, timing.get("started", finished), finished)
+                on_done(ripple_name, started, finished)
 
         fut.add_done_callback(_cb)
         return fut
