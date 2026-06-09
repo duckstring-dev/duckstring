@@ -30,11 +30,12 @@ class Event:
     f: datetime
     ripple: str | None = None
     status: str = "success"
+    retry: int = 0  # attempt index for a ripple/failed event (0 = first try); the retry trace
     started_at: datetime | None = None
     finished_at: datetime | None = None
 
     def payload(self) -> dict:
-        d = {"kind": self.kind, "f": self.f.isoformat(), "status": self.status}
+        d = {"kind": self.kind, "f": self.f.isoformat(), "status": self.status, "retry": self.retry}
         if self.ripple is not None:
             d["ripple"] = self.ripple
         if self.started_at is not None:
@@ -50,6 +51,7 @@ class DuckCore:
         self.con = con
         self.state = ledger.load_state(con, parents, optional)
         self.events: list[Event] = []  # buffered, awaiting delivery to the Catchment
+        self.attempts: dict[str, int] = {}  # ripple name → attempt index of its current in-flight run
 
     def begin_run(self, f: datetime, now: datetime, retry_immediately: int = 0) -> list[str]:
         """Start a Pond Run at freshness ``f`` (idempotent — completed Ripples are not re-stamped).
@@ -69,7 +71,8 @@ class DuckCore:
         ledger.record_ripple_complete(self.con, name, end_f)
         self.state, rc = worker.complete_ripple(self.state, name, now)
         self.events.append(
-            Event(kind="ripple", ripple=name, f=end_f, started_at=started_at, finished_at=finished_at)
+            Event(kind="ripple", ripple=name, f=end_f, retry=self.attempts.pop(name, 0),
+                  started_at=started_at, finished_at=finished_at)
         )
         if rc is not None:
             if export is not None:
@@ -86,17 +89,20 @@ class DuckCore:
         Catchment. Returns any Ripple names to (re)launch."""
         self.state, rf = worker.fail_ripple(self.state, name, now)
         ledger.record_ripple_failed(self.con, name)
+        attempt = self.attempts.get(name, 0)
         if rf is None:  # retried within budget — log the failed attempt, the Run continues
             self.events.append(Event(
                 kind="ripple", ripple=name, f=self.state.states[name].start_f, status="failed",
-                started_at=started_at, finished_at=finished_at,
+                retry=attempt, started_at=started_at, finished_at=finished_at,
             ))
+            self.attempts[name] = attempt + 1  # next launch of this Ripple is the next attempt
         else:  # immediate budget exhausted — this Pond Run failed at the Ripple's freshness
             ledger.record_pond_run_finish(self.con, rf.f, now, status="failed")
             self.events.append(Event(
                 kind="failed", ripple=name, f=rf.f, status="failed",
-                started_at=started_at, finished_at=finished_at,
+                retry=attempt, started_at=started_at, finished_at=finished_at,
             ))
+            self.attempts.pop(name, None)  # the Run is done; reset for any future run
         return self._advance(now)
 
     def _advance(self, now: datetime) -> list[str]:

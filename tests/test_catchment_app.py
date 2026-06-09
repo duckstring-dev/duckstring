@@ -589,6 +589,25 @@ def test_failed_event_marks_pond_then_clears(catchment_client):
     assert not st["is_failed"] and not st["is_blocked"] and st["failures"] == 0
 
 
+def test_ripple_retry_trace_recorded(catchment_client):
+    # Each attempt of a Ripple lands as its own ripple_run row (keyed on retry) and run history
+    # returns the full trace. (start creates the pond_run the Duck's events key off.)
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
+            toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
+    catchment_client.post("/api/ponds/outlet/start")
+    runs = catchment_client.get("/api/runs?pond=outlet&lineage=false").json()["runs"]
+    assert runs, "start should create a Pond Run"
+    f = runs[0]["f"]
+    # attempt 0 errored (immediate retry), attempt 1 succeeded.
+    catchment_client.post("/api/duck/outlet/events",
+                          json={"kind": "ripple", "ripple": "load", "f": f, "status": "failed", "retry": 0})
+    catchment_client.post("/api/duck/outlet/events",
+                          json={"kind": "ripple", "ripple": "load", "f": f, "status": "success", "retry": 1})
+    runs = catchment_client.get("/api/runs?pond=outlet&ripples=true&lineage=false").json()["runs"]
+    load_rows = [rr for run in runs if run["f"] == f for rr in run["ripples"] if rr["ripple"] == "load"]
+    assert [(rr["retry"], rr["status"]) for rr in load_rows] == [(0, "failed"), (1, "success")]
+
+
 def test_redeploy_same_version_after_run_history(catchment_client):
     # A failed Run leaves ripple_run/pond_run history; redeploying the same version rewrites the
     # topology and must clear that history first (else the ripple DELETE hits ripple_run's FK).

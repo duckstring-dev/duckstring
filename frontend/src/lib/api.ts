@@ -52,6 +52,7 @@ export interface RawRippleRun {
   started_at: string | null;
   finished_at: string | null;
   status: string;
+  retry: number;
 }
 
 export interface RawPondRun {

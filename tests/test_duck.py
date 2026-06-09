@@ -81,6 +81,22 @@ def test_duck_immediate_retry_then_failed_event(tmp_path):
     failed = [e for e in core.events if e.kind == "failed"]
     assert len(failed) == 1 and failed[0].f == T0 and failed[0].ripple == "join"
     assert ledger.read_pond_end_f(con) is None  # the Run never completed
+    # The two attempts carry distinct, ascending retry indices (the trace).
+    join_attempts = [e.retry for e in core.events if e.ripple == "join" and e.status == "failed"]
+    assert join_attempts == [0, 1]
+
+
+@pytest.mark.timeout(5)
+def test_duck_retry_then_success_indexes_attempts(tmp_path):
+    con = ledger.connect(tmp_path / "pond.db")
+    core = DuckCore("sales", con, SALES)
+    core.begin_run(T0, T0, retry_immediately=1)
+    core.ripple_completed("daily", T0)
+    core.ripple_completed("tiers", T0)
+    core.ripple_failed("join", T0)  # attempt 0 fails, retried
+    core.ripple_completed("join", T0)  # attempt 1 succeeds
+    join = [(e.status, e.retry) for e in core.events if e.ripple == "join"]
+    assert join == [("failed", 0), ("success", 1)]  # full trace: attempt 0 failed, attempt 1 succeeded
 
 
 @pytest.mark.timeout(5)

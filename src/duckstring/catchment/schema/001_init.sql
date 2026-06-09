@@ -140,9 +140,9 @@ CREATE TABLE ripple_run (
     started_at      TEXT,
     finished_at     TEXT,
     status          TEXT    NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'success', 'failed')),
-    retry           INTEGER NOT NULL DEFAULT 0,
+    retry           INTEGER NOT NULL DEFAULT 0,  -- attempt index: 0 = first try, 1 = first immediate retry, …
     log_path        TEXT,
-    PRIMARY KEY (pond_version_id, f, ripple_id),
+    PRIMARY KEY (pond_version_id, f, ripple_id, retry),  -- one row per attempt (the retry trace)
     FOREIGN KEY (pond_version_id, f) REFERENCES pond_run(pond_version_id, f)
 );
 

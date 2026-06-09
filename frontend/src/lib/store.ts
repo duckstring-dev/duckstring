@@ -68,6 +68,7 @@ function mapRun(r: RawPondRun): PondRun {
       startedAt: rr.started_at,
       finishedAt: rr.finished_at,
       status: rr.status,
+      retry: rr.retry,
     })),
   };
 }

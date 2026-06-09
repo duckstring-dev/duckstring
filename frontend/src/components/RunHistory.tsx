@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment } from 'react';
-import { useLiveStore, runKey, parseTs, THEME_SUCCESS, THEME_RUNNING, THEME_DANGER, THEME_BRAND } from '@/lib/store';
+import { useLiveStore, runKey, parseTs, THEME_SUCCESS, THEME_RUNNING, THEME_DANGER, THEME_BRAND, THEME_PULL } from '@/lib/store';
 import type { RippleRun } from '@/lib/types';
 
 export const STATUS_COLOR: Record<string, string> = {
@@ -93,6 +93,7 @@ function RippleRow({ r }: { r: RippleRun }) {
       <span style={{ ...col(STATUS_W), color: STATUS_COLOR[r.status] ?? '#71717a' }}>{r.status}</span>
       <span style={{ ...col(RIPPLE_NAME_W), color: '#a1a1aa' }}>{r.ripple}</span>
       <span style={{ color: '#71717a' }}>{durationOf(r.startedAt, r.finishedAt)}</span>
+      {r.retry > 0 && <span style={{ color: THEME_PULL }}>{`↻${r.retry}`}</span>}
     </div>
   );
 }

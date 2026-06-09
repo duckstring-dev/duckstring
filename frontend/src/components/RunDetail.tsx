@@ -1,7 +1,7 @@
 'use client';
 
-import { useLiveStore, parseTs, THEME_DANGER } from '@/lib/store';
-import type { PondRun } from '@/lib/types';
+import { useLiveStore, parseTs, THEME_DANGER, THEME_PULL } from '@/lib/store';
+import type { PondRun, RippleRun } from '@/lib/types';
 import { clock, durationOf, STATUS_COLOR } from './RunHistory';
 
 function StatusPill({ status }: { status: string }) {
@@ -29,16 +29,18 @@ function freshness(iso: string): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function RippleLine({ name, status, startedAt, finishedAt }: { name: string; status: string; startedAt: string | null; finishedAt: string | null }) {
-  const c = STATUS_COLOR[status] ?? '#71717a';
-  const dur = durationOf(startedAt, finishedAt);
+function RippleLine({ r, isRetry }: { r: RippleRun; isRetry: boolean }) {
+  const c = STATUS_COLOR[r.status] ?? '#71717a';
+  const dur = durationOf(r.startedAt, r.finishedAt);
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', borderBottom: '1px solid #161619' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', paddingLeft: isRetry ? 16 : 0, borderBottom: '1px solid #161619' }}>
       <span style={{ width: 7, height: 7, borderRadius: '50%', background: c, flexShrink: 0 }} />
-      <span style={{ flex: 1, minWidth: 0, color: '#d4d4d8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
-      <span style={{ color: c, fontSize: 11 }}>{status}</span>
+      <span style={{ flex: 1, minWidth: 0, color: isRetry ? '#a1a1aa' : '#d4d4d8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {isRetry ? <span style={{ color: THEME_PULL }}>{`↻${r.retry} `}</span> : null}{r.ripple}
+      </span>
+      <span style={{ color: c, fontSize: 11 }}>{r.status}</span>
       <span style={{ color: '#52525b', fontSize: 11, width: 48, textAlign: 'right' }}>{dur || '—'}</span>
-      <span style={{ color: '#3f3f46', fontSize: 11, width: 64, textAlign: 'right' }}>{clock(finishedAt ?? startedAt)}</span>
+      <span style={{ color: '#3f3f46', fontSize: 11, width: 64, textAlign: 'right' }}>{clock(r.finishedAt ?? r.startedAt)}</span>
     </div>
   );
 }
@@ -96,7 +98,7 @@ export function RunDetail() {
             <div style={{ color: '#52525b', fontSize: 11 }}>No Ripple detail recorded for this Run.</div>
           ) : (
             run.ripples.map((r) => (
-              <RippleLine key={r.ripple} name={r.ripple} status={r.status} startedAt={r.startedAt} finishedAt={r.finishedAt} />
+              <RippleLine key={`${r.ripple}-${r.retry}`} r={r} isRetry={r.retry > 0} />
             ))
           )}
         </div>

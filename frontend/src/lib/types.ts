@@ -65,6 +65,7 @@ export interface RippleRun {
   startedAt: string | null;
   finishedAt: string | null;
   status: string;
+  retry: number; // attempt index (0 = first try); a Ripple's failed attempts + final outcome form a trace
 }
 
 export interface PondRun {

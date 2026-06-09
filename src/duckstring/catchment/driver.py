@@ -381,6 +381,7 @@ class Driver:
                         pond, rname, f, status,
                         started_at=payload.get("started_at"),
                         finished_at=payload.get("finished_at") or _iso(now),
+                        retry=payload.get("retry", 0),
                     )
                     self._process(now)
             elif kind == "failed":
@@ -396,6 +397,7 @@ class Driver:
                         pond, rname, f, "failed",
                         started_at=payload.get("started_at"),
                         finished_at=payload.get("finished_at") or _iso(now),
+                        retry=payload.get("retry", 0),
                     )
                     self._process(now)
             elif kind == "run_completed":
@@ -476,16 +478,18 @@ class Driver:
     # ─── History + persistence ────────────────────────────────────────────────
 
     def _record_ripple_run(
-        self, pond: str, rname: str, f: str, status: str, started_at: str | None, finished_at: str
+        self, pond: str, rname: str, f: str, status: str, started_at: str | None, finished_at: str,
+        retry: int = 0,
     ) -> None:
         meta = self.meta[pond]
         rid = meta["ripple_ids"].get(rname)
         if rid is None:
             return
+        # Keyed on (pond_version, f, ripple, retry): each attempt is its own row — the retry trace.
         self.db.execute(
-            "INSERT OR REPLACE INTO ripple_run (pond_version_id, f, ripple_id, started_at, finished_at, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (meta["version_id"], f, rid, started_at, finished_at, status),
+            "INSERT OR REPLACE INTO ripple_run (pond_version_id, f, ripple_id, retry, started_at, finished_at, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (meta["version_id"], f, rid, retry, started_at, finished_at, status),
         )
         self.db.commit()
 
@@ -669,15 +673,15 @@ class Driver:
                 }
                 if ripples:
                     rrows = self.db.execute(
-                        "SELECT r.name, rr.started_at, rr.finished_at, rr.status "
+                        "SELECT r.name, rr.started_at, rr.finished_at, rr.status, rr.retry "
                         "FROM ripple_run rr JOIN ripple r ON r.id = rr.ripple_id "
                         "WHERE rr.pond_version_id = ? AND rr.f = ? "
-                        "ORDER BY COALESCE(rr.finished_at, rr.started_at)",
+                        "ORDER BY COALESCE(rr.finished_at, rr.started_at), rr.retry",
                         (pv_id, f),
                     ).fetchall()
                     run["ripples"] = [
-                        {"ripple": rn, "started_at": rsa, "finished_at": rfa, "status": rst}
-                        for (rn, rsa, rfa, rst) in rrows
+                        {"ripple": rn, "started_at": rsa, "finished_at": rfa, "status": rst, "retry": rt}
+                        for (rn, rsa, rfa, rst, rt) in rrows
                     ]
                 runs.append(run)
             return runs
