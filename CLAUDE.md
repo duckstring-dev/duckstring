@@ -4,7 +4,7 @@ A packaging standard for data transforms. Each transform is a versioned **Pond**
 
 See `brand/strategy.md` for positioning rationale and `brand/copy.md` for settled copy.
 
-`docs/guide/theory.md` is the **authoritative orchestration spec** — its "Pond State Variables" pseudocode is the exact state machine. `frontend/src/lib/orchestration.ts` is a well-tested TypeScript *simulation* (the playground); the Python engine is a faithful, behaviour-for-behaviour port of it. The other `docs/guide/` files (`catchment.md`, `ponds.md`, `ripples.md`) are design background; `docs/guide/orchestration.md` is outdated (superseded by theory.md).
+`docs/guide/theory.md` is the **authoritative orchestration spec** — its "Pond State Variables" pseudocode is the exact state machine. `playground/src/lib/orchestration.ts` is a well-tested TypeScript *simulation* (the standalone playground); the Python engine is a faithful, behaviour-for-behaviour port of it. The other `docs/guide/` files (`catchment.md`, `ponds.md`, `ripples.md`) are design background; `docs/guide/orchestration.md` is outdated (superseded by theory.md).
 
 ## Brand & Positioning
 
@@ -16,7 +16,7 @@ See `brand/strategy.md` for positioning rationale and `brand/copy.md` for settle
 
 ## Current state (2026-06)
 
-The freshness/push-token runtime is **implemented and tested** (the old generation/watermark/demand model and `frontend/src/lib/orchestration.ts`-only era are gone from the backend). The backend + CLI are near-complete. Known next steps: **failure/retry handling** (see Fault tolerance below) and the **UI**.
+The freshness/push-token runtime is **implemented and tested** (the old generation/watermark/demand model and TypeScript-simulation-only era are gone from the backend). The backend + CLI are near-complete, and the **web UI is built** (read-mostly Next.js, polls the Catchment — see Web UI below). The **playground was extracted** to a standalone `playground/` (in-memory sim). Known next step: **failure/retry handling** (see Fault tolerance below).
 
 ## Structure
 
@@ -40,13 +40,16 @@ src/duckstring/
     launcher.py            #   SubprocessLauncher (spawns Ducks) / NoopLauncher (tests)
     db.py                  #   SQLite connect + migration runner
     schema/001_init.sql    #   Database schema (see below)
-    routes/                #   deploy, orchestrate (triggers/status/windows), duck (jobs/events), data, catchment (health)
+    routes/                #   deploy, orchestrate (triggers/status/runs/windows), duck (jobs/events), data, catchment (health)
     registry.py, dag.py    #   pond DuckDB registry paths; inter-pond cycle check
   cli/                     # Typer CLI (`duckstring` / `ds`)
     trigger.py, window.py  #   tap/pulse/wave/tide/start/stop/remove ; trigger window add/list/remove
     status.py, deploy.py, data.py, pond.py, catchment.py, config.py, _http.py
 docs/guide/                # Design documentation (theory.md is authoritative)
-frontend/                  # Next.js UI (built output served as FastAPI static at catchment/static)
+frontend/                  # The live Catchment web UI (Next.js; static export served at catchment/static). See Web UI.
+  src/lib/                 #   api.ts (HTTP client), store.ts (zustand poll store + colour palette), types.ts
+  src/components/          #   DagCanvas, Pond/Ripple/TriggerNode, Sidebar, RunHistory, WindowEditor, TraceChart
+playground/                # Standalone in-memory simulation (own repo → playground.duckstring.com); src/lib/orchestration.ts is its engine
 ```
 
 ## Runtime architecture (two-tier: Catchment + Ducks)
@@ -69,6 +72,17 @@ frontend/                  # Next.js UI (built output served as FastAPI static a
 
 RFC-5545-flavoured recurrence (no cron anywhere — `croniter` is gone). `engine.core.Window(start_anchor, duration, freq_unit ∈ {SECOND,MINUTE,HOUR,DAY,WEEK}, freq_interval, valid_days ⊆ {MON..SUN}|None, until)`. Occurrences are `start_anchor + k·delta` filtered by valid_days/until; a Pond is "fresh until" the active window's end, with `D` = window duration. `Window.active_end`/`next_boundary` are O(1) (used per-tick in `pond_source_f`/`next_wake`); `Window.occurrences` (bounded) is used only for add-time overlap validation. Managed via `duckstring trigger window {pond} add|list|remove` (`cli/window.py`); operational config (CLI/API, survives redeploys), not declared in `pond.toml`. `add` requires only `--name`/`--every` (`--start` defaults to 00:00 today; `--duration` defaults to `--every` = back-to-back).
 
+## Web UI (`frontend/`) + playground
+
+The Catchment serves a **read-mostly Next.js UI** (static export, mounted at `/`; `npm run dev` proxies `/api` to a Catchment, default `:7474`). It polls `GET /api/status` (~1 s) and `GET /api/runs`, and POSTs the `trigger` surface; **topology is read-only** (Ponds come from deploying code — never UI-authored).
+
+- **`/api/status`** is enriched beyond the CLI's needs (`driver.status()`): per-Pond `d_ms` + standing `trigger`, and per-Ripple state + intra-Pond `ripple_edges` + `runs_completed`, so the UI can render the nested Ripple sub-graph live.
+- **`/api/runs`** (`driver.run_history`) is the run-history feed: newest-first Pond Runs with params `pond` / `lineage` (**upstream-only**) / `ripples` (nest Ripple Runs) / `limit` (≤1000).
+- Data layer in `frontend/src/lib/`: `api.ts` (typed client), `store.ts` (zustand poll store; growing-window run feed; the semantic colour palette `THEME_*` + helpers `stateColor`/`consumeEdgeColor`/`nodeFill`/`formatAge`), `types.ts`. **Colours are centralised in `store.ts`** — node fill is a wash of the rim colour; the brand cyan is the running state; pull=amber, push=green-yellow.
+- Built with **Next 16** — heed `frontend/AGENTS.md` (breaking changes; read `node_modules/next/dist/docs/` before editing frontend code).
+
+The **playground** (`playground/`) is the standalone in-memory sim (the old `frontend/` content), bound for its own repo + `playground.duckstring.com`; it shares no code with the product UI.
+
 ## Fault tolerance (current state — relevant to the next session)
 
 - **Duck**: in-flight Pond Runs complete without the Catchment; events buffer and replay (idempotent on freshness `F`); on (re)start the Duck reconciles against its ledger and re-runs **only incomplete Ripples**.
@@ -86,7 +100,7 @@ SQLite `duck.db` at the catchment root. Schema in `catchment/schema/001_init.sql
 - **`pond`** — the **selected** version, one per `(pond_name, major)` → `pond_version` (upserted on deploy). This is "the Pond" and the FK target for all live demand/freshness/graph tables.
 - Topology (keyed on `pond_version`): `ripple`, `ripple_to_ripple` (intra-pond edges, all required).
 - Live state (keyed on `pond`): `pond_to_pond` (sink `pond_id` → source `pond_name_id` + `source_major`, so a sink can deploy before its source), `pond_state` (start_f/end_f/d_ms/has_pull/has_received_pull), `pond_target` (push target set), `pond_window` (PK `(pond_id, name)`), `pond_trigger` (PK `pond_id`; kind wave/tide, bound_ms).
-- History (keyed on `pond_version` + freshness `f`): `pond_run`, `ripple_run`.
+- History (keyed on `pond_version` + freshness `f`): `pond_run`, `ripple_run`. `started_at`/`finished_at` are the Duck's wall-clock execution span (the Duck reports both on the `ripple` event; the Catchment records them) — that's where the UI's run durations come from. All timestamps are UTC ISO-8601 (tz-aware).
 - The **per-Pond run ledger is NOT in `duck.db`** — it lives at `ponds/{base_pond}/pond.db` (owned by `engine/pond.py`): the Duck's operational/recovery record (`ripple_run_state`, `pond_run`). The Catchment's `pond_run`/`ripple_run` are the canonical history.
 
 ## Orchestration model (theory.md is authoritative)
