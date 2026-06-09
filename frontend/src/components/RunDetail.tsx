@@ -82,13 +82,6 @@ export function RunDetail() {
             <Field label="Finished" value={clock(run.finishedAt)} />
           </div>
 
-          {run.status === 'failed' && (
-            <div style={{ fontSize: 11, color: THEME_DANGER, background: `${THEME_DANGER}12`, border: `1px solid ${THEME_DANGER}40`, borderRadius: 5, padding: '6px 10px', marginBottom: 14, lineHeight: 1.5 }}>
-              This Pond Run failed — a Ripple gave up after exhausting its immediate-retry budget. The
-              Pond is blocked until a fresher Run succeeds, a redeploy, or a manual clear.
-            </div>
-          )}
-
           <div style={{ fontSize: 9, fontWeight: 700, color: '#52525b', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>
             Ripples
           </div>
