@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from duckstring.engine import (
+    NEVER,
     EngineState,
     Pond,
     PondState,
@@ -21,13 +22,17 @@ from duckstring.engine import (
     RippleState,
     Trigger,
     Window,
+    clear_pond,
     complete_ripple,
+    derive_blocked,
+    fail_ripple,
     next_wake,
     pond_set_has_pull,
     pond_source_f,
     pulse_pond,
     ripple_source_f,
     sentinel,
+    start_pond,
     stop_pond,
     tap_pond,
     tick,
@@ -121,6 +126,11 @@ class Driver:
         self.durations = durations
         self.now = now
         self.inflight: dict[str, datetime] = {}  # rid -> scheduled completion time
+        self.fail_counts: dict[str, int] = {}  # rid -> remaining runs to fail instead of complete
+
+    def fail_next(self, rid: str, n: int = 1) -> None:
+        """Make the next ``n`` runs of ``rid`` error (the Duck gave up) rather than complete."""
+        self.fail_counts[rid] = self.fail_counts.get(rid, 0) + n
 
     def _react(self) -> None:
         self.state, started = sentinel(self.now, self.state)
@@ -144,8 +154,12 @@ class Driver:
     def step(self) -> None:
         due = [rid for rid, t in self.inflight.items() if t <= self.now]
         for rid in due:
-            self.state = complete_ripple(self.state, rid, self.now)
             del self.inflight[rid]
+            if self.fail_counts.get(rid, 0) > 0:
+                self.fail_counts[rid] -= 1
+                self.state = fail_ripple(self.state, rid, self.now)
+            else:
+                self.state = complete_ripple(self.state, rid, self.now)
         self.state = tick(self.now, self.state)
         self._react()
         self.now += STEP
@@ -376,3 +390,120 @@ def test_stop_drains_then_halts():
     settled = d.state.pond_states["p2"].runs_completed
     d.run(10)
     assert d.state.pond_states["p2"].runs_completed == settled
+
+
+# ─── Fault tolerance ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.timeout(5)
+def test_failure_without_retry_fails_and_blocks():
+    # No retry budget: a Ripple giving up fails its Pond, which won't run again on its own.
+    s, dur = chain_topology()
+    d = Driver(s, dur)
+    d.fail_next("s1", 1)
+    d.tap("p2")
+    d.run(20)
+    p2 = d.state.pond_states["p2"]
+    assert p2.is_failed and p2.is_blocked
+    assert p2.failures == 1 and p2.runs_completed == 0
+    assert not d.state.pond_states["p1"].is_failed  # no stop signal travels upstream
+
+
+@pytest.mark.timeout(5)
+def test_retry_on_change_recovers():
+    # With budget 1 and a Source that keeps moving, a single failure is retried and recovers.
+    s, dur = chain_topology()
+    s.ponds["p2"].retry_on_change = 1
+    s.triggers["p1"] = Trigger("p1", "wave")  # p1 advances on its own, independent of the failure
+    d = Driver(s, dur)
+    d.fail_next("s1", 1)  # only the first p2 run fails
+    d.tap("p2")
+    d.run(30, stop_when=lambda st: st.pond_states["p2"].runs_completed >= 1)
+    p2 = d.state.pond_states["p2"]
+    assert p2.runs_completed >= 1
+    assert not p2.is_failed and not p2.is_blocked and p2.failed_f == NEVER
+
+
+@pytest.mark.timeout(5)
+def test_retry_on_change_exhausts_to_terminal():
+    # Budget 1, but every attempt fails: original + one retry = 2 failures, then it stays failed.
+    s, dur = chain_topology()
+    s.ponds["p2"].retry_on_change = 1
+    s.triggers["p1"] = Trigger("p1", "wave")
+    d = Driver(s, dur)
+    d.fail_next("s1", 9)
+    d.tap("p2")
+    d.run(40)
+    p2 = d.state.pond_states["p2"]
+    assert p2.is_failed and p2.runs_completed == 0
+    assert p2.failures == 2  # no further retries once the budget is spent
+
+
+@pytest.mark.timeout(1)
+def test_blocked_pond_drains_available_output_without_soliciting():
+    # p1 produced F1, then failed on a later generation. A blocked p2 may still consume F1 — it just
+    # won't re-arm p1 for anything fresher.
+    s, _ = chain_topology()
+    f1 = T0 + secs(5)
+    s.pond_states["p1"].start_f = T0 + secs(6)
+    s.pond_states["p1"].end_f = f1
+    s.pond_states["p1"].is_failed = True
+    s.pond_states["p1"].failed_f = T0 + secs(6)
+    s.pond_states["p1"].failures = 1
+    derive_blocked(s, "p1")
+    assert s.pond_states["p1"].is_blocked and s.pond_states["p2"].is_blocked
+
+    s.pond_states["p2"].has_pull = True
+    s.ripple_states["s1"].has_pull = True
+    out, started = sentinel(T0 + secs(10), s)
+    assert out.pond_states["p2"].start_f == f1  # drained the available generation
+    assert "s1" in started
+    assert not out.pond_states["p1"].has_received_pull  # never solicited the failed Source
+
+
+@pytest.mark.timeout(5)
+def test_block_propagates_downstream_and_clears():
+    # p1's leaf keeps failing → p1 failed, and p2 blocks by deriving from its failed Source. Clearing
+    # p1 unblocks p2 on its own.
+    s, dur = chain_topology()
+    d = Driver(s, dur)
+    d.fail_next("r3", 9)
+    d.tap("p2")
+    d.run(15)
+    p1, p2 = d.state.pond_states["p1"], d.state.pond_states["p2"]
+    assert p1.is_failed and p1.is_blocked
+    assert p2.is_blocked and not p2.is_failed  # blocked, not failed — it produced no failure itself
+    assert p2.runs_completed == 0
+
+    d.state = clear_pond(d.state, "p1", d.now)
+    d._react()
+    assert not d.state.pond_states["p1"].is_blocked
+    assert not d.state.pond_states["p2"].is_blocked
+
+
+@pytest.mark.timeout(1)
+def test_blocked_pond_ignores_new_demand():
+    s, _ = chain_topology()
+    for f in ("is_failed", "is_blocked"):
+        setattr(s.pond_states["p2"], f, True)
+    s.pond_states["p2"].failed_f = T0 + secs(2)
+    s.pond_states["p2"].failures = 1
+    assert not tap_pond(s, "p2", T0).pond_states["p2"].has_received_pull  # pull ignored
+    assert pulse_pond(s, "p2", T0).pond_states["p2"].targets == []        # push ignored
+
+
+@pytest.mark.timeout(5)
+def test_start_clears_failure_and_runs():
+    s, dur = chain_topology()
+    s.pond_states["p1"].start_f = s.pond_states["p1"].end_f = T0 + secs(1)  # p1 has output to consume
+    ps = s.pond_states["p2"]
+    ps.is_failed = ps.is_blocked = True
+    ps.failed_f = T0 + secs(2)
+    ps.failures = 1
+    d = Driver(s, dur)
+    d.state = start_pond(d.state, "p2", d.now)
+    d._react()
+    d.run(10)
+    p2 = d.state.pond_states["p2"]
+    assert not p2.is_failed and not p2.is_blocked
+    assert p2.runs_completed >= 1

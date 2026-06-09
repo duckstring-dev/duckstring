@@ -120,6 +120,12 @@ class Pond:
     sources: list[PondId] = field(default_factory=list)
     optional_sources: set[PondId] = field(default_factory=set)
     windows: list[Window] = field(default_factory=list)
+    # Fault tolerance budgets (operational config, editable against the live Pond; default 0 = no
+    # retries). ``retry_immediately`` is consumed per Pond Run by the Duck (Ripple-level retries);
+    # ``retry_on_change`` governs how many failed Pond Runs the Catchment re-attempts on a Source
+    # update. See docs/guide/theory.md "Fault Tolerance".
+    retry_immediately: int = 0
+    retry_on_change: int = 0
 
 
 @dataclass
@@ -161,6 +167,11 @@ class PondState:
     has_received_pull: bool = False  # inbox: a Sink/trigger asked for resupply
     has_pull: bool = False  # a Pond Run is wanted in pull
     targets: list[datetime] = field(default_factory=list)  # unsatisfied push target freshnesses
+    # Fault tolerance (see docs/guide/theory.md "Fault Tolerance").
+    is_failed: bool = False  # a Pond Run gave up and has not been superseded by a fresher success
+    is_blocked: bool = False  # this Pond is failed, or a required Source is failed/blocked
+    failed_f: datetime = NEVER  # freshness of the freshest Pond Run that has failed (NEVER if none)
+    failures: int = 0  # failed Pond Runs since the last success (counted against retry_on_change)
     runs_started: int = 0
     runs_completed: int = 0
     gen_start_times: dict[int, datetime] = field(default_factory=dict)

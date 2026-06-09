@@ -26,6 +26,16 @@ class RunCompleted:
     f: datetime
 
 
+@dataclass(frozen=True)
+class RunFailed:
+    """A Pond Run gave up at freshness ``f`` (a Ripple failed and the Run's immediate-retry budget was
+    exhausted). ``ripple`` is the Ripple that gave up — the Catchment records it and keys the Pond
+    failure off ``f`` (the Run the Ripple was reaching). See docs/guide/theory.md "Fault Tolerance"."""
+
+    f: datetime
+    ripple: str
+
+
 @dataclass
 class WorkerState:
     # Intra-pond topology, keyed by ripple name. All parents required unless in `optional`.
@@ -33,6 +43,8 @@ class WorkerState:
     optional: dict[str, set[str]] = field(default_factory=dict)
     states: dict[str, RippleState] = field(default_factory=dict)
     last_completed_f: datetime = NEVER  # freshness of the last reported Pond Run completion
+    retry_immediately: int = 0  # Ripple-Run retries allowed within one Pond Run
+    immediate_left: dict[datetime, int] = field(default_factory=dict)  # per in-flight Run: retries left
 
     def clone(self) -> WorkerState:
         return WorkerState(
@@ -40,15 +52,20 @@ class WorkerState:
             optional=self.optional,
             states={k: v.copy() for k, v in self.states.items()},
             last_completed_f=self.last_completed_f,
+            retry_immediately=self.retry_immediately,
+            immediate_left=dict(self.immediate_left),
         )
 
 
-def new_state(parents: dict[str, list[str]], optional: dict[str, set[str]] | None = None) -> WorkerState:
+def new_state(
+    parents: dict[str, list[str]], optional: dict[str, set[str]] | None = None, retry_immediately: int = 0
+) -> WorkerState:
     opt = optional or {}
     return WorkerState(
         parents=dict(parents),
         optional={k: set(v) for k, v in opt.items()},
         states={name: RippleState() for name in parents},
+        retry_immediately=retry_immediately,
     )
 
 
@@ -73,8 +90,10 @@ def source_f(s: WorkerState, name: str) -> datetime:
 
 
 def begin_run(state: WorkerState, f: datetime) -> WorkerState:
-    """Start a Pond Run at freshness ``f``: stamp every Ripple with target ``f`` (push to completion)."""
+    """Start a Pond Run at freshness ``f``: stamp every Ripple with target ``f`` (push to completion),
+    and give this Run a fresh Ripple-retry budget."""
     s = state.clone()
+    s.immediate_left.setdefault(f, s.retry_immediately)
     for rs in s.states.values():
         if f > rs.end_f and f not in rs.targets:
             rs.targets.append(f)
@@ -124,5 +143,25 @@ def complete_ripple(state: WorkerState, name: str, now: datetime) -> tuple[Worke
     new_end = min(s.states[leaf].end_f for leaf in _leaves(s))
     if new_end > s.last_completed_f:
         s.last_completed_f = new_end
+        s.immediate_left.pop(new_end, None)  # this Run is done; drop its retry budget
         return s, RunCompleted(new_end)
     return s, None
+
+
+def fail_ripple(state: WorkerState, name: str, now: datetime) -> tuple[WorkerState, RunFailed | None]:
+    """A Ripple's run errored. If the Pond Run it was reaching (``F = Ripple.start_f``) still has
+    immediate-retry budget, spend one and re-arm the Ripple to run again (``sentinel`` relaunches it);
+    otherwise the Run gives up and a :class:`RunFailed` is returned for the Catchment. Either way the
+    Ripple is no longer running."""
+    s = state.clone()
+    rs = s.states[name]
+    f = rs.start_f
+    rs.is_running = False
+    rs.started_at = None
+    if s.immediate_left.get(f, 0) > 0:
+        s.immediate_left[f] -= 1
+        if f > rs.end_f and f not in rs.targets:
+            rs.targets.append(f)  # retry the same Ripple, same Run
+        return s, None
+    s.immediate_left.pop(f, None)
+    return s, RunFailed(f, name)

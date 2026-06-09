@@ -150,6 +150,42 @@ def test_worker_pipelines_two_runs():
     assert len(s.states["join"].targets) == 2
 
 
+def _run_to_join(s: worker.WorkerState) -> worker.WorkerState:
+    """Advance the sales topology until ``join`` is the running Ripple."""
+    s, _ = worker.sentinel(T0, s)  # daily, tiers
+    s, _ = worker.complete_ripple(s, "daily", T0)
+    s, _ = worker.complete_ripple(s, "tiers", T0)
+    s, launched = worker.sentinel(T0, s)
+    assert launched == ["join"]
+    return s
+
+
+@pytest.mark.timeout(5)
+def test_worker_immediate_retry_then_succeeds():
+    # Budget 1: join errors once, is retried in the same Run, then completes.
+    s = worker.new_state(sales_parents(), retry_immediately=1)
+    s = worker.begin_run(s, T0)
+    s = _run_to_join(s)
+    s, rf = worker.fail_ripple(s, "join", T0)
+    assert rf is None  # retried, not a Run failure
+    assert s.immediate_left[T0] == 0  # budget spent
+    s, launched = worker.sentinel(T0, s)
+    assert launched == ["join"]  # relaunched
+    s, rc = worker.complete_ripple(s, "join", T0)
+    assert rc is not None and rc.f == T0
+
+
+@pytest.mark.timeout(5)
+def test_worker_immediate_budget_exhausted_fails_run():
+    # Budget 0: the first error gives up the whole Pond Run, at the Ripple's freshness.
+    s = worker.new_state(sales_parents(), retry_immediately=0)
+    s = worker.begin_run(s, T0)
+    s = _run_to_join(s)
+    s, rf = worker.fail_ripple(s, "join", T0)
+    assert rf == worker.RunFailed(T0, "join")
+    assert not s.states["join"].is_running
+
+
 # ─── Ledger ───────────────────────────────────────────────────────────────────
 
 

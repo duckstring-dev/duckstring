@@ -52,10 +52,14 @@ __all__ = [
     "pond_add_target",
     "ripple_add_target",
     "complete_ripple",
+    "fail_ripple",
+    "required_sinks",
+    "derive_blocked",
     "tap_pond",
     "pulse_pond",
     "stop_pond",
     "start_pond",
+    "clear_pond",
     "sentinel",
     "tick",
     "next_wake",
@@ -154,6 +158,9 @@ def ripple_source_f(s: EngineState, rid: RippleId) -> datetime:
 
 def pond_receive_pull(s: EngineState, pid: PondId, now: datetime) -> None:
     ps = s.pond_states[pid]
+    if ps.is_blocked:  # a blocked Pond solicits nothing new; it only drains existing demand
+        ps.has_received_pull = False
+        return
     if ps.start_f == ps.end_f:  # cold start: wake the whole Pond
         pond_set_has_pull(s, pid, now)
         for rid in ripples_of(s, pid):
@@ -191,6 +198,8 @@ def ripple_set_has_pull(s: EngineState, rid: RippleId, now: datetime) -> None:
 
 def pond_add_target(s: EngineState, pid: PondId, t: datetime) -> None:
     ps = s.pond_states[pid]
+    if ps.is_blocked:  # no new push enters a blocked Pond (and none propagates upstream from it)
+        return
     if t <= ps.end_f or t in ps.targets:
         return
     ps.targets.append(t)
@@ -205,6 +214,31 @@ def ripple_add_target(s: EngineState, rid: RippleId, t: datetime) -> None:
     rs.targets.append(t)
 
 
+# ─── Fault tolerance: blocked propagation ─────────────────────────────────────
+
+
+def required_sinks(s: EngineState, pid: PondId) -> list[PondId]:
+    """Ponds that depend on ``pid`` as a *required* Source (an optional Source never blocks a Sink)."""
+    return [q.id for q in s.ponds.values() if pid in q.sources and pid not in q.optional_sources]
+
+
+def derive_blocked(s: EngineState, pid: PondId) -> None:
+    """Recompute ``is_blocked`` from this Pond's own failure and its required Sources, and — only if it
+    changed — propagate to the Sinks so they re-derive. This is the single signal that travels
+    downstream; a Pond still reads its blocked state solely from itself and its Sources."""
+    ps = s.pond_states[pid]
+    pond = s.ponds[pid]
+    blocked = ps.is_failed or any(
+        s.pond_states[sp].is_failed or s.pond_states[sp].is_blocked
+        for sp in pond.sources
+        if sp not in pond.optional_sources
+    )
+    if blocked != ps.is_blocked:
+        ps.is_blocked = blocked
+        for q in required_sinks(s, pid):
+            derive_blocked(s, q)
+
+
 # ─── Lifecycle ────────────────────────────────────────────────────────────────
 
 
@@ -213,10 +247,17 @@ def can_start_pond(s: EngineState, pid: PondId, now: datetime) -> bool:
     f, _ = pond_source_f(s, pid, now)
     if f is None:
         return False
-    mt = min_target(ps.targets)
-    if mt is not None and f >= mt:
+    if not ps.is_failed:  # a blocked-but-not-failed Pond still drains available Source freshness
+        mt = min_target(ps.targets)
+        if mt is not None and f >= mt:
+            return True
+        if ps.has_pull and f > ps.start_f:
+            return True
+    # Retry on change: a failed Pond with budget left re-runs when its Sources offer something fresher
+    # than its last attempt (bypasses is_blocked — this is how the failure recovers).
+    if ps.failed_f != NEVER and ps.failures <= s.ponds[pid].retry_on_change and f > ps.start_f:
         return True
-    return ps.has_pull and f > ps.start_f
+    return False
 
 
 def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
@@ -225,7 +266,7 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     assert f is not None
     started_as_pull = ps.has_pull
 
-    if started_as_pull:
+    if started_as_pull and not ps.is_blocked:  # a blocked Pond drains, but never solicits its Sources
         for sp in s.ponds[pid].sources:
             s.pond_states[sp].has_received_pull = True
             pond_receive_pull(s, sp, now)
@@ -297,9 +338,34 @@ def complete_ripple(state: EngineState, rid: RippleId, now: datetime) -> EngineS
         ps.runs_completed += 1
         ps.completion_times.append(now)
         ps.gen_start_times.pop(ps.runs_completed, None)
+        if ps.is_failed and ps.end_f > ps.failed_f:  # a Run fresher than the failure has succeeded
+            ps.is_failed = False
+            ps.failed_f = NEVER
+            ps.failures = 0
+            derive_blocked(s, pid)
         trig = s.triggers.get(pid)
         if trig is not None and trig.kind == "wave":
             pond_receive_pull(s, pid, now)
+    return s
+
+
+def fail_ripple(state: EngineState, rid: RippleId, now: datetime) -> EngineState:
+    """Event: a Ripple gave up (the Duck exhausted its Pond Run's immediate-retry budget, reported via
+    a ``failed`` event). The Pond has failed at the Run the Ripple was reaching (``Ripple.start_f``):
+    record it, count it against ``retry_on_change``, and block downstream. Recovery is via the retry-
+    on-change start condition (or an operator clear)."""
+    s = state.clone()
+    rs = s.ripple_states[rid]
+    f = rs.start_f
+    rs.is_running = False
+    rs.started_at = None
+
+    pid = s.ripples[rid].pond_id
+    ps = s.pond_states[pid]
+    ps.failed_f = max(ps.failed_f, f)  # gate clearing against the freshest failure
+    ps.failures += 1  # every failed Run counts, even simultaneous ones
+    ps.is_failed = True
+    derive_blocked(s, pid)
     return s
 
 
@@ -347,12 +413,30 @@ def start_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
     """Inject demand directly into a Pond: a push target of NEVER (an "-Inf" freshness) on the Pond
     alone, with **no upstream propagation**. The Pond runs once against whatever input it currently
     has (``sourceF >= NEVER`` always holds), then the target clears. Distinct from a Pulse, which
-    targets ``now`` and propagates upstream to force a full refresh."""
+    targets ``now`` and propagates upstream to force a full refresh. A ``start`` also clears a failure
+    on the Pond (the operator override), letting it run once even while it was failed/blocked."""
     s = state.clone()
+    _clear_failure(s, pid)
     ps = s.pond_states[pid]
     if NEVER not in ps.targets:
         ps.targets.append(NEVER)
     return s
+
+
+def clear_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
+    """Operator acknowledgement: clear a Pond's failure/block without forcing a run. Downstream Ponds
+    blocked only by this failure re-derive and unblock on their own."""
+    s = state.clone()
+    _clear_failure(s, pid)
+    return s
+
+
+def _clear_failure(s: EngineState, pid: PondId) -> None:
+    ps = s.pond_states[pid]
+    ps.is_failed = False
+    ps.failed_f = NEVER
+    ps.failures = 0
+    derive_blocked(s, pid)  # may stay blocked if a required Source is still failed/blocked
 
 
 def sentinel(now: datetime, state: EngineState) -> tuple[EngineState, list[RippleId]]:
