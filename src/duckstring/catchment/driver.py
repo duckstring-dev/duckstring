@@ -31,6 +31,7 @@ from ..engine import (
     clear_pond,
     complete_ripple,
     drain_begin_runs,
+    fail_pond,
     fail_ripple,
     next_wake,
     pulse_pond,
@@ -40,6 +41,11 @@ from ..engine import (
     tap_pond,
     tick,
 )
+
+# A Duck is presumed dead if it holds an in-flight Run but hasn't contacted the Catchment within this
+# window (the secondary, transport-level signal; process-liveness is the primary one). Comfortably
+# above the Duck's long-poll timeout so a healthy hold is never mistaken for death.
+_DUCK_DEAD_AFTER = timedelta(seconds=60)
 
 
 def _now() -> datetime:
@@ -60,6 +66,7 @@ class Driver:
         self.state = EngineState()
         self.meta: dict[str, dict] = {}  # pond_name -> {version_id, version, source_path, ripple_ids}
         self.jobs: dict[str, list[dict]] = {}  # pond_name -> queued Duck commands
+        self.last_seen: dict[str, datetime] = {}  # pond_name -> last Duck contact (jobs poll / event)
         self.reload()
 
     # ─── Topology load ────────────────────────────────────────────────────────
@@ -362,6 +369,7 @@ class Driver:
     def on_event(self, pond: str, payload: dict) -> None:
         with self.lock:
             now = _now()
+            self.last_seen[pond] = now  # any event proves the Duck is alive
             kind = payload.get("kind")
             f = payload.get("f")
             status = payload.get("status", "success")
@@ -403,6 +411,10 @@ class Driver:
             elif kind == "run_completed":
                 self._finish_pond_run(pond, f, now)
                 self._process(now)
+            elif kind == "pond_failed":
+                # A Duck-level error (e.g. a failed ledger write): fail the whole Pond at its most
+                # recently started Run. The Duck exits after reporting; liveness will not double-fail.
+                self._fail_whole_pond(pond, now)
 
     def resume_incomplete(self) -> None:
         """Re-dispatch Pond Runs that were in flight when the Catchment stopped, and service any
@@ -417,6 +429,7 @@ class Driver:
 
     def take_jobs(self, pond: str) -> list[dict]:
         with self.lock:
+            self.last_seen[pond] = _now()  # the Duck is alive — it just polled
             jobs = self.jobs.get(pond, [])
             self.jobs[pond] = []
             return jobs
@@ -429,7 +442,29 @@ class Driver:
 
     def scheduler_tick(self) -> None:
         with self.lock:
-            self._tick_process(_now())
+            now = _now()
+            self._check_liveness(now)
+            self._tick_process(now)
+
+    def _check_liveness(self, now: datetime) -> None:
+        """Fail any Pond whose Duck has died (process gone) or fallen silent (no contact) while a Run
+        is in flight, attributing it to that Run (``start_f``). Only for launchers that own real Duck
+        processes — the NoopLauncher (tests) has nothing to watch."""
+        if not self.launcher.manages_processes:
+            return
+        for pond in list(self.state.ponds):
+            ps = self.state.pond_states[pond]
+            if ps.is_blocked:
+                continue
+            # In flight, and fresher than any recorded failure — so a retry-on-change Run draws a fresh
+            # liveness check, but an already-failed Run is not re-failed.
+            if not (ps.start_f > ps.end_f and ps.start_f > ps.failed_f):
+                continue
+            last = self.last_seen.get(pond)
+            dead = not self.launcher.is_running(pond)
+            silent = last is not None and (now - last) > _DUCK_DEAD_AFTER
+            if dead or silent:
+                self._fail_whole_pond(pond, now)
 
     # ─── Core processing ──────────────────────────────────────────────────────
 
@@ -447,6 +482,7 @@ class Driver:
     def _dispatch_begin_run(self, pond: str, f: datetime, now: datetime) -> None:
         meta = self.meta[pond]
         self.launcher.ensure(pond, meta["version"], meta["source_path"])
+        self.last_seen[pond] = now  # grace clock: a freshly (re)spawned Duck isn't immediately stale
         self.jobs.setdefault(pond, []).append({
             "kind": "begin_run", "f": _iso(f),
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
@@ -500,6 +536,18 @@ class Driver:
             (_iso(now), meta["version_id"], f),
         )
         self.db.commit()
+
+    def _fail_whole_pond(self, pond: str, now: datetime) -> None:
+        """Fail a Pond with no single culprit Ripple (dead/silent Duck, or a reported Duck-level
+        error): mark its most recently started Run failed and run the cascade (which may re-dispatch a
+        retry-on-change Run, respawning a Duck). No-op if nothing is in flight."""
+        ps = self.state.pond_states[pond]
+        if ps.start_f <= ps.end_f:
+            return
+        f = _iso(ps.start_f)
+        self.state = fail_pond(self.state, pond, now)
+        self._fail_pond_run(pond, f, now)
+        self._process(now)
 
     def _fail_pond_run(self, pond: str, f: str, now: datetime) -> None:
         meta = self.meta[pond]

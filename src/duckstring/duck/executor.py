@@ -74,9 +74,12 @@ def _load_ripple_func(source_path: str, root: str, ripple_name: str):
 def _run_ripple(func, pond_name: str, version: str, registry_path_str: str, root_str: str) -> None:
     import duckdb
 
-    from ..core import Pond
+    from ..core import Pond, retry_on_lock
 
-    registry = duckdb.connect(registry_path_str)
+    # Retry only the connect (a transient lock from a concurrent reader/writer); the ripple body runs
+    # exactly once. Ripples in a Pond share one registry file — concurrent read-write connections to it
+    # are fine (each writes its own table); only the connect can momentarily clash.
+    registry = retry_on_lock(lambda: duckdb.connect(registry_path_str))
     try:
         func(Pond(name=pond_name, version=version, con=registry, root=Path(root_str)))
     finally:
@@ -86,17 +89,26 @@ def _run_ripple(func, pond_name: str, version: str, registry_path_str: str, root
 def _export_parquet(registry_path: Path) -> None:
     import duckdb
 
+    from ..core import retry_on_lock
+
     data_dir = registry_path.parent / "data"
     data_dir.mkdir(exist_ok=True)
-    con = duckdb.connect(str(registry_path), read_only=True)
-    try:
-        for (table,) in con.execute("SHOW TABLES").fetchall():
-            dest = data_dir / f"{table}.parquet"
-            tmp = data_dir / f"{table}.parquet.tmp"
-            con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')
-            tmp.replace(dest)
-    finally:
-        con.close()
+
+    def _export() -> None:
+        # Read-write (NOT read_only): a read_only connection clashes with the pipelined ripples' open
+        # read-write connections ("different configuration than existing connections"). Same-config
+        # connections coexist; the COPY reads a consistent MVCC snapshot.
+        con = duckdb.connect(str(registry_path))
+        try:
+            for (table,) in con.execute("SHOW TABLES").fetchall():
+                dest = data_dir / f"{table}.parquet"
+                tmp = data_dir / f"{table}.parquet.tmp"
+                con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')
+                tmp.replace(dest)
+        finally:
+            con.close()
+
+    retry_on_lock(_export)
 
 
 class RippleExecutor:

@@ -46,6 +46,7 @@ def _parse(s: str) -> datetime:
 def connect(path) -> sqlite3.Connection:
     con = sqlite3.connect(str(path), check_same_thread=False)
     con.execute("PRAGMA journal_mode = WAL")
+    con.execute("PRAGMA busy_timeout = 5000")  # queue on a locked DB (up to 5 s) instead of erroring
     con.executescript(_SCHEMA)
     con.commit()
     return con

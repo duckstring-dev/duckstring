@@ -1,6 +1,23 @@
 from __future__ import annotations
 
+import time
+
 _RIPPLES: list[dict] = []
+
+
+def retry_on_lock(fn, attempts: int = 12, base: float = 0.05):
+    """Run ``fn``, retrying on transient DuckDB lock/conflict errors so concurrent writers *queue*
+    (back off and retry) rather than crashing. Covers the catalog write-write conflict, the read-only/
+    read-write config clash, and the cross-process file lock. Re-raises after the last attempt."""
+    import duckdb
+
+    for i in range(attempts):
+        try:
+            return fn()
+        except (duckdb.TransactionException, duckdb.IOException, duckdb.ConnectionException):
+            if i == attempts - 1:
+                raise
+            time.sleep(min(base * (2**i), 0.5))
 
 
 def ripple(func=None, *, parents=None, name=None):
@@ -47,12 +64,20 @@ class Pond:
 
     def write_table(self, name: str, relation) -> None:
         tmp = f"__tmp_{name}"
-        self.con.execute("BEGIN TRANSACTION")
-        self.con.execute(f'DROP TABLE IF EXISTS "{tmp}"')
-        relation.create(f'"{tmp}"')
-        self.con.execute(f'DROP TABLE IF EXISTS "{name}"')
-        self.con.execute(f'ALTER TABLE "{tmp}" RENAME TO "{name}"')
-        self.con.execute("COMMIT")
+
+        def _write() -> None:
+            self.con.execute("BEGIN TRANSACTION")
+            try:
+                self.con.execute(f'DROP TABLE IF EXISTS "{tmp}"')
+                relation.create(f'"{tmp}"')
+                self.con.execute(f'DROP TABLE IF EXISTS "{name}"')
+                self.con.execute(f'ALTER TABLE "{tmp}" RENAME TO "{name}"')
+                self.con.execute("COMMIT")
+            except Exception:
+                self.con.execute("ROLLBACK")  # release the txn so a retry starts clean
+                raise
+
+        retry_on_lock(_write)  # a concurrent write conflict queues + retries rather than failing
 
     def read_table(self, ref: str):
         if "." in ref:

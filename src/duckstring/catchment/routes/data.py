@@ -1,3 +1,8 @@
+"""Read-only data access for Outlets, served from each Pond's **exported** Parquet snapshot
+(``ponds/{pond}/data/{table}.parquet``) — the published, consistent output of a successful run — via
+an in-memory DuckDB connection. It never opens the live ``registry.duckdb`` a Duck is writing to, so a
+data query never contends with (or blocks) a running Pond."""
+
 from __future__ import annotations
 
 import io
@@ -13,9 +18,24 @@ from pydantic import BaseModel
 router = APIRouter()
 
 
-def _registry(request: Request, pond_name: str):
-    from .. import registry as reg
-    return reg.pond_connect(request.app.state.root, pond_name)
+def _data_dir(request: Request, pond_name: str) -> Path:
+    return Path(request.app.state.root) / "ponds" / pond_name / "data"
+
+
+def _open_pond(request: Request, pond_name: str):
+    """An in-memory DuckDB connection with the Pond's exported tables registered as views — under a
+    schema named after the Pond, and in ``main`` — so queries can name them ``"pond"."table"`` or
+    bare. Reads the Parquet snapshot, not the live registry, so there is no cross-process lock."""
+    import duckdb
+
+    con = duckdb.connect()  # in-memory: no file, no lock, no contention
+    con.execute(f'CREATE SCHEMA IF NOT EXISTS "{pond_name}"')
+    for pq in sorted(_data_dir(request, pond_name).glob("*.parquet")):
+        table = pq.stem
+        select = f"SELECT * FROM read_parquet('{str(pq).replace(chr(39), chr(39) * 2)}')"
+        con.execute(f'CREATE VIEW "{pond_name}"."{table}" AS {select}')
+        con.execute(f'CREATE OR REPLACE VIEW "{table}" AS {select}')
+    return con
 
 
 @router.get("/ponds/{name}/versions/{version}")
@@ -45,30 +65,19 @@ class QueryRequest(BaseModel):
 
 @router.get("/ponds/{outlet}/ripples/{ripple_name}")
 def get_ripple(outlet: str, ripple_name: str, request: Request):
-    registry = _registry(request, outlet)
-    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
-        tmp_path = f.name
-    try:
-        registry.execute(
-            f"COPY \"{outlet}\".\"{ripple_name}\" TO '{tmp_path}' (FORMAT PARQUET)"
-        )
-    except Exception as exc:
-        Path(tmp_path).unlink(missing_ok=True)
-        registry.close()
-        raise HTTPException(status_code=404, detail=f"No data for {outlet}.{ripple_name}") from exc
-
+    # Serve the exported Parquet file directly — no DuckDB needed.
+    pq = _data_dir(request, outlet) / f"{ripple_name}.parquet"
+    if not pq.exists():
+        raise HTTPException(status_code=404, detail=f"No data for {outlet}.{ripple_name}")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(tmp_path, f"{ripple_name}.parquet")
-    Path(tmp_path).unlink(missing_ok=True)
-    registry.close()
+        zf.write(pq, f"{ripple_name}.parquet")
     return Response(content=buf.getvalue(), media_type="application/zip")
 
 
 @router.post("/query")
 def query(body: QueryRequest, request: Request):
-    registry = _registry(request, body.pond)
-
+    con = _open_pond(request, body.pond)
     sql = body.sql
     if not sql:
         if body.ripple:
@@ -76,36 +85,26 @@ def query(body: QueryRequest, request: Request):
         else:
             sql = f'SELECT * FROM "{body.pond}" LIMIT 10'
 
-    fmt = body.format
-    if fmt:
-        fmt = fmt.lower()
-        suffix_map = {"csv": ".csv", "json": ".json", "parquet": ".parquet"}
-        media_map = {
-            "csv": "text/csv",
-            "json": "application/json",
-            "parquet": "application/octet-stream",
-        }
-        with tempfile.NamedTemporaryFile(suffix=suffix_map.get(fmt, ".bin"), delete=False) as f:
-            tmp_path = f.name
-        try:
-            registry.execute(f"COPY ({sql}) TO '{tmp_path}' (FORMAT {fmt.upper()})")
-            data = Path(tmp_path).read_bytes()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
-            registry.close()
-        return Response(content=data, media_type=media_map.get(fmt, "application/octet-stream"))
-
+    fmt = (body.format or "").lower()
     try:
-        rel = registry.execute(sql)
+        if fmt:
+            suffix_map = {"csv": ".csv", "json": ".json", "parquet": ".parquet"}
+            media_map = {"csv": "text/csv", "json": "application/json", "parquet": "application/octet-stream"}
+            with tempfile.NamedTemporaryFile(suffix=suffix_map.get(fmt, ".bin"), delete=False) as f:
+                tmp_path = f.name
+            try:
+                con.execute(f"COPY ({sql}) TO '{tmp_path}' (FORMAT {fmt.upper()})")
+                data = Path(tmp_path).read_bytes()
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+            return Response(content=data, media_type=media_map.get(fmt, "application/octet-stream"))
+
+        rel = con.execute(sql)
         if rel.description is None:
-            registry.close()
             return []
         cols = [d[0] for d in rel.description]
-        rows = [dict(zip(cols, row, strict=False)) for row in rel.fetchall()]
-        registry.close()
-        return rows
+        return [dict(zip(cols, row, strict=False)) for row in rel.fetchall()]
     except Exception as exc:
-        registry.close()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        con.close()

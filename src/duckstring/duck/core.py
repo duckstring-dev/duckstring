@@ -16,8 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from ..engine import NEVER, worker
 from ..engine import pond as ledger
-from ..engine import worker
 
 
 @dataclass
@@ -52,14 +52,21 @@ class DuckCore:
         self.state = ledger.load_state(con, parents, optional)
         self.events: list[Event] = []  # buffered, awaiting delivery to the Catchment
         self.attempts: dict[str, int] = {}  # ripple name → attempt index of its current in-flight run
+        self.last_begin_f: datetime = NEVER  # freshness of the most recently started Pond Run
 
     def begin_run(self, f: datetime, now: datetime, retry_immediately: int = 0) -> list[str]:
         """Start a Pond Run at freshness ``f`` (idempotent — completed Ripples are not re-stamped).
         ``retry_immediately`` is the Run's Ripple-retry budget (the Catchment's live setting). Returns
         the Ripple names the caller must launch."""
         self.state = worker.begin_run(self.state, f, retry_immediately)
+        self.last_begin_f = max(self.last_begin_f, f)
         ledger.record_pond_run_start(self.con, f, now)
         return self._advance(now)
+
+    def pond_failed(self) -> None:
+        """Buffer a Pond-level failure (a Duck error not tied to a Ripple — e.g. a failed ledger
+        write). Attributed to the most recently started Pond Run; the Catchment fails the whole Pond."""
+        self.events.append(Event(kind="pond_failed", f=self.last_begin_f, status="failed"))
 
     def ripple_completed(
         self, name: str, now: datetime, started_at=None, finished_at=None, export=None

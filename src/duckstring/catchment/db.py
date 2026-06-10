@@ -9,6 +9,7 @@ def connect(path: Path) -> sqlite3.Connection:
     con = sqlite3.connect(path, check_same_thread=False)
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA journal_mode = WAL")
+    con.execute("PRAGMA busy_timeout = 5000")  # queue on a locked DB (up to 5 s) instead of erroring
     return con
 
 

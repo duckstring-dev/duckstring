@@ -1,6 +1,6 @@
 'use client';
 
-import { useLiveStore, parseTs, THEME_DANGER, THEME_PULL } from '@/lib/store';
+import { useLiveStore, parseTs, THEME_PULL } from '@/lib/store';
 import type { PondRun, RippleRun } from '@/lib/types';
 import { clock, durationOf, STATUS_COLOR } from './RunHistory';
 

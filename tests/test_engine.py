@@ -25,6 +25,7 @@ from duckstring.engine import (
     clear_pond,
     complete_ripple,
     derive_blocked,
+    fail_pond,
     fail_ripple,
     next_wake,
     pond_set_has_pull,
@@ -490,6 +491,26 @@ def test_blocked_pond_ignores_new_demand():
     s.pond_states["p2"].failures = 1
     assert not tap_pond(s, "p2", T0).pond_states["p2"].has_received_pull  # pull ignored
     assert pulse_pond(s, "p2", T0).pond_states["p2"].targets == []        # push ignored
+
+
+@pytest.mark.timeout(1)
+def test_fail_pond_attributes_to_start_f_and_blocks():
+    # A whole-Pond failure (dead Duck / Duck-level error) pins failedF to the most recently started
+    # Run (startF), stops its Ripples, and blocks downstream.
+    s, _ = chain_topology()
+    s.pond_states["p1"].start_f = T0 + secs(5)
+    s.pond_states["p1"].end_f = T0 + secs(2)
+    s.ripple_states["r1"].is_running = True
+    out = fail_pond(s, "p1", T0 + secs(10))
+    p1 = out.pond_states["p1"]
+    assert p1.is_failed and p1.failed_f == T0 + secs(5) and p1.failures == 1
+    assert not out.ripple_states["r1"].is_running
+    assert out.pond_states["p2"].is_blocked  # downstream derives the block
+
+    # No-op when nothing is in flight (the latest Run already completed).
+    s2, _ = chain_topology()
+    s2.pond_states["p1"].start_f = s2.pond_states["p1"].end_f = T0 + secs(3)
+    assert not fail_pond(s2, "p1", T0 + secs(9)).pond_states["p1"].is_failed
 
 
 @pytest.mark.timeout(5)

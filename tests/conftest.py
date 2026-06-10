@@ -83,7 +83,14 @@ def catchment_client(tmp_path):
 
 
 @pytest.fixture
-def live_catchment(tmp_path_factory):
+def catchment_root(tmp_path_factory):
+    """The filesystem root the live catchment serves from — tests write exported Parquet under
+    ``{root}/ponds/{pond}/data/`` to seed the (read-only, Parquet-backed) data API."""
+    return tmp_path_factory.mktemp("catchment_root")
+
+
+@pytest.fixture
+def live_catchment(catchment_root):
     """Start a real uvicorn server and register it as the 'dev' catchment.
 
     Yields the base URL. Tests can hit the API directly to verify state.
@@ -91,7 +98,7 @@ def live_catchment(tmp_path_factory):
     from duckstring.catchment.app import create_app
     from duckstring.cli.config import register_catchment
 
-    root = tmp_path_factory.mktemp("catchment_root")
+    root = catchment_root
 
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

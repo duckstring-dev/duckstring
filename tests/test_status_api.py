@@ -86,6 +86,47 @@ def test_status_running_ripple_propagates_to_pond(tmp_path):
     assert next(r for r in snk["ripples"] if r["name"] == "r2")["status"] == "idle"
 
 
+# ─── Duck liveness ─────────────────────────────────────────────────────────────
+
+
+class _DeadLauncher(NoopLauncher):
+    """A launcher that owns processes (so liveness is checked) but reports them all dead."""
+
+    manages_processes = True
+
+    def is_running(self, pond_name: str) -> bool:
+        return False
+
+
+def _inlet_driver(tmp_path, db_name, launcher):
+    from duckstring.catchment.db import connect, migrate
+
+    db = connect(tmp_path / db_name)
+    migrate(db)
+    _register(db, "src", "1.0.0", "inlet", "ponds/src/1.0.0", _cfg(), _RIPPLES)
+    return Driver(db, tmp_path, "http://x", launcher)
+
+
+def test_check_liveness_fails_dead_duck(tmp_path):
+    from duckstring.catchment.driver import _now
+
+    d = _inlet_driver(tmp_path, "duck.db", _DeadLauncher())
+    d.pulse("src")  # a Pond Run is now in flight (start_f > end_f), nothing completes it
+    assert d.state.pond_states["src"].start_f > d.state.pond_states["src"].end_f
+    d._check_liveness(_now())
+    src = d.state.pond_states["src"]
+    assert src.is_failed and src.failures == 1  # the dead Duck's Run failed at start_f
+
+
+def test_check_liveness_skipped_without_process_launcher(tmp_path):
+    from duckstring.catchment.driver import _now
+
+    d = _inlet_driver(tmp_path, "duck2.db", NoopLauncher())  # manages_processes = False
+    d.pulse("src")
+    d._check_liveness(_now())
+    assert not d.state.pond_states["src"].is_failed  # nothing to watch → never failed on liveness
+
+
 # ─── /api/runs history ───────────────────────────────────────────────────────────
 
 

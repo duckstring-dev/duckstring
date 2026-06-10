@@ -12,6 +12,8 @@ from pathlib import Path
 
 
 class SubprocessLauncher:
+    manages_processes = True  # owns real Duck processes, so liveness can be checked via proc.poll()
+
     def __init__(self, root: Path, base_url: str, token: str = ""):
         self.root = root
         self.base_url = base_url
@@ -50,6 +52,8 @@ class SubprocessLauncher:
 class NoopLauncher:
     """A launcher that never spawns anything — for tests/contexts that exercise the engine and
     persistence without running real Duck processes."""
+
+    manages_processes = False  # nothing to watch — liveness checking is skipped
 
     def is_running(self, pond_name: str) -> bool:
         return False

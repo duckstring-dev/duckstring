@@ -53,6 +53,7 @@ __all__ = [
     "ripple_add_target",
     "complete_ripple",
     "fail_ripple",
+    "fail_pond",
     "required_sinks",
     "derive_blocked",
     "tap_pond",
@@ -365,6 +366,26 @@ def fail_ripple(state: EngineState, rid: RippleId, now: datetime) -> EngineState
     ps.failed_f = max(ps.failed_f, f)  # gate clearing against the freshest failure
     ps.failures += 1  # every failed Run counts, even simultaneous ones
     ps.is_failed = True
+    derive_blocked(s, pid)
+    return s
+
+
+def fail_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
+    """Fail an entire Pond, attributing it to the most recently started Pond Run (``start_f``). This is
+    the failure with no single culprit Ripple: a Duck-level error (e.g. a failed ledger write) or a
+    dead/unreachable Duck. No-op if nothing is in flight (``start_f <= end_f``). Stops any modelled
+    Ripple execution and blocks downstream, exactly like a Ripple-level failure."""
+    s = state.clone()
+    ps = s.pond_states[pid]
+    if ps.start_f <= ps.end_f:
+        return s  # the latest Run already completed — nothing in flight to fail
+    ps.failed_f = max(ps.failed_f, ps.start_f)
+    ps.failures += 1
+    ps.is_failed = True
+    for rid in ripples_of(s, pid):
+        rs = s.ripple_states[rid]
+        rs.is_running = False
+        rs.started_at = None
     derive_blocked(s, pid)
     return s
 

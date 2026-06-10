@@ -87,6 +87,29 @@ def test_duck_immediate_retry_then_failed_event(tmp_path):
 
 
 @pytest.mark.timeout(5)
+def test_retry_on_lock_queues_then_raises():
+    import duckdb
+
+    from duckstring.core import retry_on_lock
+
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise duckdb.TransactionException("write-write conflict")
+        return "ok"
+
+    assert retry_on_lock(flaky, attempts=5, base=0.001) == "ok" and calls["n"] == 3
+
+    def always():
+        raise duckdb.IOException("Could not set lock on file")
+
+    with pytest.raises(duckdb.IOException):
+        retry_on_lock(always, attempts=3, base=0.001)
+
+
+@pytest.mark.timeout(5)
 def test_duck_retry_then_success_indexes_attempts(tmp_path):
     con = ledger.connect(tmp_path / "pond.db")
     core = DuckCore("sales", con, SALES)

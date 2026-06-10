@@ -161,6 +161,24 @@ def _run_to_join(s: worker.WorkerState) -> worker.WorkerState:
 
 
 @pytest.mark.timeout(5)
+def test_worker_no_double_launch_reruns_on_complete():
+    # A running Ripple is never launched a second time; a newer Pond Run target queues and fires the
+    # instant it completes.
+    s = worker.new_state({"a": []})
+    s = worker.begin_run(s, T0)
+    s, launched = worker.sentinel(T0, s)
+    assert launched == ["a"] and s.states["a"].is_running
+    # A second Run's target arrives mid-flight — must NOT relaunch the already-running Ripple.
+    s = worker.begin_run(s, T0 + secs(1))
+    s, launched2 = worker.sentinel(T0 + secs(1), s)
+    assert launched2 == [] and s.states["a"].is_running
+    # On completion the queued target launches it again, immediately.
+    s, _ = worker.complete_ripple(s, "a", T0 + secs(1))
+    s, launched3 = worker.sentinel(T0 + secs(1), s)
+    assert launched3 == ["a"]
+
+
+@pytest.mark.timeout(5)
 def test_worker_immediate_retry_then_succeeds():
     # Budget 1: join errors once, is retried in the same Run, then completes.
     s = worker.new_state(sales_parents(), retry_immediately=1)

@@ -90,15 +90,14 @@ def _db(catchment_client):
 
 
 def _seed(catchment_client, pond: str, ripple: str):
-    """Seed a DuckDB table with two rows for testing data endpoints."""
+    """Seed an exported Parquet snapshot (two rows) — the read-only data API serves from these."""
     import duckdb
-    root = catchment_client.app.state.root
-    reg_path = root / "ponds" / pond / "registry.duckdb"
-    reg_path.parent.mkdir(parents=True, exist_ok=True)
-    reg = duckdb.connect(str(reg_path))
-    reg.execute(f'CREATE SCHEMA IF NOT EXISTS "{pond}"')
-    reg.execute(f'CREATE OR REPLACE TABLE "{pond}"."{ripple}" AS SELECT 1 AS id, \'a\' AS val UNION ALL SELECT 2, \'b\'')
-    reg.close()
+    data_dir = catchment_client.app.state.root / "ponds" / pond / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    dest = str(data_dir / f"{ripple}.parquet").replace("'", "''")
+    con = duckdb.connect()
+    con.execute(f"COPY (SELECT 1 AS id, 'a' AS val UNION ALL SELECT 2, 'b') TO '{dest}' (FORMAT PARQUET)")
+    con.close()
 
 
 # ---------------------------------------------------------------------------
@@ -587,6 +586,20 @@ def test_failed_event_marks_pond_then_clears(catchment_client):
     assert catchment_client.post("/api/ponds/outlet/clear").status_code == 200
     st = _pond_status(catchment_client, "outlet")
     assert not st["is_failed"] and not st["is_blocked"] and st["failures"] == 0
+
+
+def test_pond_failed_event_fails_whole_pond(catchment_client):
+    # A Duck-level error (reported as a `pond_failed` event) fails the whole Pond at its in-flight Run.
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
+            toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
+    catchment_client.post("/api/ponds/outlet/start")  # puts a Run in flight
+    r = catchment_client.post(
+        "/api/duck/outlet/events",
+        json={"kind": "pond_failed", "f": "2026-01-01T00:00:00+00:00", "status": "failed"},
+    )
+    assert r.status_code == 200
+    st = _pond_status(catchment_client, "outlet")
+    assert st["is_failed"] and st["is_blocked"] and st["failures"] == 1
 
 
 def test_ripple_retry_trace_recorded(catchment_client):
