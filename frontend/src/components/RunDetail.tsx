@@ -1,8 +1,41 @@
 'use client';
 
-import { useLiveStore, parseTs, THEME_PULL } from '@/lib/store';
+import { useLiveStore, parseTs, THEME_PULL, THEME_DANGER } from '@/lib/store';
 import type { PondRun, RippleRun } from '@/lib/types';
 import { clock, durationOf, STATUS_COLOR } from './RunHistory';
+
+// One failure, attributed to its source (a Ripple by name, or a Pond-level cause).
+function ErrorBox({ source, message }: { source: string; message: string }) {
+  return (
+    <div
+      style={{
+        marginBottom: 4,
+        padding: '5px 8px',
+        background: `${THEME_DANGER}12`,
+        border: `1px solid ${THEME_DANGER}40`,
+        borderRadius: 4,
+        fontSize: 11,
+        lineHeight: 1.5,
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+      }}
+    >
+      <span style={{ color: THEME_DANGER, fontWeight: 700 }}>{source}</span>
+      <span style={{ color: '#52525b' }}> · </span>
+      <span style={{ color: '#fca5a5' }}>{message}</span>
+    </div>
+  );
+}
+
+// Errors for a run, attributed to their source. Ripple errors win (one per failed attempt, named);
+// only a genuine Pond-level failure (no Ripple errored) shows the Pond Run's own error.
+function runErrors(run: PondRun): { source: string; message: string }[] {
+  const rippleErrs = (run.ripples ?? [])
+    .filter((r) => r.error)
+    .map((r) => ({ source: r.retry > 0 ? `${r.ripple} ↻${r.retry}` : r.ripple, message: r.error as string }));
+  if (rippleErrs.length > 0) return rippleErrs;
+  return run.error ? [{ source: 'Pond', message: run.error }] : [];
+}
 
 function StatusPill({ status }: { status: string }) {
   const c = STATUS_COLOR[status] ?? '#71717a';
@@ -81,6 +114,20 @@ export function RunDetail() {
             <Field label="Started" value={clock(run.startedAt)} />
             <Field label="Finished" value={clock(run.finishedAt)} />
           </div>
+
+          {(() => {
+            const errors = runErrors(run);
+            return errors.length > 0 ? (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 9, fontWeight: 700, color: '#52525b', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>
+                  {errors.length > 1 ? 'Errors' : 'Error'}
+                </div>
+                {errors.map((e, i) => (
+                  <ErrorBox key={i} source={e.source} message={e.message} />
+                ))}
+              </div>
+            ) : null;
+          })()}
 
           <div style={{ fontSize: 9, fontWeight: 700, color: '#52525b', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>
             Ripples

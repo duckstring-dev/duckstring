@@ -502,7 +502,7 @@ def test_stop_cancels_standing_trigger(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
     catchment_client.post("/api/ponds/outlet/wave")
     assert _trigger_row(_db(catchment_client), "outlet") == [("wave", None, "active")]
-    r = catchment_client.post("/api/ponds/outlet/stop")
+    r = catchment_client.post("/api/ponds/outlet/sleep")
     assert r.status_code == 200
     assert _trigger_row(_db(catchment_client), "outlet") == []
 
@@ -588,11 +588,41 @@ def test_failed_event_marks_pond_then_clears(catchment_client):
     assert not st["is_failed"] and not st["is_blocked"] and st["failures"] == 0
 
 
+def test_kill_endpoint_parks_pond(catchment_client):
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
+            toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
+    catchment_client.post("/api/ponds/outlet/wake")  # a Run is in flight
+    assert catchment_client.post("/api/ponds/outlet/kill").status_code == 200
+    st = _pond_status(catchment_client, "outlet")
+    assert st["is_killed"] and st["status"] == "killed"
+    # Clear lifts the kill.
+    catchment_client.post("/api/ponds/outlet/clear")
+    assert not _pond_status(catchment_client, "outlet")["is_killed"]
+
+
+def test_failed_ripple_error_surfaced_in_history(catchment_client):
+    # A failed Ripple's error message reaches run history (per-Ripple and at the Pond Run level) so
+    # the UI can show it.
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
+            toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
+    catchment_client.post("/api/ponds/outlet/wake")  # a Run in flight
+    f = catchment_client.get("/api/runs?pond=outlet&lineage=false").json()["runs"][0]["f"]
+    catchment_client.post("/api/duck/outlet/events", json={
+        "kind": "failed", "ripple": "load", "f": f, "status": "failed", "retry": 0,
+        "error": "ValueError: boom",
+    })
+    run = next(r for r in catchment_client.get("/api/runs?pond=outlet&ripples=true&lineage=false").json()["runs"]
+               if r["f"] == f)
+    assert run["error"] == "ValueError: boom"
+    load = next(rr for rr in run["ripples"] if rr["ripple"] == "load")
+    assert load["error"] == "ValueError: boom"
+
+
 def test_pond_failed_event_fails_whole_pond(catchment_client):
     # A Duck-level error (reported as a `pond_failed` event) fails the whole Pond at its in-flight Run.
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
             toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
-    catchment_client.post("/api/ponds/outlet/start")  # puts a Run in flight
+    catchment_client.post("/api/ponds/outlet/wake")  # puts a Run in flight
     r = catchment_client.post(
         "/api/duck/outlet/events",
         json={"kind": "pond_failed", "f": "2026-01-01T00:00:00+00:00", "status": "failed"},
@@ -607,7 +637,7 @@ def test_ripple_retry_trace_recorded(catchment_client):
     # returns the full trace. (start creates the pond_run the Duck's events key off.)
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
             toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
-    catchment_client.post("/api/ponds/outlet/start")
+    catchment_client.post("/api/ponds/outlet/wake")
     runs = catchment_client.get("/api/runs?pond=outlet&lineage=false").json()["runs"]
     assert runs, "start should create a Pond Run"
     f = runs[0]["f"]

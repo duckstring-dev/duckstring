@@ -33,13 +33,15 @@ from ..engine import (
     drain_begin_runs,
     fail_pond,
     fail_ripple,
+    force_pond,
+    kill_pond,
     next_wake,
     pulse_pond,
     sentinel,
-    start_pond,
-    stop_pond,
+    sleep_pond,
     tap_pond,
     tick,
+    wake_pond,
 )
 
 # A Duck is presumed dead if it holds an in-flight Run but hasn't contacted the Catchment within this
@@ -172,12 +174,14 @@ class Driver:
     def _load_pond_state(self, pond_id: int) -> PondState:
         row = self.db.execute(
             "SELECT start_f, end_f, d_ms, has_pull, has_received_pull, is_failed, is_blocked, failed_f, "
-            "failures FROM pond_state WHERE pond_id = ?",
+            "failures, is_killed, pull_local FROM pond_state WHERE pond_id = ?",
             (pond_id,),
         ).fetchone()
         ps = PondState()
         if row:
-            sf, ef, d_ms, hp, hrp, is_failed, is_blocked, failed_f, failures = row
+            sf, ef, d_ms, hp, hrp, is_failed, is_blocked, failed_f, failures, is_killed, pull_local = row
+            ps.is_killed = bool(is_killed)
+            ps.pull_local = bool(pull_local)
             ps.start_f = datetime.fromisoformat(sf) if sf else NEVER
             ps.end_f = datetime.fromisoformat(ef) if ef else NEVER
             ps.d = timedelta(milliseconds=d_ms or 0)
@@ -217,10 +221,30 @@ class Driver:
             self._persist_trigger(pond, "tide", int(bound.total_seconds() * 1000))
             self._tick_process(_now())
 
-    def start(self, pond: str) -> None:
+    def wake(self, pond: str) -> None:
+        """Wake — a one-shot non-propagating pull (run on fresh input; clears failure/kill)."""
         with self.lock:
-            self.state = start_pond(self.state, pond, _now())
+            self.state = wake_pond(self.state, pond, _now())
             self._process(_now())
+
+    def force(self, pond: str) -> None:
+        """Force — recompute now at the current freshness, even with no upstream change."""
+        with self.lock:
+            self.state = force_pond(self.state, pond, _now())
+            self._process(_now())
+
+    def kill(self, pond: str) -> None:
+        """Kill — terminate the Duck and park the Pond in a terminal killed state (cancels its Run)."""
+        with self.lock:
+            now = _now()
+            ps = self.state.pond_states[pond]
+            in_flight = ps.start_f if ps.start_f > ps.end_f else None
+            self.state = kill_pond(self.state, pond, now)
+            self.launcher.terminate(pond)  # cancel the Duck's running Ripples (kills the process)
+            self.jobs[pond] = []
+            if in_flight is not None:
+                self._kill_pond_run(pond, _iso(in_flight), now)
+            self._process(now)
 
     def clear(self, pond: str) -> None:
         """Operator acknowledgement: clear a Pond's failure/block (no run). Downstream Ponds blocked
@@ -258,10 +282,10 @@ class Driver:
         p = self.state.ponds[pond]
         return {"immediate_retries": p.retry_immediately, "source_retries": p.retry_on_change}
 
-    def stop(self, pond: str, upstream: bool = False) -> None:
+    def sleep(self, pond: str, upstream: bool = False) -> None:
         with self.lock:
-            self.state = stop_pond(self.state, pond, _now(), upstream=upstream)
-            # Cancel any standing Wave/Tide trigger on every Pond the stop reached, so it can't re-tap.
+            self.state = sleep_pond(self.state, pond, _now(), upstream=upstream)
+            # Cancel any standing Wave/Tide trigger on every Pond the sleep reached, so it can't re-tap.
             for name in self._stop_set(pond, upstream):
                 if self.state.triggers.pop(name, None) is not None:
                     self.db.execute("DELETE FROM pond_trigger WHERE pond_id = ?", (self.meta[name]["pond_id"],))
@@ -390,6 +414,7 @@ class Driver:
                         started_at=payload.get("started_at"),
                         finished_at=payload.get("finished_at") or _iso(now),
                         retry=payload.get("retry", 0),
+                        error=payload.get("error"),
                     )
                     self._process(now)
             elif kind == "failed":
@@ -400,12 +425,14 @@ class Driver:
                     if f:
                         self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
                     self.state = fail_ripple(self.state, eid, now)
-                    self._fail_pond_run(pond, f, now)  # upsert the pond_run row first (ripple_run FK)
+                    err = payload.get("error")
+                    self._fail_pond_run(pond, f, now, err)  # upsert the pond_run row first (ripple_run FK)
                     self._record_ripple_run(
                         pond, rname, f, "failed",
                         started_at=payload.get("started_at"),
                         finished_at=payload.get("finished_at") or _iso(now),
                         retry=payload.get("retry", 0),
+                        error=err,
                     )
                     self._process(now)
             elif kind == "run_completed":
@@ -414,7 +441,7 @@ class Driver:
             elif kind == "pond_failed":
                 # A Duck-level error (e.g. a failed ledger write): fail the whole Pond at its most
                 # recently started Run. The Duck exits after reporting; liveness will not double-fail.
-                self._fail_whole_pond(pond, now)
+                self._fail_whole_pond(pond, now, payload.get("error"))
 
     def resume_incomplete(self) -> None:
         """Re-dispatch Pond Runs that were in flight when the Catchment stopped, and service any
@@ -454,7 +481,7 @@ class Driver:
             return
         for pond in list(self.state.ponds):
             ps = self.state.pond_states[pond]
-            if ps.is_blocked:
+            if ps.is_blocked or ps.is_killed:  # killed Ponds are intentionally down — don't re-fail
                 continue
             # In flight, and fresher than any recorded failure — so a retry-on-change Run draws a fresh
             # liveness check, but an already-failed Run is not re-failed.
@@ -463,8 +490,10 @@ class Driver:
             last = self.last_seen.get(pond)
             dead = not self.launcher.is_running(pond)
             silent = last is not None and (now - last) > _DUCK_DEAD_AFTER
-            if dead or silent:
-                self._fail_whole_pond(pond, now)
+            if dead:
+                self._fail_whole_pond(pond, now, "Duck process is not running (it crashed or exited)")
+            elif silent:
+                self._fail_whole_pond(pond, now, "Lost contact with the Duck (no events received)")
 
     # ─── Core processing ──────────────────────────────────────────────────────
 
@@ -475,21 +504,23 @@ class Driver:
     def _process(self, now: datetime) -> None:
         self.state, _started = sentinel(now, self.state)
         for cmd in drain_begin_runs(self.state):
-            self._dispatch_begin_run(cmd.pond_id, cmd.f, now)
+            self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force)
         self._persist_state()
         self._reap_idle()
 
-    def _dispatch_begin_run(self, pond: str, f: datetime, now: datetime) -> None:
+    def _dispatch_begin_run(self, pond: str, f: datetime, now: datetime, force: bool = False) -> None:
         meta = self.meta[pond]
         self.launcher.ensure(pond, meta["version"], meta["source_path"])
         self.last_seen[pond] = now  # grace clock: a freshly (re)spawned Duck isn't immediately stale
         self.jobs.setdefault(pond, []).append({
-            "kind": "begin_run", "f": _iso(f),
+            "kind": "begin_run", "f": _iso(f), "force": force,
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
         })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
-        # default is naive and would be misread as local time by the UI.
+        # default is naive and would be misread as local time by the UI. A Force re-opens the Run.
         self.db.execute(
+            "INSERT OR REPLACE INTO pond_run (pond_version_id, f, started_at, status) VALUES (?, ?, ?, 'running')"
+            if force else
             "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status) VALUES (?, ?, ?, 'running')",
             (meta["version_id"], _iso(f), _iso(now)),
         )
@@ -515,7 +546,7 @@ class Driver:
 
     def _record_ripple_run(
         self, pond: str, rname: str, f: str, status: str, started_at: str | None, finished_at: str,
-        retry: int = 0,
+        retry: int = 0, error: str | None = None,
     ) -> None:
         meta = self.meta[pond]
         rid = meta["ripple_ids"].get(rname)
@@ -523,9 +554,10 @@ class Driver:
             return
         # Keyed on (pond_version, f, ripple, retry): each attempt is its own row — the retry trace.
         self.db.execute(
-            "INSERT OR REPLACE INTO ripple_run (pond_version_id, f, ripple_id, retry, started_at, finished_at, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (meta["version_id"], f, rid, retry, started_at, finished_at, status),
+            "INSERT OR REPLACE INTO ripple_run "
+            "(pond_version_id, f, ripple_id, retry, started_at, finished_at, status, error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (meta["version_id"], f, rid, retry, started_at, finished_at, status, error),
         )
         self.db.commit()
 
@@ -537,7 +569,7 @@ class Driver:
         )
         self.db.commit()
 
-    def _fail_whole_pond(self, pond: str, now: datetime) -> None:
+    def _fail_whole_pond(self, pond: str, now: datetime, error: str | None = None) -> None:
         """Fail a Pond with no single culprit Ripple (dead/silent Duck, or a reported Duck-level
         error): mark its most recently started Run failed and run the cascade (which may re-dispatch a
         retry-on-change Run, respawning a Duck). No-op if nothing is in flight."""
@@ -546,15 +578,25 @@ class Driver:
             return
         f = _iso(ps.start_f)
         self.state = fail_pond(self.state, pond, now)
-        self._fail_pond_run(pond, f, now)
+        self._fail_pond_run(pond, f, now, error)
         self._process(now)
 
-    def _fail_pond_run(self, pond: str, f: str, now: datetime) -> None:
+    def _fail_pond_run(self, pond: str, f: str, now: datetime, error: str | None = None) -> None:
         meta = self.meta[pond]
         self.db.execute(
-            "INSERT INTO pond_run (pond_version_id, f, started_at, finished_at, status) "
-            "VALUES (?, ?, ?, ?, 'failed') ON CONFLICT(pond_version_id, f) DO UPDATE SET "
-            "finished_at = excluded.finished_at, status = 'failed'",
+            "INSERT INTO pond_run (pond_version_id, f, started_at, finished_at, status, error) "
+            "VALUES (?, ?, ?, ?, 'failed', ?) ON CONFLICT(pond_version_id, f) DO UPDATE SET "
+            "finished_at = excluded.finished_at, status = 'failed', error = excluded.error",
+            (meta["version_id"], f, _iso(now), _iso(now), error),
+        )
+        self.db.commit()
+
+    def _kill_pond_run(self, pond: str, f: str, now: datetime) -> None:
+        meta = self.meta[pond]
+        self.db.execute(
+            "INSERT INTO pond_run (pond_version_id, f, started_at, finished_at, status, error) "
+            "VALUES (?, ?, ?, ?, 'killed', 'Killed by operator') ON CONFLICT(pond_version_id, f) DO UPDATE SET "
+            "finished_at = excluded.finished_at, status = 'killed', error = excluded.error",
             (meta["version_id"], f, _iso(now), _iso(now)),
         )
         self.db.commit()
@@ -572,12 +614,13 @@ class Driver:
             pond_id = self.meta[name]["pond_id"]
             self.db.execute(
                 "INSERT INTO pond_state (pond_id, start_f, end_f, d_ms, has_pull, has_received_pull, "
-                "is_failed, is_blocked, failed_f, failures) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
+                "is_failed, is_blocked, failed_f, failures, is_killed, pull_local) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
                 "start_f = excluded.start_f, end_f = excluded.end_f, d_ms = excluded.d_ms, "
                 "has_pull = excluded.has_pull, has_received_pull = excluded.has_received_pull, "
                 "is_failed = excluded.is_failed, is_blocked = excluded.is_blocked, "
-                "failed_f = excluded.failed_f, failures = excluded.failures",
+                "failed_f = excluded.failed_f, failures = excluded.failures, "
+                "is_killed = excluded.is_killed, pull_local = excluded.pull_local",
                 (
                     pond_id,
                     _iso(ps.start_f) if ps.start_f != NEVER else None,
@@ -589,6 +632,8 @@ class Driver:
                     int(ps.is_blocked),
                     _iso(ps.failed_f) if ps.failed_f != NEVER else None,
                     ps.failures,
+                    int(ps.is_killed),
+                    int(ps.pull_local),
                 ),
             )
             self.db.execute("DELETE FROM pond_target WHERE pond_id = ?", (pond_id,))
@@ -638,9 +683,11 @@ class Driver:
                             ripple_edges.append([psrc.name, rip.name])
 
                 busy = any(r["status"] == "running" for r in ripples)
-                # Failure/block take precedence over demand state so a stalled Pond reads truthfully.
+                # Failure/kill/block take precedence over demand state so a stalled Pond reads truthfully.
                 if ps.is_failed:
                     st = "failed"
+                elif ps.is_killed:
+                    st = "killed"
                 elif ps.is_blocked:
                     st = "blocked"
                 else:
@@ -669,6 +716,7 @@ class Driver:
                     "trigger": trigger,
                     "is_failed": ps.is_failed,
                     "is_blocked": ps.is_blocked,
+                    "is_killed": ps.is_killed,
                     "failed_f": ts(ps.failed_f),
                     "failures": ps.failures,
                     "immediate_retries": self.state.ponds[name].retry_immediately,
@@ -705,7 +753,8 @@ class Driver:
                 where = f"WHERE pn.name IN ({','.join('?' * len(names))})"
                 params.extend(sorted(names))
             rows = self.db.execute(
-                "SELECT pn.name, pv.version, pr.pond_version_id, pr.f, pr.started_at, pr.finished_at, pr.status "
+                "SELECT pn.name, pv.version, pr.pond_version_id, pr.f, pr.started_at, pr.finished_at, "
+                "pr.status, pr.error "
                 "FROM pond_run pr "
                 "JOIN pond_version pv ON pv.id = pr.pond_version_id "
                 "JOIN pond_name pn ON pn.id = pv.pond_name_id "
@@ -714,22 +763,22 @@ class Driver:
             ).fetchall()
 
             runs = []
-            for pname, version, pv_id, f, started_at, finished_at, status in rows:
+            for pname, version, pv_id, f, started_at, finished_at, status, error in rows:
                 run = {
                     "pond": pname, "version": version, "f": f,
-                    "started_at": started_at, "finished_at": finished_at, "status": status,
+                    "started_at": started_at, "finished_at": finished_at, "status": status, "error": error,
                 }
                 if ripples:
                     rrows = self.db.execute(
-                        "SELECT r.name, rr.started_at, rr.finished_at, rr.status, rr.retry "
+                        "SELECT r.name, rr.started_at, rr.finished_at, rr.status, rr.retry, rr.error "
                         "FROM ripple_run rr JOIN ripple r ON r.id = rr.ripple_id "
                         "WHERE rr.pond_version_id = ? AND rr.f = ? "
                         "ORDER BY COALESCE(rr.finished_at, rr.started_at), rr.retry",
                         (pv_id, f),
                     ).fetchall()
                     run["ripples"] = [
-                        {"ripple": rn, "started_at": rsa, "finished_at": rfa, "status": rst, "retry": rt}
-                        for (rn, rsa, rfa, rst, rt) in rrows
+                        {"ripple": rn, "started_at": rsa, "finished_at": rfa, "status": rst, "retry": rt, "error": rerr}
+                        for (rn, rsa, rfa, rst, rt, rerr) in rrows
                     ]
                 runs.append(run)
             return runs

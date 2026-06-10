@@ -27,16 +27,18 @@ from duckstring.engine import (
     derive_blocked,
     fail_pond,
     fail_ripple,
+    force_pond,
+    kill_pond,
     next_wake,
     pond_set_has_pull,
     pond_source_f,
     pulse_pond,
     ripple_source_f,
     sentinel,
-    start_pond,
-    stop_pond,
+    sleep_pond,
     tap_pond,
     tick,
+    wake_pond,
 )
 
 UTC = timezone.utc
@@ -147,7 +149,7 @@ class Driver:
         self._react()
 
     def stop(self, pid: str, upstream: bool = False) -> None:
-        self.state = stop_pond(self.state, pid, self.now, upstream=upstream)
+        self.state = sleep_pond(self.state, pid, self.now, upstream=upstream)
         # Halt for the test: also drop any standing trigger so it can't re-tap.
         self.state.triggers = {k: v for k, v in self.state.triggers.items() if k != pid}
         self._react()
@@ -361,7 +363,7 @@ def test_stop_local_clears_demand_keeps_ripple_push():
     s.ripple_states["s1"].has_pull = True
     s.ripple_states["s1"].targets = [far]
     s.pond_states["p1"].has_pull = True  # upstream demand
-    out = stop_pond(s, "p2", T0)
+    out = sleep_pond(s, "p2", T0)
     assert not out.pond_states["p2"].has_pull and not out.pond_states["p2"].targets
     assert not out.ripple_states["s1"].has_pull          # ripple pull cleared
     assert out.ripple_states["s1"].targets == [far]      # ripple push kept (started run completes)
@@ -373,7 +375,7 @@ def test_stop_upstream_propagates():
     s, _ = chain_topology()
     s.pond_states["p1"].has_pull = True
     s.pond_states["p2"].has_pull = True
-    out = stop_pond(s, "p2", T0, upstream=True)
+    out = sleep_pond(s, "p2", T0, upstream=True)
     assert not out.pond_states["p2"].has_pull
     assert not out.pond_states["p1"].has_pull            # propagated to the source
 
@@ -514,7 +516,9 @@ def test_fail_pond_attributes_to_start_f_and_blocks():
 
 
 @pytest.mark.timeout(5)
-def test_start_clears_failure_and_runs():
+def test_wake_clears_failure_and_runs():
+    # Wake is a non-propagating pull: it clears the failure and runs once because fresh input is
+    # available (p1 produced T0+1s, p2 never ran), without soliciting p1.
     s, dur = chain_topology()
     s.pond_states["p1"].start_f = s.pond_states["p1"].end_f = T0 + secs(1)  # p1 has output to consume
     ps = s.pond_states["p2"]
@@ -522,9 +526,66 @@ def test_start_clears_failure_and_runs():
     ps.failed_f = T0 + secs(2)
     ps.failures = 1
     d = Driver(s, dur)
-    d.state = start_pond(d.state, "p2", d.now)
+    d.state = wake_pond(d.state, "p2", d.now)
+    assert not d.state.pond_states["p1"].has_received_pull  # non-propagating: p1 not solicited
     d._react()
     d.run(10)
     p2 = d.state.pond_states["p2"]
     assert not p2.is_failed and not p2.is_blocked
     assert p2.runs_completed >= 1
+
+
+@pytest.mark.timeout(5)
+def test_wake_no_op_when_current():
+    # Nothing fresher than the last Run → Wake parks a one-shot pull and runs nothing (no urgency).
+    s, dur = chain_topology()
+    f = T0 + secs(1)
+    s.pond_states["p1"].start_f = s.pond_states["p1"].end_f = f
+    s.pond_states["p2"].start_f = s.pond_states["p2"].end_f = f  # p2 already current with p1
+    d = Driver(s, dur)
+    d.state = wake_pond(d.state, "p2", d.now)
+    d.run(5)
+    assert d.state.pond_states["p2"].runs_completed == 0  # sourceF not > startF → no run
+
+
+@pytest.mark.timeout(5)
+def test_force_recomputes_without_advancing_freshness():
+    # A fully-current Pond: Force re-runs all Ripples at the same freshness and does NOT propagate
+    # downstream (endF returns unchanged).
+    s, dur = chain_topology()
+    f = T0 + secs(1)
+    s.pond_states["p1"].start_f = s.pond_states["p1"].end_f = f
+    s.pond_states["p2"].start_f = s.pond_states["p2"].end_f = f
+    s.ripple_states["s1"].start_f = s.ripple_states["s1"].end_f = f
+    d = Driver(s, dur)
+    before = d.state.pond_states["p2"].runs_completed
+    d.state = force_pond(d.state, "p2", d.now)
+    cmds = [c for c in d.state.pending_begin_runs]
+    d._react()
+    d.run(5)
+    p2 = d.state.pond_states["p2"]
+    assert p2.runs_completed == before + 1  # it re-ran
+    assert p2.end_f == f  # freshness unchanged → downstream sees no change
+    # the dispatched Run carried the force flag
+    assert any(c.pond_id == "p2" and c.force for c in cmds) or any(
+        c.pond_id == "p2" and c.force for c in d.state.pending_begin_runs
+    )
+
+
+@pytest.mark.timeout(1)
+def test_kill_parks_terminal_and_blocks_downstream():
+    s, _ = chain_topology()
+    # p1 has a Run in flight; Kill cancels it.
+    s.pond_states["p1"].start_f = T0 + secs(5)
+    s.pond_states["p1"].end_f = T0 + secs(2)
+    s.ripple_states["r1"].is_running = True
+    out = kill_pond(s, "p1", T0 + secs(6))
+    assert out.pond_states["p1"].is_killed
+    assert not out.ripple_states["r1"].is_running
+    assert out.pond_states["p2"].is_blocked  # downstream blocked by the killed Source
+    # Killed supersedes demand: a fresh Tap does nothing until cleared.
+    out2, _ = sentinel(T0 + secs(7), tap_pond(out, "p1", T0 + secs(7)))
+    assert out2.pond_states["p1"].runs_started == s.pond_states["p1"].runs_started  # no new run
+    # Clear lifts it and unblocks downstream.
+    cleared = clear_pond(out, "p1", T0 + secs(8))
+    assert not cleared.pond_states["p1"].is_killed and not cleared.pond_states["p2"].is_blocked

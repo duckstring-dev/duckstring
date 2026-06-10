@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useLiveStore, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED } from '@/lib/store';
+import { useLiveStore, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
 import type { FreqUnit, PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
@@ -118,8 +118,10 @@ export function Sidebar() {
   const pulse = useLiveStore((s) => s.pulse);
   const wave = useLiveStore((s) => s.wave);
   const tide = useLiveStore((s) => s.tide);
-  const start = useLiveStore((s) => s.start);
-  const stop = useLiveStore((s) => s.stop);
+  const wake = useLiveStore((s) => s.wake);
+  const sleep = useLiveStore((s) => s.sleep);
+  const force = useLiveStore((s) => s.force);
+  const kill = useLiveStore((s) => s.kill);
   const removeTrigger = useLiveStore((s) => s.removeTrigger);
   const clearFailure = useLiveStore((s) => s.clearFailure);
   const setBudget = useLiveStore((s) => s.setBudget);
@@ -148,8 +150,8 @@ export function Sidebar() {
   return (
     <div
       style={{
-        width: 290,
-        minWidth: 290,
+        width: 320,
+        minWidth: 320,
         background: '#15151a',
         borderLeft: '1px solid #27272a',
         padding: 18,
@@ -258,53 +260,41 @@ export function Sidebar() {
             )}
           </Section>
 
-          {/* Control: start a one-off run, or clear demand (this Pond, or its whole lineage) */}
+          {/* Control: Force/Wake (go) and Sleep/Kill (stop) lifecycle on the Duck */}
           <Section>
             <Label>Control</Label>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn onClick={() => start(selectedPond.id)} color={THEME_SUCCESS}>Start</Btn>
-              <Btn onClick={() => stop(selectedPond.id)} color={THEME_DANGER}>Stop</Btn>
-              <Btn onClick={() => stop(selectedPond.id, true)} color={THEME_DANGER}>Stop Lineage</Btn>
-            </div>
-            <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
-              Start: one run on this Pond, no upstream. Stop: clear this Pond&apos;s demand. Stop Lineage: also clear all upstream sources.
+              <Btn onClick={() => force(selectedPond.id)} color={THEME_SUCCESS}>Force</Btn>
+              <Btn onClick={() => wake(selectedPond.id)} color={THEME_WAKE}>Wake</Btn>
+              <Btn onClick={() => sleep(selectedPond.id)} color={THEME_BLOCKED}>Sleep</Btn>
+              <Btn onClick={() => kill(selectedPond.id)} color={THEME_DANGER}>Kill</Btn>
             </div>
           </Section>
 
-          {/* Failures: clear a failed Pond and edit its retry budgets */}
+          {/* Failures: retry budgets + clearing a failed Pond */}
           <Section>
             <Label>Failures</Label>
-            {pondInfo[selectedPond.id]?.isFailed ? (
-              <div style={{ fontSize: 12, color: THEME_DANGER, marginBottom: 8, lineHeight: 1.6 }}>
-                Failed
-                <div style={{ color: '#a1a1aa', fontSize: 11 }}>
-                  {pondInfo[selectedPond.id].failures}/{pondInfo[selectedPond.id].sourceRetries} on-change retries used
-                </div>
-              </div>
-            ) : pondInfo[selectedPond.id]?.isBlocked ? (
-              <div style={{ fontSize: 12, color: THEME_BLOCKED, marginBottom: 8 }}>Blocked by an upstream failure.</div>
-            ) : (
-              <div style={{ fontSize: 12, color: '#52525b', marginBottom: 8 }}>No failure.</div>
-            )}
-            <Btn onClick={() => clearFailure(selectedPond.id)} color={THEME_SUCCESS} disabled={!pondInfo[selectedPond.id]?.isFailed}>
-              Clear
-            </Btn>
-
-            <div style={{ marginTop: 12 }}>
-              <Label>Retry budget</Label>
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 11, color: '#71717a' }} title="Ripple retries within one Pond Run">imm</span>
-                <input type="number" min="0" step="1" value={immRetries} onChange={(e) => setImmRetries(e.target.value)} style={{ ...numInput, width: 44 }} />
-                <span style={{ fontSize: 11, color: '#71717a' }} title="Pond Runs retried when a Source updates">chg</span>
-                <input type="number" min="0" step="1" value={srcRetries} onChange={(e) => setSrcRetries(e.target.value)} style={{ ...numInput, width: 44 }} />
-                <Btn small color={THEME_PUSH} onClick={() => setBudget(selectedPond.id, Math.max(0, parseInt(immRetries) || 0), Math.max(0, parseInt(srcRetries) || 0))}>
+            {([
+              ['Immediate Retries', immRetries, setImmRetries],
+              ['On Change Retries', srcRetries, setSrcRetries],
+            ] as const).map(([label, value, setValue]) => (
+              <div key={label} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ flex: 1, fontSize: 11, color: '#a1a1aa' }}>{label}</span>
+                <input type="number" min="0" step="1" value={value} onChange={(e) => setValue(e.target.value)} style={{ ...numInput, width: 48 }} />
+                <Btn
+                  small
+                  color={THEME_PUSH}
+                  onClick={() => setBudget(selectedPond.id, Math.max(0, parseInt(immRetries) || 0), Math.max(0, parseInt(srcRetries) || 0))}
+                >
                   Set
                 </Btn>
               </div>
-              <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
-                imm: Ripple retries within a Run. chg: Runs retried when a Source updates.
+            ))}
+            {pondInfo[selectedPond.id]?.isFailed && (
+              <div style={{ marginTop: 8 }}>
+                <Btn onClick={() => clearFailure(selectedPond.id)} color={THEME_SUCCESS}>Clear Failure</Btn>
               </div>
-            </div>
+            )}
           </Section>
 
           <Section>

@@ -8,6 +8,7 @@ export const STATUS_COLOR: Record<string, string> = {
   success: THEME_SUCCESS,
   running: THEME_RUNNING,
   failed: THEME_DANGER,
+  killed: THEME_DANGER,
 };
 
 // Fixed column widths (px) so the duration lands at the same x on Pond and (indented) Ripple rows.

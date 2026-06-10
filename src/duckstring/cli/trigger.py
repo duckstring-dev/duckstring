@@ -30,35 +30,6 @@ def _post_trigger(
     )
 
 
-def start(
-    outlet: str = typer.Argument(..., help="Name of the Pond to start (one direct run)."),
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active)."),
-    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
-    silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
-    watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
-) -> None:
-    """Inject demand directly into a Pond — one run against current inputs, no upstream propagation."""
-    from .config import resolve_catchment
-    _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "start", {}, "Started.", one_shot=True)
-
-
-def stop(
-    outlet: str = typer.Argument(..., help="Name of the Pond to stop."),
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
-    upstream: bool = typer.Option(False, "--upstream", help="Also stop all upstream (source) Ponds."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active)."),
-    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
-) -> None:
-    """Clear demand from a Pond (push + pull); started Pond Runs still complete."""
-    from . import _http
-    from .config import resolve_catchment
-    _, cfg = resolve_catchment(catchment)
-    _http.post(f"{cfg['url']}/api/ponds/{outlet}/stop", json={"upstream": upstream})
-    typer.echo("Stopped (upstream)." if upstream else "Stopped.")
-
-
 def remove(
     outlet: str = typer.Argument(..., help="Name of the Outlet Pond whose standing trigger to remove."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),

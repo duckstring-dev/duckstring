@@ -5,7 +5,7 @@
 export type PondId = string; // the Pond name
 export type RippleId = string; // `${pond}.${ripple}`
 
-export type DemandStatus = 'running' | 'queued' | 'idle' | 'failed' | 'blocked';
+export type DemandStatus = 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked';
 export type FreqUnit = 'SECOND' | 'MINUTE' | 'HOUR' | 'DAY' | 'WEEK';
 export type Weekday = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI' | 'SAT' | 'SUN';
 export type TriggerKind = 'wave' | 'tide';
@@ -49,9 +49,10 @@ export interface TriggerView {
 export interface PondInfo {
   version: string;
   kind: string;
-  // Fault tolerance (Ponds only).
+  // Fault tolerance + control (Ponds only).
   isFailed: boolean;
   isBlocked: boolean;
+  isKilled: boolean;
   failedF: string | null; // freshness the failed Run was reaching
   failures: number; // failed Runs this episode (vs sourceRetries)
   immediateRetries: number; // live budget: Ripple retries within a Run
@@ -66,6 +67,7 @@ export interface RippleRun {
   finishedAt: string | null;
   status: string;
   retry: number; // attempt index (0 = first try); a Ripple's failed attempts + final outcome form a trace
+  error: string | null; // failure message for this attempt, if it errored
 }
 
 export interface PondRun {
@@ -75,6 +77,7 @@ export interface PondRun {
   startedAt: string | null;
   finishedAt: string | null;
   status: string;
+  error: string | null; // Pond-level failure message (dead/silent Duck, ledger error), if any
   ripples?: RippleRun[];
 }
 

@@ -63,12 +63,14 @@ function mapRun(r: RawPondRun): PondRun {
     startedAt: r.started_at,
     finishedAt: r.finished_at,
     status: r.status,
+    error: r.error,
     ripples: r.ripples?.map((rr) => ({
       ripple: rr.ripple,
       startedAt: rr.started_at,
       finishedAt: rr.finished_at,
       status: rr.status,
       retry: rr.retry,
+      error: rr.error,
     })),
   };
 }
@@ -109,6 +111,7 @@ function transformStatus(payload: StatusPayload): StatusSlice {
       kind: p.kind,
       isFailed: p.is_failed,
       isBlocked: p.is_blocked,
+      isKilled: p.is_killed,
       failedF: p.failed_f,
       failures: p.failures,
       immediateRetries: p.immediate_retries,
@@ -176,9 +179,12 @@ export interface LiveState extends StatusSlice {
   pulse(pond: PondId): Promise<void>;
   wave(pond: PondId): Promise<void>;
   tide(pond: PondId, boundSeconds: number): Promise<void>;
-  start(pond: PondId): Promise<void>;
-  stop(pond: PondId, upstream?: boolean): Promise<void>;
   removeTrigger(pond: PondId): Promise<void>;
+
+  wake(pond: PondId): Promise<void>;
+  sleep(pond: PondId, upstream?: boolean): Promise<void>;
+  force(pond: PondId): Promise<void>;
+  kill(pond: PondId): Promise<void>;
 
   clearFailure(pond: PondId): Promise<void>;
   setBudget(pond: PondId, immediateRetries: number, sourceRetries: number): Promise<void>;
@@ -321,9 +327,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   pulse: (pond) => act(get, set, () => postTrigger(pond, 'pulse')),
   wave: (pond) => act(get, set, () => postTrigger(pond, 'wave')),
   tide: (pond, boundSeconds) => act(get, set, () => postTrigger(pond, 'tide', { bound_seconds: boundSeconds })),
-  start: (pond) => act(get, set, () => postTrigger(pond, 'start')),
-  stop: (pond, upstream = false) => act(get, set, () => postTrigger(pond, 'stop', { upstream })),
   removeTrigger: (pond) => act(get, set, () => postTrigger(pond, 'untrigger')),
+
+  wake: (pond) => act(get, set, () => postTrigger(pond, 'wake')),
+  sleep: (pond, upstream = false) => act(get, set, () => postTrigger(pond, 'sleep', { upstream })),
+  force: (pond) => act(get, set, () => postTrigger(pond, 'force')),
+  kill: (pond) => act(get, set, () => postTrigger(pond, 'kill')),
 
   clearFailure: (pond) => act(get, set, () => clearFailure(pond)),
   setBudget: (pond, immediateRetries, sourceRetries) =>
@@ -402,14 +411,16 @@ export const THEME_PUSH = '#a3e635'; // push (Pulse/Tide) — green-yellow
 export const THEME_SUCCESS = '#22c55e'; // success · connected · start · clear (green)
 export const THEME_DANGER = '#ef4444'; // stop · failed (red)
 export const THEME_BLOCKED = '#991b1b'; // blocked by an upstream failure — a darker, muted red
+export const THEME_WAKE = '#15803d'; // Wake — a muted/dark green (the soft "go", vs Force's bright green)
 
-// Node/Ripple demand state → border colour. Failed/blocked (Ponds) take precedence in the backend's
-// status string, so they map straight through here.
+// Node/Ripple demand state → border colour. Failed/killed/blocked (Ponds) take precedence in the
+// backend's status string, so they map straight through here.
 export const STATE_COLORS: Record<string, string> = {
   running: THEME_RUNNING,
   queued: THEME_PULL,
   idle: '#71717a',
   failed: THEME_DANGER,
+  killed: THEME_DANGER, // killed reads as red, like failed
   blocked: THEME_BLOCKED,
 };
 

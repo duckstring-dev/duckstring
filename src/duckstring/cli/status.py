@@ -84,6 +84,7 @@ def _make_table(component_ponds: list[dict]) -> object:
         "queued":  "[yellow]queued[/yellow]",
         "idle":    "[dim]idle[/dim]",
         "failed":  "[bold red]failed[/bold red]",
+        "killed":  "[bold red]killed[/bold red]",
         "blocked": "[red dim]blocked[/red dim]",
     }
 
@@ -237,7 +238,7 @@ def _run_live(
                     # One-shot trigger (Tap/Pulse): close once the target Pond settles — back to idle,
                     # or stuck failed/blocked (which never returns to idle on its own).
                     tgt = next((p for p in ponds if p["name"] == until_idle_pond), None)
-                    done = tgt is not None and tgt.get("status") in ("idle", "failed", "blocked")
+                    done = tgt is not None and tgt.get("status") in ("idle", "failed", "killed", "blocked")
             ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
             footer = " · settled" if done else " · Ctrl+C to stop"
             header = Text(f"Updated {ts}{footer}", style="dim")

@@ -78,24 +78,43 @@ def tide(name: str, body: _TideBody, request: Request):
     return {"ok": True}
 
 
-@router.post("/ponds/{name}/start")
-def start(name: str, request: Request):
-    """Inject demand directly into a Pond — one run against current inputs, no upstream propagation."""
+# ─── Control (Wake / Sleep / Force / Kill) ───────────────────────────────────
+
+
+@router.post("/ponds/{name}/wake")
+def wake(name: str, request: Request):
+    """Wake a Pond — a one-shot non-propagating pull: run once on fresh input, no upstream solicit."""
     _require_pond(request, name)
-    _driver(request).start(name)
+    _driver(request).wake(name)
     return {"ok": True}
 
 
-class _StopBody(BaseModel):
+@router.post("/ponds/{name}/force")
+def force(name: str, request: Request):
+    """Force a Pond to recompute now at its current freshness, even with no upstream change."""
+    _require_pond(request, name)
+    _driver(request).force(name)
+    return {"ok": True}
+
+
+@router.post("/ponds/{name}/kill")
+def kill(name: str, request: Request):
+    """Kill a Pond — terminate its Duck and park it in a terminal killed state (cancels its Run)."""
+    _require_pond(request, name)
+    _driver(request).kill(name)
+    return {"ok": True}
+
+
+class _SleepBody(BaseModel):
     upstream: bool = False
 
 
-@router.post("/ponds/{name}/stop")
-def stop(name: str, request: Request, body: _StopBody = _StopBody()):
-    """Clear a Pond's demand (push+pull) + its Ripples' pull; keep started runs completing.
-    ``upstream`` also stops every ancestor."""
+@router.post("/ponds/{name}/sleep")
+def sleep(name: str, request: Request, body: _SleepBody = _SleepBody()):
+    """Sleep a Pond — clear its demand (push+pull) + its Ripples' pull; keep started runs completing.
+    ``upstream`` also sleeps every ancestor."""
     _require_pond(request, name)
-    _driver(request).stop(name, upstream=body.upstream)
+    _driver(request).sleep(name, upstream=body.upstream)
     return {"ok": True}
 
 

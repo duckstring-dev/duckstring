@@ -150,10 +150,12 @@ class Trigger:
 @dataclass(frozen=True)
 class BeginRun:
     """A command from the Catchment to a Duck: start a Pond Run at freshness ``f`` (push every Ripple
-    to ``f``). Emitted by the Catchment's ``start_pond_run``; identified/idempotent by ``(pond_id, f)``."""
+    to ``f``). Emitted by the Catchment's ``start_pond_run``; identified/idempotent by ``(pond_id, f)``.
+    ``force`` re-runs every Ripple even if already fresh to ``f`` (a Force/recompute)."""
 
     pond_id: PondId
     f: datetime
+    force: bool = False
 
 
 # ─── Run state (mutable) ──────────────────────────────────────────────────────
@@ -169,9 +171,13 @@ class PondState:
     targets: list[datetime] = field(default_factory=list)  # unsatisfied push target freshnesses
     # Fault tolerance (see docs/guide/theory.md "Fault Tolerance").
     is_failed: bool = False  # a Pond Run gave up and has not been superseded by a fresher success
-    is_blocked: bool = False  # this Pond is failed, or a required Source is failed/blocked
+    is_blocked: bool = False  # this Pond is failed, or a required Source is failed/blocked/killed
     failed_f: datetime = NEVER  # freshness of the freshest Pond Run that has failed (NEVER if none)
     failures: int = 0  # failed Pond Runs since the last success (counted against retry_on_change)
+    # Control (Wake/Force/Kill — see docs).
+    is_killed: bool = False  # operator Kill: terminal, supersedes retries, until Wake/Force/Clear
+    pull_local: bool = False  # the pending pull is a Wake — run on fresh input but do NOT solicit Sources
+    force_pending: bool = False  # next Run is a Force (recompute) — re-run Ripples even if unchanged
     runs_started: int = 0
     runs_completed: int = 0
     gen_start_times: dict[int, datetime] = field(default_factory=dict)

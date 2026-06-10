@@ -74,6 +74,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                         _launch(core.begin_run(
                             datetime.fromisoformat(data["f"]), _now(),
                             retry_immediately=data.get("immediate_retries", 0),
+                            force=data.get("force", False),
                         ))
                 elif kind == "done":
                     inflight -= 1
@@ -87,20 +88,22 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                     last_progress = _now()
                     name, exc, started, finished = data
                     print(f"[duck:{core.pond_name}] ripple {name} failed: {exc}", flush=True)
-                    _launch(core.ripple_failed(name, _now(), started_at=started, finished_at=finished))
+                    _launch(core.ripple_failed(
+                        name, _now(), started_at=started, finished_at=finished, error=_msg(exc)
+                    ))
 
                 core.flush(client.post_event)
             except Exception as exc:
                 # A Pond-level error (e.g. a failed ledger write): report it against the most recent
                 # Pond Run and exit. The Catchment fails the Pond (and may retry it on change).
                 print(f"[duck:{core.pond_name}] pond-level failure: {exc}", flush=True)
-                _report_pond_failure(core, client)
+                _report_pond_failure(core, client, _msg(exc))
                 break
 
             # Watchdog: outstanding work but nothing running, past the grace period → the Run is stuck.
             if not core.idle() and inflight == 0 and (_now() - last_progress).total_seconds() > _STUCK_GRACE_S:
                 print(f"[duck:{core.pond_name}] stuck: active Pond Run with no running Ripple", flush=True)
-                _report_pond_failure(core, client)
+                _report_pond_failure(core, client, "stuck: active Pond Run with no running Ripple")
                 break
 
             if shutdown_requested and core.idle() and not core.events:
@@ -111,10 +114,16 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
         client.close()
 
 
-def _report_pond_failure(core: DuckCore, client: CatchmentClient) -> None:
+def _msg(exc: BaseException) -> str:
+    """A compact, single-line failure message for the UI/DB (type + first line, length-capped)."""
+    text = f"{type(exc).__name__}: {exc}".strip().splitlines()[0]
+    return text[:500]
+
+
+def _report_pond_failure(core: DuckCore, client: CatchmentClient, error: str | None = None) -> None:
     """Best-effort: buffer + flush a Pond-level failure for the Catchment (the Duck then exits)."""
     try:
-        core.pond_failed()
+        core.pond_failed(error)
         core.flush(client.post_event)
     except Exception:
         pass

@@ -127,6 +127,54 @@ def test_check_liveness_skipped_without_process_launcher(tmp_path):
     assert not d.state.pond_states["src"].is_failed  # nothing to watch → never failed on liveness
 
 
+# ─── Control: Force / Kill ─────────────────────────────────────────────────────
+
+
+def test_force_dispatches_force_flag(tmp_path):
+    d = _driver(tmp_path)
+    d.pulse("src")
+    _complete_run(d, "src")  # src is now current (start_f == end_f)
+    d.jobs["src"] = []  # drop the prior dispatch
+    d.force("src")
+    assert any(j["kind"] == "begin_run" and j.get("force") for j in d.jobs.get("src", []))
+
+
+def test_clear_failed_pond_is_not_refailed_by_liveness(tmp_path):
+    from duckstring.catchment.driver import _now
+
+    d = _inlet_driver(tmp_path, "clr.db", _DeadLauncher())  # manages_processes, but reports Ducks dead
+    d.pulse("src")  # a Run in flight (start_f > end_f)
+    f = d.state.pond_states["src"].start_f.isoformat()
+    d.on_event("src", {"kind": "failed", "ripple": "r1", "f": f, "status": "failed", "error": "boom"})
+    assert d.state.pond_states["src"].is_failed
+    d.clear("src")
+    assert not d.state.pond_states["src"].is_failed
+    # The liveness sweep must NOT re-fail it — clearing abandoned the phantom in-flight Run.
+    d._check_liveness(_now())
+    assert not d.state.pond_states["src"].is_failed
+    assert d.state.pond_states["src"].start_f == d.state.pond_states["src"].end_f  # idle, not in-flight
+
+
+def test_kill_terminates_duck_and_parks(tmp_path):
+    terminated = []
+
+    class _RecordingLauncher(NoopLauncher):
+        manages_processes = True
+
+        def terminate(self, pond_name: str) -> None:
+            terminated.append(pond_name)
+
+    d = _inlet_driver(tmp_path, "kill.db", _RecordingLauncher())
+    d.pulse("src")  # a Run in flight
+    d.kill("src")
+    assert d.state.pond_states["src"].is_killed
+    assert terminated == ["src"]  # the Duck was terminated
+    # Killed supersedes demand: a Tap does nothing until cleared.
+    started = d.state.pond_states["src"].runs_started
+    d.tap("src")
+    assert d.state.pond_states["src"].runs_started == started
+
+
 # ─── /api/runs history ───────────────────────────────────────────────────────────
 
 

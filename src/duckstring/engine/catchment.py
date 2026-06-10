@@ -58,8 +58,10 @@ __all__ = [
     "derive_blocked",
     "tap_pond",
     "pulse_pond",
-    "stop_pond",
-    "start_pond",
+    "sleep_pond",
+    "wake_pond",
+    "force_pond",
+    "kill_pond",
     "clear_pond",
     "sentinel",
     "tick",
@@ -229,8 +231,8 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
     downstream; a Pond still reads its blocked state solely from itself and its Sources."""
     ps = s.pond_states[pid]
     pond = s.ponds[pid]
-    blocked = ps.is_failed or any(
-        s.pond_states[sp].is_failed or s.pond_states[sp].is_blocked
+    blocked = ps.is_failed or ps.is_killed or any(
+        s.pond_states[sp].is_failed or s.pond_states[sp].is_blocked or s.pond_states[sp].is_killed
         for sp in pond.sources
         if sp not in pond.optional_sources
     )
@@ -245,6 +247,8 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
 
 def can_start_pond(s: EngineState, pid: PondId, now: datetime) -> bool:
     ps = s.pond_states[pid]
+    if ps.is_killed:  # terminal until an operator Wake/Force/Clear
+        return False
     f, _ = pond_source_f(s, pid, now)
     if f is None:
         return False
@@ -267,13 +271,15 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     assert f is not None
     started_as_pull = ps.has_pull
 
-    if started_as_pull and not ps.is_blocked:  # a blocked Pond drains, but never solicits its Sources
+    # A blocked Pond drains but never solicits its Sources; a Wake (pull_local) also doesn't propagate.
+    if started_as_pull and not ps.is_blocked and not ps.pull_local:
         for sp in s.ponds[pid].sources:
             s.pond_states[sp].has_received_pull = True
             pond_receive_pull(s, sp, now)
 
     ps.start_f = f
     ps.has_pull = False
+    ps.pull_local = False
     ps.targets = [t for t in ps.targets if t > ps.start_f]
 
     if not s.ponds[pid].sources:
@@ -290,8 +296,9 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
 
     ps.runs_started += 1
     ps.gen_start_times[ps.runs_started] = now
-    # Record the command for the Catchment to dispatch to this Pond's Duck.
-    s.pending_begin_runs.append(BeginRun(pid, ps.start_f))
+    # Record the command for the Catchment to dispatch to this Pond's Duck (force = a recompute).
+    s.pending_begin_runs.append(BeginRun(pid, ps.start_f, force=ps.force_pending))
+    ps.force_pending = False
 
 
 def can_start_ripple(s: EngineState, rid: RippleId) -> bool:
@@ -405,10 +412,11 @@ def pulse_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
     return s
 
 
-def stop_pond(state: EngineState, pid: PondId, now: datetime, upstream: bool = False) -> EngineState:
-    """Stop a Pond: clear its push+pull demand and its Ripples' **pull** demand, but KEEP Ripple push
-    targets so any already-started Pond Run completes. With ``upstream=True`` the stop propagates to
-    every ancestor (a hasStop token following the source edges), clearing each one's demand too."""
+def sleep_pond(state: EngineState, pid: PondId, now: datetime, upstream: bool = False) -> EngineState:
+    """Sleep a Pond: clear its push+pull demand and its Ripples' **pull** demand, but KEEP Ripple push
+    targets so any already-started Pond Run completes. With ``upstream=True`` the sleep propagates to
+    every ancestor (a token following the source edges), clearing each one's demand too. The soft
+    counterpart to Wake — it lets the Pond settle, vs Kill which cancels everything."""
     s = state.clone()
     seen: set[PondId] = set()
     queue = [pid]
@@ -430,34 +438,78 @@ def stop_pond(state: EngineState, pid: PondId, now: datetime, upstream: bool = F
     return s
 
 
-def start_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
-    """Inject demand directly into a Pond: a push target of NEVER (an "-Inf" freshness) on the Pond
-    alone, with **no upstream propagation**. The Pond runs once against whatever input it currently
-    has (``sourceF >= NEVER`` always holds), then the target clears. Distinct from a Pulse, which
-    targets ``now`` and propagates upstream to force a full refresh. A ``start`` also clears a failure
-    on the Pond (the operator override), letting it run once even while it was failed/blocked."""
+def wake_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
+    """Wake a Pond: a one-shot, **non-propagating** pull. The Pond runs once when its Sources already
+    offer something fresher than its last Run (``sourceF > startF``); it does NOT solicit its Sources
+    (no upstream propagation — that's a Tap). Also clears any failure/kill, so a parked Pond resumes."""
     s = state.clone()
-    _clear_failure(s, pid)
+    _clear_halt(s, pid)
     ps = s.pond_states[pid]
+    ps.has_pull = True
+    ps.pull_local = True
+    return s
+
+
+def force_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
+    """Force a Pond Run now — a recompute even with no upstream change (e.g. after a code patch). Resets
+    the Pond's and its Ripples' ``endF`` so the idempotency guards re-execute them, and injects a
+    one-shot demand. It runs at the **current** freshness, so ``endF`` returns unchanged and it does
+    **not** propagate downstream. Clears any failure/kill (the operator override)."""
+    s = state.clone()
+    _clear_halt(s, pid)
+    ps = s.pond_states[pid]
+    ps.end_f = NEVER
+    for rid in ripples_of(s, pid):
+        s.ripple_states[rid].end_f = NEVER
+    ps.force_pending = True
     if NEVER not in ps.targets:
         ps.targets.append(NEVER)
     return s
 
 
-def clear_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
-    """Operator acknowledgement: clear a Pond's failure/block without forcing a run. Downstream Ponds
-    blocked only by this failure re-derive and unblock on their own."""
+def kill_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
+    """Kill a Pond: cancel its in-flight Run (attributed to ``startF``) and park it in a terminal
+    *killed* state. Clears all demand, stops its Ripples, blocks downstream, and supersedes retries —
+    it stays down until an operator Wake/Force/Clear. The Catchment also terminates the Duck process."""
     s = state.clone()
-    _clear_failure(s, pid)
+    ps = s.pond_states[pid]
+    ps.is_killed = True
+    ps.has_pull = False
+    ps.has_received_pull = False
+    ps.pull_local = False
+    ps.targets = []
+    for rid in ripples_of(s, pid):
+        rs = s.ripple_states[rid]
+        rs.is_running = False
+        rs.started_at = None
+        rs.has_pull = False
+        rs.targets = []
+    derive_blocked(s, pid)  # killed Pond blocks its Sinks
     return s
 
 
-def _clear_failure(s: EngineState, pid: PondId) -> None:
+def clear_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
+    """Operator acknowledgement: clear a Pond's failure/kill/block without forcing a run. Downstream
+    Ponds blocked only by this Pond re-derive and unblock on their own."""
+    s = state.clone()
+    _clear_halt(s, pid)
+    return s
+
+
+def _clear_halt(s: EngineState, pid: PondId) -> None:
+    """Clear every operator/fault halt on a Pond (failure, kill) and re-derive downstream blocks."""
     ps = s.pond_states[pid]
+    halted = ps.is_failed or ps.is_killed
     ps.is_failed = False
     ps.failed_f = NEVER
     ps.failures = 0
-    derive_blocked(s, pid)  # may stay blocked if a required Source is still failed/blocked
+    ps.is_killed = False
+    # Abandon the halted Run's phantom (start_f > end_f): without this the Pond looks perpetually
+    # in-flight, and once failed_f is cleared the liveness sweep would re-fail it against a Duck that
+    # is no longer there. Returning start_f to end_f leaves it genuinely idle, ready to run again.
+    if halted:
+        ps.start_f = ps.end_f
+    derive_blocked(s, pid)  # may stay blocked if a required Source is still failed/blocked/killed
 
 
 def sentinel(now: datetime, state: EngineState) -> tuple[EngineState, list[RippleId]]:

@@ -76,22 +76,22 @@ def test_restart_resumes_incomplete_run(tmp_path):
 # ─── start / stop demand controls ───────────────────────────────────────────────
 
 
-def test_start_injects_direct_run(tmp_path):
+def test_wake_injects_run(tmp_path):
     d = _driver(tmp_path)
-    d.start("p")
+    d.wake("p")
     # One direct Pond Run is dispatched, with no upstream propagation (p is an Inlet anyway).
     assert any(j["kind"] == "begin_run" for j in d.jobs.get("p", []))
     assert d.db.execute("SELECT COUNT(*) FROM pond_run").fetchone()[0] == 1
     assert d.state.pond_states["p"].runs_started == 1
 
 
-def test_stop_clears_demand_keeps_ripple_push(tmp_path):
+def test_sleep_clears_demand_keeps_ripple_push(tmp_path):
     d = _driver(tmp_path)
     far = datetime(2030, 1, 1, tzinfo=timezone.utc)
     d.state.pond_states["p"].has_pull = True
     d.state.ripple_states["p.r2"].has_pull = True
     d.state.ripple_states["p.r2"].targets = [far]  # in-flight push
-    d.stop("p")
+    d.sleep("p")
     ps = d.state.pond_states["p"]
     assert not ps.has_pull and not ps.targets
     assert not d.state.ripple_states["p.r2"].has_pull       # pull cleared

@@ -23,7 +23,7 @@ export interface RawPond {
   name: string;
   kind: string;
   version: string;
-  status: 'running' | 'queued' | 'idle' | 'failed' | 'blocked';
+  status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked';
   gen: number;
   runs_completed: number;
   has_pull: boolean;
@@ -34,6 +34,7 @@ export interface RawPond {
   trigger: { kind: 'wave' | 'tide'; bound_ms: number | null } | null;
   is_failed: boolean;
   is_blocked: boolean;
+  is_killed: boolean;
   failed_f: string | null;
   failures: number;
   immediate_retries: number;
@@ -53,6 +54,7 @@ export interface RawRippleRun {
   finished_at: string | null;
   status: string;
   retry: number;
+  error: string | null;
 }
 
 export interface RawPondRun {
@@ -62,6 +64,7 @@ export interface RawPondRun {
   started_at: string | null;
   finished_at: string | null;
   status: string;
+  error: string | null;
   ripples?: RawRippleRun[];
 }
 

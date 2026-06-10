@@ -78,9 +78,11 @@ CREATE TABLE pond_state (
     has_received_pull INTEGER NOT NULL DEFAULT 0,
     -- Fault tolerance runtime (see docs/guide/theory.md "Fault Tolerance").
     is_failed         INTEGER NOT NULL DEFAULT 0,  -- a Pond Run gave up, not yet superseded
-    is_blocked        INTEGER NOT NULL DEFAULT 0,  -- this Pond, or a required Source, is failed/blocked
+    is_blocked        INTEGER NOT NULL DEFAULT 0,  -- this Pond, or a required Source, is failed/blocked/killed
     failed_f          TEXT,                        -- freshness of the freshest failed Run (NULL if none)
-    failures          INTEGER NOT NULL DEFAULT 0   -- failed Runs this episode (counted vs source_retries)
+    failures          INTEGER NOT NULL DEFAULT 0,  -- failed Runs this episode (counted vs source_retries)
+    is_killed         INTEGER NOT NULL DEFAULT 0,  -- operator Kill: terminal until Wake/Force/Clear
+    pull_local        INTEGER NOT NULL DEFAULT 0   -- a pending Wake (non-propagating pull)
 );
 
 -- Live retry budgets, editable against the selected Pond (operational config, like pond_window /
@@ -128,8 +130,9 @@ CREATE TABLE pond_run (
     f               TEXT    NOT NULL,             -- freshness identifying the Pond Run
     started_at      TEXT    NOT NULL DEFAULT (datetime('now')),
     finished_at     TEXT,
-    status          TEXT    NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'success', 'failed')),
+    status          TEXT    NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'success', 'failed', 'killed')),
     retry           INTEGER NOT NULL DEFAULT 0,
+    error           TEXT,                          -- failure message (Duck-level error), if any
     PRIMARY KEY (pond_version_id, f)
 );
 
@@ -141,6 +144,7 @@ CREATE TABLE ripple_run (
     finished_at     TEXT,
     status          TEXT    NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'success', 'failed')),
     retry           INTEGER NOT NULL DEFAULT 0,  -- attempt index: 0 = first try, 1 = first immediate retry, …
+    error           TEXT,                        -- failure message for this attempt, if it errored
     log_path        TEXT,
     PRIMARY KEY (pond_version_id, f, ripple_id, retry),  -- one row per attempt (the retry trace)
     FOREIGN KEY (pond_version_id, f) REFERENCES pond_run(pond_version_id, f)

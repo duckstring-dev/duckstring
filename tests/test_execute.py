@@ -118,29 +118,29 @@ def test_remove_unknown_catchment_exits(runner):
 # ── start / stop ─────────────────────────────────────────────────────────────────
 
 
-def test_start_succeeds(runner, live_catchment):
+def test_wake_succeeds(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "start", "outlet", "--silent"])
+    result = runner.invoke(app, ["control", "wake", "outlet", "--silent"])
     assert result.exit_code == 0, result.output
-    assert "Started" in result.output
+    assert "Woken" in result.output
 
 
-def test_stop_succeeds(runner, live_catchment):
+def test_sleep_succeeds(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "stop", "outlet"])
+    result = runner.invoke(app, ["control", "sleep", "outlet"])
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "Stopped."
+    assert result.output.strip() == "Asleep."
 
 
-def test_stop_upstream(runner, live_catchment):
+def test_sleep_upstream(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "stop", "outlet", "--upstream"])
+    result = runner.invoke(app, ["control", "sleep", "outlet", "--upstream"])
     assert result.exit_code == 0, result.output
     assert "upstream" in result.output
 
 
-def test_stop_unknown_catchment_exits(runner):
-    result = runner.invoke(app, ["trigger", "stop", "outlet", "-c", "nonexistent"])
+def test_sleep_unknown_catchment_exits(runner):
+    result = runner.invoke(app, ["control", "sleep", "outlet", "-c", "nonexistent"])
     assert result.exit_code != 0
 
 
