@@ -40,7 +40,7 @@ app.add_typer(trigger_app, name="trigger")
 app.add_typer(control_app, name="control")
 app.add_typer(failure_app, name="failure")
 
-app.command("deploy")(deploy)
+pond_cmd.app.command("deploy")(deploy)
 app.command("status")(status)
 app.command("get")(get)
 app.command("query")(query)

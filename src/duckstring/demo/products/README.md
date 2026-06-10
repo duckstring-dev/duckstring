@@ -5,5 +5,5 @@ Demo Duckstring Inlet — simulates a product catalogue. Starts with 10 core pro
 Deploy to a Catchment:
 
 ```bash
-duckstring deploy <catchment>
+duckstring pond deploy
 ```

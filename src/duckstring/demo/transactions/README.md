@@ -5,5 +5,5 @@ Demo Duckstring Inlet — simulates a point-of-sale transaction log. Each run ap
 Deploy to a Catchment:
 
 ```bash
-duckstring deploy <catchment>
+duckstring pond deploy
 ```

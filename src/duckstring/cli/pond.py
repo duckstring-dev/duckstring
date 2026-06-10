@@ -22,7 +22,7 @@ _MAIN = """\
 
 if __name__ == "__main__":
     print("Local runner not yet implemented. Deploy to a Catchment to run this Pond.")
-    print("  duckstring deploy <catchment>")
+    print("  duckstring pond deploy")
 """
 
 
@@ -61,7 +61,7 @@ def init(
     readme = (
         f"# {name}\n\nA Duckstring Pond.\n\n"
         "Deploy to a Catchment:\n\n"
-        "```bash\nduckstring deploy <catchment>\n```\n"
+        "```bash\nduckstring pond deploy\n```\n"
     )
 
     _write_pond_files(cwd, toml_content, pond_py, readme)

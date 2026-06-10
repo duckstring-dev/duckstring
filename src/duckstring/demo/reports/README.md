@@ -7,5 +7,5 @@ Sources: `sales`
 Deploy to a Catchment:
 
 ```bash
-duckstring deploy <catchment>
+duckstring pond deploy
 ```

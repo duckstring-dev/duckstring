@@ -144,7 +144,7 @@ Here `pond.py` contains the code for a single Ripple operation (currently blank)
 From a Pond's project root run:
 
 ```bash
-duckstring deploy 
+duckstring pond deploy 
 ```
 
 This will read the Pond name, version and type (Inlet, Pond, Outlet) from `pond.toml` and deploy the project contents to the Catchment.
@@ -154,20 +154,8 @@ Alternatively, you can import the Pond using the Catchment UI.
 To upload from all Ponds within a directory, use:
 
 ```bash
-duckstring deploy --all
+duckstring pond deploy --all
 ```
-
-#### From Git
-
-If you are using git with a remote, you can deploy with:
-
-```bash
-duckstring deploy --git {branch|commit|tag}
-```
-
-This will use the current branch/commit/tag to define the Pond. Upon each execution the Catchment will clone the repository and run it.
-
-This can also be specified using the Catchment UI.
 
 ### 3) Execute
 
@@ -259,8 +247,9 @@ This sets a 10s repeating Window on both, with `products` only active for 4s of 
 
 The Window format is RFC 5545-like. Bounds may be set with `--start` (default today midnight) and `--until`, and `--on` to specify weekdays.  
 
-### 4) Monitor
+### 4) Monitor, Control and Manage Failures
 
+#### Monitor
 To open the status monitor again:
 
 ```bash
@@ -271,6 +260,40 @@ You may also target a particular Pond, showing only its lineage:
 
 ```bash
 duckstring status {pond_name}
+```
+
+#### Control
+
+Ponds can be controlled (started, stopped) directly:
+
+- **Force**: Force starts a Pond at the same freshness, regardless of Source state (for example to force a run upon deployment of a patch)
+- **Wake**: Starts a Pond if its Sources have updated (waiting until they are)
+- **Sleep**: Removes all demand (including *wake*) from the Pond
+- **Kill**: Halts a running process immediately
+
+Execute these with:
+
+```bash
+duckstring control {force|wake|sleep|kill} {pond_name}
+```
+
+#### Manage Failures
+
+A Pond can be given a retry budget of two types:
+
+- **Immediate**: A failed process (e.g. Ripple) starts again immediately
+- **On Change**: A failed process starts again only once its Sources have updated
+
+These are set as an option in the `pond.toml` file as the default value on deployment (0 if absent), but can be edited with:
+
+```bash
+duckstring failure budget {pond_name} --immediate {int} --on-change {int} 
+```
+
+When a Pond fails, it enters a `failed` state, causing all downstream Ponds (that require it) to be `blocked` (cannot receive new demand). The state can be cleared by:
+
+```bash
+duckstring failure clear {pond_name}
 ```
 
 ### 5) Retrieve Data

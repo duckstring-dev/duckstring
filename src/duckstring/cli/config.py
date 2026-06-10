@@ -90,7 +90,7 @@ def resolve_catchment(name: str | None) -> tuple[str, dict[str, Any]]:
 
     if not effective:
         typer.echo("Error: no catchment specified and no default set.", err=True)
-        typer.echo("  Pass one explicitly: duckstring deploy -c <name>", err=True)
+        typer.echo("  Pass one explicitly: duckstring pond deploy -c <name>", err=True)
         typer.echo("  Or set a default:    duckstring catchment set-default <name>", err=True)
         raise typer.Exit(1)
     if effective not in catchments:
