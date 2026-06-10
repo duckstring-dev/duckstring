@@ -133,6 +133,7 @@ CREATE TABLE pond_run (
     status          TEXT    NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'success', 'failed', 'killed')),
     retry           INTEGER NOT NULL DEFAULT 0,
     error           TEXT,                          -- failure message (Duck-level error), if any
+    traceback       TEXT,                          -- full traceback for the failure, if any
     PRIMARY KEY (pond_version_id, f)
 );
 
@@ -145,6 +146,7 @@ CREATE TABLE ripple_run (
     status          TEXT    NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'success', 'failed')),
     retry           INTEGER NOT NULL DEFAULT 0,  -- attempt index: 0 = first try, 1 = first immediate retry, …
     error           TEXT,                        -- failure message for this attempt, if it errored
+    traceback       TEXT,                        -- full traceback for this attempt, if it errored
     log_path        TEXT,
     PRIMARY KEY (pond_version_id, f, ripple_id, retry),  -- one row per attempt (the retry trace)
     FOREIGN KEY (pond_version_id, f) REFERENCES pond_run(pond_version_id, f)

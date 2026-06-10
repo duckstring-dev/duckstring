@@ -64,6 +64,7 @@ function mapRun(r: RawPondRun): PondRun {
     finishedAt: r.finished_at,
     status: r.status,
     error: r.error,
+    traceback: r.traceback,
     ripples: r.ripples?.map((rr) => ({
       ripple: rr.ripple,
       startedAt: rr.started_at,
@@ -71,6 +72,7 @@ function mapRun(r: RawPondRun): PondRun {
       status: rr.status,
       retry: rr.retry,
       error: rr.error,
+      traceback: rr.traceback,
     })),
   };
 }

@@ -68,6 +68,7 @@ export interface RippleRun {
   status: string;
   retry: number; // attempt index (0 = first try); a Ripple's failed attempts + final outcome form a trace
   error: string | null; // failure message for this attempt, if it errored
+  traceback: string | null; // full traceback for this attempt, if it errored
 }
 
 export interface PondRun {
@@ -78,6 +79,7 @@ export interface PondRun {
   finishedAt: string | null;
   status: string;
   error: string | null; // Pond-level failure message (dead/silent Duck, ledger error), if any
+  traceback: string | null; // full traceback for a Pond-level failure, if any
   ripples?: RippleRun[];
 }
 

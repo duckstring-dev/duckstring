@@ -609,13 +609,13 @@ def test_failed_ripple_error_surfaced_in_history(catchment_client):
     f = catchment_client.get("/api/runs?pond=outlet&lineage=false").json()["runs"][0]["f"]
     catchment_client.post("/api/duck/outlet/events", json={
         "kind": "failed", "ripple": "load", "f": f, "status": "failed", "retry": 0,
-        "error": "ValueError: boom",
+        "error": "ValueError: boom", "traceback": "Traceback (most recent call last):\n  ...\nValueError: boom",
     })
     run = next(r for r in catchment_client.get("/api/runs?pond=outlet&ripples=true&lineage=false").json()["runs"]
                if r["f"] == f)
-    assert run["error"] == "ValueError: boom"
+    assert run["error"] == "ValueError: boom" and run["traceback"].startswith("Traceback")
     load = next(rr for rr in run["ripples"] if rr["ripple"] == "load")
-    assert load["error"] == "ValueError: boom"
+    assert load["error"] == "ValueError: boom" and load["traceback"].startswith("Traceback")
 
 
 def test_pond_failed_event_fails_whole_pond(catchment_client):

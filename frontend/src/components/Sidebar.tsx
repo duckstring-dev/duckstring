@@ -12,12 +12,14 @@ function Btn({
   color = THEME_PUSH,
   small = false,
   disabled = false,
+  block = false,
 }: {
   onClick: () => void;
   children: React.ReactNode;
   color?: string;
   small?: boolean;
   disabled?: boolean;
+  block?: boolean;
 }) {
   return (
     <button
@@ -34,12 +36,16 @@ function Btn({
         fontWeight: 600,
         letterSpacing: '0.04em',
         opacity: disabled ? 0.35 : 1,
+        width: block ? '100%' : undefined,
       }}
     >
       {children}
     </button>
   );
 }
+
+// A 4-column row of equal-width buttons — so the Trigger and Control rows line up.
+const quadRow: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 };
 
 function Label({ children }: { children: React.ReactNode }) {
   return (
@@ -223,11 +229,11 @@ export function Sidebar() {
           {/* Triggers */}
           <Section>
             <Label>Triggers</Label>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn onClick={() => tap(selectedPond.id)} color={THEME_PULL}>Tap</Btn>
-              <Btn onClick={() => wave(selectedPond.id)} color={THEME_PULL}>Wave</Btn>
-              <Btn onClick={() => pulse(selectedPond.id)} color={THEME_PUSH}>Pulse</Btn>
-              <Btn onClick={() => setShowTideInput((v) => !v)} color={THEME_PUSH}>Tide</Btn>
+            <div style={quadRow}>
+              <Btn block onClick={() => tap(selectedPond.id)} color={THEME_PULL}>Tap</Btn>
+              <Btn block onClick={() => wave(selectedPond.id)} color={THEME_PULL}>Wave</Btn>
+              <Btn block onClick={() => pulse(selectedPond.id)} color={THEME_PUSH}>Pulse</Btn>
+              <Btn block onClick={() => setShowTideInput((v) => !v)} color={THEME_PUSH}>Tide</Btn>
             </div>
             {showTideInput && (
               <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
@@ -263,11 +269,11 @@ export function Sidebar() {
           {/* Control: Force/Wake (go) and Sleep/Kill (stop) lifecycle on the Duck */}
           <Section>
             <Label>Control</Label>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn onClick={() => force(selectedPond.id)} color={THEME_SUCCESS}>Force</Btn>
-              <Btn onClick={() => wake(selectedPond.id)} color={THEME_WAKE}>Wake</Btn>
-              <Btn onClick={() => sleep(selectedPond.id)} color={THEME_BLOCKED}>Sleep</Btn>
-              <Btn onClick={() => kill(selectedPond.id)} color={THEME_DANGER}>Kill</Btn>
+            <div style={quadRow}>
+              <Btn block onClick={() => force(selectedPond.id)} color={THEME_SUCCESS}>Force</Btn>
+              <Btn block onClick={() => wake(selectedPond.id)} color={THEME_WAKE}>Wake</Btn>
+              <Btn block onClick={() => sleep(selectedPond.id)} color={THEME_BLOCKED}>Sleep</Btn>
+              <Btn block onClick={() => kill(selectedPond.id)} color={THEME_DANGER}>Kill</Btn>
             </div>
           </Section>
 

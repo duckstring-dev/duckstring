@@ -414,7 +414,7 @@ class Driver:
                         started_at=payload.get("started_at"),
                         finished_at=payload.get("finished_at") or _iso(now),
                         retry=payload.get("retry", 0),
-                        error=payload.get("error"),
+                        error=payload.get("error"), traceback=payload.get("traceback"),
                     )
                     self._process(now)
             elif kind == "failed":
@@ -425,14 +425,14 @@ class Driver:
                     if f:
                         self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
                     self.state = fail_ripple(self.state, eid, now)
-                    err = payload.get("error")
-                    self._fail_pond_run(pond, f, now, err)  # upsert the pond_run row first (ripple_run FK)
+                    err, tb = payload.get("error"), payload.get("traceback")
+                    self._fail_pond_run(pond, f, now, err, tb)  # upsert the pond_run row first (ripple_run FK)
                     self._record_ripple_run(
                         pond, rname, f, "failed",
                         started_at=payload.get("started_at"),
                         finished_at=payload.get("finished_at") or _iso(now),
                         retry=payload.get("retry", 0),
-                        error=err,
+                        error=err, traceback=tb,
                     )
                     self._process(now)
             elif kind == "run_completed":
@@ -441,7 +441,7 @@ class Driver:
             elif kind == "pond_failed":
                 # A Duck-level error (e.g. a failed ledger write): fail the whole Pond at its most
                 # recently started Run. The Duck exits after reporting; liveness will not double-fail.
-                self._fail_whole_pond(pond, now, payload.get("error"))
+                self._fail_whole_pond(pond, now, payload.get("error"), payload.get("traceback"))
 
     def resume_incomplete(self) -> None:
         """Re-dispatch Pond Runs that were in flight when the Catchment stopped, and service any
@@ -546,7 +546,7 @@ class Driver:
 
     def _record_ripple_run(
         self, pond: str, rname: str, f: str, status: str, started_at: str | None, finished_at: str,
-        retry: int = 0, error: str | None = None,
+        retry: int = 0, error: str | None = None, traceback: str | None = None,
     ) -> None:
         meta = self.meta[pond]
         rid = meta["ripple_ids"].get(rname)
@@ -555,9 +555,9 @@ class Driver:
         # Keyed on (pond_version, f, ripple, retry): each attempt is its own row — the retry trace.
         self.db.execute(
             "INSERT OR REPLACE INTO ripple_run "
-            "(pond_version_id, f, ripple_id, retry, started_at, finished_at, status, error) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (meta["version_id"], f, rid, retry, started_at, finished_at, status, error),
+            "(pond_version_id, f, ripple_id, retry, started_at, finished_at, status, error, traceback) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (meta["version_id"], f, rid, retry, started_at, finished_at, status, error, traceback),
         )
         self.db.commit()
 
@@ -569,7 +569,9 @@ class Driver:
         )
         self.db.commit()
 
-    def _fail_whole_pond(self, pond: str, now: datetime, error: str | None = None) -> None:
+    def _fail_whole_pond(
+        self, pond: str, now: datetime, error: str | None = None, tb: str | None = None
+    ) -> None:
         """Fail a Pond with no single culprit Ripple (dead/silent Duck, or a reported Duck-level
         error): mark its most recently started Run failed and run the cascade (which may re-dispatch a
         retry-on-change Run, respawning a Duck). No-op if nothing is in flight."""
@@ -578,16 +580,19 @@ class Driver:
             return
         f = _iso(ps.start_f)
         self.state = fail_pond(self.state, pond, now)
-        self._fail_pond_run(pond, f, now, error)
+        self._fail_pond_run(pond, f, now, error, tb)
         self._process(now)
 
-    def _fail_pond_run(self, pond: str, f: str, now: datetime, error: str | None = None) -> None:
+    def _fail_pond_run(
+        self, pond: str, f: str, now: datetime, error: str | None = None, tb: str | None = None
+    ) -> None:
         meta = self.meta[pond]
         self.db.execute(
-            "INSERT INTO pond_run (pond_version_id, f, started_at, finished_at, status, error) "
-            "VALUES (?, ?, ?, ?, 'failed', ?) ON CONFLICT(pond_version_id, f) DO UPDATE SET "
-            "finished_at = excluded.finished_at, status = 'failed', error = excluded.error",
-            (meta["version_id"], f, _iso(now), _iso(now), error),
+            "INSERT INTO pond_run (pond_version_id, f, started_at, finished_at, status, error, traceback) "
+            "VALUES (?, ?, ?, ?, 'failed', ?, ?) ON CONFLICT(pond_version_id, f) DO UPDATE SET "
+            "finished_at = excluded.finished_at, status = 'failed', error = excluded.error, "
+            "traceback = excluded.traceback",
+            (meta["version_id"], f, _iso(now), _iso(now), error, tb),
         )
         self.db.commit()
 
@@ -754,7 +759,7 @@ class Driver:
                 params.extend(sorted(names))
             rows = self.db.execute(
                 "SELECT pn.name, pv.version, pr.pond_version_id, pr.f, pr.started_at, pr.finished_at, "
-                "pr.status, pr.error "
+                "pr.status, pr.error, pr.traceback "
                 "FROM pond_run pr "
                 "JOIN pond_version pv ON pv.id = pr.pond_version_id "
                 "JOIN pond_name pn ON pn.id = pv.pond_name_id "
@@ -763,22 +768,24 @@ class Driver:
             ).fetchall()
 
             runs = []
-            for pname, version, pv_id, f, started_at, finished_at, status, error in rows:
+            for pname, version, pv_id, f, started_at, finished_at, status, error, tb in rows:
                 run = {
                     "pond": pname, "version": version, "f": f,
-                    "started_at": started_at, "finished_at": finished_at, "status": status, "error": error,
+                    "started_at": started_at, "finished_at": finished_at, "status": status,
+                    "error": error, "traceback": tb,
                 }
                 if ripples:
                     rrows = self.db.execute(
-                        "SELECT r.name, rr.started_at, rr.finished_at, rr.status, rr.retry, rr.error "
+                        "SELECT r.name, rr.started_at, rr.finished_at, rr.status, rr.retry, rr.error, rr.traceback "
                         "FROM ripple_run rr JOIN ripple r ON r.id = rr.ripple_id "
                         "WHERE rr.pond_version_id = ? AND rr.f = ? "
                         "ORDER BY COALESCE(rr.finished_at, rr.started_at), rr.retry",
                         (pv_id, f),
                     ).fetchall()
                     run["ripples"] = [
-                        {"ripple": rn, "started_at": rsa, "finished_at": rfa, "status": rst, "retry": rt, "error": rerr}
-                        for (rn, rsa, rfa, rst, rt, rerr) in rrows
+                        {"ripple": rn, "started_at": rsa, "finished_at": rfa, "status": rst,
+                         "retry": rt, "error": rerr, "traceback": rtb}
+                        for (rn, rsa, rfa, rst, rt, rerr, rtb) in rrows
                     ]
                 runs.append(run)
             return runs

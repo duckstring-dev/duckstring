@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import queue
 import threading
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -89,7 +90,8 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                     name, exc, started, finished = data
                     print(f"[duck:{core.pond_name}] ripple {name} failed: {exc}", flush=True)
                     _launch(core.ripple_failed(
-                        name, _now(), started_at=started, finished_at=finished, error=_msg(exc)
+                        name, _now(), started_at=started, finished_at=finished,
+                        error=_msg(exc), traceback=_tb(exc),
                     ))
 
                 core.flush(client.post_event)
@@ -97,7 +99,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                 # A Pond-level error (e.g. a failed ledger write): report it against the most recent
                 # Pond Run and exit. The Catchment fails the Pond (and may retry it on change).
                 print(f"[duck:{core.pond_name}] pond-level failure: {exc}", flush=True)
-                _report_pond_failure(core, client, _msg(exc))
+                _report_pond_failure(core, client, _msg(exc), _tb(exc))
                 break
 
             # Watchdog: outstanding work but nothing running, past the grace period → the Run is stuck.
@@ -120,10 +122,20 @@ def _msg(exc: BaseException) -> str:
     return text[:500]
 
 
-def _report_pond_failure(core: DuckCore, client: CatchmentClient, error: str | None = None) -> None:
+def _tb(exc: BaseException) -> str | None:
+    """The full formatted traceback for the failure (length-capped), or None if unavailable."""
+    if exc.__traceback__ is None:
+        return None
+    text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return text[:8000]
+
+
+def _report_pond_failure(
+    core: DuckCore, client: CatchmentClient, error: str | None = None, tb: str | None = None
+) -> None:
     """Best-effort: buffer + flush a Pond-level failure for the Catchment (the Duck then exits)."""
     try:
-        core.pond_failed(error)
+        core.pond_failed(error, tb)
         core.flush(client.post_event)
     except Exception:
         pass
