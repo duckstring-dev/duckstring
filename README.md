@@ -19,7 +19,7 @@ Ponds are typed or referred to in context:
 
 - **Source**: A parent Pond
 - **Sink**: A child Pond
-- **Inlet**: A Pond with xternal dependencies and no Sources
+- **Inlet**: A Pond with external dependencies and no Sources
 - **Outlet**: A Pond with no Sinks (e.g. outputs final data products)
 
 ## Installation
@@ -48,10 +48,10 @@ If you just want to get a feel for how the orchestrator works, take a look at th
 To initiate a Catchment locally, run:
 
 ```bash
-duckstring catchment init --name dev --port 5000 --root ~/.duckstring/dev
+duckstring catchment init --name dev --port 7474 --root ~/.duckstring/dev
 ```
 
-This will start a server with name 'dev' (prompted if none specified) at port 5000 and store Catchment details at `~/.duckstring/dev` (default is `~/.duckstring/{name}`). 
+This will start a server with name 'dev' (prompted if none specified) at port 7474 (the default) and store Catchment details at `~/.duckstring/dev` (default is `~/.duckstring/{name}`). 
 
 This can later be restarted with:
 
@@ -157,7 +157,7 @@ To upload from all Ponds within a directory, use:
 duckstring pond deploy --all
 ```
 
-### 3) Execute
+### 4) Execute
 
 Ponds are executed by sending a demand signal from an Outlet. This propagates backwards through the DAG until it reaches each upstream Inlet, causing them to execute, with children beginning upon completion of all of their parents.
 
@@ -191,12 +191,12 @@ This emits a **push** on `reports`, running each Pond in its lineage once.
 #### Tide
 
 ```bash
-duckstring trigger tide reports 4
+duckstring trigger tide reports 4s
 ```
 
 This executes a Pulse on `reports` any time its staleness (or time since last Pulse) exceeds 4 seconds, causing it to update every 4 seconds. The pipeline takes 7 seconds to execute, so multiple Pulses will be active simultaneously.
 
-You can set the unit for the staleness limit with `--unit {seconds|minutes|hours|days|months|years}`.
+The staleness bound is a duration string, including compounds: `30s`, `90m`, `12h`, `1d`, `1h30m`.
 
 Cancel the Tide with:
 
@@ -247,7 +247,7 @@ This sets a 10s repeating Window on both, with `products` only active for 4s of 
 
 The Window format is RFC 5545-like. Bounds may be set with `--start` (default today midnight) and `--until`, and `--on` to specify weekdays.  
 
-### 4) Monitor, Control and Manage Failures
+### 5) Monitor, Control and Manage Failures
 
 #### Monitor
 To open the status monitor again:
@@ -287,16 +287,16 @@ A Pond can be given a retry budget of two types:
 These are set as an option in the `pond.toml` file as the default value on deployment (0 if absent), but can be edited with:
 
 ```bash
-duckstring failure budget {pond_name} --immediate {int} --on-change {int} 
+duckstring control failure-budget {pond_name} --immediate {int} --on-change {int}
 ```
 
 When a Pond fails, it enters a `failed` state, causing all downstream Ponds (that require it) to be `blocked` (cannot receive new demand). The state can be cleared by:
 
 ```bash
-duckstring failure clear {pond_name}
+duckstring control clear {pond_name}
 ```
 
-### 5) Retrieve Data
+### 6) Retrieve Data
 
 #### Get
 
@@ -326,10 +326,10 @@ Alternatively, include a file path:
 duckstring query reports --sql @path/to/query.sql
 ```
 
-Using `--table` queries with a default SELECT * FROM {table} LIMIT 10, useful for glimpsing:
+Passing a Ripple name queries with a default SELECT * FROM {pond}.{ripple} LIMIT 10, useful for glimpsing:
 
 ```bash
-duckstring query reports --table monthly_summary 
+duckstring query reports monthly_summary
 ```
 
 ##### Write to file
@@ -340,7 +340,7 @@ To output to a file, include a flag for the file format, followed by the file na
 `--json`: JSON records
 `--parquet`: Parquet file
 
-This writes by default to `./ponds/reports/monthly_summary/{filename}`. To overrite the default location you may use the `--path` flag.
+This writes by default to `./ponds/reports/monthly_summary/{filename}`. To override the default location you may use the `--path` flag.
 
 For example, to execute an sql statement from file `query.sql` and write the result to CSV at the current directory:
 

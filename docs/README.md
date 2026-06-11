@@ -2,7 +2,7 @@
 
 The documentation site, built with [Docusaurus](https://docusaurus.io/) and hosted at [docs.duckstring.com](https://docs.duckstring.com).
 
-Content lives in `docs/` (this site is docs-only — pages route from `/`). The sidebar is defined explicitly in `sidebars.ts`. `docs/theory.md` is the authoritative orchestration spec; most other pages are currently stubs with a "Planned content" outline, to be written out in a later pass.
+Content lives in `docs/` (this site is docs-only — pages route from `/`). The sidebar is defined explicitly in `sidebars.ts`. `docs/theory.md` is the authoritative orchestration spec; the other pages are written against the actual CLI/API surface in `src/duckstring/`, so check them when that surface changes.
 
 ```bash
 npm install

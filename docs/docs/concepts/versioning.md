@@ -5,16 +5,41 @@ description: SemVer for transforms — atomic upgrades and concurrent major vers
 
 # Versioning
 
-:::caution Work in progress
-This page is a stub. Content to be written in a later pass.
-:::
+Duckstring's answer to the coordination problem is the one software packaging settled on long ago: **SemVer, with old majors kept alive until consumers move**. Versioning isn't a label on a Pond — it's the mechanism that lets teams ship breaking changes without organising anyone else.
 
-**Planned content:**
+## SemVer on Ponds
 
-- SemVer on Ponds: what a major / minor / patch bump means for consumers
-- One selected version per `(pond, major)`: a deploy upserts the selection atomically
-- Concurrent major versions: the earlier version keeps executing until no consumer depends on it
-- Sinks pin a Source by name + major — a sink can even deploy before its source
-- Breaking changes without organisation-wide coordination (the contrast with mesh patterns)
-- Redeploying a fixed artifact auto-clears a failure episode
-- Pointers: [Deploying](../guides/deploying.md), [pond.toml reference](../reference/pond-toml.md)
+Every Pond version is a SemVer string in `pond.toml`. The contract is the Pond's published tables — their names, schemas, and semantics:
+
+- **Patch / minor** (`1.0.0 → 1.0.1`, `1.1.0`) — compatible changes: bug fixes, new tables, new columns. Consumers don't need to do anything.
+- **Major** (`1.x → 2.0.0`) — breaking changes: renamed or removed tables, changed semantics. Consumers opt in by updating their declared Source version.
+
+## One selected version per major
+
+Deploying a version registers it as an immutable artifact and atomically points "the Pond" for that major line at it. Deploying `sales 1.2.1` means every Sink consuming `sales` major 1 gets `1.2.1` from its next run onwards — no Sink changes anything, exactly as a compatible package release flows to users on their next resolve.
+
+History survives upgrades: run records are keyed to the specific version that produced them, so an upgrade never rewrites what ran before.
+
+## Concurrent majors
+
+The load-bearing feature: **a new major doesn't replace the old one — it runs alongside it.**
+
+Deploying `sales 2.0.0` creates a second live `sales` line. Sinks declaring `sales = "1.0.0"` keep consuming major 1, which keeps executing; Sinks that migrate declare `sales = "2.0.0"` and consume major 2. The owning team ships the breaking change the day it's ready, each consumer migrates on its own schedule, and major 1 is retired when nothing depends on it.
+
+This is the step most mesh architectures stop short of. Splitting a pipeline into domain-owned pieces decentralises *ownership*, but without concurrent versions a breaking change still forces every consumer to move in lockstep — the coordination just happens across team boundaries instead of within one repo. Versioned boundaries plus concurrent execution removes the lockstep.
+
+## Declaring a dependency
+
+A Sink pins each Source in `pond.toml`:
+
+```toml
+[sources]
+transactions = "1.0.0"   # major 1, at least 1.0.0 — required
+products = "1.2.0?"      # the trailing ? marks the Source optional
+```
+
+The major selects the line to consume; the full string is the minimum compatible version. A required Source that is failed or missing [blocks](../guides/fault-tolerance.md) the Sink; an optional one (`?`) lets it run regardless. Declarations are by *name and major*, not by artifact — so a Sink can deploy before its Source has, and resolves it as soon as it appears.
+
+## Versioning workflow
+
+Day to day this looks like releasing a library: bump the version in `pond.toml`, deploy, done. Compatible releases flow to consumers automatically; breaking releases open a new major and a migration window. Deploying a fixed version also auto-clears a failure on the Pond — shipping the fix *is* the recovery action. See [Deploying](../guides/deploying.md).

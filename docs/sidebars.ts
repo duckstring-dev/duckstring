@@ -7,7 +7,11 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Getting Started',
       collapsed: false,
-      items: ['getting-started/installation', 'getting-started/quickstart'],
+      items: [
+        'getting-started/playground',
+        'getting-started/installation',
+        'getting-started/quickstart',
+      ],
     },
     {
       type: 'category',
@@ -25,6 +29,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Guides',
       items: [
+        'guides/running-a-catchment',
         'guides/creating-a-pond',
         'guides/deploying',
         'guides/triggers',
@@ -33,7 +38,6 @@ const sidebars: SidebarsConfig = {
         'guides/fault-tolerance',
         'guides/querying-data',
         'guides/web-ui',
-        'guides/running-a-catchment',
       ],
     },
     'theory',
@@ -42,6 +46,7 @@ const sidebars: SidebarsConfig = {
       label: 'Reference',
       items: [
         'reference/cli',
+        'reference/python-api',
         'reference/pond-toml',
         'reference/http-api',
         'reference/architecture',
