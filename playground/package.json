@@ -11,6 +11,8 @@
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
     "@types/dagre": "^0.7.54",
+    "@vercel/analytics": "^2.0.1",
+    "@vercel/speed-insights": "^2.0.0",
     "@xyflow/react": "^12.10.2",
     "next": "16.2.6",
     "react": "19.2.4",
