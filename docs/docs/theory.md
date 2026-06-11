@@ -1,3 +1,9 @@
+---
+title: Orchestration Theory
+description: Detail for orchestration approach enabling Duckstring execution.
+slug: /theory
+---
+
 # Theory
 
 This document outlines the theory governing the orchestration mechanics. 

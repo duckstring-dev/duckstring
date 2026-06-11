@@ -4,6 +4,9 @@
  * work well for content-centric websites.
  */
 
+/* KaTeX styles for math rendering (remark-math + rehype-katex) */
+@import 'katex/dist/katex.min.css';
+
 /* Brand: the Duckstring water cyan (#06c4e6 — see frontend/src/lib/store.ts THEME_BRAND).
    Light mode uses a darker shade for contrast on white. */
 :root {
