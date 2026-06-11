@@ -123,7 +123,7 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
         ).fetchone()
 
         # Seed the live retry budgets from the pond.toml defaults, but only on first creation —
-        # operator edits via `duckstring failure budget` then survive redeploys.
+        # operator edits via `duckstring control failure-budget` then survive redeploys.
         db.execute(
             "INSERT OR IGNORE INTO pond_retry (pond_id, immediate_retries, source_retries) VALUES (?, ?, ?)",
             (pond_id, cfg["immediate_retries"], cfg["source_retries"]),

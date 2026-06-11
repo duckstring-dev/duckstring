@@ -16,7 +16,7 @@ See `brand/strategy.md` for positioning rationale and `brand/copy.md` for settle
 
 ## Current state (2026-06)
 
-The freshness/push-token runtime is **implemented and tested** (the old generation/watermark/demand model and TypeScript-simulation-only era are gone from the backend). The backend + CLI are near-complete, and the **web UI is built** (read-mostly Next.js, polls the Catchment — see Web UI below). The **playground was extracted** to a standalone `playground/` (in-memory sim). Known next step: **failure/retry handling** (see Fault tolerance below).
+The freshness/push-token runtime is **implemented and tested** (the old generation/watermark/demand model and TypeScript-simulation-only era are gone from the backend). The backend + CLI are complete, and the **web UI is built** (read-mostly Next.js, polls the Catchment — see Web UI below). The **playground was extracted** to a standalone `playground/` (in-memory sim). **Fault tolerance is now implemented end-to-end** (immediate + on-change retries, failed/killed/blocked states, dead/silent-Duck detection, error+traceback surfacing — see Fault tolerance). Outstanding: the design docs under `docs/guide/` other than `theory.md` (whose Fault-Tolerance section IS current) lag the Wake/Sleep/Force/Kill rename.
 
 ## Structure
 
@@ -40,11 +40,13 @@ src/duckstring/
     launcher.py            #   SubprocessLauncher (spawns Ducks) / NoopLauncher (tests)
     db.py                  #   SQLite connect + migration runner
     schema/001_init.sql    #   Database schema (see below)
-    routes/                #   deploy, orchestrate (triggers/status/runs/windows), duck (jobs/events), data, catchment (health)
+    routes/                #   deploy, orchestrate (triggers/control/status/runs/windows), duck (jobs/events), data (parquet), catchment (health)
     registry.py, dag.py    #   pond DuckDB registry paths; inter-pond cycle check
   cli/                     # Typer CLI (`duckstring` / `ds`)
-    trigger.py, window.py  #   tap/pulse/wave/tide/start/stop/remove ; trigger window add/list/remove
-    status.py, deploy.py, data.py, pond.py, catchment.py, config.py, _http.py
+    trigger.py             #   tap/pulse/wave/tide/remove ; window add/list/remove (cli/window.py)
+    control.py             #   wake/sleep/force/kill/clear/failure-budget (a Pond's execution & health)
+    pond.py, deploy.py     #   pond init/demo/deploy
+    status.py, data.py, catchment.py, config.py, window.py, _http.py
 docs/guide/                # Design documentation (theory.md is authoritative)
 frontend/                  # The live Catchment web UI (Next.js; static export served at catchment/static). See Web UI.
   src/lib/                 #   api.ts (HTTP client), store.ts (zustand poll store + colour palette), types.ts
@@ -60,13 +62,22 @@ playground/                # Standalone in-memory simulation (own repo → playg
 - **Transport**: Duck→Catchment is REST POST (`/api/duck/{pond}/events`); Catchment→Duck is a short-poll the Duck holds (`/api/duck/{pond}/jobs`). The Duck always dials back, so the same code works local and (future) remote — remote is just a different launcher. `DUCKSTRING_CATCHMENT_URL` tells Ducks where to dial; `DUCKSTRING_DISABLE_DUCKS=1` swaps in `NoopLauncher` (tests exercise the engine + persistence without spawning processes).
 - Cross-Pond data: each Pond writes its tables to `ponds/{name}/data/{table}.parquet` (atomic tmp+replace); sinks read those parquet files. Per-Pond DuckDB registry at `ponds/{name}/registry.duckdb`.
 
-## Triggers & demand control (CLI → `/api/outlets/{name}/…` → Driver)
+## Triggers & control (CLI → `/api/ponds/{name}/…` → Driver)
 
-- **tap** (one pull), **wave** (standing pull), **pulse** (push `now`, propagates upstream), **tide** (standing push; a **staleness bound in seconds**, not cron).
-- **start** — inject demand on the Pond alone: a push target of `NEVER` ("-Inf"), so it runs once against current inputs with **no** upstream propagation (`engine.start_pond`).
-- **stop** — clear the Pond's push+pull and its Ripples' **pull**, but KEEP Ripple push so started runs complete; also cancels the standing trigger. `--upstream` propagates to all ancestors.
-- **remove** — drop only the standing Wave/Tide trigger (existing work drains).
-- One-shot CLI commands (tap/pulse/start) open the live status until the target settles to idle; standing ones stay open.
+(Routes still live at `/api/ponds/{name}/…` and accept *any* deployed Pond, not only Outlets.)
+
+**Triggers** (`cli/trigger.py` — demand signals):
+- **tap** (one pull), **wave** (standing pull), **pulse** (push `now`, propagates upstream), **tide** (standing push; a **staleness bound** like `30s`/`1d`, not cron).
+- **remove** — drop the standing Wave/Tide trigger (existing work drains).
+
+**Control** (`cli/control.py` — a Pond's execution & health; see Fault tolerance):
+- **wake** (`engine.wake_pond`) — a one-shot **non-propagating** pull: runs once when Sources are already fresher (`sourceF > startF`), without soliciting them. Clears failure/kill.
+- **force** (`engine.force_pond`) — recompute now at the *current* freshness even with no upstream change (resets the Pond's + Ripples' `endF` so they re-run); does **not** advance freshness, so it does not propagate downstream. Clears failure/kill.
+- **sleep** (`engine.sleep_pond`, the old `stop`) — clear push+pull and Ripples' pull, KEEP Ripple push so started runs complete; cancels the standing trigger; `--upstream` reaches ancestors.
+- **kill** (`engine.kill_pond`) — terminate the Duck process and park the Pond **killed** (terminal, supersedes retries) until a wake/force/clear.
+- **clear** (`engine.clear_pond`) — reset a failed/killed Pond (no run); abandons the halted Run's phantom (`start_f → end_f`) so liveness won't re-fail it, and unblocks downstream.
+- **failure-budget** — show / set the live retry budgets (`--immediate`, `--on-change`).
+- One-shot commands (tap/pulse/wake/force) open the live status until the target settles (idle/failed/killed/blocked); standing ones stay open.
 
 ## Windows (batch availability on Inlets)
 
@@ -74,20 +85,37 @@ RFC-5545-flavoured recurrence (no cron anywhere — `croniter` is gone). `engine
 
 ## Web UI (`frontend/`) + playground
 
-The Catchment serves a **read-mostly Next.js UI** (static export, mounted at `/`; `npm run dev` proxies `/api` to a Catchment, default `:7474`). It polls `GET /api/status` (~1 s) and `GET /api/runs`, and POSTs the `trigger` surface; **topology is read-only** (Ponds come from deploying code — never UI-authored).
+The Catchment serves a **read-mostly Next.js UI** (static export, mounted at `/`; `npm run dev` proxies `/api` to a Catchment, default `:7474`). It polls `GET /api/status` (~1 s) and `GET /api/runs`, and POSTs the trigger + control surface; **topology is read-only** (Ponds come from deploying code — never UI-authored).
 
-- **`/api/status`** is enriched beyond the CLI's needs (`driver.status()`): per-Pond `d_ms` + standing `trigger`, and per-Ripple state + intra-Pond `ripple_edges` + `runs_completed`, so the UI can render the nested Ripple sub-graph live.
-- **`/api/runs`** (`driver.run_history`) is the run-history feed: newest-first Pond Runs with params `pond` / `lineage` (**upstream-only**) / `ripples` (nest Ripple Runs) / `limit` (≤1000).
+- **`/api/status`** is enriched beyond the CLI's needs (`driver.status()`): per-Pond `d_ms` + standing `trigger`, per-Ripple state + intra-Pond `ripple_edges` + `runs_completed`, and the fault/control fields `is_failed`/`is_killed`/`is_blocked`/`failed_f`/`failures`/`immediate_retries`/`source_retries`. The per-Pond `status` string has failure precedence: **failed → killed → blocked → running → queued → idle**.
+- **`/api/runs`** (`driver.run_history`) is the run-history feed: newest-first Pond Runs with params `pond` / `lineage` (**upstream-only**) / `ripples` (nest Ripple Runs) / `limit` (≤1000). Each run + ripple carries `status`, `retry` (attempt index), `error`, and `traceback`.
+- **Bottom panel** is split 50/50: `RunHistory` (left, clickable rows) + `RunDetail` (right). RunDetail shows the run's freshness/timing, the per-attempt Ripple list (the retry trace via `↻N`), and **below it** the failure(s) — one entry per source (`<ripple> · message`, or `Pond · message`) with the full `traceback` in a `<pre>`. The Sidebar's Control row is Force/Wake/Sleep/Kill (4-up, matching the Trigger row); a Failures section sets the retry budgets and shows Clear Failure when failed.
+- **`/api/data`** (`routes/data.py`) reads each Pond's **exported Parquet** (`ponds/{pond}/data/*.parquet`) via an in-memory DuckDB connection — never the live registry — so a data query never contends with a running Duck.
 - Data layer in `frontend/src/lib/`: `api.ts` (typed client), `store.ts` (zustand poll store; growing-window run feed; the semantic colour palette `THEME_*` + helpers `stateColor`/`consumeEdgeColor`/`nodeFill`/`formatAge`), `types.ts`. **Colours are centralised in `store.ts`** — node fill is a wash of the rim colour; the brand cyan is the running state; pull=amber, push=green-yellow.
 - Built with **Next 16** — heed `frontend/AGENTS.md` (breaking changes; read `node_modules/next/dist/docs/` before editing frontend code).
 
 The **playground** (`playground/`) is the standalone in-memory sim (the old `frontend/` content), bound for its own repo + `playground.duckstring.com`; it shares no code with the product UI.
 
-## Fault tolerance (current state — relevant to the next session)
+## Fault tolerance (implemented — `theory.md` "Fault Tolerance" is authoritative)
 
-- **Duck**: in-flight Pond Runs complete without the Catchment; events buffer and replay (idempotent on freshness `F`); on (re)start the Duck reconciles against its ledger and re-runs **only incomplete Ripples**.
-- **Catchment restart**: `Driver.reload` rebuilds engine state from SQLite (demand/freshness from `pond_state`/`pond_target`, `gen` from `pond_run` counts, per-Ripple `end_f` from successful `ripple_run` rows), and `resume_incomplete` (called from the lifespan) re-dispatches any `pond_run` left `status='running'`. `on_event` stamps a Ripple's `start_f` from the event freshness so replayed/resumed completions record correctly.
-- **Known gap (next session)**: ripple/run **failure handling** is not implemented in the new runtime. The Duck logs a ripple error but does not report failure status, and the Catchment does not retry. The `immediate_retries`/`source_retries` columns on `pond_version` (and `retry` on `pond_run`/`ripple_run`) exist but are not yet acted upon.
+Two retry budgets (default 0), live on the Pond and editable via `control failure-budget` (`pond_retry` table; seeded on deploy from the `pond.toml` / `pond_version` defaults, then operator-owned):
+- **immediate_retries** — Ripple-Run retries *within* one Pond Run (per-frontier, consumed by the Duck via `worker.immediate_left`).
+- **source_retries** (on-change) — whole Pond Runs the Catchment re-attempts when a Source updates.
+
+Pond fault state on `PondState`: `is_failed` (a Run gave up, not yet superseded), `failed_f` (freshest failed Run — the recovery watermark; the run-gate keys on `start_f`, this is for clearing/telemetry), `failures` (count vs `source_retries`), `is_blocked` (a required Source is failed/killed/blocked — **derived and propagated** downstream via `derive_blocked`), `is_killed` (operator Kill; terminal). Gating: a failed Pond only re-runs via the on-change path (`sourceF > startF`, while `failures <= source_retries`); a Run completing fresher than `failed_f` clears the episode; a **blocked-but-not-failed** Pond still drains existing Source output but never solicits; a killed Pond is fully gated.
+
+Failure sources (every type produces a **message**; ripple/Duck exceptions also a **traceback** — surfaced in Run Detail):
+- **Ripple error** → Duck spends `immediate_retries` (per-frontier), then reports `failed(F = ripple.startF, error, traceback)`; the Catchment fails the Pond at that Run, counts it, blocks downstream (`engine.fail_ripple`).
+- **Duck-level error** (e.g. ledger write) → the Duck reports `pond_failed` (attributed to its last `begin_run`) and exits.
+- **Dead / silent Duck** → `Driver._check_liveness` (in `scheduler_tick`, only for `SubprocessLauncher`) fails an in-flight Pond whose process is gone (`proc.poll()`), or whose last contact aged past 60 s (`engine.fail_pond` at `start_f`).
+- **Stuck Run** → the Duck's watchdog reports `pond_failed` if it has outstanding work but no Ripple running for 30 s.
+- **Kill** → `Driver.kill` terminates the Duck and parks the Pond `killed`.
+
+Recovery: a failed Pond with on-change budget re-runs on the next Source change (respawning a Duck); redeploying a fixed artifact auto-clears the failure (`Driver.clear_on_redeploy`); `control clear` / `force` / `wake` clear it manually. Run history records **one row per attempt** (`ripple_run` keyed on `retry`) with `error` + `traceback`. `_check_liveness` skips failed/killed/blocked Ponds; `clear` rolls `start_f → end_f` so the abandoned Run isn't re-failed.
+
+Concurrency hardening: SQLite connects with `PRAGMA busy_timeout`; DuckDB writes + the Parquet export retry transient locks via `core.retry_on_lock` (export uses a read-write connection, never `read_only`, to avoid clashing with pipelined Ripple connections).
+
+Duck/restart resilience (pre-existing): in-flight Runs complete without the Catchment (events buffer + replay idempotently on `F`); on (re)start the Duck reconciles against its ledger and re-runs **only incomplete Ripples**. `Driver.reload` rebuilds engine state from SQLite (demand/freshness from `pond_state`/`pond_target` incl. the fault fields + `pond_retry`, `gen` from `pond_run` counts, per-Ripple `end_f` from successful `ripple_run` rows); `resume_incomplete` re-dispatches `pond_run` left `status='running'`.
 
 ## Catchment database
 
@@ -99,8 +127,8 @@ SQLite `duck.db` at the catchment root. Schema in `catchment/schema/001_init.sql
 - **`pond_version`** — a specific deployed snapshot (`pond_name_id`, `version`, `major`, `source_path`, retry config). Immutable artifact; topology + run history key off this.
 - **`pond`** — the **selected** version, one per `(pond_name, major)` → `pond_version` (upserted on deploy). This is "the Pond" and the FK target for all live demand/freshness/graph tables.
 - Topology (keyed on `pond_version`): `ripple`, `ripple_to_ripple` (intra-pond edges, all required).
-- Live state (keyed on `pond`): `pond_to_pond` (sink `pond_id` → source `pond_name_id` + `source_major`, so a sink can deploy before its source), `pond_state` (start_f/end_f/d_ms/has_pull/has_received_pull), `pond_target` (push target set), `pond_window` (PK `(pond_id, name)`), `pond_trigger` (PK `pond_id`; kind wave/tide, bound_ms).
-- History (keyed on `pond_version` + freshness `f`): `pond_run`, `ripple_run`. `started_at`/`finished_at` are the Duck's wall-clock execution span (the Duck reports both on the `ripple` event; the Catchment records them) — that's where the UI's run durations come from. All timestamps are UTC ISO-8601 (tz-aware).
+- Live state (keyed on `pond`): `pond_to_pond` (sink `pond_id` → source `pond_name_id` + `source_major`, so a sink can deploy before its source), `pond_state` (start_f/end_f/d_ms/has_pull/has_received_pull **+ is_failed/is_blocked/failed_f/failures/is_killed/pull_local**), `pond_target` (push target set), `pond_retry` (immediate_retries/source_retries — live budgets), `pond_window` (PK `(pond_id, name)`), `pond_trigger` (PK `pond_id`; kind wave/tide, bound_ms).
+- History (keyed on `pond_version` + freshness `f`): `pond_run` (`status` ∈ running/success/failed/killed, `error`, `traceback`) and `ripple_run` (**PK includes `retry`** — one row per attempt = the retry trace; `status`, `error`, `traceback`). `started_at`/`finished_at` are the Duck's wall-clock execution span (reported on the `ripple` event) — the UI's run durations. All timestamps are UTC ISO-8601 (tz-aware).
 - The **per-Pond run ledger is NOT in `duck.db`** — it lives at `ponds/{base_pond}/pond.db` (owned by `engine/pond.py`): the Duck's operational/recovery record (`ripple_run_state`, `pond_run`). The Catchment's `pond_run`/`ripple_run` are the canonical history.
 
 ## Orchestration model (theory.md is authoritative)
@@ -109,7 +137,7 @@ Freshness-based Kanban. The Pond is a packaging/versioning boundary; its `start`
 
 - **Freshness `F`** — a UTC timestamp per node: the run-start time of the oldest root feeding it (with windows, the "fresh until" window end). `NEVER` (`datetime.min`) is the sentinel for never-run. Staleness = `now + D - F`.
 - **Pull** (Tap/Wave) — a `hasPull` token; a node runs when a parent is fresher (`sourceF > startF`) and re-arms parents on start. Cold-start guards use **startF** (`source.startF <= this.startF`).
-- **Push** (Pulse/Tide/start) — a **set** of unsatisfied target freshnesses; run when `sourceF >= min(targets)`, clearing every target reached. Pond run start stamps every Ripple with `Pond.startF`.
+- **Push** (Pulse/Tide) — a **set** of unsatisfied target freshnesses; run when `sourceF >= min(targets)`, clearing every target reached. Pond run start stamps every Ripple with `Pond.startF`. (The control verbs map onto these: **wake** = a non-propagating one-shot pull, **force** = a same-freshness recompute, **sleep** = clear demand, **kill** = terminate.)
 - The four hard-won landmines (startF cold-start guards, push target *set*, Tide `max(targets) ?? startF` clock ref, the run-start ripple stamp) are encoded in `engine/` and guarded by `tests/test_engine.py` — preserve them.
 
 ## Testing

@@ -664,5 +664,5 @@ def test_redeploy_same_version_after_run_history(catchment_client):
     r = _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
                 toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
     assert r.status_code == 200
-    # Redeploying the (fixed) artifact auto-clears the failure — no manual `failure clear` needed.
+    # Redeploying the (fixed) artifact auto-clears the failure — no manual `control clear` needed.
     assert not _pond_status(catchment_client, "outlet")["is_failed"]
