@@ -20,6 +20,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'concepts/ponds',
         'concepts/ripples',
+        'concepts/puddles',
         'concepts/catchment',
         'concepts/freshness',
         'concepts/versioning',
@@ -31,6 +32,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'guides/running-a-catchment',
         'guides/creating-a-pond',
+        'guides/local-testing',
         'guides/deploying',
         'guides/triggers',
         'guides/windows',

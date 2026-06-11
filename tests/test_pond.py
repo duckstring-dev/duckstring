@@ -7,7 +7,10 @@ import pytest
 
 from duckstring.cli import app
 
-EXPECTED_FILES = {"pond.toml", "src/pond.py", "__main__.py", ".gitignore", "README.md"}
+EXPECTED_FILES = {"pond.toml", "src/pond.py", "src/puddles.py", ".gitignore", "README.md"}
+
+# Demo ponds carry puddles.py only where it makes sense (sales — the worked example with Sources).
+DEMO_EXPECTED_FILES = {"pond.toml", "src/pond.py", ".gitignore", "README.md"}
 
 _DEMO_DIR = Path(__file__).parent.parent / "src" / "duckstring" / "demo"
 
@@ -60,7 +63,8 @@ def test_demo_creates_all_subdirs(runner, tmp_path, monkeypatch):
     result = runner.invoke(app, ["pond", "demo"], input="y\n")
     assert result.exit_code == 0
     for name in _DEMO_PONDS:
-        assert EXPECTED_FILES.issubset(_file_names(tmp_path / name)), f"Missing files in {name}/"
+        assert DEMO_EXPECTED_FILES.issubset(_file_names(tmp_path / name)), f"Missing files in {name}/"
+    assert "src/puddles.py" in _file_names(tmp_path / "sales")
 
 
 def test_demo_copies_gitignore(runner, tmp_path, monkeypatch):
@@ -141,7 +145,7 @@ def test_demo_pond_toml_valid_toml(runner, tmp_path, monkeypatch):
 @pytest.mark.parametrize("name", ["transactions", "products", "sales", "reports"])
 def test_demo_source_files_complete(name):
     pond_dir = _DEMO_DIR / name
-    for rel in ("pond.toml", "src/pond.py", "__main__.py", ".gitignore", "README.md"):
+    for rel in ("pond.toml", "src/pond.py", ".gitignore", "README.md"):
         assert (pond_dir / rel).exists(), f"{name}/{rel} missing from demo source"
 
 

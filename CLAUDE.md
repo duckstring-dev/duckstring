@@ -16,13 +16,13 @@ See `brand/strategy.md` for positioning rationale and `brand/copy.md` for settle
 
 ## Current state (2026-06)
 
-The freshness/push-token runtime is **implemented and tested** (the old generation/watermark/demand model and TypeScript-simulation-only era are gone from the backend). The backend + CLI are complete, and the **web UI is built** (read-mostly Next.js, polls the Catchment — see Web UI below). The **playground was extracted** to a standalone `playground/` (in-memory sim). **Fault tolerance is now implemented end-to-end** (immediate + on-change retries, failed/killed/blocked states, dead/silent-Duck detection, error+traceback surfacing — see Fault tolerance). The old `docs/guide/` design docs were removed; `docs/` is now a fully-written Docusaurus site (`docs/docs/theory.md` carried over — its Fault-Tolerance section IS current).
+The freshness/push-token runtime is **implemented and tested** (the old generation/watermark/demand model and TypeScript-simulation-only era are gone from the backend). The backend + CLI are complete, and the **web UI is built** (read-mostly Next.js, polls the Catchment — see Web UI below). The **playground was extracted** to a standalone `playground/` (in-memory sim). **Fault tolerance is now implemented end-to-end** (immediate + on-change retries, failed/killed/blocked states, dead/silent-Duck detection, error+traceback surfacing — see Fault tolerance). The old `docs/guide/` design docs were removed; `docs/` is now a fully-written Docusaurus site (`docs/docs/theory.md` carried over — its Fault-Tolerance section IS current). **Puddles (local pre-deploy testing) are implemented** — see Puddles below.
 
 ## Structure
 
 ```
 src/duckstring/
-  core.py                  # Pond/Ripple runtime handles + @ripple decorator (used by deployed pond code)
+  core.py                  # Pond/Ripple handles + @ripple/@puddle decorators + Catchment client + pond.toml/entrypoint/import helpers
   engine/                  # PURE orchestration engine (no FastAPI/DB/HTTP). The state machine.
     core.py                #   shared dataclasses: NEVER, Window, Pond, Ripple, Trigger, BeginRun, Pond/RippleState
     catchment.py           #   the FULL engine (Ponds + Ripples, pull + push) — the Catchment's brain
@@ -42,10 +42,15 @@ src/duckstring/
     schema/001_init.sql    #   Database schema (see below)
     routes/                #   deploy, orchestrate (triggers/control/status/runs/windows), duck (jobs/events), data (parquet), catchment (health)
     registry.py, dag.py    #   pond DuckDB registry paths; inter-pond cycle check
+  local/                   # Local pre-deploy testing (no engine/FastAPI/Ducks). See Puddles.
+    project.py             #   load_project: pond.toml + entrypoints + puddles/ dirs
+    hydrate.py             #   materialise @puddle definitions → puddles/ponds/{source}/data/*.parquet
+    runner.py              #   run_pond: one local Pond Run in topo order → puddles/out/
   cli/                     # Typer CLI (`duckstring` / `ds`)
     trigger.py             #   tap/pulse/wave/tide/remove ; window add/list/remove (cli/window.py)
     control.py             #   wake/sleep/force/kill/clear/failure-budget (a Pond's execution & health)
-    pond.py, deploy.py     #   pond init/demo/deploy
+    pond.py, deploy.py     #   pond init/demo/hydrate/run/deploy
+    puddle.py              #   puddle ls/show/query (inspect ./puddles via in-memory DuckDB views)
     status.py, data.py, catchment.py, config.py, window.py, _http.py
 docs/                      # Docusaurus docs site → docs.duckstring.com (content in docs/docs/; theory.md is authoritative)
 frontend/                  # The live Catchment web UI (Next.js; static export served at catchment/static). See Web UI.
@@ -82,6 +87,10 @@ playground/                # Standalone in-memory simulation (own repo → playg
 ## Windows (batch availability on Inlets)
 
 RFC-5545-flavoured recurrence (no cron anywhere — `croniter` is gone). `engine.core.Window(start_anchor, duration, freq_unit ∈ {SECOND,MINUTE,HOUR,DAY,WEEK}, freq_interval, valid_days ⊆ {MON..SUN}|None, until)`. Occurrences are `start_anchor + k·delta` filtered by valid_days/until; a Pond is "fresh until" the active window's end, with `D` = window duration. `Window.active_end`/`next_boundary` are O(1) (used per-tick in `pond_source_f`/`next_wake`); `Window.occurrences` (bounded) is used only for add-time overlap validation. Managed via `duckstring trigger window {pond} add|list|remove` (`cli/window.py`); operational config (CLI/API, survives redeploys), not declared in `pond.toml`. `add` requires only `--name`/`--every` (`--start` defaults to 00:00 today; `--duration` defaults to `--every` = back-to-back).
+
+## Puddles (local pre-deploy testing — `local/`, `cli/puddle.py`)
+
+A **Puddle** is a code-defined snapshot of a Source table, for testing a Pond before deployment. Definitions in `src/puddles.py` (untyped `@puddle("source.table")` or whole-source `@puddle("source")`; handle `p` has `con`/`path`/`write_table`/`write_path`/`catchment()` — see `core.py`). `duckstring pond hydrate` imports them (decorator side-effect, like `@ripple`) and materialises `puddles/ponds/{source}/data/{table}.parquet` — the catchment-root layout, so `Pond.read_table`'s foreign branch works unchanged with `root=puddles/`. Missing definitions skip with a warning (`--from-catchment` fills from the Catchment). `duckstring pond run [--ripple X] [--fresh]` is **one local Pond Run** (sequential topo order, no engine/freshness/Ducks): full runs reset `puddles/out/` (registry + exported parquet); a **self-puddle** (`puddles/ponds/{this_pond}/`) is copied in as the seed first, making incremental reruns idempotent. `duckstring puddle ls|show|query` inspects `./puddles` via in-memory DuckDB views (`"{pond}"."{table}"`; output overrides a same-named self-puddle). Entrypoints are declarable in `pond.toml` (`[pond] ripples`/`puddles`, defaults `src/pond.py`/`src/puddles.py`) and honoured by deploy + the Duck executor via `core.import_pond_module`. Tests: `tests/test_puddle.py`; demo `sales` carries a worked `src/puddles.py`.
 
 ## Web UI (`frontend/`) + playground
 

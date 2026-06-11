@@ -38,7 +38,19 @@ Registrations and the default live in `~/.duckstring/config.toml`.
 |---|---|
 | `pond init {name}` | Scaffold a new Pond project in the current (empty) directory. |
 | `pond demo` | Create the four demo Pond projects (`transactions`, `products`, `sales`, `reports`) as subdirectories. |
+| `pond hydrate [-s SOURCE] [--from-catchment] [-c NAME]` | Materialise the project's [Puddles](../guides/local-testing.md) into `puddles/`. Sources without a definition are skipped with a warning; `--from-catchment` fills them from the Catchment's exported tables; `-s` restricts to specific Sources. |
+| `pond run [--ripple NAME] [--fresh]` | Execute the Pond locally against its hydrated Puddles, output to `puddles/out/`. `--ripple` runs a single Ripple against the last run's state; `--fresh` ignores a self-puddle seed. |
 | `pond deploy [-c NAME] [--git REF] [-y] [--all]` | Deploy the current Pond project (reads `pond.toml`). `--all` deploys every subdirectory containing a `pond.toml`; `--git` deploys from a git ref (branch/tag/commit) of the project's `origin` remote instead of uploading the working tree; `-y` skips confirmations. |
+
+## `duckstring puddle` — inspect local test data
+
+See [Local Testing](../guides/local-testing.md). All three operate on the current project's `puddles/` directory, no Catchment involved.
+
+| Command | Description |
+|---|---|
+| `puddle ls` | List hydrated Puddles and run output, with row counts, size, and age. |
+| `puddle show {pond}.{table} [-n N]` | Preview a table (run output wins when a self-puddle shares the name). |
+| `puddle query {sql}` | Run SQL across everything local — snapshots as `"{source}"."{table}"`, output under the Pond's own name. |
 
 ## `duckstring trigger` — demand signals
 

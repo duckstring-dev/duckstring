@@ -13,7 +13,7 @@ from duckstring import ripple
 
 ## `@ripple`
 
-Registers a function as a [Ripple](../concepts/ripples.md) of the Pond. The Catchment discovers a Pond's topology at deploy time by importing `src/pond.py` and reading these registrations.
+Registers a function as a [Ripple](../concepts/ripples.md) of the Pond. The Catchment discovers a Pond's topology at deploy time by importing `src/pond.py` (or the `ripples` path declared in [pond.toml](pond-toml.md)) and reading these registrations.
 
 ```python
 @ripple
@@ -99,6 +99,35 @@ import pandas as pd
 df = pd.DataFrame(fetch_from_api())                    # arbitrary Python
 pond.write_table("snapshot", pond.con.sql("SELECT * FROM df"))
 ```
+
+## `@puddle` and the `Puddle` handle
+
+Registers a function in `src/puddles.py` (or the `puddles` path in [pond.toml](pond-toml.md)) as a [Puddle](../guides/local-testing.md) — a local snapshot of the Source table it names, materialised by `duckstring pond hydrate`:
+
+```python
+from duckstring import puddle
+
+@puddle("transactions.transaction")     # one table of a Source
+def transactions(p):
+    return p.con.sql("SELECT range AS id FROM range(50)")
+
+@puddle("products")                     # a whole Source — name each table
+def products(p):
+    p.write_table("product", p.con.sql("SELECT 1 AS id"))
+```
+
+The handle `p`:
+
+| Attribute | Meaning |
+|---|---|
+| `p.target` / `p.source` / `p.table` | The target as declared / its Source / its table (`None` for whole-Source puddles). |
+| `p.con` | A scratch in-memory DuckDB connection. |
+| `p.path` | The destination directory (`puddles/ponds/{source}/data/`) — write any non-table artifact there directly. |
+| `p.write_table([name,] relation)` | Export a relation as a table's Parquet snapshot (atomic). Accepts anything `write_table` on a Pond accepts. |
+| `p.write_path(path)` | Copy a parquet/csv file or glob in. |
+| `p.catchment(name=None)` | A `Catchment` client bound to the Source: `.get([table])` fetches a table, `.query(sql)` runs SQL against the Source's exported tables, `.tables()` lists them. |
+
+Returning a relation is shorthand for `p.write_table(relation)`; returning a path string for `p.write_path(path)`. Puddle code never runs on a Catchment — only `pond hydrate` imports it.
 
 ## Execution environment
 

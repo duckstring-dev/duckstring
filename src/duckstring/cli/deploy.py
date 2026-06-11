@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import sys
 import zipfile
 from pathlib import Path
 from typing import Optional
@@ -16,17 +15,13 @@ _SKIP_EXTS = {".pyc", ".pyo"}
 
 
 def _read_pond_toml(cwd: Path) -> dict:
-    toml_path = cwd / "pond.toml"
-    if not toml_path.exists():
+    from ..core import read_pond_toml
+
+    if not (cwd / "pond.toml").exists():
         typer.echo("Error: no pond.toml found in the current directory.", err=True)
         typer.echo("Are you in a Pond project root? Run 'duckstring pond init <name>' to create one.", err=True)
         raise typer.Exit(1)
-    text = toml_path.read_text(encoding="utf-8")
-    if sys.version_info >= (3, 11):
-        import tomllib
-        return tomllib.loads(text)
-    import tomli
-    return tomli.loads(text)
+    return read_pond_toml(cwd)
 
 
 def _zip_pond(cwd: Path) -> bytes:

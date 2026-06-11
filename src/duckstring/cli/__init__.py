@@ -4,6 +4,7 @@ import typer
 
 from . import catchment as catchment_cmd
 from . import pond as pond_cmd
+from . import puddle as puddle_cmd
 from .control import clear, failure_budget, force, kill, sleep, wake
 from .data import get, query
 from .deploy import deploy
@@ -37,6 +38,7 @@ control_app.command("failure-budget")(failure_budget)
 
 app.add_typer(catchment_cmd.app, name="catchment")
 app.add_typer(pond_cmd.app, name="pond")
+app.add_typer(puddle_cmd.app, name="puddle")
 app.add_typer(trigger_app, name="trigger")
 app.add_typer(control_app, name="control")
 

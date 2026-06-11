@@ -14,9 +14,9 @@ A Pond project looks like a small Python package:
 ```text
 sales/
 ├── src/
-│   └── pond.py      # the Ripples — the transform code
+│   ├── pond.py      # the Ripples — the transform code
+│   └── puddles.py   # Source snapshots for local testing
 ├── pond.toml        # name, version, type, Sources
-├── __main__.py
 ├── .gitignore
 └── README.md
 ```

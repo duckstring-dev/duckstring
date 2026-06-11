@@ -5,7 +5,7 @@ description: Write your own Pond from scratch.
 
 # Creating a Pond
 
-This guide builds a real Pond: scaffold the project, write Ripples, declare Sources, and smoke-test the logic. It assumes the [Quickstart](../getting-started/quickstart.md)'s demo Ponds are deployed, since the new Pond will consume one of them.
+This guide builds a real Pond: scaffold the project, write Ripples, declare Sources, and test the logic locally. It assumes the [Quickstart](../getting-started/quickstart.md)'s demo Ponds are deployed, since the new Pond will consume one of them.
 
 ## Scaffold
 
@@ -20,9 +20,9 @@ This creates the standard Pond layout:
 ```text
 top_sellers/
 ├── src/
-│   └── pond.py      # your Ripples
+│   ├── pond.py      # your Ripples
+│   └── puddles.py   # Source snapshots for local testing
 ├── pond.toml        # identity + Sources
-├── __main__.py
 ├── .gitignore
 └── README.md
 ```
@@ -92,28 +92,28 @@ The complete handle API is in the [Python API reference](../reference/python-api
 
 An Inlet's Ripples work the same way, minus Source reads — they fetch from the outside world (an API, a warehouse, files) and `write_table` the result. The demo `transactions` Pond is a worked example (it appends a synthetic batch each run, building on its own previous output via `pond.read_table("transaction")`). For sources that update on a known rhythm, pair the Inlet with a [Window](windows.md) so downstream Ponds only re-run when fresh data can actually exist.
 
-## Smoke-test
+## Test locally
 
-A Pond is plain Python, so the fastest check is importing it and running a Ripple against a scratch database:
+The Pond reads `sales.sale_line`, which only exists on the Catchment — so define a Puddle for it in `src/puddles.py` that pulls a sample down:
 
 ```python
-import duckdb
-from pathlib import Path
-from duckstring.core import Pond
+from duckstring import puddle
 
-import sys; sys.path.insert(0, "src")
-import pond as pond_module
 
-handle = Pond(
-    name="top_sellers", version="0.1.0",
-    con=duckdb.connect("scratch.duckdb"),
-    root=Path.home() / ".duckstring" / "dev",   # a Catchment root with sales data exported
-)
-pond_module.product_rank(handle)
-print(handle.con.sql("SELECT * FROM product_rank LIMIT 5"))
+@puddle("sales.sale_line")
+def sale_line(p):
+    p.write_table(p.catchment().get())
 ```
 
-Pointing `root` at a real Catchment root lets `read_table` resolve Source tables from the actual exported snapshots — your transform runs against real upstream data before it's ever deployed.
+Then run the Pond against it, entirely locally:
+
+```bash
+duckstring pond hydrate
+duckstring pond run
+duckstring puddle show top_sellers.top10
+```
+
+Your transform runs against real upstream data before it's ever deployed. Synthetic and file-based Puddles, single-Ripple runs, and incremental testing are covered in [Local Testing](local-testing.md).
 
 ## Deploy and run
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 _RIPPLES: list[dict] = []
+_PUDDLES: list[dict] = []
 
 
 def retry_on_lock(fn, attempts: int = 12, base: float = 0.05):
@@ -50,9 +52,236 @@ def collect_ripples() -> list[dict]:
     return result
 
 
+def puddle(target: str):
+    """Decorator that registers a function as a Puddle — a local snapshot of the Source data it
+    emulates, for testing a Pond before deployment (``duckstring pond hydrate`` / ``pond run``).
+
+    Usage:
+        @puddle("transactions.transaction")     # one table of a Source
+        def transactions(p):
+            p.write_table(p.con.sql("SELECT ..."))
+
+        @puddle("products")                     # a whole Source (name each table)
+        def products(p):
+            p.write_table("product", p.con.sql("SELECT ..."))
+    """
+
+    def decorator(f):
+        _PUDDLES.append({"func": f, "target": target, "name": f.__name__})
+        return f
+
+    return decorator
+
+
+def collect_puddles() -> list[dict]:
+    """Drain and return the current puddle registry. Used by ``duckstring pond hydrate``."""
+    result = list(_PUDDLES)
+    _PUDDLES.clear()
+    return result
+
+
+def read_pond_toml(pond_dir: Path) -> dict:
+    """Parse ``pond.toml`` in ``pond_dir``; ``{}`` if absent."""
+    import sys
+
+    toml_path = Path(pond_dir) / "pond.toml"
+    if not toml_path.exists():
+        return {}
+    text = toml_path.read_text(encoding="utf-8")
+    if sys.version_info >= (3, 11):
+        import tomllib
+
+        return tomllib.loads(text)
+    import tomli
+
+    return tomli.loads(text)
+
+
+def pond_entrypoints(info: dict) -> tuple[str, str]:
+    """The (ripples, puddles) entrypoint paths declared in pond.toml, with the standard defaults."""
+    pond = info.get("pond", {})
+    return pond.get("ripples", "src/pond.py"), pond.get("puddles", "src/puddles.py")
+
+
+def import_pond_module(source_dir: Path, entry: str):
+    """Import the module at ``source_dir/entry`` for its decorator side-effects (``@ripple`` /
+    ``@puddle``) and return it. The import is isolated: ``sys.path`` gains only the entry's parent
+    for the duration, and any modules the import added are evicted afterwards so the next Pond's
+    code never sees stale state."""
+    import importlib
+    import sys
+
+    entry_path = Path(source_dir) / entry
+    parent = str(entry_path.parent)
+    stem = entry_path.stem
+    before = set(sys.modules.keys())
+    sys.path.insert(0, parent)
+    try:
+        sys.modules.pop(stem, None)
+        importlib.invalidate_caches()
+        return importlib.import_module(stem)
+    finally:
+        if parent in sys.path:
+            sys.path.remove(parent)
+        for key in list(sys.modules):
+            if key not in before:
+                sys.modules.pop(key, None)
+
+
+def resolve_catchment_url(name: str | None = None) -> str:
+    """A Catchment URL from a name in ``~/.duckstring/config.toml`` (default Catchment when ``None``),
+    or the value itself when it already looks like a URL. Raises ``ValueError`` when unresolvable —
+    no typer here; the CLI formats the message."""
+    if name and "://" in name:
+        return name
+    from .cli.config import load_config
+
+    config = load_config()
+    catchments = config.get("catchments", {})
+    effective = name or config.get("default_catchment")
+    if not effective and len(catchments) == 1:
+        effective = next(iter(catchments))
+    if not effective or effective not in catchments:
+        raise ValueError(
+            f"no catchment {name!r} registered" if name else "no catchment specified and no default set"
+        )
+    return catchments[effective]["url"]
+
+
 class Catchment:
-    # TODO: client-side handle for communicating with the catchment server during execution
-    pass
+    """Client-side handle for a Catchment server's read surface (the ``/api/query`` route).
+
+    ``query``/``get`` return DuckDB relations materialised on ``con`` (each Pond's exported Parquet
+    is queryable under ``"{pond}"."{table}"`` or bare). Inside a puddle definition, ``p.catchment()``
+    returns one of these pre-bound to the puddle's Source and scratch connection."""
+
+    def __init__(self, url: str, con=None, default_pond: str | None = None, default_table: str | None = None):
+        self.url = url.rstrip("/")
+        self._con = con
+        self._default_pond = default_pond
+        self._default_table = default_table
+
+    @property
+    def con(self):
+        if self._con is None:
+            import duckdb
+
+            self._con = duckdb.connect()
+        return self._con
+
+    def _pond(self, pond: str | None) -> str:
+        target = pond or self._default_pond
+        if not target:
+            raise ValueError("no Pond given — pass pond=... or use this client from a puddle definition")
+        return target
+
+    def _post_query(self, payload: dict):
+        import httpx
+
+        resp = httpx.post(f"{self.url}/api/query", json=payload, timeout=httpx.Timeout(60.0, connect=5.0))
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text[:300]
+            raise RuntimeError(f"Catchment query failed ({resp.status_code}): {detail}")
+        return resp
+
+    def query(self, sql: str, pond: str | None = None):
+        """Run ``sql`` against a Pond's exported tables; returns a DuckDB relation on ``con``."""
+        import tempfile
+
+        resp = self._post_query({"pond": self._pond(pond), "sql": sql, "format": "parquet"})
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            f.write(resp.content)
+            tmp = f.name
+        return self.con.read_parquet(tmp)
+
+    def get(self, table: str | None = None, pond: str | None = None):
+        """Fetch a whole table; returns a DuckDB relation on ``con``."""
+        target_table = table or self._default_table
+        if not target_table:
+            raise ValueError("no table given — pass table=... or define the puddle on a 'source.table' target")
+        return self.query(f'SELECT * FROM "{target_table}"', pond=pond)
+
+    def tables(self, pond: str | None = None) -> list[str]:
+        """The names of a Pond's exported tables."""
+        rows = self._post_query({"pond": self._pond(pond), "sql": "SHOW TABLES"}).json()
+        return [row["name"] for row in rows]
+
+
+class Puddle:
+    """Handle passed to ``@puddle`` definitions. ``path`` is the puddle's destination directory —
+    the general escape hatch (write models, blobs, anything there directly); ``write_table`` /
+    ``write_path`` are conveniences layered on it."""
+
+    def __init__(self, target: str, root: Path, default_catchment: str | None = None):
+        self.target = target
+        source, _, table = target.partition(".")
+        self.source = source
+        self.table = table or None
+        self.root = Path(root)
+        self.default_catchment = default_catchment
+        self._con = None
+
+    @property
+    def path(self) -> Path:
+        """The destination directory (``puddles/ponds/{source}/data/``), created on access."""
+        dest = self.root / "ponds" / self.source / "data"
+        dest.mkdir(parents=True, exist_ok=True)
+        return dest
+
+    @property
+    def con(self):
+        """A scratch in-memory DuckDB connection."""
+        if self._con is None:
+            import duckdb
+
+            self._con = duckdb.connect()
+        return self._con
+
+    def write_table(self, name_or_relation, relation=None) -> Path:
+        """Export a relation to ``{path}/{table}.parquet`` (atomic tmp+replace). The single-argument
+        form uses the table named on the decorator; name the table explicitly for whole-Source puddles."""
+        if relation is None:
+            name, relation = self.table, name_or_relation
+            if name is None:
+                raise ValueError(
+                    f"puddle '{self.target}' covers a whole Source — name the table: p.write_table(name, relation)"
+                )
+        else:
+            name = name_or_relation
+        if not hasattr(relation, "write_parquet"):
+            relation = self.con.from_df(relation)
+        dest = self.path / f"{name}.parquet"
+        tmp = self.path / f"{name}.parquet.tmp"
+        relation.write_parquet(str(tmp))
+        tmp.replace(dest)
+        return dest
+
+    def write_path(self, src) -> None:
+        """Copy data file(s) into the puddle: a parquet/csv path or glob. A single-table puddle reads
+        everything matched as that table; a whole-Source puddle names each file's stem as a table."""
+        src = Path(src).expanduser()
+        if self.table is not None:
+            self.write_table(self._read_path(src))
+            return
+        files = sorted(src.parent.glob(src.name)) if any(ch in src.name for ch in "*?[") else [src]
+        if not files:
+            raise FileNotFoundError(f"puddle '{self.target}': nothing matches {src}")
+        for f in files:
+            self.write_table(f.stem, self._read_path(f))
+
+    def _read_path(self, src: Path):
+        suffix = src.suffix.lower() or Path(src.name.split("*")[0]).suffix.lower()
+        if suffix == ".csv":
+            return self.con.read_csv(str(src))
+        return self.con.read_parquet(str(src))
+
+    def catchment(self, name: str | None = None) -> Catchment:
+        """A :class:`Catchment` client bound to this puddle's Source and scratch connection."""
+        url = resolve_catchment_url(name or self.default_catchment)
+        return Catchment(url, con=self.con, default_pond=self.source, default_table=self.table)
 
 
 class Pond:

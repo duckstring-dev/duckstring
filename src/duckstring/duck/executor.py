@@ -8,8 +8,6 @@ when it finished".
 
 from __future__ import annotations
 
-import importlib
-import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -22,7 +20,7 @@ _import_lock = threading.Lock()
 
 def load_topology(source_dir: Path) -> dict[str, list[str]]:
     """Build the intra-Pond ``{ripple_name: [parent_names]}`` graph by importing the deployed
-    ``src/pond.py`` and reading the registered ripples (the Duck owns its own code)."""
+    ripples entrypoint and reading the registered ripples (the Duck owns its own code)."""
     ripples = _import_ripples(source_dir)
     func_to_name = {r["func"]: r["name"] for r in ripples}
     return {
@@ -32,43 +30,22 @@ def load_topology(source_dir: Path) -> dict[str, list[str]]:
 
 
 def _import_ripples(source_dir: Path) -> list[dict]:
-    from ..core import collect_ripples
+    from ..core import collect_ripples, import_pond_module, pond_entrypoints, read_pond_toml
 
-    src = str(source_dir / "src")
-    before = set(sys.modules.keys())
-    sys.path.insert(0, src)
-    try:
-        sys.modules.pop("pond", None)
-        importlib.invalidate_caches()
-        importlib.import_module("pond")
-        return collect_ripples()
-    finally:
-        if src in sys.path:
-            sys.path.remove(src)
-        for key in list(sys.modules):
-            if key not in before:
-                sys.modules.pop(key, None)
+    ripples_entry, _ = pond_entrypoints(read_pond_toml(source_dir))
+    import_pond_module(source_dir, ripples_entry)
+    return collect_ripples()
 
 
 def _load_ripple_func(source_path: str, root: str, ripple_name: str):
-    src = str(Path(root) / source_path / "src")
-    with _import_lock:
-        before = set(sys.modules.keys())
-        sys.path.insert(0, src)
-        try:
-            from ..core import collect_ripples
+    from ..core import collect_ripples, import_pond_module, pond_entrypoints, read_pond_toml
 
-            sys.modules.pop("pond", None)
-            importlib.invalidate_caches()
-            mod = importlib.import_module("pond")
-            collect_ripples()
-            return getattr(mod, ripple_name)
-        finally:
-            if src in sys.path:
-                sys.path.remove(src)
-            for k in list(sys.modules):
-                if k not in before:
-                    sys.modules.pop(k, None)
+    source_dir = Path(root) / source_path
+    with _import_lock:
+        ripples_entry, _ = pond_entrypoints(read_pond_toml(source_dir))
+        mod = import_pond_module(source_dir, ripples_entry)
+        collect_ripples()
+        return getattr(mod, ripple_name)
 
 
 def _run_ripple(func, pond_name: str, version: str, registry_path_str: str, root_str: str) -> None:

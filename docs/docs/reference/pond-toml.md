@@ -31,6 +31,8 @@ products = "1.1.0?"      # trailing ? — optional
 | `type` | no | `"pond"` | `"inlet"` (no Sources, ingests external data), `"pond"`, or `"outlet"` (no Sinks, final data products). |
 | `immediate_retries` | no | `0` | Default budget for Ripple retries within one Pond Run. |
 | `source_retries` | no | `0` | Default budget for fresh Pond Runs attempted as Sources update, after a failure. |
+| `ripples` | no | `"src/pond.py"` | The module defining the Pond's `@ripple` functions. |
+| `puddles` | no | `"src/puddles.py"` | The module defining the Pond's `@puddle` functions for [local testing](../guides/local-testing.md). |
 
 The retry fields are **seeds, not settings**: they initialise the live budgets when the Pond is first deployed to a Catchment, after which the budgets are operator-owned (`duckstring control failure-budget`) and redeploys don't touch them. See [Fault Tolerance](../guides/fault-tolerance.md).
 

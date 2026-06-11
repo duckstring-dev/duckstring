@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import io
 import shutil
 import subprocess
@@ -47,28 +46,17 @@ def _pond_config(toml_path: Path) -> dict:
 
 
 def _discover_ripples(source_dir: Path) -> list[dict]:
-    from duckstring.core import collect_ripples
+    from duckstring.core import collect_ripples, import_pond_module, pond_entrypoints, read_pond_toml
 
-    pond_py = source_dir / "src" / "pond.py"
-    if not pond_py.exists():
+    ripples_entry, _ = pond_entrypoints(read_pond_toml(source_dir))
+    if not (source_dir / ripples_entry).exists():
         return []
-    src_path = str(source_dir / "src")
-    before = set(sys.modules.keys())
-    sys.path.insert(0, src_path)
     try:
-        importlib.invalidate_caches()
-        sys.modules.pop("pond", None)
-        importlib.import_module("pond")
+        import_pond_module(source_dir, ripples_entry)
         return collect_ripples()
     except Exception:
         collect_ripples()
         return []
-    finally:
-        if src_path in sys.path:
-            sys.path.remove(src_path)
-        for key in list(sys.modules.keys()):
-            if key not in before:
-                sys.modules.pop(key, None)
 
 
 def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
