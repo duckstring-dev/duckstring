@@ -1,0 +1,280 @@
+/* Landing page styles. The palette is the product UI's (frontend/src/lib/store.ts): canvas
+   #0f0f14, panel #15151a, hairline #27272a, brand cyan #06c4e6, pull amber #ee9333. The page is
+   intentionally dark in both colour modes — it's the brand canvas, not a doc. */
+
+.canvas {
+  background-color: #0f0f14;
+  background-image: radial-gradient(#23232e 1px, transparent 1px);
+  background-size: 24px 24px;
+  color: #e4e4e7;
+  min-height: calc(100vh - var(--ifm-navbar-height));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 24px 72px;
+}
+
+/* ── Hero ─────────────────────────────────────────────────────────────────── */
+
+.hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding-top: 32px;
+  max-width: 720px;
+}
+
+/* The mark over expanding ripple rings — a pond, doing what ponds do. */
+.rippleStack {
+  position: relative;
+  width: 132px;
+  height: 132px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 18px;
+}
+
+.mark {
+  width: 180px;
+  height: 180px;
+  position: relative;
+  z-index: 1;
+}
+
+.ripple {
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgba(6, 196, 230, 0.45);
+  border-radius: 50%;
+  animation: ripple 4.5s linear infinite;
+  opacity: 0;
+}
+
+.ripple:nth-child(2) {
+  animation-delay: 1.5s;
+}
+
+.ripple:nth-child(3) {
+  animation-delay: 3s;
+}
+
+@keyframes ripple {
+  0% {
+    transform: scale(0.55);
+    opacity: 0;
+  }
+  12% {
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.55);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ripple {
+    animation: none;
+    opacity: 0.25;
+    transform: scale(1.15);
+  }
+}
+
+.wordmark {
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: #06c4e6;
+  margin: 0 0 10px;
+}
+
+.tagline {
+  font-size: clamp(40px, 7vw, 64px);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  color: #f4f4f5;
+  margin: 0 0 18px;
+}
+
+.lead {
+  font-size: 17px;
+  line-height: 1.65;
+  color: #a1a1aa;
+  margin: 0 0 28px;
+}
+
+.ctaRow {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-bottom: 18px;
+}
+
+.ctaPrimary,
+.ctaGhost {
+  border-radius: 7px;
+  padding: 10px 22px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  transition: filter 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.ctaPrimary {
+  background: #06c4e6;
+  color: #0f0f14;
+}
+
+.ctaPrimary:hover {
+  filter: brightness(1.12);
+  color: #0f0f14;
+  text-decoration: none;
+}
+
+.ctaGhost {
+  border: 1px solid #3f3f46;
+  color: #e4e4e7;
+}
+
+.ctaGhost:hover {
+  border-color: #06c4e6;
+  color: #06c4e6;
+  text-decoration: none;
+}
+
+.pipInstall {
+  background: none;
+  border: none;
+  font-size: 13px;
+  color: #71717a;
+  padding: 0;
+}
+
+/* ── The manifest (pond.toml) ─────────────────────────────────────────────── */
+
+.manifest {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  max-width: 780px;
+  margin-top: 64px;
+  padding: 22px 26px;
+  background: #15151acc;
+  border: 1px solid #27272a;
+  border-radius: 12px;
+}
+
+.toml {
+  background: #0c0c10;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #e4e4e7;
+  flex-shrink: 0;
+}
+
+.tomlSection {
+  color: #06c4e6;
+  font-weight: 700;
+}
+
+.tomlString {
+  color: #ee9333;
+}
+
+.manifestCaption {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #a1a1aa;
+  margin: 0;
+}
+
+.manifestCaption strong {
+  color: #e4e4e7;
+}
+
+@media (max-width: 700px) {
+  .manifest {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* ── Route cards ──────────────────────────────────────────────────────────── */
+
+.routes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  max-width: 920px;
+  width: 100%;
+  margin-top: 48px;
+}
+
+@media (max-width: 820px) {
+  .routes {
+    grid-template-columns: 1fr;
+  }
+}
+
+.routeCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #15151a;
+  border: 1px solid #27272a;
+  border-radius: 10px;
+  padding: 18px 20px;
+  color: inherit;
+  transition: border-color 0.15s ease;
+}
+
+.routeCard:hover {
+  border-color: #06c4e6;
+  color: inherit;
+  text-decoration: none;
+}
+
+.routeTitle {
+  font-size: 15px;
+  font-weight: 700;
+  color: #f4f4f5;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.routeArrow {
+  color: #06c4e6;
+}
+
+.routeBody {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #a1a1aa;
+}
+
+/* ── Hosting contact ──────────────────────────────────────────────────────── */
+
+.hosting {
+  margin-top: 56px;
+  font-size: 14px;
+  color: #71717a;
+  text-align: center;
+}
+
+.hosting p {
+  margin: 0;
+}
+
+.hosting a {
+  color: #06c4e6;
+}

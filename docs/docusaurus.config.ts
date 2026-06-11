@@ -15,7 +15,9 @@ const config: Config = {
     v4: true,
   },
 
-  url: 'https://docs.duckstring.com',
+  // The docs site doubles as the landing page until there's a commercial site, so the canonical
+  // host is the apex domain (docs.duckstring.com points at the same deployment).
+  url: 'https://duckstring.com',
   baseUrl: '/',
 
   organizationName: 'duckstring-dev',
@@ -89,7 +91,7 @@ const config: Config = {
         {
           title: 'Docs',
           items: [
-            {label: 'Introduction', to: '/'},
+            {label: 'Introduction', to: '/intro'},
             {label: 'Quickstart', to: '/getting-started/quickstart'},
             {label: 'Theory', to: '/theory'},
           ],

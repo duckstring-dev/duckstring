@@ -1,7 +1,7 @@
 ---
 title: Introduction
 description: Duckstring treats data transformations as software packages. There is no DAG.
-slug: /
+slug: /intro
 ---
 
 # Duckstring
