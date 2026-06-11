@@ -4,7 +4,7 @@ A packaging standard for data transforms. Each transform is a versioned **Pond**
 
 See `brand/strategy.md` for positioning rationale and `brand/copy.md` for settled copy.
 
-`docs/guide/theory.md` is the **authoritative orchestration spec** — its "Pond State Variables" pseudocode is the exact state machine. `playground/src/lib/orchestration.ts` is a well-tested TypeScript *simulation* (the standalone playground); the Python engine is a faithful, behaviour-for-behaviour port of it. The other `docs/guide/` files (`catchment.md`, `ponds.md`, `ripples.md`) are design background; `docs/guide/orchestration.md` is outdated (superseded by theory.md).
+`docs/docs/theory.md` is the **authoritative orchestration spec** — its "Pond State Variables" pseudocode is the exact state machine. `playground/src/lib/orchestration.ts` is a well-tested TypeScript *simulation* (the standalone playground); the Python engine is a faithful, behaviour-for-behaviour port of it. The rest of `docs/` is the Docusaurus documentation site (→ docs.duckstring.com); pages other than theory.md are stubs awaiting a writing pass.
 
 ## Brand & Positioning
 
@@ -16,7 +16,7 @@ See `brand/strategy.md` for positioning rationale and `brand/copy.md` for settle
 
 ## Current state (2026-06)
 
-The freshness/push-token runtime is **implemented and tested** (the old generation/watermark/demand model and TypeScript-simulation-only era are gone from the backend). The backend + CLI are complete, and the **web UI is built** (read-mostly Next.js, polls the Catchment — see Web UI below). The **playground was extracted** to a standalone `playground/` (in-memory sim). **Fault tolerance is now implemented end-to-end** (immediate + on-change retries, failed/killed/blocked states, dead/silent-Duck detection, error+traceback surfacing — see Fault tolerance). Outstanding: the design docs under `docs/guide/` other than `theory.md` (whose Fault-Tolerance section IS current) lag the Wake/Sleep/Force/Kill rename.
+The freshness/push-token runtime is **implemented and tested** (the old generation/watermark/demand model and TypeScript-simulation-only era are gone from the backend). The backend + CLI are complete, and the **web UI is built** (read-mostly Next.js, polls the Catchment — see Web UI below). The **playground was extracted** to a standalone `playground/` (in-memory sim). **Fault tolerance is now implemented end-to-end** (immediate + on-change retries, failed/killed/blocked states, dead/silent-Duck detection, error+traceback surfacing — see Fault tolerance). The old `docs/guide/` design docs were removed; `docs/` is now a Docusaurus site (`docs/docs/theory.md` carried over — its Fault-Tolerance section IS current). Outstanding: writing the stub doc pages.
 
 ## Structure
 
@@ -47,7 +47,7 @@ src/duckstring/
     control.py             #   wake/sleep/force/kill/clear/failure-budget (a Pond's execution & health)
     pond.py, deploy.py     #   pond init/demo/deploy
     status.py, data.py, catchment.py, config.py, window.py, _http.py
-docs/guide/                # Design documentation (theory.md is authoritative)
+docs/                      # Docusaurus docs site → docs.duckstring.com (content in docs/docs/; theory.md is authoritative)
 frontend/                  # The live Catchment web UI (Next.js; static export served at catchment/static). See Web UI.
   src/lib/                 #   api.ts (HTTP client), store.ts (zustand poll store + colour palette), types.ts
   src/components/          #   DagCanvas, Pond/Ripple/TriggerNode, Sidebar, RunHistory, WindowEditor, TraceChart

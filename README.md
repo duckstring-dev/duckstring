@@ -350,5 +350,5 @@ duckstring query reports --sql @query.sql --csv monthly_summary.csv --path .
 
 ## Further Reading
 
-For more detail on each component, please read the corresponding documentation in `docs/`. The document `docs/theory.md` is a particularly good start for understanding the details of the orchestrator.
+For more detail on each component, please read the documentation at [docs.duckstring.com](https://docs.duckstring.com) (source in `docs/`). The [Theory](https://docs.duckstring.com/theory) page is a particularly good start for understanding the details of the orchestrator.
 
