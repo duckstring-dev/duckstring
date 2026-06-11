@@ -6,8 +6,8 @@ import type {
   Ripple,
   PondRunState,
   RippleRunState,
-  EdgeKindMap,
-  EdgeDemandKind,
+  PondVisualState,
+  RippleVisualState,
   ActiveTrigger,
 } from './types';
 import type { Window, LogEntry } from './types';
@@ -16,8 +16,10 @@ import {
   tick as orchTick,
   tapPond,
   pulsePond,
-  stopPond as orchStopPond,
-  startPond as orchStartPond,
+  sleepPond as orchSleepPond,
+  wakePond as orchWakePond,
+  forcePond as orchForcePond,
+  killPond as orchKillPond,
   drainLog,
   type OrchestrState,
 } from './orchestration';
@@ -51,7 +53,10 @@ function initialPondState(): PondRunState {
     D: 0,
     hasReceivedPull: false,
     hasPull: false,
+    pullLocal: false,
     targets: [],
+    isKilled: false,
+    isBlocked: false,
     runsStarted: 0,
     runsCompleted: 0,
     genStartTimes: {},
@@ -134,7 +139,6 @@ export interface PlaygroundState {
   pondStates: Record<PondId, PondRunState>;
   ripples: Record<RippleId, Ripple>;
   rippleStates: Record<RippleId, RippleRunState>;
-  edgeKinds: EdgeKindMap;
   now: number;
   speed: number;
   paused: boolean;
@@ -169,9 +173,14 @@ export interface PlaygroundState {
   triggerPulse(pondId: PondId): void;
   triggerWave(pondId: PondId): void;
   triggerTide(pondId: PondId, stalenessMs: number): void;
-  triggerStart(pondId: PondId): void;
-  triggerStop(pondId: PondId, upstream?: boolean): void;
   removeTrigger(pondId: PondId): void;
+
+  // Control verbs (a Pond's execution lifecycle, mirroring the Catchment's force/wake/sleep/kill).
+  force(pondId: PondId): void;
+  wake(pondId: PondId): void;
+  sleep(pondId: PondId, upstream?: boolean): void;
+  kill(pondId: PondId): void;
+
   clearLogs(): void;
 
   setSpeed(speed: number): void;
@@ -185,7 +194,6 @@ function toOrchestrState(state: PlaygroundState): OrchestrState {
     pondStates: state.pondStates,
     ripples: state.ripples,
     rippleStates: state.rippleStates,
-    edgeKinds: state.edgeKinds,
     triggers: state.triggers,
   };
 }
@@ -198,7 +206,6 @@ function applyOrch(prev: PlaygroundState, orch: OrchestrState): Partial<Playgrou
   return {
     pondStates: orch.pondStates,
     rippleStates: orch.rippleStates,
-    edgeKinds: orch.edgeKinds,
     triggers: orch.triggers,
     logs,
   };
@@ -216,7 +223,6 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   pondStates: demoState.pondStates,
   ripples: demoState.ripples,
   rippleStates: demoState.rippleStates,
-  edgeKinds: {},
   logs: [],
   selectedPondId: null,
   selectedRippleId: null,
@@ -473,14 +479,25 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     set((s) => ({ triggers: { ...s.triggers, [pondId]: { pondId, kind: 'tide', stalenessMs } } }));
   },
 
-  // Start: inject a one-off run on the Pond alone (push target NEVER), no upstream propagation.
-  triggerStart(pondId) {
-    set((s) => applyOrch(s, orchStartPond(toOrchestrState(s), pondId, s.now)));
+  // Force: a recompute at the current freshness (resets endF so everything re-runs), no upstream.
+  force(pondId) {
+    set((s) => applyOrch(s, orchForcePond(toOrchestrState(s), pondId, s.now)));
   },
 
-  triggerStop(pondId, upstream = false) {
+  // Wake: a one-shot non-propagating pull (runs once if Sources are already fresher); clears a kill.
+  wake(pondId) {
+    set((s) => applyOrch(s, orchWakePond(toOrchestrState(s), pondId, s.now)));
+  },
+
+  // Sleep: clear demand so the Pond settles; cancels the standing trigger (like the Catchment).
+  sleep(pondId, upstream = false) {
     get().removeTrigger(pondId);
-    set((s) => applyOrch(s, orchStopPond(toOrchestrState(s), pondId, s.now, upstream)));
+    set((s) => applyOrch(s, orchSleepPond(toOrchestrState(s), pondId, s.now, upstream)));
+  },
+
+  // Kill: cancel the in-flight run and park the Pond killed (terminal) until a Wake/Force.
+  kill(pondId) {
+    set((s) => applyOrch(s, orchKillPond(toOrchestrState(s), pondId, s.now)));
   },
 
   removeTrigger(pondId) {
@@ -528,11 +545,11 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
 
 // ─── Visual state helpers ────────────────────────────────────────────────────
 
-// Age of a freshness timestamp relative to now, unit-scaled. F=0 → '—'. The numeric part is always
-// two digits (e.g. "02s", "47m") so the width never jitters as a value crosses 9↔10; each unit rolls
-// to the next before it would exceed 99. Caps at ">1y" — finer resolution past a year isn't useful.
+// Age of a freshness timestamp relative to now, unit-scaled. F=0 or NEVER (-Inf, e.g. right after a
+// Force) → '—'. The numeric part is always two digits (e.g. "02s", "47m") so the width never jitters
+// as a value crosses 9↔10; each unit rolls to the next before it would exceed 99. Caps at ">1y".
 export function formatAge(F: number, now: number): string {
-  if (!F) return '—';
+  if (!F || !Number.isFinite(F)) return '—';
   const pad = (n: number) => String(Math.floor(n)).padStart(2, '0');
   const secs = Math.max(0, (now - F) / 1000);
   if (secs < 60) return `${pad(secs)}s`;
@@ -547,62 +564,98 @@ export function formatAge(F: number, now: number): string {
   return '>1y';
 }
 
+// A staleness bound (ms) as a compact duration in its largest whole unit: 86_400_000 → "1d",
+// 5_400_000 → "1.5h", 2_000 → "2s".
+export function formatDuration(ms: number): string {
+  const s = ms / 1000;
+  for (const [label, unit] of [['w', 604800], ['d', 86400], ['h', 3600], ['m', 60], ['s', 1]] as const) {
+    if (s >= unit) {
+      const v = s / unit;
+      return Number.isInteger(v) ? `${v}${label}` : `${v.toFixed(1)}${label}`;
+    }
+  }
+  return `${s}s`;
+}
+
 // The freshest pending push target (for the ≤ box / edge colour), or null if none are outstanding.
-// NEVER (-Inf) targets from `start` are non-finite and excluded — they carry no displayable age.
+// NEVER (-Inf) targets from a Force are non-finite and excluded — they carry no displayable age.
 export function pushTargetF(targets: number[]): number | null {
   const finite = targets.filter((t) => Number.isFinite(t));
   return finite.length ? Math.max(...finite) : null;
 }
 
-export function getRippleVisualState(rs: RippleRunState): 'running' | 'queued' | 'idle' {
+export function getRippleVisualState(rs: RippleRunState): RippleVisualState {
   if (rs.isRunning) return 'running';
   if (rs.hasPull || rs.targets.length > 0) return 'queued';
   return 'idle';
 }
 
-export function getPondVisualState(ps: PondRunState): 'running' | 'queued' | 'idle' {
-  if (ps.runsStarted > ps.runsCompleted) return 'running';
+// Killed/blocked take precedence over demand state, matching the Catchment status string
+// (failed → killed → blocked → running → queued → idle, minus failures — out of the sim's scope).
+// `busy` is whether any of the Pond's Ripples is running (the backend's notion of a running Pond).
+export function getPondVisualState(ps: PondRunState, busy: boolean): PondVisualState {
+  if (ps.isKilled) return 'killed';
+  if (ps.isBlocked) return 'blocked';
+  if (busy) return 'running';
   if (ps.hasPull || ps.hasReceivedPull || ps.targets.length > 0) return 'queued';
   return 'idle';
 }
 
-export function pondIsIdle(ps: PondRunState | undefined): boolean {
-  if (!ps) return true;
-  return ps.runsStarted <= ps.runsCompleted && !ps.hasPull && !ps.hasReceivedPull && ps.targets.length === 0;
-}
+// ─── Semantic palette (kept in lockstep with frontend/src/lib/store.ts) ──────
+// Named by role, not hue, so the values can move without the names lying. pull / push / running form
+// a roughly-even triad (they are routinely co-visible and must mutually contrast); success/danger are
+// the fixed green/red conventions. THEME_BRAND (the Duckstring colour) IS the running colour and also
+// the generic accent.
+export const THEME_BRAND = '#06c4e6'; // a pond on a bright day — full-saturation water cyan
+export const THEME_RUNNING = THEME_BRAND; // active execution + brand accent
+export const THEME_PULL = '#ee9333'; // pull (Tap/Wave) · queued · run interval — warm amber-orange
+export const THEME_PUSH = '#a3e635'; // push (Pulse/Tide) — green-yellow
+export const THEME_SUCCESS = '#22c55e'; // success · force · clear (green)
+export const THEME_DANGER = '#ef4444'; // kill · failed (red)
+export const THEME_BLOCKED = '#991b1b'; // blocked by an upstream kill — a darker, muted red
+export const THEME_WAKE = '#15803d'; // Wake — a muted/dark green (the soft "go", vs Force's bright green)
 
-export function rippleIsIdle(rs: RippleRunState | undefined): boolean {
-  if (!rs) return true;
-  return !rs.isRunning && !rs.hasPull && rs.targets.length === 0;
-}
-
-// Edge colour reflects what the SINK is currently demanding of this source:
-//   blue  — the sink holds a push target (this source is feeding a push)
-//   green — the sink holds pull demand (this source is feeding a resupply)
-//   grey  — the sink has no demand on this edge
-// `sinkPush` is the sink's push target (or null); `sinkPull` whether it holds a pull token.
-export function getDemandEdgeColor(sinkPull: boolean, sinkPush: number | null): string {
-  if (sinkPush !== null) return EDGE_COLORS.push;
-  if (sinkPull) return EDGE_COLORS.pull;
-  return EDGE_COLORS.idle;
-}
-
-// Edge colour = most-recent demand kind, but cleared to grey once both endpoints are idle.
-export function getEdgeColor(kind: EdgeDemandKind | undefined, sourceIdle: boolean, sinkIdle: boolean): string {
-  if (!kind || (sourceIdle && sinkIdle)) return EDGE_COLORS.idle;
-  return EDGE_COLORS[kind];
-}
-
+// Node/Ripple demand state → border colour. Killed/blocked (Ponds) take precedence in the visual
+// state, so they map straight through here.
 export const STATE_COLORS: Record<string, string> = {
-  running: '#22c55e',
-  queued: '#f97316',
+  running: THEME_RUNNING,
+  queued: THEME_PULL,
   idle: '#71717a',
+  killed: THEME_DANGER, // killed reads as red, like failed
+  blocked: THEME_BLOCKED,
 };
 
-// pull (Tap/Wave) keeps green; push (Pulse/Tide) blue; stop red.
+// Border colour for a node. Running is always the brand cyan and idle is grey; a *queued* node is
+// coloured by its demand — push if it holds any push target, else pull. (Push is the more specific
+// demand, so it wins the colour when a node holds both.)
+export function stateColor(status: string, hasPull: boolean, targetF: number | null): string {
+  if (status === 'queued') {
+    if (targetF !== null) return THEME_PUSH;
+    if (hasPull) return THEME_PULL;
+  }
+  return STATE_COLORS[status] ?? STATE_COLORS.idle;
+}
+
+// pull amber; push green-yellow; idle grey.
 export const EDGE_COLORS: Record<string, string> = {
-  pull: '#22c55e',
-  push: '#3b82f6',
-  stop: '#ef4444',
+  pull: THEME_PULL,
+  push: THEME_PUSH,
   idle: '#3f3f46',
 };
+
+// Edge colour = whether the child can consume the parent. Coloured when the parent's output is
+// fresher than the child's last run start (parent.endF > child.startF); push if consuming it would
+// also meet a push target the child holds (parent.endF >= child.targetF), else pull. Freshnesses are
+// ms-epoch (0 = never); childTargetF is null when there is no push target.
+export function consumeEdgeColor(parentEndF: number, childStartF: number, childTargetF: number | null): string {
+  if (parentEndF <= childStartF) return EDGE_COLORS.idle;
+  if (childTargetF !== null && parentEndF >= childTargetF) return EDGE_COLORS.push;
+  return EDGE_COLORS.pull;
+}
+
+// Internal fill of a node/pill: its rim colour washed in at low alpha over the dark canvas, so the
+// interior is a dark shade of the rim. Shared by Ponds, Ripples, and the trigger pills so they match.
+const FILL_ALPHA = '17'; // ~9% — tune to taste
+export function nodeFill(rim: string): string {
+  return `${rim}${FILL_ALPHA}`;
+}

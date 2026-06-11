@@ -17,38 +17,31 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { usePlaygroundStore, getDemandEdgeColor, formatAge, pushTargetF } from '@/lib/store';
+import { usePlaygroundStore, consumeEdgeColor, formatAge, pushTargetF, THEME_PULL, THEME_PUSH } from '@/lib/store';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
 import { TriggerNode } from './TriggerNode';
 import { SimControls } from './SimControls';
 
-// ─── Custom edges ────────────────────────────────────────────────────────────
+// ─── Custom edges (colour reflects what the sink can consume) ────────────────
 
-// Edge colour reflects the SINK's demand on this edge: blue=push, green=pull, grey=none.
 function RippleEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
-  const sinkRippleId = (data as { sinkRippleId: string }).sinkRippleId;
-  const sinkPull = usePlaygroundStore((s) => s.rippleStates[sinkRippleId]?.hasPull ?? false);
-  const sinkPush = usePlaygroundStore((s) => pushTargetF(s.rippleStates[sinkRippleId]?.targets ?? []));
-
-  const color = getDemandEdgeColor(sinkPull, sinkPush);
-
+  const { sourceRippleId, sinkRippleId } = data as { sourceRippleId: string; sinkRippleId: string };
+  const parentEndF = usePlaygroundStore((s) => s.rippleStates[sourceRippleId]?.endF ?? 0);
+  const childStartF = usePlaygroundStore((s) => s.rippleStates[sinkRippleId]?.startF ?? 0);
+  const childTargetF = usePlaygroundStore((s) => pushTargetF(s.rippleStates[sinkRippleId]?.targets ?? []));
+  const color = consumeEdgeColor(parentEndF, childStartF, childTargetF);
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
 }
 
 function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
-  const sinkPondId = (data as { sinkPondId: string }).sinkPondId;
-  // A Pond's inbound demand on a Source is captured by the Pond's own pull/push state.
-  const sinkPull = usePlaygroundStore((s) => {
-    const ps = s.pondStates[sinkPondId];
-    return (ps?.hasPull ?? false) || (ps?.hasReceivedPull ?? false);
-  });
-  const sinkPush = usePlaygroundStore((s) => pushTargetF(s.pondStates[sinkPondId]?.targets ?? []));
-
-  const color = getDemandEdgeColor(sinkPull, sinkPush);
-
+  const { sourcePondId, sinkPondId } = data as { sourcePondId: string; sinkPondId: string };
+  const parentEndF = usePlaygroundStore((s) => s.pondStates[sourcePondId]?.endF ?? 0);
+  const childStartF = usePlaygroundStore((s) => s.pondStates[sinkPondId]?.startF ?? 0);
+  const childTargetF = usePlaygroundStore((s) => pushTargetF(s.pondStates[sinkPondId]?.targets ?? []));
+  const color = consumeEdgeColor(parentEndF, childStartF, childTargetF);
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
 }
@@ -56,7 +49,7 @@ function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
 function TriggerEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const pondId = (data as { pondId: string }).pondId;
   const trigger = usePlaygroundStore((s) => s.triggers[pondId]);
-  const color = trigger?.kind === 'wave' ? '#22c55e' : '#3b82f6';
+  const color = trigger?.kind === 'wave' ? THEME_PULL : THEME_PUSH;
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return (
     <BaseEdge

@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { usePlaygroundStore } from '@/lib/store';
+import { usePlaygroundStore, formatDuration, THEME_PULL, THEME_PUSH, nodeFill } from '@/lib/store';
 
 export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
@@ -13,10 +13,8 @@ export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
   if (!trigger) return null;
 
   const isWave = trigger.kind === 'wave';
-  const color = isWave ? '#22c55e' : '#3b82f6';
-  const label = isWave
-    ? 'Wave'
-    : `Tide (≤${((trigger.stalenessMs ?? 1000) / 1000).toFixed(1)}s)`;
+  const color = isWave ? THEME_PULL : THEME_PUSH;
+  const label = isWave ? 'Wave' : `Tide (≤${formatDuration(trigger.stalenessMs ?? 1000)})`;
 
   const isSelected = selectedTriggerId === pondId;
 
@@ -31,7 +29,7 @@ export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
         boxShadow: isSelected ? `0 0 0 2px ${color}` : undefined,
         borderRadius: 20,
         padding: '4px 12px',
-        background: `${color}18`,
+        background: nodeFill(color),
         cursor: 'pointer',
         display: 'inline-flex',
         alignItems: 'center',

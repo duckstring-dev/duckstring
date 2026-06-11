@@ -5,8 +5,6 @@ import type {
   Ripple,
   PondRunState,
   RippleRunState,
-  EdgeKindMap,
-  EdgeDemandKind,
   ActiveTrigger,
   LogEntry,
   Window,
@@ -14,13 +12,13 @@ import type {
 } from './types';
 
 // "-Inf" freshness sentinel: a push target below every real timestamp (and below the 0 "never run"
-// freshness). Used by `start` — a target that is always satisfiable, so the Pond runs once against
+// freshness). Used by `force` — a target that is always satisfiable, so the Pond runs once against
 // whatever input it currently has. Mirrors the backend's NEVER (datetime.min).
 export const NEVER = -Infinity;
 
-// ─── Freshness orchestrator (faithful port of docs/guide/theory.md) ───────────
+// ─── Freshness orchestrator (faithful port of docs/docs/theory.md) ────────────
 //
-// Ponds and Ripples are first-class state machines. Demand changes (pull/push/stop)
+// Ponds and Ripples are first-class state machines. Demand changes (pull/push/sleep)
 // cascade SYNCHRONOUSLY to a fixpoint at the moment they happen — `tick` only advances
 // time: it completes elapsed runs, services Wave/Tide triggers, then starts everything
 // runnable. There are no per-tick cleanup/scan passes. See theory.md "Pond State Variables".
@@ -33,7 +31,6 @@ export interface OrchestrState {
   pondStates: Record<PondId, PondRunState>;
   ripples: Record<RippleId, Ripple>;
   rippleStates: Record<RippleId, RippleRunState>;
-  edgeKinds: EdgeKindMap;
   triggers: Record<PondId, ActiveTrigger>;
 }
 
@@ -90,7 +87,7 @@ function clone(s: OrchestrState): OrchestrState {
   for (const [k, v] of Object.entries(s.pondStates)) pondStates[k] = { ...v, targets: [...v.targets] };
   const rippleStates: Record<RippleId, RippleRunState> = {};
   for (const [k, v] of Object.entries(s.rippleStates)) rippleStates[k] = { ...v, targets: [...v.targets] };
-  return { ...s, pondStates, rippleStates, edgeKinds: { ...s.edgeKinds }, triggers: { ...s.triggers } };
+  return { ...s, pondStates, rippleStates, triggers: { ...s.triggers } };
 }
 
 // ─── Push target sets ─────────────────────────────────────────────────────────
@@ -116,21 +113,6 @@ function leavesOf(s: OrchestrState, pid: PondId): RippleId[] {
 }
 function anyRippleBusy(s: OrchestrState, pid: PondId): boolean {
   return ripplesOf(s, pid).some((id) => s.rippleStates[id].isRunning);
-}
-
-// ─── Edge marking (visuals only) ──────────────────────────────────────────────
-
-function setEdge(s: OrchestrState, key: string, kind: EdgeDemandKind): void {
-  s.edgeKinds[key] = kind;
-}
-function markRippleEdge(s: OrchestrState, parent: RippleId, child: RippleId, kind: EdgeDemandKind): void {
-  const p = s.ripples[parent];
-  const c = s.ripples[child];
-  if (!p || !c) return;
-  setEdge(s, p.pondId === c.pondId ? `${parent}::${child}` : `${p.pondId}::${c.pondId}`, kind);
-}
-function markPondEdge(s: OrchestrState, src: PondId, sink: PondId, kind: EdgeDemandKind): void {
-  setEdge(s, `${src}::${sink}`, kind);
 }
 
 // ─── Windows (RFC-5545-flavoured recurrence; faithful port of engine/core.py Window) ──────────
@@ -200,6 +182,7 @@ function rippleSourceF(s: OrchestrState, rid: RippleId): number {
 // on Pond.hasReceivedPull becomes true
 function pondReceivePull(s: OrchestrState, pid: PondId, now: number): void {
   const ps = s.pondStates[pid];
+  if (ps.isBlocked) return; // a blocked Pond solicits nothing new; it only drains existing demand
   if (ps.startF === ps.endF) {
     // cold start: wake the whole Pond
     pondSetHasPull(s, pid, now);
@@ -224,7 +207,6 @@ function pondSetHasPull(s: OrchestrState, pid: PondId, now: number): void {
     // satisfy this demand, so re-arming it (a redundant extra generation) is suppressed. (That
     // skip is what stopped a downstream Wave's re-tap leaking into a Pond mid-cycle → over-pull.)
     if (s.pondStates[sp].startF <= ps.startF) {
-      markPondEdge(s, sp, pid, 'pull');
       pondReceivePull(s, sp, now);
     }
   }
@@ -245,7 +227,6 @@ function rippleSetHasPull(s: OrchestrState, rid: RippleId, now: number): void {
       // us (Parent.startF <= our startF). Idle → startF == endF (caught up or behind); a parent
       // running ahead has startF > ours and is skipped, its in-flight Run satisfying the demand.
       if (s.rippleStates[p].startF <= rs.startF) {
-        markRippleEdge(s, p, rid, 'pull');
         rippleSetHasPull(s, p, now);
       }
     }
@@ -256,11 +237,11 @@ function rippleSetHasPull(s: OrchestrState, rid: RippleId, now: number): void {
 // upstream to required Sources. The set keeps every outstanding request, not just the latest.
 function pondAddTarget(s: OrchestrState, pid: PondId, T: number): void {
   const ps = s.pondStates[pid];
+  if (ps.isBlocked) return; // no new push enters a blocked Pond (and none propagates upstream from it)
   if (T <= ps.endF || ps.targets.includes(T)) return; // already satisfied, or already requested
   ps.targets.push(T);
   emit('pond-push', `${pname(s, pid)} pond push target → age ${ageStr(T, logNow)}`);
   for (const sp of s.ponds[pid].sources) {
-    markPondEdge(s, sp, pid, 'push');
     pondAddTarget(s, sp, T);
   }
 }
@@ -273,10 +254,36 @@ function rippleAddTarget(s: OrchestrState, rid: RippleId, T: number): void {
   rs.targets.push(T);
 }
 
+// ─── Blocked propagation (port of engine/catchment.py derive_blocked) ─────────
+// Without failures in the sim, Kill is the only blocking event; the derivation is the same.
+
+// Ponds that depend on `pid` as a *required* Source (an optional Source never blocks a Sink).
+function requiredSinks(s: OrchestrState, pid: PondId): PondId[] {
+  return Object.values(s.ponds)
+    .filter((q) => q.sources.includes(pid) && !(q.optionalSources ?? []).includes(pid))
+    .map((q) => q.id);
+}
+
+// Recompute `isBlocked` from this Pond's own kill and its required Sources, and — only if it
+// changed — propagate to the Sinks so they re-derive.
+function deriveBlocked(s: OrchestrState, pid: PondId): void {
+  const ps = s.pondStates[pid];
+  const pond = s.ponds[pid];
+  const optSrc = new Set(pond.optionalSources ?? []);
+  const blocked =
+    ps.isKilled ||
+    pond.sources.some((sp) => !optSrc.has(sp) && (s.pondStates[sp].isBlocked || s.pondStates[sp].isKilled));
+  if (blocked !== ps.isBlocked) {
+    ps.isBlocked = blocked;
+    for (const q of requiredSinks(s, pid)) deriveBlocked(s, q);
+  }
+}
+
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 
 function canStartPond(s: OrchestrState, pid: PondId, now: number): boolean {
   const ps = s.pondStates[pid];
+  if (ps.isKilled) return false; // terminal until an operator Wake/Force
   const { F } = pondSourceF(s, pid, now);
   if (F == null) return false;
   // Push: run when the inputs can satisfy the oldest outstanding request (the run takes the freshest
@@ -294,16 +301,17 @@ function startPondRun(s: OrchestrState, pid: PondId, now: number): void {
   const startedAsPush = ps.targets.length > 0 && sourceF >= Math.min(...ps.targets);
 
   // A Sink starting as pull replenishes all its Sources (Kanban draw → restock); no-op for an
-  // Inlet. Done before clearing hasPull, matching "if hasPull and not Inlet" in theory.
-  if (startedAsPull) {
+  // Inlet. Done before clearing hasPull, matching "if hasPull and not Inlet" in theory. A blocked
+  // Pond drains but never solicits its Sources; a Wake (pullLocal) also doesn't propagate.
+  if (startedAsPull && !ps.isBlocked && !ps.pullLocal) {
     for (const sp of s.ponds[pid].sources) {
-      markPondEdge(s, sp, pid, 'pull');
       pondReceivePull(s, sp, now);
     }
   }
 
   ps.startF = sourceF;
   ps.hasPull = false;
+  ps.pullLocal = false;
   ps.targets = ps.targets.filter((t) => t > ps.startF); // this Run satisfies every target it reached
 
   // Window delay: from the window for an Inlet, else the worst-case of the deciding Sources.
@@ -347,10 +355,8 @@ function startRipple(s: OrchestrState, rid: RippleId, now: number): void {
   emit('ripple-start', `${rfullname(s, rid)} started (freshness age ${ageStr(sourceF, now)}, ~${((rs.currentRunDurationMs ?? 0) / 1000).toFixed(1)}s)`);
 
   if (rs.hasPull) {
-    const intra = intraParents(s, rid);
-    for (const p of intra) {
-      markRippleEdge(s, p, rid, 'pull'); // pull propagation upstream
-      rippleSetHasPull(s, p, now);
+    for (const p of intraParents(s, rid)) {
+      rippleSetHasPull(s, p, now); // pull propagation upstream
     }
     rs.hasPull = false;
   }
@@ -407,14 +413,15 @@ export function pulsePond(state: OrchestrState, pid: PondId, now: number): Orche
   return s;
 }
 
-// Stop a Pond: clear its push+pull demand and its Ripples' **pull** demand, but KEEP Ripple push
-// targets so any already-started Pond Run completes. With `upstream=true` the stop propagates to
-// every ancestor (a hasStop token following the source edges), clearing each one's demand too.
-// Faithful port of engine/catchment.py:stop_pond.
-export function stopPond(state: OrchestrState, pid: PondId, now: number, upstream = false): OrchestrState {
+// Sleep a Pond: clear its push+pull demand and its Ripples' **pull** demand, but KEEP Ripple push
+// targets so any already-started Pond Run completes. With `upstream=true` the sleep propagates to
+// every ancestor (a token following the source edges), clearing each one's demand too. The soft
+// counterpart to Wake — it lets the Pond settle, vs Kill which cancels everything. Faithful port
+// of engine/catchment.py:sleep_pond.
+export function sleepPond(state: OrchestrState, pid: PondId, now: number, upstream = false): OrchestrState {
   logNow = now;
   const s = clone(state);
-  emit('stop', `Stop on ${pname(s, pid)}${upstream ? ' (upstream)' : ''}`);
+  emit('sleep', `Sleep on ${pname(s, pid)}${upstream ? ' (upstream)' : ''}`);
   const seen = new Set<PondId>();
   const queue = [pid];
   while (queue.length) {
@@ -430,7 +437,6 @@ export function stopPond(state: OrchestrState, pid: PondId, now: number, upstrea
     }
     if (upstream) {
       for (const sp of s.ponds[cur].sources) {
-        markPondEdge(s, sp, cur, 'stop');
         if (!seen.has(sp)) queue.push(sp);
       }
     }
@@ -438,17 +444,73 @@ export function stopPond(state: OrchestrState, pid: PondId, now: number, upstrea
   return s;
 }
 
-// Inject demand directly into a Pond: a push target of NEVER (an "-Inf" freshness) on the Pond
-// alone, with **no** upstream propagation. The Pond runs once against whatever input it currently
-// has (sourceF >= NEVER always holds), then the target clears. Distinct from a Pulse, which targets
-// `now` and propagates upstream to force a full refresh. Port of engine/catchment.py:start_pond.
-export function startPond(state: OrchestrState, pid: PondId, now: number): OrchestrState {
+// Wake a Pond: a one-shot, **non-propagating** pull. The Pond runs once when its Sources already
+// offer something fresher than its last Run (sourceF > startF); it does NOT solicit its Sources
+// (no upstream propagation — that's a Tap). Also clears a kill, so a parked Pond resumes. Port of
+// engine/catchment.py:wake_pond.
+export function wakePond(state: OrchestrState, pid: PondId, now: number): OrchestrState {
   logNow = now;
   const s = clone(state);
-  emit('start', `Start on ${pname(s, pid)} (one run, no upstream)`);
+  emit('wake', `Wake on ${pname(s, pid)} (one-shot pull, no upstream)`);
+  clearHalt(s, pid);
   const ps = s.pondStates[pid];
+  ps.hasPull = true;
+  ps.pullLocal = true;
+  return s;
+}
+
+// Force a Pond Run now — a recompute even with no upstream change. Resets the Pond's and its
+// Ripples' endF so the idempotency guards re-execute them, and injects a one-shot demand (a push
+// target of NEVER, always satisfiable). It runs at the **current** freshness, so endF returns
+// unchanged and it does **not** propagate downstream. Clears a kill (the operator override).
+// Port of engine/catchment.py:force_pond.
+export function forcePond(state: OrchestrState, pid: PondId, now: number): OrchestrState {
+  logNow = now;
+  const s = clone(state);
+  emit('force', `Force on ${pname(s, pid)} (recompute at current freshness)`);
+  clearHalt(s, pid);
+  const ps = s.pondStates[pid];
+  ps.endF = NEVER;
+  for (const r of ripplesOf(s, pid)) s.rippleStates[r].endF = NEVER;
   if (!ps.targets.includes(NEVER)) ps.targets.push(NEVER);
   return s;
+}
+
+// Kill a Pond: cancel its in-flight Run and park it in a terminal *killed* state. Clears all
+// demand, stops its Ripples, and blocks downstream — it stays down until an operator Wake/Force.
+// Port of engine/catchment.py:kill_pond.
+export function killPond(state: OrchestrState, pid: PondId, now: number): OrchestrState {
+  logNow = now;
+  const s = clone(state);
+  emit('kill', `Kill on ${pname(s, pid)}`);
+  const ps = s.pondStates[pid];
+  ps.isKilled = true;
+  ps.hasPull = false;
+  ps.hasReceivedPull = false;
+  ps.pullLocal = false;
+  ps.targets = [];
+  for (const r of ripplesOf(s, pid)) {
+    const rs = s.rippleStates[r];
+    rs.isRunning = false;
+    rs.runStartedAt = null;
+    rs.currentRunDurationMs = null;
+    rs.hasPull = false;
+    rs.targets = [];
+  }
+  deriveBlocked(s, pid); // killed Pond blocks its Sinks
+  return s;
+}
+
+// Clear the operator halt on a Pond (kill) and re-derive downstream blocks. Mirrors the backend's
+// _clear_halt, minus the failure fields (errors are out of the sim's scope).
+function clearHalt(s: OrchestrState, pid: PondId): void {
+  const ps = s.pondStates[pid];
+  const halted = ps.isKilled;
+  ps.isKilled = false;
+  // Abandon the halted Run's phantom (startF > endF): without this the Pond would read as
+  // perpetually in-flight. Returning startF to endF leaves it genuinely idle, ready to run again.
+  if (halted) ps.startF = ps.endF;
+  deriveBlocked(s, pid); // may stay blocked if a required Source is still killed/blocked
 }
 
 // ─── Tick (advance time only) ─────────────────────────────────────────────────

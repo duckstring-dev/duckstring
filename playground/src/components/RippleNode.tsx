@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { usePlaygroundStore, getRippleVisualState, formatAge, pushTargetF, STATE_COLORS } from '@/lib/store';
+import { usePlaygroundStore, getRippleVisualState, formatAge, pushTargetF, stateColor, nodeFill } from '@/lib/store';
 import { DemandIndicators } from './DemandIndicators';
 
 export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
@@ -16,7 +16,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
   if (!ripple || !rs) return null;
 
   const visualState = getRippleVisualState(rs);
-  const borderColor = STATE_COLORS[visualState];
+  const borderColor = stateColor(visualState, rs.hasPull, pushTargetF(rs.targets));
   const isSelected = selectedRippleId === rippleId;
   // Started-run freshness: in-flight start while running, else last completed freshness.
   const startedF = rs.isRunning ? rs.startF : rs.endF;
@@ -32,7 +32,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
         boxShadow: isSelected ? `0 0 0 2px ${borderColor}` : undefined,
         borderRadius: 6,
         padding: '6px 10px',
-        background: '#1a1a1f',
+        background: nodeFill(borderColor),
         cursor: 'pointer',
         width: '100%',
         height: 80,

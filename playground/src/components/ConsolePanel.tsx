@@ -1,16 +1,20 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { usePlaygroundStore } from '@/lib/store';
+import { usePlaygroundStore, THEME_BRAND, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
 
-// Colour per event kind, for quick scanning.
+// Colour per event kind, for quick scanning. Triggers and demand follow the pull/push palette;
+// the control verbs reuse their Sidebar button colours.
 const KIND_COLOR: Record<string, string> = {
-  tap: '#22c55e',
-  pulse: '#3b82f6',
-  stop: '#ef4444',
-  'pond-pull': '#16a34a',
-  'ripple-pull': '#16a34a',
-  'pond-push': '#2563eb',
+  tap: THEME_PULL,
+  pulse: THEME_PUSH,
+  force: THEME_SUCCESS,
+  wake: THEME_WAKE,
+  sleep: THEME_BLOCKED,
+  kill: THEME_DANGER,
+  'pond-pull': THEME_PULL,
+  'ripple-pull': THEME_PULL,
+  'pond-push': THEME_PUSH,
   'pond-start': '#a1a1aa',
   'ripple-start': '#a1a1aa',
   'ripple-done': '#71717a',
@@ -90,7 +94,7 @@ export function ConsolePanel() {
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); copyAll(); }}
-              style={btn(copied ? '#22c55e' : '#6366f1')}
+              style={btn(copied ? THEME_SUCCESS : THEME_BRAND)}
             >
               {copied ? 'Copied' : 'Copy'}
             </button>

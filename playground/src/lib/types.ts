@@ -67,7 +67,10 @@ export interface PondRunState {
   D: number; // window delay carried by the current freshness (0 unless fed by a window)
   hasReceivedPull: boolean; // inbox: a Sink/trigger has asked for resupply
   hasPull: boolean; // a Pond Run is wanted in pull
+  pullLocal: boolean; // the pull is a Wake: one-shot, does NOT solicit Sources on run start
   targets: number[]; // set of unsatisfied push target freshnesses (empty = none)
+  isKilled: boolean; // operator Kill: terminal until a Wake/Force
+  isBlocked: boolean; // derived: this Pond or a required Source is killed/blocked
   // Trace data for the sidebar charts:
   runsStarted: number;
   runsCompleted: number;
@@ -75,11 +78,6 @@ export interface PondRunState {
   completionTimes: number[];
   durations: number[];
 }
-
-// Kind of demand most recently sent across an edge. Keyed `${parent}::${child}` /
-// `${sourcePond}::${sinkPond}`.
-export type EdgeDemandKind = 'push' | 'pull' | 'stop';
-export type EdgeKindMap = Record<string, EdgeDemandKind>;
 
 // Persistent triggers only (Tap and Pulse are one-shot, no entity).
 export type TriggerKind = 'wave' | 'tide';
@@ -92,8 +90,8 @@ export interface ActiveTrigger {
 }
 
 export type RippleVisualState = 'running' | 'queued' | 'idle';
-export type PondVisualState = 'running' | 'queued' | 'idle';
-export type EdgeVisualState = 'push' | 'pull' | 'stop' | 'idle';
+// Killed/blocked take precedence over demand state, matching the Catchment's status string.
+export type PondVisualState = 'killed' | 'blocked' | 'running' | 'queued' | 'idle';
 
 // A single logged orchestration event, for the console panel.
 export interface LogEntry {

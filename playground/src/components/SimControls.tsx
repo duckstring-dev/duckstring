@@ -1,6 +1,6 @@
 'use client';
 
-import { usePlaygroundStore } from '@/lib/store';
+import { usePlaygroundStore, THEME_BRAND, THEME_SUCCESS } from '@/lib/store';
 
 // Selectable run speeds (multipliers of real time).
 const SPEEDS = [0.1, 0.5, 1, 2, 10];
@@ -35,8 +35,8 @@ export function SimControls() {
         style={{
           ...btnBase,
           width: 28,
-          color: paused ? '#22c55e' : '#e4e4e7',
-          borderColor: paused ? '#22c55e' : '#3f3f46',
+          color: paused ? THEME_SUCCESS : '#e4e4e7',
+          borderColor: paused ? THEME_SUCCESS : '#3f3f46',
         }}
       >
         {paused ? '▶' : '⏸'}
@@ -51,8 +51,8 @@ export function SimControls() {
             style={{
               ...btnBase,
               color: active ? '#0f0f14' : '#a1a1aa',
-              background: active ? '#6366f1' : 'transparent',
-              borderColor: active ? '#6366f1' : '#3f3f46',
+              background: active ? THEME_BRAND : 'transparent',
+              borderColor: active ? THEME_BRAND : '#3f3f46',
             }}
           >
             {speedLabel(sp)}

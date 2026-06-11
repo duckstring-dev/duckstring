@@ -1,20 +1,32 @@
 'use client';
 
 import { useState } from 'react';
-import { usePlaygroundStore, formatAge } from '@/lib/store';
+import {
+  usePlaygroundStore,
+  formatAge,
+  THEME_BRAND,
+  THEME_PULL,
+  THEME_PUSH,
+  THEME_SUCCESS,
+  THEME_DANGER,
+  THEME_BLOCKED,
+  THEME_WAKE,
+} from '@/lib/store';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
 
 function Btn({
   onClick,
   children,
-  color = '#3b82f6',
+  color = THEME_PUSH,
   small = false,
+  block = false,
 }: {
   onClick: () => void;
   children: React.ReactNode;
   color?: string;
   small?: boolean;
+  block?: boolean;
 }) {
   return (
     <button
@@ -29,12 +41,16 @@ function Btn({
         cursor: 'pointer',
         fontWeight: 600,
         letterSpacing: '0.04em',
+        width: block ? '100%' : undefined,
       }}
     >
       {children}
     </button>
   );
 }
+
+// A 4-column row of equal-width buttons — so the Trigger and Control rows line up.
+const quadRow: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 };
 
 function Label({ children }: { children: React.ReactNode }) {
   return (
@@ -85,10 +101,12 @@ export function Sidebar() {
   const triggerPulse = usePlaygroundStore((s) => s.triggerPulse);
   const triggerWave = usePlaygroundStore((s) => s.triggerWave);
   const triggerTide = usePlaygroundStore((s) => s.triggerTide);
-  const triggerStop = usePlaygroundStore((s) => s.triggerStop);
-  const triggerStart = usePlaygroundStore((s) => s.triggerStart);
   const triggerTap = usePlaygroundStore((s) => s.triggerTap);
   const removeTrigger = usePlaygroundStore((s) => s.removeTrigger);
+  const force = usePlaygroundStore((s) => s.force);
+  const wake = usePlaygroundStore((s) => s.wake);
+  const sleep = usePlaygroundStore((s) => s.sleep);
+  const kill = usePlaygroundStore((s) => s.kill);
 
   const [tidePeriod, setTidePeriod] = useState('2');
   const [showTideInput, setShowTideInput] = useState(false);
@@ -138,7 +156,7 @@ export function Sidebar() {
         Playground
       </div>
 
-      <Btn onClick={addPond} color="#6366f1">+ Add Pond</Btn>
+      <Btn onClick={addPond} color={THEME_BRAND}>+ Add Pond</Btn>
       {selectedPond && !selectedRipple && (
         <div style={{ fontSize: 10, color: '#52525b', marginTop: 4 }}>links as a sink of {selectedPond.name}</div>
       )}
@@ -167,7 +185,7 @@ export function Sidebar() {
               <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
             </div>
           )}
-          <Btn onClick={() => removeTrigger(selectedTriggerId)} color="#ef4444">Delete Trigger</Btn>
+          <Btn onClick={() => removeTrigger(selectedTriggerId)} color={THEME_DANGER}>Delete Trigger</Btn>
         </Section>
       )}
 
@@ -188,8 +206,8 @@ export function Sidebar() {
               freshness <span style={{ color: '#a1a1aa' }}>{formatAge(pondStates[selectedPond.id]?.endF ?? 0, now)}</span> old
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn onClick={() => addRipple(selectedPond.id)} color="#6366f1">+ Add Ripple</Btn>
-              <Btn onClick={() => deletePond(selectedPond.id)} color="#ef4444">Delete Pond</Btn>
+              <Btn onClick={() => addRipple(selectedPond.id)} color={THEME_BRAND}>+ Add Ripple</Btn>
+              <Btn onClick={() => deletePond(selectedPond.id)} color={THEME_DANGER}>Delete Pond</Btn>
             </div>
 
             {selectedPond.sources.length > 0 && (
@@ -204,7 +222,7 @@ export function Sidebar() {
               </div>
             )}
             <div style={{ marginTop: 8 }}>
-              <Btn small onClick={() => setShowAddSourcePond((v) => !v)} color="#6366f1">+ Add Source Pond</Btn>
+              <Btn small onClick={() => setShowAddSourcePond((v) => !v)} color={THEME_BRAND}>+ Add Source Pond</Btn>
               {showAddSourcePond && (
                 <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 3 }}>
                   {availableSourcePonds.length === 0 ? (
@@ -235,18 +253,18 @@ export function Sidebar() {
             <Label>Triggers</Label>
             {isOutlet ? (
               <>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  <Btn onClick={() => triggerTap(selectedPond.id)} color="#22c55e">Tap</Btn>
-                  <Btn onClick={() => triggerWave(selectedPond.id)} color="#22c55e">Wave</Btn>
-                  <Btn onClick={() => triggerPulse(selectedPond.id)} color="#3b82f6">Pulse</Btn>
-                  <Btn onClick={() => setShowTideInput((v) => !v)} color="#3b82f6">Tide</Btn>
+                <div style={quadRow}>
+                  <Btn block onClick={() => triggerTap(selectedPond.id)} color={THEME_PULL}>Tap</Btn>
+                  <Btn block onClick={() => triggerWave(selectedPond.id)} color={THEME_PULL}>Wave</Btn>
+                  <Btn block onClick={() => triggerPulse(selectedPond.id)} color={THEME_PUSH}>Pulse</Btn>
+                  <Btn block onClick={() => setShowTideInput((v) => !v)} color={THEME_PUSH}>Tide</Btn>
                 </div>
                 {showTideInput && (
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
                     <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
                     <input type="number" min="1" step="1" value={tidePeriod} onChange={(e) => setTidePeriod(e.target.value)} style={numInput} />
                     <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
-                    <Btn small onClick={() => { triggerTide(selectedPond.id, Math.max(100, parseFloat(tidePeriod) * 1000)); setShowTideInput(false); }} color="#3b82f6">Set</Btn>
+                    <Btn small onClick={() => { triggerTide(selectedPond.id, Math.max(100, parseFloat(tidePeriod) * 1000)); setShowTideInput(false); }} color={THEME_PUSH}>Set</Btn>
                   </div>
                 )}
               </>
@@ -255,23 +273,29 @@ export function Sidebar() {
             )}
             {trigger && (
               <div style={{ marginTop: 8 }}>
-                <Btn small onClick={() => removeTrigger(selectedPond.id)} color="#ef4444">
+                <Btn small onClick={() => removeTrigger(selectedPond.id)} color={THEME_DANGER}>
                   Delete {trigger.kind === 'wave' ? 'Wave' : 'Tide'} Trigger
                 </Btn>
               </div>
             )}
           </Section>
 
-          {/* Control: start a one-off run, or clear demand (this Pond, or its whole lineage) */}
+          {/* Control: Force/Wake (go) and Sleep/Kill (stop) — the Pond's execution lifecycle */}
           <Section>
             <Label>Control</Label>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn onClick={() => triggerStart(selectedPond.id)} color="#22c55e">Start</Btn>
-              <Btn onClick={() => triggerStop(selectedPond.id)} color="#ef4444">Stop</Btn>
-              <Btn onClick={() => triggerStop(selectedPond.id, true)} color="#ef4444">Stop Lineage</Btn>
+            <div style={quadRow}>
+              <Btn block onClick={() => force(selectedPond.id)} color={THEME_SUCCESS}>Force</Btn>
+              <Btn block onClick={() => wake(selectedPond.id)} color={THEME_WAKE}>Wake</Btn>
+              <Btn block onClick={() => sleep(selectedPond.id)} color={THEME_BLOCKED}>Sleep</Btn>
+              <Btn block onClick={() => kill(selectedPond.id)} color={THEME_DANGER}>Kill</Btn>
             </div>
             <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
-              Start: one run on this Pond, no upstream. Stop: clear this Pond&apos;s demand. Stop Lineage: also clear all upstream sources.
+              Force: recompute now at the current freshness. Wake: run once if Sources are fresher
+              (no upstream pull); clears a kill. Sleep: clear demand and the standing trigger.
+              Kill: cancel the run and park the Pond until a Wake/Force.
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <Btn small onClick={() => sleep(selectedPond.id, true)} color={THEME_BLOCKED}>Sleep Upstream</Btn>
             </div>
           </Section>
 
@@ -290,7 +314,7 @@ export function Sidebar() {
           <Section>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
               <Label>Ripple: {selectedRipple.name}</Label>
-              <Btn small onClick={() => deleteRipple(selectedRippleId!)} color="#ef4444">Delete</Btn>
+              <Btn small onClick={() => deleteRipple(selectedRippleId!)} color={THEME_DANGER}>Delete</Btn>
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
@@ -342,8 +366,8 @@ export function Sidebar() {
             )}
 
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <Btn small onClick={() => addRipple(selectedRipple.pondId, selectedRippleId!)} color="#6366f1">+ Add Ripple</Btn>
-              <Btn small onClick={() => setShowAddParentRipple((v) => !v)} color="#6366f1">+ Add Parent</Btn>
+              <Btn small onClick={() => addRipple(selectedRipple.pondId, selectedRippleId!)} color={THEME_BRAND}>+ Add Ripple</Btn>
+              <Btn small onClick={() => setShowAddParentRipple((v) => !v)} color={THEME_BRAND}>+ Add Parent</Btn>
             </div>
             {showAddParentRipple && (
               <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 3 }}>
@@ -377,7 +401,7 @@ export function Sidebar() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <input type="number" min="0" step="0.1" value={allVar} onChange={(e) => setAllVar(e.target.value)} style={numInput} />
             <span style={{ fontSize: 11, color: '#71717a' }}>σ(ln)</span>
-            <Btn small onClick={() => { const v = parseFloat(allVar); if (!isNaN(v) && v >= 0) setAllVariability(v); }} color="#6366f1">Set</Btn>
+            <Btn small onClick={() => { const v = parseFloat(allVar); if (!isNaN(v) && v >= 0) setAllVariability(v); }} color={THEME_BRAND}>Set</Btn>
           </div>
           <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
             Overwrites variability on every ripple. Each run takes duration·exp(σ·Z).

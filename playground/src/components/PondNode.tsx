@@ -2,13 +2,17 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, STATE_COLORS } from '@/lib/store';
+import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, stateColor, nodeFill, THEME_PUSH } from '@/lib/store';
 import { DemandIndicators } from './DemandIndicators';
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
   const pond = usePlaygroundStore((s) => s.ponds[pondId]);
   const ps = usePlaygroundStore((s) => s.pondStates[pondId]);
+  // A Pond is running while any of its Ripples is (the Catchment's notion of a running Pond).
+  const busy = usePlaygroundStore((s) =>
+    Object.values(s.ripples).some((r) => r.pondId === pondId && s.rippleStates[r.id]?.isRunning)
+  );
   const selectedPondId = usePlaygroundStore((s) => s.selectedPondId);
   const selectPond = usePlaygroundStore((s) => s.selectPond);
   const now = usePlaygroundStore((s) => s.now);
@@ -16,8 +20,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
 
   if (!pond || !ps) return null;
 
-  const visualState = getPondVisualState(ps);
-  const borderColor = STATE_COLORS[visualState];
+  const visualState = getPondVisualState(ps, busy);
+  const borderColor = stateColor(visualState, ps.hasPull || ps.hasReceivedPull, pushTargetF(ps.targets));
   const isSelected = selectedPondId === pondId;
   const showPulseTag = pulseTagGen !== undefined && ps.runsCompleted <= pulseTagGen;
 
@@ -33,7 +37,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
         border: `2px solid ${borderColor}`,
         boxShadow: isSelected ? `0 0 0 3px ${borderColor}40` : undefined,
         borderRadius: 10,
-        background: '#15151a',
+        background: nodeFill(borderColor),
         cursor: 'pointer',
         position: 'relative',
         boxSizing: 'border-box',
@@ -81,8 +85,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
             right: 8,
             fontSize: 10,
             fontWeight: 700,
-            color: '#3b82f6',
-            border: '1px solid #3b82f6',
+            color: THEME_PUSH,
+            border: `1px solid ${THEME_PUSH}`,
             borderRadius: 10,
             padding: '1px 7px',
             background: '#0f0f14',
