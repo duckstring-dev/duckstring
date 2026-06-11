@@ -7,6 +7,8 @@ import { DemandIndicators } from './DemandIndicators';
 
 export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
   const rippleId = data.rippleId as string;
+  // TB (mobile) layout: intra-pond flow also runs top→bottom.
+  const vertical = data.vertical as boolean | undefined;
   const ripple = usePlaygroundStore((s) => s.ripples[rippleId]);
   const rs = usePlaygroundStore((s) => s.rippleStates[rippleId]);
   const selectedRippleId = usePlaygroundStore((s) => s.selectedRippleId);
@@ -44,7 +46,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
         userSelect: 'none',
       }}
     >
-      <Handle type="target" position={Position.Left} style={{ background: '#52525b' }} />
+      <Handle type="target" position={vertical ? Position.Top : Position.Left} style={{ background: '#52525b' }} />
       <span style={{ fontSize: 12, fontWeight: 600, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {ripple.name}
       </span>
@@ -60,7 +62,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
         <span style={{ color: '#52525b' }}>|</span>
         <span style={{ color: '#71717a' }}>~{(ripple.durationMs / 1000).toFixed(1)}s</span>
       </div>
-      <Handle type="source" position={Position.Right} style={{ background: '#52525b' }} />
+      <Handle type="source" position={vertical ? Position.Bottom : Position.Right} style={{ background: '#52525b' }} />
     </div>
   );
 });

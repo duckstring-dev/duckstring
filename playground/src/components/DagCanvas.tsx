@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useEffect } from 'react';
 import {
   ReactFlow,
   Background,
@@ -8,6 +8,8 @@ import {
   Panel,
   BaseEdge,
   getStraightPath,
+  useReactFlow,
+  useUpdateNodeInternals,
   type NodeTypes,
   type EdgeTypes,
   type Connection,
@@ -18,6 +20,7 @@ import {
 import '@xyflow/react/dist/style.css';
 
 import { usePlaygroundStore, consumeEdgeColor, formatAge, pushTargetF, THEME_PULL, THEME_PUSH } from '@/lib/store';
+import { useIsMobile } from '@/lib/useIsMobile';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
@@ -33,7 +36,7 @@ function RippleEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps)
   const childTargetF = usePlaygroundStore((s) => pushTargetF(s.rippleStates[sinkRippleId]?.targets ?? []));
   const color = consumeEdgeColor(parentEndF, childStartF, childTargetF);
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
-  return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
+  return <BaseEdge id={id} path={edgePath} interactionWidth={0} style={{ stroke: color, strokeWidth: 2 }} />;
 }
 
 function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
@@ -43,7 +46,7 @@ function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const childTargetF = usePlaygroundStore((s) => pushTargetF(s.pondStates[sinkPondId]?.targets ?? []));
   const color = consumeEdgeColor(parentEndF, childStartF, childTargetF);
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
-  return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
+  return <BaseEdge id={id} path={edgePath} interactionWidth={0} style={{ stroke: color, strokeWidth: 2 }} />;
 }
 
 function TriggerEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
@@ -55,6 +58,7 @@ function TriggerEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps
     <BaseEdge
       id={id}
       path={edgePath}
+      interactionWidth={0}
       style={{ stroke: color, strokeWidth: 2, strokeDasharray: '6 3' }}
     />
   );
@@ -86,6 +90,23 @@ export function DagCanvas() {
   const linkPonds = usePlaygroundStore((s) => s.linkPonds);
   const linkRipples = usePlaygroundStore((s) => s.linkRipples);
   const clearSelection = usePlaygroundStore((s) => s.clearSelection);
+  const selectedPondId = usePlaygroundStore((s) => s.selectedPondId);
+  const selectedRippleId = usePlaygroundStore((s) => s.selectedRippleId);
+  const selectedTriggerId = usePlaygroundStore((s) => s.selectedTriggerId);
+
+  // On mobile, tapping a node zooms to it — the clear "this is selected" signal, and the
+  // only way the node text gets readable. The delay lets the bottom sheet open (the canvas
+  // shrinks) before the viewport is fitted to the remaining space.
+  const { fitView } = useReactFlow();
+  const updateNodeInternals = useUpdateNodeInternals();
+  const isMobile = useIsMobile();
+  useEffect(() => {
+    if (!isMobile) return;
+    const id = selectedRippleId ?? (selectedTriggerId ? `trigger-${selectedTriggerId}` : selectedPondId);
+    if (!id) return;
+    const t = setTimeout(() => fitView({ nodes: [{ id }], duration: 350, padding: 0.15, maxZoom: 1.1 }), 120);
+    return () => clearTimeout(t);
+  }, [isMobile, selectedPondId, selectedRippleId, selectedTriggerId, fitView]);
 
   // Recompute layout whenever graph structure changes (not on every sim tick)
   const layoutKey = useMemo(
@@ -143,10 +164,20 @@ export function DagCanvas() {
   }, [floors]);
 
   const { nodes, edges } = useMemo(
-    () => computeLayout(ponds, ripples, triggers, floors),
+    () => computeLayout(ponds, ripples, triggers, floors, isMobile ? 'TB' : 'LR'),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [layoutKey, widthKey]
+    [layoutKey, widthKey, isMobile]
   );
+
+  // Handle positions move between the LR and TB layouts; nudge React Flow to re-measure them
+  // when the orientation flips, or edges keep their old anchors. Then re-frame: the fitView prop
+  // only fires at init, against the pre-hydration desktop layout (isMobile is false during SSR).
+  useEffect(() => {
+    updateNodeInternals(nodes.map((n) => n.id));
+    const t = setTimeout(() => fitView({ padding: 0.15 }), 100);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMobile]);
 
   const onConnect = useCallback(
     (connection: Connection) => {

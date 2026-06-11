@@ -3,11 +3,13 @@
 import { useEffect } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { usePlaygroundStore } from '@/lib/store';
+import { useIsMobile } from '@/lib/useIsMobile';
 import { DagCanvas } from './DagCanvas';
 import { Sidebar } from './Sidebar';
 import { ConsolePanel } from './ConsolePanel';
 
 export function Playground() {
+  const isMobile = useIsMobile();
   useEffect(() => {
     // Real-time driver. Sim time advances by (real elapsed × speed); frozen while paused.
     let last = performance.now();
@@ -23,14 +25,15 @@ export function Playground() {
   }, []);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', width: '100vw', height: '100vh', overflow: 'hidden', fontFamily: 'ui-monospace, SFMono-Regular, monospace' }}>
-      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+    <div className="ds-app" style={{ display: 'flex', flexDirection: 'column', width: '100%', overflow: 'hidden', fontFamily: 'ui-monospace, SFMono-Regular, monospace' }}>
+      {/* On mobile the sidebar drops below the canvas as a collapsible bottom sheet. */}
+      <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', flex: 1, minHeight: 0 }}>
         <ReactFlowProvider>
-          <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
             <DagCanvas />
           </div>
         </ReactFlowProvider>
-        <Sidebar />
+        <Sidebar mobile={isMobile} />
       </div>
       <ConsolePanel />
     </div>
