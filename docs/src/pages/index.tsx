@@ -108,7 +108,6 @@ function Hosting() {
 export default function Home(): ReactNode {
   return (
     <Layout
-      title="There is no DAG."
       description="Build data pipelines the way you build software: version each transform, declare its dependencies, and Duckstring resolves the execution DAG automatically.">
       <main className={styles.canvas}>
         <Hero />
