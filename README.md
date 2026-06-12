@@ -64,7 +64,7 @@ A Tide keeps an Outlet no staler than a bound (`duckstring trigger tide reports 
 
 ## Scope & maturity
 
-Duckstring targets single-node workloads (DuckDB under the hood) — pipelines in the tens of millions of rows, not big-data scale. Incremental transforms (the **Trickle** concept) are not yet implemented: transforms recompute their tables each run, with incremental state via self-reads.
+Duckstring targets single-node workloads (DuckDB under the hood) — pipelines in the tens of millions of rows, not big-data scale. A first-class incremental construct (**Trickle**) is not yet built; incremental processing today is a [documented self-read pattern](https://docs.duckstring.com/guides/incremental-ripples). Pipelines that run on external engines can be orchestrated as [proxy Ponds](https://docs.duckstring.com/guides/external-pipelines).
 
 ## Going further
 

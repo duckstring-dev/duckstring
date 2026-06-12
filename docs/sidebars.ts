@@ -38,6 +38,8 @@ const sidebars: SidebarsConfig = {
         'guides/windows',
         'guides/control',
         'guides/fault-tolerance',
+        'guides/incremental-ripples',
+        'guides/external-pipelines',
         'guides/querying-data',
         'guides/web-ui',
       ],

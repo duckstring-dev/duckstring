@@ -46,6 +46,7 @@ Each Ripple invocation receives a fresh `Pond` — the runtime handle bound to t
 | `pond.name` | `str` | The Pond's name |
 | `pond.version` | `str` | The deployed version executing |
 | `pond.con` | `duckdb.DuckDBPyConnection` | A connection to the Pond's private working database |
+| `pond.f` | `datetime` | The run's [freshness](../concepts/freshness.md) (tz-aware UTC) — the natural watermark/provenance stamp, stable across retries and crash recovery (see [Incremental Ripples](../guides/incremental-ripples.md)) |
 | `pond.root` | `Path` | The Catchment root (rarely needed directly) |
 
 ### `pond.read_table(ref)`
@@ -57,7 +58,7 @@ own = pond.read_table("daily_sales")                  # this Pond's table — li
 src = pond.read_table("transactions.transaction")     # a Source's table — its published Parquet snapshot
 ```
 
-- **Bare name** — a table this Pond wrote, read live from its working database. This is how intermediate state flows between Ripples in a run (and how an Inlet can build on its own previous output).
+- **Bare name** — a table this Pond wrote, read live from its working database. This is how intermediate state flows between Ripples in a run, and how a Ripple builds on its own previous output (see [Incremental Ripples](../guides/incremental-ripples.md)).
 - **`source_pond.table`** — a Source's *published* output: the Parquet snapshot exported by its last successful run. Reads never touch the Source's live database, so they see only consistent, completed data and never contend with the Source's execution. The table is also registered as a view under its own name, so plain SQL can reference it directly — `FROM "transaction"` after the read above.
 
 Raises `FileNotFoundError` if a Source table has no exported snapshot yet — i.e. the Source hasn't completed a successful run.
@@ -137,4 +138,4 @@ Facts about how Ripple code runs, occasionally relevant when writing it:
 
 - **Threads, one process.** A Pond's Ripples execute in a thread pool inside the Pond's worker process. Independent Ripples genuinely overlap (DuckDB releases the GIL for query work); module-level mutable state in `pond.py` is shared and best avoided.
 - **One database per Pond.** All of a Pond's Ripples share one working database; each invocation gets its own connection to it. Cross-Pond access is only ever via `read_table("source.table")` — Parquet snapshots, not the Source's database.
-- **Failures are exceptions.** A Ripple fails by raising. The exception's message and traceback are captured into [run history](../guides/fault-tolerance.md), and the [immediate-retry budget](../guides/fault-tolerance.md#the-two-retry-budgets) governs re-attempts. Write Ripples idempotently — a retry re-runs the whole function. `write_table`'s replace semantics make the common derive-and-replace case idempotent by construction; append-style Ripples (which build on their own previous output) need their own care, since a retry appends again.
+- **Failures are exceptions.** A Ripple fails by raising. The exception's message and traceback are captured into [run history](../guides/fault-tolerance.md), and the [immediate-retry budget](../guides/fault-tolerance.md#the-two-retry-budgets) governs re-attempts. Write Ripples idempotently — a retry re-runs the whole function. `write_table`'s replace semantics make the common derive-and-replace case idempotent by construction, and the same atomicity makes self-read appends replay-safe when the increment is computed from the previous state (see [Incremental Ripples](../guides/incremental-ripples.md)). What needs care is anything with *external* side effects — a retry repeats them (see [External Pipelines](../guides/external-pipelines.md) for the ensure-then-poll shape).

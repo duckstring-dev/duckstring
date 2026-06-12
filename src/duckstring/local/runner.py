@@ -124,13 +124,18 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
         seeded = False if fresh else _seed(project)
         targets = order
 
+    from datetime import datetime, timezone
+
+    run_f = datetime.now(timezone.utc)  # one freshness for the whole local run, like a deployed Pond Run
     results: list[RippleResult] = []
     for name in targets:
         started = time.perf_counter()
         try:
             con = _registry_connect(project)
             try:
-                by_name[name]["func"](Pond(project.name, project.version, con, root=project.puddles_dir))
+                by_name[name]["func"](
+                    Pond(project.name, project.version, con, root=project.puddles_dir, f=run_f)
+                )
             finally:
                 con.close()
             results.append(RippleResult(name, "ok", time.perf_counter() - started))

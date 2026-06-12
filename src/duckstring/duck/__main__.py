@@ -52,6 +52,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
             last_progress = _now()
             executor.submit(
                 name,
+                core.state.states[name].start_f,  # the run's freshness, exposed as pond.f
                 on_done=lambda n, started, finished: q.put(("done", (n, started, finished))),
                 on_error=lambda n, exc, started, finished: q.put(("error", (n, exc, started, finished))),
             )

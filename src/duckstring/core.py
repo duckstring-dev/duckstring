@@ -303,7 +303,10 @@ class Puddle:
 
 
 class Pond:
-    def __init__(self, name: str, version: str, con, root, source_majors: dict[str, int] | None = None) -> None:
+    def __init__(
+        self, name: str, version: str, con, root,
+        source_majors: dict[str, int] | None = None, f=None,
+    ) -> None:
         self.name = name
         self.version = version
         self.con = con
@@ -311,6 +314,10 @@ class Pond:
         # Which major line of each Source this Pond consumes (from its pond.toml [sources] pins).
         # None/missing falls back to the flat puddles layout (local runs have no majors).
         self.source_majors = source_majors or {}
+        # The run's freshness F (tz-aware UTC datetime): the ideal watermark/provenance stamp —
+        # stable across crash recovery and retries, which all re-run at the same F (wall-clock
+        # would differ per attempt). Local (puddle) runs stamp the run's start time.
+        self.f = f
 
     def write_table(self, name: str, relation) -> None:
         tmp = f"__tmp_{name}"

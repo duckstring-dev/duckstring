@@ -38,12 +38,11 @@ def _make_pond(
 
             @ripple
             def shape(pond):
-                raw = pond.read_table("tx.event")  # noqa: F841
-                pond.write_table("shaped", pond.con.sql("SELECT id, value * 2 AS doubled FROM raw"))
+                pond.read_table("tx.event")  # registers the Source table as the view `event`
+                pond.write_table("shaped", pond.con.sql("SELECT id, value * 2 AS doubled FROM event"))
 
             @ripple(parents=[shape])
             def total(pond):
-                shaped = pond.read_table("shaped")  # noqa: F841
                 pond.write_table("total", pond.con.sql("SELECT sum(doubled) AS grand FROM shaped"))
         """
     (path / "src" / "pond.py").write_text(textwrap.dedent(pond_py))
@@ -390,3 +389,19 @@ def test_from_catchment_fills_missing_sources(tmp_path, live_catchment, catchmen
     assert {f.name for f in data.glob("*.parquet")} == {"t1.parquet", "t2.parquet"}
     # sanity: httpx reached the live server, not a mock
     assert httpx.get(f"{live_catchment}/api/health", timeout=2.0).status_code == 200
+
+
+def test_local_run_exposes_run_freshness(tmp_path, monkeypatch):
+    """A local run stamps one freshness for the whole run — pond.f is set and tz-aware."""
+    monkeypatch.chdir(_make_pond(tmp_path, sources={}, pond_py="""
+        from duckstring import ripple
+
+        @ripple
+        def stamp(pond):
+            assert pond.f is not None and pond.f.tzinfo is not None
+            pond.write_table("stamped", pond.con.sql(f"SELECT '{pond.f.isoformat()}' AS run_f"))
+    """))
+    from duckstring.local import load_project, run_pond
+
+    result = run_pond(load_project())
+    assert result.ok, [r.error for r in result.ripples]

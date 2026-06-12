@@ -49,7 +49,8 @@ def _load_ripple_func(source_path: str, root: str, ripple_name: str):
 
 
 def _run_ripple(
-    func, pond_name: str, version: str, registry_path_str: str, root_str: str, source_majors: dict[str, int]
+    func, pond_name: str, version: str, registry_path_str: str, root_str: str,
+    source_majors: dict[str, int], f: datetime | None,
 ) -> None:
     import duckdb
 
@@ -60,7 +61,10 @@ def _run_ripple(
     # are fine (each writes its own table); only the connect can momentarily clash.
     registry = retry_on_lock(lambda: duckdb.connect(registry_path_str))
     try:
-        func(Pond(name=pond_name, version=version, con=registry, root=Path(root_str), source_majors=source_majors))
+        func(Pond(
+            name=pond_name, version=version, con=registry, root=Path(root_str),
+            source_majors=source_majors, f=f,
+        ))
     finally:
         registry.close()
 
@@ -107,17 +111,19 @@ class RippleExecutor:
         self.source_majors = {sname: spec_major(spec) for sname, spec in sources.items()}
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
 
-    def submit(self, ripple_name: str, on_done, on_error):
-        """Load and run ``ripple_name``; call ``on_done(name, started_at, finished_at)`` on success and
-        ``on_error(name, exc, started_at, finished_at)`` on failure (timings wall-clock UTC, for the
-        run-history duration; both fire on a pool thread)."""
+    def submit(self, ripple_name: str, f: datetime | None, on_done, on_error):
+        """Load and run ``ripple_name`` at freshness ``f`` (exposed to the ripple as ``pond.f``);
+        call ``on_done(name, started_at, finished_at)`` on success and ``on_error(name, exc,
+        started_at, finished_at)`` on failure (timings wall-clock UTC, for the run-history
+        duration; both fire on a pool thread)."""
         timing: dict[str, datetime] = {}
 
         def _task():
             timing["started"] = datetime.now(timezone.utc)
             func = _load_ripple_func(self.source_path, str(self.root), ripple_name)
             _run_ripple(
-                func, self.pond_name, self.version, str(self.registry_path), str(self.root), self.source_majors
+                func, self.pond_name, self.version, str(self.registry_path), str(self.root),
+                self.source_majors, f,
             )
 
         fut = self._pool.submit(_task)

@@ -123,7 +123,10 @@ from duckstring import ripple
 
 @ripple
 def make(pond):
-    pond.write_table("event", pond.con.sql("SELECT {value} AS marker"))
+    assert pond.f is not None and pond.f.tzinfo is not None  # the run's freshness, for watermarks
+    pond.write_table("event", pond.con.sql(
+        f"SELECT {value} AS marker, '{{pond.f.isoformat()}}' AS run_f"
+    ))
 """
 
 
@@ -182,7 +185,13 @@ def test_two_majors_execute_concurrently_e2e(tmp_path_factory, monkeypatch):
             assert data.exists(), f"no exported data for major {major}"
             assert (root / "ponds" / "inlet" / f"m{major}" / "pond.db").exists()
             r = httpx.post(f"{url}/api/query", json={"pond": "inlet", "major": major, "ripple": "event"}, timeout=5.0)
-            assert r.json()[0]["marker"] == value, f"major {major} data should be its own"
+            row = r.json()[0]
+            assert row["marker"] == value, f"major {major} data should be its own"
+            # pond.f stamped into the data matches the run's recorded freshness exactly.
+            runs = httpx.get(
+                f"{url}/api/runs", params={"pond": "inlet", "major": major, "lineage": False}, timeout=5.0
+            ).json()["runs"]
+            assert row["run_f"] == runs[0]["f"], "pond.f should be the Pond Run's freshness"
     finally:
         server.should_exit = True
         thread.join(timeout=5)
