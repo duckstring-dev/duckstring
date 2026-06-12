@@ -3,6 +3,33 @@
 body {
   background: #201e21;
   color: #fff;
+  /* Don't let canvas pans become pull-to-refresh / back-swipe on mobile. */
+  overscroll-behavior: none;
+}
+
+/* App shell height: dvh tracks the mobile browser chrome (URL bar) so the
+   bottom panels are never pushed off-screen; vh is the fallback. */
+.ds-app {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* Edges are decorative (no click behavior), but React Flow wraps them in .nopan, which
+   swallows pan gestures that start on them — on a phone that's most of the screen's
+   midline. Make them transparent to pointers so the canvas pans from anywhere. */
+.react-flow__edge {
+  pointer-events: none !important;
+}
+
+/* Comfortable touch targets on coarse-pointer devices. */
+@media (pointer: coarse) {
+  .ds-sidebar button {
+    min-height: 36px;
+  }
+  .ds-sidebar input,
+  .ds-sidebar select {
+    min-height: 32px;
+  }
 }
 
 /* React Flow zoom/fit controls — make icons visible on the dark panel.

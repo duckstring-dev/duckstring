@@ -6,6 +6,8 @@ import { useLiveStore, formatDuration, THEME_PULL, THEME_PUSH, nodeFill } from '
 
 export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
+  // TB (mobile) layout: the pill hangs below its pond, so the edge leaves from the top.
+  const vertical = data.vertical as boolean | undefined;
   const trigger = useLiveStore((s) => s.triggers[pondId]);
   const selectedTriggerId = useLiveStore((s) => s.selectedTriggerId);
   const selectTrigger = useLiveStore((s) => s.selectTrigger);
@@ -25,20 +27,26 @@ export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
         selectTrigger(pondId);
       }}
       style={{
+        // Fill the node wrapper (TRIGGER_W × TRIGGER_H) so the handles — positioned
+        // relative to the wrapper — sit on the visible pill's edge.
+        width: '100%',
+        height: '100%',
+        boxSizing: 'border-box',
         border: `2px solid ${color}`,
         boxShadow: isSelected ? `0 0 0 2px ${color}` : undefined,
         borderRadius: 20,
         padding: '4px 12px',
         background: nodeFill(color),
         cursor: 'pointer',
-        display: 'inline-flex',
+        display: 'flex',
         alignItems: 'center',
+        justifyContent: 'center',
         gap: 4,
         whiteSpace: 'nowrap',
         userSelect: 'none',
       }}
     >
-      <Handle type="source" position={Position.Left} style={{ background: color }} />
+      <Handle type="source" position={vertical ? Position.Top : Position.Left} style={{ background: color }} />
       <span style={{ fontSize: 12, fontWeight: 600, color }}>{label}</span>
     </div>
   );

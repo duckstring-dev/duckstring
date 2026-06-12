@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import {
   ReactFlow,
   Background,
@@ -8,6 +8,8 @@ import {
   Panel,
   BaseEdge,
   getStraightPath,
+  useReactFlow,
+  useUpdateNodeInternals,
   type NodeTypes,
   type EdgeTypes,
   type EdgeProps,
@@ -16,6 +18,7 @@ import '@xyflow/react/dist/style.css';
 
 import { useLiveStore, consumeEdgeColor, formatAge, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER } from '@/lib/store';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
+import { useIsMobile } from '@/lib/useIsMobile';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
 import { TriggerNode } from './TriggerNode';
@@ -29,7 +32,7 @@ function RippleEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps)
   const childTargetF = useLiveStore((s) => s.rippleViews[sinkRippleId]?.targetF ?? null);
   const color = consumeEdgeColor(parentEndF, childStartF, childTargetF);
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
-  return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
+  return <BaseEdge id={id} path={edgePath} interactionWidth={0} style={{ stroke: color, strokeWidth: 2 }} />;
 }
 
 function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
@@ -39,7 +42,7 @@ function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   const childTargetF = useLiveStore((s) => s.pondViews[sinkPondId]?.targetF ?? null);
   const color = consumeEdgeColor(parentEndF, childStartF, childTargetF);
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
-  return <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2 }} />;
+  return <BaseEdge id={id} path={edgePath} interactionWidth={0} style={{ stroke: color, strokeWidth: 2 }} />;
 }
 
 function TriggerEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
@@ -48,7 +51,7 @@ function TriggerEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps
   const color = trigger?.kind === 'wave' ? THEME_PULL : THEME_PUSH;
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return (
-    <BaseEdge id={id} path={edgePath} style={{ stroke: color, strokeWidth: 2, strokeDasharray: '6 3' }} />
+    <BaseEdge id={id} path={edgePath} interactionWidth={0} style={{ stroke: color, strokeWidth: 2, strokeDasharray: '6 3' }} />
   );
 }
 
@@ -72,6 +75,49 @@ function StatusPanel() {
   const connected = useLiveStore((s) => s.connected);
   const error = useLiveStore((s) => s.error);
   const count = useLiveStore((s) => Object.keys(s.ponds).length);
+  const isMobile = useIsMobile();
+
+  // Mobile: one compact row — the full card would shade a third of a phone canvas.
+  if (isMobile) {
+    return (
+      <div
+        style={{
+          background: '#15151a',
+          border: '1px solid #27272a',
+          borderRadius: 8,
+          padding: '5px 10px',
+          fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+          fontSize: 11,
+          color: '#a1a1aa',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+        }}
+      >
+        <span
+          aria-label="Duckstring"
+          style={{
+            width: 22,
+            height: 22,
+            flexShrink: 0,
+            backgroundImage: 'url(/logo-mark.svg)',
+            backgroundSize: 'contain',
+            backgroundRepeat: 'no-repeat',
+            backgroundPosition: 'center',
+          }}
+        />
+        <span style={{ fontSize: 13, fontWeight: 700, color: '#f4f4f5' }}>Duckstring</span>
+        <span
+          title={connected ? 'connected' : error ? 'unreachable' : 'connecting'}
+          style={{ width: 8, height: 8, flexShrink: 0, borderRadius: '50%', background: connected ? THEME_SUCCESS : THEME_DANGER }}
+        />
+        <span style={{ color: '#71717a' }}>
+          {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div
       style={{
@@ -131,6 +177,23 @@ export function DagCanvas() {
   const rippleViews = useLiveStore((s) => s.rippleViews);
   const now = useLiveStore((s) => s.now);
   const clearSelection = useLiveStore((s) => s.clearSelection);
+  const selectedPondId = useLiveStore((s) => s.selectedPondId);
+  const selectedRippleId = useLiveStore((s) => s.selectedRippleId);
+  const selectedTriggerId = useLiveStore((s) => s.selectedTriggerId);
+
+  // On mobile, tapping a node zooms to it — the clear "this is selected" signal, and the
+  // only way the node text gets readable. The delay lets the bottom sheet open (the canvas
+  // shrinks) before the viewport is fitted to the remaining space.
+  const { fitView } = useReactFlow();
+  const updateNodeInternals = useUpdateNodeInternals();
+  const isMobile = useIsMobile();
+  useEffect(() => {
+    if (!isMobile) return;
+    const id = selectedRippleId ?? (selectedTriggerId ? `trigger-${selectedTriggerId}` : selectedPondId);
+    if (!id) return;
+    const t = setTimeout(() => fitView({ nodes: [{ id }], duration: 350, padding: 0.15, maxZoom: 1.1 }), 120);
+    return () => clearTimeout(t);
+  }, [isMobile, selectedPondId, selectedRippleId, selectedTriggerId, fitView]);
 
   // Relayout only when graph structure changes — not on every poll.
   const layoutKey = useMemo(
@@ -187,10 +250,20 @@ export function DagCanvas() {
   }, [floors]);
 
   const { nodes, edges } = useMemo(
-    () => computeLayout(ponds, ripples, triggers, floors),
+    () => computeLayout(ponds, ripples, triggers, floors, isMobile ? 'TB' : 'LR'),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [layoutKey, widthKey]
+    [layoutKey, widthKey, isMobile]
   );
+
+  // Handle positions move between the LR and TB layouts; nudge React Flow to re-measure them
+  // when the orientation flips, or edges keep their old anchors. Then re-frame: the fitView prop
+  // only fires at init, against the pre-hydration desktop layout (isMobile is false during SSR).
+  useEffect(() => {
+    updateNodeInternals(nodes.map((n) => n.id));
+    const t = setTimeout(() => fitView({ padding: 0.15 }), 100);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMobile]);
 
   // React Flow controlled mode requires these handlers; layout is managed externally, so no-op.
   const onNodesChange = () => {};

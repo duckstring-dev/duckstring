@@ -106,7 +106,7 @@ function rippleTrace(runs: PondRun[], rippleName: string): { times: number[]; du
   return { times, durations };
 }
 
-export function Sidebar() {
+export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const ponds = useLiveStore((s) => s.ponds);
   const ripples = useLiveStore((s) => s.ripples);
   const pondViews = useLiveStore((s) => s.pondViews);
@@ -153,21 +153,24 @@ export function Sidebar() {
   const trigger = selectedPondId ? triggers[selectedPondId] : undefined;
   const isInlet = selectedPond ? selectedPond.sources.length === 0 : false;
 
-  return (
-    <div
-      style={{
-        width: 320,
-        minWidth: 320,
-        background: '#15151a',
-        borderLeft: '1px solid #27272a',
-        padding: 18,
-        display: 'flex',
-        flexDirection: 'column',
-        overflowY: 'auto',
-        color: '#e4e4e7',
-        fontFamily: 'inherit',
-      }}
-    >
+  // Mobile: the sidebar is a collapsible bottom sheet; selecting a node opens it
+  // (state adjusted during render, like the budget inputs above).
+  const [collapsed, setCollapsed] = useState(true);
+  const selectionKey = selectedRippleId ?? selectedTriggerId ?? selectedPondId;
+  const [prevSelectionKey, setPrevSelectionKey] = useState(selectionKey);
+  if (selectionKey !== prevSelectionKey) {
+    setPrevSelectionKey(selectionKey);
+    if (mobile && selectionKey) setCollapsed(false);
+  }
+
+  const headerContext = selectedTriggerId
+    ? `${ponds[selectedTriggerId]?.name ?? selectedTriggerId} trigger`
+    : selectedRipple
+      ? `${ponds[selectedRipple.pondId]?.name ?? ''} / ${selectedRipple.name}`
+      : selectedPond?.name ?? null;
+
+  const content = (
+    <>
       {!selectedPond && !selectedRipple && !selectedTriggerId && (
         <div style={{ fontSize: 12, color: '#71717a', lineHeight: 1.6 }}>
           Select a Pond or Ripple to inspect its freshness and run history, or to send a Tap, Pulse,
@@ -338,6 +341,55 @@ export function Sidebar() {
           </Section>
         </>
       )}
+    </>
+  );
+
+  if (mobile) {
+    return (
+      <div
+        className="ds-sidebar"
+        style={{
+          background: '#15151a',
+          borderTop: '1px solid #27272a',
+          flexShrink: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          maxHeight: '46dvh',
+          color: '#e4e4e7',
+          fontFamily: 'inherit',
+        }}
+      >
+        <div
+          onClick={() => setCollapsed((v) => !v)}
+          style={{ display: 'flex', alignItems: 'center', padding: '8px 14px', cursor: 'pointer', userSelect: 'none', flexShrink: 0 }}
+        >
+          <span style={{ fontSize: 11, fontWeight: 700, color: '#a1a1aa', letterSpacing: '0.08em' }}>
+            {collapsed ? '▸' : '▾'} CATCHMENT
+            {headerContext && <span style={{ color: '#52525b', fontWeight: 400, marginLeft: 8 }}>{headerContext}</span>}
+          </span>
+        </div>
+        {!collapsed && <div style={{ overflowY: 'auto', padding: '0 14px 14px' }}>{content}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="ds-sidebar"
+      style={{
+        width: 320,
+        minWidth: 320,
+        background: '#15151a',
+        borderLeft: '1px solid #27272a',
+        padding: 18,
+        display: 'flex',
+        flexDirection: 'column',
+        overflowY: 'auto',
+        color: '#e4e4e7',
+        fontFamily: 'inherit',
+      }}
+    >
+      {content}
     </div>
   );
 }

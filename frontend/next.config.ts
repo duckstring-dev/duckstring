@@ -9,6 +9,9 @@ const isStaticExport = process.env.NEXT_STATIC_EXPORT === "true";
 const nextConfig: NextConfig = isStaticExport
   ? { output: "export" }
   : {
+      // Dev-only: let phones on the LAN load the dev server (Next blocks cross-origin
+      // requests to dev resources by default).
+      allowedDevOrigins: ["192.168.*.*"],
       async rewrites() {
         return [
           {

@@ -7,6 +7,9 @@ import { DemandIndicators } from './DemandIndicators';
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
+  // TB (mobile) layout: flow enters at the top and leaves at the bottom; the trigger pill
+  // hangs below the outlet, so its edge also lands on the bottom.
+  const vertical = data.vertical as boolean | undefined;
   const pond = useLiveStore((s) => s.ponds[pondId]);
   const view = useLiveStore((s) => s.pondViews[pondId]);
   const info = useLiveStore((s) => s.pondInfo[pondId]);
@@ -38,11 +41,11 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
         userSelect: 'none',
       }}
     >
-      <Handle id="in" type="target" position={Position.Left} style={{ background: '#52525b' }} />
+      <Handle id="in" type="target" position={vertical ? Position.Top : Position.Left} style={{ background: '#52525b' }} />
       <Handle
         id="trigger-in"
         type="target"
-        position={Position.Right}
+        position={vertical ? Position.Bottom : Position.Right}
         style={{ background: '#52525b', opacity: 0 }}
       />
 
@@ -74,7 +77,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
         </span>
       </div>
 
-      <Handle id="out" type="source" position={Position.Right} style={{ background: '#52525b' }} />
+      <Handle id="out" type="source" position={vertical ? Position.Bottom : Position.Right} style={{ background: '#52525b' }} />
     </div>
   );
 });

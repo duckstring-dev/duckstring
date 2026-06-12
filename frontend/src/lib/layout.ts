@@ -64,7 +64,8 @@ export interface ContentFloors {
 function buildRippleLayout(
   pondId: PondId,
   ripples: Record<RippleId, Ripple>,
-  rippleFloors?: Record<RippleId, number>
+  rippleFloors?: Record<RippleId, number>,
+  direction: 'LR' | 'TB' = 'LR'
 ): {
   positions: Record<RippleId, { x: number; y: number }>;
   widths: Record<RippleId, number>;
@@ -81,7 +82,10 @@ function buildRippleLayout(
   for (const r of pondRipples) widths[r.id] = rippleWidth(r, rippleFloors?.[r.id] ?? 0);
 
   const g = new dagre.graphlib.Graph();
-  g.setGraph({ rankdir: 'LR', ranksep: 60, nodesep: 40, marginx: 0, marginy: 0 });
+  // TB: tighter gaps — the vertical flow is rank-to-rank (ranksep) and siblings sit
+  // side by side (nodesep), which is what widens the pond on a narrow screen.
+  const gaps = direction === 'TB' ? { ranksep: 32, nodesep: 24 } : { ranksep: 60, nodesep: 40 };
+  g.setGraph({ rankdir: direction, ...gaps, marginx: 0, marginy: 0 });
   g.setDefaultEdgeLabel(() => ({}));
 
   for (const r of pondRipples) {
@@ -123,13 +127,17 @@ function buildRippleLayout(
   };
 }
 
+// `direction` orients the whole graph: LR on desktop, TB on mobile so the chain (and each pond's
+// ripple flow) reads down a portrait screen — it fits at roughly twice the zoom.
 export function computeLayout(
   ponds: Record<PondId, Pond>,
   ripples: Record<RippleId, Ripple>,
   triggers: Record<PondId, TriggerView>,
-  floors?: ContentFloors
+  floors?: ContentFloors,
+  direction: 'LR' | 'TB' = 'LR'
 ): LayoutResult {
   const pondList = Object.values(ponds);
+  const vertical = direction === 'TB';
 
   // Step 1: compute internal ripple layout per pond
   const pondLayouts: Record<
@@ -142,7 +150,7 @@ export function computeLayout(
     }
   > = {};
   for (const pond of pondList) {
-    const layout = buildRippleLayout(pond.id, ripples, floors?.ripples);
+    const layout = buildRippleLayout(pond.id, ripples, floors?.ripples, direction);
     // Floor the pond width to fit its title line and its (live) stats line.
     layout.width = Math.max(layout.width, pondNameWidth(pond.name), floors?.ponds?.[pond.id] ?? 0);
     pondLayouts[pond.id] = layout;
@@ -150,7 +158,7 @@ export function computeLayout(
 
   // Step 2: compute pond-level layout
   const pg = new dagre.graphlib.Graph();
-  pg.setGraph({ rankdir: 'LR', ranksep: 120, nodesep: 80, marginx: 40, marginy: 40 });
+  pg.setGraph({ rankdir: direction, ranksep: vertical ? 80 : 120, nodesep: vertical ? 60 : 80, marginx: 40, marginy: 40 });
   pg.setDefaultEdgeLabel(() => ({}));
 
   for (const pond of pondList) {
@@ -181,7 +189,7 @@ export function computeLayout(
       id: pond.id,
       type: 'pond',
       position: { x: pondX, y: pondY },
-      data: { pondId: pond.id },
+      data: { pondId: pond.id, vertical },
       style: { width, height },
     });
 
@@ -195,7 +203,7 @@ export function computeLayout(
         type: 'ripple',
         parentId: pond.id,
         position: { x: pos.x + POND_PAD_SIDE, y: pos.y + POND_PAD_TOP },
-        data: { rippleId: r.id },
+        data: { rippleId: r.id, vertical },
         extent: 'parent',
         draggable: false,
         style: { width: widths[r.id] ?? MIN_RIPPLE_W, height: RIPPLE_H },
@@ -217,15 +225,18 @@ export function computeLayout(
       }
     }
 
-    // Trigger node (positioned to the right of the pond)
+    // Trigger node — to the right of the pond (LR), or below it (TB, where the right edge is the
+    // narrow phone's margin and an outlet's bottom is free).
     const triggerInfo = triggers[pond.id];
     if (triggerInfo) {
       const triggerId = `trigger-${pond.id}`;
       nodes.push({
         id: triggerId,
         type: 'trigger',
-        position: { x: pondX + width + 40, y: pondY + height / 2 - TRIGGER_H / 2 },
-        data: { pondId: pond.id },
+        position: vertical
+          ? { x: pondX + width / 2 - TRIGGER_W / 2, y: pondY + height + 40 }
+          : { x: pondX + width + 40, y: pondY + height / 2 - TRIGGER_H / 2 },
+        data: { pondId: pond.id, vertical },
         style: { width: TRIGGER_W, height: TRIGGER_H },
       });
       edges.push({
