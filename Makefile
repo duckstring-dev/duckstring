@@ -11,4 +11,5 @@ build-frontend: clean-frontend
 	cp -r $(FRONTEND_OUT)/. $(STATIC_DIR)/
 
 clean-frontend:
+	mkdir -p $(STATIC_DIR)
 	find $(STATIC_DIR) -mindepth 1 -maxdepth 1 ! -name 'dev' -exec rm -rf {} +
