@@ -7,8 +7,8 @@ import styles from './index.module.css';
 
 // The landing page (duckstring.com). Deliberately sparse: the brand statement, just enough of the
 // model to intrigue, and routes out to the docs, the playground, and GitHub. It is styled on the
-// product UI's dark canvas regardless of the site colour mode — copy and palette follow
-// brand/copy.md and frontend/src/lib/store.ts.
+// product UI's dark canvas regardless of the site colour mode — the palette follows
+// frontend/src/lib/store.ts.
 
 function Hero() {
   return (

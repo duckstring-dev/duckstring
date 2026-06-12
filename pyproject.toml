@@ -51,7 +51,9 @@ ds = "duckstring.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-timeout = 1
+# Tight enough to catch an accidental real sleep (sim tests finish in ms), loose enough to absorb
+# cold-runner I/O on CI (SQLite migrate / uvicorn startup can exceed 1s on shared runners).
+timeout = 5
 
 [tool.ruff]
 line-length = 128

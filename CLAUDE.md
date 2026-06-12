@@ -2,17 +2,18 @@
 
 A packaging standard for data transforms. Each transform is a versioned **Pond** (Python package) that declares its parent Ponds in `pond.toml`. The pipeline is implicit in the package graph. **Ripples** are the execution units within a Pond. The **Catchment** (FastAPI server) is the reference runtime — a convenience, not the product.
 
-See `brand/strategy.md` for positioning rationale and `brand/copy.md` for settled copy.
-
 `docs/docs/theory.md` is the **authoritative orchestration spec** — its "Pond State Variables" pseudocode is the exact state machine. `playground/src/lib/orchestration.ts` is a well-tested TypeScript *simulation* (the standalone playground); the Python engine is a faithful, behaviour-for-behaviour port of it. The rest of `docs/` is the Docusaurus documentation site (→ docs.duckstring.com), written against the real CLI/API surface — update it when that surface changes.
 
 ## Brand & Positioning
 
-- **Never describe Duckstring as an orchestration framework.** That positions it against Airflow/Prefect/Dagster. The differentiation is the package model, not the execution model.
+(The old `brand/` directory was removed from the repo — internal strategy doesn't belong in OSS. These are the settled rules.)
+
+- **Never describe Duckstring as an orchestration framework.** That positions it against Airflow/Prefect/Dagster. The differentiation is the package model, not the execution model. **Never mention competitors by name in copy or docs.**
 - **The Catchment is not the product.** Don't lead with it in copy or docs introductions. It's the batteries-included runtime for teams that want the full stack.
-- **Target audience**: data engineers who have hit the coordination and ownership walls of large transform pipelines — specifically those who've adopted or considered a mesh pattern and found that breaking changes still require organisation-wide coordination. They've reasoned their way to needing versioned package boundaries; they just don't have SemVer or concurrent version execution yet.
-- **Tagline**: "There is no DAG." — the DAG exists but is implicit in the package graph. You don't build or govern it.
-- **dbt Mesh users** are the warmest possible first audience. See `brand/strategy.md` for migration path and gaps.
+- **Target audience**: data engineers who have hit the coordination and ownership walls of large transform pipelines — specifically those who've adopted or considered a mesh pattern and found that breaking changes still require organisation-wide coordination. They've reasoned their way to needing versioned package boundaries; they just don't have SemVer or concurrent version execution yet. Mesh-pattern users are the warmest first audience.
+- **Tagline**: "There is no DAG." — the DAG exists but is implicit in the package graph. You don't build or govern it. **Package description** (pyproject/PyPI): "Build data pipelines the way you build software: version each transform, declare its dependencies, and Duckstring resolves the execution DAG automatically."
+- **Name the gaps honestly** — single-node scope (~<50M rows) and the unimplemented Trickle (incremental) concept are stated, not downplayed; engineers find them immediately anyway.
+- The README is deliberately short (positioning → concepts → one golden-path quickstart → trigger table → docs links); examples live in `docs/`, not the README — duplicated examples drift, and the PyPI copy of a stale README is immutable per release. The README's opening paragraphs are the author's own wording — don't rewrite them.
 
 ## Current state (2026-06)
 
@@ -154,7 +155,7 @@ Freshness-based Kanban. The Pond is a packaging/versioning boundary; its `start`
 
 ## Testing
 
-`pytest` (budgets via `pytest-timeout`; `timeout = 1` default in `pyproject.toml`, sim/integration tests override). Pure-engine tests are behavioural simulations driving `sentinel`/`tick` over sim-time (100 ms step, **never sleep**). Session env in `tests/conftest.py`: `DUCKSTRING_SLEEP_MULTIPLIER=0.01`, `DUCKSTRING_DISABLE_DUCKS=1`. Notable suites: `test_engine` (validated engine), `test_engine_split`, `test_duck` (buffer/replay/recovery), `test_restart` (restart restore), `test_window`, `test_runtime` (**e2e: real subprocess Ducks** on the demo ponds; enables Ducks + a live server). Demo ponds in `src/duckstring/demo/` (transactions, products → sales → reports; bottleneck = sales.join 3 s).
+`pytest` (budgets via `pytest-timeout`; `timeout = 5` default in `pyproject.toml`, sim/integration tests override). Pure-engine tests are behavioural simulations driving `sentinel`/`tick` over sim-time (100 ms step, **never sleep**). Session env in `tests/conftest.py`: `DUCKSTRING_SLEEP_MULTIPLIER=0.01`, `DUCKSTRING_DISABLE_DUCKS=1`. Notable suites: `test_engine` (validated engine), `test_engine_split`, `test_duck` (buffer/replay/recovery), `test_restart` (restart restore), `test_window`, `test_runtime` (**e2e: real subprocess Ducks** on the demo ponds; enables Ducks + a live server). Demo ponds in `src/duckstring/demo/` (transactions, products → sales → reports; bottleneck = sales.join 3 s).
 
 ## Before finishing any code change
 
