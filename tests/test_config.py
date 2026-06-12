@@ -32,9 +32,11 @@ def test_register_remote():
 
 
 def test_resolve_unknown_exits():
-    import click
+    # typer.Exit, not click's: newer typer vendors click (typer._click), so the separately
+    # installed click's Exit can be a different class than the one typer.Exit subclasses.
+    import typer
 
-    with pytest.raises(click.exceptions.Exit):
+    with pytest.raises(typer.Exit):
         resolve_catchment("nonexistent")
 
 
