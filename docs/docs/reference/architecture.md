@@ -40,7 +40,7 @@ The orchestration rules live in a pure engine package (`duckstring.engine`) with
 
 ## Transport: Ducks always dial back
 
-All communication is Duck-initiated: a Duck holds a short poll on `GET /api/duck/{pond}/jobs` for commands and POSTs progress to `/api/duck/{pond}/events`. The Catchment never needs to reach a Duck.
+All communication is Duck-initiated: a Duck holds a short poll on `GET /api/duck/{name}/{major}/jobs` for commands and POSTs progress to `/api/duck/{name}/{major}/events` (a Duck serves one major line of a Pond). The Catchment never needs to reach a Duck.
 
 This buys two properties. First, **location transparency**: a Duck on the same machine and a Duck across a network run identical code — remote execution is just a different way of launching the process (`DUCKSTRING_CATCHMENT_URL` tells a Duck where to dial). Second, **resilience**: because the Duck doesn't depend on being reachable, it doesn't depend on the Catchment being up either. Events are idempotent on freshness, so replays after a gap are harmless.
 
@@ -61,11 +61,11 @@ Everything lives under the Catchment root, in three layers with distinct owners:
 |---|---|---|
 | `duck.db` | Catchment | The system of record: deployed versions and topology, the live graph, freshness/demand/fault state, triggers, windows, budgets, and the canonical run history (one row per Ripple attempt, with errors and tracebacks). SQLite. |
 | `ponds/{name}/{version}/` | Catchment | Each deployed version's source, exactly as uploaded — the immutable artifact. |
-| `ponds/{name}/registry.duckdb` | Duck | The Pond's live working database — every table its Ripples write. Private to the Pond. |
-| `ponds/{name}/data/*.parquet` | Duck | The published snapshots, exported atomically (write-then-rename) after each successful run. The only thing Sinks and queries read. |
-| `ponds/{name}/pond.db` | Duck | The Duck's run ledger — its operational record for crash recovery and event replay. The Catchment's history remains canonical. |
+| `ponds/{name}/m{major}/registry.duckdb` | Duck | The major line's live working database — every table its Ripples write. Private to the Pond. |
+| `ponds/{name}/m{major}/data/*.parquet` | Duck | The published snapshots, exported atomically (write-then-rename) after each successful run. The only thing Sinks and queries read. |
+| `ponds/{name}/m{major}/pond.db` | Duck | The Duck's run ledger — its operational record for crash recovery and event replay. The Catchment's history remains canonical. |
 
-Identity in `duck.db` follows the versioning model: the Pond *name*, each immutable deployed *version*, and a *selection* pointer per `(name, major)` are separate records — which is what makes [deploys atomic and majors concurrent](../concepts/versioning.md). Paths in the database are root-relative, so the whole directory is relocatable and a backup of the root is a backup of the Catchment.
+Runtime storage is per **major line** (`m1/`, `m2/`, …) — concurrent majors execute and publish independently. Identity in `duck.db` follows the versioning model: the Pond *name*, each immutable deployed *version*, and a *selection* pointer per `(name, major)` are separate records — which is what makes [deploys atomic and majors concurrent](../concepts/versioning.md). Paths in the database are root-relative, so the whole directory is relocatable and a backup of the root is a backup of the Catchment.
 
 ## Flow control
 

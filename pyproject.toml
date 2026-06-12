@@ -1,6 +1,6 @@
 [project]
 name = "duckstring"
-version = "0.1.0"
+version = "0.2.0"
 description = "Build data pipelines the way you build software: version each transform, declare its dependencies, and Duckstring resolves the execution DAG automatically."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,11 +33,17 @@ dev = [
 package-dir = { "" = "src" }
 
 [tool.setuptools.package-data]
-"duckstring.catchment" = ["static/**/*"]
+"duckstring.catchment" = ["static/**/*", "schema/*.sql"]
 "duckstring" = ["demo/**/*", "demo/**/.gitignore"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.urls]
+Homepage = "https://duckstring.com"
+Documentation = "https://docs.duckstring.com"
+Repository = "https://github.com/duckstring-dev/duckstring"
+Playground = "https://playground.duckstring.com"
 
 [project.scripts]
 duckstring = "duckstring.cli:main"

@@ -31,7 +31,7 @@ def _deploy(url: str, *, name: str, version: str, kind: str, sources: dict[str, 
 def test_status_empty_ponds_message(runner, live_catchment):
     result = runner.invoke(app, ["status", "--once"])
     assert result.exit_code == 0
-    assert "No active" in result.output
+    assert "No Ponds" in result.output
 
 
 def test_status_explicit_catchment(runner, live_catchment):
@@ -56,15 +56,14 @@ def test_status_default_shows_active_only(runner, live_catchment):
     assert "1.0.0" not in result.output
 
 
-def test_status_all_shows_selected_only(runner, live_catchment):
-    # Status reflects live engine state (the selected version per major), not version history —
-    # a superseded version within a major is no longer surfaced, even with --all.
+def test_status_shows_both_majors(runner, live_catchment):
+    # Two major lines of one name are independent live Ponds — both appear in status.
     _deploy(live_catchment, name="inlet", version="1.0.0", kind="inlet")
-    _deploy(live_catchment, name="inlet", version="1.1.0", kind="inlet")
-    result = runner.invoke(app, ["status", "--once", "--all"])
+    _deploy(live_catchment, name="inlet", version="2.0.0", kind="inlet")
+    result = runner.invoke(app, ["status", "--once"])
     assert result.exit_code == 0
-    assert "1.1.0" in result.output
-    assert "1.0.0" not in result.output
+    assert "1.0.0" in result.output
+    assert "2.0.0" in result.output
 
 
 def test_status_unknown_catchment_exits(runner):
@@ -80,45 +79,45 @@ def test_status_no_default_exits(runner):
 # --- Unit tests for _ancestors ---
 
 def test_ancestors_root_only():
-    assert _ancestors("a", []) == {"a"}
+    assert _ancestors({"a"}, []) == {"a"}
 
 
 def test_ancestors_chain():
     edges = [("a", "b"), ("b", "c")]
-    assert _ancestors("c", edges) == {"a", "b", "c"}
+    assert _ancestors({"c"}, edges) == {"a", "b", "c"}
 
 
 def test_ancestors_diamond():
     edges = [("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]
-    assert _ancestors("d", edges) == {"a", "b", "c", "d"}
+    assert _ancestors({"d"}, edges) == {"a", "b", "c", "d"}
 
 
 def test_ancestors_excludes_downstream():
     edges = [("a", "b"), ("b", "c")]
-    assert _ancestors("b", edges) == {"a", "b"}
+    assert _ancestors({"b"}, edges) == {"a", "b"}
 
 
 # --- Unit tests for _filter_for_pond ---
 
 def _make_ponds(*specs):
-    return [{"name": n, "version": v, "kind": "pond", "status": "idle", "gen": 0,
-             "last_run_at": None, "last_run_status": None, "last_run_version": None}
+    return [{"id": f"{n}@{v.split('.')[0]}", "name": n, "major": int(v.split(".")[0]), "version": v,
+             "kind": "pond", "status": "idle", "gen": 0}
             for n, v in specs]
 
 
 def test_filter_for_pond_name_only():
     ponds = _make_ponds(("inlet", "1.0.0"), ("outlet", "1.0.0"), ("other", "1.0.0"))
-    edges = [("inlet", "outlet")]
+    edges = [("inlet@1", "outlet@1")]
     result_ponds, result_edges = _filter_for_pond(ponds, edges, "outlet", None, None)
     names = {p["name"] for p in result_ponds}
     assert names == {"inlet", "outlet"}
     assert ("other", "1.0.0") not in [(p["name"], p["version"]) for p in result_ponds]
-    assert result_edges == [("inlet", "outlet")]
+    assert result_edges == [("inlet@1", "outlet@1")]
 
 
 def test_filter_for_pond_excludes_unrelated():
     ponds = _make_ponds(("a", "1.0.0"), ("b", "1.0.0"), ("c", "1.0.0"))
-    edges = [("a", "b")]
+    edges = [("a@1", "b@1")]
     result_ponds, _ = _filter_for_pond(ponds, edges, "b", None, None)
     assert {p["name"] for p in result_ponds} == {"a", "b"}
 
@@ -132,11 +131,11 @@ def test_filter_for_pond_major():
 
 
 def test_filter_for_pond_version_str():
-    ponds = _make_ponds(("outlet", "1.0.0"), ("outlet", "1.1.0"))
+    ponds = _make_ponds(("outlet", "1.0.0"), ("outlet", "2.0.0"))
     edges: list = []
-    result_ponds, _ = _filter_for_pond(ponds, edges, "outlet", None, "1.1.0")
+    result_ponds, _ = _filter_for_pond(ponds, edges, "outlet", None, "2.0.0")
     assert len(result_ponds) == 1
-    assert result_ponds[0]["version"] == "1.1.0"
+    assert result_ponds[0]["version"] == "2.0.0"
 
 
 def test_filter_for_pond_unknown_returns_empty():
@@ -187,7 +186,7 @@ def test_status_pond_arg_inlet_filter(runner, live_catchment):
 
 
 def test_status_default_uses_live_mode(runner, live_catchment, monkeypatch):
-    # Default invocation should call _run_live (not --once path).
+    # Default invocation should call _run_live (not the --once path), staying open until Ctrl+C.
     import importlib
     status_mod = importlib.import_module("duckstring.cli.status")
 
@@ -196,33 +195,4 @@ def test_status_default_uses_live_mode(runner, live_catchment, monkeypatch):
 
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
-    assert calls and calls[0]["watch"] is False
-
-
-def test_status_watch_flag_passed_through(runner, live_catchment, monkeypatch):
-    import importlib
-    status_mod = importlib.import_module("duckstring.cli.status")
-
-    calls = []
-    monkeypatch.setattr(status_mod, "_run_live", lambda *a, **kw: calls.append(kw))
-
-    result = runner.invoke(app, ["status", "--watch"])
-    assert result.exit_code == 0
     assert calls and calls[0]["watch"] is True
-
-
-def test_status_live_auto_exits_on_all_stopped():
-    stopped_ponds = [{"name": "outlet", "version": "1.0.0", "kind": "outlet", "status": "stopped",
-                      "gen": 0, "last_run_at": None, "last_run_status": None,
-                      "last_run_version": None, "last_run_duration": None}]
-
-    # _build() is a closure inside _run_live — test the exit condition directly.
-    # All ponds stopped + watch=False → done=True.
-    done = not False and all(p.get("status") == "stopped" for p in stopped_ponds)
-    assert done is True
-
-
-def test_status_watch_suppresses_auto_exit():
-    stopped_ponds = [{"status": "stopped"}]
-    done = not True and all(p.get("status") == "stopped" for p in stopped_ponds)
-    assert done is False

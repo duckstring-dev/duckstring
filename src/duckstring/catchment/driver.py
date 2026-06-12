@@ -10,8 +10,9 @@ loaded from SQLite at startup and write-through-persisted per event. It is event
   more ``BeginRun``s; run history is written to ``pond_run`` / ``ripple_run``.
 * ``scheduler_tick`` (called on a timer) runs ``tick`` for Tide/window clocks.
 
-Ponds are keyed by name in the engine; Ripples by ``"{pond}.{ripple}"``. A ``threading.RLock``
-guards all state; SQLite is the durable mirror, the per-Pond ``pond.db`` ledgers the fallback.
+Ponds are keyed by ``"{name}@{major}"`` in the engine — each deployed major line is an independent
+Pond instance — and Ripples by ``"{pond_key}.{ripple}"``. A ``threading.RLock`` guards all state;
+SQLite is the durable mirror, the per-Pond ``pond.db`` ledgers the fallback.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from ..engine import (
     tick,
     wake_pond,
 )
+from ..keys import pond_key
 
 # A Duck is presumed dead if it holds an in-flight Run but hasn't contacted the Catchment within this
 # window (the secondary, transport-level signal; process-liveness is the primary one). Comfortably
@@ -66,9 +68,10 @@ class Driver:
         self.launcher = launcher
         self.lock = threading.RLock()
         self.state = EngineState()
-        self.meta: dict[str, dict] = {}  # pond_name -> {version_id, version, source_path, ripple_ids}
-        self.jobs: dict[str, list[dict]] = {}  # pond_name -> queued Duck commands
-        self.last_seen: dict[str, datetime] = {}  # pond_name -> last Duck contact (jobs poll / event)
+        # All dicts below are keyed by the pond key "{name}@{major}" — one entry per major line.
+        self.meta: dict[str, dict] = {}  # key -> {name, major, version_id, version, source_path, ...}
+        self.jobs: dict[str, list[dict]] = {}  # key -> queued Duck commands
+        self.last_seen: dict[str, datetime] = {}  # key -> last Duck contact (jobs poll / event)
         self.reload()
 
     # ─── Topology load ────────────────────────────────────────────────────────
@@ -87,26 +90,30 @@ class Driver:
 
             name_by_pnid = {r[0]: r[1] for r in db.execute("SELECT id, name FROM pond_name")}
             rows = db.execute("""
-                SELECT pn.name, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind
+                SELECT pn.name, p.major, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind
                 FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id
                 JOIN pond_version pv ON pv.id = p.pond_version_id
             """).fetchall()
-            deployed = {name for name, *_ in rows}
-            pondid_to_name = {pid: nm for nm, pid, *_ in rows}
-            for name, pond_id, pv_id, version, source_path, kind in rows:
-                self.meta[name] = {"version_id": pv_id, "version": version, "source_path": source_path,
-                                   "pond_id": pond_id, "kind": kind, "ripple_ids": {}}
+            deployed = {pond_key(name, major) for name, major, *_ in rows}
+            pondid_to_key = {pid: pond_key(nm, mj) for nm, mj, pid, *_ in rows}
+            for name, major, pond_id, pv_id, version, source_path, kind in rows:
+                self.meta[pond_key(name, major)] = {
+                    "name": name, "major": major, "version_id": pv_id, "version": version,
+                    "source_path": source_path, "pond_id": pond_id, "kind": kind, "ripple_ids": {},
+                }
 
-            for name, pond_id, pv_id, _version, _source_path, _kind in rows:
+            for name, major, pond_id, pv_id, _version, _source_path, _kind in rows:
+                key = pond_key(name, major)
                 sources, optional = [], set()
-                for snid, required in db.execute(
-                    "SELECT source_pond_name_id, required FROM pond_to_pond WHERE pond_id = ?", (pond_id,)
+                for snid, smajor, required in db.execute(
+                    "SELECT source_pond_name_id, source_major, required FROM pond_to_pond WHERE pond_id = ?",
+                    (pond_id,),
                 ):
-                    sname = name_by_pnid.get(snid)
-                    if sname in deployed:  # only wire sources that are themselves deployed
-                        sources.append(sname)
+                    skey = pond_key(name_by_pnid.get(snid, ""), smajor)
+                    if skey in deployed:  # only wire sources whose (name, major) line is deployed
+                        sources.append(skey)
                         if not required:
-                            optional.add(sname)
+                            optional.add(skey)
                 windows = [self._row_to_window(r) for r in db.execute(
                     "SELECT start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time "
                     "FROM pond_window WHERE pond_id = ?", (pond_id,)
@@ -115,28 +122,28 @@ class Driver:
                     "SELECT immediate_retries, source_retries FROM pond_retry WHERE pond_id = ?", (pond_id,)
                 ).fetchone()
                 imm, onc = retry if retry else (0, 0)
-                ponds[name] = Pond(
-                    id=name, name=name, sources=sources, optional_sources=optional, windows=windows,
+                ponds[key] = Pond(
+                    id=key, name=key, sources=sources, optional_sources=optional, windows=windows,
                     retry_immediately=imm, retry_on_change=onc,
                 )
-                pond_states[name] = self._load_pond_state(pond_id)
+                pond_states[key] = self._load_pond_state(pond_id)
 
                 rip_rows = db.execute("SELECT id, name FROM ripple WHERE pond_version_id = ?", (pv_id,)).fetchall()
                 rid_to_rname = {rid: rname for rid, rname in rip_rows}
                 for rid, rname in rip_rows:
-                    self.meta[name]["ripple_ids"][rname] = rid
+                    self.meta[key]["ripple_ids"][rname] = rid
                 for rid, rname in rip_rows:
                     parent_rids = [
                         r[0] for r in db.execute("SELECT source_id FROM ripple_to_ripple WHERE sink_id = ?", (rid,))
                     ]
-                    eid = f"{name}.{rname}"
-                    parents = [f"{name}.{rid_to_rname[p]}" for p in parent_rids if p in rid_to_rname]
-                    ripples[eid] = Ripple(id=eid, pond_id=name, name=rname, parents=parents)
+                    eid = f"{key}.{rname}"
+                    parents = [f"{key}.{rid_to_rname[p]}" for p in parent_rids if p in rid_to_rname]
+                    ripples[eid] = Ripple(id=eid, pond_id=key, name=rname, parents=parents)
                     ripple_states[eid] = RippleState()
 
                 # Restore execution state from run history: gen (run counts), per-Ripple freshness, and
                 # any Pond Run that was still 'running' when the Catchment stopped (resumed below).
-                ps = pond_states[name]
+                ps = pond_states[key]
                 ps.runs_started = db.execute(
                     "SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ?", (pv_id,)
                 ).fetchone()[0]
@@ -150,26 +157,26 @@ class Driver:
                     ).fetchone()
                     if row and row[0]:
                         ef = datetime.fromisoformat(row[0])
-                        ripple_states[f"{name}.{rname}"].start_f = ef
-                        ripple_states[f"{name}.{rname}"].end_f = ef
+                        ripple_states[f"{key}.{rname}"].start_f = ef
+                        ripple_states[f"{key}.{rname}"].end_f = ef
                 for (incf,) in db.execute(
                     "SELECT f FROM pond_run WHERE pond_version_id = ? AND status = 'running'", (pv_id,)
                 ):
-                    self._incomplete.append((name, datetime.fromisoformat(incf)))
+                    self._incomplete.append((key, datetime.fromisoformat(incf)))
 
             for pond_id, kind, bound_ms in db.execute(
                 "SELECT pond_id, kind, bound_ms FROM pond_trigger WHERE status = 'active'"
             ):
-                name = pondid_to_name.get(pond_id)
-                if name:
+                key = pondid_to_key.get(pond_id)
+                if key:
                     bound = timedelta(milliseconds=bound_ms) if bound_ms is not None else None
-                    triggers[name] = Trigger(pond_id=name, kind=kind, bound=bound)
+                    triggers[key] = Trigger(pond_id=key, kind=kind, bound=bound)
 
             self.state = EngineState(
                 ponds=ponds, pond_states=pond_states, ripples=ripples,
                 ripple_states=ripple_states, triggers=triggers,
             )
-            self.jobs = {name: self.jobs.get(name, []) for name in ponds}
+            self.jobs = {key: self.jobs.get(key, []) for key in ponds}
 
     def _load_pond_state(self, pond_id: int) -> PondState:
         row = self.db.execute(
@@ -196,6 +203,40 @@ class Driver:
                 for r in self.db.execute("SELECT target_f FROM pond_target WHERE pond_id = ?", (pond_id,))
             ]
         return ps
+
+    # ─── Pond resolution ──────────────────────────────────────────────────────
+
+    def resolve(self, name: str, major: int | None = None, version: str | None = None) -> str:
+        """Resolve a Pond reference to its engine key ``"{name}@{major}"``.
+
+        Default is the highest deployed major line. ``version`` targets that version's major line
+        and must be the currently *selected* artifact for it (only selected versions execute).
+        Raises KeyError (unknown pond / major line) or ValueError (conflicting / unselected version).
+        """
+        with self.lock:
+            majors = {m["major"]: k for k, m in self.meta.items() if m["name"] == name}
+            if not majors:
+                raise KeyError(f"Pond '{name}' not found")
+            if version is not None:
+                vmajor = int(version.split(".")[0])
+                if major is not None and major != vmajor:
+                    raise ValueError(f"major {major} conflicts with version {version} (major {vmajor})")
+                key = majors.get(vmajor)
+                if key is None:
+                    raise KeyError(f"No deployed major {vmajor} of Pond '{name}'")
+                selected = self.meta[key]["version"]
+                if selected != version:
+                    raise ValueError(
+                        f"Version {version} of '{name}' is not the selected version for major {vmajor} "
+                        f"(selected: {selected}) — deploy it to select it"
+                    )
+                return key
+            if major is not None:
+                key = majors.get(major)
+                if key is None:
+                    raise KeyError(f"No deployed major {major} of Pond '{name}'")
+                return key
+            return majors[max(majors)]
 
     # ─── Triggers ─────────────────────────────────────────────────────────────
 
@@ -253,14 +294,14 @@ class Driver:
             self.state = clear_pond(self.state, pond, _now())
             self._process(_now())
 
-    def clear_on_redeploy(self, pond: str) -> None:
+    def clear_on_redeploy(self, name: str, major: int) -> None:
         """Called after a (re)deploy: if the Pond was failed, clear it — a fresh artifact presumably
         fixes the cause — so it (and anything blocked downstream) can resume without a manual clear.
         Only clears a Pond's *own* failure; one merely blocked by a still-failed Source stays blocked."""
         with self.lock:
-            ps = self.state.pond_states.get(pond)
+            ps = self.state.pond_states.get(pond_key(name, major))
             if ps is not None and ps.is_failed:
-                self.state = clear_pond(self.state, pond, _now())
+                self.state = clear_pond(self.state, pond_key(name, major), _now())
                 self._process(_now())
 
     def set_retry(self, pond: str, immediate_retries: int, source_retries: int) -> None:
@@ -663,13 +704,13 @@ class Driver:
                 return "idle"
 
             ponds = []
-            for name in self.state.ponds:
-                ps = self.state.pond_states[name]
+            for key in self.state.ponds:
+                ps = self.state.pond_states[key]
                 # Ripples belonging to this Pond, with their live per-Ripple state and intra-Pond edges.
                 ripples = []
                 ripple_edges = []
                 for rid, rip in self.state.ripples.items():
-                    if rip.pond_id != name:
+                    if rip.pond_id != key:
                         continue
                     rs = self.state.ripple_states[rid]
                     ripples.append({
@@ -684,7 +725,7 @@ class Driver:
                     })
                     for parent in rip.parents:
                         psrc = self.state.ripples.get(parent)
-                        if psrc is not None and psrc.pond_id == name:
+                        if psrc is not None and psrc.pond_id == key:
                             ripple_edges.append([psrc.name, rip.name])
 
                 busy = any(r["status"] == "running" for r in ripples)
@@ -698,7 +739,7 @@ class Driver:
                 else:
                     st = _demand_status(ps, busy)
 
-                trig = self.state.triggers.get(name)
+                trig = self.state.triggers.get(key)
                 trigger = None
                 if trig is not None:
                     trigger = {
@@ -707,9 +748,11 @@ class Driver:
                     }
 
                 ponds.append({
-                    "name": name,
-                    "kind": self.meta[name]["kind"],
-                    "version": self.meta[name]["version"],
+                    "id": key,
+                    "name": self.meta[key]["name"],
+                    "major": self.meta[key]["major"],
+                    "kind": self.meta[key]["kind"],
+                    "version": self.meta[key]["version"],
                     "status": st,
                     "gen": ps.runs_started,
                     "runs_completed": ps.runs_completed,
@@ -724,12 +767,13 @@ class Driver:
                     "is_killed": ps.is_killed,
                     "failed_f": ts(ps.failed_f),
                     "failures": ps.failures,
-                    "immediate_retries": self.state.ponds[name].retry_immediately,
-                    "source_retries": self.state.ponds[name].retry_on_change,
+                    "immediate_retries": self.state.ponds[key].retry_immediately,
+                    "source_retries": self.state.ponds[key].retry_on_change,
                     "ripples": ripples,
                     "ripple_edges": ripple_edges,
                 })
-            edges = [[s, name] for name, pond in self.state.ponds.items() for s in pond.sources]
+            # Edge endpoints are pond keys ("name@major") — match entries on their "id".
+            edges = [[s, key] for key, pond in self.state.ponds.items() for s in pond.sources]
             return {"ponds": ponds, "edges": edges}
 
     def _ancestors(self, name: str) -> set[str]:
@@ -748,17 +792,18 @@ class Driver:
         return seen
 
     def run_history(self, pond: str | None, lineage: bool, ripples: bool, limit: int) -> list[dict]:
-        """Recent Pond Runs (newest first), optionally filtered to ``pond`` and — when ``lineage`` —
-        its upstream sources. Ripple Runs are nested under each Pond Run only when ``ripples`` is set."""
+        """Recent Pond Runs (newest first), optionally filtered to ``pond`` (an engine key,
+        ``name@major``) and — when ``lineage`` — its upstream sources. History within a major line
+        spans every version that ran on it. Ripple Runs are nested only when ``ripples`` is set."""
         with self.lock:
             params: list = []
             where = ""
             if pond is not None:
-                names = self._ancestors(pond) if lineage else {pond}
-                where = f"WHERE pn.name IN ({','.join('?' * len(names))})"
-                params.extend(sorted(names))
+                keys = self._ancestors(pond) if lineage else {pond}
+                where = f"WHERE (pn.name || '@' || pv.major) IN ({','.join('?' * len(keys))})"
+                params.extend(sorted(keys))
             rows = self.db.execute(
-                "SELECT pn.name, pv.version, pr.pond_version_id, pr.f, pr.started_at, pr.finished_at, "
+                "SELECT pn.name, pv.major, pv.version, pr.pond_version_id, pr.f, pr.started_at, pr.finished_at, "
                 "pr.status, pr.error, pr.traceback "
                 "FROM pond_run pr "
                 "JOIN pond_version pv ON pv.id = pr.pond_version_id "
@@ -768,9 +813,9 @@ class Driver:
             ).fetchall()
 
             runs = []
-            for pname, version, pv_id, f, started_at, finished_at, status, error, tb in rows:
+            for pname, major, version, pv_id, f, started_at, finished_at, status, error, tb in rows:
                 run = {
-                    "pond": pname, "version": version, "f": f,
+                    "pond": pname, "major": major, "id": pond_key(pname, major), "version": version, "f": f,
                     "started_at": started_at, "finished_at": finished_at, "status": status,
                     "error": error, "traceback": tb,
                 }

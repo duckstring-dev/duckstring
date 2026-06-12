@@ -79,35 +79,35 @@ def _driver(tmp_path):
 @pytest.mark.timeout(2)
 def test_driver_window_add_list_remove(tmp_path):
     d = _driver(tmp_path)
-    d.add_window("tx", "nightly", "2026-01-01T02:00:00+00:00", 3600, "DAY", 1)
-    ws = d.list_windows("tx")
+    d.add_window("tx@1", "nightly", "2026-01-01T02:00:00+00:00", 3600, "DAY", 1)
+    ws = d.list_windows("tx@1")
     assert len(ws) == 1 and ws[0]["name"] == "nightly" and ws[0]["freq_unit"] == "DAY"
-    assert len(d.state.ponds["tx"].windows) == 1  # loaded into the engine
-    assert d.remove_window("tx", "nightly") is True
-    assert d.list_windows("tx") == []
-    assert d.state.ponds["tx"].windows == []
-    assert d.remove_window("tx", "nightly") is False  # already gone
+    assert len(d.state.ponds["tx@1"].windows) == 1  # loaded into the engine
+    assert d.remove_window("tx@1", "nightly") is True
+    assert d.list_windows("tx@1") == []
+    assert d.state.ponds["tx@1"].windows == []
+    assert d.remove_window("tx@1", "nightly") is False  # already gone
 
 
 @pytest.mark.timeout(2)
 def test_driver_window_duplicate_name(tmp_path):
     d = _driver(tmp_path)
-    d.add_window("tx", "w", "2026-01-01T00:00:00+00:00", 600, "HOUR", 1)
+    d.add_window("tx@1", "w", "2026-01-01T00:00:00+00:00", 600, "HOUR", 1)
     with pytest.raises(ValueError, match="already exists"):
-        d.add_window("tx", "w", "2026-01-01T05:00:00+00:00", 600, "HOUR", 1)
+        d.add_window("tx@1", "w", "2026-01-01T05:00:00+00:00", 600, "HOUR", 1)
 
 
 @pytest.mark.timeout(2)
 def test_driver_window_overlap_rejected(tmp_path):
     d = _driver(tmp_path)
     # 'a': 1h windows every 2h → [00:00,01:00), [02:00,03:00), ...
-    d.add_window("tx", "a", "2026-01-01T00:00:00+00:00", 3600, "HOUR", 2)
+    d.add_window("tx@1", "a", "2026-01-01T00:00:00+00:00", 3600, "HOUR", 2)
     # 'b' at 00:30 collides with a's [00:00,01:00).
     with pytest.raises(ValueError, match="overlaps"):
-        d.add_window("tx", "b", "2026-01-01T00:30:00+00:00", 600, "HOUR", 2)
+        d.add_window("tx@1", "b", "2026-01-01T00:30:00+00:00", 600, "HOUR", 2)
     # 'c' at 01:30 sits in the gap → accepted.
-    d.add_window("tx", "c", "2026-01-01T01:30:00+00:00", 600, "HOUR", 2)
-    assert {w["name"] for w in d.list_windows("tx")} == {"a", "c"}
+    d.add_window("tx@1", "c", "2026-01-01T01:30:00+00:00", 600, "HOUR", 2)
+    assert {w["name"] for w in d.list_windows("tx@1")} == {"a", "c"}
 
 
 # ─── CLI parsers ─────────────────────────────────────────────────────────────────

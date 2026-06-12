@@ -4,7 +4,7 @@ FRONTEND_OUT := frontend/out
 .PHONY: dev build-frontend clean-frontend
 
 dev:
-	duckstring catchment start --name dev --root .dev --port 8000
+	duckstring catchment init --name dev --root .dev --port 8000
 
 build-frontend: clean-frontend
 	cd frontend && NEXT_STATIC_EXPORT=true npx next build

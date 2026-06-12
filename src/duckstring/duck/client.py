@@ -13,9 +13,10 @@ import httpx
 
 
 class CatchmentClient:
-    def __init__(self, base_url: str, pond_name: str, token: str, poll_timeout: float = 25.0):
+    def __init__(self, base_url: str, pond_name: str, major: int, token: str, poll_timeout: float = 25.0):
         self.base = base_url.rstrip("/")
         self.pond = pond_name
+        self.major = major
         self.token = token
         self.poll_timeout = poll_timeout
         self._client = httpx.Client(timeout=poll_timeout + 5.0, headers={"X-Duck-Token": token})
@@ -24,7 +25,9 @@ class CatchmentClient:
         """Long-poll for commands. Returns a list of ``{"kind": "begin_run", "f": ...}`` /
         ``{"kind": "shutdown"}`` dicts; empty on timeout. Returns ``[]`` on any transport error."""
         try:
-            r = self._client.get(f"{self.base}/api/duck/{self.pond}/jobs", params={"wait": self.poll_timeout})
+            r = self._client.get(
+                f"{self.base}/api/duck/{self.pond}/{self.major}/jobs", params={"wait": self.poll_timeout}
+            )
             r.raise_for_status()
             return r.json().get("jobs", [])
         except Exception:
@@ -33,7 +36,7 @@ class CatchmentClient:
     def post_event(self, payload: dict) -> bool:
         """Deliver one buffered event. Returns True on success (so the Duck drops it from the buffer)."""
         try:
-            r = self._client.post(f"{self.base}/api/duck/{self.pond}/events", json=payload)
+            r = self._client.post(f"{self.base}/api/duck/{self.pond}/{self.major}/events", json=payload)
             r.raise_for_status()
             return True
         except Exception:

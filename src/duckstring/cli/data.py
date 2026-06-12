@@ -12,6 +12,8 @@ def get(
     outlet: str = typer.Argument(..., help="Pond name."),
     ripple: str = typer.Argument(..., help="Ripple name within the Pond."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to read from (default: latest)."),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line to read."),
     path: Optional[Path] = typer.Option(None, "--path", help="Output directory (default: ./ponds/{outlet}/{ripple})."),
 ) -> None:
     """Download a Ripple's output directory from a Catchment."""
@@ -28,7 +30,10 @@ def get(
 
     console = Console()
     console.print(f"Fetching [bold]{outlet}.{ripple}[/bold]...")
-    resp = _http.get(f"{url}/api/ponds/{outlet}/ripples/{ripple}")
+    resp = _http.get(
+        f"{url}/api/ponds/{outlet}/ripples/{ripple}", key=cfg.get("key"),
+        params=_http.pond_params(major, version),
+    )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -44,6 +49,8 @@ def query(
     outlet: str = typer.Argument(..., help="Pond name."),
     ripple: Optional[str] = typer.Argument(None, help="Ripple name (default query: SELECT * LIMIT 10)."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to query (default: latest)."),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line to query."),
     sql: Optional[str] = typer.Option(None, "--sql", help="SQL statement, or @path/to/file.sql to read from a file."),
     csv_out: Optional[str] = typer.Option(None, "--csv", metavar="FILENAME", help="Write result as CSV."),
     json_out: Optional[str] = typer.Option(None, "--json", metavar="FILENAME", help="Write result as JSON records."),
@@ -72,6 +79,10 @@ def query(
         sql_stmt = f"SELECT * FROM {outlet}.{ripple} LIMIT 10"
 
     payload: dict = {"pond": outlet}
+    if major is not None:
+        payload["major"] = major
+    if version is not None:
+        payload["version"] = version
     if ripple:
         payload["ripple"] = ripple
     if sql_stmt:
@@ -86,7 +97,7 @@ def query(
         else:
             payload["format"] = "parquet"
 
-    resp = _http.post(f"{url}/api/query", json=payload)
+    resp = _http.post(f"{url}/api/query", key=cfg.get("key"), json=payload)
 
     if not output_filename:
         try:

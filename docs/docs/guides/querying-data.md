@@ -69,4 +69,4 @@ Applications have the same two options, over HTTP (see the [HTTP API](../referen
 
 A pattern worth knowing from the [trigger model](triggers.md): pair each application read with a **Tap** on the Pond it reads. The pipeline then refreshes at the pace of actual consumption — each query effectively orders the next batch, and an unused Outlet costs nothing.
 
-For heavier integration, the snapshots themselves are plain Parquet files under the Catchment root (`ponds/{pond}/data/{table}.parquet`) — directly readable by anything that speaks Parquet, no Duckstring involved.
+For heavier integration, the snapshots themselves are plain Parquet files under the Catchment root (`ponds/{pond}/m{major}/data/{table}.parquet`) — directly readable by anything that speaks Parquet, no Duckstring involved.

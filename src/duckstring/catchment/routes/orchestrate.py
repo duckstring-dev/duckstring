@@ -2,6 +2,10 @@
 
 Tap/Pulse are one-shot; Wave/Tide are standing. Tide carries a staleness **bound** (seconds), not a
 cron. Status reports freshness/staleness from the engine, not generations.
+
+Every pond-targeting route takes optional ``major`` / ``version`` query params: ``major`` picks the
+major line (default: the highest deployed), ``version`` additionally requires that exact version to
+be the line's currently selected artifact. The resolved target is the engine key ``name@major``.
 """
 
 from __future__ import annotations
@@ -18,9 +22,14 @@ def _driver(request: Request):
     return request.app.state.driver
 
 
-def _require_pond(request: Request, name: str) -> None:
-    if name not in _driver(request).state.ponds:
-        raise HTTPException(status_code=404, detail=f"Pond '{name}' not found")
+def _resolve(request: Request, name: str, major: int | None, version: str | None) -> str:
+    """Resolve a Pond reference to its engine key, mapping resolution errors to HTTP ones."""
+    try:
+        return _driver(request).resolve(name, major, version)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/status")
@@ -32,36 +41,34 @@ def status(request: Request):
 def runs(
     request: Request,
     pond: str | None = None,
+    major: int | None = None,
+    version: str | None = None,
     lineage: bool = True,
     ripples: bool = False,
     limit: int = 100,
 ):
     """Recent Pond Run history (newest first). ``pond`` filters to that Pond and, when ``lineage``,
     its upstream sources; ``ripples`` nests each run's Ripple Runs. ``limit`` is clamped to [1, 1000]."""
-    if pond is not None:
-        _require_pond(request, pond)
+    key = _resolve(request, pond, major, version) if pond is not None else None
     limit = max(1, min(limit, 1000))
-    return {"runs": _driver(request).run_history(pond, lineage, ripples, limit)}
+    return {"runs": _driver(request).run_history(key, lineage, ripples, limit)}
 
 
 @router.post("/ponds/{name}/tap")
-def tap(name: str, request: Request):
-    _require_pond(request, name)
-    _driver(request).tap(name)
+def tap(name: str, request: Request, major: int | None = None, version: str | None = None):
+    _driver(request).tap(_resolve(request, name, major, version))
     return {"ok": True}
 
 
 @router.post("/ponds/{name}/pulse")
-def pulse(name: str, request: Request):
-    _require_pond(request, name)
-    _driver(request).pulse(name)
+def pulse(name: str, request: Request, major: int | None = None, version: str | None = None):
+    _driver(request).pulse(_resolve(request, name, major, version))
     return {"ok": True}
 
 
 @router.post("/ponds/{name}/wave")
-def wave(name: str, request: Request):
-    _require_pond(request, name)
-    _driver(request).wave(name)
+def wave(name: str, request: Request, major: int | None = None, version: str | None = None):
+    _driver(request).wave(_resolve(request, name, major, version))
     return {"ok": True}
 
 
@@ -70,11 +77,11 @@ class _TideBody(BaseModel):
 
 
 @router.post("/ponds/{name}/tide")
-def tide(name: str, body: _TideBody, request: Request):
-    _require_pond(request, name)
+def tide(name: str, body: _TideBody, request: Request, major: int | None = None, version: str | None = None):
+    key = _resolve(request, name, major, version)
     if body.bound_seconds <= 0:
         raise HTTPException(status_code=422, detail="bound_seconds must be positive")
-    _driver(request).tide(name, timedelta(seconds=body.bound_seconds))
+    _driver(request).tide(key, timedelta(seconds=body.bound_seconds))
     return {"ok": True}
 
 
@@ -82,26 +89,23 @@ def tide(name: str, body: _TideBody, request: Request):
 
 
 @router.post("/ponds/{name}/wake")
-def wake(name: str, request: Request):
+def wake(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Wake a Pond — a one-shot non-propagating pull: run once on fresh input, no upstream solicit."""
-    _require_pond(request, name)
-    _driver(request).wake(name)
+    _driver(request).wake(_resolve(request, name, major, version))
     return {"ok": True}
 
 
 @router.post("/ponds/{name}/force")
-def force(name: str, request: Request):
+def force(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Force a Pond to recompute now at its current freshness, even with no upstream change."""
-    _require_pond(request, name)
-    _driver(request).force(name)
+    _driver(request).force(_resolve(request, name, major, version))
     return {"ok": True}
 
 
 @router.post("/ponds/{name}/kill")
-def kill(name: str, request: Request):
+def kill(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Kill a Pond — terminate its Duck and park it in a terminal killed state (cancels its Run)."""
-    _require_pond(request, name)
-    _driver(request).kill(name)
+    _driver(request).kill(_resolve(request, name, major, version))
     return {"ok": True}
 
 
@@ -110,19 +114,20 @@ class _SleepBody(BaseModel):
 
 
 @router.post("/ponds/{name}/sleep")
-def sleep(name: str, request: Request, body: _SleepBody = _SleepBody()):
+def sleep(
+    name: str, request: Request, body: _SleepBody = _SleepBody(),
+    major: int | None = None, version: str | None = None,
+):
     """Sleep a Pond — clear its demand (push+pull) + its Ripples' pull; keep started runs completing.
     ``upstream`` also sleeps every ancestor."""
-    _require_pond(request, name)
-    _driver(request).sleep(name, upstream=body.upstream)
+    _driver(request).sleep(_resolve(request, name, major, version), upstream=body.upstream)
     return {"ok": True}
 
 
 @router.post("/ponds/{name}/untrigger")
-def untrigger(name: str, request: Request):
+def untrigger(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Remove the standing Wave/Tide trigger from a Pond (existing work drains)."""
-    _require_pond(request, name)
-    _driver(request).remove_trigger(name)
+    _driver(request).remove_trigger(_resolve(request, name, major, version))
     return {"ok": True}
 
 
@@ -130,10 +135,9 @@ def untrigger(name: str, request: Request):
 
 
 @router.post("/ponds/{name}/clear")
-def clear(name: str, request: Request):
+def clear(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Clear a failed Pond (the operator okay): resets its failure and unblocks downstream. No run."""
-    _require_pond(request, name)
-    _driver(request).clear(name)
+    _driver(request).clear(_resolve(request, name, major, version))
     return {"ok": True}
 
 
@@ -143,19 +147,21 @@ class _BudgetBody(BaseModel):
 
 
 @router.post("/ponds/{name}/budget")
-def set_budget(name: str, body: _BudgetBody, request: Request):
+def set_budget(
+    name: str, body: _BudgetBody, request: Request,
+    major: int | None = None, version: str | None = None,
+):
     """Set the live retry budgets on a Pond (Ripple retries within a Run; Pond Runs retried on change)."""
-    _require_pond(request, name)
+    key = _resolve(request, name, major, version)
     if body.immediate_retries < 0 or body.source_retries < 0:
         raise HTTPException(status_code=422, detail="budgets must be non-negative")
-    _driver(request).set_retry(name, body.immediate_retries, body.source_retries)
+    _driver(request).set_retry(key, body.immediate_retries, body.source_retries)
     return {"ok": True}
 
 
 @router.get("/ponds/{name}/budget")
-def get_budget(name: str, request: Request):
-    _require_pond(request, name)
-    return _driver(request).retry_config(name)
+def get_budget(name: str, request: Request, major: int | None = None, version: str | None = None):
+    return _driver(request).retry_config(_resolve(request, name, major, version))
 
 
 # ─── Windows (batch-availability on Inlets) ──────────────────────────────────────
@@ -172,11 +178,14 @@ class _WindowBody(BaseModel):
 
 
 @router.post("/ponds/{name}/windows")
-def add_window(name: str, body: _WindowBody, request: Request):
-    _require_pond(request, name)
+def add_window(
+    name: str, body: _WindowBody, request: Request,
+    major: int | None = None, version: str | None = None,
+):
+    key = _resolve(request, name, major, version)
     try:
         _driver(request).add_window(
-            name, body.name, body.start_anchor, body.duration_seconds,
+            key, body.name, body.start_anchor, body.duration_seconds,
             body.freq_unit, body.freq_interval, body.valid_days, body.until_time,
         )
     except ValueError as exc:
@@ -185,14 +194,16 @@ def add_window(name: str, body: _WindowBody, request: Request):
 
 
 @router.get("/ponds/{name}/windows")
-def list_windows(name: str, request: Request):
-    _require_pond(request, name)
-    return {"windows": _driver(request).list_windows(name)}
+def list_windows(name: str, request: Request, major: int | None = None, version: str | None = None):
+    return {"windows": _driver(request).list_windows(_resolve(request, name, major, version))}
 
 
 @router.post("/ponds/{name}/windows/{window_name}/remove")
-def remove_window(name: str, window_name: str, request: Request):
-    _require_pond(request, name)
-    if not _driver(request).remove_window(name, window_name):
+def remove_window(
+    name: str, window_name: str, request: Request,
+    major: int | None = None, version: str | None = None,
+):
+    key = _resolve(request, name, major, version)
+    if not _driver(request).remove_window(key, window_name):
         raise HTTPException(status_code=404, detail=f"No window '{window_name}' on '{name}'")
     return {"ok": True}

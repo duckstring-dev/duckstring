@@ -70,16 +70,16 @@ def test_status_exposes_d_ms_and_null_trigger_by_default(tmp_path):
 
 def test_status_reports_standing_wave_and_tide_triggers(tmp_path):
     d = _driver(tmp_path)
-    d.wave("snk")
+    d.wave("snk@1")
     assert _pond(d.status(), "snk")["trigger"] == {"kind": "wave", "bound_ms": None}
 
-    d.tide("snk", timedelta(seconds=2.5))
+    d.tide("snk@1", timedelta(seconds=2.5))
     assert _pond(d.status(), "snk")["trigger"] == {"kind": "tide", "bound_ms": 2500}
 
 
 def test_status_running_ripple_propagates_to_pond(tmp_path):
     d = _driver(tmp_path)
-    d.state.ripple_states["snk.r1"].is_running = True  # an in-flight Ripple
+    d.state.ripple_states["snk@1.r1"].is_running = True  # an in-flight Ripple
     snk = _pond(d.status(), "snk")
     assert snk["status"] == "running", "a running Ripple makes its Pond running"
     assert next(r for r in snk["ripples"] if r["name"] == "r1")["status"] == "running"
@@ -111,10 +111,10 @@ def test_check_liveness_fails_dead_duck(tmp_path):
     from duckstring.catchment.driver import _now
 
     d = _inlet_driver(tmp_path, "duck.db", _DeadLauncher())
-    d.pulse("src")  # a Pond Run is now in flight (start_f > end_f), nothing completes it
-    assert d.state.pond_states["src"].start_f > d.state.pond_states["src"].end_f
+    d.pulse("src@1")  # a Pond Run is now in flight (start_f > end_f), nothing completes it
+    assert d.state.pond_states["src@1"].start_f > d.state.pond_states["src@1"].end_f
     d._check_liveness(_now())
-    src = d.state.pond_states["src"]
+    src = d.state.pond_states["src@1"]
     assert src.is_failed and src.failures == 1  # the dead Duck's Run failed at start_f
 
 
@@ -122,9 +122,9 @@ def test_check_liveness_skipped_without_process_launcher(tmp_path):
     from duckstring.catchment.driver import _now
 
     d = _inlet_driver(tmp_path, "duck2.db", NoopLauncher())  # manages_processes = False
-    d.pulse("src")
+    d.pulse("src@1")
     d._check_liveness(_now())
-    assert not d.state.pond_states["src"].is_failed  # nothing to watch → never failed on liveness
+    assert not d.state.pond_states["src@1"].is_failed  # nothing to watch → never failed on liveness
 
 
 # ─── Control: Force / Kill ─────────────────────────────────────────────────────
@@ -132,27 +132,27 @@ def test_check_liveness_skipped_without_process_launcher(tmp_path):
 
 def test_force_dispatches_force_flag(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("src")
-    _complete_run(d, "src")  # src is now current (start_f == end_f)
-    d.jobs["src"] = []  # drop the prior dispatch
-    d.force("src")
-    assert any(j["kind"] == "begin_run" and j.get("force") for j in d.jobs.get("src", []))
+    d.pulse("src@1")
+    _complete_run(d, "src@1")  # src is now current (start_f == end_f)
+    d.jobs["src@1"] = []  # drop the prior dispatch
+    d.force("src@1")
+    assert any(j["kind"] == "begin_run" and j.get("force") for j in d.jobs.get("src@1", []))
 
 
 def test_clear_failed_pond_is_not_refailed_by_liveness(tmp_path):
     from duckstring.catchment.driver import _now
 
     d = _inlet_driver(tmp_path, "clr.db", _DeadLauncher())  # manages_processes, but reports Ducks dead
-    d.pulse("src")  # a Run in flight (start_f > end_f)
-    f = d.state.pond_states["src"].start_f.isoformat()
-    d.on_event("src", {"kind": "failed", "ripple": "r1", "f": f, "status": "failed", "error": "boom"})
-    assert d.state.pond_states["src"].is_failed
-    d.clear("src")
-    assert not d.state.pond_states["src"].is_failed
+    d.pulse("src@1")  # a Run in flight (start_f > end_f)
+    f = d.state.pond_states["src@1"].start_f.isoformat()
+    d.on_event("src@1", {"kind": "failed", "ripple": "r1", "f": f, "status": "failed", "error": "boom"})
+    assert d.state.pond_states["src@1"].is_failed
+    d.clear("src@1")
+    assert not d.state.pond_states["src@1"].is_failed
     # The liveness sweep must NOT re-fail it — clearing abandoned the phantom in-flight Run.
     d._check_liveness(_now())
-    assert not d.state.pond_states["src"].is_failed
-    assert d.state.pond_states["src"].start_f == d.state.pond_states["src"].end_f  # idle, not in-flight
+    assert not d.state.pond_states["src@1"].is_failed
+    assert d.state.pond_states["src@1"].start_f == d.state.pond_states["src@1"].end_f  # idle, not in-flight
 
 
 def test_kill_terminates_duck_and_parks(tmp_path):
@@ -165,14 +165,14 @@ def test_kill_terminates_duck_and_parks(tmp_path):
             terminated.append(pond_name)
 
     d = _inlet_driver(tmp_path, "kill.db", _RecordingLauncher())
-    d.pulse("src")  # a Run in flight
-    d.kill("src")
-    assert d.state.pond_states["src"].is_killed
-    assert terminated == ["src"]  # the Duck was terminated
+    d.pulse("src@1")  # a Run in flight
+    d.kill("src@1")
+    assert d.state.pond_states["src@1"].is_killed
+    assert terminated == ["src@1"]  # the Duck was terminated
     # Killed supersedes demand: a Tap does nothing until cleared.
-    started = d.state.pond_states["src"].runs_started
-    d.tap("src")
-    assert d.state.pond_states["src"].runs_started == started
+    started = d.state.pond_states["src@1"].runs_started
+    d.tap("src@1")
+    assert d.state.pond_states["src@1"].runs_started == started
 
 
 # ─── /api/runs history ───────────────────────────────────────────────────────────
@@ -180,8 +180,8 @@ def test_kill_terminates_duck_and_parks(tmp_path):
 
 def test_run_history_newest_first_and_records_freshness(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("src")
-    f = _complete_run(d, "src")
+    d.pulse("src@1")
+    f = _complete_run(d, "src@1")
     runs = d.run_history(None, lineage=True, ripples=False, limit=100)
     assert len(runs) == 1
     assert runs[0]["pond"] == "src" and runs[0]["f"] == f
@@ -191,23 +191,23 @@ def test_run_history_newest_first_and_records_freshness(tmp_path):
 
 def test_run_history_lineage_filter(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("src")
-    _complete_run(d, "src")
+    d.pulse("src@1")
+    _complete_run(d, "src@1")
 
     # snk's lineage includes its upstream source src.
-    with_lineage = d.run_history("snk", lineage=True, ripples=False, limit=100)
+    with_lineage = d.run_history("snk@1", lineage=True, ripples=False, limit=100)
     assert {r["pond"] for r in with_lineage} == {"src"}
 
     # Without lineage, only snk's own runs (none yet).
-    without = d.run_history("snk", lineage=False, ripples=False, limit=100)
+    without = d.run_history("snk@1", lineage=False, ripples=False, limit=100)
     assert without == []
 
 
 def test_run_history_nests_ripple_runs_when_requested(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("src")
-    _complete_run(d, "src")
-    runs = d.run_history("src", lineage=False, ripples=True, limit=100)
+    d.pulse("src@1")
+    _complete_run(d, "src@1")
+    runs = d.run_history("src@1", lineage=False, ripples=True, limit=100)
     assert len(runs) == 1
     nested = {r["ripple"]: r["status"] for r in runs[0]["ripples"]}
     assert nested == {"r1": "success", "r2": "success"}

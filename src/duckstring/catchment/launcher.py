@@ -1,7 +1,8 @@
 """Pond launcher: brings a Duck process to life and tears it down.
 
-Local-subprocess only for now (one Duck per executing Pond). The Duck dials back to the Catchment, so
-"remote" later is just a different launcher with the same interface — nothing else changes.
+Local-subprocess only for now (one Duck per executing Pond — that is, per ``name@major`` line). The
+Duck dials back to the Catchment, so "remote" later is just a different launcher with the same
+interface — nothing else changes.
 """
 
 from __future__ import annotations
@@ -9,6 +10,8 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+
+from ..keys import split_pond_key
 
 
 class SubprocessLauncher:
@@ -18,19 +21,21 @@ class SubprocessLauncher:
         self.root = root
         self.base_url = base_url
         self.token = token
-        self._procs: dict[str, subprocess.Popen] = {}
+        self._procs: dict[str, subprocess.Popen] = {}  # pond key (name@major) → process
 
-    def is_running(self, pond_name: str) -> bool:
-        proc = self._procs.get(pond_name)
+    def is_running(self, pond_key: str) -> bool:
+        proc = self._procs.get(pond_key)
         return proc is not None and proc.poll() is None
 
-    def ensure(self, pond_name: str, version: str, source_path: str) -> None:
-        if self.is_running(pond_name):
+    def ensure(self, pond_key: str, version: str, source_path: str) -> None:
+        if self.is_running(pond_key):
             return
-        self._procs[pond_name] = subprocess.Popen(
+        name, major = split_pond_key(pond_key)
+        self._procs[pond_key] = subprocess.Popen(
             [
                 sys.executable, "-m", "duckstring.duck",
-                "--pond", pond_name,
+                "--pond", name,
+                "--major", str(major),
                 "--version", version,
                 "--catchment", self.base_url,
                 "--token", self.token,
@@ -39,14 +44,14 @@ class SubprocessLauncher:
             ]
         )
 
-    def terminate(self, pond_name: str) -> None:
-        proc = self._procs.pop(pond_name, None)
+    def terminate(self, pond_key: str) -> None:
+        proc = self._procs.pop(pond_key, None)
         if proc is not None and proc.poll() is None:
             proc.terminate()
 
     def shutdown_all(self) -> None:
-        for name in list(self._procs):
-            self.terminate(name)
+        for key in list(self._procs):
+            self.terminate(key)
 
 
 class NoopLauncher:
@@ -55,13 +60,13 @@ class NoopLauncher:
 
     manages_processes = False  # nothing to watch — liveness checking is skipped
 
-    def is_running(self, pond_name: str) -> bool:
+    def is_running(self, pond_key: str) -> bool:
         return False
 
-    def ensure(self, pond_name: str, version: str, source_path: str) -> None:
+    def ensure(self, pond_key: str, version: str, source_path: str) -> None:
         pass
 
-    def terminate(self, pond_name: str) -> None:
+    def terminate(self, pond_key: str) -> None:
         pass
 
     def shutdown_all(self) -> None:

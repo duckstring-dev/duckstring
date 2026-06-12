@@ -125,7 +125,7 @@ def demo() -> None:
     console.print("  [bold]transactions/[/bold]  — deploy first  (POS event log, grows each run)")
     console.print("  [bold]products/[/bold]      — deploy second (product catalogue, grows each run)")
     console.print("  [bold]sales/[/bold]         — deploy third  (3 Ripples: daily_sales → price_tiers → join_lines)")
-    console.print("  [bold]reports/[/bold]       — deploy fourth, then: [dim]duckstring pulse <catchment> reports[/dim]")
+    console.print("  [bold]reports/[/bold]       — deploy fourth, then: [dim]duckstring trigger pulse reports[/dim]")
 
 
 @app.command()

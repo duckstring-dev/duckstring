@@ -207,5 +207,6 @@ async def deploy(request: Request):
 
     if getattr(request.app.state, "driver", None) is not None:
         request.app.state.driver.reload()
-        request.app.state.driver.clear_on_redeploy(name)  # a fix redeploy auto-clears the failure
+        # A fix redeploy auto-clears the failure on the deployed major line.
+        request.app.state.driver.clear_on_redeploy(name, int(version.split(".")[0]))
     return {"ok": True}

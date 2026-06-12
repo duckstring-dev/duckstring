@@ -5,7 +5,7 @@ description: Full command reference for the duckstring / ds CLI.
 
 # CLI Reference
 
-The CLI installs as both `duckstring` and `ds`; the two are identical. Every command and group prints detailed help with `--help`, and shell completions install with `duckstring --install-completion`.
+The CLI installs as both `duckstring` and `ds`; the two are identical. Every command and group prints detailed help with `--help`, `duckstring --version` prints the installed version, and shell completions install with `duckstring --install-completion`.
 
 ## Common options
 
@@ -14,8 +14,8 @@ Most commands that talk to a Catchment share these:
 | Option | Meaning |
 |---|---|
 | `--catchment`, `-c {name}` | Target a registered Catchment (default: the configured default; if exactly one is registered, it's implicit) |
-| `--major`, `-m {int}` | Target a specific major version line (default: latest active) |
-| `--version`, `-v {semver}` | Target a specific version, e.g. `1.2.3` |
+| `--major`, `-m {int}` | Target a specific major version line (default: the highest deployed) |
+| `--version`, `-v {semver}` | Target a specific version, e.g. `1.2.3` — must be its major line's currently selected version |
 | `--silent` | Submit without opening the live status view |
 | `--watch` | Keep the status view open even after a one-shot settles |
 
@@ -23,9 +23,9 @@ Most commands that talk to a Catchment share these:
 
 | Command | Description |
 |---|---|
-| `catchment init -n {name} [--host H] [-p PORT] [--root DIR] [-y]` | Create and register a local Catchment, then start its server. Defaults: host `127.0.0.1`, port `7474`, root `~/.duckstring/{name}`. Offers to set as default (`-y` accepts). |
+| `catchment init -n {name} [--host H] [-p PORT] [--root DIR] [--key KEY] [-y]` | Create and register a local Catchment, then start its server. Defaults: host `127.0.0.1`, port `7474`, root `~/.duckstring/{name}`, no API key (open). Offers to set as default (`-y` accepts). |
 | `catchment start {name}` | Start the server for a registered local Catchment. |
-| `catchment connect -n {name} --path {url} [-y]` | Register a remote Catchment by URL. |
+| `catchment connect -n {name} --path {url} [--key KEY] [-y]` | Register a remote Catchment by URL; `--key` stores its API key, sent with every request. |
 | `catchment list` | List registered Catchments; `●` marks the default. |
 | `catchment set-default {name}` | Set the default Catchment. |
 | `catchment disconnect {name} [--purge]` | Unregister; for local Catchments, offers to delete the data directory (`--purge` deletes without asking). |
@@ -92,10 +92,10 @@ See [Control](../guides/control.md) and [Fault Tolerance](../guides/fault-tolera
 ## `duckstring status` — live monitor
 
 ```bash
-duckstring status [pond] [-c NAME] [--all] [--once] [--watch]
+duckstring status [pond] [-c NAME] [--once]
 ```
 
-Live view of active Ponds: state, freshness, staleness, and standing triggers. With a `pond` argument, shows only that Pond and its upstream lineage. `--once` prints a snapshot and exits; `--watch` never auto-exits; `--all`/`-a` includes inactive Ponds; `-m`/`-v` select a version line.
+Live view of deployed Ponds: state, freshness, staleness, and standing triggers — open until `Ctrl+C`. With a `pond` argument, shows only that Pond and its upstream lineage. `--once` prints a snapshot and exits; `-m`/`-v` narrow a named Pond to one major line.
 
 ## `duckstring get` / `query` — data access
 

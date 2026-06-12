@@ -142,8 +142,11 @@ def _report_pond_failure(
 
 
 def main() -> None:
+    from ..catchment.registry import pond_major_dir
+
     ap = argparse.ArgumentParser(prog="duckstring.duck")
     ap.add_argument("--pond", required=True)
+    ap.add_argument("--major", required=True, type=int)
     ap.add_argument("--version", required=True)
     ap.add_argument("--catchment", required=True)
     ap.add_argument("--token", default="")
@@ -153,10 +156,12 @@ def main() -> None:
 
     root = Path(args.root)
     parents = load_topology(root / args.source_path)
-    con = ledger.connect(root / "ponds" / args.pond / "pond.db")
-    core = DuckCore(args.pond, con, parents)
-    executor = RippleExecutor(args.pond, args.version, args.source_path, root)
-    client = CatchmentClient(args.catchment, args.pond, args.token)
+    major_dir = pond_major_dir(root, args.pond, args.major)
+    major_dir.mkdir(parents=True, exist_ok=True)
+    con = ledger.connect(major_dir / "pond.db")
+    core = DuckCore(f"{args.pond}@{args.major}", con, parents)  # name@major label for log lines
+    executor = RippleExecutor(args.pond, args.major, args.version, args.source_path, root)
+    client = CatchmentClient(args.catchment, args.pond, args.major, args.token)
     serve(core, executor, client)
 
 

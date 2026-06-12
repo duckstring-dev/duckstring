@@ -58,6 +58,8 @@ function nodeView(n: RawPond | RawRipple, dMs: number): NodeView {
 function mapRun(r: RawPondRun): PondRun {
   return {
     pond: r.pond,
+    id: r.id,
+    major: r.major,
     version: r.version,
     f: r.f,
     startedAt: r.started_at,
@@ -107,9 +109,10 @@ function transformStatus(payload: StatusPayload): StatusSlice {
   const triggers: Record<PondId, TriggerView> = {};
 
   for (const p of payload.ponds) {
-    ponds[p.name] = { id: p.name, name: p.name, kind: p.kind, sources: [] };
-    pondInfo[p.name] = {
+    ponds[p.id] = { id: p.id, name: p.name, kind: p.kind, sources: [] };
+    pondInfo[p.id] = {
       version: p.version,
+      major: p.major,
       kind: p.kind,
       isFailed: p.is_failed,
       isBlocked: p.is_blocked,
@@ -119,20 +122,20 @@ function transformStatus(payload: StatusPayload): StatusSlice {
       immediateRetries: p.immediate_retries,
       sourceRetries: p.source_retries,
     };
-    pondViews[p.name] = nodeView(p, p.d_ms);
-    if (p.trigger) triggers[p.name] = { kind: p.trigger.kind, boundMs: p.trigger.bound_ms };
+    pondViews[p.id] = nodeView(p, p.d_ms);
+    if (p.trigger) triggers[p.id] = { kind: p.trigger.kind, boundMs: p.trigger.bound_ms };
 
     for (const r of p.ripples) {
-      const eid = `${p.name}.${r.name}`;
-      ripples[eid] = { id: eid, pondId: p.name, name: r.name, parents: [] };
+      const eid = `${p.id}.${r.name}`;
+      ripples[eid] = { id: eid, pondId: p.id, name: r.name, parents: [] };
       rippleViews[eid] = nodeView(r, 0);
     }
     // ripple_edges are [sourceName, sinkName] within the Pond → sink.parents includes source.
     for (const [src, snk] of p.ripple_edges) {
-      ripples[`${p.name}.${snk}`]?.parents.push(`${p.name}.${src}`);
+      ripples[`${p.id}.${snk}`]?.parents.push(`${p.id}.${src}`);
     }
   }
-  // Pond sources from inter-Pond edges [sourcePond, sinkPond].
+  // Pond sources from inter-Pond edges [sourceId, sinkId] (pond keys).
   for (const [src, snk] of payload.edges) {
     ponds[snk]?.sources.push(src);
   }
@@ -211,7 +214,7 @@ function focusPond(s: LiveState): PondId | null {
 
 // Identity of a Pond Run (newest history can re-fetch the same run to keep the detail pane live).
 export function runKey(r: PondRun): string {
-  return `${r.pond}::${r.version}::${r.f}`;
+  return `${r.id}::${r.version}::${r.f}`;
 }
 
 export const useLiveStore = create<LiveState>((set, get) => ({
@@ -272,7 +275,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     if (!sel) return;
     try {
       // The feed may not carry ripples; fetch this run's own Pond history (with ripples) and match it.
-      const rows = await fetchRuns({ pond: sel.pond, lineage: false, ripples: true, limit: 200 });
+      const rows = await fetchRuns({ pond: sel.id, lineage: false, ripples: true, limit: 200 });
       const found = rows.map(mapRun).find((r) => runKey(r) === runKey(sel));
       const still = get().selectedRun;
       if (found && still && runKey(still) === runKey(found)) set({ selectedRun: found });

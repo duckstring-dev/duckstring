@@ -7,7 +7,7 @@ import typer
 from .trigger import _SILENT_HELP, _WATCH_HELP, _post_trigger
 
 _CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted).")
-_MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active).")
+_MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest).")
 _VERSION = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3.")
 
 
@@ -22,7 +22,7 @@ def wake(
     """Wake a Pond — run once if its Sources already hold fresher data (no upstream solicit). Gentle."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], pond, major, version, silent, watch, "wake", {}, "Woken.", one_shot=True)
+    _post_trigger(cfg, pond, major, version, silent, watch, "wake", {}, "Woken.", one_shot=True)
 
 
 def force(
@@ -37,7 +37,7 @@ def force(
     a patch). Does not propagate downstream — freshness is unchanged."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], pond, major, version, silent, watch, "force", {}, "Forced.", one_shot=True)
+    _post_trigger(cfg, pond, major, version, silent, watch, "force", {}, "Forced.", one_shot=True)
 
 
 def sleep(
@@ -51,7 +51,10 @@ def sleep(
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _http.post(f"{cfg['url']}/api/ponds/{pond}/sleep", json={"upstream": upstream})
+    _http.post(
+        f"{cfg['url']}/api/ponds/{pond}/sleep", key=cfg.get("key"),
+        params=_http.pond_params(major, version), json={"upstream": upstream},
+    )
     typer.echo("Asleep (with upstream)." if upstream else "Asleep.")
 
 
@@ -66,7 +69,10 @@ def kill(
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _http.post(f"{cfg['url']}/api/ponds/{pond}/kill", json={})
+    _http.post(
+        f"{cfg['url']}/api/ponds/{pond}/kill", key=cfg.get("key"),
+        params=_http.pond_params(major, version), json={},
+    )
     typer.echo(f"Killed '{pond}'.")
 
 
@@ -80,13 +86,18 @@ def clear(
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _http.post(f"{cfg['url']}/api/ponds/{pond}/clear", json={})
+    _http.post(
+        f"{cfg['url']}/api/ponds/{pond}/clear", key=cfg.get("key"),
+        params=_http.pond_params(major, version), json={},
+    )
     typer.echo(f"Cleared failure from '{pond}'.")
 
 
 def failure_budget(
     pond: str = typer.Argument(..., help="Name of the Pond whose retry budgets to show or set."),
     catchment: Optional[str] = _CATCHMENT,
+    major: Optional[int] = _MAJOR,
+    version: Optional[str] = _VERSION,
     immediate: Optional[int] = typer.Option(
         None, "--immediate", "-i", help="Ripple-Run retries allowed within one Pond Run."
     ),
@@ -98,7 +109,8 @@ def failure_budget(
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    cur = _http.get(f"{cfg['url']}/api/ponds/{pond}/budget").json()
+    key, params = cfg.get("key"), _http.pond_params(major, version)
+    cur = _http.get(f"{cfg['url']}/api/ponds/{pond}/budget", key=key, params=params).json()
     if immediate is None and on_change is None:
         typer.echo(f"immediate: {cur['immediate_retries']}   on-change: {cur['source_retries']}")
         return
@@ -107,5 +119,8 @@ def failure_budget(
     if imm < 0 or onc < 0:
         typer.echo("Error: budgets must be non-negative.", err=True)
         raise typer.Exit(1)
-    _http.post(f"{cfg['url']}/api/ponds/{pond}/budget", json={"immediate_retries": imm, "source_retries": onc})
+    _http.post(
+        f"{cfg['url']}/api/ponds/{pond}/budget", key=key, params=params,
+        json={"immediate_retries": imm, "source_retries": onc},
+    )
     typer.echo(f"Set '{pond}' — immediate: {imm}   on-change: {onc}")

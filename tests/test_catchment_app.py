@@ -92,7 +92,7 @@ def _db(catchment_client):
 def _seed(catchment_client, pond: str, ripple: str):
     """Seed an exported Parquet snapshot (two rows) — the read-only data API serves from these."""
     import duckdb
-    data_dir = catchment_client.app.state.root / "ponds" / pond / "data"
+    data_dir = catchment_client.app.state.root / "ponds" / pond / "m1" / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     dest = str(data_dir / f"{ripple}.parquet").replace("'", "''")
     con = duckdb.connect()
@@ -324,8 +324,14 @@ def test_query_parquet_format(catchment_client):
     assert r.content[:4] == b"PAR1"
 
 
-def test_query_missing_relation_returns_400(catchment_client):
+def test_query_unknown_pond_returns_404(catchment_client):
     r = catchment_client.post("/api/query", json={"pond": "ghost", "ripple": "nothing"})
+    assert r.status_code == 404
+
+
+def test_query_missing_relation_returns_400(catchment_client):
+    _seed(catchment_client, "outlet", "daily")
+    r = catchment_client.post("/api/query", json={"pond": "outlet", "ripple": "nothing"})
     assert r.status_code == 400
 
 
@@ -571,7 +577,7 @@ def test_failed_event_marks_pond_then_clears(catchment_client):
             toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
     # The Duck reports a Ripple gave up: the Pond fails (and, with no Sinks, just blocks itself).
     r = catchment_client.post(
-        "/api/duck/outlet/events",
+        "/api/duck/outlet/2/events",
         json={"kind": "failed", "ripple": "load", "f": "2026-01-01T00:00:00+00:00", "status": "failed"},
     )
     assert r.status_code == 200
@@ -607,7 +613,7 @@ def test_failed_ripple_error_surfaced_in_history(catchment_client):
             toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
     catchment_client.post("/api/ponds/outlet/wake")  # a Run in flight
     f = catchment_client.get("/api/runs?pond=outlet&lineage=false").json()["runs"][0]["f"]
-    catchment_client.post("/api/duck/outlet/events", json={
+    catchment_client.post("/api/duck/outlet/2/events", json={
         "kind": "failed", "ripple": "load", "f": f, "status": "failed", "retry": 0,
         "error": "ValueError: boom", "traceback": "Traceback (most recent call last):\n  ...\nValueError: boom",
     })
@@ -624,7 +630,7 @@ def test_pond_failed_event_fails_whole_pond(catchment_client):
             toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
     catchment_client.post("/api/ponds/outlet/wake")  # puts a Run in flight
     r = catchment_client.post(
-        "/api/duck/outlet/events",
+        "/api/duck/outlet/2/events",
         json={"kind": "pond_failed", "f": "2026-01-01T00:00:00+00:00", "status": "failed"},
     )
     assert r.status_code == 200
@@ -642,9 +648,9 @@ def test_ripple_retry_trace_recorded(catchment_client):
     assert runs, "start should create a Pond Run"
     f = runs[0]["f"]
     # attempt 0 errored (immediate retry), attempt 1 succeeded.
-    catchment_client.post("/api/duck/outlet/events",
+    catchment_client.post("/api/duck/outlet/2/events",
                           json={"kind": "ripple", "ripple": "load", "f": f, "status": "failed", "retry": 0})
-    catchment_client.post("/api/duck/outlet/events",
+    catchment_client.post("/api/duck/outlet/2/events",
                           json={"kind": "ripple", "ripple": "load", "f": f, "status": "success", "retry": 1})
     runs = catchment_client.get("/api/runs?pond=outlet&ripples=true&lineage=false").json()["runs"]
     load_rows = [rr for run in runs if run["f"] == f for rr in run["ripples"] if rr["ripple"] == "load"]
@@ -657,7 +663,7 @@ def test_redeploy_same_version_after_run_history(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
             toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
     catchment_client.post(
-        "/api/duck/outlet/events",
+        "/api/duck/outlet/2/events",
         json={"kind": "failed", "ripple": "load", "f": "2026-01-01T00:00:00+00:00", "status": "failed"},
     )
     assert _pond_status(catchment_client, "outlet")["is_failed"]

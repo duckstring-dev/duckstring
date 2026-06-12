@@ -37,7 +37,9 @@ class CatchmentConflict(Exception):
         super().__init__(f"'{value}' is already registered as catchment '{existing_name}'")
 
 
-def register_catchment(name: str, url: str, kind: str = "local", root: str | None = None) -> None:
+def register_catchment(
+    name: str, url: str, kind: str = "local", root: str | None = None, key: str | None = None
+) -> None:
     config = load_config()
     catchments = config.setdefault("catchments", {})
 
@@ -55,6 +57,7 @@ def register_catchment(name: str, url: str, kind: str = "local", root: str | Non
         "url": url,
         "type": kind,
         **({"root": root} if root else {}),
+        **({"key": key} if key else {}),
     }
     save_config(config)
 

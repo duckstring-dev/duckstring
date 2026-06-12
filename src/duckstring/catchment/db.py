@@ -24,7 +24,10 @@ def migrate(con: sqlite3.Connection) -> None:
 
     applied = {row[0] for row in con.execute("SELECT version FROM schema_migrations")}
 
-    for sql_file in sorted(_SCHEMA_DIR.glob("*.sql")):
+    sql_files = sorted(_SCHEMA_DIR.glob("*.sql"))
+    if not sql_files:
+        raise RuntimeError(f"No schema migrations found at {_SCHEMA_DIR} — broken duckstring installation?")
+    for sql_file in sql_files:
         version = int(sql_file.stem.split("_")[0])
         if version in applied:
             continue

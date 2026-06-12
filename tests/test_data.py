@@ -8,7 +8,7 @@ def _seed(root, pond: str, table: str):
     API serves from these, exactly as a real Pond's run export would produce."""
     import duckdb
 
-    data_dir = root / "ponds" / pond / "data"
+    data_dir = root / "ponds" / pond / "m1" / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     dest = str(data_dir / f"{table}.parquet").replace("'", "''")
     con = duckdb.connect()
@@ -78,7 +78,8 @@ def test_query_explicit_catchment(runner, catchment_root, live_catchment):
     assert result.exit_code == 0, result.output
 
 
-def test_query_custom_sql(runner, live_catchment):
+def test_query_custom_sql(runner, catchment_root, live_catchment):
+    _seed(catchment_root, "outlet", "daily")
     result = runner.invoke(app, ["query", "outlet", "--sql", "SELECT 42 AS answer"])
     assert result.exit_code == 0, result.output
     assert "42" in result.output

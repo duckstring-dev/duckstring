@@ -64,15 +64,17 @@ def connected_components(sorted_nodes: list[str], edges: list[tuple[str, str]]) 
 
 
 def assert_no_cycles(db) -> None:
-    """Query the selected inter-pond graph and raise ValueError if a cycle exists."""
+    """Query the selected inter-pond graph and raise ValueError if a cycle exists. Nodes are major
+    lines (``name@major``) — distinct majors of one name are independent and cannot form a cycle
+    with each other."""
     nodes = [
-        r[0] for r in db.execute(
-            "SELECT pn.name FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id"
+        f"{r[0]}@{r[1]}" for r in db.execute(
+            "SELECT pn.name, p.major FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id"
         ).fetchall()
     ]
     edges = [
-        (r[0], r[1]) for r in db.execute("""
-            SELECT src.name, snk.name
+        (f"{r[0]}@{r[1]}", f"{r[2]}@{r[3]}") for r in db.execute("""
+            SELECT src.name, e.source_major, snk.name, p.major
             FROM pond_to_pond e
             JOIN pond p ON p.id = e.pond_id
             JOIN pond_name snk ON snk.id = p.pond_name_id

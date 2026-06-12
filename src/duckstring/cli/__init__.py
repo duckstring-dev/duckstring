@@ -14,6 +14,24 @@ from .window import app as window_app
 
 app = typer.Typer(help="Duckstring CLI", no_args_is_help=True, add_completion=True)
 
+
+def _version_callback(value: bool) -> None:
+    if value:
+        from duckstring import __version__
+
+        typer.echo(f"duckstring {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        False, "--version", callback=_version_callback, is_eager=True,
+        help="Show the duckstring version and exit.",
+    ),
+) -> None:
+    pass
+
 trigger_app = typer.Typer(
     help="Send execution signals to Outlet Ponds.",
     no_args_is_help=True,

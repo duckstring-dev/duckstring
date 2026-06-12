@@ -19,7 +19,7 @@ def _offer_default(name: str, yes: bool) -> None:
         typer.echo(f"Default catchment set to '{name}'.")
 
 
-def _launch(name: str, url: str, root: Path) -> None:
+def _launch(name: str, url: str, root: Path, key: str | None = None) -> None:
     from urllib.parse import urlparse
 
     import uvicorn
@@ -35,7 +35,8 @@ def _launch(name: str, url: str, root: Path) -> None:
         Panel(
             f"[bold white]duckstring catchment[/bold white] [bold cyan]{name}[/bold cyan]\n\n"
             f"  [dim]url:  {url}[/dim]\n"
-            f"  [dim]root: {root}[/dim]\n\n"
+            f"  [dim]root: {root}[/dim]\n"
+            f"  [dim]auth: {'API key required' if key else 'open (no API key)'}[/dim]\n\n"
             f"  Press [bold]Ctrl-C[/bold] to stop.",
             border_style="bright_black",
             padding=(1, 2),
@@ -43,15 +44,15 @@ def _launch(name: str, url: str, root: Path) -> None:
     )
     from duckstring.catchment.app import create_app
 
-    uvicorn.run(create_app(root), host=host, port=port, reload=False, log_level="warning")
+    uvicorn.run(create_app(root, api_key=key), host=host, port=port, reload=False, log_level="warning")
 
 
-def _register_or_abort(name: str, url: str, kind: str, root: str | None = None) -> None:
+def _register_or_abort(name: str, url: str, kind: str, root: str | None = None, key: str | None = None) -> None:
     """Call register_catchment, printing a friendly error on conflict."""
     from .config import CatchmentConflict, register_catchment
 
     try:
-        register_catchment(name, url=url, kind=kind, root=root)
+        register_catchment(name, url=url, kind=kind, root=root, key=key)
     except CatchmentConflict as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -63,6 +64,9 @@ def init(
     host: str = typer.Option("127.0.0.1", "--host", help="Host to bind to."),
     port: int = typer.Option(7474, "--port", "-p", help="Port to listen on."),
     root: Optional[Path] = typer.Option(None, "--root", help="Root directory for Catchment data."),
+    key: Optional[str] = typer.Option(
+        None, "--key", help="API key the server requires on every request (and the CLI then sends)."
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Automatically set as default catchment."),
 ) -> None:
     """Create and register a new local Catchment, then start the server."""
@@ -74,20 +78,23 @@ def init(
     existing = dict(list_catchments()).get(name)
     if existing:
         existing_root = existing.get("root", str(CONFIG_DIR / name))
+        key = key or existing.get("key")
         if existing_root == str(root_dir):
             typer.echo(f"Catchment '{name}' already registered at {root_dir}.")
+            if key != existing.get("key"):
+                _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key)
         else:
             typer.echo(f"Catchment '{name}' is already registered with data at: {existing_root}")
             if not typer.confirm(f"Update root to {root_dir}?", default=False):
                 raise typer.Exit(0)
             root_dir.mkdir(parents=True, exist_ok=True)
-            _register_or_abort(name, url=url, kind="local", root=str(root_dir))
+            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key)
     else:
         root_dir.mkdir(parents=True, exist_ok=True)
-        _register_or_abort(name, url=url, kind="local", root=str(root_dir))
+        _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key)
         _offer_default(name, yes)
 
-    _launch(name, url, root_dir)
+    _launch(name, url, root_dir, key)
 
 
 @app.command()
@@ -110,19 +117,22 @@ def start(
 
     url = cfg["url"]
     root_dir = Path(cfg["root"]) if cfg.get("root") else Path.home() / ".duckstring" / name
-    _launch(name, url, root_dir)
+    _launch(name, url, root_dir, cfg.get("key"))
 
 
 @app.command()
 def connect(
     name: str = typer.Option(..., "--name", "-n", help="Name to register this Catchment under."),
     path: str = typer.Option(..., "--path", help="URL of the remote Catchment server."),
+    key: Optional[str] = typer.Option(
+        None, "--key", help="API key the server requires; sent with every request to this Catchment."
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Automatically set as default catchment."),
 ) -> None:
     """Register a remote Catchment server by name."""
     from rich.console import Console
 
-    _register_or_abort(name, url=path, kind="remote")
+    _register_or_abort(name, url=path, kind="remote", key=key)
     console = Console()
     console.print(f"[green]Registered[/green] catchment [bold]{name}[/bold] → {path}")
     _offer_default(name, yes)

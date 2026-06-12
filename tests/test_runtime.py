@@ -126,7 +126,7 @@ def test_pulse_runs_chain_end_to_end(runtime):
     # Every pond produced a run ledger recording a successful Pond Run.
     from duckstring.engine import pond as ledger
     for name in _PONDS:
-        db_path = root / "ponds" / name / "pond.db"
+        db_path = root / "ponds" / name / "m1" / "pond.db"
         assert db_path.exists(), f"no ledger for {name}"
         con = ledger.connect(db_path)
         assert ledger.read_pond_end_f(con) is not None, f"{name} recorded no completed run"
@@ -145,7 +145,7 @@ def test_wave_then_remove(runtime):
     httpx.post(f"{url}/api/ponds/reports/wave", timeout=5.0)
 
     # A Wave keeps producing runs: reports completes several times.
-    rep_db = root / "ponds" / "reports" / "pond.db"
+    rep_db = root / "ponds" / "reports" / "m1" / "pond.db"
     from duckstring.engine import pond as ledger
 
     def completed_runs() -> int:

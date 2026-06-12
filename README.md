@@ -64,10 +64,10 @@ duckstring catchment start dev
 Alternatively, you can connect to a server running a Catchment:
 
 ```bash
-duckstring catchment connect --name dev --path https://path.to.catchment
+duckstring catchment connect --name dev --path https://path.to.catchment --key YOUR_API_KEY
 ```
 
-This will prompt for any necessary auth, and will add the Catchment under the specified name.
+This adds the Catchment under the specified name. `--key` is the server's API key (set when the server was started with `duckstring catchment init --key ...` or `DUCKSTRING_API_KEY`); it is stored against the registration and sent with every request.
 
 #### Connect to *duckstring.com*
 
@@ -129,13 +129,13 @@ This will create a duckstring pond structure:
 root/
 |-- src/
 |   |-- pond.py
+|   |-- puddles.py
 |-- pond.toml
-|-- __main__.py
 |-- .gitignore
 |-- README.md
 ```
 
-Here `pond.py` contains the code for a single Ripple operation (currently blank), and `pond.toml` specifies the Pond name "example_pond" and version (defaulting to "0.1.0").
+Here `pond.py` contains the code for a single Ripple operation (a stub to fill in), `puddles.py` holds optional Source snapshots for local pre-deploy testing, and `pond.toml` specifies the Pond name "example_pond" and version (defaulting to "0.1.0").
 
 ### 3) Deploy to Catchment
 

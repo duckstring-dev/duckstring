@@ -20,7 +20,9 @@ export interface RawRipple {
 }
 
 export interface RawPond {
+  id: string; // the pond key "name@major" — the runtime identity of one major line
   name: string;
+  major: number;
   kind: string;
   version: string;
   status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked';
@@ -45,7 +47,7 @@ export interface RawPond {
 
 export interface StatusPayload {
   ponds: RawPond[];
-  edges: [string, string][]; // [sourcePond, sinkPond]
+  edges: [string, string][]; // [sourceId, sinkId] — pond keys ("name@major")
 }
 
 export interface RawRippleRun {
@@ -60,6 +62,8 @@ export interface RawRippleRun {
 
 export interface RawPondRun {
   pond: string;
+  id: string; // pond key "name@major"
+  major: number;
   version: string;
   f: string;
   started_at: string | null;
@@ -109,8 +113,18 @@ export function fetchStatus(): Promise<StatusPayload> {
   return getJSON<StatusPayload>('/status');
 }
 
+// A pond id ("name@major") → the route path + query addressing that major line. All pond-targeting
+// routes are keyed by name with a `major` query param.
+function pondPath(id: string, rest: string): string {
+  const at = id.lastIndexOf('@');
+  const name = at === -1 ? id : id.slice(0, at);
+  const major = at === -1 ? null : id.slice(at + 1);
+  const suffix = major === null ? '' : `${rest.includes('?') ? '&' : '?'}major=${major}`;
+  return `/ponds/${encodeURIComponent(name)}/${rest}${suffix}`;
+}
+
 export interface RunsQuery {
-  pond?: string | null;
+  pond?: string | null; // a pond id ("name@major")
   lineage?: boolean;
   ripples?: boolean;
   limit?: number;
@@ -118,7 +132,11 @@ export interface RunsQuery {
 
 export async function fetchRuns(q: RunsQuery = {}): Promise<RawPondRun[]> {
   const params = new URLSearchParams();
-  if (q.pond) params.set('pond', q.pond);
+  if (q.pond) {
+    const at = q.pond.lastIndexOf('@');
+    params.set('pond', at === -1 ? q.pond : q.pond.slice(0, at));
+    if (at !== -1) params.set('major', q.pond.slice(at + 1));
+  }
   if (q.lineage !== undefined) params.set('lineage', String(q.lineage));
   if (q.ripples !== undefined) params.set('ripples', String(q.ripples));
   if (q.limit !== undefined) params.set('limit', String(q.limit));
@@ -127,26 +145,27 @@ export async function fetchRuns(q: RunsQuery = {}): Promise<RawPondRun[]> {
   return data.runs;
 }
 
-// Trigger / demand actions (the CLI `trigger` surface). `endpoint` is the route segment under
-// /api/ponds/{pond}/ — tap | pulse | wave | tide | start | stop | untrigger.
+// Trigger / demand actions (the CLI `trigger` surface). `pond` is a pond id ("name@major");
+// `endpoint` is the route segment under /api/ponds/{name}/ — tap | pulse | wave | tide | wake |
+// sleep | force | kill | untrigger.
 export function postTrigger(pond: string, endpoint: string, body: unknown = {}): Promise<void> {
-  return postJSON(`/ponds/${encodeURIComponent(pond)}/${endpoint}`, body);
+  return postJSON(pondPath(pond, endpoint), body);
 }
 
 // Failure management.
 export function clearFailure(pond: string): Promise<void> {
-  return postJSON(`/ponds/${encodeURIComponent(pond)}/clear`);
+  return postJSON(pondPath(pond, 'clear'));
 }
 
 export function setBudget(pond: string, immediateRetries: number, sourceRetries: number): Promise<void> {
-  return postJSON(`/ponds/${encodeURIComponent(pond)}/budget`, {
+  return postJSON(pondPath(pond, 'budget'), {
     immediate_retries: immediateRetries,
     source_retries: sourceRetries,
   });
 }
 
 export function fetchWindows(pond: string): Promise<RawWindow[]> {
-  return getJSON<{ windows: RawWindow[] }>(`/ponds/${encodeURIComponent(pond)}/windows`).then((d) => d.windows);
+  return getJSON<{ windows: RawWindow[] }>(pondPath(pond, 'windows')).then((d) => d.windows);
 }
 
 export interface AddWindowBody {
@@ -160,9 +179,9 @@ export interface AddWindowBody {
 }
 
 export function addWindow(pond: string, body: AddWindowBody): Promise<void> {
-  return postJSON(`/ponds/${encodeURIComponent(pond)}/windows`, body);
+  return postJSON(pondPath(pond, 'windows'), body);
 }
 
 export function removeWindow(pond: string, name: string): Promise<void> {
-  return postJSON(`/ponds/${encodeURIComponent(pond)}/windows/${encodeURIComponent(name)}/remove`);
+  return postJSON(pondPath(pond, `windows/${encodeURIComponent(name)}/remove`));
 }

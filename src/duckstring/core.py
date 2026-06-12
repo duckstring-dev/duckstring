@@ -132,8 +132,14 @@ def resolve_catchment_url(name: str | None = None) -> str:
     """A Catchment URL from a name in ``~/.duckstring/config.toml`` (default Catchment when ``None``),
     or the value itself when it already looks like a URL. Raises ``ValueError`` when unresolvable —
     no typer here; the CLI formats the message."""
+    return resolve_catchment_auth(name)[0]
+
+
+def resolve_catchment_auth(name: str | None = None) -> tuple[str, str | None]:
+    """``(url, api_key)`` for a registered Catchment — see :func:`resolve_catchment_url`. A bare URL
+    resolves with no key."""
     if name and "://" in name:
-        return name
+        return name, None
     from .cli.config import load_config
 
     config = load_config()
@@ -145,7 +151,8 @@ def resolve_catchment_url(name: str | None = None) -> str:
         raise ValueError(
             f"no catchment {name!r} registered" if name else "no catchment specified and no default set"
         )
-    return catchments[effective]["url"]
+    cfg = catchments[effective]
+    return cfg["url"], cfg.get("key")
 
 
 class Catchment:
@@ -155,8 +162,12 @@ class Catchment:
     is queryable under ``"{pond}"."{table}"`` or bare). Inside a puddle definition, ``p.catchment()``
     returns one of these pre-bound to the puddle's Source and scratch connection."""
 
-    def __init__(self, url: str, con=None, default_pond: str | None = None, default_table: str | None = None):
+    def __init__(
+        self, url: str, con=None, default_pond: str | None = None, default_table: str | None = None,
+        api_key: str | None = None,
+    ):
         self.url = url.rstrip("/")
+        self.api_key = api_key
         self._con = con
         self._default_pond = default_pond
         self._default_table = default_table
@@ -178,7 +189,10 @@ class Catchment:
     def _post_query(self, payload: dict):
         import httpx
 
-        resp = httpx.post(f"{self.url}/api/query", json=payload, timeout=httpx.Timeout(60.0, connect=5.0))
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        resp = httpx.post(
+            f"{self.url}/api/query", json=payload, headers=headers, timeout=httpx.Timeout(60.0, connect=5.0)
+        )
         if resp.status_code >= 400:
             try:
                 detail = resp.json().get("detail", resp.text)
@@ -280,16 +294,19 @@ class Puddle:
 
     def catchment(self, name: str | None = None) -> Catchment:
         """A :class:`Catchment` client bound to this puddle's Source and scratch connection."""
-        url = resolve_catchment_url(name or self.default_catchment)
-        return Catchment(url, con=self.con, default_pond=self.source, default_table=self.table)
+        url, key = resolve_catchment_auth(name or self.default_catchment)
+        return Catchment(url, con=self.con, default_pond=self.source, default_table=self.table, api_key=key)
 
 
 class Pond:
-    def __init__(self, name: str, version: str, con, root) -> None:
+    def __init__(self, name: str, version: str, con, root, source_majors: dict[str, int] | None = None) -> None:
         self.name = name
         self.version = version
         self.con = con
         self.root = root
+        # Which major line of each Source this Pond consumes (from its pond.toml [sources] pins).
+        # None/missing falls back to the flat puddles layout (local runs have no majors).
+        self.source_majors = source_majors or {}
 
     def write_table(self, name: str, relation) -> None:
         tmp = f"__tmp_{name}"
@@ -313,7 +330,11 @@ class Pond:
             source_pond, table = ref.split(".", 1)
             if source_pond != self.name:
                 from pathlib import Path as _Path
-                parquet = _Path(self.root) / "ponds" / source_pond / "data" / f"{table}.parquet"
+                base = _Path(self.root) / "ponds" / source_pond
+                # Deployed Sources export per major line; puddles (local runs) are flat.
+                major = self.source_majors.get(source_pond)
+                data_dir = base / f"m{major}" / "data" if major is not None else base / "data"
+                parquet = data_dir / f"{table}.parquet"
                 if not parquet.exists():
                     raise FileNotFoundError(
                         f"No exported data found for '{source_pond}.{table}' — "

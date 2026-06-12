@@ -357,7 +357,7 @@ def test_custom_ripples_entrypoint_deploys(tmp_path, catchment_client):
 
 @pytest.mark.timeout(30)
 def test_catchment_get_puddle(tmp_path, live_catchment, catchment_root):
-    data_dir = catchment_root / "ponds" / "tx" / "data"
+    data_dir = catchment_root / "ponds" / "tx" / "m1" / "data"
     data_dir.mkdir(parents=True)
     duckdb.sql("SELECT 7 AS id, 70 AS value").write_parquet(str(data_dir / "event.parquet"))
 
@@ -377,7 +377,7 @@ def test_catchment_get_puddle(tmp_path, live_catchment, catchment_root):
 
 @pytest.mark.timeout(30)
 def test_from_catchment_fills_missing_sources(tmp_path, live_catchment, catchment_root):
-    data_dir = catchment_root / "ponds" / "other" / "data"
+    data_dir = catchment_root / "ponds" / "other" / "m1" / "data"
     data_dir.mkdir(parents=True)
     duckdb.sql("SELECT 1 AS a").write_parquet(str(data_dir / "t1.parquet"))
     duckdb.sql("SELECT 2 AS b").write_parquet(str(data_dir / "t2.parquet"))

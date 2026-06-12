@@ -18,11 +18,38 @@ from pydantic import BaseModel
 router = APIRouter()
 
 
-def _data_dir(request: Request, pond_name: str) -> Path:
-    return Path(request.app.state.root) / "ponds" / pond_name / "data"
+def _resolve_major(request: Request, pond_name: str, major: Optional[int], version: Optional[str]) -> int:
+    """The major line whose exported data to read: explicit ``major``, the ``version``'s major, or
+    the highest deployed major of the Pond (falling back to the highest ``m*`` dir on disk — exported
+    data outlives a deployment). Data is per major line, not per version."""
+    if major is not None:
+        return major
+    if version is not None:
+        return int(version.split(".")[0])
+    db = request.app.state.db
+    row = db.execute(
+        "SELECT MAX(p.major) FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id WHERE pn.name = ?",
+        (pond_name,),
+    ).fetchone()
+    if row is not None and row[0] is not None:
+        return row[0]
+    on_disk = sorted(
+        int(d.name[1:])
+        for d in (Path(request.app.state.root) / "ponds" / pond_name).glob("m*")
+        if d.is_dir() and d.name[1:].isdigit()
+    )
+    if on_disk:
+        return on_disk[-1]
+    raise HTTPException(status_code=404, detail=f"Pond '{pond_name}' not found")
 
 
-def _open_pond(request: Request, pond_name: str):
+def _data_dir(request: Request, pond_name: str, major: int) -> Path:
+    from ..registry import pond_data_dir
+
+    return pond_data_dir(Path(request.app.state.root), pond_name, major)
+
+
+def _open_pond(request: Request, pond_name: str, major: int):
     """An in-memory DuckDB connection with the Pond's exported tables registered as views — under a
     schema named after the Pond, and in ``main`` — so queries can name them ``"pond"."table"`` or
     bare. Reads the Parquet snapshot, not the live registry, so there is no cross-process lock."""
@@ -30,7 +57,7 @@ def _open_pond(request: Request, pond_name: str):
 
     con = duckdb.connect()  # in-memory: no file, no lock, no contention
     con.execute(f'CREATE SCHEMA IF NOT EXISTS "{pond_name}"')
-    for pq in sorted(_data_dir(request, pond_name).glob("*.parquet")):
+    for pq in sorted(_data_dir(request, pond_name, major).glob("*.parquet")):
         table = pq.stem
         select = f"SELECT * FROM read_parquet('{str(pq).replace(chr(39), chr(39) * 2)}')"
         con.execute(f'CREATE VIEW "{pond_name}"."{table}" AS {select}')
@@ -58,17 +85,23 @@ def get_pond_version(name: str, version: str, request: Request):
 
 class QueryRequest(BaseModel):
     pond: str
+    major: Optional[int] = None
+    version: Optional[str] = None
     ripple: Optional[str] = None
     sql: Optional[str] = None
     format: Optional[str] = None
 
 
 @router.get("/ponds/{outlet}/ripples/{ripple_name}")
-def get_ripple(outlet: str, ripple_name: str, request: Request):
+def get_ripple(
+    outlet: str, ripple_name: str, request: Request,
+    major: Optional[int] = None, version: Optional[str] = None,
+):
     # Serve the exported Parquet file directly — no DuckDB needed.
-    pq = _data_dir(request, outlet) / f"{ripple_name}.parquet"
+    m = _resolve_major(request, outlet, major, version)
+    pq = _data_dir(request, outlet, m) / f"{ripple_name}.parquet"
     if not pq.exists():
-        raise HTTPException(status_code=404, detail=f"No data for {outlet}.{ripple_name}")
+        raise HTTPException(status_code=404, detail=f"No data for {outlet}.{ripple_name} (major {m})")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(pq, f"{ripple_name}.parquet")
@@ -77,7 +110,7 @@ def get_ripple(outlet: str, ripple_name: str, request: Request):
 
 @router.post("/query")
 def query(body: QueryRequest, request: Request):
-    con = _open_pond(request, body.pond)
+    con = _open_pond(request, body.pond, _resolve_major(request, body.pond, body.major, body.version))
     sql = body.sql
     if not sql:
         if body.ripple:

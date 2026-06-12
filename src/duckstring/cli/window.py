@@ -76,10 +76,10 @@ def _fmt_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
-def _resolve(catchment: Optional[str]) -> str:
+def _resolve(catchment: Optional[str]) -> tuple[str, Optional[str]]:
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    return cfg["url"]
+    return cfg["url"], cfg.get("key")
 
 
 @app.callback()
@@ -97,7 +97,7 @@ def add(
     on: Optional[str] = typer.Option(None, "--on", "-o", help="Restrict to weekdays, e.g. MON,WED,FRI."),
     until: Optional[str] = typer.Option(None, "--until", "-u", help="Expiration (ISO 8601)."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
 ) -> None:
     """Add a recurring batch-availability window to the Pond."""
@@ -113,7 +113,11 @@ def add(
         "valid_days": _parse_days(on),
         "until_time": _parse_dt(until, allow_hhmm=False) if until else None,
     }
-    _http.post(f"{_resolve(catchment)}/api/ponds/{ctx.obj['pond']}/windows", json=payload)
+    url, api_key = _resolve(catchment)
+    _http.post(
+        f"{url}/api/ponds/{ctx.obj['pond']}/windows", key=api_key,
+        params=_http.pond_params(major, version), json=payload,
+    )
     typer.echo(f"Window '{name}' added.")
 
 
@@ -121,7 +125,7 @@ def add(
 def list_(
     ctx: typer.Context,
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
 ) -> None:
     """List the Pond's windows."""
@@ -130,7 +134,11 @@ def list_(
 
     from . import _http
 
-    windows = _http.get(f"{_resolve(catchment)}/api/ponds/{ctx.obj['pond']}/windows").json().get("windows", [])
+    url, api_key = _resolve(catchment)
+    windows = _http.get(
+        f"{url}/api/ponds/{ctx.obj['pond']}/windows", key=api_key,
+        params=_http.pond_params(major, version),
+    ).json().get("windows", [])
     if not windows:
         typer.echo("No windows.")
         return
@@ -156,11 +164,15 @@ def remove(
     ctx: typer.Context,
     window_name: str = typer.Argument(..., help="Name of the window rule to remove."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
 ) -> None:
     """Remove a window from the Pond."""
     from . import _http
 
-    _http.post(f"{_resolve(catchment)}/api/ponds/{ctx.obj['pond']}/windows/{window_name}/remove", json={})
+    url, api_key = _resolve(catchment)
+    _http.post(
+        f"{url}/api/ponds/{ctx.obj['pond']}/windows/{window_name}/remove", key=api_key,
+        params=_http.pond_params(major, version), json={},
+    )
     typer.echo(f"Window '{window_name}' removed.")

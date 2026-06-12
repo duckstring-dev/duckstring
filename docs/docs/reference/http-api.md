@@ -7,6 +7,8 @@ description: The Catchment's REST surface.
 
 Everything the CLI and [web UI](../guides/web-ui.md) do goes through this API, served by the Catchment under `/api`. All timestamps are UTC ISO-8601 strings; all bodies are JSON unless noted.
 
+When the Catchment is started with an API key (`duckstring catchment init --key …` or the `DUCKSTRING_API_KEY` environment variable), every `/api` request except `/api/health` must carry it — `Authorization: Bearer {key}` — and is `401` otherwise. The CLI sends the key registered against the Catchment (`catchment connect --key …`) automatically.
+
 ## Health
 
 ```
@@ -46,7 +48,7 @@ The full live state, as one document — this is what the UI and `duckstring sta
 {
   "ponds": [
     {
-      "name": "sales", "kind": "pond", "version": "1.0.0",
+      "id": "sales@1", "name": "sales", "major": 1, "kind": "pond", "version": "1.0.0",
       "status": "running",
       "gen": 12, "runs_completed": 11,
       "has_pull": true, "target_f": null,
@@ -62,12 +64,13 @@ The full live state, as one document — this is what the UI and `duckstring sta
       "ripple_edges": [["daily_sales", "join_lines"], ["price_tiers", "join_lines"]]
     }
   ],
-  "edges": [["transactions", "sales"], ["products", "sales"], ["sales", "reports"]]
+  "edges": [["transactions@1", "sales@1"], ["products@1", "sales@1"], ["sales@1", "reports@1"]]
 }
 ```
 
 Field notes:
 
+- `id` — the pond key `name@major`: one entry per deployed **major line** ([concurrent majors](../concepts/versioning.md) appear as separate live Ponds). `edges` reference these ids.
 - `status` — one of `failed | killed | blocked | running | queued | idle`, in that precedence (a failed Pond reads `failed` even if work is queued behind it).
 - `start_f` / `end_f` — the node's [freshness](../concepts/freshness.md) at run start / completion; `null` means never-run. `target_f` is the nearest unsatisfied push target; `has_pull` is the pull token.
 - `gen` / `runs_completed` — runs started / completed since the Catchment loaded.
@@ -79,16 +82,16 @@ Field notes:
 ## Run history
 
 ```
-GET /api/runs?pond={name}&lineage=true&ripples=false&limit=100
+GET /api/runs?pond={name}&major={int}&version={semver}&lineage=true&ripples=false&limit=100
 ```
 
-Recent Pond Runs, newest first. `pond` filters to one Pond — and with `lineage=true` (the default) its upstream Sources too; `ripples=true` nests each run's Ripple Runs; `limit` clamps to [1, 1000].
+Recent Pond Runs, newest first. `pond` filters to one Pond — and with `lineage=true` (the default) its upstream Sources too; `major`/`version` narrow to one major line (default: the highest deployed); `ripples=true` nests each run's Ripple Runs; `limit` clamps to [1, 1000].
 
 ```json
 {
   "runs": [
     {
-      "pond": "sales", "version": "1.0.0", "f": "2026-06-11T09:30:00+00:00",
+      "pond": "sales", "id": "sales@1", "major": 1, "version": "1.0.0", "f": "2026-06-11T09:30:00+00:00",
       "started_at": "…", "finished_at": "…",
       "status": "success", "error": null, "traceback": null,
       "ripples": [
@@ -104,7 +107,7 @@ Run `status` is `running | success | failed | killed`. Ripple Runs carry one rec
 
 ## Triggers & control
 
-All under `/api/ponds/{name}/…`, all returning `{"ok": true}`; `404` for unknown Ponds, `422` for invalid payloads. Semantics in [Triggers](../guides/triggers.md) and [Control](../guides/control.md).
+All under `/api/ponds/{name}/…`, all returning `{"ok": true}`; `404` for unknown Ponds, `422` for invalid payloads. Every route takes optional `major` / `version` query params selecting the major line to act on: `major` picks the line (default: the highest deployed), `version` additionally requires that exact version to be the line's selected artifact (`422` if it isn't). Semantics in [Triggers](../guides/triggers.md) and [Control](../guides/control.md).
 
 | Endpoint | Body | Action |
 |---|---|---|
@@ -137,14 +140,14 @@ See [Querying Data](../guides/querying-data.md). Reads always hit the exported P
 POST /api/query
 ```
 
-`{"pond", "ripple"?, "sql"?, "format"?}` — runs `sql` against the Pond's exported tables (default: `SELECT * … LIMIT 10` on `ripple`). Without `format`, returns JSON rows; with `"csv" | "json" | "parquet"`, returns the file. `400` on SQL errors.
+`{"pond", "major"?, "version"?, "ripple"?, "sql"?, "format"?}` — runs `sql` against the Pond's exported tables (default: `SELECT * … LIMIT 10` on `ripple`; `major`/`version` select the major line to read, default the highest). Without `format`, returns JSON rows; with `"csv" | "json" | "parquet"`, returns the file. `400` on SQL errors.
 
 ```
-GET /api/ponds/{pond}/ripples/{ripple}
+GET /api/ponds/{pond}/ripples/{ripple}?major={int}
 ```
 
 The Ripple's published output, zipped. `404` if it has no export yet.
 
 ## Worker protocol (informational)
 
-Two further endpoints exist for the Catchment's own worker processes (Ducks) — listed for completeness, not for external use: workers hold a short poll on `GET /api/duck/{pond}/jobs` for commands (`begin_run` / `shutdown`) and report progress to `POST /api/duck/{pond}/events`, idempotently on freshness. Both are worker-initiated — the dial-back design that lets local and remote workers share one protocol. See [Architecture](architecture.md).
+Two further endpoints exist for the Catchment's own worker processes (Ducks) — listed for completeness, not for external use: workers hold a short poll on `GET /api/duck/{name}/{major}/jobs` for commands (`begin_run` / `shutdown`) and report progress to `POST /api/duck/{name}/{major}/events`, idempotently on freshness (one Duck per major line). Both are worker-initiated — the dial-back design that lets local and remote workers share one protocol. See [Architecture](architecture.md).

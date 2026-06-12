@@ -9,12 +9,16 @@ _WATCH_HELP  = "Keep the status view open even for one-shot triggers (never auto
 
 
 def _post_trigger(
-    url: str, outlet: str, major: Optional[int], version: Optional[str],
+    cfg: dict, outlet: str, major: Optional[int], version: Optional[str],
     silent: bool, watch: bool, endpoint: str, payload: dict, success_msg: str, one_shot: bool,
 ) -> None:
     from . import _http
 
-    _http.post(f"{url}/api/ponds/{outlet}/{endpoint}", json=payload)
+    url, key = cfg["url"], cfg.get("key")
+    _http.post(
+        f"{url}/api/ponds/{outlet}/{endpoint}", key=key,
+        params=_http.pond_params(major, version), json=payload,
+    )
 
     if silent:
         typer.echo(success_msg)
@@ -25,7 +29,7 @@ def _post_trigger(
     from .status import _run_live
     stay = watch or not one_shot
     _run_live(
-        url, all_versions=False, pond_name=outlet, major=major, version_str=version,
+        url, key=key, pond_name=outlet, major=major, version_str=version,
         watch=stay, until_idle_pond=None if stay else outlet,
     )
 
@@ -33,21 +37,24 @@ def _post_trigger(
 def remove(
     outlet: str = typer.Argument(..., help="Name of the Outlet Pond whose standing trigger to remove."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
 ) -> None:
     """Remove the standing Wave/Tide trigger from an Outlet (existing work drains)."""
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _http.post(f"{cfg['url']}/api/ponds/{outlet}/untrigger", json={})
+    _http.post(
+        f"{cfg['url']}/api/ponds/{outlet}/untrigger", key=cfg.get("key"),
+        params=_http.pond_params(major, version), json={},
+    )
     typer.echo("Trigger removed.")
 
 
 def tap(
     outlet: str = typer.Argument(..., help="Name of the Outlet Pond to resupply once."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to run (default: latest active)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to run (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
@@ -55,13 +62,13 @@ def tap(
     """Pull an Outlet once (a single resupply from its sources)."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "tap", {}, "Tap sent.", one_shot=True)
+    _post_trigger(cfg, outlet, major, version, silent, watch, "tap", {}, "Tap sent.", one_shot=True)
 
 
 def pulse(
     outlet: str = typer.Argument(..., help="Name of the Outlet Pond to trigger."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to run (default: latest active)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to run (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
@@ -69,27 +76,27 @@ def pulse(
     """Push an Outlet once to current freshness (runs the pipeline through to it)."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], outlet, major, version, silent, watch, "pulse", {}, "Pulse sent.", one_shot=True)
+    _post_trigger(cfg, outlet, major, version, silent, watch, "pulse", {}, "Pulse sent.", one_shot=True)
 
 
 def wave(
     outlet: str = typer.Argument(..., help="Name of the Outlet Pond to trigger continuously."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
 ) -> None:
     """Start continuous Demand from an Outlet (runs at maximum frequency)."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    _post_trigger(cfg["url"], outlet, major, version, silent, False, "wave", {}, "Wave started.", one_shot=False)
+    _post_trigger(cfg, outlet, major, version, silent, False, "wave", {}, "Wave started.", one_shot=False)
 
 
 def tide(
     outlet: str = typer.Argument(..., help="Name of the Outlet Pond to keep fresh."),
     bound: str = typer.Argument(..., help="Maximum staleness, e.g. 30s, 12h, 1d, 1h30m — kept no older than this."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest active)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
 ) -> None:
@@ -98,6 +105,6 @@ def tide(
     from .window import _parse_duration
     _, cfg = resolve_catchment(catchment)
     _post_trigger(
-        cfg["url"], outlet, major, version, silent, False, "tide",
+        cfg, outlet, major, version, silent, False, "tide",
         {"bound_seconds": _parse_duration(bound)}, "Tide started.", one_shot=False,
     )

@@ -1,9 +1,9 @@
-// Live Catchment UI types. The DAG topology mirrors the playground's shape (Ponds keyed by name,
-// Ripples keyed by `${pond}.${ripple}`) so the layout engine (lib/layout.ts) is reused unchanged.
+// Live Catchment UI types. The DAG topology mirrors the playground's shape (Ponds keyed by id,
+// Ripples keyed by `${pondId}.${ripple}`) so the layout engine (lib/layout.ts) is reused unchanged.
 // Per-node live state is carried in a NodeView, fed from the enriched /api/status payload.
 
-export type PondId = string; // the Pond name
-export type RippleId = string; // `${pond}.${ripple}`
+export type PondId = string; // the pond key "name@major" — one live major line
+export type RippleId = string; // `${pondId}.${ripple}`
 
 export type DemandStatus = 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked';
 export type FreqUnit = 'SECOND' | 'MINUTE' | 'HOUR' | 'DAY' | 'WEEK';
@@ -48,6 +48,7 @@ export interface TriggerView {
 
 export interface PondInfo {
   version: string;
+  major: number;
   kind: string;
   // Fault tolerance + control (Ponds only).
   isFailed: boolean;
@@ -73,6 +74,8 @@ export interface RippleRun {
 
 export interface PondRun {
   pond: string;
+  id: string; // pond key "name@major"
+  major: number;
   version: string;
   f: string;
   startedAt: string | null;

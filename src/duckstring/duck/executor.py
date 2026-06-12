@@ -48,7 +48,9 @@ def _load_ripple_func(source_path: str, root: str, ripple_name: str):
         return getattr(mod, ripple_name)
 
 
-def _run_ripple(func, pond_name: str, version: str, registry_path_str: str, root_str: str) -> None:
+def _run_ripple(
+    func, pond_name: str, version: str, registry_path_str: str, root_str: str, source_majors: dict[str, int]
+) -> None:
     import duckdb
 
     from ..core import Pond, retry_on_lock
@@ -58,7 +60,7 @@ def _run_ripple(func, pond_name: str, version: str, registry_path_str: str, root
     # are fine (each writes its own table); only the connect can momentarily clash.
     registry = retry_on_lock(lambda: duckdb.connect(registry_path_str))
     try:
-        func(Pond(name=pond_name, version=version, con=registry, root=Path(root_str)))
+        func(Pond(name=pond_name, version=version, con=registry, root=Path(root_str), source_majors=source_majors))
     finally:
         registry.close()
 
@@ -89,13 +91,20 @@ def _export_parquet(registry_path: Path) -> None:
 
 
 class RippleExecutor:
-    def __init__(self, pond_name: str, version: str, source_path: str, root: Path, max_workers: int = 8):
+    def __init__(self, pond_name: str, major: int, version: str, source_path: str, root: Path, max_workers: int = 8):
+        from ..core import read_pond_toml
+        from ..keys import spec_major
+
         self.pond_name = pond_name
+        self.major = major
         self.version = version
         self.source_path = source_path
         self.root = root
-        self.registry_path = pond_registry_path(root, pond_name)
+        self.registry_path = pond_registry_path(root, pond_name, major)
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        # Which major line of each Source this Pond's reads resolve to (its pond.toml pins).
+        sources = read_pond_toml(root / source_path).get("sources", {})
+        self.source_majors = {sname: spec_major(spec) for sname, spec in sources.items()}
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
 
     def submit(self, ripple_name: str, on_done, on_error):
@@ -107,7 +116,9 @@ class RippleExecutor:
         def _task():
             timing["started"] = datetime.now(timezone.utc)
             func = _load_ripple_func(self.source_path, str(self.root), ripple_name)
-            _run_ripple(func, self.pond_name, self.version, str(self.registry_path), str(self.root))
+            _run_ripple(
+                func, self.pond_name, self.version, str(self.registry_path), str(self.root), self.source_majors
+            )
 
         fut = self._pool.submit(_task)
 

@@ -18,6 +18,8 @@ See `brand/strategy.md` for positioning rationale and `brand/copy.md` for settle
 
 The freshness/push-token runtime is **implemented and tested** (the old generation/watermark/demand model and TypeScript-simulation-only era are gone from the backend). The backend + CLI are complete, and the **web UI is built** (read-mostly Next.js, polls the Catchment — see Web UI below). The **playground was extracted** to a standalone `playground/` (in-memory sim). **Fault tolerance is now implemented end-to-end** (immediate + on-change retries, failed/killed/blocked states, dead/silent-Duck detection, error+traceback surfacing — see Fault tolerance). The old `docs/guide/` design docs were removed; `docs/` is now a fully-written Docusaurus site (`docs/docs/theory.md` carried over — its Fault-Tolerance section IS current). **Puddles (local pre-deploy testing) are implemented** — see Puddles below.
 
+**Concurrent major versions are implemented** (v0.2.0): the runtime Pond identity is the **pond key `"{name}@{major}"`** (`keys.py`) — each deployed major line is an independent live Pond with its own engine node, Duck, and storage (`ponds/{name}/m{major}/{registry.duckdb,data/,pond.db}`). Sinks wire to the Source major their `[sources]` pin selects; `Pond.read_table` resolves it via `source_majors` (computed by the Duck from the deployed `pond.toml`; absent for puddle runs → flat layout). All pond-targeting routes take optional `major`/`version` query params — `major` picks the line (default: highest deployed), `version` must be that line's *selected* artifact (422 otherwise) — resolved by `Driver.resolve`; the CLI `--major`/`-m`, `--version`/`-v` pass through everywhere; `/api/status` entries carry `id`/`name`/`major` and `edges` use ids. `min_version` from `[sources]` is still stored-but-unenforced. **API-key auth is implemented**: `create_app(root, api_key=...)` / `DUCKSTRING_API_KEY` gates every `/api` route except `/api/health` (Bearer or X-Duck-Token; Ducks inherit the key via the launcher token); `catchment init/connect --key` stores it in config and the CLI sends it on every request (the web UI does not yet support keyed Catchments). **Release automation**: `release.yml` builds the frontend + dists on a `v*` tag and publishes via PyPI Trusted Publishing (the `pypi` GitHub environment + PyPI publisher must be configured once).
+
 ## Structure
 
 ```
@@ -27,7 +29,7 @@ src/duckstring/
     core.py                #   shared dataclasses: NEVER, Window, Pond, Ripple, Trigger, BeginRun, Pond/RippleState
     catchment.py           #   the FULL engine (Ponds + Ripples, pull + push) — the Catchment's brain
     worker.py              #   push-only WorkerEngine — the Duck's engine (executes a Pond Run to completion)
-    pond.py                #   the per-Pond run LEDGER (SQLite at ponds/{base_pond}/pond.db)
+    pond.py                #   the per-Pond run LEDGER (SQLite at ponds/{name}/m{major}/pond.db)
     __init__.py            #   re-exports the composed API; tests/test_engine.py is the behaviour gate
   duck/                    # The Duck: per-Pond worker process (intra-Pond push execution)
     core.py                #   DuckCore: WorkerEngine + ledger + outgoing event buffer (transport-free)
@@ -62,10 +64,10 @@ playground/                # Standalone in-memory simulation (own repo → playg
 ## Runtime architecture (two-tier: Catchment + Ducks)
 
 - **The Catchment owns pull.** It runs the **full** engine (`engine/catchment.py`: Ponds *and* Ripples, pull + push), holds triggers/windows, and decides Pond Runs. Modelling ripples is required — the Tap-3/1 result and the bottleneck cadence come from *ripple-level* pull. `start_pond_run` records a `BeginRun(pond, F)` on `state.pending_begin_runs`; `Driver` drains these and dispatches them.
-- **Each executing Pond runs a "Duck"** (`duck/`, one subprocess per Pond, `SubprocessLauncher`). Given `begin_run(F)` it pushes every Ripple to `F` (push-only, `engine/worker.py`), executes ripple functions, and reports `ripple`/`run_completed` events. It is spawned on the first run, killed when the Pond is idle (kept warm while a standing trigger is active), and **survives Catchment downtime** (finishes in-flight runs from its ledger + engine, buffers events, replays idempotently on reconnect).
+- **Each executing Pond runs a "Duck"** (`duck/`, one subprocess per pond key `name@major`, `SubprocessLauncher`). Given `begin_run(F)` it pushes every Ripple to `F` (push-only, `engine/worker.py`), executes ripple functions, and reports `ripple`/`run_completed` events. It is spawned on the first run, killed when the Pond is idle (kept warm while a standing trigger is active), and **survives Catchment downtime** (finishes in-flight runs from its ledger + engine, buffers events, replays idempotently on reconnect).
 - **No cap** on concurrent Pond Runs — completions clock the pull cascade; that is the flow control.
-- **Transport**: Duck→Catchment is REST POST (`/api/duck/{pond}/events`); Catchment→Duck is a short-poll the Duck holds (`/api/duck/{pond}/jobs`). The Duck always dials back, so the same code works local and (future) remote — remote is just a different launcher. `DUCKSTRING_CATCHMENT_URL` tells Ducks where to dial; `DUCKSTRING_DISABLE_DUCKS=1` swaps in `NoopLauncher` (tests exercise the engine + persistence without spawning processes).
-- Cross-Pond data: each Pond writes its tables to `ponds/{name}/data/{table}.parquet` (atomic tmp+replace); sinks read those parquet files. Per-Pond DuckDB registry at `ponds/{name}/registry.duckdb`.
+- **Transport**: Duck→Catchment is REST POST (`/api/duck/{name}/{major}/events`); Catchment→Duck is a short-poll the Duck holds (`/api/duck/{name}/{major}/jobs`). The Duck always dials back, so the same code works local and (future) remote — remote is just a different launcher. `DUCKSTRING_CATCHMENT_URL` tells Ducks where to dial; `DUCKSTRING_DISABLE_DUCKS=1` swaps in `NoopLauncher` (tests exercise the engine + persistence without spawning processes).
+- Cross-Pond data: each major line writes its tables to `ponds/{name}/m{major}/data/{table}.parquet` (atomic tmp+replace); sinks read the parquet of the Source major they pin. Per-line DuckDB registry at `ponds/{name}/m{major}/registry.duckdb`.
 
 ## Triggers & control (CLI → `/api/ponds/{name}/…` → Driver)
 
@@ -138,7 +140,7 @@ SQLite `duck.db` at the catchment root. Schema in `catchment/schema/001_init.sql
 - Topology (keyed on `pond_version`): `ripple`, `ripple_to_ripple` (intra-pond edges, all required).
 - Live state (keyed on `pond`): `pond_to_pond` (sink `pond_id` → source `pond_name_id` + `source_major`, so a sink can deploy before its source), `pond_state` (start_f/end_f/d_ms/has_pull/has_received_pull **+ is_failed/is_blocked/failed_f/failures/is_killed/pull_local**), `pond_target` (push target set), `pond_retry` (immediate_retries/source_retries — live budgets), `pond_window` (PK `(pond_id, name)`), `pond_trigger` (PK `pond_id`; kind wave/tide, bound_ms).
 - History (keyed on `pond_version` + freshness `f`): `pond_run` (`status` ∈ running/success/failed/killed, `error`, `traceback`) and `ripple_run` (**PK includes `retry`** — one row per attempt = the retry trace; `status`, `error`, `traceback`). `started_at`/`finished_at` are the Duck's wall-clock execution span (reported on the `ripple` event) — the UI's run durations. All timestamps are UTC ISO-8601 (tz-aware).
-- The **per-Pond run ledger is NOT in `duck.db`** — it lives at `ponds/{base_pond}/pond.db` (owned by `engine/pond.py`): the Duck's operational/recovery record (`ripple_run_state`, `pond_run`). The Catchment's `pond_run`/`ripple_run` are the canonical history.
+- The **per-Pond run ledger is NOT in `duck.db`** — it lives at `ponds/{name}/m{major}/pond.db` (owned by `engine/pond.py`): the Duck's operational/recovery record (`ripple_run_state`, `pond_run`). The Catchment's `pond_run`/`ripple_run` are the canonical history.
 
 ## Orchestration model (theory.md is authoritative)
 

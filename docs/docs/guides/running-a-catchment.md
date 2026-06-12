@@ -21,6 +21,7 @@ This creates a Catchment named `dev`, registers it in your CLI config, offers to
 | `--host` | `127.0.0.1` | Bind address |
 | `--port`, `-p` | `7474` | Port — the web UI and API are served here |
 | `--root` | `~/.duckstring/{name}` | Where the Catchment's data lives |
+| `--key` | *(none — open)* | API key the server requires on every request; the CLI stores it and sends it automatically |
 | `--yes`, `-y` | | Set as default without prompting |
 
 Once created, start it again any time with:
@@ -36,10 +37,10 @@ The server is fully restartable: state lives on disk, not in the process (see [R
 A Catchment running elsewhere is registered by URL:
 
 ```bash
-duckstring catchment connect --name prod --path https://catchment.example.com
+duckstring catchment connect --name prod --path https://catchment.example.com --key $PROD_KEY
 ```
 
-From then on `prod` works exactly like a local Catchment in every command. Local-vs-remote is a property of where the server runs, not of how you use it — start local, move to a hosted server later, and your commands don't change.
+`--key` is the server's API key (if it requires one); it is stored against the registration and attached to every request — including by the Ducks the server spawns. From then on `prod` works exactly like a local Catchment in every command. Local-vs-remote is a property of where the server runs, not of how you use it — start local, move to a hosted server later, and your commands don't change.
 
 ## Managing registrations
 
@@ -53,6 +54,18 @@ duckstring catchment disconnect dev      # unregister (offers to delete local da
 
 Every command that talks to a Catchment accepts `--catchment`/`-c {name}`; without it, the default is used (and if exactly one Catchment is registered, it's implicitly the default).
 
+## Authentication
+
+A Catchment is open by default — fine on `127.0.0.1`. To expose one beyond your machine, give it an API key:
+
+```bash
+duckstring catchment init --name prod --host 0.0.0.0 --key "$(openssl rand -hex 24)"
+```
+
+(or set `DUCKSTRING_API_KEY` in the server's environment). With a key set, every `/api` request except the health check must carry `Authorization: Bearer {key}` and is rejected `401` otherwise. Clients register the key once with `catchment connect --key`; the server's own Ducks inherit it automatically. Note the bundled web UI does not yet prompt for a key, so on a keyed Catchment use the CLI.
+
+Transport security is yours to provide — put a keyed Catchment behind TLS (a reverse proxy) before sending the key over a network.
+
 ## What's in the root directory
 
 The `--root` directory is the Catchment's entire state:
@@ -63,10 +76,11 @@ The `--root` directory is the Catchment's entire state:
 └── ponds/
     └── sales/
         ├── 1.0.0/               # each deployed version's source, as uploaded
-        ├── registry.duckdb      # the Pond's live working database
-        ├── data/                # exported Parquet snapshots — the published output
-        │   └── sale_line.parquet
-        └── pond.db              # the Pond worker's run ledger
+        └── m1/                  # runtime state of major line 1 (m2/ if a 2.x is live, …)
+            ├── registry.duckdb  # the line's live working database
+            ├── data/            # exported Parquet snapshots — the published output
+            │   └── sale_line.parquet
+            └── pond.db          # the line's worker run ledger
 ```
 
 Back up the root and you've backed up the Catchment. Paths inside the database are relative to the root, so the directory is relocatable.
@@ -79,7 +93,7 @@ duckstring status sales      # one Pond and its upstream lineage
 duckstring status --once     # single snapshot, no live updates
 ```
 
-The live view polls the Catchment and shows each Pond's state (idle / queued / running / failed / killed / blocked), freshness, and standing trigger. It exits when everything settles unless `--watch` is set; `--all`/`-a` includes inactive Ponds. The [web UI](web-ui.md) at the Catchment's URL shows the same state graphically.
+The live view polls the Catchment and shows each Pond's state (idle / queued / running / failed / killed / blocked), freshness, and standing trigger, staying open until `Ctrl+C`. The [web UI](web-ui.md) at the Catchment's URL shows the same state graphically.
 
 ## Restart behaviour
 
