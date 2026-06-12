@@ -44,7 +44,12 @@ def _launch(name: str, url: str, root: Path, key: str | None = None) -> None:
     )
     from duckstring.catchment.app import create_app
 
-    uvicorn.run(create_app(root, api_key=key), host=host, port=port, reload=False, log_level="warning")
+    # Ducks dial back to the actual bind address (a wildcard bind is dialled via loopback).
+    dial_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    uvicorn.run(
+        create_app(root, api_key=key, base_url=f"http://{dial_host}:{port}"),
+        host=host, port=port, reload=False, log_level="warning",
+    )
 
 
 def _register_or_abort(
@@ -263,6 +268,89 @@ def disconnect(
 
     unregister_catchment(name)
     typer.echo(f"Disconnected catchment '{name}'.")
+
+
+def _fmt_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{n} B"
+
+
+@app.command()
+def download(
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to download (uses default if omitted)."),
+    path: Path = typer.Option(
+        Path(".duckstring"), "--path",
+        help="Destination directory for the Catchment root (default ./.duckstring — drops straight "
+             "into a platform deploy bundle).",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the size confirmation."),
+) -> None:
+    """Download a Catchment's entire state (its root: database, artifacts, data, ledgers) into a
+    local directory — e.g. to carry state across a platform redeploy, or as a backup."""
+    import tarfile
+    import tempfile
+
+    import httpx
+    from rich.console import Console
+    from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TransferSpeedColumn
+
+    from . import _http
+    from .config import auth_headers, resolve_catchment
+
+    cname, cfg = resolve_catchment(catchment)
+    url = cfg["url"]
+
+    use = _http.get(f"{url}/api/catchment/usage", auth=cfg).json()
+    size_str = _fmt_bytes(use["total_bytes"])
+    console = Console()
+    console.print(
+        f"Catchment [bold]{cname}[/bold] holds [bold]{size_str}[/bold] "
+        f"({use['file_count']} files) → [bold]{path}[/bold]"
+        + (" [yellow](exists — contents will be overwritten where names collide)[/yellow]"
+           if path.exists() and any(path.iterdir()) else "")
+    )
+    if not yes:
+        typer.confirm("Download?", default=True, abort=True)
+
+    # Stream to a temp tar with a progress bar, then extract — so a broken transfer never leaves a
+    # half-written root.
+    with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        try:
+            with httpx.stream(
+                "GET", f"{url}/api/catchment/archive", headers=auth_headers(cfg),
+                timeout=httpx.Timeout(None, connect=5.0),
+            ) as resp:
+                resp.raise_for_status()
+                with Progress(
+                    TextColumn("[progress.description]{task.description}"), BarColumn(),
+                    DownloadColumn(), TransferSpeedColumn(), console=console,
+                ) as progress:
+                    task = progress.add_task("Downloading", total=use["archive_bytes"])
+                    for chunk in resp.iter_raw():
+                        tmp.write(chunk)
+                        progress.update(task, advance=len(chunk))
+            tmp.close()
+            path.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(tmp_path, mode="r") as tar:
+                try:
+                    tar.extractall(path, filter="data")
+                except TypeError:  # Python without the extraction-filter backport
+                    tar.extractall(path)
+        except httpx.HTTPStatusError as exc:
+            typer.echo(f"Error: {exc.response.status_code} from Catchment", err=True)
+            raise typer.Exit(1) from None
+        except httpx.HTTPError as exc:
+            typer.echo(f"Error: download failed — {exc}", err=True)
+            raise typer.Exit(1) from None
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    console.print(f"[green]Downloaded[/green] catchment [bold]{cname}[/bold] → {path}")
 
 
 @app.command(name="set-default")

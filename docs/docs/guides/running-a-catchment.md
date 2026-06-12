@@ -86,6 +86,68 @@ duckstring catchment init --name prod --host 0.0.0.0 --generate-key
 
 Transport security is yours to provide — put a keyed Catchment behind TLS (a reverse proxy) before sending the key over a network. Either way, keys and headers live in `~/.duckstring/config.toml`, which the CLI keeps private (`0600`).
 
+## Hosting on a platform
+
+Anywhere that runs an ASGI app can host a Catchment. The packaged entry is `duckstring.catchment.asgi:app`, configured entirely by environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DUCKSTRING_ROOT` | `./.duckstring` | The Catchment root. The default is relative to the working directory; point it at a persistent path for durable state. |
+| `DUCKSTRING_API_KEY` | *(unset)* | The built-in API key. Leave unset when the platform already gates requests (see [Authentication](#authentication)). |
+| `DUCKSTRING_CATCHMENT_URL` | *(unset)* | The Duck dial-back address. Normally unset: the Catchment learns its bound address from the first request it serves, and its Ducks dial that directly. |
+
+One rule applies everywhere: **run exactly one process of the app.** The Catchment is a single brain — one scheduler, one database, one set of Ducks. Multiple workers (a `--workers` flag, a platform's process autoscaling) would double-dispatch runs.
+
+### A server or container
+
+The simplest hosted Catchment is uvicorn behind whatever TLS proxy you already run (Caddy, nginx, Traefik):
+
+```bash
+DUCKSTRING_ROOT=/var/lib/duckstring DUCKSTRING_API_KEY=$KEY \
+    uvicorn duckstring.catchment.asgi:app --host 127.0.0.1 --port 7474
+```
+
+or containerised, with the root on a volume:
+
+```dockerfile
+FROM python:3.13-slim
+RUN pip install duckstring
+ENV DUCKSTRING_ROOT=/data
+VOLUME /data
+EXPOSE 7474
+CMD ["uvicorn", "duckstring.catchment.asgi:app", "--host", "0.0.0.0", "--port", "7474"]
+```
+
+```bash
+docker run -p 7474:7474 -v duckstring-data:/data -e DUCKSTRING_API_KEY=$KEY my-catchment
+```
+
+Both of these use the built-in key; clients connect with `catchment connect --key`.
+
+### A gated app platform (e.g. Posit Connect)
+
+Platforms that host ASGI apps behind their own login — Posit Connect, an oauth2-proxied PaaS — need only a two-file bundle:
+
+```text
+catchment-deploy/
+├── app.py              # from duckstring.catchment.asgi import app
+└── requirements.txt    # duckstring
+```
+
+For Posit Connect specifically: `rsconnect deploy fastapi . --title "Duckstring Catchment"`, then in the content settings set **Max processes = 1**, **Min processes = 1** (standing Waves/Tides need the scheduler ticking between visits), and a generous idle timeout. Leave `DUCKSTRING_API_KEY` unset — the platform's gate is the auth: the UI works through its login (and under the content's path prefix), and the CLI connects with the platform credential as a header, e.g. `--header "Authorization: Key $POSIT_API_KEY"`.
+
+### Surviving a redeploy of the Catchment app
+
+Platforms like Connect **replace the content directory on every redeploy**, and the default root lives inside it — so a redeploy of the Catchment app wipes deployed Ponds, history, and data (Pond deploys and triggers are unaffected; this is only about redeploying the Catchment itself). The defaults are arranged so state can ride along in the bundle:
+
+```bash
+cd catchment-deploy/
+duckstring catchment download -c prod      # pulls the root into ./.duckstring (after a size confirmation)
+rsconnect deploy fastapi .                 # redeploy WITH the state in the bundle
+```
+
+The new deployment starts from exactly the downloaded state. `catchment download` streams the whole root with consistent SQLite snapshots; do it while the Catchment is quiescent (no runs in flight) so the DuckDB registries are coherent too. It doubles as a plain backup.
+
 ## What's in the root directory
 
 The `--root` directory is the Catchment's entire state:

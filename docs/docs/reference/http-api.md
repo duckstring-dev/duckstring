@@ -17,6 +17,20 @@ GET /api/health
 
 Returns `{"status": "ok"}` when the Catchment and its database are reachable.
 
+## State download
+
+```
+GET /api/catchment/usage
+```
+
+`{"total_bytes", "file_count", "archive_bytes"}` — the root's state size and a close estimate of the archive below (the CLI's size confirmation and progress total).
+
+```
+GET /api/catchment/archive
+```
+
+Streams the whole Catchment root as an uncompressed tar (`application/x-tar`). SQLite files are added as consistent point-in-time snapshots (WAL content included); DuckDB registries are copied as-is, so download while quiescent if registry coherence matters. This is what `duckstring catchment download` consumes.
+
 ## Deploy
 
 ```

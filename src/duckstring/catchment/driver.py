@@ -61,7 +61,7 @@ def _iso(dt: datetime) -> str:
 
 
 class Driver:
-    def __init__(self, db, root, base_url: str, launcher):
+    def __init__(self, db, root, base_url: str | None, launcher):
         self.db = db
         self.root = root
         self.base_url = base_url

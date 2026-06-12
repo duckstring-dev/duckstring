@@ -34,11 +34,13 @@ async def _scheduler(driver: Driver) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    base_url = os.environ.get("DUCKSTRING_CATCHMENT_URL", "http://127.0.0.1:7474")
+    base_url = app.state.base_url
     if os.environ.get("DUCKSTRING_DISABLE_DUCKS"):
         launcher = NoopLauncher()
     else:
         # Ducks dial back over the same authenticated surface — they present the API key as their token.
+        # base_url None = unknown (the platform picked the bind address): the launcher defers spawns
+        # until the dial-back middleware learns the address from the first request.
         launcher = SubprocessLauncher(app.state.root, base_url, token=app.state.api_key or "")
     driver = Driver(app.state.db, app.state.root, base_url, launcher)
     app.state.driver = driver
@@ -59,7 +61,7 @@ async def _lifespan(app: FastAPI):
         launcher.shutdown_all()
 
 
-def create_app(root: Path, api_key: str | None = None) -> FastAPI:
+def create_app(root: Path, api_key: str | None = None, base_url: str | None = None) -> FastAPI:
     root.mkdir(parents=True, exist_ok=True)
     con = connect(root / "duck.db")
     migrate(con)
@@ -70,6 +72,23 @@ def create_app(root: Path, api_key: str | None = None) -> FastAPI:
     # API key: explicit argument, or the environment (useful for containers/remote serving). When
     # set, every /api request (except /api/health) must present it — Bearer header or X-Duck-Token.
     app.state.api_key = api_key or os.environ.get("DUCKSTRING_API_KEY") or None
+    # The address Ducks dial back to: explicit argument (the CLI passes its bind address), or the
+    # environment, or None — unknown, because the host platform picks the bind address (e.g. Posit
+    # Connect). When None it is learned from the first request's ASGI scope below.
+    app.state.base_url = base_url or os.environ.get("DUCKSTRING_CATCHMENT_URL") or None
+
+    @app.middleware("http")
+    async def _learn_dialback_address(request, call_next):
+        launcher = getattr(app.state, "launcher", None)
+        if launcher is not None and getattr(launcher, "base_url", "") is None:
+            server = request.scope.get("server")  # the server's bound (host, port) per the ASGI spec
+            if server and server[1]:  # a unix socket has port None — nothing TCP to dial
+                host = "127.0.0.1" if server[0] in ("0.0.0.0", "::") else server[0]
+                url = f"http://{host}:{server[1]}"
+                app.state.base_url = url
+                app.state.driver.base_url = url
+                launcher.set_base_url(url)  # spawns any Ducks that were waiting on the address
+        return await call_next(request)
 
     @app.middleware("http")
     async def _require_api_key(request, call_next):
