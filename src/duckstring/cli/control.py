@@ -52,7 +52,7 @@ def sleep(
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
     _http.post(
-        f"{cfg['url']}/api/ponds/{pond}/sleep", key=cfg.get("key"),
+        f"{cfg['url']}/api/ponds/{pond}/sleep", auth=cfg,
         params=_http.pond_params(major, version), json={"upstream": upstream},
     )
     typer.echo("Asleep (with upstream)." if upstream else "Asleep.")
@@ -70,7 +70,7 @@ def kill(
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
     _http.post(
-        f"{cfg['url']}/api/ponds/{pond}/kill", key=cfg.get("key"),
+        f"{cfg['url']}/api/ponds/{pond}/kill", auth=cfg,
         params=_http.pond_params(major, version), json={},
     )
     typer.echo(f"Killed '{pond}'.")
@@ -87,7 +87,7 @@ def clear(
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
     _http.post(
-        f"{cfg['url']}/api/ponds/{pond}/clear", key=cfg.get("key"),
+        f"{cfg['url']}/api/ponds/{pond}/clear", auth=cfg,
         params=_http.pond_params(major, version), json={},
     )
     typer.echo(f"Cleared failure from '{pond}'.")
@@ -109,8 +109,8 @@ def failure_budget(
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    key, params = cfg.get("key"), _http.pond_params(major, version)
-    cur = _http.get(f"{cfg['url']}/api/ponds/{pond}/budget", key=key, params=params).json()
+    params = _http.pond_params(major, version)
+    cur = _http.get(f"{cfg['url']}/api/ponds/{pond}/budget", auth=cfg, params=params).json()
     if immediate is None and on_change is None:
         typer.echo(f"immediate: {cur['immediate_retries']}   on-change: {cur['source_retries']}")
         return
@@ -120,7 +120,7 @@ def failure_budget(
         typer.echo("Error: budgets must be non-negative.", err=True)
         raise typer.Exit(1)
     _http.post(
-        f"{cfg['url']}/api/ponds/{pond}/budget", key=key, params=params,
+        f"{cfg['url']}/api/ponds/{pond}/budget", auth=cfg, params=params,
         json={"immediate_retries": imm, "source_retries": onc},
     )
     typer.echo(f"Set '{pond}' — immediate: {imm}   on-change: {onc}")

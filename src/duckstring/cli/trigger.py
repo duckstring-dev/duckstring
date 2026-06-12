@@ -14,9 +14,9 @@ def _post_trigger(
 ) -> None:
     from . import _http
 
-    url, key = cfg["url"], cfg.get("key")
+    url = cfg["url"]
     _http.post(
-        f"{url}/api/ponds/{outlet}/{endpoint}", key=key,
+        f"{url}/api/ponds/{outlet}/{endpoint}", auth=cfg,
         params=_http.pond_params(major, version), json=payload,
     )
 
@@ -29,7 +29,7 @@ def _post_trigger(
     from .status import _run_live
     stay = watch or not one_shot
     _run_live(
-        url, key=key, pond_name=outlet, major=major, version_str=version,
+        url, auth=cfg, pond_name=outlet, major=major, version_str=version,
         watch=stay, until_idle_pond=None if stay else outlet,
     )
 
@@ -45,7 +45,7 @@ def remove(
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
     _http.post(
-        f"{cfg['url']}/api/ponds/{outlet}/untrigger", key=cfg.get("key"),
+        f"{cfg['url']}/api/ponds/{outlet}/untrigger", auth=cfg,
         params=_http.pond_params(major, version), json={},
     )
     typer.echo("Trigger removed.")

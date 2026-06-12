@@ -97,7 +97,7 @@ def test_cli_without_key_gets_friendly_401(runner, keyed_catchment):
     set_default_catchment("unkeyed")
     result = runner.invoke(cli_app, ["status", "--once"])
     assert result.exit_code == 1
-    assert "API key" in result.output
+    assert "401" in result.output
 
 
 def test_connect_stores_key(runner, keyed_catchment):
@@ -174,3 +174,85 @@ def test_duck_authenticates_e2e(tmp_path_factory, monkeypatch):
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+# ─── Custom headers (platform auth in front of the Catchment) ────────────────────
+
+
+def test_cli_sends_custom_headers(runner, keyed_catchment):
+    # No `key` on the registration — the Authorization header comes from the custom headers table,
+    # exactly as it would for a platform gate (e.g. 'Authorization: Key …' on Posit Connect).
+    from duckstring.cli.config import register_catchment, set_default_catchment
+
+    register_catchment("hdr", url=keyed_catchment, kind="remote", headers={"Authorization": f"Bearer {KEY}"})
+    set_default_catchment("hdr")
+    result = runner.invoke(cli_app, ["status", "--once"])
+    assert result.exit_code == 0, result.output
+
+
+def test_connect_header_flag_stores_headers(runner, keyed_catchment):
+    from duckstring.cli.config import load_config
+
+    result = runner.invoke(
+        cli_app,
+        ["catchment", "connect", "--name", "ph", "--path", keyed_catchment,
+         "--header", f"Authorization: Bearer {KEY}", "--header", "X-Extra: 1", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    assert load_config()["catchments"]["ph"]["headers"] == {
+        "Authorization": f"Bearer {KEY}", "X-Extra": "1",
+    }
+    result = runner.invoke(cli_app, ["status", "--once", "-c", "ph"])
+    assert result.exit_code == 0, result.output
+
+
+def test_connect_malformed_header_rejected(runner):
+    result = runner.invoke(
+        cli_app,
+        ["catchment", "connect", "--name", "bad", "--path", "http://x", "--header", "no-colon", "--yes"],
+    )
+    assert result.exit_code == 1
+    assert "invalid --header" in result.output
+
+
+def test_auth_headers_merging():
+    from duckstring.cli.config import auth_headers
+
+    # key alone → Bearer; explicit Authorization header wins over the key; others pass through.
+    assert auth_headers({"key": "k"}) == {"Authorization": "Bearer k"}
+    assert auth_headers({"key": "k", "headers": {"Authorization": "Key posit"}}) == {"Authorization": "Key posit"}
+    assert auth_headers({"headers": {"X-A": "1"}, "key": "k"}) == {"X-A": "1", "Authorization": "Bearer k"}
+    assert auth_headers({}) == {}
+
+
+def test_config_file_is_private(runner, keyed_catchment):
+    from duckstring.cli.config import CONFIG_FILE, register_catchment
+
+    register_catchment("perm", url=keyed_catchment, kind="remote", key=KEY)
+    assert (CONFIG_FILE.stat().st_mode & 0o777) == 0o600
+
+
+# ─── --generate-key ───────────────────────────────────────────────────────────────
+
+
+def test_init_generate_key(runner, tmp_path, mock_uvicorn):
+    from duckstring.cli.config import load_config
+
+    result = runner.invoke(
+        cli_app,
+        ["catchment", "init", "--name", "gen", "--root", str(tmp_path / "gen"), "--generate-key", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Generated API key" in result.output
+    stored = load_config()["catchments"]["gen"].get("key")
+    assert stored and len(stored) >= 24  # generated, stored — `catchment start gen` reuses it
+
+
+def test_init_generate_key_conflicts_with_key(runner, tmp_path):
+    result = runner.invoke(
+        cli_app,
+        ["catchment", "init", "--name", "g2", "--root", str(tmp_path / "g2"),
+         "--generate-key", "--key", "explicit", "--yes"],
+    )
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output

@@ -56,15 +56,35 @@ Every command that talks to a Catchment accepts `--catchment`/`-c {name}`; witho
 
 ## Authentication
 
-A Catchment is open by default — fine on `127.0.0.1`. To expose one beyond your machine, give it an API key:
+A Catchment is open by default — fine on `127.0.0.1`. Beyond your machine there are two models, and which one applies depends on where the Catchment runs.
+
+### Platform auth (hosted deployments)
+
+If the Catchment runs behind a service that already gates requests — Posit Connect, an oauth2 proxy, a cloud platform's IAM — leave the Catchment itself open and let the platform do the auth. This works without configuration on two of the three surfaces:
+
+- **The web UI** is same-origin, so the platform's login session (cookies) flows with every request automatically.
+- **Ducks** are subprocesses next to the server, dialing it directly inside the sandbox — they never pass through the platform's gate.
+
+Only the **CLI** enters through the front door, so it must present the platform's credential. Register it as custom headers attached to every request:
 
 ```bash
-duckstring catchment init --name prod --host 0.0.0.0 --key "$(openssl rand -hex 24)"
+duckstring catchment connect --name prod --path https://connect.example.com/content/abc123/ \
+    --header "Authorization: Key $POSIT_API_KEY"
 ```
 
-(or set `DUCKSTRING_API_KEY` in the server's environment). With a key set, every `/api` request except the health check must carry `Authorization: Bearer {key}` and is rejected `401` otherwise. Clients register the key once with `catchment connect --key`; the server's own Ducks inherit it automatically. Note the bundled web UI does not yet prompt for a key, so on a keyed Catchment use the CLI.
+`--header` is repeatable and takes any `'Name: value'` pair, so it covers whatever the platform in front expects. The UI also works when the Catchment is hosted **under a path prefix** (like Posit Connect's `/content/{guid}/`) — all of its asset and API references are relative.
 
-Transport security is yours to provide — put a keyed Catchment behind TLS (a reverse proxy) before sending the key over a network.
+### Built-in API key (self-hosted)
+
+To expose a bare Catchment (a VM, a LAN box) without a platform in front, give it an API key:
+
+```bash
+duckstring catchment init --name prod --host 0.0.0.0 --generate-key
+```
+
+`--generate-key` creates a fresh key, prints it once, and stores it against the registration so `catchment start prod` reuses it; pass `--key` instead to supply your own (the two are mutually exclusive), or set `DUCKSTRING_API_KEY` in the server's environment. With a key set, every `/api` request except the health check must carry `Authorization: Bearer {key}` and is rejected `401` otherwise. Clients register the key once with `catchment connect --key`; the server's own Ducks inherit it automatically; the web UI prompts for it on first visit and keeps it in the browser.
+
+Transport security is yours to provide — put a keyed Catchment behind TLS (a reverse proxy) before sending the key over a network. Either way, keys and headers live in `~/.duckstring/config.toml`, which the CLI keeps private (`0600`).
 
 ## What's in the root directory
 

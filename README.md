@@ -67,7 +67,7 @@ Alternatively, you can connect to a server running a Catchment:
 duckstring catchment connect --name dev --path https://path.to.catchment --key YOUR_API_KEY
 ```
 
-This adds the Catchment under the specified name. `--key` is the server's API key (set when the server was started with `duckstring catchment init --key ...` or `DUCKSTRING_API_KEY`); it is stored against the registration and sent with every request.
+This adds the Catchment under the specified name. `--key` is the server's API key (set when the server was started with `duckstring catchment init --key ...` / `--generate-key`, or `DUCKSTRING_API_KEY`); it is stored against the registration and sent with every request. For a Catchment behind a platform gate (e.g. Posit Connect), use `--header 'Name: value'` (repeatable) instead to attach the platform's credential — see the [docs](https://docs.duckstring.com/guides/running-a-catchment#authentication).
 
 #### Connect to *duckstring.com*
 

@@ -7,7 +7,7 @@ description: The Catchment's REST surface.
 
 Everything the CLI and [web UI](../guides/web-ui.md) do goes through this API, served by the Catchment under `/api`. All timestamps are UTC ISO-8601 strings; all bodies are JSON unless noted.
 
-When the Catchment is started with an API key (`duckstring catchment init --key …` or the `DUCKSTRING_API_KEY` environment variable), every `/api` request except `/api/health` must carry it — `Authorization: Bearer {key}` — and is `401` otherwise. The CLI sends the key registered against the Catchment (`catchment connect --key …`) automatically.
+When the Catchment is started with an API key (`duckstring catchment init --key …` / `--generate-key`, or the `DUCKSTRING_API_KEY` environment variable), every `/api` request except `/api/health` must carry it — `Authorization: Bearer {key}` — and is `401` otherwise. The CLI sends the credentials registered against the Catchment (`catchment connect --key …`, or arbitrary `--header` pairs for a platform gate in front) automatically; the web UI prompts for the key on a `401`. See [Authentication](../guides/running-a-catchment.md#authentication).
 
 ## Health
 

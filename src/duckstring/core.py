@@ -135,12 +135,13 @@ def resolve_catchment_url(name: str | None = None) -> str:
     return resolve_catchment_auth(name)[0]
 
 
-def resolve_catchment_auth(name: str | None = None) -> tuple[str, str | None]:
-    """``(url, api_key)`` for a registered Catchment — see :func:`resolve_catchment_url`. A bare URL
-    resolves with no key."""
+def resolve_catchment_auth(name: str | None = None) -> tuple[str, dict[str, str]]:
+    """``(url, auth_headers)`` for a registered Catchment — see :func:`resolve_catchment_url`. The
+    headers merge the registration's custom ``headers`` table with its ``key`` (as a Bearer
+    Authorization). A bare URL resolves with no headers."""
     if name and "://" in name:
-        return name, None
-    from .cli.config import load_config
+        return name, {}
+    from .cli.config import auth_headers, load_config
 
     config = load_config()
     catchments = config.get("catchments", {})
@@ -152,7 +153,7 @@ def resolve_catchment_auth(name: str | None = None) -> tuple[str, str | None]:
             f"no catchment {name!r} registered" if name else "no catchment specified and no default set"
         )
     cfg = catchments[effective]
-    return cfg["url"], cfg.get("key")
+    return cfg["url"], auth_headers(cfg)
 
 
 class Catchment:
@@ -164,10 +165,14 @@ class Catchment:
 
     def __init__(
         self, url: str, con=None, default_pond: str | None = None, default_table: str | None = None,
-        api_key: str | None = None,
+        api_key: str | None = None, headers: dict[str, str] | None = None,
     ):
         self.url = url.rstrip("/")
-        self.api_key = api_key
+        # Auth attached to every request: custom headers (platform gates like Posit Connect), with
+        # api_key as Bearer-Authorization sugar when no explicit Authorization header is given.
+        self.headers = dict(headers or {})
+        if api_key and not any(h.lower() == "authorization" for h in self.headers):
+            self.headers["Authorization"] = f"Bearer {api_key}"
         self._con = con
         self._default_pond = default_pond
         self._default_table = default_table
@@ -189,9 +194,8 @@ class Catchment:
     def _post_query(self, payload: dict):
         import httpx
 
-        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         resp = httpx.post(
-            f"{self.url}/api/query", json=payload, headers=headers, timeout=httpx.Timeout(60.0, connect=5.0)
+            f"{self.url}/api/query", json=payload, headers=self.headers, timeout=httpx.Timeout(60.0, connect=5.0)
         )
         if resp.status_code >= 400:
             try:
@@ -294,8 +298,8 @@ class Puddle:
 
     def catchment(self, name: str | None = None) -> Catchment:
         """A :class:`Catchment` client bound to this puddle's Source and scratch connection."""
-        url, key = resolve_catchment_auth(name or self.default_catchment)
-        return Catchment(url, con=self.con, default_pond=self.source, default_table=self.table, api_key=key)
+        url, headers = resolve_catchment_auth(name or self.default_catchment)
+        return Catchment(url, con=self.con, default_pond=self.source, default_table=self.table, headers=headers)
 
 
 class Pond:

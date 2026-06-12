@@ -45,7 +45,7 @@ def _deploy_one(
     console,
     pond_dir: Path,
     url: str,
-    api_key: Optional[str],
+    cfg: dict,
     catchment_name: str,
     git: Optional[str],
     yes: bool,
@@ -61,8 +61,9 @@ def _deploy_one(
 
     try:
         import httpx as _httpx
-        _headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        _r = _httpx.get(f"{url}/api/ponds/{name}/versions/{version}", headers=_headers, timeout=5.0)
+
+        from .config import auth_headers
+        _r = _httpx.get(f"{url}/api/ponds/{name}/versions/{version}", headers=auth_headers(cfg), timeout=5.0)
         if _r.status_code == 200:
             version_exists: bool | None = True
         elif _r.status_code == 404:
@@ -99,13 +100,13 @@ def _deploy_one(
             raise typer.Exit(1) from None
 
         _http.post(
-            f"{url}/api/deploy", key=api_key,
+            f"{url}/api/deploy", auth=cfg,
             json={"name": name, "version": version, "type": pond_type, "git_ref": git, "repo_url": repo_url},
         )
     else:
         archive = _zip_pond(pond_dir)
         _http.post(
-            f"{url}/api/deploy", key=api_key,
+            f"{url}/api/deploy", auth=cfg,
             files={"pond": ("pond.zip", archive, "application/zip")},
             data={"name": name, "version": version, "type": pond_type},
             timeout=120,
@@ -130,7 +131,7 @@ def deploy(
 
     console = Console()
     catchment_name, cfg = resolve_catchment(catchment)
-    url, api_key = cfg["url"], cfg.get("key")
+    url = cfg["url"]
 
     if all_ponds:
         cwd = Path.cwd()
@@ -144,6 +145,6 @@ def deploy(
         console.print(f"Found [bold]{len(pond_dirs)}[/bold] pond(s): {', '.join(d.name for d in pond_dirs)}")
         for pond_dir in pond_dirs:
             console.rule(pond_dir.name)
-            _deploy_one(console, pond_dir, url, api_key, catchment_name, git, yes)
+            _deploy_one(console, pond_dir, url, cfg, catchment_name, git, yes)
     else:
-        _deploy_one(console, Path.cwd(), url, api_key, catchment_name, git, yes)
+        _deploy_one(console, Path.cwd(), url, cfg, catchment_name, git, yes)

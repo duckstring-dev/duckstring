@@ -19,6 +19,8 @@ import {
   setBudget,
   addWindow,
   removeWindow,
+  setApiKey,
+  UnauthorizedError,
   type StatusPayload,
   type RawPond,
   type RawRipple,
@@ -154,6 +156,7 @@ export interface LiveState extends StatusSlice {
   now: number;
   connected: boolean;
   error: string | null;
+  needsKey: boolean; // the Catchment answered 401 — show the API-key prompt
 
   selectedPondId: PondId | null;
   selectedRippleId: RippleId | null;
@@ -169,6 +172,7 @@ export interface LiveState extends StatusSlice {
   windowsByPond: Record<PondId, WindowRow[]>;
 
   refresh(): Promise<void>;
+  submitApiKey(key: string): Promise<void>;
   refreshWindows(pond: PondId): Promise<void>;
   refreshRunDetail(): Promise<void>;
   setRunFilter(key: keyof RunFilters, value: boolean): void;
@@ -227,6 +231,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   now: Date.now(),
   connected: false,
   error: null,
+  needsKey: false,
 
   selectedPondId: null,
   selectedRippleId: null,
@@ -244,9 +249,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   async refresh() {
     try {
       const payload = await fetchStatus();
-      set({ ...transformStatus(payload), now: Date.now(), connected: true, error: null });
+      set({ ...transformStatus(payload), now: Date.now(), connected: true, error: null, needsKey: false });
     } catch (e) {
-      set({ connected: false, error: e instanceof Error ? e.message : String(e) });
+      if (e instanceof UnauthorizedError) {
+        set({ connected: false, needsKey: true, error: null });
+      } else {
+        set({ connected: false, error: e instanceof Error ? e.message : String(e) });
+      }
       return; // if the Catchment is unreachable, skip the dependent fetches this tick
     }
 
@@ -268,6 +277,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       /* history is non-critical; leave the last good feed in place */
     }
     if (get().selectedRun) void get().refreshRunDetail(); // keep the open detail live as it runs/retries
+  },
+
+  async submitApiKey(key: string) {
+    setApiKey(key.trim() || null);
+    await get().refresh(); // a wrong key just re-raises 401 → the prompt stays up
   },
 
   async refreshRunDetail() {
@@ -367,7 +381,8 @@ async function act(
     set({ error: null });
     await get().refresh();
   } catch (e) {
-    set({ error: e instanceof Error ? e.message : String(e) });
+    if (e instanceof UnauthorizedError) set({ needsKey: true });
+    else set({ error: e instanceof Error ? e.message : String(e) });
   }
 }
 

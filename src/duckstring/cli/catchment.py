@@ -47,15 +47,39 @@ def _launch(name: str, url: str, root: Path, key: str | None = None) -> None:
     uvicorn.run(create_app(root, api_key=key), host=host, port=port, reload=False, log_level="warning")
 
 
-def _register_or_abort(name: str, url: str, kind: str, root: str | None = None, key: str | None = None) -> None:
+def _register_or_abort(
+    name: str, url: str, kind: str, root: str | None = None, key: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> None:
     """Call register_catchment, printing a friendly error on conflict."""
     from .config import CatchmentConflict, register_catchment
 
     try:
-        register_catchment(name, url=url, kind=kind, root=root, key=key)
+        register_catchment(name, url=url, kind=kind, root=root, key=key, headers=headers)
     except CatchmentConflict as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
+
+
+def _parse_headers(values: Optional[list[str]]) -> Optional[dict[str, str]]:
+    """``["Name: value", ...]`` → a headers dict; friendly error on a malformed entry."""
+    if not values:
+        return None
+    headers: dict[str, str] = {}
+    for raw in values:
+        hname, sep, hval = raw.partition(":")
+        if not sep or not hname.strip() or not hval.strip():
+            typer.echo(f"Error: invalid --header {raw!r} — use 'Name: value'.", err=True)
+            raise typer.Exit(1)
+        headers[hname.strip()] = hval.strip()
+    return headers
+
+
+_HEADER_HELP = (
+    "Extra header attached to every request to this Catchment, as 'Name: value' (repeatable). "
+    "For auth handled by the platform in front of the Catchment, e.g. 'Authorization: Key …' "
+    "for Posit Connect."
+)
 
 
 @app.command()
@@ -67,11 +91,42 @@ def init(
     key: Optional[str] = typer.Option(
         None, "--key", help="API key the server requires on every request (and the CLI then sends)."
     ),
+    generate_key: bool = typer.Option(
+        False, "--generate-key",
+        help="Generate a fresh API key, print it once, and start the server with it (stored in the "
+             "registration so `catchment start` reuses it). Mutually exclusive with --key.",
+    ),
+    header: Optional[list[str]] = typer.Option(None, "--header", help=_HEADER_HELP),
     yes: bool = typer.Option(False, "--yes", "-y", help="Automatically set as default catchment."),
 ) -> None:
     """Create and register a new local Catchment, then start the server."""
     from .config import CONFIG_DIR, list_catchments
 
+    if generate_key:
+        if key:
+            typer.echo("Error: --generate-key and --key are mutually exclusive — the generated key IS the key.",
+                       err=True)
+            raise typer.Exit(1)
+        import secrets
+
+        from rich.console import Console
+        from rich.panel import Panel
+
+        key = secrets.token_urlsafe(24)
+        Console().print(
+            Panel(
+                f"[bold white]Generated API key[/bold white]\n\n"
+                f"  [bold cyan]{key}[/bold cyan]\n\n"
+                f"  Clients connect with:\n"
+                f"  [dim]duckstring catchment connect --name {name} --path <url> --key {key}[/dim]\n\n"
+                f"  Stored in [dim]~/.duckstring/config.toml[/dim] against '{name}' — "
+                f"[dim]catchment start {name}[/dim] reuses it.",
+                border_style="cyan",
+                padding=(1, 2),
+            )
+        )
+
+    headers = _parse_headers(header)
     root_dir = Path(root) if root else CONFIG_DIR / name
     url = f"http://{host}:{port}"
 
@@ -79,19 +134,20 @@ def init(
     if existing:
         existing_root = existing.get("root", str(CONFIG_DIR / name))
         key = key or existing.get("key")
+        headers = headers or existing.get("headers")
         if existing_root == str(root_dir):
             typer.echo(f"Catchment '{name}' already registered at {root_dir}.")
-            if key != existing.get("key"):
-                _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key)
+            if key != existing.get("key") or headers != existing.get("headers"):
+                _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers)
         else:
             typer.echo(f"Catchment '{name}' is already registered with data at: {existing_root}")
             if not typer.confirm(f"Update root to {root_dir}?", default=False):
                 raise typer.Exit(0)
             root_dir.mkdir(parents=True, exist_ok=True)
-            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key)
+            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers)
     else:
         root_dir.mkdir(parents=True, exist_ok=True)
-        _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key)
+        _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers)
         _offer_default(name, yes)
 
     _launch(name, url, root_dir, key)
@@ -127,12 +183,13 @@ def connect(
     key: Optional[str] = typer.Option(
         None, "--key", help="API key the server requires; sent with every request to this Catchment."
     ),
+    header: Optional[list[str]] = typer.Option(None, "--header", help=_HEADER_HELP),
     yes: bool = typer.Option(False, "--yes", "-y", help="Automatically set as default catchment."),
 ) -> None:
     """Register a remote Catchment server by name."""
     from rich.console import Console
 
-    _register_or_abort(name, url=path, kind="remote", key=key)
+    _register_or_abort(name, url=path, kind="remote", key=key, headers=_parse_headers(header))
     console = Console()
     console.print(f"[green]Registered[/green] catchment [bold]{name}[/bold] → {path}")
     _offer_default(name, yes)

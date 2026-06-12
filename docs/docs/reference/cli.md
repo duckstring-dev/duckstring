@@ -23,9 +23,9 @@ Most commands that talk to a Catchment share these:
 
 | Command | Description |
 |---|---|
-| `catchment init -n {name} [--host H] [-p PORT] [--root DIR] [--key KEY] [-y]` | Create and register a local Catchment, then start its server. Defaults: host `127.0.0.1`, port `7474`, root `~/.duckstring/{name}`, no API key (open). Offers to set as default (`-y` accepts). |
+| `catchment init -n {name} [--host H] [-p PORT] [--root DIR] [--key KEY \| --generate-key] [--header 'N: v']… [-y]` | Create and register a local Catchment, then start its server. Defaults: host `127.0.0.1`, port `7474`, root `~/.duckstring/{name}`, no API key (open). `--generate-key` creates a key, prints it once, and stores it (mutually exclusive with `--key`). Offers to set as default (`-y` accepts). |
 | `catchment start {name}` | Start the server for a registered local Catchment. |
-| `catchment connect -n {name} --path {url} [--key KEY] [-y]` | Register a remote Catchment by URL; `--key` stores its API key, sent with every request. |
+| `catchment connect -n {name} --path {url} [--key KEY] [--header 'N: v']… [-y]` | Register a remote Catchment by URL; `--key` stores its API key (sent as a Bearer header), `--header` stores arbitrary headers for platform auth (e.g. `'Authorization: Key …'` for Posit Connect) — both attached to every request. |
 | `catchment list` | List registered Catchments; `●` marks the default. |
 | `catchment set-default {name}` | Set the default Catchment. |
 | `catchment disconnect {name} [--purge]` | Unregister; for local Catchments, offers to delete the data directory (`--purge` deletes without asking). |

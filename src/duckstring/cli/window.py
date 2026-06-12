@@ -76,10 +76,10 @@ def _fmt_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
-def _resolve(catchment: Optional[str]) -> tuple[str, Optional[str]]:
+def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
-    return cfg["url"], cfg.get("key")
+    return cfg["url"], cfg
 
 
 @app.callback()
@@ -113,9 +113,9 @@ def add(
         "valid_days": _parse_days(on),
         "until_time": _parse_dt(until, allow_hhmm=False) if until else None,
     }
-    url, api_key = _resolve(catchment)
+    url, cfg = _resolve(catchment)
     _http.post(
-        f"{url}/api/ponds/{ctx.obj['pond']}/windows", key=api_key,
+        f"{url}/api/ponds/{ctx.obj['pond']}/windows", auth=cfg,
         params=_http.pond_params(major, version), json=payload,
     )
     typer.echo(f"Window '{name}' added.")
@@ -134,9 +134,9 @@ def list_(
 
     from . import _http
 
-    url, api_key = _resolve(catchment)
+    url, cfg = _resolve(catchment)
     windows = _http.get(
-        f"{url}/api/ponds/{ctx.obj['pond']}/windows", key=api_key,
+        f"{url}/api/ponds/{ctx.obj['pond']}/windows", auth=cfg,
         params=_http.pond_params(major, version),
     ).json().get("windows", [])
     if not windows:
@@ -170,9 +170,9 @@ def remove(
     """Remove a window from the Pond."""
     from . import _http
 
-    url, api_key = _resolve(catchment)
+    url, cfg = _resolve(catchment)
     _http.post(
-        f"{url}/api/ponds/{ctx.obj['pond']}/windows/{window_name}/remove", key=api_key,
+        f"{url}/api/ponds/{ctx.obj['pond']}/windows/{window_name}/remove", auth=cfg,
         params=_http.pond_params(major, version), json={},
     )
     typer.echo(f"Window '{window_name}' removed.")

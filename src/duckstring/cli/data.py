@@ -31,7 +31,7 @@ def get(
     console = Console()
     console.print(f"Fetching [bold]{outlet}.{ripple}[/bold]...")
     resp = _http.get(
-        f"{url}/api/ponds/{outlet}/ripples/{ripple}", key=cfg.get("key"),
+        f"{url}/api/ponds/{outlet}/ripples/{ripple}", auth=cfg,
         params=_http.pond_params(major, version),
     )
 
@@ -97,7 +97,7 @@ def query(
         else:
             payload["format"] = "parquet"
 
-    resp = _http.post(f"{url}/api/query", key=cfg.get("key"), json=payload)
+    resp = _http.post(f"{url}/api/query", auth=cfg, json=payload)
 
     if not output_filename:
         try:

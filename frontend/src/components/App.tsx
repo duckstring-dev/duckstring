@@ -11,6 +11,66 @@ import { RunDetail } from './RunDetail';
 
 const POLL_MS = 1000;
 
+// Shown when the Catchment answers 401 (it was started with --key / --generate-key). The key is
+// kept in localStorage and sent as a Bearer header on every request; a wrong key re-raises 401 so
+// the prompt simply stays up.
+function KeyPrompt() {
+  const submitApiKey = useLiveStore((s) => s.submitApiKey);
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!value.trim() || busy) return;
+    setBusy(true);
+    try {
+      await submitApiKey(value);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center',
+      justifyContent: 'center', background: 'rgba(9, 9, 11, 0.85)', backdropFilter: 'blur(2px)',
+    }}>
+      <div style={{
+        background: '#101014', border: '1px solid #27272a', borderRadius: 8, padding: '22px 26px',
+        width: 360, maxWidth: '90vw', display: 'flex', flexDirection: 'column', gap: 12,
+      }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#e4e4e7' }}>API key required</div>
+        <div style={{ fontSize: 12, color: '#a1a1aa', lineHeight: 1.5 }}>
+          This Catchment was started with an API key. Enter it to connect; it is stored in this
+          browser only.
+        </div>
+        <input
+          type="password"
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') void submit(); }}
+          placeholder="API key"
+          style={{
+            background: '#18181b', border: '1px solid #3f3f46', borderRadius: 5, padding: '8px 10px',
+            color: '#e4e4e7', fontSize: 13, fontFamily: 'inherit', outline: 'none',
+          }}
+        />
+        <button
+          onClick={() => void submit()}
+          disabled={!value.trim() || busy}
+          style={{
+            background: '#06c4e6', border: 'none', borderRadius: 5, padding: '8px 10px',
+            color: '#09090b', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+            opacity: !value.trim() || busy ? 0.5 : 1, fontFamily: 'inherit',
+          }}
+        >
+          {busy ? 'Connecting…' : 'Connect'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // Mobile: the run panels collapse into a bottom sheet (RunHistory stacked over RunDetail)
 // behind a header bar, so the canvas keeps the screen until runs are wanted.
 function MobileRunsPanel() {
@@ -46,6 +106,7 @@ function MobileRunsPanel() {
 
 export function App() {
   const refresh = useLiveStore((s) => s.refresh);
+  const needsKey = useLiveStore((s) => s.needsKey);
   const isMobile = useIsMobile();
 
   useEffect(() => {
@@ -73,6 +134,7 @@ export function App() {
 
   return (
     <div className="ds-app" style={{ display: 'flex', flexDirection: 'column', width: '100%', overflow: 'hidden', fontFamily: 'ui-monospace, SFMono-Regular, monospace' }}>
+      {needsKey && <KeyPrompt />}
       {/* On mobile the sidebar drops below the canvas as a collapsible bottom sheet. */}
       <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', flex: 1, minHeight: 0 }}>
         <ReactFlowProvider>

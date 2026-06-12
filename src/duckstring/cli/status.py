@@ -184,10 +184,10 @@ def _build_renderable(ponds: list[dict], edges: list[tuple[str, str]]) -> object
     return Group(*panels)
 
 
-def _fetch_status(url: str, key: Optional[str]) -> tuple[list[dict], list[tuple[str, str]]]:
+def _fetch_status(url: str, auth: Optional[dict]) -> tuple[list[dict], list[tuple[str, str]]]:
     from . import _http
 
-    resp = _http.get(f"{url}/api/status", key=key)
+    resp = _http.get(f"{url}/api/status", auth=auth)
     data = resp.json()
     ponds = data.get("ponds", [])
     edges = [tuple(e) for e in data.get("edges", [])]
@@ -196,7 +196,7 @@ def _fetch_status(url: str, key: Optional[str]) -> tuple[list[dict], list[tuple[
 
 def _run_live(
     url: str,
-    key: Optional[str],
+    auth: Optional[dict],
     pond_name: Optional[str],
     major: Optional[int],
     version_str: Optional[str],
@@ -211,7 +211,7 @@ def _run_live(
 
     def _build() -> tuple[object, bool]:
         try:
-            ponds, edges = _fetch_status(url, key)
+            ponds, edges = _fetch_status(url, auth)
             if pond_name:
                 ponds, edges = _filter_for_pond(ponds, edges, pond_name, major, version_str)
             done = False
@@ -263,13 +263,13 @@ def status(
     from .config import resolve_catchment
 
     _, cfg = resolve_catchment(catchment)
-    url, key = cfg["url"], cfg.get("key")
+    url = cfg["url"]
 
     if not once:
-        _run_live(url, key, pond, major, version, watch=True)
+        _run_live(url, cfg, pond, major, version, watch=True)
         return
 
-    ponds, edges = _fetch_status(url, key)
+    ponds, edges = _fetch_status(url, cfg)
 
     console = Console()
 

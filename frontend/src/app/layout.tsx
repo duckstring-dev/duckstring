@@ -5,7 +5,7 @@ export const metadata: Metadata = {
   title: "Catchment | Duckstring",
   description: "There is no DAG.",
   icons: {
-    icon: '/favicon.svg',
+    icon: './favicon.svg',
   }
 };
 

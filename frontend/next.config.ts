@@ -6,8 +6,11 @@ const FASTAPI_URL = process.env.FASTAPI_URL ?? "http://localhost:7474";
 const isStaticExport = process.env.NEXT_STATIC_EXPORT === "true";
 
 // Static export (used when building for FastAPI to serve) is incompatible with rewrites.
+// assetPrefix "./" emits relative asset URLs so the Catchment can be hosted under a path prefix
+// (a reverse proxy or Posit Connect's /content/{guid}/) — the app is a single root-level page,
+// so "./_next/…" resolves correctly from any mount point.
 const nextConfig: NextConfig = isStaticExport
-  ? { output: "export" }
+  ? { output: "export", assetPrefix: "./" }
   : {
       // Dev-only: let phones on the LAN load the dev server (Next blocks cross-origin
       // requests to dev resources by default).

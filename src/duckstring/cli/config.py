@@ -26,6 +26,18 @@ def save_config(config: dict[str, Any]) -> None:
     import tomli_w
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(tomli_w.dumps(config), encoding="utf-8")
+    CONFIG_FILE.chmod(0o600)  # may hold API keys / auth headers
+
+
+def auth_headers(cfg: dict[str, Any]) -> dict[str, str]:
+    """The auth headers to attach to every request to a registered Catchment: its custom ``headers``
+    table (``catchment connect --header``), with ``Authorization: Bearer {key}`` filled in from
+    ``key`` when no explicit Authorization header is set."""
+    headers = {str(k): str(v) for k, v in cfg.get("headers", {}).items()}
+    key = cfg.get("key")
+    if key and not any(h.lower() == "authorization" for h in headers):
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
 
 
 class CatchmentConflict(Exception):
@@ -38,7 +50,8 @@ class CatchmentConflict(Exception):
 
 
 def register_catchment(
-    name: str, url: str, kind: str = "local", root: str | None = None, key: str | None = None
+    name: str, url: str, kind: str = "local", root: str | None = None, key: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> None:
     config = load_config()
     catchments = config.setdefault("catchments", {})
@@ -58,6 +71,7 @@ def register_catchment(
         "type": kind,
         **({"root": root} if root else {}),
         **({"key": key} if key else {}),
+        **({"headers": headers} if headers else {}),
     }
     save_config(config)
 

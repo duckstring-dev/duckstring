@@ -46,6 +46,10 @@ jobs:
           wheel=$(ls dist/*.whl)
           unzip -l "$wheel" | grep -q "duckstring/catchment/static/index.html" || { echo "wheel missing web UI"; exit 1; }
           unzip -l "$wheel" | grep -q "duckstring/catchment/schema/001_init.sql" || { echo "wheel missing schema"; exit 1; }
+          # Subpath hosting: the UI must reference its assets relatively, never origin-absolute.
+          if grep -qE '(src|href)="/' src/duckstring/catchment/static/index.html; then
+            echo "web UI has origin-absolute asset paths (breaks subpath hosting)"; exit 1
+          fi
       - name: Verify tag matches package version
         run: |
           pkg_version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")

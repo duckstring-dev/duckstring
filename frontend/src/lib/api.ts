@@ -1,10 +1,52 @@
 // Thin typed client for the Catchment HTTP API. In dev, next.config rewrites /api/* to the FastAPI
-// server (DUCKSTRING_CATCHMENT_URL / :8000); in the static-export build FastAPI serves this app at
-// the same origin, so a relative /api base works in both.
+// server (DUCKSTRING_CATCHMENT_URL / :8000); in the static-export build FastAPI serves this app —
+// possibly under a path prefix (a reverse proxy, Posit Connect's /content/{guid}/), so the API base
+// is derived from where the page is mounted rather than hard-coded to the origin root.
 
 import type { FreqUnit } from './types';
 
-const API = '/api';
+function apiBase(): string {
+  if (typeof window === 'undefined') return '/api';
+  const p = window.location.pathname;
+  // The app is a single root-level page: its directory is the Catchment mount point.
+  const dir = p.endsWith('/') ? p : p.slice(0, p.lastIndexOf('/') + 1);
+  return `${dir}api`;
+}
+
+// ─── API key (for a Catchment started with --key) ────────────────────────────
+// Kept in localStorage; attached as a Bearer header on every request. A 401 raises
+// UnauthorizedError so the store can surface the key prompt.
+
+const KEY_STORAGE = 'duckstring.apiKey';
+
+export class UnauthorizedError extends Error {
+  constructor() {
+    super('The Catchment requires an API key');
+    this.name = 'UnauthorizedError';
+  }
+}
+
+export function getApiKey(): string | null {
+  try {
+    return window.localStorage.getItem(KEY_STORAGE);
+  } catch {
+    return null;
+  }
+}
+
+export function setApiKey(key: string | null): void {
+  try {
+    if (key) window.localStorage.setItem(KEY_STORAGE, key);
+    else window.localStorage.removeItem(KEY_STORAGE);
+  } catch {
+    /* storage unavailable — the key just won't persist */
+  }
+}
+
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const key = getApiKey();
+  return key ? { ...extra, authorization: `Bearer ${key}` } : extra;
+}
 
 // ─── Raw payload shapes (snake_case, as the backend emits) ───────────────────
 
@@ -87,17 +129,19 @@ export interface RawWindow {
 // ─── Requests ────────────────────────────────────────────────────────────────
 
 async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(`${API}${path}`, { cache: 'no-store' });
+  const res = await fetch(`${apiBase()}${path}`, { cache: 'no-store', headers: authHeaders() });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error(`GET ${path} → ${res.status}`);
   return res.json() as Promise<T>;
 }
 
 async function postJSON(path: string, body: unknown = {}): Promise<void> {
-  const res = await fetch(`${API}${path}`, {
+  const res = await fetch(`${apiBase()}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: authHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),
   });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) {
     let detail = '';
     try {

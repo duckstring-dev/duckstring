@@ -14,8 +14,13 @@ def pond_params(major: int | None = None, version: str | None = None) -> dict:
     return params
 
 
-def request(method: str, url: str, key: str | None = None, **kwargs):
+def request(method: str, url: str, auth: dict | None = None, **kwargs):
+    """``auth`` is the registered catchment's config dict — its `key` and/or custom `headers`
+    (``catchment connect --key/--header``) are attached to the request via
+    :func:`duckstring.cli.config.auth_headers`."""
     import httpx
+
+    from .config import auth_headers
 
     raw_timeout = kwargs.pop("timeout", None)
     if raw_timeout is None:
@@ -25,10 +30,12 @@ def request(method: str, url: str, key: str | None = None, **kwargs):
     else:
         timeout = raw_timeout
 
-    if key:
+    if auth:
         headers = kwargs.pop("headers", None) or {}
-        headers.setdefault("Authorization", f"Bearer {key}")
-        kwargs["headers"] = headers
+        for name, value in auth_headers(auth).items():
+            headers.setdefault(name, value)
+        if headers:
+            kwargs["headers"] = headers
 
     try:
         resp = httpx.request(method, url, timeout=timeout, **kwargs)
@@ -43,9 +50,9 @@ def request(method: str, url: str, key: str | None = None, **kwargs):
         raise typer.Exit(1) from None
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 401:
-            typer.echo("Error: the Catchment rejected the API key (401).", err=True)
-            typer.echo("Set one for this catchment: duckstring catchment connect --name <name> --path <url> --key <key>",
-                       err=True)
+            typer.echo("Error: the Catchment (or the service in front of it) rejected the request (401).", err=True)
+            typer.echo("Set its credentials on the registration: duckstring catchment connect --name <name> "
+                       "--path <url> --key <key>  (or --header 'Name: value' for platform auth)", err=True)
         elif exc.response.status_code == 404:
             typer.echo(f"Error: endpoint not found — {exc.request.url}", err=True)
             try:
@@ -64,9 +71,9 @@ def request(method: str, url: str, key: str | None = None, **kwargs):
         raise typer.Exit(1) from None
 
 
-def get(url: str, key: str | None = None, **kwargs):
-    return request("GET", url, key=key, **kwargs)
+def get(url: str, auth: dict | None = None, **kwargs):
+    return request("GET", url, auth=auth, **kwargs)
 
 
-def post(url: str, key: str | None = None, **kwargs):
-    return request("POST", url, key=key, **kwargs)
+def post(url: str, auth: dict | None = None, **kwargs):
+    return request("POST", url, auth=auth, **kwargs)
