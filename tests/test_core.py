@@ -51,3 +51,44 @@ def test_stub_classes_importable():
     assert Pond is not None
     assert Ripple is not None
     assert Trickle is not None
+
+
+def test_read_table_registers_source_view(tmp_path):
+    """A foreign read_table registers the Source table as a view under its own name, so SQL can
+    say `FROM table` directly — no Python frame scanning (unreliable in the threaded executor)."""
+    import duckdb
+
+    from duckstring.core import Pond
+
+    data_dir = tmp_path / "ponds" / "src" / "m1" / "data"
+    data_dir.mkdir(parents=True)
+    duckdb.sql("SELECT 1 AS id, 'a' AS val").write_parquet(str(data_dir / "event.parquet"))
+
+    con = duckdb.connect()
+    pond = Pond(name="snk", version="1.0.0", con=con, root=tmp_path, source_majors={"src": 1})
+    rel = pond.read_table("src.event")
+    assert rel.fetchall() == [(1, "a")]
+    # The registered view — referenced by table name, not by the Python variable.
+    assert con.sql("SELECT val FROM event WHERE id = 1").fetchall() == [("a",)]
+    con.close()
+
+
+def test_read_table_view_yields_to_own_table(tmp_path):
+    """If the Pond already owns a table with the Source table's name, the view registration is
+    skipped (loudly clashing names can't silently shadow own data) — the relation still works."""
+    import duckdb
+
+    from duckstring.core import Pond
+
+    data_dir = tmp_path / "ponds" / "src" / "m1" / "data"
+    data_dir.mkdir(parents=True)
+    duckdb.sql("SELECT 99 AS id").write_parquet(str(data_dir / "event.parquet"))
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE event (id INT)")
+    con.execute("INSERT INTO event VALUES (1)")
+    pond = Pond(name="snk", version="1.0.0", con=con, root=tmp_path, source_majors={"src": 1})
+    rel = pond.read_table("src.event")
+    assert rel.fetchall() == [(99,)]  # the relation reads the Source
+    assert con.sql("SELECT id FROM event").fetchall() == [(1,)]  # own table untouched
+    con.close()

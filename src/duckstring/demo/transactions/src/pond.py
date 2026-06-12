@@ -41,9 +41,6 @@ def ingest(pond):
     )
 
     if existing is not None:
-        combined = pond.con.sql(
-            "SELECT * FROM existing UNION ALL SELECT * FROM new_data"
-        )
-        pond.write_table("transaction", combined)
+        pond.write_table("transaction", existing.union(new_data))
     else:
         pond.write_table("transaction", new_data)

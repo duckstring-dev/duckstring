@@ -330,6 +330,10 @@ class Pond:
         retry_on_lock(_write)  # a concurrent write conflict queues + retries rather than failing
 
     def read_table(self, ref: str):
+        """A relation over a table — own (``"name"``) or a Source's (``"source.table"``). A Source
+        table is also registered as a temp view under its own name, so SQL can reference it directly
+        (``FROM table``). Prefer that over naming the returned relation's Python variable in SQL:
+        that resolves by scanning Python frames, which is unreliable under the threaded executor."""
         if "." in ref:
             source_pond, table = ref.split(".", 1)
             if source_pond != self.name:
@@ -344,7 +348,12 @@ class Pond:
                         f"No exported data found for '{source_pond}.{table}' — "
                         f"has {source_pond} completed a successful run?"
                     )
-                return self.con.sql(f"SELECT * FROM read_parquet('{parquet}')")
+                rel = self.con.sql(f"SELECT * FROM read_parquet('{parquet}')")
+                try:
+                    rel.create_view(table, replace=True)
+                except Exception:
+                    pass  # name taken by one of this Pond's own tables — the relation still works
+                return rel
             return self.con.sql(f'SELECT * FROM "{table}"')
         return self.con.sql(f'SELECT * FROM "{ref}"')
 

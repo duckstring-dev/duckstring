@@ -58,7 +58,7 @@ src = pond.read_table("transactions.transaction")     # a Source's table — its
 ```
 
 - **Bare name** — a table this Pond wrote, read live from its working database. This is how intermediate state flows between Ripples in a run (and how an Inlet can build on its own previous output).
-- **`source_pond.table`** — a Source's *published* output: the Parquet snapshot exported by its last successful run. Reads never touch the Source's live database, so they see only consistent, completed data and never contend with the Source's execution.
+- **`source_pond.table`** — a Source's *published* output: the Parquet snapshot exported by its last successful run. Reads never touch the Source's live database, so they see only consistent, completed data and never contend with the Source's execution. The table is also registered as a view under its own name, so plain SQL can reference it directly — `FROM "transaction"` after the read above.
 
 Raises `FileNotFoundError` if a Source table has no exported snapshot yet — i.e. the Source hasn't completed a successful run.
 
@@ -67,7 +67,7 @@ Raises `FileNotFoundError` if a Source table has no exported snapshot yet — i.
 Publishes a relation as a table of this Pond, atomically:
 
 ```python
-agg = pond.con.sql("SELECT product_id, SUM(quantity) AS qty FROM raw GROUP BY 1")
+agg = pond.con.sql('SELECT product_id, SUM(quantity) AS qty FROM "transaction" GROUP BY 1')
 pond.write_table("daily_sales", agg)
 ```
 
@@ -77,19 +77,21 @@ Each successful Pond Run ends with every table exported to Parquet (`ponds/{pond
 
 ### `pond.con` — direct DuckDB
 
-`pond.con` is an ordinary DuckDB connection, with the full SQL and Python-API surface. The idiom worth knowing is **replacement scans**: DuckDB resolves table names in SQL against Python variables holding relations (or pandas/Polars/Arrow objects) in the enclosing scope:
+`pond.con` is an ordinary DuckDB connection, with the full SQL and Python-API surface. SQL sees every table this Pond has written, plus a view for each Source table read with `read_table`:
 
 ```python
-raw = pond.read_table("transactions.transaction")
+pond.read_table("transactions.transaction")    # registers the view `transaction`
 agg = pond.con.sql("""
     SELECT product_id, SUM(quantity) AS total
-    FROM raw                       -- the Python variable above
+    FROM "transaction"
     GROUP BY product_id
 """)
 pond.write_table("totals", agg)
 ```
 
-Relations are lazy — `pond.con.sql(...)` builds a query plan, and nothing executes until the result is consumed (here, by `write_table`). Chains of relations compose into a single optimised query.
+Relations are lazy — `pond.con.sql(...)` builds a query plan, and nothing executes until the result is consumed (here, by `write_table`). Chains of relations compose into a single optimised query, and the relation API (`.filter`, `.aggregate`, `.union`, …) composes the same way.
+
+One DuckDB feature to avoid inside Ripples: **replacement scans** — referencing a Python *variable* as a table name in SQL (``FROM raw`` for a local named ``raw``). That resolves by scanning Python stack frames, which is unreliable under the threaded executor Ripples run in. Reference registered names as above, or compose relations with the relation API instead.
 
 Anything that produces a DuckDB relation works as `write_table` input, which is also the bridge for non-SQL transforms:
 
@@ -97,7 +99,7 @@ Anything that produces a DuckDB relation works as `write_table` input, which is 
 import pandas as pd
 
 df = pd.DataFrame(fetch_from_api())                    # arbitrary Python
-pond.write_table("snapshot", pond.con.sql("SELECT * FROM df"))
+pond.write_table("snapshot", pond.con.from_df(df))
 ```
 
 ## `@puddle` and the `Puddle` handle

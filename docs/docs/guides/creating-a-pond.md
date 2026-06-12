@@ -61,13 +61,13 @@ from duckstring import ripple
 
 @ripple
 def product_rank(pond):
-    lines = pond.read_table("sales.sale_line")
+    pond.read_table("sales.sale_line")    # registers the Source table as the view `sale_line`
     ranked = pond.con.sql("""
         SELECT product_name, category,
                SUM(revenue)        AS total_revenue,
                SUM(total_quantity) AS units_sold,
                RANK() OVER (ORDER BY SUM(revenue) DESC) AS rank
-        FROM lines
+        FROM sale_line
         GROUP BY product_name, category
     """)
     pond.write_table("product_rank", ranked)
@@ -75,8 +75,8 @@ def product_rank(pond):
 
 @ripple(parents=[product_rank])
 def top10(pond):
-    ranked = pond.read_table("product_rank")
-    pond.write_table("top10", pond.con.sql("SELECT * FROM ranked WHERE rank <= 10"))
+    # product_rank is this Pond's own table — SQL sees it directly.
+    pond.write_table("top10", pond.con.sql("SELECT * FROM product_rank WHERE rank <= 10"))
 ```
 
 The moving parts:

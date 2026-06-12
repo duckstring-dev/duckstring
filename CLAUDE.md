@@ -168,3 +168,4 @@ Run `ruff check .` and fix all errors (line-length 128; E/F/I/B).
 - FK columns: **`{table}_id`**; qualify (`sink_id`, `source_id`) when two FKs reference the same table.
 - Inter-pond and intra-pond concerns stay in separate tables — do not unify them.
 - Freshness/demand state is keyed on `pond` (the selected version); topology and run history on `pond_version`.
+- **No DuckDB replacement scans in Ripple/demo/docs code** (referencing a Python local as a SQL table name, `FROM raw`): it resolves by scanning Python frames and is flaky under the Duck's threaded executor ("don't know what type:" failures on CI). `Pond.read_table` registers foreign Source tables as temp views named after the table — SQL references the table name directly; own tables are queried directly; compose relations via the relation API (`.union`, …) otherwise.

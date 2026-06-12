@@ -17,11 +17,11 @@ from duckstring import ripple
 
 @ripple
 def daily_sales(pond):
-    raw = pond.read_table("transactions.transaction")
+    pond.read_table("transactions.transaction")    # registers the view `transaction`
     agg = pond.con.sql("""
         SELECT product_id, created_at AS sale_date,
                SUM(quantity) AS total_quantity, COUNT(*) AS tx_count
-        FROM raw
+        FROM "transaction"
         GROUP BY product_id, created_at
     """)
     pond.write_table("daily_sales", agg)

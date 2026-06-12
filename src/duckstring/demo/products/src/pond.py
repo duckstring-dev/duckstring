@@ -60,8 +60,7 @@ def ingest(pond):
         return
 
     vals = _to_values(next_batch)
-    new_rows = pond.con.sql(  # noqa: F841
+    new_rows = pond.con.sql(
         f"SELECT * FROM (VALUES {vals}) t(id, name, category, unit_price)"
     )
-    combined = pond.con.sql("SELECT * FROM existing UNION ALL SELECT * FROM new_rows")
-    pond.write_table("product", combined)
+    pond.write_table("product", existing.union(new_rows))
