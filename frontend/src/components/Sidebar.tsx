@@ -59,24 +59,23 @@ function Section({ children }: { children: React.ReactNode }) {
   return <div style={{ borderTop: '1px solid #27272a', paddingTop: 14, marginTop: 14 }}>{children}</div>;
 }
 
-// A bordered, tinted callout for a Pond's failed/blocked state — sits just below the summary.
+// A bordered, tinted callout for a Pond's failed/blocked state — shown in the Triggers section in
+// place of the trigger buttons (triggers have no effect while halted), so its presence is the signal.
 function StatusCard({ color, title, children }: { color: string; title: string; children?: React.ReactNode }) {
   return (
-    <Section>
-      <div style={{ border: `1px solid ${color}`, background: `${color}14`, borderRadius: 6, padding: '10px 12px' }}>
-        <div style={{ fontSize: 11, fontWeight: 700, color, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: children ? 7 : 0 }}>
-          {title}
-        </div>
-        {children && (
-          <div style={{ fontSize: 12, color: '#d4d4d8', lineHeight: 1.6, wordBreak: 'break-word' }}>{children}</div>
-        )}
+    <div style={{ border: `1px solid ${color}`, background: `${color}14`, borderRadius: 6, padding: '10px 12px' }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: children ? 7 : 0 }}>
+        {title}
       </div>
-    </Section>
+      {children && (
+        <div style={{ fontSize: 12, color: '#d4d4d8', lineHeight: 1.6, wordBreak: 'break-word' }}>{children}</div>
+      )}
+    </div>
   );
 }
 
-// The reason a Pond is failed or blocked (missing Sources / a failed upstream), with details. Null
-// when the Pond is healthy. Rendered between the summary and the trigger/window sections.
+// The reason a Pond is failed/killed/blocked (missing Sources / a failed upstream), with details.
+// Null when the Pond is healthy.
 function StatusBox({ info, ponds }: { info: PondInfo; ponds: Record<string, Pond> }) {
   const bullets = (items: string[], render: (s: string) => string) => (
     <ul style={{ margin: 0, paddingLeft: 18, color: '#fafafa', listStyleType: 'disc', listStylePosition: 'outside' }}>
@@ -199,6 +198,10 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const selectedRipple = selectedRippleId ? ripples[selectedRippleId] : null;
   const trigger = selectedPondId ? triggers[selectedPondId] : undefined;
   const isInlet = selectedPond ? selectedPond.sources.length === 0 : false;
+  const selectedInfo = selectedPondId ? pondInfo[selectedPondId] : undefined;
+  // Failed/killed/blocked all no-op triggers (only Control/Clear recover them), so the Triggers
+  // section shows the reason in place of the buttons.
+  const halted = !!selectedInfo && (selectedInfo.isFailed || selectedInfo.isKilled || selectedInfo.isBlocked);
 
   // Mobile: the sidebar is a collapsible bottom sheet; selecting a node opens it
   // (state adjusted during render, like the budget inputs above).
@@ -268,9 +271,6 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             )}
           </Section>
 
-          {/* Why the Pond is failed/blocked — below the summary, above triggers. */}
-          {pondInfo[selectedPond.id] && <StatusBox info={pondInfo[selectedPond.id]} ponds={ponds} />}
-
           {/* Windows (Inlet ponds only) */}
           {isInlet && (
             <Section>
@@ -279,43 +279,49 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             </Section>
           )}
 
-          {/* Triggers */}
+          {/* Triggers — or, while halted, the reason (triggers have no effect). */}
           <Section>
             <Label>Triggers</Label>
-            <div style={quadRow}>
-              <Btn block onClick={() => tap(selectedPond.id)} color={THEME_PULL}>Tap</Btn>
-              <Btn block onClick={() => wave(selectedPond.id)} color={THEME_PULL}>Wave</Btn>
-              <Btn block onClick={() => pulse(selectedPond.id)} color={THEME_PUSH}>Pulse</Btn>
-              <Btn block onClick={() => setShowTideInput((v) => !v)} color={THEME_PUSH}>Tide</Btn>
-            </div>
-            {showTideInput && (
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
-                <span style={{ fontSize: 11, color: '#71717a' }} title="keep no more stale than">≤</span>
-                <input type="number" min="1" step="1" value={tideBound} onChange={(e) => setTideBound(e.target.value)} style={{ ...numInput, width: 56 }} />
-                <select value={tideUnit} onChange={(e) => setTideUnit(e.target.value as FreqUnit)} style={selectInput}>
-                  {TIDE_UNITS.map((u) => (
-                    <option key={u.value} value={u.value}>{u.label}</option>
-                  ))}
-                </select>
-                <Btn
-                  small
-                  onClick={() => {
-                    const secs = TIDE_UNITS.find((u) => u.value === tideUnit)!.secs;
-                    tide(selectedPond.id, Math.max(0.1, parseFloat(tideBound) * secs));
-                    setShowTideInput(false);
-                  }}
-                  color={THEME_PUSH}
-                >
-                  Set
-                </Btn>
-              </div>
-            )}
-            {trigger && (
-              <div style={{ marginTop: 8 }}>
-                <Btn small onClick={() => removeTrigger(selectedPond.id)} color={THEME_DANGER}>
-                  Remove {trigger.kind === 'wave' ? 'Wave' : 'Tide'} Trigger
-                </Btn>
-              </div>
+            {halted ? (
+              <StatusBox info={selectedInfo!} ponds={ponds} />
+            ) : (
+              <>
+                <div style={quadRow}>
+                  <Btn block onClick={() => tap(selectedPond.id)} color={THEME_PULL}>Tap</Btn>
+                  <Btn block onClick={() => wave(selectedPond.id)} color={THEME_PULL}>Wave</Btn>
+                  <Btn block onClick={() => pulse(selectedPond.id)} color={THEME_PUSH}>Pulse</Btn>
+                  <Btn block onClick={() => setShowTideInput((v) => !v)} color={THEME_PUSH}>Tide</Btn>
+                </div>
+                {showTideInput && (
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
+                    <span style={{ fontSize: 11, color: '#71717a' }} title="keep no more stale than">≤</span>
+                    <input type="number" min="1" step="1" value={tideBound} onChange={(e) => setTideBound(e.target.value)} style={{ ...numInput, width: 56 }} />
+                    <select value={tideUnit} onChange={(e) => setTideUnit(e.target.value as FreqUnit)} style={selectInput}>
+                      {TIDE_UNITS.map((u) => (
+                        <option key={u.value} value={u.value}>{u.label}</option>
+                      ))}
+                    </select>
+                    <Btn
+                      small
+                      onClick={() => {
+                        const secs = TIDE_UNITS.find((u) => u.value === tideUnit)!.secs;
+                        tide(selectedPond.id, Math.max(0.1, parseFloat(tideBound) * secs));
+                        setShowTideInput(false);
+                      }}
+                      color={THEME_PUSH}
+                    >
+                      Set
+                    </Btn>
+                  </div>
+                )}
+                {trigger && (
+                  <div style={{ marginTop: 8 }}>
+                    <Btn small onClick={() => removeTrigger(selectedPond.id)} color={THEME_DANGER}>
+                      Remove {trigger.kind === 'wave' ? 'Wave' : 'Tide'} Trigger
+                    </Btn>
+                  </div>
+                )}
+              </>
             )}
           </Section>
 
