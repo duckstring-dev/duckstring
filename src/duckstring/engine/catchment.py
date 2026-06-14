@@ -236,7 +236,7 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
     downstream; a Pond still reads its blocked state solely from itself and its Sources."""
     ps = s.pond_states[pid]
     pond = s.ponds[pid]
-    blocked = ps.is_failed or ps.is_killed or ps.remote_down or any(
+    blocked = ps.is_failed or ps.is_killed or ps.remote_down or pond.has_missing_source or any(
         s.pond_states[sp].is_failed or s.pond_states[sp].is_blocked or s.pond_states[sp].is_killed
         for sp in pond.sources
         if sp not in pond.optional_sources
@@ -253,6 +253,8 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
 def can_start_pond(s: EngineState, pid: PondId, now: datetime) -> bool:
     ps = s.pond_states[pid]
     if ps.is_killed:  # terminal until an operator Wake/Force/Clear
+        return False
+    if s.ponds[pid].has_missing_source:  # a declared Source is absent — never run (hard block)
         return False
     f, _ = pond_source_f(s, pid, now)
     if f is None:

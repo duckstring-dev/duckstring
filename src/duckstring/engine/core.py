@@ -130,6 +130,10 @@ class Pond:
     # its freshness is the upstream freshness mirrored by the poller (PondState.remote_f), and its
     # single ripple performs the data transfer. See plans/cross-catchment-ducts.md.
     is_draw: bool = False
+    # At least one declared Source (required OR optional) is absent from the Catchment — not deployed
+    # and not drawn over a duct. The Pond cannot run with a missing dependency, so it is hard-blocked
+    # until every Source is present (e.g. the Source is deployed, or a duct draws it in).
+    has_missing_source: bool = False
 
 
 @dataclass

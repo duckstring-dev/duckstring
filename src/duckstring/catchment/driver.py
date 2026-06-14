@@ -112,6 +112,7 @@ class Driver:
             for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw in rows:
                 key = pond_key(name, major)
                 sources, optional = [], set()
+                has_missing_source = False
                 for snid, smajor, required in db.execute(
                     "SELECT source_pond_name_id, source_major, required FROM pond_to_pond WHERE pond_id = ?",
                     (pond_id,),
@@ -121,6 +122,10 @@ class Driver:
                         sources.append(skey)
                         if not required:
                             optional.add(skey)
+                    else:
+                        # A declared Source (required or optional) is absent from this Catchment —
+                        # not deployed and not drawn over a duct. Hard-block until it is present.
+                        has_missing_source = True
                 windows = [self._row_to_window(r) for r in db.execute(
                     "SELECT start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time "
                     "FROM pond_window WHERE pond_id = ?", (pond_id,)
@@ -132,6 +137,7 @@ class Driver:
                 ponds[key] = Pond(
                     id=key, name=key, sources=sources, optional_sources=optional, windows=windows,
                     retry_immediately=imm, retry_on_change=onc, is_draw=bool(is_draw),
+                    has_missing_source=has_missing_source,
                 )
                 pond_states[key] = self._load_pond_state(pond_id)
 
@@ -183,6 +189,11 @@ class Driver:
                 ponds=ponds, pond_states=pond_states, ripples=ripples,
                 ripple_states=ripple_states, triggers=triggers,
             )
+            # Recompute blocked from the freshly-loaded topology: a Source that is absent now (or has
+            # since become present, e.g. a duct was added) flips has_missing_source, so the persisted
+            # is_blocked may be stale. Re-derive for every Pond (propagates to Sinks).
+            for pid in self.state.pond_states:
+                derive_blocked(self.state, pid)
             self.jobs = {key: self.jobs.get(key, []) for key in ponds}
 
     def _load_pond_state(self, pond_id: int) -> PondState:

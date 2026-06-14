@@ -22,6 +22,7 @@ from duckstring.catchment.poller import poll_once
 from duckstring.catchment.registry import pond_data_dir
 from duckstring.catchment.routes import router
 from duckstring.catchment.routes.deploy import _register
+from duckstring.engine import NEVER
 
 pytestmark = pytest.mark.timeout(5)
 
@@ -134,6 +135,57 @@ def test_cannot_draw_over_an_existing_local_pond(tmp_path):
     d.create_duct("up", "http://up", None)
     with pytest.raises(ValueError, match="already exists"):
         d.add_duct_pond("up", "sales", 1)
+
+
+# ─── Missing-source blocking (a declared Source absent from the Catchment) ─────
+
+
+def _demo_minus_products(tmp_path):
+    """transactions + products → sales → reports, with products NOT deployed locally."""
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "transactions", "1.0.0", "inlet", "ponds/transactions/1.0.0", _cfg(), _RIPPLES)
+    _register(db, "sales", "1.0.0", "pond", "ponds/sales/1.0.0",
+              _cfg(sources={"transactions": "1.0.0", "products": "1.0.0"}), _RIPPLES)
+    _register(db, "reports", "1.0.0", "outlet", "ponds/reports/1.0.0",
+              _cfg(sources={"sales": "1.0.0"}), _RIPPLES)
+    return Driver(db, tmp_path, "http://x", NoopLauncher())
+
+
+def test_missing_source_blocks_pond_and_downstream(tmp_path):
+    d = _demo_minus_products(tmp_path)
+    assert d.state.ponds["sales@1"].has_missing_source
+    assert d.state.pond_states["sales@1"].is_blocked       # products absent
+    assert d.state.pond_states["reports@1"].is_blocked      # blocked via its required Source sales
+
+
+def test_pulse_does_not_run_a_pond_with_a_missing_source(tmp_path):
+    d = _demo_minus_products(tmp_path)
+    d.pulse("reports@1")  # the scenario: pulse the set before products is available
+    # Nothing downstream of the gap runs, and the push does not cascade through sales to transactions.
+    assert d.state.pond_states["sales@1"].start_f == NEVER
+    assert d.state.pond_states["transactions@1"].start_f == NEVER
+    assert d.state.pond_states["sales@1"].targets == []
+
+
+def test_drawing_the_missing_source_unblocks(tmp_path):
+    d = _demo_minus_products(tmp_path)
+    d.create_duct("up", "http://up", None)
+    d.add_duct_pond("up", "products", 1)  # products now present (as a Draw) → reload re-derives
+    assert not d.state.ponds["sales@1"].has_missing_source
+    assert not d.state.pond_states["sales@1"].is_blocked
+    assert not d.state.pond_states["reports@1"].is_blocked
+
+
+def test_optional_missing_source_also_blocks(tmp_path):
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    # "products?" is an optional source — still blocks while absent (every Source must be present).
+    _register(db, "sales", "1.0.0", "pond", "ponds/sales/1.0.0",
+              _cfg(sources={"products": "1.0.0?"}), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    assert d.state.ponds["sales@1"].has_missing_source
+    assert d.state.pond_states["sales@1"].is_blocked
 
 
 # ─── HTTP routes ───────────────────────────────────────────────────────────────
