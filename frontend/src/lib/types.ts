@@ -16,6 +16,7 @@ export interface Pond {
   id: PondId;
   name: string;
   kind: string; // inlet | pond | outlet
+  isDraw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment
   sources: PondId[];
 }
 

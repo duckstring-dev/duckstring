@@ -66,6 +66,7 @@ export interface RawPond {
   name: string;
   major: number;
   kind: string;
+  is_draw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment, not run by a Duck
   version: string;
   status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked';
   gen: number;

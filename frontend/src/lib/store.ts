@@ -111,7 +111,7 @@ function transformStatus(payload: StatusPayload): StatusSlice {
   const triggers: Record<PondId, TriggerView> = {};
 
   for (const p of payload.ponds) {
-    ponds[p.id] = { id: p.id, name: p.name, kind: p.kind, sources: [] };
+    ponds[p.id] = { id: p.id, name: p.name, kind: p.kind, isDraw: p.is_draw ?? false, sources: [] };
     pondInfo[p.id] = {
       version: p.version,
       major: p.major,
@@ -130,14 +130,18 @@ function transformStatus(payload: StatusPayload): StatusSlice {
     pondViews[p.id] = nodeView(p, p.d_ms);
     if (p.trigger) triggers[p.id] = { kind: p.trigger.kind, boundMs: p.trigger.bound_ms };
 
-    for (const r of p.ripples) {
-      const eid = `${p.id}.${r.name}`;
-      ripples[eid] = { id: eid, pondId: p.id, name: r.name, parents: [] };
-      rippleViews[eid] = nodeView(r, 0);
-    }
-    // ripple_edges are [sourceName, sinkName] within the Pond → sink.parents includes source.
-    for (const [src, snk] of p.ripple_edges) {
-      ripples[`${p.id}.${snk}`]?.parents.push(`${p.id}.${src}`);
+    // A Pond Draw's single "draw" ripple is an internal transfer mechanism — not worth rendering. Skip
+    // its ripples entirely; the Draw shows as a bare node (its running/idle state is pond-level).
+    if (!p.is_draw) {
+      for (const r of p.ripples) {
+        const eid = `${p.id}.${r.name}`;
+        ripples[eid] = { id: eid, pondId: p.id, name: r.name, parents: [] };
+        rippleViews[eid] = nodeView(r, 0);
+      }
+      // ripple_edges are [sourceName, sinkName] within the Pond → sink.parents includes source.
+      for (const [src, snk] of p.ripple_edges) {
+        ripples[`${p.id}.${snk}`]?.parents.push(`${p.id}.${src}`);
+      }
     }
   }
   // Pond sources from inter-Pond edges [sourceId, sinkId] (pond keys).

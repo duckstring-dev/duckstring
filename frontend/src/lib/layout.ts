@@ -40,10 +40,12 @@ function rippleWidth(r: Ripple, floor = 0): number {
 function pondNameWidth(name: string): number {
   return Math.ceil(name.length * 8.2 + 24 /* padding */); // ~13px bold monospace
 }
-const POND_PAD_TOP = 68;
+const POND_PAD_TOP = 68; // header area above the ripples (also the height of a ripple-less Pond)
 const POND_PAD_SIDE = 24;
 const POND_PAD_BOTTOM = 24;
-const MIN_POND_W = 160;
+// A Pond is always at least as wide as one ripple plus its side margins — the floor a single-ripple
+// Pond would have. Applied even to a Pond with no ripples (a Draw) so it doesn't render narrower.
+const MIN_POND_W = MIN_RIPPLE_W + POND_PAD_SIDE * 2;
 const MIN_POND_H = 120;
 
 const TRIGGER_W = 120;
@@ -75,7 +77,8 @@ function buildRippleLayout(
   const pondRipples = Object.values(ripples).filter((r) => r.pondId === pondId);
 
   if (pondRipples.length === 0) {
-    return { positions: {}, widths: {}, width: MIN_POND_W, height: MIN_POND_H };
+    // A ripple-less Pond (a Draw) is just its header — no ripple area, no bottom padding.
+    return { positions: {}, widths: {}, width: MIN_POND_W, height: POND_PAD_TOP };
   }
 
   const widths: Record<RippleId, number> = {};

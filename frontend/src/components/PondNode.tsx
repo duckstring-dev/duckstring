@@ -31,7 +31,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
       style={{
         width: '100%',
         height: '100%',
-        border: `2px solid ${borderColor}`,
+        // A Pond Draw (fed by a duct) is drawn with a dashed border to set it apart from a local Pond.
+        border: `2px ${pond.isDraw ? 'dashed' : 'solid'} ${borderColor}`,
         boxShadow: isSelected ? `0 0 0 3px ${borderColor}40` : undefined,
         borderRadius: 10,
         background: nodeFill(borderColor),
@@ -61,10 +62,16 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           flexDirection: 'column',
           justifyContent: 'center',
           gap: 5,
-          borderBottom: `1px solid ${borderColor}30`,
+          // No divider on a Draw — it's header-only, with no ripple area beneath to separate.
+          borderBottom: pond.isDraw ? 'none' : `1px solid ${borderColor}30`,
         }}
       >
         <span style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          {pond.isDraw && (
+            <span style={{ fontSize: 10, fontWeight: 700, color: borderColor, letterSpacing: '0.06em', flexShrink: 0 }}>
+              [DRAW]
+            </span>
+          )}
           <span style={{ fontSize: 13, fontWeight: 700, color: '#e4e4e7', letterSpacing: '0.04em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {pond.name}
           </span>

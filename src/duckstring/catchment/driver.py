@@ -1066,6 +1066,7 @@ class Driver:
                     "name": self.meta[key]["name"],
                     "major": self.meta[key]["major"],
                     "kind": self.meta[key]["kind"],
+                    "is_draw": self.meta[key].get("is_draw", False),
                     "version": self.meta[key]["version"],
                     "status": st,
                     "gen": ps.runs_started,
