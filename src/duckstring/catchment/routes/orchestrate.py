@@ -164,6 +164,31 @@ def get_budget(name: str, request: Request, major: int | None = None, version: s
     return _driver(request).retry_config(_resolve(request, name, major, version))
 
 
+# ─── Cross-Catchment exposure (open / tap-on-get) ────────────────────────────
+
+
+class _OpenBody(BaseModel):
+    tap_on_get: bool = False
+
+
+@router.post("/ponds/{name}/open")
+def open_pond(
+    name: str, request: Request, body: _OpenBody = _OpenBody(),
+    major: int | None = None, version: str | None = None,
+):
+    """Mark a Pond open — it accepts demand from any source (e.g. a downstream Catchment over a duct).
+    With ``tap_on_get`` a read on the query route also fires a Tap (the snapshot is served first)."""
+    _driver(request).set_pond_open(_resolve(request, name, major, version), body.tap_on_get)
+    return {"ok": True}
+
+
+@router.post("/ponds/{name}/close")
+def close_pond(name: str, request: Request, major: int | None = None, version: str | None = None):
+    """Close a Pond — remove its open flag (and tap-on-get)."""
+    _driver(request).unset_pond_open(_resolve(request, name, major, version))
+    return {"ok": True}
+
+
 # ─── Windows (batch-availability on Inlets) ──────────────────────────────────────
 
 

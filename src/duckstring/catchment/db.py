@@ -7,6 +7,8 @@ _SCHEMA_DIR = Path(__file__).parent / "schema"
 
 def connect(path: Path) -> sqlite3.Connection:
     con = sqlite3.connect(path, check_same_thread=False)
+    if path != Path(":memory:") and path.exists():
+        path.chmod(0o600)  # may hold duct credentials (auth headers for upstream Catchments)
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA journal_mode = WAL")
     con.execute("PRAGMA busy_timeout = 5000")  # queue on a locked DB (up to 5 s) instead of erroring

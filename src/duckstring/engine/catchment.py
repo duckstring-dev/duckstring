@@ -128,6 +128,11 @@ def any_ripple_busy(s: EngineState, pid: PondId) -> bool:
 
 def pond_source_f(s: EngineState, pid: PondId, now: datetime) -> tuple[datetime | None, timedelta]:
     pond = s.ponds[pid]
+    if pond.is_draw:
+        # A Pond Draw's freshness is the upstream freshness the poller mirrored in. NEVER (not yet
+        # polled, or upstream never run) → cannot transfer.
+        rf = s.pond_states[pid].remote_f
+        return (rf if rf != NEVER else None), ZERO
     if not pond.sources:
         if pond.windows:
             best: tuple[datetime, timedelta] | None = None
@@ -231,7 +236,7 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
     downstream; a Pond still reads its blocked state solely from itself and its Sources."""
     ps = s.pond_states[pid]
     pond = s.ponds[pid]
-    blocked = ps.is_failed or ps.is_killed or any(
+    blocked = ps.is_failed or ps.is_killed or ps.remote_down or any(
         s.pond_states[sp].is_failed or s.pond_states[sp].is_blocked or s.pond_states[sp].is_killed
         for sp in pond.sources
         if sp not in pond.optional_sources

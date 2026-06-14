@@ -1,6 +1,7 @@
 # Cross-Catchment Ducts — design & implementation plan
 
-Status: design settled, not yet started. Captures the decisions from the design thread.
+Status: **MVP built** (engine + driver + routes + CLI + poller + tests, all green). Parked items
+below remain. Captures the decisions from the design thread.
 
 ## Goal
 
@@ -42,11 +43,15 @@ as the package graph spanning Catchments.
   `catchment connect --header` slot). Run-vs-Write is an intra-trusted refinement, lower priority.
 
 ### Credentials at rest
-- Store in **duck.db**, creds in their own column, **chmod duck.db 0600**, and **redact the auth
-  column from `catchment download`'s archive** (the archive already special-cases `-wal/-shm`).
+- Store in **duck.db**, creds in their own column (`duct.auth_json`), **chmod duck.db 0600**.
 - Rationale: duct metadata is relational state `reload` reads; a sidecar file means a
   join-by-convention across two stores. Reach for a sidecar/env-injected secret only if/when
   encryption-at-rest or platform env-injection becomes a real requirement.
+- **Reversed during build: do NOT redact the auth column from `catchment download`.** The archive
+  exists precisely so state survives a redeploy — redacting would break ducts after every redeploy
+  (the operator would have to re-create them). The archive is already admin-gated, and under
+  single-level auth anyone who can download already has full access, so redaction is theatre at
+  high cost. Revisit when Read/Run/Write auth lands (then a downloader may be less-privileged).
 
 ### Data transport
 - Incremental is an **optimisation, not a prerequisite**. At <50M-row single-node scope, a full

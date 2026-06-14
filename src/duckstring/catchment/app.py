@@ -49,15 +49,19 @@ async def _lifespan(app: FastAPI):
     # Restore: resume any Pond Runs that were in flight when the Catchment last stopped.
     driver.resume_incomplete()
 
+    from .poller import run_poller
+
     scheduler = asyncio.create_task(_scheduler(driver))
+    poller = asyncio.create_task(run_poller(driver, app.state.root))
     try:
         yield
     finally:
-        scheduler.cancel()
-        try:
-            await scheduler
-        except asyncio.CancelledError:
-            pass
+        for task in (scheduler, poller):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         launcher.shutdown_all()
 
 

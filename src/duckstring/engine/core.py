@@ -126,6 +126,10 @@ class Pond:
     # update. See docs/guide/theory.md "Fault Tolerance".
     retry_immediately: int = 0
     retry_on_change: int = 0
+    # A Pond Draw (cross-Catchment): fed by a duct, not executed by a Duck. It has no local sources;
+    # its freshness is the upstream freshness mirrored by the poller (PondState.remote_f), and its
+    # single ripple performs the data transfer. See plans/cross-catchment-ducts.md.
+    is_draw: bool = False
 
 
 @dataclass
@@ -166,6 +170,10 @@ class PondState:
     start_f: datetime = NEVER  # freshness of the most recently started Pond Run
     end_f: datetime = NEVER  # freshness of the most recently completed Pond Run
     d: timedelta = ZERO  # window delay carried by the current freshness
+    remote_f: datetime = NEVER  # Pond Draws only: the upstream freshness mirrored by the poller
+                                # (transient — repopulated on each poll, not persisted)
+    remote_down: bool = False  # Pond Draws only: upstream is failed/killed/blocked/unreachable →
+                               # the Draw is blocked (drains landed data, solicits nothing)
     has_received_pull: bool = False  # inbox: a Sink/trigger asked for resupply
     has_pull: bool = False  # a Pond Run is wanted in pull
     targets: list[datetime] = field(default_factory=list)  # unsatisfied push target freshnesses
