@@ -111,8 +111,7 @@ class Driver:
 
             for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw in rows:
                 key = pond_key(name, major)
-                sources, optional = [], set()
-                has_missing_source = False
+                sources, optional, missing = [], set(), []
                 for snid, smajor, required in db.execute(
                     "SELECT source_pond_name_id, source_major, required FROM pond_to_pond WHERE pond_id = ?",
                     (pond_id,),
@@ -125,7 +124,9 @@ class Driver:
                     else:
                         # A declared Source (required or optional) is absent from this Catchment —
                         # not deployed and not drawn over a duct. Hard-block until it is present.
-                        has_missing_source = True
+                        missing.append(skey)
+                has_missing_source = bool(missing)
+                self.meta[key]["missing_sources"] = missing
                 windows = [self._row_to_window(r) for r in db.execute(
                     "SELECT start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time "
                     "FROM pond_window WHERE pond_id = ?", (pond_id,)
@@ -1034,6 +1035,24 @@ class Driver:
                 else:
                     st = _demand_status(ps, busy)
 
+                # Why is it blocked? Required Sources that are themselves down (failed/killed/blocked).
+                pond = self.state.ponds[key]
+                blocked_by = [
+                    sp for sp in pond.sources if sp not in pond.optional_sources and (
+                        self.state.pond_states[sp].is_failed
+                        or self.state.pond_states[sp].is_blocked
+                        or self.state.pond_states[sp].is_killed
+                    )
+                ]
+                # The failure message (freshest failed Run), shown when failed.
+                error = None
+                if ps.is_failed:
+                    row = self.db.execute(
+                        "SELECT error FROM pond_run WHERE pond_version_id = ? AND status = 'failed' "
+                        "ORDER BY f DESC LIMIT 1", (self.meta[key]["version_id"],),
+                    ).fetchone()
+                    error = row[0] if row else None
+
                 trig = self.state.triggers.get(key)
                 trigger = None
                 if trig is not None:
@@ -1062,6 +1081,9 @@ class Driver:
                     "is_killed": ps.is_killed,
                     "failed_f": ts(ps.failed_f),
                     "failures": ps.failures,
+                    "missing_sources": self.meta[key].get("missing_sources", []),
+                    "blocked_by": blocked_by,
+                    "error": error,
                     "immediate_retries": self.state.ponds[key].retry_immediately,
                     "source_retries": self.state.ponds[key].retry_on_change,
                     "ripples": ripples,

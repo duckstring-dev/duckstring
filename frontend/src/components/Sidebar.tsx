@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useLiveStore, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
-import type { FreqUnit, PondRun } from '@/lib/types';
+import type { FreqUnit, Pond, PondInfo, PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
 
@@ -57,6 +57,53 @@ function Label({ children }: { children: React.ReactNode }) {
 
 function Section({ children }: { children: React.ReactNode }) {
   return <div style={{ borderTop: '1px solid #27272a', paddingTop: 14, marginTop: 14 }}>{children}</div>;
+}
+
+// A bordered, tinted callout for a Pond's failed/blocked state — sits just below the summary.
+function StatusCard({ color, title, children }: { color: string; title: string; children?: React.ReactNode }) {
+  return (
+    <Section>
+      <div style={{ border: `1px solid ${color}`, background: `${color}14`, borderRadius: 6, padding: '10px 12px' }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: children ? 7 : 0 }}>
+          {title}
+        </div>
+        {children && (
+          <div style={{ fontSize: 12, color: '#d4d4d8', lineHeight: 1.6, wordBreak: 'break-word' }}>{children}</div>
+        )}
+      </div>
+    </Section>
+  );
+}
+
+// The reason a Pond is failed or blocked (missing Sources / a failed upstream), with details. Null
+// when the Pond is healthy. Rendered between the summary and the trigger/window sections.
+function StatusBox({ info, ponds }: { info: PondInfo; ponds: Record<string, Pond> }) {
+  const bullets = (items: string[], render: (s: string) => string) => (
+    <ul style={{ margin: 0, paddingLeft: 18, color: '#fafafa', listStyleType: 'disc', listStylePosition: 'outside' }}>
+      {items.map((s) => <li key={s} style={{ marginTop: 2 }}>{render(s)}</li>)}
+    </ul>
+  );
+
+  if (info.isFailed) {
+    return (
+      <StatusCard color={THEME_DANGER} title="Failed">
+        {info.error ?? 'The most recent Pond Run failed.'}
+      </StatusCard>
+    );
+  }
+  if (info.isKilled) {
+    return <StatusCard color={THEME_DANGER} title="Killed">Stopped by an operator. Wake, Force, or clear to resume.</StatusCard>;
+  }
+  if (info.isBlocked) {
+    if (info.missingSources.length > 0) {
+      return <StatusCard color={THEME_BLOCKED} title="Blocked · Missing Sources">{bullets(info.missingSources, (s) => s)}</StatusCard>;
+    }
+    if (info.blockedBy.length > 0) {
+      return <StatusCard color={THEME_BLOCKED} title="Blocked · Upstream unavailable">{bullets(info.blockedBy, (s) => ponds[s]?.name ?? s)}</StatusCard>;
+    }
+    return <StatusCard color={THEME_BLOCKED} title="Blocked" />;
+  }
+  return null;
 }
 
 const numInput: React.CSSProperties = {
@@ -220,6 +267,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               </div>
             )}
           </Section>
+
+          {/* Why the Pond is failed/blocked — below the summary, above triggers. */}
+          {pondInfo[selectedPond.id] && <StatusBox info={pondInfo[selectedPond.id]} ponds={ponds} />}
 
           {/* Windows (Inlet ponds only) */}
           {isInlet && (

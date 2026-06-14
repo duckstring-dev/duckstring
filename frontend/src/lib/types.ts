@@ -56,6 +56,9 @@ export interface PondInfo {
   isKilled: boolean;
   failedF: string | null; // freshness the failed Run was reaching
   failures: number; // failed Runs this episode (vs sourceRetries)
+  missingSources: string[]; // declared Sources absent from the Catchment (pond keys "name@major")
+  blockedBy: string[]; // required Sources that are down — the reason for an upstream block
+  error: string | null; // failure message of the freshest failed Run, when failed
   immediateRetries: number; // live budget: Ripple retries within a Run
   sourceRetries: number; // live budget: Runs retried on a Source change
 }

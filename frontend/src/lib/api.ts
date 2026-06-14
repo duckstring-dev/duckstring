@@ -81,6 +81,9 @@ export interface RawPond {
   is_killed: boolean;
   failed_f: string | null;
   failures: number;
+  missing_sources: string[]; // declared Sources absent from the Catchment (pond keys "name@major")
+  blocked_by: string[]; // required Sources that are down (failed/killed/blocked) — the upstream block
+  error: string | null; // failure message of the freshest failed Run, when failed
   immediate_retries: number;
   source_retries: number;
   ripples: RawRipple[];

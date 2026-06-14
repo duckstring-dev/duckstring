@@ -121,6 +121,9 @@ function transformStatus(payload: StatusPayload): StatusSlice {
       isKilled: p.is_killed,
       failedF: p.failed_f,
       failures: p.failures,
+      missingSources: p.missing_sources ?? [],
+      blockedBy: p.blocked_by ?? [],
+      error: p.error,
       immediateRetries: p.immediate_retries,
       sourceRetries: p.source_retries,
     };

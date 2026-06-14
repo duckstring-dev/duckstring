@@ -177,6 +177,28 @@ def test_drawing_the_missing_source_unblocks(tmp_path):
     assert not d.state.pond_states["reports@1"].is_blocked
 
 
+def test_status_exposes_block_reason_and_failure_message(tmp_path):
+    d = _demo_minus_products(tmp_path)
+    by_id = {p["id"]: p for p in d.status()["ponds"]}
+    # The Pond with the absent Source reports it (with version line); the downstream reports the cause.
+    assert by_id["sales@1"]["status"] == "blocked"
+    assert by_id["sales@1"]["missing_sources"] == ["products@1"]
+    assert by_id["reports@1"]["status"] == "blocked"
+    assert by_id["reports@1"]["blocked_by"] == ["sales@1"]
+
+
+def test_status_exposes_failure_message(tmp_path):
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "src", "1.0.0", "inlet", "ponds/src/1.0.0", _cfg(), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    d.tap("src@1")  # start a run so there is something in flight to fail
+    d.on_event("src@1", {"kind": "pond_failed", "error": "boom: ledger write failed"})
+    entry = next(p for p in d.status()["ponds"] if p["id"] == "src@1")
+    assert entry["status"] == "failed"
+    assert entry["error"] == "boom: ledger write failed"
+
+
 def test_optional_missing_source_also_blocks(tmp_path):
     db = connect(tmp_path / "duck.db")
     migrate(db)
