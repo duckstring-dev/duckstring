@@ -7,7 +7,7 @@ description: Use Duckstring as the coordination layer over pipelines that run el
 
 A Pond doesn't have to compute anything itself. If your transforms already run on an external engine — a warehouse job, a managed pipeline service, anything with a "start run" API — each pipeline can be wrapped as a **proxy Pond**: a single Ripple that starts the external run, polls until it finishes, and fails if it failed.
 
-The data never touches the Catchment. What you get is the coordination layer those platforms tend to lack across pipeline boundaries:
+In its simplest form the data never touches the Catchment (though it can — see [moving data across the boundary](#moving-data-across-the-boundary)). What you get is the coordination layer those platforms tend to lack across pipeline boundaries:
 
 - **Dependencies by declaration** — each domain's `pond.toml` names its upstream domains; downstream runs when upstream completes, instead of by guessed schedule offsets.
 - **[Demand](triggers.md) instead of schedules** — a Tide keeps a terminal domain no staler than a bound; a Wave re-runs the chain as fast as the slowest pipeline allows; a Pulse runs everything once, in order.
@@ -66,6 +66,50 @@ def run_pipeline(pond):
 ```
 
 Long polls are fine — a Ripple may run for hours; the worker stays live throughout and the Catchment's liveness checks key off the worker, not the Ripple.
+
+## Moving data across the boundary
+
+Proxy Ponds don't have to be data-free. A Ripple can carry data *to* the external engine before triggering it, and carry results *back* afterwards — which inverts the usual architecture: Duckstring executes the many small transforms directly, and the external engine is reserved for the steps that genuinely need its scale. Draw the boundary so only **reduced** data crosses it — dimensions, configs, and aggregates travel; the raw volume stays where it lives.
+
+Pushing inputs up, using a managed volume as the hand-off (file upload is plain REST; the job ingests from the volume path — `COPY INTO` or an autoloader — using the engine's own writer rather than writing its table format from outside):
+
+```python
+import tempfile
+from pathlib import Path
+
+@ripple
+def push_inputs(pond):
+    tiers = pond.read_table("pricing.tier")        # small: dims, thresholds, lookup tables
+    with tempfile.TemporaryDirectory() as tmp:
+        pq = Path(tmp) / "tier.parquet"
+        tiers.write_parquet(str(pq))
+        httpx.put(f"{HOST}/api/2.0/fs/files/Volumes/main/landing/in/tier.parquet",
+                  content=pq.read_bytes(), params={"overwrite": "true"}, headers=AUTH)
+
+
+@ripple(parents=[push_inputs])
+def run_pipeline(pond):
+    ...  # ensure-then-poll, as above
+```
+
+Pulling a result set down, via the SQL statement-execution API — the rows land as an ordinary Pond table, published as Parquet, and every downstream Duckstring Pond consumes it like any other Source:
+
+```python
+@ripple(parents=[run_pipeline])
+def pull_summary(pond):
+    r = httpx.post(f"{HOST}/api/2.0/sql/statements", headers=AUTH, json={
+        "warehouse_id": os.environ["WAREHOUSE_ID"],
+        "statement": "SELECT * FROM main.gold.daily_summary",
+        "wait_timeout": "30s", "format": "JSON_ARRAY",
+    }).json()
+    cols = ", ".join(c["name"] for c in r["manifest"]["schema"]["columns"])
+    rows = ", ".join(f"({', '.join(repr(v) for v in row)})" for row in r["result"]["data_array"])
+    pond.write_table("daily_summary", pond.con.sql(f"SELECT * FROM (VALUES {rows}) t({cols})"))
+```
+
+(For results beyond what a single statement response should carry, have the job write Parquet to a volume and download it instead — the same Files API, in reverse.)
+
+Stamp what crosses the boundary with [`pond.f`](incremental-ripples.md#freshness-as-the-watermark) and both sides get a shared, replay-stable watermark for free.
 
 ## Wiring the domains
 
