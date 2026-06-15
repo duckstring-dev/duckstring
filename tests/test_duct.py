@@ -308,9 +308,17 @@ def test_draw_wait_long_poll(tmp_path):
     body = client.get("/api/draw/sales/1/wait", params={"timeout": 5}).json()
     assert body["end_f"] == f.isoformat() and body["down"] is False
 
-    # A down Pond returns at once (so a Draw learns of the fault without waiting).
+    # A down Pond returns at once (so a Draw learns of the fault without waiting) — it's a *transition*
+    # from the consumer's last-known down=False.
     d.state.pond_states["sales@1"].is_failed = True
     assert client.get("/api/draw/sales/1/wait", params={"timeout": 5, "after": f.isoformat()}).json()["down"]
+
+    # But once the consumer already knows it's down (down=True), a persistent down does NOT return
+    # immediately — it holds until the timeout. This is what stops the poller spinning on a durably
+    # blocked upstream.
+    assert client.get(
+        "/api/draw/sales/1/wait", params={"timeout": 0.3, "after": f.isoformat(), "down": True}
+    ).json()["down"]
 
 
 def test_notify_fires_on_demand_not_on_poller_observe(tmp_path):
@@ -344,6 +352,57 @@ def test_draw_route_streams_all_parquet(tmp_path):
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         assert sorted(zf.namelist()) == ["items.parquet", "orders.parquet"]
         assert zf.read("orders.parquet") == b"ORDERS"
+
+
+# ─── Recursive lineage view ────────────────────────────────────────────────────
+
+
+def test_cyclic_ducts_view_terminates(tmp_path):
+    # downstream ⇄ upstream mutual ducts (the A↔B compute split). The visited-set must cut the cycle.
+    from duckstring.catchment.routes.view import assemble_view
+
+    def mk(name, ponds):
+        db = connect(tmp_path / f"{name}.db")
+        migrate(db)
+        ensure_identity(db, name)
+        for pname, kind, srcs in ponds:
+            _register(db, pname, "1.0.0", kind, f"ponds/{pname}/1.0.0", _cfg(sources=srcs, kind=kind), _RIPPLES)
+        (tmp_path / name).mkdir(exist_ok=True)
+        return Driver(db, tmp_path / name, f"http://{name}", NoopLauncher())
+
+    ds = mk("downstream", [("transactions", "inlet", {}), ("reports", "outlet", {"sales": "1.0.0"})])
+    us = mk("upstream", [("products", "inlet", {}), ("sales", "pond", {"transactions": "1.0.0", "products": "1.0.0"})])
+    ds_id, us_id = ds.identity()["id"], us.identity()["id"]
+    ds.create_duct("upstream", "http://upstream", None, upstream_id=us_id)
+    ds.add_duct_pond("upstream", "products", 1)
+    ds.add_duct_pond("upstream", "sales", 1)
+    us.create_duct("downstream", "http://downstream", None, upstream_id=ds_id)
+    us.add_duct_pond("downstream", "transactions", 1)
+    us.add_duct_pond("downstream", "reports", 1)
+
+    by_url = {"http://upstream": us, "http://downstream": ds}
+
+    class _Resp:
+        def __init__(self, data):
+            self._d = data
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._d
+
+    class _Client:  # routes a /api/view fetch to the target Catchment's assemble_view, recursively
+        async def get(self, url, params=None, headers=None, timeout=None):
+            target = by_url[url.split("/api/view")[0]]
+            scope = (params or {}).get("scope")
+            visited = (params or {}).get("visited")
+            scope_list = [s for s in scope.split(",") if s] if scope else None
+            visited_set = {v for v in visited.split(",") if v} if visited else set()
+            return _Resp(await assemble_view(target, scope_list, visited_set, self))
+
+    result = asyncio.run(assemble_view(ds, None, set(), _Client()))
+    assert {c["id"] for c in result["catchments"]} == {ds_id, us_id}  # both, once — cycle cut
 
 
 # ─── Recursive lineage view ────────────────────────────────────────────────────

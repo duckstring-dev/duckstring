@@ -156,7 +156,12 @@ async def _wait_for_change(driver, client: httpx.AsyncClient, wake: asyncio.Even
     tasks: list[asyncio.Task] = []
     for duct in targets:
         for m in duct["members"]:
-            params = {"after": m["remote_f"]} if m["remote_f"] else {}
+            # Pass both the freshness baseline and the last-known down-state: the wait returns only on
+            # a CHANGE (freshness advance or a down transition), so a durably-blocked upstream holds the
+            # connection instead of returning instantly and spinning the poller.
+            params: dict = {"down": m["remote_down"]}
+            if m["remote_f"]:
+                params["after"] = m["remote_f"]
             url = f"{duct['remote_url']}/api/draw/{m['name']}/{m['major']}/wait"
             tasks.append(asyncio.ensure_future(_wait_member(client, url, params, duct["auth"])))
     wake_task = asyncio.ensure_future(wake.wait())

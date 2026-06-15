@@ -772,6 +772,7 @@ class Driver:
                     members.append({
                         "name": n, "major": mj,
                         "remote_f": _iso(rf) if rf != NEVER else None,  # the poller's wait baseline
+                        "remote_down": ps.remote_down if ps is not None else False,  # last-known down-state
                     })
                 out.append({
                     "origin": origin, "remote_url": url, "upstream_id": upstream_id,

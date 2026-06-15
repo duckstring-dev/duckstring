@@ -63,12 +63,13 @@ app = typer.Typer(help="Manage ducts (conduits from upstream Catchments).", no_a
 
 
 def _resolve_pair(upstream: str, consumer: Optional[str]):
-    """The consumer's config (where the duct lives) and the upstream's registration (forwarded creds)."""
+    """The consuming Catchment's name+config (where the duct lives) and the upstream's registration
+    (URL + forwarded creds)."""
     from .config import auth_headers, resolve_catchment
 
-    _, consumer_cfg = resolve_catchment(consumer)
+    consumer_name, consumer_cfg = resolve_catchment(consumer)
     _, up_cfg = resolve_catchment(upstream)
-    return consumer_cfg, up_cfg["url"], auth_headers(up_cfg)
+    return consumer_name, consumer_cfg, up_cfg["url"], auth_headers(up_cfg)
 
 
 @app.command("create")
@@ -80,7 +81,7 @@ def create(
     """Open a conduit from an upstream Catchment into the consuming Catchment."""
     from . import _http
 
-    consumer_cfg, up_url, up_headers = _resolve_pair(upstream, catchment)
+    consumer_name, consumer_cfg, up_url, up_headers = _resolve_pair(upstream, catchment)
     # Record the upstream's stable identity (resolves cross-mesh edges + cuts cycles in the lineage
     # view). Reachability at create time is reasonable to require for a duct.
     upstream_id = _http.get(f"{up_url}/api/catchment/identity", auth={"headers": up_headers}).json().get("id")
@@ -89,9 +90,9 @@ def create(
         json={"origin": upstream, "remote_url": up_url, "auth_headers": up_headers or None,
               "upstream_id": upstream_id},
     )
-    typer.echo(f"Duct created from '{upstream}'.")
+    typer.echo(f"Duct created: '{upstream}' → '{consumer_name}'.")
     if sync:
-        _sync(consumer_cfg, upstream)
+        _sync(consumer_cfg, upstream, consumer_name)
 
 
 @app.command("destroy")
@@ -116,16 +117,17 @@ def sync(
     """Reflect the upstream's current Ponds into the duct — draw every Pond it exposes."""
     from .config import resolve_catchment
 
-    _, cfg = resolve_catchment(catchment)
-    _sync(cfg, upstream)
+    consumer_name, cfg = resolve_catchment(catchment)
+    _sync(cfg, upstream, consumer_name)
 
 
-def _sync(consumer_cfg: dict, upstream: str) -> None:
+def _sync(consumer_cfg: dict, upstream: str, consumer_name: str) -> None:
     from . import _http
 
     resp = _http.post(f"{consumer_cfg['url']}/api/duct/{upstream}/sync", auth=consumer_cfg)
     added = resp.json().get("added", [])
-    typer.echo(f"Synced '{upstream}' — drawing {len(added)} pond(s): {', '.join(added) or '(none)'}.")
+    typer.echo(f"Synced '{upstream}' → '{consumer_name}' — drawing {len(added)} pond(s): "
+               f"{', '.join(added) or '(none)'}.")
 
 
 @app.command("ls")

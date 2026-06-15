@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -59,7 +60,9 @@ async def status(request: Request, since: Optional[int] = None):
             if driver.state_version != since:
                 break
             await asyncio.sleep(_STATUS_WAIT_TICK)
-    return driver.status()
+    # status() holds the driver lock and builds the whole payload — off the event loop so concurrent
+    # requests (the draw long-polls, cross-Catchment view recursion) aren't blocked behind it.
+    return await run_in_threadpool(driver.status)
 
 
 @router.get("/runs")

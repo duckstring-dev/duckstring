@@ -28,20 +28,25 @@ interface Built {
 }
 
 function depths(view: ViewPayload, selfId: string | null): Record<string, number> {
+  // Duct-depth = shortest hop count from the local Catchment, walking duct edges upstream
+  // (consumer `to` → producer `from`). BFS, so each Catchment is assigned once and a mesh **cycle**
+  // (mutual ducts, A↔B) terminates — a longest-path relaxation would loop forever and freeze the tab.
+  const adj: Record<string, string[]> = {};
+  for (const e of view.duct_edges) {
+    if (e.to.catchment && e.from.catchment) (adj[e.to.catchment] ||= []).push(e.from.catchment);
+  }
   const depth: Record<string, number> = {};
-  if (selfId) depth[selfId] = 0;
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const e of view.duct_edges) {
-      const tc = e.to.catchment;
-      const fc = e.from.catchment;
-      if (tc && fc && depth[tc] !== undefined) {
-        const d = depth[tc] + 1;
-        if (depth[fc] === undefined || d > depth[fc]) {
-          depth[fc] = d;
-          changed = true;
-        }
+  const queue: string[] = [];
+  if (selfId) {
+    depth[selfId] = 0;
+    queue.push(selfId);
+  }
+  while (queue.length) {
+    const tc = queue.shift() as string;
+    for (const fc of adj[tc] ?? []) {
+      if (depth[fc] === undefined) {
+        depth[fc] = depth[tc] + 1;
+        queue.push(fc);
       }
     }
   }

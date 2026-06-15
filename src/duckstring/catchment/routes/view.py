@@ -12,6 +12,7 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 
 router = APIRouter()
 
@@ -53,7 +54,9 @@ async def _fetch_upstream(client, remote_url, auth, scope, visited) -> dict:
 
 async def assemble_view(driver, scope: Optional[list[str]], visited: set[str], client) -> dict:
     """This hop's fragment + recursion into its non-visited upstreams (using each duct's creds)."""
-    frag = driver.view_fragment(scope)
+    # view_fragment holds the driver lock and builds the full status — run it off the event loop so a
+    # busy Catchment (esp. mutual ducts, where each serves the other's recursion) stays responsive.
+    frag = await run_in_threadpool(driver.view_fragment, scope)
     self_id = frag["catchment"]["id"]
     visited = visited | ({self_id} if self_id else set())
     result = {
@@ -73,7 +76,9 @@ async def assemble_view(driver, scope: Optional[list[str]], visited: set[str], c
             try:
                 sub = await _fetch_upstream(client, duct["remote_url"], duct["auth"], duct["drawn"], visited)
                 _merge(result, sub)
-            except httpx.HTTPError:
+            except Exception as exc:  # noqa: BLE001 — the lineage is read-only; never 500 the view
+                if not isinstance(exc, httpx.HTTPError):
+                    print(f"[catchment] view recursion into {duct['remote_url']}: {exc}", flush=True)
                 if uid not in {c["id"] for c in result["catchments"]}:
                     result["catchments"].append(
                         {"id": uid, "name": None, "reachable": False, "ponds": [], "edges": []}
