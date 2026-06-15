@@ -53,6 +53,13 @@ from ..keys import pond_key
 # above the Duck's long-poll timeout so a healthy hold is never mistaken for death.
 _DUCK_DEAD_AFTER = timedelta(seconds=60)
 
+# Keep an idle Duck warm for this long before reaping it. Reaping the instant a Pond goes idle, then
+# respawning on the next run, races: a Pond re-armed in the window between the shutdown being sent and
+# the Duck exiting ends up in-flight with a dying Duck → a spurious "Duck not running" failure. The
+# grace means a Pond running on any sub-grace cadence is never reaped (so never races); truly idle
+# Ponds still reap. A duct exposed this by driving _process — hence _reap_idle — far more often.
+_REAP_GRACE = timedelta(seconds=30)
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -74,6 +81,7 @@ class Driver:
         self.meta: dict[str, dict] = {}  # key -> {name, major, version_id, version, source_path, ...}
         self.jobs: dict[str, list[dict]] = {}  # key -> queued Duck commands
         self.last_seen: dict[str, datetime] = {}  # key -> last Duck contact (jobs poll / event)
+        self._idle_since: dict[str, datetime] = {}  # key -> when the Pond went idle (reap grace clock)
         # Pond Draw transfers awaiting the poller: (pond_key, F). A Draw run is not dispatched to a
         # Duck — the poller performs the parquet fetch out-of-lock, then reports completion.
         self._pending_transfers: list[tuple[str, datetime]] = []
@@ -903,7 +911,10 @@ class Driver:
             return
         self.launcher.ensure(pond, meta["version"], meta["source_path"])
         self.last_seen[pond] = now  # grace clock: a freshly (re)spawned Duck isn't immediately stale
-        self.jobs.setdefault(pond, []).append({
+        self._idle_since.pop(pond, None)  # it's running again — reset its reap grace clock
+        # Cancel any not-yet-collected shutdown: this Pond is running again, so the Duck must not exit.
+        self.jobs[pond] = [j for j in self.jobs.get(pond, []) if j.get("kind") != "shutdown"]
+        self.jobs[pond].append({
             "kind": "begin_run", "f": _iso(f), "force": force,
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
         })
@@ -921,7 +932,9 @@ class Driver:
         # Keep all Ducks warm while any standing trigger is active (a Wave/Tide will run them again
         # shortly) — reaping mid-cycle would thrash on respawns. Only reap once fully quiescent.
         if self.state.triggers:
+            self._idle_since.clear()
             return
+        now = _now()
         for name in self.state.ponds:
             ps = self.state.pond_states[name]
             busy = any(
@@ -929,9 +942,17 @@ class Driver:
                 for rid in self.state.ripples
                 if self.state.ripples[rid].pond_id == name
             )
-            if (not busy and not ps.targets and not ps.has_pull and not self.jobs.get(name)
-                    and self.launcher.is_running(name)):
+            idle = (not busy and not ps.targets and not ps.has_pull and not self.jobs.get(name)
+                    and self.launcher.is_running(name))
+            if not idle:
+                self._idle_since.pop(name, None)
+                continue
+            # Reap only after the Pond has been continuously idle for the grace period — so a Pond
+            # that re-runs on any sub-grace cadence keeps its Duck and never hits the reap/respawn race.
+            since = self._idle_since.setdefault(name, now)
+            if now - since >= _REAP_GRACE:
                 self.jobs.setdefault(name, []).append({"kind": "shutdown"})
+                self._idle_since.pop(name, None)
 
     # ─── History + persistence ────────────────────────────────────────────────
 
