@@ -77,7 +77,14 @@ class Driver:
         # Pond Draw transfers awaiting the poller: (pond_key, F). A Draw run is not dispatched to a
         # Duck — the poller performs the parquet fetch out-of-lock, then reports completion.
         self._pending_transfers: list[tuple[str, datetime]] = []
+        # Set by the app to a thread-safe callback that wakes the duct poller. Called from _process on
+        # demand-bearing operations (tap/pulse/wave/…/Duck events) so a Draw solicits its upstream
+        # immediately, not on the next poll. NOT called from the poller's own observe/transfer paths.
+        self._notify_cb = None
         self.reload()
+
+    def set_notify(self, cb) -> None:
+        self._notify_cb = cb
 
     # ─── Topology load ────────────────────────────────────────────────────────
 
@@ -566,7 +573,17 @@ class Driver:
             if ps.remote_down != down:
                 ps.remote_down = down
                 derive_blocked(self.state, pond)
-            self._process(_now())
+            self._process(_now(), notify=False)  # poller-driven; transfers handled in this cycle
+
+    def pond_observation(self, pond: str) -> dict:
+        """A Pond's freshness + down-state, for the producer's ``…/wait`` long-poll (a downstream
+        Catchment blocks on this until its drawn Pond advances)."""
+        with self.lock:
+            ps = self.state.pond_states.get(pond)
+            if ps is None:
+                return {"end_f": None, "down": False}
+            down = ps.is_failed or ps.is_killed or ps.is_blocked
+            return {"end_f": _iso(ps.end_f) if ps.end_f != NEVER else None, "down": down}
 
     def take_transfers(self) -> list[dict]:
         """Drain the Pond Draw transfers the poller should perform (fetch + land the parquet)."""
@@ -593,7 +610,7 @@ class Driver:
             self.state = complete_ripple(self.state, eid, now)
             self._record_ripple_run(pond, "draw", f, "success", started_at=started, finished_at=_iso(now))
             self._finish_pond_run(pond, f, now)
-            self._process(now)
+            self._process(now, notify=False)  # poller-driven
 
     def fail_draw_transfer(self, pond: str, f: str, error: str) -> None:
         """The poller could not land a Draw's parquet: fail the transfer (blocks downstream until the
@@ -610,7 +627,7 @@ class Driver:
             self._fail_pond_run(pond, f, now, error, None)
             self._record_ripple_run(pond, "draw", f, "failed", started_at=started,
                                     finished_at=_iso(now), error=error)
-            self._process(now)
+            self._process(now, notify=False)  # poller-driven
 
     # ─── Producer exposure (open / tap-on-get) ──────────────────────────────────
 
@@ -723,12 +740,16 @@ class Driver:
             for did, origin, url, auth_json in self.db.execute(
                 "SELECT id, origin_catchment, remote_url, auth_json FROM duct"
             ).fetchall():
-                members = [
-                    {"name": n, "major": mj}
-                    for n, mj in self.db.execute(
-                        "SELECT source_pond_name, major FROM duct_to_pond WHERE duct_id = ?", (did,)
-                    )
-                ]
+                members = []
+                for n, mj in self.db.execute(
+                    "SELECT source_pond_name, major FROM duct_to_pond WHERE duct_id = ?", (did,)
+                ):
+                    ps = self.state.pond_states.get(pond_key(n, mj))
+                    rf = ps.remote_f if ps is not None else NEVER
+                    members.append({
+                        "name": n, "major": mj,
+                        "remote_f": _iso(rf) if rf != NEVER else None,  # the poller's wait baseline
+                    })
                 out.append({
                     "origin": origin, "remote_url": url,
                     "auth": json.loads(auth_json) if auth_json else {},
@@ -839,12 +860,16 @@ class Driver:
         self.state = tick(now, self.state)
         self._process(now)
 
-    def _process(self, now: datetime) -> None:
+    def _process(self, now: datetime, notify: bool = True) -> None:
         self.state, _started = sentinel(now, self.state)
         for cmd in drain_begin_runs(self.state):
             self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force)
         self._persist_state()
         self._reap_idle()
+        # Wake the poller so a Draw forwards new demand to its upstream at once. The poller's own
+        # observe/transfer paths pass notify=False (they're handled in-cycle) to avoid a busy loop.
+        if notify and self._notify_cb is not None:
+            self._notify_cb()
 
     def _dispatch_begin_run(self, pond: str, f: datetime, now: datetime, force: bool = False) -> None:
         meta = self.meta[pond]

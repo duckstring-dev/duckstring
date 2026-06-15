@@ -51,8 +51,14 @@ async def _lifespan(app: FastAPI):
 
     from .poller import run_poller
 
+    # The poller wakes immediately when a Draw acquires demand (so it solicits its upstream at once),
+    # instead of waiting for its next cycle. The driver signals across threads via the running loop.
+    wake = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    driver.set_notify(lambda: loop.call_soon_threadsafe(wake.set))
+
     scheduler = asyncio.create_task(_scheduler(driver))
-    poller = asyncio.create_task(run_poller(driver, app.state.root))
+    poller = asyncio.create_task(run_poller(driver, app.state.root, wake))
     try:
         yield
     finally:

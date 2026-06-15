@@ -25,7 +25,8 @@ import httpx
 
 from .registry import pond_data_dir
 
-_POLL_INTERVAL = 2.0  # seconds between poll cycles
+_MAX_WAIT = 25.0  # ceiling on a held wait (refresh baselines / survive a silently-dropped connection)
+_ERR_BACKOFF = 2.0  # after a failed wait, pause before re-issuing so an unreachable upstream isn't hammered
 _DOWN_STATES = {"failed", "killed", "blocked"}
 
 
@@ -127,12 +128,48 @@ def _origin_for(targets: list[dict], name: str, major: int) -> str | None:
     return None
 
 
-async def run_poller(driver, root) -> None:
-    """The poller loop. Cancelled on Catchment shutdown."""
+async def _wait_member(client: httpx.AsyncClient, url: str, params: dict, auth: dict) -> None:
+    """Hold one freshness long-poll against an upstream Pond; back off on error so an unreachable
+    upstream isn't hammered (cancellation propagates — it must not be swallowed into the backoff)."""
+    try:
+        await client.get(url, params=params, headers=auth)
+    except httpx.HTTPError:
+        await asyncio.sleep(_ERR_BACKOFF)
+
+
+async def _wait_for_change(driver, client: httpx.AsyncClient, wake: asyncio.Event) -> None:
+    """Block until something a Draw cares about may have changed: an upstream Pond's freshness
+    advances (a held ``…/wait`` returns), local demand arrives (``wake`` is set, so a Draw solicits at
+    once), or a ceiling elapses. Then return — ``poll_once`` does the actual observe/transfer/solicit."""
+    targets = driver.duct_targets()
+    tasks: list[asyncio.Task] = []
+    for duct in targets:
+        for m in duct["members"]:
+            params = {"after": m["remote_f"]} if m["remote_f"] else {}
+            url = f"{duct['remote_url']}/api/draw/{m['name']}/{m['major']}/wait"
+            tasks.append(asyncio.ensure_future(_wait_member(client, url, params, duct["auth"])))
+    wake_task = asyncio.ensure_future(wake.wait())
+    tasks.append(wake_task)
+    try:
+        await asyncio.wait(tasks, timeout=_MAX_WAIT, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        wake.clear()
+
+
+async def run_poller(driver, root, wake: asyncio.Event) -> None:
+    """The poller loop. Each cycle observes/transfers/solicits, then waits — on an upstream freshness
+    long-poll or a local-demand wake — rather than sleeping a fixed interval. Cancelled on shutdown."""
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
         while True:
             try:
                 await poll_once(driver, root, client)
             except Exception as exc:  # keep the loop alive
                 print(f"[catchment] poller error: {exc}", flush=True)
-            await asyncio.sleep(_POLL_INTERVAL)
+            try:
+                await _wait_for_change(driver, client, wake)
+            except Exception as exc:
+                print(f"[catchment] poller wait error: {exc}", flush=True)
+                await asyncio.sleep(_ERR_BACKOFF)

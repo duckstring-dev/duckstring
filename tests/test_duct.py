@@ -264,6 +264,43 @@ def test_duct_crud_routes(tmp_path):
     assert client.delete("/api/duct/up").status_code == 404
 
 
+def test_draw_wait_long_poll(tmp_path):
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "sales", "1.0.0", "inlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    client = _client(d)
+
+    # Not fresh yet → blocks until the (short) timeout, then returns the current observation.
+    assert client.get("/api/draw/sales/1/wait", params={"timeout": 0.3}).json() == {"end_f": None, "down": False}
+
+    # Freshness advanced past `after` → returns immediately.
+    f = _now()
+    d.state.pond_states["sales@1"].end_f = f
+    body = client.get("/api/draw/sales/1/wait", params={"timeout": 5}).json()
+    assert body["end_f"] == f.isoformat() and body["down"] is False
+
+    # A down Pond returns at once (so a Draw learns of the fault without waiting).
+    d.state.pond_states["sales@1"].is_failed = True
+    assert client.get("/api/draw/sales/1/wait", params={"timeout": 5, "after": f.isoformat()}).json()["down"]
+
+
+def test_notify_fires_on_demand_not_on_poller_observe(tmp_path):
+    # The wake fires when downstream demand arrives (solicit promptly) but NOT from the poller's own
+    # observe — otherwise the poller would wake itself in a tight loop.
+    d = _driver(tmp_path)
+    d.create_duct("up", "http://up", None)
+    d.add_duct_pond("up", "sales", 1)
+    calls: list = []
+    d.set_notify(lambda: calls.append(1))
+
+    d.tap("sales@1")          # demand → wake
+    assert len(calls) >= 1
+    n = len(calls)
+    d.observe_remote("sales@1", _now())  # poller-driven → must NOT wake
+    assert len(calls) == n
+
+
 def test_draw_route_streams_all_parquet(tmp_path):
     db = connect(tmp_path / "duck.db")
     migrate(db)
