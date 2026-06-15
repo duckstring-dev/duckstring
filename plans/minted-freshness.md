@@ -1,7 +1,7 @@
 # Minted-freshness: demand carries an epoch; inlets stamp it
 
-Status: planned (core-engine change, touches all four landmines). Supersedes the duct-solicit
-freshness discussion in cross-catchment-ducts.md.
+Status: **built** (engine + driver + routes + poller + tests, full suite green). Supersedes the
+duct-solicit freshness discussion in cross-catchment-ducts.md.
 
 ## The model
 

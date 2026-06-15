@@ -98,19 +98,24 @@ async def poll_once(driver, root, client: httpx.AsyncClient) -> None:
         except Exception as exc:  # noqa: BLE001 — any failure fails the transfer (blocks downstream)
             driver.fail_draw_transfer(t["key"], t["f"], f"transfer failed: {exc}")
 
-    # 3. Solicit upstreams for Draws with unmet downstream demand.
+    # 3. Solicit upstreams for Draws with unmet downstream demand — forwarding the demand's epoch so
+    #    the upstream Inlet mints the SAME freshness (push target → pulse-at-T; pull → tap-with-m).
     for d in driver.draws():
-        if not d["wants_upstream"]:
-            continue
         origin = _origin_for(targets, d["name"], d["major"])
         duct = url_by_origin.get(origin) if origin else None
         if duct is None:
             continue
         try:
-            await client.post(
-                f"{duct['remote_url']}/api/ponds/{d['name']}/tap",
-                params={"major": d["major"]}, headers=duct["auth"],
-            )
+            if d["target"] is not None:
+                await client.post(
+                    f"{duct['remote_url']}/api/ponds/{d['name']}/pulse",
+                    params={"major": d["major"], "at": d["target"]}, headers=duct["auth"],
+                )
+            if d["pull_m"] is not None:
+                await client.post(
+                    f"{duct['remote_url']}/api/ponds/{d['name']}/tap",
+                    params={"major": d["major"], "m": d["pull_m"]}, headers=duct["auth"],
+                )
         except httpx.HTTPError:
             pass  # next cycle retries
 

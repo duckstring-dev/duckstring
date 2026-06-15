@@ -180,6 +180,8 @@ class PondState:
                                # the Draw is blocked (drains landed data, solicits nothing)
     has_received_pull: bool = False  # inbox: a Sink/trigger asked for resupply
     has_pull: bool = False  # a Pond Run is wanted in pull
+    pull_m: datetime = NEVER  # minted epoch of the active pull (the freshness an Inlet stamps; the
+                              # pull counterpart of a push target's value). NEVER when no pull.
     targets: list[datetime] = field(default_factory=list)  # unsatisfied push target freshnesses
     # Fault tolerance (see docs/guide/theory.md "Fault Tolerance").
     is_failed: bool = False  # a Pond Run gave up and has not been superseded by a fresher success

@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import io
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -108,13 +108,30 @@ def test_draw_freshness_cascades_to_a_local_sink(tmp_path):
 
     f = _now()
     d.tap("snk@1")  # demand cascades up to the draw (solicit)
-    assert any(x["key"] == "sales@1" and x["wants_upstream"] for x in d.draws())
+    assert any(x["key"] == "sales@1" and (x["pull_m"] or x["target"]) for x in d.draws())
 
     d.observe_remote("sales@1", f)
     t = d.take_transfers()[0]
     d.complete_draw_transfer("sales@1", t["f"])
     # snk now has a fresher source and starts a run at that freshness.
     assert d.state.pond_states["snk@1"].start_f == f
+
+
+def test_pending_pull_epoch_survives_reload(tmp_path):
+    # A pull-driven Draw waiting on its upstream holds pull_m as its solicitation epoch; it must
+    # survive a Catchment restart (persisted on pond_state), or the draw would stop soliciting.
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    d.create_duct("up", "http://up", None)
+    d.add_duct_pond("up", "sales", 1)
+    d.tap("sales@1")  # pending pull (upstream not yet fresh) → pull_m minted
+    pull_m = d.state.pond_states["sales@1"].pull_m
+    assert pull_m != NEVER
+
+    d.reload()  # simulate a restart: rebuild engine state from the DB
+    assert d.state.pond_states["sales@1"].pull_m == pull_m
+    assert d.draws()[0]["pull_m"] == pull_m.isoformat()  # still solicits with the original epoch
 
 
 def test_remove_and_destroy_clean_up_draw_rows(tmp_path):
@@ -321,6 +338,44 @@ def test_poller_solicits_upstream_when_demand_unmet(tmp_path):
     asyncio.run(client.aclose())
 
     assert tapped == ["1"]  # forwarded a Tap upstream for major 1
+
+
+def test_poller_forwards_push_demand_with_its_epoch(tmp_path):
+    # A push target at epoch T on the draw is forwarded upstream as a pulse carrying `at=T`, so the
+    # upstream Inlet mints the same freshness (minted-freshness across the duct).
+    d = _driver(tmp_path)
+    d.create_duct("up", "http://up", None)
+    d.add_duct_pond("up", "sales", 1)
+    T = _now()
+    d.pulse("sales@1", at=T)
+
+    seen: dict = {}
+
+    def handler(request):
+        if request.url.path == "/api/status":  # present upstream, but nothing fresher yet
+            return httpx.Response(200, json={
+                "ponds": [{"name": "sales", "major": 1, "end_f": None, "status": "idle"}], "edges": []})
+        if request.url.path == "/api/ponds/sales/pulse":
+            seen["at"] = request.url.params.get("at")
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    asyncio.run(poll_once(d, tmp_path, client))
+    asyncio.run(client.aclose())
+    assert seen["at"] == T.isoformat()
+
+
+def test_pulse_at_makes_an_inlet_stamp_the_forwarded_epoch(tmp_path):
+    # The producer side of the duct: a pulse carrying `at=T` makes the Inlet stamp T, not now.
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "transactions", "1.0.0", "inlet", "ponds/transactions/1.0.0", _cfg(), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    client = _client(d)
+
+    T = _now() - timedelta(seconds=5)  # an earlier demand epoch
+    assert client.post("/api/ponds/transactions/pulse", params={"at": T.isoformat()}).json() == {"ok": True}
+    assert d.state.pond_states["transactions@1"].start_f == T
 
 
 def test_poller_blocks_draw_when_upstream_unreachable(tmp_path):

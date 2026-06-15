@@ -200,14 +200,16 @@ class Driver:
     def _load_pond_state(self, pond_id: int) -> PondState:
         row = self.db.execute(
             "SELECT start_f, end_f, d_ms, has_pull, has_received_pull, is_failed, is_blocked, failed_f, "
-            "failures, is_killed, pull_local FROM pond_state WHERE pond_id = ?",
+            "failures, is_killed, pull_local, pull_m FROM pond_state WHERE pond_id = ?",
             (pond_id,),
         ).fetchone()
         ps = PondState()
         if row:
-            sf, ef, d_ms, hp, hrp, is_failed, is_blocked, failed_f, failures, is_killed, pull_local = row
+            (sf, ef, d_ms, hp, hrp, is_failed, is_blocked, failed_f, failures, is_killed, pull_local,
+             pull_m) = row
             ps.is_killed = bool(is_killed)
             ps.pull_local = bool(pull_local)
+            ps.pull_m = datetime.fromisoformat(pull_m) if pull_m else NEVER
             ps.start_f = datetime.fromisoformat(sf) if sf else NEVER
             ps.end_f = datetime.fromisoformat(ef) if ef else NEVER
             ps.d = timedelta(milliseconds=d_ms or 0)
@@ -259,14 +261,18 @@ class Driver:
 
     # ─── Triggers ─────────────────────────────────────────────────────────────
 
-    def tap(self, pond: str) -> None:
+    def tap(self, pond: str, m: datetime | None = None) -> None:
+        """One pull. ``m`` (a duct forwarding the downstream's demand epoch) is the freshness an Inlet
+        it reaches will mint; defaults to now."""
         with self.lock:
-            self.state = tap_pond(self.state, pond, _now())
+            self.state = tap_pond(self.state, pond, _now(), m)
             self._process(_now())
 
-    def pulse(self, pond: str) -> None:
+    def pulse(self, pond: str, at: datetime | None = None) -> None:
+        """Push a target freshness. ``at`` (a duct forwarding the downstream's target) is the demand
+        epoch; defaults to now."""
         with self.lock:
-            self.state = pulse_pond(self.state, pond, _now())
+            self.state = pulse_pond(self.state, pond, at or _now())
             self._process(_now())
 
     def wave(self, pond: str) -> None:
@@ -532,10 +538,17 @@ class Driver:
                 if not m.get("is_draw"):
                     continue
                 ps = self.state.pond_states[key]
+                real_targets = [t for t in ps.targets if t > NEVER]
+                if ps.remote_down:
+                    target = pull_m = None  # blocked upstream: solicit nothing
+                else:
+                    # Forward the draw's outstanding demand upstream carrying its epoch, so the upstream
+                    # Inlet mints the SAME freshness: the max push target, and the pull epoch.
+                    target = _iso(max(real_targets)) if real_targets else None
+                    pull_m = _iso(ps.pull_m) if (ps.has_pull and ps.pull_m > NEVER) else None
                 out.append({
                     "key": key, "name": m["name"], "major": m["major"],
-                    # Demand the upstream hasn't satisfied yet → solicit it (forward a Tap upstream).
-                    "wants_upstream": (ps.has_pull or bool(ps.targets)) and not ps.remote_down,
+                    "target": target, "pull_m": pull_m,
                 })
             return out
 
@@ -956,13 +969,13 @@ class Driver:
             pond_id = self.meta[name]["pond_id"]
             self.db.execute(
                 "INSERT INTO pond_state (pond_id, start_f, end_f, d_ms, has_pull, has_received_pull, "
-                "is_failed, is_blocked, failed_f, failures, is_killed, pull_local) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
+                "is_failed, is_blocked, failed_f, failures, is_killed, pull_local, pull_m) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
                 "start_f = excluded.start_f, end_f = excluded.end_f, d_ms = excluded.d_ms, "
                 "has_pull = excluded.has_pull, has_received_pull = excluded.has_received_pull, "
                 "is_failed = excluded.is_failed, is_blocked = excluded.is_blocked, "
                 "failed_f = excluded.failed_f, failures = excluded.failures, "
-                "is_killed = excluded.is_killed, pull_local = excluded.pull_local",
+                "is_killed = excluded.is_killed, pull_local = excluded.pull_local, pull_m = excluded.pull_m",
                 (
                     pond_id,
                     _iso(ps.start_f) if ps.start_f != NEVER else None,
@@ -976,6 +989,7 @@ class Driver:
                     ps.failures,
                     int(ps.is_killed),
                     int(ps.pull_local),
+                    _iso(ps.pull_m) if ps.pull_m != NEVER else None,
                 ),
             )
             self.db.execute("DELETE FROM pond_target WHERE pond_id = ?", (pond_id,))

@@ -10,7 +10,7 @@ be the line's currently selected artifact. The resolved target is the engine key
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -20,6 +20,16 @@ router = APIRouter()
 
 def _driver(request: Request):
     return request.app.state.driver
+
+
+def _parse_f(value: str | None) -> datetime | None:
+    """Parse an optional ISO-8601 demand epoch (a duct forwards the downstream's freshness)."""
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid freshness {value!r}") from exc
 
 
 def _resolve(request: Request, name: str, major: int | None, version: str | None) -> str:
@@ -55,14 +65,22 @@ def runs(
 
 
 @router.post("/ponds/{name}/tap")
-def tap(name: str, request: Request, major: int | None = None, version: str | None = None):
-    _driver(request).tap(_resolve(request, name, major, version))
+def tap(
+    name: str, request: Request, major: int | None = None, version: str | None = None,
+    m: str | None = None,
+):
+    """``m`` (optional ISO freshness) is the demand epoch to mint — a duct forwards the downstream's."""
+    _driver(request).tap(_resolve(request, name, major, version), _parse_f(m))
     return {"ok": True}
 
 
 @router.post("/ponds/{name}/pulse")
-def pulse(name: str, request: Request, major: int | None = None, version: str | None = None):
-    _driver(request).pulse(_resolve(request, name, major, version))
+def pulse(
+    name: str, request: Request, major: int | None = None, version: str | None = None,
+    at: str | None = None,
+):
+    """``at`` (optional ISO freshness) is the push target — a duct forwards the downstream's target."""
+    _driver(request).pulse(_resolve(request, name, major, version), _parse_f(at))
     return {"ok": True}
 
 
