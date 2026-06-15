@@ -18,7 +18,6 @@ import '@xyflow/react/dist/style.css';
 
 import { useLiveStore, consumeEdgeColor, formatAge, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER } from '@/lib/store';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
-import { computeLineage } from '@/lib/lineage';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
@@ -269,9 +268,7 @@ export function DagCanvas() {
   }, [lineage]);
 
   const { nodes, edges } = useMemo(() => {
-    const local = computeLayout(ponds, ripples, triggers, floors, isMobile ? 'TB' : 'LR');
-    const remote = computeLineage(lineage, selfId, isMobile ? 'TB' : 'LR');
-    return { nodes: [...local.nodes, ...remote.nodes], edges: [...local.edges, ...remote.edges] };
+    return computeLayout(ponds, ripples, triggers, floors, isMobile ? 'TB' : 'LR', lineage, selfId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layoutKey, widthKey, isMobile, lineageKey, selfId]);
 

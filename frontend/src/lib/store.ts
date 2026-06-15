@@ -113,7 +113,12 @@ function transformStatus(payload: StatusPayload): StatusSlice {
   const pondInfo: Record<PondId, PondInfo> = {};
   const triggers: Record<PondId, TriggerView> = {};
 
+  // A Pond Draw only earns a node if a local Pond actually sources from it — an unconsumed Draw (e.g.
+  // from `duct create --sync` drawing more than this Catchment uses) is noise, so hide it.
+  const consumed = new Set<PondId>(payload.edges.map(([src]) => src));
+
   for (const p of payload.ponds) {
+    if (p.is_draw && !consumed.has(p.id)) continue;
     ponds[p.id] = { id: p.id, name: p.name, kind: p.kind, isDraw: p.is_draw ?? false, sources: [] };
     pondInfo[p.id] = {
       version: p.version,

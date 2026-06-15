@@ -1,6 +1,7 @@
 import dagre from '@dagrejs/dagre';
 import type { Node, Edge } from '@xyflow/react';
-import type { PondId, RippleId, Pond, Ripple, TriggerView } from './types';
+import type { PondId, RippleId, Pond, Ripple, TriggerView, ViewPayload } from './types';
+import { computeRemote, assembleRemote } from './lineage';
 
 const MIN_RIPPLE_W = 200;
 const RIPPLE_H = 80;
@@ -137,10 +138,16 @@ export function computeLayout(
   ripples: Record<RippleId, Ripple>,
   triggers: Record<PondId, TriggerView>,
   floors?: ContentFloors,
-  direction: 'LR' | 'TB' = 'LR'
+  direction: 'LR' | 'TB' = 'LR',
+  lineage: ViewPayload | null = null,
+  selfId: string | null = null
 ): LayoutResult {
   const pondList = Object.values(ponds);
   const vertical = direction === 'TB';
+
+  // Upstream-lineage boxes (position-free internals) join the pond-level dagre below as nodes, so a
+  // local Pond that feeds an upstream box ranks on the correct side of it.
+  const remote = computeRemote(lineage, selfId, direction);
 
   // Step 1: compute internal ripple layout per pond
   const pondLayouts: Record<
@@ -168,11 +175,25 @@ export function computeLayout(
     const { width, height } = pondLayouts[pond.id];
     pg.setNode(pond.id, { width, height });
   }
+  // Each upstream-lineage box is a single dagre node; the duct edges connect it to the local Ponds
+  // (and to other boxes) so ranking flows through the cross-Catchment graph.
+  const dagreNodes = new Set<string>(pondList.map((p) => p.id));
+  for (const box of remote.boxes) {
+    pg.setNode(`cat:${box.id}`, { width: box.w, height: box.h });
+    dagreNodes.add(`cat:${box.id}`);
+  }
   for (const pond of pondList) {
     for (const sourceId of pond.sources) {
       if (ponds[sourceId]) {
         pg.setEdge(sourceId, pond.id);
       }
+    }
+  }
+  for (const de of remote.ductEdges) {
+    // Guard against an endpoint that isn't a laid-out node (a hidden/absent Pond) — setEdge would
+    // otherwise auto-create a zero-size phantom node and skew the layout.
+    if (dagreNodes.has(de.dagreSource) && dagreNodes.has(de.dagreTarget)) {
+      pg.setEdge(de.dagreSource, de.dagreTarget);
     }
   }
 
@@ -270,5 +291,13 @@ export function computeLayout(
     }
   }
 
-  return { nodes, edges };
+  // Remote lineage boxes: positioned by the same dagre pass, then assembled into group + Pond nodes.
+  const boxPos: Record<string, { x: number; y: number }> = {};
+  for (const box of remote.boxes) {
+    const n = pg.node(`cat:${box.id}`);
+    if (n) boxPos[box.id] = { x: n.x - box.w / 2, y: n.y - box.h / 2 };
+  }
+  const remoteRF = assembleRemote(remote.boxes, remote.ductEdges, boxPos, vertical);
+
+  return { nodes: [...nodes, ...remoteRF.nodes], edges: [...edges, ...remoteRF.edges] };
 }

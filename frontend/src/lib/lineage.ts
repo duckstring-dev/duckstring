@@ -1,83 +1,86 @@
 import dagre from '@dagrejs/dagre';
 import type { Node, Edge } from '@xyflow/react';
-import type { ViewPayload } from './types';
+import type { ViewPayload, ViewPond } from './types';
 
-// Lays out the upstream-lineage overlay: each upstream Catchment as a labelled container (group)
-// node, its Ponds inside (read-only boxes), positioned to the upstream side of the local graph and
-// ordered by duct depth, with cross-container duct edges into the local Draw nodes. The local
-// Catchment is rendered by the normal (status-driven) layout; this only adds the remote side.
+// Builds the upstream-lineage overlay: each upstream Catchment as a labelled container (group) node,
+// its Ponds inside (read-only boxes), with cross-container duct edges into the consumer's Draw nodes.
+// Placement is NOT done here — the boxes are laid out *together with* the local graph by a single
+// dagre pass in computeLayout (each box is a node, the duct edges give it its rank), so a Pond that
+// feeds an upstream box sits on the correct side of it. computeRemote produces the box internals +
+// resolved edges; assembleRemote turns them into React Flow nodes once positions are known.
 
 const RP_W = 184;
 const RP_H = 52;
 const PAD_TOP = 32; // container header band
 const PAD_SIDE = 16;
 const PAD_BOT = 16;
-const STACK_GAP = 44; // between stacked containers
-const AWAY = 140; // distance of the remote column/row from the local graph origin
 
-interface Built {
+// A box-internal layout + sizing, position-free (the global pass places it).
+export interface RemoteBox {
   id: string;
   name: string | null;
   reachable: boolean;
-  depth: number;
   w: number;
   h: number;
-  pondPos: Record<string, { x: number; y: number }>;
-  ponds: ViewPayload['catchments'][number]['ponds'];
-  edges: [string, string][];
+  pondPos: Record<string, { x: number; y: number }>; // box-relative top-left per Pond
+  ponds: ViewPond[];
+  edges: [string, string][]; // intra-Catchment edges, filtered to visible Ponds
 }
 
-function depths(view: ViewPayload, selfId: string | null): Record<string, number> {
-  // Duct-depth = shortest hop count from the local Catchment, walking duct edges upstream
-  // (consumer `to` → producer `from`). BFS, so each Catchment is assigned once and a mesh **cycle**
-  // (mutual ducts, A↔B) terminates — a longest-path relaxation would loop forever and freeze the tab.
-  const adj: Record<string, string[]> = {};
-  for (const e of view.duct_edges) {
-    if (e.to.catchment && e.from.catchment) (adj[e.to.catchment] ||= []).push(e.from.catchment);
-  }
-  const depth: Record<string, number> = {};
-  const queue: string[] = [];
-  if (selfId) {
-    depth[selfId] = 0;
-    queue.push(selfId);
-  }
-  while (queue.length) {
-    const tc = queue.shift() as string;
-    for (const fc of adj[tc] ?? []) {
-      if (depth[fc] === undefined) {
-        depth[fc] = depth[tc] + 1;
-        queue.push(fc);
-      }
-    }
-  }
-  return depth;
+// A duct edge resolved to node ids: `rf*` are React Flow node ids (a local Pond, or `cat::pond` in a
+// box); `dagre*` collapse the box side to its container node `cat:{id}` so the global pass can rank
+// boxes against local Ponds.
+export interface RemoteDuctEdge {
+  id: string;
+  rfSource: string;
+  rfTarget: string;
+  dagreSource: string;
+  dagreTarget: string;
 }
 
-export function computeLineage(
+export interface RemoteModel {
+  boxes: RemoteBox[];
+  ductEdges: RemoteDuctEdge[];
+}
+
+export function computeRemote(
   view: ViewPayload | null,
   selfId: string | null,
   direction: 'LR' | 'TB'
-): { nodes: Node[]; edges: Edge[] } {
-  if (!view) return { nodes: [], edges: [] };
+): RemoteModel {
+  if (!view) return { boxes: [], ductEdges: [] };
   const remote = view.catchments.filter((c) => c.id && c.id !== selfId);
-  if (remote.length === 0) return { nodes: [], edges: [] };
-
-  const depth = depths(view, selfId);
+  if (remote.length === 0) return { boxes: [], ductEdges: [] };
   const rendered = new Set(remote.map((c) => c.id as string));
 
-  // Pass 1: lay out each Catchment's Ponds and size its container.
-  const built: Built[] = remote.map((c) => {
+  // A Draw only shows if a Pond in its own Catchment sources from it (it appears as an edge source) —
+  // an unconsumed Draw is noise. Computed per Catchment (incl. the local one) so the cross-Catchment
+  // duct edges can drop the ones that target a hidden Draw.
+  const shownDraws: Record<string, Set<string>> = {};
+  for (const c of view.catchments) {
+    if (!c.id) continue;
+    const draws = new Set(c.ponds.filter((p) => p.is_draw).map((p) => p.id));
+    const shown = new Set<string>();
+    for (const [src] of c.edges) if (draws.has(src)) shown.add(src);
+    shownDraws[c.id] = shown;
+  }
+  const visible = (c: ViewPayload['catchments'][number]) =>
+    c.ponds.filter((p) => !p.is_draw || (c.id ? shownDraws[c.id]?.has(p.id) : false));
+
+  // Box internals: a dagre layout of each Catchment's visible Ponds, sized to fit.
+  const boxes: RemoteBox[] = remote.map((c) => {
     const g = new dagre.graphlib.Graph();
     g.setGraph({ rankdir: direction, ranksep: 48, nodesep: 28, marginx: 0, marginy: 0 });
     g.setDefaultEdgeLabel(() => ({}));
-    const ids = new Set(c.ponds.map((p) => p.id));
-    for (const p of c.ponds) g.setNode(p.id, { width: RP_W, height: RP_H });
+    const ponds = visible(c);
+    const ids = new Set(ponds.map((p) => p.id));
+    for (const p of ponds) g.setNode(p.id, { width: RP_W, height: RP_H });
     for (const [src, snk] of c.edges) if (ids.has(src) && ids.has(snk)) g.setEdge(src, snk);
     dagre.layout(g);
     const pondPos: Record<string, { x: number; y: number }> = {};
     let maxX = 0;
     let maxY = 0;
-    for (const p of c.ponds) {
+    for (const p of ponds) {
       const n = g.node(p.id);
       const x = (n?.x ?? RP_W / 2) - RP_W / 2;
       const y = (n?.y ?? RP_H / 2) - RP_H / 2;
@@ -89,32 +92,55 @@ export function computeLineage(
       id: c.id as string,
       name: c.name,
       reachable: c.reachable,
-      depth: depth[c.id as string] ?? 1,
       w: (maxX || RP_W) + PAD_SIDE * 2,
       h: (maxY || RP_H) + PAD_TOP + PAD_BOT,
       pondPos,
-      ponds: c.ponds,
-      edges: c.edges,
+      ponds,
+      edges: c.edges.filter(([s, t]) => ids.has(s) && ids.has(t)),
     };
   });
 
-  // Pass 2: place containers — ordered by depth (shallowest nearest the local graph), stacked along
-  // the cross axis. LR puts them in a column to the left; TB in a row above.
-  const vertical = direction === 'TB';
-  built.sort((a, b) => a.depth - b.depth || a.id.localeCompare(b.id));
-  const maxW = Math.max(...built.map((b) => b.w));
-  const maxH = Math.max(...built.map((b) => b.h));
-  let cursor = 0;
+  // Resolve each duct edge to node ids. Either endpoint may be the local Catchment (a mesh duct draws
+  // *from* the local graph too). Skip an edge whose target Draw was hidden as unconsumed.
+  const resolve = (c: string, p: string) =>
+    c === selfId ? { rf: p, dagre: p } : { rf: `${c}::${p}`, dagre: `cat:${c}` };
+  const ductEdges: RemoteDuctEdge[] = [];
+  for (const e of view.duct_edges) {
+    const fc = e.from.catchment;
+    const tc = e.to.catchment;
+    if (!fc || !tc) continue;
+    const fromOk = fc === selfId || rendered.has(fc);
+    const toOk = tc === selfId || rendered.has(tc);
+    if (!fromOk || !toOk) continue;
+    if (!shownDraws[tc]?.has(e.to.pond)) continue;
+    const s = resolve(fc, e.from.pond);
+    const t = resolve(tc, e.to.pond);
+    ductEdges.push({
+      id: `de:${fc}:${e.from.pond}->${tc}:${e.to.pond}`,
+      rfSource: s.rf,
+      rfTarget: t.rf,
+      dagreSource: s.dagre,
+      dagreTarget: t.dagre,
+    });
+  }
 
+  return { boxes, ductEdges };
+}
+
+// Turn the box internals + duct edges into React Flow nodes/edges, given each box's top-left position
+// (computed by the global dagre pass in computeLayout). Boxes without a position are dropped.
+export function assembleRemote(
+  boxes: RemoteBox[],
+  ductEdges: RemoteDuctEdge[],
+  boxPos: Record<string, { x: number; y: number }>,
+  vertical: boolean
+): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
 
-  for (const b of built) {
-    const pos = vertical
-      ? { x: cursor, y: -(AWAY + maxH) }
-      : { x: -(AWAY + maxW), y: cursor };
-    cursor += (vertical ? b.w : b.h) + STACK_GAP;
-
+  for (const b of boxes) {
+    const pos = boxPos[b.id];
+    if (!pos) continue;
     nodes.push({
       id: `cat:${b.id}`,
       type: 'catchmentGroup',
@@ -146,16 +172,11 @@ export function computeLineage(
     }
   }
 
-  // Cross-container duct edges: upstream source Pond → consumer's Draw node.
-  for (const e of view.duct_edges) {
-    const fc = e.from.catchment;
-    if (!fc || !rendered.has(fc)) continue; // unknown / unrendered upstream
-    const source = `${fc}::${e.from.pond}`;
-    const target = e.to.catchment === selfId ? e.to.pond : `${e.to.catchment}::${e.to.pond}`;
+  for (const de of ductEdges) {
     edges.push({
-      id: `de:${fc}:${e.from.pond}->${e.to.catchment}:${e.to.pond}`,
-      source,
-      target,
+      id: de.id,
+      source: de.rfSource,
+      target: de.rfTarget,
       animated: true,
       style: { stroke: '#52525b', strokeDasharray: '4 3' },
     });
