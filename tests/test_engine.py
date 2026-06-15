@@ -274,6 +274,26 @@ def test_force_inlet_ignores_never_sentinel_and_stamps_now():
     assert s2.pond_states["i"].start_f == T0 + secs(3)
 
 
+@pytest.mark.timeout(1)
+def test_completion_prunes_a_target_added_mid_run():
+    # A target added during a Run (valid then: t > end_f) must not linger past completion to fire a
+    # second Run at the same freshness.
+    pond = Pond("p", "p")
+    s = build([pond], [Ripple("r", "p", "r")])
+    T = T0 + secs(5)
+    s.pond_states["p"].start_f = T  # mid-run at freshness T
+    s.pond_states["p"].end_f = T0
+    s.ripple_states["r"].start_f = T
+    s.ripple_states["r"].is_running = True
+    s.pond_states["p"].targets = [T]  # a duplicate target arrived during the Run
+
+    s = complete_ripple(s, "r", T0 + secs(6))
+    assert s.pond_states["p"].end_f == T
+    assert s.pond_states["p"].targets == []  # satisfied target pruned
+    _, started = sentinel(T0 + secs(7), s)
+    assert started == []  # no spurious re-run
+
+
 @pytest.mark.timeout(2)
 def test_pulse_freshness_uniform_across_staggered_diamond():
     # S -> A, S -> B, X <- A,B with B slower: a Pulse reaches all; every node ends at the pulse epoch.

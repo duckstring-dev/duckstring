@@ -369,6 +369,10 @@ def complete_ripple(state: EngineState, rid: RippleId, now: datetime) -> EngineS
     new_end = min(s.ripple_states[leaf].end_f for leaf in leaves_of(s, pid))
     if new_end > ps.end_f:
         ps.end_f = new_end
+        # A completed Run satisfies every target up to its freshness — drop them so a target that was
+        # added *during* the Run (valid then, ``t > end_f``) can't linger past completion and trigger a
+        # spurious re-run at the same F. (start_pond_run clears only what existed at start.)
+        ps.targets = [t for t in ps.targets if t > ps.end_f]
         ps.runs_completed += 1
         ps.completion_times.append(now)
         ps.gen_start_times.pop(ps.runs_completed, None)
