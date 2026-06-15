@@ -1,7 +1,8 @@
 # Cross-Catchment visibility: stable identity + recursive lineage
 
-Status: planned. Builds on cross-catchment-ducts.md. Goal: every Pond's **entire** upstream lineage is
-visible, recursing all the way up the ducts, with mesh cycles handled.
+Status: **Phase 1 (identity) + Phase 2 (recursive view backend) built & tested**; Phase 3 (UI
+overlay) pending. Builds on cross-catchment-ducts.md. Goal: every Pond's **entire** upstream lineage
+is visible, recursing all the way up the ducts, with mesh cycles handled.
 
 ## Why recursion (not single-hop)
 

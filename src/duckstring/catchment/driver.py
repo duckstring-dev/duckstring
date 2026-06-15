@@ -86,6 +86,12 @@ class Driver:
     def set_notify(self, cb) -> None:
         self._notify_cb = cb
 
+    def identity(self) -> dict:
+        """This Catchment's stable id + optional display name (see plans/cross-catchment-visibility.md)."""
+        with self.lock:
+            rows = dict(self.db.execute("SELECT key, value FROM catchment_meta").fetchall())
+            return {"id": rows.get("id"), "name": rows.get("name")}
+
     # ─── Topology load ────────────────────────────────────────────────────────
 
     def reload(self) -> None:
@@ -660,15 +666,19 @@ class Driver:
 
     # ─── Ducts (consumer side) ───────────────────────────────────────────────────
 
-    def create_duct(self, origin: str, remote_url: str, auth_headers: dict | None) -> None:
+    def create_duct(
+        self, origin: str, remote_url: str, auth_headers: dict | None, upstream_id: str | None = None
+    ) -> None:
         """Register (or update) a conduit from an upstream Catchment. ``auth_headers`` are the request
-        headers to attach when dialling it — a secret at rest (duck.db is 0600)."""
+        headers to attach when dialling it — a secret at rest (duck.db is 0600). ``upstream_id`` is the
+        upstream's stable identity (for cross-mesh edge resolution + cycle cutting)."""
         with self.lock:
             self.db.execute(
-                "INSERT INTO duct (origin_catchment, remote_url, auth_json) VALUES (?, ?, ?) "
-                "ON CONFLICT(origin_catchment) DO UPDATE SET remote_url = excluded.remote_url, "
-                "auth_json = excluded.auth_json",
-                (origin, remote_url, json.dumps(auth_headers) if auth_headers else None),
+                "INSERT INTO duct (origin_catchment, remote_url, auth_json, upstream_id) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(origin_catchment) DO UPDATE SET "
+                "remote_url = excluded.remote_url, auth_json = excluded.auth_json, "
+                "upstream_id = excluded.upstream_id",
+                (origin, remote_url, json.dumps(auth_headers) if auth_headers else None, upstream_id),
             )
             self.db.commit()
 
@@ -737,8 +747,8 @@ class Driver:
         """Ducts with auth resolved — for the poller only (never serialised to a client)."""
         with self.lock:
             out = []
-            for did, origin, url, auth_json in self.db.execute(
-                "SELECT id, origin_catchment, remote_url, auth_json FROM duct"
+            for did, origin, url, auth_json, upstream_id in self.db.execute(
+                "SELECT id, origin_catchment, remote_url, auth_json, upstream_id FROM duct"
             ).fetchall():
                 members = []
                 for n, mj in self.db.execute(
@@ -751,7 +761,7 @@ class Driver:
                         "remote_f": _iso(rf) if rf != NEVER else None,  # the poller's wait baseline
                     })
                 out.append({
-                    "origin": origin, "remote_url": url,
+                    "origin": origin, "remote_url": url, "upstream_id": upstream_id,
                     "auth": json.loads(auth_json) if auth_json else {},
                     "members": members,
                 })
@@ -1131,7 +1141,50 @@ class Driver:
                 })
             # Edge endpoints are pond keys ("name@major") — match entries on their "id".
             edges = [[s, key] for key, pond in self.state.ponds.items() for s in pond.sources]
-            return {"ponds": ponds, "edges": edges}
+            rows = dict(self.db.execute("SELECT key, value FROM catchment_meta").fetchall())
+            return {
+                "catchment": {"id": rows.get("id"), "name": rows.get("name")},
+                "ponds": ponds, "edges": edges,
+            }
+
+    def view_fragment(self, scope: list[str] | None) -> dict:
+        """This Catchment's slice of the recursive lineage view (see plans/cross-catchment-visibility.md):
+        the in-scope Ponds (``scope`` keys + their ancestors here; all local Ponds when ``scope`` is
+        None) with state + intra-Catchment edges, plus the ducts to expand for the next hop. The route
+        does the cross-Catchment fan-out + merge; this is the pure local part."""
+        with self.lock:
+            full = self.status()
+            all_keys = {p["id"] for p in full["ponds"]}
+            if scope is None:
+                in_scope = all_keys
+            else:
+                in_scope = self._ancestor_keys([k for k in scope if k in all_keys]) & all_keys
+            ponds = [p for p in full["ponds"] if p["id"] in in_scope]
+            edges = [[s, k] for s, k in full["edges"] if s in in_scope and k in in_scope]
+            ducts = []
+            for duct in self.duct_targets():
+                drawn = [pond_key(m["name"], m["major"]) for m in duct["members"]
+                         if pond_key(m["name"], m["major"]) in in_scope]
+                if drawn:
+                    ducts.append({
+                        "upstream_id": duct["upstream_id"], "remote_url": duct["remote_url"],
+                        "auth": duct["auth"], "drawn": drawn,
+                    })
+            return {"catchment": full["catchment"], "ponds": ponds, "edges": edges, "ducts": ducts}
+
+    def _ancestor_keys(self, keys: list[str]) -> set[str]:
+        """``keys`` plus all upstream (source) Pond keys reachable from them (BFS over engine sources)."""
+        seen: set[str] = set()
+        queue = list(keys)
+        while queue:
+            k = queue.pop()
+            if k in seen:
+                continue
+            seen.add(k)
+            pond = self.state.ponds.get(k)
+            if pond is not None:
+                queue.extend(pond.sources)
+        return seen
 
     def _ancestors(self, name: str) -> set[str]:
         """``name`` plus all upstream (source) Pond names reachable from it (BFS over engine sources)."""

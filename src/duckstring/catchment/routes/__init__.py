@@ -7,6 +7,7 @@ from .draw import router as draw_router
 from .duck import router as duck_router
 from .duct import router as duct_router
 from .orchestrate import router as orchestrate_router
+from .view import router as view_router
 
 router = APIRouter()
 router.include_router(catchment_router)
@@ -16,5 +17,6 @@ router.include_router(orchestrate_router)
 router.include_router(duck_router)
 router.include_router(draw_router)
 router.include_router(duct_router)
+router.include_router(view_router)
 
 __all__ = ["router"]

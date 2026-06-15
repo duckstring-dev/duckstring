@@ -23,12 +23,15 @@ class _CreateDuctBody(BaseModel):
     origin: str
     remote_url: str
     auth_headers: dict[str, str] | None = None
+    upstream_id: str | None = None
 
 
 @router.post("/duct")
 def create_duct(body: _CreateDuctBody, request: Request):
     """Register (or update) a conduit from an upstream Catchment."""
-    _driver(request).create_duct(body.origin, body.remote_url.rstrip("/"), body.auth_headers)
+    _driver(request).create_duct(
+        body.origin, body.remote_url.rstrip("/"), body.auth_headers, body.upstream_id
+    )
     return {"ok": True}
 
 

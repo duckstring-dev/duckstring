@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .db import connect, migrate
+from .db import connect, ensure_identity, migrate
 from .driver import Driver
 from .launcher import NoopLauncher, SubprocessLauncher
 from .routes import router
@@ -71,10 +71,13 @@ async def _lifespan(app: FastAPI):
         launcher.shutdown_all()
 
 
-def create_app(root: Path, api_key: str | None = None, base_url: str | None = None) -> FastAPI:
+def create_app(
+    root: Path, api_key: str | None = None, base_url: str | None = None, name: str | None = None
+) -> FastAPI:
     root.mkdir(parents=True, exist_ok=True)
     con = connect(root / "duck.db")
     migrate(con)
+    ensure_identity(con, name or os.environ.get("DUCKSTRING_CATCHMENT_NAME"))
 
     app = FastAPI(title="Duckstring Catchment", lifespan=_lifespan)
     app.state.root = root

@@ -75,6 +75,9 @@ function StatusPanel() {
   const connected = useLiveStore((s) => s.connected);
   const error = useLiveStore((s) => s.error);
   const count = useLiveStore((s) => Object.keys(s.ponds).length);
+  const catchment = useLiveStore((s) => s.catchment);
+  // This Catchment's display name, or a short slice of its stable id, or a plain label.
+  const label = catchment?.name || (catchment?.id ? catchment.id.slice(0, 8) : 'Catchment');
   const isMobile = useIsMobile();
 
   // Mobile: one compact row — the full card would shade a third of a phone canvas.
@@ -158,7 +161,7 @@ function StatusPanel() {
           style={{ width: 8, height: 8, flexShrink: 0, borderRadius: '50%', background: connected ? THEME_SUCCESS : THEME_DANGER }}
         />
         <span style={{ color: '#71717a' }}>
-          Catchment
+          <span title={catchment?.id ?? undefined} style={{ color: '#a1a1aa' }}>{label}</span>
           <span style={{ color: '#3f3f46' }}> · </span>
           {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
         </span>

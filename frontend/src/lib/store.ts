@@ -94,6 +94,7 @@ function mapWindow(w: RawWindow): WindowRow {
 }
 
 interface StatusSlice {
+  catchment: { id: string | null; name: string | null } | null;
   ponds: Record<PondId, Pond>;
   ripples: Record<RippleId, Ripple>;
   pondViews: Record<PondId, NodeView>;
@@ -149,7 +150,7 @@ function transformStatus(payload: StatusPayload): StatusSlice {
     ponds[snk]?.sources.push(src);
   }
 
-  return { ponds, ripples, pondViews, rippleViews, pondInfo, triggers };
+  return { catchment: payload.catchment ?? null, ponds, ripples, pondViews, rippleViews, pondInfo, triggers };
 }
 
 // ─── Store ───────────────────────────────────────────────────────────────────
@@ -229,6 +230,7 @@ export function runKey(r: PondRun): string {
 }
 
 export const useLiveStore = create<LiveState>((set, get) => ({
+  catchment: null,
   ponds: {},
   ripples: {},
   pondViews: {},

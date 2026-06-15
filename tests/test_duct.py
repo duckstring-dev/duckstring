@@ -15,7 +15,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from duckstring.catchment.db import connect, migrate
+from duckstring.catchment.db import connect, ensure_identity, migrate
 from duckstring.catchment.driver import Driver
 from duckstring.catchment.launcher import NoopLauncher
 from duckstring.catchment.poller import poll_once
@@ -41,6 +41,34 @@ def _driver(tmp_path):
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+# ─── Catchment identity ────────────────────────────────────────────────────────
+
+
+def test_identity_minted_once_and_name_refreshes(tmp_path):
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    ensure_identity(db, "main")
+    id1 = db.execute("SELECT value FROM catchment_meta WHERE key = 'id'").fetchone()[0]
+    ensure_identity(db, "renamed")  # id is stable; name updates
+    id2 = db.execute("SELECT value FROM catchment_meta WHERE key = 'id'").fetchone()[0]
+    assert id1 and id1 == id2
+
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    assert d.identity() == {"id": id1, "name": "renamed"}
+    assert d.status()["catchment"] == {"id": id1, "name": "renamed"}
+
+
+def test_identity_route_and_upstream_id_recorded(tmp_path):
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    ensure_identity(db, "consumer")
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    assert _client(d).get("/api/catchment/identity").json()["name"] == "consumer"
+
+    d.create_duct("up", "http://up", None, upstream_id="upstream-uuid")
+    assert db.execute("SELECT upstream_id FROM duct WHERE origin_catchment = 'up'").fetchone()[0] == "upstream-uuid"
 
 
 # ─── Draw materialisation + lifecycle (driver level) ───────────────────────────
@@ -316,6 +344,95 @@ def test_draw_route_streams_all_parquet(tmp_path):
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         assert sorted(zf.namelist()) == ["items.parquet", "orders.parquet"]
         assert zf.read("orders.parquet") == b"ORDERS"
+
+
+# ─── Recursive lineage view ────────────────────────────────────────────────────
+
+
+def _view_consumer(tmp_path, upstream_id="A-uuid"):
+    """A consumer 'B' with a local sink drawing 'sales' from upstream 'A' (id=upstream_id)."""
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    ensure_identity(db, "B")
+    _register(db, "snk", "1.0.0", "outlet", "ponds/snk/1.0.0", _cfg(sources={"sales": "1.0.0"}), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    d.create_duct("A", "http://a", None, upstream_id=upstream_id)
+    d.add_duct_pond("A", "sales", 1)  # materialises the sales@1 Draw, wires snk -> sales@1
+    return d
+
+
+def test_view_fragment_scopes_to_ancestors(tmp_path):
+    d = _view_consumer(tmp_path)
+    frag = d.view_fragment(["snk@1"])  # snk + its ancestor (the sales draw)
+    ids = {p["id"] for p in frag["ponds"]}
+    assert ids == {"snk@1", "sales@1"}
+    assert frag["ducts"] and frag["ducts"][0]["drawn"] == ["sales@1"]
+
+
+def test_assemble_view_recurses_merges_and_emits_boundary_edge(tmp_path):
+    from duckstring.catchment.routes.view import assemble_view
+
+    d = _view_consumer(tmp_path)
+    # Mock A's /api/view: A's own pond 'sales' plus a 'C' it draws (transitive — C shows through).
+    a_response = {
+        "catchments": [
+            {"id": "A-uuid", "name": "A", "reachable": True,
+             "ponds": [{"id": "sales@1", "name": "sales"}], "edges": []},
+            {"id": "C-uuid", "name": "C", "reachable": True,
+             "ponds": [{"id": "raw@1", "name": "raw"}], "edges": []},
+        ],
+        "duct_edges": [{"from": {"catchment": "C-uuid", "pond": "raw@1"},
+                        "to": {"catchment": "A-uuid", "pond": "raw@1"}}],
+    }
+    calls: list = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, json=a_response)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    result = asyncio.run(assemble_view(d, None, set(), client))
+    asyncio.run(client.aclose())
+
+    cids = {c["id"] for c in result["catchments"]}
+    assert cids == {d.identity()["id"], "A-uuid", "C-uuid"}  # B + A + C (transitive)
+    # The boundary edge B drew: A.sales@1 -> B.sales@1 (the local Draw node).
+    assert {"from": {"catchment": "A-uuid", "pond": "sales@1"},
+            "to": {"catchment": d.identity()["id"], "pond": "sales@1"}} in result["duct_edges"]
+    assert len(calls) == 1  # fetched A once
+
+
+def test_assemble_view_cuts_cycle_via_visited(tmp_path):
+    from duckstring.catchment.routes.view import assemble_view
+
+    d = _view_consumer(tmp_path)
+    calls: list = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"catchments": [], "duct_edges": []})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    # A is already visited (the cycle case) → no fetch, but the boundary edge is still emitted.
+    result = asyncio.run(assemble_view(d, None, {"A-uuid"}, client))
+    asyncio.run(client.aclose())
+    assert calls == []  # cycle cut — did not recurse into A
+    assert any(e["from"]["catchment"] == "A-uuid" for e in result["duct_edges"])
+
+
+def test_assemble_view_unreachable_upstream_stub(tmp_path):
+    from duckstring.catchment.routes.view import assemble_view
+
+    d = _view_consumer(tmp_path)
+
+    def handler(request):
+        raise httpx.ConnectError("unreachable")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    result = asyncio.run(assemble_view(d, None, set(), client))
+    asyncio.run(client.aclose())
+    a = next(c for c in result["catchments"] if c["id"] == "A-uuid")
+    assert a["reachable"] is False
 
 
 # ─── Poller end-to-end (mocked upstream transport) ─────────────────────────────

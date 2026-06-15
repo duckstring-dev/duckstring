@@ -92,6 +92,7 @@ export interface RawPond {
 }
 
 export interface StatusPayload {
+  catchment: { id: string | null; name: string | null } | null; // this Catchment's stable identity
   ponds: RawPond[];
   edges: [string, string][]; // [sourceId, sinkId] — pond keys ("name@major")
 }

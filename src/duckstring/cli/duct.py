@@ -81,9 +81,13 @@ def create(
     from . import _http
 
     consumer_cfg, up_url, up_headers = _resolve_pair(upstream, catchment)
+    # Record the upstream's stable identity (resolves cross-mesh edges + cuts cycles in the lineage
+    # view). Reachability at create time is reasonable to require for a duct.
+    upstream_id = _http.get(f"{up_url}/api/catchment/identity", auth={"headers": up_headers}).json().get("id")
     _http.post(
         f"{consumer_cfg['url']}/api/duct", auth=consumer_cfg,
-        json={"origin": upstream, "remote_url": up_url, "auth_headers": up_headers or None},
+        json={"origin": upstream, "remote_url": up_url, "auth_headers": up_headers or None,
+              "upstream_id": upstream_id},
     )
     typer.echo(f"Duct created from '{upstream}'.")
     if sync:
