@@ -7,11 +7,13 @@ import type {
   NodeView,
   TriggerView,
   PondInfo,
+  ViewPayload,
   PondRun,
   WindowRow,
 } from './types';
 import {
   fetchStatus,
+  fetchView,
   fetchRuns,
   fetchWindows,
   postTrigger,
@@ -164,6 +166,7 @@ export interface LiveState extends StatusSlice {
   now: number;
   connected: boolean;
   error: string | null;
+  lineage: ViewPayload | null; // upstream Catchments + duct edges, for the lineage overlay
   needsKey: boolean; // the Catchment answered 401 — show the API-key prompt
 
   selectedPondId: PondId | null;
@@ -254,6 +257,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   loadingMore: false,
   selectedPondRuns: [],
   windowsByPond: {},
+  lineage: null,
 
   async refresh() {
     try {
@@ -266,6 +270,13 @@ export const useLiveStore = create<LiveState>((set, get) => ({
         set({ connected: false, error: e instanceof Error ? e.message : String(e) });
       }
       return; // if the Catchment is unreachable, skip the dependent fetches this tick
+    }
+
+    // Upstream lineage (recursive across ducts) — non-critical; keep the last good view on failure.
+    try {
+      set({ lineage: await fetchView() });
+    } catch {
+      /* leave the last lineage in place */
     }
 
     const s = get();

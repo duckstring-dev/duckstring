@@ -18,10 +18,13 @@ import '@xyflow/react/dist/style.css';
 
 import { useLiveStore, consumeEdgeColor, formatAge, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER } from '@/lib/store';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
+import { computeLineage } from '@/lib/lineage';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
 import { TriggerNode } from './TriggerNode';
+import { CatchmentGroupNode } from './CatchmentGroupNode';
+import { RemotePondNode } from './RemotePondNode';
 
 // ─── Custom edges (read-only; colour reflects the sink's demand) ─────────────
 
@@ -59,6 +62,8 @@ const nodeTypes: NodeTypes = {
   pond: PondNode as NodeTypes[string],
   ripple: RippleNode as NodeTypes[string],
   trigger: TriggerNode as NodeTypes[string],
+  catchmentGroup: CatchmentGroupNode as NodeTypes[string],
+  remotePond: RemotePondNode as NodeTypes[string],
 };
 
 const edgeTypes: EdgeTypes = {
@@ -252,11 +257,23 @@ export function DagCanvas() {
     return `${enc(floors.ripples ?? {})}|${enc(floors.ponds ?? {})}`;
   }, [floors]);
 
-  const { nodes, edges } = useMemo(
-    () => computeLayout(ponds, ripples, triggers, floors, isMobile ? 'TB' : 'LR'),
+  const lineage = useLiveStore((s) => s.lineage);
+  const selfId = useLiveStore((s) => s.catchment?.id ?? null);
+  // Lineage layout changes only when the upstream topology does (not on every freshness tick) — key
+  // off the catchment + pond ids, mirroring layoutKey for the local graph.
+  const lineageKey = useMemo(() => {
+    if (!lineage) return '';
+    return lineage.catchments
+      .map((c) => `${c.id}:${c.reachable}:${c.ponds.map((p) => p.id).join('+')}`)
+      .join('|') + '#' + lineage.duct_edges.map((e) => `${e.from.catchment}.${e.from.pond}>${e.to.catchment}.${e.to.pond}`).join(',');
+  }, [lineage]);
+
+  const { nodes, edges } = useMemo(() => {
+    const local = computeLayout(ponds, ripples, triggers, floors, isMobile ? 'TB' : 'LR');
+    const remote = computeLineage(lineage, selfId, isMobile ? 'TB' : 'LR');
+    return { nodes: [...local.nodes, ...remote.nodes], edges: [...local.edges, ...remote.edges] };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [layoutKey, widthKey, isMobile]
-  );
+  }, [layoutKey, widthKey, isMobile, lineageKey, selfId]);
 
   // Handle positions move between the LR and TB layouts; nudge React Flow to re-measure them
   // when the orientation flips, or edges keep their old anchors. Then re-frame: the fitView prop

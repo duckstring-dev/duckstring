@@ -90,6 +90,36 @@ export interface PondRun {
   ripples?: RippleRun[];
 }
 
+// ─── Cross-Catchment lineage view (/api/view) ─────────────────────────────────
+
+// A read-only Pond in an upstream Catchment's container (subset of the status pond shape).
+export interface ViewPond {
+  id: PondId;
+  name: string;
+  status: DemandStatus;
+  is_draw: boolean;
+  end_f: string | null;
+  start_f: string | null;
+}
+
+export interface ViewCatchment {
+  id: string | null;
+  name: string | null;
+  reachable: boolean;
+  ponds: ViewPond[];
+  edges: [PondId, PondId][]; // [source, sink] within this Catchment
+}
+
+export interface DuctEdge {
+  from: { catchment: string | null; pond: PondId }; // upstream source Pond
+  to: { catchment: string | null; pond: PondId }; // the consumer's Draw node
+}
+
+export interface ViewPayload {
+  catchments: ViewCatchment[];
+  duct_edges: DuctEdge[];
+}
+
 // ─── Windows ─────────────────────────────────────────────────────────────────
 
 // Matches the backend list_windows shape (ISO start/until, seconds duration). Operational config

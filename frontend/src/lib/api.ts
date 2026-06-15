@@ -3,7 +3,7 @@
 // possibly under a path prefix (a reverse proxy, Posit Connect's /content/{guid}/), so the API base
 // is derived from where the page is mounted rather than hard-coded to the origin root.
 
-import type { FreqUnit } from './types';
+import type { FreqUnit, ViewPayload } from './types';
 
 function apiBase(): string {
   if (typeof window === 'undefined') return '/api';
@@ -160,6 +160,10 @@ async function postJSON(path: string, body: unknown = {}): Promise<void> {
 
 export function fetchStatus(): Promise<StatusPayload> {
   return getJSON<StatusPayload>('/status');
+}
+
+export function fetchView(): Promise<ViewPayload> {
+  return getJSON<ViewPayload>('/view');
 }
 
 // A pond id ("name@major") → the route path + query addressing that major line. All pond-targeting
