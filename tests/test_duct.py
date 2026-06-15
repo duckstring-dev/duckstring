@@ -519,6 +519,32 @@ def test_poller_forwards_push_demand_with_its_epoch(tmp_path):
     assert seen["at"] == T.isoformat()
 
 
+def test_poller_does_not_resend_the_same_demand(tmp_path):
+    # The same push target must be forwarded once, not on every cycle — re-sending it would re-add the
+    # target on a mid-run upstream and cause a duplicate run.
+    d = _driver(tmp_path)
+    d.create_duct("up", "http://up", None)
+    d.add_duct_pond("up", "sales", 1)
+    d.pulse("sales@1", at=_now())  # a push target on the draw; upstream not yet fresh
+
+    pulses: list = []
+
+    def handler(request):
+        if request.url.path == "/api/status":
+            return httpx.Response(200, json={
+                "ponds": [{"name": "sales", "major": 1, "end_f": None, "status": "idle"}], "edges": []})
+        if request.url.path == "/api/ponds/sales/pulse":
+            pulses.append(request.url.params.get("at"))
+        return httpx.Response(200, json={"ok": True})
+
+    solicited: dict = {}
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    asyncio.run(poll_once(d, tmp_path, client, solicited))
+    asyncio.run(poll_once(d, tmp_path, client, solicited))  # second cycle, same unmet demand
+    asyncio.run(client.aclose())
+    assert len(pulses) == 1  # forwarded once across both cycles
+
+
 def test_pulse_at_makes_an_inlet_stamp_the_forwarded_epoch(tmp_path):
     # The producer side of the duct: a pulse carrying `at=T` makes the Inlet stamp T, not now.
     db = connect(tmp_path / "duck.db")

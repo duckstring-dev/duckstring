@@ -59,7 +59,12 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
             tmp.replace(dest)  # atomic publish
 
 
-async def poll_once(driver, root, client: httpx.AsyncClient) -> None:
+async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | None = None) -> None:
+    # `solicited` (persisted across cycles by run_poller) is the last demand forwarded per Draw, so we
+    # never re-send the same push/pull. Re-sending the SAME target would re-add it on the upstream
+    # mid-run and trigger a spurious second run at the same freshness.
+    if solicited is None:
+        solicited = {}
     targets = driver.duct_targets()
     if not targets:
         return
@@ -76,13 +81,11 @@ async def poll_once(driver, root, client: httpx.AsyncClient) -> None:
                 by_key[(p["name"], p["major"])] = p
         for m in duct["members"]:
             key = f"{m['name']}@{m['major']}"
-            if status is None:  # upstream unreachable
+            if status is None or by_key.get((m["name"], m["major"])) is None:  # unreachable / not deployed
                 driver.observe_remote(key, None, down=True)
+                solicited.pop(key, None)  # forget what we sent so it re-forwards on recovery
                 continue
-            up = by_key.get((m["name"], m["major"]))
-            if up is None:  # not (yet) deployed upstream
-                driver.observe_remote(key, None, down=True)
-                continue
+            up = by_key[(m["name"], m["major"])]
             driver.observe_remote(key, _parse_f(up.get("end_f")), down=up.get("status") in _DOWN_STATES)
 
     # 2. Perform pending transfers (fetch + land), then report completion.
@@ -101,10 +104,17 @@ async def poll_once(driver, root, client: httpx.AsyncClient) -> None:
 
     # 3. Solicit upstreams for Draws with unmet downstream demand — forwarding the demand's epoch so
     #    the upstream Inlet mints the SAME freshness (push target → pulse-at-T; pull → tap-with-m).
+    #    Each distinct demand is forwarded exactly once (see `solicited`): re-sending the same epoch
+    #    would re-add the target on a mid-run upstream and cause a duplicate run.
     for d in driver.draws():
+        key = d["key"]
         origin = _origin_for(targets, d["name"], d["major"])
         duct = url_by_origin.get(origin) if origin else None
         if duct is None:
+            continue
+        demand = (d["target"], d["pull_m"])
+        if demand == (None, None) or solicited.get(key) == demand:
+            solicited[key] = demand  # nothing to send, or already sent this exact demand
             continue
         try:
             if d["target"] is not None:
@@ -117,8 +127,9 @@ async def poll_once(driver, root, client: httpx.AsyncClient) -> None:
                     f"{duct['remote_url']}/api/ponds/{d['name']}/tap",
                     params={"major": d["major"], "m": d["pull_m"]}, headers=duct["auth"],
                 )
+            solicited[key] = demand
         except httpx.HTTPError:
-            pass  # next cycle retries
+            pass  # don't record → retry next cycle
 
 
 def _origin_for(targets: list[dict], name: str, major: int) -> str | None:
@@ -162,10 +173,11 @@ async def _wait_for_change(driver, client: httpx.AsyncClient, wake: asyncio.Even
 async def run_poller(driver, root, wake: asyncio.Event) -> None:
     """The poller loop. Each cycle observes/transfers/solicits, then waits — on an upstream freshness
     long-poll or a local-demand wake — rather than sleeping a fixed interval. Cancelled on shutdown."""
+    solicited: dict[str, tuple] = {}  # last demand forwarded per Draw — persisted so we don't re-send
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
         while True:
             try:
-                await poll_once(driver, root, client)
+                await poll_once(driver, root, client, solicited)
             except Exception as exc:  # keep the loop alive
                 print(f"[catchment] poller error: {exc}", flush=True)
             try:

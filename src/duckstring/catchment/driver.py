@@ -81,6 +81,9 @@ class Driver:
         # demand-bearing operations (tap/pulse/wave/…/Duck events) so a Draw solicits its upstream
         # immediately, not on the next poll. NOT called from the poller's own observe/transfer paths.
         self._notify_cb = None
+        # Monotonic counter bumped on every state change — the UI long-polls /api/status against it, so
+        # the display updates the instant the engine state moves rather than on a fixed timer.
+        self.state_version = 0
         self.reload()
 
     def set_notify(self, cb) -> None:
@@ -209,6 +212,7 @@ class Driver:
             for pid in self.state.pond_states:
                 derive_blocked(self.state, pid)
             self.jobs = {key: self.jobs.get(key, []) for key in ponds}
+            self.state_version += 1  # topology/config (deploy, ducts, windows) changed
 
     def _load_pond_state(self, pond_id: int) -> PondState:
         row = self.db.execute(
@@ -356,6 +360,7 @@ class Driver:
             p = self.state.ponds[pond]
             p.retry_immediately = immediate_retries
             p.retry_on_change = source_retries
+            self.state_version += 1  # budgets show in /api/status
 
     def retry_config(self, pond: str) -> dict:
         p = self.state.ponds[pond]
@@ -876,6 +881,7 @@ class Driver:
             self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force)
         self._persist_state()
         self._reap_idle()
+        self.state_version += 1  # state moved → release any /api/status long-poll
         # Wake the poller so a Draw forwards new demand to its upstream at once. The poller's own
         # observe/transfer paths pass notify=False (they're handled in-cycle) to avoid a busy loop.
         if notify and self._notify_cb is not None:
@@ -1144,6 +1150,7 @@ class Driver:
             rows = dict(self.db.execute("SELECT key, value FROM catchment_meta").fetchall())
             return {
                 "catchment": {"id": rows.get("id"), "name": rows.get("name")},
+                "version": self.state_version,  # the /api/status long-poll's change token
                 "ponds": ponds, "edges": edges,
             }
 

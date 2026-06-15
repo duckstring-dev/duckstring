@@ -10,12 +10,17 @@ be the line's currently selected artifact. The resolved target is the engine key
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter()
+
+_STATUS_WAIT_TICK = 0.05  # how often the status long-poll re-checks the state version
+_STATUS_WAIT_TIMEOUT = 25.0  # heartbeat ceiling on a held status request
 
 
 def _driver(request: Request):
@@ -43,8 +48,18 @@ def _resolve(request: Request, name: str, major: int | None, version: str | None
 
 
 @router.get("/status")
-def status(request: Request):
-    return _driver(request).status()
+async def status(request: Request, since: Optional[int] = None):
+    """Live state. Without ``since``, returns immediately (the CLI / first load). With ``since``, it
+    **long-polls**: holds until the engine state moves past that version (or a heartbeat timeout), so
+    the UI updates the instant anything changes instead of on a fixed timer. The payload's ``version``
+    is the token to pass back as ``since``."""
+    driver = _driver(request)
+    if since is not None:
+        for _ in range(int(_STATUS_WAIT_TIMEOUT / _STATUS_WAIT_TICK)):
+            if driver.state_version != since:
+                break
+            await asyncio.sleep(_STATUS_WAIT_TICK)
+    return driver.status()
 
 
 @router.get("/runs")

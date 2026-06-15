@@ -31,6 +31,12 @@ GET /api/catchment/archive
 
 Streams the whole Catchment root as an uncompressed tar (`application/x-tar`). SQLite files are added as consistent point-in-time snapshots (WAL content included); DuckDB registries are copied as-is, so download while quiescent if registry coherence matters. This is what `duckstring catchment download` consumes.
 
+```
+GET /api/catchment/identity
+```
+
+`{"id", "name"}` — this Catchment's stable UUID (minted once on first start) and optional display name. How a downstream resolves cross-Catchment identity over a [duct](../guides/connecting-catchments.md).
+
 ## Deploy
 
 ```
@@ -53,17 +59,19 @@ Whether that exact version exists, and whether it's the selected one: `{"name", 
 ## Status
 
 ```
-GET /api/status
+GET /api/status[?since={version}]
 ```
 
-The full live state, as one document — this is what the UI and `duckstring status` poll:
+The full live state, as one document — this is what the UI and `duckstring status` read. Without `since` it returns immediately. With `since`, it **long-polls**: the request holds until the engine state moves past that `version` (or a heartbeat timeout), so the UI updates the instant anything changes rather than on a timer. Each response carries the current `version` to pass back as `since`.
 
 ```json
 {
+  "catchment": {"id": "b1f0…", "name": "main"},
+  "version": 1287,
   "ponds": [
     {
       "id": "sales@1", "name": "sales", "major": 1, "kind": "pond", "version": "1.0.0",
-      "status": "running",
+      "status": "running", "is_draw": false,
       "gen": 12, "runs_completed": 11,
       "has_pull": true, "target_f": null,
       "start_f": "2026-06-11T09:30:00+00:00", "end_f": "2026-06-11T09:29:57+00:00",
@@ -90,7 +98,8 @@ Field notes:
 - `gen` / `runs_completed` — runs started / completed since the Catchment loaded.
 - `d_ms` — the Pond's window-derived freshness duration (0 without [Windows](../guides/windows.md)).
 - `trigger` — the standing trigger, e.g. `{"kind": "tide", "bound_ms": 14400000}`, or `null`.
-- The fault fields (`is_failed`, `is_blocked`, `is_killed`, `failed_f`, `failures`) and live budgets are described in [Fault Tolerance](../guides/fault-tolerance.md).
+- The fault fields (`is_failed`, `is_blocked`, `is_killed`, `failed_f`, `failures`) and live budgets are described in [Fault Tolerance](../guides/fault-tolerance.md). When blocked, `missing_sources` (declared Sources absent from this Catchment, as `name@major`) and `blocked_by` (Sources that are themselves down) explain why; `error` carries a failed Pond's message.
+- `catchment` — this Catchment's [stable identity](../guides/connecting-catchments.md#identity-and-the-lineage-view) `{id, name}`. `is_draw` marks a [Pond Draw](../guides/connecting-catchments.md) (fed by a duct, not run by a worker).
 - `edges` — the inter-Pond graph as `[source, sink]` pairs; `ripple_edges` the intra-Pond graph as `[parent, child]`.
 
 ## Run history
@@ -125,8 +134,8 @@ All under `/api/ponds/{name}/…`, all returning `{"ok": true}`; `404` for unkno
 
 | Endpoint | Body | Action |
 |---|---|---|
-| `POST …/tap` | — | Pull once |
-| `POST …/pulse` | — | Push once to now |
+| `POST …/tap` | — | Pull once (optional `?m={iso}` mints that demand epoch — a duct forwards the downstream's) |
+| `POST …/pulse` | — | Push once (optional `?at={iso}` targets that freshness instead of now — a duct forwards the downstream's) |
 | `POST …/wave` | — | Standing pull |
 | `POST …/tide` | `{"bound_seconds": 14400}` | Standing push with staleness bound |
 | `POST …/untrigger` | — | Remove the standing trigger |
@@ -161,6 +170,36 @@ GET /api/ponds/{pond}/ripples/{ripple}?major={int}
 ```
 
 The Ripple's published output, zipped. `404` if it has no export yet.
+
+## Cross-Catchment (ducts)
+
+See [Connecting Catchments](../guides/connecting-catchments.md). The producer side reuses the routes above (the consumer reads its data and forwards demand as an ordinary client); these are the duct-specific additions.
+
+Producer side — expose and transfer:
+
+| Endpoint | Description |
+|---|---|
+| `POST /api/ponds/{name}/open` | `{"tap_on_get": false}` — mark the Pond open (and optionally tap-on-get). |
+| `POST /api/ponds/{name}/close` | Remove the open flag. |
+| `GET /api/draw/{name}/{major}?tables={csv}` | The Pond line's full exported Parquet as a zip — what a Draw transfers. `tables` optionally restricts the set. |
+| `GET /api/draw/{name}/{major}/wait?after={iso}` | Long-poll: blocks until the Pond's freshness advances past `after` (or it goes down, or a timeout), returning `{end_f, down}`. Lets a downstream transfer the instant the upstream is fresh. |
+
+Consumer side — manage ducts (a duct lives on the consuming Catchment):
+
+| Endpoint | Description |
+|---|---|
+| `POST /api/duct` | `{"origin", "remote_url", "auth_headers"?, "upstream_id"?}` — register a conduit from an upstream Catchment. |
+| `GET /api/duct` | `{"ducts": [...]}` — ducts and the Ponds each draws (credentials redacted). |
+| `DELETE /api/duct/{origin}` | Destroy a duct and its Pond Draws. |
+| `POST /api/duct/{origin}/ponds` | `{"pond", "major", "incremental"?}` — draw one Pond. |
+| `DELETE /api/duct/{origin}/ponds/{pond}?major={int}` | Stop drawing a Pond. |
+| `POST /api/duct/{origin}/sync` | Draw every Pond the upstream currently exposes. |
+
+```
+GET /api/view?scope={csv pond keys}&visited={csv uuids}
+```
+
+The recursive upstream lineage: `{catchments: [{id, name, reachable, ponds, edges}], duct_edges: [{from, to}]}`, where each `duct_edge` is `from:(upstream_id, pond) → to:(consumer_id, draw)`. Each hop expands its own ducts (it holds their credentials), threading `visited` so a mesh cycle cuts cleanly; the merge de-dups Catchments by id. This is what the [web UI](../guides/web-ui.md) renders as upstream containers.
 
 ## Worker protocol (informational)
 

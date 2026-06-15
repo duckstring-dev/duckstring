@@ -93,6 +93,7 @@ export interface RawPond {
 
 export interface StatusPayload {
   catchment: { id: string | null; name: string | null } | null; // this Catchment's stable identity
+  version: number; // change token for the /api/status long-poll (pass back as ?since=)
   ponds: RawPond[];
   edges: [string, string][]; // [sourceId, sinkId] — pond keys ("name@major")
 }
@@ -158,8 +159,9 @@ async function postJSON(path: string, body: unknown = {}): Promise<void> {
   }
 }
 
-export function fetchStatus(): Promise<StatusPayload> {
-  return getJSON<StatusPayload>('/status');
+export function fetchStatus(since?: number): Promise<StatusPayload> {
+  // `since` long-polls: the request holds until the state moves past that version (or a heartbeat).
+  return getJSON<StatusPayload>(since === undefined ? '/status' : `/status?since=${since}`);
 }
 
 export function fetchView(): Promise<ViewPayload> {

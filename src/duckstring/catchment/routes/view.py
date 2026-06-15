@@ -8,16 +8,12 @@ its scoped Ponds + the boundary (duct) edges; the merge de-dups Catchments by UU
 
 from __future__ import annotations
 
-import time
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter()
-
-_CACHE_TTL = 2.0  # outbound /view fetches are cached briefly so a per-poll fan-out doesn't multiply
-_cache: dict[tuple, tuple[float, dict]] = {}
 
 
 def _merge(into: dict, sub: dict) -> None:
@@ -46,20 +42,13 @@ def _edge_key(e: dict) -> tuple:
 
 
 async def _fetch_upstream(client, remote_url, auth, scope, visited) -> dict:
-    key = (remote_url, frozenset(scope), frozenset(visited))
-    now = time.monotonic()
-    hit = _cache.get(key)
-    if hit is not None and now - hit[0] < _CACHE_TTL:
-        return hit[1]
     resp = await client.get(
         f"{remote_url}/api/view",
         params={"scope": ",".join(scope), "visited": ",".join(sorted(visited))},
         headers=auth, timeout=httpx.Timeout(15.0, connect=5.0),
     )
     resp.raise_for_status()
-    result = resp.json()
-    _cache[key] = (now, result)
-    return result
+    return resp.json()
 
 
 async def assemble_view(driver, scope: Optional[list[str]], visited: set[str], client) -> dict:

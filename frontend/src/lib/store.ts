@@ -167,6 +167,7 @@ export interface LiveState extends StatusSlice {
   connected: boolean;
   error: string | null;
   lineage: ViewPayload | null; // upstream Catchments + duct edges, for the lineage overlay
+  statusVersion: number | null; // last seen engine-state version; drives the /api/status long-poll
   needsKey: boolean; // the Catchment answered 401 — show the API-key prompt
 
   selectedPondId: PondId | null;
@@ -258,11 +259,14 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   selectedPondRuns: [],
   windowsByPond: {},
   lineage: null,
+  statusVersion: null,
 
   async refresh() {
+    let payload;
     try {
-      const payload = await fetchStatus();
-      set({ ...transformStatus(payload), now: Date.now(), connected: true, error: null, needsKey: false });
+      // Long-poll: holds until the engine state moves past the version we last saw (or a heartbeat),
+      // so this resolves the instant anything changes rather than on a fixed timer.
+      payload = await fetchStatus(get().statusVersion ?? undefined);
     } catch (e) {
       if (e instanceof UnauthorizedError) {
         set({ connected: false, needsKey: true, error: null });
@@ -272,12 +276,18 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       return; // if the Catchment is unreachable, skip the dependent fetches this tick
     }
 
-    // Upstream lineage (recursive across ducts) — non-critical; keep the last good view on failure.
+    // The state just changed → fetch the lineage fresh (after the gate, not concurrently, so it
+    // reflects the post-change state). Non-critical: keep the last good one on failure.
+    let lineage = get().lineage;
     try {
-      set({ lineage: await fetchView() });
+      lineage = await fetchView();
     } catch {
       /* leave the last lineage in place */
     }
+    set({
+      ...transformStatus(payload), lineage, statusVersion: payload.version,
+      now: Date.now(), connected: true, error: null, needsKey: false,
+    });
 
     const s = get();
     const pond = focusPond(s);
