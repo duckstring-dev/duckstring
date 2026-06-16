@@ -128,6 +128,11 @@ def any_ripple_busy(s: EngineState, pid: PondId) -> bool:
 
 def pond_source_f(s: EngineState, pid: PondId, now: datetime) -> tuple[datetime | None, timedelta]:
     pond = s.ponds[pid]
+    if pond.is_draw:
+        # A Pond Draw's freshness is the upstream freshness the poller mirrored in. NEVER (not yet
+        # polled, or upstream never run) → cannot transfer.
+        rf = s.pond_states[pid].remote_f
+        return (rf if rf != NEVER else None), ZERO
     if not pond.sources:
         if pond.windows:
             best: tuple[datetime, timedelta] | None = None
@@ -159,44 +164,49 @@ def ripple_source_f(s: EngineState, rid: RippleId) -> datetime:
 # ─── Demand reactions (synchronous cascades; mutate the working state) ─────────
 
 
-def pond_receive_pull(s: EngineState, pid: PondId, now: datetime) -> None:
+def pond_receive_pull(s: EngineState, pid: PondId, now: datetime, m: datetime) -> None:
+    """``m`` is the minted demand epoch carried by this pull — the freshness an Inlet it reaches will
+    stamp. A cold-start (idle) receive passes ``m`` through unchanged so the whole cascade shares one
+    epoch; a sustaining re-arm (from a running Pond's start) mints ``m`` at that Pond's start time."""
     ps = s.pond_states[pid]
     if ps.is_blocked:  # a blocked Pond solicits nothing new; it only drains existing demand
         ps.has_received_pull = False
         return
     if ps.start_f == ps.end_f:  # cold start: wake the whole Pond
-        pond_set_has_pull(s, pid, now)
+        pond_set_has_pull(s, pid, now, m)
         for rid in ripples_of(s, pid):
-            ripple_set_has_pull(s, rid, now)
+            ripple_set_has_pull(s, rid, now, m)
     else:  # running: only sustain the leaves
         for rid in leaves_of(s, pid):
-            ripple_set_has_pull(s, rid, now)
+            ripple_set_has_pull(s, rid, now, m)
     ps.has_received_pull = False
 
 
-def pond_set_has_pull(s: EngineState, pid: PondId, now: datetime) -> None:
+def pond_set_has_pull(s: EngineState, pid: PondId, now: datetime, m: datetime) -> None:
     ps = s.pond_states[pid]
+    if m > ps.pull_m:
+        ps.pull_m = m  # the strongest (latest) pull epoch drives an Inlet's stamp
     if ps.has_pull:
         return
     ps.has_pull = True
     for sp in s.ponds[pid].sources:
         if s.pond_states[sp].start_f <= ps.start_f:
             s.pond_states[sp].has_received_pull = True
-            pond_receive_pull(s, sp, now)
+            pond_receive_pull(s, sp, now, m)  # cold-start cascade: pass the epoch through unchanged
 
 
-def ripple_set_has_pull(s: EngineState, rid: RippleId, now: datetime) -> None:
+def ripple_set_has_pull(s: EngineState, rid: RippleId, now: datetime, m: datetime) -> None:
     rs = s.ripple_states[rid]
     if rs.has_pull:
         return
     rs.has_pull = True
     intra = intra_parents(s, rid)
     if not intra:
-        pond_set_has_pull(s, s.ripples[rid].pond_id, now)
+        pond_set_has_pull(s, s.ripples[rid].pond_id, now, m)
     else:
         for p in intra:
             if s.ripple_states[p].start_f <= rs.start_f:
-                ripple_set_has_pull(s, p, now)
+                ripple_set_has_pull(s, p, now, m)
 
 
 def pond_add_target(s: EngineState, pid: PondId, t: datetime) -> None:
@@ -231,7 +241,7 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
     downstream; a Pond still reads its blocked state solely from itself and its Sources."""
     ps = s.pond_states[pid]
     pond = s.ponds[pid]
-    blocked = ps.is_failed or ps.is_killed or any(
+    blocked = ps.is_failed or ps.is_killed or ps.remote_down or pond.has_missing_source or any(
         s.pond_states[sp].is_failed or s.pond_states[sp].is_blocked or s.pond_states[sp].is_killed
         for sp in pond.sources
         if sp not in pond.optional_sources
@@ -248,6 +258,8 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
 def can_start_pond(s: EngineState, pid: PondId, now: datetime) -> bool:
     ps = s.pond_states[pid]
     if ps.is_killed:  # terminal until an operator Wake/Force/Clear
+        return False
+    if s.ponds[pid].has_missing_source:  # a declared Source is absent — never run (hard block)
         return False
     f, _ = pond_source_f(s, pid, now)
     if f is None:
@@ -267,19 +279,33 @@ def can_start_pond(s: EngineState, pid: PondId, now: datetime) -> bool:
 
 def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     ps = s.pond_states[pid]
+    pond = s.ponds[pid]
     f, window_d = pond_source_f(s, pid, now)
     assert f is not None
     started_as_pull = ps.has_pull
 
+    # Minted freshness: an Inlet stamps the demand epoch — the max minted ``m`` of its outstanding
+    # demand (push ``m`` is the target value; pull ``m`` is ps.pull_m) — not its run-now. So a Pulse/
+    # Tap at T yields freshness T for every Inlet it reaches, whenever each physically runs. Force's
+    # NEVER target is filtered out, so a Force keeps the pond_source_f `now`. Windowed Inlets and
+    # non-Inlets (and Draws) are unaffected — their freshness is window-end / source-derived / remote.
+    if not pond.sources and not pond.windows and not pond.is_draw:
+        ms = [t for t in ps.targets if t > NEVER]
+        if started_as_pull and ps.pull_m > NEVER:
+            ms.append(ps.pull_m)
+        if ms:
+            f = max(ms)
+
     # A blocked Pond drains but never solicits its Sources; a Wake (pull_local) also doesn't propagate.
     if started_as_pull and not ps.is_blocked and not ps.pull_local:
-        for sp in s.ponds[pid].sources:
+        for sp in pond.sources:
             s.pond_states[sp].has_received_pull = True
-            pond_receive_pull(s, sp, now)
+            pond_receive_pull(s, sp, now, now)  # sustain: mint this Pond's start time as the epoch
 
     ps.start_f = f
     ps.has_pull = False
     ps.pull_local = False
+    ps.pull_m = NEVER
     ps.targets = [t for t in ps.targets if t > ps.start_f]
 
     if not s.ponds[pid].sources:
@@ -322,7 +348,7 @@ def start_ripple(s: EngineState, rid: RippleId, now: datetime) -> None:
 
     if rs.has_pull:
         for p in intra_parents(s, rid):
-            ripple_set_has_pull(s, p, now)
+            ripple_set_has_pull(s, p, now, now)  # intra re-arm (same Pond) — epoch is moot here
         rs.has_pull = False
     rs.targets = [t for t in rs.targets if t > source_f]
 
@@ -343,6 +369,10 @@ def complete_ripple(state: EngineState, rid: RippleId, now: datetime) -> EngineS
     new_end = min(s.ripple_states[leaf].end_f for leaf in leaves_of(s, pid))
     if new_end > ps.end_f:
         ps.end_f = new_end
+        # A completed Run satisfies every target up to its freshness — drop them so a target that was
+        # added *during* the Run (valid then, ``t > end_f``) can't linger past completion and trigger a
+        # spurious re-run at the same F. (start_pond_run clears only what existed at start.)
+        ps.targets = [t for t in ps.targets if t > ps.end_f]
         ps.runs_completed += 1
         ps.completion_times.append(now)
         ps.gen_start_times.pop(ps.runs_completed, None)
@@ -353,7 +383,7 @@ def complete_ripple(state: EngineState, rid: RippleId, now: datetime) -> EngineS
             derive_blocked(s, pid)
         trig = s.triggers.get(pid)
         if trig is not None and trig.kind == "wave":
-            pond_receive_pull(s, pid, now)
+            pond_receive_pull(s, pid, now, now)  # Wave re-tap: a new demand epoch at completion
     return s
 
 
@@ -400,9 +430,11 @@ def fail_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
 # ─── Public entry points (operate on a clone, run cascades) ───────────────────
 
 
-def tap_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
+def tap_pond(state: EngineState, pid: PondId, now: datetime, m: datetime | None = None) -> EngineState:
+    """One pull. ``m`` is the demand epoch to mint (defaults to ``now``); a duct passes the
+    downstream's epoch so the upstream Inlet stamps the same freshness."""
     s = state.clone()
-    pond_receive_pull(s, pid, now)
+    pond_receive_pull(s, pid, now, m if m is not None else now)
     return s
 
 
@@ -427,6 +459,7 @@ def sleep_pond(state: EngineState, pid: PondId, now: datetime, upstream: bool = 
         seen.add(cur)
         ps = s.pond_states[cur]
         ps.has_pull = False
+        ps.pull_m = NEVER
         ps.has_received_pull = False
         ps.targets = []
         for rid in ripples_of(s, cur):
@@ -447,6 +480,7 @@ def wake_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
     ps = s.pond_states[pid]
     ps.has_pull = True
     ps.pull_local = True
+    ps.pull_m = now  # Wake mints its own epoch (it sets has_pull directly, bypassing the cascade)
     return s
 
 
@@ -475,6 +509,7 @@ def kill_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
     ps = s.pond_states[pid]
     ps.is_killed = True
     ps.has_pull = False
+    ps.pull_m = NEVER
     ps.has_received_pull = False
     ps.pull_local = False
     ps.targets = []
@@ -542,7 +577,7 @@ def tick(now: datetime, state: EngineState) -> EngineState:
         if trig.kind == "wave":
             idle = ps.start_f == ps.end_f and not ps.has_pull and not ps.targets and not any_ripple_busy(s, pid)
             if idle:
-                pond_receive_pull(s, pid, now)
+                pond_receive_pull(s, pid, now, now)  # Wave-on-idle: a fresh demand epoch
         elif trig.kind == "tide":
             bound = trig.bound or ZERO
             ref = max_target(ps.targets) or ps.start_f

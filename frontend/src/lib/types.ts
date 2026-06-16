@@ -16,6 +16,7 @@ export interface Pond {
   id: PondId;
   name: string;
   kind: string; // inlet | pond | outlet
+  isDraw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment
   sources: PondId[];
 }
 
@@ -56,6 +57,9 @@ export interface PondInfo {
   isKilled: boolean;
   failedF: string | null; // freshness the failed Run was reaching
   failures: number; // failed Runs this episode (vs sourceRetries)
+  missingSources: string[]; // declared Sources absent from the Catchment (pond keys "name@major")
+  blockedBy: string[]; // required Sources that are down — the reason for an upstream block
+  error: string | null; // failure message of the freshest failed Run, when failed
   immediateRetries: number; // live budget: Ripple retries within a Run
   sourceRetries: number; // live budget: Runs retried on a Source change
 }
@@ -84,6 +88,36 @@ export interface PondRun {
   error: string | null; // Pond-level failure message (dead/silent Duck, ledger error), if any
   traceback: string | null; // full traceback for a Pond-level failure, if any
   ripples?: RippleRun[];
+}
+
+// ─── Cross-Catchment lineage view (/api/view) ─────────────────────────────────
+
+// A read-only Pond in an upstream Catchment's container (subset of the status pond shape).
+export interface ViewPond {
+  id: PondId;
+  name: string;
+  status: DemandStatus;
+  is_draw: boolean;
+  end_f: string | null;
+  start_f: string | null;
+}
+
+export interface ViewCatchment {
+  id: string | null;
+  name: string | null;
+  reachable: boolean;
+  ponds: ViewPond[];
+  edges: [PondId, PondId][]; // [source, sink] within this Catchment
+}
+
+export interface DuctEdge {
+  from: { catchment: string | null; pond: PondId }; // upstream source Pond
+  to: { catchment: string | null; pond: PondId }; // the consumer's Draw node
+}
+
+export interface ViewPayload {
+  catchments: ViewCatchment[];
+  duct_edges: DuctEdge[];
 }
 
 // ─── Windows ─────────────────────────────────────────────────────────────────

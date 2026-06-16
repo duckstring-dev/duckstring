@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .db import connect, migrate
+from .db import connect, ensure_identity, migrate
 from .driver import Driver
 from .launcher import NoopLauncher, SubprocessLauncher
 from .routes import router
@@ -49,22 +49,35 @@ async def _lifespan(app: FastAPI):
     # Restore: resume any Pond Runs that were in flight when the Catchment last stopped.
     driver.resume_incomplete()
 
+    from .poller import run_poller
+
+    # The poller wakes immediately when a Draw acquires demand (so it solicits its upstream at once),
+    # instead of waiting for its next cycle. The driver signals across threads via the running loop.
+    wake = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    driver.set_notify(lambda: loop.call_soon_threadsafe(wake.set))
+
     scheduler = asyncio.create_task(_scheduler(driver))
+    poller = asyncio.create_task(run_poller(driver, app.state.root, wake))
     try:
         yield
     finally:
-        scheduler.cancel()
-        try:
-            await scheduler
-        except asyncio.CancelledError:
-            pass
+        for task in (scheduler, poller):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         launcher.shutdown_all()
 
 
-def create_app(root: Path, api_key: str | None = None, base_url: str | None = None) -> FastAPI:
+def create_app(
+    root: Path, api_key: str | None = None, base_url: str | None = None, name: str | None = None
+) -> FastAPI:
     root.mkdir(parents=True, exist_ok=True)
     con = connect(root / "duck.db")
     migrate(con)
+    ensure_identity(con, name or os.environ.get("DUCKSTRING_CATCHMENT_NAME"))
 
     app = FastAPI(title="Duckstring Catchment", lifespan=_lifespan)
     app.state.root = root

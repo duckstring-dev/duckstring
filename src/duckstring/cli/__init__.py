@@ -3,6 +3,7 @@ from __future__ import annotations
 import typer
 
 from . import catchment as catchment_cmd
+from . import duct as duct_cmd
 from . import pond as pond_cmd
 from . import puddle as puddle_cmd
 from .control import clear, failure_budget, force, kill, sleep, wake
@@ -53,6 +54,10 @@ control_app.command("sleep")(sleep)
 control_app.command("kill")(kill)
 control_app.command("clear")(clear)
 control_app.command("failure-budget")(failure_budget)
+
+catchment_cmd.app.command("open")(duct_cmd.open_pond)
+catchment_cmd.app.command("close")(duct_cmd.close_pond)
+catchment_cmd.app.add_typer(duct_cmd.app, name="duct")
 
 app.add_typer(catchment_cmd.app, name="catchment")
 app.add_typer(pond_cmd.app, name="pond")

@@ -40,6 +40,7 @@ const sidebars: SidebarsConfig = {
         'guides/fault-tolerance',
         'guides/incremental-ripples',
         'guides/external-pipelines',
+        'guides/connecting-catchments',
         'guides/querying-data',
         'guides/web-ui',
       ],

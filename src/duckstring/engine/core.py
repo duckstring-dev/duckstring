@@ -126,6 +126,14 @@ class Pond:
     # update. See docs/guide/theory.md "Fault Tolerance".
     retry_immediately: int = 0
     retry_on_change: int = 0
+    # A Pond Draw (cross-Catchment): fed by a duct, not executed by a Duck. It has no local sources;
+    # its freshness is the upstream freshness mirrored by the poller (PondState.remote_f), and its
+    # single ripple performs the data transfer. See plans/cross-catchment-ducts.md.
+    is_draw: bool = False
+    # At least one declared Source (required OR optional) is absent from the Catchment — not deployed
+    # and not drawn over a duct. The Pond cannot run with a missing dependency, so it is hard-blocked
+    # until every Source is present (e.g. the Source is deployed, or a duct draws it in).
+    has_missing_source: bool = False
 
 
 @dataclass
@@ -166,8 +174,14 @@ class PondState:
     start_f: datetime = NEVER  # freshness of the most recently started Pond Run
     end_f: datetime = NEVER  # freshness of the most recently completed Pond Run
     d: timedelta = ZERO  # window delay carried by the current freshness
+    remote_f: datetime = NEVER  # Pond Draws only: the upstream freshness mirrored by the poller
+                                # (transient — repopulated on each poll, not persisted)
+    remote_down: bool = False  # Pond Draws only: upstream is failed/killed/blocked/unreachable →
+                               # the Draw is blocked (drains landed data, solicits nothing)
     has_received_pull: bool = False  # inbox: a Sink/trigger asked for resupply
     has_pull: bool = False  # a Pond Run is wanted in pull
+    pull_m: datetime = NEVER  # minted epoch of the active pull (the freshness an Inlet stamps; the
+                              # pull counterpart of a push target's value). NEVER when no pull.
     targets: list[datetime] = field(default_factory=list)  # unsatisfied push target freshnesses
     # Fault tolerance (see docs/guide/theory.md "Fault Tolerance").
     is_failed: bool = False  # a Pond Run gave up and has not been superseded by a fresher success

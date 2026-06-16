@@ -35,6 +35,14 @@ def health(request: Request):
     return {"status": "ok"}
 
 
+@router.get("/catchment/identity")
+def identity(request: Request):
+    """This Catchment's stable id + optional display name — how a downstream resolves cross-mesh
+    identity (which upstream a duct points at, and cutting cycles in the recursive lineage view)."""
+    rows = dict(_db(request).execute("SELECT key, value FROM catchment_meta").fetchall())
+    return {"id": rows.get("id"), "name": rows.get("name")}
+
+
 def _root_files(root: Path) -> list[tuple[Path, str]]:
     """Every regular file in the root as (path, root-relative arcname), WAL sidecars skipped."""
     files = []

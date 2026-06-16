@@ -28,4 +28,6 @@ duckstring catchment connect --name prod --path https://host:7474 # register a r
 
 Each registered Catchment has a name; one is the default, and any command takes `-c {name}` to target another. Starting locally and later pointing the same commands at a hosted server is the intended upgrade path — there are future plans for a managed Catchment service at [duckstring.com](https://duckstring.com).
 
+Every Catchment also carries a stable identity (a UUID minted on first start), which lets Catchments reference each other unambiguously. A Catchment can **draw a Pond from another** over a duct — so the package graph can span teams and machines, not just one runtime. See [Connecting Catchments](../guides/connecting-catchments.md).
+
 See [Running a Catchment](../guides/running-a-catchment.md) for operations: starting, connecting, what lives on disk, and restart behaviour.

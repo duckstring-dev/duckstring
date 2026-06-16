@@ -30,8 +30,23 @@ Most commands that talk to a Catchment share these:
 | `catchment download [-c NAME] [--path DIR] [-y]` | Download the Catchment's entire root (database, artifacts, data, ledgers) into a local directory — default `./.duckstring`, so it drops straight into a platform deploy bundle. Shows the state size and asks before transferring (`-y` skips); streams with a progress bar. |
 | `catchment set-default {name}` | Set the default Catchment. |
 | `catchment disconnect {name} [--purge]` | Unregister; for local Catchments, offers to delete the data directory (`--purge` deletes without asking). |
+| `catchment open {pond} [-m M] [--tap-on-get]` | Mark a Pond open to demand from any source; `--tap-on-get` makes a [query](../guides/querying-data.md) read fire a Tap (snapshot served first). |
+| `catchment close {pond} [-m M]` | Remove a Pond's open flag. |
 
 Registrations and the default live in `~/.duckstring/config.toml`.
+
+### `duckstring catchment duct` — draw Ponds from other Catchments
+
+Conduits that draw a Pond from an upstream Catchment into the consuming one (`-c`, default). See [Connecting Catchments](../guides/connecting-catchments.md). `{upstream}` is a registered Catchment name.
+
+| Command | Description |
+|---|---|
+| `catchment duct create {upstream} [--sync] [-c]` | Open a duct from `{upstream}` into the consuming Catchment (forwards the upstream's URL, credentials, and identity). `--sync` then draws every Pond it exposes. |
+| `catchment duct destroy {upstream} [-c]` | Remove a duct and all the Pond Draws it created. |
+| `catchment duct add {upstream} {pond} [-m M] [--incremental] [-c]` | Draw one upstream Pond (materialises a Pond Draw). `--incremental` is reserved for delta transfer (not yet implemented). |
+| `catchment duct remove {upstream} {pond} [-m M] [-c]` | Stop drawing a Pond. |
+| `catchment duct sync {upstream} [-c]` | Draw every Pond the upstream currently exposes. |
+| `catchment duct ls [-c]` | List ducts and the Ponds each draws. |
 
 ## `duckstring pond` — manage Pond projects
 

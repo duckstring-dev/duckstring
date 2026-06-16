@@ -13,11 +13,12 @@ One thing it deliberately is not: a pipeline editor. **Topology comes from deplo
 
 ## The canvas
 
-The main view is the package graph, live: Ponds as containers with their Ripples and intra-Pond edges inside, Source→Sink edges between them. It updates continuously (~1 s poll), and everything on it is the real engine state:
+The main view is the package graph, live: Ponds as containers with their Ripples and intra-Pond edges inside, Source→Sink edges between them. It updates the instant the engine state changes (a long-poll on `/api/status`, not a timer), and everything on it is the real engine state:
 
 - **Node state by colour** — running (the brand cyan), queued, idle; failure states take visual precedence (failed / killed / blocked) so a stalled lineage is unmissable.
 - **Demand on the edges** — pull demand (amber) and push demand (green-yellow) are visibly distinct, so you can watch a Tap propagate upstream or a Pulse's targets resolve downstream.
 - **Freshness at a glance** — each Pond shows the age of its data and its standing trigger, if any.
+- **Upstream Catchments** — when you [draw Ponds over a duct](connecting-catchments.md), their source Catchments appear as labelled containers feeding your Draw nodes, recursing the full lineage up the mesh. The top-left box names this Catchment (and its stable id).
 
 Selecting any Pond, Ripple, or trigger opens it in the sidebar.
 

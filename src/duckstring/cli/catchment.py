@@ -47,7 +47,7 @@ def _launch(name: str, url: str, root: Path, key: str | None = None) -> None:
     # Ducks dial back to the actual bind address (a wildcard bind is dialled via loopback).
     dial_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     uvicorn.run(
-        create_app(root, api_key=key, base_url=f"http://{dial_host}:{port}"),
+        create_app(root, api_key=key, base_url=f"http://{dial_host}:{port}", name=name),
         host=host, port=port, reload=False, log_level="warning",
     )
 

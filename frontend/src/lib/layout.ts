@@ -1,6 +1,7 @@
 import dagre from '@dagrejs/dagre';
 import type { Node, Edge } from '@xyflow/react';
-import type { PondId, RippleId, Pond, Ripple, TriggerView } from './types';
+import type { PondId, RippleId, Pond, Ripple, TriggerView, ViewPayload } from './types';
+import { computeRemote, assembleRemote } from './lineage';
 
 const MIN_RIPPLE_W = 200;
 const RIPPLE_H = 80;
@@ -40,10 +41,12 @@ function rippleWidth(r: Ripple, floor = 0): number {
 function pondNameWidth(name: string): number {
   return Math.ceil(name.length * 8.2 + 24 /* padding */); // ~13px bold monospace
 }
-const POND_PAD_TOP = 68;
+const POND_PAD_TOP = 68; // header area above the ripples (also the height of a ripple-less Pond)
 const POND_PAD_SIDE = 24;
 const POND_PAD_BOTTOM = 24;
-const MIN_POND_W = 160;
+// A Pond is always at least as wide as one ripple plus its side margins — the floor a single-ripple
+// Pond would have. Applied even to a Pond with no ripples (a Draw) so it doesn't render narrower.
+const MIN_POND_W = MIN_RIPPLE_W + POND_PAD_SIDE * 2;
 const MIN_POND_H = 120;
 
 const TRIGGER_W = 120;
@@ -75,7 +78,8 @@ function buildRippleLayout(
   const pondRipples = Object.values(ripples).filter((r) => r.pondId === pondId);
 
   if (pondRipples.length === 0) {
-    return { positions: {}, widths: {}, width: MIN_POND_W, height: MIN_POND_H };
+    // A ripple-less Pond (a Draw) is just its header — no ripple area, no bottom padding.
+    return { positions: {}, widths: {}, width: MIN_POND_W, height: POND_PAD_TOP };
   }
 
   const widths: Record<RippleId, number> = {};
@@ -134,10 +138,16 @@ export function computeLayout(
   ripples: Record<RippleId, Ripple>,
   triggers: Record<PondId, TriggerView>,
   floors?: ContentFloors,
-  direction: 'LR' | 'TB' = 'LR'
+  direction: 'LR' | 'TB' = 'LR',
+  lineage: ViewPayload | null = null,
+  selfId: string | null = null
 ): LayoutResult {
   const pondList = Object.values(ponds);
   const vertical = direction === 'TB';
+
+  // Upstream-lineage boxes (position-free internals) join the pond-level dagre below as nodes, so a
+  // local Pond that feeds an upstream box ranks on the correct side of it.
+  const remote = computeRemote(lineage, selfId, direction);
 
   // Step 1: compute internal ripple layout per pond
   const pondLayouts: Record<
@@ -165,11 +175,25 @@ export function computeLayout(
     const { width, height } = pondLayouts[pond.id];
     pg.setNode(pond.id, { width, height });
   }
+  // Each upstream-lineage box is a single dagre node; the duct edges connect it to the local Ponds
+  // (and to other boxes) so ranking flows through the cross-Catchment graph.
+  const dagreNodes = new Set<string>(pondList.map((p) => p.id));
+  for (const box of remote.boxes) {
+    pg.setNode(`cat:${box.id}`, { width: box.w, height: box.h });
+    dagreNodes.add(`cat:${box.id}`);
+  }
   for (const pond of pondList) {
     for (const sourceId of pond.sources) {
       if (ponds[sourceId]) {
         pg.setEdge(sourceId, pond.id);
       }
+    }
+  }
+  for (const de of remote.ductEdges) {
+    // Guard against an endpoint that isn't a laid-out node (a hidden/absent Pond) — setEdge would
+    // otherwise auto-create a zero-size phantom node and skew the layout.
+    if (dagreNodes.has(de.dagreSource) && dagreNodes.has(de.dagreTarget)) {
+      pg.setEdge(de.dagreSource, de.dagreTarget);
     }
   }
 
@@ -267,5 +291,13 @@ export function computeLayout(
     }
   }
 
-  return { nodes, edges };
+  // Remote lineage boxes: positioned by the same dagre pass, then assembled into group + Pond nodes.
+  const boxPos: Record<string, { x: number; y: number }> = {};
+  for (const box of remote.boxes) {
+    const n = pg.node(`cat:${box.id}`);
+    if (n) boxPos[box.id] = { x: n.x - box.w / 2, y: n.y - box.h / 2 };
+  }
+  const remoteRF = assembleRemote(remote.boxes, remote.ductEdges, boxPos, vertical);
+
+  return { nodes: [...nodes, ...remoteRF.nodes], edges: [...edges, ...remoteRF.edges] };
 }

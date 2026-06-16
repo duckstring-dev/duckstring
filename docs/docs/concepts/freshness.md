@@ -18,6 +18,8 @@ Two consequences do a lot of work:
 
 When an Inlet's source updates in batches (say, daily), a [Window](../guides/windows.md) refines this: data is considered fresh until the end of the window it arrived in, so downstream nodes don't re-run pointlessly between batches.
 
+A coordinated trigger stamps **one** freshness everywhere it reaches: a Pulse or Tap at time `T` lands `T` on every root it touches — even across a [duct](../guides/connecting-catchments.md) to another Catchment — so the whole cascade shares a freshness rather than drifting by when each node happened to run.
+
 ## Pull and push
 
 Demand — the reason a node runs — comes in two flavours, and the difference is the direction the signal travels.

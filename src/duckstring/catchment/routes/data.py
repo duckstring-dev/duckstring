@@ -108,8 +108,23 @@ def get_ripple(
     return Response(content=buf.getvalue(), media_type="application/zip")
 
 
+def _maybe_tap_on_get(request: Request, pond: str, major: Optional[int], version: Optional[str]) -> None:
+    """If the Pond is open with tap-on-get, fire a Tap (the snapshot is served first — we never block
+    on freshness). Best-effort: a data query must never fail because of this."""
+    driver = getattr(request.app.state, "driver", None)
+    if driver is None:
+        return
+    try:
+        key = driver.resolve(pond, major, version)
+        if driver.pond_tap_on_get(key):
+            driver.tap(key)
+    except Exception:
+        pass
+
+
 @router.post("/query")
 def query(body: QueryRequest, request: Request):
+    _maybe_tap_on_get(request, body.pond, body.major, body.version)
     con = _open_pond(request, body.pond, _resolve_major(request, body.pond, body.major, body.version))
     sql = body.sql
     if not sql:

@@ -223,6 +223,29 @@ def _client(driver):
     return TestClient(app)
 
 
+def test_status_version_bumps_and_long_poll_returns_on_change(tmp_path):
+    d = _driver(tmp_path)
+    client = _client(d)
+    v0 = client.get("/api/status").json()["version"]  # no `since` → immediate
+    d.tap("src@1")  # a state change bumps the version
+    # `since` the pre-change version → the version has already moved, so the long-poll returns at once.
+    body = client.get("/api/status", params={"since": v0}).json()
+    assert body["version"] > v0
+
+
+def test_begin_run_cancels_a_pending_shutdown(tmp_path):
+    # Re-arming a Pond must cancel a not-yet-collected reap shutdown, so the Duck doesn't exit out
+    # from under an in-flight run (the "Duck process is not running" race).
+    from datetime import datetime, timezone
+
+    d = _driver(tmp_path)
+    d.jobs["src@1"] = [{"kind": "shutdown"}]
+    now = datetime.now(timezone.utc)
+    d._dispatch_begin_run("src@1", now, now)
+    kinds = [j["kind"] for j in d.jobs["src@1"]]
+    assert "shutdown" not in kinds and "begin_run" in kinds
+
+
 def test_runs_route_params_and_unknown_pond(tmp_path):
     client = _client(_driver(tmp_path))
     assert client.get("/api/runs").json() == {"runs": []}

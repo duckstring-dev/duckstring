@@ -10,16 +10,32 @@ be the line's currently selected artifact. The resolved target is the engine key
 
 from __future__ import annotations
 
-from datetime import timedelta
+import asyncio
+from datetime import datetime, timedelta
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 router = APIRouter()
 
+_STATUS_WAIT_TICK = 0.05  # how often the status long-poll re-checks the state version
+_STATUS_WAIT_TIMEOUT = 25.0  # heartbeat ceiling on a held status request
+
 
 def _driver(request: Request):
     return request.app.state.driver
+
+
+def _parse_f(value: str | None) -> datetime | None:
+    """Parse an optional ISO-8601 demand epoch (a duct forwards the downstream's freshness)."""
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid freshness {value!r}") from exc
 
 
 def _resolve(request: Request, name: str, major: int | None, version: str | None) -> str:
@@ -33,8 +49,20 @@ def _resolve(request: Request, name: str, major: int | None, version: str | None
 
 
 @router.get("/status")
-def status(request: Request):
-    return _driver(request).status()
+async def status(request: Request, since: Optional[int] = None):
+    """Live state. Without ``since``, returns immediately (the CLI / first load). With ``since``, it
+    **long-polls**: holds until the engine state moves past that version (or a heartbeat timeout), so
+    the UI updates the instant anything changes instead of on a fixed timer. The payload's ``version``
+    is the token to pass back as ``since``."""
+    driver = _driver(request)
+    if since is not None:
+        for _ in range(int(_STATUS_WAIT_TIMEOUT / _STATUS_WAIT_TICK)):
+            if driver.state_version != since:
+                break
+            await asyncio.sleep(_STATUS_WAIT_TICK)
+    # status() holds the driver lock and builds the whole payload — off the event loop so concurrent
+    # requests (the draw long-polls, cross-Catchment view recursion) aren't blocked behind it.
+    return await run_in_threadpool(driver.status)
 
 
 @router.get("/runs")
@@ -55,14 +83,22 @@ def runs(
 
 
 @router.post("/ponds/{name}/tap")
-def tap(name: str, request: Request, major: int | None = None, version: str | None = None):
-    _driver(request).tap(_resolve(request, name, major, version))
+def tap(
+    name: str, request: Request, major: int | None = None, version: str | None = None,
+    m: str | None = None,
+):
+    """``m`` (optional ISO freshness) is the demand epoch to mint — a duct forwards the downstream's."""
+    _driver(request).tap(_resolve(request, name, major, version), _parse_f(m))
     return {"ok": True}
 
 
 @router.post("/ponds/{name}/pulse")
-def pulse(name: str, request: Request, major: int | None = None, version: str | None = None):
-    _driver(request).pulse(_resolve(request, name, major, version))
+def pulse(
+    name: str, request: Request, major: int | None = None, version: str | None = None,
+    at: str | None = None,
+):
+    """``at`` (optional ISO freshness) is the push target — a duct forwards the downstream's target."""
+    _driver(request).pulse(_resolve(request, name, major, version), _parse_f(at))
     return {"ok": True}
 
 
@@ -162,6 +198,31 @@ def set_budget(
 @router.get("/ponds/{name}/budget")
 def get_budget(name: str, request: Request, major: int | None = None, version: str | None = None):
     return _driver(request).retry_config(_resolve(request, name, major, version))
+
+
+# ─── Cross-Catchment exposure (open / tap-on-get) ────────────────────────────
+
+
+class _OpenBody(BaseModel):
+    tap_on_get: bool = False
+
+
+@router.post("/ponds/{name}/open")
+def open_pond(
+    name: str, request: Request, body: _OpenBody = _OpenBody(),
+    major: int | None = None, version: str | None = None,
+):
+    """Mark a Pond open — it accepts demand from any source (e.g. a downstream Catchment over a duct).
+    With ``tap_on_get`` a read on the query route also fires a Tap (the snapshot is served first)."""
+    _driver(request).set_pond_open(_resolve(request, name, major, version), body.tap_on_get)
+    return {"ok": True}
+
+
+@router.post("/ponds/{name}/close")
+def close_pond(name: str, request: Request, major: int | None = None, version: str | None = None):
+    """Close a Pond — remove its open flag (and tap-on-get)."""
+    _driver(request).unset_pond_open(_resolve(request, name, major, version))
+    return {"ok": True}
 
 
 # ─── Windows (batch-availability on Inlets) ──────────────────────────────────────

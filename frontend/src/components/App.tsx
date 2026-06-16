@@ -110,25 +110,22 @@ export function App() {
   const isMobile = useIsMobile();
 
   useEffect(() => {
-    // Poll the Catchment for live engine state. A guard prevents overlap if a tick runs long.
+    // Long-poll loop: refresh() holds (via /api/status?since=) until the engine state changes, then
+    // resolves at once, so the UI tracks state changes instantly rather than on a fixed timer. A short
+    // gap between iterations (longer while disconnected) avoids a hot loop on instant returns/errors.
     let alive = true;
-    let inflight = false;
-    const tick = async () => {
-      if (inflight) return;
-      inflight = true;
-      try {
+    (async () => {
+      while (alive) {
         await refresh();
-      } finally {
-        inflight = false;
+        if (!alive) break;
+        await new Promise((r) => setTimeout(r, useLiveStore.getState().connected ? 100 : POLL_MS));
       }
-    };
-    tick();
-    const id = setInterval(() => {
-      if (alive) tick();
-    }, POLL_MS);
+    })();
+    // A separate lightweight clock so freshness "age" keeps counting up between state changes.
+    const clock = setInterval(() => useLiveStore.setState({ now: Date.now() }), POLL_MS);
     return () => {
       alive = false;
-      clearInterval(id);
+      clearInterval(clock);
     };
   }, [refresh]);
 

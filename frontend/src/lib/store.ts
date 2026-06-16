@@ -7,11 +7,13 @@ import type {
   NodeView,
   TriggerView,
   PondInfo,
+  ViewPayload,
   PondRun,
   WindowRow,
 } from './types';
 import {
   fetchStatus,
+  fetchView,
   fetchRuns,
   fetchWindows,
   postTrigger,
@@ -94,6 +96,7 @@ function mapWindow(w: RawWindow): WindowRow {
 }
 
 interface StatusSlice {
+  catchment: { id: string | null; name: string | null } | null;
   ponds: Record<PondId, Pond>;
   ripples: Record<RippleId, Ripple>;
   pondViews: Record<PondId, NodeView>;
@@ -110,8 +113,13 @@ function transformStatus(payload: StatusPayload): StatusSlice {
   const pondInfo: Record<PondId, PondInfo> = {};
   const triggers: Record<PondId, TriggerView> = {};
 
+  // A Pond Draw only earns a node if a local Pond actually sources from it — an unconsumed Draw (e.g.
+  // from `duct create --sync` drawing more than this Catchment uses) is noise, so hide it.
+  const consumed = new Set<PondId>(payload.edges.map(([src]) => src));
+
   for (const p of payload.ponds) {
-    ponds[p.id] = { id: p.id, name: p.name, kind: p.kind, sources: [] };
+    if (p.is_draw && !consumed.has(p.id)) continue;
+    ponds[p.id] = { id: p.id, name: p.name, kind: p.kind, isDraw: p.is_draw ?? false, sources: [] };
     pondInfo[p.id] = {
       version: p.version,
       major: p.major,
@@ -121,20 +129,27 @@ function transformStatus(payload: StatusPayload): StatusSlice {
       isKilled: p.is_killed,
       failedF: p.failed_f,
       failures: p.failures,
+      missingSources: p.missing_sources ?? [],
+      blockedBy: p.blocked_by ?? [],
+      error: p.error,
       immediateRetries: p.immediate_retries,
       sourceRetries: p.source_retries,
     };
     pondViews[p.id] = nodeView(p, p.d_ms);
     if (p.trigger) triggers[p.id] = { kind: p.trigger.kind, boundMs: p.trigger.bound_ms };
 
-    for (const r of p.ripples) {
-      const eid = `${p.id}.${r.name}`;
-      ripples[eid] = { id: eid, pondId: p.id, name: r.name, parents: [] };
-      rippleViews[eid] = nodeView(r, 0);
-    }
-    // ripple_edges are [sourceName, sinkName] within the Pond → sink.parents includes source.
-    for (const [src, snk] of p.ripple_edges) {
-      ripples[`${p.id}.${snk}`]?.parents.push(`${p.id}.${src}`);
+    // A Pond Draw's single "draw" ripple is an internal transfer mechanism — not worth rendering. Skip
+    // its ripples entirely; the Draw shows as a bare node (its running/idle state is pond-level).
+    if (!p.is_draw) {
+      for (const r of p.ripples) {
+        const eid = `${p.id}.${r.name}`;
+        ripples[eid] = { id: eid, pondId: p.id, name: r.name, parents: [] };
+        rippleViews[eid] = nodeView(r, 0);
+      }
+      // ripple_edges are [sourceName, sinkName] within the Pond → sink.parents includes source.
+      for (const [src, snk] of p.ripple_edges) {
+        ripples[`${p.id}.${snk}`]?.parents.push(`${p.id}.${src}`);
+      }
     }
   }
   // Pond sources from inter-Pond edges [sourceId, sinkId] (pond keys).
@@ -142,7 +157,7 @@ function transformStatus(payload: StatusPayload): StatusSlice {
     ponds[snk]?.sources.push(src);
   }
 
-  return { ponds, ripples, pondViews, rippleViews, pondInfo, triggers };
+  return { catchment: payload.catchment ?? null, ponds, ripples, pondViews, rippleViews, pondInfo, triggers };
 }
 
 // ─── Store ───────────────────────────────────────────────────────────────────
@@ -156,6 +171,8 @@ export interface LiveState extends StatusSlice {
   now: number;
   connected: boolean;
   error: string | null;
+  lineage: ViewPayload | null; // upstream Catchments + duct edges, for the lineage overlay
+  statusVersion: number | null; // last seen engine-state version; drives the /api/status long-poll
   needsKey: boolean; // the Catchment answered 401 — show the API-key prompt
 
   selectedPondId: PondId | null;
@@ -222,6 +239,7 @@ export function runKey(r: PondRun): string {
 }
 
 export const useLiveStore = create<LiveState>((set, get) => ({
+  catchment: null,
   ponds: {},
   ripples: {},
   pondViews: {},
@@ -245,11 +263,15 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   loadingMore: false,
   selectedPondRuns: [],
   windowsByPond: {},
+  lineage: null,
+  statusVersion: null,
 
   async refresh() {
+    let payload;
     try {
-      const payload = await fetchStatus();
-      set({ ...transformStatus(payload), now: Date.now(), connected: true, error: null, needsKey: false });
+      // Long-poll: holds until the engine state moves past the version we last saw (or a heartbeat),
+      // so this resolves the instant anything changes rather than on a fixed timer.
+      payload = await fetchStatus(get().statusVersion ?? undefined);
     } catch (e) {
       if (e instanceof UnauthorizedError) {
         set({ connected: false, needsKey: true, error: null });
@@ -258,6 +280,19 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       }
       return; // if the Catchment is unreachable, skip the dependent fetches this tick
     }
+
+    // The state just changed → fetch the lineage fresh (after the gate, not concurrently, so it
+    // reflects the post-change state). Non-critical: keep the last good one on failure.
+    let lineage = get().lineage;
+    try {
+      lineage = await fetchView();
+    } catch {
+      /* leave the last lineage in place */
+    }
+    set({
+      ...transformStatus(payload), lineage, statusVersion: payload.version,
+      now: Date.now(), connected: true, error: null, needsKey: false,
+    });
 
     const s = get();
     const pond = focusPond(s);

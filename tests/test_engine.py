@@ -238,8 +238,72 @@ def test_startf_propagation_guard():
     s.pond_states["p1"].start_f = T0 + secs(5)  # p1 running ahead
     s.pond_states["p1"].end_f = T0 + secs(4)
     s.pond_states["p2"].start_f = T0 + secs(1)  # p2 behind
-    pond_set_has_pull(s, "p2", T0 + secs(10))
+    pond_set_has_pull(s, "p2", T0 + secs(10), T0 + secs(10))
     assert not s.pond_states["p1"].has_pull  # skipped — its in-flight run will satisfy the demand
+
+
+@pytest.mark.timeout(1)
+def test_inlet_stamps_push_epoch_not_run_now():
+    # Minted freshness: an Inlet that runs LATER than the push that demanded it stamps the demand
+    # epoch (the target), not its run-now. (Same-tick runs are unchanged because now == target.)
+    s = build([Pond("i", "i")], [Ripple("ir", "i", "ir")])
+    epoch = T0 + secs(5)
+    s.pond_states["i"].targets = [epoch]
+    s2, started = sentinel(T0 + secs(10), s)  # runs at T0+10, but the demand epoch is T0+5
+    assert "ir" in started
+    assert s2.pond_states["i"].start_f == epoch
+
+
+@pytest.mark.timeout(1)
+def test_inlet_stamps_pull_epoch_not_run_now():
+    s = build([Pond("i", "i")], [Ripple("ir", "i", "ir")])
+    epoch = T0 + secs(5)
+    s.pond_states["i"].has_pull = True
+    s.pond_states["i"].pull_m = epoch
+    s.ripple_states["ir"].has_pull = True
+    s2, _ = sentinel(T0 + secs(10), s)
+    assert s2.pond_states["i"].start_f == epoch
+
+
+@pytest.mark.timeout(1)
+def test_force_inlet_ignores_never_sentinel_and_stamps_now():
+    # Force adds a NEVER target; it must be filtered out so the Inlet stamps `now`, not datetime.min.
+    s = build([Pond("i", "i")], [Ripple("ir", "i", "ir")])
+    s = force_pond(s, "i", T0)
+    s2, _ = sentinel(T0 + secs(3), s)
+    assert s2.pond_states["i"].start_f == T0 + secs(3)
+
+
+@pytest.mark.timeout(1)
+def test_completion_prunes_a_target_added_mid_run():
+    # A target added during a Run (valid then: t > end_f) must not linger past completion to fire a
+    # second Run at the same freshness.
+    pond = Pond("p", "p")
+    s = build([pond], [Ripple("r", "p", "r")])
+    T = T0 + secs(5)
+    s.pond_states["p"].start_f = T  # mid-run at freshness T
+    s.pond_states["p"].end_f = T0
+    s.ripple_states["r"].start_f = T
+    s.ripple_states["r"].is_running = True
+    s.pond_states["p"].targets = [T]  # a duplicate target arrived during the Run
+
+    s = complete_ripple(s, "r", T0 + secs(6))
+    assert s.pond_states["p"].end_f == T
+    assert s.pond_states["p"].targets == []  # satisfied target pruned
+    _, started = sentinel(T0 + secs(7), s)
+    assert started == []  # no spurious re-run
+
+
+@pytest.mark.timeout(2)
+def test_pulse_freshness_uniform_across_staggered_diamond():
+    # S -> A, S -> B, X <- A,B with B slower: a Pulse reaches all; every node ends at the pulse epoch.
+    s, durations = diamond_topology()
+    durations["b"] = secs(3)
+    d = Driver(s, durations)
+    d.pulse("X")
+    d.run(10)
+    for pid in ("S", "A", "B", "X"):
+        assert d.state.pond_states[pid].end_f == T0
 
 
 @pytest.mark.timeout(1)

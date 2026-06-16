@@ -3,7 +3,7 @@
 // possibly under a path prefix (a reverse proxy, Posit Connect's /content/{guid}/), so the API base
 // is derived from where the page is mounted rather than hard-coded to the origin root.
 
-import type { FreqUnit } from './types';
+import type { FreqUnit, ViewPayload } from './types';
 
 function apiBase(): string {
   if (typeof window === 'undefined') return '/api';
@@ -66,6 +66,7 @@ export interface RawPond {
   name: string;
   major: number;
   kind: string;
+  is_draw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment, not run by a Duck
   version: string;
   status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked';
   gen: number;
@@ -81,6 +82,9 @@ export interface RawPond {
   is_killed: boolean;
   failed_f: string | null;
   failures: number;
+  missing_sources: string[]; // declared Sources absent from the Catchment (pond keys "name@major")
+  blocked_by: string[]; // required Sources that are down (failed/killed/blocked) — the upstream block
+  error: string | null; // failure message of the freshest failed Run, when failed
   immediate_retries: number;
   source_retries: number;
   ripples: RawRipple[];
@@ -88,6 +92,8 @@ export interface RawPond {
 }
 
 export interface StatusPayload {
+  catchment: { id: string | null; name: string | null } | null; // this Catchment's stable identity
+  version: number; // change token for the /api/status long-poll (pass back as ?since=)
   ponds: RawPond[];
   edges: [string, string][]; // [sourceId, sinkId] — pond keys ("name@major")
 }
@@ -153,8 +159,13 @@ async function postJSON(path: string, body: unknown = {}): Promise<void> {
   }
 }
 
-export function fetchStatus(): Promise<StatusPayload> {
-  return getJSON<StatusPayload>('/status');
+export function fetchStatus(since?: number): Promise<StatusPayload> {
+  // `since` long-polls: the request holds until the state moves past that version (or a heartbeat).
+  return getJSON<StatusPayload>(since === undefined ? '/status' : `/status?since=${since}`);
+}
+
+export function fetchView(): Promise<ViewPayload> {
+  return getJSON<ViewPayload>('/view');
 }
 
 // A pond id ("name@major") → the route path + query addressing that major line. All pond-targeting

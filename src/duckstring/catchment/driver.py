@@ -17,6 +17,7 @@ SQLite is the durable mirror, the per-Pond ``pond.db`` ledgers the fallback.
 
 from __future__ import annotations
 
+import json
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -31,6 +32,7 @@ from ..engine import (
     Window,
     clear_pond,
     complete_ripple,
+    derive_blocked,
     drain_begin_runs,
     fail_pond,
     fail_ripple,
@@ -50,6 +52,13 @@ from ..keys import pond_key
 # window (the secondary, transport-level signal; process-liveness is the primary one). Comfortably
 # above the Duck's long-poll timeout so a healthy hold is never mistaken for death.
 _DUCK_DEAD_AFTER = timedelta(seconds=60)
+
+# Keep an idle Duck warm for this long before reaping it. Reaping the instant a Pond goes idle, then
+# respawning on the next run, races: a Pond re-armed in the window between the shutdown being sent and
+# the Duck exiting ends up in-flight with a dying Duck → a spurious "Duck not running" failure. The
+# grace means a Pond running on any sub-grace cadence is never reaped (so never races); truly idle
+# Ponds still reap. A duct exposed this by driving _process — hence _reap_idle — far more often.
+_REAP_GRACE = timedelta(seconds=30)
 
 
 def _now() -> datetime:
@@ -72,7 +81,27 @@ class Driver:
         self.meta: dict[str, dict] = {}  # key -> {name, major, version_id, version, source_path, ...}
         self.jobs: dict[str, list[dict]] = {}  # key -> queued Duck commands
         self.last_seen: dict[str, datetime] = {}  # key -> last Duck contact (jobs poll / event)
+        self._idle_since: dict[str, datetime] = {}  # key -> when the Pond went idle (reap grace clock)
+        # Pond Draw transfers awaiting the poller: (pond_key, F). A Draw run is not dispatched to a
+        # Duck — the poller performs the parquet fetch out-of-lock, then reports completion.
+        self._pending_transfers: list[tuple[str, datetime]] = []
+        # Set by the app to a thread-safe callback that wakes the duct poller. Called from _process on
+        # demand-bearing operations (tap/pulse/wave/…/Duck events) so a Draw solicits its upstream
+        # immediately, not on the next poll. NOT called from the poller's own observe/transfer paths.
+        self._notify_cb = None
+        # Monotonic counter bumped on every state change — the UI long-polls /api/status against it, so
+        # the display updates the instant the engine state moves rather than on a fixed timer.
+        self.state_version = 0
         self.reload()
+
+    def set_notify(self, cb) -> None:
+        self._notify_cb = cb
+
+    def identity(self) -> dict:
+        """This Catchment's stable id + optional display name (see plans/cross-catchment-visibility.md)."""
+        with self.lock:
+            rows = dict(self.db.execute("SELECT key, value FROM catchment_meta").fetchall())
+            return {"id": rows.get("id"), "name": rows.get("name")}
 
     # ─── Topology load ────────────────────────────────────────────────────────
 
@@ -90,21 +119,23 @@ class Driver:
 
             name_by_pnid = {r[0]: r[1] for r in db.execute("SELECT id, name FROM pond_name")}
             rows = db.execute("""
-                SELECT pn.name, p.major, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind
+                SELECT pn.name, p.major, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind,
+                       p.is_draw
                 FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id
                 JOIN pond_version pv ON pv.id = p.pond_version_id
             """).fetchall()
             deployed = {pond_key(name, major) for name, major, *_ in rows}
             pondid_to_key = {pid: pond_key(nm, mj) for nm, mj, pid, *_ in rows}
-            for name, major, pond_id, pv_id, version, source_path, kind in rows:
+            for name, major, pond_id, pv_id, version, source_path, kind, is_draw in rows:
                 self.meta[pond_key(name, major)] = {
                     "name": name, "major": major, "version_id": pv_id, "version": version,
-                    "source_path": source_path, "pond_id": pond_id, "kind": kind, "ripple_ids": {},
+                    "source_path": source_path, "pond_id": pond_id, "kind": kind,
+                    "is_draw": bool(is_draw), "ripple_ids": {},
                 }
 
-            for name, major, pond_id, pv_id, _version, _source_path, _kind in rows:
+            for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw in rows:
                 key = pond_key(name, major)
-                sources, optional = [], set()
+                sources, optional, missing = [], set(), []
                 for snid, smajor, required in db.execute(
                     "SELECT source_pond_name_id, source_major, required FROM pond_to_pond WHERE pond_id = ?",
                     (pond_id,),
@@ -114,6 +145,12 @@ class Driver:
                         sources.append(skey)
                         if not required:
                             optional.add(skey)
+                    else:
+                        # A declared Source (required or optional) is absent from this Catchment —
+                        # not deployed and not drawn over a duct. Hard-block until it is present.
+                        missing.append(skey)
+                has_missing_source = bool(missing)
+                self.meta[key]["missing_sources"] = missing
                 windows = [self._row_to_window(r) for r in db.execute(
                     "SELECT start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time "
                     "FROM pond_window WHERE pond_id = ?", (pond_id,)
@@ -124,7 +161,8 @@ class Driver:
                 imm, onc = retry if retry else (0, 0)
                 ponds[key] = Pond(
                     id=key, name=key, sources=sources, optional_sources=optional, windows=windows,
-                    retry_immediately=imm, retry_on_change=onc,
+                    retry_immediately=imm, retry_on_change=onc, is_draw=bool(is_draw),
+                    has_missing_source=has_missing_source,
                 )
                 pond_states[key] = self._load_pond_state(pond_id)
 
@@ -176,19 +214,27 @@ class Driver:
                 ponds=ponds, pond_states=pond_states, ripples=ripples,
                 ripple_states=ripple_states, triggers=triggers,
             )
+            # Recompute blocked from the freshly-loaded topology: a Source that is absent now (or has
+            # since become present, e.g. a duct was added) flips has_missing_source, so the persisted
+            # is_blocked may be stale. Re-derive for every Pond (propagates to Sinks).
+            for pid in self.state.pond_states:
+                derive_blocked(self.state, pid)
             self.jobs = {key: self.jobs.get(key, []) for key in ponds}
+            self.state_version += 1  # topology/config (deploy, ducts, windows) changed
 
     def _load_pond_state(self, pond_id: int) -> PondState:
         row = self.db.execute(
             "SELECT start_f, end_f, d_ms, has_pull, has_received_pull, is_failed, is_blocked, failed_f, "
-            "failures, is_killed, pull_local FROM pond_state WHERE pond_id = ?",
+            "failures, is_killed, pull_local, pull_m FROM pond_state WHERE pond_id = ?",
             (pond_id,),
         ).fetchone()
         ps = PondState()
         if row:
-            sf, ef, d_ms, hp, hrp, is_failed, is_blocked, failed_f, failures, is_killed, pull_local = row
+            (sf, ef, d_ms, hp, hrp, is_failed, is_blocked, failed_f, failures, is_killed, pull_local,
+             pull_m) = row
             ps.is_killed = bool(is_killed)
             ps.pull_local = bool(pull_local)
+            ps.pull_m = datetime.fromisoformat(pull_m) if pull_m else NEVER
             ps.start_f = datetime.fromisoformat(sf) if sf else NEVER
             ps.end_f = datetime.fromisoformat(ef) if ef else NEVER
             ps.d = timedelta(milliseconds=d_ms or 0)
@@ -240,14 +286,18 @@ class Driver:
 
     # ─── Triggers ─────────────────────────────────────────────────────────────
 
-    def tap(self, pond: str) -> None:
+    def tap(self, pond: str, m: datetime | None = None) -> None:
+        """One pull. ``m`` (a duct forwarding the downstream's demand epoch) is the freshness an Inlet
+        it reaches will mint; defaults to now."""
         with self.lock:
-            self.state = tap_pond(self.state, pond, _now())
+            self.state = tap_pond(self.state, pond, _now(), m)
             self._process(_now())
 
-    def pulse(self, pond: str) -> None:
+    def pulse(self, pond: str, at: datetime | None = None) -> None:
+        """Push a target freshness. ``at`` (a duct forwarding the downstream's target) is the demand
+        epoch; defaults to now."""
         with self.lock:
-            self.state = pulse_pond(self.state, pond, _now())
+            self.state = pulse_pond(self.state, pond, at or _now())
             self._process(_now())
 
     def wave(self, pond: str) -> None:
@@ -318,6 +368,7 @@ class Driver:
             p = self.state.ponds[pond]
             p.retry_immediately = immediate_retries
             p.retry_on_change = source_retries
+            self.state_version += 1  # budgets show in /api/status
 
     def retry_config(self, pond: str) -> dict:
         p = self.state.ponds[pond]
@@ -502,6 +553,295 @@ class Driver:
             self.jobs[pond] = []
             return jobs
 
+    # ─── Pond Draws (cross-Catchment) ───────────────────────────────────────────
+
+    def draws(self) -> list[dict]:
+        """Every Pond Draw, for the poller: its key/name/major and whether downstream demand wants
+        the upstream solicited (a pull/push is pending but the upstream hasn't offered it yet)."""
+        with self.lock:
+            out = []
+            for key, m in self.meta.items():
+                if not m.get("is_draw"):
+                    continue
+                ps = self.state.pond_states[key]
+                real_targets = [t for t in ps.targets if t > NEVER]
+                if ps.remote_down:
+                    target = pull_m = None  # blocked upstream: solicit nothing
+                else:
+                    # Forward the draw's outstanding demand upstream carrying its epoch, so the upstream
+                    # Inlet mints the SAME freshness: the max push target, and the pull epoch.
+                    target = _iso(max(real_targets)) if real_targets else None
+                    pull_m = _iso(ps.pull_m) if (ps.has_pull and ps.pull_m > NEVER) else None
+                out.append({
+                    "key": key, "name": m["name"], "major": m["major"],
+                    "target": target, "pull_m": pull_m,
+                })
+            return out
+
+    def observe_remote(
+        self, pond: str, remote_f: datetime | None, *, down: bool = False,
+    ) -> None:
+        """The poller reports an upstream Pond's freshness + reachability for a Draw. Mirror them and
+        run the cascade — a transfer starts if there is downstream demand and the upstream is fresher."""
+        with self.lock:
+            ps = self.state.pond_states.get(pond)
+            if ps is None or not self.meta.get(pond, {}).get("is_draw"):
+                return
+            if remote_f is not None:
+                ps.remote_f = remote_f
+            if ps.remote_down != down:
+                ps.remote_down = down
+                derive_blocked(self.state, pond)
+            self._process(_now(), notify=False)  # poller-driven; transfers handled in this cycle
+
+    def pond_observation(self, pond: str) -> dict:
+        """A Pond's freshness + down-state, for the producer's ``…/wait`` long-poll (a downstream
+        Catchment blocks on this until its drawn Pond advances)."""
+        with self.lock:
+            ps = self.state.pond_states.get(pond)
+            if ps is None:
+                return {"end_f": None, "down": False}
+            down = ps.is_failed or ps.is_killed or ps.is_blocked
+            return {"end_f": _iso(ps.end_f) if ps.end_f != NEVER else None, "down": down}
+
+    def take_transfers(self) -> list[dict]:
+        """Drain the Pond Draw transfers the poller should perform (fetch + land the parquet)."""
+        with self.lock:
+            out = []
+            for key, f in self._pending_transfers:
+                m = self.meta.get(key)
+                if m is not None:
+                    out.append({"key": key, "name": m["name"], "major": m["major"], "f": _iso(f)})
+            self._pending_transfers = []
+            return out
+
+    def complete_draw_transfer(self, pond: str, f: str) -> None:
+        """The poller finished landing a Draw's parquet at freshness ``f``: complete its transfer
+        ripple (advancing the Draw's freshness, which cascades to downstream Sinks)."""
+        with self.lock:
+            now = _now()
+            eid = f"{pond}.draw"
+            rs = self.state.ripple_states.get(eid)
+            if rs is None:
+                return
+            started = _iso(rs.started_at) if rs.started_at else _iso(now)
+            rs.start_f = datetime.fromisoformat(f)
+            self.state = complete_ripple(self.state, eid, now)
+            self._record_ripple_run(pond, "draw", f, "success", started_at=started, finished_at=_iso(now))
+            self._finish_pond_run(pond, f, now)
+            self._process(now, notify=False)  # poller-driven
+
+    def fail_draw_transfer(self, pond: str, f: str, error: str) -> None:
+        """The poller could not land a Draw's parquet: fail the transfer (blocks downstream until the
+        next successful poll/transfer)."""
+        with self.lock:
+            now = _now()
+            eid = f"{pond}.draw"
+            rs = self.state.ripple_states.get(eid)
+            if rs is None:
+                return
+            started = _iso(rs.started_at) if rs.started_at else _iso(now)
+            rs.start_f = datetime.fromisoformat(f)
+            self.state = fail_ripple(self.state, eid, now)
+            self._fail_pond_run(pond, f, now, error, None)
+            self._record_ripple_run(pond, "draw", f, "failed", started_at=started,
+                                    finished_at=_iso(now), error=error)
+            self._process(now, notify=False)  # poller-driven
+
+    # ─── Producer exposure (open / tap-on-get) ──────────────────────────────────
+
+    def set_pond_open(self, pond: str, tap_on_get: bool) -> None:
+        """Mark a Pond open (accepts demand from any source). Under single-level auth this is a no-op
+        gate; its live effect is ``tap_on_get`` (a read on the query route fires a Tap)."""
+        with self.lock:
+            pid = self.meta[pond]["pond_id"]
+            self.db.execute(
+                "INSERT INTO pond_open (pond_id, tap_on_get) VALUES (?, ?) "
+                "ON CONFLICT(pond_id) DO UPDATE SET tap_on_get = excluded.tap_on_get",
+                (pid, int(tap_on_get)),
+            )
+            self.db.commit()
+
+    def unset_pond_open(self, pond: str) -> None:
+        with self.lock:
+            self.db.execute("DELETE FROM pond_open WHERE pond_id = ?", (self.meta[pond]["pond_id"],))
+            self.db.commit()
+
+    def pond_tap_on_get(self, pond: str) -> bool:
+        with self.lock:
+            m = self.meta.get(pond)
+            if m is None:
+                return False
+            row = self.db.execute(
+                "SELECT tap_on_get FROM pond_open WHERE pond_id = ?", (m["pond_id"],)
+            ).fetchone()
+            return bool(row and row[0])
+
+    # ─── Ducts (consumer side) ───────────────────────────────────────────────────
+
+    def create_duct(
+        self, origin: str, remote_url: str, auth_headers: dict | None, upstream_id: str | None = None
+    ) -> None:
+        """Register (or update) a conduit from an upstream Catchment. ``auth_headers`` are the request
+        headers to attach when dialling it — a secret at rest (duck.db is 0600). ``upstream_id`` is the
+        upstream's stable identity (for cross-mesh edge resolution + cycle cutting)."""
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO duct (origin_catchment, remote_url, auth_json, upstream_id) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(origin_catchment) DO UPDATE SET "
+                "remote_url = excluded.remote_url, auth_json = excluded.auth_json, "
+                "upstream_id = excluded.upstream_id",
+                (origin, remote_url, json.dumps(auth_headers) if auth_headers else None, upstream_id),
+            )
+            self.db.commit()
+
+    def destroy_duct(self, origin: str) -> bool:
+        with self.lock:
+            row = self.db.execute("SELECT id FROM duct WHERE origin_catchment = ?", (origin,)).fetchone()
+            if row is None:
+                return False
+            duct_id = row[0]
+            for src_name, major in self.db.execute(
+                "SELECT source_pond_name, major FROM duct_to_pond WHERE duct_id = ?", (duct_id,)
+            ).fetchall():
+                self._destroy_draw(src_name, major)
+            self.db.execute("DELETE FROM duct_to_pond WHERE duct_id = ?", (duct_id,))
+            self.db.execute("DELETE FROM duct WHERE id = ?", (duct_id,))
+            self.db.commit()
+            self.reload()
+            return True
+
+    def add_duct_pond(self, origin: str, pond_name: str, major: int, incremental: bool = False) -> None:
+        with self.lock:
+            row = self.db.execute("SELECT id FROM duct WHERE origin_catchment = ?", (origin,)).fetchone()
+            if row is None:
+                raise KeyError(f"No duct from '{origin}' — create it first")
+            self._create_draw(pond_name, major)  # raises ValueError on a local-Pond collision
+            self.db.execute(
+                "INSERT OR REPLACE INTO duct_to_pond (duct_id, source_pond_name, major, incremental) "
+                "VALUES (?, ?, ?, ?)",
+                (row[0], pond_name, major, int(incremental)),
+            )
+            self.db.commit()
+            self.reload()
+
+    def remove_duct_pond(self, origin: str, pond_name: str, major: int) -> bool:
+        with self.lock:
+            row = self.db.execute("SELECT id FROM duct WHERE origin_catchment = ?", (origin,)).fetchone()
+            if row is None:
+                return False
+            cur = self.db.execute(
+                "DELETE FROM duct_to_pond WHERE duct_id = ? AND source_pond_name = ? AND major = ?",
+                (row[0], pond_name, major),
+            )
+            self._destroy_draw(pond_name, major)
+            self.db.commit()
+            self.reload()
+            return cur.rowcount > 0
+
+    def list_ducts(self) -> list[dict]:
+        """Ducts + their drawn Ponds, for the CLI/API (auth redacted)."""
+        with self.lock:
+            out = []
+            for did, origin, url in self.db.execute(
+                "SELECT id, origin_catchment, remote_url FROM duct ORDER BY origin_catchment"
+            ).fetchall():
+                members = [
+                    {"pond": n, "major": mj, "incremental": bool(inc)}
+                    for n, mj, inc in self.db.execute(
+                        "SELECT source_pond_name, major, incremental FROM duct_to_pond "
+                        "WHERE duct_id = ? ORDER BY source_pond_name, major", (did,)
+                    )
+                ]
+                out.append({"origin": origin, "remote_url": url, "ponds": members})
+            return out
+
+    def duct_targets(self) -> list[dict]:
+        """Ducts with auth resolved — for the poller only (never serialised to a client)."""
+        with self.lock:
+            out = []
+            for did, origin, url, auth_json, upstream_id in self.db.execute(
+                "SELECT id, origin_catchment, remote_url, auth_json, upstream_id FROM duct"
+            ).fetchall():
+                members = []
+                for n, mj in self.db.execute(
+                    "SELECT source_pond_name, major FROM duct_to_pond WHERE duct_id = ?", (did,)
+                ):
+                    ps = self.state.pond_states.get(pond_key(n, mj))
+                    rf = ps.remote_f if ps is not None else NEVER
+                    members.append({
+                        "name": n, "major": mj,
+                        "remote_f": _iso(rf) if rf != NEVER else None,  # the poller's wait baseline
+                        "remote_down": ps.remote_down if ps is not None else False,  # last-known down-state
+                    })
+                out.append({
+                    "origin": origin, "remote_url": url, "upstream_id": upstream_id,
+                    "auth": json.loads(auth_json) if auth_json else {},
+                    "members": members,
+                })
+            return out
+
+    def _create_draw(self, name: str, major: int) -> None:
+        """Materialise a Pond Draw's identity rows (caller holds the lock and reloads). Real but
+        synthetic: kind='inlet', is_draw=1, a single immutable pond_version + one ``"draw"`` ripple."""
+        db = self.db
+        db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, 'inlet')", (name,))
+        db.execute("UPDATE pond_name SET kind = 'inlet' WHERE name = ?", (name,))
+        (pn_id,) = db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)).fetchone()
+
+        existing = db.execute(
+            "SELECT is_draw FROM pond WHERE pond_name_id = ? AND major = ?", (pn_id, major)
+        ).fetchone()
+        if existing is not None and not existing[0]:
+            raise ValueError(f"A local Pond '{name}@{major}' already exists — cannot draw it over a duct")
+
+        version = f"{major}.0.0"
+        db.execute(
+            "INSERT OR IGNORE INTO pond_version (pond_name_id, version, major, source_path) "
+            "VALUES (?, ?, ?, ?)",
+            (pn_id, version, major, f"draw://{name}@{major}"),
+        )
+        (pv_id,) = db.execute(
+            "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
+        ).fetchone()
+        db.execute("INSERT OR IGNORE INTO ripple (pond_version_id, name) VALUES (?, 'draw')", (pv_id,))
+        db.execute(
+            "INSERT INTO pond (pond_name_id, major, pond_version_id, is_draw) VALUES (?, ?, ?, 1) "
+            "ON CONFLICT(pond_name_id, major) DO UPDATE SET pond_version_id = excluded.pond_version_id, "
+            "is_draw = 1",
+            (pn_id, major, pv_id),
+        )
+
+    def _destroy_draw(self, name: str, major: int) -> None:
+        """Remove a Pond Draw's identity + state rows (caller holds the lock and reloads). Leaves the
+        ``pond_name`` placeholder so a Sink that still references it keeps its source row."""
+        db = self.db
+        row = db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)).fetchone()
+        if row is None:
+            return
+        pn_id = row[0]
+        prow = db.execute(
+            "SELECT id, pond_version_id, is_draw FROM pond WHERE pond_name_id = ? AND major = ?",
+            (pn_id, major),
+        ).fetchone()
+        if prow is None or not prow[2]:
+            return  # not a Draw — never remove a real local Pond here
+        pond_id, pv_id = prow[0], prow[1]
+        db.execute("DELETE FROM ripple_run WHERE pond_version_id = ?", (pv_id,))
+        db.execute("DELETE FROM pond_run WHERE pond_version_id = ?", (pv_id,))
+        for tbl in ("pond_state", "pond_target", "pond_open", "pond_trigger", "pond_retry", "pond_window"):
+            db.execute(f"DELETE FROM {tbl} WHERE pond_id = ?", (pond_id,))
+        db.execute("DELETE FROM pond WHERE id = ?", (pond_id,))
+        rids = [r[0] for r in db.execute("SELECT id FROM ripple WHERE pond_version_id = ?", (pv_id,))]
+        if rids:
+            marks = ",".join("?" * len(rids))
+            db.execute(
+                f"DELETE FROM ripple_to_ripple WHERE sink_id IN ({marks}) OR source_id IN ({marks})",
+                rids * 2,
+            )
+        db.execute("DELETE FROM ripple WHERE pond_version_id = ?", (pv_id,))
+        db.execute("DELETE FROM pond_version WHERE id = ?", (pv_id,))
+
     # ─── Scheduling ───────────────────────────────────────────────────────────
 
     def next_wake(self) -> datetime | None:
@@ -521,6 +861,8 @@ class Driver:
         if not self.launcher.manages_processes:
             return
         for pond in list(self.state.ponds):
+            if self.state.ponds[pond].is_draw:  # no Duck process — the poller drives transfers
+                continue
             ps = self.state.pond_states[pond]
             if ps.is_blocked or ps.is_killed:  # killed Ponds are intentionally down — don't re-fail
                 continue
@@ -542,18 +884,38 @@ class Driver:
         self.state = tick(now, self.state)
         self._process(now)
 
-    def _process(self, now: datetime) -> None:
+    def _process(self, now: datetime, notify: bool = True) -> None:
         self.state, _started = sentinel(now, self.state)
         for cmd in drain_begin_runs(self.state):
             self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force)
         self._persist_state()
         self._reap_idle()
+        self.state_version += 1  # state moved → release any /api/status long-poll
+        # Wake the poller so a Draw forwards new demand to its upstream at once. The poller's own
+        # observe/transfer paths pass notify=False (they're handled in-cycle) to avoid a busy loop.
+        if notify and self._notify_cb is not None:
+            self._notify_cb()
 
     def _dispatch_begin_run(self, pond: str, f: datetime, now: datetime, force: bool = False) -> None:
         meta = self.meta[pond]
+        # A Pond Draw is not run by a Duck: record the Run as running and hand the parquet transfer to
+        # the poller (it fetches out-of-lock, then reports completion via complete_draw_transfer).
+        if meta.get("is_draw"):
+            self.db.execute(
+                "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status) "
+                "VALUES (?, ?, ?, 'running')",
+                (meta["version_id"], _iso(f), _iso(now)),
+            )
+            self.db.commit()
+            if (pond, f) not in self._pending_transfers:
+                self._pending_transfers.append((pond, f))
+            return
         self.launcher.ensure(pond, meta["version"], meta["source_path"])
         self.last_seen[pond] = now  # grace clock: a freshly (re)spawned Duck isn't immediately stale
-        self.jobs.setdefault(pond, []).append({
+        self._idle_since.pop(pond, None)  # it's running again — reset its reap grace clock
+        # Cancel any not-yet-collected shutdown: this Pond is running again, so the Duck must not exit.
+        self.jobs[pond] = [j for j in self.jobs.get(pond, []) if j.get("kind") != "shutdown"]
+        self.jobs[pond].append({
             "kind": "begin_run", "f": _iso(f), "force": force,
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
         })
@@ -571,7 +933,9 @@ class Driver:
         # Keep all Ducks warm while any standing trigger is active (a Wave/Tide will run them again
         # shortly) — reaping mid-cycle would thrash on respawns. Only reap once fully quiescent.
         if self.state.triggers:
+            self._idle_since.clear()
             return
+        now = _now()
         for name in self.state.ponds:
             ps = self.state.pond_states[name]
             busy = any(
@@ -579,9 +943,17 @@ class Driver:
                 for rid in self.state.ripples
                 if self.state.ripples[rid].pond_id == name
             )
-            if (not busy and not ps.targets and not ps.has_pull and not self.jobs.get(name)
-                    and self.launcher.is_running(name)):
+            idle = (not busy and not ps.targets and not ps.has_pull and not self.jobs.get(name)
+                    and self.launcher.is_running(name))
+            if not idle:
+                self._idle_since.pop(name, None)
+                continue
+            # Reap only after the Pond has been continuously idle for the grace period — so a Pond
+            # that re-runs on any sub-grace cadence keeps its Duck and never hits the reap/respawn race.
+            since = self._idle_since.setdefault(name, now)
+            if now - since >= _REAP_GRACE:
                 self.jobs.setdefault(name, []).append({"kind": "shutdown"})
+                self._idle_since.pop(name, None)
 
     # ─── History + persistence ────────────────────────────────────────────────
 
@@ -660,13 +1032,13 @@ class Driver:
             pond_id = self.meta[name]["pond_id"]
             self.db.execute(
                 "INSERT INTO pond_state (pond_id, start_f, end_f, d_ms, has_pull, has_received_pull, "
-                "is_failed, is_blocked, failed_f, failures, is_killed, pull_local) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
+                "is_failed, is_blocked, failed_f, failures, is_killed, pull_local, pull_m) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
                 "start_f = excluded.start_f, end_f = excluded.end_f, d_ms = excluded.d_ms, "
                 "has_pull = excluded.has_pull, has_received_pull = excluded.has_received_pull, "
                 "is_failed = excluded.is_failed, is_blocked = excluded.is_blocked, "
                 "failed_f = excluded.failed_f, failures = excluded.failures, "
-                "is_killed = excluded.is_killed, pull_local = excluded.pull_local",
+                "is_killed = excluded.is_killed, pull_local = excluded.pull_local, pull_m = excluded.pull_m",
                 (
                     pond_id,
                     _iso(ps.start_f) if ps.start_f != NEVER else None,
@@ -680,6 +1052,7 @@ class Driver:
                     ps.failures,
                     int(ps.is_killed),
                     int(ps.pull_local),
+                    _iso(ps.pull_m) if ps.pull_m != NEVER else None,
                 ),
             )
             self.db.execute("DELETE FROM pond_target WHERE pond_id = ?", (pond_id,))
@@ -739,6 +1112,24 @@ class Driver:
                 else:
                     st = _demand_status(ps, busy)
 
+                # Why is it blocked? Required Sources that are themselves down (failed/killed/blocked).
+                pond = self.state.ponds[key]
+                blocked_by = [
+                    sp for sp in pond.sources if sp not in pond.optional_sources and (
+                        self.state.pond_states[sp].is_failed
+                        or self.state.pond_states[sp].is_blocked
+                        or self.state.pond_states[sp].is_killed
+                    )
+                ]
+                # The failure message (freshest failed Run), shown when failed.
+                error = None
+                if ps.is_failed:
+                    row = self.db.execute(
+                        "SELECT error FROM pond_run WHERE pond_version_id = ? AND status = 'failed' "
+                        "ORDER BY f DESC LIMIT 1", (self.meta[key]["version_id"],),
+                    ).fetchone()
+                    error = row[0] if row else None
+
                 trig = self.state.triggers.get(key)
                 trigger = None
                 if trig is not None:
@@ -752,6 +1143,7 @@ class Driver:
                     "name": self.meta[key]["name"],
                     "major": self.meta[key]["major"],
                     "kind": self.meta[key]["kind"],
+                    "is_draw": self.meta[key].get("is_draw", False),
                     "version": self.meta[key]["version"],
                     "status": st,
                     "gen": ps.runs_started,
@@ -767,6 +1159,9 @@ class Driver:
                     "is_killed": ps.is_killed,
                     "failed_f": ts(ps.failed_f),
                     "failures": ps.failures,
+                    "missing_sources": self.meta[key].get("missing_sources", []),
+                    "blocked_by": blocked_by,
+                    "error": error,
                     "immediate_retries": self.state.ponds[key].retry_immediately,
                     "source_retries": self.state.ponds[key].retry_on_change,
                     "ripples": ripples,
@@ -774,7 +1169,51 @@ class Driver:
                 })
             # Edge endpoints are pond keys ("name@major") — match entries on their "id".
             edges = [[s, key] for key, pond in self.state.ponds.items() for s in pond.sources]
-            return {"ponds": ponds, "edges": edges}
+            rows = dict(self.db.execute("SELECT key, value FROM catchment_meta").fetchall())
+            return {
+                "catchment": {"id": rows.get("id"), "name": rows.get("name")},
+                "version": self.state_version,  # the /api/status long-poll's change token
+                "ponds": ponds, "edges": edges,
+            }
+
+    def view_fragment(self, scope: list[str] | None) -> dict:
+        """This Catchment's slice of the recursive lineage view (see plans/cross-catchment-visibility.md):
+        the in-scope Ponds (``scope`` keys + their ancestors here; all local Ponds when ``scope`` is
+        None) with state + intra-Catchment edges, plus the ducts to expand for the next hop. The route
+        does the cross-Catchment fan-out + merge; this is the pure local part."""
+        with self.lock:
+            full = self.status()
+            all_keys = {p["id"] for p in full["ponds"]}
+            if scope is None:
+                in_scope = all_keys
+            else:
+                in_scope = self._ancestor_keys([k for k in scope if k in all_keys]) & all_keys
+            ponds = [p for p in full["ponds"] if p["id"] in in_scope]
+            edges = [[s, k] for s, k in full["edges"] if s in in_scope and k in in_scope]
+            ducts = []
+            for duct in self.duct_targets():
+                drawn = [pond_key(m["name"], m["major"]) for m in duct["members"]
+                         if pond_key(m["name"], m["major"]) in in_scope]
+                if drawn:
+                    ducts.append({
+                        "upstream_id": duct["upstream_id"], "remote_url": duct["remote_url"],
+                        "auth": duct["auth"], "drawn": drawn,
+                    })
+            return {"catchment": full["catchment"], "ponds": ponds, "edges": edges, "ducts": ducts}
+
+    def _ancestor_keys(self, keys: list[str]) -> set[str]:
+        """``keys`` plus all upstream (source) Pond keys reachable from them (BFS over engine sources)."""
+        seen: set[str] = set()
+        queue = list(keys)
+        while queue:
+            k = queue.pop()
+            if k in seen:
+                continue
+            seen.add(k)
+            pond = self.state.ponds.get(k)
+            if pond is not None:
+                queue.extend(pond.sources)
+        return seen
 
     def _ancestors(self, name: str) -> set[str]:
         """``name`` plus all upstream (source) Pond names reachable from it (BFS over engine sources)."""

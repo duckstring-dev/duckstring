@@ -77,3 +77,7 @@ def get(url: str, auth: dict | None = None, **kwargs):
 
 def post(url: str, auth: dict | None = None, **kwargs):
     return request("POST", url, auth=auth, **kwargs)
+
+
+def delete(url: str, auth: dict | None = None, **kwargs):
+    return request("DELETE", url, auth=auth, **kwargs)
