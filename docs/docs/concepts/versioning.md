@@ -40,6 +40,17 @@ products = "1.2.0?"      # the trailing ? marks the Source optional
 
 The major selects the line to consume; the full string records the **minimum compatible version** the Sink was built against, enforced at deploy: a Sink whose pinned Source (within the pinned major) is selected *below* that version is rejected, and selecting a Source version that would regress below an existing downstream pin is rejected too. A major bump is the sanctioned escape hatch — a new line is independent of the old pin. A required Source that is failed or missing [blocks](../guides/fault-tolerance.md) the Sink; an optional one (`?`) lets it run regardless. Declarations are by *name and major*, not by artifact — so a Sink can deploy before its Source has (the pin is checked once the Source appears), and resolves it as soon as it does.
 
+## The schema contract
+
+A Pond's output schema is whatever its Ripples produce — so it can't be vetted before the Pond runs. Instead Duckstring checks it **at publish time**, before the new output overwrites the live tables. The rule for a major line is **additive-only**: a version that advances the line must keep every table and column the line already published (new tables and columns are fine; a dropped column, a removed table, or a changed type is a breaking change).
+
+- On a Pond's first successful run, its output schema is captured as the line's contract.
+- A later run (a new version on the same major) whose output isn't a superset of that contract is **rejected at publish**: the live tables keep their last-good data, the Pond's Run is failed with a contract message, and its Sinks are [blocked](../guides/fault-tolerance.md) rather than run against the broken output. Nothing downstream ever sees the incompatible schema.
+- A compatible run publishes and *extends* the contract.
+- A deliberate **rollback** to an already-accepted lower version skips this check — it's governed by `min_version` instead (a Sink that needs a later version's columns pinned them, and the rollback is already rejected for that Sink).
+
+To make a genuine breaking change — drop a column, change a type — **bump the major**. The new line carries the new shape; the old line keeps running for the Sinks that haven't re-pinned, so they migrate on their own schedule. (Because the data plane records schema metadata per version, this is cheap to enforce; it's strongest on the default [Iceberg data plane](../guides/running-a-catchment.md#the-data-plane), which captures the published schema directly.)
+
 ## Versioning workflow
 
 Day to day this looks like releasing a library: bump the version in `pond.toml`, deploy, done. Compatible releases flow to consumers automatically; breaking releases open a new major and a migration window. Deploying a fixed version also auto-clears a failure on the Pond — shipping the fix *is* the recovery action. See [Deploying](../guides/deploying.md).

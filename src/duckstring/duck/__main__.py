@@ -82,6 +82,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                             retry_immediately=data.get("immediate_retries", 0),
                             force=data.get("force", False),
                             previous_f=datetime.fromisoformat(prev) if prev else NEVER,
+                            contract=data.get("contract"),
                         ))
                 elif kind == "done":
                     inflight -= 1

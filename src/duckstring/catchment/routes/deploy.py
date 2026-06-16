@@ -11,6 +11,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from ...keys import version_key as _version_key
+
 router = APIRouter()
 
 
@@ -28,12 +30,6 @@ def _parse_version(s: str) -> tuple[int, str, bool]:
     ver = s.rstrip("?")
     major = int(ver.split(".")[0])
     return major, ver, required
-
-
-def _version_key(v: str) -> tuple[int, ...]:
-    """A comparable key for a dotted numeric version ("1.2.3" → (1, 2, 3)). Shorter pins order below
-    longer ones with the same prefix ("1.2" < "1.2.3"), which is the intended min_version semantic."""
-    return tuple(int("".join(ch for ch in part if ch.isdigit()) or 0) for part in v.split("."))
 
 
 def _selected_version(db, source_name: str, major: int) -> str | None:

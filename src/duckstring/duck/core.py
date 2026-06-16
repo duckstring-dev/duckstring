@@ -18,6 +18,7 @@ from datetime import datetime
 
 from ..engine import NEVER, worker
 from ..engine import pond as ledger
+from ..schema_contract import ContractViolation
 
 
 @dataclass
@@ -35,6 +36,7 @@ class Event:
     traceback: str | None = None  # full traceback for the failure, if any
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    schema: dict | None = None  # published output schema (run_completed) — captured as the version contract
 
     def payload(self) -> dict:
         d = {"kind": self.kind, "f": self.f.isoformat(), "status": self.status, "retry": self.retry}
@@ -48,6 +50,8 @@ class Event:
             d["started_at"] = self.started_at.isoformat()
         if self.finished_at is not None:
             d["finished_at"] = self.finished_at.isoformat()
+        if self.schema is not None:
+            d["schema"] = self.schema
         return d
 
 
@@ -60,16 +64,19 @@ class DuckCore:
         self.attempts: dict[str, int] = {}  # ripple name → attempt index of its current in-flight run
         self.last_begin_f: datetime = NEVER  # freshness of the most recently started Pond Run
         self._previous_f: dict[datetime, datetime] = {}  # Pond Run freshness → the prior run's freshness
+        self.contract: dict | None = None  # the major line's additive schema contract (gated at publish)
 
     def begin_run(
         self, f: datetime, now: datetime, retry_immediately: int = 0, force: bool = False,
-        previous_f: datetime = NEVER,
+        previous_f: datetime = NEVER, contract: dict | None = None,
     ) -> list[str]:
         """Start a Pond Run at freshness ``f`` (idempotent — completed Ripples are not re-stamped, unless
         ``force``, which recomputes every Ripple). ``retry_immediately`` is the Run's Ripple-retry budget
         (the Catchment's live setting); ``previous_f`` is the prior completed run's freshness (the
-        Catchment computes it at dispatch), carried through to the Ripples as ``pond.previous_f``.
+        Catchment computes it at dispatch), carried through to the Ripples as ``pond.previous_f``;
+        ``contract`` is the major line's additive schema contract, vetted at publish.
         Returns the Ripple names the caller must launch."""
+        self.contract = contract
         self.state = worker.begin_run(self.state, f, retry_immediately, force=force)
         self.last_begin_f = max(self.last_begin_f, f)
         self._previous_f[f] = previous_f
@@ -102,11 +109,20 @@ class DuckCore:
                   started_at=started_at, finished_at=finished_at)
         )
         if rc is not None:
+            schema = None
             if export is not None:
-                export(rc.f)  # publish outputs (stamped with the run freshness) before announcing
+                try:
+                    # Publish stamped with the run freshness. The contract is vetted here, before the
+                    # live tables are overwritten — a violation aborts the publish (last-good intact).
+                    schema = export(rc.f, self.contract)
+                except ContractViolation as exc:
+                    self._previous_f.pop(rc.f, None)
+                    ledger.record_pond_run_finish(self.con, rc.f, now, status="failed")  # don't re-run on restart
+                    self.events.append(Event(kind="contract_failed", f=rc.f, status="failed", error=str(exc)))
+                    return self._advance(now)
             ledger.record_pond_run_finish(self.con, rc.f, now)
             self._previous_f.pop(rc.f, None)  # the Run is done; drop its carried previous_f
-            self.events.append(Event(kind="run_completed", f=rc.f))
+            self.events.append(Event(kind="run_completed", f=rc.f, schema=schema))
         return self._advance(now)
 
     def ripple_failed(

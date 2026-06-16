@@ -137,6 +137,67 @@ by construction (a PK is upsert *or* delete in one run; partial-mode validation 
 Over-read is **idempotent-safe** for merge consumers (re-applying the same latest rows). Union/append
 consumers rely on the exactly-once ceiling; append sources preserve history, so the ceiling holds.
 
+## Helpers for the partial path (`comprehensive=False`)
+
+The IVM-like skeleton of a partial merge — *find the affected output keys, recompute only those, derive
+the deletes* — is generic, and we can give it framework-agnostic helpers **without** imposing a compute
+layer (Ibis et al.) by having them operate on **key-set relations only**. The transform stays raw SQL /
+the DuckDB relation API; the helpers do the set bookkeeping. Three primitives:
+
+- **`delta.keys()`** — a source delta's changed keys (`upserts ∪ deletes`), as a relation of its PK.
+- **`pond.keys_joining(spine, delta, on=…)`** — spine PKs whose `on` column(s) match `delta.keys()`,
+  i.e. *which output keys a change in this dimension ripples to*. Reads the full spine + the delta's
+  keys; returns spine PKs.
+- **`affected.dropped(recomputed)`** — deletes = `affected EXCEPT recomputed[pk]`. A single set
+  difference, and **correct however `affected` was built**: because `.keys()` folds in source deletes,
+  a deleted spine key is in `affected`, never in `recomputed`, so it lands in the delete set
+  automatically — which is exactly the subtle case that's easy to miss by hand.
+
+```python
+@trickle(pk=("order_id", "line_no"))
+def priced_line(pond):
+    ol = pond.read_delta("sales.order_line")
+    pr = pond.read_delta("catalog.product")
+    pond.read_table("sales.order_line")          # view `order_line` (full)
+    pond.read_table("catalog.product")           # view `product`    (full)
+
+    affected = ol.keys().union(pond.keys_joining("sales.order_line", pr, on="product_id"))
+    affected.create_view("affected")
+
+    recomputed = pond.con.sql("""
+        SELECT ol.order_id, ol.line_no, ol.product_id, p.name AS product_name,
+               ol.qty, p.unit_price, ol.qty * p.unit_price AS line_total
+        FROM order_line ol JOIN affected USING (order_id, line_no)
+        JOIN product    p USING (product_id)
+    """)
+
+    pond.merge_table("priced_line", recomputed,
+                     comprehensive=False, deletes=affected.dropped(recomputed))
+```
+
+**`keys_joining` join constraint:** `on` equi-joins the spine's column(s) to the **delta source's full
+PK** — the delta side is pinned to its PK (composite is fine; arity = the PK's), the spine side is any
+column(s) (typically an FK, *not* required to be the spine's PK). The delta-side-must-be-PK rule is
+what makes **delete propagation sound**: a delete tombstone carries only the PK, so a non-PK delta-side
+join could propagate upserts but would silently drop deletions. Reject non-PK delta-side joins.
+
+**Where it's clean vs. where it gets weird:**
+- **Star / enrichment** (one spine owns the output PK, dimensions joined directly): clean — one
+  `keys_joining` term per dimension edge, unioned. The dominant Trickle shape; scales fine.
+- **Snowflake / transitive chains** (a change two hops away ripples through an intermediate): expressible
+  by *nesting* `keys_joining`, but it gets hairy — you're hand-traversing the FK graph again (example-2
+  territory). Cap the helpers at declared direct edges; deeper chains drop to hand-rolling or
+  `comprehensive=True`. Going further is the slope toward reimplementing a query planner.
+- **Aggregations** want a *sibling* primitive, not this one: `pond.affected_groups(delta, by=…)` (group
+  keys touched by the delta), then recompute by re-aggregating those groups from the full input.
+- **Window functions, non-equi / self-joins:** no clean key propagation → `comprehensive=True` or
+  hand-rolled.
+
+**Residual risk:** the helpers shrink the boilerplate and structurally guide the error-prone parts, but
+they do **not** remove the partial path's core obligation — you must still enumerate *every* edge that
+can ripple to the spine. Miss a `keys_joining` term and you under-merge, silently. So `comprehensive=True`
+stays the default (it has no enumerate-every-edge obligation); these make the opt-in nicer, not safe.
+
 ## Retention, compaction, idempotency
 
 - **Retention = a lag SLA.** Default `retain_t ≈ 30 days` ("a consumer/draw offline this long resumes
@@ -173,8 +234,12 @@ The data-plane plan left the draw at get-all; Trickle implements incremental tra
 
 - `comprehensive=False` main upsert: pyiceberg `upsert` maturity vs. a self-computed delete+append
   (we know the changed PK set from the caller).
-- `source.delta` return shape: how deletes are surfaced to ripple code (an `_duckstring_op` column on
-  the returned relation, vs. a separate `(upserts, deletes)` pair).
+- `source.delta` return shape: leaning to a **`Delta` with `.upserts` / `.deletes` / `.keys()`**
+  relations (the pair form reads far better than an `_duckstring_op` column for the partial-path
+  helpers above) — confirm against the `_duckstring_op` alternative.
+- Helper homes/signatures: `Delta.keys()`, `pond.keys_joining(spine, delta, on=…)` (reject non-PK
+  delta-side joins), `affected.dropped(recomputed)`, and the aggregation sibling
+  `pond.affected_groups(delta, by=…)`.
 - Hash canonicalisation specifics (decimal/float/null/timestamp normalisation, nested types).
 - PK + mode declaration surface: `@trickle(pk=…, mode=…)` decorator vs. per-`write` args, and how it
   feeds Phase-2 schema/contract capture (`pond_version_schema` already earmarked a `primary_key` slot).
@@ -189,6 +254,9 @@ The data-plane plan left the draw at get-all; Trickle implements incremental tra
   changelog carries the ops; over-read is idempotent; delete-then-re-add resolves to present.
 - Merge partial: supplied upserts applied, untouched PKs untouched, explicit deletes honoured;
   under-supplied deletes leave stale rows (documented risk, asserted in a test so it's intentional).
+- Partial helpers: `keys_joining` propagates a dimension's upserts *and* deletes to spine keys (and
+  rejects a non-PK delta-side join); `affected.dropped` deletes the keys that fell out of the recompute
+  (incl. source-deleted keys); the worked star example equals a `comprehensive=True` run row-for-row.
 - `source.delta` collapse = max-`f`-per-PK; coverage-miss falls back to full read; bootstrap full-reads.
 - Retention: at-write file drop past `retain_t`; oldest-retained watermark advances; a consumer behind
   it full-reads. Cross-Catchment draw transfers only the window; bootstrap transfers the main.

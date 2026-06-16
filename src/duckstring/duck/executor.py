@@ -66,8 +66,9 @@ def _run_ripple(
         con.close()
 
 
-def _export_data(con, registry_path: Path, f: datetime | None) -> None:
+def _export_data(con, registry_path: Path, f: datetime | None, contract=None) -> dict | None:
     from ..dataplane import get_data_plane
+    from ..schema_contract import ContractViolation, contract_violations, extract_schema
 
     data_dir = registry_path.parent / "data"
 
@@ -76,7 +77,14 @@ def _export_data(con, registry_path: Path, f: datetime | None) -> None:
     # file handle the way a separate connect() to the same file would. The data plane owns the publish
     # format (Parquet today); ``f`` is the run's freshness, recorded by backends that snapshot.
     try:
+        schema = extract_schema(con)
+        # The contract gate: vet the output BEFORE publishing. A violation aborts the publish, so the
+        # live tables keep last-good data; the Catchment fails the Pond and blocks downstream.
+        violations = contract_violations(schema, contract)
+        if violations:
+            raise ContractViolation("; ".join(violations))
         get_data_plane().export(con, data_dir, mode="overwrite", f=f)
+        return schema
     finally:
         con.close()
 
@@ -140,10 +148,12 @@ class RippleExecutor:
         fut.add_done_callback(_cb)
         return fut
 
-    def export(self, f: datetime | None = None) -> None:
+    def export(self, f: datetime | None = None, contract=None) -> dict | None:
         """Publish the Pond's tables for cross-Pond consumption via the data plane, stamped with the
-        run's freshness ``f`` (recorded by snapshotting backends)."""
-        _export_data(self._cursor(), self.registry_path, f)
+        run's freshness ``f`` (recorded by snapshotting backends). ``contract`` is the major line's
+        additive contract — a violation raises :class:`ContractViolation` *before* publishing (last-good
+        is left intact). Returns the published output schema (for the Catchment to capture)."""
+        return _export_data(self._cursor(), self.registry_path, f, contract)
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=True)

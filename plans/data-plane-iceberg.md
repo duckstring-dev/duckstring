@@ -51,10 +51,28 @@ the file-backed `FileCatalog`) backs it, `get_data_plane()` defaults to `iceberg
 suite is pinned to `parquet` to stay fast/offline; the Iceberg integration is proven by
 `test_demo_chain_runs_on_iceberg_end_to_end`, and `test_iceberg.py` runs without SQLAlchemy installed.)
 
-**Still deferred:** **Phase 2 schema capture + schema-compatibility enforcement**
-(`pond_version_schema`, blocked-by-contract surfacing) beyond the `min_version` guard already shipped.
-The seams are shaped so these slot in without touching call sites — and the Iceberg schema metadata
-the default plane now records is exactly the substrate that work consumes.
+**Phase 2 schema-compatibility enforcement is now shipped** (`schema_contract.py`, migration
+`005_pond_version_schema.sql`):
+- **Capture.** A Pond's published output schema is captured per `pond_version` on each accepted run
+  (`Driver._capture_schema`), reported by the Duck on the `run_completed` event.
+- **Forward-only additive contract.** The Catchment computes the major line's high-water schema and
+  ships it in the `begin_run` job (`Driver._contract_for`); it's `None` for a first run or a rollback
+  (selection ≤ a previously-accepted version — governed by `min_version`, not the schema gate).
+- **Staged/gated publish.** The Duck vets its output against the contract **before publishing**
+  (`duck/executor._export_data`): a violation raises `ContractViolation`, aborts the publish (live
+  tables keep last-good), and reports `contract_failed`. The Catchment fails the Source at that Run and
+  blocks downstream via the existing `is_blocked`/`derive_blocked` machinery (a contract violation is
+  just a Pond failure with a contract message — no new engine state). The escape hatch for a real
+  breaking change is a **major bump** (the old line keeps running; Sinks re-pin on their own schedule).
+- Tests: `test_schema_contract.py` (the additive check, capture, forward/rollback/first contract,
+  Source-fail-and-Sink-block, and the real executor gate against a live DuckDB registry) + DuckCore
+  gate tests in `test_duck.py`. `pond_version_schema` is per-column with a reserved `primary_key` flag,
+  so both a future pinned-minor contract and Trickle's PK declaration drop in without restructuring.
+
+**Still deferred:** the richer **pinned-minor** contract (drop a column only breaks Sinks that pinned
+the version that added it — removes the high-water "additions are permanent" strictness) and a
+dedicated `contract` blocked sub-reason in the UI (today the contract message rides the failed Source's
+`error`, and the Sink shows `blocked_by` the Source). Both are additive on the shipped shape.
 
 ## Why
 

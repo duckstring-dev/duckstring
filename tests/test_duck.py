@@ -30,7 +30,7 @@ class FakeRun:
         self.inflight: dict[str, datetime] = {}
         self.export_calls = 0
 
-    def _export(self, f=None):
+    def _export(self, f=None, contract=None):
         self.export_calls += 1
 
     def launch(self, names):
@@ -82,6 +82,40 @@ def test_duck_carries_previous_f_then_drops_it(tmp_path):
     sim.run(10)
     assert core.state.states["join"].end_f == T0  # run completed
     assert core.previous_f_for(T0) == NEVER  # dropped on completion
+
+
+@pytest.mark.timeout(5)
+def test_duck_contract_violation_aborts_publish(tmp_path):
+    """When the output breaks the contract, the Duck's publish (export) raises ContractViolation: the
+    Run is NOT completed (last-good stays published), a contract_failed event is buffered for the
+    Catchment, and the ledger records the Run failed (so a restart doesn't re-run it)."""
+    from duckstring.schema_contract import ContractViolation
+
+    con = ledger.connect(tmp_path / "pond.db")
+    core = DuckCore("src", con, {"event": []})  # single-ripple Pond
+    core.begin_run(T0, T0, contract={"event": {"id": "INTEGER", "val": "VARCHAR"}})
+
+    def bad_export(f, contract):
+        raise ContractViolation("column 'event.val' was dropped")
+
+    core.ripple_completed("event", T0, export=bad_export)
+
+    assert any(e.kind == "contract_failed" and e.f == T0 and "val" in (e.error or "") for e in core.events)
+    assert not any(e.kind == "run_completed" for e in core.events)
+    assert con.execute("SELECT status FROM pond_run WHERE f = ?", (T0.isoformat(),)).fetchone()[0] == "failed"
+
+
+@pytest.mark.timeout(5)
+def test_duck_contract_satisfied_publishes_and_reports_schema(tmp_path):
+    """A compatible (superset) output publishes and the published schema rides the run_completed event."""
+    con = ledger.connect(tmp_path / "pond.db")
+    core = DuckCore("src", con, {"event": []})
+    core.begin_run(T0, T0, contract={"event": {"id": "INTEGER"}})
+    schema = {"event": {"id": "INTEGER", "val": "VARCHAR"}}  # additive — id kept, val new
+    core.ripple_completed("event", T0, export=lambda f, contract: schema)
+
+    rc = next(e for e in core.events if e.kind == "run_completed")
+    assert rc.schema == schema
 
 
 @pytest.mark.timeout(5)
