@@ -918,6 +918,9 @@ class Driver:
         self.jobs[pond].append({
             "kind": "begin_run", "f": _iso(f), "force": force,
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
+            # The prior completed run's freshness (the pond's end_f *before* this run advances it),
+            # carried to the Ripples as pond.previous_f. NEVER on the first run.
+            "previous_f": _iso(self.state.pond_states[pond].end_f),
         })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI. A Force re-opens the Run.

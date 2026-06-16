@@ -30,7 +30,7 @@ class FakeRun:
         self.inflight: dict[str, datetime] = {}
         self.export_calls = 0
 
-    def _export(self):
+    def _export(self, f=None):
         self.export_calls += 1
 
     def launch(self, names):
@@ -61,6 +61,27 @@ def test_duck_completes_pond_run(tmp_path):
     assert sim.export_calls == 1
     # A run_completed event was buffered for the Catchment.
     assert any(e.kind == "run_completed" and e.f == T0 for e in core.events)
+
+
+@pytest.mark.timeout(5)
+def test_duck_carries_previous_f_then_drops_it(tmp_path):
+    """begin_run carries the prior run's freshness (for pond.previous_f) keyed by the run's f; it is
+    available while the run is in flight and dropped once the run completes. An unknown run (e.g. a
+    ledger-recovered Run with no live begin_run) reports NEVER."""
+    from duckstring.engine import NEVER
+
+    con = ledger.connect(tmp_path / "pond.db")
+    core = DuckCore("sales", con, SALES)
+    sim = FakeRun(core)
+
+    prev = T0 - timedelta(seconds=30)
+    sim.launch(core.begin_run(T0, sim.now, previous_f=prev))
+    assert core.previous_f_for(T0) == prev
+    assert core.previous_f_for(T0 + timedelta(seconds=1)) == NEVER  # unknown run → NEVER
+
+    sim.run(10)
+    assert core.state.states["join"].end_f == T0  # run completed
+    assert core.previous_f_for(T0) == NEVER  # dropped on completion
 
 
 @pytest.mark.timeout(5)

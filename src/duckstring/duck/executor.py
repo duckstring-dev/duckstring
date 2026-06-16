@@ -50,7 +50,7 @@ def _load_ripple_func(source_path: str, root: str, ripple_name: str):
 
 def _run_ripple(
     func, pond_name: str, version: str, con, root_str: str,
-    source_majors: dict[str, int], f: datetime | None,
+    source_majors: dict[str, int], f: datetime | None, previous_f: datetime | None,
 ) -> None:
     from ..core import Pond
 
@@ -60,30 +60,23 @@ def _run_ripple(
     try:
         func(Pond(
             name=pond_name, version=version, con=con, root=Path(root_str),
-            source_majors=source_majors, f=f,
+            source_majors=source_majors, f=f, previous_f=previous_f,
         ))
     finally:
         con.close()
 
 
-def _export_parquet(con, registry_path: Path) -> None:
-    from ..core import retry_on_lock
+def _export_data(con, registry_path: Path, f: datetime | None) -> None:
+    from ..dataplane import get_data_plane
 
     data_dir = registry_path.parent / "data"
-    data_dir.mkdir(exist_ok=True)
 
-    # ``con`` is a cursor off the shared instance: the COPY reads a consistent MVCC snapshot and shares
+    # ``con`` is a cursor off the shared instance: the export reads a consistent MVCC snapshot and shares
     # the ripples' configuration, so it neither clashes with their open connections nor conflicts on the
-    # file handle the way a separate connect() to the same file would.
-    def _export() -> None:
-        for (table,) in con.execute("SHOW TABLES").fetchall():
-            dest = data_dir / f"{table}.parquet"
-            tmp = data_dir / f"{table}.parquet.tmp"
-            con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')
-            tmp.replace(dest)
-
+    # file handle the way a separate connect() to the same file would. The data plane owns the publish
+    # format (Parquet today); ``f`` is the run's freshness, recorded by backends that snapshot.
     try:
-        retry_on_lock(_export)
+        get_data_plane().export(con, data_dir, mode="overwrite", f=f)
     finally:
         con.close()
 
@@ -118,11 +111,11 @@ class RippleExecutor:
         with self._cursor_lock:
             return self._registry.cursor()
 
-    def submit(self, ripple_name: str, f: datetime | None, on_done, on_error):
-        """Load and run ``ripple_name`` at freshness ``f`` (exposed to the ripple as ``pond.f``);
-        call ``on_done(name, started_at, finished_at)`` on success and ``on_error(name, exc,
-        started_at, finished_at)`` on failure (timings wall-clock UTC, for the run-history
-        duration; both fire on a pool thread)."""
+    def submit(self, ripple_name: str, f: datetime | None, previous_f: datetime | None, on_done, on_error):
+        """Load and run ``ripple_name`` at freshness ``f`` (exposed to the ripple as ``pond.f``, with
+        the prior run's freshness as ``pond.previous_f``); call ``on_done(name, started_at,
+        finished_at)`` on success and ``on_error(name, exc, started_at, finished_at)`` on failure
+        (timings wall-clock UTC, for the run-history duration; both fire on a pool thread)."""
         timing: dict[str, datetime] = {}
 
         def _task():
@@ -130,7 +123,7 @@ class RippleExecutor:
             func = _load_ripple_func(self.source_path, str(self.root), ripple_name)
             _run_ripple(
                 func, self.pond_name, self.version, self._cursor(), str(self.root),
-                self.source_majors, f,
+                self.source_majors, f, previous_f,
             )
 
         fut = self._pool.submit(_task)
@@ -147,9 +140,10 @@ class RippleExecutor:
         fut.add_done_callback(_cb)
         return fut
 
-    def export(self) -> None:
-        """Export the Pond's tables to Parquet for cross-Pond consumption (atomic tmp+replace)."""
-        _export_parquet(self._cursor(), self.registry_path)
+    def export(self, f: datetime | None = None) -> None:
+        """Publish the Pond's tables for cross-Pond consumption via the data plane, stamped with the
+        run's freshness ``f`` (recorded by snapshotting backends)."""
+        _export_data(self._cursor(), self.registry_path, f)
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=True)

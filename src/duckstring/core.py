@@ -305,8 +305,10 @@ class Puddle:
 class Pond:
     def __init__(
         self, name: str, version: str, con, root,
-        source_majors: dict[str, int] | None = None, f=None,
+        source_majors: dict[str, int] | None = None, f=None, previous_f=None,
     ) -> None:
+        from .engine.core import NEVER
+
         self.name = name
         self.version = version
         self.con = con
@@ -318,6 +320,10 @@ class Pond:
         # stable across crash recovery and retries, which all re-run at the same F (wall-clock
         # would differ per attempt). Local (puddle) runs stamp the run's start time.
         self.f = f
+        # The previous successfully-completed run's freshness — the lower bound of the bracket
+        # ``(previous_f, f]`` a ripple can read from a Source for hand-rolled incremental logic.
+        # ``NEVER`` on the first run (so that bracket reads everything). Trickle will automate this.
+        self.previous_f = NEVER if previous_f is None else previous_f
 
     def write_table(self, name: str, relation) -> None:
         tmp = f"__tmp_{name}"
@@ -345,17 +351,20 @@ class Pond:
             source_pond, table = ref.split(".", 1)
             if source_pond != self.name:
                 from pathlib import Path as _Path
+
+                from .dataplane import get_data_plane
                 base = _Path(self.root) / "ponds" / source_pond
-                # Deployed Sources export per major line; puddles (local runs) are flat.
+                # Deployed Sources publish per major line; puddles (local runs) are flat.
                 major = self.source_majors.get(source_pond)
                 data_dir = base / f"m{major}" / "data" if major is not None else base / "data"
-                parquet = data_dir / f"{table}.parquet"
-                if not parquet.exists():
+                try:
+                    select = get_data_plane().read_select(data_dir, table)
+                except FileNotFoundError as exc:
                     raise FileNotFoundError(
                         f"No exported data found for '{source_pond}.{table}' — "
                         f"has {source_pond} completed a successful run?"
-                    )
-                rel = self.con.sql(f"SELECT * FROM read_parquet('{parquet}')")
+                    ) from exc
+                rel = self.con.sql(select)
                 try:
                     rel.create_view(table, replace=True)
                 except Exception:

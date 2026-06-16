@@ -59,15 +59,27 @@ class DuckCore:
         self.events: list[Event] = []  # buffered, awaiting delivery to the Catchment
         self.attempts: dict[str, int] = {}  # ripple name → attempt index of its current in-flight run
         self.last_begin_f: datetime = NEVER  # freshness of the most recently started Pond Run
+        self._previous_f: dict[datetime, datetime] = {}  # Pond Run freshness → the prior run's freshness
 
-    def begin_run(self, f: datetime, now: datetime, retry_immediately: int = 0, force: bool = False) -> list[str]:
+    def begin_run(
+        self, f: datetime, now: datetime, retry_immediately: int = 0, force: bool = False,
+        previous_f: datetime = NEVER,
+    ) -> list[str]:
         """Start a Pond Run at freshness ``f`` (idempotent — completed Ripples are not re-stamped, unless
         ``force``, which recomputes every Ripple). ``retry_immediately`` is the Run's Ripple-retry budget
-        (the Catchment's live setting). Returns the Ripple names the caller must launch."""
+        (the Catchment's live setting); ``previous_f`` is the prior completed run's freshness (the
+        Catchment computes it at dispatch), carried through to the Ripples as ``pond.previous_f``.
+        Returns the Ripple names the caller must launch."""
         self.state = worker.begin_run(self.state, f, retry_immediately, force=force)
         self.last_begin_f = max(self.last_begin_f, f)
+        self._previous_f[f] = previous_f
         ledger.record_pond_run_start(self.con, f, now)
         return self._advance(now)
+
+    def previous_f_for(self, f: datetime) -> datetime:
+        """The prior run's freshness for the in-flight Pond Run at ``f`` (``NEVER`` if unknown — e.g.
+        a Run recovered from the ledger after a Duck restart, with no live ``begin_run`` to carry it)."""
+        return self._previous_f.get(f, NEVER)
 
     def pond_failed(self, error: str | None = None, traceback: str | None = None) -> None:
         """Buffer a Pond-level failure (a Duck error not tied to a Ripple — e.g. a failed ledger
@@ -91,8 +103,9 @@ class DuckCore:
         )
         if rc is not None:
             if export is not None:
-                export()  # materialise outputs (parquet) before announcing completion
+                export(rc.f)  # publish outputs (stamped with the run freshness) before announcing
             ledger.record_pond_run_finish(self.con, rc.f, now)
+            self._previous_f.pop(rc.f, None)  # the Run is done; drop its carried previous_f
             self.events.append(Event(kind="run_completed", f=rc.f))
         return self._advance(now)
 

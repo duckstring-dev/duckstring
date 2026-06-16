@@ -38,7 +38,7 @@ transactions = "1.0.0"   # major 1, at least 1.0.0 — required
 products = "1.2.0?"      # the trailing ? marks the Source optional
 ```
 
-The major selects the line to consume; the full string records the minimum compatible version the Sink was built against (documentation today — the runtime does not yet enforce it). A required Source that is failed or missing [blocks](../guides/fault-tolerance.md) the Sink; an optional one (`?`) lets it run regardless. Declarations are by *name and major*, not by artifact — so a Sink can deploy before its Source has, and resolves it as soon as it appears.
+The major selects the line to consume; the full string records the **minimum compatible version** the Sink was built against, enforced at deploy: a Sink whose pinned Source (within the pinned major) is selected *below* that version is rejected, and selecting a Source version that would regress below an existing downstream pin is rejected too. A major bump is the sanctioned escape hatch — a new line is independent of the old pin. A required Source that is failed or missing [blocks](../guides/fault-tolerance.md) the Sink; an optional one (`?`) lets it run regardless. Declarations are by *name and major*, not by artifact — so a Sink can deploy before its Source has (the pin is checked once the Source appears), and resolves it as soon as it does.
 
 ## Versioning workflow
 

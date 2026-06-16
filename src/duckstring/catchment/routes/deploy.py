@@ -30,6 +30,60 @@ def _parse_version(s: str) -> tuple[int, str, bool]:
     return major, ver, required
 
 
+def _version_key(v: str) -> tuple[int, ...]:
+    """A comparable key for a dotted numeric version ("1.2.3" → (1, 2, 3)). Shorter pins order below
+    longer ones with the same prefix ("1.2" < "1.2.3"), which is the intended min_version semantic."""
+    return tuple(int("".join(ch for ch in part if ch.isdigit()) or 0) for part in v.split("."))
+
+
+def _selected_version(db, source_name: str, major: int) -> str | None:
+    """The version currently *selected* for ``source_name@major`` (the ``pond`` pointer), or None when
+    that major line isn't deployed yet."""
+    row = db.execute(
+        "SELECT pv.version FROM pond p "
+        "JOIN pond_version pv ON pv.id = p.pond_version_id "
+        "JOIN pond_name pn ON pn.id = p.pond_name_id "
+        "WHERE pn.name = ? AND p.major = ?",
+        (source_name, major),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _check_version_contracts(db, pn_id: int, name: str, version: str, cfg: dict) -> None:
+    """Enforce the ``min_version`` contract on this deploy (raises ValueError → HTTP 422 on violation):
+
+    1. **As a Sink** — each Source pin's selected version (within the pinned major) must be ``>=`` the
+       pin's ``min_version``. An undeployed Source is skipped (the Source's own deploy will re-check).
+    2. **As a Source** — selecting ``version`` for this major must not regress below the ``min_version``
+       any already-deployed downstream Sink pins on this major (a downgrade that would break them)."""
+    # (1) This Pond as a Sink under-pinning its Sources.
+    for src_name, ver_str in cfg["sources"].items():
+        src_major, src_min, _required = _parse_version(ver_str)
+        selected = _selected_version(db, src_name, src_major)
+        if selected is not None and _version_key(selected) < _version_key(src_min):
+            raise ValueError(
+                f"'{name}' pins '{src_name}' at >= {src_min} (major {src_major}), but the deployed "
+                f"selected version is {selected} — deploy {src_name} {src_min} or newer first, "
+                f"or relax the pin in pond.toml"
+            )
+
+    # (2) This Pond as a Source whose new selected version regresses an existing downstream pin.
+    this_major = int(version.split(".")[0])
+    for min_ver, sink_name in db.execute(
+        "SELECT p2p.min_version, sink_pn.name FROM pond_to_pond p2p "
+        "JOIN pond sink ON sink.id = p2p.pond_id "
+        "JOIN pond_name sink_pn ON sink_pn.id = sink.pond_name_id "
+        "WHERE p2p.source_pond_name_id = ? AND p2p.source_major = ? AND p2p.min_version IS NOT NULL",
+        (pn_id, this_major),
+    ).fetchall():
+        if _version_key(version) < _version_key(min_ver):
+            raise ValueError(
+                f"selecting '{name}' {version} would break '{sink_name}', which pins '{name}' at "
+                f">= {min_ver} (major {this_major}) — deploy a version >= {min_ver}, "
+                f"or bump the major as the sanctioned breaking-change escape hatch"
+            )
+
+
 def _pond_config(toml_path: Path) -> dict:
     """Extract the deploy-relevant config from pond.toml: sources, retries, kind. (Windows are
     operational config managed via `duckstring trigger window`, not declared at deploy time.)"""
@@ -145,6 +199,8 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
                 "(pond_id, source_pond_name_id, source_major, required, min_version) VALUES (?, ?, ?, ?, ?)",
                 (pond_id, src_pn_id, src_major, int(src_required), src_min),
             )
+
+        _check_version_contracts(db, pn_id, name, version, cfg)
 
         from ..dag import assert_no_cycles
         assert_no_cycles(db)

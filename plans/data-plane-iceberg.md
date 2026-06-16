@@ -1,9 +1,27 @@
 # Data plane: Iceberg base layer + version-contract enforcement
 
-Status: **planned**. Covers **Phase 1** (swap the Parquet export/read for an Iceberg table layer) and
-**Phase 2** (enforce the version contract at Source→Sink boundaries). **Trickle** (append + `_duckstring_f` +
-merge + windowed incremental + incremental draws) is deferred to its own session; this plan only lays
-the seams Trickle needs and calls them out explicitly under **Trickle-prep**.
+Status: **partially implemented (2026-06-16)**. Covers **Phase 1** (swap the Parquet export/read for an
+Iceberg table layer) and **Phase 2** (enforce the version contract at Source→Sink boundaries).
+**Trickle** (append + `_duckstring_f` + merge + windowed incremental + incremental draws) is deferred to
+its own session; this plan only lays the seams Trickle needs and calls them out explicitly under
+**Trickle-prep**.
+
+**Shipped this session (zero-dependency seams):**
+- The pluggable **data-plane interface** (`src/duckstring/dataplane.py`): `ParquetDataPlane` as the
+  zero-dep default behind `get_data_plane()` (env `DUCKSTRING_DATA_PLANE`); a write **`mode`**
+  (`overwrite` now; `append`/`merge` reserved → raise) and a per-run **`f`** stamp threaded through
+  every call site; the **`_duckstring_*` namespace reserved** (rejected at publish). The executor
+  export, local-runner export+seed, `Pond.read_table` foreign reads, and `/api/data` all route through
+  it. The draw/duct raw-Parquet transfer (poller.py/draw.py) is intentionally left untouched.
+- **`pond.previous_f`** end-to-end (driver job → `DuckCore` → executor → `Pond`; local runner via a
+  `puddles/.run_f` marker), documented in python-api.md + the Incremental Ripples guide.
+- **`min_version` enforced at deploy** (`routes/deploy.py`): sink-under-pin + source-downgrade guards,
+  with a major-bump escape hatch.
+
+**Deferred (the dependency-adding, spike-laden part):** the actual **Iceberg backend** (pyiceberg +
+SqlCatalog/SQLAlchemy, snapshots stamped with `f`, as-of read), and **Phase 2 schema capture +
+schema-compatibility enforcement** (`pond_version_schema`, blocked-by-contract surfacing). The seams
+above are shaped so these slot in without touching call sites.
 
 ## Why
 
