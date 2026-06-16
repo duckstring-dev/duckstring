@@ -198,6 +198,39 @@ they do **not** remove the partial path's core obligation — you must still enu
 can ripple to the spine. Miss a `keys_joining` term and you under-merge, silently. So `comprehensive=True`
 stays the default (it has no enumerate-every-edge obligation); these make the opt-in nicer, not safe.
 
+### Builder: `pond.trickle(...)` — optional sugar over the helpers
+
+A fluent builder for the common shapes:
+
+```python
+priced_line = (
+    pond.trickle("sales.order_line")
+        .join(pond.trickle("catalog.product"), on="product_id")
+)
+priced_line.merge()
+```
+
+- It records a **tiny op graph** (`Source` / `Join` / `Filter` / `Project` [/ `GroupBy`]) over Trickle
+  sources — **its own minimal IR, not Ibis** (Ibis is only needed for the *general* arbitrary-algebra
+  version we're not building; a closed op set is cheaper to model ourselves and maps straight onto
+  DuckDB relations). `.merge()` walks the graph: `read_delta` each leaf, propagate affected keys along
+  the recorded edges, recompute the affected slice, `merge_table(comprehensive=False, deletes=…)`.
+- **Correct-by-construction within its op set.** Because it sees the whole graph, it can't *forget* an
+  edge the way hand-composed `keys_joining` can — no silent under-merge. That safety, not just the
+  terser API, is the reason to prefer it for supported shapes.
+- **Closed op set; hard error outside it.** An unsupported operation (non-equi/self/cross join, window,
+  `having`, opaque expr, a non-PK join key, …) **raises at build time** — it does **not** silently
+  degrade to a full refresh. Silent degradation hides a performance cliff (you think you're
+  incremental; you're secretly recomputing everything every run), so the builder refuses rather than
+  surprise you.
+- **Escape hatch: a downstream ripple.** Do the unsupported/complex computation in a *subsequent*
+  Ripple/Trickle consuming the builder's output. (Caps incrementality at that hop unless the downstream
+  is itself a comprehensive Trickle — Trickle→Ripple full-materialises; see composition rules. Often
+  the right shape anyway: keep the incremental enrichment in the builder, the gnarly bit downstream.)
+- **Sequencing:** build the helpers first (primitives, no DSL ceiling, usable standalone); the builder
+  is optional sugar layered on them. Keep its op set deliberately small and let the downstream-ripple
+  escape carry the rest — don't let it grow into a parallel transform DSL chasing SQL's surface.
+
 ## Retention, compaction, idempotency
 
 - **Retention = a lag SLA.** Default `retain_t ≈ 30 days` ("a consumer/draw offline this long resumes
@@ -230,6 +263,40 @@ The data-plane plan left the draw at get-all; Trickle implements incremental tra
 - **Iceberg equality-delete / merge-on-read for the main** — avoided by overwriting (comprehensive) or
   CoW-upserting (partial) the clean main + an append-only changelog.
 
+## Future & prior art — automatic IVM (deliberately not building in-core)
+
+We explored a general automatic-IVM layer (trace affected keys/deltas through arbitrary relational
+algebra, fall back on anything unsupported). Conclusion: **don't build it.** It's a real IVM engine
+with the worst failure mode in data — *silent* wrong results — and it's an entire industry.
+
+- **Over-approximate IVM** (trace affected keys → recompute the affected slice → diff) is what the
+  helpers/builder do: in-process, DuckDB-only, bounded to a small op set. This is our supported
+  incremental story, and at the **~50M single-node scope it's almost certainly enough.**
+- **Exact IVM** (maintain per-operator deltas/state, never recompute from base) is service- or
+  Rust-shaped: **Feldera/DBSP, Materialize, RisingWave** (streaming DBs you connect to), **pg_ivm**
+  (Postgres), **differential-dataflow / `dbsp`** (Rust), **DBToaster** (SQL→native codegen). There is
+  **no mature pip-install, pure-Python, in-process** exact-IVM engine; the closest embedded-Python
+  option is **Bytewax** (timely-based, stateful), but it's stream-shaped dataflow primitives, not
+  turnkey relational IVM. So "import a library and go" doesn't exist for exact IVM — the engines are
+  the escalation for past-single-node, and they're service-shaped.
+
+### Integrating an external IVM engine (when you outgrow in-process)
+
+The Trickle contract already speaks the right interface — **change-set in (`read_delta`), change-set
+out (`merge_table(comprehensive=False, deletes=…)`), `pond.f`/`previous_f` as the watermark** — so a
+stateful engine slots in as ordinary ripple code: feed each source's delta, take the engine's emitted
+output delta, `merge_table` it; bootstrap (first run / lost state / freshness mismatch) feeds full
+`read_table` → comprehensive merge.
+
+- **Consistency burden the author owns:** the engine's state lives outside the data plane, so
+  **checkpoint keyed by `f`** and **restore from `previous_f`** at the top of each run — that's what
+  makes a *stateful* engine replay-stable under Duckstring's "re-run at the same `f`" model (feeding
+  deltas isn't idempotent; restoring the pre-run checkpoint and re-feeding is). Bootstrap on any
+  checkpoint mismatch/loss.
+- **Affordance to add: `pond.state_dir`** — a managed, per-pond, writable directory that survives
+  across runs, is included in `catchment archive`, and survives a redeploy (same durability as the
+  Iceberg data). The one piece of plumbing an embedded engine needs; worth reserving even before use.
+
 ## Open questions for the build session
 
 - `comprehensive=False` main upsert: pyiceberg `upsert` maturity vs. a self-computed delete+append
@@ -245,6 +312,11 @@ The data-plane plan left the draw at get-all; Trickle implements incremental tra
   feeds Phase-2 schema/contract capture (`pond_version_schema` already earmarked a `primary_key` slot).
 - Where `source.delta` lives on the `Pond` handle and how the window bounds are injected (mirrors how
   `pond.f` / `pond.previous_f` are threaded through the executor).
+- Builder (`pond.trickle`): the exact closed op set to support first (lean: `Source`/`Join`/`Filter`/
+  `Project`, maybe `GroupBy`), the minimal IR shape, and the build-time error surface for unsupported
+  ops. Layer on the helpers; ship after them.
+- `pond.state_dir` (only if/when external-engine integration is pursued): a managed per-pond writable
+  dir, archived + redeploy-surviving. Reserve the name; no need to build until needed.
 
 ## Testing
 
@@ -257,6 +329,9 @@ The data-plane plan left the draw at get-all; Trickle implements incremental tra
 - Partial helpers: `keys_joining` propagates a dimension's upserts *and* deletes to spine keys (and
   rejects a non-PK delta-side join); `affected.dropped` deletes the keys that fell out of the recompute
   (incl. source-deleted keys); the worked star example equals a `comprehensive=True` run row-for-row.
+- Builder: a supported `join`/`filter`/`project` chain produces the same result as the equivalent
+  comprehensive Trickle, incrementally; an unsupported op **raises at build time** (no silent
+  full-refresh); it can't under-merge (the graph supplies every edge).
 - `source.delta` collapse = max-`f`-per-PK; coverage-miss falls back to full read; bootstrap full-reads.
 - Retention: at-write file drop past `retain_t`; oldest-retained watermark advances; a consumer behind
   it full-reads. Cross-Catchment draw transfers only the window; bootstrap transfers the main.
