@@ -68,12 +68,18 @@ def test_read_missing_table_raises(tmp_path):
         ParquetDataPlane().read_select(tmp_path, "absent")
 
 
-def test_get_data_plane_defaults_to_parquet(monkeypatch):
+def test_get_data_plane_defaults_to_iceberg(monkeypatch):
     monkeypatch.delenv("DUCKSTRING_DATA_PLANE", raising=False)
+    from duckstring.iceberg_plane import IcebergDataPlane
+    assert isinstance(get_data_plane(), IcebergDataPlane)
+
+
+def test_get_data_plane_parquet_opt_out(monkeypatch):
+    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     assert isinstance(get_data_plane(), ParquetDataPlane)
 
 
 def test_get_data_plane_unknown_backend_raises(monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "iceberg")
-    with pytest.raises(NotImplementedError):
+    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "nonsense")
+    with pytest.raises(ValueError):
         get_data_plane()

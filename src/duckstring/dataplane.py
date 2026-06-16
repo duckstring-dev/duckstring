@@ -42,9 +42,15 @@ class DataPlane:
         (``_duckstring_*``) column."""
         raise NotImplementedError
 
-    def read_select(self, data_dir: Path, table: str) -> str:
+    def prepare(self, con) -> None:
+        """Make ``con`` able to read this backend's published tables (e.g. load a DuckDB extension).
+        Idempotent; a no-op for the Parquet backend. Call once before using ``read_select`` on ``con``."""
+
+    def read_select(self, data_dir: Path, table: str, *, as_of=None) -> str:
         """A DuckDB ``SELECT`` over a published Source ``table``, for registering as a view or relation.
-        Raises :class:`FileNotFoundError` when the Source has not published that table yet."""
+        ``as_of`` (a freshness) is the **as-of read seam**: the Source snapshot whose ``f <= as_of``;
+        ``None`` reads the latest (the Phase 1 default — full reads return most-recent-possible). Raises
+        :class:`FileNotFoundError` when the Source has not published that table yet."""
         raise NotImplementedError
 
     def list_tables(self, data_dir: Path) -> list[str]:
@@ -76,6 +82,21 @@ def _reserved_columns(con, table: str) -> list[str]:
     ]
 
 
+def registry_tables(con) -> list[str]:
+    """The table names a Pond has written into ``con``'s registry — the publish set."""
+    return [t for (t,) in con.execute("SHOW TABLES").fetchall()]
+
+
+def validate_publish(con, table: str) -> None:
+    """Reject a table carrying a column in the reserved ``_duckstring_*`` namespace (framework-owned)."""
+    reserved = _reserved_columns(con, table)
+    if reserved:
+        raise ReservedColumnError(
+            f"table '{table}' has column(s) {', '.join(reserved)} in the reserved "
+            f"'{RESERVED_PREFIX}*' namespace — these names are framework-owned; rename them"
+        )
+
+
 class ParquetDataPlane(DataPlane):
     """The zero-dependency default: each table is one ``{table}.parquet`` file, written atomically
     (tmp + replace) and overwritten wholesale per run."""
@@ -88,13 +109,8 @@ class ParquetDataPlane(DataPlane):
         data_dir.mkdir(parents=True, exist_ok=True)
 
         def _export() -> None:
-            for (table,) in con.execute("SHOW TABLES").fetchall():
-                reserved = _reserved_columns(con, table)
-                if reserved:
-                    raise ReservedColumnError(
-                        f"table '{table}' has column(s) {', '.join(reserved)} in the reserved "
-                        f"'{RESERVED_PREFIX}*' namespace — these names are framework-owned; rename them"
-                    )
+            for table in registry_tables(con):
+                validate_publish(con, table)
                 dest = data_dir / f"{table}.parquet"
                 tmp = data_dir / f"{table}.parquet.tmp"
                 con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')
@@ -102,7 +118,7 @@ class ParquetDataPlane(DataPlane):
 
         retry_on_lock(_export)
 
-    def read_select(self, data_dir: Path, table: str) -> str:
+    def read_select(self, data_dir: Path, table: str, *, as_of=None) -> str:
         pq = self.table_path(data_dir, table)
         if pq is None or not pq.exists():
             raise FileNotFoundError(str(Path(data_dir) / f"{table}.parquet"))
@@ -119,15 +135,29 @@ class ParquetDataPlane(DataPlane):
 
 
 def get_data_plane() -> DataPlane:
-    """The active data-plane backend. The selection seam for the future Iceberg backend: today only
-    the Parquet default exists; ``DUCKSTRING_DATA_PLANE`` is honoured so an Iceberg backend can be
-    opted into without changing call sites."""
+    """The active data-plane backend, selected by ``DUCKSTRING_DATA_PLANE``:
+
+    - ``iceberg`` (default) — the Apache Iceberg base layer (snapshots + schema metadata over the
+      Parquet data files); its deps are in core, so it's available out of the box;
+    - ``parquet`` — the whole-table Parquet plane, the opt-out for the lightest footprint or for an
+      offline Catchment that can't fetch DuckDB's iceberg extension.
+
+    Iceberg is the default because the version-contract (schema) and incremental work build on its
+    metadata; ``parquet`` stays a first-class fallback."""
     import os
 
-    backend = os.environ.get("DUCKSTRING_DATA_PLANE", "parquet").lower()
+    backend = os.environ.get("DUCKSTRING_DATA_PLANE", "iceberg").lower()
     if backend == "parquet":
         return ParquetDataPlane()
-    raise NotImplementedError(
-        f"data plane {backend!r} is not available — the Iceberg backend is not implemented yet "
-        f"(see plans/data-plane-iceberg.md); unset DUCKSTRING_DATA_PLANE or set it to 'parquet'"
+    if backend == "iceberg":
+        try:
+            from .iceberg_plane import IcebergDataPlane
+        except ImportError as exc:  # pragma: no cover - core deps, but guard a stripped install
+            raise NotImplementedError(
+                "the iceberg data plane needs pyiceberg + sqlalchemy (core dependencies) — reinstall "
+                "duckstring, or set DUCKSTRING_DATA_PLANE=parquet for the zero-extra-dep plane"
+            ) from exc
+        return IcebergDataPlane()
+    raise ValueError(
+        f"unknown DUCKSTRING_DATA_PLANE {backend!r} (expected 'iceberg' or 'parquet')"
     )

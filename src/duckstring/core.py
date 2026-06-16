@@ -357,8 +357,10 @@ class Pond:
                 # Deployed Sources publish per major line; puddles (local runs) are flat.
                 major = self.source_majors.get(source_pond)
                 data_dir = base / f"m{major}" / "data" if major is not None else base / "data"
+                dp = get_data_plane()
+                dp.prepare(self.con)  # ready the connection to read the Source's published format
                 try:
-                    select = get_data_plane().read_select(data_dir, table)
+                    select = dp.read_select(data_dir, table)
                 except FileNotFoundError as exc:
                     raise FileNotFoundError(
                         f"No exported data found for '{source_pond}.{table}' — "

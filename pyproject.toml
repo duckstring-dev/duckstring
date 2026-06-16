@@ -19,9 +19,18 @@ dependencies = [
   "httpx>=0.25",
   "tomli>=2.0; python_version < '3.11'",
   "tomli-w>=1.0",
+  # The default data plane: an Apache Iceberg base layer (snapshots + schema metadata over the
+  # Parquet files we already write). pyiceberg's SQL catalog pulls SQLAlchemy. Core deps because
+  # Iceberg is default-on; set DUCKSTRING_DATA_PLANE=parquet to opt out (the zero-extra-dep fallback,
+  # also for offline Catchments that can't fetch DuckDB's iceberg extension).
+  "pyiceberg>=0.7",
+  "sqlalchemy>=2.0",
+  "pyarrow>=14",
 ]
 
 [project.optional-dependencies]
+# Retained for back-compat: the Iceberg deps are in core now (Iceberg is the default plane).
+iceberg = []
 dev = [
   "pytest>=8.0",
   "pytest-timeout>=0.5",

@@ -79,6 +79,7 @@ def _seed(project: Project) -> bool:
         return False
     con = _registry_connect(project)
     try:
+        dp.prepare(con)  # ready the connection to read the published format
         for table in tables:
             con.execute(f'CREATE OR REPLACE TABLE "{table}" AS {dp.read_select(seed_dir, table)}')
     finally:

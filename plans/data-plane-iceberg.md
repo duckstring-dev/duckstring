@@ -18,10 +18,33 @@ its own session; this plan only lays the seams Trickle needs and calls them out 
 - **`min_version` enforced at deploy** (`routes/deploy.py`): sink-under-pin + source-downgrade guards,
   with a major-bump escape hatch.
 
-**Deferred (the dependency-adding, spike-laden part):** the actual **Iceberg backend** (pyiceberg +
-SqlCatalog/SQLAlchemy, snapshots stamped with `f`, as-of read), and **Phase 2 schema capture +
-schema-compatibility enforcement** (`pond_version_schema`, blocked-by-contract surfacing). The seams
-above are shaped so these slot in without touching call sites.
+**Shipped in a follow-up session — the Iceberg backend** (`src/duckstring/iceberg_plane.py`,
+`duckstring[iceberg]` extra, opt in with `DUCKSTRING_DATA_PLANE=iceberg`):
+- **One catalog per `name@major`** (a pyiceberg `SqlCatalog` SQLite at `{data_dir}/catalog.db`,
+  warehouse rooted at `data_dir`, namespace `pond`). This **deviates from the plan's "one catalog at
+  root, namespace per name@major"** — a per-line catalog gives the same major-line isolation
+  *physically*, and (the deciding factor, which the plan flagged as an open concurrency question)
+  removes the shared-catalog contention between concurrently-committing Ducks. It's also archived for
+  free: `catchment archive`'s root walk already snapshots `*.db` via the backup API and copies the
+  Iceberg metadata/data, so **no archive change was needed** (download while quiescent, as before).
+- **Write** = pyiceberg Arrow `overwrite`, one commit per Pond Run, snapshot stamped
+  `duckstring.f = <iso>`. A schema change recreates the table (overwrite Ripples keep no history).
+- **Read** = DuckDB's `iceberg` extension (`iceberg_scan` on the snapshot's metadata file); `prepare(con)`
+  loads it at the read sites. **As-of by `f`** is implemented as the seam (`read_select(..., as_of=)`
+  resolves the latest snapshot whose stamped `f <= as_of`); the Phase-1 default stays latest.
+- **Behaviour-neutral via a flat-`{table}.parquet` sidecar** written alongside each commit: the
+  duct/draw transfer, the `/api/data` direct file-serve, and the transitional read of a not-yet-Iceberg
+  Source all keep working unchanged. `read_select` falls back to that sidecar when a Source has no
+  Iceberg table yet.
+- Validated by `tests/test_iceberg.py` (round-trip, `f`-stamp, as-of, reserved namespace, fallback,
+  schema change, `Pond.read_table`) and `test_runtime.py::test_demo_chain_runs_on_iceberg_end_to_end`
+  (the demo chain on real Duck subprocesses). The default plane stays Parquet, so the rest of the suite
+  is unaffected.
+
+**Still deferred:** **Phase 2 schema capture + schema-compatibility enforcement**
+(`pond_version_schema`, blocked-by-contract surfacing) beyond the `min_version` guard already shipped;
+and making Iceberg the default-on plane (kept opt-in until it soaks). The seams are shaped so these
+slot in without touching call sites.
 
 ## Why
 

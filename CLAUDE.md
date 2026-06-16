@@ -26,6 +26,8 @@ The freshness/push-token runtime is **implemented and tested** (the old generati
 ```
 src/duckstring/
   core.py                  # Pond/Ripple handles + @ripple/@puddle decorators + Catchment client + pond.toml/entrypoint/import helpers
+  dataplane.py             # The DATA PLANE: how a Pond publishes/reads tables cross-Pond (pluggable; Parquet default). See Data plane.
+  iceberg_plane.py         # IcebergDataPlane backend (duckstring[iceberg] extra; opt in via DUCKSTRING_DATA_PLANE=iceberg)
   engine/                  # PURE orchestration engine (no FastAPI/DB/HTTP). The state machine.
     core.py                #   shared dataclasses: NEVER, Window, Pond, Ripple, Trigger, BeginRun, Pond/RippleState
     catchment.py           #   the FULL engine (Ponds + Ripples, pull + push) — the Catchment's brain
@@ -95,6 +97,14 @@ RFC-5545-flavoured recurrence (no cron anywhere — `croniter` is gone). `engine
 ## Puddles (local pre-deploy testing — `local/`, `cli/puddle.py`)
 
 A **Puddle** is a code-defined snapshot of a Source table, for testing a Pond before deployment. Definitions in `src/puddles.py` (untyped `@puddle("source.table")` or whole-source `@puddle("source")`; handle `p` has `con`/`path`/`write_table`/`write_path`/`catchment()` — see `core.py`). `duckstring pond hydrate` imports them (decorator side-effect, like `@ripple`) and materialises `puddles/ponds/{source}/data/{table}.parquet` — the catchment-root layout, so `Pond.read_table`'s foreign branch works unchanged with `root=puddles/`. Missing definitions skip with a warning (`--from-catchment` fills from the Catchment). `duckstring pond run [--ripple X] [--fresh]` is **one local Pond Run** (sequential topo order, no engine/freshness/Ducks): full runs reset `puddles/out/` (registry + exported parquet); a **self-puddle** (`puddles/ponds/{this_pond}/`) is copied in as the seed first, making incremental reruns idempotent. `duckstring puddle ls|show|query` inspects `./puddles` via in-memory DuckDB views (`"{pond}"."{table}"`; output overrides a same-named self-puddle). Entrypoints are declarable in `pond.toml` (`[pond] ripples`/`puddles`, defaults `src/pond.py`/`src/puddles.py`) and honoured by deploy + the Duck executor via `core.import_pond_module`. Tests: `tests/test_puddle.py`; demo `sales` carries a worked `src/puddles.py`.
+
+## Data plane (`dataplane.py`, `iceberg_plane.py`)
+
+The **data plane** is how a Pond *publishes* its tables for, and *reads* them from, other Ponds — the cross-Pond interchange layer, distinct from the DuckDB **registry** where Ripples compute (Ripples always compute on the registry; the data plane is the export/interchange layer only). It is **pluggable** behind `dataplane.get_data_plane()`, selected by `DUCKSTRING_DATA_PLANE` (default `parquet`):
+- **`ParquetDataPlane`** (zero-dep default): each table → one `{table}.parquet` in the line's `data/` dir, overwritten wholesale per run (atomic tmp+replace).
+- **`IcebergDataPlane`** (`duckstring[iceberg]` extra; opt in via `DUCKSTRING_DATA_PLANE=iceberg`): an Apache Iceberg base layer **over Parquet data files** (a metadata/snapshot layer, not a file-format swap). One pyiceberg `SqlCatalog` (SQLite) **per `name@major`** at `{data_dir}/catalog.db` (namespace `pond`) — a per-line catalog (deviates from the original plan's single root catalog) to keep major-line isolation physical and avoid cross-Duck catalog contention. Write = pyiceberg Arrow `overwrite`, one commit per Pond Run, snapshot stamped `duckstring.f=<iso>`. Read = DuckDB `iceberg` extension (`iceberg_scan` on the snapshot metadata; `prepare(con)` loads it). A flat `{table}.parquet` **sidecar** is written alongside each commit so ducts/draws + direct file-serve + the not-yet-Iceberg-Source fallback stay behaviour-neutral. `catchment archive` already includes the catalog (`*.db` backup-API snapshot) + Iceberg dirs via its root walk.
+
+The interface threads a write **`mode`** (`overwrite` now; `append`/`merge` reserved → raise) and a per-run **`f`** stamp, and reserves the **`_duckstring_*`** system-column namespace (rejected at publish). **As-of read by `f`** is wired as the seam (`read_select(..., as_of=)` resolves the snapshot whose stamped `f <= as_of`); Phase-1 default is latest. Routed through it: executor export, local-runner export+seed, `Pond.read_table` foreign reads, `/api/data`. The duct/draw raw-Parquet *transfer* (poller.py/draw.py) is intentionally left on the flat sidecar. See `plans/data-plane-iceberg.md` (Phase 2 schema-compat enforcement + making Iceberg default-on are still deferred; `min_version` is enforced at deploy).
 
 ## Web UI (`frontend/`) + playground
 

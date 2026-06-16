@@ -60,6 +60,7 @@ def _open_pond(request: Request, pond_name: str, major: int):
     dp = get_data_plane()
     data_dir = _data_dir(request, pond_name, major)
     con = duckdb.connect()  # in-memory: no file, no lock, no contention
+    dp.prepare(con)  # ready the connection to read the published format (e.g. load the iceberg ext)
     con.execute(f'CREATE SCHEMA IF NOT EXISTS "{pond_name}"')
     for table in dp.list_tables(data_dir):
         select = dp.read_select(data_dir, table)
