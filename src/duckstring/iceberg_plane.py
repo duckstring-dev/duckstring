@@ -1,4 +1,4 @@
-"""The Iceberg data-plane backend (``DUCKSTRING_DATA_PLANE=iceberg``, ``duckstring[iceberg]`` extra).
+"""The Iceberg data-plane backend — the default (``DUCKSTRING_DATA_PLANE`` unset or ``iceberg``).
 
 An Apache Iceberg base layer over the Parquet files we already write: it adds **snapshots** (one
 overwrite commit per Pond Run, stamped with the run's freshness ``f``) and **schema metadata**, the
@@ -9,20 +9,20 @@ Layout (per ``name@major`` line, so the major-line isolation ``ponds/{name}/m{ma
 is preserved physically, not just by namespace — and there is no shared catalog for concurrent Ducks
 to contend on):
 
-- a pyiceberg ``SqlCatalog`` (SQLite) at ``{data_dir}/catalog.db``, warehouse rooted at ``data_dir``;
+- a :class:`~duckstring.iceberg_catalog.FileCatalog` (a JSON-pointer pyiceberg catalog, **no
+  SQLAlchemy**) at ``{data_dir}/catalog.json``, warehouse rooted at ``data_dir``;
 - one namespace, ``pond`` — the catalog is already isolated to one line, so the table is ``pond.{table}``.
 
 Writes go through pyiceberg (Arrow ``overwrite``); reads go through DuckDB's ``iceberg`` extension
 (``iceberg_scan`` on the snapshot's metadata file). A **flat ``{table}.parquet`` copy is written
 alongside** each commit: it keeps the unchanged consumers working behaviour-neutrally — the duct/draw
 file transfer, the direct file-serve, and the transitional read of a Source that hasn't re-exported to
-Iceberg yet. The ``catalog.db`` (a ``*.db`` file) and the Iceberg metadata/data under ``data_dir`` are
-included in ``catchment archive`` by the existing root walk (download while quiescent).
+Iceberg yet. The ``catalog.json`` and the Iceberg metadata/data under ``data_dir`` are included in
+``catchment archive`` by the existing root walk (download while quiescent).
 """
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from .dataplane import (
@@ -36,19 +36,6 @@ _NAMESPACE = "pond"  # the single namespace within each per-line catalog
 F_PROP = "duckstring.f"  # snapshot summary property carrying the Pond Run's freshness
 
 
-def _retry(fn, attempts: int = 12, base: float = 0.05):
-    """Retry a catalog op on a transient SQLite lock (a sink reading a Source's catalog while its Duck
-    commits) — queue and back off rather than fail. Re-raises anything that isn't a lock after the last
-    attempt."""
-    for i in range(attempts):
-        try:
-            return fn()
-        except Exception as exc:  # noqa: BLE001 - narrow to the lock message below
-            if "locked" not in str(exc).lower() or i == attempts - 1:
-                raise
-            time.sleep(min(base * (2**i), 0.5))
-
-
 class IcebergDataPlane(DataPlane):
     def __init__(self) -> None:
         # The flat-Parquet sidecar: the compat copy for draws, direct-serve, and the legacy fallback.
@@ -57,13 +44,13 @@ class IcebergDataPlane(DataPlane):
     # ─── catalog ──────────────────────────────────────────────────────────────
 
     def _catalog(self, data_dir: Path):
-        from pyiceberg.catalog.sql import SqlCatalog
+        from .iceberg_catalog import FileCatalog
 
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
-        cat = SqlCatalog(
+        cat = FileCatalog(
             "duckstring",
-            uri=f"sqlite:///{data_dir / 'catalog.db'}",
+            catalog_path=data_dir / "catalog.json",
             warehouse=data_dir.as_uri(),
         )
         cat.create_namespace_if_not_exists(_NAMESPACE)
@@ -74,11 +61,11 @@ class IcebergDataPlane(DataPlane):
         table never written)."""
         from pyiceberg.exceptions import NoSuchTableError
 
-        if not (Path(data_dir) / "catalog.db").exists():
+        if not (Path(data_dir) / "catalog.json").exists():
             return None
         cat = self._catalog(data_dir)
         try:
-            return _retry(lambda: cat.load_table(f"{_NAMESPACE}.{table}"))
+            return cat.load_table(f"{_NAMESPACE}.{table}")
         except NoSuchTableError:
             return None
 
@@ -116,12 +103,12 @@ class IcebergDataPlane(DataPlane):
                 # Overwriting a fresh/empty table warns "Delete operation did not match any records" —
                 # expected on every first write of an overwrite Ripple; suppress the noise.
                 warnings.filterwarnings("ignore", message="Delete operation did not match any records")
-                _retry(lambda: tbl.overwrite(arrow, snapshot_properties=props))
+                tbl.overwrite(arrow, snapshot_properties=props)
 
         try:
-            tbl = _retry(lambda: cat.load_table(ident))
+            tbl = cat.load_table(ident)
         except NoSuchTableError:
-            tbl = _retry(_create)
+            tbl = _create()
 
         try:
             _overwrite(tbl)
@@ -129,8 +116,8 @@ class IcebergDataPlane(DataPlane):
             # A Ripple is overwrite-per-run; if the output schema changed since the table was created,
             # overwrite can't reconcile it. Recreate the table at the new schema (snapshot history is a
             # Phase-2/Trickle concern; an overwrite Ripple keeps no history anyway).
-            _retry(lambda: cat.drop_table(ident))
-            _overwrite(_retry(_create))
+            cat.drop_table(ident)
+            _overwrite(_create())
 
     # ─── read ──────────────────────────────────────────────────────────────────
 

@@ -241,10 +241,9 @@ def test_status_and_runs_feed_live(runtime):
 @pytest.fixture
 def runtime_iceberg(tmp_path_factory, monkeypatch):
     """Like ``runtime`` but with the Iceberg data plane enabled — the spawned Ducks inherit the env,
-    so the demo chain publishes to and reads from Iceberg in real subprocesses. Skipped without the
-    optional extra."""
+    so the demo chain publishes to and reads from Iceberg in real subprocesses. Skipped without
+    pyiceberg (SQLAlchemy is deliberately not required)."""
     pytest.importorskip("pyiceberg")
-    pytest.importorskip("sqlalchemy")
     root = tmp_path_factory.mktemp("runtime_iceberg_root")
     port = _free_port()
     url = f"http://127.0.0.1:{port}"
@@ -273,7 +272,7 @@ def test_demo_chain_runs_on_iceberg_end_to_end(runtime_iceberg):
     # alongside the flat-Parquet compat sidecar.
     for name in _PONDS:
         data_dir = root / "ponds" / name / "m1" / "data"
-        assert (data_dir / "catalog.db").exists(), f"{name}: no iceberg catalog"
+        assert (data_dir / "catalog.json").exists(), f"{name}: no iceberg catalog"
         assert list(data_dir.rglob("*.metadata.json")), f"{name}: no iceberg metadata"
         assert list(data_dir.glob("*.parquet")), f"{name}: no flat-parquet sidecar"
 

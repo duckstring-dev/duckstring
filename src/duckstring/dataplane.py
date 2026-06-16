@@ -152,10 +152,10 @@ def get_data_plane() -> DataPlane:
     if backend == "iceberg":
         try:
             from .iceberg_plane import IcebergDataPlane
-        except ImportError as exc:  # pragma: no cover - core deps, but guard a stripped install
+        except ImportError as exc:  # pragma: no cover - pyiceberg is a core dep, but guard a stripped install
             raise NotImplementedError(
-                "the iceberg data plane needs pyiceberg + sqlalchemy (core dependencies) — reinstall "
-                "duckstring, or set DUCKSTRING_DATA_PLANE=parquet for the zero-extra-dep plane"
+                "the iceberg data plane needs pyiceberg (a core dependency) — reinstall duckstring, "
+                "or set DUCKSTRING_DATA_PLANE=parquet for the lighter plane"
             ) from exc
         return IcebergDataPlane()
     raise ValueError(

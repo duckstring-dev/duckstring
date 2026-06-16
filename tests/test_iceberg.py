@@ -9,8 +9,7 @@ from datetime import datetime, timezone
 import duckdb
 import pytest
 
-pytest.importorskip("pyiceberg")
-pytest.importorskip("sqlalchemy")
+pytest.importorskip("pyiceberg")  # the only data-plane dep; SQLAlchemy is deliberately NOT required
 
 from duckstring.dataplane import ReservedColumnError, get_data_plane  # noqa: E402
 from duckstring.iceberg_plane import F_PROP, IcebergDataPlane  # noqa: E402
@@ -40,7 +39,7 @@ def test_flat_parquet_sidecar_and_catalog_written(tmp_path):
     dp.export(_con("CREATE TABLE event AS SELECT 1 AS id"), tmp_path, f=datetime(2026, 6, 16, tzinfo=UTC))
     # The compat sidecar (for draws / direct-serve / fallback) and the per-line catalog both exist.
     assert (tmp_path / "event.parquet").exists()
-    assert (tmp_path / "catalog.db").exists()
+    assert (tmp_path / "catalog.json").exists()
     assert dp.table_path(tmp_path, "event") == tmp_path / "event.parquet"
 
 

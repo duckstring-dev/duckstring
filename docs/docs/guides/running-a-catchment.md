@@ -95,7 +95,7 @@ Anywhere that runs an ASGI app can host a Catchment. The packaged entry is `duck
 | `DUCKSTRING_ROOT` | `./.duckstring` | The Catchment root. The default is relative to the working directory; point it at a persistent path for durable state. |
 | `DUCKSTRING_API_KEY` | *(unset)* | The built-in API key. Leave unset when the platform already gates requests (see [Authentication](#authentication)). |
 | `DUCKSTRING_CATCHMENT_URL` | *(unset)* | The Duck dial-back address. Normally unset: the Catchment learns its bound address from the first request it serves, and its Ducks dial that directly. |
-| `DUCKSTRING_DATA_PLANE` | `parquet` | How Ponds publish their tables for each other — `parquet` (zero-dependency, whole-table snapshots) or `iceberg` (see [the data plane](#the-data-plane)). |
+| `DUCKSTRING_DATA_PLANE` | `iceberg` | How Ponds publish their tables for each other — `iceberg` (default; snapshots + schema metadata) or `parquet` (whole-table snapshots, the lightest/offline opt-out). See [the data plane](#the-data-plane). |
 
 One rule applies everywhere: **run exactly one process of the app.** The Catchment is a single brain — one scheduler, one database, one set of Ducks. Multiple workers (a `--workers` flag, a platform's process autoscaling) would double-dispatch runs.
 
@@ -172,10 +172,10 @@ Back up the root and you've backed up the Catchment. Paths inside the database a
 
 A Pond publishes its output tables into its line's `data/` directory; Sinks and [queries](querying-data.md) read from there. How that publishing happens is the **data plane**, set by `DUCKSTRING_DATA_PLANE`:
 
-- **`parquet`** (default) — each table is one `{table}.parquet` file, overwritten wholesale per run. Zero dependencies; nothing to configure.
-- **`iceberg`** — an [Apache Iceberg](https://iceberg.apache.org/) base layer (a per-line SQLite catalog `catalog.db` + table metadata, **over Parquet data files** — it's a metadata/snapshot layer, not a file-format change). Each run is an overwrite commit recorded as a snapshot stamped with the run's [freshness](../concepts/freshness.md). Requires the extra: `pip install duckstring[iceberg]` (it pulls `pyiceberg` + SQLAlchemy), and DuckDB's `iceberg` extension is loaded on first read (a one-time download). A flat `{table}.parquet` copy is still written alongside, so [ducts](connecting-catchments.md) and direct downloads are unchanged.
+- **`iceberg`** (default) — an [Apache Iceberg](https://iceberg.apache.org/) base layer (a per-line catalog `catalog.json` + table metadata, **over Parquet data files** — it's a metadata/snapshot layer, not a file-format change). Each run is an overwrite commit recorded as a snapshot stamped with the run's [freshness](../concepts/freshness.md). It ships with Duckstring (`pyiceberg`; a lightweight file-backed catalog means **no SQLAlchemy**). DuckDB's `iceberg` extension is loaded on first read (a one-time download — so a fully offline Catchment should either pre-cache it or use `parquet`). A flat `{table}.parquet` copy is still written alongside, so [ducts](connecting-catchments.md) and direct downloads are unchanged.
+- **`parquet`** — each table is one `{table}.parquet` file, overwritten wholesale per run. The lightest option (no catalog, no extension); the right choice for an offline Catchment or when you don't need snapshots.
 
-Both are **behaviour-neutral** — same overwrite-per-run semantics, same query results. Iceberg adds snapshots and schema metadata (the substrate for version contracts and future incremental reads); it's opt-in while it soaks. The whole root — catalog included — is captured by `catchment download` (download while [quiescent](#surviving-a-redeploy-of-the-catchment-app)).
+Both are **behaviour-neutral** — same overwrite-per-run semantics, same query results. Iceberg is the default because it adds the snapshots and schema metadata that version contracts and future incremental reads build on. The whole root — catalog included — is captured by `catchment download` (download while [quiescent](#surviving-a-redeploy-of-the-catchment-app)).
 
 The `_duckstring_*` column-name prefix is **reserved** for framework system columns on either plane; a published table using it is rejected at write.
 

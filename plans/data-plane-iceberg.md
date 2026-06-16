@@ -20,13 +20,17 @@ its own session; this plan only lays the seams Trickle needs and calls them out 
 
 **Shipped in a follow-up session — the Iceberg backend** (`src/duckstring/iceberg_plane.py`,
 `duckstring[iceberg]` extra, opt in with `DUCKSTRING_DATA_PLANE=iceberg`):
-- **One catalog per `name@major`** (a pyiceberg `SqlCatalog` SQLite at `{data_dir}/catalog.db`,
-  warehouse rooted at `data_dir`, namespace `pond`). This **deviates from the plan's "one catalog at
+- **One catalog per `name@major`** — our own **`FileCatalog`** (`iceberg_catalog.py`), a pyiceberg
+  `MetastoreCatalog` subclass that stores the `table → metadata.json` pointer in `{data_dir}/catalog.json`
+  (warehouse rooted at `data_dir`, namespace `pond`). It **deviates from the plan's "one catalog at
   root, namespace per name@major"** — a per-line catalog gives the same major-line isolation
   *physically*, and (the deciding factor, which the plan flagged as an open concurrency question)
-  removes the shared-catalog contention between concurrently-committing Ducks. It's also archived for
-  free: `catchment archive`'s root walk already snapshots `*.db` via the backup API and copies the
-  Iceberg metadata/data, so **no archive change was needed** (download while quiescent, as before).
+  removes the shared-catalog contention between concurrently-committing Ducks (single writer per line,
+  atomic JSON saves for cross-Pond readers). It's archived for free: `catchment archive`'s root walk
+  copies `catalog.json` + the Iceberg metadata/data, so **no archive change was needed** (download
+  while quiescent, as before). **No SQLAlchemy** — pyiceberg's only embedded catalog (`SqlCatalog`)
+  pulls SQLAlchemy purely for that pointer row, so we replace just the pointer store and inherit all
+  the Iceberg metadata/manifest/FileIO machinery from the base.
 - **Write** = pyiceberg Arrow `overwrite`, one commit per Pond Run, snapshot stamped
   `duckstring.f = <iso>`. A schema change recreates the table (overwrite Ripples keep no history).
 - **Read** = DuckDB's `iceberg` extension (`iceberg_scan` on the snapshot's metadata file); `prepare(con)`
@@ -41,10 +45,16 @@ its own session; this plan only lays the seams Trickle needs and calls them out 
   (the demo chain on real Duck subprocesses). The default plane stays Parquet, so the rest of the suite
   is unaffected.
 
+**Iceberg is now the default-on plane** — `pyiceberg` (a core dependency; **no SQLAlchemy**, thanks to
+the file-backed `FileCatalog`) backs it, `get_data_plane()` defaults to `iceberg`, and
+`DUCKSTRING_DATA_PLANE=parquet` is the lightweight/offline opt-out. (`test_runtime`'s broad subprocess
+suite is pinned to `parquet` to stay fast/offline; the Iceberg integration is proven by
+`test_demo_chain_runs_on_iceberg_end_to_end`, and `test_iceberg.py` runs without SQLAlchemy installed.)
+
 **Still deferred:** **Phase 2 schema capture + schema-compatibility enforcement**
-(`pond_version_schema`, blocked-by-contract surfacing) beyond the `min_version` guard already shipped;
-and making Iceberg the default-on plane (kept opt-in until it soaks). The seams are shaped so these
-slot in without touching call sites.
+(`pond_version_schema`, blocked-by-contract surfacing) beyond the `min_version` guard already shipped.
+The seams are shaped so these slot in without touching call sites — and the Iceberg schema metadata
+the default plane now records is exactly the substrate that work consumes.
 
 ## Why
 
@@ -211,6 +221,10 @@ the windowed read has a single obvious source of truth when Trickle formalises i
   reintroduce the over-read.
 
 ## Deferred to the Trickle session (do **not** build here)
+
+Now designed in full in **`plans/trickle.md`** — that doc supersedes the sketch below (e.g. the merge
+main is overwrite/CoW + an append-only **changelog**, not Iceberg merge-on-read delete-files; deletes
+live in the changelog with `_duckstring_op`, not the main). Kept here as the seam list:
 
 - `append_table` (history-preserving, `_duckstring_f`-stamped, idempotent-on-`f` via
   delete-where-`_duckstring_f`+insert).

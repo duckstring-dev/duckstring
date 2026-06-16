@@ -20,11 +20,11 @@ dependencies = [
   "tomli>=2.0; python_version < '3.11'",
   "tomli-w>=1.0",
   # The default data plane: an Apache Iceberg base layer (snapshots + schema metadata over the
-  # Parquet files we already write). pyiceberg's SQL catalog pulls SQLAlchemy. Core deps because
-  # Iceberg is default-on; set DUCKSTRING_DATA_PLANE=parquet to opt out (the zero-extra-dep fallback,
-  # also for offline Catchments that can't fetch DuckDB's iceberg extension).
+  # Parquet files we already write). Core deps because Iceberg is default-on; set
+  # DUCKSTRING_DATA_PLANE=parquet to opt out (the lighter fallback, also for offline Catchments that
+  # can't fetch DuckDB's iceberg extension). NB: we use our own file-backed catalog
+  # (duckstring.iceberg_catalog) rather than pyiceberg's SqlCatalog, so SQLAlchemy is NOT pulled in.
   "pyiceberg>=0.7",
-  "sqlalchemy>=2.0",
   "pyarrow>=14",
 ]
 

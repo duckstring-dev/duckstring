@@ -75,7 +75,7 @@ pond.write_table("daily_sales", agg)
 
 The write is build-then-swap: the relation materialises into a temporary table which then replaces the target in one transaction. Readers see the old table or the new one, never anything in between. Concurrent write conflicts (other Ripples writing their own tables to the same database) are retried with backoff automatically — they queue rather than fail.
 
-Each successful Pond Run ends with every table published (as Parquet, `ponds/{pond}/data/{table}.parquet`) — that published copy is what Sinks and [queries](../guides/querying-data.md) consume.
+Each successful Pond Run ends with every table published into the Pond's `data/` directory — via the [data plane](../guides/running-a-catchment.md#the-data-plane) (Iceberg by default, Parquet optional) — and that published copy is what Sinks and [queries](../guides/querying-data.md) consume.
 
 Column names beginning with `_duckstring_` are **reserved** for framework system columns and rejected at publish time — keep your output columns out of that namespace.
 

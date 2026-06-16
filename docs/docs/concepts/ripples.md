@@ -48,7 +48,7 @@ The full handle API — `read_table`, `write_table`, `pond.con` for arbitrary Du
 A Ripple addresses its own Pond's tables by bare name (`"daily_sales"`) and a Source's tables as `"source_pond.table"` (`"transactions.transaction"`). The two reads are deliberately different things:
 
 - **Own tables** are read live from the Pond's private DuckDB registry — intermediate state flowing between Ripples within the run.
-- **Source tables** are read from the Source's exported Parquet snapshot — the published output of its last successful run. A Ripple never reaches into another Pond's internals.
+- **Source tables** are read from the Source's published snapshot — the output of its last successful run, via the [data plane](../guides/running-a-catchment.md#the-data-plane). A Ripple never reaches into another Pond's internals.
 
 ## How Ripples execute
 
