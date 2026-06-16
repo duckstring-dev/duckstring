@@ -49,53 +49,49 @@ def _load_ripple_func(source_path: str, root: str, ripple_name: str):
 
 
 def _run_ripple(
-    func, pond_name: str, version: str, registry_path_str: str, root_str: str,
+    func, pond_name: str, version: str, con, root_str: str,
     source_majors: dict[str, int], f: datetime | None,
 ) -> None:
-    import duckdb
+    from ..core import Pond
 
-    from ..core import Pond, retry_on_lock
-
-    # Retry only the connect (a transient lock from a concurrent reader/writer); the ripple body runs
-    # exactly once. Ripples in a Pond share one registry file — concurrent read-write connections to it
-    # are fine (each writes its own table); only the connect can momentarily clash.
-    registry = retry_on_lock(lambda: duckdb.connect(registry_path_str))
+    # ``con`` is a cursor off the executor's single shared registry instance (see RippleExecutor).
+    # Ripples run concurrently on pool threads, each with its own cursor — they share the one instance,
+    # so they coexist without the "file handle conflict" two separate connect()s to the same file raise.
     try:
         func(Pond(
-            name=pond_name, version=version, con=registry, root=Path(root_str),
+            name=pond_name, version=version, con=con, root=Path(root_str),
             source_majors=source_majors, f=f,
         ))
     finally:
-        registry.close()
+        con.close()
 
 
-def _export_parquet(registry_path: Path) -> None:
-    import duckdb
-
+def _export_parquet(con, registry_path: Path) -> None:
     from ..core import retry_on_lock
 
     data_dir = registry_path.parent / "data"
     data_dir.mkdir(exist_ok=True)
 
+    # ``con`` is a cursor off the shared instance: the COPY reads a consistent MVCC snapshot and shares
+    # the ripples' configuration, so it neither clashes with their open connections nor conflicts on the
+    # file handle the way a separate connect() to the same file would.
     def _export() -> None:
-        # Read-write (NOT read_only): a read_only connection clashes with the pipelined ripples' open
-        # read-write connections ("different configuration than existing connections"). Same-config
-        # connections coexist; the COPY reads a consistent MVCC snapshot.
-        con = duckdb.connect(str(registry_path))
-        try:
-            for (table,) in con.execute("SHOW TABLES").fetchall():
-                dest = data_dir / f"{table}.parquet"
-                tmp = data_dir / f"{table}.parquet.tmp"
-                con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')
-                tmp.replace(dest)
-        finally:
-            con.close()
+        for (table,) in con.execute("SHOW TABLES").fetchall():
+            dest = data_dir / f"{table}.parquet"
+            tmp = data_dir / f"{table}.parquet.tmp"
+            con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')
+            tmp.replace(dest)
 
-    retry_on_lock(_export)
+    try:
+        retry_on_lock(_export)
+    finally:
+        con.close()
 
 
 class RippleExecutor:
     def __init__(self, pond_name: str, major: int, version: str, source_path: str, root: Path, max_workers: int = 8):
+        import duckdb
+
         from ..core import read_pond_toml
         from ..keys import spec_major
 
@@ -106,10 +102,21 @@ class RippleExecutor:
         self.root = root
         self.registry_path = pond_registry_path(root, pond_name, major)
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        # ONE registry instance for the Duck's life: ripples (and the export) each run on a `.cursor()`
+        # off it. Separate `connect()`s to the same file in one process raise a "file handle conflict"
+        # (a Binder error, not a transient lock) the moment two overlap — single instance avoids it.
+        self._registry = duckdb.connect(str(self.registry_path))
+        self._cursor_lock = threading.Lock()
         # Which major line of each Source this Pond's reads resolve to (its pond.toml pins).
         sources = read_pond_toml(root / source_path).get("sources", {})
         self.source_majors = {sname: spec_major(spec) for sname, spec in sources.items()}
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
+
+    def _cursor(self):
+        """A fresh connection sharing the one registry instance. Cursor creation is serialised; the
+        cursors themselves run concurrently."""
+        with self._cursor_lock:
+            return self._registry.cursor()
 
     def submit(self, ripple_name: str, f: datetime | None, on_done, on_error):
         """Load and run ``ripple_name`` at freshness ``f`` (exposed to the ripple as ``pond.f``);
@@ -122,7 +129,7 @@ class RippleExecutor:
             timing["started"] = datetime.now(timezone.utc)
             func = _load_ripple_func(self.source_path, str(self.root), ripple_name)
             _run_ripple(
-                func, self.pond_name, self.version, str(self.registry_path), str(self.root),
+                func, self.pond_name, self.version, self._cursor(), str(self.root),
                 self.source_majors, f,
             )
 
@@ -142,7 +149,8 @@ class RippleExecutor:
 
     def export(self) -> None:
         """Export the Pond's tables to Parquet for cross-Pond consumption (atomic tmp+replace)."""
-        _export_parquet(self.registry_path)
+        _export_parquet(self._cursor(), self.registry_path)
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=True)
+        self._registry.close()
