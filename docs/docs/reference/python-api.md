@@ -47,6 +47,7 @@ Each Ripple invocation receives a fresh `Pond` — the runtime handle bound to t
 | `pond.version` | `str` | The deployed version executing |
 | `pond.con` | `duckdb.DuckDBPyConnection` | A connection to the Pond's private working database |
 | `pond.f` | `datetime` | The run's [freshness](../concepts/freshness.md) (tz-aware UTC) — the natural watermark/provenance stamp, stable across retries and crash recovery (see [Incremental Ripples](../guides/incremental-ripples.md)) |
+| `pond.previous_f` | `datetime` | The previous successfully-completed run's freshness — the lower bound of the bracket `(previous_f, f]` for hand-rolled incremental reads. Equal to the sentinel `NEVER` (far past) on the first run, so that bracket reads everything. Stable across retries/crash recovery, like `pond.f` |
 | `pond.root` | `Path` | The Catchment root (rarely needed directly) |
 
 ### `pond.read_table(ref)`
@@ -74,7 +75,9 @@ pond.write_table("daily_sales", agg)
 
 The write is build-then-swap: the relation materialises into a temporary table which then replaces the target in one transaction. Readers see the old table or the new one, never anything in between. Concurrent write conflicts (other Ripples writing their own tables to the same database) are retried with backoff automatically — they queue rather than fail.
 
-Each successful Pond Run ends with every table exported to Parquet (`ponds/{pond}/data/{table}.parquet`) — that export is what Sinks and [queries](../guides/querying-data.md) consume.
+Each successful Pond Run ends with every table published into the Pond's `data/` directory — via the [data plane](../guides/running-a-catchment.md#the-data-plane) (Iceberg by default, Parquet optional) — and that published copy is what Sinks and [queries](../guides/querying-data.md) consume.
+
+Column names beginning with `_duckstring_` are **reserved** for framework system columns and rejected at publish time — keep your output columns out of that namespace.
 
 ### `pond.con` — direct DuckDB
 

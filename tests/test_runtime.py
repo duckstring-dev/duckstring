@@ -74,12 +74,17 @@ def _free_port() -> int:
 
 @pytest.fixture
 def runtime(tmp_path_factory, monkeypatch):
-    """A real uvicorn Catchment with Duck spawning ENABLED, reachable by the spawned subprocesses."""
+    """A real uvicorn Catchment with Duck spawning ENABLED, reachable by the spawned subprocesses.
+
+    Pinned to the Parquet data plane: it keeps this broad subprocess suite fast and network-free (no
+    DuckDB iceberg-extension fetch), and is the end-to-end coverage of the ``parquet`` opt-out. The
+    default Iceberg plane gets its own e2e proof in ``test_demo_chain_runs_on_iceberg_end_to_end``."""
     root = tmp_path_factory.mktemp("runtime_root")
     port = _free_port()
     url = f"http://127.0.0.1:{port}"
     monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)  # enable real Ducks
     monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
+    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")  # inherited by the Duck subprocesses
 
     server, thread = _serve(root, port)
     yield url, root
@@ -231,3 +236,51 @@ def test_status_and_runs_feed_live(runtime):
     assert "sales" in ponds_seen and "transactions" in ponds_seen
     only = httpx.get(f"{url}/api/runs", params={"pond": "reports", "lineage": False}, timeout=5.0).json()["runs"]
     assert {r["pond"] for r in only} == {"reports"}
+
+
+@pytest.fixture
+def runtime_iceberg(tmp_path_factory, monkeypatch):
+    """Like ``runtime`` but with the Iceberg data plane enabled — the spawned Ducks inherit the env,
+    so the demo chain publishes to and reads from Iceberg in real subprocesses. Skipped without
+    pyiceberg (SQLAlchemy is deliberately not required)."""
+    pytest.importorskip("pyiceberg")
+    root = tmp_path_factory.mktemp("runtime_iceberg_root")
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}"
+    monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)
+    monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
+    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "iceberg")  # inherited by the Duck subprocesses
+
+    server, thread = _serve(root, port)
+    yield url, root
+    server.should_exit = True
+    thread.join(timeout=5)
+
+
+def test_demo_chain_runs_on_iceberg_end_to_end(runtime_iceberg):
+    url, root = runtime_iceberg
+    _deploy_demo(url)
+
+    httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
+
+    # reports reaching a freshness proves the whole chain ran — including sales reading its Sources
+    # (transactions, products) *through Iceberg* in the Duck subprocess.
+    assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None), \
+        "reports never became fresh on the iceberg data plane"
+
+    # The Iceberg base layer was actually used: each pond line has a catalog + committed metadata,
+    # alongside the flat-Parquet compat sidecar.
+    for name in _PONDS:
+        data_dir = root / "ponds" / name / "m1" / "data"
+        assert (data_dir / "catalog.json").exists(), f"{name}: no iceberg catalog"
+        assert list(data_dir.rglob("*.metadata.json")), f"{name}: no iceberg metadata"
+        assert list(data_dir.glob("*.parquet")), f"{name}: no flat-parquet sidecar"
+
+    # The exported data is queryable via /api/data (in-memory, iceberg-aware view registration).
+    resp = httpx.post(
+        f"{url}/api/query",
+        json={"pond": "reports", "sql": "SELECT COUNT(*) AS n FROM monthly_summary"},
+        timeout=10.0,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()[0]["n"] >= 0

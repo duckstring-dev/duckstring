@@ -65,7 +65,30 @@ def consume(pond):
 
 (`_cold` is the same `information_schema` existence check as above — the `COALESCE` already makes the filter cold-start-safe, so the branch only decides between create and append.)
 
-This is the protocol the planned **Trickle** construct will formalise; using `pond.f` now means nothing to unlearn later.
+## The `(previous_f, f]` bracket
+
+The Sink above tracks "what it has consumed" itself. The framework hands you the same information directly: **`pond.previous_f`** is the freshness of the Sink's *own* previous successful run, so the rows a run should newly read from a Source are exactly the bracket **`(previous_f, f]`** — open at the bottom (already consumed), closed at the top.
+
+```python
+@ripple
+def consume(pond):
+    src = pond.read_table("tracker.event")  # registers the view `event`
+    new = pond.con.sql(
+        f"SELECT * FROM event "
+        f"WHERE run_f >  TIMESTAMP '{pond.previous_f.strftime('%Y-%m-%d %H:%M:%S.%f')}' "
+        f"  AND run_f <= TIMESTAMP '{pond.f.strftime('%Y-%m-%d %H:%M:%S.%f')}'"
+    )
+    pond.write_table("events", new if _cold(pond) else pond.read_table("events").union(new))
+```
+
+On the first run `previous_f` is the far-past sentinel `NEVER`, so the lower bound lets everything through. Like `pond.f`, it is stable across retries and crash recovery.
+
+Two things to keep in mind:
+
+- **The upper bound `f` matters** — read *up to* your own freshness, not the Source's latest. A Source can independently run ahead of your coordination epoch; the closed top is the exactly-once ceiling that stops you over-reading rows from a future the run hasn't reached.
+- Both bounds come from **your** freshness, not a per-edge watermark — which is why this composes without bookkeeping.
+
+This is the protocol the planned **Trickle** construct will formalise (windowing the read automatically, and owning the stamp column under the reserved `_duckstring_*` namespace); using `pond.f` / `pond.previous_f` now means nothing to unlearn later.
 
 ## Why this is replay-safe
 

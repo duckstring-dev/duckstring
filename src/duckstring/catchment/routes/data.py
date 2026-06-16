@@ -55,11 +55,15 @@ def _open_pond(request: Request, pond_name: str, major: int):
     bare. Reads the Parquet snapshot, not the live registry, so there is no cross-process lock."""
     import duckdb
 
+    from ...dataplane import get_data_plane
+
+    dp = get_data_plane()
+    data_dir = _data_dir(request, pond_name, major)
     con = duckdb.connect()  # in-memory: no file, no lock, no contention
+    dp.prepare(con)  # ready the connection to read the published format (e.g. load the iceberg ext)
     con.execute(f'CREATE SCHEMA IF NOT EXISTS "{pond_name}"')
-    for pq in sorted(_data_dir(request, pond_name, major).glob("*.parquet")):
-        table = pq.stem
-        select = f"SELECT * FROM read_parquet('{str(pq).replace(chr(39), chr(39) * 2)}')"
+    for table in dp.list_tables(data_dir):
+        select = dp.read_select(data_dir, table)
         con.execute(f'CREATE VIEW "{pond_name}"."{table}" AS {select}')
         con.execute(f'CREATE OR REPLACE VIEW "{table}" AS {select}')
     return con
@@ -97,10 +101,12 @@ def get_ripple(
     outlet: str, ripple_name: str, request: Request,
     major: Optional[int] = None, version: Optional[str] = None,
 ):
-    # Serve the exported Parquet file directly — no DuckDB needed.
+    # Serve the published file directly — no DuckDB needed (Parquet backend has one file per table).
+    from ...dataplane import get_data_plane
+
     m = _resolve_major(request, outlet, major, version)
-    pq = _data_dir(request, outlet, m) / f"{ripple_name}.parquet"
-    if not pq.exists():
+    pq = get_data_plane().table_path(_data_dir(request, outlet, m), ripple_name)
+    if pq is None or not pq.exists():
         raise HTTPException(status_code=404, detail=f"No data for {outlet}.{ripple_name} (major {m})")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:

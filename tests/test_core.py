@@ -53,6 +53,22 @@ def test_stub_classes_importable():
     assert Trickle is not None
 
 
+def test_previous_f_defaults_to_never():
+    """pond.previous_f defaults to NEVER (the bracket (previous_f, f] reads everything on a first run);
+    an explicit value is stored verbatim."""
+    import duckdb
+
+    from duckstring.core import Pond
+    from duckstring.engine.core import NEVER
+
+    con = duckdb.connect()
+    assert Pond("p", "1.0.0", con, root=".").previous_f == NEVER
+    from datetime import datetime, timezone
+    prev = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert Pond("p", "1.0.0", con, root=".", previous_f=prev).previous_f == prev
+    con.close()
+
+
 def test_read_table_registers_source_view(tmp_path):
     """A foreign read_table registers the Source table as a view under its own name, so SQL can
     say `FROM table` directly — no Python frame scanning (unreliable in the threaded executor)."""

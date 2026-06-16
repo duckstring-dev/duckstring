@@ -20,3 +20,9 @@ def split_pond_key(key: str) -> tuple[str, int]:
 def spec_major(version_spec: str) -> int:
     """The major line a ``[sources]`` version spec pins: ``"1.2.3"`` / ``"1.2.3?"`` → 1."""
     return int(version_spec.rstrip("?").split(".")[0])
+
+
+def version_key(version: str) -> tuple[int, ...]:
+    """A comparable key for a dotted numeric version ("1.2.3" → (1, 2, 3)). Shorter strings order below
+    longer ones with the same prefix ("1.2" < "1.2.3"), which is the intended min_version semantic."""
+    return tuple(int("".join(ch for ch in part if ch.isdigit()) or 0) for part in version.split("."))

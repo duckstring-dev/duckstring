@@ -14,6 +14,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..engine import NEVER
 from ..engine import pond as ledger
 from .client import CatchmentClient
 from .core import DuckCore
@@ -50,9 +51,11 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
         for name in names:
             inflight += 1
             last_progress = _now()
+            start_f = core.state.states[name].start_f  # the run's freshness, exposed as pond.f
             executor.submit(
                 name,
-                core.state.states[name].start_f,  # the run's freshness, exposed as pond.f
+                start_f,
+                core.previous_f_for(start_f),  # the prior run's freshness, exposed as pond.previous_f
                 on_done=lambda n, started, finished: q.put(("done", (n, started, finished))),
                 on_error=lambda n, exc, started, finished: q.put(("error", (n, exc, started, finished))),
             )
@@ -73,10 +76,13 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                     if data.get("kind") == "shutdown":
                         shutdown_requested = True
                     elif data.get("kind") == "begin_run":
+                        prev = data.get("previous_f")
                         _launch(core.begin_run(
                             datetime.fromisoformat(data["f"]), _now(),
                             retry_immediately=data.get("immediate_retries", 0),
                             force=data.get("force", False),
+                            previous_f=datetime.fromisoformat(prev) if prev else NEVER,
+                            contract=data.get("contract"),
                         ))
                 elif kind == "done":
                     inflight -= 1

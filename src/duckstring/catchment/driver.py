@@ -529,7 +529,15 @@ class Driver:
                     self._process(now)
             elif kind == "run_completed":
                 self._finish_pond_run(pond, f, now)
+                # Freeze the published output schema as the version's contract (the substrate the
+                # additive gate and min_version enforcement build on).
+                if payload.get("schema"):
+                    self._capture_schema(pond, payload["schema"])
                 self._process(now)
+            elif kind == "contract_failed":
+                # The Duck refused to publish: the output broke the major line's additive contract.
+                # Fail the Pond at this Run (keeping last-good data) and block downstream, like any failure.
+                self._fail_whole_pond(pond, now, payload.get("error"), None)
             elif kind == "pond_failed":
                 # A Duck-level error (e.g. a failed ledger write): fail the whole Pond at its most
                 # recently started Run. The Duck exits after reporting; liveness will not double-fail.
@@ -918,6 +926,12 @@ class Driver:
         self.jobs[pond].append({
             "kind": "begin_run", "f": _iso(f), "force": force,
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
+            # The prior completed run's freshness (the pond's end_f *before* this run advances it),
+            # carried to the Ripples as pond.previous_f. NEVER on the first run.
+            "previous_f": _iso(self.state.pond_states[pond].end_f),
+            # The major line's additive schema contract this Run must keep (vetted by the Duck before
+            # publishing); None for a first run or a deliberate rollback (governed by min_version).
+            "contract": self._contract_for(pond),
         })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI. A Force re-opens the Run.
@@ -980,6 +994,48 @@ class Driver:
             "UPDATE pond_run SET finished_at = ?, status = 'success' WHERE pond_version_id = ? AND f = ?",
             (_iso(now), meta["version_id"], f),
         )
+        self.db.commit()
+
+    # ─── Version contract (schema) ───────────────────────────────────────────────
+
+    def _contract_for(self, pond: str) -> dict | None:
+        """The major line's additive contract this Pond's next Run must remain a superset of, or
+        ``None`` when there is nothing to enforce: the first run on the major (no schema captured yet),
+        or a deliberate rollback to a version at or below the high-water (``min_version`` governs that —
+        the schema gate is **forward-only**). The contract is the schema of the highest accepted version
+        on the major."""
+        from ..keys import version_key
+
+        meta = self.meta[pond]
+        rows = self.db.execute(
+            'SELECT pv.version, s."table", s."column", s.type FROM pond_version_schema s '
+            "JOIN pond_version pv ON pv.id = s.pond_version_id "
+            "JOIN pond_name pn ON pn.id = pv.pond_name_id "
+            "WHERE pn.name = ? AND pv.major = ?",
+            (meta["name"], meta["major"]),
+        ).fetchall()
+        if not rows:
+            return None
+        by_version: dict[str, dict] = {}
+        for ver, table, column, type_ in rows:
+            by_version.setdefault(ver, {}).setdefault(table, {})[column] = type_
+        high_water = max(by_version, key=version_key)
+        if version_key(meta["version"]) < version_key(high_water):
+            return None  # rollback — governed by min_version, not the forward-only schema gate
+        return by_version[high_water]
+
+    def _capture_schema(self, pond: str, schema: dict) -> None:
+        """Freeze a Pond version's published output schema as its contract (idempotent upsert, keyed on
+        ``pond_version``). Only reached for accepted runs — the Duck publishes only what passed the gate."""
+        vid = self.meta[pond]["version_id"]
+        self.db.execute("DELETE FROM pond_version_schema WHERE pond_version_id = ?", (vid,))
+        for table, columns in schema.items():
+            for column, type_ in columns.items():
+                self.db.execute(
+                    'INSERT INTO pond_version_schema (pond_version_id, "table", "column", type) '
+                    "VALUES (?, ?, ?, ?)",
+                    (vid, table, column, type_),
+                )
         self.db.commit()
 
     def _fail_whole_pond(

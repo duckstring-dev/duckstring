@@ -164,6 +164,44 @@ def test_run_full_pond_exports_output(tmp_path):
     assert (out / "shaped.parquet").exists()
 
 
+def test_run_previous_f_never_then_prior_run(tmp_path):
+    """pond.previous_f mirrors a deployed Pond: NEVER on a fresh first run, and the prior local run's
+    freshness once a self-puddle seed makes the rerun incremental. --fresh resets it to NEVER."""
+    import shutil
+
+    pond_py = """
+        from duckstring import ripple
+
+        @ripple
+        def echo(pond):
+            pond.write_table("meta", pond.con.sql(
+                f"SELECT '{pond.previous_f.isoformat()}' AS prev, '{pond.f.isoformat()}' AS cur"
+            ))
+    """
+    project = load_project(_make_pond(
+        tmp_path, name="echoer", sources={}, pond_py=pond_py,
+        puddles_py="from duckstring import puddle\n",
+    ))
+    out = tmp_path / "puddles" / "out" / "meta.parquet"
+
+    run_pond(project)  # first run: no prior → NEVER
+    prev1, cur1 = duckdb.sql(f"SELECT prev, cur FROM read_parquet('{out}')").fetchone()
+    assert prev1.startswith("0001-01-01")  # NEVER
+
+    # Seed a self-puddle so the next run is an incremental rerun (seeded=True).
+    selfdir = tmp_path / "puddles" / "ponds" / "echoer" / "data"
+    selfdir.mkdir(parents=True)
+    shutil.copy(out, selfdir / "meta.parquet")
+
+    run_pond(project)  # second run: seeded → previous_f is the prior run's f
+    prev2, _ = duckdb.sql(f"SELECT prev, cur FROM read_parquet('{out}')").fetchone()
+    assert prev2 == cur1
+
+    run_pond(project, fresh=True)  # --fresh: not seeded → back to NEVER
+    prev3, _ = duckdb.sql(f"SELECT prev, cur FROM read_parquet('{out}')").fetchone()
+    assert prev3.startswith("0001-01-01")
+
+
 def test_run_single_ripple_uses_existing_state(tmp_path):
     project = load_project(_make_pond(tmp_path))
     hydrate(project)

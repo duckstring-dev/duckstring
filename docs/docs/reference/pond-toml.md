@@ -50,7 +50,7 @@ products = "1.1.0?"
 |---|---|
 | Key | The Source Pond's name. |
 | Value, major digit | Which major line to consume — `"2.1.0"` consumes major 2. |
-| Value, full string | The minimum compatible version of that line. |
+| Value, full string | The minimum compatible version of that line — enforced at deploy (see [Versioning](../concepts/versioning.md)). |
 | Trailing `?` | The Source is **optional**: its absence or [failure](../guides/fault-tolerance.md) doesn't block this Pond. Without it, the Source is required. |
 
 Sources are declared by name and major, not by deployed artifact — a Sink can deploy before its Source exists, and binds the moment the Source is deployed. An Inlet has no `[sources]` section.

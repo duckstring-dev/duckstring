@@ -4,6 +4,7 @@ import shutil
 import time
 import traceback as tb
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..core import Pond, collect_ripples, import_pond_module, retry_on_lock
 from .project import Project
@@ -69,34 +70,35 @@ def _registry_connect(project: Project):
 def _seed(project: Project) -> bool:
     """Copy a self-puddle (``puddles/ponds/{name}/data/*.parquet``) into the run registry as the
     prior state, so an incremental run starts from the same point every time (rerun-idempotent)."""
+    from ..dataplane import get_data_plane
+
+    dp = get_data_plane()
     seed_dir = project.snapshot_dir(project.name)
-    files = sorted(seed_dir.glob("*.parquet")) if seed_dir.exists() else []
-    if not files:
+    tables = dp.list_tables(seed_dir)
+    if not tables:
         return False
     con = _registry_connect(project)
     try:
-        for pq in files:
-            path_sql = str(pq).replace("'", "''")
-            con.execute(f'CREATE OR REPLACE TABLE "{pq.stem}" AS SELECT * FROM read_parquet(\'{path_sql}\')')
+        dp.prepare(con)  # ready the connection to read the published format
+        for table in tables:
+            con.execute(f'CREATE OR REPLACE TABLE "{table}" AS {dp.read_select(seed_dir, table)}')
     finally:
         con.close()
     return True
 
 
-def _export(project: Project) -> None:
+def _export(project: Project, f=None) -> None:
     registry = project.out_dir / "registry.duckdb"
     if not registry.exists():
         return
     import duckdb
 
+    from ..dataplane import get_data_plane
+
     def _copy() -> None:
         con = duckdb.connect(str(registry))
         try:
-            for (table,) in con.execute("SHOW TABLES").fetchall():
-                dest = project.out_dir / f"{table}.parquet"
-                tmp = project.out_dir / f"{table}.parquet.tmp"
-                con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')
-                tmp.replace(dest)
+            get_data_plane().export(con, project.out_dir, mode="overwrite", f=f)
         finally:
             con.close()
 
@@ -127,6 +129,9 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
     from datetime import datetime, timezone
 
     run_f = datetime.now(timezone.utc)  # one freshness for the whole local run, like a deployed Pond Run
+    # The prior run's freshness, mirroring the deployed pond.previous_f: when this run is seeded from a
+    # self-puddle (an incremental rerun), the previous local run's f; NEVER on a fresh/first run.
+    previous_f = _read_previous_f(project) if seeded else None
     results: list[RippleResult] = []
     for name in targets:
         started = time.perf_counter()
@@ -134,7 +139,8 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
             con = _registry_connect(project)
             try:
                 by_name[name]["func"](
-                    Pond(project.name, project.version, con, root=project.puddles_dir, f=run_f)
+                    Pond(project.name, project.version, con, root=project.puddles_dir,
+                         f=run_f, previous_f=previous_f)
                 )
             finally:
                 con.close()
@@ -148,5 +154,28 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
             )
             break
 
-    _export(project)
+    _export(project, run_f)
+    _write_previous_f(project, run_f)  # record this run's freshness for the next run's previous_f
     return RunResult(seeded=seeded, ripples=results)
+
+
+def _run_f_marker(project: Project) -> Path:
+    # Lives in puddles/ (parent of out/), so a full run's out_dir wipe doesn't clear the prior f.
+    return project.puddles_dir / ".run_f"
+
+
+def _read_previous_f(project: Project):
+    marker = _run_f_marker(project)
+    if not marker.exists():
+        return None
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(marker.read_text(encoding="utf-8").strip())
+    except ValueError:
+        return None
+
+
+def _write_previous_f(project: Project, run_f) -> None:
+    marker = _run_f_marker(project)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(run_f.isoformat(), encoding="utf-8")
