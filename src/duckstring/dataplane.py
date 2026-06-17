@@ -84,8 +84,18 @@ def _reserved_columns(con, table: str) -> list[str]:
 
 def registry_tables(con) -> list[str]:
     """The table names a Pond has written into ``con``'s registry — the publish set. Tables in the
-    reserved ``_duckstring_*`` namespace (Trickle's mode/PK meta) are framework-internal, never published."""
-    return [t for (t,) in con.execute("SHOW TABLES").fetchall() if not t.startswith(RESERVED_PREFIX)]
+    reserved ``_duckstring_*`` namespace (Trickle's mode/PK meta) are framework-internal, never published.
+
+    Only **base tables** count: a Pond's real output is always a table (``write_table`` create+rename, or
+    a Trickle main/changelog), never a view. ``read_table("source.table")`` registers each foreign Source
+    as a same-named *view* so SQL can ``FROM table`` it — those must NOT be published (``SHOW TABLES``
+    lists views too, so this filtered ``duckdb_tables()`` query is what stops a Pond from re-exporting a
+    full copy of every Source it reads)."""
+    return [
+        t for (t,) in con.execute(
+            "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main' ORDER BY table_name"
+        ).fetchall() if not t.startswith(RESERVED_PREFIX)
+    ]
 
 
 def validate_publish(con, table: str) -> None:

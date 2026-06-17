@@ -503,15 +503,24 @@ class Pond:
         )
         return KeySet(self.con, self.con.sql(f'SELECT * FROM "{result}"'), spine_pk)
 
-    def trickle(self, spine_ref: str):
+    def trickle(self, spine_ref: str, *, p: float = 0.3):
         """Start a :class:`~duckstring.trickle_builder.TrickleBuilder` rooted at the **spine** source
         ``spine_ref`` (the one owning the output PK) — the optional sugar over the partial-merge helpers.
         Chain ``.join(pond.trickle(dim), on=…)`` / ``.filter(...)`` / ``.select(...)`` then ``.merge(name)``;
         the builder propagates every join edge automatically, so (unlike hand-composed ``keys_joining``)
-        it can't silently under-merge. Unsupported ops raise at build time."""
+        it can't silently under-merge. Unsupported ops raise at build time.
+
+        ``p`` is this source's **change-fraction threshold**: if its delta touches more than ``p`` of the
+        source's current keys, the incremental slice stops paying off (a partial recompute + merge + a big
+        changelog costs more than one clean pass), so ``.merge()`` falls back to a full comprehensive
+        recompute for that run. It's **per source** — set it where you want the guard: ``p=0.3`` (default)
+        caps a source that drives the output row count; ``p=1.0`` disables the check (always go incremental,
+        skipping even the count) for a source you know rarely matches the other side. Applies to the spine
+        (``pond.trickle(spine, p=…)``) and independently to each joined dimension
+        (``.join(pond.trickle(dim, p=…), on=…)``)."""
         from .trickle_builder import TrickleBuilder
 
-        return TrickleBuilder(self, spine_ref)
+        return TrickleBuilder(self, spine_ref, p=p)
 
     def affected_groups(self, delta, *, by):
         """The distinct ``by`` group keys touched by ``delta`` — the aggregation sibling of

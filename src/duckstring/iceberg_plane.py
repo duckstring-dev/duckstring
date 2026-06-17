@@ -34,6 +34,27 @@ F_PROP = "duckstring.f"  # snapshot summary property carrying the Pond Run's fre
 LAST_F_PROP = "duckstring.last_f"
 FLOOR_PROP = "duckstring.floor"
 
+# Snapshot/metadata retention. Iceberg accrues a new data file + manifests + snapshot + metadata.json per
+# commit, and pyiceberg 0.11 expires snapshots from the *metadata* only (it leaves the files on disk), so
+# without an explicit prune every Pond Run leaks an overwrite table's previous full copy plus a pile of
+# manifest avros, forever. We keep the most-recent N snapshots (the as-of read seam can still reach that
+# far back) and reclaim everything no surviving snapshot references. The metadata.json files are bounded
+# by pyiceberg itself via the cleanup properties below, set at table creation.
+_DEFAULT_KEEP_SNAPSHOTS = 5
+_CLEANUP_PROPS = {  # let pyiceberg delete superseded metadata.json files itself
+    "write.metadata.delete-after-commit.enabled": "true",
+    "write.metadata.previous-versions-max": str(_DEFAULT_KEEP_SNAPSHOTS),
+}
+
+
+def _keep_snapshots() -> int:
+    import os
+
+    try:
+        return max(1, int(os.environ.get("DUCKSTRING_ICEBERG_KEEP_SNAPSHOTS", _DEFAULT_KEEP_SNAPSHOTS)))
+    except ValueError:
+        return _DEFAULT_KEEP_SNAPSHOTS
+
 
 class IcebergDataPlane(DataPlane):
     def __init__(self) -> None:
@@ -119,11 +140,12 @@ class IcebergDataPlane(DataPlane):
 
         if tbl is None:
             arrow = con.execute(f'SELECT * FROM "{table}"').fetch_arrow_table()
-            tbl = cat.create_table(ident, schema=arrow.schema)
+            tbl = self._create_table(cat, ident, arrow.schema)
             if arrow.num_rows:
                 tbl.append(arrow, snapshot_properties=self._props(f))
                 self._set_props(tbl, **{LAST_F_PROP: f.isoformat()})
             self._sync_retention(cat.load_table(ident), table, con)
+            self._prune(cat, table)
             return
         # Only the rows newer than the last committed run — its LAST_F_PROP cursor (a *table* property, not
         # the snapshot summary, so a retention delete-snapshot below can't clobber it). For append/changelog
@@ -135,6 +157,7 @@ class IcebergDataPlane(DataPlane):
             tbl.append(arrow, snapshot_properties=self._props(f))
             self._set_props(tbl, **{LAST_F_PROP: f.isoformat()})
         self._sync_retention(cat.load_table(ident), table, con)
+        self._prune(cat, table)
 
     def _sync_retention(self, tbl, table: str, con) -> None:
         """Mirror the registry's retention into the Iceberg history: the registry table was already
@@ -177,7 +200,7 @@ class IcebergDataPlane(DataPlane):
 
         def _create():
             cat.create_namespace_if_not_exists(_NAMESPACE)
-            return cat.create_table(ident, schema=arrow.schema)
+            return self._create_table(cat, ident, arrow.schema)
 
         def _overwrite(tbl):
             with warnings.catch_warnings():
@@ -199,6 +222,77 @@ class IcebergDataPlane(DataPlane):
             # Phase-2/Trickle concern; an overwrite Ripple keeps no history anyway).
             cat.drop_table(ident)
             _overwrite(_create())
+        # Overwrite leaves the prior run's full data file referenced only by the now-superseded snapshot —
+        # reclaim it (and the stale manifests) once that snapshot ages out.
+        self._prune(cat, table)
+
+    @staticmethod
+    def _create_table(cat, ident: str, schema):
+        """Create the table with pyiceberg's metadata-cleanup properties set, so superseded
+        ``*.metadata.json`` files are deleted on each commit rather than accumulating forever."""
+        return cat.create_table(ident, schema=schema, properties=dict(_CLEANUP_PROPS))
+
+    # ─── prune (bound on-disk growth) ─────────────────────────────────────────────
+
+    def _prune(self, cat, table: str) -> None:
+        """Keep only the most-recent ``_keep_snapshots()`` snapshots and physically remove any data /
+        manifest files no surviving snapshot references. Space-only — correctness rides the current
+        snapshot (always retained) and the consumer's window read — so any failure here is swallowed: a
+        Pond Run must never fail on housekeeping. An overwrite table sheds its old full data files; an
+        append history / changelog keeps every data file its *current* snapshot still references (the row
+        data is trimmed separately by :meth:`_sync_retention`), shedding only stale manifests/metadata."""
+        try:
+            ident = f"{_NAMESPACE}.{table}"
+            tbl = cat.load_table(ident)
+            keep = _keep_snapshots()
+            snaps = sorted(tbl.snapshots(), key=lambda s: s.timestamp_ms)
+            if len(snaps) > keep:
+                # Drop the oldest; the current snapshot is the newest, so it's never in this set.
+                expire = [s.snapshot_id for s in snaps[:-keep]]
+                tbl.maintenance.expire_snapshots().by_ids(expire).commit()
+                tbl = cat.load_table(ident)
+            self._gc_orphan_files(tbl)
+        except Exception:  # pragma: no cover - housekeeping must never break a run
+            import logging
+
+            logging.getLogger(__name__).debug("iceberg prune skipped for %s", table, exc_info=True)
+
+    @staticmethod
+    def _gc_orphan_files(tbl) -> None:
+        """Delete files under the table's ``data/`` and ``metadata/`` dirs that no surviving snapshot (or
+        the retained metadata log / current metadata pointer) references — the orphans left behind when a
+        snapshot is expired (pyiceberg 0.11 expires metadata only, never the files)."""
+        import os
+        from urllib.parse import unquote, urlparse
+
+        def _norm(p) -> str:
+            u = urlparse(str(p))
+            return os.path.abspath(unquote(u.path) if u.scheme in ("file", "") else str(p))
+
+        io = tbl.io
+        live: set[str] = {_norm(tbl.metadata_location)}
+        for entry in tbl.metadata.metadata_log:
+            live.add(_norm(entry.metadata_file))
+        for snap in tbl.snapshots():
+            if snap.manifest_list:
+                live.add(_norm(snap.manifest_list))
+            for mf in snap.manifests(io):
+                live.add(_norm(mf.manifest_path))
+                for e in mf.fetch_manifest_entry(io, discard_deleted=False):
+                    live.add(_norm(e.data_file.file_path))
+
+        table_dir = os.path.dirname(os.path.dirname(_norm(tbl.metadata_location)))  # .../{namespace}/{table}
+        for sub in ("data", "metadata"):
+            dpath = os.path.join(table_dir, sub)
+            if not os.path.isdir(dpath):
+                continue
+            for fn in os.listdir(dpath):
+                fp = os.path.abspath(os.path.join(dpath, fn))
+                if os.path.isfile(fp) and fp not in live:
+                    try:
+                        os.remove(fp)
+                    except OSError:
+                        pass
 
     # ─── read ──────────────────────────────────────────────────────────────────
 

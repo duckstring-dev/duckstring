@@ -491,6 +491,67 @@ def test_builder_matches_comprehensive_row_for_row(tmp_path):
     snk_con.close()
 
 
+def _priced_p(tmp_path, f, previous_f, snk_con, snk_dir, *, spine_p=0.3, dim_p=0.3):
+    """Like :func:`_priced` but with per-source change-fraction thresholds on the builder."""
+    pond = Pond("priced", "1.0.0", snk_con, root=tmp_path,
+                source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=previous_f)
+    (pond.trickle("sales.order_line", p=spine_p)
+         .join(pond.trickle("catalog.product", p=dim_p), on="product_id")
+         .select("s0.order_id, s0.product_id, s0.qty, s1.price, s0.qty * s1.price AS total")
+         .merge("priced"))
+    publish(snk_con, snk_dir)
+
+
+def _spy_merge_mode(monkeypatch):
+    """Record the ``comprehensive`` flag of each Pond.merge_table call (to see which path the builder took)."""
+    modes: list[bool] = []
+    orig = Pond.merge_table
+
+    def spy(self, name, relation, *, comprehensive=True, **kw):
+        modes.append(comprehensive)
+        return orig(self, name, relation, comprehensive=comprehensive, **kw)
+
+    monkeypatch.setattr(Pond, "merge_table", spy)
+    return modes
+
+
+def test_builder_threshold_falls_back_to_comprehensive(tmp_path, monkeypatch):
+    """When a source's delta exceeds its change-fraction threshold ``p``, ``.merge()`` abandons the
+    partial slice and recomputes comprehensively — and the output is still correct."""
+    _cons, ol, pr = _star_sources(tmp_path)
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p3", 3)], ts(1))
+    pr([("p1", 5), ("p2", 9), ("p3", 7)], ts(1))
+    snk_con = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "priced" / "m1" / "data"
+    _priced_p(tmp_path, ts(1), NEVER, snk_con, snk_dir)  # bootstrap (full → comprehensive)
+
+    modes = _spy_merge_mode(monkeypatch)
+    # All 3 of 3 product prices change → 100% of the dimension's keys > p=0.3 → comprehensive fallback.
+    pr([("p1", 50), ("p2", 90), ("p3", 70)], ts(2))
+    _priced_p(tmp_path, ts(2), ts(1), snk_con, snk_dir)
+    assert modes == [True], "over-threshold run should take the comprehensive path"
+    assert rows(snk_con, snk_dir, "priced", "order_id, total") == [(10, 100), (11, 90), (12, 210)]
+    snk_con.close()
+
+
+def test_builder_threshold_p1_forces_incremental(tmp_path, monkeypatch):
+    """``p=1.0`` disables the check for that source — the builder stays on the incremental path even when
+    every key changed (and never pays for the count)."""
+    _cons, ol, pr = _star_sources(tmp_path)
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p3", 3)], ts(1))
+    pr([("p1", 5), ("p2", 9), ("p3", 7)], ts(1))
+    snk_con = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "priced" / "m1" / "data"
+    _priced_p(tmp_path, ts(1), NEVER, snk_con, snk_dir, dim_p=1.0)
+
+    modes = _spy_merge_mode(monkeypatch)
+    pr([("p1", 50), ("p2", 90), ("p3", 70)], ts(2))  # 100% churn, but dim_p=1.0 → stays incremental
+    _priced_p(tmp_path, ts(2), ts(1), snk_con, snk_dir, dim_p=1.0)
+    assert modes == [False], "p=1.0 should keep the incremental (comprehensive=False) path"
+    assert rows(snk_con, snk_dir, "priced", "order_id, total") == [(10, 100), (11, 90), (12, 210)]
+    snk_con.close()
+
+
 def test_builder_build_time_errors(tmp_path):
     from duckstring.trickle_builder import BuildError
 

@@ -59,6 +59,50 @@ def test_one_snapshot_per_run_stamped_with_f(tmp_path):
     assert "2026-06-16T01:00:00+00:00" in stamps
 
 
+def _data_files(tmp_path, table):
+    import os
+
+    d = tmp_path / "pond" / table / "data"
+    return len(os.listdir(d)) if d.is_dir() else 0
+
+
+def test_prune_bounds_overwrite_data_files_keeping_latest(tmp_path, monkeypatch):
+    """An overwrite table (merge main / plain Ripple) rewrites a full data file each run; the prune keeps
+    only the most-recent N snapshots and reclaims the superseded data files — so disk stays bounded while
+    the latest state still reads."""
+    monkeypatch.setenv("DUCKSTRING_ICEBERG_KEEP_SNAPSHOTS", "2")
+    dp = IcebergDataPlane()
+    con = _con("CREATE TABLE t AS SELECT 0 AS id, 0 AS v")
+    for k in range(8):
+        con.execute(f"CREATE OR REPLACE TABLE t AS SELECT i AS id, {k} AS v FROM range(50) x(i)")
+        dp.export(con, tmp_path, f=datetime(2026, 6, 16, k, tzinfo=UTC))
+
+    assert _data_files(tmp_path, "t") <= 3, "overwrite data files not reclaimed"
+    rcon = duckdb.connect()
+    dp.prepare(rcon)
+    assert rcon.sql(f"SELECT DISTINCT v FROM ({dp.read_select(tmp_path, 't')})").fetchall() == [(7,)]
+
+
+def test_prune_keeps_all_append_history_data(tmp_path, monkeypatch):
+    """An append history's *current* snapshot references every appended data file, so the prune must keep
+    them all (only stale manifests/metadata are reclaimed) — the full history still reads."""
+    from duckstring import trickle_io as T
+
+    monkeypatch.setenv("DUCKSTRING_ICEBERG_KEEP_SNAPSHOTS", "2")
+    dp = IcebergDataPlane()
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    for k in range(6):
+        batch = con.sql(f"SELECT {k} * 10 + i AS id, {k} AS v FROM range(10) x(i)")
+        T.append_table(con, "hist", batch, datetime(2026, 6, 16, k, tzinfo=UTC), ("id",))
+        dp.export(con, tmp_path, f=datetime(2026, 6, 16, k, tzinfo=UTC))
+
+    assert _data_files(tmp_path, "hist") == 6, "append data files must not be reclaimed"
+    rcon = duckdb.connect()
+    dp.prepare(rcon)
+    assert rcon.sql(f"SELECT count(*) FROM ({dp.read_select(tmp_path, 'hist')})").fetchone() == (60,)
+
+
 def test_as_of_reads_the_snapshot_for_that_freshness(tmp_path):
     dp = IcebergDataPlane()
     con = _con("CREATE TABLE event AS SELECT * FROM (VALUES (1,'a'),(2,'b')) t(id,val)")

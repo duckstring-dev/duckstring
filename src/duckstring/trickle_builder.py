@@ -32,11 +32,12 @@ class TrickleBuilder:
     """One node of the build graph. ``pond.trickle(ref)`` starts a graph rooted at the **spine** source
     (the one that owns the output PK); :meth:`join` attaches a dimension directly to the spine."""
 
-    def __init__(self, pond, spine_ref: str) -> None:
+    def __init__(self, pond, spine_ref: str, *, p: float = 0.3) -> None:
         from .trickle_io import load_sidecar
 
         self.pond = pond
         self.spine_ref = spine_ref
+        self.p = p  # this source's change-fraction threshold (see Pond.trickle)
         source_pond, table = spine_ref.split(".", 1)
         meta = load_sidecar(pond._source_data_dir(source_pond)).get(table, {})
         self.spine_pk = tuple(meta.get("pk", ()))
@@ -46,7 +47,9 @@ class TrickleBuilder:
                 f"builder and the delta helpers need Trickle sources; to consume an overwrite Ripple, read "
                 f"it with pond.read_table(...) and write a comprehensive pond.merge_table(...) instead"
             )
-        self._joins: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []  # (dim_ref, dim_pk, on)
+        # (dim_ref, dim_pk, on, p) — p is the dimension's own threshold, captured here because join()
+        # keeps only this tuple (the dimension TrickleBuilder is otherwise discarded).
+        self._joins: list[tuple[str, tuple[str, ...], tuple[str, ...], float]] = []
         self._filters: list[str] = []
         self._projection: str | None = None
 
@@ -69,7 +72,7 @@ class TrickleBuilder:
                 f"join('{dimension.spine_ref}', on={on_cols}): 'on' has {len(on_cols)} column(s) but the "
                 f"dimension PK has {len(dimension.spine_pk)} — 'on' must equi-join to the dimension's full PK"
             )
-        self._joins.append((dimension.spine_ref, dimension.spine_pk, on_cols))
+        self._joins.append((dimension.spine_ref, dimension.spine_pk, on_cols, dimension.p))
         return self
 
     def filter(self, predicate: str) -> "TrickleBuilder":
@@ -96,9 +99,17 @@ class TrickleBuilder:
         # merge_table diffs it against our own main and computes the right deletes (incl. rows that vanished
         # across the discontinuity). This is what makes the builder robust to an upstream refresh/reset.
         spine_delta = pond.read_delta(self.spine_ref)
-        dim_deltas = [(on_cols, pond.read_delta(dim_ref)) for dim_ref, _dim_pk, on_cols in self._joins]
+        dim_deltas = [(on_cols, pond.read_delta(dim_ref)) for dim_ref, _pk, on_cols, _p in self._joins]
 
-        if spine_delta.is_full or any(d.is_full for _, d in dim_deltas):
+        # The same comprehensive fallback also catches a delta too *large* to pay for incrementally: if any
+        # source changed more than its threshold `p` of its own keys, a partial recompute + merge + a fat
+        # changelog costs more than one clean pass (see Pond.trickle). is_full ⇒ already full; p == 1 skips
+        # the (cheap, but non-zero) count entirely.
+        over = self._over_threshold(self.spine_ref, spine_delta, self.p) or any(
+            self._over_threshold(dim_ref, d, p)
+            for (dim_ref, _pk, _on, p), (_oc, d) in zip(self._joins, dim_deltas, strict=True)
+        )
+        if spine_delta.is_full or any(d.is_full for _, d in dim_deltas) or over:
             pond.merge_table(
                 name, self._recompute(None), comprehensive=True,
                 pk=out_pk, retain_t=retain_t, retain_n=retain_n,
@@ -118,6 +129,18 @@ class TrickleBuilder:
             pk=out_pk, retain_t=retain_t, retain_n=retain_n,
         )
 
+    def _over_threshold(self, ref: str, delta, p: float) -> bool:
+        """Whether ``delta`` touches more than fraction ``p`` of ``ref``'s current keys. ``p >= 1`` never
+        trips (and skips the count); ``p <= 0`` always trips on any change. The total is the source's
+        current key count (one row per PK in its clean state), the changed count its delta key-set."""
+        if p >= 1.0:
+            return False
+        total = self.pond.read_table(ref).aggregate("count(*) AS n").fetchone()[0] or 0
+        if total == 0:
+            return False
+        changed = delta.keys().relation.aggregate("count(*) AS n").fetchone()[0] or 0
+        return changed > p * total
+
     def _recompute(self, affected):
         """The join over the full sources, optionally restricted to the ``affected`` spine keys (a
         :class:`KeySet`). ``affected=None`` recomputes the whole output (the comprehensive path)."""
@@ -130,7 +153,7 @@ class TrickleBuilder:
         s0 = "_duckstring_tb_s0"
         self.pond.read_table(self.spine_ref).create_view(s0, replace=True)
         froms = [f'"{s0}" s0']
-        for i, (dim_ref, dim_pk, on_cols) in enumerate(self._joins):
+        for i, (dim_ref, dim_pk, on_cols, _p) in enumerate(self._joins):
             alias = f"_duckstring_tb_s{i + 1}"
             self.pond.read_table(dim_ref).create_view(alias, replace=True)
             cond = " AND ".join(
