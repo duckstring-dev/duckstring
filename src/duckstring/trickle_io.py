@@ -122,17 +122,21 @@ def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
       scales with run frequency. The current run's ``f`` rows are always kept (``f - retain_t <= f``).
     - ``retain_n`` (a count): keep only the newest ``retain_n`` distinct ``_duckstring_f`` runs.
 
-    The coverage watermark for the window read is just ``min(_duckstring_f)`` over what remains, so
-    trimming here automatically advances it — no separate watermark to store."""
+    Returns the **cutoff** it applied (the oldest freshness still retained) so the caller can raise the
+    published ``floor`` to it — a consumer behind the cutoff then coverage-misses and full-reads."""
+    cutoff = None
     if retain_t is not None:
         cutoff = f - retain_t
         con.execute(f'DELETE FROM {_q(table)} WHERE {_q(F_COL)} < {_ts(cutoff)}')
     if retain_n is not None and retain_n >= 1:
-        con.execute(
-            f'DELETE FROM {_q(table)} WHERE {_q(F_COL)} < ('
+        kept_min = con.execute(
             f'SELECT min(g) FROM (SELECT DISTINCT {_q(F_COL)} AS g FROM {_q(table)} '
-            f'ORDER BY g DESC LIMIT {int(retain_n)}))'
-        )
+            f'ORDER BY g DESC LIMIT {int(retain_n)})'
+        ).fetchone()[0]
+        if kept_min is not None:
+            con.execute(f'DELETE FROM {_q(table)} WHERE {_q(F_COL)} < {_ts(kept_min)}')
+            cutoff = kept_min if cutoff is None else max(cutoff, kept_min)
+    return cutoff
 
 
 # ─── meta (mode + PK) ─────────────────────────────────────────────────────────
@@ -141,31 +145,59 @@ def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
 def _ensure_meta(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
-        f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR)"
+        f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR)"
     )
+    try:  # an older registry predates the floor column
+        con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN floor VARCHAR')
+    except Exception:
+        pass
 
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
     _ensure_meta(con)
+    # Preserve any existing floor (a normal incremental run must not reset it).
     con.execute(
-        f'INSERT OR REPLACE INTO {_q(META_TABLE)} (table_name, mode, pk) VALUES (?, ?, ?)',
+        f'INSERT INTO {_q(META_TABLE)} (table_name, mode, pk) VALUES (?, ?, ?) '
+        f'ON CONFLICT (table_name) DO UPDATE SET mode=excluded.mode, pk=excluded.pk',
         [table, mode, ",".join(pk)],
     )
 
 
+def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
+    """Maintain a Trickle table's coverage **floor** — the earliest freshness a windowed read can rely on
+    (below it, a consumer full-reads the clean state). A bootstrap/refresh **sets** it to that run's ``f``
+    (the changelog starts fresh there); retention **raises** it to its cutoff. A normal incremental run
+    touches neither, so the floor stays put."""
+    from datetime import datetime, timezone
+
+    cur = con.execute(f'SELECT floor FROM {_q(META_TABLE)} WHERE table_name = ?', [table]).fetchone()
+    floor = datetime.fromisoformat(cur[0]) if (cur and cur[0]) else None
+    if bootstrap_f is not None:
+        floor = bootstrap_f
+    if cutoff is not None and (floor is None or cutoff > floor):
+        floor = cutoff
+    if floor is not None:
+        # Normalise to UTC so the published floor string is producer-session-tz-independent.
+        con.execute(
+            f'UPDATE {_q(META_TABLE)} SET floor = ? WHERE table_name = ?',
+            [floor.astimezone(timezone.utc).isoformat(), table],
+        )
+
+
 def read_meta(con) -> dict[str, dict]:
-    """``{table: {"mode", "pk": [...]}}`` for every Trickle table in this registry (``{}`` if none)."""
+    """``{table: {"mode", "pk": [...], "floor": iso|None}}`` for every Trickle table (``{}`` if none)."""
     if not _table_exists(con, META_TABLE):
         return {}
-    rows = con.execute(f'SELECT table_name, mode, pk FROM {_q(META_TABLE)}').fetchall()
-    return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else [])} for r in rows}
+    rows = con.execute(f'SELECT table_name, mode, pk, floor FROM {_q(META_TABLE)}').fetchall()
+    return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else []), "floor": r[3]} for r in rows}
 
 
 def write_sidecar(data_dir: Path, meta: dict[str, dict]) -> None:
-    """Publish mode/PK next to the data so a cross-Pond reader can resolve a Trickle source."""
+    """Publish mode/PK/floor next to the data so a cross-Pond reader can resolve a Trickle source and key
+    its coverage check off the floor."""
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    payload = {t: {"mode": m["mode"], "pk": list(m["pk"])} for t, m in meta.items()}
+    payload = {t: {"mode": m["mode"], "pk": list(m["pk"]), "floor": m.get("floor")} for t, m in meta.items()}
     tmp = data_dir / (SIDECAR + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     tmp.replace(data_dir / SIDECAR)
@@ -208,27 +240,35 @@ def _con_utc():
 
 
 def landed_after(data_dir: Path) -> str | None:
-    """The freshness a consumer has fully landed = ``min`` over its windowable tables' ``max
-    (_duckstring_f)`` (conservative, so no table is under-served). ``None`` — bootstrap (no sidecar) or
-    any windowable table empty — means *transfer wholesale*."""
+    """The freshness a consumer has fully landed = ``min`` over its windowable tables' high-water, where a
+    table's high-water is ``max(its floor, max(_duckstring_f))`` — so a bootstrap whose changelog is empty
+    still counts as "landed up to floor". ``None`` (no sidecar, or a table with neither floor nor rows)
+    means *transfer wholesale*."""
+    from datetime import datetime
+
     data_dir = Path(data_dir)
-    windowable = windowable_tables(load_sidecar(data_dir))
+    sidecar = load_sidecar(data_dir)
+    windowable = windowable_tables(sidecar)
     if not windowable:
         return None
     con = _con_utc()
     try:
-        maxes = []
+        highs = []
         for table in windowable:
+            base = table[: -len(CHANGELOG_SUFFIX)] if table.endswith(CHANGELOG_SUFFIX) else table
+            floor = sidecar.get(base, {}).get("floor")
+            high = datetime.fromisoformat(floor) if floor else None
             pq = data_dir / f"{table}.parquet"
-            if not pq.exists():
-                continue
-            m = con.execute(
-                f"SELECT max({_q(F_COL)}) FROM read_parquet('{_sql_lit(pq)}')"
-            ).fetchone()[0]
-            if m is None:
-                return None  # an empty windowable table → fall back to a wholesale transfer
-            maxes.append(m)
-        return min(maxes).isoformat() if maxes else None
+            if pq.exists():
+                rows_max = con.execute(
+                    f"SELECT max({_q(F_COL)}) FROM read_parquet('{_sql_lit(pq)}')"
+                ).fetchone()[0]
+                if rows_max is not None and (high is None or rows_max > high):
+                    high = rows_max
+            if high is None:
+                return None  # nothing landed for this table → wholesale
+            highs.append(high)
+        return min(highs).isoformat() if highs else None
     finally:
         con.close()
 
@@ -301,7 +341,8 @@ def append_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=N
     relation.create_view(src, replace=True)
     cols = relation.columns
     sel_cols = ", ".join(_q(c) for c in cols)
-    if not _table_exists(con, name):
+    first = not _table_exists(con, name)  # the floor anchors at the first append's freshness
+    if first:
         con.execute(
             f'CREATE TABLE {_q(name)} AS '
             f'SELECT {sel_cols}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(src)} LIMIT 0'
@@ -312,7 +353,8 @@ def append_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=N
         f'SELECT {sel_cols}, {_ts(f)} FROM {_q(src)}'
     )
     _record_meta(con, name, "append", pk)
-    _apply_retention(con, name, f, retain_t, retain_n)
+    cutoff = _apply_retention(con, name, f, retain_t, retain_n)
+    _advance_floor(con, name, bootstrap_f=(f if first else None), cutoff=cutoff)
 
 
 # ─── write: merge ─────────────────────────────────────────────────────────────
@@ -360,7 +402,10 @@ def merge_table(
         con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')  # idempotent replay (re-apply supplied set)
         _merge_partial(con, name, clog, new, cols, nonpk, pk, f, main_exists, deletes)
     _record_meta(con, name, "merge", pk)
-    _apply_retention(con, clog, f, retain_t, retain_n)  # bound the changelog; the main is current-state
+    cutoff = _apply_retention(con, clog, f, retain_t, retain_n)  # bound the changelog; the main is current-state
+    # A bootstrap/refresh (no prior main) sets the floor to f; retention raises it. The floor is keyed on
+    # the base table name (not the changelog), since that's what read_delta resolves.
+    _advance_floor(con, name, bootstrap_f=(f if not main_exists else None), cutoff=cutoff)
 
 
 def _ensure_changelog(con, clog: str, cols: list[str]) -> None:
@@ -388,9 +433,9 @@ def _merge_comprehensive(con, name, clog, new, cols, nonpk, pk, f, main_exists) 
     # snapshot is destroyed), so a re-run after a successful apply derives an empty delta; leaving the
     # changelog untouched then preserves the F rows the first attempt already wrote.
     delta = "_duckstring_ds_cdelta"
-    con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(delta)} AS SELECT * FROM {_q(clog)} LIMIT 0')
     if main_exists:
         # upserts = rows new-or-changed vs the prior main (hash differs); deletes = PKs gone from new.
+        con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(delta)} AS SELECT * FROM {_q(clog)} LIMIT 0')
         con.execute(
             f'INSERT INTO {_q(delta)} ({sel_user}, {_q(OP_COL)}, {_q(F_COL)}) '
             f'SELECT {", ".join("n." + _q(c) for c in cols)}, \'{OP_UPSERT}\', {_ts(f)} '
@@ -403,14 +448,13 @@ def _merge_comprehensive(con, name, clog, new, cols, nonpk, pk, f, main_exists) 
             f'FROM {_q(name)} o LEFT JOIN {_q(new)} n ON {_on(pk, "o", "n")} '
             f'WHERE n.{_q(pk[0])} IS NULL'
         )
-    else:
-        con.execute(
-            f'INSERT INTO {_q(delta)} ({sel_user}, {_q(OP_COL)}, {_q(F_COL)}) '
-            f'SELECT {sel_user}, \'{OP_UPSERT}\', {_ts(f)} FROM {_q(new)}'
-        )
-    if con.execute(f'SELECT count(*) FROM {_q(delta)}').fetchone()[0] > 0:
-        con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')  # replace this F's window
-        con.execute(f'INSERT INTO {_q(clog)} SELECT * FROM {_q(delta)}')
+        if con.execute(f'SELECT count(*) FROM {_q(delta)}').fetchone()[0] > 0:
+            con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')  # replace this F's window
+            con.execute(f'INSERT INTO {_q(clog)} SELECT * FROM {_q(delta)}')
+    # else: a **bootstrap** (or refresh) — no prior main, so every row is "new". Re-emitting all of them
+    # into the changelog is dead weight: a first-time consumer bootstraps from the main, and no window's
+    # lower bound can predate this run. So write *nothing* to the changelog; the published floor = f marks
+    # "full-read the main below here" (set by the caller).
     # The main is the clean current state: overwrite it with the full new state (reuses overwrite — no
     # Iceberg delete-files / CoW needed). Carries _duckstring_hash for the next run's diff.
     con.execute(f'CREATE OR REPLACE TABLE {_q(name)} AS SELECT * FROM {_q(new)}')
@@ -523,32 +567,45 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp) -> Delta:
     - **overwrite** source (a plain Ripple): no history → a full read, every row an upsert.
     - **coverage / bootstrap**: ``previous_f = NEVER`` or earlier than the oldest retained stamp → a full
       read (of the main / the whole table); resume incrementally next run."""
+    from datetime import datetime
+
     from .engine.core import NEVER
 
     meta = load_sidecar(data_dir).get(table, {})
     mode = meta.get("mode", "overwrite")
     pk = tuple(meta.get("pk", ()))
+    floor = datetime.fromisoformat(meta["floor"]) if meta.get("floor") else None
 
     if mode == "append":
-        return _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER)
+        return _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
     if mode == "merge":
-        return _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER)
+        return _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
     # overwrite source (a plain Ripple): no history → always a full read, every row an upsert.
     upserts = _strip_system(con.sql(dp.read_select(data_dir, table)))
     return Delta(con, pk, upserts, _empty_pk(upserts, pk), is_full=True)
 
 
-def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER) -> Delta:
+def _covered(previous_f, NEVER, floor, oldest) -> bool:
+    """Whether ``previous_f`` is covered by the available history — i.e. a windowed read is valid. Keys off
+    the published ``floor`` (set by a bootstrap/refresh, raised by retention); falls back to the oldest
+    retained row when a legacy sidecar carries no floor."""
+    if previous_f == NEVER:
+        return False
+    bound = floor if floor is not None else oldest
+    return bound is None or previous_f >= bound
+
+
+def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor) -> Delta:
     rel = con.sql(dp.read_select(data_dir, table))  # includes _duckstring_f
     oldest = con.sql(f"SELECT min({_q(F_COL)}) FROM ({dp.read_select(data_dir, table)})").fetchone()[0]
-    full = previous_f == NEVER or (oldest is not None and previous_f < oldest)
+    full = not _covered(previous_f, NEVER, floor, oldest)
     upper = f"{_q(F_COL)} <= {_ts(f)}"
     cond = upper if full else f"{_q(F_COL)} > {_ts(previous_f)} AND {upper}"
     upserts = _strip_system(rel.filter(cond))
     return Delta(con, pk, upserts, _empty_pk(upserts, pk), is_full=full)
 
 
-def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER) -> Delta:
+def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor) -> Delta:
     clog = changelog_name(table)
     try:
         clog_sql = dp.read_select(data_dir, clog)
@@ -557,7 +614,7 @@ def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER) -> Del
     oldest = None
     if clog_sql is not None:
         oldest = con.sql(f"SELECT min({_q(F_COL)}) FROM ({clog_sql})").fetchone()[0]
-    full = clog_sql is None or previous_f == NEVER or (oldest is not None and previous_f < oldest)
+    full = clog_sql is None or not _covered(previous_f, NEVER, floor, oldest)
     if full:
         main = _strip_system(con.sql(dp.read_select(data_dir, table)))
         return Delta(con, pk, main, _empty_pk(main, pk), is_full=True)

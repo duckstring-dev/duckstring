@@ -72,7 +72,8 @@ def test_append_delta_window_and_meta_sidecar(reg, tmp_path):
     T.append_table(reg, "event", reg.sql("SELECT 3 AS id"), ts(3), ("id",))
     data_dir = publish(reg, tmp_path / "data")
 
-    assert T.load_sidecar(data_dir)["event"] == {"mode": "append", "pk": ["id"]}
+    _sc = T.load_sidecar(data_dir)["event"]
+    assert _sc["mode"] == "append" and _sc["pk"] == ["id"]
     rcon = duckdb.connect()
     d = T.read_delta(rcon, data_dir, "event", previous_f=ts(1), f=ts(3), dp=ParquetDataPlane())
     assert sorted(d.upserts.fetchall()) == [(2,), (3,)]  # (prev, f] — excludes 1, includes 3
@@ -106,10 +107,12 @@ def test_merge_comprehensive_diffs_insert_update_delete(reg, tmp_path):
         'SELECT id, v, _duckstring_op, _duckstring_f FROM dim__changelog ORDER BY _duckstring_f, id'
     ).fetchall()
     assert clog == [
-        (1, "a", "upsert", ts(1)), (2, "b", "upsert", ts(1)),    # run 1: both inserted
+        # run 1 (bootstrap) writes NO changelog — re-emitting all rows is dead weight (consumers
+        # bootstrap from the main); the floor marks "full-read below run 1".
         (2, "B", "upsert", ts(2)), (3, "c", "upsert", ts(2)),    # run 2: 2 changed, 3 inserted (1 unchanged)
         (1, None, "delete", ts(3)), (3, None, "delete", ts(3)),  # run 3: 1 and 3 removed (2 unchanged)
     ]
+    assert T.load_sidecar(data_dir)["dim"]["floor"] == ts(1).isoformat()  # floor anchored at the first run
 
 
 def test_merge_comprehensive_no_hash_in_user_read(reg, tmp_path):
@@ -337,14 +340,15 @@ def test_trickle_decorator_pk_default_via_local_runner(tmp_path):
     assert result.ok, [r.error for r in result.ripples if r.status != "ok"]
 
     out = project.out_dir
-    # The @trickle(pk="id") default flowed to merge_table — the clean main + its changelog were published.
-    assert T.load_sidecar(out)["loud"] == {"mode": "merge", "pk": ["id"]}
+    # The @trickle(pk="id") default flowed to merge_table — a clean merge main was published, with the
+    # floor anchored at this first (bootstrap) run and an empty changelog (no wasteful re-emit).
+    _sc = T.load_sidecar(out)["loud"]
+    assert _sc["mode"] == "merge" and _sc["pk"] == ["id"] and _sc["floor"] is not None
     con = duckdb.connect()
     assert rows(con, out, "loud", "id, v") == [(1, "A"), (2, "B")]
-    clog = con.sql(
-        f"SELECT id, v, _duckstring_op FROM ({ParquetDataPlane().read_select(out, 'loud__changelog')}) ORDER BY id"
-    ).fetchall()
-    assert clog == [(1, "A", "upsert"), (2, "B", "upsert")]
+    assert con.sql(
+        f"SELECT count(*) FROM ({ParquetDataPlane().read_select(out, 'loud__changelog')})"
+    ).fetchone()[0] == 0  # bootstrap → empty changelog
 
 
 # ─── retention (lag SLA; correctness never depends on it) ────────────────────────
@@ -588,16 +592,17 @@ def test_incremental_draw_window_roundtrip(tmp_path):
                       ts(hour), ("id",), comprehensive=True)
         ParquetDataPlane().export(con, prod)
 
-    producer_run([(1, "a"), (2, "b")], 1)
-    # Consumer bootstraps wholesale (copies the producer's run-1 state).
+    producer_run([(1, "a"), (2, "b")], 1)        # bootstrap — empty changelog, floor = run 1
+    producer_run([(1, "A"), (3, "c")], 2)        # run 2 changelog: 1 upd, 2 del, 3 add
+    # Consumer bootstraps wholesale after run 2 (copies the producer's state — changelog has run-2 rows).
     cons.mkdir()
     for f in prod.iterdir():
         shutil.copy(f, cons / f.name)
-    assert T.landed_after(cons) == ts(1).isoformat()  # it holds everything up to run 1
+    assert T.landed_after(cons) == ts(2).isoformat()  # holds everything up to run 2 (floor=1, rows up to 2)
 
-    producer_run([(1, "A"), (3, "c")], 2)  # run 2: 1 updated, 2 removed, 3 added (producer now ahead)
+    producer_run([(1, "A"), (3, "C"), (4, "d")], 3)  # run 3: 3 changed, 4 added (producer now ahead)
 
-    # Incremental transfer: only the changelog rows > after; the main is wholesale.
+    # Incremental transfer: only the changelog rows > after (run 3); the main is wholesale.
     after = T.landed_after(cons)
     shipped = T.window_parquet_bytes(prod / "dim__changelog.parquet", after)
     (tmp_path / "shipped.parquet").write_bytes(shipped)
@@ -605,18 +610,16 @@ def test_incremental_draw_window_roundtrip(tmp_path):
     rcon.execute("SET TimeZone='UTC'")
     assert rcon.sql(
         f"SELECT DISTINCT _duckstring_f FROM read_parquet('{tmp_path / 'shipped.parquet'}')"
-    ).fetchall() == [(ts(2),)]  # the slice carries ONLY run 2, not run 1
+    ).fetchall() == [(ts(3),)]  # the slice carries ONLY run 3, not earlier runs
 
-    # land the slice + the wholesale main, then read incrementally
+    # land the slice (merge, not replace) + the wholesale main, then read incrementally
     T.land_windowed(cons / "dim__changelog.parquet", shipped, after)
     shutil.copy(prod / "dim.parquet", cons / "dim.parquet")
 
-    # The consumer's landed changelog now mirrors the producer's, so a windowed read over (run1, run2]
-    # sees exactly run 2's net change.
-    d = T.read_delta(rcon, cons, "dim", previous_f=ts(1), f=ts(2), dp=ParquetDataPlane())
-    assert sorted(d.upserts.fetchall()) == [(1, "A"), (3, "c")]
-    assert d.deletes.fetchall() == [(2,)]  # run 2 dropped id 2 — the slice carried that delete op
-    # And the full landed changelog spans both runs (the slice was merged, not replaced).
+    d = T.read_delta(rcon, cons, "dim", previous_f=ts(2), f=ts(3), dp=ParquetDataPlane())
+    assert sorted(d.upserts.fetchall()) == [(3, "C"), (4, "d")]  # run 3's net change
+    assert d.deletes.fetchall() == []
+    # The landed changelog spans runs 2 and 3 — the slice was merged in, not replaced.
     assert rcon.sql(
         f"SELECT count(DISTINCT _duckstring_f) FROM read_parquet('{cons / 'dim__changelog.parquet'}')"
     ).fetchone()[0] == 2
@@ -680,3 +683,30 @@ def test_builder_absorbs_coverage_miss_comprehensively(tmp_path):
     build(ts(3), ts(1))
     assert rows(snk, snk_dir, "priced", "order_id") == [(10,)]  # 11 dropped, not stale
     snk.close()
+
+
+# ─── coverage floor (bootstrap anchor + retention + refresh signal) ──────────────
+
+
+def test_floor_anchors_at_bootstrap_and_retention_advances_it(reg, tmp_path):
+    T.merge_table(reg, "dim", _state(reg, [(1, "a")]), ts(1), ("id",), comprehensive=True)         # bootstrap
+    assert T.load_sidecar(publish(reg, tmp_path / "d1"))["dim"]["floor"] == ts(1).isoformat()
+    T.merge_table(reg, "dim", _state(reg, [(1, "b")]), ts(2), ("id",), comprehensive=True)         # floor stays 1
+    assert T.load_sidecar(publish(reg, tmp_path / "d2"))["dim"]["floor"] == ts(1).isoformat()
+    # Retention trims run-2 down to the newest 1 → floor rises to the surviving min.
+    T.merge_table(reg, "dim", _state(reg, [(1, "c")]), ts(3), ("id",), comprehensive=True, retain_n=1)
+    assert T.load_sidecar(publish(reg, tmp_path / "d3"))["dim"]["floor"] == ts(3).isoformat()
+
+
+def test_floor_forces_full_read_for_a_lagging_consumer(reg, tmp_path):
+    T.merge_table(reg, "dim", _state(reg, [(1, "a")]), ts(1), ("id",), comprehensive=True)
+    T.merge_table(reg, "dim", _state(reg, [(1, "b")]), ts(3), ("id",), comprehensive=True, retain_n=1)  # floor→3
+    data_dir = publish(reg, tmp_path / "data")
+    rcon = duckdb.connect()
+    dp = ParquetDataPlane()
+    # A consumer last at ts(2) is behind the floor (3) — even though a changelog row exists, it must
+    # full-read (is_full) the clean main, not trust a partial window.
+    d = T.read_delta(rcon, data_dir, "dim", previous_f=ts(2), f=ts(9), dp=dp)
+    assert d.is_full and sorted(d.upserts.fetchall()) == [(1, "b")]
+    # A consumer at the floor reads the window incrementally.
+    assert not T.read_delta(rcon, data_dir, "dim", previous_f=ts(3), f=ts(9), dp=dp).is_full
