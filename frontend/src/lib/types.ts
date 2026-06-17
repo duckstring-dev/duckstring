@@ -24,6 +24,7 @@ export interface Ripple {
   id: RippleId;
   pondId: PondId;
   name: string;
+  isTrickle: boolean; // a @trickle Ripple — incremental I/O; drawn with a more pronounced chamfer
   parents: RippleId[];
 }
 

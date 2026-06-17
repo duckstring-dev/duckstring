@@ -147,7 +147,7 @@ function transformStatus(payload: StatusPayload): StatusSlice {
     if (!p.is_draw) {
       for (const r of p.ripples) {
         const eid = `${p.id}.${r.name}`;
-        ripples[eid] = { id: eid, pondId: p.id, name: r.name, parents: [] };
+        ripples[eid] = { id: eid, pondId: p.id, name: r.name, isTrickle: r.is_trickle ?? false, parents: [] };
         rippleViews[eid] = nodeView(r, 0);
       }
       // ripple_edges are [sourceName, sinkName] within the Pond → sink.parents includes source.
@@ -182,6 +182,12 @@ export interface LiveState extends StatusSlice {
   selectedPondId: PondId | null;
   selectedRippleId: RippleId | null;
   selectedTriggerId: PondId | null;
+
+  // Collapsed Ponds hide their Ripples/Trickles in the canvas (header-only). Purely client-side view
+  // state — keyed by pond id, `true` = collapsed.
+  collapsedPonds: Record<PondId, boolean>;
+  toggleCollapse(id: PondId): void;
+  setAllCollapsed(collapsed: boolean): void;
 
   runs: PondRun[]; // run-history feed (filtered by selection + filters)
   selectedRun: PondRun | null; // the run open in the detail pane (enriched with ripples on select)
@@ -269,6 +275,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   selectedPondId: null,
   selectedRippleId: null,
   selectedTriggerId: null,
+  collapsedPonds: {},
 
   runs: [],
   selectedRun: null,
@@ -390,6 +397,18 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
   clearSelection() {
     set({ selectedPondId: null, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
+  },
+
+  toggleCollapse(id) {
+    set((s) => ({ collapsedPonds: { ...s.collapsedPonds, [id]: !s.collapsedPonds[id] } }));
+  },
+  setAllCollapsed(collapsed) {
+    // Only Ponds that actually own Ripples can collapse — a Draw (ripple-less) has nothing to hide.
+    const next: Record<PondId, boolean> = {};
+    if (collapsed) {
+      for (const r of Object.values(get().ripples)) next[r.pondId] = true;
+    }
+    set({ collapsedPonds: next });
   },
 
   tap: (pond) => act(get, set, () => postTrigger(pond, 'tap')),

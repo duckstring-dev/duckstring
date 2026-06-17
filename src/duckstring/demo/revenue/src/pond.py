@@ -4,18 +4,14 @@ Reads the **clean current state** of ``priced.priced_line`` (a Trickle source â€
 stripped on read), re-aggregates per product, and merges comprehensively: Duckstring diffs the new
 totals against the prior ones so only the products whose revenue actually moved hit the changelog. An
 aggregate recomputes fully each run (the win is the small delta *out*, not less compute in) â€” the honest
-scope of Trickle.
+scope of Trickle. No ``time.sleep``: the full re-aggregation over the (large) priced lines is the work.
 """
-
-import os
-import time
 
 from duckstring import trickle
 
 
 @trickle(pk="product_id")
 def by_product(pond):
-    time.sleep(1 * float(os.environ.get("DUCKSTRING_SLEEP_MULTIPLIER", "1.0")))
     pond.read_table("priced.priced_line")  # registers the Source as the view `priced_line`
     totals = pond.con.sql("""
         SELECT

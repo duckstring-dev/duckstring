@@ -57,8 +57,25 @@ def test_status_exposes_ripples_and_intra_pond_edges(tmp_path):
     assert {r["name"] for r in snk["ripples"]} == {"r1", "r2"}
     assert snk["ripple_edges"] == [["r1", "r2"]]
     for r in snk["ripples"]:
-        assert set(r) == {"name", "status", "gen", "runs_completed", "has_pull", "target_f", "start_f", "end_f"}
+        assert set(r) == {
+            "name", "is_trickle", "status", "gen", "runs_completed", "has_pull", "target_f", "start_f", "end_f",
+        }
         assert r["status"] == "idle"
+        assert r["is_trickle"] is False  # plain @ripple chain
+
+
+def test_status_flags_trickle_ripples(tmp_path):
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    ripples = [
+        {"func": "f1", "name": "plain", "parents": []},
+        {"func": "f2", "name": "incr", "parents": ["f1"], "trickle": {"pk": ("id",)}},
+    ]
+    _register(db, "src", "1.0.0", "inlet", "ponds/src/1.0.0", _cfg(), ripples)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    src = _pond(d.status(), "src")
+    flags = {r["name"]: r["is_trickle"] for r in src["ripples"]}
+    assert flags == {"plain": False, "incr": True}
 
 
 def test_status_exposes_d_ms_and_null_trigger_by_default(tmp_path):

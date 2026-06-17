@@ -52,6 +52,7 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 
 export interface RawRipple {
   name: string;
+  is_trickle: boolean; // a @trickle Ripple (history-preserving incremental I/O) — rendered distinctly
   status: 'running' | 'queued' | 'idle';
   gen: number;
   runs_completed: number;

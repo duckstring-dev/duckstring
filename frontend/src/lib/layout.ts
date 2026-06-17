@@ -68,17 +68,19 @@ function buildRippleLayout(
   pondId: PondId,
   ripples: Record<RippleId, Ripple>,
   rippleFloors?: Record<RippleId, number>,
-  direction: 'LR' | 'TB' = 'LR'
+  direction: 'LR' | 'TB' = 'LR',
+  collapsed = false
 ): {
   positions: Record<RippleId, { x: number; y: number }>;
   widths: Record<RippleId, number>;
   width: number;
   height: number;
 } {
-  const pondRipples = Object.values(ripples).filter((r) => r.pondId === pondId);
+  const pondRipples = collapsed ? [] : Object.values(ripples).filter((r) => r.pondId === pondId);
 
   if (pondRipples.length === 0) {
-    // A ripple-less Pond (a Draw) is just its header — no ripple area, no bottom padding.
+    // A ripple-less Pond (a Draw, or a collapsed Pond) is just its header — no ripple area or
+    // bottom padding.
     return { positions: {}, widths: {}, width: MIN_POND_W, height: POND_PAD_TOP };
   }
 
@@ -140,7 +142,8 @@ export function computeLayout(
   floors?: ContentFloors,
   direction: 'LR' | 'TB' = 'LR',
   lineage: ViewPayload | null = null,
-  selfId: string | null = null
+  selfId: string | null = null,
+  collapsed: Set<PondId> = new Set()
 ): LayoutResult {
   const pondList = Object.values(ponds);
   const vertical = direction === 'TB';
@@ -160,7 +163,7 @@ export function computeLayout(
     }
   > = {};
   for (const pond of pondList) {
-    const layout = buildRippleLayout(pond.id, ripples, floors?.ripples, direction);
+    const layout = buildRippleLayout(pond.id, ripples, floors?.ripples, direction, collapsed.has(pond.id));
     // Floor the pond width to fit its title line and its (live) stats line.
     layout.width = Math.max(layout.width, pondNameWidth(pond.name), floors?.ponds?.[pond.id] ?? 0);
     pondLayouts[pond.id] = layout;
@@ -217,9 +220,10 @@ export function computeLayout(
       style: { width, height },
     });
 
-    // Ripple nodes inside this pond (positions relative to pond)
+    // Ripple nodes inside this pond (positions relative to pond). A collapsed Pond hides them — its
+    // ripple layout is header-only, so emit no ripple nodes or intra-pond edges.
     const { positions, widths } = pondLayouts[pond.id];
-    const pondRipples = Object.values(ripples).filter((r) => r.pondId === pond.id);
+    const pondRipples = collapsed.has(pond.id) ? [] : Object.values(ripples).filter((r) => r.pondId === pond.id);
     for (const r of pondRipples) {
       const pos = positions[r.id] ?? { x: POND_PAD_SIDE, y: POND_PAD_TOP };
       nodes.push({

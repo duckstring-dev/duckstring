@@ -3,8 +3,16 @@
 Each run emits the **complete** current catalogue; ``merge_table(comprehensive=True)`` diffs it against
 the prior state to derive inserts/updates/deletes automatically (the safe default — no enumerate-every-
 change obligation). So when a price drifts between runs, the change shows up as a single ``upsert`` in
-the changelog; a discontinued product shows up as a ``delete`` — and a downstream Trickle re-prices only
-the affected order lines, never the whole catalogue.
+the changelog; a downstream Trickle then re-prices only the affected order lines, never the whole
+catalogue.
+
+The catalogue is **generated** at scale (``_PRODUCTS`` rows) from a deterministic base, so an unchanged
+product hashes identically run to run and the comprehensive diff stays small: only the ``_PRICE_CHANGES``
+products this run perturbs (plus the handful reverting from last run's drift) reach the ``__changelog``.
+That tiny, *targeted* delta — rather than the all-rows churn you get from too few products — is what lets
+``priced`` re-price an affected slice instead of the whole join. Sizes are env-overridable
+(``DUCKSTRING_DEMO_*``; the test suite shrinks them); no ``time.sleep`` — the comprehensive diff over the
+full catalogue is the real work.
 
 The clean *main* table is the current catalogue (one row per product, no tombstones); the ``__changelog``
 companion is the CDC stream a delta read consumes.
@@ -12,32 +20,42 @@ companion is the CDC stream a delta read consumes.
 
 import os
 import random
-import time
 
 from duckstring import trickle
 
-_CATALOG = [
-    (1, "Laptop Pro", "Electronics", 1299.00),
-    (2, "Wireless Earbuds", "Electronics", 89.99),
-    (3, "Running Shoes", "Clothing", 79.99),
-    (4, "Winter Jacket", "Clothing", 149.99),
-    (5, "Espresso Beans", "Food", 14.99),
-    (6, "Olive Oil", "Food", 11.49),
-    (7, "Desk Lamp", "Home", 34.99),
-    (8, "Throw Pillow", "Home", 24.99),
-    (9, "Sci-Fi Novel", "Books", 16.99),
-    (10, "Cookbook", "Books", 22.99),
-]
+_PRODUCTS = int(os.environ.get("DUCKSTRING_DEMO_PRODUCTS", "100000"))
+_PRICE_CHANGES = int(os.environ.get("DUCKSTRING_DEMO_PRICE_CHANGES", "100"))  # products that drift per run
+_CATEGORIES = ["Electronics", "Clothing", "Food", "Home", "Books"]
 
 
 @trickle(pk="product_id")
 def ingest(pond):
-    time.sleep(2 * float(os.environ.get("DUCKSTRING_SLEEP_MULTIPLIER", "1.0")))
-    # Jitter a couple of prices each run so the comprehensive diff has updates to detect.
-    catalog = [
-        (pid, name, cat, round(price * random.choice([1.0, 1.0, 1.0, 0.9, 1.1]), 2))
-        for pid, name, cat, price in _CATALOG
-    ]
-    vals = ", ".join(f"({r[0]}, '{r[1]}', '{r[2]}', {r[3]:.2f})" for r in catalog)
-    state = pond.con.sql(f"SELECT * FROM (VALUES {vals}) t(product_id, name, category, unit_price)")
+    # Pick a small random set of products to re-price this run; everything else regenerates at its
+    # deterministic base price (identical hash → no changelog churn). A product that drifted last run but
+    # not this one reverts to base — itself a detected change, so the changelog carries ~2·_PRICE_CHANGES
+    # rows: small and bounded, however large the catalogue.
+    changed = random.sample(range(1, _PRODUCTS + 1), min(_PRICE_CHANGES, _PRODUCTS))
+    if changed:
+        drift = ", ".join(f"({pid}, {random.choice([0.85, 0.9, 1.1, 1.2, 1.5])})" for pid in changed)
+        cte = f"WITH drift(product_id, factor) AS (VALUES {drift}) "
+        factor, join = "COALESCE(d.factor, 1.0)", "LEFT JOIN drift d USING (product_id)"
+    else:
+        cte, factor, join = "", "1.0", ""
+
+    cats = "[" + ", ".join(f"'{c}'" for c in _CATEGORIES) + "]"
+    state = pond.con.sql(
+        f"""
+        {cte}
+        SELECT
+          p.product_id,
+          'Product ' || p.product_id                                  AS name,
+          {cats}[CAST(p.product_id % {len(_CATEGORIES)} AS INTEGER) + 1] AS category,
+          round(p.base_price * {factor}, 2)                           AS unit_price
+        FROM (
+          SELECT (i + 1) AS product_id, 5.0 + ((i * 37) % 2000) * 0.5 AS base_price
+          FROM range({_PRODUCTS}) AS t(i)
+        ) p
+        {join}
+        """
+    )
     pond.merge_table("product", state)  # comprehensive (default): Duckstring derives the CDC

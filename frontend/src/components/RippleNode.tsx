@@ -31,7 +31,9 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
       style={{
         border: `2px solid ${borderColor}`,
         boxShadow: isSelected ? `0 0 0 2px ${borderColor}` : undefined,
-        borderRadius: 6,
+        // A Trickle (incremental I/O) gets a markedly larger corner radius than a plain Ripple — the
+        // at-a-glance shape cue that this node preserves history rather than overwriting wholesale.
+        borderRadius: ripple.isTrickle ? 22 : 6,
         padding: '6px 10px',
         background: nodeFill(borderColor),
         cursor: 'pointer',

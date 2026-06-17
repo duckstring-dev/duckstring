@@ -19,6 +19,10 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const inRepair = useLiveStore((s) => s.repairScope.includes(pondId));
   const toggleRepair = useLiveStore((s) => s.toggleRepair);
   const refreshPending = useLiveStore((s) => s.pondInfo[pondId]?.refreshPending ?? false);
+  const collapsed = useLiveStore((s) => !!s.collapsedPonds[pondId]);
+  const toggleCollapse = useLiveStore((s) => s.toggleCollapse);
+  // Only a Pond that owns Ripples can collapse — a Draw has nothing to hide, so it shows no caret.
+  const hasRipples = useLiveStore((s) => Object.values(s.ripples).some((r) => r.pondId === pondId));
   const now = useLiveStore((s) => s.now);
 
   if (!pond || !view) return null;
@@ -73,11 +77,24 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           flexDirection: 'column',
           justifyContent: 'center',
           gap: 5,
-          // No divider on a Draw — it's header-only, with no ripple area beneath to separate.
-          borderBottom: pond.isDraw ? 'none' : `1px solid ${borderColor}30`,
+          // No divider when there's no ripple area beneath to separate — a Draw, or a collapsed Pond.
+          borderBottom: pond.isDraw || collapsed ? 'none' : `1px solid ${borderColor}30`,
         }}
       >
         <span style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          {hasRipples && (
+            <span
+              role="button"
+              title={collapsed ? 'Expand ripples' : 'Collapse ripples'}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleCollapse(pondId);
+              }}
+              style={{ fontSize: 10, color: '#a1a1aa', cursor: 'pointer', flexShrink: 0, userSelect: 'none' }}
+            >
+              {collapsed ? '▸' : '▾'}
+            </span>
+          )}
           {pond.isDraw && (
             <span style={{ fontSize: 10, fontWeight: 700, color: borderColor, letterSpacing: '0.06em', flexShrink: 0 }}>
               [DRAW]
