@@ -508,3 +508,120 @@ def test_builder_build_time_errors(tmp_path):
     # A joined graph with no .select(...).
     with pytest.raises(BuildError, match="select"):
         pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id").merge("x")
+
+
+# ─── a Trickle following a Ripple (overwrite source) ─────────────────────────────
+
+
+def test_trickle_follows_overwrite_ripple_via_comprehensive(tmp_path):
+    """A Trickle can sit downstream of a plain (overwrite) Ripple: it full-reads at that hop and merges
+    comprehensively. The incremental win only applies to Trickle→Trickle sequences after it — but the
+    output is correct, including deletes the comprehensive diff infers from the overwrite snapshot."""
+    rip_dir = tmp_path / "ponds" / "rip" / "m1" / "data"
+    rip_dir.mkdir(parents=True)
+    rip = duckdb.connect()
+    rip.execute("CREATE TABLE dim AS SELECT * FROM (VALUES (1, 'a'), (2, 'b')) t(id, v)")
+    ParquetDataPlane().export(rip, rip_dir)  # overwrite publish — no sidecar, no pk
+
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+
+    def consume(f, previous_f):
+        pond = Pond("snk", "1.0.0", snk, root=tmp_path, source_majors={"rip": 1}, f=f, previous_f=previous_f)
+        pond.read_table("rip.dim")  # full read of the overwrite source (system-col-free)
+        pond.merge_table("loud", snk.sql("SELECT id, upper(v) AS v FROM dim"), pk=("id",))
+
+    consume(ts(1), NEVER)
+    assert sorted(snk.sql("SELECT id, v FROM loud").fetchall()) == [(1, "A"), (2, "B")]
+
+    rip.execute("DROP TABLE dim; CREATE TABLE dim AS SELECT * FROM (VALUES (1, 'a')) t(id, v)")
+    ParquetDataPlane().export(rip, rip_dir)  # the Ripple dropped row 2
+    consume(ts(2), ts(1))
+    assert sorted(snk.sql("SELECT id, v FROM loud").fetchall()) == [(1, "A")]  # delete inferred
+    clog = snk.sql("SELECT id, _duckstring_op FROM loud__changelog ORDER BY _duckstring_f, id").fetchall()
+    assert (2, "delete") in clog
+
+
+def test_builder_over_overwrite_source_raises_with_guidance(tmp_path):
+    from duckstring.trickle_builder import BuildError
+
+    rip_dir = tmp_path / "ponds" / "rip" / "m1" / "data"
+    rip_dir.mkdir(parents=True)
+    con = duckdb.connect()
+    con.execute("CREATE TABLE dim AS SELECT 1 AS id")
+    ParquetDataPlane().export(con, rip_dir)
+    pond = Pond("snk", "1.0.0", con, root=tmp_path, source_majors={"rip": 1}, f=ts(1))
+    with pytest.raises(BuildError, match="not a Trickle"):
+        pond.trickle("rip.dim")
+
+
+def test_comprehensive_replay_preserves_changelog_after_main_advanced(reg, tmp_path):
+    """Crash-safety: the changelog window is rewritten BEFORE the main is overwritten, and only when the
+    derived delta is non-empty. So a replay after the main already advanced (the diff now yields nothing)
+    leaves the changelog rows the first attempt wrote intact — they are never lost."""
+    T.merge_table(reg, "dim", _state(reg, [(1, "a"), (2, "b")]), ts(1), ("id",), comprehensive=True)
+    T.merge_table(reg, "dim", _state(reg, [(1, "A"), (2, "b")]), ts(2), ("id",), comprehensive=True)
+    clog_at_f2 = reg.execute("SELECT id, _duckstring_op FROM dim__changelog WHERE _duckstring_f = ?", [ts(2)]).fetchall()
+    assert clog_at_f2 == [(1, "upsert")]  # run 2 changed id 1
+
+    # Simulate the post-crash replay state: the main already reflects f2 (committed before the crash),
+    # and the run re-executes at the same f2 with the same output.
+    T.merge_table(reg, "dim", _state(reg, [(1, "A"), (2, "b")]), ts(2), ("id",), comprehensive=True)
+    replayed = reg.execute("SELECT id, _duckstring_op FROM dim__changelog WHERE _duckstring_f = ?",
+                           [ts(2)]).fetchall()
+    assert replayed == [(1, "upsert")]  # not lost, not duplicated
+
+
+# ─── incremental draw (cross-Catchment transfer window) ──────────────────────────
+
+
+def test_incremental_draw_window_roundtrip(tmp_path):
+    """A consumer behind by some runs fetches only the changelog rows newer than what it has landed and
+    merges them in — the producer ships a small delta, the consumer ends row-for-row identical to it."""
+    import shutil
+
+    prod, cons = tmp_path / "prod", tmp_path / "cons"
+    con = duckdb.connect()
+
+    def producer_run(rows, hour):
+        vals = ", ".join(f"({i}, '{v}')" for i, v in rows)
+        T.merge_table(con, "dim", con.sql(f"SELECT * FROM (VALUES {vals}) t(id, v)"),
+                      ts(hour), ("id",), comprehensive=True)
+        ParquetDataPlane().export(con, prod)
+
+    producer_run([(1, "a"), (2, "b")], 1)
+    # Consumer bootstraps wholesale (copies the producer's run-1 state).
+    cons.mkdir()
+    for f in prod.iterdir():
+        shutil.copy(f, cons / f.name)
+    assert T.landed_after(cons) == ts(1).isoformat()  # it holds everything up to run 1
+
+    producer_run([(1, "A"), (3, "c")], 2)  # run 2: 1 updated, 2 removed, 3 added (producer now ahead)
+
+    # Incremental transfer: only the changelog rows > after; the main is wholesale.
+    after = T.landed_after(cons)
+    shipped = T.window_parquet_bytes(prod / "dim__changelog.parquet", after)
+    (tmp_path / "shipped.parquet").write_bytes(shipped)
+    rcon = duckdb.connect()
+    rcon.execute("SET TimeZone='UTC'")
+    assert rcon.sql(
+        f"SELECT DISTINCT _duckstring_f FROM read_parquet('{tmp_path / 'shipped.parquet'}')"
+    ).fetchall() == [(ts(2),)]  # the slice carries ONLY run 2, not run 1
+
+    # land the slice + the wholesale main, then read incrementally
+    T.land_windowed(cons / "dim__changelog.parquet", shipped, after)
+    shutil.copy(prod / "dim.parquet", cons / "dim.parquet")
+
+    # The consumer's landed changelog now mirrors the producer's, so a windowed read over (run1, run2]
+    # sees exactly run 2's net change.
+    d = T.read_delta(rcon, cons, "dim", previous_f=ts(1), f=ts(2), dp=ParquetDataPlane())
+    assert sorted(d.upserts.fetchall()) == [(1, "A"), (3, "c")]
+    assert d.deletes.fetchall() == [(2,)]  # run 2 dropped id 2 — the slice carried that delete op
+    # And the full landed changelog spans both runs (the slice was merged, not replaced).
+    assert rcon.sql(
+        f"SELECT count(DISTINCT _duckstring_f) FROM read_parquet('{cons / 'dim__changelog.parquet'}')"
+    ).fetchone()[0] == 2
+
+
+def test_landed_after_bootstrap_is_none(tmp_path):
+    # No sidecar (nothing landed yet) → wholesale transfer.
+    assert T.landed_after(tmp_path) is None

@@ -31,14 +31,31 @@ rejects non-UTC tz) and `_duckstring_hash` is a VARCHAR (an unsigned 64-bit valu
 signed-long column stats). Plus a **demo Trickle pipeline** (`orders` append → `catalog` merge → `priced`
 builder → `revenue` aggregate) behind `duckstring pond demo --trickle`.
 
-**Still deferred:** the **incremental-draw window** (the draw ships the *whole* changelog+main, which is
-correct — the consumer windows on its own side — just not minimal-transfer) and `pond.state_dir`.
-Correctness never depends on these (full-read fallback covers retention; wholesale draw covers transfer).
-Two known gaps: (1) the Iceberg changelog grows by append and is **not** trimmed when the registry's
-retention drops rows (over-retains space, still correct — reads window-prune, coverage stays generous);
-(2) a comprehensive merge that crashes in the microsecond between the main overwrite and the changelog
-window-replace can lose that run's changelog rows — the Iceberg snapshot model (immutable prior snapshot
-for the diff) closes it.
+**Now also built (fourth pass — gaps closed):**
+- **Incremental draws** (`routes/draw.py?after=`, `poller._land_transfer`, the `trickle_io` window
+  helpers): a consumer sends the freshness it has already landed (`after = landed_after(...)`, the `min`
+  over its append/changelog tables' `max(_duckstring_f)`); the producer windows each append history /
+  merge changelog to `_duckstring_f > after` (the merge main stays wholesale); the consumer merges the
+  slice in (`land_windowed` — keep `<= after`, add the shipped `> after`, idempotent). Bootstrap / no
+  Trickle source → wholesale (back-compat).
+- **Iceberg retention** (`iceberg_plane._sync_retention`): the Iceberg append/changelog now mirrors the
+  registry's retention — anything below the registry's `min(_duckstring_f)` is dropped via `tbl.delete`
+  (homogeneous files → metadata-only, no Iceberg delete-files), gated by a `duckstring.floor` property so
+  a no-retention run is a no-op. The append cursor moved to a `duckstring.last_f` **table** property so a
+  delete-snapshot can't clobber it.
+- **Comprehensive-replay crash** verified closed (not a real gap with the shipped ordering): the
+  changelog window is rewritten **before** the main overwrite and **only when the derived delta is
+  non-empty**, so a replay after the main already advanced (empty delta) leaves the first attempt's
+  changelog rows intact (`test_comprehensive_replay_preserves_changelog_after_main_advanced`).
+
+**A Trickle may follow a Ripple.** A Trickle downstream of an overwrite Ripple full-reads at that hop
+(`read_table` + a comprehensive `merge_table`, which infers deletes from the overwrite snapshot) — the
+incremental win simply doesn't apply across that edge, only along Trickle→Trickle runs after it. The
+builder / `keys_joining` need a Trickle source (declared PK) and raise a guiding `BuildError` over an
+overwrite source.
+
+**Still deferred:** `pond.state_dir` for external stateful-IVM engines — that integration is an advanced,
+unstable feature better suited to duckstring-cloud (paid), not the OSS core. Not built here.
 
 ## Scope — what Trickle is and is not
 

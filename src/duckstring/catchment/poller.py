@@ -20,6 +20,7 @@ import asyncio
 import io
 import zipfile
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 
@@ -44,22 +45,37 @@ async def _fetch_status(client: httpx.AsyncClient, url: str, auth: dict) -> dict
 
 
 async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, name: str, major: int) -> None:
-    """Fetch all of an upstream Pond line's exported Parquet (+ the Trickle sidecar) and land it."""
-    from ..trickle_io import SIDECAR
+    """Fetch an upstream Pond line's exported Parquet (+ the Trickle sidecar) and land it. **Incremental
+    for Trickle sources**: the consumer sends the freshness it has already landed (``after``); the producer
+    windows each append history / merge changelog to its rows newer than that, and the consumer merges the
+    slice into its landed copy (keep ``<= after``, add the shipped ``> after``). A merge main / plain
+    Ripple output is wholesale (replace). ``after = None`` (bootstrap / no Trickle source) → whole set."""
+    import json
 
-    resp = await client.get(f"{url}/api/draw/{name}/{major}", headers=auth)
-    resp.raise_for_status()
+    from ..trickle_io import SIDECAR, land_windowed, landed_after, windowable_tables
+
     data_dir = pond_data_dir(root, name, major)
+    after = landed_after(data_dir)  # what we already hold; None → wholesale (bootstrap)
+    params = {"after": after} if after else {}
+    resp = await client.get(f"{url}/api/draw/{name}/{major}", params=params, headers=auth)
+    resp.raise_for_status()
     data_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        names = set(zf.namelist())
+        # The shipped sidecar tells us which tables the producer windowed (so we merge those, replace the
+        # rest). Same mode classification both ends — mode is stable across runs.
+        sidecar = json.loads(zf.read(SIDECAR)) if SIDECAR in names else {}
+        windowable = windowable_tables(sidecar) if after else set()
         for info in zf.infolist():
-            # Parquet data + the Trickle mode/PK sidecar (so the local read_delta can resolve the source).
             if not (info.filename.endswith(".parquet") or info.filename == SIDECAR):
                 continue
             dest = data_dir / info.filename
-            tmp = dest.with_suffix(dest.suffix + ".tmp")
-            tmp.write_bytes(zf.read(info))
-            tmp.replace(dest)  # atomic publish
+            if Path(info.filename).stem in windowable:
+                land_windowed(dest, zf.read(info), after)  # merge the incremental slice
+            else:
+                tmp = dest.with_suffix(dest.suffix + ".tmp")
+                tmp.write_bytes(zf.read(info))
+                tmp.replace(dest)  # atomic wholesale publish
 
 
 async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | None = None) -> None:

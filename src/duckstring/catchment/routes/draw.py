@@ -56,9 +56,16 @@ async def draw_wait(
 
 
 @router.get("/draw/{name}/{major}")
-def draw(name: str, major: int, request: Request, tables: Optional[str] = None):
-    """Stream all of a Pond line's exported Parquet as a zip. ``tables`` (comma-separated) optionally
-    restricts the set — reserved for per-Ripple duct scope; default is every table."""
+def draw(name: str, major: int, request: Request, tables: Optional[str] = None, after: Optional[str] = None):
+    """Stream a Pond line's exported Parquet as a zip. ``tables`` (comma-separated) optionally restricts
+    the set — reserved for per-Ripple duct scope; default is every table.
+
+    ``after`` (a consumer's already-landed ``_duckstring_f``) makes a Trickle transfer **incremental**:
+    an append history / merge changelog is windowed to its rows newer than ``after`` (the small delta);
+    a merge main and plain Ripple output are always wholesale (current state). Omit ``after`` (or for a
+    bootstrap) → the whole set, as before. The consumer merges the slices in (see poller ``_land_transfer``)."""
+    from ...trickle_io import SIDECAR, load_sidecar, window_parquet_bytes, windowable_tables
+
     m = _resolve_major(request, name, major, None)
     data_dir = _data_dir(request, name, m)
     wanted = {t.strip() for t in tables.split(",")} if tables else None
@@ -67,14 +74,16 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None):
     if not files and wanted is None and not data_dir.exists():
         raise HTTPException(status_code=404, detail=f"No exported data for '{name}' (major {m})")
 
+    windowable = windowable_tables(load_sidecar(data_dir)) if after else set()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for pq in files:
-            zf.write(pq, pq.name)
+            if pq.stem in windowable:
+                zf.writestr(pq.name, window_parquet_bytes(pq, after))  # the incremental slice
+            else:
+                zf.write(pq, pq.name)
         # The Trickle mode/PK sidecar travels with the data so the consuming Catchment's read_delta can
         # resolve a Trickle source (mode/PK aren't in the downstream's duck.db). Harmless for plain Ponds.
-        from ...trickle_io import SIDECAR
-
         sidecar = data_dir / SIDECAR
         if sidecar.exists():
             zf.write(sidecar, sidecar.name)

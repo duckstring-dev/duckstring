@@ -184,3 +184,44 @@ def test_trickle_merge_main_overwrite_changelog_append_over_iceberg(tmp_path):
                      f=datetime(2026, 6, 16, 2, tzinfo=UTC), dp=dp)
     assert sorted(d.upserts.fetchall()) == [(1, "A")]
     assert d.deletes.fetchall() == [(2,)]
+
+
+def test_trickle_retention_drops_expired_iceberg_files(tmp_path):
+    # Registry retention (retain_n) trims old changelog/history rows; the Iceberg history mirrors it by
+    # dropping whole expired files (floor advances), so it doesn't grow unbounded. Space-only — a reader
+    # behind the floor still reads correctly via the full-read fallback.
+    from duckstring import trickle_io as T
+    from duckstring.iceberg_plane import FLOOR_PROP
+
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    dp = IcebergDataPlane()
+    for h in (1, 2, 3, 4):
+        T.append_table(con, "event", con.sql(f"SELECT {h} AS id"),
+                       datetime(2026, 6, 16, h, tzinfo=UTC), ("id",), retain_n=2)
+        dp.export(con, tmp_path, f=datetime(2026, 6, 16, h, tzinfo=UTC))
+
+    tbl = dp._load(tmp_path, "event")
+    assert tbl.properties[FLOOR_PROP] == "2026-06-16T03:00:00+00:00"  # newest 2 runs retained
+    rcon = duckdb.connect()
+    rcon.execute("SET TimeZone='UTC'")
+    dp.prepare(rcon)
+    assert sorted(r[0] for r in rcon.sql(dp.read_select(tmp_path, "event")).fetchall()) == [3, 4]
+
+
+def test_trickle_iceberg_replay_appends_no_duplicates(tmp_path):
+    # The append cursor is a table property, so a replay at the same f (or a re-export) adds nothing —
+    # even after a retention delete-snapshot (which must not clobber the cursor).
+    from duckstring import trickle_io as T
+
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    dp = IcebergDataPlane()
+    T.append_table(con, "event", con.sql("SELECT 1 AS id"), datetime(2026, 6, 16, 1, tzinfo=UTC), ("id",))
+    dp.export(con, tmp_path, f=datetime(2026, 6, 16, 1, tzinfo=UTC))
+    dp.export(con, tmp_path, f=datetime(2026, 6, 16, 1, tzinfo=UTC))  # replay / re-export at the same f
+
+    rcon = duckdb.connect()
+    rcon.execute("SET TimeZone='UTC'")
+    dp.prepare(rcon)
+    assert sorted(r[0] for r in rcon.sql(dp.read_select(tmp_path, "event")).fetchall()) == [1]  # no dup

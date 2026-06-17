@@ -181,6 +181,112 @@ def load_sidecar(data_dir: Path) -> dict[str, dict]:
         return {}
 
 
+# ─── incremental draw (cross-Catchment transfer) ──────────────────────────────
+#
+# The append-only history a draw can ship *incrementally*: an append Trickle's single table and every
+# merge Trickle's __changelog. A merge *main* is clean current state → always shipped wholesale.
+
+
+def windowable_tables(sidecar: dict[str, dict]) -> set[str]:
+    """The published table names whose history a draw can window by ``_duckstring_f`` (append tables +
+    merge changelogs). The merge main and plain overwrite output are not windowable (wholesale)."""
+    out: set[str] = set()
+    for table, meta in sidecar.items():
+        if meta.get("mode") == "append":
+            out.add(table)
+        elif meta.get("mode") == "merge":
+            out.add(changelog_name(table))
+    return out
+
+
+def _con_utc():
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    return con
+
+
+def landed_after(data_dir: Path) -> str | None:
+    """The freshness a consumer has fully landed = ``min`` over its windowable tables' ``max
+    (_duckstring_f)`` (conservative, so no table is under-served). ``None`` — bootstrap (no sidecar) or
+    any windowable table empty — means *transfer wholesale*."""
+    data_dir = Path(data_dir)
+    windowable = windowable_tables(load_sidecar(data_dir))
+    if not windowable:
+        return None
+    con = _con_utc()
+    try:
+        maxes = []
+        for table in windowable:
+            pq = data_dir / f"{table}.parquet"
+            if not pq.exists():
+                continue
+            m = con.execute(
+                f"SELECT max({_q(F_COL)}) FROM read_parquet('{_sql_lit(pq)}')"
+            ).fetchone()[0]
+            if m is None:
+                return None  # an empty windowable table → fall back to a wholesale transfer
+            maxes.append(m)
+        return min(maxes).isoformat() if maxes else None
+    finally:
+        con.close()
+
+
+def window_parquet_bytes(pq_path: Path, after_iso: str) -> bytes:
+    """The rows of ``pq_path`` newer than ``after_iso`` (``_duckstring_f > after``), as Parquet bytes —
+    the producer's incremental slice for a draw."""
+    import os
+    import tempfile
+
+    con = _con_utc()
+    fd, tmp = tempfile.mkstemp(suffix=".parquet")
+    os.close(fd)
+    try:
+        con.execute(
+            f"COPY (SELECT * FROM read_parquet('{_sql_lit(pq_path)}') "
+            f"WHERE {_q(F_COL)} > TIMESTAMPTZ '{after_iso}') TO '{_sql_lit(tmp)}' (FORMAT PARQUET)"
+        )
+        return Path(tmp).read_bytes()
+    finally:
+        con.close()
+        os.unlink(tmp)
+
+
+def land_windowed(dest_path: Path, shipped: bytes, after_iso: str) -> None:
+    """Land an incremental slice: keep the consumer's rows ``<= after`` and add the shipped rows
+    (``> after``) — idempotent (a re-transfer replaces, never duplicates, the ``> after`` rows). A brand-
+    new table (no destination yet) is shipped whole, so it just writes through."""
+    import os
+    import tempfile
+
+    dest_path = Path(dest_path)
+    if not dest_path.exists():
+        dest_path.write_bytes(shipped)
+        return
+    fd, ship_tmp = tempfile.mkstemp(suffix=".parquet")
+    os.close(fd)
+    Path(ship_tmp).write_bytes(shipped)
+    con = _con_utc()
+    out_tmp = dest_path.with_suffix(dest_path.suffix + ".tmp")
+    try:
+        con.execute(
+            f"COPY (SELECT * FROM read_parquet('{_sql_lit(dest_path)}') WHERE {_q(F_COL)} <= TIMESTAMPTZ '{after_iso}' "
+            f"UNION ALL BY NAME SELECT * FROM read_parquet('{_sql_lit(ship_tmp)}')) "
+            f"TO '{_sql_lit(out_tmp)}' (FORMAT PARQUET)"
+        )
+        out_tmp.replace(dest_path)  # atomic publish
+    finally:
+        con.close()
+        os.unlink(ship_tmp)
+        if out_tmp.exists():
+            out_tmp.unlink()
+
+
+def _sql_lit(path) -> str:
+    return str(path).replace("'", "''")
+
+
 # ─── write: append ────────────────────────────────────────────────────────────
 
 

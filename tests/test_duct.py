@@ -375,6 +375,39 @@ def test_draw_route_includes_trickle_sidecar(tmp_path):
         assert "order_line.parquet" in names and "order_line__changelog.parquet" in names
 
 
+def test_draw_route_windows_trickle_changelog_with_after(tmp_path):
+    # `?after=` makes a Trickle changelog transfer incremental: only rows newer than `after` ship; the
+    # merge main stays wholesale (current state).
+    import duckdb
+
+    from duckstring.trickle_io import SIDECAR
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    data_dir.mkdir(parents=True)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    con.execute(
+        "COPY (SELECT * FROM (VALUES "
+        "(1,'upsert',TIMESTAMPTZ '2026-06-16T01:00:00+00:00'), "
+        "(2,'upsert',TIMESTAMPTZ '2026-06-16T02:00:00+00:00'), "
+        "(3,'upsert',TIMESTAMPTZ '2026-06-16T03:00:00+00:00')) t(id,_duckstring_op,_duckstring_f)) "
+        f"TO '{data_dir / 'sale__changelog.parquet'}' (FORMAT PARQUET)"
+    )
+    (data_dir / "sale.parquet").write_bytes(b"MAIN")  # wholesale
+    (data_dir / SIDECAR).write_text('{"sale": {"mode": "merge", "pk": ["id"]}}')
+
+    resp = _client(d).get("/api/draw/sales/1", params={"after": "2026-06-16T01:00:00+00:00"})
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        (tmp_path / "clog.parquet").write_bytes(zf.read("sale__changelog.parquet"))
+        assert zf.read("sale.parquet") == b"MAIN"  # main shipped wholesale
+    got = sorted(con.sql(f"SELECT id FROM read_parquet('{tmp_path / 'clog.parquet'}')").fetchall())
+    assert got == [(2,), (3,)]  # only rows newer than `after` (excludes id 1 at 01:00)
+
+
 # ─── Recursive lineage view ────────────────────────────────────────────────────
 
 

@@ -29,6 +29,10 @@ from .dataplane import DataPlane, ParquetDataPlane
 
 _NAMESPACE = "pond"  # the single namespace within each per-line catalog
 F_PROP = "duckstring.f"  # snapshot summary property carrying the Pond Run's freshness
+# Table properties for Trickle append/changelog tables (survive a retention delete-snapshot, unlike a
+# snapshot summary): the append cursor (max committed _duckstring_f) and the retained-history floor.
+LAST_F_PROP = "duckstring.last_f"
+FLOOR_PROP = "duckstring.floor"
 
 
 class IcebergDataPlane(DataPlane):
@@ -118,15 +122,46 @@ class IcebergDataPlane(DataPlane):
             tbl = cat.create_table(ident, schema=arrow.schema)
             if arrow.num_rows:
                 tbl.append(arrow, snapshot_properties=self._props(f))
+                self._set_props(tbl, **{LAST_F_PROP: f.isoformat()})
+            self._sync_retention(cat.load_table(ident), table, con)
             return
-        # Only the rows newer than the last committed run (its F_PROP stamp == that run's freshness, which
-        # for append/changelog equals the max _duckstring_f it wrote). Replay at the same f → no new rows.
-        snap = tbl.current_snapshot()
-        last = snap.summary.additional_properties.get(F_PROP) if (snap and snap.summary) else None
+        # Only the rows newer than the last committed run — its LAST_F_PROP cursor (a *table* property, not
+        # the snapshot summary, so a retention delete-snapshot below can't clobber it). For append/changelog
+        # that cursor equals the max _duckstring_f committed, so a replay at the same f appends nothing.
+        last = tbl.properties.get(LAST_F_PROP)
         where = f"WHERE {F_COL} > TIMESTAMPTZ '{last}'" if last else ""
         arrow = con.execute(f'SELECT * FROM "{table}" {where}').fetch_arrow_table()
         if arrow.num_rows:
             tbl.append(arrow, snapshot_properties=self._props(f))
+            self._set_props(tbl, **{LAST_F_PROP: f.isoformat()})
+        self._sync_retention(cat.load_table(ident), table, con)
+
+    def _sync_retention(self, tbl, table: str, con) -> None:
+        """Mirror the registry's retention into the Iceberg history: the registry table was already
+        trimmed (``trickle_io._apply_retention``), so anything below its ``min(_duckstring_f)`` is expired
+        here too. Files are ``_duckstring_f``-homogeneous, so the delete drops whole files (metadata-only,
+        no Iceberg delete-files). A ``duckstring.floor`` property gates it so a no-retention run is a
+        cheap no-op. Space-only — correctness rides the consumer's window read + full-read fallback."""
+        from datetime import datetime
+
+        from .trickle_io import F_COL
+
+        reg_floor = con.execute(f'SELECT min({F_COL}) FROM "{table}"').fetchone()[0]
+        if reg_floor is None:
+            return
+        stored = tbl.properties.get(FLOOR_PROP)
+        if stored is None:  # first observation — record the floor, nothing to drop yet
+            self._set_props(tbl, **{FLOOR_PROP: reg_floor.isoformat()})
+            return
+        if reg_floor <= datetime.fromisoformat(stored):
+            return  # retention hasn't advanced the floor → nothing newly expired
+        tbl.delete(f"{F_COL} < '{reg_floor.isoformat()}'")  # drops whole expired files (metadata-only)
+        self._set_props(tbl, **{FLOOR_PROP: reg_floor.isoformat()})
+
+    @staticmethod
+    def _set_props(tbl, **props) -> None:
+        with tbl.transaction() as txn:
+            txn.set_properties(**props)
 
     @staticmethod
     def _props(f) -> dict:

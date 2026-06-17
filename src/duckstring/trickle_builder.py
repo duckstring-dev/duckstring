@@ -41,7 +41,11 @@ class TrickleBuilder:
         meta = load_sidecar(pond._source_data_dir(source_pond)).get(table, {})
         self.spine_pk = tuple(meta.get("pk", ()))
         if not self.spine_pk:
-            raise BuildError(f"pond.trickle('{spine_ref}'): the spine source has no declared primary key")
+            raise BuildError(
+                f"pond.trickle('{spine_ref}'): source is not a Trickle (no declared primary key). The "
+                f"builder and the delta helpers need Trickle sources; to consume an overwrite Ripple, read "
+                f"it with pond.read_table(...) and write a comprehensive pond.merge_table(...) instead"
+            )
         self._joins: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []  # (dim_ref, dim_pk, on)
         self._filters: list[str] = []
         self._projection: str | None = None
