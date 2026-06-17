@@ -69,6 +69,7 @@ export interface RawPond {
   kind: string;
   is_draw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment, not run by a Duck
   version: string;
+  has_tables: boolean; // this major line has published at least one table — the data viewer is offered
   status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
   gen: number;
   runs_completed: number;
@@ -244,6 +245,62 @@ export function setBudget(pond: string, immediateRetries: number, sourceRetries:
   return postJSON(pondPath(pond, 'budget'), {
     immediate_retries: immediateRetries,
     source_retries: sourceRetries,
+  });
+}
+
+// ─── Data viewer (windowed read of a Pond's exported tables) ─────────────────
+
+export interface PageResult {
+  columns: string[];
+  rows: unknown[][];
+  has_more: boolean;
+}
+
+// A query against a Pond's exported data: either a named `table` (browse) or custom `sql`.
+export interface DataQuery {
+  pond: string; // pond id ("name@major")
+  table?: string;
+  sql?: string;
+}
+
+// Split a pond id ("name@major") into the name + major the data routes expect.
+function splitPond(pond: string): { name: string; major: number | undefined } {
+  const at = pond.lastIndexOf('@');
+  return { name: at === -1 ? pond : pond.slice(0, at), major: at === -1 ? undefined : Number(pond.slice(at + 1)) };
+}
+
+async function postData<T>(path: string, body: object): Promise<T> {
+  const res = await fetch(`${apiBase()}${path}`, {
+    method: 'POST',
+    headers: authHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `${path} → ${res.status}`);
+  return res.json() as Promise<T>;
+}
+
+// The tables this Pond's major line has published — the viewer's table picker.
+export async function fetchTables(pond: string): Promise<string[]> {
+  const { name, major } = splitPond(pond);
+  const qs = major === undefined ? '' : `?major=${major}`;
+  return getJSON<{ tables: string[] }>(`/ponds/${encodeURIComponent(name)}/tables${qs}`).then((d) => d.tables);
+}
+
+// Total rows of a query — sizes the viewer's virtual scroll.
+export async function fetchCount(q: DataQuery): Promise<number> {
+  const { name, major } = splitPond(q.pond);
+  return postData<{ count: number }>('/query/count', { pond: name, major, table: q.table, sql: q.sql }).then(
+    (d) => d.count
+  );
+}
+
+// A windowed read [offset, offset+limit) for the virtual grid. The server wraps the (table or custom)
+// query in a subquery with LIMIT/OFFSET; a static Parquet scan is deterministic, so windows are stable.
+export async function fetchPage(q: DataQuery & { limit: number; offset: number }): Promise<PageResult> {
+  const { name, major } = splitPond(q.pond);
+  return postData<PageResult>('/query/page', {
+    pond: name, major, table: q.table, sql: q.sql, limit: q.limit, offset: q.offset,
   });
 }
 

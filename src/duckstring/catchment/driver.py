@@ -1263,6 +1263,24 @@ class Driver:
 
     # ─── Status ───────────────────────────────────────────────────────────────
 
+    def _exported_tables(self, key: str) -> set[str]:
+        """Names of the tables this major line has published to its data dir (the exported Parquet/
+        Iceberg snapshot). Best-effort — a data-read hiccup must never break ``status()``; a Draw has
+        no local output. ``list_tables`` globs the flat sidecar, so it needs no Iceberg extension."""
+        from pathlib import Path
+
+        from ..dataplane import get_data_plane
+        from .registry import pond_data_dir
+
+        meta = self.meta.get(key, {})
+        if meta.get("is_draw"):
+            return set()
+        try:
+            data_dir = pond_data_dir(Path(self.root), meta["name"], meta["major"])
+            return set(get_data_plane().list_tables(data_dir))
+        except Exception:
+            return set()
+
     def status(self) -> dict:
         with self.lock:
             from ..engine import NEVER, min_target
@@ -1278,6 +1296,8 @@ class Driver:
             ponds = []
             for key in self.state.ponds:
                 ps = self.state.pond_states[key]
+                # Whether this major line has published any tables — gates the Pond's data viewer.
+                has_tables = bool(self._exported_tables(key))
                 # Ripples belonging to this Pond, with their live per-Ripple state and intra-Pond edges.
                 ripples = []
                 ripple_edges = []
@@ -1347,6 +1367,7 @@ class Driver:
                     "kind": self.meta[key]["kind"],
                     "is_draw": self.meta[key].get("is_draw", False),
                     "version": self.meta[key]["version"],
+                    "has_tables": has_tables,
                     "status": st,
                     "gen": ps.runs_started,
                     "runs_completed": ps.runs_completed,

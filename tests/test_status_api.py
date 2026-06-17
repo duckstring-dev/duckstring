@@ -58,10 +58,12 @@ def test_status_exposes_ripples_and_intra_pond_edges(tmp_path):
     assert snk["ripple_edges"] == [["r1", "r2"]]
     for r in snk["ripples"]:
         assert set(r) == {
-            "name", "is_trickle", "status", "gen", "runs_completed", "has_pull", "target_f", "start_f", "end_f",
+            "name", "is_trickle", "status", "gen", "runs_completed",
+            "has_pull", "target_f", "start_f", "end_f",
         }
         assert r["status"] == "idle"
         assert r["is_trickle"] is False  # plain @ripple chain
+    assert snk["has_tables"] is False  # nothing exported yet
 
 
 def test_status_flags_trickle_ripples(tmp_path):
@@ -76,6 +78,23 @@ def test_status_flags_trickle_ripples(tmp_path):
     src = _pond(d.status(), "src")
     flags = {r["name"]: r["is_trickle"] for r in src["ripples"]}
     assert flags == {"plain": False, "incr": True}
+
+
+def test_status_flags_ponds_with_exported_tables(tmp_path):
+    import duckdb
+
+    d = _driver(tmp_path)
+    assert _pond(d.status(), "src")["has_tables"] is False  # nothing exported
+
+    # Export any table under src's data dir — the Pond now reports has_tables.
+    data_dir = tmp_path / "ponds" / "src" / "m1" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.execute(f"COPY (SELECT 1 AS id) TO '{data_dir / 'anything.parquet'}' (FORMAT PARQUET)")
+    con.close()
+
+    assert _pond(d.status(), "src")["has_tables"] is True
+    assert _pond(d.status(), "snk")["has_tables"] is False  # only src exported
 
 
 def test_status_exposes_d_ms_and_null_trigger_by_default(tmp_path):

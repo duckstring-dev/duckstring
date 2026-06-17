@@ -5,6 +5,17 @@ import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { useLiveStore, formatAge, stateColor, nodeFill } from '@/lib/store';
 import { DemandIndicators } from './DemandIndicators';
 
+// A small grid/table glyph — the affordance to open this Pond's data viewer (shown when it has tables).
+function TableIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+      <line x1="1.5" y1="6.5" x2="14.5" y2="6.5" />
+      <line x1="6" y1="6.5" x2="6" y2="13.5" />
+    </svg>
+  );
+}
+
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
   // TB (mobile) layout: flow enters at the top and leaves at the bottom; the trigger pill
@@ -23,6 +34,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const toggleCollapse = useLiveStore((s) => s.toggleCollapse);
   // Only a Pond that owns Ripples can collapse — a Draw has nothing to hide, so it shows no caret.
   const hasRipples = useLiveStore((s) => Object.values(s.ripples).some((r) => r.pondId === pondId));
+  const hasTables = useLiveStore((s) => s.pondInfo[pondId]?.hasTables ?? false);
+  const openDataViewer = useLiveStore((s) => s.openDataViewer);
   const now = useLiveStore((s) => s.now);
 
   if (!pond || !view) return null;
@@ -64,6 +77,23 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
         position={vertical ? Position.Bottom : Position.Right}
         style={{ background: '#52525b', opacity: 0 }}
       />
+
+      {hasTables && (
+        <span
+          role="button"
+          title="View data"
+          onClick={(e) => {
+            e.stopPropagation();
+            openDataViewer(pondId);
+          }}
+          style={{
+            position: 'absolute', top: 7, right: 9, zIndex: 1, lineHeight: 0, padding: 3, borderRadius: 5,
+            cursor: 'pointer', color: borderColor, background: '#0f0f14cc', opacity: 0.9,
+          }}
+        >
+          <TableIcon />
+        </span>
+      )}
 
       <div
         style={{

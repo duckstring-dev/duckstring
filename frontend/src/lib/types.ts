@@ -52,6 +52,7 @@ export interface PondInfo {
   version: string;
   major: number;
   kind: string;
+  hasTables: boolean; // this major line has published tables — the data viewer is offered
   // Fault tolerance + control (Ponds only).
   isFailed: boolean;
   isBlocked: boolean;

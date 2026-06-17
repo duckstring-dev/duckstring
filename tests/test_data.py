@@ -146,3 +146,90 @@ def test_query_json_format(runner, tmp_path, monkeypatch, catchment_root, live_c
 def test_query_unknown_catchment_exits(runner):
     result = runner.invoke(app, ["query", "outlet", "-c", "nonexistent"])
     assert result.exit_code != 0
+
+
+# ── /api/query/page (the data viewer's paged read) ──────────────────────────────
+
+
+def _seed_n(root, pond: str, table: str, n: int):
+    """An exported Parquet snapshot of `n` rows (id 0..n-1) at ponds/{pond}/m1/data/{table}.parquet."""
+    import duckdb
+
+    data_dir = root / "ponds" / pond / "m1" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    dest = str(data_dir / f"{table}.parquet").replace("'", "''")
+    con = duckdb.connect()
+    con.execute(f"COPY (SELECT i AS id, i * 10 AS v FROM range({n}) t(i)) TO '{dest}' (FORMAT PARQUET)")
+    con.close()
+
+
+def test_query_page_paginates_with_has_more(catchment_client, tmp_path):
+    _seed_n(tmp_path, "outlet", "daily", 5)
+    r = catchment_client.post("/api/query/page", json={"pond": "outlet", "table": "daily", "limit": 2, "offset": 0})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["columns"] == ["id", "v"]
+    assert body["rows"] == [[0, 0], [1, 10]]
+    assert body["has_more"] is True
+
+    # Last page: one row left, no more.
+    r2 = catchment_client.post("/api/query/page", json={"pond": "outlet", "table": "daily", "limit": 2, "offset": 4})
+    body2 = r2.json()
+    assert body2["rows"] == [[4, 40]]
+    assert body2["has_more"] is False
+
+
+def test_query_page_wraps_custom_sql(catchment_client, tmp_path):
+    _seed_n(tmp_path, "outlet", "daily", 10)
+    # A custom query with its own LIMIT — the page wraps it as a subquery, so the user's cap still
+    # bounds the result while the page reads within it.
+    r = catchment_client.post(
+        "/api/query/page",
+        json={"pond": "outlet", "sql": 'SELECT id FROM "outlet"."daily" LIMIT 3', "limit": 2, "offset": 0},
+    )
+    body = r.json()
+    assert body["columns"] == ["id"]
+    assert body["rows"] == [[0], [1]]
+    assert body["has_more"] is True  # one more within the LIMIT 3
+    r2 = catchment_client.post(
+        "/api/query/page",
+        json={"pond": "outlet", "sql": 'SELECT id FROM "outlet"."daily" LIMIT 3', "limit": 2, "offset": 2},
+    )
+    assert r2.json()["rows"] == [[2]]
+    assert r2.json()["has_more"] is False
+
+
+def test_query_page_bad_sql_is_400(catchment_client, tmp_path):
+    _seed_n(tmp_path, "outlet", "daily", 1)
+    r = catchment_client.post("/api/query/page", json={"pond": "outlet", "sql": "SELECT nope FROM missing"})
+    assert r.status_code == 400
+
+
+def test_list_pond_tables(catchment_client, tmp_path):
+    _seed_n(tmp_path, "outlet", "daily", 1)
+    _seed_n(tmp_path, "outlet", "hourly", 1)
+    r = catchment_client.get("/api/ponds/outlet/tables")
+    assert r.status_code == 200
+    assert sorted(r.json()["tables"]) == ["daily", "hourly"]
+
+
+def test_list_pond_tables_empty(catchment_client, tmp_path):
+    # An unknown pond with no exported data resolves to no tables (no error).
+    (tmp_path / "ponds" / "ghost" / "m1" / "data").mkdir(parents=True)
+    assert catchment_client.get("/api/ponds/ghost/tables").json()["tables"] == []
+
+
+def test_query_count_table_and_sql(catchment_client, tmp_path):
+    _seed_n(tmp_path, "outlet", "daily", 7)
+    assert catchment_client.post("/api/query/count", json={"pond": "outlet", "table": "daily"}).json()["count"] == 7
+    # A custom query's count reflects its own shape (here a LIMIT).
+    r = catchment_client.post(
+        "/api/query/count", json={"pond": "outlet", "sql": 'SELECT * FROM "outlet"."daily" LIMIT 3'}
+    )
+    assert r.json()["count"] == 3
+
+
+def test_query_count_bad_sql_is_400(catchment_client, tmp_path):
+    _seed_n(tmp_path, "outlet", "daily", 1)
+    r = catchment_client.post("/api/query/count", json={"pond": "outlet", "sql": "SELECT * FROM missing"})
+    assert r.status_code == 400

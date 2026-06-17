@@ -8,6 +8,7 @@ import { DagCanvas } from './DagCanvas';
 import { Sidebar } from './Sidebar';
 import { RunHistory } from './RunHistory';
 import { RunDetail } from './RunDetail';
+import { DataViewerModal } from './DataViewerModal';
 
 const POLL_MS = 1000;
 
@@ -166,6 +167,7 @@ export function App() {
   return (
     <div className="ds-app" style={{ display: 'flex', flexDirection: 'column', width: '100%', overflow: 'hidden', fontFamily: 'ui-monospace, SFMono-Regular, monospace' }}>
       {needsKey && <KeyPrompt />}
+      <DataViewerModal />
       <RepairBanner />
       {/* On mobile the sidebar drops below the canvas as a collapsible bottom sheet. */}
       <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', flex: 1, minHeight: 0 }}>

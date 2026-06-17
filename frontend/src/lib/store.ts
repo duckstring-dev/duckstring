@@ -126,6 +126,7 @@ function transformStatus(payload: StatusPayload): StatusSlice {
       version: p.version,
       major: p.major,
       kind: p.kind,
+      hasTables: p.has_tables ?? false,
       isFailed: p.is_failed,
       isBlocked: p.is_blocked,
       isKilled: p.is_killed,
@@ -188,6 +189,12 @@ export interface LiveState extends StatusSlice {
   collapsedPonds: Record<PondId, boolean>;
   toggleCollapse(id: PondId): void;
   setAllCollapsed(collapsed: boolean): void;
+
+  // The Pond whose exported tables are open in the full-screen data viewer (null = closed). The modal
+  // owns its own table-selection / SQL / windowing state; the store just tracks the target.
+  dataViewerPondId: PondId | null;
+  openDataViewer(id: PondId): void;
+  closeDataViewer(): void;
 
   runs: PondRun[]; // run-history feed (filtered by selection + filters)
   selectedRun: PondRun | null; // the run open in the detail pane (enriched with ripples on select)
@@ -276,6 +283,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   selectedRippleId: null,
   selectedTriggerId: null,
   collapsedPonds: {},
+  dataViewerPondId: null,
 
   runs: [],
   selectedRun: null,
@@ -401,6 +409,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   toggleCollapse(id) {
     set((s) => ({ collapsedPonds: { ...s.collapsedPonds, [id]: !s.collapsedPonds[id] } }));
+  },
+  openDataViewer(id) {
+    set({ dataViewerPondId: id });
+  },
+  closeDataViewer() {
+    set({ dataViewerPondId: null });
   },
   setAllCollapsed(collapsed) {
     // Only Ponds that actually own Ripples can collapse — a Draw (ripple-less) has nothing to hide.

@@ -128,6 +128,91 @@ def _maybe_tap_on_get(request: Request, pond: str, major: Optional[int], version
         pass
 
 
+@router.get("/ponds/{name}/tables")
+def list_pond_tables(
+    name: str, request: Request, major: Optional[int] = None, version: Optional[str] = None,
+):
+    """The names of the tables this Pond's selected major line has published — the data viewer's
+    table picker. Empty when nothing has been exported yet."""
+    from ...dataplane import get_data_plane
+
+    m = _resolve_major(request, name, major, version)
+    try:
+        tables = get_data_plane().list_tables(_data_dir(request, name, m))
+    except Exception:
+        tables = []
+    return {"tables": tables}
+
+
+class CountRequest(BaseModel):
+    pond: str
+    major: Optional[int] = None
+    version: Optional[str] = None
+    table: Optional[str] = None
+    sql: Optional[str] = None
+
+
+@router.post("/query/count")
+def query_count(body: CountRequest, request: Request):
+    """Total rows of the (default or custom) query — sizes the data viewer's virtual scroll. A bare
+    ``COUNT(*)`` over a Parquet table is metadata-fast (no scan)."""
+    con = _open_pond(request, body.pond, _resolve_major(request, body.pond, body.major, body.version))
+    base = body.sql or (
+        f'SELECT * FROM "{body.pond}"."{body.table}"' if body.table else f'SELECT * FROM "{body.pond}"'
+    )
+    try:
+        (count,) = con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count").fetchone()
+        return {"count": count}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        con.close()
+
+
+class PageRequest(BaseModel):
+    pond: str
+    major: Optional[int] = None
+    version: Optional[str] = None
+    table: Optional[str] = None  # the table to browse (default query) — ignored when `sql` is set
+    sql: Optional[str] = None  # a custom query; overrides the default `SELECT * FROM table`
+    limit: int = 200
+    offset: int = 0
+
+
+def _json_safe(v):
+    """Coerce a DuckDB cell to something JSON can carry: primitives pass through, everything else
+    (datetimes, Decimals, blobs, lists, structs) is stringified for display in the grid."""
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    return str(v)
+
+
+@router.post("/query/page")
+def query_page(body: PageRequest, request: Request):
+    """A paged read for the data viewer: runs the (default or custom) query as a subquery with
+    ``LIMIT/OFFSET`` and returns ordered columns + row arrays + a ``has_more`` flag. Wrapping means a
+    user's own ``LIMIT`` still caps the result while the grid pages within it. One row beyond the page
+    is fetched to detect ``has_more`` without a separate count."""
+    _maybe_tap_on_get(request, body.pond, body.major, body.version)
+    con = _open_pond(request, body.pond, _resolve_major(request, body.pond, body.major, body.version))
+    limit = max(1, min(body.limit, 5000))
+    offset = max(0, body.offset)
+    base = body.sql or (
+        f'SELECT * FROM "{body.pond}"."{body.table}"' if body.table else f'SELECT * FROM "{body.pond}"'
+    )
+    try:
+        rel = con.execute(f"SELECT * FROM ({base}) AS _ds_page LIMIT {limit + 1} OFFSET {offset}")
+        cols = [d[0] for d in rel.description] if rel.description else []
+        fetched = rel.fetchall()
+        has_more = len(fetched) > limit
+        rows = [[_json_safe(c) for c in row] for row in fetched[:limit]]
+        return {"columns": cols, "rows": rows, "has_more": has_more}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        con.close()
+
+
 @router.post("/query")
 def query(body: QueryRequest, request: Request):
     _maybe_tap_on_get(request, body.pond, body.major, body.version)
