@@ -11,7 +11,7 @@ remote**, so it reuses `read_delta` unchanged.
 Egress is **OSS**, because "get my data where my consumers already are" is a use-it-at-all need — gating
 it is crippleware that poisons adoption. Specifically OSS:
 
-- the **Spout** construct + the pluggable **Outflow** driver seam;
+- the **Spout** construct + the pluggable egress-driver seam (no product noun);
 - two reference drivers: **object store** (S3/GCS/local, the baseline) and **Postgres** (the flagship
   *incremental* destination);
 - the **secrets** store the drivers need for credentials.
@@ -19,7 +19,7 @@ it is crippleware that poisons adoption. Specifically OSS:
 Reserved for **duckstring-cloud** (it's *maintenance, credentials, and support*, not the mechanism): the
 curated **managed connector catalog** (Snowflake / BigQuery / Redshift / SaaS destinations with managed,
 rotated credentials), hosted delivery monitoring, and a dedicated egress worker fleet. The seam being OSS
-is the flywheel: anyone can write an `Outflow` for their warehouse; cloud sells the catalog that's
+is the flywheel: anyone can write an egress driver for their warehouse; cloud sells the catalog that's
 maintained for them.
 
 ## Core idea — egress is a remote-storage Trickle read
@@ -30,32 +30,59 @@ it writes the result to an external system instead of a local registry. So egres
 `read_delta(source) → apply to remote`, and it **reuses `trickle_io` verbatim** (`read_delta`, the
 `Delta` upserts/deletes, the coverage/full-read fallback).
 
-The destination's *capabilities* decide whether the read is full or incremental:
+The destination's *capabilities* and the source's *guarantees* decide the read:
 
 | Source | Destination | Read | Apply |
 |---|---|---|---|
-| any (Ripple or Trickle) | object store | full snapshot | write the table's files (overwrite, or sync new files) |
+| any (Ripple or Trickle) | object store | full snapshot, or Trickle file-sync | write the table's files (overwrite, or sync new files) |
 | **merge Trickle** | **transactional (Postgres)** | **changelog window** | **`INSERT … ON CONFLICT DO UPDATE` (upserts) + `DELETE` (tombstones)** — native CDC |
 | append Trickle | transactional | append window | `INSERT` the new rows |
-| Ripple (overwrite) | transactional | full | replace (staged `TRUNCATE`+load, or full upsert) |
+| Ripple (overwrite) | transactional | — | **rejected at creation** (no primary key — see below) |
 
 The merge-Trickle → Postgres row is the whole point: the changelog Duckstring already produces **is** a
 CDC stream, so a modeled table syncs *incrementally* into an app's database — a few changed rows per run,
 not a full reload. That makes Duckstring a legitimate reverse-ETL / CDC-sink, from machinery that already
 exists.
 
+## When the source is a Ripple (not a Trickle)
+
+The smarts depend not on "Trickle-ness" but on a **declared primary key + change history** — a Trickle is
+how you get those. So gate on the *capability requirement*, not the source type:
+
+- **Object store** requires neither → a Spout works from **any** source. A Ripple writes an overwrite
+  snapshot; a Trickle syncs only its new files. No restriction.
+- **Transactional destinations** do identity-based upsert/delete → they **require a primary key**, which
+  only a Trickle declares. A Ripple → Postgres Spout is **refused at creation** with a signpost error:
+  *"egress to a transactional destination needs a primary key — put an `@trickle(pk=…)` before this
+  Spout."*
+
+This is "always full-overwrite for a Ripple" (option 1) framed as a PK requirement, and it's deliberate.
+**Two paths considered and rejected:**
+
+- **Full-reload a Ripple into Postgres** (truncate+load every run): correct but a trap — fine on a small
+  table, a reload-the-world as it grows, and the fix is "add a Trickle" they could have added up front.
+  Don't let them paint into that corner; ask for the Trickle now.
+- **A hidden Trickle between the Ripple and the Spout** (auto-derive a changelog, with a PK on the Spout):
+  duplicates exactly what a Trickle is, but worse — the changelog is *private to the Spout*, so it's not
+  reusable by other consumers, the UI, or draws, and not versioned or contract-checked. If you want
+  incremental egress from overwrite logic, the changelog belongs in a **visible** Trickle node that the
+  whole graph benefits from. No shadow state; no second way to get a changelog.
+
+The forced Trickle isn't overhead for the Spout — it's a better graph: that node gains a changelog a
+second Spout, a downstream incremental Pond, and an incremental draw all reuse for free.
+
 ## The Spout construct
 
 A **Spout** is a Pond's egress binding — "pour this table out to there." It is **operational config**
-(created via CLI/API, persisted, survives redeploys), exactly like [windows] — *not* declared in
+(created via CLI/API, persisted, survives redeploys), exactly like windows — *not* declared in
 `pond.toml`, because destinations and credentials are environment-specific and shouldn't live in the
-versioned artifact. (Naming provisional; "Spout" fits the water metaphor and avoids the reserved **Sink**
-= a Pond's child. The pluggable backend is an **Outflow**, scheme-selected from the destination URI, so
-users never name it directly.)
+versioned artifact. ("Spout" fits the water metaphor and avoids the reserved **Sink** = a Pond's child.
+The pluggable backend has **no product noun** — it's just the *egress driver* for a scheme, selected from
+the destination URI; the directions are simply **ingress** and **egress**, both already water-themed.)
 
 A Spout is `(pond, major, table | *, destination, mode, schedule)`:
 
-- **destination** — a URI whose scheme selects the Outflow: `s3://bucket/prefix`, `postgres://…/schema`,
+- **destination** — a URI whose scheme selects the egress driver: `s3://bucket/prefix`, `postgres://…/schema`,
   `file:///path`. Credentials come from the URI or a referenced [secret](#secrets), never stored plain.
 - **mode** — `auto` (default: incremental when the source is a Trickle and the driver supports deltas,
   else full), `full` (always snapshot), or `append`.
@@ -68,13 +95,14 @@ drains them (see below). A Spout has its own fault state (`is_failed`, `failures
 a Pond's — **an egress failure never fails the Pond Run** (the data is published and correct locally;
 egress is downstream of the boundary), it parks the Spout and raises an [alert](#alerting-adjacent-track).
 
-## The Outflow driver seam
+## The egress-driver seam
 
 Mirrors `dataplane.DataPlane`: a small interface, scheme-selected, that the Spout machinery threads a
-`Delta` (or a full relation) through. The transform stays framework code; the user writes none.
+`Delta` (or a full relation) through. The transform stays framework code; the user writes none. (No
+product noun — an *egress driver*, like a data-plane backend.)
 
 ```python
-class Outflow:
+class EgressDriver:
     def capabilities(self) -> Capabilities          # supports_delta, supports_delete, transactional
     def ensure(self, table, schema, pk)              # create/verify the destination shape (idempotent)
     def write_full(self, relation, *, table, pk, f)  # snapshot / replace
@@ -83,7 +111,7 @@ class Outflow:
     def set_watermark(self, table, f, *, txn)        # advance it — atomically with the data when possible
 ```
 
-`get_outflow(uri)` resolves the driver by scheme. A driver that returns `supports_delta=False` forces the
+`get_egress(uri)` resolves the driver by scheme. A driver that returns `supports_delta=False` forces the
 Spout to `write_full`; one that returns `True` lets `mode=auto` use the changelog.
 
 ## Execution & exactly-once
@@ -109,7 +137,7 @@ Bootstrap / coverage miss (the destination is empty, or behind the source's rete
 of the clean main and a replace/full-upsert, then resume incrementally — the same fallback `read_delta`
 already implements.
 
-## Object-store Outflow (the baseline)
+## Object-store egress (the baseline)
 
 `s3://` / `gs://` / `file://`. `capabilities = {delta: True (append-only), delete: False, transactional:
 False}`. v1: mirror the data plane's published artifacts to the prefix — for a Trickle, the per-run
@@ -119,7 +147,7 @@ Ripple, write the snapshot. Layout option: raw Parquet, or a real **Iceberg tabl
 keys; uses DuckDB `httpfs` for the write. This is the floor you flagged as "probably enough for OSS
 egress" — plus the existing `get`/`query`/draw read paths.
 
-## Postgres Outflow (the flagship)
+## Postgres egress (the flagship)
 
 `postgres://user@host/db?schema=public`, password via a [secret](#secrets). `capabilities = {delta: True,
 delete: True, transactional: True}`.
@@ -175,7 +203,7 @@ These are the cheapest large credibility win; build them in the same milestone b
 ## Reuse, non-goals, risks
 
 - **Reuse**: `trickle_io.read_delta` / `Delta` / the coverage fallback are the read half wholesale; the
-  Spout is "read_delta + an Outflow apply + a watermark." Egress from a *drawn* Trickle (cross-Catchment)
+  Spout is "read_delta + an egress-driver apply + a watermark." Egress from a *drawn* Trickle (cross-Catchment)
   works too, since the landing zone carries the changelog — but v1 scopes to local Outlets.
 - **Non-goals**: arbitrary transformation on the way out (egress writes what the Pond published — shape it
   in a Ripple/Trickle first); managed connectors (cloud); a generic CDC *source* (this is sink-only).
@@ -185,7 +213,7 @@ These are the cheapest large credibility win; build them in the same milestone b
 
 ## Open questions for the build session
 
-- Outflow transport for Postgres: DuckDB `postgres` extension vs. `psycopg` for the upsert/delete apply.
+- Egress transport for Postgres: DuckDB `postgres` extension vs. `psycopg` for the upsert/delete apply.
 - Object-store layout: raw Parquet mirror vs. a real Iceberg table in the bucket (lean Iceberg — it's the
   useful one and reuses `iceberg_plane`).
 - Spout execution: in-Catchment thread pool (v1) vs. a dedicated egress worker (when writes are heavy /
@@ -197,9 +225,9 @@ These are the cheapest large credibility win; build them in the same milestone b
 ## Testing
 
 - Spout CRUD + persistence + restore across restart (mirrors window/trigger tests).
-- Object-store Outflow against a local `file://` + a MinIO/moto S3 in CI; full snapshot and incremental
+- Object-store egress against a local `file://` + a MinIO/moto S3 in CI; full snapshot and incremental
   file-sync; idempotent re-put.
-- Postgres Outflow against a containerised Postgres: `ensure` creates table+PK+watermark; merge-Trickle
+- Postgres egress against a containerised Postgres: `ensure` creates table+PK+watermark; merge-Trickle
   delta applies upserts+deletes; **exactly-once** under a simulated mid-apply crash (watermark rolls back
   with the data); bootstrap full-load; an additive schema change `ALTER`s the destination.
 - Egress reuses `read_delta` — assert a Spout over a merge Trickle ships only the changed rows per run,
