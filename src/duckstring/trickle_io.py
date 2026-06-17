@@ -105,10 +105,12 @@ def _hash_expr(nonpk: list[str], alias: str | None = None) -> str:
     (new vs old for the same key) keeps it collision-safe (≈2⁻⁶⁴ per changed row; no birthday bound).
     Casts to VARCHAR to canonicalise types/nulls so the hash is stable run to run."""
     if not nonpk:
-        return "CAST(0 AS UBIGINT)"  # all-PK table: nothing non-key can change → only insert/delete
+        return "'0'"  # all-PK table: nothing non-key can change → only insert/delete
     pref = f"{alias}." if alias else ""
     items = ", ".join(f"CAST({pref}{_q(c)} AS VARCHAR)" for c in nonpk)
-    return f"hash(list_value({items}))"
+    # As VARCHAR (not the raw UBIGINT hash): per-PK equality is all the diff needs, and an unsigned 64-bit
+    # value overflows the Iceberg/pyiceberg signed-long column stats.
+    return f"CAST(hash(list_value({items})) AS VARCHAR)"
 
 
 def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:

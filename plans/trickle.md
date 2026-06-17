@@ -22,12 +22,21 @@ aggregation sibling, and the **cross-Catchment sidecar transfer** (the `_trickle
 now travels with the draw zip — without it a drawn Trickle source was unresolvable downstream, a real
 correctness gap, not just an optimization).
 
-**Still deferred:** true small-write incremental *file* output (Iceberg append-commits + manifest-stat
-pruning) and the **incremental-draw window** (the draw still ships the *whole* changelog+main, which is
-correct — the consumer windows on its own side — just not minimal-transfer), plus `pond.state_dir`.
-Correctness never depends on these (full-read fallback covers retention; wholesale publish/draw covers
-transfer). The original design text below is the spec for those phases. One known narrow gap: a
-comprehensive merge that crashes in the microsecond between the main overwrite and the changelog
+**Now also built (third pass):** **Iceberg small-writes** — an append Trickle's history and a merge
+Trickle's `__changelog` publish via Iceberg **append-commits** (`iceberg_plane._append_commit`): one
+`_duckstring_f`-homogeneous data file per run (tracked by the snapshot's `duckstring.f` stamp), so the
+window read prunes by manifest stats; the clean merge *main* and plain-Ripple output stay overwrite. Two
+Iceberg-compatibility fixes fell out: `_duckstring_f` is exported under `SET TimeZone='UTC'` (pyiceberg
+rejects non-UTC tz) and `_duckstring_hash` is a VARCHAR (an unsigned 64-bit value overflows Iceberg's
+signed-long column stats). Plus a **demo Trickle pipeline** (`orders` append → `catalog` merge → `priced`
+builder → `revenue` aggregate) behind `duckstring pond demo --trickle`.
+
+**Still deferred:** the **incremental-draw window** (the draw ships the *whole* changelog+main, which is
+correct — the consumer windows on its own side — just not minimal-transfer) and `pond.state_dir`.
+Correctness never depends on these (full-read fallback covers retention; wholesale draw covers transfer).
+Two known gaps: (1) the Iceberg changelog grows by append and is **not** trimmed when the registry's
+retention drops rows (over-retains space, still correct — reads window-prune, coverage stays generous);
+(2) a comprehensive merge that crashes in the microsecond between the main overwrite and the changelog
 window-replace can lose that run's changelog rows — the Iceberg snapshot model (immutable prior snapshot
 for the diff) closes it.
 

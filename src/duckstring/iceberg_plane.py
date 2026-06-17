@@ -67,6 +67,7 @@ class IcebergDataPlane(DataPlane):
     # ─── write ──────────────────────────────────────────────────────────────────
 
     def export(self, con, data_dir: Path, *, mode: str = "overwrite", f=None) -> None:
+        from . import trickle_io
         from .dataplane import _check_mode, publish_plan
 
         _check_mode(mode)
@@ -76,10 +77,60 @@ class IcebergDataPlane(DataPlane):
         tables = publish_plan(con, data_dir)
         # Flat-Parquet sidecar first (also the consistent fallback if the Iceberg commit fails).
         self._parquet.export(con, data_dir, mode=mode, f=f)
+        # Stamp _duckstring_f (a TIMESTAMPTZ) as UTC for Arrow: pyiceberg accepts only UTC-tz timestamps,
+        # and a registry written under a local session tz would otherwise fetch as e.g. tz=Australia/…
+        con.execute("SET TimeZone='UTC'")
         cat = self._catalog(data_dir)
+        meta = trickle_io.read_meta(con)
         for table in tables:
+            if self._is_incremental(table, meta):
+                # A Trickle history/changelog grows by **append** — commit only this run's new rows as one
+                # `_duckstring_f`-homogeneous data file, so the window read prunes by manifest stats. The
+                # clean merge *main* and plain Ripple output stay overwrite (see _commit).
+                self._append_commit(cat, table, con, f)
+            else:
+                arrow = con.execute(f'SELECT * FROM "{table}"').fetch_arrow_table()
+                self._commit(cat, table, arrow, f)
+
+    @staticmethod
+    def _is_incremental(table: str, meta: dict) -> bool:
+        """A Trickle append history, or any merge Trickle's ``__changelog`` companion — the append-only
+        tables. A merge *main* (``meta[table]['mode'] == 'merge'``) is overwrite, not incremental."""
+        from .trickle_io import CHANGELOG_SUFFIX
+
+        if meta.get(table, {}).get("mode") == "append":
+            return True
+        return table.endswith(CHANGELOG_SUFFIX) and table[: -len(CHANGELOG_SUFFIX)] in meta
+
+    def _append_commit(self, cat, table: str, con, f) -> None:
+        from pyiceberg.exceptions import NoSuchTableError
+
+        from .trickle_io import F_COL
+
+        ident = f"{_NAMESPACE}.{table}"
+        try:
+            tbl = cat.load_table(ident)
+        except NoSuchTableError:
+            tbl = None
+
+        if tbl is None:
             arrow = con.execute(f'SELECT * FROM "{table}"').fetch_arrow_table()
-            self._commit(cat, table, arrow, f)
+            tbl = cat.create_table(ident, schema=arrow.schema)
+            if arrow.num_rows:
+                tbl.append(arrow, snapshot_properties=self._props(f))
+            return
+        # Only the rows newer than the last committed run (its F_PROP stamp == that run's freshness, which
+        # for append/changelog equals the max _duckstring_f it wrote). Replay at the same f → no new rows.
+        snap = tbl.current_snapshot()
+        last = snap.summary.additional_properties.get(F_PROP) if (snap and snap.summary) else None
+        where = f"WHERE {F_COL} > TIMESTAMPTZ '{last}'" if last else ""
+        arrow = con.execute(f'SELECT * FROM "{table}" {where}').fetch_arrow_table()
+        if arrow.num_rows:
+            tbl.append(arrow, snapshot_properties=self._props(f))
+
+    @staticmethod
+    def _props(f) -> dict:
+        return {F_PROP: f.isoformat()} if f is not None else {}
 
     def _commit(self, cat, table: str, arrow, f) -> None:
         import warnings

@@ -92,8 +92,11 @@ def runtime(tmp_path_factory, monkeypatch):
     thread.join(timeout=5)
 
 
-def _deploy_demo(url: str) -> None:
-    for name in _PONDS:
+_TRICKLE_PONDS = ("orders", "catalog", "priced", "revenue")
+
+
+def _deploy(url: str, ponds) -> None:
+    for name in ponds:
         info = _read_toml(_DEMO / name / "pond.toml")["pond"]
         r = httpx.post(
             f"{url}/api/deploy",
@@ -102,6 +105,10 @@ def _deploy_demo(url: str) -> None:
             timeout=15.0,
         )
         assert r.status_code == 200, r.text
+
+
+def _deploy_demo(url: str) -> None:
+    _deploy(url, _PONDS)
 
 
 def _pond_status(url: str, name: str) -> dict | None:
@@ -141,6 +148,31 @@ def test_pulse_runs_chain_end_to_end(runtime):
     reports = _pond_status(url, "reports")
     sales = _pond_status(url, "sales")
     assert reports["end_f"] is not None and sales["end_f"] is not None
+
+
+def test_trickle_chain_runs_end_to_end(runtime):
+    """The incremental-Trickle demo on real Duck subprocesses: a pulse on the revenue Outlet cascades
+    up through the builder Pond to the append + merge inlets, every Pond runs, and the published layout
+    carries the Trickle sidecar + a changelog for the merge lines."""
+    url, root = runtime
+    _deploy(url, _TRICKLE_PONDS)
+
+    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None), \
+        "revenue never became fresh"
+
+    # The append inlet published an order_line history with the mode/PK sidecar.
+    orders_dir = root / "ponds" / "orders" / "m1" / "data"
+    assert (orders_dir / "_trickle.json").exists()
+    import json
+    assert json.loads((orders_dir / "_trickle.json").read_text())["order_line"]["mode"] == "append"
+
+    # The merge lines published a clean main + a __changelog companion.
+    for name, table in (("catalog", "product"), ("priced", "priced_line"), ("revenue", "revenue_by_product")):
+        data_dir = root / "ponds" / name / "m1" / "data"
+        assert (data_dir / f"{table}.parquet").exists(), f"{name}: no main"
+        assert (data_dir / f"{table}__changelog.parquet").exists(), f"{name}: no changelog"
+        assert json.loads((data_dir / "_trickle.json").read_text())[table]["mode"] == "merge"
 
 
 def test_wave_then_remove(runtime):

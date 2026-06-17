@@ -1,0 +1,7 @@
+[pond]
+name = "revenue"
+version = "1.0.0"
+type = "outlet"
+
+[sources]
+priced = "1.0.0"

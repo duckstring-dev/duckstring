@@ -124,3 +124,63 @@ def test_pond_read_table_foreign_under_iceberg(tmp_path, monkeypatch):
     assert rel.fetchall() == [(1, "a")]
     # The registered view (referenced by table name) reads the Iceberg snapshot.
     assert rcon.sql("SELECT val FROM event WHERE id = 1").fetchall() == [("a",)]
+
+
+def test_trickle_append_commits_are_incremental_and_window_reads(tmp_path):
+    # An append Trickle published over Iceberg commits one _duckstring_f-homogeneous data file per run
+    # (small writes), and the window read returns only the rows in (previous_f, f].
+    from duckstring import trickle_io as T
+
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    dp = IcebergDataPlane()
+
+    def run(idval, hour):
+        T.append_table(con, "event", con.sql(f"SELECT {idval} AS id"),
+                       datetime(2026, 6, 16, hour, tzinfo=UTC), ("id",))
+        dp.export(con, tmp_path, f=datetime(2026, 6, 16, hour, tzinfo=UTC))
+
+    run(1, 1)
+    run(2, 2)
+    run(3, 3)
+
+    # Three append commits → three snapshots (one per run), not a wholesale rewrite each time.
+    tbl = dp._load(tmp_path, "event")
+    assert len([s for s in tbl.snapshots() if s.summary and s.summary.additional_properties.get(F_PROP)]) == 3
+    # The sidecar travelled, so a fresh reader resolves the append mode and windows correctly.
+    assert T.load_sidecar(tmp_path)["event"]["mode"] == "append"
+    rcon = duckdb.connect()
+    dp.prepare(rcon)
+    d = T.read_delta(rcon, tmp_path, "event",
+                     previous_f=datetime(2026, 6, 16, 1, tzinfo=UTC),
+                     f=datetime(2026, 6, 16, 3, tzinfo=UTC), dp=dp)
+    assert sorted(d.upserts.fetchall()) == [(2,), (3,)]  # excludes run 1, includes run 3
+
+
+def test_trickle_merge_main_overwrite_changelog_append_over_iceberg(tmp_path):
+    # A merge Trickle: the clean main is overwritten (current state, no tombstones) while the changelog
+    # grows by append — and a delta read collapses the changelog window per PK to the latest op.
+    from duckstring import trickle_io as T
+
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    dp = IcebergDataPlane()
+
+    def state(rows, hour):
+        vals = ", ".join(f"({i}, '{v}')" for i, v in rows)
+        T.merge_table(con, "dim", con.sql(f"SELECT * FROM (VALUES {vals}) t(id, v)"),
+                      datetime(2026, 6, 16, hour, tzinfo=UTC), ("id",), comprehensive=True)
+        dp.export(con, tmp_path, f=datetime(2026, 6, 16, hour, tzinfo=UTC))
+
+    state([(1, "a"), (2, "b")], 1)
+    state([(1, "A")], 2)  # 1 updated, 2 deleted
+
+    rcon = duckdb.connect()
+    dp.prepare(rcon)
+    # The main is the clean current state, system columns stripped.
+    assert sorted(T._strip_system(rcon.sql(dp.read_select(tmp_path, "dim"))).fetchall()) == [(1, "A")]
+    d = T.read_delta(rcon, tmp_path, "dim",
+                     previous_f=datetime(2026, 6, 16, 1, tzinfo=UTC),
+                     f=datetime(2026, 6, 16, 2, tzinfo=UTC), dp=dp)
+    assert sorted(d.upserts.fetchall()) == [(1, "A")]
+    assert d.deletes.fetchall() == [(2,)]

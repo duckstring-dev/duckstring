@@ -1,0 +1,7 @@
+[pond]
+name = "priced"
+version = "1.0.0"
+
+[sources]
+orders = "1.0.0"
+catalog = "1.0.0"

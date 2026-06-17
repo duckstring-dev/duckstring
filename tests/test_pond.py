@@ -67,6 +67,61 @@ def test_demo_creates_all_subdirs(runner, tmp_path, monkeypatch):
     assert "src/puddles.py" in _file_names(tmp_path / "sales")
 
 
+_TRICKLE_PONDS = ("orders", "catalog", "priced", "revenue")
+
+
+def test_demo_ripple_flag_creates_ripple_set(runner, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["pond", "demo", "--ripple"], input="y\n")
+    assert result.exit_code == 0
+    for name in _DEMO_PONDS:
+        assert DEMO_EXPECTED_FILES.issubset(_file_names(tmp_path / name)), f"Missing files in {name}/"
+    assert not (tmp_path / "orders").exists()  # the Trickle set is not created
+
+
+def test_demo_trickle_flag_creates_trickle_set(runner, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["pond", "demo", "--trickle"], input="y\n")
+    assert result.exit_code == 0
+    for name in _TRICKLE_PONDS:
+        assert DEMO_EXPECTED_FILES.issubset(_file_names(tmp_path / name)), f"Missing files in {name}/"
+    assert "src/puddles.py" in _file_names(tmp_path / "priced")  # builder pond ships Trickle puddles
+    assert not (tmp_path / "transactions").exists()  # the Ripple set is not created
+
+
+def test_demo_trickle_pond_uses_trickle_decorator(runner, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["pond", "demo", "--trickle"], input="y\n")
+    assert "@trickle" in (tmp_path / "orders" / "src" / "pond.py").read_text()
+    assert "pond.trickle(" in (tmp_path / "priced" / "src" / "pond.py").read_text()
+
+
+def test_demo_both_flags_errors(runner, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["pond", "demo", "--ripple", "--trickle"], input="y\n")
+    assert result.exit_code != 0
+    assert not (tmp_path / "transactions").exists()
+    assert not (tmp_path / "orders").exists()
+
+
+def test_trickle_demo_runs_locally(runner, tmp_path, monkeypatch):
+    # The Trickle demo runs end-to-end through the local runner: the inlets stand alone, and the builder
+    # pond consumes its hydrated Trickle-shaped Sources. Pinned to the offline Parquet plane.
+    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["pond", "demo", "--trickle"], input="y\n")
+
+    from duckstring.local import hydrate, load_project, run_pond
+
+    for name in ("orders", "catalog"):  # inlets generate data — runnable standalone
+        assert run_pond(load_project(tmp_path / name)).ok, f"{name} failed"
+    for name in ("priced", "revenue"):  # consumers — hydrate their Trickle sources, then run
+        project = load_project(tmp_path / name)
+        hydrate(project)
+        result = run_pond(project)
+        assert result.ok, [r.error for r in result.ripples if r.status != "ok"]
+
+
 def test_demo_copies_gitignore(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runner.invoke(app, ["pond", "demo"], input="y\n")
