@@ -33,6 +33,29 @@ Force re-runs the Pond immediately **at its current freshness** — no upstream 
 
 That containment is the point. The canonical use is after deploying a patch: the transform logic changed but the input data didn't, so you want *this* Pond's output rebuilt without replaying the lineage or waking the consumers. (If downstream *should* see the change — say the fix alters the published tables — follow up with a `wake` on the consumer, or let its standing demand pick the change up naturally.) Force also clears a failed/killed state.
 
+## Refresh — rebuild from scratch on the next run
+
+```bash
+duckstring control refresh sales      # ...and `--clear` to un-flag
+```
+
+Force *recomputes* the current state; **refresh** *rebuilds it from nothing*. It flags the Pond so its **next** run wipes the working database and reads its Sources in full — for a [Trickle](trickle.md) that means a clean re-bootstrap (a fresh main, an empty changelog) that raises the published *floor*, so downstream coverage-misses and reloads too.
+
+Refresh is **lazy**: it changes *how* the next run computes, not *when*. Nothing runs the moment you flag it; the rebuild happens on the next genuine run, at a new freshness, so the correction propagates honestly through the graph. Use it after a logic fix that changes *history* (not just the latest slice), or to recover a Pond whose accumulated state is wrong — without un-deploying it. Often you set it and simply let the next end-to-end run heal everything.
+
+## Repair — rebuild a set of Ponds now
+
+```bash
+duckstring control repair sales reports          # a connected set
+duckstring control repair sales --downstream     # ...and everything below it
+```
+
+When you can't wait for a next run — the fix is urgent and no new upstream data is coming — **repair** rebuilds a chosen set immediately. It steps out of the demand model: the Catchment rebuilds each Pond in dependency order (each reads its freshly-rebuilt parents), holding the scope `repairing` (blocked from normal demand) until each one's turn.
+
+The set must be **connected**: any two selected Ponds joined by a path must stay connected *through the selection* — selecting `A` and `D` but skipping the `B`/`C` between them is rejected (`D` would rebuild from stale parents). `--downstream` adds every descendant, which is always valid. The web UI offers the same as a click-to-select mode on the graph.
+
+Repair is a one-off maintenance operation; for steady-state corrections, prefer plain [refresh](#refresh--rebuild-from-scratch-on-the-next-run) and let freshness carry it.
+
 ## Sleep — withdraw demand
 
 ```bash

@@ -1,6 +1,15 @@
 # Refresh & Repair: full rebuild and propagated repair
 
-Status: **designed, unbuilt.** Three interlocking pieces, building on Trickle (`plans/trickle.md`,
+Status: **built.** Shipped across D1 (the bugfix), the coverage floor, D2 (the refresh flag), and D3
+(the repair planner) — engine + driver + duck + CLI (`control refresh` / `control repair`) + API
+(`/api/ponds/{name}/refresh`, `/api/repair`) + the web UI (a refresh toggle + a canvas repair-selection
+mode). Tested in `tests/test_trickle.py`, `tests/test_duct.py` (the repair graph + plan), and
+`tests/test_runtime.py` (deployed-Duck e2e for both the refresh flag and a repair chain). One settled
+nuance from the build: a repaired Pond's *floor* only advances where freshness genuinely does (an inlet);
+an un-refreshed Source pins downstream freshness, but the data is rebuilt regardless (verified via the
+empty-changelog bootstrap signature).
+
+Three interlocking pieces, building on Trickle (`plans/trickle.md`,
 `src/duckstring/trickle_io.py`): (1) a **bugfix** so a consumer absorbs a discontinuous read correctly,
 (2) a per-Pond **refresh** flag (full rebuild on next run), and (3) **repair** — force-refresh a chosen
 set now. Ship in that order; each is usable on its own and the later ones lean on the earlier.
