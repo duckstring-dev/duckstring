@@ -136,6 +136,10 @@ def priced_line(pond):
 
 For aggregations there's a sibling, `pond.affected_groups(delta, by=…)` — the group keys a delta touches, to re-aggregate just those groups from the full input.
 
+:::danger Handle a full read
+On a **full read** — a bootstrap, or a coverage-miss when you've fallen behind the source's retained history (`delta.is_full` is `True`) — the delta carries *no deletes*, so a partial merge would silently keep rows that have since vanished. Branch on it: when `delta.is_full`, recompute your **whole** output and `merge_table(comprehensive=True)`; only take the partial path when it's `False`. (The builder above does this for you — another reason to prefer it.)
+:::
+
 :::warning Comprehensive is the safe default
 With `comprehensive=False` you own correctness: **over-merging** (re-emitting unchanged rows) is harmless — idempotent merge absorbs it — but **under-merging** (missing a changed row, or under-supplying `deletes`) is silent data corruption. Reach for the partial path only when the full recompute is genuinely too expensive, and prefer the builder, which can't forget an edge.
 :::

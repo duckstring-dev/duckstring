@@ -90,35 +90,45 @@ class TrickleBuilder:
         pond = self.pond
         out_pk = self.pond._resolve_pk(pk) if pk is not None else self.spine_pk
 
-        # 1. Affected output (spine) keys: the spine's own changed keys, plus — per join edge — the spine
-        #    keys a dimension change ripples to. Seeing every edge here is what makes this safe.
+        # Read every source's delta first. A *full* read on any of them (bootstrap, coverage-miss, or an
+        # overwrite source) can't be expressed as an affected-key slice — and its empty deletes would make
+        # a partial merge silently keep stale rows. So fall back to a whole-output comprehensive recompute:
+        # merge_table diffs it against our own main and computes the right deletes (incl. rows that vanished
+        # across the discontinuity). This is what makes the builder robust to an upstream refresh/reset.
         spine_delta = pond.read_delta(self.spine_ref)
+        dim_deltas = [(on_cols, pond.read_delta(dim_ref)) for dim_ref, _dim_pk, on_cols in self._joins]
+
+        if spine_delta.is_full or any(d.is_full for _, d in dim_deltas):
+            pond.merge_table(
+                name, self._recompute(None), comprehensive=True,
+                pk=out_pk, retain_t=retain_t, retain_n=retain_n,
+            )
+            return
+
+        # Incremental path: affected output (spine) keys = the spine's own changed keys, plus — per join
+        # edge — the spine keys a dimension change ripples to. Seeing every edge here is what makes it safe.
         affected = spine_delta.keys()
-        for dim_ref, _dim_pk, on_cols in self._joins:
-            dim_delta = pond.read_delta(dim_ref)
+        for on_cols, dim_delta in dim_deltas:
             affected = affected.union(pond.keys_joining(self.spine_ref, dim_delta, on=on_cols))
-
-        # 2. Recompute just the affected slice from the full sources.
         recomputed = self._recompute(affected)
-
-        # 3. Apply: upserts = the recomputed rows; deletes = affected keys that fell out of the recompute
-        #    (a spine key whose row no longer exists — incl. source-deleted keys, folded in by .keys()).
+        # deletes = affected keys that fell out of the recompute (a spine key whose row no longer exists —
+        # incl. source-deleted keys, folded in by .keys()).
         pond.merge_table(
             name, recomputed, comprehensive=False, deletes=affected.dropped(recomputed),
             pk=out_pk, retain_t=retain_t, retain_n=retain_n,
         )
 
     def _recompute(self, affected):
+        """The join over the full sources, optionally restricted to the ``affected`` spine keys (a
+        :class:`KeySet`). ``affected=None`` recomputes the whole output (the comprehensive path)."""
         if self._joins and self._projection is None:
             raise BuildError(
                 f"pond.trickle('{self.spine_ref}').join(...): a joined graph needs .select(...) to name the "
                 f"output columns (and include the spine PK)"
             )
         con = self.pond.con
-        # Register each full source under a unique alias view; restrict to the affected spine keys.
         s0 = "_duckstring_tb_s0"
         self.pond.read_table(self.spine_ref).create_view(s0, replace=True)
-        affected.create_view("_duckstring_tb_affected")
         froms = [f'"{s0}" s0']
         for i, (dim_ref, dim_pk, on_cols) in enumerate(self._joins):
             alias = f"_duckstring_tb_s{i + 1}"
@@ -127,8 +137,10 @@ class TrickleBuilder:
                 f's0."{sc}" = s{i + 1}."{dc}"' for sc, dc in zip(on_cols, dim_pk, strict=True)
             )
             froms.append(f'JOIN "{alias}" s{i + 1} ON {cond}')
-        key_cond = " AND ".join(f's0."{c}" = ak."{c}"' for c in self.spine_pk)
-        froms.append(f'JOIN "_duckstring_tb_affected" ak ON {key_cond}')
+        if affected is not None:  # restrict to the affected slice (the incremental path)
+            affected.create_view("_duckstring_tb_affected")
+            key_cond = " AND ".join(f's0."{c}" = ak."{c}"' for c in self.spine_pk)
+            froms.append(f'JOIN "_duckstring_tb_affected" ak ON {key_cond}')
         projection = self._projection or "s0.*"
         where = f" WHERE {' AND '.join(self._filters)}" if self._filters else ""
         return con.sql(f"SELECT {projection} FROM {' '.join(froms)}{where}")

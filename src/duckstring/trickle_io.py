@@ -461,13 +461,22 @@ def _delete_relation(deletes):
 
 class Delta:
     """A source's change-set over the window ``(previous_f, f]`` — :attr:`upserts` (the net upsert rows,
-    user columns), :attr:`deletes` (the deleted PK rows), and :meth:`keys` (their union, a key-set)."""
+    user columns), :attr:`deletes` (the deleted PK rows), and :meth:`keys` (their union, a key-set).
 
-    def __init__(self, con, pk: tuple[str, ...], upserts, deletes) -> None:
+    :attr:`is_full` is ``True`` when this is **not** a windowed delta but a *full read* — a bootstrap, a
+    coverage-miss (the consumer fell behind the source's retained history / its floor), or an overwrite
+    (plain Ripple) source. A full read has no deletes to report (``deletes`` is empty), because deletes
+    can only be derived against the consumer's own prior state. So a consumer **must absorb a full read
+    comprehensively** (recompute its whole output and ``merge_table(comprehensive=True)``, which diffs
+    against its own main and computes the right deletes) — never a partial merge trusting the empty
+    ``deletes``. The builder does this automatically; hand-rolled partial consumers must check this."""
+
+    def __init__(self, con, pk: tuple[str, ...], upserts, deletes, *, is_full: bool = False) -> None:
         self.con = con
         self.pk = tuple(pk)
         self.upserts = upserts
         self.deletes = deletes
+        self.is_full = is_full
 
     def keys(self) -> "KeySet":
         """The changed PKs — ``upserts ∪ deletes`` — as a key-set (folds source deletes in, so a deleted
@@ -524,9 +533,9 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp) -> Delta:
         return _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER)
     if mode == "merge":
         return _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER)
-    # overwrite source: full read, everything an upsert, no deletes.
+    # overwrite source (a plain Ripple): no history → always a full read, every row an upsert.
     upserts = _strip_system(con.sql(dp.read_select(data_dir, table)))
-    return Delta(con, pk, upserts, _empty_pk(upserts, pk))
+    return Delta(con, pk, upserts, _empty_pk(upserts, pk), is_full=True)
 
 
 def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER) -> Delta:
@@ -536,7 +545,7 @@ def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER) -> De
     upper = f"{_q(F_COL)} <= {_ts(f)}"
     cond = upper if full else f"{_q(F_COL)} > {_ts(previous_f)} AND {upper}"
     upserts = _strip_system(rel.filter(cond))
-    return Delta(con, pk, upserts, _empty_pk(upserts, pk))
+    return Delta(con, pk, upserts, _empty_pk(upserts, pk), is_full=full)
 
 
 def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER) -> Delta:
@@ -551,7 +560,7 @@ def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER) -> Del
     full = clog_sql is None or previous_f == NEVER or (oldest is not None and previous_f < oldest)
     if full:
         main = _strip_system(con.sql(dp.read_select(data_dir, table)))
-        return Delta(con, pk, main, _empty_pk(main, pk))
+        return Delta(con, pk, main, _empty_pk(main, pk), is_full=True)
     # Window the changelog, then collapse per PK to the latest op (net change per key). Inlined as a
     # self-contained subquery (over immutable read_parquet) — NOT a named view: several read_delta calls
     # in one run would share a view name, and the lazy upserts/deletes relations would re-bind to whoever

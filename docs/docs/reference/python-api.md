@@ -185,6 +185,7 @@ A Source's change-set over this run's window `(pond.previous_f, pond.f]`. Resolv
 | `delta.upserts` | The changed rows (new + updated), user columns only — a DuckDB relation. |
 | `delta.deletes` | The removed primary keys — a relation. |
 | `delta.keys()` | `upserts ∪ deletes` as a `KeySet`. |
+| `delta.is_full` | `True` when this is a **full read** (a bootstrap, a coverage-miss past the source's retained history, or an overwrite Ripple source) rather than a window. A full read carries **no deletes** (they can't be derived without your prior state), so on `is_full` you must **absorb comprehensively** — recompute your whole output and `merge_table(comprehensive=True)`, never a partial merge trusting the empty `deletes`. The builder does this automatically. |
 
 ### The builder — `pond.trickle(spine_ref)`
 

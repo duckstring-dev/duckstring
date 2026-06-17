@@ -625,3 +625,58 @@ def test_incremental_draw_window_roundtrip(tmp_path):
 def test_landed_after_bootstrap_is_none(tmp_path):
     # No sidecar (nothing landed yet) → wholesale transfer.
     assert T.landed_after(tmp_path) is None
+
+
+# ─── D1: full-read absorption (the coverage-miss / retention-lag delete bug) ──────
+
+
+def test_delta_is_full_flag_per_branch(reg, tmp_path):
+    T.merge_table(reg, "dim", _state(reg, [(1, "a")]), ts(1), ("id",), comprehensive=True)
+    T.merge_table(reg, "dim", _state(reg, [(1, "b")]), ts(2), ("id",), comprehensive=True)
+    data_dir = publish(reg, tmp_path / "data")
+    rcon = duckdb.connect()
+    dp = ParquetDataPlane()
+    assert T.read_delta(rcon, data_dir, "dim", previous_f=NEVER, f=ts(9), dp=dp).is_full      # bootstrap
+    assert T.read_delta(rcon, data_dir, "dim", previous_f=ts(0), f=ts(9), dp=dp).is_full       # coverage miss
+    assert not T.read_delta(rcon, data_dir, "dim", previous_f=ts(1), f=ts(2), dp=dp).is_full    # windowed
+
+
+def test_builder_absorbs_coverage_miss_comprehensively(tmp_path):
+    """The bug: a partial/builder consumer that falls behind a source's retained changelog gets a
+    full-read fallback (empty deletes) and would keep stale rows. With is_full → comprehensive, the
+    builder drops the vanished row instead."""
+    ol_con, ol_dir = _producer(tmp_path, "sales")
+    pr_con, pr_dir = _producer(tmp_path, "catalog")
+
+    def order_lines(state, f):
+        vals = ", ".join(f"({o}, '{p}')" for o, p in state)
+        T.merge_table(ol_con, "order_line", ol_con.sql(f"SELECT * FROM (VALUES {vals}) v(order_id, product_id)"),
+                      f, ("order_id",), comprehensive=True, retain_n=1)  # retain only the newest run
+        publish(ol_con, ol_dir)
+
+    T.merge_table(pr_con, "product", pr_con.sql("SELECT * FROM (VALUES ('p1', 5), ('p2', 9)) v(product_id, price)"),
+                  ts(1), ("product_id",), comprehensive=True)
+    publish(pr_con, pr_dir)
+    order_lines([(10, "p1"), (11, "p2")], ts(1))
+
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "priced" / "m1" / "data"
+
+    def build(f, previous_f):
+        pond = Pond("priced", "1.0.0", snk, root=tmp_path,
+                    source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=previous_f)
+        (pond.trickle("sales.order_line")
+             .join(pond.trickle("catalog.product"), on="product_id")
+             .select("s0.order_id, s0.product_id, s1.price").merge("priced"))
+        publish(snk, snk_dir)
+
+    build(ts(1), NEVER)
+    assert rows(snk, snk_dir, "priced", "order_id") == [(10,), (11,)]
+
+    # Two more source runs with retain_n=1 trim the changelog past the consumer's ts(1) watermark, and
+    # order 11 is dropped. The consumer coverage-misses → comprehensive absorb → 11 must disappear.
+    order_lines([(10, "p1")], ts(2))   # 11 removed
+    order_lines([(10, "p1")], ts(3))   # advance again so the changelog floor passes ts(1)
+    build(ts(3), ts(1))
+    assert rows(snk, snk_dir, "priced", "order_id") == [(10,)]  # 11 dropped, not stale
+    snk.close()
