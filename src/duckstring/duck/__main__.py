@@ -77,6 +77,8 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                         shutdown_requested = True
                     elif data.get("kind") == "begin_run":
                         prev = data.get("previous_f")
+                        if data.get("refresh"):
+                            executor.wipe()  # cold reset: the run rebuilds from scratch
                         _launch(core.begin_run(
                             datetime.fromisoformat(data["f"]), _now(),
                             retry_immediately=data.get("immediate_retries", 0),

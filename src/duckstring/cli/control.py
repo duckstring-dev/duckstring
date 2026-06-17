@@ -40,6 +40,26 @@ def force(
     _post_trigger(cfg, pond, major, version, silent, watch, "force", {}, "Forced.", one_shot=True)
 
 
+def refresh(
+    pond: str = typer.Argument(..., help="Name of the Pond to flag for a refresh."),
+    catchment: Optional[str] = _CATCHMENT,
+    major: Optional[int] = _MAJOR,
+    version: Optional[str] = _VERSION,
+    clear: bool = typer.Option(False, "--clear", help="Un-set a pending refresh instead."),
+) -> None:
+    """Refresh a Pond — flag its *next* run to be a cold wipe-and-rebuild (full recompute, clears the
+    changelog so downstream reloads). Lazy: nothing runs now; it takes effect on the next run. For an
+    immediate rebuild across a set of Ponds, use `control repair`."""
+    from . import _http
+    from .config import resolve_catchment
+    _, cfg = resolve_catchment(catchment)
+    _http.post(
+        f"{cfg['url']}/api/ponds/{pond}/refresh", auth=cfg,
+        params={**_http.pond_params(major, version), "clear": clear}, json={},
+    )
+    typer.echo(f"Refresh cleared on '{pond}'." if clear else f"'{pond}' will refresh on its next run.")
+
+
 def sleep(
     pond: str = typer.Argument(..., help="Name of the Pond to put to sleep."),
     catchment: Optional[str] = _CATCHMENT,

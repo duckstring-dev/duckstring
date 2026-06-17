@@ -175,6 +175,32 @@ def test_trickle_chain_runs_end_to_end(runtime):
         assert json.loads((data_dir / "_trickle.json").read_text())[table]["mode"] == "merge"
 
 
+def test_refresh_flag_rebuilds_and_bumps_floor(runtime):
+    """`control refresh` is lazy: it flags the Pond (refresh_pending) but runs nothing. The next run is a
+    cold wipe-and-rebuild that raises the published changelog floor, so downstream coverage-misses."""
+    import json
+
+    url, root = runtime
+    _deploy(url, _TRICKLE_PONDS)
+    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
+
+    sidecar = root / "ponds" / "catalog" / "m1" / "data" / "_trickle.json"
+    floor1 = json.loads(sidecar.read_text())["product"]["floor"]
+
+    # Flag catalog for refresh — lazy: it shows pending, but nothing runs.
+    httpx.post(f"{url}/api/ponds/catalog/refresh", timeout=5.0)
+    assert (_pond_status(url, "catalog") or {}).get("refresh_pending") is True
+    assert json.loads(sidecar.read_text())["product"]["floor"] == floor1  # unchanged — no run yet
+
+    # A new pulse runs the chain at a fresh epoch → catalog refreshes (wipe + rebuild), floor bumps,
+    # and the pending flag is consumed.
+    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    assert _wait(lambda: json.loads(sidecar.read_text())["product"]["floor"] > floor1), \
+        "catalog's floor never advanced after the refresh run"
+    assert (_pond_status(url, "catalog") or {}).get("refresh_pending") is False
+
+
 def test_wave_then_remove(runtime):
     url, root = runtime
     _deploy_demo(url)

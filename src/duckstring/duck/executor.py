@@ -160,6 +160,31 @@ class RippleExecutor:
         is left intact). Returns the published output schema (for the Catchment to capture)."""
         return _export_data(self._cursor(), self.registry_path, f, contract)
 
+    def wipe(self) -> None:
+        """Drop every table in the Pond's registry — a Refresh's cold reset. The next run then reads its
+        Sources in full (``previous_f = NEVER``) and rebuilds from scratch: a Trickle re-bootstraps (clean
+        main + empty changelog + floor at this run's freshness), so downstream coverage-misses and reloads.
+        The published snapshot is untouched until the rebuild re-exports."""
+        from ..core import retry_on_lock
+
+        def _drop() -> None:
+            cur = self._cursor()
+            try:
+                # Views first (a view may depend on a table), then tables. SHOW TABLES lists both, and a
+                # registry can hold leftover scratch views from a Trickle write (`relation.create_view`).
+                for (v,) in cur.execute(
+                    "SELECT view_name FROM duckdb_views() WHERE schema_name = 'main' AND NOT internal"
+                ).fetchall():
+                    cur.execute(f'DROP VIEW IF EXISTS "{v}"')
+                for (t,) in cur.execute(
+                    "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'"
+                ).fetchall():
+                    cur.execute(f'DROP TABLE IF EXISTS "{t}"')
+            finally:
+                cur.close()
+
+        retry_on_lock(_drop)
+
     def shutdown(self) -> None:
         self._pool.shutdown(wait=True)
         self._registry.close()

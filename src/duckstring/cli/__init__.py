@@ -6,7 +6,7 @@ from . import catchment as catchment_cmd
 from . import duct as duct_cmd
 from . import pond as pond_cmd
 from . import puddle as puddle_cmd
-from .control import clear, failure_budget, force, kill, sleep, wake
+from .control import clear, failure_budget, force, kill, refresh, sleep, wake
 from .data import get, query
 from .deploy import deploy
 from .status import status
@@ -49,6 +49,7 @@ control_app = typer.Typer(
     no_args_is_help=True,
 )
 control_app.command("force")(force)
+control_app.command("refresh")(refresh)
 control_app.command("wake")(wake)
 control_app.command("sleep")(sleep)
 control_app.command("kill")(kill)

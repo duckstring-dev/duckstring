@@ -40,6 +40,7 @@ from ..engine import (
     kill_pond,
     next_wake,
     pulse_pond,
+    refresh_pond,
     sentinel,
     sleep_pond,
     tap_pond,
@@ -225,15 +226,18 @@ class Driver:
     def _load_pond_state(self, pond_id: int) -> PondState:
         row = self.db.execute(
             "SELECT start_f, end_f, d_ms, has_pull, has_received_pull, is_failed, is_blocked, failed_f, "
-            "failures, is_killed, pull_local, pull_m FROM pond_state WHERE pond_id = ?",
+            "failures, is_killed, pull_local, pull_m, refresh_pending, repairing "
+            "FROM pond_state WHERE pond_id = ?",
             (pond_id,),
         ).fetchone()
         ps = PondState()
         if row:
             (sf, ef, d_ms, hp, hrp, is_failed, is_blocked, failed_f, failures, is_killed, pull_local,
-             pull_m) = row
+             pull_m, refresh_pending, repairing) = row
             ps.is_killed = bool(is_killed)
             ps.pull_local = bool(pull_local)
+            ps.refresh_pending = bool(refresh_pending)
+            ps.repairing = bool(repairing)
             ps.pull_m = datetime.fromisoformat(pull_m) if pull_m else NEVER
             ps.start_f = datetime.fromisoformat(sf) if sf else NEVER
             ps.end_f = datetime.fromisoformat(ef) if ef else NEVER
@@ -323,6 +327,14 @@ class Driver:
         with self.lock:
             self.state = force_pond(self.state, pond, _now())
             self._process(_now())
+
+    def refresh(self, pond: str, clear: bool = False) -> None:
+        """Refresh — flag the Pond so its next run is a cold wipe-and-rebuild. Lazy: persists the flag
+        but starts nothing; the rebuild happens on the next natural run. ``clear`` un-sets it."""
+        with self.lock:
+            self.state = refresh_pond(self.state, pond, clear=clear)
+            self._persist_state()
+            self.state_version += 1
 
     def kill(self, pond: str) -> None:
         """Kill — terminate the Duck and park the Pond in a terminal killed state (cancels its Run)."""
@@ -895,7 +907,7 @@ class Driver:
     def _process(self, now: datetime, notify: bool = True) -> None:
         self.state, _started = sentinel(now, self.state)
         for cmd in drain_begin_runs(self.state):
-            self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force)
+            self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force, refresh=cmd.refresh)
         self._persist_state()
         self._reap_idle()
         self.state_version += 1  # state moved → release any /api/status long-poll
@@ -904,7 +916,9 @@ class Driver:
         if notify and self._notify_cb is not None:
             self._notify_cb()
 
-    def _dispatch_begin_run(self, pond: str, f: datetime, now: datetime, force: bool = False) -> None:
+    def _dispatch_begin_run(
+        self, pond: str, f: datetime, now: datetime, force: bool = False, refresh: bool = False
+    ) -> None:
         meta = self.meta[pond]
         # A Pond Draw is not run by a Duck: record the Run as running and hand the parquet transfer to
         # the poller (it fetches out-of-lock, then reports completion via complete_draw_transfer).
@@ -924,11 +938,11 @@ class Driver:
         # Cancel any not-yet-collected shutdown: this Pond is running again, so the Duck must not exit.
         self.jobs[pond] = [j for j in self.jobs.get(pond, []) if j.get("kind") != "shutdown"]
         self.jobs[pond].append({
-            "kind": "begin_run", "f": _iso(f), "force": force,
+            "kind": "begin_run", "f": _iso(f), "force": force, "refresh": refresh,
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
             # The prior completed run's freshness (the pond's end_f *before* this run advances it),
-            # carried to the Ripples as pond.previous_f. NEVER on the first run.
-            "previous_f": _iso(self.state.pond_states[pond].end_f),
+            # carried to the Ripples as pond.previous_f. A Refresh reads its Sources in full, so NEVER.
+            "previous_f": _iso(NEVER) if refresh else _iso(self.state.pond_states[pond].end_f),
             # The major line's additive schema contract this Run must keep (vetted by the Duck before
             # publishing); None for a first run or a deliberate rollback (governed by min_version).
             "contract": self._contract_for(pond),
@@ -1088,13 +1102,15 @@ class Driver:
             pond_id = self.meta[name]["pond_id"]
             self.db.execute(
                 "INSERT INTO pond_state (pond_id, start_f, end_f, d_ms, has_pull, has_received_pull, "
-                "is_failed, is_blocked, failed_f, failures, is_killed, pull_local, pull_m) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
+                "is_failed, is_blocked, failed_f, failures, is_killed, pull_local, pull_m, "
+                "refresh_pending, repairing) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
                 "start_f = excluded.start_f, end_f = excluded.end_f, d_ms = excluded.d_ms, "
                 "has_pull = excluded.has_pull, has_received_pull = excluded.has_received_pull, "
                 "is_failed = excluded.is_failed, is_blocked = excluded.is_blocked, "
                 "failed_f = excluded.failed_f, failures = excluded.failures, "
-                "is_killed = excluded.is_killed, pull_local = excluded.pull_local, pull_m = excluded.pull_m",
+                "is_killed = excluded.is_killed, pull_local = excluded.pull_local, pull_m = excluded.pull_m, "
+                "refresh_pending = excluded.refresh_pending, repairing = excluded.repairing",
                 (
                     pond_id,
                     _iso(ps.start_f) if ps.start_f != NEVER else None,
@@ -1109,6 +1125,8 @@ class Driver:
                     int(ps.is_killed),
                     int(ps.pull_local),
                     _iso(ps.pull_m) if ps.pull_m != NEVER else None,
+                    int(ps.refresh_pending),
+                    int(ps.repairing),
                 ),
             )
             self.db.execute("DELETE FROM pond_target WHERE pond_id = ?", (pond_id,))
@@ -1213,6 +1231,8 @@ class Driver:
                     "is_failed": ps.is_failed,
                     "is_blocked": ps.is_blocked,
                     "is_killed": ps.is_killed,
+                    "refresh_pending": ps.refresh_pending,
+                    "repairing": ps.repairing,
                     "failed_f": ts(ps.failed_f),
                     "failures": ps.failures,
                     "missing_sources": self.meta[key].get("missing_sources", []),

@@ -164,6 +164,7 @@ class BeginRun:
     pond_id: PondId
     f: datetime
     force: bool = False
+    refresh: bool = False  # a Refresh: the Duck wipes the registry first → a cold full rebuild
 
 
 # ─── Run state (mutable) ──────────────────────────────────────────────────────
@@ -192,6 +193,8 @@ class PondState:
     is_killed: bool = False  # operator Kill: terminal, supersedes retries, until Wake/Force/Clear
     pull_local: bool = False  # the pending pull is a Wake — run on fresh input but do NOT solicit Sources
     force_pending: bool = False  # next Run is a Force (recompute) — re-run Ripples even if unchanged
+    refresh_pending: bool = False  # next Run is a Refresh — the Duck wipes state first for a cold rebuild
+    repairing: bool = False  # in an active repair plan: blocked from normal demand until its turn (D3)
     runs_started: int = 0
     runs_completed: int = 0
     gen_start_times: dict[int, datetime] = field(default_factory=dict)

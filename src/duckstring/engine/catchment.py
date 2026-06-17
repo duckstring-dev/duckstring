@@ -61,6 +61,8 @@ __all__ = [
     "sleep_pond",
     "wake_pond",
     "force_pond",
+    "refresh_pond",
+    "repair_pond",
     "kill_pond",
     "clear_pond",
     "sentinel",
@@ -322,9 +324,12 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
 
     ps.runs_started += 1
     ps.gen_start_times[ps.runs_started] = now
-    # Record the command for the Catchment to dispatch to this Pond's Duck (force = a recompute).
-    s.pending_begin_runs.append(BeginRun(pid, ps.start_f, force=ps.force_pending))
+    # Record the command for the Catchment to dispatch to this Pond's Duck (force = a recompute; refresh
+    # = a cold wipe-and-rebuild). Both are consumed here; a refresh wipes the registry at the Duck, so a
+    # retry of a failed refresh still cold-bootstraps from the emptied registry.
+    s.pending_begin_runs.append(BeginRun(pid, ps.start_f, force=ps.force_pending, refresh=ps.refresh_pending))
     ps.force_pending = False
+    ps.refresh_pending = False
 
 
 def can_start_ripple(s: EngineState, rid: RippleId) -> bool:
@@ -498,6 +503,25 @@ def force_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
     ps.force_pending = True
     if NEVER not in ps.targets:
         ps.targets.append(NEVER)
+    return s
+
+
+def refresh_pond(state: EngineState, pid: PondId, *, clear: bool = False) -> EngineState:
+    """Flag a Pond so its **next** run is a Refresh — a cold wipe-and-rebuild (the Duck drops the
+    registry and reads its Sources in full). Lazy: it does *not* start a run, so the refresh happens at
+    the next genuinely-new freshness and propagates honestly (its rebuilt changelog floor rises above
+    downstream consumers' watermarks). ``clear`` un-sets the flag. See ``plans/refresh.md``."""
+    s = state.clone()
+    s.pond_states[pid].refresh_pending = not clear
+    return s
+
+
+def repair_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
+    """A repair step (D3): refresh **and** force this Pond at the current freshness — combine a cold
+    rebuild with a one-shot run so the rebuild happens now, not on the next natural epoch. The Driver
+    sequences these in topological order over a connected scope (see ``plans/refresh.md``)."""
+    s = force_pond(state, pid, now)
+    s.pond_states[pid].refresh_pending = True
     return s
 
 

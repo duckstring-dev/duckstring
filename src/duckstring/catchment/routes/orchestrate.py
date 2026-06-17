@@ -138,6 +138,17 @@ def force(name: str, request: Request, major: int | None = None, version: str | 
     return {"ok": True}
 
 
+@router.post("/ponds/{name}/refresh")
+def refresh(
+    name: str, request: Request, clear: bool = False,
+    major: int | None = None, version: str | None = None,
+):
+    """Refresh a Pond — flag its next run to be a cold wipe-and-rebuild (lazy; runs nothing now).
+    ``clear=true`` un-sets a pending refresh."""
+    _driver(request).refresh(_resolve(request, name, major, version), clear=clear)
+    return {"ok": True}
+
+
 @router.post("/ponds/{name}/kill")
 def kill(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Kill a Pond — terminate its Duck and park it in a terminal killed state (cancels its Run)."""
