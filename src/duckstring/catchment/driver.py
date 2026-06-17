@@ -41,6 +41,7 @@ from ..engine import (
     next_wake,
     pulse_pond,
     refresh_pond,
+    repair_pond,
     sentinel,
     sleep_pond,
     tap_pond,
@@ -70,6 +71,57 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+# ─── Repair scope graph helpers (D3 — see plans/refresh.md) ────────────────────
+
+
+def _reach(start: str, children: dict[str, set[str]], within: set[str] | None = None) -> set[str]:
+    """Forward reachability from ``start`` (excluding itself). ``within`` restricts traversal to a subset
+    (edges only into nodes in ``within``) — used to ask "reachable *through the selection*"."""
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        for c in children.get(stack.pop(), ()):
+            if (within is None or c in within) and c not in seen:
+                seen.add(c)
+                stack.append(c)
+    return seen
+
+
+def _descendants(seeds: list[str], children: dict[str, set[str]]) -> set[str]:
+    out: set[str] = set()
+    for s in seeds:
+        out |= _reach(s, children)
+    return out
+
+
+def _connectivity_gap(scope: set[str], children: dict[str, set[str]]) -> tuple[str, str] | None:
+    """The relaxed connectivity rule: any two selected Ponds connected in the full graph must stay
+    connected **within the selection**. Returns the first ``(X, Z)`` where ``Z`` is reachable from ``X``
+    in the full graph but not via a path inside ``scope`` (a skipped intermediate), else ``None``."""
+    for x in scope:
+        reachable_in_scope = _reach(x, children, within=scope)
+        for z in _reach(x, children):
+            if z in scope and z not in reachable_in_scope:
+                return (x, z)
+    return None
+
+
+def _topo_order(scope: set[str], parents: dict[str, set[str]]) -> list[str]:
+    """A topological order of the induced subgraph (parents = in-scope sources). Deterministic (sorted)."""
+    done: list[str] = []
+    seen: set[str] = set()
+    remaining = set(scope)
+    while remaining:
+        ready = sorted(k for k in remaining if parents[k] <= seen)
+        if not ready:  # a cycle is impossible (the pond graph is a DAG), but guard anyway
+            ready = sorted(remaining)
+        for k in ready:
+            done.append(k)
+            seen.add(k)
+            remaining.discard(k)
+    return done
+
+
 class Driver:
     def __init__(self, db, root, base_url: str | None, launcher):
         self.db = db
@@ -86,6 +138,9 @@ class Driver:
         # Pond Draw transfers awaiting the poller: (pond_key, F). A Draw run is not dispatched to a
         # Duck — the poller performs the parquet fetch out-of-lock, then reports completion.
         self._pending_transfers: list[tuple[str, datetime]] = []
+        # An in-progress repair plan (D3) or None: {scope, parents (in-scope), done, released}. The Driver
+        # walks it imperatively in topological order, releasing each node once its in-scope parents finish.
+        self._repair: dict | None = None
         # Set by the app to a thread-safe callback that wakes the duct poller. Called from _process on
         # demand-bearing operations (tap/pulse/wave/…/Duck events) so a Draw solicits its upstream
         # immediately, not on the next poll. NOT called from the poller's own observe/transfer paths.
@@ -336,6 +391,72 @@ class Driver:
             self._persist_state()
             self.state_version += 1
 
+    def repair(self, ponds: list[tuple[str, int | None]], downstream: bool = False) -> dict:
+        """Repair — force-rebuild a **connected** set of Ponds now, in topological order (steps out of
+        the demand model; see ``plans/refresh.md``). Each node is wiped and rebuilt (refresh + force) once
+        its in-scope parents finish, so it reads their freshly-rebuilt output. The scope is marked
+        ``repairing`` (blocked from normal demand) until each node's turn. Rejects a disconnected set."""
+        with self.lock:
+            now = _now()
+            if self._repair is not None:
+                raise ValueError("a repair is already in progress on this Catchment")
+            seeds = [self.resolve(n, m, None) for n, m in ponds]
+            children = self._children_graph()
+            scope = set(seeds)
+            if downstream:
+                scope |= _descendants(seeds, children)
+            gap = _connectivity_gap(scope, children)
+            if gap is not None:
+                raise ValueError(
+                    f"disconnected repair set: '{gap[0]}' reaches '{gap[1]}' only through unselected Ponds "
+                    f"— include the connecting Pond(s) or pass downstream=true"
+                )
+            parents = {k: {p for p in self.state.ponds[k].sources if p in scope} for k in scope}
+            order = _topo_order(scope, parents)
+            for k in scope:  # quiesce: block normal demand, abandon any in-flight run cleanly
+                ps = self.state.pond_states[k]
+                if ps.start_f > ps.end_f:
+                    self.launcher.terminate(k)
+                    self.jobs[k] = []
+                    ps.start_f = ps.end_f
+                ps.repairing = True
+            for k in scope:
+                derive_blocked(self.state, k)
+            self._repair = {"scope": scope, "parents": parents, "done": set(), "released": set()}
+            for k in scope:  # release the roots (no in-scope parent)
+                if not parents[k]:
+                    self._release_repair(k, now)
+            self._process(now)
+            return {"scope": order, "downstream": downstream}
+
+    def _release_repair(self, key: str, now: datetime) -> None:
+        self.state = repair_pond(self.state, key, now)  # force + refresh: a cold rebuild at current f
+        self._repair["released"].add(key)
+
+    def _advance_repair(self, pond: str, now: datetime) -> None:
+        """A scope Pond's repair run completed: mark it done, unblock it, and release any child whose
+        in-scope parents are now all done. When the whole scope is done, the plan ends."""
+        r = self._repair
+        if r is None or pond not in r["released"] or pond in r["done"]:
+            return
+        r["done"].add(pond)
+        self.state.pond_states[pond].repairing = False
+        derive_blocked(self.state, pond)
+        for k in r["scope"]:
+            if k not in r["released"] and r["parents"][k] <= r["done"]:
+                self._release_repair(k, now)
+        if r["done"] >= r["scope"]:
+            self._repair = None  # the repair plan is complete
+        self._process(now)
+
+    def _children_graph(self) -> dict[str, set[str]]:
+        children: dict[str, set[str]] = {k: set() for k in self.state.ponds}
+        for k, pond in self.state.ponds.items():
+            for sp in pond.sources:
+                if sp in children:
+                    children[sp].add(k)
+        return children
+
     def kill(self, pond: str) -> None:
         """Kill — terminate the Duck and park the Pond in a terminal killed state (cancels its Run)."""
         with self.lock:
@@ -546,6 +667,7 @@ class Driver:
                 if payload.get("schema"):
                     self._capture_schema(pond, payload["schema"])
                 self._process(now)
+                self._advance_repair(pond, now)  # if this Pond was a repair step, release its children
             elif kind == "contract_failed":
                 # The Duck refused to publish: the output broke the major line's additive contract.
                 # Fail the Pond at this Run (keeping last-good data) and block downstream, like any failure.
@@ -1181,6 +1303,8 @@ class Driver:
                     st = "failed"
                 elif ps.is_killed:
                     st = "killed"
+                elif ps.repairing:
+                    st = "repairing"
                 elif ps.is_blocked:
                     st = "blocked"
                 else:

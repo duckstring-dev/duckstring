@@ -689,3 +689,59 @@ def test_poller_blocks_draw_when_upstream_unreachable(tmp_path):
     asyncio.run(poll_once(d, tmp_path, client))
     asyncio.run(client.aclose())
     assert d.state.pond_states["sales@1"].is_blocked
+
+
+# ─── Repair planner (D3) ───────────────────────────────────────────────────────
+
+
+def _diamond(tmp_path):
+    # A → B, A → C, B → D, C → D
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "A", "1.0.0", "inlet", "ponds/A/1.0.0", _cfg(), _RIPPLES)
+    _register(db, "B", "1.0.0", "pond", "ponds/B/1.0.0", _cfg(sources={"A": "1.0.0"}), _RIPPLES)
+    _register(db, "C", "1.0.0", "pond", "ponds/C/1.0.0", _cfg(sources={"A": "1.0.0"}), _RIPPLES)
+    _register(db, "D", "1.0.0", "outlet", "ponds/D/1.0.0",
+              _cfg(sources={"B": "1.0.0", "C": "1.0.0"}), _RIPPLES)
+    return Driver(db, tmp_path, "http://x", NoopLauncher())
+
+
+def test_repair_graph_helpers():
+    from duckstring.catchment.driver import _connectivity_gap, _descendants, _topo_order
+
+    children = {"A": {"B", "C"}, "B": {"D"}, "C": {"D"}, "D": set()}
+    assert _descendants(["A"], children) == {"B", "C", "D"}
+    assert _connectivity_gap({"A", "B", "D"}, children) is None       # path A→B→D inside the set
+    assert _connectivity_gap({"A", "D"}, children) == ("A", "D")      # only via unselected B/C → gap
+    assert _topo_order({"A", "B", "D"}, {"A": set(), "B": {"A"}, "D": {"B"}}) == ["A", "B", "D"]
+
+
+def test_repair_rejects_disconnected_set(tmp_path):
+    d = _diamond(tmp_path)
+    with pytest.raises(ValueError, match="disconnected"):
+        d.repair([("A", 1), ("D", 1)])  # B/C skipped → D would rebuild from stale parents
+
+
+def test_repair_downstream_expands_and_quiesces(tmp_path):
+    d = _diamond(tmp_path)
+    plan = d.repair([("A", 1)], downstream=True)
+    assert set(plan["scope"]) == {"A@1", "B@1", "C@1", "D@1"}
+    assert plan["scope"][0] == "A@1" and plan["scope"][-1] == "D@1"  # topological
+    # Every scope Pond is marked repairing (blocked from normal demand); the root is released (running).
+    assert all(d.state.pond_states[k].repairing for k in ("A@1", "B@1", "C@1", "D@1"))
+    assert "A@1" in d._repair["released"] and "B@1" not in d._repair["released"]
+
+
+def test_repair_releases_children_as_parents_finish(tmp_path):
+    d = _diamond(tmp_path)
+    d.repair([("A", 1), ("B", 1), ("D", 1)])  # connected: A→B→D
+    assert d._repair["released"] == {"A@1"}
+    # Simulate A's repair run completing → B is released (D still waits on B).
+    d._advance_repair("A@1", _now())
+    assert "B@1" in d._repair["released"] and "D@1" not in d._repair["released"]
+    assert not d.state.pond_states["A@1"].repairing  # A done → unblocked
+    # B completes → D released; D completes → plan done.
+    d._advance_repair("B@1", _now())
+    assert "D@1" in d._repair["released"]
+    d._advance_repair("D@1", _now())
+    assert d._repair is None  # the whole scope rebuilt

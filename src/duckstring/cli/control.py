@@ -60,6 +60,24 @@ def refresh(
     typer.echo(f"Refresh cleared on '{pond}'." if clear else f"'{pond}' will refresh on its next run.")
 
 
+def repair(
+    ponds: list[str] = typer.Argument(..., help="Ponds to rebuild (a connected set)."),
+    catchment: Optional[str] = _CATCHMENT,
+    major: Optional[int] = _MAJOR,
+    downstream: bool = typer.Option(False, "--downstream", help="Also rebuild everything downstream."),
+) -> None:
+    """Repair — force-rebuild a connected set of Ponds now, in dependency order (each reads its freshly-
+    rebuilt parents). Use for an immediate fix when no new upstream run is coming; the set must be
+    connected (no skipped Pond in a sequence) — `--downstream` extends it to all descendants."""
+    from . import _http
+    from .config import resolve_catchment
+    _, cfg = resolve_catchment(catchment)
+    body = {"ponds": [{"name": p, "major": major} for p in ponds], "downstream": downstream}
+    resp = _http.post(f"{cfg['url']}/api/repair", auth=cfg, json=body)
+    order = resp.json().get("scope", [])
+    typer.echo(f"Repairing {len(order)} Pond(s) in order: {' → '.join(order)}")
+
+
 def sleep(
     pond: str = typer.Argument(..., help="Name of the Pond to put to sleep."),
     catchment: Optional[str] = _CATCHMENT,

@@ -149,6 +149,27 @@ def refresh(
     return {"ok": True}
 
 
+class _RepairPond(BaseModel):
+    name: str
+    major: Optional[int] = None
+
+
+class _RepairBody(BaseModel):
+    ponds: list[_RepairPond]
+    downstream: bool = False
+
+
+@router.post("/repair")
+def repair(request: Request, body: _RepairBody):
+    """Repair — force-rebuild a connected set of Ponds now, in topological order. ``downstream`` extends
+    the scope to all descendants. 422 if the set is disconnected (a skipped Pond in a sequence)."""
+    try:
+        plan = _driver(request).repair([(p.name, p.major) for p in body.ponds], downstream=body.downstream)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, **plan}
+
+
 @router.post("/ponds/{name}/kill")
 def kill(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Kill a Pond — terminate its Duck and park it in a terminal killed state (cancels its Run)."""

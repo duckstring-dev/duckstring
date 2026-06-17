@@ -245,6 +245,7 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
     pond = s.ponds[pid]
     blocked = ps.is_failed or ps.is_killed or ps.remote_down or pond.has_missing_source or any(
         s.pond_states[sp].is_failed or s.pond_states[sp].is_blocked or s.pond_states[sp].is_killed
+        or s.pond_states[sp].repairing  # a Source mid-repair: don't run downstream on its stale output
         for sp in pond.sources
         if sp not in pond.optional_sources
     )
@@ -261,6 +262,8 @@ def can_start_pond(s: EngineState, pid: PondId, now: datetime) -> bool:
     ps = s.pond_states[pid]
     if ps.is_killed:  # terminal until an operator Wake/Force/Clear
         return False
+    if ps.repairing and not ps.force_pending:  # in a repair plan, awaiting its turn (the plan releases
+        return False                            # it by setting force_pending via repair_pond)
     if s.ponds[pid].has_missing_source:  # a declared Source is absent — never run (hard block)
         return False
     f, _ = pond_source_f(s, pid, now)

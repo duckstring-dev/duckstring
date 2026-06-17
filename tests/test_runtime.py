@@ -201,6 +201,41 @@ def test_refresh_flag_rebuilds_and_bumps_floor(runtime):
     assert (_pond_status(url, "catalog") or {}).get("refresh_pending") is False
 
 
+def test_repair_chain_rebuilds_downstream_in_order(runtime):
+    """`/api/repair` with downstream rebuilds a connected scope now, in topological order — each Pond
+    wiped and rebuilt once its in-scope parents finish. Every scope Pond's floor advances."""
+    import json
+
+    url, root = runtime
+    _deploy(url, _TRICKLE_PONDS)
+    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
+
+    def floor(name, table):
+        return json.loads((root / "ponds" / name / "m1" / "data" / "_trickle.json").read_text())[table]["floor"]
+
+    def changelog_rows(name, table):
+        import duckdb
+        pq = root / "ponds" / name / "m1" / "data" / f"{table}__changelog.parquet"
+        return duckdb.connect().execute(f"SELECT count(*) FROM read_parquet('{pq}')").fetchone()[0]
+
+    catalog_floor_before = floor("catalog", "product")
+
+    r = httpx.post(f"{url}/api/repair", json={"ponds": [{"name": "catalog"}], "downstream": True}, timeout=5.0)
+    assert r.status_code == 200
+    assert set(r.json()["scope"]) == {"catalog@1", "priced@1", "revenue@1"}  # orders is a Source, not downstream
+    assert r.json()["scope"][0] == "catalog@1" and r.json()["scope"][-1] == "revenue@1"  # topological
+
+    # The inlet (catalog) refreshes at *now*, so its floor advances; the whole scope is rebuilt cold, which
+    # for a merge Trickle means an empty changelog (a bootstrap). (priced/revenue's *floor* stays pinned to
+    # the un-refreshed `orders` source — repair rebuilds the data, freshness only moves where it genuinely
+    # advances; that's expected.)
+    assert _wait(lambda: floor("catalog", "product") > catalog_floor_before), "catalog never rebuilt"
+    assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("status") != "repairing"), "repair never finished"
+    for n, t in (("catalog", "product"), ("priced", "priced_line"), ("revenue", "revenue_by_product")):
+        assert changelog_rows(n, t) == 0, f"{n} was not rebuilt cold (changelog not empty)"
+
+
 def test_wave_then_remove(runtime):
     url, root = runtime
     _deploy_demo(url)
