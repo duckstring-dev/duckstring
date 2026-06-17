@@ -83,8 +83,9 @@ def _reserved_columns(con, table: str) -> list[str]:
 
 
 def registry_tables(con) -> list[str]:
-    """The table names a Pond has written into ``con``'s registry — the publish set."""
-    return [t for (t,) in con.execute("SHOW TABLES").fetchall()]
+    """The table names a Pond has written into ``con``'s registry — the publish set. Tables in the
+    reserved ``_duckstring_*`` namespace (Trickle's mode/PK meta) are framework-internal, never published."""
+    return [t for (t,) in con.execute("SHOW TABLES").fetchall() if not t.startswith(RESERVED_PREFIX)]
 
 
 def validate_publish(con, table: str) -> None:
@@ -95,6 +96,27 @@ def validate_publish(con, table: str) -> None:
             f"table '{table}' has column(s) {', '.join(reserved)} in the reserved "
             f"'{RESERVED_PREFIX}*' namespace — these names are framework-owned; rename them"
         )
+
+
+def publish_plan(con, data_dir: Path) -> list[str]:
+    """Validate the publish set, write the Trickle sidecar, and return the tables to publish.
+
+    Trickle tables (a history/main table + its ``__changelog`` companion) legitimately carry
+    ``_duckstring_*`` system columns, so they are exempt from the reserved-column check that guards plain
+    overwrite output; their mode/PK is mirrored to a ``_trickle.json`` sidecar so cross-Pond readers can
+    resolve them. Call this *before* writing anything so a reserved-column violation aborts the whole
+    publish (last-good left intact)."""
+    from . import trickle_io as trickle
+
+    meta = trickle.read_meta(con)
+    trickle_tables = set(meta) | {trickle.changelog_name(t) for t in meta}
+    tables = registry_tables(con)
+    for table in tables:
+        if table not in trickle_tables:
+            validate_publish(con, table)
+    if meta:
+        trickle.write_sidecar(data_dir, meta)
+    return tables
 
 
 class ParquetDataPlane(DataPlane):
@@ -108,9 +130,10 @@ class ParquetDataPlane(DataPlane):
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
 
+        tables = publish_plan(con, data_dir)
+
         def _export() -> None:
-            for table in registry_tables(con):
-                validate_publish(con, table)
+            for table in tables:
                 dest = data_dir / f"{table}.parquet"
                 tmp = data_dir / f"{table}.parquet.tmp"
                 con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')

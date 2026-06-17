@@ -25,11 +25,12 @@ The freshness/push-token runtime is **implemented and tested** (the old generati
 
 ```
 src/duckstring/
-  core.py                  # Pond/Ripple handles + @ripple/@puddle decorators + Catchment client + pond.toml/entrypoint/import helpers
+  core.py                  # Pond/Ripple handles + @ripple/@puddle/@trickle decorators + Catchment client + pond.toml/entrypoint/import helpers
   dataplane.py             # The DATA PLANE: how a Pond publishes/reads tables cross-Pond (pluggable; Iceberg default). See Data plane.
   iceberg_plane.py         # IcebergDataPlane: the default backend (core deps; DUCKSTRING_DATA_PLANE=parquet opts out)
   iceberg_catalog.py       # FileCatalog: a JSON-pointer pyiceberg catalog (no SQLAlchemy) used by iceberg_plane
   schema_contract.py       # Version contract: extract_schema(con) + contract_violations(output, contract) (additive check)
+  trickle_io.py            # Trickle runtime: incremental I/O (append/merge writes, change detection, read_delta, partial helpers). See Trickle.
   engine/                  # PURE orchestration engine (no FastAPI/DB/HTTP). The state machine.
     core.py                #   shared dataclasses: NEVER, Window, Pond, Ripple, Trigger, BeginRun, Pond/RippleState
     catchment.py           #   the FULL engine (Ponds + Ripples, pull + push) — the Catchment's brain
@@ -107,6 +108,17 @@ The **data plane** is how a Pond *publishes* its tables for, and *reads* them fr
 - **`ParquetDataPlane`** (`DUCKSTRING_DATA_PLANE=parquet`): each table → one `{table}.parquet` in the line's `data/` dir, overwritten wholesale per run (atomic tmp+replace). The lightest/offline opt-out.
 
 The interface threads a write **`mode`** (`overwrite` now; `append`/`merge` reserved → raise) and a per-run **`f`** stamp, and reserves the **`_duckstring_*`** system-column namespace (rejected at publish). **As-of read by `f`** is wired as the seam (`read_select(..., as_of=)` resolves the snapshot whose stamped `f <= as_of`); Phase-1 default is latest. Routed through it: executor export, local-runner export+seed, `Pond.read_table` foreign reads, `/api/data`. The duct/draw raw-Parquet *transfer* (poller.py/draw.py) is intentionally left on the flat sidecar. **Tests**: `test_runtime`'s broad e2e suite is pinned to `parquet` (fast/offline); the Iceberg e2e is `test_demo_chain_runs_on_iceberg_end_to_end` + `test_iceberg.py`. See `plans/data-plane-iceberg.md`.
+
+## Trickle — incremental I/O (`trickle_io.py`; core built, advanced phases deferred — see `plans/trickle.md`)
+
+A **Trickle** is a Ripple variant for **incremental** work: it preserves history so a consumer reads only the rows that changed in the window `(pond.previous_f, pond.f]` — a small **delta out**. It delivers incremental **I/O**, **not** incremental **compute** (joins still recompute fully; the win is the small write/read). Declared `@trickle(pk=...)` (a Ripple in every orchestration respect; differs only in I/O). The module is **`trickle_io.py`**, not `trickle.py`, so it doesn't shadow the `@trickle` decorator the package exports.
+
+- **System columns** (reserved `_duckstring_*`): `_duckstring_f` (freshness, stamped on every history/changelog row), `_duckstring_op` (`upsert`/`delete` in a merge changelog), `_duckstring_hash` (change-detection digest, in a merge main). `_duckstring_f` is read as a **content predicate** (`WHERE _duckstring_f > previous_f AND _duckstring_f <= f`), **never a snapshot cursor** — so the core needs **no Iceberg incremental-scan path**: Trickle state lives in the **registry** (history/main + `__changelog`) and is published **wholesale** each run; the consumer's window read prunes.
+- **Write API** (on the Pond handle): `append_table(name, rel, *, pk=)` — insert-only history (no diff, no deletes; idempotent at `f`). `merge_table(name, rel, *, comprehensive=True, deletes=None, pk=)` — clean **main** (one row per PK, no tombstones) + append-only **changelog** CDC stream. `comprehensive=True` (default, safe) diffs the full new state vs the prior main (via `_duckstring_hash`) to derive insert/update/delete; `comprehensive=False` (expert) applies a supplied partial change-set + explicit `deletes` (**under-merge silently corrupts** → comprehensive is the default). pk defaults from `@trickle(pk=...)`, threaded into the Pond by the executor/local-runner.
+- **Read API**: `pond.read_delta("src.table")` → a **`Delta`** (`.upserts` / `.deletes` / `.keys()`) over the window. Append source → history window; merge source → changelog window **collapsed per PK to the latest op** (handles delete-then-re-add); overwrite source / bootstrap (`previous_f=NEVER`) / coverage-miss → **full read** (the safety fallback). `read_table` of a Trickle source is the **clean current state** (system columns stripped).
+- **Partial-path helpers** (key-set bookkeeping, no imposed compute layer): `Delta.keys()`, `pond.keys_joining(spine_ref, delta, on=…)` (spine PKs a dimension change ripples to; `on` equi-joins the spine to the delta source's **full PK** — non-PK-arity rejected, which is what keeps delete propagation sound), `KeySet.union`/`.dropped(recomputed)` (deletes = affected EXCEPT recomputed[pk]).
+- **Mode/PK travel** via a `_trickle.json` **sidecar** in the published `data_dir` (a cross-Pond reader has no access to the producer's registry) + a registry meta table `_duckstring_trickle` (hidden from the publish set; `registry_tables`/`extract_schema` exclude `_duckstring_*` tables/columns and `__changelog` companions). Data-plane `export` is Trickle-aware via `dataplane.publish_plan` (validates non-Trickle tables, exempts Trickle ones, writes the sidecar) — call sites unchanged.
+- **Deferred** (correctness never depends on them): true small-write *file* output + Iceberg manifest pruning, file-drop **retention/compaction**, **incremental draws**, the `pond.trickle(...)` **builder DSL**, `affected_groups`, `pond.state_dir`. The deferred phases are speced in `plans/trickle.md`.
 
 ## Version contract (`schema_contract.py`; Phase 2 — implemented)
 

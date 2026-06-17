@@ -1,9 +1,27 @@
 # Trickle: incremental I/O and transfer (not incremental compute)
 
-Status: **designed, unbuilt**. The full design from the bed-down sessions. Builds on the Iceberg data
-plane in `data-plane-iceberg.md` — Trickle **requires the deferred Iceberg backend** (snapshots,
-schema metadata, the `_duckstring_*` namespace, `pond.previous_f`, the mode-capable `DataPlane`
-interface in `src/duckstring/dataplane.py`). Build that first.
+Status: **core built (single-Catchment), advanced phases deferred.** Implemented in
+`src/duckstring/trickle_io.py` (the runtime — append/merge writes, change detection, `read_delta`
+windowing, the partial-path helpers) + the `@trickle` decorator and `pond.append_table` /
+`merge_table` / `read_delta` / `keys_joining` surface in `core.py`, wired through the executor, local
+runner, and data-plane publish (`tests/test_trickle.py`). The module is named `trickle_io.py`, not
+`trickle.py`, to avoid shadowing the `@trickle` decorator exported from the package.
+
+**Key simplification vs. this design:** the semantics rest on `_duckstring_f` as a **content predicate**
+(as the design intends), so the core does **not** need the Iceberg snapshot-incremental path. Trickle
+state lives in the Pond **registry** (history table / merge main + `__changelog`) and is published
+**wholesale** each run; the window read prunes on the consumer side. This is correct and plane-agnostic
+(tested on Parquet), and dodges the immature pyiceberg incremental-scan API entirely.
+
+**Still deferred (noted at each section below):** true small-write incremental *file* output (Iceberg
+append-commits + manifest-stat pruning), file-drop **retention/compaction**, **incremental draws**
+(cross-Catchment transfer — `routes/draw.py` still ships get-all), the `pond.trickle(...)` **builder
+DSL**, the `affected_groups` aggregation sibling, and `pond.state_dir`. Correctness never depends on the
+deferred parts (the full-read fallback covers retention; wholesale publish covers transfer). The
+original design text is kept below as the spec for those phases. One known narrow gap: a comprehensive
+merge that crashes in the microsecond between the main overwrite and the changelog window-replace can
+lose that run's changelog rows — the Iceberg snapshot model (immutable prior snapshot for the diff)
+closes it.
 
 ## Scope — what Trickle is and is not
 

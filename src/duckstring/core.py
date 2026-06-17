@@ -45,6 +45,31 @@ def ripple(func=None, *, parents=None, name=None):
     return decorator
 
 
+def trickle(func=None, *, pk=None, parents=None, name=None):
+    """Decorator that registers a function as a **Trickle** — a history-preserving (incremental) Ripple.
+
+    A Trickle is orchestrated exactly like a Ripple (a node in the package graph); it differs only in
+    *I/O*: it writes via ``pond.append_table`` / ``pond.merge_table`` (history + changelog) and reads a
+    source's change-set via ``pond.read_delta`` instead of a wholesale overwrite. ``pk`` declares the
+    output primary key (identity for merge + downstream delta consumption) — required for a merge write,
+    and the default a write inherits when it doesn't pass its own ``pk=``.
+
+    Usage:
+        @trickle(pk=("order_id", "line_no"))
+        def priced_line(pond): ...
+    """
+    from .trickle_io import normalize_pk
+
+    def make(f):
+        _RIPPLES.append({
+            "func": f, "name": name or f.__name__, "parents": parents or [],
+            "trickle": {"pk": normalize_pk(pk)},
+        })
+        return f
+
+    return make(func) if func is not None else make
+
+
 def collect_ripples() -> list[dict]:
     """Drain and return the current ripple registry. Used by the catchment at deploy time."""
     result = list(_RIPPLES)
@@ -306,6 +331,7 @@ class Pond:
     def __init__(
         self, name: str, version: str, con, root,
         source_majors: dict[str, int] | None = None, f=None, previous_f=None,
+        trickle: dict | None = None,
     ) -> None:
         from .engine.core import NEVER
 
@@ -316,6 +342,9 @@ class Pond:
         # Which major line of each Source this Pond consumes (from its pond.toml [sources] pins).
         # None/missing falls back to the flat puddles layout (local runs have no majors).
         self.source_majors = source_majors or {}
+        # Trickle metadata for the running ripple (``{"pk": (...)}``) — the default PK its incremental
+        # writes inherit. ``{}`` for a plain Ripple (the incremental write API still works if given a pk).
+        self._trickle = trickle or {}
         # The run's freshness F (tz-aware UTC datetime): the ideal watermark/provenance stamp —
         # stable across crash recovery and retries, which all re-run at the same F (wall-clock
         # would differ per attempt). Local (puddle) runs stamp the run's start time.
@@ -342,21 +371,30 @@ class Pond:
 
         retry_on_lock(_write)  # a concurrent write conflict queues + retries rather than failing
 
+    def _source_data_dir(self, source_pond: str):
+        """The published ``data_dir`` for a foreign Source, honouring this Pond's major pin (or the flat
+        puddles layout in local runs, which have no majors)."""
+        from pathlib import Path as _Path
+
+        base = _Path(self.root) / "ponds" / source_pond
+        major = self.source_majors.get(source_pond)
+        return base / f"m{major}" / "data" if major is not None else base / "data"
+
     def read_table(self, ref: str):
         """A relation over a table — own (``"name"``) or a Source's (``"source.table"``). A Source
         table is also registered as a temp view under its own name, so SQL can reference it directly
         (``FROM table``). Prefer that over naming the returned relation's Python variable in SQL:
-        that resolves by scanning Python frames, which is unreliable under the threaded executor."""
+        that resolves by scanning Python frames, which is unreliable under the threaded executor.
+
+        For a Trickle source this is the **clean current state** (the merge *main* / the full append
+        history); its ``_duckstring_*`` system columns are projected out so the read is user-facing."""
         if "." in ref:
             source_pond, table = ref.split(".", 1)
             if source_pond != self.name:
-                from pathlib import Path as _Path
-
                 from .dataplane import get_data_plane
-                base = _Path(self.root) / "ponds" / source_pond
-                # Deployed Sources publish per major line; puddles (local runs) are flat.
-                major = self.source_majors.get(source_pond)
-                data_dir = base / f"m{major}" / "data" if major is not None else base / "data"
+                from .trickle_io import _strip_system
+
+                data_dir = self._source_data_dir(source_pond)
                 dp = get_data_plane()
                 dp.prepare(self.con)  # ready the connection to read the Source's published format
                 try:
@@ -366,7 +404,7 @@ class Pond:
                         f"No exported data found for '{source_pond}.{table}' — "
                         f"has {source_pond} completed a successful run?"
                     ) from exc
-                rel = self.con.sql(select)
+                rel = _strip_system(self.con.sql(select))
                 try:
                     rel.create_view(table, replace=True)
                 except Exception:
@@ -374,6 +412,85 @@ class Pond:
                 return rel
             return self.con.sql(f'SELECT * FROM "{table}"')
         return self.con.sql(f'SELECT * FROM "{ref}"')
+
+    # ─── Trickle: incremental I/O (see duckstring.trickle_io / plans/trickle.md) ───
+
+    def _resolve_pk(self, pk):
+        from .trickle_io import normalize_pk
+
+        resolved = normalize_pk(pk) if pk is not None else tuple(self._trickle.get("pk", ()))
+        return resolved
+
+    def append_table(self, name: str, relation, *, pk=None) -> None:
+        """Append ``relation`` to the history table ``name`` (insert-only; each row stamped with the
+        run's freshness ``pond.f``). The fast path for event/fact logs whose identity is unique by
+        construction — no PK check, no diff, no deletes; idempotent on replay at the same ``f``."""
+        from . import trickle_io as trickle
+
+        trickle.append_table(self.con, name, relation, self.f, self._resolve_pk(pk))
+
+    def merge_table(self, name: str, relation, *, comprehensive: bool = True, deletes=None, pk=None) -> None:
+        """Upsert ``relation`` into the clean main table ``name`` + its changelog, stamped ``pond.f``.
+
+        ``comprehensive=True`` (default, safe): ``relation`` is the *complete* current state — Duckstring
+        diffs it against the prior state to derive inserts/updates/deletes automatically. ``comprehensive
+        =False`` (expert): ``relation`` is a *partial* change-set and ``deletes`` the explicit PK removals
+        (over-merge is idempotent-safe; **under-merge silently corrupts** — hence comprehensive default)."""
+        from . import trickle_io as trickle
+
+        trickle.merge_table(
+            self.con, name, relation, self.f, self._resolve_pk(pk),
+            comprehensive=comprehensive, deletes=deletes,
+        )
+
+    def read_delta(self, ref: str):
+        """A Source's change-set over this run's window ``(pond.previous_f, pond.f]`` — a
+        :class:`~duckstring.trickle_io.Delta` (``.upserts`` / ``.deletes`` / ``.keys()``). Resolves the
+        source's declared mode (append → history window; merge → changelog collapsed per PK; overwrite →
+        full read) and falls back to a full read on a coverage miss / bootstrap."""
+        from . import trickle_io as trickle
+        from .dataplane import get_data_plane
+
+        if "." not in ref:
+            raise ValueError(f"read_delta needs a 'source.table' reference, got '{ref}'")
+        source_pond, table = ref.split(".", 1)
+        data_dir = self._source_data_dir(source_pond)
+        dp = get_data_plane()
+        dp.prepare(self.con)
+        return trickle.read_delta(self.con, data_dir, table, self.previous_f, self.f, dp=dp)
+
+    def keys_joining(self, spine_ref: str, delta, *, on):
+        """The PKs of the full Source ``spine_ref`` whose ``on`` column(s) match ``delta.keys()`` — i.e.
+        which of the spine's output keys a change in this dimension ripples to (the partial-path
+        ``comprehensive=False`` helper). ``on`` equi-joins the spine column(s) to the **delta source's
+        full PK** (delete propagation depends on the delta side being its PK); a non-PK-arity ``on`` is
+        rejected."""
+        from .trickle_io import KeySet, load_sidecar
+
+        on_cols = (on,) if isinstance(on, str) else tuple(on)
+        source_pond, table = spine_ref.split(".", 1)
+        meta = load_sidecar(self._source_data_dir(source_pond)).get(table, {})
+        spine_pk = tuple(meta.get("pk", ()))
+        if not spine_pk:
+            raise ValueError(f"keys_joining: spine '{spine_ref}' has no declared primary key")
+        keyset = delta.keys()  # a KeySet over the delta source's PK
+        if len(on_cols) != len(keyset.pk):
+            raise ValueError(
+                f"keys_joining: 'on' has {len(on_cols)} column(s) but the delta source's PK has "
+                f"{len(keyset.pk)} — 'on' must equi-join the spine to the delta source's full PK"
+            )
+        spine = self.read_table(spine_ref)
+        sview, dview = "_duckstring_ds_spine", "_duckstring_ds_delta_keys"
+        spine.create_view(sview, replace=True)
+        keyset.create_view(dview)
+        cond = " AND ".join(
+            f's."{sc}" = d."{dc}"' for sc, dc in zip(on_cols, keyset.pk, strict=True)
+        )
+        pk_sel = ", ".join(f's."{c}"' for c in spine_pk)
+        rel = self.con.sql(
+            f'SELECT DISTINCT {pk_sel} FROM "{sview}" s JOIN "{dview}" d ON {cond}'
+        )
+        return KeySet(self.con, rel, spine_pk)
 
 
 class Ripple:

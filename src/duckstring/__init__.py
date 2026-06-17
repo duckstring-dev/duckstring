@@ -9,6 +9,7 @@ from .core import (
     Trickle,
     puddle,
     ripple,
+    trickle,
 )
 
 try:
@@ -24,5 +25,6 @@ __all__ = [
     "Trickle",
     "puddle",
     "ripple",
+    "trickle",
     "__version__",
 ]

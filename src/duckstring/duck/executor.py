@@ -37,20 +37,25 @@ def _import_ripples(source_dir: Path) -> list[dict]:
     return collect_ripples()
 
 
-def _load_ripple_func(source_path: str, root: str, ripple_name: str):
+def _load_ripple(source_path: str, root: str, ripple_name: str):
+    """Load ``ripple_name``'s function and its Trickle metadata (``{"pk": (...)}`` or ``None``) from the
+    deployed code. Importing here (lazily, per run) keeps executor construction free of the Pond's code,
+    so an executor can be stood up for export-only paths that never import a ripple."""
     from ..core import collect_ripples, import_pond_module, pond_entrypoints, read_pond_toml
 
     source_dir = Path(root) / source_path
     with _import_lock:
         ripples_entry, _ = pond_entrypoints(read_pond_toml(source_dir))
         mod = import_pond_module(source_dir, ripples_entry)
-        collect_ripples()
-        return getattr(mod, ripple_name)
+        ripples = collect_ripples()
+        meta = next((r.get("trickle") for r in ripples if r["name"] == ripple_name), None)
+        return getattr(mod, ripple_name), meta
 
 
 def _run_ripple(
     func, pond_name: str, version: str, con, root_str: str,
     source_majors: dict[str, int], f: datetime | None, previous_f: datetime | None,
+    trickle: dict | None = None,
 ) -> None:
     from ..core import Pond
 
@@ -60,7 +65,7 @@ def _run_ripple(
     try:
         func(Pond(
             name=pond_name, version=version, con=con, root=Path(root_str),
-            source_majors=source_majors, f=f, previous_f=previous_f,
+            source_majors=source_majors, f=f, previous_f=previous_f, trickle=trickle,
         ))
     finally:
         con.close()
@@ -128,10 +133,10 @@ class RippleExecutor:
 
         def _task():
             timing["started"] = datetime.now(timezone.utc)
-            func = _load_ripple_func(self.source_path, str(self.root), ripple_name)
+            func, trickle = _load_ripple(self.source_path, str(self.root), ripple_name)
             _run_ripple(
                 func, self.pond_name, self.version, self._cursor(), str(self.root),
-                self.source_majors, f, previous_f,
+                self.source_majors, f, previous_f, trickle,
             )
 
         fut = self._pool.submit(_task)

@@ -25,12 +25,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .dataplane import (
-    DataPlane,
-    ParquetDataPlane,
-    registry_tables,
-    validate_publish,
-)
+from .dataplane import DataPlane, ParquetDataPlane
 
 _NAMESPACE = "pond"  # the single namespace within each per-line catalog
 F_PROP = "duckstring.f"  # snapshot summary property carrying the Pond Run's freshness
@@ -72,13 +67,13 @@ class IcebergDataPlane(DataPlane):
     # ─── write ──────────────────────────────────────────────────────────────────
 
     def export(self, con, data_dir: Path, *, mode: str = "overwrite", f=None) -> None:
-        from .dataplane import _check_mode
+        from .dataplane import _check_mode, publish_plan
 
         _check_mode(mode)
         data_dir = Path(data_dir)
-        tables = registry_tables(con)
-        for table in tables:
-            validate_publish(con, table)  # reject reserved _duckstring_* columns before any write
+        # Validates the publish set (Trickle tables exempt from the reserved-column check), writes the
+        # Trickle mode/PK sidecar, and returns the tables to commit — all before any write.
+        tables = publish_plan(con, data_dir)
         # Flat-Parquet sidecar first (also the consistent fallback if the Iceberg commit fails).
         self._parquet.export(con, data_dir, mode=mode, f=f)
         cat = self._catalog(data_dir)
