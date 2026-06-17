@@ -5,7 +5,11 @@ description: Process only new rows each run — the self-read pattern, why it's 
 
 # Incremental Ripples
 
-A Ripple recomputes its tables each run — but nothing says it must recompute them *from scratch*. A Pond's working database persists between runs, so a Ripple can read its own previous output, work out what's new, and append. This page is the supported pattern for that today; a first-class incremental construct (**Trickle**, which moves the watermark bookkeeping into the framework) is planned but not yet built.
+A Ripple recomputes its tables each run — but nothing says it must recompute them *from scratch*. A Pond's working database persists between runs, so a Ripple can read its own previous output, work out what's new, and append.
+
+:::tip Prefer a Trickle for most incremental work
+Duckstring has a first-class incremental construct — the [**Trickle**](../concepts/trickle.md) — which moves the watermark and change-detection bookkeeping into the framework (see [Incremental Processing](trickle.md)). Reach for the hand-rolled pattern on this page when you want the logic explicit, or for a shape a Trickle doesn't cover. The two share the same `pond.f` / `pond.previous_f` foundation, so there's nothing to unlearn moving between them.
+:::
 
 ## The self-read pattern
 
@@ -88,7 +92,7 @@ Two things to keep in mind:
 - **The upper bound `f` matters** — read *up to* your own freshness, not the Source's latest. A Source can independently run ahead of your coordination epoch; the closed top is the exactly-once ceiling that stops you over-reading rows from a future the run hasn't reached.
 - Both bounds come from **your** freshness, not a per-edge watermark — which is why this composes without bookkeeping.
 
-This is the protocol the planned **Trickle** construct will formalise (windowing the read automatically, and owning the stamp column under the reserved `_duckstring_*` namespace); using `pond.f` / `pond.previous_f` now means nothing to unlearn later.
+This is exactly the protocol a [**Trickle**](trickle.md) formalises — windowing the read automatically with `read_delta`, and owning the stamp column under the reserved `_duckstring_*` namespace — so doing it by hand here means nothing to unlearn if you adopt one.
 
 ## Why this is replay-safe
 
@@ -110,4 +114,4 @@ Sometimes you want to rebuild from nothing — after a logic fix that changes hi
 - **Locally**, `duckstring pond run --fresh` ignores the self-puddle seed and starts cold.
 - **On a deployed Pond** there is no built-in full-refresh verb yet. The operational route: make sure the Pond is idle (`duckstring control sleep`, and `kill` if a run is in flight), delete its working database — `ponds/{name}/m{major}/registry.duckdb` under the Catchment root — then `duckstring control force`. The next run finds no table and takes the cold-start branch. The published Parquet snapshot stays in place until that run completes, so Sinks keep reading consistent data throughout.
 
-A `--full-refresh` control verb that does this safely in one step is on the roadmap alongside Trickle.
+A `--full-refresh` control verb that does this safely in one step is on the roadmap. (A [Trickle](trickle.md) rebuilds the same way — clear its working database and force a run, and the cold-start branch is the comprehensive first run.)

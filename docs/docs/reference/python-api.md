@@ -135,6 +135,73 @@ The handle `p`:
 
 Returning a relation is shorthand for `p.write_table(relation)`; returning a path string for `p.write_path(path)`. Puddle code never runs on a Catchment — only `pond hydrate` imports it.
 
+## Trickle: incremental I/O
+
+A [Trickle](../concepts/trickle.md) is a history-preserving Ripple. Declare it with `@trickle` and write through `pond.append_table` / `pond.merge_table` instead of `write_table`; consumers read change-sets with `pond.read_delta`. The [Incremental Processing guide](../guides/trickle.md) is the worked walkthrough; this is the surface.
+
+### `@trickle`
+
+```python
+from duckstring import trickle
+
+@trickle(pk="order_id")
+def ingest(pond): ...
+
+@trickle(pk=("order_id", "line_no"), parents=[ingest])
+def priced_line(pond): ...
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `pk` | — | The output primary key (a column name or tuple) — identity for merge and for downstream delta reads. Required for a `merge_table`; the default a write inherits when it doesn't pass its own `pk=`. |
+| `parents` | `[]` | As [`@ripple`](#ripple). |
+| `name` | the function's name | As `@ripple`. |
+
+A Trickle is orchestrated exactly like a Ripple — it differs only in I/O.
+
+### `pond.append_table(name, relation, *, pk=None, retain_t=None, retain_n=None)`
+
+Append `relation` to the insert-only history table `name`; each row is stamped with `pond.f`. No diff, no uniqueness check, no deletes. Idempotent on replay at the same freshness. The history table is both the full read and the delta source.
+
+### `pond.merge_table(name, relation, *, comprehensive=True, deletes=None, pk=None, retain_t=None, retain_n=None)`
+
+Upsert `relation` into the clean current-state **main** table `name`, recording the changes in its `__changelog` companion.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `comprehensive` | `True` | `relation` is the *complete* current state — Duckstring diffs it against the previous state to derive inserts/updates/deletes. The safe default. |
+| `deletes` | `None` | Only with `comprehensive=False`: a relation (or `KeySet`) of primary keys to remove. |
+| `pk` | the `@trickle` default | The merge identity. |
+| `retain_t` / `retain_n` | `None` | Bound the kept changelog: a `timedelta` and/or a run count. Off by default (keep everything); a lag SLA, never a correctness gate. |
+
+With `comprehensive=False`, `relation` is a *partial* set of changed rows. **Under-supplying changes or deletes silently corrupts data** — prefer the default, or the builder below.
+
+### `pond.read_delta(ref)` → `Delta`
+
+A Source's change-set over this run's window `(pond.previous_f, pond.f]`. Resolves the Source's mode automatically (append history window; merge changelog collapsed per key; an overwrite Ripple → a full read), and falls back to a full read on a first run or a coverage miss.
+
+| Attribute / method | Meaning |
+|---|---|
+| `delta.upserts` | The changed rows (new + updated), user columns only — a DuckDB relation. |
+| `delta.deletes` | The removed primary keys — a relation. |
+| `delta.keys()` | `upserts ∪ deletes` as a `KeySet`. |
+
+### The builder — `pond.trickle(spine_ref)`
+
+A fluent builder over Trickle sources that wires an incremental join and *can't forget an edge* (it sees the whole graph). Chain `.join(pond.trickle(dim), on=…)` / `.filter(predicate)` / `.select(projection)`, then `.merge(name, *, pk=None, retain_t=None, retain_n=None)`. The spine owns the output key; dimensions are `s1`, `s2`, … in the projection. The op set is closed — unsupported operations raise at build time. See the [guide](../guides/trickle.md#the-builder-pondtrickle).
+
+### Partial-path helpers
+
+For `comprehensive=False` by hand. They operate on key-sets, imposing no compute layer.
+
+| Helper | Returns |
+|---|---|
+| `pond.keys_joining(spine_ref, delta, on=…)` | The spine keys a dimension `delta` ripples to (`on` equi-joins the spine to the dimension's full key; a non-key join is rejected). A `KeySet`. |
+| `pond.affected_groups(delta, by=…)` | The group keys a `delta` touches, for re-aggregation. A `KeySet`. |
+| `KeySet.union(other)` | The union, deduplicated. |
+| `KeySet.dropped(recomputed)` | The deletes — affected keys absent from `recomputed` (a relation). |
+| `KeySet.create_view(name)` / `KeySet.relation` | Register as a view / the underlying relation. |
+
 ## Execution environment
 
 Facts about how Ripple code runs, occasionally relevant when writing it:
