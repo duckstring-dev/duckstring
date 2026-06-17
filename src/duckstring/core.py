@@ -421,26 +421,34 @@ class Pond:
         resolved = normalize_pk(pk) if pk is not None else tuple(self._trickle.get("pk", ()))
         return resolved
 
-    def append_table(self, name: str, relation, *, pk=None) -> None:
+    def append_table(self, name: str, relation, *, pk=None, retain_t=None, retain_n=None) -> None:
         """Append ``relation`` to the history table ``name`` (insert-only; each row stamped with the
         run's freshness ``pond.f``). The fast path for event/fact logs whose identity is unique by
-        construction — no PK check, no diff, no deletes; idempotent on replay at the same ``f``."""
+        construction — no PK check, no diff, no deletes; idempotent on replay at the same ``f``.
+        ``retain_t`` (a ``timedelta``) / ``retain_n`` (a count) opt into bounding the kept history."""
         from . import trickle_io as trickle
 
-        trickle.append_table(self.con, name, relation, self.f, self._resolve_pk(pk))
+        trickle.append_table(
+            self.con, name, relation, self.f, self._resolve_pk(pk),
+            retain_t=retain_t, retain_n=retain_n,
+        )
 
-    def merge_table(self, name: str, relation, *, comprehensive: bool = True, deletes=None, pk=None) -> None:
+    def merge_table(
+        self, name: str, relation, *, comprehensive: bool = True, deletes=None, pk=None,
+        retain_t=None, retain_n=None,
+    ) -> None:
         """Upsert ``relation`` into the clean main table ``name`` + its changelog, stamped ``pond.f``.
 
         ``comprehensive=True`` (default, safe): ``relation`` is the *complete* current state — Duckstring
         diffs it against the prior state to derive inserts/updates/deletes automatically. ``comprehensive
         =False`` (expert): ``relation`` is a *partial* change-set and ``deletes`` the explicit PK removals
-        (over-merge is idempotent-safe; **under-merge silently corrupts** — hence comprehensive default)."""
+        (over-merge is idempotent-safe; **under-merge silently corrupts** — hence comprehensive default).
+        ``retain_t`` / ``retain_n`` opt into bounding the kept changelog (the main is never trimmed)."""
         from . import trickle_io as trickle
 
         trickle.merge_table(
             self.con, name, relation, self.f, self._resolve_pk(pk),
-            comprehensive=comprehensive, deletes=deletes,
+            comprehensive=comprehensive, deletes=deletes, retain_t=retain_t, retain_n=retain_n,
         )
 
     def read_delta(self, ref: str):
@@ -465,7 +473,7 @@ class Pond:
         ``comprehensive=False`` helper). ``on`` equi-joins the spine column(s) to the **delta source's
         full PK** (delete propagation depends on the delta side being its PK); a non-PK-arity ``on`` is
         rejected."""
-        from .trickle_io import KeySet, load_sidecar
+        from .trickle_io import KeySet, load_sidecar, unique_name
 
         on_cols = (on,) if isinstance(on, str) else tuple(on)
         source_pond, table = spine_ref.split(".", 1)
@@ -479,18 +487,51 @@ class Pond:
                 f"keys_joining: 'on' has {len(on_cols)} column(s) but the delta source's PK has "
                 f"{len(keyset.pk)} — 'on' must equi-join the spine to the delta source's full PK"
             )
-        spine = self.read_table(spine_ref)
-        sview, dview = "_duckstring_ds_spine", "_duckstring_ds_delta_keys"
-        spine.create_view(sview, replace=True)
+        sview, dview = unique_name("spine"), unique_name("dkeys")
+        self.read_table(spine_ref).create_view(sview, replace=True)
         keyset.create_view(dview)
         cond = " AND ".join(
             f's."{sc}" = d."{dc}"' for sc, dc in zip(on_cols, keyset.pk, strict=True)
         )
         pk_sel = ", ".join(f's."{c}"' for c in spine_pk)
-        rel = self.con.sql(
+        # Materialise the (small) key result into a uniquely-named temp so it doesn't re-bind to a later
+        # keys_joining call's transient views (a second join edge would otherwise corrupt the first).
+        result = unique_name("kj")
+        self.con.execute(
+            f'CREATE OR REPLACE TEMP TABLE "{result}" AS '
             f'SELECT DISTINCT {pk_sel} FROM "{sview}" s JOIN "{dview}" d ON {cond}'
         )
-        return KeySet(self.con, rel, spine_pk)
+        return KeySet(self.con, self.con.sql(f'SELECT * FROM "{result}"'), spine_pk)
+
+    def trickle(self, spine_ref: str):
+        """Start a :class:`~duckstring.trickle_builder.TrickleBuilder` rooted at the **spine** source
+        ``spine_ref`` (the one owning the output PK) — the optional sugar over the partial-merge helpers.
+        Chain ``.join(pond.trickle(dim), on=…)`` / ``.filter(...)`` / ``.select(...)`` then ``.merge(name)``;
+        the builder propagates every join edge automatically, so (unlike hand-composed ``keys_joining``)
+        it can't silently under-merge. Unsupported ops raise at build time."""
+        from .trickle_builder import TrickleBuilder
+
+        return TrickleBuilder(self, spine_ref)
+
+    def affected_groups(self, delta, *, by):
+        """The distinct ``by`` group keys touched by ``delta`` — the aggregation sibling of
+        :meth:`keys_joining`. Re-aggregate just these groups from the full input, then merge.
+
+        Upserts carry their ``by`` columns; deletes carry only the PK, so a delete contributes its group
+        **only when ``by`` ⊆ the delta source's PK** (then the deleted row's group key is known). If ``by``
+        isn't a subset of the PK, deletes can't supply their group here — a deletion that empties a group
+        not otherwise touched would be missed, so use ``by`` ⊆ PK or fall back to ``comprehensive=True``."""
+        from .trickle_io import DeltaError, KeySet
+
+        by_cols = (by,) if isinstance(by, str) else tuple(by)
+        missing = [c for c in by_cols if c not in delta.upserts.columns]
+        if missing:
+            raise DeltaError(f"affected_groups: by column(s) {missing} are not in the delta's upserts")
+        proj = ", ".join(f'"{c}"' for c in by_cols)
+        groups = delta.upserts.project(proj)
+        if set(by_cols) <= set(delta.pk):  # deletes carry the PK → their group key is known
+            groups = groups.union(delta.deletes.project(proj))
+        return KeySet(self.con, groups.distinct(), by_cols)
 
 
 class Ripple:

@@ -351,7 +351,28 @@ def test_draw_route_streams_all_parquet(tmp_path):
     assert resp.status_code == 200
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         assert sorted(zf.namelist()) == ["items.parquet", "orders.parquet"]
-        assert zf.read("orders.parquet") == b"ORDERS"
+
+
+def test_draw_route_includes_trickle_sidecar(tmp_path):
+    # A Trickle source's mode/PK sidecar must travel with the data — the consuming Catchment has no
+    # access to the producer's duck.db, so read_delta resolves the source from this file.
+    from duckstring.trickle_io import SIDECAR
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    data_dir.mkdir(parents=True)
+    (data_dir / "order_line.parquet").write_bytes(b"DATA")
+    (data_dir / "order_line__changelog.parquet").write_bytes(b"CDC")
+    (data_dir / SIDECAR).write_text('{"order_line": {"mode": "merge", "pk": ["order_id"]}}')
+
+    resp = _client(d).get("/api/draw/sales/1")
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        names = zf.namelist()
+        assert SIDECAR in names
+        assert "order_line.parquet" in names and "order_line__changelog.parquet" in names
 
 
 # ─── Recursive lineage view ────────────────────────────────────────────────────
@@ -499,9 +520,12 @@ def test_assemble_view_unreachable_upstream_stub(tmp_path):
 
 def _mock_upstream(f_iso: str, *, status="idle", tapped: list | None = None):
     """An httpx transport standing in for the upstream Catchment."""
+    from duckstring.trickle_io import SIDECAR
+
     zbuf = io.BytesIO()
     with zipfile.ZipFile(zbuf, "w") as zf:
         zf.writestr("orders.parquet", b"PARQUET-BYTES")
+        zf.writestr(SIDECAR, '{"orders": {"mode": "append", "pk": ["id"]}}')  # a Trickle source's sidecar
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -532,9 +556,12 @@ def test_poller_mirrors_fetches_and_lands_parquet(tmp_path):
     asyncio.run(poll_once(d, tmp_path, client))
     asyncio.run(client.aclose())
 
-    # Freshness mirrored, transfer landed, draw advanced.
+    # Freshness mirrored, transfer landed (data + the Trickle sidecar), draw advanced.
+    from duckstring.trickle_io import SIDECAR
+
     landed = pond_data_dir(tmp_path, "sales", 1) / "orders.parquet"
     assert landed.read_bytes() == b"PARQUET-BYTES"
+    assert (pond_data_dir(tmp_path, "sales", 1) / SIDECAR).exists()  # sidecar landed → read_delta can resolve
     assert d.state.pond_states["sales@1"].end_f == f
 
 

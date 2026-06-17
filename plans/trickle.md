@@ -13,15 +13,23 @@ state lives in the Pond **registry** (history table / merge main + `__changelog`
 **wholesale** each run; the window read prunes on the consumer side. This is correct and plane-agnostic
 (tested on Parquet), and dodges the immature pyiceberg incremental-scan API entirely.
 
-**Still deferred (noted at each section below):** true small-write incremental *file* output (Iceberg
-append-commits + manifest-stat pruning), file-drop **retention/compaction**, **incremental draws**
-(cross-Catchment transfer — `routes/draw.py` still ships get-all), the `pond.trickle(...)` **builder
-DSL**, the `affected_groups` aggregation sibling, and `pond.state_dir`. Correctness never depends on the
-deferred parts (the full-read fallback covers retention; wholesale publish covers transfer). The
-original design text is kept below as the spec for those phases. One known narrow gap: a comprehensive
-merge that crashes in the microsecond between the main overwrite and the changelog window-replace can
-lose that run's changelog rows — the Iceberg snapshot model (immutable prior snapshot for the diff)
-closes it.
+**Now also built (second pass):** **retention** (`retain_t`/`retain_n` on `append_table`/`merge_table` —
+opt-in row trimming at write time, advancing the coverage watermark; `min(_duckstring_f)` over what
+remains is the watermark, so no separate store), the **`pond.trickle(...)` builder DSL**
+(`trickle_builder.py` — closed `Source`/`Join`/`Filter`/`Project` op set, correct-by-construction,
+build-time errors for snowflakes / non-PK join keys / missing `.select`), the **`affected_groups`**
+aggregation sibling, and the **cross-Catchment sidecar transfer** (the `_trickle.json` mode/PK sidecar
+now travels with the draw zip — without it a drawn Trickle source was unresolvable downstream, a real
+correctness gap, not just an optimization).
+
+**Still deferred:** true small-write incremental *file* output (Iceberg append-commits + manifest-stat
+pruning) and the **incremental-draw window** (the draw still ships the *whole* changelog+main, which is
+correct — the consumer windows on its own side — just not minimal-transfer), plus `pond.state_dir`.
+Correctness never depends on these (full-read fallback covers retention; wholesale publish/draw covers
+transfer). The original design text below is the spec for those phases. One known narrow gap: a
+comprehensive merge that crashes in the microsecond between the main overwrite and the changelog
+window-replace can lose that run's changelog rows — the Iceberg snapshot model (immutable prior snapshot
+for the diff) closes it.
 
 ## Scope — what Trickle is and is not
 

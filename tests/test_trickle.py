@@ -345,3 +345,166 @@ def test_trickle_decorator_pk_default_via_local_runner(tmp_path):
         f"SELECT id, v, _duckstring_op FROM ({ParquetDataPlane().read_select(out, 'loud__changelog')}) ORDER BY id"
     ).fetchall()
     assert clog == [(1, "A", "upsert"), (2, "B", "upsert")]
+
+
+# ─── retention (lag SLA; correctness never depends on it) ────────────────────────
+
+
+def test_retention_retain_n_keeps_newest_runs(reg):
+    for h, v in [(1, "a"), (2, "b"), (3, "c"), (4, "d")]:
+        T.merge_table(reg, "dim", _state(reg, [(1, v)]), ts(h), ("id",), comprehensive=True, retain_n=2)
+    kept = [r[0] for r in reg.sql("SELECT DISTINCT _duckstring_f FROM dim__changelog ORDER BY 1").fetchall()]
+    assert kept == [ts(3), ts(4)]  # only the newest 2 runs survive
+
+
+def test_retention_retain_t_drops_old(reg):
+    from datetime import timedelta
+
+    T.merge_table(reg, "dim", _state(reg, [(1, "a")]), ts(1), ("id",), comprehensive=True, retain_t=timedelta(hours=2))
+    T.merge_table(reg, "dim", _state(reg, [(1, "b")]), ts(4), ("id",), comprehensive=True, retain_t=timedelta(hours=2))
+    # cutoff at run 2 = ts(4) - 2h = ts(2); the ts(1) row is older → trimmed, the current run is kept.
+    kept = [r[0] for r in reg.sql("SELECT DISTINCT _duckstring_f FROM dim__changelog ORDER BY 1").fetchall()]
+    assert kept == [ts(4)]
+
+
+def test_append_retention_and_window(reg):
+    for h in (1, 2, 3):
+        T.append_table(reg, "event", reg.sql(f"SELECT {h} AS id"), ts(h), ("id",), retain_n=2)
+    assert sorted(r[0] for r in reg.sql("SELECT id FROM event").fetchall()) == [2, 3]  # 1 trimmed
+
+
+def test_retention_then_coverage_fallback_full_read(reg, tmp_path):
+    T.merge_table(reg, "dim", _state(reg, [(1, "a"), (2, "b")]), ts(1), ("id",), comprehensive=True)
+    T.merge_table(reg, "dim", _state(reg, [(1, "A"), (2, "b")]), ts(3), ("id",), comprehensive=True, retain_n=1)
+    data_dir = publish(reg, tmp_path / "data")  # changelog now retains only ts(3)
+    rcon = duckdb.connect()
+    # A consumer last at ts(1) is now behind the retained window → coverage miss → full read of the main.
+    d = T.read_delta(rcon, data_dir, "dim", previous_f=ts(1), f=ts(9), dp=ParquetDataPlane())
+    assert sorted(d.upserts.fetchall()) == [(1, "A"), (2, "b")]
+    assert d.deletes.fetchall() == []
+
+
+# ─── affected_groups (aggregation sibling) ───────────────────────────────────────
+
+
+def test_affected_groups_upserts_only_and_with_deletes(tmp_path):
+    con = duckdb.connect()
+    up = con.sql("SELECT * FROM (VALUES (1, 'x'), (2, 'y')) v(id, region)")
+    de = con.sql("SELECT * FROM (VALUES (3)) v(id)")  # a delete carries only the PK
+    delta = T.Delta(con, ("id",), up, de)
+    pond = Pond("p", "1.0.0", con, root=tmp_path)
+    # by=region is not ⊆ pk(id) → deletes can't supply their group → upserts only.
+    assert sorted(pond.affected_groups(delta, by="region").relation.fetchall()) == [("x",), ("y",)]
+    # by=id IS ⊆ pk → the deleted key's group is known and included.
+    assert sorted(pond.affected_groups(delta, by="id").relation.fetchall()) == [(1,), (2,), (3,)]
+
+
+# ─── builder DSL (pond.trickle) ──────────────────────────────────────────────────
+
+
+def _star_sources(tmp_path):
+    ol_con, ol_dir = _producer(tmp_path, "sales")
+    pr_con, pr_dir = _producer(tmp_path, "catalog")
+
+    def ol(state, f):
+        vals = ", ".join(f"({o}, '{p}', {q})" for o, p, q in state)
+        T.merge_table(ol_con, "order_line", ol_con.sql(f"SELECT * FROM (VALUES {vals}) v(order_id, product_id, qty)"),
+                      f, ("order_id",), comprehensive=True)
+        publish(ol_con, ol_dir)
+
+    def pr(state, f):
+        vals = ", ".join(f"('{p}', {pr_})" for p, pr_ in state)
+        T.merge_table(pr_con, "product", pr_con.sql(f"SELECT * FROM (VALUES {vals}) v(product_id, price)"),
+                      f, ("product_id",), comprehensive=True)
+        publish(pr_con, pr_dir)
+
+    return (ol_con, pr_con), ol, pr
+
+
+def _priced(tmp_path, f, previous_f, snk_con, snk_dir):
+    pond = Pond("priced", "1.0.0", snk_con, root=tmp_path,
+                source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=previous_f)
+    (pond.trickle("sales.order_line")
+         .join(pond.trickle("catalog.product"), on="product_id")
+         .select("s0.order_id, s0.product_id, s0.qty, s1.price, s0.qty * s1.price AS total")
+         .merge("priced"))
+    publish(snk_con, snk_dir)
+
+
+def test_builder_star_enrichment_incremental(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    snk_con = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "priced" / "m1" / "data"
+
+    _priced(tmp_path, ts(1), NEVER, snk_con, snk_dir)  # bootstrap
+    assert rows(snk_con, snk_dir, "priced", "order_id, total") == [(10, 10), (11, 9)]
+
+    # A dimension change: p1 price 5 → 50. Only order 10 (uses p1) should be recomputed.
+    pr([("p1", 50), ("p2", 9)], ts(2))
+    _priced(tmp_path, ts(2), ts(1), snk_con, snk_dir)
+    assert rows(snk_con, snk_dir, "priced", "order_id, total") == [(10, 100), (11, 9)]
+    snk_con.close()
+
+
+def test_builder_propagates_spine_delete(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    snk_con = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "priced" / "m1" / "data"
+    _priced(tmp_path, ts(1), NEVER, snk_con, snk_dir)
+
+    ol([(10, "p1", 2)], ts(2))  # order 11 removed from the spine
+    _priced(tmp_path, ts(2), ts(1), snk_con, snk_dir)
+    assert rows(snk_con, snk_dir, "priced", "order_id, total") == [(10, 10)]  # 11 dropped from the output
+    snk_con.close()
+
+
+def test_builder_matches_comprehensive_row_for_row(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p1", 3)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    snk_con = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "priced" / "m1" / "data"
+    _priced(tmp_path, ts(1), NEVER, snk_con, snk_dir)
+    pr([("p1", 50), ("p2", 9)], ts(2))
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p1", 3), (13, "p2", 4)], ts(2))  # add order 13
+    _priced(tmp_path, ts(2), ts(1), snk_con, snk_dir)
+
+    # The incremental builder result must equal a full comprehensive recompute over the same final state.
+    truth_con = duckdb.connect()
+    truth_con.execute("SET TimeZone='UTC'")
+    ol_main = T._strip_system(truth_con.sql(ParquetDataPlane().read_select(tmp_path / "ponds/sales/m1/data", "order_line")))
+    pr_main = T._strip_system(truth_con.sql(ParquetDataPlane().read_select(tmp_path / "ponds/catalog/m1/data", "product")))
+    ol_main.create_view("ol", replace=True)
+    pr_main.create_view("pr", replace=True)
+    truth = sorted(truth_con.sql(
+        "SELECT ol.order_id, ol.qty * pr.price FROM ol JOIN pr USING (product_id) ORDER BY 1"
+    ).fetchall())
+    assert rows(snk_con, snk_dir, "priced", "order_id, total") == truth
+    snk_con.close()
+
+
+def test_builder_build_time_errors(tmp_path):
+    from duckstring.trickle_builder import BuildError
+
+    _cons, ol, pr = _star_sources(tmp_path)
+    ol([(10, "p1", 2)], ts(1))
+    pr([("p1", 5)], ts(1))
+    con = duckdb.connect()
+    pond = Pond("priced", "1.0.0", con, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=ts(1))
+
+    # A snowflake (a dimension that itself has joins) is outside the op set.
+    snowflake_dim = pond.trickle("catalog.product").join(pond.trickle("catalog.product"), on="product_id")
+    with pytest.raises(BuildError, match="snowflake|deeper hop"):
+        pond.trickle("sales.order_line").join(snowflake_dim, on="product_id")
+
+    # A non-PK-arity join key.
+    with pytest.raises(BuildError, match="full PK|arity|column"):
+        pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on=("product_id", "qty"))
+
+    # A joined graph with no .select(...).
+    with pytest.raises(BuildError, match="select"):
+        pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id").merge("x")

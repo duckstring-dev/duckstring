@@ -71,4 +71,11 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None):
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for pq in files:
             zf.write(pq, pq.name)
+        # The Trickle mode/PK sidecar travels with the data so the consuming Catchment's read_delta can
+        # resolve a Trickle source (mode/PK aren't in the downstream's duck.db). Harmless for plain Ponds.
+        from ...trickle_io import SIDECAR
+
+        sidecar = data_dir / SIDECAR
+        if sidecar.exists():
+            zf.write(sidecar, sidecar.name)
     return Response(content=buf.getvalue(), media_type="application/zip")

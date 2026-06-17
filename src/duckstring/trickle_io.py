@@ -39,8 +39,18 @@ registry) can resolve them.
 
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
+
+_uid = itertools.count()
+
+
+def unique_name(prefix: str) -> str:
+    """A process-unique scratch identifier in the reserved namespace (so ``registry_tables`` hides it).
+    Used where a *materialised* result must outlive any shared-name view it was built from (a returned
+    relation that would otherwise re-bind when the next call re-creates that view)."""
+    return f"_duckstring_ds_{prefix}_{next(_uid)}"
 
 # System columns — the reserved ``_duckstring_*`` namespace (see :mod:`duckstring.dataplane`).
 F_COL = "_duckstring_f"
@@ -101,6 +111,28 @@ def _hash_expr(nonpk: list[str], alias: str | None = None) -> str:
     return f"hash(list_value({items}))"
 
 
+def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
+    """Bound a history/changelog table's retained window at write time — a **lag SLA**, not a
+    correctness control (a consumer behind the retained window falls back to a full read of the clean
+    state; see :func:`read_delta`). Both are opt-in (``None`` keeps everything, the audit/replay choice):
+
+    - ``retain_t`` (a ``timedelta``): drop rows stamped older than ``f - retain_t`` — time-based, so it
+      scales with run frequency. The current run's ``f`` rows are always kept (``f - retain_t <= f``).
+    - ``retain_n`` (a count): keep only the newest ``retain_n`` distinct ``_duckstring_f`` runs.
+
+    The coverage watermark for the window read is just ``min(_duckstring_f)`` over what remains, so
+    trimming here automatically advances it — no separate watermark to store."""
+    if retain_t is not None:
+        cutoff = f - retain_t
+        con.execute(f'DELETE FROM {_q(table)} WHERE {_q(F_COL)} < {_ts(cutoff)}')
+    if retain_n is not None and retain_n >= 1:
+        con.execute(
+            f'DELETE FROM {_q(table)} WHERE {_q(F_COL)} < ('
+            f'SELECT min(g) FROM (SELECT DISTINCT {_q(F_COL)} AS g FROM {_q(table)} '
+            f'ORDER BY g DESC LIMIT {int(retain_n)}))'
+        )
+
+
 # ─── meta (mode + PK) ─────────────────────────────────────────────────────────
 
 
@@ -150,10 +182,11 @@ def load_sidecar(data_dir: Path) -> dict[str, dict]:
 # ─── write: append ────────────────────────────────────────────────────────────
 
 
-def append_table(con, name: str, relation, f, pk: tuple[str, ...]) -> None:
+def append_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None) -> None:
     """Append ``relation``'s rows to the history table ``name``, each stamped ``_duckstring_f = f``.
     Insert-only: no PK uniqueness check, no diff. Idempotent at a given ``f`` (replay/retry re-run at the
-    same freshness): rows already stamped ``f`` are dropped before re-appending."""
+    same freshness): rows already stamped ``f`` are dropped before re-appending. ``retain_t`` /
+    ``retain_n`` bound the kept history (see :func:`_apply_retention`)."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     src = "_duckstring_ds_append_src"
@@ -171,19 +204,24 @@ def append_table(con, name: str, relation, f, pk: tuple[str, ...]) -> None:
         f'SELECT {sel_cols}, {_ts(f)} FROM {_q(src)}'
     )
     _record_meta(con, name, "append", pk)
+    _apply_retention(con, name, f, retain_t, retain_n)
 
 
 # ─── write: merge ─────────────────────────────────────────────────────────────
 
 
-def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, comprehensive: bool, deletes=None) -> None:
+def merge_table(
+    con, name: str, relation, f, pk: tuple[str, ...], *,
+    comprehensive: bool, deletes=None, retain_t=None, retain_n=None,
+) -> None:
     """Upsert ``relation`` into the clean *main* table ``name`` and append the changes to its
     ``__changelog`` CDC stream, stamped ``_duckstring_f = f``.
 
     ``comprehensive=True`` (default): ``relation`` is the *complete* current state — diff it against the
     prior main (via ``_duckstring_hash``) to derive inserts/updates/deletes; the main is overwritten.
     ``comprehensive=False``: ``relation`` is a *partial* change-set (upserts only) and ``deletes`` (a
-    relation of PK rows) the explicit removals — the main is upserted in place."""
+    relation of PK rows) the explicit removals — the main is upserted in place. ``retain_t`` / ``retain_n``
+    bound the kept *changelog* history (the main is the clean current state and is never trimmed)."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if not pk:
@@ -214,6 +252,7 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, comprehensi
         con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')  # idempotent replay (re-apply supplied set)
         _merge_partial(con, name, clog, new, cols, nonpk, pk, f, main_exists, deletes)
     _record_meta(con, name, "merge", pk)
+    _apply_retention(con, clog, f, retain_t, retain_n)  # bound the changelog; the main is current-state
 
 
 def _ensure_changelog(con, clog: str, cols: list[str]) -> None:
@@ -405,18 +444,19 @@ def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER) -> Del
     if full:
         main = _strip_system(con.sql(dp.read_select(data_dir, table)))
         return Delta(con, pk, main, _empty_pk(main, pk))
-    # Window the changelog, then collapse per PK to the latest op (net change per key).
+    # Window the changelog, then collapse per PK to the latest op (net change per key). Inlined as a
+    # self-contained subquery (over immutable read_parquet) — NOT a named view: several read_delta calls
+    # in one run would share a view name, and the lazy upserts/deletes relations would re-bind to whoever
+    # wrote it last (e.g. a spine delta silently re-pointing at a dimension's changelog).
     window = (
-        f"SELECT * FROM ({clog_sql}) "
+        f"(SELECT * FROM ({clog_sql}) "
         f"WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)} "
         f"QUALIFY row_number() OVER (PARTITION BY {', '.join(_q(c) for c in pk)} "
-        f"ORDER BY {_q(F_COL)} DESC) = 1"
+        f"ORDER BY {_q(F_COL)} DESC) = 1)"
     )
-    collapsed = "_duckstring_ds_delta_collapsed"
-    con.sql(window).create_view(collapsed, replace=True)
-    upserts = _strip_system(con.sql(f'SELECT * FROM {_q(collapsed)} WHERE {_q(OP_COL)} = \'{OP_UPSERT}\''))
+    upserts = _strip_system(con.sql(f"SELECT * FROM {window} WHERE {_q(OP_COL)} = '{OP_UPSERT}'"))
     pk_sel = ", ".join(_q(c) for c in pk)
-    deletes = con.sql(f'SELECT {pk_sel} FROM {_q(collapsed)} WHERE {_q(OP_COL)} = \'{OP_DELETE}\'')
+    deletes = con.sql(f"SELECT {pk_sel} FROM {window} WHERE {_q(OP_COL)} = '{OP_DELETE}'")
     return Delta(con, pk, upserts, deletes)
 
 

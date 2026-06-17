@@ -44,14 +44,17 @@ async def _fetch_status(client: httpx.AsyncClient, url: str, auth: dict) -> dict
 
 
 async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, name: str, major: int) -> None:
-    """Fetch all of an upstream Pond line's exported Parquet and land it in the landing zone."""
+    """Fetch all of an upstream Pond line's exported Parquet (+ the Trickle sidecar) and land it."""
+    from ..trickle_io import SIDECAR
+
     resp = await client.get(f"{url}/api/draw/{name}/{major}", headers=auth)
     resp.raise_for_status()
     data_dir = pond_data_dir(root, name, major)
     data_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         for info in zf.infolist():
-            if not info.filename.endswith(".parquet"):
+            # Parquet data + the Trickle mode/PK sidecar (so the local read_delta can resolve the source).
+            if not (info.filename.endswith(".parquet") or info.filename == SIDECAR):
                 continue
             dest = data_dir / info.filename
             tmp = dest.with_suffix(dest.suffix + ".tmp")
