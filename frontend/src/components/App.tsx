@@ -104,6 +104,40 @@ function MobileRunsPanel() {
   );
 }
 
+// The repair-mode toolbar — a top banner while the operator picks a connected set of Ponds on the
+// canvas to force-rebuild now. The server validates connectivity on submit (its detail shows here).
+function RepairBanner() {
+  const repairMode = useLiveStore((s) => s.repairMode);
+  const scope = useLiveStore((s) => s.repairScope);
+  const error = useLiveStore((s) => s.repairError);
+  const addDownstream = useLiveStore((s) => s.addRepairDownstream);
+  const submit = useLiveStore((s) => s.submitRepair);
+  const cancel = useLiveStore((s) => s.exitRepair);
+  if (!repairMode) return null;
+
+  const btn = (bg: string): React.CSSProperties => ({
+    background: bg, border: 'none', borderRadius: 5, padding: '6px 12px', color: '#0a0a0a',
+    fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+  });
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 12, padding: '8px 14px',
+      background: '#1a1206', borderBottom: '1px solid #ee9333', color: '#fbbf24', fontSize: 12,
+    }}>
+      <span style={{ fontWeight: 700 }}>Repair mode</span>
+      <span style={{ color: '#a1a1aa' }}>
+        Click Ponds to select a connected set to rebuild now · <b style={{ color: '#e4e4e7' }}>{scope.length}</b> selected
+      </span>
+      {error && <span style={{ color: '#ef4444' }}>{error}</span>}
+      <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+        <button style={btn('#52525b')} onClick={() => addDownstream()} disabled={scope.length === 0}>Include downstream</button>
+        <button style={btn('#a3e635')} onClick={() => void submit()} disabled={scope.length === 0}>Repair {scope.length}</button>
+        <button style={btn('#71717a')} onClick={() => cancel()}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const refresh = useLiveStore((s) => s.refresh);
   const needsKey = useLiveStore((s) => s.needsKey);
@@ -132,6 +166,7 @@ export function App() {
   return (
     <div className="ds-app" style={{ display: 'flex', flexDirection: 'column', width: '100%', overflow: 'hidden', fontFamily: 'ui-monospace, SFMono-Regular, monospace' }}>
       {needsKey && <KeyPrompt />}
+      <RepairBanner />
       {/* On mobile the sidebar drops below the canvas as a collapsible bottom sheet. */}
       <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', flex: 1, minHeight: 0 }}>
         <ReactFlowProvider>

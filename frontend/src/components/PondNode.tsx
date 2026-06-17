@@ -15,25 +15,36 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const info = useLiveStore((s) => s.pondInfo[pondId]);
   const selectedPondId = useLiveStore((s) => s.selectedPondId);
   const selectPond = useLiveStore((s) => s.selectPond);
+  const repairMode = useLiveStore((s) => s.repairMode);
+  const inRepair = useLiveStore((s) => s.repairScope.includes(pondId));
+  const toggleRepair = useLiveStore((s) => s.toggleRepair);
+  const refreshPending = useLiveStore((s) => s.pondInfo[pondId]?.refreshPending ?? false);
   const now = useLiveStore((s) => s.now);
 
   if (!pond || !view) return null;
 
   const borderColor = stateColor(view);
   const isSelected = selectedPondId === pondId;
+  // In repair mode, clicking a Pond toggles it in/out of the repair scope (a bright ring marks it).
+  const ringColor = repairMode && inRepair ? '#a3e635' : borderColor;
 
   return (
     <div
       onClick={(e) => {
         e.stopPropagation();
-        selectPond(pondId);
+        if (repairMode) toggleRepair(pondId);
+        else selectPond(pondId);
       }}
       style={{
         width: '100%',
         height: '100%',
         // A Pond Draw (fed by a duct) is drawn with a dashed border to set it apart from a local Pond.
         border: `2px ${pond.isDraw ? 'dashed' : 'solid'} ${borderColor}`,
-        boxShadow: isSelected ? `0 0 0 3px ${borderColor}40` : undefined,
+        boxShadow: repairMode && inRepair
+          ? `0 0 0 3px ${ringColor}`
+          : refreshPending
+            ? `0 0 0 2px #ee9333aa`  // pending refresh — an amber hint
+            : isSelected ? `0 0 0 3px ${borderColor}40` : undefined,
         borderRadius: 10,
         background: nodeFill(borderColor),
         cursor: 'pointer',

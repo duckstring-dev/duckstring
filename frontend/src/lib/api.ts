@@ -68,7 +68,7 @@ export interface RawPond {
   kind: string;
   is_draw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment, not run by a Duck
   version: string;
-  status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked';
+  status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
   gen: number;
   runs_completed: number;
   has_pull: boolean;
@@ -80,6 +80,8 @@ export interface RawPond {
   is_failed: boolean;
   is_blocked: boolean;
   is_killed: boolean;
+  refresh_pending: boolean; // next run is a cold wipe-and-rebuild (control refresh)
+  repairing: boolean; // in an active repair plan — blocked from normal demand
   failed_f: string | null;
   failures: number;
   missing_sources: string[]; // declared Sources absent from the Catchment (pond keys "name@major")
@@ -205,6 +207,31 @@ export async function fetchRuns(q: RunsQuery = {}): Promise<RawPondRun[]> {
 // sleep | force | kill | untrigger.
 export function postTrigger(pond: string, endpoint: string, body: unknown = {}): Promise<void> {
   return postJSON(pondPath(pond, endpoint), body);
+}
+
+// Refresh: flag a Pond so its next run is a cold wipe-and-rebuild (or `clear` to un-flag).
+export function refreshPond(pond: string, clear = false): Promise<void> {
+  return postJSON(pondPath(pond, clear ? 'refresh?clear=true' : 'refresh'));
+}
+
+// Repair: force-rebuild a connected set of Ponds now (ids "name@major"). Throws the server's detail
+// (e.g. a disconnected set) on a 4xx so the caller can surface it.
+export async function repairPonds(
+  ids: string[],
+  downstream: boolean,
+): Promise<{ scope: string[] }> {
+  const ponds = ids.map((id) => {
+    const at = id.lastIndexOf('@');
+    return { name: at === -1 ? id : id.slice(0, at), major: at === -1 ? null : Number(id.slice(at + 1)) };
+  });
+  const res = await fetch(`${apiBase()}/repair`, {
+    method: 'POST',
+    headers: authHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify({ ponds, downstream }),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `repair failed (${res.status})`);
+  return res.json();
 }
 
 // Failure management.
