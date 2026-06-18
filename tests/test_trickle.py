@@ -166,6 +166,46 @@ def test_merge_requires_primary_key(reg):
         T.merge_table(reg, "dim", _state(reg, [(1, "a")]), ts(1), ())
 
 
+class _CrashOn:
+    """Proxy a DuckDB connection, raising when an executed statement contains ``needle`` — to inject a
+    crash mid-apply and prove the changelog + main commit/abort atomically."""
+
+    def __init__(self, con, needle):
+        self._c, self._needle = con, needle
+
+    def execute(self, sql, *a, **k):
+        if self._needle in sql:
+            raise RuntimeError("injected crash")
+        return self._c.execute(sql, *a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
+def test_merge_apply_is_atomic_changelog_and_main(reg, tmp_path):
+    T.merge_table(reg, "dim", _state(reg, [(1, "a"), (2, "b")]), ts(1), ("id",))  # bootstrap
+    T.merge_table(reg, "dim", _state(reg, [(1, "A"), (2, "b")]), ts(2), ("id",))  # changelog now exists
+
+    # Crash on the main CoW insert — after the changelog rows were inserted in the same transaction.
+    with pytest.raises(RuntimeError):
+        T.merge_table(_CrashOn(reg, 'INSERT INTO "dim" SELECT'),
+                      "dim", _state(reg, [(1, "Z"), (2, "b")]), ts(3), ("id",))
+
+    # The transaction rolled back: main is untouched AND the changelog has no ts(3) rows (never the
+    # main-advanced / changelog-missing state the old ordering could produce).
+    assert sorted(reg.execute("SELECT id, v FROM dim").fetchall()) == [(1, "A"), (2, "b")]
+    assert reg.execute(
+        f"SELECT count(*) FROM dim__changelog WHERE {T.F_COL} = {T._ts(ts(3))}"
+    ).fetchone()[0] == 0
+
+    # A clean replay recovers fully — both the main and the changelog land.
+    T.merge_table(reg, "dim", _state(reg, [(1, "Z"), (2, "b")]), ts(3), ("id",))
+    assert sorted(reg.execute("SELECT id, v FROM dim").fetchall()) == [(1, "Z"), (2, "b")]
+    assert sorted(reg.execute(
+        f"SELECT id, v, {T.D_COL} FROM dim__changelog WHERE {T.F_COL} = {T._ts(ts(3))}"
+    ).fetchall()) == [(1, "A", -1), (1, "Z", 1)]
+
+
 # ─── builder DSL (pond.trickle) — DBSP composition ──────────────────────────────
 
 

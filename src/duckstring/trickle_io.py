@@ -370,35 +370,45 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     main_exists = _table_exists(con, name)
 
     # Consolidate by full row: an update's old(-1)/new(+1) survive as distinct rows; a spurious +1/-1 of
-    # the same row cancels. This is the Z-set `distinct`/`consolidate` operator.
+    # the same row cancels. This is the Z-set `distinct`/`consolidate` operator. The weight is cast to a
+    # BIGINT (the changelog's stored type — a DuckDB SUM widens to HUGEINT, which Iceberg can't hold).
     consol = unique_name("consol")
     con.execute(
         f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
-        f'SELECT {sel_user}, SUM({_q(D_COL)}) AS {_q(D_COL)} FROM {_q(src)} '
+        f'SELECT {sel_user}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} FROM {_q(src)} '
         f'GROUP BY {sel_user} HAVING SUM({_q(D_COL)}) <> 0'
     )
     nonempty = con.execute(f'SELECT count(*) FROM {_q(consol)}').fetchone()[0] > 0
+    # The changelog table always exists before the apply — including a bootstrap, which writes no rows but
+    # must still publish an (empty) changelog and give retention a table to trim. Its schema is borrowed
+    # from the consolidated delta, so this works before the main exists.
+    _ensure_changelog(con, clog, consol)
 
-    if not main_exists:  # bootstrap: stand up the clean main from the +1 rows
-        con.execute(f'CREATE TABLE {_q(name)} AS SELECT {sel_user} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
-    else:
-        # CoW upsert: drop every key the change touches, re-insert the surviving positive rows.
-        con.execute(
-            f'DELETE FROM {_q(name)} WHERE ({pk_list}) IN (SELECT {pk_list} FROM {_q(consol)})'
-        )
-        con.execute(
-            f'INSERT INTO {_q(name)} SELECT {sel_user} FROM {_q(consol)} WHERE {_q(D_COL)} > 0'
-        )
-
-    _ensure_changelog(con, clog, user)
-    # A bootstrap writes no changelog (a first consumer reads the main; no window predates this run). A
-    # normal run rewrites this F's window only when the change is non-empty (the replay-idempotency guard).
-    if main_exists and nonempty:
-        con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')
-        con.execute(
-            f'INSERT INTO {_q(clog)} ({sel_user}, {_q(D_COL)}, {_q(F_COL)}) '
-            f'SELECT {sel_user}, {_q(D_COL)}, {_ts(f)} FROM {_q(consol)}'
-        )
+    # Apply the changelog and the main in ONE transaction, **changelog first**. A comprehensive merge
+    # derives its delta against the *current main*, so a crash that left the main advanced past a changelog
+    # missing this run's rows would make the replay diff against the already-advanced main, compute an empty
+    # delta, and lose the changelog entry for good. Committing both together (single-writer-per-line) means a
+    # replay sees either all-old — re-derive and apply — or all-new — an empty delta that no-ops. A bootstrap
+    # writes no changelog (a first consumer reads the main; no window predates this run); a normal run
+    # rewrites this F's window only when the change is non-empty (the replay-idempotency guard).
+    con.execute("BEGIN TRANSACTION")
+    try:
+        if main_exists:
+            if nonempty:
+                con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')
+                con.execute(
+                    f'INSERT INTO {_q(clog)} ({sel_user}, {_q(D_COL)}, {_q(F_COL)}) '
+                    f'SELECT {sel_user}, {_q(D_COL)}, {_ts(f)} FROM {_q(consol)}'
+                )
+            # CoW upsert: drop every key the change touches, re-insert the surviving positive rows.
+            con.execute(f'DELETE FROM {_q(name)} WHERE ({pk_list}) IN (SELECT {pk_list} FROM {_q(consol)})')
+            con.execute(f'INSERT INTO {_q(name)} SELECT {sel_user} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
+        else:  # bootstrap: stand up the clean main from the +1 rows
+            con.execute(f'CREATE TABLE {_q(name)} AS SELECT {sel_user} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
     _record_meta(con, name, "merge", pk)
     cutoff = _apply_retention(con, clog, f, retain_t, retain_n)
     _advance_floor(con, name, bootstrap_f=(f if not main_exists else None), cutoff=cutoff)
@@ -428,16 +438,15 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
     apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n)
 
 
-def _ensure_changelog(con, clog: str, user: list[str]) -> None:
+def _ensure_changelog(con, clog: str, schema_src: str) -> None:
+    """Create the changelog table if absent, borrowing its column schema (user columns + the BIGINT
+    ``_duckstring_d`` weight) from the consolidated-delta table ``schema_src`` and adding ``_duckstring_f``.
+    Borrowing from the delta (not the main) means this works on a bootstrap, before the main exists."""
     if _table_exists(con, clog):
         return
-    sel = ", ".join(_q(c) for c in user)
-    # Borrow column types from the freshly-created main (it always exists by the time we get here).
-    base = clog[: -len(CHANGELOG_SUFFIX)]
     con.execute(
-        f'CREATE TABLE {_q(clog)} AS SELECT {sel}, '
-        f'CAST(NULL AS BIGINT) AS {_q(D_COL)}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} '
-        f'FROM {_q(base)} LIMIT 0'
+        f'CREATE TABLE {_q(clog)} AS '
+        f'SELECT *, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(schema_src)} LIMIT 0'
     )
 
 
