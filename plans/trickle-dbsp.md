@@ -1,6 +1,15 @@
 # Trickle, take two: Z-set / DBSP-style incremental joins
 
-Status: **proposed (design).** Supersedes the change-detection + key-set propagation core of
+Status: **built.** Implemented in `trickle_io.py` (Z-set changelog, `apply_zset`, `merge_table`,
+`read_delta`), `trickle_builder.py` (the DBSP composition), `core.py` (`Pond.merge_table`/`apply_zset`/
+`trickle`), and `dataplane.publish_plan` (the per-table `f`-stamped sidecar). Tests: `tests/test_trickle.py`
+(incl. the worked fact+dim example, non-PK joins, ripple inputs, the threshold) + the Iceberg cases. The
+Trickle/ripple feature was unreleased, so the on-disk changelog/sidecar format changed outright (no
+migration). Two notes from the build, folded in below: **(1)** the weight column is `_duckstring_d` (like
+every system column), not a bare `_d`; **(2)** the final/comprehensive step reads the **last-written main**
+as its prior output (`O_old`) and never recomputes it.
+
+Supersedes the change-detection + key-set propagation core of
 `plans/trickle.md` (the `comprehensive` diff, `keys_joining`, the `upsert`/`delete` changelog, the
 `Source`/`Join`/`Filter`/`Project` builder with its FK=PK constraint). The orchestration model
 (freshness, the `(previous_f, f]` window, retention/floor, the data-plane sidecar) is unchanged — this

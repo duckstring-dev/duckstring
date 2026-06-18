@@ -213,7 +213,7 @@ def test_trickle_merge_main_overwrite_changelog_append_over_iceberg(tmp_path):
     def state(rows, hour):
         vals = ", ".join(f"({i}, '{v}')" for i, v in rows)
         T.merge_table(con, "dim", con.sql(f"SELECT * FROM (VALUES {vals}) t(id, v)"),
-                      datetime(2026, 6, 16, hour, tzinfo=UTC), ("id",), comprehensive=True)
+                      datetime(2026, 6, 16, hour, tzinfo=UTC), ("id",))
         dp.export(con, tmp_path, f=datetime(2026, 6, 16, hour, tzinfo=UTC))
 
     state([(1, "a"), (2, "b")], 1)

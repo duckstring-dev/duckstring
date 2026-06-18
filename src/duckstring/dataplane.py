@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 # System columns are framework-owned and persisted; the WHOLE prefix is reserved (not a single name),
-# leaving room for siblings (``_duckstring_f`` for freshness, ``_duckstring_op`` for merge, …).
+# leaving room for siblings (``_duckstring_f`` for freshness, ``_duckstring_d`` for the Z-set weight, …).
 RESERVED_PREFIX = "_duckstring_"
 
 # Write modes the interface can express. Only ``overwrite`` is implemented in Phase 1; the others are
@@ -108,24 +108,33 @@ def validate_publish(con, table: str) -> None:
         )
 
 
-def publish_plan(con, data_dir: Path) -> list[str]:
-    """Validate the publish set, write the Trickle sidecar, and return the tables to publish.
+def publish_plan(con, data_dir: Path, f=None) -> list[str]:
+    """Validate the publish set, write the ``_trickle.json`` sidecar, and return the tables to publish.
 
-    Trickle tables (a history/main table + its ``__changelog`` companion) legitimately carry
+    Trickle tables (a clean *main* + its ``__changelog`` Z-set companion) legitimately carry
     ``_duckstring_*`` system columns, so they are exempt from the reserved-column check that guards plain
-    overwrite output; their mode/PK is mirrored to a ``_trickle.json`` sidecar so cross-Pond readers can
-    resolve them. Call this *before* writing anything so a reserved-column violation aborts the whole
-    publish (last-good left intact)."""
+    overwrite output. The sidecar carries one entry per published *base* table — ``{mode, pk, floor}`` for
+    a Trickle, ``{mode: "overwrite"}`` for plain output — each stamped with this run's freshness ``f`` so a
+    cross-Pond reader can resolve a Trickle's coverage *and* detect whether an overwrite source advanced
+    (its ``f`` vs the consumer's ``previous_f``). Call this *before* writing anything so a reserved-column
+    violation aborts the whole publish (last-good left intact)."""
+    from datetime import timezone
+
     from . import trickle_io as trickle
 
     meta = trickle.read_meta(con)
-    trickle_tables = set(meta) | {trickle.changelog_name(t) for t in meta}
+    changelogs = {trickle.changelog_name(t) for t in meta}
     tables = registry_tables(con)
+    f_iso = f.astimezone(timezone.utc).isoformat() if f is not None else None
+    payload: dict[str, dict] = {}
     for table in tables:
-        if table not in trickle_tables:
-            validate_publish(con, table)
-    if meta:
-        trickle.write_sidecar(data_dir, meta)
+        if table in meta or table in changelogs:
+            continue  # Trickle base/companion — added (base) or implied (companion) below
+        validate_publish(con, table)
+        payload[table] = {"mode": "overwrite", "f": f_iso}
+    for base, m in meta.items():
+        payload[base] = {"mode": m["mode"], "pk": list(m["pk"]), "floor": m.get("floor"), "f": f_iso}
+    trickle.write_sidecar(data_dir, payload)
     return tables
 
 
@@ -140,7 +149,7 @@ class ParquetDataPlane(DataPlane):
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        tables = publish_plan(con, data_dir)
+        tables = publish_plan(con, data_dir, f)
 
         def _export() -> None:
             for table in tables:

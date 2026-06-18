@@ -392,9 +392,9 @@ def test_draw_route_windows_trickle_changelog_with_after(tmp_path):
     con.execute("SET TimeZone='UTC'")
     con.execute(
         "COPY (SELECT * FROM (VALUES "
-        "(1,'upsert',TIMESTAMPTZ '2026-06-16T01:00:00+00:00'), "
-        "(2,'upsert',TIMESTAMPTZ '2026-06-16T02:00:00+00:00'), "
-        "(3,'upsert',TIMESTAMPTZ '2026-06-16T03:00:00+00:00')) t(id,_duckstring_op,_duckstring_f)) "
+        "(1,1,TIMESTAMPTZ '2026-06-16T01:00:00+00:00'), "
+        "(2,1,TIMESTAMPTZ '2026-06-16T02:00:00+00:00'), "
+        "(3,1,TIMESTAMPTZ '2026-06-16T03:00:00+00:00')) t(id,_duckstring_d,_duckstring_f)) "
         f"TO '{data_dir / 'sale__changelog.parquet'}' (FORMAT PARQUET)"
     )
     (data_dir / "sale.parquet").write_bytes(b"MAIN")  # wholesale

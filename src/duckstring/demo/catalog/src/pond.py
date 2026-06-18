@@ -1,17 +1,17 @@
 """catalog — a merge Trickle (the history-preserving upsert path).
 
-Each run emits the **complete** current catalogue; ``merge_table(comprehensive=True)`` diffs it against
-the prior state to derive inserts/updates/deletes automatically (the safe default — no enumerate-every-
-change obligation). So when a price drifts between runs, the change shows up as a single ``upsert`` in
-the changelog; a downstream Trickle then re-prices only the affected order lines, never the whole
-catalogue.
+Each run emits the **complete** current catalogue; ``merge_table`` diffs it against the prior main as a
+full-row Z-set difference to derive inserts/updates/deletes automatically (no enumerate-every-change
+obligation). So when a price drifts between runs, the change shows up as a ``-1`` of the old row and a
+``+1`` of the new in the changelog; a downstream Trickle then re-prices only the affected order lines,
+never the whole catalogue.
 
 The catalogue is **generated** at scale (``_PRODUCTS`` rows) from a deterministic base, so an unchanged
-product hashes identically run to run and the comprehensive diff stays small: only the ``_PRICE_CHANGES``
+product diffs to nothing run to run and the changelog stays small: only the ``_PRICE_CHANGES``
 products this run perturbs (plus the handful reverting from last run's drift) reach the ``__changelog``.
 That tiny, *targeted* delta — rather than the all-rows churn you get from too few products — is what lets
 ``priced`` re-price an affected slice instead of the whole join. Sizes are env-overridable
-(``DUCKSTRING_DEMO_*``; the test suite shrinks them); no ``time.sleep`` — the comprehensive diff over the
+(``DUCKSTRING_DEMO_*``; the test suite shrinks them); no ``time.sleep`` — the full-row diff over the
 full catalogue is the real work.
 
 The clean *main* table is the current catalogue (one row per product, no tombstones); the ``__changelog``
@@ -58,4 +58,4 @@ def ingest(pond):
         {join}
         """
     )
-    pond.merge_table("product", state)  # comprehensive (default): Duckstring derives the CDC
+    pond.merge_table("product", state)  # full current state → Duckstring diffs it to derive the CDC

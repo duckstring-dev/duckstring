@@ -22,4 +22,4 @@ def by_product(pond):
         FROM priced_line
         GROUP BY product_id
     """)
-    pond.merge_table("revenue_by_product", totals)  # comprehensive (default)
+    pond.merge_table("revenue_by_product", totals)  # full current state → diffed to derive the delta out

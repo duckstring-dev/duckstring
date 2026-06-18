@@ -1,40 +1,42 @@
-"""Trickle: incremental I/O and transfer — the history-preserving Ripple variant.
+"""Trickle: incremental I/O via **Z-sets** (DBSP-style) — the history-preserving Ripple variant.
 
 A **Trickle** is a Ripple that maintains *history* instead of overwriting wholesale, so a consumer can
-read just the rows that changed in the window ``(previous_f, f]`` (a small **delta out**, the win — see
-``plans/trickle.md``). It delivers incremental I/O and transfer, **not** incremental computation: joins
-still recompute fully; the gain is the small write/read, not less work in.
+compute its output from just the rows that changed in the window ``(previous_f, f]`` (a small **delta**,
+the win — see ``plans/trickle-dbsp.md``). Every change is a **Z-set**: a relation carrying an integer
+weight column ``_duckstring_d`` per row (``+1`` = a present row, ``-1`` = a retraction). A normal table is
+a Z-set with every weight ``+1``; an **update is a `-1` of the old full image plus a `+1` of the new** —
+so deletions/updates carry *full row images*, not key-only tombstones. That is what lets a change compose
+through a join/project on **any** key (the old tombstone-on-PK constraint is gone).
 
 The freshness stamp ``_duckstring_f`` **lives in the data** and is read as a **content predicate**
 (``WHERE _duckstring_f > previous_f AND _duckstring_f <= f``), never a snapshot cursor — so the window
-read works regardless of compaction and over either data plane. The whole ``_duckstring_*`` namespace is
-framework-owned (rejected from user output by the data plane); Trickle's system columns are:
+read works regardless of compaction and over either data plane. The ``_duckstring_*`` namespace is
+framework-owned; Trickle's system columns are now just:
 
-- ``_duckstring_f``    — the run's freshness, stamped on every history/changelog row;
-- ``_duckstring_op``   — ``upsert`` / ``delete`` in a merge Trickle's changelog;
-- ``_duckstring_hash`` — the change-detection digest, stored in a merge Trickle's clean *main* table.
+- ``_duckstring_f`` — the run's freshness, stamped on every history/changelog row;
+- ``_duckstring_d`` — the Z-set weight (``+1`` / ``-1``) on a merge Trickle's changelog.
 
-Two write modes (binary; no append-then-compact middle):
+(The old ``_duckstring_op`` and ``_duckstring_hash`` columns are gone: a comprehensive diff is now a
+full-row Z-set difference ``new(+1) ⊎ main(-1)`` consolidated, which needs no per-row hash, and the merge
+*main* is pure user columns.)
 
-- **append** — insert-only, trust-the-writer. One table, append-only: it is at once the history, the
-  full-read source, and the delta source. No PK uniqueness check, no diff, no deletes.
-- **merge** — upsert (+delete) with auto change-detection. A clean *main* table (one row per PK, no
-  tombstones — ``SELECT *`` over it is the current state) **plus** an append-only *changelog* CDC stream
-  (``__changelog`` companion). ``comprehensive=True`` (default, safe) diffs the full new state against
-  the prior main via ``_duckstring_hash`` to derive inserts/updates/deletes automatically;
-  ``comprehensive=False`` (expert) applies a supplied partial change-set + explicit ``deletes``.
+Two write modes:
 
-A consumer reads a source's delta via ``pond.read_delta("source.table")`` → a :class:`Delta`
-(``.upserts`` / ``.deletes`` / ``.keys()``); the merge collapses the changelog window per PK to the
-latest op (handles delete-then-re-add). The partial-path helpers (:meth:`KeySet.union`,
-``pond.keys_joining``, :meth:`KeySet.dropped`) do the affected-key bookkeeping for ``comprehensive=False``
-without imposing a compute layer — they operate on key-set relations only.
+- **append** — insert-only history. One table; its delta is the window of new rows, each weight ``+1``.
+- **merge** — a clean *main* table (one row per PK, ``SELECT *`` = current state) **plus** an append-only
+  ``__changelog`` Z-set stream. The public :func:`merge_table` takes the *complete current state* and
+  diffs it against the prior main to derive the Z-set; the builder composes a Z-set directly and applies
+  it via :func:`apply_zset`.
 
-Storage is kept in the Pond's **registry** (the compute substrate that persists across runs) and
-published wholesale by the data plane each run; the window read prunes on the consumer side via the
-content predicate. Mode + PK are recorded in a registry meta table and mirrored to a ``_trickle.json``
-sidecar in the published ``data_dir`` so a cross-Pond reader (which has no access to the producer's
-registry) can resolve them.
+A consumer reads a source's delta via ``pond.read_delta("source.table")`` → a :class:`Delta` exposing the
+Z-set (``.zset``) plus ``.is_full`` (a from-scratch full read: bootstrap, coverage-miss, or a *changed*
+overwrite Ripple — the consumer must then recompute comprehensively). An *unchanged* overwrite Ripple
+returns an **empty** delta (detected by comparing the source's published freshness to ``previous_f``), so
+it contributes only as a stable history operand — the master-data common case, free.
+
+Storage is kept in the Pond's **registry** and published wholesale by the data plane each run; the window
+read prunes on the consumer side. Mode/PK/floor and the source's run freshness ``f`` are mirrored to a
+``_trickle.json`` sidecar so a cross-Pond reader (no registry access) can resolve them.
 """
 
 from __future__ import annotations
@@ -52,25 +54,22 @@ def unique_name(prefix: str) -> str:
     relation that would otherwise re-bind when the next call re-creates that view)."""
     return f"_duckstring_ds_{prefix}_{next(_uid)}"
 
+
 # System columns — the reserved ``_duckstring_*`` namespace (see :mod:`duckstring.dataplane`).
 F_COL = "_duckstring_f"
-OP_COL = "_duckstring_op"
-HASH_COL = "_duckstring_hash"
-
-OP_UPSERT = "upsert"
-OP_DELETE = "delete"
+D_COL = "_duckstring_d"  # the Z-set weight (+1 present / -1 retraction)
 
 # A merge Trickle's CDC stream lives in a ``{table}__changelog`` companion registry table.
 CHANGELOG_SUFFIX = "__changelog"
 # The mode/PK registry: one row per Trickle output table. Named in the reserved namespace so
 # ``registry_tables`` hides it from the publish set.
 META_TABLE = "_duckstring_trickle"
-# The published sidecar carrying mode/PK to cross-Pond readers (they can't see the registry meta table).
+# The published sidecar carrying mode/PK/floor + the source run freshness to cross-Pond readers.
 SIDECAR = "_trickle.json"
 
 
 class DeltaError(ValueError):
-    """A delta read or partial-merge helper was used incompatibly (e.g. a non-PK delta-side join)."""
+    """A delta read or Trickle write was used incompatibly."""
 
 
 def changelog_name(table: str) -> str:
@@ -100,26 +99,19 @@ def _table_exists(con, name: str) -> bool:
     ).fetchone() is not None
 
 
-def _hash_expr(nonpk: list[str], alias: str | None = None) -> str:
-    """A 64-bit change-detection digest over the non-PK columns in schema order. Per-PK comparison
-    (new vs old for the same key) keeps it collision-safe (≈2⁻⁶⁴ per changed row; no birthday bound).
-    Casts to VARCHAR to canonicalise types/nulls so the hash is stable run to run."""
-    if not nonpk:
-        return "'0'"  # all-PK table: nothing non-key can change → only insert/delete
-    pref = f"{alias}." if alias else ""
-    items = ", ".join(f"CAST({pref}{_q(c)} AS VARCHAR)" for c in nonpk)
-    # As VARCHAR (not the raw UBIGINT hash): per-PK equality is all the diff needs, and an unsigned 64-bit
-    # value overflows the Iceberg/pyiceberg signed-long column stats.
-    return f"CAST(hash(list_value({items})) AS VARCHAR)"
+def _user_cols(columns) -> list[str]:
+    """The user columns of a relation — everything outside the reserved ``_duckstring_*`` namespace."""
+    from .dataplane import RESERVED_PREFIX
+
+    return [c for c in columns if not c.startswith(RESERVED_PREFIX)]
 
 
 def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
     """Bound a history/changelog table's retained window at write time — a **lag SLA**, not a
     correctness control (a consumer behind the retained window falls back to a full read of the clean
-    state; see :func:`read_delta`). Both are opt-in (``None`` keeps everything, the audit/replay choice):
+    state; see :func:`read_delta`). Both are opt-in (``None`` keeps everything):
 
-    - ``retain_t`` (a ``timedelta``): drop rows stamped older than ``f - retain_t`` — time-based, so it
-      scales with run frequency. The current run's ``f`` rows are always kept (``f - retain_t <= f``).
+    - ``retain_t`` (a ``timedelta``): drop rows stamped older than ``f - retain_t``.
     - ``retain_n`` (a count): keep only the newest ``retain_n`` distinct ``_duckstring_f`` runs.
 
     Returns the **cutoff** it applied (the oldest freshness still retained) so the caller can raise the
@@ -139,7 +131,7 @@ def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
     return cutoff
 
 
-# ─── meta (mode + PK) ─────────────────────────────────────────────────────────
+# ─── meta (mode + PK + floor) ──────────────────────────────────────────────────
 
 
 def _ensure_meta(con) -> None:
@@ -147,10 +139,6 @@ def _ensure_meta(con) -> None:
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
         f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR)"
     )
-    try:  # an older registry predates the floor column
-        con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN floor VARCHAR')
-    except Exception:
-        pass
 
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
@@ -165,9 +153,8 @@ def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
 
 def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
     """Maintain a Trickle table's coverage **floor** — the earliest freshness a windowed read can rely on
-    (below it, a consumer full-reads the clean state). A bootstrap/refresh **sets** it to that run's ``f``
-    (the changelog starts fresh there); retention **raises** it to its cutoff. A normal incremental run
-    touches neither, so the floor stays put."""
+    (below it, a consumer full-reads the clean state). A bootstrap/refresh **sets** it to that run's ``f``;
+    retention **raises** it to its cutoff. A normal incremental run touches neither."""
     from datetime import datetime, timezone
 
     cur = con.execute(f'SELECT floor FROM {_q(META_TABLE)} WHERE table_name = ?', [table]).fetchone()
@@ -177,7 +164,6 @@ def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
     if cutoff is not None and (floor is None or cutoff > floor):
         floor = cutoff
     if floor is not None:
-        # Normalise to UTC so the published floor string is producer-session-tz-independent.
         con.execute(
             f'UPDATE {_q(META_TABLE)} SET floor = ? WHERE table_name = ?',
             [floor.astimezone(timezone.utc).isoformat(), table],
@@ -192,12 +178,12 @@ def read_meta(con) -> dict[str, dict]:
     return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else []), "floor": r[3]} for r in rows}
 
 
-def write_sidecar(data_dir: Path, meta: dict[str, dict]) -> None:
-    """Publish mode/PK/floor next to the data so a cross-Pond reader can resolve a Trickle source and key
-    its coverage check off the floor."""
+def write_sidecar(data_dir: Path, payload: dict[str, dict]) -> None:
+    """Publish ``{table: {mode, pk, floor, f}}`` next to the data so a cross-Pond reader can resolve a
+    Trickle source's coverage and detect whether an overwrite source advanced (its ``f`` vs the
+    consumer's ``previous_f``)."""
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    payload = {t: {"mode": m["mode"], "pk": list(m["pk"]), "floor": m.get("floor")} for t, m in meta.items()}
     tmp = data_dir / (SIDECAR + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     tmp.replace(data_dir / SIDECAR)
@@ -220,8 +206,8 @@ def load_sidecar(data_dir: Path) -> dict[str, dict]:
 
 
 def windowable_tables(sidecar: dict[str, dict]) -> set[str]:
-    """The published table names whose history a draw can window by ``_duckstring_f`` (append tables +
-    merge changelogs). The merge main and plain overwrite output are not windowable (wholesale)."""
+    """Published table names whose history a draw can window by ``_duckstring_f`` (append tables + merge
+    changelogs). The merge main and plain overwrite output are not windowable (wholesale)."""
     out: set[str] = set()
     for table, meta in sidecar.items():
         if meta.get("mode") == "append":
@@ -241,9 +227,7 @@ def _con_utc():
 
 def landed_after(data_dir: Path) -> str | None:
     """The freshness a consumer has fully landed = ``min`` over its windowable tables' high-water, where a
-    table's high-water is ``max(its floor, max(_duckstring_f))`` — so a bootstrap whose changelog is empty
-    still counts as "landed up to floor". ``None`` (no sidecar, or a table with neither floor nor rows)
-    means *transfer wholesale*."""
+    table's high-water is ``max(its floor, max(_duckstring_f))``. ``None`` means *transfer wholesale*."""
     from datetime import datetime
 
     data_dir = Path(data_dir)
@@ -274,8 +258,7 @@ def landed_after(data_dir: Path) -> str | None:
 
 
 def window_parquet_bytes(pq_path: Path, after_iso: str) -> bytes:
-    """The rows of ``pq_path`` newer than ``after_iso`` (``_duckstring_f > after``), as Parquet bytes —
-    the producer's incremental slice for a draw."""
+    """The rows of ``pq_path`` newer than ``after_iso`` (``_duckstring_f > after``), as Parquet bytes."""
     import os
     import tempfile
 
@@ -295,8 +278,7 @@ def window_parquet_bytes(pq_path: Path, after_iso: str) -> bytes:
 
 def land_windowed(dest_path: Path, shipped: bytes, after_iso: str) -> None:
     """Land an incremental slice: keep the consumer's rows ``<= after`` and add the shipped rows
-    (``> after``) — idempotent (a re-transfer replaces, never duplicates, the ``> after`` rows). A brand-
-    new table (no destination yet) is shipped whole, so it just writes through."""
+    (``> after``) — idempotent. A brand-new table (no destination yet) is shipped whole."""
     import os
     import tempfile
 
@@ -327,14 +309,13 @@ def _sql_lit(path) -> str:
     return str(path).replace("'", "''")
 
 
-# ─── write: append ────────────────────────────────────────────────────────────
+# ─── write: append ──────────────────────────────────────────────────────────────
 
 
 def append_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None) -> None:
     """Append ``relation``'s rows to the history table ``name``, each stamped ``_duckstring_f = f``.
-    Insert-only: no PK uniqueness check, no diff. Idempotent at a given ``f`` (replay/retry re-run at the
-    same freshness): rows already stamped ``f`` are dropped before re-appending. ``retain_t`` /
-    ``retain_n`` bound the kept history (see :func:`_apply_retention`)."""
+    Insert-only: no PK uniqueness check, no diff, no deletes (its Z-set is all ``+1``). Idempotent at a
+    given ``f`` (rows already stamped ``f`` are dropped before re-appending)."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     src = "_duckstring_ds_append_src"
@@ -357,216 +338,165 @@ def append_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=N
     _advance_floor(con, name, bootstrap_f=(f if first else None), cutoff=cutoff)
 
 
-# ─── write: merge ─────────────────────────────────────────────────────────────
+# ─── write: merge (Z-set apply) ───────────────────────────────────────────────
 
 
-def merge_table(
-    con, name: str, relation, f, pk: tuple[str, ...], *,
-    comprehensive: bool, deletes=None, retain_t=None, retain_n=None,
-) -> None:
-    """Upsert ``relation`` into the clean *main* table ``name`` and append the changes to its
-    ``__changelog`` CDC stream, stamped ``_duckstring_f = f``.
+def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None) -> None:
+    """Apply a Z-set ``zset`` (a relation of user columns + ``_duckstring_d``) to the clean *main* table
+    ``name`` and record it on the ``__changelog``. ``zset`` is the **change** to the output — its ``+1``
+    rows are the new/updated rows, its ``-1`` rows the retractions of superseded/deleted ones.
 
-    ``comprehensive=True`` (default): ``relation`` is the *complete* current state — diff it against the
-    prior main (via ``_duckstring_hash``) to derive inserts/updates/deletes; the main is overwritten.
-    ``comprehensive=False``: ``relation`` is a *partial* change-set (upserts only) and ``deletes`` (a
-    relation of PK rows) the explicit removals — the main is upserted in place. ``retain_t`` / ``retain_n``
-    bound the kept *changelog* history (the main is the clean current state and is never trimmed)."""
+    The main is the materialised prior output (``O_old``); we update it in place (a copy-on-write upsert),
+    never recomputing it. Idempotent replay at the same ``f``: the apply re-deletes-and-re-inserts the same
+    keys (a no-op the second time), and an **empty** consolidated change leaves the changelog untouched (so
+    a comprehensive replay, whose diff against the already-advanced main is empty, preserves the first
+    attempt's changelog rows)."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
+    if not pk:
+        raise DeltaError(f"apply_zset('{name}', ...) needs a primary key (declare @trickle(pk=...) or pass pk=...)")
+    src = unique_name("zset")
+    zset.create_view(src, replace=True)
+    cols = list(zset.columns)
+    if D_COL not in cols:
+        raise DeltaError(f"apply_zset('{name}', ...): the relation has no {D_COL} weight column")
+    user = [c for c in cols if c != D_COL]
+    missing = [c for c in pk if c not in user]
+    if missing:
+        raise DeltaError(f"apply_zset('{name}', ...): primary key column(s) {missing} not in the relation")
+    sel_user = ", ".join(_q(c) for c in user)
+    pk_list = ", ".join(_q(c) for c in pk)
+    clog = changelog_name(name)
+    main_exists = _table_exists(con, name)
+
+    # Consolidate by full row: an update's old(-1)/new(+1) survive as distinct rows; a spurious +1/-1 of
+    # the same row cancels. This is the Z-set `distinct`/`consolidate` operator.
+    consol = unique_name("consol")
+    con.execute(
+        f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
+        f'SELECT {sel_user}, SUM({_q(D_COL)}) AS {_q(D_COL)} FROM {_q(src)} '
+        f'GROUP BY {sel_user} HAVING SUM({_q(D_COL)}) <> 0'
+    )
+    nonempty = con.execute(f'SELECT count(*) FROM {_q(consol)}').fetchone()[0] > 0
+
+    if not main_exists:  # bootstrap: stand up the clean main from the +1 rows
+        con.execute(f'CREATE TABLE {_q(name)} AS SELECT {sel_user} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
+    else:
+        # CoW upsert: drop every key the change touches, re-insert the surviving positive rows.
+        con.execute(
+            f'DELETE FROM {_q(name)} WHERE ({pk_list}) IN (SELECT {pk_list} FROM {_q(consol)})'
+        )
+        con.execute(
+            f'INSERT INTO {_q(name)} SELECT {sel_user} FROM {_q(consol)} WHERE {_q(D_COL)} > 0'
+        )
+
+    _ensure_changelog(con, clog, user)
+    # A bootstrap writes no changelog (a first consumer reads the main; no window predates this run). A
+    # normal run rewrites this F's window only when the change is non-empty (the replay-idempotency guard).
+    if main_exists and nonempty:
+        con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')
+        con.execute(
+            f'INSERT INTO {_q(clog)} ({sel_user}, {_q(D_COL)}, {_q(F_COL)}) '
+            f'SELECT {sel_user}, {_q(D_COL)}, {_ts(f)} FROM {_q(consol)}'
+        )
+    _record_meta(con, name, "merge", pk)
+    cutoff = _apply_retention(con, clog, f, retain_t, retain_n)
+    _advance_floor(con, name, bootstrap_f=(f if not main_exists else None), cutoff=cutoff)
+
+
+def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None) -> None:
+    """Comprehensive merge: ``relation`` is the **complete current state**. Diff it against the prior main
+    as a Z-set (``new(+1) ⊎ main(-1)``, consolidated by full row — rows present in both cancel, only-in-new
+    are inserts/updates ``+1``, only-in-main are retractions ``-1``) and apply it. No per-row hash needed;
+    the main holds pure user columns."""
     if not pk:
         raise DeltaError(f"merge_table('{name}', ...) needs a primary key (declare @trickle(pk=...) or pass pk=...)")
     cols = list(relation.columns)
     missing = [c for c in pk if c not in cols]
     if missing:
         raise DeltaError(f"merge_table('{name}', ...): primary key column(s) {missing} not in the relation")
-    nonpk = [c for c in cols if c not in pk]
-    clog = changelog_name(name)
-
-    src = "_duckstring_ds_merge_src"
-    relation.create_view(src, replace=True)
-    new = "_duckstring_ds_merge_new"
-    con.execute(
-        f'CREATE OR REPLACE TEMP TABLE {_q(new)} AS '
-        f'SELECT {", ".join(_q(c) for c in cols)}, {_hash_expr(nonpk)} AS {_q(HASH_COL)} FROM {_q(src)}'
-    )
-
-    main_exists = _table_exists(con, name)
-    _ensure_changelog(con, clog, cols)
-
-    if comprehensive:
-        if deletes is not None:
-            raise DeltaError("merge_table(comprehensive=True) derives deletes from the diff — drop the deletes= argument")
-        _merge_comprehensive(con, name, clog, new, cols, nonpk, pk, f, main_exists)
+    sel = ", ".join(_q(c) for c in cols)
+    state = unique_name("state")
+    relation.create_view(state, replace=True)
+    if _table_exists(con, name):
+        zset = con.sql(
+            f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)} '
+            f'UNION ALL BY NAME SELECT {sel}, -1 AS {_q(D_COL)} FROM {_q(name)}'
+        )
     else:
-        con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')  # idempotent replay (re-apply supplied set)
-        _merge_partial(con, name, clog, new, cols, nonpk, pk, f, main_exists, deletes)
-    _record_meta(con, name, "merge", pk)
-    cutoff = _apply_retention(con, clog, f, retain_t, retain_n)  # bound the changelog; the main is current-state
-    # A bootstrap/refresh (no prior main) sets the floor to f; retention raises it. The floor is keyed on
-    # the base table name (not the changelog), since that's what read_delta resolves.
-    _advance_floor(con, name, bootstrap_f=(f if not main_exists else None), cutoff=cutoff)
+        zset = con.sql(f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)}')
+    apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n)
 
 
-def _ensure_changelog(con, clog: str, cols: list[str]) -> None:
+def _ensure_changelog(con, clog: str, user: list[str]) -> None:
     if _table_exists(con, clog):
         return
-    src = "_duckstring_ds_merge_src"  # the new-state view, for its column types
-    sel = ", ".join(_q(c) for c in cols)
+    sel = ", ".join(_q(c) for c in user)
+    # Borrow column types from the freshly-created main (it always exists by the time we get here).
+    base = clog[: -len(CHANGELOG_SUFFIX)]
     con.execute(
         f'CREATE TABLE {_q(clog)} AS SELECT {sel}, '
-        f'CAST(NULL AS VARCHAR) AS {_q(OP_COL)}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} '
-        f'FROM {_q(src)} LIMIT 0'
+        f'CAST(NULL AS BIGINT) AS {_q(D_COL)}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} '
+        f'FROM {_q(base)} LIMIT 0'
     )
-
-
-def _on(pk: tuple[str, ...], a: str, b: str) -> str:
-    return " AND ".join(f"{a}.{_q(c)} = {b}.{_q(c)}" for c in pk)
-
-
-def _merge_comprehensive(con, name, clog, new, cols, nonpk, pk, f, main_exists) -> None:
-    sel_user = ", ".join(_q(c) for c in cols)
-    pk_list = ", ".join(_q(c) for c in pk)
-    # Stage this run's CDC delta (upserts + deletes) in a temp with the changelog schema, derived against
-    # the *current* main (the state before this F). Apply it to the changelog only when non-empty — this
-    # is what makes a comprehensive replay idempotent: the main is overwritten in place (the diff's prior
-    # snapshot is destroyed), so a re-run after a successful apply derives an empty delta; leaving the
-    # changelog untouched then preserves the F rows the first attempt already wrote.
-    delta = "_duckstring_ds_cdelta"
-    if main_exists:
-        # upserts = rows new-or-changed vs the prior main (hash differs); deletes = PKs gone from new.
-        con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(delta)} AS SELECT * FROM {_q(clog)} LIMIT 0')
-        con.execute(
-            f'INSERT INTO {_q(delta)} ({sel_user}, {_q(OP_COL)}, {_q(F_COL)}) '
-            f'SELECT {", ".join("n." + _q(c) for c in cols)}, \'{OP_UPSERT}\', {_ts(f)} '
-            f'FROM {_q(new)} n LEFT JOIN {_q(name)} o ON {_on(pk, "n", "o")} '
-            f'WHERE o.{_q(pk[0])} IS NULL OR o.{_q(HASH_COL)} IS DISTINCT FROM n.{_q(HASH_COL)}'
-        )
-        con.execute(
-            f'INSERT INTO {_q(delta)} ({pk_list}, {_q(OP_COL)}, {_q(F_COL)}) '
-            f'SELECT {", ".join("o." + _q(c) for c in pk)}, \'{OP_DELETE}\', {_ts(f)} '
-            f'FROM {_q(name)} o LEFT JOIN {_q(new)} n ON {_on(pk, "o", "n")} '
-            f'WHERE n.{_q(pk[0])} IS NULL'
-        )
-        if con.execute(f'SELECT count(*) FROM {_q(delta)}').fetchone()[0] > 0:
-            con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')  # replace this F's window
-            con.execute(f'INSERT INTO {_q(clog)} SELECT * FROM {_q(delta)}')
-    # else: a **bootstrap** (or refresh) — no prior main, so every row is "new". Re-emitting all of them
-    # into the changelog is dead weight: a first-time consumer bootstraps from the main, and no window's
-    # lower bound can predate this run. So write *nothing* to the changelog; the published floor = f marks
-    # "full-read the main below here" (set by the caller).
-    # The main is the clean current state: overwrite it with the full new state (reuses overwrite — no
-    # Iceberg delete-files / CoW needed). Carries _duckstring_hash for the next run's diff.
-    con.execute(f'CREATE OR REPLACE TABLE {_q(name)} AS SELECT * FROM {_q(new)}')
-
-
-def _merge_partial(con, name, clog, new, cols, nonpk, pk, f, main_exists, deletes) -> None:
-    sel_user = ", ".join(_q(c) for c in cols)
-    pk_list = ", ".join(_q(c) for c in pk)
-    if not main_exists:
-        # No prior main: stand one up empty so the upsert below lands somewhere.
-        con.execute(f'CREATE TABLE {_q(name)} AS SELECT * FROM {_q(new)} LIMIT 0')
-
-    # Changelog: the supplied upserts, then the explicit deletes (PK only; non-PK cols default NULL).
-    con.execute(
-        f'INSERT INTO {_q(clog)} ({sel_user}, {_q(OP_COL)}, {_q(F_COL)}) '
-        f'SELECT {sel_user}, \'{OP_UPSERT}\', {_ts(f)} FROM {_q(new)}'
-    )
-    del_view = None
-    if deletes is not None:
-        del_view = "_duckstring_ds_merge_del"
-        _delete_relation(deletes).create_view(del_view, replace=True)
-        dcols = list(_delete_relation(deletes).columns)
-        if list(dcols) != list(pk) and len(dcols) == len(pk):
-            # tolerate column-name drift but require matching arity; align positionally
-            sel_del = ", ".join(_q(dc) for dc in dcols)
-        else:
-            sel_del = ", ".join(_q(c) for c in pk)
-        con.execute(
-            f'INSERT INTO {_q(clog)} ({pk_list}, {_q(OP_COL)}, {_q(F_COL)}) '
-            f'SELECT {sel_del}, \'{OP_DELETE}\', {_ts(f)} FROM {_q(del_view)}'
-        )
-
-    # Main: drop the upserted PKs and the deleted PKs, then re-insert the upserts (a CoW upsert).
-    con.execute(f'DELETE FROM {_q(name)} WHERE ({pk_list}) IN (SELECT {pk_list} FROM {_q(new)})')
-    if del_view is not None:
-        sel_del = ", ".join(_q(c) for c in (list(_delete_relation(deletes).columns) or pk))
-        con.execute(f'DELETE FROM {_q(name)} WHERE ({pk_list}) IN (SELECT {sel_del} FROM {_q(del_view)})')
-    con.execute(f'INSERT INTO {_q(name)} SELECT * FROM {_q(new)}')
-
-
-def _delete_relation(deletes):
-    """Coerce a ``deletes`` argument (a :class:`KeySet` or a raw DuckDB relation) to a relation."""
-    return deletes.relation if isinstance(deletes, KeySet) else deletes
 
 
 # ─── read: source.delta ───────────────────────────────────────────────────────
 
 
 class Delta:
-    """A source's change-set over the window ``(previous_f, f]`` — :attr:`upserts` (the net upsert rows,
-    user columns), :attr:`deletes` (the deleted PK rows), and :meth:`keys` (their union, a key-set).
+    """A source's change over the window ``(previous_f, f]`` as a **Z-set** (:attr:`zset` — user columns +
+    ``_duckstring_d``).
 
-    :attr:`is_full` is ``True`` when this is **not** a windowed delta but a *full read* — a bootstrap, a
-    coverage-miss (the consumer fell behind the source's retained history / its floor), or an overwrite
-    (plain Ripple) source. A full read has no deletes to report (``deletes`` is empty), because deletes
-    can only be derived against the consumer's own prior state. So a consumer **must absorb a full read
-    comprehensively** (recompute its whole output and ``merge_table(comprehensive=True)``, which diffs
-    against its own main and computes the right deletes) — never a partial merge trusting the empty
-    ``deletes``. The builder does this automatically; hand-rolled partial consumers must check this."""
+    :attr:`is_full` is ``True`` when this is a *full read*, not a windowed delta — a bootstrap, a
+    coverage-miss (the consumer fell behind the source's retained history / its floor), or a **changed**
+    overwrite (plain Ripple) source. A full read is the whole current state at weight ``+1``; a consumer
+    must **absorb it comprehensively** (recompute its whole output and diff against its own main), never
+    treat it as an incremental slice. An *unchanged* overwrite source returns an **empty** Z-set
+    (``is_full`` False, no rows) — it contributes only as a stable history operand."""
 
-    def __init__(self, con, pk: tuple[str, ...], upserts, deletes, *, is_full: bool = False) -> None:
+    def __init__(self, con, pk: tuple[str, ...], zset, *, is_full: bool = False) -> None:
         self.con = con
         self.pk = tuple(pk)
-        self.upserts = upserts
-        self.deletes = deletes
+        self.zset = zset
         self.is_full = is_full
 
-    def keys(self) -> "KeySet":
-        """The changed PKs — ``upserts ∪ deletes`` — as a key-set (folds source deletes in, so a deleted
-        spine key lands in the delete set automatically; see :meth:`KeySet.dropped`)."""
+    def is_empty(self) -> bool:
+        return self.zset.aggregate("count(*) AS n").fetchone()[0] == 0
+
+    def keys_count(self) -> int:
+        """Distinct rows that changed — the cost the change-fraction threshold measures against."""
+        return self.zset.aggregate("count(*) AS n").fetchone()[0]
+
+    @property
+    def upserts(self):
+        """The net present rows (weight ``> 0``), user columns only — a convenience for hand-rolled
+        consumers and the comprehensive case."""
+        consolidated = self._consolidated()
+        return _strip_system(consolidated.filter(f"{_q(D_COL)} > 0"))
+
+    @property
+    def deletes(self):
+        """The PKs that were removed — keys appearing only with retractions (no surviving positive row)."""
         if not self.pk:
-            raise DeltaError("this delta has no declared primary key — .keys() needs one")
+            return self.zset.filter("1=0").project(", ".join(_q(c) for c in self.zset.columns if c != D_COL))
+        consolidated = self._consolidated()
         pk_sel = ", ".join(_q(c) for c in self.pk)
-        u = self.upserts.project(pk_sel)
-        d = self.deletes.project(pk_sel)
-        return KeySet(self.con, u.union(d).distinct(), self.pk)
+        neg = consolidated.filter(f"{_q(D_COL)} < 0").project(pk_sel)
+        pos = consolidated.filter(f"{_q(D_COL)} > 0").project(pk_sel)
+        return neg.except_(pos)
 
-
-class KeySet:
-    """A relation of primary keys — the currency of the partial-merge (``comprehensive=False``) helpers.
-    Operating on keys only keeps the bookkeeping framework-agnostic (no imposed compute layer)."""
-
-    def __init__(self, con, relation, pk: tuple[str, ...]) -> None:
-        self.con = con
-        self.relation = relation
-        self.pk = tuple(pk)
-
-    def union(self, other: "KeySet") -> "KeySet":
-        return KeySet(self.con, self.relation.union(other.relation).distinct(), self.pk)
-
-    def create_view(self, name: str):
-        self.relation.create_view(name, replace=True)
-        return self
-
-    def dropped(self, recomputed):
-        """The keys that fell out of the recompute = ``self EXCEPT recomputed[pk]`` — the deletes for a
-        partial merge. Correct however ``self`` was built: a source-deleted key is in ``self`` (``.keys()``
-        folds deletes in) and never in ``recomputed``, so it lands here automatically."""
-        pk_sel = ", ".join(_q(c) for c in self.pk)
-        rec_pk = recomputed.project(pk_sel)
-        return self.relation.project(pk_sel).except_(rec_pk)
+    def _consolidated(self):
+        user = [c for c in self.zset.columns if c != D_COL]
+        sel = ", ".join(_q(c) for c in user)
+        return self.con.sql(
+            f'SELECT {sel}, SUM({_q(D_COL)}) AS {_q(D_COL)} FROM ({self.zset.sql_query()}) '
+            f'GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0'
+        )
 
 
 def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp) -> Delta:
-    """Resolve ``table``'s declared mode in ``data_dir`` and read its change-set over ``(previous_f, f]``.
-
-    - **append** source: window-filter the single history table.
-    - **merge** source: read the changelog window, collapse per PK to the max-``_duckstring_f`` row (the
-      *net* change per key).
-    - **overwrite** source (a plain Ripple): no history → a full read, every row an upsert.
-    - **coverage / bootstrap**: ``previous_f = NEVER`` or earlier than the oldest retained stamp → a full
-      read (of the main / the whole table); resume incrementally next run."""
+    """Resolve ``table``'s mode in ``data_dir`` and read its Z-set change over ``(previous_f, f]``."""
     from datetime import datetime
 
     from .engine.core import NEVER
@@ -580,15 +510,24 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp) -> Delta:
         return _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
     if mode == "merge":
         return _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
-    # overwrite source (a plain Ripple): no history → always a full read, every row an upsert.
-    upserts = _strip_system(con.sql(dp.read_select(data_dir, table)))
-    return Delta(con, pk, upserts, _empty_pk(upserts, pk), is_full=True)
+
+    # overwrite source (a plain Ripple): no history. If its published freshness `f` shows it has not
+    # advanced past the consumer's previous_f, it is unchanged → an empty delta (stable history operand).
+    # Otherwise (advanced / unknown / bootstrap) → a full read at +1, forcing the comprehensive path.
+    src_f = datetime.fromisoformat(meta["f"]) if meta.get("f") else None
+    state = _strip_system(con.sql(dp.read_select(data_dir, table)))
+    if previous_f != NEVER and src_f is not None and src_f <= previous_f:
+        return Delta(con, pk, _as_zset(state, 1).filter("1=0"), is_full=False)
+    return Delta(con, pk, _as_zset(state, 1), is_full=True)
+
+
+def _as_zset(relation, weight: int):
+    """Tag every row of a clean relation with the constant Z-set weight ``weight``."""
+    return relation.project(f"*, {int(weight)} AS {_q(D_COL)}")
 
 
 def _covered(previous_f, NEVER, floor, oldest) -> bool:
-    """Whether ``previous_f`` is covered by the available history — i.e. a windowed read is valid. Keys off
-    the published ``floor`` (set by a bootstrap/refresh, raised by retention); falls back to the oldest
-    retained row when a legacy sidecar carries no floor."""
+    """Whether ``previous_f`` is covered by the available history (a windowed read is valid)."""
     if previous_f == NEVER:
         return False
     bound = floor if floor is not None else oldest
@@ -601,8 +540,8 @@ def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor
     full = not _covered(previous_f, NEVER, floor, oldest)
     upper = f"{_q(F_COL)} <= {_ts(f)}"
     cond = upper if full else f"{_q(F_COL)} > {_ts(previous_f)} AND {upper}"
-    upserts = _strip_system(rel.filter(cond))
-    return Delta(con, pk, upserts, _empty_pk(upserts, pk), is_full=full)
+    rows = _strip_system(rel.filter(cond))  # append rows are all present (+1); never retracted
+    return Delta(con, pk, _as_zset(rows, 1), is_full=full)
 
 
 def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor) -> Delta:
@@ -617,21 +556,19 @@ def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
     full = clog_sql is None or not _covered(previous_f, NEVER, floor, oldest)
     if full:
         main = _strip_system(con.sql(dp.read_select(data_dir, table)))
-        return Delta(con, pk, main, _empty_pk(main, pk), is_full=True)
-    # Window the changelog, then collapse per PK to the latest op (net change per key). Inlined as a
-    # self-contained subquery (over immutable read_parquet) — NOT a named view: several read_delta calls
-    # in one run would share a view name, and the lazy upserts/deletes relations would re-bind to whoever
-    # wrote it last (e.g. a spine delta silently re-pointing at a dimension's changelog).
-    window = (
-        f"(SELECT * FROM ({clog_sql}) "
-        f"WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)} "
-        f"QUALIFY row_number() OVER (PARTITION BY {', '.join(_q(c) for c in pk)} "
-        f"ORDER BY {_q(F_COL)} DESC) = 1)"
+        return Delta(con, pk, _as_zset(main, 1), is_full=True)
+    # Window the changelog and consolidate by full row (the net Z-set over the window — multiple updates
+    # and delete-then-re-add collapse). Inlined as a self-contained subquery (over immutable read_parquet),
+    # NOT a named view: several read_delta calls in one run would share a view name and re-bind.
+    user = [c for c in con.sql(clog_sql).columns if c not in (F_COL, D_COL)]
+    sel = ", ".join(_q(c) for c in user)
+    zset = con.sql(
+        f"SELECT {sel}, SUM({_q(D_COL)}) AS {_q(D_COL)} FROM ("
+        f"  SELECT * FROM ({clog_sql}) "
+        f"  WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)}"
+        f") GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0"
     )
-    upserts = _strip_system(con.sql(f"SELECT * FROM {window} WHERE {_q(OP_COL)} = '{OP_UPSERT}'"))
-    pk_sel = ", ".join(_q(c) for c in pk)
-    deletes = con.sql(f"SELECT {pk_sel} FROM {window} WHERE {_q(OP_COL)} = '{OP_DELETE}'")
-    return Delta(con, pk, upserts, deletes)
+    return Delta(con, pk, zset, is_full=False)
 
 
 def _strip_system(rel):
@@ -642,10 +579,3 @@ def _strip_system(rel):
     if not sys_cols:
         return rel
     return rel.project(f"* EXCLUDE ({', '.join(_q(c) for c in sys_cols)})")
-
-
-def _empty_pk(rel, pk: tuple[str, ...]):
-    """An empty deletes relation with the PK schema (for sources that never delete: append / full reads)."""
-    if not pk:
-        return rel.filter("1=0")
-    return rel.project(", ".join(_q(c) for c in pk)).filter("1=0")

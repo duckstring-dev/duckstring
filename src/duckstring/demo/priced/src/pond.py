@@ -1,10 +1,10 @@
 """priced — the ``pond.trickle(...)`` builder: incremental star enrichment.
 
-Joins the ``orders`` order-line stream to the ``catalog`` product dimension. The builder records the
-join graph and walks it: it reads each Source's delta, propagates the affected order keys along the
-edge (a new order line, *or* an order line whose product's price changed), recomputes only that slice,
-and merges it. Because it sees the whole graph it can't forget the price-change edge — no silent
-under-merge. The output is itself a merge Trickle (clean main + changelog) for ``revenue`` to consume.
+Joins the ``orders`` order-line stream to the ``catalog`` product dimension. The builder composes each
+changed Source's **Z-set delta** through the join: a new order line (a ``+1`` on the spine) or a product
+whose price drifted (a ``-1``/``+1`` on the dimension) both flow to the right output rows, and a deletion
+propagates as a full-row retraction — so the join needs no FK=PK constraint. The output is itself a merge
+Trickle (clean main + Z-set changelog) for ``revenue`` to consume.
 """
 
 from duckstring import trickle
@@ -19,5 +19,6 @@ def priced_line(pond):
             "s0.order_id, s0.product_id, s0.quantity, s1.unit_price, "
             "round(s0.quantity * s1.unit_price, 2) AS revenue"
         )
+        .pk("order_id")
         .merge("priced_line")
     )

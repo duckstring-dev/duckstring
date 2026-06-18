@@ -54,6 +54,6 @@ def catalog(p):
     def build(con):
         vals = ", ".join(f"({pid}, '{n}', '{c}', {pr})" for pid, n, c, pr in _PRODUCTS)
         rel = con.sql(f"SELECT * FROM (VALUES {vals}) v(product_id, name, category, unit_price)")
-        trickle_io.merge_table(con, "product", rel, _F, ("product_id",), comprehensive=True)
+        trickle_io.merge_table(con, "product", rel, _F, ("product_id",))
 
     _publish(p, build)

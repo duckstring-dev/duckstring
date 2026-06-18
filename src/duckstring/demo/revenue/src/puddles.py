@@ -29,7 +29,7 @@ def priced(p):
         rel = con.sql(
             f"SELECT * FROM (VALUES {vals}) v(order_id, product_id, quantity, unit_price, revenue)"
         )
-        trickle_io.merge_table(con, "priced_line", rel, _F, ("order_id",), comprehensive=True)
+        trickle_io.merge_table(con, "priced_line", rel, _F, ("order_id",))
         ParquetDataPlane().export(con, p.path)
     finally:
         con.close()

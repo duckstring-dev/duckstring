@@ -99,7 +99,7 @@ class IcebergDataPlane(DataPlane):
         data_dir = Path(data_dir)
         # Validates the publish set (Trickle tables exempt from the reserved-column check), writes the
         # Trickle mode/PK sidecar, and returns the tables to commit — all before any write.
-        tables = publish_plan(con, data_dir)
+        tables = publish_plan(con, data_dir, f)
         # Flat-Parquet sidecar first (also the consistent fallback if the Iceberg commit fails).
         self._parquet.export(con, data_dir, mode=mode, f=f)
         # Stamp _duckstring_f (a TIMESTAMPTZ) as UTC for Arrow: pyiceberg accepts only UTC-tz timestamps,
