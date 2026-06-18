@@ -1,6 +1,6 @@
 ---
 title: Trickles
-description: The incremental variant of a Ripple — history-preserving I/O, not incremental compute.
+description: The incremental variant of a Ripple — history-preserving I/O and Z-set incremental joins.
 ---
 
 # Trickles
@@ -11,9 +11,9 @@ In every orchestration respect a Trickle *is* a Ripple: it's a node in the packa
 
 ## What a Trickle is — and is not
 
-A Trickle delivers **incremental I/O and incremental transfer, not incremental computation.** Joins still recompute fully each run — you cannot derive `Δ(A ⋈ B)` from input deltas without maintaining per-operator state, and that machinery (with its worst-in-data failure mode, silently wrong results) is exactly what Duckstring keeps out of the core. So a Trickle's win is the **small write and small draw** at the boundary, not less work in the middle.
+A Trickle delivers incremental I/O and transfer **and incremental joins**. Every change is carried as a **Z-set** — each row tagged with an integer weight (`+1` for a present row, `-1` for a retraction) — and the [builder](../guides/trickle.md#the-builder-pondtrickle) composes the Z-set deltas of its sources through a join, so when only some inputs change it recomputes just the affected output rather than the whole join. Because a deletion is a full-row `-1` (not a key-only tombstone), a join can be on **any** column and deletes still propagate soundly.
 
-That's the honest scope, and it's the right one at Duckstring's single-node target (transforms up to roughly 50M rows): the bytes a transform *publishes* and *ships between Catchments* are usually what hurt, and those are what a Trickle shrinks.
+What stays a full recompute is **aggregation**: incremental `MIN`/`MAX`/`DISTINCT` need retraction-aware operators Duckstring doesn't ship, so an aggregate re-runs over its full input — the win there is the small delta *out*, not less compute in. That's the honest boundary, and the right one at Duckstring's single-node target (transforms up to roughly 50M rows): the bytes a transform *publishes* and *ships between Catchments* are usually what hurt, and a Trickle shrinks those regardless; incremental joins then cut the in-between work for the shapes that have it.
 
 ## Two modes
 
@@ -24,7 +24,7 @@ A Trickle is either **append** or **merge** — history-preserving in two differ
 | **append** | `pond.append_table(...)` | One insert-only history table | Event / fact logs whose identity is unique by construction — no diff, no deletes |
 | **merge** | `pond.merge_table(...)` | A clean current-state **main** + an append-only **changelog** (CDC stream) | Dimensions and any computed state where rows update or disappear |
 
-A merge Trickle keeps its `main` table as the clean current state — one row per primary key, no tombstones, so a plain read of it is just "the data now". Alongside it, a `__changelog` companion records the per-run inserts, updates, and deletes that a delta read consumes. With `merge_table`'s default, Duckstring **derives that changelog for you** by diffing the new state against the previous one — see the [guide](../guides/trickle.md).
+A merge Trickle keeps its `main` table as the clean current state — one row per primary key, no tombstones, so a plain read of it is just "the data now". Alongside it, a `__changelog` companion records each run's change as a **Z-set**: an update is a `-1` of the old row plus a `+1` of the new, a delete a `-1` of the old row, an insert a `+1` of the new. You hand `merge_table` the *complete current state* and Duckstring **derives that Z-set for you** by diffing it against the previous main — see the [guide](../guides/trickle.md).
 
 ## Freshness in the data
 
@@ -32,16 +32,16 @@ The mechanism under both modes is the run's [freshness](freshness.md) stamped in
 
 ## Composition
 
-Incrementality chains through **Trickle → Trickle**:
+Incrementality chains through **Trickle → Trickle**, and any table is a valid Source for the builder:
 
-- A **Trickle reading a Trickle** reads its delta and stays incremental.
-- A **Trickle reading an ordinary Ripple** (overwrite output) full-reads at that hop and merges comprehensively — perfectly correct, just not incremental across that one edge. A chain stays incremental for the Trickle→Trickle runs after the overwrite node.
+- A **Trickle reading a Trickle** composes its Z-set delta and stays incremental.
+- A **Trickle reading an ordinary Ripple** (overwrite output) treats it as a Source like any other. If that Ripple *hasn't* changed since the consumer last ran it costs nothing (a stable join operand); if it *has* changed, the consumer recomputes that output comprehensively (an overwrite source carries no prior state to retract against). Promote the Ripple to a Trickle upstream to make its changes incremental too — a zero-touch change for consumers.
 - A **Ripple reading a Trickle** reads its clean current state, like any other Source.
 
 So you can adopt Trickles gradually: turn the nodes that benefit into Trickles and leave the rest as Ripples; mixing the two is expected, not a special case.
 
 ## Where to go next
 
-- **[Incremental processing](../guides/trickle.md)** — the guide: writing append and merge Trickles, reading deltas, the `pond.trickle(...)` builder, retention, and the partial-merge escape hatch.
+- **[Incremental processing](../guides/trickle.md)** — the guide: writing append and merge Trickles, reading deltas, the `pond.trickle(...)` builder, and retention.
 - **[Incremental Ripples](../guides/incremental-ripples.md)** — the same idea by hand, with `pond.f` / `pond.previous_f`, for when you want the watermark logic explicit (or a shape a Trickle doesn't cover).
 - **[Python API](../reference/python-api.md)** — the exact write/read surface.

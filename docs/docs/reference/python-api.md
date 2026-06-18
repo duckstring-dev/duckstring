@@ -163,45 +163,41 @@ A Trickle is orchestrated exactly like a Ripple — it differs only in I/O.
 
 Append `relation` to the insert-only history table `name`; each row is stamped with `pond.f`. No diff, no uniqueness check, no deletes. Idempotent on replay at the same freshness. The history table is both the full read and the delta source.
 
-### `pond.merge_table(name, relation, *, comprehensive=True, deletes=None, pk=None, retain_t=None, retain_n=None)`
+### `pond.merge_table(name, relation, *, pk=None, retain_t=None, retain_n=None)`
 
-Upsert `relation` into the clean current-state **main** table `name`, recording the changes in its `__changelog` companion.
+Merge the **complete current state** `relation` into the clean current-state **main** table `name`, recording the change as a Z-set in its `__changelog` companion. Duckstring diffs `relation` against the previous main as a full-row Z-set difference to derive inserts/updates/deletes — so it is always safe to hand it the whole state, and there is no way to under-merge.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `comprehensive` | `True` | `relation` is the *complete* current state — Duckstring diffs it against the previous state to derive inserts/updates/deletes. The safe default. |
-| `deletes` | `None` | Only with `comprehensive=False`: a relation (or `KeySet`) of primary keys to remove. |
 | `pk` | the `@trickle` default | The merge identity. |
 | `retain_t` / `retain_n` | `None` | Bound the kept changelog: a `timedelta` and/or a run count. Off by default (keep everything); a lag SLA, never a correctness gate. |
 
-With `comprehensive=False`, `relation` is a *partial* set of changed rows. **Under-supplying changes or deletes silently corrupts data** — prefer the default, or the builder below.
+### `pond.apply_zset(name, zset, *, pk=None, retain_t=None, retain_n=None)`
+
+The low-level primitive the builder uses: apply a **Z-set** change `zset` (a relation of user columns + the `_duckstring_d` weight) directly to the output Trickle `name`. Reach for it only for hand-rolled incremental compute outside the builder; otherwise use `merge_table` (full state) or the builder.
 
 ### `pond.read_delta(ref)` → `Delta`
 
-A Source's change-set over this run's window `(pond.previous_f, pond.f]`. Resolves the Source's mode automatically (append history window; merge changelog collapsed per key; an overwrite Ripple → a full read), and falls back to a full read on a first run or a coverage miss.
+A Source's change over this run's window `(pond.previous_f, pond.f]`, as a Z-set. Resolves the Source's mode automatically (append history window all `+1`; merge changelog consolidated by full row; an overwrite Ripple → a full read if it advanced, else an empty delta), and falls back to a full read on a first run or a coverage miss.
 
 | Attribute / method | Meaning |
 |---|---|
-| `delta.upserts` | The changed rows (new + updated), user columns only — a DuckDB relation. |
-| `delta.deletes` | The removed primary keys — a relation. |
-| `delta.keys()` | `upserts ∪ deletes` as a `KeySet`. |
-| `delta.is_full` | `True` when this is a **full read** (a bootstrap, a coverage-miss past the source's retained history, or an overwrite Ripple source) rather than a window. A full read carries **no deletes** (they can't be derived without your prior state), so on `is_full` you must **absorb comprehensively** — recompute your whole output and `merge_table(comprehensive=True)`, never a partial merge trusting the empty `deletes`. The builder does this automatically. |
+| `delta.zset` | The change as a Z-set — user columns plus `_duckstring_d` (`+1` present, `-1` retraction), a DuckDB relation. |
+| `delta.upserts` | Derived: the net present rows (weight `> 0`), user columns only. |
+| `delta.deletes` | Derived: the removed primary keys. |
+| `delta.is_full` | `True` when this is a **full read** (a bootstrap, a coverage-miss past the source's retained history, or a *changed* overwrite Ripple source) rather than a window — the whole current state at `+1`, to be absorbed comprehensively. The builder does this automatically. |
 
-### The builder — `pond.trickle(spine_ref)`
+### The builder — `pond.trickle(spine_ref, *, p=0.3)`
 
-A fluent builder over Trickle sources that wires an incremental join and *can't forget an edge* (it sees the whole graph). Chain `.join(pond.trickle(dim), on=…)` / `.filter(predicate)` / `.select(projection)`, then `.merge(name, *, pk=None, retain_t=None, retain_n=None)`. The spine owns the output key; dimensions are `s1`, `s2`, … in the projection. The op set is closed — unsupported operations raise at build time. See the [guide](../guides/trickle.md#the-builder-pondtrickle).
+A fluent builder that composes an incremental join from its sources' Z-set deltas and *can't forget an edge* (it sees the whole graph). Chain `.join(pond.trickle(dim), on=…)` / `.filter(predicate)` / `.select(projection)` / `.pk(key)`, then `.merge(name, *, retain_t=None, retain_n=None)`.
 
-### Partial-path helpers
+- **`on`** is a shared column name (or list), or a `{spine_col: dim_col}` dict — **any** equi-join key (no FK=PK requirement).
+- **`.pk(key)`** is **required** (the output identity; must be unique in the output). **`.select`** is required once there's a join and must include the PK; computed columns are allowed.
+- The spine is `s0`, dimensions `s1`, `s2`, … in the projection. Any table is a valid source (Trickle or overwrite Ripple).
+- **`p`** (per source, default `0.3`) is the change-fraction threshold: past that share of a source's rows the builder recomputes comprehensively for that run; `p=1.0` disables the check.
+- Bootstrap / coverage-miss / changed-Ripple / over-`p` → comprehensive recompute diffed against the last-written main. The op set is closed — a snowflake dimension, a missing `.pk()`, or a joined graph with no `.select` raises at build time.
 
-For `comprehensive=False` by hand. They operate on key-sets, imposing no compute layer.
-
-| Helper | Returns |
-|---|---|
-| `pond.keys_joining(spine_ref, delta, on=…)` | The spine keys a dimension `delta` ripples to (`on` equi-joins the spine to the dimension's full key; a non-key join is rejected). A `KeySet`. |
-| `pond.affected_groups(delta, by=…)` | The group keys a `delta` touches, for re-aggregation. A `KeySet`. |
-| `KeySet.union(other)` | The union, deduplicated. |
-| `KeySet.dropped(recomputed)` | The deletes — affected keys absent from `recomputed` (a relation). |
-| `KeySet.create_view(name)` / `KeySet.relation` | Register as a view / the underlying relation. |
+See the [guide](../guides/trickle.md#the-builder-pondtrickle).
 
 ## Execution environment
 
