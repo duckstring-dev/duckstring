@@ -74,25 +74,24 @@ def test_append_idempotent_replay_at_same_f(reg):
     assert reg.sql("SELECT count(*) FROM event").fetchone()[0] == 1
 
 
-def test_append_validate_pk_catches_duplicates(reg):
-    # Duplicate within the appended batch.
+def test_append_fail_on_conflict_catches_duplicates(reg):
+    # fail_on_conflict defaults True; with a pk it asserts uniqueness. Duplicate within the appended batch:
     with pytest.raises(T.DeltaError, match="duplicate"):
-        T.append_table(reg, "event", reg.sql("SELECT 1 AS id UNION ALL SELECT 1 AS id"),
-                       ts(1), ("id",), validate_pk=True)
+        T.append_table(reg, "event", reg.sql("SELECT 1 AS id UNION ALL SELECT 1 AS id"), ts(1), ("id",))
     assert not reg.sql("SELECT 1 FROM information_schema.tables WHERE table_name = 'event'").fetchall()
 
     # Collision against existing history (a different run's row).
-    T.append_table(reg, "event", reg.sql("SELECT 1 AS id"), ts(1), ("id",), validate_pk=True)
+    T.append_table(reg, "event", reg.sql("SELECT 1 AS id"), ts(1), ("id",))
     with pytest.raises(T.DeltaError, match="already present"):
-        T.append_table(reg, "event", reg.sql("SELECT 1 AS id"), ts(2), ("id",), validate_pk=True)
+        T.append_table(reg, "event", reg.sql("SELECT 1 AS id"), ts(2), ("id",))
 
     # A replay at the same f re-appends its own rows without tripping the check.
-    T.append_table(reg, "event", reg.sql("SELECT 1 AS id"), ts(1), ("id",), validate_pk=True)
+    T.append_table(reg, "event", reg.sql("SELECT 1 AS id"), ts(1), ("id",))
     assert reg.sql("SELECT count(*) FROM event").fetchone()[0] == 1
 
-    # validate_pk with no pk is a usage error.
-    with pytest.raises(T.DeltaError, match="needs a primary key"):
-        T.append_table(reg, "event2", reg.sql("SELECT 1 AS id"), ts(1), (), validate_pk=True)
+    # fail_on_conflict=False is the trust-the-writer fast path — a colliding pk is appended without a check.
+    T.append_table(reg, "event", reg.sql("SELECT 1 AS id"), ts(3), ("id",), fail_on_conflict=False)
+    assert reg.sql("SELECT count(*) FROM event").fetchone()[0] == 2
 
 
 def test_append_delta_window_is_plus_one(reg, tmp_path):
@@ -654,6 +653,102 @@ def test_builder_chain_matches_comprehensive_join(tmp_path):
     """).fetchall())
     assert got == want
     snk.close()
+
+
+# ─── builder .append() terminal (monotonic transforms + conflict handling) ───────
+
+
+def _enriched(tmp_path, snk, snk_dir, f, pf, *, fail_on_conflict=True, log_drops=True, dim_p=0.3):
+    """Append-enrich the order-line spine with the product dim (one output row per order_id). ``dim_p=1.0``
+    forces the incremental path (skips the change-fraction threshold) so a tiny dim drives a Z-set delta."""
+    pond = Pond("e", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+    (pond.trickle("sales.order_line").join(pond.trickle("catalog.product", p=dim_p), on="product_id")
+         .select("s0.order_id, s0.product_id, s0.qty, s1.price")
+         .append("enriched", pk="order_id", fail_on_conflict=fail_on_conflict, log_drops=log_drops))
+    publish(snk, snk_dir, f=f)
+
+
+def test_builder_append_monotonic_accumulates_history(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "e" / "m1" / "data"
+
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    _enriched(tmp_path, snk, snk_dir, ts(1), NEVER)               # bootstrap → append both
+    assert rows(snk, snk_dir, "enriched", "order_id, price") == [(10, 5), (11, 9)]
+    assert T.load_sidecar(snk_dir)["enriched"]["mode"] == "append"
+
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p1", 3)], ts(2))     # a NEW order (monotonic spine growth)
+    _enriched(tmp_path, snk, snk_dir, ts(2), ts(1))
+    assert rows(snk, snk_dir, "enriched", "order_id, price") == [(10, 5), (11, 9), (12, 5)]
+    snk.close()
+
+
+def test_builder_append_fails_on_changed_past(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "e" / "m1" / "data"
+
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    _enriched(tmp_path, snk, snk_dir, ts(1), NEVER)
+
+    pr([("p1", 50), ("p2", 9)], ts(2))   # p1 reprice retracts order 10's enriched row — not append-safe
+    with pytest.raises(T.DeltaError, match="not append-safe|retraction|changed-past"):
+        _enriched(tmp_path, snk, snk_dir, ts(2), ts(1))
+    snk.close()
+
+
+def test_builder_append_drops_conflicts_and_logs(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "e" / "m1" / "data"
+
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    _enriched(tmp_path, snk, snk_dir, ts(1), NEVER)
+
+    # p1 reprice, forced down the incremental path (dim_p=1.0) so ΔO carries the retraction explicitly.
+    pr([("p1", 50), ("p2", 9)], ts(2))
+    _enriched(tmp_path, snk, snk_dir, ts(2), ts(1), fail_on_conflict=False, dim_p=1.0)
+    # Order 10 stays frozen at its original enriched price (the past is not rewritten).
+    assert rows(snk, snk_dir, "enriched", "order_id, price") == [(10, 5), (11, 9)]
+    # Both dropped rows are logged to the __droplog companion: the retraction (−1, old price 5) and the
+    # changed-image insert (+1, new price 50).
+    drops = snk.sql('SELECT order_id, price, _duckstring_d FROM "enriched__droplog" ORDER BY _duckstring_d').fetchall()
+    assert drops == [(10, 5, -1), (10, 50, 1)]
+    # ...and the __droplog is published alongside the table (like __changelog) — readable, but not a Trickle
+    # base, so it carries no sidecar entry.
+    published = ParquetDataPlane().read_select(snk_dir, "enriched__droplog")
+    assert sorted(snk.sql(f"SELECT order_id, price, _duckstring_d FROM ({published})").fetchall()) == [
+        (10, 5, -1), (10, 50, 1),
+    ]
+    assert "enriched__droplog" not in T.load_sidecar(snk_dir)
+
+    # A new order still flows through while the conflict is tolerated.
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p2", 4)], ts(3))
+    _enriched(tmp_path, snk, snk_dir, ts(3), ts(2), fail_on_conflict=False)
+    assert rows(snk, snk_dir, "enriched", "order_id, price") == [(10, 5), (11, 9), (12, 9)]
+    snk.close()
+
+
+def test_builder_append_log_drops_false_squashes_table(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "e" / "m1" / "data"
+
+    ol([(10, "p1", 2)], ts(1))
+    pr([("p1", 5)], ts(1))
+    _enriched(tmp_path, snk, snk_dir, ts(1), NEVER, fail_on_conflict=False, log_drops=False)
+    pr([("p1", 50)], ts(2))
+    _enriched(tmp_path, snk, snk_dir, ts(2), ts(1), fail_on_conflict=False, log_drops=False)
+    assert not _table_exists(snk, "enriched__droplog")
+    snk.close()
+
+
+def _table_exists(con, name):
+    return con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ?", [name]).fetchone() is not None
 
 
 # ─── coverage-miss absorption (the retention-lag delete bug) ─────────────────────

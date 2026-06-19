@@ -405,20 +405,21 @@ class Pond:
         return normalize_pk(pk) if pk is not None else ()
 
     def append_table(
-        self, name: str, relation, *, pk=None, validate_pk=False, retain_t=None, retain_n=None
+        self, name: str, relation, *, pk=None, fail_on_conflict=True, retain_t=None, retain_n=None
     ) -> None:
         """Append ``relation`` to the history table ``name`` (insert-only; each row stamped with the
         run's freshness ``pond.f``). The fast path for event/fact logs whose identity is unique by
         construction — no diff, no deletes; idempotent on replay at the same ``f``. ``pk`` is optional
-        (recorded as the table's declared key, for downstream/the data viewer); pass ``validate_pk=True``
-        to assert that ``pk`` is unique across the appended rows and existing history (a per-write cost
-        that trades speed for a correctness guarantee). ``retain_t`` (a ``timedelta``) / ``retain_n`` (a
-        count) opt into bounding the kept history."""
+        (recorded as the table's declared key, for downstream/the data viewer); when it is set,
+        ``fail_on_conflict=True`` (the default) asserts ``pk`` is unique across the appended rows and the
+        existing history (raising before any write). Pass ``fail_on_conflict=False`` for the trust-the-writer
+        fast path (no check); with ``pk`` unset the check is a no-op regardless. ``retain_t`` (a
+        ``timedelta``) / ``retain_n`` (a count) opt into bounding the kept history."""
         from . import trickle_io as trickle
 
         trickle.append_table(
             self.con, name, relation, self.f, self._resolve_pk(pk),
-            validate_pk=validate_pk, retain_t=retain_t, retain_n=retain_n,
+            fail_on_conflict=fail_on_conflict, retain_t=retain_t, retain_n=retain_n,
         )
 
     def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None) -> None:

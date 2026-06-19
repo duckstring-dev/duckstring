@@ -124,12 +124,14 @@ def publish_plan(con, data_dir: Path, f=None) -> list[str]:
 
     meta = trickle.read_meta(con)
     changelogs = {trickle.changelog_name(t) for t in meta}
+    droplogs = {f"{t}{trickle.DROPLOG_SUFFIX}" for t in meta}
     tables = registry_tables(con)
     f_iso = f.astimezone(timezone.utc).isoformat() if f is not None else None
     payload: dict[str, dict] = {}
     for table in tables:
-        if table in meta or table in changelogs:
-            continue  # Trickle base/companion — added (base) or implied (companion) below
+        if table in meta or table in changelogs or table in droplogs:
+            continue  # Trickle base/companion — base added below; the __changelog/__droplog companions are
+            #            exported as files (they carry reserved system columns) but take no sidecar entry.
         validate_publish(con, table)
         payload[table] = {"mode": "overwrite", "f": f_iso}
     for base, m in meta.items():

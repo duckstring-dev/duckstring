@@ -139,14 +139,14 @@ Returning a relation is shorthand for `p.write_table(relation)`; returning a pat
 
 A [Trickle](../concepts/trickle.md) is a history-preserving table, not a separate node type — there's no decorator. Inside any `@ripple`, write through `pond.append_table` / `pond.merge_table` instead of `write_table`; consumers read change-sets with `pond.read_delta`. The merge key is declared at the write. The [Incremental Processing guide](../guides/trickle.md) is the worked walkthrough; this is the surface.
 
-### `pond.append_table(name, relation, *, pk=None, validate_pk=False, retain_t=None, retain_n=None)`
+### `pond.append_table(name, relation, *, pk=None, fail_on_conflict=True, retain_t=None, retain_n=None)`
 
 Append `relation` to the insert-only history table `name`; each row is stamped with `pond.f`. No diff, no deletes. Idempotent on replay at the same freshness. The history table is both the full read and the delta source.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `pk` | — | Optional. Recorded as the table's declared key (for downstream / the data viewer); not enforced unless `validate_pk`. |
-| `validate_pk` | `False` | When `True`, assert `pk` is unique across the appended rows and existing history — a per-write cost; raises before any write on a violation (the live table is untouched). Requires `pk`. |
+| `pk` | — | Optional. Recorded as the table's declared key (for downstream / the data viewer); also the key the conflict check uses. |
+| `fail_on_conflict` | `True` | With `pk` set, assert it is unique across the appended rows and existing history — raising before any write on a violation (the live table is untouched). Pass `False` for the trust-the-writer fast path (no check). A no-op when `pk` is unset. |
 | `retain_t` / `retain_n` | `None` | Bound the kept history: a `timedelta` and/or a row count. Off by default. |
 
 ### `pond.merge_table(name, relation, *, pk, retain_t=None, retain_n=None)`
@@ -182,7 +182,8 @@ A fluent builder that composes an incremental join from its sources' Z-set delta
 - The spine is `s0`, dimensions `s1`, `s2`, … in the projection. Any table is a valid source (Trickle or overwrite Ripple).
 - **`p`** (per source, default `0.3`) is the change-fraction threshold: past that share of a source's rows the builder recomputes comprehensively for that run; `p=1.0` disables the check.
 - Bootstrap / coverage-miss / changed-Ripple / over-`p` → comprehensive recompute diffed against the last-written main. The op set is closed — a snowflake dimension, a missing merge key, or a joined graph with no `.select` raises at build time.
-- **`.merge(...)` returns a builder rooted at the table it just wrote**, so joins chain through materialised intermediates in one Ripple — `a.join(b).merge("ab", pk=…).join(c).merge("abc", pk=…)`. Each `.merge()` stores its output's trace, so a later run that changes only `c` reuses the stored `ab` instead of recomputing `a⋈b`. The returned handle is the next **spine** (its in-run delta is threaded forward); a composed builder still can't be a *dimension*.
+- **`.append(name, *, pk=None, fail_on_conflict=True, log_drops=True, retain_t=None, retain_n=None)`** is the alternative terminal: write the result to an **append** (insert-only history) Trickle instead of a merge main+changelog — for a *monotonic* transform (output rows only added, never updated/retracted), e.g. enriching an append-only fact stream with stable/SCD dims. A retraction in ΔO, or a `+1` row whose `pk` is in history with a *different* image, is a conflict (identical-image is a benign idempotent skip); `fail_on_conflict=True` raises, `False` drops it (history wins) and — with `log_drops` — records the dropped rows in a `{name}__droplog` companion (published alongside the table like `__changelog`). `pk=None` + `fail_on_conflict=False` skips the checks (fast; sound only when duplicates/past-changes are impossible).
+- **`.merge(...)` / `.append(...)` return a builder rooted at the table just written**, so joins chain through materialised intermediates in one Ripple — `a.join(b).merge("ab", pk=…).join(c).merge("abc", pk=…)`. Each terminal stores its output's trace, so a later run that changes only `c` reuses the stored `ab` instead of recomputing `a⋈b`. The returned handle is the next **spine** (its in-run delta is threaded forward); a composed builder still can't be a *dimension*.
 
 See the [guide](../guides/trickle.md#the-builder-pondtrickle).
 

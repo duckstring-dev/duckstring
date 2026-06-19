@@ -33,7 +33,7 @@ def ingest(pond):
     pond.append_table("order_line", batch, pk="order_id")
 ```
 
-`pk` is optional on an append — it's recorded as the table's declared key (for downstream and the data viewer), but not enforced by default. Pass `validate_pk=True` to assert the key is unique across the appended rows and the existing history; it's a per-write cost that buys a correctness guarantee, and it raises before any write so the live table is untouched on a violation.
+`pk` is optional on an append — it's recorded as the table's declared key (for downstream and the data viewer). When set, `fail_on_conflict=True` (the default) asserts the key is unique across the appended rows and the existing history, raising before any write so the live table is untouched on a violation. Pass `fail_on_conflict=False` for the trust-the-writer fast path (no check) when the key is unique by construction; with `pk` unset the check is a no-op either way.
 
 The single history table is at once the full read *and* the delta source. It is idempotent on replay — a retry or crash-recovery at the same freshness re-appends the same rows, never duplicates.
 
@@ -135,6 +135,26 @@ Two things to know:
 - **Materialise at reuse boundaries, not between every join.** Each `.merge()` is a real registry write. Scatter them where the stored trace earns its keep (a hop reused across runs, or a join key that only exists downstream), the same judgement as deciding where to split a Trickle.
 
 The returned handle is the next builder's **spine** — its just-computed delta is threaded forward in memory (nothing is published mid-run, so a downstream join can't re-read it by name). Passing a composed builder as a *dimension* (`x.join(ab, …)`) is still rejected — dimensions must be bare sources; keep the composed thing on the spine.
+
+### Appending the builder's output
+
+`.merge(name, pk=…)` maintains a clean main + changelog — correct for any transform, including ones whose output rows update or disappear. When the transform is **monotonic** — output rows are only ever *added*, never updated or retracted, like enriching an append-only fact stream with stable/SCD dimensions — `.append(name, pk=…)` writes an insert-only history instead:
+
+```python
+(
+    pond.trickle("orders.order_line")
+        .join(pond.trickle("catalog.product"), on="product_id")
+        .select("s0.order_id, s0.product_id, s0.qty, s1.unit_price")
+        .append("enriched", pk="order_id")
+)
+```
+
+An insert-only table can't reflect a *change to the past*, so two things are conflicts: a **retraction** in the computed delta (a previously-emitted row changed or disappeared), and a `+1` row whose `pk` is already in history with a **different** image. (A `+1` whose `pk` is in history with an *identical* image is a benign idempotent skip — never a conflict.) The `fail_on_conflict` flag (default `True`, correctness first) decides what happens:
+
+- **`True`** — raise on any conflict. Use this when the transform *should* be monotonic and a conflict means a bug (or a dimension you assumed stable isn't).
+- **`False`** — drop the offending rows (history wins, the past stays frozen) and append the rest. With `log_drops=True` (the default) the dropped rows land in a `{name}__droplog` companion — published alongside the table like a merge's `__changelog`, growing one record per run (the output's columns + the Z-set weight + the run freshness); set `log_drops=False` to skip even that if collisions are expected and you don't care.
+
+`pk` is optional but recommended — it's what the conflict check keys on. `pk=None` with `fail_on_conflict=False` skips the checks entirely: the fastest path, sound only when you're certain duplicates and changed-pasts are impossible by construction. Like `.merge()`, `.append()` returns a chainable handle.
 
 ## Following a Ripple
 

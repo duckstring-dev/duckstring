@@ -119,13 +119,17 @@ class IcebergDataPlane(DataPlane):
 
     @staticmethod
     def _is_incremental(table: str, meta: dict) -> bool:
-        """A Trickle append history, or any merge Trickle's ``__changelog`` companion — the append-only
-        tables. A merge *main* (``meta[table]['mode'] == 'merge'``) is overwrite, not incremental."""
-        from .trickle_io import CHANGELOG_SUFFIX
+        """A Trickle append history, or a Trickle's ``__changelog`` / ``__droplog`` companion — the
+        append-only tables. A merge *main* (``meta[table]['mode'] == 'merge'``) is overwrite, not
+        incremental."""
+        from .trickle_io import CHANGELOG_SUFFIX, DROPLOG_SUFFIX
 
         if meta.get(table, {}).get("mode") == "append":
             return True
-        return table.endswith(CHANGELOG_SUFFIX) and table[: -len(CHANGELOG_SUFFIX)] in meta
+        for suffix in (CHANGELOG_SUFFIX, DROPLOG_SUFFIX):
+            if table.endswith(suffix) and table[: -len(suffix)] in meta:
+                return True
+        return False
 
     def _append_commit(self, cat, table: str, con, f) -> None:
         from pyiceberg.exceptions import NoSuchTableError

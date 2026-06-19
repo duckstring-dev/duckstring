@@ -61,6 +61,10 @@ D_COL = "_duckstring_d"  # the Z-set weight (+1 present / -1 retraction)
 
 # A merge Trickle's CDC stream lives in a ``{table}__changelog`` companion registry table.
 CHANGELOG_SUFFIX = "__changelog"
+# A builder ``.append(..., log_drops=True)`` records rows it could not append (retractions / value
+# conflicts under ``fail_on_conflict=False``) in a ``{table}__droplog`` companion — an append-only diagnostic
+# published alongside the table (like ``__changelog``), one growing record of what each run dropped.
+DROPLOG_SUFFIX = "__droplog"
 # The mode/PK registry: one row per Trickle output table. Named in the reserved namespace so
 # ``registry_tables`` hides it from the publish set.
 META_TABLE = "_duckstring_trickle"
@@ -313,13 +317,15 @@ def _sql_lit(path) -> str:
 
 
 def append_table(
-    con, name: str, relation, f, pk: tuple[str, ...], *, validate_pk=False, retain_t=None, retain_n=None
+    con, name: str, relation, f, pk: tuple[str, ...], *, fail_on_conflict=True, retain_t=None, retain_n=None
 ) -> None:
     """Append ``relation``'s rows to the history table ``name``, each stamped ``_duckstring_f = f``.
     Insert-only: no diff, no deletes (its Z-set is all ``+1``). Idempotent at a given ``f`` (rows already
-    stamped ``f`` are dropped before re-appending). ``pk`` is recorded as the declared key; with
-    ``validate_pk=True`` it is asserted unique across the appended rows and the existing history (raising
-    :class:`DeltaError` before any write, so the live table is untouched on a violation)."""
+    stamped ``f`` are dropped before re-appending). ``pk`` is recorded as the declared key; when it is set,
+    ``fail_on_conflict=True`` (the default) asserts it is unique across the appended rows and the existing
+    history, raising :class:`DeltaError` before any write (the live table is untouched on a violation). Pass
+    ``fail_on_conflict=False`` for the trust-the-writer fast path (no check). With ``pk`` unset the check is a
+    no-op regardless."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     src = "_duckstring_ds_append_src"
@@ -327,18 +333,16 @@ def append_table(
     cols = relation.columns
     sel_cols = ", ".join(_q(c) for c in cols)
     first = not _table_exists(con, name)  # the floor anchors at the first append's freshness
-    if validate_pk:
-        if not pk:
-            raise DeltaError(f"append_table('{name}', validate_pk=True) needs a primary key — pass pk=...")
+    if fail_on_conflict and pk:
         missing = [c for c in pk if c not in cols]
         if missing:
-            raise DeltaError(f"append_table('{name}', validate_pk=True): primary key column(s) {missing} not in the relation")
+            raise DeltaError(f"append_table('{name}'): primary key column(s) {missing} not in the relation")
         pk_list = ", ".join(_q(c) for c in pk)
         dup = con.execute(
             f'SELECT 1 FROM {_q(src)} GROUP BY {pk_list} HAVING count(*) > 1 LIMIT 1'
         ).fetchone()
         if dup:
-            raise DeltaError(f"append_table('{name}', validate_pk=True): duplicate primary key {pk} among the appended rows")
+            raise DeltaError(f"append_table('{name}'): duplicate primary key {pk} among the appended rows")
         if not first:
             # Collide only against rows from *other* runs — a replay re-appends this f's identical rows.
             coll = con.execute(
@@ -346,7 +350,7 @@ def append_table(
                 f'WHERE t.{_q(F_COL)} IS DISTINCT FROM {_ts(f)} LIMIT 1'
             ).fetchone()
             if coll:
-                raise DeltaError(f"append_table('{name}', validate_pk=True): primary key {pk} already present in history")
+                raise DeltaError(f"append_table('{name}'): primary key {pk} already present in history")
     if first:
         con.execute(
             f'CREATE TABLE {_q(name)} AS '
@@ -360,6 +364,146 @@ def append_table(
     _record_meta(con, name, "append", pk)
     cutoff = _apply_retention(con, name, f, retain_t, retain_n)
     _advance_floor(con, name, bootstrap_f=(f if first else None), cutoff=cutoff)
+
+
+def append_zset(
+    con, name: str, zset, f, pk: tuple[str, ...], *, fail_on_conflict=True, log_drops=True,
+    retain_t=None, retain_n=None,
+) -> None:
+    """Append the **present** rows of a Z-set ΔO (the builder's incremental output, or a full recompute
+    tagged ``+1``) to the insert-only history ``name`` — the ``.append()`` terminal of the builder. An
+    insert-only table can't reflect a *change to the past*, so two things are conflicts:
+
+    - a **retraction** (a ``-1`` row) — a previously-emitted output row changed or disappeared;
+    - a present (``+1``) row whose ``pk`` is already in history with a **different** image.
+
+    A present row whose ``pk`` is already in history with an **identical** image is a benign skip (an
+    idempotent replay or a comprehensive re-derivation re-producing it) — never a conflict, never logged.
+    A ``pk`` duplicated **within this run** with distinct images is unresolvable (one freshness, no
+    recency to choose by) and always raises.
+
+    ``fail_on_conflict=True`` (default — correctness over speed) raises :class:`DeltaError` on any conflict
+    before writing. ``False`` drops conflicting rows (history wins) and appends the rest; with
+    ``log_drops`` the dropped rows land in a ``{name}__droplog`` companion (user columns + ``_duckstring_d``
+    sign + ``_duckstring_f``), published alongside the table like ``__changelog``. ``pk`` unset skips the pk
+    checks entirely (only retractions are conflicts) — fast, sound only when duplicates and past-changes are
+    impossible by construction."""
+    if f is None:
+        raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
+    src = unique_name("appz")
+    zset.create_view(src, replace=True)
+    user = [c for c in zset.columns if c != D_COL]
+    if D_COL not in zset.columns:
+        raise DeltaError(f"append_zset('{name}', ...): the relation has no {D_COL} weight column")
+    sel = ", ".join(_q(c) for c in user)
+    first = not _table_exists(con, name)
+
+    # Consolidate by full row: net weight per distinct image (an update's -old/+new survive as two rows).
+    consol = unique_name("appc")
+    con.execute(
+        f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
+        f'SELECT {sel}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} FROM {_q(src)} '
+        f'GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0'
+    )
+
+    # Idempotent replay: drop this run's prior attempt (rows stamped f) so the history checks below see the
+    # pre-f state and a retry re-derives the same result. Done before the conflict probes.
+    if not first:
+        con.execute(f'DELETE FROM {_q(name)} WHERE {_q(F_COL)} = {_ts(f)}')
+
+    retractions = con.execute(f'SELECT count(*) FROM {_q(consol)} WHERE {_q(D_COL)} < 0').fetchone()[0]
+    pk_dup = 0
+    hist_conflict = 0
+    if pk:
+        missing = [c for c in pk if c not in user]
+        if missing:
+            raise DeltaError(f"append_zset('{name}', ...): primary key column(s) {missing} not in the relation")
+        pk_list = ", ".join(_q(c) for c in pk)
+        pk_dup = con.execute(
+            f'SELECT count(*) FROM (SELECT 1 FROM {_q(consol)} WHERE {_q(D_COL)} > 0 '
+            f'GROUP BY {pk_list} HAVING count(*) > 1)'
+        ).fetchone()[0]
+        if pk_dup:
+            # Two distinct images for one key in one run — no recency to disambiguate; always fatal.
+            raise DeltaError(
+                f"append_zset('{name}', ...): primary key {pk} produced {pk_dup} duplicate key(s) with "
+                f"differing values in one run — the output is not unique by {pk}"
+            )
+        if not first:
+            eq = " AND ".join(f'p.{_q(c)} IS NOT DISTINCT FROM h.{_q(c)}' for c in user)
+            hist_conflict = con.execute(
+                f'SELECT count(*) FROM {_q(consol)} p JOIN {_q(name)} h USING ({pk_list}) '
+                f'WHERE p.{_q(D_COL)} > 0 AND NOT ({eq})'
+            ).fetchone()[0]
+
+    if fail_on_conflict and (retractions or hist_conflict):
+        raise DeltaError(
+            f"append_zset('{name}', ...): not append-safe — {retractions} retraction(s) and {hist_conflict} "
+            f"changed-past row(s). Pass fail_on_conflict=False to drop them, or use .merge() to track changes."
+        )
+
+    # The rows to actually append: present (+1) rows that are genuinely new (pk absent from history, or no
+    # pk → all present rows). Benign skips (pk present with identical image) and dropped conflicts fall out.
+    if pk and not first:
+        pk_list = ", ".join(_q(c) for c in pk)
+        new_rows = con.sql(
+            f'SELECT {sel} FROM {_q(consol)} WHERE {_q(D_COL)} > 0 '
+            f'AND ({pk_list}) NOT IN (SELECT {pk_list} FROM {_q(name)})'
+        )
+    else:
+        new_rows = con.sql(f'SELECT {sel} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
+
+    if first:
+        con.execute(
+            f'CREATE TABLE {_q(name)} AS '
+            f'SELECT {sel}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(consol)} LIMIT 0'
+        )
+    new_view = unique_name("appn")
+    new_rows.create_view(new_view, replace=True)
+    con.execute(f'INSERT INTO {_q(name)} ({sel}, {_q(F_COL)}) SELECT {sel}, {_ts(f)} FROM {_q(new_view)}')
+
+    if log_drops and not fail_on_conflict and (retractions or hist_conflict):
+        _log_drops(con, name, consol, user, pk, f, first)
+
+    _record_meta(con, name, "append", pk)
+    cutoff = _apply_retention(con, name, f, retain_t, retain_n)
+    _advance_floor(con, name, bootstrap_f=(f if first else None), cutoff=cutoff)
+
+
+def _log_drops(con, name, consol, user, pk, f, first_output) -> None:
+    """Record the rows ``.append(fail_on_conflict=False)`` could not append — retractions (``_duckstring_d``
+    < 0) and present rows whose ``pk`` collided with a different image — in a ``{name}__droplog`` companion
+    (append-only, published alongside the table like ``__changelog``). Replay-idempotent (this run's prior
+    drops are cleared first)."""
+    drops = f"{name}{DROPLOG_SUFFIX}"
+    sel = ", ".join(_q(c) for c in user)
+    if pk:
+        pk_list = ", ".join(_q(c) for c in pk)
+        eq = " AND ".join(f'c.{_q(col)} IS NOT DISTINCT FROM h.{_q(col)}' for col in user)
+        # Present rows that collided with a *different* image in history (benign identical-image skips excluded).
+        conflicts = (
+            f'SELECT {", ".join(f"c.{_q(col)}" for col in user)}, c.{_q(D_COL)} FROM {_q(consol)} c '
+            f'JOIN {_q(name)} h USING ({pk_list}) WHERE c.{_q(D_COL)} > 0 AND NOT ({eq})'
+        )
+    else:
+        conflicts = f'SELECT {sel}, {_q(D_COL)} FROM {_q(consol)} WHERE 1=0'
+    dropped = con.sql(
+        f'SELECT {sel}, {_q(D_COL)} FROM {_q(consol)} WHERE {_q(D_COL)} < 0 '
+        f'UNION ALL BY NAME ({conflicts})'
+    )
+    if not _table_exists(con, drops):
+        con.execute(
+            f'CREATE TABLE {_q(drops)} AS '
+            f'SELECT {sel}, {_q(D_COL)}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(consol)} LIMIT 0'
+        )
+    else:
+        con.execute(f'DELETE FROM {_q(drops)} WHERE {_q(F_COL)} = {_ts(f)}')  # replay-idempotent
+    dview = unique_name("appd")
+    dropped.create_view(dview, replace=True)
+    con.execute(
+        f'INSERT INTO {_q(drops)} ({sel}, {_q(D_COL)}, {_q(F_COL)}) '
+        f'SELECT {sel}, {_q(D_COL)}, {_ts(f)} FROM {_q(dview)}'
+    )
 
 
 # ─── write: merge (Z-set apply) ───────────────────────────────────────────────
@@ -568,15 +712,20 @@ def _covered(previous_f, NEVER, floor, oldest) -> bool:
 
 
 def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor) -> Delta:
-    # As-of pin to `f`: read the one Source snapshot at this run's freshness for BOTH the data and the
-    # `oldest` coverage probe, so a mid-run republish can't make them see different snapshots (read skew).
-    rel = con.sql(dp.read_select(data_dir, table, as_of=f))  # includes _duckstring_f
-    oldest = con.sql(f"SELECT min({_q(F_COL)}) FROM ({dp.read_select(data_dir, table, as_of=f)})").fetchone()[0]
+    # As-of pin to `f`: read the one Source snapshot at this run's freshness (the data plane pins it; the
+    # coverage probe shares the same SELECT so a mid-run republish can't make them see different snapshots).
+    return _append_delta_from_sql(con, dp.read_select(data_dir, table, as_of=f), previous_f, f, pk, NEVER, floor)
+
+
+def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor) -> Delta:
+    """The append-delta core over a single history SELECT — shared by the published read and the in-run
+    registry read. Append rows are all present (``+1``); never retracted."""
+    rel = con.sql(hist_sql)  # includes _duckstring_f
+    oldest = con.sql(f"SELECT min({_q(F_COL)}) FROM ({hist_sql})").fetchone()[0]
     full = not _covered(previous_f, NEVER, floor, oldest)
     upper = f"{_q(F_COL)} <= {_ts(f)}"
     cond = upper if full else f"{_q(F_COL)} > {_ts(previous_f)} AND {upper}"
-    rows = _strip_system(rel.filter(cond))  # append rows are all present (+1); never retracted
-    return Delta(con, pk, _as_zset(rows, 1), is_full=full)
+    return Delta(con, pk, _as_zset(_strip_system(rel.filter(cond)), 1), is_full=full)
 
 
 def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor) -> Delta:
@@ -616,23 +765,26 @@ def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, flo
 
 
 def read_registry_delta(con, table, previous_f, f, pk) -> Delta:
-    """The Z-set change a **just-merged** Trickle ``table`` exposes over ``(previous_f, f]``, read back from
-    the **registry** (its clean main + ``__changelog``) rather than the published data plane. Used to thread
-    a mid-chain ``pond.trickle(...).merge(name)`` forward as an in-run join operand: nothing is published
-    until end-of-run, so a downstream ``.join(...)`` in the same Ripple can't go through the normal
-    (data-plane) ``read_delta``. The coverage rule is identical to the published read — a bootstrap (floor
-    just set to ``f``) or a retention/coverage gap yields a full read (``is_full``), forcing the downstream
-    comprehensive path; otherwise a windowed delta (empty if the merge wrote nothing this run)."""
+    """The Z-set change a **just-written** Trickle ``table`` exposes over ``(previous_f, f]``, read back from
+    the **registry** (its clean main + ``__changelog`` for a merge, or its history for an append) rather than
+    the published data plane. Used to thread a mid-chain ``pond.trickle(...).merge(name)`` / ``.append(name)``
+    forward as an in-run join operand: nothing is published until end-of-run, so a downstream ``.join(...)``
+    in the same Ripple can't go through the normal (data-plane) ``read_delta``. The coverage rule is
+    identical to the published read — a bootstrap (floor just set to ``f``) or a retention/coverage gap
+    yields a full read (``is_full``), forcing the downstream comprehensive path; otherwise a windowed delta
+    (empty if the write produced nothing this run)."""
     from datetime import datetime
 
     from .engine.core import NEVER
 
-    floor_iso = read_meta(con).get(table, {}).get("floor")
-    floor = datetime.fromisoformat(floor_iso) if floor_iso else None
+    m = read_meta(con).get(table, {})
+    floor = datetime.fromisoformat(m["floor"]) if m.get("floor") else None
+    out_pk = normalize_pk(pk)
+    if m.get("mode") == "append":
+        return _append_delta_from_sql(con, f'SELECT * FROM {_q(table)}', previous_f, f, out_pk, NEVER, floor)
     clog = changelog_name(table)
     clog_sql = f'SELECT * FROM {_q(clog)}' if _table_exists(con, clog) else None
-    main_sql = f'SELECT * FROM {_q(table)}'
-    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, normalize_pk(pk), NEVER, floor)
+    return _merge_delta_from_sql(con, f'SELECT * FROM {_q(table)}', clog_sql, previous_f, f, out_pk, NEVER, floor)
 
 
 def _strip_system(rel):

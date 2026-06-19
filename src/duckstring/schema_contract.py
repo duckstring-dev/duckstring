@@ -30,10 +30,11 @@ def extract_schema(con) -> Schema:
     """The output schema of every published table in a Pond's registry connection
     (``{table: {column: type}}``).
 
-    A Trickle's ``__changelog`` companion is framework-internal CDC, and ``_duckstring_*`` system columns
-    are framework-owned — both are excluded so the contract captures only the user-facing output schema."""
+    A Trickle's ``__changelog``/``__droplog`` companions are framework-internal (CDC / dropped-row
+    diagnostic), and ``_duckstring_*`` system columns are framework-owned — all excluded so the contract
+    captures only the user-facing output schema."""
     from .dataplane import RESERVED_PREFIX, registry_tables
-    from .trickle_io import CHANGELOG_SUFFIX
+    from .trickle_io import CHANGELOG_SUFFIX, DROPLOG_SUFFIX
 
     return {
         table: {
@@ -42,7 +43,7 @@ def extract_schema(con) -> Schema:
             if not str(row[0]).startswith(RESERVED_PREFIX)
         }
         for table in registry_tables(con)
-        if not table.endswith(CHANGELOG_SUFFIX)
+        if not table.endswith((CHANGELOG_SUFFIX, DROPLOG_SUFFIX))
     }
 
 

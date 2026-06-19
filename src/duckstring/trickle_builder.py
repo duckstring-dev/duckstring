@@ -83,8 +83,9 @@ class TrickleBuilder:
 
     def merge(self, name: str, *, pk, retain_t=None, retain_n=None) -> "TrickleBuilder":
         """Execute: compose ΔO from the changed sources' Z-sets (or recompute comprehensively) and apply it
-        to the output Trickle ``name``. ``pk`` (**required**) is the output identity / merge key — it must be
-        genuinely unique in the output (a many-to-many join that fans out past it corrupts the keyed main).
+        to the output **merge** Trickle ``name`` (clean main + Z-set changelog). ``pk`` (**required**) is the
+        output identity / merge key — it must be genuinely unique in the output (a many-to-many join that
+        fans out past it corrupts the keyed main).
 
         Returns a :class:`TrickleBuilder` rooted at the just-materialised ``name``, so joins can be chained
         through intermediate materialisations **in one Ripple** —
@@ -98,12 +99,56 @@ class TrickleBuilder:
         out_pk = normalize_pk(pk)
         if not out_pk:
             raise BuildError(f"pond.trickle('{self.spine_ref}')...merge('{name}'): pass the output key, merge(pk=...)")
+        kind, rel = self._compute(out_pk, name)
+        if kind == "comprehensive":
+            pond.merge_table(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
+        elif kind == "incremental":
+            pond.apply_zset(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
+        # "empty": nothing changed (and no full read) → output unchanged, no write.
+        return self._chain(name, out_pk)
+
+    def append(
+        self, name: str, *, pk=None, fail_on_conflict=True, log_drops=True, retain_t=None, retain_n=None
+    ) -> "TrickleBuilder":
+        """Execute, writing the result to an **append** (insert-only history) Trickle ``name`` instead of a
+        merge main+changelog — the right terminal for a *monotonic* transform (output rows are only ever
+        added, never updated or retracted), e.g. enriching an append-only fact stream with stable/SCD dims.
+
+        An insert-only table can't reflect a change to the past, so a retraction in ΔO, or a ``+1`` row whose
+        ``pk`` is already in history with a **different** image, is a conflict (an identical-image collision
+        is a benign idempotent skip). ``fail_on_conflict=True`` (default — correctness first) raises; ``False``
+        drops the offending rows (history wins) and, with ``log_drops``, records them in a ``{name}__droplog``
+        companion (published alongside the table, like ``__changelog``). ``pk`` is optional but recommended:
+        with it set the conflict checks engage;
+        ``pk=None`` + ``fail_on_conflict=False`` skips them entirely (fast, sound only when duplicates and
+        past-changes are impossible by construction). Returns a chainable handle like :meth:`merge`."""
+        pond = self.pond
+        out_pk = normalize_pk(pk)
+        from . import trickle_io as trickle
+
+        kind, rel = self._compute(out_pk, name)
+        if kind != "empty":
+            # A comprehensive recompute is the whole current output (clean rows) → tag it +1; an incremental
+            # ΔO already carries its ±weights. append_zset filters retractions / pk conflicts either way.
+            zset = trickle._as_zset(rel, 1) if kind == "comprehensive" else rel
+            trickle.append_zset(
+                pond.con, name, zset, pond.f, out_pk,
+                fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
+            )
+        return self._chain(name, out_pk)
+
+    def _compute(self, out_pk, name: str):
+        """Compose this build graph's change once. Returns ``(kind, rel)``:
+        ``("comprehensive", o_prime)`` — the whole output recomputed (clean rows), when any source can't
+        supply a clean delta or exceeds its threshold ``p``; ``("incremental", unioned)`` — the Z-set ΔO
+        (user cols + ``_duckstring_d``); ``("empty", None)`` — nothing changed. Shared by :meth:`merge` and
+        :meth:`append`. Validates ``.select`` is present for a joined graph and includes the PK."""
+        pond = self.pond
         if self._joins and self._projection is None:
             raise BuildError(
                 f"pond.trickle('{self.spine_ref}').join(...): a joined graph needs .select(...) to name the "
                 f"output columns (and include the PK)"
             )
-
         refs = [self.spine_ref] + [dim_ref for dim_ref, _pairs, _p in self._joins]
         ps = [self.p] + [p for _dim_ref, _pairs, p in self._joins]
         # The spine of a chained builder is a just-materialised in-run Trickle: use its known delta, not the
@@ -111,33 +156,30 @@ class TrickleBuilder:
         spine_delta = self._spine_delta if self._spine_delta is not None else pond.read_delta(self.spine_ref)
         deltas = [spine_delta] + [pond.read_delta(r) for r in refs[1:]]
 
-        # Comprehensive fallback: any source can't supply a clean delta (full read), or changed more than
-        # its threshold p. Recompute the whole output and diff it against the materialised prior output.
         over = any(self._over_threshold(r, d, p) for r, d, p in zip(refs, deltas, ps, strict=True))
         if any(d.is_full for d in deltas) or over:
             o_prime = self._full_join()
-            cols = list(o_prime.columns)
-            missing = [c for c in out_pk if c not in cols]
-            if missing:
-                raise BuildError(f".select(...) must include the PK column(s) {missing}")
-            pond.merge_table(name, o_prime, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
-        else:
-            # Incremental: per source build current/prior/delta views; sum one join term per changed source.
-            states = [self._state_views(r, d) for r, d in zip(refs, deltas, strict=True)]
-            terms = [self._term(i, states) for i, st in enumerate(states) if st["changed"]]
-            if terms:
-                unioned = pond.con.sql(" UNION ALL BY NAME ".join(f"({t})" for t in terms))
-                cols = [c for c in unioned.columns if c != D_COL]
-                missing = [c for c in out_pk if c not in cols]
-                if missing:
-                    raise BuildError(f".select(...) must include the PK column(s) {missing}")
-                pond.apply_zset(name, unioned, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
-            # else: nothing changed (and no full read) → output unchanged, no write.
+            self._require_pk(out_pk, o_prime.columns)
+            return "comprehensive", o_prime
+        states = [self._state_views(r, d) for r, d in zip(refs, deltas, strict=True)]
+        terms = [self._term(i, states) for i, st in enumerate(states) if st["changed"]]
+        if not terms:
+            return "empty", None
+        unioned = pond.con.sql(" UNION ALL BY NAME ".join(f"({t})" for t in terms))
+        self._require_pk(out_pk, [c for c in unioned.columns if c != D_COL])
+        return "incremental", unioned
 
-        # Thread the materialised output forward as a chainable in-run operand (its delta read back from the
-        # registry, same coverage rule as the published read_delta).
-        threaded = read_registry_delta(pond.con, name, pond.previous_f, pond.f, out_pk)
-        return TrickleBuilder(pond, name, _spine_delta=threaded)
+    def _require_pk(self, out_pk, cols) -> None:
+        missing = [c for c in out_pk if c not in cols]
+        if missing:
+            raise BuildError(f".select(...) must include the PK column(s) {missing}")
+
+    def _chain(self, name: str, out_pk) -> "TrickleBuilder":
+        """Thread the just-materialised output forward as a chainable in-run operand — its delta read back
+        from the registry (same coverage rule as the published read_delta), so a downstream ``.join(...)``
+        composes without a round-trip through the not-yet-published data plane."""
+        threaded = read_registry_delta(self.pond.con, name, self.pond.previous_f, self.pond.f, out_pk)
+        return TrickleBuilder(self.pond, name, _spine_delta=threaded)
 
     # ─── internals ────────────────────────────────────────────────────────────
 

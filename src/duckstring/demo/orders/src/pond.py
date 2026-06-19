@@ -48,5 +48,5 @@ def ingest(pond):
         """
     )
     # Insert-only, each row stamped with pond.f. order_id is unique by construction (the fast path), so we
-    # declare it as the key (pk=) but skip validate_pk — no need to pay the per-write uniqueness check.
-    pond.append_table("order_line", batch, pk="order_id")
+    # declare it as the key (pk=) but pass fail_on_conflict=False — no need to pay the per-write uniqueness check.
+    pond.append_table("order_line", batch, pk="order_id", fail_on_conflict=False)

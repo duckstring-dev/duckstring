@@ -226,6 +226,39 @@ def test_trickle_append_commits_are_incremental_and_window_reads(tmp_path):
     assert sorted(d.upserts.fetchall()) == [(2,), (3,)]  # excludes run 1, includes run 3
 
 
+def test_append_droplog_published_over_iceberg(tmp_path):
+    # A builder .append(fail_on_conflict=False)'s `{name}__droplog` companion publishes over Iceberg like a
+    # __changelog (append-commit), not a wholesale overwrite — and the main stays frozen on a dropped conflict.
+    from duckstring import trickle_io as T
+
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    dp = IcebergDataPlane()
+    dp.prepare(con)
+
+    def z(rows):
+        vals = ", ".join(f"({i}, '{v}', {d})" for i, v, d in rows)
+        return con.sql(f"SELECT * FROM (VALUES {vals}) t(id, v, _duckstring_d)")
+
+    T.append_zset(con, "enriched", z([(1, "a", 1), (2, "b", 1)]), datetime(2026, 6, 16, 1, tzinfo=UTC), ("id",))
+    dp.export(con, tmp_path, f=datetime(2026, 6, 16, 1, tzinfo=UTC))
+    # Run 2: id 1 changes (retraction + conflicting insert → dropped, history frozen) and id 3 is new.
+    T.append_zset(con, "enriched", z([(1, "a", -1), (1, "A", 1), (3, "c", 1)]),
+                  datetime(2026, 6, 16, 2, tzinfo=UTC), ("id",), fail_on_conflict=False)
+    dp.export(con, tmp_path, f=datetime(2026, 6, 16, 2, tzinfo=UTC))
+
+    rcon = duckdb.connect()
+    dp.prepare(rcon)
+    main = sorted(rcon.sql(f"SELECT id, v FROM ({dp.read_select(tmp_path, 'enriched')})").fetchall())
+    assert main == [(1, "a"), (2, "b"), (3, "c")]  # id 1 stayed 'a' (the past was not rewritten)
+    drops = sorted(rcon.sql(f"SELECT id, v, _duckstring_d FROM ({dp.read_select(tmp_path, 'enriched__droplog')})").fetchall())
+    assert drops == [(1, "A", 1), (1, "a", -1)]
+    # The droplog took append commits (one per run that dropped), not a full overwrite.
+    tbl = dp._load(tmp_path, "enriched__droplog")
+    assert len([s for s in tbl.snapshots() if s.summary and s.summary.additional_properties.get(F_PROP)]) == 1
+    assert "enriched__droplog" not in T.load_sidecar(tmp_path)  # companion, no sidecar entry
+
+
 def test_trickle_merge_main_overwrite_changelog_append_over_iceberg(tmp_path):
     # A merge Trickle: the clean main is overwritten (current state, no tombstones) while the changelog
     # grows by append — and a delta read collapses the changelog window per PK to the latest op.
