@@ -553,6 +553,109 @@ def test_builder_build_time_errors(tmp_path):
              .select("s1.price").merge("x", pk="order_id"))
 
 
+# ─── chained merges: materialise an intermediate mid-chain in one ripple ─────────
+
+
+def _chain_sources(tmp_path):
+    """Three producers for a genuine *chain* a→b→c (c joins on a column produced by a⋈b, not on the spine —
+    a shape a single star builder can't express, so the intermediate must be materialised)."""
+    a_con, a_dir = _producer(tmp_path, "a")
+    b_con, b_dir = _producer(tmp_path, "b")
+    c_con, c_dir = _producer(tmp_path, "c")
+
+    def a(state, f):  # order lines: order_id → product_id
+        vals = ", ".join(f"({o}, '{p}', {q})" for o, p, q in state)
+        T.merge_table(a_con, "ol", a_con.sql(f"SELECT * FROM (VALUES {vals}) v(order_id, product_id, qty)"),
+                      f, ("order_id",))
+        publish(a_con, a_dir, f=f)
+
+    def b(state, f):  # product → category
+        vals = ", ".join(f"('{p}', '{cat}')" for p, cat in state)
+        T.merge_table(b_con, "prod", b_con.sql(f"SELECT * FROM (VALUES {vals}) v(product_id, category)"),
+                      f, ("product_id",))
+        publish(b_con, b_dir, f=f)
+
+    def c(state, f):  # category → tax (the join key only exists after a⋈b)
+        vals = ", ".join(f"('{cat}', {t})" for cat, t in state)
+        T.merge_table(c_con, "tax", c_con.sql(f"SELECT * FROM (VALUES {vals}) v(category, tax)"), f, ("category",))
+        publish(c_con, c_dir, f=f)
+
+    return (a_con, b_con, c_con), a, b, c
+
+
+def test_builder_chains_through_materialised_intermediate(tmp_path):
+    _cons, a, b, c = _chain_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    out_dir = tmp_path / "ponds" / "o" / "m1" / "data"
+
+    def run(f, pf):
+        p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"a": 1, "b": 1, "c": 1}, f=f, previous_f=pf)
+        ab = (p.trickle("a.ol").join(p.trickle("b.prod"), on="product_id")
+                .select("s0.order_id, s0.product_id, s0.qty, s1.category").merge("ab", pk="order_id"))
+        (ab.join(p.trickle("c.tax"), on="category")
+            .select("s0.order_id, s0.qty, s0.category, s1.tax").merge("abc", pk="order_id"))
+        publish(snk, out_dir, f=f)
+
+    # bootstrap — the is_full of a/b cascades through ab into abc (comprehensive both hops).
+    a([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    b([("p1", "books"), ("p2", "food")], ts(1))
+    c([("books", 10), ("food", 5)], ts(1))
+    run(ts(1), NEVER)
+    assert rows(snk, out_dir, "abc", "order_id, category, tax") == [(10, "books", 10), (11, "food", 5)]
+    assert rows(snk, out_dir, "ab", "order_id, category") == [(10, "books"), (11, "food")]  # intermediate stored
+
+    # c-only change (books tax 10→20): ab is unchanged (not recomputed); only order 10 (books) flows to abc.
+    c([("books", 20), ("food", 5)], ts(2))
+    run(ts(2), ts(1))
+    assert rows(snk, out_dir, "ab", "order_id, category") == [(10, "books"), (11, "food")]  # ab untouched
+    assert rows(snk, out_dir, "abc", "order_id, category, tax") == [(10, "books", 20), (11, "food", 5)]
+
+    # a-only change (order 11's product p2→p1, i.e. food→books): the change propagates through the stored ab.
+    a([(10, "p1", 2), (11, "p1", 1)], ts(3))
+    run(ts(3), ts(2))
+    assert rows(snk, out_dir, "ab", "order_id, category") == [(10, "books"), (11, "books")]
+    assert rows(snk, out_dir, "abc", "order_id, category, tax") == [(10, "books", 20), (11, "books", 20)]
+    snk.close()
+
+
+def test_builder_chain_matches_comprehensive_join(tmp_path):
+    """A chained build equals the full 3-way join recomputed from scratch (correctness of the threaded
+    in-run delta), across an incremental run."""
+    _cons, a, b, c = _chain_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    out_dir = tmp_path / "ponds" / "o" / "m1" / "data"
+
+    def run(f, pf):
+        p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"a": 1, "b": 1, "c": 1}, f=f, previous_f=pf)
+        ab = (p.trickle("a.ol").join(p.trickle("b.prod"), on="product_id")
+                .select("s0.order_id, s0.product_id, s0.qty, s1.category").merge("ab", pk="order_id"))
+        (ab.join(p.trickle("c.tax"), on="category")
+            .select("s0.order_id, s0.qty, s0.category, s1.tax").merge("abc", pk="order_id"))
+        publish(snk, out_dir, f=f)
+
+    a([(10, "p1", 2), (11, "p2", 1), (12, "p3", 4)], ts(1))
+    b([("p1", "books"), ("p2", "food"), ("p3", "books")], ts(1))
+    c([("books", 10), ("food", 5)], ts(1))
+    run(ts(1), NEVER)
+    # An incremental run touching all three sources at once.
+    a([(10, "p1", 2), (11, "p2", 1), (12, "p3", 9), (13, "p1", 1)], ts(2))  # 12 qty change, 13 new
+    b([("p1", "media"), ("p2", "food"), ("p3", "books")], ts(2))            # p1 books→media
+    c([("books", 10), ("food", 7), ("media", 3)], ts(2))                    # food tax change, media new
+    run(ts(2), ts(1))
+
+    got = rows(snk, out_dir, "abc", "order_id, category, tax")
+    # The ground truth: recompute the whole 3-way join from the published source mains.
+    ref = duckdb.connect()
+    want = sorted(ref.sql(f"""
+        SELECT ol.order_id, prod.category, tax.tax
+        FROM ({ParquetDataPlane().read_select(tmp_path / 'ponds/a/m1/data', 'ol')}) ol
+        JOIN ({ParquetDataPlane().read_select(tmp_path / 'ponds/b/m1/data', 'prod')}) prod USING (product_id)
+        JOIN ({ParquetDataPlane().read_select(tmp_path / 'ponds/c/m1/data', 'tax')}) tax USING (category)
+    """).fetchall())
+    assert got == want
+    snk.close()
+
+
 # ─── coverage-miss absorption (the retention-lag delete bug) ─────────────────────
 
 

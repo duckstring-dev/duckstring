@@ -182,6 +182,7 @@ A fluent builder that composes an incremental join from its sources' Z-set delta
 - The spine is `s0`, dimensions `s1`, `s2`, … in the projection. Any table is a valid source (Trickle or overwrite Ripple).
 - **`p`** (per source, default `0.3`) is the change-fraction threshold: past that share of a source's rows the builder recomputes comprehensively for that run; `p=1.0` disables the check.
 - Bootstrap / coverage-miss / changed-Ripple / over-`p` → comprehensive recompute diffed against the last-written main. The op set is closed — a snowflake dimension, a missing merge key, or a joined graph with no `.select` raises at build time.
+- **`.merge(...)` returns a builder rooted at the table it just wrote**, so joins chain through materialised intermediates in one Ripple — `a.join(b).merge("ab", pk=…).join(c).merge("abc", pk=…)`. Each `.merge()` stores its output's trace, so a later run that changes only `c` reuses the stored `ab` instead of recomputing `a⋈b`. The returned handle is the next **spine** (its in-run delta is threaded forward); a composed builder still can't be a *dimension*.
 
 See the [guide](../guides/trickle.md#the-builder-pondtrickle).
 

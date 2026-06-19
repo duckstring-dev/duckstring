@@ -20,11 +20,11 @@ stable history operand; only a *changed* one forces the comprehensive path.
 
 from __future__ import annotations
 
-from .trickle_io import D_COL, _q, normalize_pk, unique_name
+from .trickle_io import D_COL, _q, normalize_pk, read_registry_delta, unique_name
 
 
 class BuildError(ValueError):
-    """The builder was misconfigured (a missing ``.pk()``/``.select()``, a malformed join)."""
+    """The builder was misconfigured (a missing merge key / ``.select()``, a malformed join)."""
 
 
 def _cols(on) -> tuple[str, ...]:
@@ -41,15 +41,20 @@ def _join_pairs(on) -> list[tuple[str, str]]:
 
 class TrickleBuilder:
     """One node of the build graph. ``pond.trickle(ref)`` starts a graph rooted at the **spine** source;
-    :meth:`join` attaches a dimension directly to the spine."""
+    :meth:`join` attaches a dimension directly to the spine.
 
-    def __init__(self, pond, spine_ref: str, *, p: float = 0.3) -> None:
+    ``_spine_delta`` is set when this builder is the value returned by an upstream :meth:`merge` — the
+    spine is then a just-materialised in-run Trickle whose change is already known, so it is read from
+    that handle (the registry) instead of the not-yet-published data plane."""
+
+    def __init__(self, pond, spine_ref: str, *, p: float = 0.3, _spine_delta=None) -> None:
         self.pond = pond
         self.spine_ref = spine_ref
         self.p = p  # this source's change-fraction threshold (see Pond.trickle)
         self._joins: list[tuple[str, list[tuple[str, str]], float]] = []  # (dim_ref, pairs, p)
         self._filters: list[str] = []
         self._projection: str | None = None
+        self._spine_delta = _spine_delta  # set by an upstream .merge() → chained in-run operand
 
     def join(self, dimension: "TrickleBuilder", *, on) -> "TrickleBuilder":
         """Equi-join a **dimension** (another bare ``pond.trickle(...)``) directly to the spine on ``on``
@@ -76,10 +81,19 @@ class TrickleBuilder:
         self._projection = projection
         return self
 
-    def merge(self, name: str, *, pk, retain_t=None, retain_n=None) -> None:
+    def merge(self, name: str, *, pk, retain_t=None, retain_n=None) -> "TrickleBuilder":
         """Execute: compose ΔO from the changed sources' Z-sets (or recompute comprehensively) and apply it
         to the output Trickle ``name``. ``pk`` (**required**) is the output identity / merge key — it must be
-        genuinely unique in the output (a many-to-many join that fans out past it corrupts the keyed main)."""
+        genuinely unique in the output (a many-to-many join that fans out past it corrupts the keyed main).
+
+        Returns a :class:`TrickleBuilder` rooted at the just-materialised ``name``, so joins can be chained
+        through intermediate materialisations **in one Ripple** —
+        ``a.join(b).merge("ab", pk=…).join(c).merge("abc", pk=…)``. Each ``.merge()`` stores its output's
+        trace (registry main + changelog), so a later run that changes only ``c`` reuses the stored ``ab``
+        instead of recomputing ``a⋈b`` — the same win as splitting into a downstream Trickle, without the
+        boilerplate (and without the parallelism a separate Ripple under a Wave would allow — a chain is
+        explicitly sequential). The returned handle carries ``ab``'s in-run delta (read from the registry),
+        so the downstream join composes without a round-trip through the not-yet-published data plane."""
         pond = self.pond
         out_pk = normalize_pk(pk)
         if not out_pk:
@@ -92,7 +106,10 @@ class TrickleBuilder:
 
         refs = [self.spine_ref] + [dim_ref for dim_ref, _pairs, _p in self._joins]
         ps = [self.p] + [p for _dim_ref, _pairs, p in self._joins]
-        deltas = [pond.read_delta(r) for r in refs]
+        # The spine of a chained builder is a just-materialised in-run Trickle: use its known delta, not the
+        # (unpublished) data-plane read. Dimensions are always bare sources read the normal way.
+        spine_delta = self._spine_delta if self._spine_delta is not None else pond.read_delta(self.spine_ref)
+        deltas = [spine_delta] + [pond.read_delta(r) for r in refs[1:]]
 
         # Comprehensive fallback: any source can't supply a clean delta (full read), or changed more than
         # its threshold p. Recompute the whole output and diff it against the materialised prior output.
@@ -104,19 +121,23 @@ class TrickleBuilder:
             if missing:
                 raise BuildError(f".select(...) must include the PK column(s) {missing}")
             pond.merge_table(name, o_prime, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
-            return
+        else:
+            # Incremental: per source build current/prior/delta views; sum one join term per changed source.
+            states = [self._state_views(r, d) for r, d in zip(refs, deltas, strict=True)]
+            terms = [self._term(i, states) for i, st in enumerate(states) if st["changed"]]
+            if terms:
+                unioned = pond.con.sql(" UNION ALL BY NAME ".join(f"({t})" for t in terms))
+                cols = [c for c in unioned.columns if c != D_COL]
+                missing = [c for c in out_pk if c not in cols]
+                if missing:
+                    raise BuildError(f".select(...) must include the PK column(s) {missing}")
+                pond.apply_zset(name, unioned, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
+            # else: nothing changed (and no full read) → output unchanged, no write.
 
-        # Incremental: per source build current/prior/delta views; sum one join term per changed source.
-        states = [self._state_views(r, d) for r, d in zip(refs, deltas, strict=True)]
-        terms = [self._term(i, states) for i, st in enumerate(states) if st["changed"]]
-        if not terms:
-            return  # nothing changed (and no full read) → output is unchanged
-        unioned = pond.con.sql(" UNION ALL BY NAME ".join(f"({t})" for t in terms))
-        cols = [c for c in unioned.columns if c != D_COL]
-        missing = [c for c in out_pk if c not in cols]
-        if missing:
-            raise BuildError(f".select(...) must include the PK column(s) {missing}")
-        pond.apply_zset(name, unioned, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
+        # Thread the materialised output forward as a chainable in-run operand (its delta read back from the
+        # registry, same coverage rule as the published read_delta).
+        threaded = read_registry_delta(pond.con, name, pond.previous_f, pond.f, out_pk)
+        return TrickleBuilder(pond, name, _spine_delta=threaded)
 
     # ─── internals ────────────────────────────────────────────────────────────
 

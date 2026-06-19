@@ -585,12 +585,21 @@ def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
         clog_sql = dp.read_select(data_dir, clog, as_of=f)  # as-of pin to this run's freshness
     except FileNotFoundError:
         clog_sql = None
+    main_sql = dp.read_select(data_dir, table, as_of=f)
+    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, floor)
+
+
+def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, floor) -> Delta:
+    """The merge-delta core over two source SELECTs — a clean *main* and its *changelog* (``None`` if the
+    changelog is unavailable). Shared by the published read (``_read_merge_delta``, over the data plane) and
+    the in-run registry read (:func:`read_registry_delta`). ``previous_f`` covered by the floor → a windowed
+    Z-set; otherwise a full read at ``+1``."""
     oldest = None
     if clog_sql is not None:
         oldest = con.sql(f"SELECT min({_q(F_COL)}) FROM ({clog_sql})").fetchone()[0]
     full = clog_sql is None or not _covered(previous_f, NEVER, floor, oldest)
     if full:
-        main = _strip_system(con.sql(dp.read_select(data_dir, table, as_of=f)))
+        main = _strip_system(con.sql(main_sql))
         return Delta(con, pk, _as_zset(main, 1), is_full=True)
     # Window the changelog and consolidate by full row (the net Z-set over the window — multiple updates
     # and delete-then-re-add collapse). Inlined as a self-contained subquery (over immutable read_parquet),
@@ -604,6 +613,26 @@ def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
         f") GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0"
     )
     return Delta(con, pk, zset, is_full=False)
+
+
+def read_registry_delta(con, table, previous_f, f, pk) -> Delta:
+    """The Z-set change a **just-merged** Trickle ``table`` exposes over ``(previous_f, f]``, read back from
+    the **registry** (its clean main + ``__changelog``) rather than the published data plane. Used to thread
+    a mid-chain ``pond.trickle(...).merge(name)`` forward as an in-run join operand: nothing is published
+    until end-of-run, so a downstream ``.join(...)`` in the same Ripple can't go through the normal
+    (data-plane) ``read_delta``. The coverage rule is identical to the published read — a bootstrap (floor
+    just set to ``f``) or a retention/coverage gap yields a full read (``is_full``), forcing the downstream
+    comprehensive path; otherwise a windowed delta (empty if the merge wrote nothing this run)."""
+    from datetime import datetime
+
+    from .engine.core import NEVER
+
+    floor_iso = read_meta(con).get(table, {}).get("floor")
+    floor = datetime.fromisoformat(floor_iso) if floor_iso else None
+    clog = changelog_name(table)
+    clog_sql = f'SELECT * FROM {_q(clog)}' if _table_exists(con, clog) else None
+    main_sql = f'SELECT * FROM {_q(table)}'
+    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, normalize_pk(pk), NEVER, floor)
 
 
 def _strip_system(rel):

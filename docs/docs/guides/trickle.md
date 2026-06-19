@@ -109,6 +109,33 @@ The op set is deliberately small — `join` / `filter` / `select` over sources �
 
 A single-source transform (no join — just filter/project a stream) is the builder with no `.join()`: `pond.trickle("src.dim").select("id, upper(v) AS v").merge("loud", pk="id")`. For a shape outside the op set entirely, the low-level escape is `pond.apply_zset(name, zset, pk=…)` — apply a hand-built Z-set (user columns + `_duckstring_d`) directly — but that's rare; prefer a downstream node.
 
+### Chaining through materialised intermediates
+
+`.merge(name, pk=…)` **returns a builder rooted at the table it just wrote**, so you can keep joining — materialising intermediates mid-chain, all in one Ripple:
+
+```python
+ab = (
+    pond.trickle("a.order_line")
+        .join(pond.trickle("b.product"), on="product_id")
+        .select("s0.order_id, s0.qty, s1.category")
+        .merge("ab", pk="order_id")          # ← stores `ab`, returns a handle
+)
+(
+    ab.join(pond.trickle("c.tax"), on="category")   # joins on `category`, produced by a⋈b
+      .select("s0.order_id, s0.qty, s0.category, s1.tax")
+      .merge("abc", pk="order_id")
+)
+```
+
+Why materialise rather than write one big `a.join(b).join(c)`? A single builder keeps **no stored intermediate**, so a run that changes only `c` still joins through `a⋈b`. The mid-chain `.merge("ab")` stores `ab`'s trace (its main + changelog), so that run reuses the stored `ab` and never touches `a`/`b`. It's the same win as splitting into a downstream Trickle — every Trickle boundary materialises a reusable history — **without the second Ripple's boilerplate**. The chain is also where you put a join whose key only exists *after* an upstream join (here `category`), which a single star builder can't express.
+
+Two things to know:
+
+- **It's sequential by construction.** Statements in a Ripple run top-to-bottom on one connection. The only thing a separate Ripple buys you over a chain is *parallelism* — two independent branches running concurrently under a Wave. A chain is the right tool when the steps depend on each other; reach for separate Ripples when they don't and you want them to overlap.
+- **Materialise at reuse boundaries, not between every join.** Each `.merge()` is a real registry write. Scatter them where the stored trace earns its keep (a hop reused across runs, or a join key that only exists downstream), the same judgement as deciding where to split a Trickle.
+
+The returned handle is the next builder's **spine** — its just-computed delta is threaded forward in memory (nothing is published mid-run, so a downstream join can't re-read it by name). Passing a composed builder as a *dimension* (`x.join(ab, …)`) is still rejected — dimensions must be bare sources; keep the composed thing on the spine.
+
 ## Following a Ripple
 
 A Trickle can read an ordinary (overwrite) Ripple as a source — the builder accepts it directly. While that Ripple is unchanged it's a free, stable join operand; the run a change lands, the consumer recomputes that output comprehensively (an overwrite source has no prior state to retract against, so the incremental win doesn't apply across that edge). Promote the Ripple to a Trickle upstream when you want its changes to flow incrementally — consumers don't change.
