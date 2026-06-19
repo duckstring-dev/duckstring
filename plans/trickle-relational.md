@@ -225,15 +225,17 @@ Effort: large. This is a new stateful operator. The distributive metrics (sum/co
 
 ## Sequencing (each independently shippable)
 
-1. **`.alias()`** (+ fast-path regex generalization). Small, unblocks readable multi-joins.
-2. **`.sql()` escape + comprehensive-mode terminal.** Small–medium; immediately collapses the
+1. ✅ **`.alias()`** (+ fast-path regex generalization). Small, unblocks readable multi-joins.
+2. ✅ **`.sql()` escape + comprehensive-mode terminal.** Small–medium; immediately collapses the
    `priced→revenue` split into one ripple even before native aggregation lands.
-3. **`.schema()` / `.to_ibis_schema()` + `.sql(expr)`.** Small; rides on (2).
-4. **`how="left"` join (spine-preserved).** Medium; the highest-value join gap.
+3. ✅ **`.schema()` / `.to_ibis_schema()` + `.sql(expr)`.** Small; rides on (2).
+4. ✅ **`how="left"` join (spine-preserved).** Medium; the highest-value join gap.
 5. **Incremental aggregation — distributive (sum/count/mean).** Large; the headline. Supersedes the
    `.sql()` aggregate for the common case with a genuinely incremental one.
 6. **Aggregation — min/max (rescan) + var/stddev.** Large.
-7. **`how=` right/full/semi/anti.** Medium–large; the long tail of join types.
+7. ✅ **`how=` right/full/semi/anti.** Done together with (4): `left`/`semi`/`anti` are spine-grained and
+   incremental (telescoping for all-inner, `_spine_recompute` for any non-inner star); `right`/`full` are
+   solo-only and **comprehensive** (correct, **incremental still deferred** — the next join-side step).
 
 After (1)–(3) the builder already matches the discussed ergonomics; (4)–(7) close the DBSP completeness
 gaps in value order.

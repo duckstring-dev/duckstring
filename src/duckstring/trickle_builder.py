@@ -58,6 +58,16 @@ def _duckdb_to_ibis(t: str) -> str:
     raise BuildError(f"to_ibis_schema(): no Ibis mapping for DuckDB type {t!r} — use .schema() and map it yourself")
 
 
+# Supported join types → their DuckDB keyword. **Spine-grained** ones (inner/left/semi/anti) keep the
+# output one-contribution-per-spine-row, so they compose in a multi-way star and are maintained
+# incrementally (telescoping for all-inner; affected-spine-row recompute when any non-inner is present).
+# right/full preserve the *other* side (unmatched dim rows), so they must be the only join and recompute
+# comprehensively (correct, not yet incrementalised).
+_JOIN_SQL = {"inner": "JOIN", "left": "LEFT JOIN", "right": "RIGHT JOIN", "full": "FULL JOIN",
+             "semi": "SEMI JOIN", "anti": "ANTI JOIN"}
+_SPINE_GRAINED = {"inner", "left", "semi", "anti"}
+
+
 def _cols(on) -> tuple[str, ...]:
     return (on,) if isinstance(on, str) else tuple(on)
 
@@ -108,7 +118,8 @@ class TrickleBuilder:
         self.pond = pond
         self.spine_ref = spine_ref
         self.p = p  # this source's change-fraction threshold (see Pond.trickle)
-        self._joins: list[tuple[str, list[tuple[str, str]], float, str | None]] = []  # (dim_ref, pairs, p, alias)
+        # (dim_ref, pairs, p, alias, how)
+        self._joins: list[tuple[str, list[tuple[str, str]], float, str | None, str]] = []
         self._filters: list[str] = []
         self._projection: str | None = None
         self._alias: str | None = None  # this node's name in .select/.filter and as the .sql() table
@@ -123,11 +134,20 @@ class TrickleBuilder:
         self._alias = name
         return self
 
-    def join(self, dimension: "TrickleBuilder", *, on) -> "TrickleBuilder":
+    def join(self, dimension: "TrickleBuilder", *, on, how: str = "inner") -> "TrickleBuilder":
         """Equi-join a **dimension** (another bare ``pond.trickle(...)``) directly to the spine on ``on``
-        (any column(s); see :func:`_join_pairs`). The dimension must be a bare source — a snowflake/chain
-        isn't in the op set (do the deeper hop in a downstream Trickle)."""
+        (any column(s); see :func:`_join_pairs`). ``how`` ∈ ``inner`` (default) / ``left`` / ``right`` /
+        ``full`` / ``semi`` / ``anti``. The dimension must be a bare source — a snowflake/chain isn't in the
+        op set (do the deeper hop in a downstream Trickle).
+
+        ``inner``/``left``/``semi``/``anti`` are **spine-grained** (one contribution per spine row): they
+        compose in a multi-way star and are maintained incrementally. ``right``/``full`` preserve unmatched
+        dimension rows, so they must be the **only** join and recompute comprehensively (correct, not yet
+        incrementalised)."""
         self._ensure_incremental("join")
+        how = how.lower()
+        if how not in _JOIN_SQL:
+            raise BuildError(f"join(how={how!r}): one of {sorted(_JOIN_SQL)}")
         if not isinstance(dimension, TrickleBuilder):
             raise BuildError("join() takes another pond.trickle(...) source as the dimension")
         if dimension._joins or dimension._filters or dimension._projection is not None:
@@ -135,7 +155,7 @@ class TrickleBuilder:
                 f"join('{dimension.spine_ref}'): a dimension must be a bare source — a snowflake/transitive "
                 f"chain isn't in the builder's op set; do the deeper hop in a downstream Trickle"
             )
-        self._joins.append((dimension.spine_ref, _join_pairs(on), dimension.p, dimension._alias))
+        self._joins.append((dimension.spine_ref, _join_pairs(on), dimension.p, dimension._alias, how))
         return self
 
     def filter(self, predicate: str) -> "TrickleBuilder":
@@ -270,7 +290,9 @@ class TrickleBuilder:
             return self._chain(name, out_pk)
 
         spine_delta = self._spine_delta if self._spine_delta is not None else pond.read_delta(self.spine_ref)
-        if self._joins and not fail_on_conflict and not log_drops and self._spine_pk_passthrough(out_pk, spine_delta.pk):
+        spine_grained = all(t[4] in _SPINE_GRAINED for t in self._joins)
+        if (self._joins and spine_grained and not fail_on_conflict and not log_drops
+                and self._spine_pk_passthrough(out_pk, spine_delta.pk)):
             candidate = self._full_join(spine_rel=self._new_spine_rows(spine_delta, name, out_pk))
             trickle.append_zset(
                 pond.con, name, trickle._as_zset(candidate, 1), pond.f, out_pk,
@@ -336,8 +358,15 @@ class TrickleBuilder:
                 f"pond.trickle('{self.spine_ref}').join(...): a joined graph needs .select(...) to name the "
                 f"output columns (and include the PK)"
             )
-        refs = [self.spine_ref] + [dim_ref for dim_ref, _pairs, _p, _a in self._joins]
-        ps = [self.p] + [p for _dim_ref, _pairs, p, _a in self._joins]
+        hows = [t[4] for t in self._joins]
+        outer = any(h in ("right", "full") for h in hows)
+        if outer and len(self._joins) > 1:
+            raise BuildError(
+                "a right/full outer join must be the only join in a builder (it preserves unmatched rows, so "
+                "it can't anchor a star) — do the multi-way part in a downstream Trickle"
+            )
+        refs = [self.spine_ref] + [t[0] for t in self._joins]
+        ps = [self.p] + [t[2] for t in self._joins]
         # The spine of a chained builder is a just-materialised in-run Trickle: use its known delta, not the
         # (unpublished) data-plane read. Dimensions are always bare sources read the normal way.
         if spine_delta is None:
@@ -345,17 +374,62 @@ class TrickleBuilder:
         deltas = [spine_delta] + [pond.read_delta(r) for r in refs[1:]]
 
         over = any(self._over_threshold(r, d, p) for r, d, p in zip(refs, deltas, ps, strict=True))
-        if any(d.is_full for d in deltas) or over:
+        # Comprehensive: any source full-reads, a source is over its threshold, or a right/full outer join
+        # (preserves unmatched rows → not incrementalised here). _full_join honours every join type.
+        if outer or any(d.is_full for d in deltas) or over:
             o_prime = self._full_join()
             self._require_pk(out_pk, o_prime.columns)
             return "comprehensive", o_prime
         states = [self._state_views(r, d) for r, d in zip(refs, deltas, strict=True)]
-        terms = [self._term(i, states) for i, st in enumerate(states) if st["changed"]]
-        if not terms:
+        if not any(st["changed"] for st in states):
             return "empty", None
-        unioned = pond.con.sql(" UNION ALL BY NAME ".join(f"({t})" for t in terms))
-        self._require_pk(out_pk, [c for c in unioned.columns if c != D_COL])
-        return "incremental", unioned
+        if all(h == "inner" for h in hows):
+            # All-inner star → the bilinear telescoping sum (one term per changed source).
+            terms = [self._term(i, states) for i, st in enumerate(states) if st["changed"]]
+            delta_rel = pond.con.sql(" UNION ALL BY NAME ".join(f"({t})" for t in terms))
+        else:
+            # A spine-grained non-inner star (left/semi/anti, possibly mixed with inner) → recompute the
+            # affected spine rows over new (+1) and old (−1) states and diff.
+            delta_rel = self._spine_recompute(states)
+        self._require_pk(out_pk, [c for c in delta_rel.columns if c != D_COL])
+        return "incremental", delta_rel
+
+    def _spine_recompute(self, states):
+        """ΔO for a spine-grained star with a non-inner join. Recompute the full star (honouring each join's
+        ``how``) for the **affected spine rows** — those in the spine delta or matching a changed dimension's
+        delta keys — over the new states (``+1``) and old states (``−1``), and diff. Over-inclusion is safe
+        (an unchanged row's old and new outputs cancel); the filter just keeps the recompute bounded by the
+        delta rather than the whole spine."""
+        affected = self._affected_filter(states)
+        aliases = self._aliases()
+        new = self._recompute_select([st["current"] for st in states], aliases, 1, affected)
+        old = self._recompute_select([st["prior"] for st in states], aliases, -1, affected)
+        return self.pond.con.sql(f"({new}) UNION ALL BY NAME ({old})")
+
+    def _recompute_select(self, backing, aliases, sign: int, spine_filter: str) -> str:
+        projection = self._projection or f"{aliases[0]}.*"
+        where = f" WHERE {' AND '.join(self._filters)}" if self._filters else ""
+        return (
+            f"SELECT {projection}, {sign} AS {_q(D_COL)} "
+            f"FROM {self._from_clause(backing, aliases, spine_filter)}{where}"
+        )
+
+    def _affected_filter(self, states) -> str:
+        """A SQL predicate over the spine's own columns selecting the rows whose output could have changed:
+        the changed spine rows themselves, plus any spine row whose join key matches a changed dimension's
+        delta. (Evaluated inside the spine subquery, so it names bare spine columns + the delta views.)"""
+        clauses = []
+        sp = states[0]
+        if sp["changed"]:
+            cols = ", ".join(_q(c) for c in sp["user"])
+            clauses.append(f"({cols}) IN (SELECT {cols} FROM {_q(sp['delta'])})")
+        for i, st in enumerate(states[1:], start=1):
+            if st["changed"]:
+                _dim_ref, pairs, _p, _alias, _how = self._joins[i - 1]
+                sc = ", ".join(_q(s) for s, _d in pairs)
+                dc = ", ".join(_q(d) for _s, d in pairs)
+                clauses.append(f"({sc}) IN (SELECT {dc} FROM {_q(st['delta'])})")
+        return " OR ".join(clauses) if clauses else "1=0"
 
     def _require_pk(self, out_pk, cols) -> None:
         missing = [c for c in out_pk if c not in cols]
@@ -414,7 +488,7 @@ class TrickleBuilder:
         """The SQL alias for each source — the spine then each dimension. A source's ``.alias()`` name if it
         set one, else the positional ``s{j}`` fallback (so unaliased graphs read exactly as before)."""
         out = [self._alias or "s0"]
-        out += [alias or f"s{i + 1}" for i, (_ref, _pairs, _p, alias) in enumerate(self._joins)]
+        out += [alias or f"s{i + 1}" for i, (_ref, _pairs, _p, alias, _how) in enumerate(self._joins)]
         return out
 
     def _from_clause(self, backing: list[str], aliases: list[str], spine_filter: str | None = None) -> str:
@@ -424,10 +498,10 @@ class TrickleBuilder:
         s0a = aliases[0]
         s0 = (f'(SELECT * FROM {_q(backing[0])} WHERE {spine_filter})' if spine_filter else _q(backing[0]))
         parts = [f'{s0} {s0a}']
-        for d, (_dim_ref, pairs, _p, _alias) in enumerate(self._joins):
+        for d, (_dim_ref, pairs, _p, _alias, how) in enumerate(self._joins):
             a = aliases[d + 1]
             cond = " AND ".join(f'{s0a}.{_q(sc)} = {a}.{_q(dc)}' for sc, dc in pairs)
-            parts.append(f'JOIN {_q(backing[d + 1])} {a} ON {cond}')
+            parts.append(f'{_JOIN_SQL[how]} {_q(backing[d + 1])} {a} ON {cond}')
         return " ".join(parts)
 
     def _term(self, i: int, states: list[dict]) -> str:
@@ -452,7 +526,7 @@ class TrickleBuilder:
                 backing.append(st["prior"])
         spine_filter = None
         if i >= 1:  # a dimension changed → pre-filter the spine to its affected keys
-            _dim_ref, pairs, _p, _alias = self._joins[i - 1]
+            _dim_ref, pairs, _p, _alias, _how = self._joins[i - 1]
             sc = ", ".join(_q(s) for s, _d in pairs)
             dc = ", ".join(_q(d) for _s, d in pairs)
             spine_filter = f"({sc}) IN (SELECT {dc} FROM {_q(states[i]['delta'])})"
@@ -471,7 +545,7 @@ class TrickleBuilder:
         con = self.pond.con
         aliases = self._aliases()
         backing = []
-        for j, ref in enumerate([self.spine_ref] + [dim_ref for dim_ref, _pairs, _p, _a in self._joins]):
+        for j, ref in enumerate([self.spine_ref] + [t[0] for t in self._joins]):
             v = unique_name("full")
             rel = spine_rel if (j == 0 and spine_rel is not None) else self.pond.read_table(ref)
             rel.create_view(v, replace=True)

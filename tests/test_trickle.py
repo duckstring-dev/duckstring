@@ -938,6 +938,182 @@ def test_builder_sql_accepts_ibis_expression(tmp_path):
     snk.close()
 
 
+# ─── join types: left / semi / anti (incremental), right / full (comprehensive) ──
+
+
+def _two_dim_sources(tmp_path):
+    """A fact spine (order_id, product_id, store_id) + two dimensions on different spine keys."""
+    f_con, f_dir = _producer(tmp_path, "fact")
+    p_con, p_dir = _producer(tmp_path, "prod")
+    s_con, s_dir = _producer(tmp_path, "store")
+
+    def fact(state, f):
+        vals = ", ".join(f"({o}, '{p}', '{s}')" for o, p, s in state)
+        T.merge_table(f_con, "f", f_con.sql(f"SELECT * FROM (VALUES {vals}) v(order_id, product_id, store_id)"),
+                      f, ("order_id",))
+        publish(f_con, f_dir, f=f)
+
+    def prod(state, f):
+        vals = ", ".join(f"('{p}', {pr})" for p, pr in state)
+        T.merge_table(p_con, "p", p_con.sql(f"SELECT * FROM (VALUES {vals}) v(product_id, price)"), f, ("product_id",))
+        publish(p_con, p_dir, f=f)
+
+    def store(state, f):
+        vals = ", ".join(f"('{s}', '{r}')" for s, r in state) if state else None
+        rel = s_con.sql(f"SELECT * FROM (VALUES {vals}) v(store_id, region)") if vals else \
+            s_con.sql("SELECT NULL::VARCHAR AS store_id, NULL::VARCHAR AS region WHERE 1=0")
+        T.merge_table(s_con, "s", rel, f, ("store_id",))
+        publish(s_con, s_dir, f=f)
+
+    return fact, prod, store
+
+
+def test_builder_left_join_keeps_unmatched_spine(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "j" / "m1" / "data"
+
+    def run(f, pf):  # p=1.0 → exercise the incremental spine-recompute (not the comprehensive fallback)
+        pond = Pond("j", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line", p=1.0).alias("o")
+             .join(pond.trickle("catalog.product", p=1.0).alias("p"), on="product_id", how="left")
+             .select("o.order_id, p.price")
+             .merge("j", pk="order_id"))
+        publish(snk, snk_dir, f=f)
+
+    ol([(10, "p1", 2), (11, "pX", 1)], ts(1))   # pX has no product row
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    run(ts(1), NEVER)
+    assert rows(snk, snk_dir, "j", "order_id, price") == [(10, 5), (11, None)]   # 11 kept, NULL price
+    pr([("p1", 5), ("p2", 9), ("pX", 7)], ts(2))     # pX appears → 11 flips matched
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "j", "order_id, price") == [(10, 5), (11, 7)]
+    pr([("p1", 50), ("p2", 9), ("pX", 7)], ts(3))    # p1 reprice → 10 updates
+    run(ts(3), ts(2))
+    assert rows(snk, snk_dir, "j", "order_id, price") == [(10, 50), (11, 7)]
+    ol([(10, "p1", 2), (11, "pX", 1), (12, "pZ", 1)], ts(4))   # new unmatched spine row
+    run(ts(4), ts(3))
+    assert rows(snk, snk_dir, "j", "order_id, price") == [(10, 50), (11, 7), (12, None)]
+    snk.close()
+
+
+def test_builder_semi_join_filters_spine(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "j" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("j", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line", p=1.0).alias("o")
+             .join(pond.trickle("catalog.product", p=1.0).alias("p"), on="product_id", how="semi")
+             .select("o.order_id, o.qty")
+             .merge("j", pk="order_id"))
+        publish(snk, snk_dir, f=f)
+
+    ol([(10, "p1", 2), (11, "pX", 1)], ts(1))
+    pr([("p1", 5)], ts(1))
+    run(ts(1), NEVER)
+    assert rows(snk, snk_dir, "j", "order_id, qty") == [(10, 2)]      # 11 (pX, no match) filtered out
+    pr([("p1", 5), ("pX", 7)], ts(2))                                  # pX appears → 11 enters
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "j", "order_id, qty") == [(10, 2), (11, 1)]
+    pr([("p1", 5)], ts(3))                                             # pX removed → 11 leaves
+    run(ts(3), ts(2))
+    assert rows(snk, snk_dir, "j", "order_id, qty") == [(10, 2)]
+    snk.close()
+
+
+def test_builder_anti_join_keeps_unmatched(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "j" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("j", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line", p=1.0).alias("o")
+             .join(pond.trickle("catalog.product", p=1.0).alias("p"), on="product_id", how="anti")
+             .select("o.order_id, o.qty")
+             .merge("j", pk="order_id"))
+        publish(snk, snk_dir, f=f)
+
+    ol([(10, "p1", 2), (11, "pX", 1)], ts(1))
+    pr([("p1", 5), ("pX", 7)], ts(1))
+    run(ts(1), NEVER)
+    assert rows(snk, snk_dir, "j", "order_id, qty") == []   # both match → anti empty
+    pr([("p1", 5)], ts(2))                                  # pX removed → 11 has no match → enters anti
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "j", "order_id, qty") == [(11, 1)]
+    snk.close()
+
+
+def test_builder_right_and_full_outer_join_comprehensive(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    rdir = tmp_path / "ponds" / "r" / "m1" / "data"
+    fdir = tmp_path / "ponds" / "fo" / "m1" / "data"
+    ol([(10, "p1", 2)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))   # p2 has no order
+
+    pr_pond = Pond("r", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=ts(1), previous_f=NEVER)
+    (pr_pond.trickle("sales.order_line").alias("o")
+            .join(pr_pond.trickle("catalog.product").alias("p"), on="product_id", how="right")
+            .select("p.product_id, o.order_id").merge("r", pk="product_id"))
+    publish(snk, rdir, f=ts(1))
+    assert rows(snk, rdir, "r", "product_id, order_id") == [("p1", 10), ("p2", None)]   # p2 kept, NULL order
+
+    fo_pond = Pond("fo", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=ts(1), previous_f=NEVER)
+    ol([(10, "p1", 2), (11, "pX", 1)], ts(1))   # pX has no product; p2 has no order
+    (fo_pond.trickle("sales.order_line").alias("o")
+            .join(fo_pond.trickle("catalog.product").alias("p"), on="product_id", how="full")
+            .select("coalesce(o.product_id, p.product_id) AS pid, o.order_id, p.price").merge("fo", pk="pid"))
+    publish(snk, fdir, f=ts(1))
+    assert rows(snk, fdir, "fo", "pid, order_id, price") == [("p1", 10, 5), ("p2", None, 9), ("pX", 11, None)]
+    snk.close()
+
+
+def test_builder_mixed_left_inner_star(tmp_path):
+    fact, prod, store = _two_dim_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "m" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("m", "1.0.0", snk, root=tmp_path,
+                    source_majors={"fact": 1, "prod": 1, "store": 1}, f=f, previous_f=pf)
+        (pond.trickle("fact.f", p=1.0).alias("f")
+             .join(pond.trickle("prod.p", p=1.0).alias("p"), on="product_id", how="left")
+             .join(pond.trickle("store.s", p=1.0).alias("s"), on="store_id", how="inner")
+             .select("f.order_id, p.price, s.region")
+             .merge("m", pk="order_id"))
+        publish(snk, snk_dir, f=f)
+
+    fact([(10, "p1", "sA"), (11, "pX", "sA")], ts(1))   # pX unmatched in prod (left → NULL)
+    prod([("p1", 5)], ts(1))
+    store([("sA", "north")], ts(1))
+    run(ts(1), NEVER)
+    assert rows(snk, snk_dir, "m", "order_id, price, region") == [(10, 5, "north"), (11, None, "north")]
+    store([("sA", "south")], ts(2))   # inner-dim change → both orders re-region
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "m", "order_id, price, region") == [(10, 5, "south"), (11, None, "south")]
+    prod([("p1", 5), ("pX", 7)], ts(3))   # left-dim gains pX → order 11 now priced
+    run(ts(3), ts(2))
+    assert rows(snk, snk_dir, "m", "order_id, price, region") == [(10, 5, "south"), (11, 7, "south")]
+    store([], ts(4))   # store emptied → inner join drops everything
+    run(ts(4), ts(3))
+    assert rows(snk, snk_dir, "m", "order_id, price, region") == []
+    snk.close()
+
+
+def test_builder_outer_join_guards(tmp_path):
+    snk = duckdb.connect()
+    pond = Pond("x", "1.0.0", snk, root=tmp_path, source_majors={"a": 1, "b": 1, "c": 1}, f=ts(1))
+    with pytest.raises(BuildError, match="how"):
+        pond.trickle("a.t").join(pond.trickle("b.u"), on="k", how="cross")
+    with pytest.raises(BuildError, match="only join"):
+        (pond.trickle("a.t").join(pond.trickle("b.u"), on="k", how="full")
+             .join(pond.trickle("c.v"), on="k").select("s0.k").merge("x", pk="k"))
+    snk.close()
+
+
 # ─── coverage-miss absorption (the retention-lag delete bug) ─────────────────────
 
 
