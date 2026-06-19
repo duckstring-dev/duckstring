@@ -20,11 +20,18 @@ stable history operand; only a *changed* one forces the comprehensive path.
 
 from __future__ import annotations
 
-from .trickle_io import D_COL, _q, normalize_pk, read_registry_delta, unique_name
+import re
+
+from .trickle_io import D_COL, _q, _table_exists, normalize_pk, read_registry_delta, unique_name
 
 
 class BuildError(ValueError):
     """The builder was misconfigured (a missing merge key / ``.select()``, a malformed join)."""
+
+
+# A select item that is a verbatim spine pass-through: ``s0.col`` / ``s0."col"`` / ``s0.col AS alias``.
+# group(2) = spine column, group(4) = alias (if any). Used to detect the spine-PK append fast path.
+_S0_PASSTHROUGH = re.compile(r'^s0\.("?)(\w+)\1(?:\s+as\s+("?)(\w+)\3)?$', re.IGNORECASE)
 
 
 def _cols(on) -> tuple[str, ...]:
@@ -37,6 +44,32 @@ def _join_pairs(on) -> list[tuple[str, str]]:
     if isinstance(on, dict):
         return [(s, d) for s, d in on.items()]
     return [(c, c) for c in _cols(on)]
+
+
+def _select_items(projection: str) -> list[str]:
+    """Split a SQL select list on **top-level** commas (ignoring those inside parens or quotes), so a
+    computed item like ``round(a, 2) AS x`` stays one piece."""
+    items, depth, buf, quote = [], 0, [], None
+    for ch in projection:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            items.append("".join(buf).strip())
+            buf = []
+            continue
+        buf.append(ch)
+    if "".join(buf).strip():
+        items.append("".join(buf).strip())
+    return items
 
 
 class TrickleBuilder:
@@ -121,12 +154,30 @@ class TrickleBuilder:
         companion (published alongside the table, like ``__changelog``). ``pk`` is optional but recommended:
         with it set the conflict checks engage;
         ``pk=None`` + ``fail_on_conflict=False`` skips them entirely (fast, sound only when duplicates and
-        past-changes are impossible by construction). Returns a chainable handle like :meth:`merge`."""
+        past-changes are impossible by construction). Returns a chainable handle like :meth:`merge`.
+
+        **Spine-PK fast path** — when the output is keyed by the spine's own PK (passed through the projection
+        by identity) *and* conflicts are both waived (``fail_on_conflict=False``) and unlogged
+        (``log_drops=False``), a change to an existing output row is dropped-and-forgotten either way, so a
+        dimension delta cannot affect the result. The builder skips the dimension deltas entirely and enriches
+        only the **new spine rows** with the **current** dimension states — turning a small dimension churn
+        that would otherwise drive a spine scan into an O(spine delta) lookup. Detection is conservative (only
+        a verbatim ``s0.<pk>`` projection); anything else falls back to the general path, which is always
+        correct."""
         pond = self.pond
         out_pk = normalize_pk(pk)
         from . import trickle_io as trickle
 
-        kind, rel = self._compute(out_pk, name)
+        spine_delta = self._spine_delta if self._spine_delta is not None else pond.read_delta(self.spine_ref)
+        if self._joins and not fail_on_conflict and not log_drops and self._spine_pk_passthrough(out_pk, spine_delta.pk):
+            candidate = self._full_join(spine_rel=self._new_spine_rows(spine_delta, name, out_pk))
+            trickle.append_zset(
+                pond.con, name, trickle._as_zset(candidate, 1), pond.f, out_pk,
+                fail_on_conflict=False, log_drops=False, retain_t=retain_t, retain_n=retain_n,
+            )
+            return self._chain(name, out_pk)
+
+        kind, rel = self._compute(out_pk, name, spine_delta=spine_delta)
         if kind != "empty":
             # A comprehensive recompute is the whole current output (clean rows) → tag it +1; an incremental
             # ΔO already carries its ±weights. append_zset filters retractions / pk conflicts either way.
@@ -137,7 +188,41 @@ class TrickleBuilder:
             )
         return self._chain(name, out_pk)
 
-    def _compute(self, out_pk, name: str):
+    def _spine_pk_passthrough(self, out_pk, spine_pk):
+        """If every output-PK column is a verbatim ``s0.<col>`` pass-through of the **spine's** PK (so the
+        output is keyed by the spine's identity), return ``{out_col: spine_col}``; else ``None``. Conservative
+        — it bails on any computed / non-``s0`` / ambiguous PK column, so a false positive (which would wrongly
+        drop rows) is impossible; a false negative just forgoes the optimization."""
+        spine_pk = tuple(spine_pk or ())
+        if not spine_pk or not out_pk or self._projection is None:
+            return None
+        proj = {}
+        for item in _select_items(self._projection):
+            m = _S0_PASSTHROUGH.match(item)
+            if m:
+                proj[(m.group(4) or m.group(2))] = m.group(2)  # output name → spine column
+        smap = {}
+        for p in out_pk:
+            if p not in proj:
+                return None
+            smap[p] = proj[p]
+        return smap if set(smap.values()) == set(spine_pk) else None
+
+    def _new_spine_rows(self, spine_delta, name: str, out_pk):
+        """The spine rows that arrived/changed this run whose (mapped) PK is **not yet** in the output history
+        — the only rows that can produce a new append row when the output is spine-PK keyed."""
+        con = self.pond.con
+        new = spine_delta.upserts  # +1 net spine rows (clean user columns)
+        smap = self._spine_pk_passthrough(out_pk, spine_delta.pk)
+        if not _table_exists(con, name):
+            return new  # bootstrap → every row is new
+        v = unique_name("newsp")
+        new.create_view(v, replace=True)
+        spine_cols = ", ".join(_q(smap[p]) for p in out_pk)
+        out_cols = ", ".join(_q(p) for p in out_pk)
+        return con.sql(f'SELECT * FROM {_q(v)} WHERE ({spine_cols}) NOT IN (SELECT {out_cols} FROM {_q(name)})')
+
+    def _compute(self, out_pk, name: str, spine_delta=None):
         """Compose this build graph's change once. Returns ``(kind, rel)``:
         ``("comprehensive", o_prime)`` — the whole output recomputed (clean rows), when any source can't
         supply a clean delta or exceeds its threshold ``p``; ``("incremental", unioned)`` — the Z-set ΔO
@@ -153,7 +238,8 @@ class TrickleBuilder:
         ps = [self.p] + [p for _dim_ref, _pairs, p in self._joins]
         # The spine of a chained builder is a just-materialised in-run Trickle: use its known delta, not the
         # (unpublished) data-plane read. Dimensions are always bare sources read the normal way.
-        spine_delta = self._spine_delta if self._spine_delta is not None else pond.read_delta(self.spine_ref)
+        if spine_delta is None:
+            spine_delta = self._spine_delta if self._spine_delta is not None else pond.read_delta(self.spine_ref)
         deltas = [spine_delta] + [pond.read_delta(r) for r in refs[1:]]
 
         over = any(self._over_threshold(r, d, p) for r, d, p in zip(refs, deltas, ps, strict=True))
@@ -266,14 +352,17 @@ class TrickleBuilder:
             f'FROM {self._from_clause(backing, spine_filter)}{where}'
         )
 
-    def _full_join(self):
-        """The whole output over the full current source states + filter + projection — the comprehensive
-        recompute (clean rows, no weight)."""
+    def _full_join(self, spine_rel=None):
+        """The output over the current source states + filter + projection (clean rows, no weight). With no
+        ``spine_rel`` this is the comprehensive recompute (spine at its full current state); with one, the
+        spine is backed by that relation instead — the spine-PK fast path joins only the *new* spine rows to
+        the current dimensions."""
         con = self.pond.con
         backing = []
-        for ref in [self.spine_ref] + [dim_ref for dim_ref, _pairs, _p in self._joins]:
+        for j, ref in enumerate([self.spine_ref] + [dim_ref for dim_ref, _pairs, _p in self._joins]):
             v = unique_name("full")
-            self.pond.read_table(ref).create_view(v, replace=True)
+            rel = spine_rel if (j == 0 and spine_rel is not None) else self.pond.read_table(ref)
+            rel.create_view(v, replace=True)
             backing.append(v)
         projection = self._projection or "s0.*"
         where = f" WHERE {' AND '.join(self._filters)}" if self._filters else ""

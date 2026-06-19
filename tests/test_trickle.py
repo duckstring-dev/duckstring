@@ -751,6 +751,69 @@ def _table_exists(con, name):
     return con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ?", [name]).fetchone() is not None
 
 
+# ─── spine-PK append fast path (skip dim deltas when output is keyed by the spine) ───
+
+
+def test_spine_pk_passthrough_detection():
+    from duckstring.trickle_builder import TrickleBuilder
+
+    def detect(projection, out_pk, spine_pk):
+        b = TrickleBuilder(None, "spine")
+        b._projection = projection
+        return b._spine_pk_passthrough(out_pk, spine_pk)
+
+    # Verbatim s0 pass-throughs (single, renamed, composite) → detected.
+    assert detect("s0.order_id, s1.price", ("order_id",), ("order_id",)) == {"order_id": "order_id"}
+    assert detect("s0.oid AS order_id, s1.price", ("order_id",), ("oid",)) == {"order_id": "oid"}
+    assert detect('s0."a", s0.b, s1.x', ("a", "b"), ("a", "b")) == {"a": "a", "b": "b"}
+    # A comma inside a computed dim column doesn't break item splitting.
+    assert detect("s0.id, round(s1.a, 2) AS r", ("id",), ("id",)) == {"id": "id"}
+
+    # Conservative bails (→ None, falls back to the always-correct general path):
+    assert detect("round(s0.x, 2) AS k, s1.y", ("k",), ("x",)) is None    # computed PK
+    assert detect("s1.k, s0.v", ("k",), ("k",)) is None                    # PK from a dimension, not s0
+    assert detect("s0.order_id, s0.region", ("order_id", "region"), ("order_id",)) is None  # out PK ⊋ spine PK
+    assert detect("s0.order_id", ("order_id",), ()) is None                # spine has no declared PK
+
+
+def test_builder_append_spine_pk_fast_path(tmp_path, monkeypatch):
+    from duckstring.trickle_builder import TrickleBuilder
+
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "e" / "m1" / "data"
+
+    def run(f, pf):  # fail_on_conflict=False + log_drops=False + s0.order_id PK → fast path eligible
+        _enriched(tmp_path, snk, snk_dir, f, pf, fail_on_conflict=False, log_drops=False)
+
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    run(ts(1), NEVER)
+    assert rows(snk, snk_dir, "enriched", "order_id, price") == [(10, 5), (11, 9)]
+
+    # A dimension-only change touches no spine rows → nothing flows; the past stays frozen.
+    pr([("p1", 50), ("p2", 9)], ts(2))
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "enriched", "order_id, price") == [(10, 5), (11, 9)]
+
+    # A new spine row arriving the same run a dim reprices is enriched with the *current* dim value.
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p1", 3)], ts(3))
+    pr([("p1", 70), ("p2", 9)], ts(3))
+    run(ts(3), ts(2))
+    assert rows(snk, snk_dir, "enriched", "order_id, price") == [(10, 5), (11, 9), (12, 70)]
+
+    # Prove the fast path skipped the telescoping ΔO composition entirely: with _compute sabotaged, a
+    # new-spine-row run still succeeds (it never calls it).
+    def _boom(*a, **k):
+        raise AssertionError("_compute should not run on the spine-PK fast path")
+
+    monkeypatch.setattr(TrickleBuilder, "_compute", _boom)
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p1", 3), (13, "p2", 1)], ts(4))
+    run(ts(4), ts(3))
+    assert rows(snk, snk_dir, "enriched", "order_id, price") == [(10, 5), (11, 9), (12, 70), (13, 9)]
+    snk.close()
+
+
 # ─── coverage-miss absorption (the retention-lag delete bug) ─────────────────────
 
 

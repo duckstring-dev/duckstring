@@ -156,6 +156,12 @@ An insert-only table can't reflect a *change to the past*, so two things are con
 
 `pk` is optional but recommended — it's what the conflict check keys on. `pk=None` with `fail_on_conflict=False` skips the checks entirely: the fastest path, sound only when you're certain duplicates and changed-pasts are impossible by construction. Like `.merge()`, `.append()` returns a chainable handle.
 
+#### The spine-PK fast path
+
+When the output is keyed by the **spine's own PK** — projected straight through (`s0.order_id`, optionally aliased) — *and* you've set both `fail_on_conflict=False` and `log_drops=False`, the builder takes a shortcut. In that mode a change to an already-appended row is dropped-and-forgotten regardless of what caused it, so a **dimension** change to an existing fact can't affect the result. The builder skips the dimension deltas entirely and computes only `new spine rows ⋈ current dimensions`. A dimension reprice that touches a million existing facts becomes a no-op instead of a million-row scan; a new fact is enriched with the dimension's *current* value.
+
+This is automatic and conservative — it engages only when the PK is a verbatim `s0.<col>` pass-through of the spine's declared key, and falls back to the full path for anything computed or renamed-off-a-dimension (the full path is always correct, so a missed detection only costs speed, never correctness). It's the in-builder equivalent of "this fact stream is enrich-once, append-only" — exactly the case where recomputing against changing dimensions would be wasted work.
+
 ## Following a Ripple
 
 A Trickle can read an ordinary (overwrite) Ripple as a source — the builder accepts it directly. While that Ripple is unchanged it's a free, stable join operand; the run a change lands, the consumer recomputes that output comprehensively (an overwrite source has no prior state to retract against, so the incremental win doesn't apply across that edge). Promote the Ripple to a Trickle upstream when you want its changes to flow incrementally — consumers don't change.
