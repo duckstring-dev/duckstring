@@ -315,18 +315,23 @@ class IcebergDataPlane(DataPlane):
         return f"SELECT * FROM iceberg_scan('{ml}')"
 
     def _snapshot_for(self, tbl, as_of):
-        """The id of the latest snapshot whose stamped ``f`` is ``<= as_of`` — the as-of read seam. None
-        when no snapshot is eligible (consumer's freshness predates the Source's first run)."""
+        """The id of the last-committed snapshot whose stamped ``f`` is ``<= as_of`` — the as-of read seam.
+        None when no snapshot is eligible (consumer's freshness predates the Source's first run).
+
+        ``tbl.snapshots()`` yields in commit order. One overwrite commit produces TWO snapshots stamped with
+        the *same* ``f`` — a DELETE then an APPEND — so ties must NOT break on ``snapshot_id`` (random): that
+        can resolve to the empty DELETE. Pick the latest in commit order (``timestamp_ms`` then position) =
+        the final committed state at that freshness."""
         from datetime import datetime
 
         eligible = []
-        for s in tbl.snapshots():
+        for i, s in enumerate(tbl.snapshots()):  # commit order
             stamp = s.summary.additional_properties.get(F_PROP) if s.summary else None
             if stamp and datetime.fromisoformat(stamp) <= as_of:
-                eligible.append((stamp, s.snapshot_id))
+                eligible.append((s.timestamp_ms, i, s.snapshot_id))
         if not eligible:
             return None
-        return max(eligible)[1]
+        return max(eligible)[2]
 
     def list_tables(self, data_dir: Path) -> list[str]:
         # The flat sidecar is written for every published table, so its listing is the publish set.

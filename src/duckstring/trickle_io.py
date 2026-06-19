@@ -524,7 +524,7 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp) -> Delta:
     # advanced past the consumer's previous_f, it is unchanged → an empty delta (stable history operand).
     # Otherwise (advanced / unknown / bootstrap) → a full read at +1, forcing the comprehensive path.
     src_f = datetime.fromisoformat(meta["f"]) if meta.get("f") else None
-    state = _strip_system(con.sql(dp.read_select(data_dir, table)))
+    state = _strip_system(con.sql(dp.read_select(data_dir, table, as_of=f)))
     if previous_f != NEVER and src_f is not None and src_f <= previous_f:
         return Delta(con, pk, _as_zset(state, 1).filter("1=0"), is_full=False)
     return Delta(con, pk, _as_zset(state, 1), is_full=True)
@@ -544,8 +544,10 @@ def _covered(previous_f, NEVER, floor, oldest) -> bool:
 
 
 def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor) -> Delta:
-    rel = con.sql(dp.read_select(data_dir, table))  # includes _duckstring_f
-    oldest = con.sql(f"SELECT min({_q(F_COL)}) FROM ({dp.read_select(data_dir, table)})").fetchone()[0]
+    # As-of pin to `f`: read the one Source snapshot at this run's freshness for BOTH the data and the
+    # `oldest` coverage probe, so a mid-run republish can't make them see different snapshots (read skew).
+    rel = con.sql(dp.read_select(data_dir, table, as_of=f))  # includes _duckstring_f
+    oldest = con.sql(f"SELECT min({_q(F_COL)}) FROM ({dp.read_select(data_dir, table, as_of=f)})").fetchone()[0]
     full = not _covered(previous_f, NEVER, floor, oldest)
     upper = f"{_q(F_COL)} <= {_ts(f)}"
     cond = upper if full else f"{_q(F_COL)} > {_ts(previous_f)} AND {upper}"
@@ -556,7 +558,7 @@ def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor
 def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor) -> Delta:
     clog = changelog_name(table)
     try:
-        clog_sql = dp.read_select(data_dir, clog)
+        clog_sql = dp.read_select(data_dir, clog, as_of=f)  # as-of pin to this run's freshness
     except FileNotFoundError:
         clog_sql = None
     oldest = None
@@ -564,7 +566,7 @@ def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
         oldest = con.sql(f"SELECT min({_q(F_COL)}) FROM ({clog_sql})").fetchone()[0]
     full = clog_sql is None or not _covered(previous_f, NEVER, floor, oldest)
     if full:
-        main = _strip_system(con.sql(dp.read_select(data_dir, table)))
+        main = _strip_system(con.sql(dp.read_select(data_dir, table, as_of=f)))
         return Delta(con, pk, _as_zset(main, 1), is_full=True)
     # Window the changelog and consolidate by full row (the net Z-set over the window — multiple updates
     # and delete-then-re-add collapse). Inlined as a self-contained subquery (over immutable read_parquet),

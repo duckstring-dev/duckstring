@@ -256,11 +256,27 @@ export interface PageResult {
   has_more: boolean;
 }
 
-// A query against a Pond's exported data: either a named `table` (browse) or custom `sql`.
+export type TrickleMode = 'append' | 'merge';
+
+// A published table, with its Trickle mode (if any) and primary key.
+export interface TableInfo {
+  name: string;
+  trickle: TrickleMode | null;
+  pk: string[];
+}
+
+// A query against a Pond's exported data: a named `table` (browse), a custom `sql`, or — for a Trickle
+// — a server-built windowed/consolidated view (`trickle` + `pk` + the freshness window `fLo`..`fHi`).
 export interface DataQuery {
   pond: string; // pond id ("name@major")
   table?: string;
   sql?: string;
+  trickle?: TrickleMode;
+  pk?: string[];
+  fLo?: string | null; // inclusive lower freshness bound (ISO), null = unbounded
+  fHi?: string | null; // inclusive upper freshness bound (ISO), null = unbounded
+  orderBy?: string | null; // opt-in sort column (null = base order); only affects /page
+  orderDesc?: boolean;
 }
 
 // Split a pond id ("name@major") into the name + major the data routes expect.
@@ -280,27 +296,44 @@ async function postData<T>(path: string, body: object): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-// The tables this Pond's major line has published — the viewer's table picker.
-export async function fetchTables(pond: string): Promise<string[]> {
+// The query body shared by /query/count and /query/page: maps the client DataQuery onto the backend's
+// snake_case fields, adding the pond name + major.
+function queryBody(q: DataQuery): object {
+  const { name, major } = splitPond(q.pond);
+  return { pond: name, major, table: q.table, sql: q.sql, trickle: q.trickle, pk: q.pk, f_lo: q.fLo, f_hi: q.fHi };
+}
+
+// The tables this Pond's major line has published — the viewer's table picker (with Trickle mode + pk).
+export async function fetchTables(pond: string): Promise<TableInfo[]> {
   const { name, major } = splitPond(pond);
   const qs = major === undefined ? '' : `?major=${major}`;
-  return getJSON<{ tables: string[] }>(`/ponds/${encodeURIComponent(name)}/tables${qs}`).then((d) => d.tables);
+  return getJSON<{ tables: TableInfo[] }>(`/ponds/${encodeURIComponent(name)}/tables${qs}`).then((d) => d.tables);
+}
+
+// The distinct run freshnesses (newest-first) of a Trickle table — the window selector's options.
+export async function fetchFreshness(pond: string, table: string): Promise<{ freshness: string[]; floor: string | null }> {
+  const { name, major } = splitPond(pond);
+  const params = new URLSearchParams({ table });
+  if (major !== undefined) params.set('major', String(major));
+  return getJSON(`/ponds/${encodeURIComponent(name)}/freshness?${params}`);
+}
+
+// The full changelog history of one record (merge Trickle), for the per-row history view.
+export async function fetchHistory(pond: string, table: string, pk: Record<string, unknown>): Promise<PageResult> {
+  const { name, major } = splitPond(pond);
+  return postData<PageResult>('/query/history', { pond: name, major, table, pk });
 }
 
 // Total rows of a query — sizes the viewer's virtual scroll.
 export async function fetchCount(q: DataQuery): Promise<number> {
-  const { name, major } = splitPond(q.pond);
-  return postData<{ count: number }>('/query/count', { pond: name, major, table: q.table, sql: q.sql }).then(
-    (d) => d.count
-  );
+  return postData<{ count: number }>('/query/count', queryBody(q)).then((d) => d.count);
 }
 
-// A windowed read [offset, offset+limit) for the virtual grid. The server wraps the (table or custom)
-// query in a subquery with LIMIT/OFFSET; a static Parquet scan is deterministic, so windows are stable.
+// A windowed read [offset, offset+limit) for the virtual grid. The server wraps the query in a subquery
+// with LIMIT/OFFSET; a static Parquet scan is deterministic, so windows are stable.
 export async function fetchPage(q: DataQuery & { limit: number; offset: number }): Promise<PageResult> {
-  const { name, major } = splitPond(q.pond);
   return postData<PageResult>('/query/page', {
-    pond: name, major, table: q.table, sql: q.sql, limit: q.limit, offset: q.offset,
+    ...queryBody(q), order_by: q.orderBy, order_desc: q.orderDesc, limit: q.limit, offset: q.offset,
   });
 }
 

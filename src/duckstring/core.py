@@ -398,7 +398,12 @@ class Pond:
                 dp = get_data_plane()
                 dp.prepare(self.con)  # ready the connection to read the Source's published format
                 try:
-                    select = dp.read_select(data_dir, table)
+                    # As-of pin: read the Source snapshot at this run's freshness, NOT latest. A Pond Run
+                    # spans wall-clock time over several Ripples; an upstream Source can republish mid-run.
+                    # Pinning to `self.f` gives every Ripple the same consistent as-of-F view of the Source
+                    # (no intra-run read skew / too-fresh data). Honoured by the Iceberg plane (retained
+                    # snapshots); the Parquet plane has no history and reads latest regardless.
+                    select = dp.read_select(data_dir, table, as_of=self.f)
                 except FileNotFoundError as exc:
                     raise FileNotFoundError(
                         f"No exported data found for '{source_pond}.{table}' — "

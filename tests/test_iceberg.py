@@ -170,6 +170,31 @@ def test_pond_read_table_foreign_under_iceberg(tmp_path, monkeypatch):
     assert rcon.sql("SELECT val FROM event WHERE id = 1").fetchall() == [("a",)]
 
 
+def test_read_table_pins_to_run_freshness_not_too_fresh(tmp_path, monkeypatch):
+    # A Pond Run spans wall-clock time; an upstream Source can republish mid-run. read_table must pin to
+    # the run's freshness `f` (the as-of snapshot), never read a too-fresh republish (intra-run read skew).
+    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "iceberg")
+    from duckstring.core import Pond
+
+    src_data = tmp_path / "ponds" / "src" / "m1" / "data"
+    src_data.mkdir(parents=True)
+    dp = get_data_plane()
+    dp.export(_con("CREATE TABLE event AS SELECT * FROM (VALUES (1,'a')) t(id,val)"),
+              src_data, f=datetime(2026, 6, 16, tzinfo=UTC))
+    # The Source republishes a fresher snapshot partway through the sink's run.
+    dp.export(_con("CREATE TABLE event AS SELECT * FROM (VALUES (1,'b')) t(id,val)"),
+              src_data, f=datetime(2026, 6, 18, tzinfo=UTC))
+
+    def _read_at(f):
+        pond = Pond("snk", "1.0.0", duckdb.connect(), root=tmp_path, source_majors={"src": 1}, f=f)
+        return pond.read_table("src.event").fetchall()
+
+    # A run pinned between the two publishes sees the old snapshot, not the too-fresh 'b'.
+    assert _read_at(datetime(2026, 6, 17, tzinfo=UTC)) == [(1, "a")]
+    # A run at/after the republish sees the new snapshot.
+    assert _read_at(datetime(2026, 6, 18, tzinfo=UTC)) == [(1, "b")]
+
+
 def test_trickle_append_commits_are_incremental_and_window_reads(tmp_path):
     # An append Trickle published over Iceberg commits one _duckstring_f-homogeneous data file per run
     # (small writes), and the window read returns only the rows in (previous_f, f].
@@ -269,3 +294,44 @@ def test_trickle_iceberg_replay_appends_no_duplicates(tmp_path):
     rcon.execute("SET TimeZone='UTC'")
     dp.prepare(rcon)
     assert sorted(r[0] for r in rcon.sql(dp.read_select(tmp_path, "event")).fetchall()) == [1]  # no dup
+
+
+def test_data_viewer_browse_and_history_on_iceberg(catchment_client, tmp_path):
+    """Regression: the data viewer's merge browse and per-record history must work over the *Iceberg*
+    plane. History collapses the changelog with a windowed self-join + a bound PK param; over an
+    iceberg_scan that previously raised "IcebergScan serialization not implemented" (the analytic step
+    is now run over a materialised temp table). Browse is the consolidated view; both must be 200."""
+    from duckstring import trickle_io
+
+    dp = IcebergDataPlane()
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    data_dir = tmp_path / "ponds" / "p" / "m1" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    last = None
+    for f_iso, rows in [
+        ("2026-01-01T00:00:00+00:00", [(1, "a", 10.0), (2, "b", 20.0)]),
+        ("2026-01-02T00:00:00+00:00", [(1, "a", 15.0), (3, "c", 30.0)]),  # id1 updated, id2 deleted, id3 added
+    ]:
+        con.execute("CREATE OR REPLACE TEMP TABLE _s(id BIGINT, name VARCHAR, price DOUBLE)")
+        con.executemany("INSERT INTO _s VALUES (?, ?, ?)", rows)
+        last = datetime.fromisoformat(f_iso)
+        trickle_io.merge_table(con, "priced", con.sql("SELECT * FROM _s"), last, ("id",))
+    dp.export(con, data_dir, f=last)
+    con.close()
+
+    # Browse (consolidated view) — the changelog scanned several times under joins/windows, no params.
+    page = catchment_client.post(
+        "/api/query/page", json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"], "limit": 100}
+    )
+    assert page.status_code == 200, page.text
+    assert {r[page.json()["columns"].index("id")] for r in page.json()["rows"]} == {1, 2, 3}  # id4 absent
+
+    # History (param + windowed self-join over iceberg_scan) — the path that used to 500.
+    hist = catchment_client.post("/api/query/history", json={"pond": "p", "table": "priced", "pk": {"id": 1}})
+    assert hist.status_code == 200, hist.text
+    body = hist.json()
+    idx = {c: i for i, c in enumerate(body["columns"])}
+    # The f2 update, plus the original bootstrap image recovered as a synthetic 'create' at the bottom.
+    assert [row[idx["_duckstring_event"]] for row in body["rows"]] == ["update", "create"]
+    assert body["rows"][-1][idx["price"]] == 10.0
