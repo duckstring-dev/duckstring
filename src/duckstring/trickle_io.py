@@ -312,10 +312,14 @@ def _sql_lit(path) -> str:
 # ─── write: append ──────────────────────────────────────────────────────────────
 
 
-def append_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None) -> None:
+def append_table(
+    con, name: str, relation, f, pk: tuple[str, ...], *, validate_pk=False, retain_t=None, retain_n=None
+) -> None:
     """Append ``relation``'s rows to the history table ``name``, each stamped ``_duckstring_f = f``.
-    Insert-only: no PK uniqueness check, no diff, no deletes (its Z-set is all ``+1``). Idempotent at a
-    given ``f`` (rows already stamped ``f`` are dropped before re-appending)."""
+    Insert-only: no diff, no deletes (its Z-set is all ``+1``). Idempotent at a given ``f`` (rows already
+    stamped ``f`` are dropped before re-appending). ``pk`` is recorded as the declared key; with
+    ``validate_pk=True`` it is asserted unique across the appended rows and the existing history (raising
+    :class:`DeltaError` before any write, so the live table is untouched on a violation)."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     src = "_duckstring_ds_append_src"
@@ -323,6 +327,26 @@ def append_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=N
     cols = relation.columns
     sel_cols = ", ".join(_q(c) for c in cols)
     first = not _table_exists(con, name)  # the floor anchors at the first append's freshness
+    if validate_pk:
+        if not pk:
+            raise DeltaError(f"append_table('{name}', validate_pk=True) needs a primary key — pass pk=...")
+        missing = [c for c in pk if c not in cols]
+        if missing:
+            raise DeltaError(f"append_table('{name}', validate_pk=True): primary key column(s) {missing} not in the relation")
+        pk_list = ", ".join(_q(c) for c in pk)
+        dup = con.execute(
+            f'SELECT 1 FROM {_q(src)} GROUP BY {pk_list} HAVING count(*) > 1 LIMIT 1'
+        ).fetchone()
+        if dup:
+            raise DeltaError(f"append_table('{name}', validate_pk=True): duplicate primary key {pk} among the appended rows")
+        if not first:
+            # Collide only against rows from *other* runs — a replay re-appends this f's identical rows.
+            coll = con.execute(
+                f'SELECT 1 FROM {_q(src)} s JOIN {_q(name)} t USING ({pk_list}) '
+                f'WHERE t.{_q(F_COL)} IS DISTINCT FROM {_ts(f)} LIMIT 1'
+            ).fetchone()
+            if coll:
+                raise DeltaError(f"append_table('{name}', validate_pk=True): primary key {pk} already present in history")
     if first:
         con.execute(
             f'CREATE TABLE {_q(name)} AS '
@@ -354,7 +378,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if not pk:
-        raise DeltaError(f"apply_zset('{name}', ...) needs a primary key (declare @trickle(pk=...) or pass pk=...)")
+        raise DeltaError(f"apply_zset('{name}', ...) needs a primary key — pass pk=...")
     src = unique_name("zset")
     zset.create_view(src, replace=True)
     cols = list(zset.columns)
@@ -420,7 +444,7 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
     are inserts/updates ``+1``, only-in-main are retractions ``-1``) and apply it. No per-row hash needed;
     the main holds pure user columns."""
     if not pk:
-        raise DeltaError(f"merge_table('{name}', ...) needs a primary key (declare @trickle(pk=...) or pass pk=...)")
+        raise DeltaError(f"merge_table('{name}', ...) needs a primary key — pass pk=...")
     cols = list(relation.columns)
     missing = [c for c in pk if c not in cols]
     if missing:

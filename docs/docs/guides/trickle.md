@@ -15,44 +15,40 @@ duckstring pond demo --trickle
 
 It creates `orders` (append) → `catalog` (merge) → `priced` (the builder) → `revenue` (an aggregate). `priced` and `revenue` ship Trickle-shaped Puddles, so `duckstring pond hydrate && duckstring pond run` runs them locally.
 
-## Declaring a Trickle
+## There is no `@trickle`
 
-Use `@trickle` instead of `@ripple`, and declare the output **primary key** — the identity Duckstring uses for merge and for downstream delta consumption:
-
-```python
-from duckstring import trickle
-
-
-@trickle(pk="order_id")
-def ingest(pond):
-    ...
-```
-
-`pk` accepts a single column or a tuple for a composite key. Everything else about the function is a normal Ripple: `parents=`, `name=`, the `pond` handle.
+A Trickle isn't a separate kind of node — it's a *table* a Ripple publishes with history preserved, and "incremental" is a capability any `@ripple` can reach for. You write a Trickle table by calling `pond.append_table` or `pond.merge_table` (instead of `write_table`) inside an ordinary Ripple; the merge key is declared at the write. One Ripple can publish plain overwrite tables and Trickle tables side by side — the mode is chosen per write, not per node.
 
 ## append — insert-only history
 
-The fast path for event and fact logs whose identity is unique by construction. `append_table` strictly appends; there's no diff, no uniqueness check, and no deletes. Each row is stamped with the run's freshness automatically.
+The fast path for event and fact logs whose identity is unique by construction. `append_table` strictly appends; there's no diff and no deletes. Each row is stamped with the run's freshness automatically.
 
 ```python
-@trickle(pk="order_id")
+from duckstring import ripple
+
+
+@ripple
 def ingest(pond):
     batch = pond.con.sql("SELECT ... FROM new_orders")
-    pond.append_table("order_line", batch)
+    pond.append_table("order_line", batch, pk="order_id")
 ```
+
+`pk` is optional on an append — it's recorded as the table's declared key (for downstream and the data viewer), but not enforced by default. Pass `validate_pk=True` to assert the key is unique across the appended rows and the existing history; it's a per-write cost that buys a correctness guarantee, and it raises before any write so the live table is untouched on a violation.
 
 The single history table is at once the full read *and* the delta source. It is idempotent on replay — a retry or crash-recovery at the same freshness re-appends the same rows, never duplicates.
 
 ## merge — upsert with auto change-detection
 
-When rows update or disappear, use `merge_table`. You hand it the *complete current state*, and Duckstring diffs it against the previous main — as a full-row **Z-set difference** — to derive the inserts, updates, and deletes for you. There's nothing to enumerate and no way to under-merge.
+When rows update or disappear, use `merge_table`. You hand it the *complete current state* and a `pk`, and Duckstring diffs it against the previous main — as a full-row **Z-set difference** — to derive the inserts, updates, and deletes for you. There's nothing to enumerate and no way to under-merge.
 
 ```python
-@trickle(pk="product_id")
+@ripple
 def ingest(pond):
     catalog = pond.con.sql("SELECT product_id, name, category, unit_price FROM ...")
-    pond.merge_table("product", catalog)   # full current state → Duckstring derives the CDC
+    pond.merge_table("product", catalog, pk="product_id")   # full current state → Duckstring derives the CDC
 ```
+
+`pk` is **required** for a merge — it's the merge identity. It accepts a single column or a tuple for a composite key.
 
 This is correct by construction for any computation. The cost is a full recompute plus a diff each run; the *I/O* out is incremental (only the changed rows reach the changelog). When you want the *compute* incremental too — recomputing only the slice a change touches — use the [builder](#the-builder-pondtrickle), which composes source deltas through a join.
 
@@ -63,7 +59,7 @@ The result is two published tables: `product` (the clean current state, one row 
 A consuming Trickle reads a Source's change over its own window with `read_delta`. The change is a **Z-set** — `delta.zset` is the changed rows carrying the `_duckstring_d` weight column:
 
 ```python
-@trickle(pk="order_id")
+@ripple
 def enrich(pond):
     delta = pond.read_delta("orders.order_line")   # a Delta over (previous_f, f]
     ...
@@ -85,7 +81,7 @@ For a **merge** Source the changelog window is consolidated by full row, so mult
 The builder is how you get an **incremental join**. It reads each Source's Z-set delta and composes them through the join (DBSP-style), recomputing only the output the change touches — and because it sees the whole graph, it can't forget an edge:
 
 ```python
-@trickle(pk="order_id")
+@ripple
 def priced_line(pond):
     (
         pond.trickle("orders.order_line")
@@ -94,8 +90,7 @@ def priced_line(pond):
                 "s0.order_id, s0.product_id, s0.quantity, s1.unit_price, "
                 "round(s0.quantity * s1.unit_price, 2) AS revenue"
             )
-            .pk("order_id")
-            .merge("priced_line")
+            .merge("priced_line", pk="order_id")
     )
 ```
 
@@ -104,16 +99,15 @@ The **spine** (the first source) is `s0`; joined dimensions are `s1`, `s2`, … 
 - **`.join(pond.trickle(dim), on=…)`** — equi-join a dimension on **any** column(s). `on` is a shared column name (or list), or a `{spine_col: dim_col}` dict when the names differ. There's no FK=PK requirement: deletions are full-row retractions, so a change on any join key propagates soundly. Any table is a valid source — a Trickle or a plain overwrite Ripple.
 - **`.filter(predicate)`** — a SQL boolean over the joined sources.
 - **`.select(projection)`** — the output columns (required once there's a join); must include the PK. Computed columns are fine (`s0.a || '-' || s0.b AS key`).
-- **`.pk(key)`** — **required**: the output identity (a column or tuple), which must be genuinely unique in the output.
-- **`.merge(name, *, retain_t=, retain_n=)`** — execute.
+- **`.merge(name, *, pk=, retain_t=, retain_n=)`** — execute. `pk` is **required**: the output identity (a column or tuple), which must be genuinely unique in the output.
 
 When a dimension changes, the builder pre-filters the (large) spine to that dimension's changed join keys before the join — so a small dimension change doesn't drive a full spine scan. That key pre-filter is the general-purpose performance lever.
 
 **Comprehensive fallback.** When a source can't supply a clean delta — a bootstrap, a coverage-miss, or a *changed* overwrite Ripple source — the builder recomputes the whole output and diffs it against the last-written main. It also takes that path when a source's delta exceeds its **change-fraction threshold** `p` (per source, default `0.3`): past that share of the source's rows, a clean full pass beats the incremental slice. Set `pond.trickle(ref, p=…)` to tune it (`p=1.0` disables the check for a source you know rarely matches the other side).
 
-The op set is deliberately small — `join` / `filter` / `select` over sources — and **closed**: a snowflake chain (a dimension that itself has joins), a missing `.pk()`, or a joined graph with no `.select` raises at *build time* rather than degrading silently. When you need something it won't express, do that part in a downstream Ripple or Trickle.
+The op set is deliberately small — `join` / `filter` / `select` over sources — and **closed**: a snowflake chain (a dimension that itself has joins), a missing merge key, or a joined graph with no `.select` raises at *build time* rather than degrading silently. When you need something it won't express, do that part in a downstream Ripple.
 
-A single-source transform (no join — just filter/project a stream) is the builder with no `.join()`: `pond.trickle("src.dim").select("id, upper(v) AS v").pk("id").merge("loud")`. For a shape outside the op set entirely, the low-level escape is `pond.apply_zset(name, zset, pk=…)` — apply a hand-built Z-set (user columns + `_duckstring_d`) directly — but that's rare; prefer a downstream node.
+A single-source transform (no join — just filter/project a stream) is the builder with no `.join()`: `pond.trickle("src.dim").select("id, upper(v) AS v").merge("loud", pk="id")`. For a shape outside the op set entirely, the low-level escape is `pond.apply_zset(name, zset, pk=…)` — apply a hand-built Z-set (user columns + `_duckstring_d`) directly — but that's rare; prefer a downstream node.
 
 ## Following a Ripple
 
@@ -137,4 +131,4 @@ When a downstream Catchment [draws](connecting-catchments.md) a Trickle Source, 
 
 ## Reference
 
-The full surface — `@trickle`, `append_table`, `merge_table`, `apply_zset`, `read_delta`, and the builder — is in the [Python API reference](../reference/python-api.md#trickle-incremental-io).
+The full surface — `append_table`, `merge_table`, `apply_zset`, `read_delta`, and the builder — is in the [Python API reference](../reference/python-api.md#trickle-incremental-io).

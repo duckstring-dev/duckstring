@@ -50,7 +50,6 @@ class TrickleBuilder:
         self._joins: list[tuple[str, list[tuple[str, str]], float]] = []  # (dim_ref, pairs, p)
         self._filters: list[str] = []
         self._projection: str | None = None
-        self._pk: tuple[str, ...] | None = None
 
     def join(self, dimension: "TrickleBuilder", *, on) -> "TrickleBuilder":
         """Equi-join a **dimension** (another bare ``pond.trickle(...)``) directly to the spine on ``on``
@@ -77,24 +76,19 @@ class TrickleBuilder:
         self._projection = projection
         return self
 
-    def pk(self, pk) -> "TrickleBuilder":
-        """**Required.** Declare the output identity (the merge key). It must be genuinely unique in the
-        output (a many-to-many join that fans out past it corrupts the keyed main)."""
-        self._pk = normalize_pk(pk)
-        return self
-
-    def merge(self, name: str, *, retain_t=None, retain_n=None) -> None:
+    def merge(self, name: str, *, pk, retain_t=None, retain_n=None) -> None:
         """Execute: compose ΔO from the changed sources' Z-sets (or recompute comprehensively) and apply it
-        to the output Trickle ``name``."""
+        to the output Trickle ``name``. ``pk`` (**required**) is the output identity / merge key — it must be
+        genuinely unique in the output (a many-to-many join that fans out past it corrupts the keyed main)."""
         pond = self.pond
-        if not self._pk:
-            raise BuildError(f"pond.trickle('{self.spine_ref}')...merge('{name}'): declare the output key with .pk(...)")
+        out_pk = normalize_pk(pk)
+        if not out_pk:
+            raise BuildError(f"pond.trickle('{self.spine_ref}')...merge('{name}'): pass the output key, merge(pk=...)")
         if self._joins and self._projection is None:
             raise BuildError(
                 f"pond.trickle('{self.spine_ref}').join(...): a joined graph needs .select(...) to name the "
                 f"output columns (and include the PK)"
             )
-        out_pk = self._pk
 
         refs = [self.spine_ref] + [dim_ref for dim_ref, _pairs, _p in self._joins]
         ps = [self.p] + [p for _dim_ref, _pairs, p in self._joins]

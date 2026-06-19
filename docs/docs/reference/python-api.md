@@ -137,42 +137,28 @@ Returning a relation is shorthand for `p.write_table(relation)`; returning a pat
 
 ## Trickle: incremental I/O
 
-A [Trickle](../concepts/trickle.md) is a history-preserving Ripple. Declare it with `@trickle` and write through `pond.append_table` / `pond.merge_table` instead of `write_table`; consumers read change-sets with `pond.read_delta`. The [Incremental Processing guide](../guides/trickle.md) is the worked walkthrough; this is the surface.
+A [Trickle](../concepts/trickle.md) is a history-preserving table, not a separate node type — there's no decorator. Inside any `@ripple`, write through `pond.append_table` / `pond.merge_table` instead of `write_table`; consumers read change-sets with `pond.read_delta`. The merge key is declared at the write. The [Incremental Processing guide](../guides/trickle.md) is the worked walkthrough; this is the surface.
 
-### `@trickle`
+### `pond.append_table(name, relation, *, pk=None, validate_pk=False, retain_t=None, retain_n=None)`
 
-```python
-from duckstring import trickle
-
-@trickle(pk="order_id")
-def ingest(pond): ...
-
-@trickle(pk=("order_id", "line_no"), parents=[ingest])
-def priced_line(pond): ...
-```
+Append `relation` to the insert-only history table `name`; each row is stamped with `pond.f`. No diff, no deletes. Idempotent on replay at the same freshness. The history table is both the full read and the delta source.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `pk` | — | The output primary key (a column name or tuple) — identity for merge and for downstream delta reads. Required for a `merge_table`; the default a write inherits when it doesn't pass its own `pk=`. |
-| `parents` | `[]` | As [`@ripple`](#ripple). |
-| `name` | the function's name | As `@ripple`. |
+| `pk` | — | Optional. Recorded as the table's declared key (for downstream / the data viewer); not enforced unless `validate_pk`. |
+| `validate_pk` | `False` | When `True`, assert `pk` is unique across the appended rows and existing history — a per-write cost; raises before any write on a violation (the live table is untouched). Requires `pk`. |
+| `retain_t` / `retain_n` | `None` | Bound the kept history: a `timedelta` and/or a row count. Off by default. |
 
-A Trickle is orchestrated exactly like a Ripple — it differs only in I/O.
-
-### `pond.append_table(name, relation, *, pk=None, retain_t=None, retain_n=None)`
-
-Append `relation` to the insert-only history table `name`; each row is stamped with `pond.f`. No diff, no uniqueness check, no deletes. Idempotent on replay at the same freshness. The history table is both the full read and the delta source.
-
-### `pond.merge_table(name, relation, *, pk=None, retain_t=None, retain_n=None)`
+### `pond.merge_table(name, relation, *, pk, retain_t=None, retain_n=None)`
 
 Merge the **complete current state** `relation` into the clean current-state **main** table `name`, recording the change as a Z-set in its `__changelog` companion. Duckstring diffs `relation` against the previous main as a full-row Z-set difference to derive inserts/updates/deletes — so it is always safe to hand it the whole state, and there is no way to under-merge.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `pk` | the `@trickle` default | The merge identity. |
+| `pk` | — | **Required.** The merge identity (a column name or tuple). |
 | `retain_t` / `retain_n` | `None` | Bound the kept changelog: a `timedelta` and/or a run count. Off by default (keep everything); a lag SLA, never a correctness gate. |
 
-### `pond.apply_zset(name, zset, *, pk=None, retain_t=None, retain_n=None)`
+### `pond.apply_zset(name, zset, *, pk, retain_t=None, retain_n=None)`
 
 The low-level primitive the builder uses: apply a **Z-set** change `zset` (a relation of user columns + the `_duckstring_d` weight) directly to the output Trickle `name`. Reach for it only for hand-rolled incremental compute outside the builder; otherwise use `merge_table` (full state) or the builder.
 
@@ -189,13 +175,13 @@ A Source's change over this run's window `(pond.previous_f, pond.f]`, as a Z-set
 
 ### The builder — `pond.trickle(spine_ref, *, p=0.3)`
 
-A fluent builder that composes an incremental join from its sources' Z-set deltas and *can't forget an edge* (it sees the whole graph). Chain `.join(pond.trickle(dim), on=…)` / `.filter(predicate)` / `.select(projection)` / `.pk(key)`, then `.merge(name, *, retain_t=None, retain_n=None)`.
+A fluent builder that composes an incremental join from its sources' Z-set deltas and *can't forget an edge* (it sees the whole graph). Chain `.join(pond.trickle(dim), on=…)` / `.filter(predicate)` / `.select(projection)`, then `.merge(name, *, pk, retain_t=None, retain_n=None)`.
 
 - **`on`** is a shared column name (or list), or a `{spine_col: dim_col}` dict — **any** equi-join key (no FK=PK requirement).
-- **`.pk(key)`** is **required** (the output identity; must be unique in the output). **`.select`** is required once there's a join and must include the PK; computed columns are allowed.
+- **`.merge(name, pk=…)`** — `pk` is **required** (the output identity; must be unique in the output). **`.select`** is required once there's a join and must include the PK; computed columns are allowed.
 - The spine is `s0`, dimensions `s1`, `s2`, … in the projection. Any table is a valid source (Trickle or overwrite Ripple).
 - **`p`** (per source, default `0.3`) is the change-fraction threshold: past that share of a source's rows the builder recomputes comprehensively for that run; `p=1.0` disables the check.
-- Bootstrap / coverage-miss / changed-Ripple / over-`p` → comprehensive recompute diffed against the last-written main. The op set is closed — a snowflake dimension, a missing `.pk()`, or a joined graph with no `.select` raises at build time.
+- Bootstrap / coverage-miss / changed-Ripple / over-`p` → comprehensive recompute diffed against the last-written main. The op set is closed — a snowflake dimension, a missing merge key, or a joined graph with no `.select` raises at build time.
 
 See the [guide](../guides/trickle.md#the-builder-pondtrickle).
 

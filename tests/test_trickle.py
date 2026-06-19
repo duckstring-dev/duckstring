@@ -74,6 +74,27 @@ def test_append_idempotent_replay_at_same_f(reg):
     assert reg.sql("SELECT count(*) FROM event").fetchone()[0] == 1
 
 
+def test_append_validate_pk_catches_duplicates(reg):
+    # Duplicate within the appended batch.
+    with pytest.raises(T.DeltaError, match="duplicate"):
+        T.append_table(reg, "event", reg.sql("SELECT 1 AS id UNION ALL SELECT 1 AS id"),
+                       ts(1), ("id",), validate_pk=True)
+    assert not reg.sql("SELECT 1 FROM information_schema.tables WHERE table_name = 'event'").fetchall()
+
+    # Collision against existing history (a different run's row).
+    T.append_table(reg, "event", reg.sql("SELECT 1 AS id"), ts(1), ("id",), validate_pk=True)
+    with pytest.raises(T.DeltaError, match="already present"):
+        T.append_table(reg, "event", reg.sql("SELECT 1 AS id"), ts(2), ("id",), validate_pk=True)
+
+    # A replay at the same f re-appends its own rows without tripping the check.
+    T.append_table(reg, "event", reg.sql("SELECT 1 AS id"), ts(1), ("id",), validate_pk=True)
+    assert reg.sql("SELECT count(*) FROM event").fetchone()[0] == 1
+
+    # validate_pk with no pk is a usage error.
+    with pytest.raises(T.DeltaError, match="needs a primary key"):
+        T.append_table(reg, "event2", reg.sql("SELECT 1 AS id"), ts(1), (), validate_pk=True)
+
+
 def test_append_delta_window_is_plus_one(reg, tmp_path):
     for h in (1, 2, 3):
         T.append_table(reg, "event", reg.sql(f"SELECT {h} AS id"), ts(h), ("id",))
@@ -239,8 +260,7 @@ def _priced(tmp_path, f, previous_f, snk_con, snk_dir, *, spine_p=0.3, dim_p=0.3
     (pond.trickle("sales.order_line", p=spine_p)
          .join(pond.trickle("catalog.product", p=dim_p), on="product_id")
          .select("s0.order_id, s0.product_id, s0.qty, s1.price, s0.qty * s1.price AS total")
-         .pk("order_id")
-         .merge("priced"))
+         .merge("priced", pk="order_id"))
     publish(snk_con, snk_dir, f=f)
 
 
@@ -270,7 +290,7 @@ def test_builder_key_prefilter_restricts_spine_on_dim_change(tmp_path):
     pond = Pond("priced", "1.0.0", con, root=tmp_path,
                 source_majors={"sales": 1, "catalog": 1}, f=ts(2), previous_f=ts(1))
     b = (pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id")
-             .select("s0.order_id, s1.price").pk("order_id"))
+             .select("s0.order_id, s1.price"))
     states = [b._state_views(r, pond.read_delta(r)) for r in ["sales.order_line", "catalog.product"]]
     dim_term = b._term(1, states)          # the dimension (catalog) is the delta
     assert "IN (SELECT" in dim_term         # spine pre-filtered to the dim's changed keys
@@ -310,7 +330,7 @@ def test_builder_fact_and_dim_both_change(tmp_path):
     def run(f, pf):
         p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1, "dim": 1}, f=f, previous_f=pf)
         (p.trickle("fact.f").join(p.trickle("dim.d"), on="k")
-           .select("s0.id, s0.k, s0.qty, s1.price").pk("id").merge("o"))
+           .select("s0.id, s0.k, s0.qty, s1.price").merge("o", pk="id"))
         publish(snk, snk_dir, f=f)
 
     run(ts(1), NEVER)
@@ -369,7 +389,7 @@ def test_builder_joins_on_non_pk_business_code(tmp_path):
     def run(f, pf):
         p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1, "dim": 1}, f=f, previous_f=pf)
         (p.trickle("fact.f").join(p.trickle("dim.d"), on="code")
-           .select("s0.id, s0.code, s1.label").pk("id").merge("o"))
+           .select("s0.id, s0.code, s1.label").merge("o", pk="id"))
         publish(snk, snk_dir, f=f)
 
     run(ts(1), NEVER)
@@ -401,7 +421,7 @@ def test_builder_unchanged_ripple_is_stable_history(tmp_path, monkeypatch):
     def run(f, pf):
         p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1, "dim": 1}, f=f, previous_f=pf)
         (p.trickle("fact.f", p=1.0).join(p.trickle("dim.m", p=1.0), on="code")
-           .select("s0.id, s0.code, s1.label").pk("id").merge("o"))
+           .select("s0.id, s0.code, s1.label").merge("o", pk="id"))
         publish(snk, snk_dir, f=f)
 
     run(ts(1), NEVER)
@@ -430,7 +450,7 @@ def test_builder_changed_ripple_forces_comprehensive(tmp_path, monkeypatch):
     def run(f, pf):
         p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1, "dim": 1}, f=f, previous_f=pf)
         (p.trickle("fact.f", p=1.0).join(p.trickle("dim.m", p=1.0), on="code")
-           .select("s0.id, s0.code, s1.label").pk("id").merge("o"))
+           .select("s0.id, s0.code, s1.label").merge("o", pk="id"))
         publish(snk, snk_dir, f=f)
 
     run(ts(1), NEVER)
@@ -515,17 +535,22 @@ def test_builder_build_time_errors(tmp_path):
 
     # A joined graph with no .select(...).
     with pytest.raises(BuildError, match="select"):
-        pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id").pk("order_id").merge("x")
+        pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id").merge("x", pk="order_id")
 
-    # No .pk(...).
-    with pytest.raises(BuildError, match="pk"):
+    # No pk passed to .merge(...) — pk is a required keyword arg (TypeError, like merge_table).
+    with pytest.raises(TypeError, match="pk"):
         (pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id")
              .select("s0.order_id, s1.price").merge("x"))
+
+    # An empty/None pk passed explicitly raises a friendly BuildError.
+    with pytest.raises(BuildError, match="key"):
+        (pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id")
+             .select("s0.order_id, s1.price").merge("x", pk=()))
 
     # .select that omits the PK.
     with pytest.raises(BuildError, match="PK"):
         (pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id")
-             .select("s1.price").pk("order_id").merge("x"))
+             .select("s1.price").merge("x", pk="order_id"))
 
 
 # ─── coverage-miss absorption (the retention-lag delete bug) ─────────────────────
@@ -554,7 +579,7 @@ def test_builder_absorbs_coverage_miss_comprehensively(tmp_path):
                     source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=previous_f)
         (pond.trickle("sales.order_line")
              .join(pond.trickle("catalog.product"), on="product_id")
-             .select("s0.order_id, s0.product_id, s1.price").pk("order_id").merge("priced"))
+             .select("s0.order_id, s0.product_id, s1.price").merge("priced", pk="order_id"))
         publish(snk, snk_dir, f=f)
 
     build(ts(1), NEVER)
@@ -598,7 +623,7 @@ def test_floor_anchors_at_bootstrap_and_retention_advances_it(reg, tmp_path):
     assert T.load_sidecar(publish(reg, tmp_path / "d3", f=ts(3)))["dim"]["floor"] == ts(3).isoformat()
 
 
-# ─── @trickle decorator threading through the local runner (pk default) ──────────
+# ─── a merge Ripple threading through the local runner ───────────────────────────
 
 
 def _trickle_project(tmp_path: Path) -> Path:
@@ -607,12 +632,12 @@ def _trickle_project(tmp_path: Path) -> Path:
     )
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "pond.py").write_text(textwrap.dedent("""
-        from duckstring import trickle
+        from duckstring import ripple
 
-        @trickle(pk="id")                       # the PK default the merge inherits (no pk= at the call)
+        @ripple
         def loud(pond):
             pond.read_table("src.dim")          # registers the Source as the view `dim`
-            pond.merge_table("loud", pond.con.sql("SELECT id, upper(v) AS v FROM dim"))
+            pond.merge_table("loud", pond.con.sql("SELECT id, upper(v) AS v FROM dim"), pk="id")
     """))
     (tmp_path / "src" / "puddles.py").write_text(textwrap.dedent("""
         from duckstring import puddle
@@ -624,7 +649,7 @@ def _trickle_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_trickle_decorator_pk_default_via_local_runner(tmp_path):
+def test_merge_ripple_via_local_runner(tmp_path):
     project = load_project(_trickle_project(tmp_path))
     hydrate(project)
     result = run_pond(project)

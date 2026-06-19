@@ -140,7 +140,7 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
             try:
                 by_name[name]["func"](
                     Pond(project.name, project.version, con, root=project.puddles_dir,
-                         f=run_f, previous_f=previous_f, trickle=by_name[name].get("trickle"))
+                         f=run_f, previous_f=previous_f)
                 )
             finally:
                 con.close()

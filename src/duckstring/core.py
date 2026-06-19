@@ -23,7 +23,15 @@ def retry_on_lock(fn, attempts: int = 12, base: float = 0.05):
 
 
 def ripple(func=None, *, parents=None, name=None):
-    """Decorator that registers a function as a Ripple in a Pond.
+    """Decorator that registers a function as a Ripple — a named unit of code in a Pond. A Ripple has no
+    tabular expectations: it may write zero, one, or many tables (in call order — sequential within the
+    Ripple; split across Ripples for parallelism), or none at all. ``parents`` are the *within-Pond*
+    Ripples it runs after, given by function reference; cross-Pond dependencies are declared in
+    ``pond.toml [sources]``, not here.
+
+    Incremental I/O is a capability, not a separate node type: any Ripple may read a Source's change-set
+    (:meth:`Pond.read_delta` / :meth:`Pond.trickle`) and publish history-preserving **Trickle** tables
+    (:meth:`Pond.append_table` / :meth:`Pond.merge_table`) — the mode is chosen per write.
 
     Usage:
         @ripple
@@ -43,31 +51,6 @@ def ripple(func=None, *, parents=None, name=None):
         return f
 
     return decorator
-
-
-def trickle(func=None, *, pk=None, parents=None, name=None):
-    """Decorator that registers a function as a **Trickle** — a history-preserving (incremental) Ripple.
-
-    A Trickle is orchestrated exactly like a Ripple (a node in the package graph); it differs only in
-    *I/O*: it writes via ``pond.append_table`` / ``pond.merge_table`` (history + changelog) and reads a
-    source's change-set via ``pond.read_delta`` instead of a wholesale overwrite. ``pk`` declares the
-    output primary key (identity for merge + downstream delta consumption) — required for a merge write,
-    and the default a write inherits when it doesn't pass its own ``pk=``.
-
-    Usage:
-        @trickle(pk=("order_id", "line_no"))
-        def priced_line(pond): ...
-    """
-    from .trickle_io import normalize_pk
-
-    def make(f):
-        _RIPPLES.append({
-            "func": f, "name": name or f.__name__, "parents": parents or [],
-            "trickle": {"pk": normalize_pk(pk)},
-        })
-        return f
-
-    return make(func) if func is not None else make
 
 
 def collect_ripples() -> list[dict]:
@@ -331,7 +314,6 @@ class Pond:
     def __init__(
         self, name: str, version: str, con, root,
         source_majors: dict[str, int] | None = None, f=None, previous_f=None,
-        trickle: dict | None = None,
     ) -> None:
         from .engine.core import NEVER
 
@@ -342,9 +324,6 @@ class Pond:
         # Which major line of each Source this Pond consumes (from its pond.toml [sources] pins).
         # None/missing falls back to the flat puddles layout (local runs have no majors).
         self.source_majors = source_majors or {}
-        # Trickle metadata for the running ripple (``{"pk": (...)}``) — the default PK its incremental
-        # writes inherit. ``{}`` for a plain Ripple (the incremental write API still works if given a pk).
-        self._trickle = trickle or {}
         # The run's freshness F (tz-aware UTC datetime): the ideal watermark/provenance stamp —
         # stable across crash recovery and retries, which all re-run at the same F (wall-clock
         # would differ per attempt). Local (puddle) runs stamp the run's start time.
@@ -423,27 +402,32 @@ class Pond:
     def _resolve_pk(self, pk):
         from .trickle_io import normalize_pk
 
-        resolved = normalize_pk(pk) if pk is not None else tuple(self._trickle.get("pk", ()))
-        return resolved
+        return normalize_pk(pk) if pk is not None else ()
 
-    def append_table(self, name: str, relation, *, pk=None, retain_t=None, retain_n=None) -> None:
+    def append_table(
+        self, name: str, relation, *, pk=None, validate_pk=False, retain_t=None, retain_n=None
+    ) -> None:
         """Append ``relation`` to the history table ``name`` (insert-only; each row stamped with the
         run's freshness ``pond.f``). The fast path for event/fact logs whose identity is unique by
-        construction — no PK check, no diff, no deletes; idempotent on replay at the same ``f``.
-        ``retain_t`` (a ``timedelta``) / ``retain_n`` (a count) opt into bounding the kept history."""
+        construction — no diff, no deletes; idempotent on replay at the same ``f``. ``pk`` is optional
+        (recorded as the table's declared key, for downstream/the data viewer); pass ``validate_pk=True``
+        to assert that ``pk`` is unique across the appended rows and existing history (a per-write cost
+        that trades speed for a correctness guarantee). ``retain_t`` (a ``timedelta``) / ``retain_n`` (a
+        count) opt into bounding the kept history."""
         from . import trickle_io as trickle
 
         trickle.append_table(
             self.con, name, relation, self.f, self._resolve_pk(pk),
-            retain_t=retain_t, retain_n=retain_n,
+            validate_pk=validate_pk, retain_t=retain_t, retain_n=retain_n,
         )
 
-    def merge_table(self, name: str, relation, *, pk=None, retain_t=None, retain_n=None) -> None:
+    def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None) -> None:
         """Merge the **complete current state** ``relation`` into the clean main table ``name`` + its Z-set
-        changelog, stamped ``pond.f``. Duckstring diffs ``relation`` against the prior main as a full-row
-        Z-set difference to derive inserts/updates/deletes automatically — so it is always safe to hand it
-        the whole state. ``retain_t`` / ``retain_n`` opt into bounding the kept changelog (the main, being
-        the clean current state, is never trimmed)."""
+        changelog, stamped ``pond.f``. ``pk`` (the output identity) is **required** — it is the merge key.
+        Duckstring diffs ``relation`` against the prior main as a full-row Z-set difference to derive
+        inserts/updates/deletes automatically — so it is always safe to hand it the whole state. ``retain_t``
+        / ``retain_n`` opt into bounding the kept changelog (the main, being the clean current state, is
+        never trimmed)."""
         from . import trickle_io as trickle
 
         trickle.merge_table(
@@ -451,10 +435,11 @@ class Pond:
             retain_t=retain_t, retain_n=retain_n,
         )
 
-    def apply_zset(self, name: str, zset, *, pk=None, retain_t=None, retain_n=None) -> None:
+    def apply_zset(self, name: str, zset, *, pk, retain_t=None, retain_n=None) -> None:
         """Apply a **Z-set** change (a relation of user columns + ``_duckstring_d``) to the output Trickle
-        ``name`` — the low-level primitive the builder uses for the incremental path. Prefer
-        :meth:`trickle` / :meth:`merge_table`; reach for this only for hand-rolled incremental compute."""
+        ``name`` — the low-level primitive the builder uses for the incremental path. ``pk`` (the output
+        identity) is **required**. Prefer :meth:`trickle` / :meth:`merge_table`; reach for this only for
+        hand-rolled incremental compute."""
         from . import trickle_io as trickle
 
         trickle.apply_zset(
@@ -481,8 +466,9 @@ class Pond:
 
     def trickle(self, spine_ref: str, *, p: float = 0.3):
         """Start a :class:`~duckstring.trickle_builder.TrickleBuilder` rooted at the **spine** source
-        ``spine_ref``. Chain ``.join(pond.trickle(dim), on=…)`` / ``.filter(...)`` / ``.select(...)`` /
-        ``.pk(...)`` then ``.merge(name)``. The builder composes each changed source's Z-set delta through
+        ``spine_ref``. Chain ``.join(pond.trickle(dim), on=…)`` / ``.filter(...)`` / ``.select(...)``
+        then ``.merge(name, pk=…)`` (the merge key is the output identity). The builder composes each
+        changed source's Z-set delta through
         the join (DBSP-style), so a join can be on **any** key and a deletion propagates by full-row
         retraction — there is one ``.join()`` and no FK=PK constraint. Any table is a valid source
         (Trickle or plain overwrite Ripple): an unchanged Ripple is a free stable operand, a changed one
@@ -500,9 +486,4 @@ class Pond:
 
 class Ripple:
     # TODO: runtime wrapper around a registered ripple function — name, func, parents list
-    pass
-
-
-class Trickle:
-    # TODO: deferred — incremental/stateful Ripple variant with watermarks and merge semantics
     pass

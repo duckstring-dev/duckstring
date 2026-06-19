@@ -7,10 +7,10 @@ propagates as a full-row retraction — so the join needs no FK=PK constraint. T
 Trickle (clean main + Z-set changelog) for ``revenue`` to consume.
 """
 
-from duckstring import trickle
+from duckstring import ripple
 
 
-@trickle(pk="order_id")
+@ripple
 def priced_line(pond):
     (
         pond.trickle("orders.order_line")
@@ -19,6 +19,5 @@ def priced_line(pond):
             "s0.order_id, s0.product_id, s0.quantity, s1.unit_price, "
             "round(s0.quantity * s1.unit_price, 2) AS revenue"
         )
-        .pk("order_id")
-        .merge("priced_line")
+        .merge("priced_line", pk="order_id")
     )

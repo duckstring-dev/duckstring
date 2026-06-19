@@ -7,10 +7,10 @@ aggregate recomputes fully each run (the win is the small delta *out*, not less 
 scope of Trickle. No ``time.sleep``: the full re-aggregation over the (large) priced lines is the work.
 """
 
-from duckstring import trickle
+from duckstring import ripple
 
 
-@trickle(pk="product_id")
+@ripple
 def by_product(pond):
     pond.read_table("priced.priced_line")  # registers the Source as the view `priced_line`
     totals = pond.con.sql("""
@@ -22,4 +22,4 @@ def by_product(pond):
         FROM priced_line
         GROUP BY product_id
     """)
-    pond.merge_table("revenue_by_product", totals)  # full current state → diffed to derive the delta out
+    pond.merge_table("revenue_by_product", totals, pk="product_id")  # full state → diffed to derive the delta out

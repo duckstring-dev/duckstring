@@ -223,13 +223,12 @@ class Driver:
                 pond_states[key] = self._load_pond_state(pond_id)
 
                 rip_rows = db.execute(
-                    "SELECT id, name, is_trickle FROM ripple WHERE pond_version_id = ?", (pv_id,)
+                    "SELECT id, name FROM ripple WHERE pond_version_id = ?", (pv_id,)
                 ).fetchall()
-                rid_to_rname = {rid: rname for rid, rname, _ in rip_rows}
-                self.meta[key]["trickle_ripples"] = {rname for _, rname, is_t in rip_rows if is_t}
-                for rid, rname, _ in rip_rows:
+                rid_to_rname = {rid: rname for rid, rname in rip_rows}
+                for rid, rname in rip_rows:
                     self.meta[key]["ripple_ids"][rname] = rid
-                for rid, rname, _ in rip_rows:
+                for rid, rname in rip_rows:
                     parent_rids = [
                         r[0] for r in db.execute("SELECT source_id FROM ripple_to_ripple WHERE sink_id = ?", (rid,))
                     ]
@@ -247,7 +246,7 @@ class Driver:
                 ps.runs_completed = db.execute(
                     "SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ? AND status = 'success'", (pv_id,)
                 ).fetchone()[0]
-                for rid, rname, _ in rip_rows:
+                for rid, rname in rip_rows:
                     row = db.execute(
                         "SELECT MAX(f) FROM ripple_run WHERE pond_version_id = ? AND ripple_id = ? "
                         "AND status = 'success'", (pv_id, rid),
@@ -1307,7 +1306,6 @@ class Driver:
                     rs = self.state.ripple_states[rid]
                     ripples.append({
                         "name": rip.name,
-                        "is_trickle": rip.name in self.meta[key].get("trickle_ripples", set()),
                         "status": _demand_status(rs, rs.is_running),
                         "gen": rs.runs_started,
                         "runs_completed": rs.runs_completed,

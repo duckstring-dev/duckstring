@@ -89,10 +89,10 @@ def test_demo_trickle_flag_creates_trickle_set(runner, tmp_path, monkeypatch):
     assert not (tmp_path / "transactions").exists()  # the Ripple set is not created
 
 
-def test_demo_trickle_pond_uses_trickle_decorator(runner, tmp_path, monkeypatch):
+def test_demo_trickle_pond_uses_incremental_io(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runner.invoke(app, ["pond", "demo", "--trickle"], input="y\n")
-    assert "@trickle" in (tmp_path / "orders" / "src" / "pond.py").read_text()
+    assert "pond.append_table(" in (tmp_path / "orders" / "src" / "pond.py").read_text()
     assert "pond.trickle(" in (tmp_path / "priced" / "src" / "pond.py").read_text()
 
 

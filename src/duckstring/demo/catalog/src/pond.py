@@ -21,14 +21,14 @@ companion is the CDC stream a delta read consumes.
 import os
 import random
 
-from duckstring import trickle
+from duckstring import ripple
 
 _PRODUCTS = int(os.environ.get("DUCKSTRING_DEMO_PRODUCTS", "100000"))
 _PRICE_CHANGES = int(os.environ.get("DUCKSTRING_DEMO_PRICE_CHANGES", "100"))  # products that drift per run
 _CATEGORIES = ["Electronics", "Clothing", "Food", "Home", "Books"]
 
 
-@trickle(pk="product_id")
+@ripple
 def ingest(pond):
     # Pick a small random set of products to re-price this run; everything else regenerates at its
     # deterministic base price (identical hash → no changelog churn). A product that drifted last run but
@@ -58,4 +58,4 @@ def ingest(pond):
         {join}
         """
     )
-    pond.merge_table("product", state)  # full current state → Duckstring diffs it to derive the CDC
+    pond.merge_table("product", state, pk="product_id")  # full current state → Duckstring diffs it for CDC

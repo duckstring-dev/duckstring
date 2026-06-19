@@ -15,7 +15,7 @@ shrinks them to keep the e2e runs quick); no ``time.sleep`` — the work here is
 import os
 from datetime import date
 
-from duckstring import trickle
+from duckstring import ripple
 
 _PRODUCTS = int(os.environ.get("DUCKSTRING_DEMO_PRODUCTS", "100000"))
 _STORES = 50
@@ -23,7 +23,7 @@ _BOOTSTRAP = int(os.environ.get("DUCKSTRING_DEMO_ORDERS", "1500000"))  # first-r
 _BATCH = int(os.environ.get("DUCKSTRING_DEMO_BATCH", "25000"))  # appended every subsequent run (~500 KB)
 
 
-@trickle(pk="order_id")
+@ripple
 def ingest(pond):
     # Continue the id sequence across runs — the history table persists in the registry. The first run
     # (no table yet) lays down the big bootstrap; every run after it appends a small batch.
@@ -47,4 +47,6 @@ def ingest(pond):
         FROM range({n}) AS t(i)
         """
     )
-    pond.append_table("order_line", batch)  # insert-only; each row stamped with pond.f
+    # Insert-only, each row stamped with pond.f. order_id is unique by construction (the fast path), so we
+    # declare it as the key (pk=) but skip validate_pk — no need to pay the per-write uniqueness check.
+    pond.append_table("order_line", batch, pk="order_id")

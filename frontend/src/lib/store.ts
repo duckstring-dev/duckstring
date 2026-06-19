@@ -148,7 +148,7 @@ function transformStatus(payload: StatusPayload): StatusSlice {
     if (!p.is_draw) {
       for (const r of p.ripples) {
         const eid = `${p.id}.${r.name}`;
-        ripples[eid] = { id: eid, pondId: p.id, name: r.name, isTrickle: r.is_trickle ?? false, parents: [] };
+        ripples[eid] = { id: eid, pondId: p.id, name: r.name, parents: [] };
         rippleViews[eid] = nodeView(r, 0);
       }
       // ripple_edges are [sourceName, sinkName] within the Pond → sink.parents includes source.
