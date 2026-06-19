@@ -757,13 +757,17 @@ def _table_exists(con, name):
 def test_spine_pk_passthrough_detection():
     from duckstring.trickle_builder import TrickleBuilder
 
-    def detect(projection, out_pk, spine_pk):
+    def detect(projection, out_pk, spine_pk, spine_alias=None):
         b = TrickleBuilder(None, "spine")
         b._projection = projection
+        b._alias = spine_alias
         return b._spine_pk_passthrough(out_pk, spine_pk)
 
     # Verbatim s0 pass-throughs (single, renamed, composite) → detected.
     assert detect("s0.order_id, s1.price", ("order_id",), ("order_id",)) == {"order_id": "order_id"}
+    # ...and the same off a custom spine .alias() (the detector keys on the spine's effective alias).
+    assert detect("o.order_id, p.price", ("order_id",), ("order_id",), spine_alias="o") == {"order_id": "order_id"}
+    assert detect("s0.order_id, p.price", ("order_id",), ("order_id",), spine_alias="o") is None  # s0 isn't the alias
     assert detect("s0.oid AS order_id, s1.price", ("order_id",), ("oid",)) == {"order_id": "oid"}
     assert detect('s0."a", s0.b, s1.x', ("a", "b"), ("a", "b")) == {"a": "a", "b": "b"}
     # A comma inside a computed dim column doesn't break item splitting.
@@ -811,6 +815,126 @@ def test_builder_append_spine_pk_fast_path(tmp_path, monkeypatch):
     ol([(10, "p1", 2), (11, "p2", 1), (12, "p1", 3), (13, "p2", 1)], ts(4))
     run(ts(4), ts(3))
     assert rows(snk, snk_dir, "enriched", "order_id, price") == [(10, 5), (11, 9), (12, 70), (13, 9)]
+    snk.close()
+
+
+# ─── .alias() / .sql() / .schema() (relational surface, Ibis-aligned) ────────────
+
+
+def test_builder_alias_names_sources(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "o" / "m1" / "data"
+
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    pond = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=ts(1), previous_f=NEVER)
+    (pond.trickle("sales.order_line").alias("ol")
+         .join(pond.trickle("catalog.product").alias("pr"), on="product_id")
+         .select("ol.order_id, ol.qty, pr.price, ol.qty * pr.price AS total")
+         .merge("priced", pk="order_id"))
+    publish(snk, snk_dir, f=ts(1))
+    assert rows(snk, snk_dir, "priced", "order_id, total") == [(10, 10), (11, 9)]
+    snk.close()
+
+
+def test_builder_sql_aggregation_keeps_incremental_output(tmp_path):
+    """The priced→revenue pattern in one ripple: incremental join cached with .merge(), aggregated with the
+    comprehensive .sql() escape, final .merge() — and the delta OUT stays incremental (only changed groups)."""
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "rev" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("rev", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        priced = (
+            pond.trickle("sales.order_line").alias("o")
+                .join(pond.trickle("catalog.product").alias("p"), on="product_id")
+                .select("o.order_id, o.product_id, o.qty * p.price AS revenue")
+                .merge("priced_line", pk="order_id")
+        )
+        agg = priced.alias("pl").sql(
+            "SELECT product_id, sum(revenue) AS total_revenue, count(*) AS n FROM pl GROUP BY product_id"
+        )
+        with pytest.raises(BuildError, match="after .sql"):
+            agg.join(pond.trickle("catalog.product"), on="product_id")   # no incremental ops post-.sql
+        agg.merge("revenue_by_product", pk="product_id")
+        publish(snk, snk_dir, f=f)
+
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p1", 3)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    run(ts(1), NEVER)
+    # p1: 2*5 + 3*5 = 25 (n=2); p2: 1*9 = 9 (n=1).
+    assert rows(snk, snk_dir, "revenue_by_product", "product_id, total_revenue, n") == [("p1", 25, 2), ("p2", 9, 1)]
+
+    pr([("p1", 10), ("p2", 9)], ts(2))   # only p1 reprices
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "revenue_by_product", "product_id, total_revenue, n") == [("p1", 50, 2), ("p2", 9, 1)]
+    # Incremental output: only p1 moved → only p1 in this run's changelog window (p2 untouched).
+    latest = snk.sql('SELECT DISTINCT product_id FROM "revenue_by_product__changelog" '
+                     'WHERE _duckstring_f = (SELECT max(_duckstring_f) FROM "revenue_by_product__changelog")').fetchall()
+    assert latest == [("p1",)]
+    snk.close()
+
+
+def test_builder_sql_requires_alias_and_select(tmp_path):
+    snk = duckdb.connect()
+    pond = Pond("x", "1.0.0", snk, root=tmp_path, source_majors={"a": 1, "b": 1}, f=ts(1))
+    with pytest.raises(BuildError, match="alias"):
+        pond.trickle("a.t").sql("SELECT 1")
+    with pytest.raises(BuildError, match="select"):
+        pond.trickle("a.t").join(pond.trickle("b.u"), on="k").alias("x").sql("SELECT 1 FROM x")
+    snk.close()
+
+
+def test_duckdb_to_ibis_type_map():
+    from duckstring.trickle_builder import _duckdb_to_ibis
+
+    assert _duckdb_to_ibis("BIGINT") == "int64"
+    assert _duckdb_to_ibis("VARCHAR") == "string"
+    assert _duckdb_to_ibis("DOUBLE") == "float64"
+    assert _duckdb_to_ibis("TIMESTAMP WITH TIME ZONE") == "timestamp('UTC')"
+    assert _duckdb_to_ibis("DECIMAL(18,2)") == "decimal(18,2)"
+    with pytest.raises(BuildError, match="no Ibis mapping"):
+        _duckdb_to_ibis("INTEGER[]")
+
+
+def test_builder_schema_and_to_ibis_schema(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    ol([(10, "p1", 2)], ts(1))
+    pr([("p1", 5)], ts(1))
+    pond = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=ts(1), previous_f=NEVER)
+    priced = (
+        pond.trickle("sales.order_line").alias("o")
+            .join(pond.trickle("catalog.product").alias("p"), on="product_id")
+            .select("CAST(o.order_id AS BIGINT) AS order_id, CAST(o.qty * p.price AS DOUBLE) AS revenue")
+            .merge("priced", pk="order_id")
+    )
+    assert priced.schema() == {"order_id": "BIGINT", "revenue": "DOUBLE"}
+    assert priced.to_ibis_schema() == {"order_id": "int64", "revenue": "float64"}
+    snk.close()
+
+
+def test_builder_sql_accepts_ibis_expression(tmp_path):
+    ibis = pytest.importorskip("ibis")
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "rev" / "m1" / "data"
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p1", 3)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    pond = Pond("rev", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=ts(1), previous_f=NEVER)
+    priced = (
+        pond.trickle("sales.order_line").alias("o")
+            .join(pond.trickle("catalog.product").alias("p"), on="product_id")
+            .select("o.order_id, o.product_id, o.qty * p.price AS revenue")
+            .merge("priced_line", pk="order_id")
+    )
+    pl = ibis.table(priced.to_ibis_schema(), name="pl")
+    agg = pl.group_by("product_id").aggregate(total_revenue=pl.revenue.sum())
+    priced.alias("pl").sql(agg).merge("revenue_by_product", pk="product_id")
+    publish(snk, snk_dir, f=ts(1))
+    assert rows(snk, snk_dir, "revenue_by_product", "product_id, total_revenue") == [("p1", 25), ("p2", 9)]
     snk.close()
 
 

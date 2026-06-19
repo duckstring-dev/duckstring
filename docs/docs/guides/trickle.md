@@ -94,20 +94,65 @@ def priced_line(pond):
     )
 ```
 
-The **spine** (the first source) is `s0`; joined dimensions are `s1`, `s2`, … in `.select(...)`. The chain:
+The **spine** (the first source) is `s0`; joined dimensions are `s1`, `s2`, … in `.select(...)` — *or* give each source a name with **`.alias()`** and reference that instead (recommended once there's more than one join). The chain:
 
-- **`.join(pond.trickle(dim), on=…)`** — equi-join a dimension on **any** column(s). `on` is a shared column name (or list), or a `{spine_col: dim_col}` dict when the names differ. There's no FK=PK requirement: deletions are full-row retractions, so a change on any join key propagates soundly. Any table is a valid source — a Trickle or a plain overwrite Ripple.
+- **`.alias(name)`** — name a source so `.select`/`.filter` read `o.order_id` / `p.unit_price` instead of `s0`/`s1`. `s0`/`s1` stay the fallback for unaliased sources. Aliasing also makes the select *reorder-safe* — the name follows the source, so reordering `.join()` calls (which you might do for cost) no longer silently remaps positional references.
+- **`.join(pond.trickle(dim), on=…)`** — equi-join a dimension on **any** column(s). `on` is a shared column name (or list), or a `{spine_col: dim_col}` dict when the names differ. There's no FK=PK requirement: deletions are full-row retractions, so a change on any join key propagates soundly. Any table is a valid source — a Trickle or a plain overwrite Ripple. (Only **inner** joins for now; other join types are planned.)
 - **`.filter(predicate)`** — a SQL boolean over the joined sources.
-- **`.select(projection)`** — the output columns (required once there's a join); must include the PK. Computed columns are fine (`s0.a || '-' || s0.b AS key`).
+- **`.select(projection)`** — the output columns (required once there's a join); must include the PK. Computed columns are fine (`o.a || '-' || o.b AS key`).
 - **`.merge(name, *, pk=, retain_t=, retain_n=)`** — execute. `pk` is **required**: the output identity (a column or tuple), which must be genuinely unique in the output.
+
+Here the same join with aliases:
+
+```python
+(pond.trickle("orders.order_line").alias("o")
+     .join(pond.trickle("catalog.product").alias("p"), on="product_id")
+     .select("o.order_id, o.quantity, p.unit_price, round(o.quantity * p.unit_price, 2) AS revenue")
+     .merge("priced_line", pk="order_id"))
+```
 
 When a dimension changes, the builder pre-filters the (large) spine to that dimension's changed join keys before the join — so a small dimension change doesn't drive a full spine scan. That key pre-filter is the general-purpose performance lever.
 
 **Comprehensive fallback.** When a source can't supply a clean delta — a bootstrap, a coverage-miss, or a *changed* overwrite Ripple source — the builder recomputes the whole output and diffs it against the last-written main. It also takes that path when a source's delta exceeds its **change-fraction threshold** `p` (per source, default `0.3`): past that share of the source's rows, a clean full pass beats the incremental slice. Set `pond.trickle(ref, p=…)` to tune it (`p=1.0` disables the check for a source you know rarely matches the other side).
 
-The op set is deliberately small — `join` / `filter` / `select` over sources — and **closed**: a snowflake chain (a dimension that itself has joins), a missing merge key, or a joined graph with no `.select` raises at *build time* rather than degrading silently. When you need something it won't express, do that part in a downstream Ripple.
+The op set is deliberately small — `join` / `filter` / `select` over sources — and **closed**: a builder method exists *only* when the engine maintains it incrementally. A snowflake chain (a dimension that itself has joins), a missing merge key, or a joined graph with no `.select` raises at *build time* rather than degrading silently. Anything outside that set — aggregation, window functions, `DISTINCT`, set ops — goes through **`.sql()`** (below).
 
-A single-source transform (no join — just filter/project a stream) is the builder with no `.join()`: `pond.trickle("src.dim").select("id, upper(v) AS v").merge("loud", pk="id")`. For a shape outside the op set entirely, the low-level escape is `pond.apply_zset(name, zset, pk=…)` — apply a hand-built Z-set (user columns + `_duckstring_d`) directly — but that's rare; prefer a downstream node.
+A single-source transform (no join — just filter/project a stream) is the builder with no `.join()`: `pond.trickle("src.dim").select("id, upper(v) AS v").merge("loud", pk="id")`. For a shape outside the op set entirely, the low-level escape is `pond.apply_zset(name, zset, pk=…)` — apply a hand-built Z-set (user columns + `_duckstring_d`) directly — but that's rare; prefer `.sql()` or a downstream node.
+
+### Beyond the op set: `.sql()`
+
+`.sql(query)` is the comprehensive escape hatch. Name the builder with `.alias()`, then run any SQL over it:
+
+```python
+priced = (
+    pond.trickle("orders.order_line").alias("o")
+        .join(pond.trickle("catalog.product").alias("p"), on="product_id")
+        .select("o.product_id, o.quantity, round(o.quantity * p.unit_price, 2) AS revenue")
+        .merge("priced_line", pk="order_id")          # ← incremental join, cached
+)
+(
+    priced.alias("pl")
+          .sql("SELECT product_id, sum(revenue) AS total_revenue, count(*) AS orders "
+               "FROM pl GROUP BY product_id")
+          .merge("revenue_by_product", pk="product_id")   # ← aggregate, then delta out
+)
+```
+
+This is the whole `priced → revenue` pipeline in one Ripple. Two things to understand about `.sql()`:
+
+- It **breaks incremental compute** — after `.sql()` the data is fully materialised; there are no joins, key pre-filter, or fast-path shortcuts left (`.join`/`.select`/`.filter` after it raise). Aggregation isn't in the DBSP core, so the `GROUP BY` *does* re-scan `priced_line` each run — the same cost the separate `revenue` Pond pays. The `.merge()` before `.sql()` is load-bearing: it's what keeps the *join* incremental.
+- It **keeps incremental output** — the terminal `.merge()` still diffs the aggregate against last run's totals, so only products whose revenue actually moved reach the changelog. The win is the small delta *out*, not less compute in.
+
+So `.sql()` collapses the `priced→revenue` Ripple boundary into one node — an *ergonomic* win (one deployment unit), not a compute one. Keep them as separate Ponds when `priced_line` is a reuse/parallelism boundary (which is why the demo does).
+
+**Ibis.** If you have [Ibis](https://ibis-project.org) installed, hop into it without Duckstring depending on it: `.to_ibis_schema()` returns a schema dict `ibis.table(...)` accepts, and `.sql()` takes an Ibis expression directly (compiled lazily to DuckDB SQL):
+
+```python
+import ibis
+pl = ibis.table(priced.to_ibis_schema(), name="pl")
+agg = pl.group_by("product_id").aggregate(total_revenue=pl.revenue.sum())
+priced.alias("pl").sql(agg).merge("revenue_by_product", pk="product_id")
+```
 
 ### Chaining through materialised intermediates
 
