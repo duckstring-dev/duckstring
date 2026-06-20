@@ -228,13 +228,14 @@ alternative.
    fast path is preserved over the DAG; all six `how` are incremental via the one recompute rule; the
    internal-method-coupled tests were migrated to the new IR; full suite green).
 
-**Deferred (not in this pass):**
-
-5. **`ivm` / `key_filter` flags** — not surfaced. The gate showed `key_filter` (the pre-filter) is always on
-   and load-bearing, and `ivm`-vs-recompute is moot because the affected-key recompute *is* the maintained
-   form and inline beats fencing — so the manual flags have no quadrant left to select. `p` stays as the
-   key-filter payoff heuristic (a source over `p` reads `is_full` → comprehensive). Revisit only if a real
-   workload wants to force a quadrant.
+5. **`ivm` / `key_filter` flags** — surfaced on `.merge()`/`.append()` as manual strategy escapes (both
+   default `True`). **✅ done.** `ivm=False` ignores deltas entirely and recomputes the whole output with
+   plain full-table joins diffed vs the stored main (the escape when the delta machinery is counterproductive,
+   short of raw `.sql()`; also disables the append spine-PK fast path). `key_filter=False` keeps the delta
+   composition but drops the `IN (…)` pre-filter (joins full new/old states and diffs — for when the change
+   is large enough to trip `p` anyway, so the filter buys nothing). `p` stays as the automatic key-filter
+   payoff heuristic (a source over `p` reads `is_full` → comprehensive). Tests:
+   `test_builder_ivm_false_forces_comprehensive`, `test_builder_key_filter_false_skips_in_filter`.
 
 Effort: large (a core rewrite). But it's **internal** — the public surface (`.join/.filter/.select/.alias/
 .merge/.append/.sql`) and correctness are unchanged, so it carries no backwards-compatibility risk; it can

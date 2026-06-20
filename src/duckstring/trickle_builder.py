@@ -225,6 +225,7 @@ class TrickleBuilder:
         self._materialised = None  # a full relation after .sql() → comprehensive mode (no incremental compute)
         self._agg = None  # {"by": (...), "metrics": {out: (kind, col, how)}} after .aggregate()
         self._agg_by: tuple[str, ...] | None = None
+        self._key_filter = True  # set per-terminal from the .merge()/.append() key_filter flag
         # compile-scoped caches (rebuilt per terminal): leaf → alias, leaf → bare cols
         self._alias_of: dict[int, str] = {}
         self._cols_cache: dict[int, list[str]] = {}
@@ -360,10 +361,15 @@ class TrickleBuilder:
 
     # ─── terminals ──────────────────────────────────────────────────────────────
 
-    def merge(self, name: str, *, pk=None, retain_t=None, retain_n=None) -> "TrickleBuilder":
+    def merge(self, name: str, *, pk=None, ivm: bool = True, key_filter: bool = True,
+              retain_t=None, retain_n=None) -> "TrickleBuilder":
         """Compose ΔO from the changed sources (or recompute comprehensively) and apply it to the output
         **merge** Trickle ``name`` (clean main + Z-set changelog). ``pk`` (**required**, except after
         :meth:`aggregate` where it defaults to the group key) is the output identity / merge key.
+
+        ``ivm`` / ``key_filter`` are the two strategy escapes (both default ``True`` — the normal path); see
+        :meth:`_compute` for what they do. Use them only when you've measured that the default hurts a
+        specific build.
 
         Returns a chainable :class:`TrickleBuilder` rooted at ``name`` so joins can be chained through
         intermediate materialisations **in one Ripple** — each ``.merge()`` persists the intermediate as a
@@ -375,7 +381,7 @@ class TrickleBuilder:
             by, metrics = self._agg["by"], self._agg["metrics"]
             out_pk = normalize_pk(pk) if pk is not None else by
             required = tuple(dict.fromkeys(by + tuple(c for _k, c, _h in metrics.values() if c is not None)))
-            kind, rel = self._compute(required, name)
+            kind, rel = self._compute(required, name, ivm=ivm, key_filter=key_filter)
             needs_current = kind == "incremental" and any(k in ("min", "max") for k, _c, _h in metrics.values())
             current = self._full_join() if needs_current else None
             trickle.apply_aggregate(pond.con, name, by, metrics, kind, rel, current, pond.f,
@@ -387,7 +393,7 @@ class TrickleBuilder:
         if self._materialised is not None:  # comprehensive mode (post-.sql) → diff the relation vs prior main
             pond.merge_table(name, self._materialised, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
             return self._chain(name, out_pk)
-        kind, rel = self._compute(out_pk, name)
+        kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter)
         if kind == "comprehensive":
             pond.merge_table(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
         elif kind == "incremental":
@@ -396,11 +402,13 @@ class TrickleBuilder:
         return self._chain(name, out_pk)
 
     def append(
-        self, name: str, *, pk=None, fail_on_conflict=True, log_drops=True, retain_t=None, retain_n=None
+        self, name: str, *, pk=None, fail_on_conflict=True, log_drops=True, ivm: bool = True,
+        key_filter: bool = True, retain_t=None, retain_n=None
     ) -> "TrickleBuilder":
         """Execute, writing the result to an **append** (insert-only history) Trickle ``name`` — for a
         *monotonic* transform (output rows only added, never updated/retracted). See the module docs and
-        :func:`duckstring.trickle_io.append_zset` for the conflict semantics.
+        :func:`duckstring.trickle_io.append_zset` for the conflict semantics. ``ivm`` / ``key_filter`` are
+        the strategy escapes (see :meth:`_compute`); ``ivm=False`` also disables the spine-PK fast path.
 
         **Spine-PK fast path** — when the output is keyed by the spine's own PK (a verbatim ``s0.<pk>``
         projection) *and* conflicts are both waived (``fail_on_conflict=False``) and unlogged
@@ -420,7 +428,7 @@ class TrickleBuilder:
             return self._chain(name, out_pk)
 
         spine_delta = self._spine_delta_value()
-        if (isinstance(self._root, _Join) and not fail_on_conflict and not log_drops
+        if (ivm and isinstance(self._root, _Join) and not fail_on_conflict and not log_drops
                 and self._spine_pk_passthrough(out_pk, spine_delta.pk)):
             candidate = self._full_join(spine_rel=self._new_spine_rows(spine_delta, name, out_pk))
             trickle.append_zset(
@@ -429,7 +437,7 @@ class TrickleBuilder:
             )
             return self._chain(name, out_pk)
 
-        kind, rel = self._compute(out_pk, name)
+        kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter)
         if kind != "empty":
             zset = trickle._as_zset(rel, 1) if kind == "comprehensive" else rel
             trickle.append_zset(
@@ -476,16 +484,35 @@ class TrickleBuilder:
 
     # ─── compute (the shared ΔO step behind .merge() and .append()) ───────────────
 
-    def _compute(self, out_pk, name: str, spine_delta=None):
+    def _compute(self, out_pk, name: str, *, ivm: bool = True, key_filter: bool = True):
         """Compose this DAG's change once. Returns ``(kind, rel)``: ``("comprehensive", o_prime)`` (whole
-        output recomputed, clean rows), ``("incremental", delta)`` (the Z-set ΔO, user cols + ``_duckstring_d``),
-        or ``("empty", None)`` (nothing changed). Validates ``.select`` is present for a joined DAG and that
-        it includes the PK."""
+        output recomputed, clean rows — the caller diffs it against the stored main), ``("incremental",
+        delta)`` (the Z-set ΔO, user cols + ``_duckstring_d``), or ``("empty", None)`` (nothing changed).
+        Validates ``.select`` is present for a joined DAG and that it includes the PK.
+
+        Two orthogonal strategy flags, both default ``True`` (the normal path), exposed on the terminals as
+        manual escapes — reach for them only when you've measured the default hurts a specific build:
+
+        - **``ivm``** — *reuse the incremental machinery*. ``True`` composes the Z-set delta through the
+          operator DAG (skips recomputing unchanged subtrees). ``False`` ignores deltas entirely and
+          recomputes the whole output with plain full-table joins, diffed against the stored main (the
+          comprehensive path) — the escape for when the delta logic is counterproductive, short of dropping
+          to raw ``.sql()``.
+        - **``key_filter``** — *bound the per-join recompute to the changed keys*. ``True`` pre-filters both
+          join inputs to ``key ∈ K`` (the affected keys). ``False`` keeps the delta composition but skips the
+          ``IN (…)`` restriction (joins the full new/old states and diffs) — useful when the change is large
+          enough to trip ``p`` anyway, so the filter buys nothing. (No effect when ``ivm=False``.)"""
         if isinstance(self._root, _Join) and self._projection is None:
             raise BuildError(
                 f"pond.trickle('{self.spine_ref}').join(...): a joined DAG needs .select(...) to name the "
                 f"output columns (and include the PK)"
             )
+        if not ivm:
+            # ivm=False escape: ignore deltas, recompute the whole output and diff vs the stored main.
+            o_prime = self._full_join()
+            self._require_pk(out_pk, o_prime.columns)
+            return "comprehensive", o_prime
+        self._key_filter = key_filter
         self._prepare_leaves()
         state = self._compile(self._root)
         if state.is_full:
@@ -640,9 +667,11 @@ class TrickleBuilder:
 
     def _join_delta(self, node: _Join, ls: _NodeState, rs: _NodeState, out_cols) -> str:
         """δ(L ⋈ R) by the affected-key recompute: K = the changed sides' join-key values; recompute the
-        join restricted to ``key ∈ K`` over the new states (+1) and the old states (−1), and consolidate."""
+        join restricted to ``key ∈ K`` over the new states (+1) and the old states (−1), and consolidate.
+        With ``key_filter=False`` the ``K`` restriction is skipped — the same diff over the *full* new/old
+        states (correct, just unpruned)."""
         pairs = self._resolve_pairs(node)
-        k = self._affected_keys(ls, rs, pairs)
+        k = self._affected_keys(ls, rs, pairs) if self._key_filter else None
         new = self._restricted_join(node, ls.cols, ls.current, rs.cols, rs.current, pairs, k, 1)
         old = self._restricted_join(node, ls.cols, ls.old, rs.cols, rs.old, pairs, k, -1)
         cols_sql = ", ".join(_q(c) for c in out_cols)
@@ -667,14 +696,16 @@ class TrickleBuilder:
         return self._view(f"SELECT DISTINCT {ksel} FROM ({' UNION ALL '.join(parts)})")
 
     def _restricted_join(self, node, lcols, lview, rcols, rview, pairs, kview, weight) -> str:
-        """A join view of two states with **both** inputs pre-filtered to ``key ∈ K`` and the rows weighted
-        ``weight`` — the affected-key recompute term."""
-        lkey = ", ".join(_q(lq) for lq, _rq in pairs)
-        rkey = ", ".join(_q(rq) for _lq, rq in pairs)
-        ksel = ", ".join(f"k{i}" for i in range(len(pairs)))
-        lk = self._view(f"SELECT * FROM {_q(lview)} WHERE ({lkey}) IN (SELECT {ksel} FROM {_q(kview)})")
-        rk = self._view(f"SELECT * FROM {_q(rview)} WHERE ({rkey}) IN (SELECT {ksel} FROM {_q(kview)})")
-        _, view = self._join_view(node, lcols, lk, rcols, rk, weight=weight)
+        """A join view of two states weighted ``weight`` — the affected-key recompute term. ``kview`` (the
+        affected keys) pre-filters **both** inputs to ``key ∈ K``; ``None`` (``key_filter=False``) joins the
+        full states unrestricted."""
+        if kview is not None:
+            lkey = ", ".join(_q(lq) for lq, _rq in pairs)
+            rkey = ", ".join(_q(rq) for _lq, rq in pairs)
+            ksel = ", ".join(f"k{i}" for i in range(len(pairs)))
+            lview = self._view(f"SELECT * FROM {_q(lview)} WHERE ({lkey}) IN (SELECT {ksel} FROM {_q(kview)})")
+            rview = self._view(f"SELECT * FROM {_q(rview)} WHERE ({rkey}) IN (SELECT {ksel} FROM {_q(kview)})")
+        _, view = self._join_view(node, lcols, lview, rcols, rview, weight=weight)
         return view
 
     def _reconstruct_old(self, cols, current, delta_view) -> str:

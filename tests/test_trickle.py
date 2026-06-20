@@ -555,6 +555,63 @@ def test_builder_threshold_p1_forces_incremental(tmp_path, monkeypatch):
     snk_con.close()
 
 
+# ─── ivm / key_filter strategy escapes ───────────────────────────────────────────
+
+
+def test_builder_ivm_false_forces_comprehensive(tmp_path, monkeypatch):
+    """``ivm=False`` ignores deltas: even a tiny dimension change (well under ``p``, so the default would go
+    incremental) recomputes the whole output and diffs vs the stored main. Output stays correct."""
+    _cons, ol, pr = _star_sources(tmp_path)
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p3", 3)], ts(1))
+    pr([("p1", 5), ("p2", 9), ("p3", 7)], ts(1))
+    snk_con = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "priced" / "m1" / "data"
+
+    def build(f, pf, *, ivm=True):
+        pond = Pond("priced", "1.0.0", snk_con, root=tmp_path,
+                    source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id")
+             .select("s0.order_id, s0.qty * s1.price AS total").merge("priced", pk="order_id", ivm=ivm))
+        publish(snk_con, snk_dir, f=f)
+
+    build(ts(1), NEVER)
+    paths = _spy_paths(monkeypatch)
+    pr([("p1", 50), ("p2", 9), ("p3", 7)], ts(2))   # one product reprices (1/3 < p=0.3 → default is incremental)
+    build(ts(2), ts(1), ivm=False)
+    assert paths == ["comprehensive"]   # but ivm=False forces the comprehensive recompute
+    assert rows(snk_con, snk_dir, "priced", "order_id, total") == [(10, 100), (11, 9), (12, 21)]
+    snk_con.close()
+
+
+def test_builder_key_filter_false_skips_in_filter(tmp_path):
+    """``key_filter=False`` keeps the incremental delta composition but drops the ``IN (SELECT k0 …)``
+    pre-filter — the same result over full new/old states (correct, just unpruned)."""
+    _cons, ol, pr = _star_sources(tmp_path)
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    snk_con = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "priced" / "m1" / "data"
+
+    def build(f, pf, *, key_filter=True, capture=None):
+        pond = Pond("priced", "1.0.0", snk_con, root=tmp_path,
+                    source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        b = (pond.trickle("sales.order_line").join(pond.trickle("catalog.product", p=1.0), on="product_id")
+                 .select("s0.order_id, s0.qty * s1.price AS total"))
+        if capture is not None:
+            orig = b._view
+            b._view = lambda sql: capture.append(sql) or orig(sql)
+        b.merge("priced", pk="order_id", key_filter=key_filter)
+        publish(snk_con, snk_dir, f=f)
+
+    build(ts(1), NEVER)   # bootstrap
+    pr([("p1", 50), ("p2", 9)], ts(2))   # only the dimension changes
+    seen: list[str] = []
+    build(ts(2), ts(1), key_filter=False, capture=seen)
+    assert not any("IN (SELECT k0" in s for s in seen)   # the pre-filter is skipped
+    assert rows(snk_con, snk_dir, "priced", "order_id, total") == [(10, 100), (11, 9)]
+    snk_con.close()
+
+
 # ─── build-time errors ───────────────────────────────────────────────────────────
 
 
