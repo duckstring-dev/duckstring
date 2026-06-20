@@ -19,7 +19,9 @@ from pathlib import Path
 
 # System columns are framework-owned and persisted; the WHOLE prefix is reserved (not a single name),
 # leaving room for siblings (``_duckstring_f`` for freshness, ``_duckstring_d`` for the Z-set weight, …).
-RESERVED_PREFIX = "_duckstring_"
+# The Trickle subpackage owns this namespace (its system columns live in it); re-exported here so the data
+# plane and Trickle share a single source of truth (see duckstring/trickle/context.py).
+from .trickle.context import SYSTEM_PREFIX as RESERVED_PREFIX  # noqa: E402
 
 # Write modes the interface can express. Only ``overwrite`` is implemented in Phase 1; the others are
 # the history-preserving Trickle write paths, reserved here so call sites don't hard-code a mode.

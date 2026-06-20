@@ -1,86 +1,12 @@
-"""Aggregate metric specs for the Trickle builder's ``.aggregate(by=…, name=agg.…)`` operator.
+"""Backwards-compatible alias — aggregate metric specs now live in :mod:`duckstring.trickle.agg`.
 
-Each metric is a small typed spec, not a SQL string, because the incremental engine needs to know its
-*kind* — which accumulators it maintains and how it updates from a delta. The supported set:
-
-- **Distributive** — maintainable from the delta alone:
-  - ``count()`` — the group's row count.
-  - ``sum(col)`` — running sum (SQL semantics: NULLs ignored; an all-NULL group sums to NULL).
-  - ``min(col)`` / ``max(col)`` — the extreme; an insert extends it in place (O(δ)), but a retraction of
-    the supporting row triggers a **rescan** of the group's current membership.
-- **Algebraic** — derived from distributive accumulators:
-  - ``mean(col)`` — ``sum(col) / count(col)`` over non-NULL values.
-  - ``var(col)`` / ``stddev(col)`` — from ``count``, ``sum``, ``sum(x²)``. ``how`` ∈ ``"sample"`` (default,
-    matching Ibis; ``/(n-1)``, NULL for n<2) or ``"pop"`` (``/n``).
-
-``min``/``max`` need the current group membership on a retraction; everything else is pure ``O(δ)``.
-
-Usage::
-
-    from duckstring import agg
-    (pond.trickle("priced.priced_line")
-         .aggregate(by="product_id",
-                    total_revenue=agg.sum("revenue"),
-                    orders=agg.count(),
-                    top_price=agg.max("unit_price"),
-                    revenue_sd=agg.stddev("revenue"))
-         .merge("revenue_by_product"))   # pk defaults to `by`
+Kept so ``from duckstring import agg`` continues to work. See :mod:`duckstring.trickle_io` for the rationale.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from .trickle import agg as _agg
 
 
-@dataclass(frozen=True)
-class Metric:
-    """One output aggregate: its ``kind``, the input column it reads (if any), and — for ``var``/``stddev``
-    — whether it's a ``sample`` or ``pop``ulation statistic."""
-
-    kind: str
-    col: str | None = None
-    how: str | None = None
-
-
-def count() -> Metric:
-    """Count of rows in the group (``count(*)``)."""
-    return Metric("count")
-
-
-def sum(col: str) -> Metric:  # noqa: A001 - deliberate SQL-style name on the agg namespace
-    """Running sum of ``col`` (NULLs ignored; an all-NULL group is NULL, per SQL ``sum``)."""
-    return Metric("sum", col)
-
-
-def mean(col: str) -> Metric:
-    """Mean of ``col`` over its non-NULL values — algebraic, maintained as ``sum(col)/count(col)``."""
-    return Metric("mean", col)
-
-
-def min(col: str) -> Metric:  # noqa: A001 - deliberate SQL-style name on the agg namespace
-    """Minimum of ``col`` (NULLs ignored). A retraction of the supporting row rescans the group."""
-    return Metric("min", col)
-
-
-def max(col: str) -> Metric:  # noqa: A001 - deliberate SQL-style name on the agg namespace
-    """Maximum of ``col`` (NULLs ignored). A retraction of the supporting row rescans the group."""
-    return Metric("max", col)
-
-
-def var(col: str, how: str = "sample") -> Metric:
-    """Variance of ``col`` over its non-NULL values. ``how`` ∈ ``"sample"`` (default) / ``"pop"``."""
-    return Metric("var", col, _check_how(how))
-
-
-def stddev(col: str, how: str = "sample") -> Metric:
-    """Standard deviation of ``col`` over its non-NULL values. ``how`` ∈ ``"sample"`` (default) / ``"pop"``."""
-    return Metric("stddev", col, _check_how(how))
-
-
-def _check_how(how: str) -> str:
-    h = how.lower()
-    if h in ("pop", "population"):
-        return "pop"
-    if h == "sample":
-        return "sample"
-    raise ValueError(f"agg how={how!r}: one of 'sample' / 'pop'")
+def __getattr__(name):  # PEP 562: forward all names to the relocated module
+    return getattr(_agg, name)
