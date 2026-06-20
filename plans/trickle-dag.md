@@ -45,8 +45,8 @@ sum. Each operator node is materialised once per run (see below) and reused ever
   affected-key path are re-expressed as DAG behaviours (key pre-filter on a binary term; recompute a node
   from its inputs).
 - **Subsumes all join types.** Each binary node carries its `how` (`inner`/`left`/`right`/`full`/`semi`/
-  `anti`); `right`/`full` stop being "solo + comprehensive" — a binary node maintains its own incomparables
-  (the match-count transitions) like any other, so a `(A ⟕ B)` node composes into a larger DAG.
+  `anti`) and maintains its own output — including outer joins' incomparables — so `right`/`full` stop being
+  "solo + comprehensive" and a `(A ⟕ B)` node composes into a larger DAG. See **Join semantics** below.
 
 ### Per-run materialisation (the "in-memory, recomputed each run" point)
 
@@ -59,6 +59,56 @@ Materialise each DAG node's current state once per run (a temp relation), so:
 This is **within-run** only — rebuilt each run from the (persisted) source mains; it is **not** a cross-run
 trace and gives none of the "apply only the delta to last run's intermediate" win. That win is gap #2
 (persistence) and stays deferred. A `.merge()` boundary remains the way to get a *persisted* trace.
+
+## Join semantics — all types incremental, in scope for v2
+
+Every join type is maintained by **one rule**: the *affected-key recompute* (equivalently, match-count
+incomparable maintenance). This is the v2 generalisation that **drops the current `right`/`full` "solo +
+comprehensive" restriction** — in the DAG each binary join node maintains its own output incrementally,
+**including the NULL-padded "incomparable" rows** that outer joins preserve, so a `(A ⟕ B)` node composes
+into a larger DAG like any other.
+
+**The rule.** For a binary equi-join `O = A ⋈ₖ B` of any `how`, with source deltas `δA`, `δB`:
+
+- affected key set `K = πₖ(δA) ∪ πₖ(δB)` — the join-key *values* that changed on either side, and **only**
+  those (evaluate match information for nothing else);
+- recompute the join (of that `how`) restricted to `key ∈ K`, over both the **new** and the **old** states;
+- emit `O_new|K (+1) ⊎ O_old|K (−1)`, consolidated.
+
+Rows for any key ∉ K are provably unchanged, so they never appear in the delta. Re-evaluating a key's full
+output old-vs-new *is* the match-count logic, just computed by re-evaluation rather than explicit counters —
+either implementation is sound; re-evaluation is less bookkeeping. `key_filter` (above) is exactly the `IN
+(K)` restriction; with it off, the same recompute runs unrestricted.
+
+**Per type** (matched part = the inner join; an *incomparable* is a NULL-padded preserved row):
+
+| `how` | output |
+|---|---|
+| `inner` | matched rows only |
+| `left` | matched **+ A-side incomparables** — an A row with no B match → `(A, NULL)` |
+| `right` | matched **+ B-side incomparables** → `(NULL, B)`; i.e. `left` with the operands swapped |
+| `full` | matched **+ both sides' incomparables** |
+| `semi` / `anti` | A rows that **have** / **lack** a B match (existence filters; A-grained output) |
+
+**`full` is just `left` run on both sides.** It is *not* harder than `left` — it's the same incomparable
+management applied symmetrically (A-side *and* B-side). What made it awkward in v1 was the spine-anchored
+mechanism, which only ever enumerates one side's unmatched rows; a DAG node has no privileged spine, so both
+sides fall out of the same recompute. `right` = `left` with operands swapped; `full` = `left` + `right`.
+
+**The incomparable transitions** (what the re-evaluation reproduces; all bounded to `K`):
+
+- *First match* — `δB` lifts a key's B-count `0 → >0`: retract the incomparable `−(A, NULL)` (and add the
+  matched `+(A, B)`).
+- *Last match* — `δB` drops it `>0 → 0`: insert the incomparable `+(A, NULL)` (and retract `−(A, B)`).
+- *New unmatched* — `δA` adds a row whose key has B-count `0`: insert `+(A, NULL)`.
+- (Symmetric on the A-side for `right`/`full`.)
+
+**Status & migration from v1.** Today: `left`/`semi`/`anti` are incremental but **spine-anchored**
+(`_spine_recompute`); `right`/`full` are restricted to a **solo** join and recompute **comprehensively**
+(`_full_join` + diff). v2 makes **all six** incremental and composable in a bushy DAG via the rule above —
+`right`/`full` lose both the solo restriction and the comprehensive fallback. The *only* comprehensive cases
+that survive are the universal no-delta-available ones (bootstrap / coverage-miss / a changed overwrite
+Ripple source), which force a full recompute for **every** join type, outer or not.
 
 ## API generalisation: star → tree
 
