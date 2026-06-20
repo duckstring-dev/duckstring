@@ -164,6 +164,40 @@ bushy/deep case and compare:
 The result decides the **default materialisation strategy** (inline vs always-fence vs threshold) and
 whether the flags are convenience escape valves or load-bearing. Do not start the rewrite until this is run on a sufficiently complex, large test case, and a more typical star schema.
 
+### Gate result (run 2026-06-20 — DuckDB 1.4.3, fact=2M rows, dims=50k, ~20-key delta)
+
+Prototypes: `/tmp/dag_planner_prototype.py` (single-term, star/bushy/chain) and `/tmp/dag_sharing_prototype.py`
+(the multi-changed-source UNION-ALL telescoping sum, with reconstructed prior states — the case where fencing
+*should* win via shared sub-results). Results (min/median ms, warm):
+
+| case | inline | fence | full recompute |
+|---|---|---|---|
+| star (1 dim changed, 4-way) | **3.5** | 4.6 | 474 |
+| bushy `(A⋈B)⋈(C⋈D)` | **3.1** | 4.1 | — |
+| chain depth 4 / 8 / 12 | **0.9 / 1.7 / 2.5** | — | 6.5 / 7.6 / 8.1 |
+| 6-way star, 2 dims changed | **12.6** | 22.0 | — |
+| 6-way star, 4 dims changed | **23.4** | 33.4 | — |
+| 6-way star, 6 dims changed | **29.8** | 42.2 | — |
+
+**Decision: inline nested views, no per-node fence.** Findings:
+
+1. **Inline always wins, including the sharing case.** Fencing (a `CREATE TEMP TABLE` per node) is a net
+   *pessimization* at these scales — the key pre-filter restricts every term's spine to the ~20 changed keys
+   *before* the join, so re-evaluating a shared sub-join inline is nearly free, while materialising shared
+   prior states costs more than it saves. The plan's concern #1 (no intermediate sharing) is real in theory
+   but does not pay off in practice for the key-filtered incremental path.
+2. **No planner blow-up.** Deep nesting (chain depth 12) and `UNION ALL` of up to 6 telescoping terms with
+   reconstructed prior states plan and execute fine; inline scales ~linearly with depth/terms.
+3. **The key pre-filter is doing the heavy lifting** — it is what makes inline cheap, so `key_filter` is the
+   load-bearing axis and `ivm` (reuse) is the secondary one. Full recompute is 100×+ slower (474ms vs 3.5ms),
+   confirming the comprehensive fallback should stay a fallback.
+
+Consequences for the rewrite: **per-run materialisation is NOT the default** (it stays available only as the
+explicit `.merge()` persistence boundary, which also buys cross-run reuse). The DAG IR composes to **inline
+SQL**; the `ivm`/`key_filter` flags are convenience escape valves over an inline default, not load-bearing
+machinery. This deviates from §"Per-run materialisation" above — keep that section as the rejected
+alternative.
+
 ## Interactions
 
 - **Comprehensive fallback** is unchanged in spirit (bootstrap / coverage-miss / changed-overwrite-Ripple →
@@ -180,16 +214,27 @@ whether the flags are convenience escape valves or load-bearing. Do not start th
 
 ## Sequencing & effort
 
-1. **(prereq) Incremental aggregation** — `plans/trickle-relational.md` steps 5–6. Orthogonal; lands first.
-2. **Planner prototype** (the gate above). Small, decides the design.
-3. **DAG IR + per-run materialisation** — the builder core rewrite; spine+telescoping becomes a special
-   case. Largest piece.
+1. **(prereq) Incremental aggregation** — `plans/trickle-relational.md` steps 5–6. Orthogonal; lands first. **✅ done.**
+2. **Planner prototype** (the gate above). Small, decides the design. **✅ done** — see §"Gate result":
+   inline wins, no per-node fence.
+3. **DAG IR ~~+ per-run materialisation~~** — the builder core rewrite; spine+telescoping is gone, replaced
+   by a DAG of `_Source`/`_Join` nodes maintained by the affected-key recompute, composed to **inline SQL**
+   (the gate dropped per-run materialisation). **✅ done** (`trickle_builder.py`).
 4. **Composed-operand `.join()`** (star → tree; lift the snowflake guard) + bushy-tree tests incl.
-   `(A⋈B)⋈(C⋈D)`.
-5. **`ivm` / `key_filter` flags** (orthogonal; keep `p` as the key-filter payoff heuristic).
+   `(A⋈B)⋈(C⋈D)`. **✅ done** — leaf-alias name resolution (`_resolve_col`/`_qualify`), bushy + incremental
+   right/full tests in `tests/test_trickle.py`.
 6. **Re-express** the append spine-PK fast path and the per-join-type incomparable maintenance on the DAG;
-   migrate the existing trickle test suite (behaviour must be unchanged — this is an engine swap, not a
-   surface change).
+   migrate the existing trickle test suite (behaviour unchanged — an engine swap). **✅ done** (the spine-PK
+   fast path is preserved over the DAG; all six `how` are incremental via the one recompute rule; the
+   internal-method-coupled tests were migrated to the new IR; full suite green).
+
+**Deferred (not in this pass):**
+
+5. **`ivm` / `key_filter` flags** — not surfaced. The gate showed `key_filter` (the pre-filter) is always on
+   and load-bearing, and `ivm`-vs-recompute is moot because the affected-key recompute *is* the maintained
+   form and inline beats fencing — so the manual flags have no quadrant left to select. `p` stays as the
+   key-filter payoff heuristic (a source over `p` reads `is_full` → comprehensive). Revisit only if a real
+   workload wants to force a quadrant.
 
 Effort: large (a core rewrite). But it's **internal** — the public surface (`.join/.filter/.select/.alias/
 .merge/.append/.sql`) and correctness are unchanged, so it carries no backwards-compatibility risk; it can
@@ -197,13 +242,13 @@ land whenever, and the only cost of waiting is integration churn against a large
 
 ## Open questions
 
-- **Default materialisation**: inline views, always-fence (temp table per node), or fence-past-a-size or past-a-depth — set
-  by the prototype.
-- **Node identity for sharing**: detect a repeated sub-DAG (so `A⋈B` used twice is materialised once) by
-  structural hashing of the op graph, or require the dev to share it explicitly (one Python handle reused)?
-  Lean: structural dedup within one build.
-- **`p` granularity**: it's per-source and governs the `key_filter` payoff (large slice → fall through to
-  full). Keep as-is; confirm it composes sensibly when a build mixes `key_filter`-worthwhile and
-  `key_filter`-futile sources (per-source decision, not whole-build).
-- **Bushy + outer**: a `full`/`right` node deep in a bushy DAG — does per-node incomparable maintenance
-  compose cleanly through a downstream join? (Believed yes; confirm in the prototype.)
+- **Default materialisation** — *resolved:* **inline views** (the gate; no fence). Per-node `CREATE TEMP
+  VIEW`, planner-inlined; `.merge()` is the only fence.
+- **Node identity for sharing** — *moot under inline.* No within-run materialisation, so there is nothing to
+  dedup; sharing is the planner's job over the inlined SQL. A repeated handle is recompiled to repeated SQL,
+  which the planner can common-subexpression. Revisit only if a future fence mode lands.
+- **`p` granularity** — *kept as-is:* per-source; a source over `p` reads `is_full`, which propagates up its
+  subtree (so a mixed build decides per source, not whole-build).
+- **Bushy + outer** — *resolved: yes.* A `full`/`right` node's incomparables are maintained by the same
+  affected-key recompute and its `δO`/`O_new`/`O_old` feed a downstream join like any node. Covered by
+  `test_builder_full_join_incremental_matches_comprehensive` and the bushy test.

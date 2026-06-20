@@ -280,22 +280,29 @@ def test_builder_dimension_change_incremental(tmp_path):
 
 
 def test_builder_key_prefilter_restricts_spine_on_dim_change(tmp_path):
-    """The general-purpose performance lever: when a dimension changes, the (large) spine is pre-filtered
-    to that dimension's affected join keys before the join — not a full spine scan. Guards the pushdown."""
+    """The general-purpose performance lever: the affected-key recompute pre-filters BOTH join inputs to the
+    changed join keys (``IN (SELECT k0 …)``) before the join — so a small dimension change never drives a
+    full spine scan. Guards the pushdown by inspecting the generated SQL."""
     _cons, ol, pr = _star_sources(tmp_path)
     ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
     pr([("p1", 5), ("p2", 9)], ts(1))
-    con = duckdb.connect()
-    pond = Pond("priced", "1.0.0", con, root=tmp_path,
+    snk_con = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "priced" / "m1" / "data"
+    _priced(tmp_path, ts(1), NEVER, snk_con, snk_dir)  # bootstrap
+
+    pr([("p1", 50), ("p2", 9)], ts(2))   # only the dimension changes this run
+    pond = Pond("priced", "1.0.0", snk_con, root=tmp_path,
                 source_majors={"sales": 1, "catalog": 1}, f=ts(2), previous_f=ts(1))
-    b = (pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id")
+    b = (pond.trickle("sales.order_line").join(pond.trickle("catalog.product", p=1.0), on="product_id")
              .select("s0.order_id, s1.price"))
-    states = [b._state_views(r, pond.read_delta(r)) for r in ["sales.order_line", "catalog.product"]]
-    dim_term = b._term(1, states)          # the dimension (catalog) is the delta
-    assert "IN (SELECT" in dim_term         # spine pre-filtered to the dim's changed keys
-    spine_term = b._term(0, states)         # the spine (sales) is the delta → no spine pre-filter
-    assert "IN (SELECT" not in spine_term
-    con.close()
+    seen: list[str] = []
+    orig_view = b._view
+    b._view = lambda sql: seen.append(sql) or orig_view(sql)  # capture the raw generated SQL
+    kind, _rel = b._compute(("order_id",), "priced")
+    assert kind == "incremental"
+    # The spine (s0) is pre-filtered to the changed dim's keys (IN (SELECT k0 …)) before the join.
+    assert any('"s0.product_id") IN (SELECT k0' in s for s in seen)
+    snk_con.close()
 
 
 def test_builder_propagates_spine_delete(tmp_path):
@@ -344,6 +351,37 @@ def test_builder_fact_and_dim_both_change(tmp_path):
     assert rows(snk, snk_dir, "o", "id, k, qty, price") == [
         (1, "A", 10, 120), (2, "A", 8, 120), (3, "B", 7, 200), (4, "B", 2, 200),
     ]
+    snk.close()
+
+
+def test_builder_filter_applies_to_delta_and_crosses_boundary(tmp_path):
+    """`.filter()` distributes over the Z-set delta: a dimension change that pushes a row across the filter
+    boundary inserts/retracts it incrementally (the old image passes/fails the filter on its own side)."""
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "f" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("f", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line", p=1.0).alias("o")
+             .join(pond.trickle("catalog.product", p=1.0).alias("p"), on="product_id")
+             .filter("o.qty * p.price >= 10")
+             .select("o.order_id, o.qty * p.price AS total")
+             .merge("f", pk="order_id"))
+        publish(snk, snk_dir, f=f)
+
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    run(ts(1), NEVER)   # totals 10, 9 → only order 10 passes (>= 10)
+    assert rows(snk, snk_dir, "f", "order_id, total") == [(10, 10)]
+
+    pr([("p1", 5), ("p2", 20)], ts(2))   # p2 reprice → order 11 total 20 crosses into the output
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "f", "order_id, total") == [(10, 10), (11, 20)]
+
+    pr([("p1", 3), ("p2", 20)], ts(3))   # p1 reprice → order 10 total 6 drops out (retracted)
+    run(ts(3), ts(2))
+    assert rows(snk, snk_dir, "f", "order_id, total") == [(11, 20)]
     snk.close()
 
 
@@ -527,10 +565,16 @@ def test_builder_build_time_errors(tmp_path):
     con = duckdb.connect()
     pond = Pond("priced", "1.0.0", con, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=ts(1))
 
-    # A snowflake (a dimension that itself has joins) is outside the op set.
-    snowflake_dim = pond.trickle("catalog.product").join(pond.trickle("catalog.product"), on="product_id")
-    with pytest.raises(BuildError, match="snowflake|deeper hop"):
-        pond.trickle("sales.order_line").join(snowflake_dim, on="product_id")
+    # A composed operand (a join DAG) is now a valid join input (the snowflake guard is lifted) — this
+    # composes without error.
+    composed = pond.trickle("catalog.product").alias("p1").join(
+        pond.trickle("catalog.product").alias("p2"), on="product_id")
+    pond.trickle("sales.order_line").join(composed, on="product_id")
+
+    # But a join operand carrying its own .filter()/.select() is rejected (attach those to the result).
+    with pytest.raises(BuildError, match="operand"):
+        dim_with_select = pond.trickle("catalog.product").select("product_id")
+        pond.trickle("sales.order_line").join(dim_with_select, on="product_id")
 
     # A joined graph with no .select(...).
     with pytest.raises(BuildError, match="select"):
@@ -1103,14 +1147,170 @@ def test_builder_mixed_left_inner_star(tmp_path):
     snk.close()
 
 
-def test_builder_outer_join_guards(tmp_path):
+def test_builder_join_guards(tmp_path):
     snk = duckdb.connect()
     pond = Pond("x", "1.0.0", snk, root=tmp_path, source_majors={"a": 1, "b": 1, "c": 1}, f=ts(1))
     with pytest.raises(BuildError, match="how"):
         pond.trickle("a.t").join(pond.trickle("b.u"), on="k", how="cross")
-    with pytest.raises(BuildError, match="only join"):
-        (pond.trickle("a.t").join(pond.trickle("b.u"), on="k", how="full")
-             .join(pond.trickle("c.v"), on="k").select("s0.k").merge("x", pk="k"))
+    # A right/full outer join is no longer restricted to a solo join — it can sit anywhere in a DAG
+    # (the v2 affected-key recompute maintains the incomparables per node). Composing it raises no error:
+    pond.trickle("a.t").join(pond.trickle("b.u"), on="k", how="full").join(pond.trickle("c.v"), on="k")
+    # A .sql()/.aggregate() result can't be a join operand (no incremental compute left).
+    with pytest.raises(BuildError, match="operand"):
+        from duckstring import agg
+        pond.trickle("a.t").join(pond.trickle("b.u").aggregate(by="k", n=agg.count()), on="k")
+    snk.close()
+
+
+# ─── DAG composition: bushy trees + incremental outer joins (v2) ─────────────────
+
+
+def _four_sources(tmp_path):
+    """A 4-leaf DAG: orders(order_id,cust_id,prod_id), customers(cust_id,region), products(prod_id,cat_id),
+    categories(cat_id,tax) — for a bushy (orders⋈customers)⋈(products⋈categories)."""
+    a_con, a_dir = _producer(tmp_path, "a")
+    b_con, b_dir = _producer(tmp_path, "b")
+    c_con, c_dir = _producer(tmp_path, "c")
+    d_con, d_dir = _producer(tmp_path, "d")
+
+    def a(state, f):
+        vals = ", ".join(f"({o},'{cu}','{pr}')" for o, cu, pr in state)
+        T.merge_table(a_con, "orders", a_con.sql(f"SELECT * FROM (VALUES {vals}) v(order_id, cust_id, prod_id)"),
+                      f, ("order_id",))
+        publish(a_con, a_dir, f=f)
+
+    def b(state, f):
+        vals = ", ".join(f"('{cu}','{r}')" for cu, r in state)
+        T.merge_table(b_con, "customers", b_con.sql(f"SELECT * FROM (VALUES {vals}) v(cust_id, region)"),
+                      f, ("cust_id",))
+        publish(b_con, b_dir, f=f)
+
+    def c(state, f):
+        vals = ", ".join(f"('{pr}','{ca}')" for pr, ca in state)
+        T.merge_table(c_con, "products", c_con.sql(f"SELECT * FROM (VALUES {vals}) v(prod_id, cat_id)"),
+                      f, ("prod_id",))
+        publish(c_con, c_dir, f=f)
+
+    def d(state, f):
+        vals = ", ".join(f"('{ca}',{t})" for ca, t in state)
+        T.merge_table(d_con, "categories", d_con.sql(f"SELECT * FROM (VALUES {vals}) v(cat_id, tax)"),
+                      f, ("cat_id",))
+        publish(d_con, d_dir, f=f)
+
+    return a, b, c, d
+
+
+def _bushy_truth(tmp_path):
+    ref = duckdb.connect()
+    pp = ParquetDataPlane()
+    return sorted(ref.sql(f"""
+        SELECT orders.order_id, customers.region, categories.tax
+        FROM ({pp.read_select(tmp_path / 'ponds/a/m1/data', 'orders')}) orders
+        JOIN ({pp.read_select(tmp_path / 'ponds/b/m1/data', 'customers')}) customers USING (cust_id)
+        JOIN ({pp.read_select(tmp_path / 'ponds/c/m1/data', 'products')}) products USING (prod_id)
+        JOIN ({pp.read_select(tmp_path / 'ponds/d/m1/data', 'categories')}) categories USING (cat_id)
+    """).fetchall())
+
+
+def test_builder_bushy_join_matches_comprehensive(tmp_path):
+    """(A⋈B)⋈(C⋈D): a bushy DAG with no privileged spine — composed operands on both sides of the top
+    join. The incremental result equals a full recompute across a run that changes a leaf in each subtree."""
+    a, b, c, d = _four_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    out_dir = tmp_path / "ponds" / "o" / "m1" / "data"
+
+    def run(f, pf):
+        p = Pond("o", "1.0.0", snk, root=tmp_path,
+                 source_majors={"a": 1, "b": 1, "c": 1, "d": 1}, f=f, previous_f=pf)
+        ab = (p.trickle("a.orders", p=1.0).alias("o")
+               .join(p.trickle("b.customers", p=1.0).alias("cu"), on="cust_id"))
+        cd = (p.trickle("c.products", p=1.0).alias("pr")
+               .join(p.trickle("d.categories", p=1.0).alias("g"), on="cat_id"))
+        (ab.join(cd, on="prod_id").select("o.order_id, cu.region, g.tax").merge("res", pk="order_id"))
+        publish(snk, out_dir, f=f)
+
+    a([(1, "cA", "pX"), (2, "cB", "pY")], ts(1))
+    b([("cA", "north"), ("cB", "south")], ts(1))
+    c([("pX", "books"), ("pY", "food")], ts(1))
+    d([("books", 10), ("food", 5)], ts(1))
+    run(ts(1), NEVER)
+    assert rows(snk, out_dir, "res", "order_id, region, tax") == [(1, "north", 10), (2, "south", 5)]
+
+    # A change in each subtree at once: new order (A), a region update (B), a tax update (D).
+    a([(1, "cA", "pX"), (2, "cB", "pY"), (3, "cA", "pY")], ts(2))
+    b([("cA", "NORTH"), ("cB", "south")], ts(2))
+    d([("books", 12), ("food", 5)], ts(2))
+    run(ts(2), ts(1))
+    assert rows(snk, out_dir, "res", "order_id, region, tax") == _bushy_truth(tmp_path)
+    assert rows(snk, out_dir, "res", "order_id, region, tax") == [
+        (1, "NORTH", 12), (2, "south", 5), (3, "NORTH", 5)]
+    snk.close()
+
+
+def test_builder_right_join_incremental(tmp_path):
+    """A ``right`` join maintained incrementally (no longer solo + comprehensive): B-side incomparables are
+    kept and their first-match / last-match / new-unmatched transitions tracked across runs."""
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    rdir = tmp_path / "ponds" / "r" / "m1" / "data"
+
+    def run(f, pf):
+        p = Pond("r", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        (p.trickle("sales.order_line", p=1.0).alias("o")
+          .join(p.trickle("catalog.product", p=1.0).alias("p"), on="product_id", how="right")
+          .select("p.product_id, o.order_id").merge("r", pk="product_id"))
+        publish(snk, rdir, f=f)
+
+    ol([(10, "p1", 2)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))   # p2 unmatched (B-side incomparable)
+    run(ts(1), NEVER)
+    assert rows(snk, rdir, "r", "product_id, order_id") == [("p1", 10), ("p2", None)]
+
+    ol([(10, "p1", 2), (12, "p2", 1)], ts(2))   # p2 gains its first order → incomparable retracted
+    pr([("p1", 5), ("p2", 9), ("p3", 7)], ts(2))  # p3 appears unmatched → new incomparable
+    run(ts(2), ts(1))
+    assert rows(snk, rdir, "r", "product_id, order_id") == [("p1", 10), ("p2", 12), ("p3", None)]
+
+    ol([(10, "p1", 2)], ts(3))   # p2's order removed → p2 back to incomparable (last match dropped)
+    run(ts(3), ts(2))
+    assert rows(snk, rdir, "r", "product_id, order_id") == [("p1", 10), ("p2", None), ("p3", None)]
+    snk.close()
+
+
+def test_builder_full_join_incremental_matches_comprehensive(tmp_path):
+    """A ``full`` join maintained incrementally — both sides' incomparables — equals a comprehensive full
+    outer join recompute across an incremental run."""
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    fdir = tmp_path / "ponds" / "fo" / "m1" / "data"
+
+    def run(f, pf):
+        p = Pond("fo", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        (p.trickle("sales.order_line", p=1.0).alias("o")
+          .join(p.trickle("catalog.product", p=1.0).alias("p"), on="product_id", how="full")
+          .select("coalesce(o.product_id, p.product_id) AS pid, o.order_id, p.price").merge("fo", pk="pid"))
+        publish(snk, fdir, f=f)
+
+    def truth():
+        ref = duckdb.connect()
+        pp = ParquetDataPlane()
+        return sorted(ref.sql(f"""
+            SELECT coalesce(o.product_id, p.product_id) AS pid, o.order_id, p.price
+            FROM ({pp.read_select(tmp_path / 'ponds/sales/m1/data', 'order_line')}) o
+            FULL JOIN ({pp.read_select(tmp_path / 'ponds/catalog/m1/data', 'product')}) p USING (product_id)
+        """).fetchall())
+
+    ol([(10, "p1", 2), (11, "pX", 1)], ts(1))   # pX unmatched (A-side incomparable)
+    pr([("p1", 5), ("p2", 9)], ts(1))           # p2 unmatched (B-side incomparable)
+    run(ts(1), NEVER)
+    assert rows(snk, fdir, "fo", "pid, order_id, price") == truth()
+
+    # pX gains a product (A-incomparable → matched); p2 gains an order (B-incomparable → matched); p1
+    # product dropped (order 10 keeps p1 as an A-side incomparable).
+    ol([(10, "p1", 2), (11, "pX", 1), (12, "p2", 4)], ts(2))
+    pr([("p2", 9), ("pX", 7)], ts(2))
+    run(ts(2), ts(1))
+    assert rows(snk, fdir, "fo", "pid, order_id, price") == truth()
     snk.close()
 
 

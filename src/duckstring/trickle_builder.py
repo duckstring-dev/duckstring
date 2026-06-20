@@ -1,21 +1,27 @@
-"""The ``pond.trickle(...)`` builder — DBSP-style incremental joins over Z-set sources.
+"""The ``pond.trickle(...)`` builder — a DBSP-style **DAG of binary incremental joins** over Z-set sources.
 
-A fluent builder that records a **tiny op graph** (a spine source + direct equi-joins to dimension
-sources, plus filters and a projection) and maintains its output incrementally by composing the **Z-set
-delta** of each changed source through the join (see ``plans/trickle-dbsp.md``). Because deletions are
-full-row ``-1`` tuples (not key tombstones), a join may be on **any** key — there is one ``.join()`` and
-no FK=PK constraint.
+A fluent builder that records an **operator DAG** (sources + binary equi-joins of any ``how``, plus a final
+filter and projection) and maintains its output incrementally. Each join node is maintained by the single
+**affected-key recompute** rule (``plans/trickle-dag.md``): for ``O = A ⋈ₖ B`` with deltas ``δA``, ``δB``,
 
-The incremental answer for an n-way join is the standard IVM telescoping sum: for sources ``[s0, s1, …]``
-in evaluation order, ``ΔO = Σᵢ (s0_new · … · s_{i-1}_new · δᵢ · s_{i+1}_old · … · sn_old)``. A term whose
-source did not change (``δᵢ = ∅``) drops out, so an unchanged source costs nothing; ``_old`` reconstruction
-(``current − delta``) is needed only for a *changed* source that sits after another changed source.
+    K = πₖ(δA) ∪ πₖ(δB)                 -- the join-key values that changed on either side
+    δO = (O_new restricted to K)(+1) ⊎ (O_old restricted to K)(−1), consolidated
+
+Restricting **both** inputs to ``key ∈ K`` before the join is sound for every join type (it is the semijoin
+the join already performs) and is the key pre-filter — a small change never drives a full scan of the other
+side. Re-evaluating each affected key's full output old-vs-new *is* the match-count logic for the outer
+incomparables (a NULL-padded preserved row), so ``left``/``right``/``full``/``semi``/``anti`` are maintained
+the same way as ``inner`` — no privileged spine, so a bushy ``(A⋈B)⋈(C⋈D)`` and outer joins compose freely.
+
+Because deletions are full-row ``−1`` tuples (not key tombstones), a join may be on **any** key. The DAG
+composes to **inline SQL** (the planner's gate, ``plans/trickle-dag.md``: per-node materialisation loses to
+inline nested views at every scale) — the only persistence fence is an explicit ``.merge()`` boundary, which
+also buys cross-run reuse of the materialised intermediate.
 
 When any source can't supply a clean delta — a **bootstrap**, a **coverage-miss**, a **changed overwrite
-Ripple**, or a delta over its change-fraction threshold ``p`` — the whole output is recomputed and diffed
-against the **materialised prior output** (the last-written *main*, read not recomputed). That is always
-correct because the main is the one prior state we always have. An *unchanged* overwrite Ripple is a free
-stable history operand; only a *changed* one forces the comprehensive path.
+Ripple**, or a delta over its change-fraction threshold ``p`` — that subtree (and so the whole output) is
+recomputed and diffed against the **materialised prior output** (the last-written *main*, read not
+recomputed). An *unchanged* overwrite Ripple is a free stable operand.
 """
 
 from __future__ import annotations
@@ -24,9 +30,12 @@ import re
 
 from .trickle_io import D_COL, _q, _table_exists, normalize_pk, read_registry_delta, unique_name
 
+_W = "_duckstring_w"  # scratch weight column for prior-state reconstruction (distinct from the Z-set D_COL)
+
 
 class BuildError(ValueError):
-    """The builder was misconfigured (a missing merge key / ``.select()``, a malformed join)."""
+    """The builder was misconfigured (a missing merge key / ``.select()``, an ambiguous join key, a
+    malformed join)."""
 
 
 # A verbatim source pass-through select item: ``<alias>.col`` / ``<alias>."col"`` / ``<alias>.col AS x``.
@@ -58,14 +67,12 @@ def _duckdb_to_ibis(t: str) -> str:
     raise BuildError(f"to_ibis_schema(): no Ibis mapping for DuckDB type {t!r} — use .schema() and map it yourself")
 
 
-# Supported join types → their DuckDB keyword. **Spine-grained** ones (inner/left/semi/anti) keep the
-# output one-contribution-per-spine-row, so they compose in a multi-way star and are maintained
-# incrementally (telescoping for all-inner; affected-spine-row recompute when any non-inner is present).
-# right/full preserve the *other* side (unmatched dim rows), so they must be the only join and recompute
-# comprehensively (correct, not yet incrementalised).
+# Supported join types → their DuckDB keyword. All six are now maintained incrementally (per-node
+# affected-key recompute), including the outer incomparables, so any of them can sit anywhere in a DAG.
 _JOIN_SQL = {"inner": "JOIN", "left": "LEFT JOIN", "right": "RIGHT JOIN", "full": "FULL JOIN",
              "semi": "SEMI JOIN", "anti": "ANTI JOIN"}
-_SPINE_GRAINED = {"inner", "left", "semi", "anti"}
+# Join types whose output is the left side only (existence filters) — no right-side columns in the output.
+_LEFT_ONLY = {"semi", "anti"}
 
 
 def _cols(on) -> tuple[str, ...]:
@@ -73,8 +80,9 @@ def _cols(on) -> tuple[str, ...]:
 
 
 def _join_pairs(on) -> list[tuple[str, str]]:
-    """Normalise ``on`` to ``[(spine_col, dim_col), …]``. A str/list names columns shared by both sides;
-    a dict maps spine columns to dim columns (when the names differ)."""
+    """Normalise ``on`` to ``[(left_name, right_name), …]``. A str/list names columns shared by both sides;
+    a dict maps left columns to right columns (when the names differ). A name may be ``alias.col`` to
+    disambiguate when several sources share a bare column name."""
     if isinstance(on, dict):
         return [(s, d) for s, d in on.items()]
     return [(c, c) for c in _cols(on)]
@@ -106,71 +114,165 @@ def _select_items(projection: str) -> list[str]:
     return items
 
 
-class TrickleBuilder:
-    """One node of the build graph. ``pond.trickle(ref)`` starts a graph rooted at the **spine** source;
-    :meth:`join` attaches a dimension directly to the spine.
+_IDENT = re.compile(r"[A-Za-z_]\w*")
+_COLPART = re.compile(r'"[^"]*"|[A-Za-z_]\w*')
 
-    ``_spine_delta`` is set when this builder is the value returned by an upstream :meth:`merge` — the
-    spine is then a just-materialised in-run Trickle whose change is already known, so it is read from
-    that handle (the registry) instead of the not-yet-published data plane."""
+
+def _qualify(text: str, aliases: set[str]) -> str:
+    """Rewrite leaf references ``alias.col`` / ``alias."col"`` to the internal qualified column name
+    ``"alias.col"`` (a single dotted, quoted identifier) — for any ``alias`` in ``aliases``. String literals
+    and unknown identifiers are left untouched; ``alias.*`` is handled by the caller (projection star
+    expansion), not here."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "'":  # a string literal — copy verbatim (incl. doubled '' escapes)
+            j = i + 1
+            while j < n:
+                if text[j] == "'":
+                    if j + 1 < n and text[j + 1] == "'":
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            out.append(text[i:j])
+            i = j
+            continue
+        m = _IDENT.match(text, i)
+        if m:
+            word = m.group(0)
+            k = m.end()
+            if word in aliases and k < n and text[k] == ".":
+                cm = _COLPART.match(text, k + 1)
+                if cm:
+                    col = cm.group(0)
+                    bare = col[1:-1] if col.startswith('"') else col
+                    out.append(_q(f"{word}.{bare}"))
+                    i = cm.end()
+                    continue
+            out.append(word)
+            i = m.end()
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+# ─── operator DAG nodes ────────────────────────────────────────────────────────
+
+
+class _Source:
+    """A leaf: a base table read as a Z-set source. ``alias`` is the explicit ``.alias()`` name (else a
+    positional ``s{i}`` is assigned at compile); ``threaded_delta`` is set when this source is a
+    just-materialised in-run Trickle (a chained ``.merge()`` result read from the registry, not the
+    not-yet-published data plane)."""
+
+    def __init__(self, ref: str, p: float, *, alias: str | None = None, threaded_delta=None) -> None:
+        self.ref = ref
+        self.p = p
+        self.alias = alias
+        self.threaded_delta = threaded_delta
+
+    def leaves(self) -> list["_Source"]:
+        return [self]
+
+
+class _Join:
+    """An internal node: a binary equi-join ``left ⋈ right`` of type ``how`` on ``on_pairs`` (raw column
+    names, resolved to qualified columns at compile)."""
+
+    def __init__(self, left, right, on_pairs, how: str) -> None:
+        self.left = left
+        self.right = right
+        self.on_pairs = on_pairs
+        self.how = how
+
+    def leaves(self) -> list["_Source"]:
+        return self.left.leaves() + self.right.leaves()
+
+
+class _NodeState:
+    """The compiled SQL handles for one DAG node over this run: ``cols`` (qualified output columns),
+    ``current``/``old`` (view names for the new and prior full states), ``delta`` (view name for the
+    consolidated Z-set ΔO, or ``None``), ``changed`` and ``is_full``."""
+
+    __slots__ = ("cols", "current", "old", "delta", "changed", "is_full")
+
+    def __init__(self, cols, current, old, delta, changed, is_full) -> None:
+        self.cols = cols
+        self.current = current
+        self.old = old
+        self.delta = delta
+        self.changed = changed
+        self.is_full = is_full
+
+
+class TrickleBuilder:
+    """One handle into the build DAG. ``pond.trickle(ref)`` starts a DAG rooted at a source; :meth:`join`
+    composes another (possibly itself composed) ``pond.trickle(...)`` operand as a binary join. ``.filter``/
+    ``.select`` attach to the composed result; the terminals are :meth:`merge` / :meth:`append`."""
 
     def __init__(self, pond, spine_ref: str, *, p: float = 0.3, _spine_delta=None) -> None:
         self.pond = pond
         self.spine_ref = spine_ref
-        self.p = p  # this source's change-fraction threshold (see Pond.trickle)
-        # (dim_ref, pairs, p, alias, how)
-        self._joins: list[tuple[str, list[tuple[str, str]], float, str | None, str]] = []
+        self.p = p
+        self._root = _Source(spine_ref, p, threaded_delta=_spine_delta)
         self._filters: list[str] = []
         self._projection: str | None = None
-        self._alias: str | None = None  # this node's name in .select/.filter and as the .sql() table
-        self._spine_delta = _spine_delta  # set by an upstream .merge() → chained in-run operand
+        self._alias: str | None = None  # this node's alias (the spine's, for .select refs / the .sql table)
         self._materialised = None  # a full relation after .sql() → comprehensive mode (no incremental compute)
-        self._agg = None  # {"by": (...), "metrics": {out: (kind, col)}} after .aggregate() → grouped output
-        self._agg_by: tuple[str, ...] | None = None  # set by .group_by(), consumed by a following .aggregate()
+        self._agg = None  # {"by": (...), "metrics": {out: (kind, col, how)}} after .aggregate()
+        self._agg_by: tuple[str, ...] | None = None
+        # compile-scoped caches (rebuilt per terminal): leaf → alias, leaf → bare cols
+        self._alias_of: dict[int, str] = {}
+        self._cols_cache: dict[int, list[str]] = {}
+
+    # ─── fluent surface ─────────────────────────────────────────────────────────
 
     def alias(self, name: str) -> "TrickleBuilder":
         """Name this node. On a **source** the parent's ``.select``/``.filter`` reference it by name instead
-        of ``s0``/``s1``; on the builder you ``.sql()`` over, it's the name the query uses (the Ibis idiom).
-        ``s0``/``s1`` stay the fallback for unaliased sources, so naming is opt-in and reordering ``.join()``
-        calls no longer silently remaps positional column references."""
+        of ``s0``/``s1``; on a builder you ``.sql()`` over, it's the name the query uses."""
         self._alias = name
+        if isinstance(self._root, _Source):
+            self._root.alias = name
         return self
 
     def join(self, dimension: "TrickleBuilder", *, on, how: str = "inner") -> "TrickleBuilder":
-        """Equi-join a **dimension** (another bare ``pond.trickle(...)``) directly to the spine on ``on``
-        (any column(s); see :func:`_join_pairs`). ``how`` ∈ ``inner`` (default) / ``left`` / ``right`` /
-        ``full`` / ``semi`` / ``anti``. The dimension must be a bare source — a snowflake/chain isn't in the
-        op set (do the deeper hop in a downstream Trickle).
+        """Equi-join another ``pond.trickle(...)`` operand on ``on`` (any column(s); a shared name, a list,
+        or a ``{left: right}`` dict; a name may be ``alias.col`` to disambiguate). ``how`` ∈ ``inner``
+        (default) / ``left`` / ``right`` / ``full`` / ``semi`` / ``anti`` — all maintained incrementally.
 
-        ``inner``/``left``/``semi``/``anti`` are **spine-grained** (one contribution per spine row): they
-        compose in a multi-way star and are maintained incrementally. ``right``/``full`` preserve unmatched
-        dimension rows, so they must be the **only** join and recompute comprehensively (correct, not yet
-        incrementalised)."""
+        The operand may itself be a join DAG (``(a⋈b)`` composed), so bushy and snowflake shapes are
+        expressible. It must not already carry a ``.filter()``/``.select()``/``.aggregate()``/``.sql()`` —
+        attach those to the composed result, or split via a downstream Trickle."""
         self._ensure_incremental("join")
         how = how.lower()
         if how not in _JOIN_SQL:
             raise BuildError(f"join(how={how!r}): one of {sorted(_JOIN_SQL)}")
         if not isinstance(dimension, TrickleBuilder):
-            raise BuildError("join() takes another pond.trickle(...) source as the dimension")
-        if dimension._joins or dimension._filters or dimension._projection is not None:
+            raise BuildError("join() takes another pond.trickle(...) operand")
+        if dimension._materialised is not None or dimension._agg is not None:
+            raise BuildError("join(): a .sql()/.aggregate() result can't be a join operand — do it downstream")
+        if dimension._filters or dimension._projection is not None:
             raise BuildError(
-                f"join('{dimension.spine_ref}'): a dimension must be a bare source — a snowflake/transitive "
-                f"chain isn't in the builder's op set; do the deeper hop in a downstream Trickle"
+                f"join('{dimension.spine_ref}'): a join operand can't carry its own .filter()/.select() — "
+                f"attach those to the composed result, or materialise it with a downstream .merge()"
             )
-        self._joins.append((dimension.spine_ref, _join_pairs(on), dimension.p, dimension._alias, how))
+        self._root = _Join(self._root, dimension._root, _join_pairs(on), how)
         return self
 
     def filter(self, predicate: str) -> "TrickleBuilder":
-        """Restrict the output with a SQL boolean ``predicate`` (over the joined sources, by ``s0``/``s1``/…
+        """Restrict the output with a SQL boolean ``predicate`` over the composed sources (by ``s0``/``s1``/…
         or their ``.alias()`` names)."""
         self._ensure_incremental("filter")
         self._filters.append(predicate)
         return self
 
     def select(self, projection: str) -> "TrickleBuilder":
-        """The output column list (a SQL select list). Required when the graph has joins; it must include
-        the output PK. The spine is ``s0`` and the i-th joined dimension is ``s{i+1}`` — or use the
-        ``.alias()`` names (``o.id``, ``p."col"``)."""
+        """The output column list (a SQL select list). Required when the DAG has joins; it must include the
+        output PK. Reference sources by ``s{i}`` (left-to-right leaf order) or their ``.alias()`` names."""
         self._ensure_incremental("select")
         self._projection = projection
         return self
@@ -196,9 +298,7 @@ class TrickleBuilder:
     def aggregate(self, by=None, **metrics) -> "TrickleBuilder":
         """Group the composed output by ``by`` and maintain the ``metrics`` incrementally — a grouped merge
         Trickle keyed by ``by`` (the output ``pk`` defaults to it). Metrics are :mod:`duckstring.agg` specs
-        (``agg.count()`` / ``agg.sum(col)`` / ``agg.mean(col)`` — the distributive/algebraic set, maintained
-        from the delta alone). Terminal-bound to :meth:`merge`; ``.append`` and further joins/filters/selects
-        after it are out of the op set (use a downstream Trickle)."""
+        (count / sum / mean / min / max / var / stddev). Terminal-bound to :meth:`merge`."""
         self._ensure_incremental("aggregate")
         from .agg import Metric
 
@@ -223,17 +323,15 @@ class TrickleBuilder:
         in *comprehensive mode* — the home for anything outside the incremental op set (aggregation, window
         functions, ``DISTINCT``, set ops, …).
 
-        It **breaks incremental compute** (after ``.sql()`` there are no joins/key-prefilter/fast-path
-        shortcuts — the data is fully materialised) but **keeps incremental output**: the terminal
-        :meth:`merge` still diffs the result against the prior main, so only changed rows reach the changelog.
-        ``query`` is a SQL string, or — if you have Ibis installed — an Ibis expression, compiled lazily via
-        ``ibis.to_sql(..., dialect="duckdb")`` (see :meth:`to_ibis_schema`)."""
+        It **breaks incremental compute** but **keeps incremental output**: the terminal :meth:`merge` still
+        diffs the result against the prior main, so only changed rows reach the changelog. ``query`` is a SQL
+        string, or — with Ibis installed — an Ibis expression compiled lazily via ``ibis.to_sql``."""
         pond = self.pond
         if self._agg is not None:
             raise BuildError(".sql() can't follow .aggregate() — aggregate is terminal-bound to .merge()")
         if self._alias is None:
             raise BuildError(".sql() needs a table name to reference — call .alias('t') first, then '… FROM t'")
-        if self._materialised is None and self._joins and self._projection is None:
+        if self._materialised is None and isinstance(self._root, _Join) and self._projection is None:
             raise BuildError(
                 "pond.trickle(...).join(...).sql(...): add .select(...) before .sql() so the joined columns "
                 "are named for the query"
@@ -245,7 +343,6 @@ class TrickleBuilder:
             import ibis
 
             query = str(ibis.to_sql(query, dialect="duckdb"))
-        # Materialise the result into a stable temp table so it can't rebind if the alias is reused later.
         out_table = unique_name("sqlout")
         pond.con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(out_table)} AS {query}')
         out = TrickleBuilder(pond, out_table)
@@ -253,41 +350,32 @@ class TrickleBuilder:
         return out
 
     def schema(self) -> dict[str, str]:
-        """``{column: DuckDB type}`` for this node's current output — introspection, no execution. Most
-        useful on a projected or just-``.merge()``'d builder; pairs with :meth:`to_ibis_schema`."""
+        """``{column: DuckDB type}`` for this node's current output — introspection, no execution."""
         rel = self._materialised if self._materialised is not None else self._full_join()
         return {c: str(t) for c, t in zip(rel.columns, rel.types, strict=True)}
 
     def to_ibis_schema(self) -> dict[str, str]:
-        """:meth:`schema` mapped to Ibis type-strings — feed it to ``ibis.table(builder.to_ibis_schema(),
-        name="x")`` to build an Ibis expression, then hand that expression back to ``.sql()``. No Ibis
-        dependency (returns a plain dict). Raises on a DuckDB type with no Ibis mapping."""
+        """:meth:`schema` mapped to Ibis type-strings."""
         return {c: _duckdb_to_ibis(t) for c, t in self.schema().items()}
 
-    def merge(self, name: str, *, pk=None, retain_t=None, retain_n=None) -> "TrickleBuilder":
-        """Execute: compose ΔO from the changed sources' Z-sets (or recompute comprehensively) and apply it
-        to the output **merge** Trickle ``name`` (clean main + Z-set changelog). ``pk`` (**required**, except
-        after :meth:`aggregate` where it defaults to the group key) is the output identity / merge key — it
-        must be genuinely unique in the output (a many-to-many join that fans out past it corrupts the keyed
-        main).
+    # ─── terminals ──────────────────────────────────────────────────────────────
 
-        Returns a :class:`TrickleBuilder` rooted at the just-materialised ``name``, so joins can be chained
-        through intermediate materialisations **in one Ripple** —
-        ``a.join(b).merge("ab", pk=…).join(c).merge("abc", pk=…)``. Each ``.merge()`` stores its output's
-        trace (registry main + changelog), so a later run that changes only ``c`` reuses the stored ``ab``
-        instead of recomputing ``a⋈b`` — the same win as splitting into a downstream Trickle, without the
-        boilerplate (and without the parallelism a separate Ripple under a Wave would allow — a chain is
-        explicitly sequential). The returned handle carries ``ab``'s in-run delta (read from the registry),
-        so the downstream join composes without a round-trip through the not-yet-published data plane."""
+    def merge(self, name: str, *, pk=None, retain_t=None, retain_n=None) -> "TrickleBuilder":
+        """Compose ΔO from the changed sources (or recompute comprehensively) and apply it to the output
+        **merge** Trickle ``name`` (clean main + Z-set changelog). ``pk`` (**required**, except after
+        :meth:`aggregate` where it defaults to the group key) is the output identity / merge key.
+
+        Returns a chainable :class:`TrickleBuilder` rooted at ``name`` so joins can be chained through
+        intermediate materialisations **in one Ripple** — each ``.merge()`` persists the intermediate as a
+        cross-run trace (the explicit short-circuit to per-run recomputation)."""
         pond = self.pond
-        if self._agg is not None:  # grouped aggregate output (keyed by the group columns)
+        if self._agg is not None:
             from . import trickle_io as trickle
 
             by, metrics = self._agg["by"], self._agg["metrics"]
             out_pk = normalize_pk(pk) if pk is not None else by
             required = tuple(dict.fromkeys(by + tuple(c for _k, c, _h in metrics.values() if c is not None)))
             kind, rel = self._compute(required, name)
-            # min/max need the group's *current* membership to rescan on a retraction (the full join output).
             needs_current = kind == "incremental" and any(k in ("min", "max") for k, _c, _h in metrics.values())
             current = self._full_join() if needs_current else None
             trickle.apply_aggregate(pond.con, name, by, metrics, kind, rel, current, pond.f,
@@ -310,27 +398,14 @@ class TrickleBuilder:
     def append(
         self, name: str, *, pk=None, fail_on_conflict=True, log_drops=True, retain_t=None, retain_n=None
     ) -> "TrickleBuilder":
-        """Execute, writing the result to an **append** (insert-only history) Trickle ``name`` instead of a
-        merge main+changelog — the right terminal for a *monotonic* transform (output rows are only ever
-        added, never updated or retracted), e.g. enriching an append-only fact stream with stable/SCD dims.
+        """Execute, writing the result to an **append** (insert-only history) Trickle ``name`` — for a
+        *monotonic* transform (output rows only added, never updated/retracted). See the module docs and
+        :func:`duckstring.trickle_io.append_zset` for the conflict semantics.
 
-        An insert-only table can't reflect a change to the past, so a retraction in ΔO, or a ``+1`` row whose
-        ``pk`` is already in history with a **different** image, is a conflict (an identical-image collision
-        is a benign idempotent skip). ``fail_on_conflict=True`` (default — correctness first) raises; ``False``
-        drops the offending rows (history wins) and, with ``log_drops``, records them in a ``{name}__droplog``
-        companion (published alongside the table, like ``__changelog``). ``pk`` is optional but recommended:
-        with it set the conflict checks engage;
-        ``pk=None`` + ``fail_on_conflict=False`` skips them entirely (fast, sound only when duplicates and
-        past-changes are impossible by construction). Returns a chainable handle like :meth:`merge`.
-
-        **Spine-PK fast path** — when the output is keyed by the spine's own PK (passed through the projection
-        by identity) *and* conflicts are both waived (``fail_on_conflict=False``) and unlogged
-        (``log_drops=False``), a change to an existing output row is dropped-and-forgotten either way, so a
-        dimension delta cannot affect the result. The builder skips the dimension deltas entirely and enriches
-        only the **new spine rows** with the **current** dimension states — turning a small dimension churn
-        that would otherwise drive a spine scan into an O(spine delta) lookup. Detection is conservative (only
-        a verbatim ``s0.<pk>`` projection); anything else falls back to the general path, which is always
-        correct."""
+        **Spine-PK fast path** — when the output is keyed by the spine's own PK (a verbatim ``s0.<pk>``
+        projection) *and* conflicts are both waived (``fail_on_conflict=False``) and unlogged
+        (``log_drops=False``), a dimension delta cannot affect the result, so the builder enriches only the
+        **new spine rows** with the **current** dimension states (an O(spine delta) lookup)."""
         pond = self.pond
         if self._agg is not None:
             raise BuildError(".append() can't follow .aggregate() — an aggregate updates groups; use .merge()")
@@ -344,9 +419,8 @@ class TrickleBuilder:
             )
             return self._chain(name, out_pk)
 
-        spine_delta = self._spine_delta if self._spine_delta is not None else pond.read_delta(self.spine_ref)
-        spine_grained = all(t[4] in _SPINE_GRAINED for t in self._joins)
-        if (self._joins and spine_grained and not fail_on_conflict and not log_drops
+        spine_delta = self._spine_delta_value()
+        if (isinstance(self._root, _Join) and not fail_on_conflict and not log_drops
                 and self._spine_pk_passthrough(out_pk, spine_delta.pk)):
             candidate = self._full_join(spine_rel=self._new_spine_rows(spine_delta, name, out_pk))
             trickle.append_zset(
@@ -355,10 +429,8 @@ class TrickleBuilder:
             )
             return self._chain(name, out_pk)
 
-        kind, rel = self._compute(out_pk, name, spine_delta=spine_delta)
+        kind, rel = self._compute(out_pk, name)
         if kind != "empty":
-            # A comprehensive recompute is the whole current output (clean rows) → tag it +1; an incremental
-            # ΔO already carries its ±weights. append_zset filters retractions / pk conflicts either way.
             zset = trickle._as_zset(rel, 1) if kind == "comprehensive" else rel
             trickle.append_zset(
                 pond.con, name, zset, pond.f, out_pk,
@@ -366,20 +438,21 @@ class TrickleBuilder:
             )
         return self._chain(name, out_pk)
 
+    # ─── the append spine-PK fast path (output keyed by the spine's own identity) ──
+
     def _spine_pk_passthrough(self, out_pk, spine_pk):
-        """If every output-PK column is a verbatim ``s0.<col>`` pass-through of the **spine's** PK (so the
-        output is keyed by the spine's identity), return ``{out_col: spine_col}``; else ``None``. Conservative
-        — it bails on any computed / non-``s0`` / ambiguous PK column, so a false positive (which would wrongly
-        drop rows) is impossible; a false negative just forgoes the optimization."""
+        """If every output-PK column is a verbatim ``s0.<col>`` pass-through of the **spine's** PK, return
+        ``{out_col: spine_col}``; else ``None``. Conservative — it bails on any computed / non-``s0`` /
+        ambiguous PK column, so a false positive (which would wrongly drop rows) is impossible."""
         spine_pk = tuple(spine_pk or ())
         if not spine_pk or not out_pk or self._projection is None:
             return None
-        pat = _passthrough_re(self._alias or "s0")  # match against the spine's effective alias
+        pat = _passthrough_re(self._alias or "s0")
         proj = {}
         for item in _select_items(self._projection):
             m = pat.match(item)
             if m:
-                proj[(m.group(4) or m.group(2))] = m.group(2)  # output name → spine column
+                proj[(m.group(4) or m.group(2))] = m.group(2)
         smap = {}
         for p in out_pk:
             if p not in proj:
@@ -388,103 +461,310 @@ class TrickleBuilder:
         return smap if set(smap.values()) == set(spine_pk) else None
 
     def _new_spine_rows(self, spine_delta, name: str, out_pk):
-        """The spine rows that arrived/changed this run whose (mapped) PK is **not yet** in the output history
-        — the only rows that can produce a new append row when the output is spine-PK keyed."""
+        """The spine rows that arrived/changed this run whose (mapped) PK is **not yet** in the output
+        history — the only rows that can produce a new append row when the output is spine-PK keyed."""
         con = self.pond.con
-        new = spine_delta.upserts  # +1 net spine rows (clean user columns)
+        new = spine_delta.upserts
         smap = self._spine_pk_passthrough(out_pk, spine_delta.pk)
         if not _table_exists(con, name):
-            return new  # bootstrap → every row is new
+            return new
         v = unique_name("newsp")
         new.create_view(v, replace=True)
         spine_cols = ", ".join(_q(smap[p]) for p in out_pk)
         out_cols = ", ".join(_q(p) for p in out_pk)
         return con.sql(f'SELECT * FROM {_q(v)} WHERE ({spine_cols}) NOT IN (SELECT {out_cols} FROM {_q(name)})')
 
+    # ─── compute (the shared ΔO step behind .merge() and .append()) ───────────────
+
     def _compute(self, out_pk, name: str, spine_delta=None):
-        """Compose this build graph's change once. Returns ``(kind, rel)``:
-        ``("comprehensive", o_prime)`` — the whole output recomputed (clean rows), when any source can't
-        supply a clean delta or exceeds its threshold ``p``; ``("incremental", unioned)`` — the Z-set ΔO
-        (user cols + ``_duckstring_d``); ``("empty", None)`` — nothing changed. Shared by :meth:`merge` and
-        :meth:`append`. Validates ``.select`` is present for a joined graph and includes the PK."""
-        pond = self.pond
-        if self._joins and self._projection is None:
+        """Compose this DAG's change once. Returns ``(kind, rel)``: ``("comprehensive", o_prime)`` (whole
+        output recomputed, clean rows), ``("incremental", delta)`` (the Z-set ΔO, user cols + ``_duckstring_d``),
+        or ``("empty", None)`` (nothing changed). Validates ``.select`` is present for a joined DAG and that
+        it includes the PK."""
+        if isinstance(self._root, _Join) and self._projection is None:
             raise BuildError(
-                f"pond.trickle('{self.spine_ref}').join(...): a joined graph needs .select(...) to name the "
+                f"pond.trickle('{self.spine_ref}').join(...): a joined DAG needs .select(...) to name the "
                 f"output columns (and include the PK)"
             )
-        hows = [t[4] for t in self._joins]
-        outer = any(h in ("right", "full") for h in hows)
-        if outer and len(self._joins) > 1:
-            raise BuildError(
-                "a right/full outer join must be the only join in a builder (it preserves unmatched rows, so "
-                "it can't anchor a star) — do the multi-way part in a downstream Trickle"
-            )
-        refs = [self.spine_ref] + [t[0] for t in self._joins]
-        ps = [self.p] + [t[2] for t in self._joins]
-        # The spine of a chained builder is a just-materialised in-run Trickle: use its known delta, not the
-        # (unpublished) data-plane read. Dimensions are always bare sources read the normal way.
-        if spine_delta is None:
-            spine_delta = self._spine_delta if self._spine_delta is not None else pond.read_delta(self.spine_ref)
-        deltas = [spine_delta] + [pond.read_delta(r) for r in refs[1:]]
-
-        over = any(self._over_threshold(r, d, p) for r, d, p in zip(refs, deltas, ps, strict=True))
-        # Comprehensive: any source full-reads, a source is over its threshold, or a right/full outer join
-        # (preserves unmatched rows → not incrementalised here). _full_join honours every join type.
-        if outer or any(d.is_full for d in deltas) or over:
-            o_prime = self._full_join()
+        self._prepare_leaves()
+        state = self._compile(self._root)
+        if state.is_full:
+            o_prime = self._project_current(state)
             self._require_pk(out_pk, o_prime.columns)
             return "comprehensive", o_prime
-        states = [self._state_views(r, d) for r, d in zip(refs, deltas, strict=True)]
-        if not any(st["changed"] for st in states):
+        if not state.changed:
             return "empty", None
-        if all(h == "inner" for h in hows):
-            # All-inner star → the bilinear telescoping sum (one term per changed source).
-            terms = [self._term(i, states) for i, st in enumerate(states) if st["changed"]]
-            delta_rel = pond.con.sql(" UNION ALL BY NAME ".join(f"({t})" for t in terms))
-        else:
-            # A spine-grained non-inner star (left/semi/anti, possibly mixed with inner) → recompute the
-            # affected spine rows over new (+1) and old (−1) states and diff.
-            delta_rel = self._spine_recompute(states)
+        delta_rel = self._project_delta(state)
         self._require_pk(out_pk, [c for c in delta_rel.columns if c != D_COL])
         return "incremental", delta_rel
 
-    def _spine_recompute(self, states):
-        """ΔO for a spine-grained star with a non-inner join. Recompute the full star (honouring each join's
-        ``how``) for the **affected spine rows** — those in the spine delta or matching a changed dimension's
-        delta keys — over the new states (``+1``) and old states (``−1``), and diff. Over-inclusion is safe
-        (an unchanged row's old and new outputs cancel); the filter just keeps the recompute bounded by the
-        delta rather than the whole spine."""
-        affected = self._affected_filter(states)
-        aliases = self._aliases()
-        new = self._recompute_select([st["current"] for st in states], aliases, 1, affected)
-        old = self._recompute_select([st["prior"] for st in states], aliases, -1, affected)
-        return self.pond.con.sql(f"({new}) UNION ALL BY NAME ({old})")
+    def _full_join(self, spine_rel=None):
+        """The clean current output (filter + projection applied), recomputed from the current source
+        states — the comprehensive recompute, also reused by ``.sql``/``.schema``/aggregate-rescan. With a
+        ``spine_rel`` the leftmost leaf is backed by that relation (the append spine-PK fast path)."""
+        self._prepare_leaves()
+        cols, current = self._compile_current(self._root, spine_rel)
+        state = _NodeState(cols, current, current, None, False, False)
+        return self._project_current(state)
 
-    def _recompute_select(self, backing, aliases, sign: int, spine_filter: str) -> str:
-        projection = self._projection or f"{aliases[0]}.*"
-        where = f" WHERE {' AND '.join(self._filters)}" if self._filters else ""
-        return (
-            f"SELECT {projection}, {sign} AS {_q(D_COL)} "
-            f"FROM {self._from_clause(backing, aliases, spine_filter)}{where}"
+    # ─── leaf bookkeeping ────────────────────────────────────────────────────────
+
+    def _leaves(self) -> list[_Source]:
+        return self._root.leaves()
+
+    def _prepare_leaves(self) -> None:
+        """Assign each leaf its effective alias (explicit, else positional ``s{i}`` by left-to-right order)
+        and validate uniqueness. Called at the start of every compile."""
+        leaves = self._leaves()
+        self._alias_of = {}
+        seen = set()
+        for i, leaf in enumerate(leaves):
+            a = leaf.alias or f"s{i}"
+            if a in seen:
+                raise BuildError(f"duplicate source alias '{a}' — give each .trickle(...) a distinct .alias()")
+            seen.add(a)
+            self._alias_of[id(leaf)] = a
+
+    def _alias_for(self, leaf: _Source) -> str:
+        return self._alias_of[id(leaf)]
+
+    def _bare_cols(self, leaf: _Source) -> list[str]:
+        if id(leaf) not in self._cols_cache:
+            self._cols_cache[id(leaf)] = list(self.pond.read_table(leaf.ref).columns)
+        return self._cols_cache[id(leaf)]
+
+    @property
+    def _spine(self) -> _Source:
+        leaves = self._leaves()
+        return leaves[0]
+
+    @property
+    def _spine_delta(self):
+        return self._spine.threaded_delta
+
+    def _spine_delta_value(self):
+        s = self._spine
+        return s.threaded_delta if s.threaded_delta is not None else self.pond.read_delta(s.ref)
+
+    def _aliases_set(self) -> set[str]:
+        return set(self._alias_of.values())
+
+    # ─── compile: current-only (no deltas) ───────────────────────────────────────
+
+    def _compile_current(self, node, spine_override=None):
+        """Build the view(s) for ``node``'s full current state and return ``(cols, view)``. ``spine_override``
+        (a relation) backs the leftmost leaf instead of its source read (the fast path)."""
+        if isinstance(node, _Source):
+            a = self._alias_for(node)
+            if spine_override is not None:
+                cols = [f"{a}.{c}" for c in spine_override.columns]
+                base = unique_name("ovr")
+                spine_override.create_view(base, replace=True)
+                bare = spine_override.columns
+            else:
+                rel = self.pond.read_table(node.ref)
+                bare = list(rel.columns)
+                cols = [f"{a}.{c}" for c in bare]
+                base = unique_name("src")
+                rel.create_view(base, replace=True)
+            sel = ", ".join(f'{_q(c)} AS {_q(f"{a}.{c}")}' for c in bare)
+            return cols, self._view(f"SELECT {sel} FROM {_q(base)}")
+        # _Join — the leftmost leaf lives in the left subtree, so the override goes left.
+        lcols, lcur = self._compile_current(node.left, spine_override)
+        rcols, rcur = self._compile_current(node.right, None)
+        cols, cur = self._join_view(node, lcols, lcur, rcols, rcur)
+        return cols, cur
+
+    def _join_view(self, node, lcols, lcur, rcols, rcur, *, weight=None):
+        """Emit one join view over the two child views. ``weight`` (``+1``/``−1``) appends a ``_duckstring_d``
+        column (for delta terms); ``None`` is a plain state join. Returns ``(out_cols, view_name)``."""
+        out_cols = lcols if node.how in _LEFT_ONLY else lcols + rcols
+        pairs = self._resolve_pairs(node)
+        cond = " AND ".join(f'L.{_q(lq)} = R.{_q(rq)}' for lq, rq in pairs)
+        sel = ", ".join(f'L.{_q(c)} AS {_q(c)}' for c in lcols)
+        if node.how not in _LEFT_ONLY:
+            sel += ", " + ", ".join(f'R.{_q(c)} AS {_q(c)}' for c in rcols)
+        if weight is not None:
+            sel += f", {int(weight)} AS {_q(D_COL)}"
+        sql = f"SELECT {sel} FROM {_q(lcur)} L {_JOIN_SQL[node.how]} {_q(rcur)} R ON {cond}"
+        return out_cols, self._view(sql)
+
+    # ─── compile: full (current + old + delta) ───────────────────────────────────
+
+    def _compile(self, node) -> _NodeState:
+        if isinstance(node, _Source):
+            return self._compile_source(node)
+        return self._compile_join(node)
+
+    def _compile_source(self, node: _Source) -> _NodeState:
+        a = self._alias_for(node)
+        rel = self.pond.read_table(node.ref)
+        bare = list(rel.columns)
+        self._cols_cache[id(node)] = bare
+        cols = [f"{a}.{c}" for c in bare]
+        base = unique_name("src")
+        rel.create_view(base, replace=True)
+        sel = ", ".join(f'{_q(c)} AS {_q(f"{a}.{c}")}' for c in bare)
+        current = self._view(f"SELECT {sel} FROM {_q(base)}")
+
+        delta = node.threaded_delta if node.threaded_delta is not None else self.pond.read_delta(node.ref)
+        is_full = delta.is_full
+        changed = is_full
+        delta_view = None
+        old = current
+        if not is_full:
+            if delta.is_empty():
+                return _NodeState(cols, current, current, None, False, False)
+            changed = True
+            if self._over_threshold(node.ref, delta, node.p):
+                return _NodeState(cols, current, current, None, True, True)
+            dbase = unique_name("dsrc")
+            delta.zset.create_view(dbase, replace=True)
+            dsel = ", ".join(f'{_q(c)} AS {_q(f"{a}.{c}")}' for c in bare) + f", {_q(D_COL)} AS {_q(D_COL)}"
+            delta_view = self._view(f"SELECT {dsel} FROM {_q(dbase)}")
+            old = self._reconstruct_old(cols, current, delta_view)
+        return _NodeState(cols, current, old, delta_view, changed, is_full)
+
+    def _compile_join(self, node: _Join) -> _NodeState:
+        ls = self._compile(node.left)
+        rs = self._compile(node.right)
+        out_cols = ls.cols if node.how in _LEFT_ONLY else ls.cols + rs.cols
+        is_full = ls.is_full or rs.is_full
+        changed = ls.changed or rs.changed
+        _, current = self._join_view(node, ls.cols, ls.current, rs.cols, rs.current)
+        if is_full or not changed:
+            return _NodeState(out_cols, current, current, None, changed, is_full)
+        _, old = self._join_view(node, ls.cols, ls.old, rs.cols, rs.old)
+        delta = self._join_delta(node, ls, rs, out_cols)
+        return _NodeState(out_cols, current, old, delta, True, False)
+
+    def _join_delta(self, node: _Join, ls: _NodeState, rs: _NodeState, out_cols) -> str:
+        """δ(L ⋈ R) by the affected-key recompute: K = the changed sides' join-key values; recompute the
+        join restricted to ``key ∈ K`` over the new states (+1) and the old states (−1), and consolidate."""
+        pairs = self._resolve_pairs(node)
+        k = self._affected_keys(ls, rs, pairs)
+        new = self._restricted_join(node, ls.cols, ls.current, rs.cols, rs.current, pairs, k, 1)
+        old = self._restricted_join(node, ls.cols, ls.old, rs.cols, rs.old, pairs, k, -1)
+        cols_sql = ", ".join(_q(c) for c in out_cols)
+        return self._view(
+            f"SELECT {cols_sql}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} "
+            f"FROM (SELECT * FROM {_q(new)} UNION ALL BY NAME SELECT * FROM {_q(old)}) "
+            f"GROUP BY {cols_sql} HAVING SUM({_q(D_COL)}) <> 0"
         )
 
-    def _affected_filter(self, states) -> str:
-        """A SQL predicate over the spine's own columns selecting the rows whose output could have changed:
-        the changed spine rows themselves, plus any spine row whose join key matches a changed dimension's
-        delta. (Evaluated inside the spine subquery, so it names bare spine columns + the delta views.)"""
-        clauses = []
-        sp = states[0]
-        if sp["changed"]:
-            cols = ", ".join(_q(c) for c in sp["user"])
-            clauses.append(f"({cols}) IN (SELECT {cols} FROM {_q(sp['delta'])})")
-        for i, st in enumerate(states[1:], start=1):
-            if st["changed"]:
-                _dim_ref, pairs, _p, _alias, _how = self._joins[i - 1]
-                sc = ", ".join(_q(s) for s, _d in pairs)
-                dc = ", ".join(_q(d) for _s, d in pairs)
-                clauses.append(f"({sc}) IN (SELECT {dc} FROM {_q(st['delta'])})")
-        return " OR ".join(clauses) if clauses else "1=0"
+    def _affected_keys(self, ls: _NodeState, rs: _NodeState, pairs) -> str:
+        """A view of the changed join-key values: the left-side key columns of ``δL`` ∪ the right-side key
+        columns of ``δR`` (aliased to a common ``k0,k1,…``)."""
+        knames = [f"k{i}" for i in range(len(pairs))]
+        ksel = ", ".join(knames)
+        parts = []
+        if ls.changed and ls.delta is not None:
+            sel = ", ".join(f'{_q(lq)} AS {kn}' for (lq, _rq), kn in zip(pairs, knames, strict=True))
+            parts.append(f"SELECT {sel} FROM {_q(ls.delta)}")
+        if rs.changed and rs.delta is not None:
+            sel = ", ".join(f'{_q(rq)} AS {kn}' for (_lq, rq), kn in zip(pairs, knames, strict=True))
+            parts.append(f"SELECT {sel} FROM {_q(rs.delta)}")
+        return self._view(f"SELECT DISTINCT {ksel} FROM ({' UNION ALL '.join(parts)})")
+
+    def _restricted_join(self, node, lcols, lview, rcols, rview, pairs, kview, weight) -> str:
+        """A join view of two states with **both** inputs pre-filtered to ``key ∈ K`` and the rows weighted
+        ``weight`` — the affected-key recompute term."""
+        lkey = ", ".join(_q(lq) for lq, _rq in pairs)
+        rkey = ", ".join(_q(rq) for _lq, rq in pairs)
+        ksel = ", ".join(f"k{i}" for i in range(len(pairs)))
+        lk = self._view(f"SELECT * FROM {_q(lview)} WHERE ({lkey}) IN (SELECT {ksel} FROM {_q(kview)})")
+        rk = self._view(f"SELECT * FROM {_q(rview)} WHERE ({rkey}) IN (SELECT {ksel} FROM {_q(kview)})")
+        _, view = self._join_view(node, lcols, lk, rcols, rk, weight=weight)
+        return view
+
+    def _reconstruct_old(self, cols, current, delta_view) -> str:
+        """``prior = consolidate(current(+1) ⊎ −delta)`` — the source's state before this run's change."""
+        sel = ", ".join(_q(c) for c in cols)
+        return self._view(
+            f"SELECT {sel} FROM ("
+            f"SELECT {sel}, 1 AS {_q(_W)} FROM {_q(current)} "
+            f"UNION ALL BY NAME SELECT {sel}, -{_q(D_COL)} AS {_q(_W)} FROM {_q(delta_view)}"
+            f") GROUP BY {sel} HAVING SUM({_q(_W)}) > 0"
+        )
+
+    # ─── join-key resolution ──────────────────────────────────────────────────────
+
+    def _resolve_pairs(self, node: _Join):
+        """Resolve each raw ``(left_name, right_name)`` of ``node`` to a ``(left_qualified, right_qualified)``
+        column pair, by searching the left/right subtrees' leaf columns."""
+        out = []
+        for lname, rname in node.on_pairs:
+            lq = self._resolve_col(node.left, lname, prefer_leftmost=True)
+            rq = self._resolve_col(node.right, rname, prefer_leftmost=False)
+            out.append((lq, rq))
+        return out
+
+    def _resolve_col(self, subtree, name: str, *, prefer_leftmost: bool) -> str:
+        """Find the qualified column for ``name`` within ``subtree``. ``name`` may be ``alias.col`` (exact)
+        or a bare column (unique across the subtree's leaves; ties broken by the leftmost leaf only when
+        ``prefer_leftmost`` — else ambiguity raises)."""
+        if "." in name:
+            alias, _, col = name.partition(".")
+            for leaf in subtree.leaves():
+                if self._alias_for(leaf) == alias and col in self._bare_cols(leaf):
+                    return f"{alias}.{col}"
+            raise BuildError(f"join key '{name}' not found among the operand's sources")
+        hits = [leaf for leaf in subtree.leaves() if name in self._bare_cols(leaf)]
+        if not hits:
+            raise BuildError(f"join key '{name}' not found among the operand's sources")
+        if len(hits) > 1 and not prefer_leftmost:
+            aliases = [self._alias_for(leaf) for leaf in hits]
+            raise BuildError(
+                f"join key '{name}' is ambiguous across {aliases} — qualify it as 'alias.{name}' or rename"
+            )
+        return f"{self._alias_for(hits[0])}.{name}"
+
+    # ─── projection / filter ──────────────────────────────────────────────────────
+
+    def _filter_clause(self) -> str:
+        if not self._filters:
+            return ""
+        aliases = self._aliases_set()
+        return " WHERE " + " AND ".join(_qualify(p, aliases) for p in self._filters)
+
+    def _projection_sql(self, state: _NodeState) -> str:
+        """The output select list: qualified internal columns mapped to **bare** output names. With no
+        ``.select`` (a single-source build) the leftmost leaf's columns pass through bare."""
+        aliases = self._aliases_set()
+        if self._projection is None:
+            spine = self._spine
+            a = self._alias_for(spine)
+            return ", ".join(f'{_q(f"{a}.{c}")} AS {_q(c)}' for c in self._bare_cols(spine))
+        out = []
+        star = re.compile(r"^(\w+)\.\*$")
+        bare = re.compile(r'^(\w+)\.("?)(\w+)\2$')
+        for item in _select_items(self._projection):
+            s = item.strip()
+            sm = star.match(s)
+            if sm and sm.group(1) in aliases:
+                a = sm.group(1)
+                leaf = next(leaf for leaf in self._leaves() if self._alias_for(leaf) == a)
+                out += [f'{_q(f"{a}.{c}")} AS {_q(c)}' for c in self._bare_cols(leaf)]
+                continue
+            q = _qualify(item, aliases)
+            bm = bare.match(s)
+            if bm and bm.group(1) in aliases:
+                out.append(f"{q} AS {_q(bm.group(3))}")
+            else:
+                out.append(q)
+        return ", ".join(out)
+
+    def _project_current(self, state: _NodeState):
+        proj = self._projection_sql(state)
+        return self.pond.con.sql(f"SELECT {proj} FROM {_q(state.current)}{self._filter_clause()}")
+
+    def _project_delta(self, state: _NodeState):
+        proj = self._projection_sql(state)
+        return self.pond.con.sql(
+            f"SELECT {proj}, {_q(D_COL)} FROM {_q(state.delta)}{self._filter_clause()}"
+        )
+
+    # ─── misc ─────────────────────────────────────────────────────────────────────
 
     def _require_pk(self, out_pk, cols) -> None:
         missing = [c for c in out_pk if c not in cols]
@@ -493,16 +773,13 @@ class TrickleBuilder:
 
     def _chain(self, name: str, out_pk) -> "TrickleBuilder":
         """Thread the just-materialised output forward as a chainable in-run operand — its delta read back
-        from the registry (same coverage rule as the published read_delta), so a downstream ``.join(...)``
-        composes without a round-trip through the not-yet-published data plane."""
+        from the registry (same coverage rule as the published read_delta)."""
         threaded = read_registry_delta(self.pond.con, name, self.pond.previous_f, self.pond.f, out_pk)
         return TrickleBuilder(self.pond, name, _spine_delta=threaded)
 
-    # ─── internals ────────────────────────────────────────────────────────────
-
     def _over_threshold(self, ref: str, delta, p: float) -> bool:
         """Whether ``delta`` touches more than fraction ``p`` of ``ref``'s current rows (``p >= 1`` never
-        trips and skips the count; ``p <= 0`` trips on any change). A full read is handled separately."""
+        trips and skips the count; ``p <= 0`` trips on any change)."""
         if p >= 1.0 or delta.is_full:
             return False
         total = self.pond.read_table(ref).aggregate("count(*) AS n").fetchone()[0] or 0
@@ -510,101 +787,7 @@ class TrickleBuilder:
             return False
         return delta.keys_count() > p * total
 
-    def _state_views(self, ref: str, delta) -> dict:
-        """Register the current state, and (if the source changed) the delta and reconstructed prior state,
-        as uniquely-named views. ``prior = consolidate(current(+1) ⊎ −delta)`` — only built when changed
-        (an unchanged source's prior is its current)."""
-        con = self.pond.con
-        current_rel = self.pond.read_table(ref)
-        user = list(current_rel.columns)
-        cur = unique_name("cur")
-        current_rel.create_view(cur, replace=True)
-        st = {"user": user, "current": cur, "changed": not delta.is_empty()}
-        if not st["changed"]:
-            st["prior"] = cur
-            st["delta"] = None
-            return st
-        dview = unique_name("dlt")
-        delta.zset.create_view(dview, replace=True)
-        st["delta"] = dview
-        sel = ", ".join(_q(c) for c in user)
-        prior = unique_name("pri")
-        con.execute(
-            f'CREATE OR REPLACE TEMP VIEW {_q(prior)} AS '
-            f'SELECT {sel} FROM ('
-            f'  SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(cur)} '
-            f'  UNION ALL BY NAME SELECT {sel}, -{_q(D_COL)} AS {_q(D_COL)} FROM {_q(dview)}'
-            f') GROUP BY {sel} HAVING SUM({_q(D_COL)}) > 0'
-        )
-        st["prior"] = prior
-        return st
-
-    def _aliases(self) -> list[str]:
-        """The SQL alias for each source — the spine then each dimension. A source's ``.alias()`` name if it
-        set one, else the positional ``s{j}`` fallback (so unaliased graphs read exactly as before)."""
-        out = [self._alias or "s0"]
-        out += [alias or f"s{i + 1}" for i, (_ref, _pairs, _p, alias, _how) in enumerate(self._joins)]
-        return out
-
-    def _from_clause(self, backing: list[str], aliases: list[str], spine_filter: str | None = None) -> str:
-        """The ``FROM spine JOIN dim …`` clause, source ``j`` SQL-aliased ``aliases[j]`` and backed by
-        ``backing[j]`` (a view). ``spine_filter`` (a SQL predicate over the spine's own columns) restricts
-        the spine *before* the join — the key pre-filter (see :meth:`_term`)."""
-        s0a = aliases[0]
-        s0 = (f'(SELECT * FROM {_q(backing[0])} WHERE {spine_filter})' if spine_filter else _q(backing[0]))
-        parts = [f'{s0} {s0a}']
-        for d, (_dim_ref, pairs, _p, _alias, how) in enumerate(self._joins):
-            a = aliases[d + 1]
-            cond = " AND ".join(f'{s0a}.{_q(sc)} = {a}.{_q(dc)}' for sc, dc in pairs)
-            parts.append(f'{_JOIN_SQL[how]} {_q(backing[d + 1])} {a} ON {cond}')
-        return " ".join(parts)
-
-    def _term(self, i: int, states: list[dict]) -> str:
-        """Telescoping term where source ``i`` contributes its delta: sources before ``i`` use their *new*
-        (current) state, source ``i`` its delta, sources after ``i`` their *old* (prior) state. The term's
-        weight is source ``i``'s ``_duckstring_d`` (every other operand is a clean +1 state).
-
-        **Key pre-filter** — when a *dimension* (``i >= 1``) is the delta, the (large) spine is restricted
-        to the rows whose join key matches that dimension's changed keys before the join, so a small
-        dimension change doesn't drive a full spine scan. Sound for *any* equi-join (it is the semi-join
-        the join already performs) and inclusive of deletes (a retraction carries the full image, so its
-        join key is in the delta). This is the general-purpose performance lever; the join key need not be
-        the dimension's PK."""
-        aliases = self._aliases()
-        backing = []
-        for j, st in enumerate(states):
-            if j < i:
-                backing.append(st["current"])
-            elif j == i:
-                backing.append(st["delta"])
-            else:
-                backing.append(st["prior"])
-        spine_filter = None
-        if i >= 1:  # a dimension changed → pre-filter the spine to its affected keys
-            _dim_ref, pairs, _p, _alias, _how = self._joins[i - 1]
-            sc = ", ".join(_q(s) for s, _d in pairs)
-            dc = ", ".join(_q(d) for _s, d in pairs)
-            spine_filter = f"({sc}) IN (SELECT {dc} FROM {_q(states[i]['delta'])})"
-        projection = self._projection or f"{aliases[0]}.*"
-        where = f" WHERE {' AND '.join(self._filters)}" if self._filters else ""
-        return (
-            f'SELECT {projection}, {aliases[i]}.{_q(D_COL)} AS {_q(D_COL)} '
-            f'FROM {self._from_clause(backing, aliases, spine_filter)}{where}'
-        )
-
-    def _full_join(self, spine_rel=None):
-        """The output over the current source states + filter + projection (clean rows, no weight). With no
-        ``spine_rel`` this is the comprehensive recompute (spine at its full current state); with one, the
-        spine is backed by that relation instead — the spine-PK fast path joins only the *new* spine rows to
-        the current dimensions."""
-        con = self.pond.con
-        aliases = self._aliases()
-        backing = []
-        for j, ref in enumerate([self.spine_ref] + [t[0] for t in self._joins]):
-            v = unique_name("full")
-            rel = spine_rel if (j == 0 and spine_rel is not None) else self.pond.read_table(ref)
-            rel.create_view(v, replace=True)
-            backing.append(v)
-        projection = self._projection or f"{aliases[0]}.*"
-        where = f" WHERE {' AND '.join(self._filters)}" if self._filters else ""
-        return con.sql(f"SELECT {projection} FROM {self._from_clause(backing, aliases)}{where}")
+    def _view(self, sql: str) -> str:
+        v = unique_name("dag")
+        self.pond.con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(v)} AS {sql}")
+        return v
