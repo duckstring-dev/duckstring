@@ -180,7 +180,8 @@ A fluent builder that composes an incremental join from its sources' Z-set delta
 - **`on`** is a shared column name (or list), or a `{spine_col: dim_col}` dict — **any** equi-join key (no FK=PK requirement). **`how`** ∈ `inner` (default) / `left` / `right` / `full` / `semi` / `anti`: `inner`/`left`/`semi`/`anti` are spine-grained and maintained incrementally (compose in a multi-way star); `right`/`full` must be the only join and recompute comprehensively.
 - **`.merge(name, pk=…)`** — `pk` is **required** (the output identity; must be unique in the output). **`.select`** is required once there's a join and must include the PK; computed columns are allowed.
 - The spine is `s0`, dimensions `s1`, `s2`, … in the projection — or name each source with **`.alias(name)`** and reference that (`o.id`, `p."col"`). `s0`/`s1` stay the fallback; aliasing makes the select reorder-safe.
-- **`.sql(query)`** — the comprehensive escape hatch for anything outside the incremental op set (aggregation, windows, `DISTINCT`, set ops). Name the builder with `.alias()`, then `.sql("… FROM that_name")`. It materialises (no incremental compute, no fast path after it — `.join`/`.select`/`.filter` raise) but the terminal `.merge()` still diffs → incremental delta out. Accepts a SQL string or, if Ibis is installed, an Ibis expression (compiled lazily). See **`.to_ibis_schema()`** (and **`.schema()`**) → a `{column: type}` dict for `ibis.table(...)`.
+- **`.aggregate(by, **metrics)`** (and the Ibis-shaped **`.group_by(by).aggregate(**metrics)`**) — a grouped aggregate maintained **incrementally**: a merge Trickle keyed by `by` (`pk` defaults to `by`). Metrics are [`duckstring.agg`](#aggregate-metrics) specs — `agg.count()`, `agg.sum(col)`, `agg.mean(col)` (distributive/algebraic, maintained from the delta alone; raw accumulators in a registry-only companion, only changed groups emitted). Terminal-bound to `.merge()`; `.append`/further joins after it raise (do it downstream). Anything outside this metric set → `.sql()`.
+- **`.sql(query)`** — the comprehensive escape hatch for anything outside the incremental op set (non-distributive aggregation, windows, `DISTINCT`, set ops). Name the builder with `.alias()`, then `.sql("… FROM that_name")`. It materialises (no incremental compute, no fast path after it — `.join`/`.select`/`.filter` raise) but the terminal `.merge()` still diffs → incremental delta out. Accepts a SQL string or, if Ibis is installed, an Ibis expression (compiled lazily). See **`.to_ibis_schema()`** (and **`.schema()`**) → a `{column: type}` dict for `ibis.table(...)`.
 - Any table is a valid source (Trickle or overwrite Ripple).
 - **`p`** (per source, default `0.3`) is the change-fraction threshold: past that share of a source's rows the builder recomputes comprehensively for that run; `p=1.0` disables the check.
 - Bootstrap / coverage-miss / changed-Ripple / over-`p` → comprehensive recompute diffed against the last-written main. The op set is closed — a snowflake dimension, a missing merge key, or a joined graph with no `.select` raises at build time.
@@ -188,6 +189,18 @@ A fluent builder that composes an incremental join from its sources' Z-set delta
 - **`.merge(...)` / `.append(...)` return a builder rooted at the table just written**, so joins chain through materialised intermediates in one Ripple — `a.join(b).merge("ab", pk=…).join(c).merge("abc", pk=…)`. Each terminal stores its output's trace, so a later run that changes only `c` reuses the stored `ab` instead of recomputing `a⋈b`. The returned handle is the next **spine** (its in-run delta is threaded forward); a composed builder still can't be a *dimension*.
 
 See the [guide](../guides/trickle.md#the-builder-pondtrickle).
+
+### Aggregate metrics
+
+`duckstring.agg` — the metric specs for `.aggregate(by, **metrics)`. Distributive/algebraic only (maintained from the delta alone):
+
+| Spec | Result |
+|---|---|
+| `agg.count()` | rows in the group (`count(*)`) |
+| `agg.sum(col)` | running sum (NULLs ignored; all-NULL group → NULL) |
+| `agg.mean(col)` | `sum(col) / count(col)` over non-NULL values |
+
+`min`/`max` (retraction-aware) and `var`/`stddev` are planned. For anything else, aggregate via `.sql()`.
 
 ## Execution environment
 

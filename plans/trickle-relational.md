@@ -230,9 +230,11 @@ Effort: large. This is a new stateful operator. The distributive metrics (sum/co
    `priced→revenue` split into one ripple even before native aggregation lands.
 3. ✅ **`.schema()` / `.to_ibis_schema()` + `.sql(expr)`.** Small; rides on (2).
 4. ✅ **`how="left"` join (spine-preserved).** Medium; the highest-value join gap.
-5. **Incremental aggregation — distributive (sum/count/mean).** Large; the headline. Supersedes the
-   `.sql()` aggregate for the common case with a genuinely incremental one.
-6. **Aggregation — min/max (rescan) + var/stddev.** Large.
+5. ✅ **Incremental aggregation — distributive (sum/count/mean).** `.aggregate(by, **metrics)` /
+   `.group_by(by).aggregate(...)` with `duckstring.agg` specs; additive accumulators in a registry-only
+   `_duckstring_agg_{name}` companion (f-stamped for replay), derived main; comprehensive rebuild on
+   bootstrap/coverage-miss. `trickle_io.apply_aggregate`.
+6. **Aggregation — min/max (rescan) + var/stddev.** Large; next.
 7. ✅ **`how=` right/full/semi/anti.** Done together with (4): `left`/`semi`/`anti` are spine-grained and
    incremental (telescoping for all-inner, `_spine_recompute` for any non-inner star); `right`/`full` are
    solo-only and **comprehensive** (correct, **incremental still deferred** — the next join-side step).

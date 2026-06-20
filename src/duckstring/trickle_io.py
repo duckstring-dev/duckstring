@@ -65,6 +65,10 @@ CHANGELOG_SUFFIX = "__changelog"
 # conflicts under ``fail_on_conflict=False``) in a ``{table}__droplog`` companion — an append-only diagnostic
 # published alongside the table (like ``__changelog``), one growing record of what each run dropped.
 DROPLOG_SUFFIX = "__droplog"
+# A ``.aggregate(...)`` output keeps its raw accumulators (count + per-summed-col sum & non-NULL count) in a
+# ``_duckstring_agg_{name}`` companion. Reserved prefix → ``registry_tables`` hides it from publish; the
+# published main holds only the derived user columns.
+AGG_STATE_PREFIX = "_duckstring_agg_"
 # The mode/PK registry: one row per Trickle output table. Named in the reserved namespace so
 # ``registry_tables`` hides it from the publish set.
 META_TABLE = "_duckstring_trickle"
@@ -604,6 +608,126 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
     else:
         zset = con.sql(f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)}')
     apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n)
+
+
+# ─── write: incremental aggregation (distributive / algebraic) ──────────────────
+
+
+def apply_aggregate(con, name, by, metrics, kind, rel, f, *, retain_t=None, retain_n=None) -> None:
+    """Maintain a grouped aggregate output ``name`` (a merge Trickle keyed by ``by``) incrementally.
+
+    ``metrics`` is ``{out_col: (kind, src_col)}`` with kind ∈ ``count`` / ``sum`` / ``mean`` (distributive
+    /algebraic — maintainable from the delta alone). Raw accumulators (count, and per summed/meaned column a
+    running sum + non-NULL count) live in a registry-only ``_duckstring_agg_{name}`` companion; the published
+    main holds only the derived user columns. ``kind`` is the builder's ``_compute`` class for the input:
+    ``incremental`` (a Z-set ΔO → fold weighted contributions into the accumulators, O(δ)), ``comprehensive``
+    (a full clean output → rebuild the accumulators wholesale), or ``empty`` (no-op)."""
+    if f is None:
+        raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
+    if kind == "empty":
+        return
+    by = tuple(by)
+    by_list = ", ".join(_q(b) for b in by)
+    sum_cols: list[str] = []
+    for _out, (k, c) in metrics.items():
+        if k in ("sum", "mean") and c not in sum_cols:
+            sum_cols.append(c)
+    sidx = {c: i for i, c in enumerate(sum_cols)}
+    state = f"{AGG_STATE_PREFIX}{name}"
+    acc_order = ["_a_cnt"] + [col for i in range(len(sum_cols)) for col in (f"_a_sum_{i}", f"_a_cnt_{i}")]
+
+    if kind == "comprehensive":
+        _agg_rebuild(con, state, rel, by_list, sum_cols, f)
+        derived = con.sql(f"SELECT {by_list}, {_agg_derive(metrics, sidx)} FROM {_q(state)} WHERE _a_cnt > 0")
+        merge_table(con, name, derived, f, by, retain_t=retain_t, retain_n=retain_n)
+        return
+
+    # Incremental: ΔO is a Z-set (user cols + _duckstring_d). Per-group accumulator delta (a +1/-1 row
+    # contributes ±x to the sum and ±1 to the counts — the distributive fold, O(δ)).
+    delta = unique_name("aggd")
+    rel.create_view(delta, replace=True)
+    dexprs = [f"CAST(SUM({_q(D_COL)}) AS BIGINT) AS _a_cnt"]
+    for i, c in enumerate(sum_cols):
+        dexprs.append(f"COALESCE(SUM({_q(D_COL)} * {_q(c)}), 0) AS _a_sum_{i}")
+        dexprs.append(f"CAST(SUM(CASE WHEN {_q(c)} IS NOT NULL THEN {_q(D_COL)} ELSE 0 END) AS BIGINT) AS _a_cnt_{i}")
+    dacc = unique_name("dacc")
+    con.execute(
+        f"CREATE OR REPLACE TEMP TABLE {_q(dacc)} AS "
+        f"SELECT {by_list}, {', '.join(dexprs)} FROM {_q(delta)} GROUP BY {by_list}"
+    )
+
+    # Merge the accumulator delta into the state — additive, for affected groups not already at this f (the
+    # replay guard: a group stamped with the current f was applied by a prior attempt, so leave it).
+    macc = ["CAST(COALESCE(a._a_cnt, 0) + d._a_cnt AS BIGINT) AS _a_cnt"]
+    for i in range(len(sum_cols)):
+        macc.append(f"COALESCE(a._a_sum_{i}, 0) + COALESCE(d._a_sum_{i}, 0) AS _a_sum_{i}")
+        macc.append(f"CAST(COALESCE(a._a_cnt_{i}, 0) + COALESCE(d._a_cnt_{i}, 0) AS BIGINT) AS _a_cnt_{i}")
+    merged = unique_name("magg")
+    con.execute(
+        f"CREATE OR REPLACE TEMP TABLE {_q(merged)} AS "
+        f"SELECT {', '.join(f'd.{_q(b)} AS {_q(b)}' for b in by)}, {', '.join(macc)} "
+        f"FROM {_q(dacc)} d LEFT JOIN {_q(state)} a USING ({by_list}) "
+        f"WHERE a.{_q(F_COL)} IS DISTINCT FROM {_ts(f)}"
+    )
+    con.execute("BEGIN TRANSACTION")
+    try:
+        con.execute(f"DELETE FROM {_q(state)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(merged)})")
+        con.execute(
+            f"INSERT INTO {_q(state)} ({by_list}, {', '.join(acc_order)}, {_q(F_COL)}) "
+            f"SELECT {by_list}, {', '.join(acc_order)}, {_ts(f)} FROM {_q(merged)}"
+        )
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    con.execute(f"DELETE FROM {_q(state)} WHERE _a_cnt <= 0 AND ({by_list}) IN (SELECT {by_list} FROM {_q(dacc)})")
+
+    # Emit the output delta for the affected groups: new (derived from the updated state) +1, old (the prior
+    # published main) −1 — unchanged groups cancel; emptied groups (gone from state) are retracted.
+    affected = f"({by_list}) IN (SELECT {by_list} FROM {_q(dacc)})"
+    out_cols = list(by) + list(metrics.keys())
+    out_sel = ", ".join(_q(c) for c in out_cols)
+    new_out = f"SELECT {by_list}, {_agg_derive(metrics, sidx)} FROM {_q(state)} WHERE {affected} AND _a_cnt > 0"
+    old_out = f"SELECT {out_sel} FROM {_q(name)} WHERE {affected}" if _table_exists(con, name) \
+        else f"SELECT {out_sel} FROM {_q(state)} WHERE 1=0"
+    delta_out = con.sql(
+        f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM ({new_out}) "
+        f"UNION ALL BY NAME SELECT {out_sel}, -1 AS {_q(D_COL)} FROM ({old_out})"
+    )
+    apply_zset(con, name, delta_out, f, by, retain_t=retain_t, retain_n=retain_n)
+
+
+def _agg_rebuild(con, state, rel, by_list, sum_cols, f) -> None:
+    """(Re)build the accumulator state wholesale from a clean full output ``rel`` — the comprehensive path
+    (bootstrap / coverage-miss). Idempotent: same input → same state."""
+    src = unique_name("aggfull")
+    rel.create_view(src, replace=True)
+    exprs = ["CAST(count(*) AS BIGINT) AS _a_cnt"]
+    for i, c in enumerate(sum_cols):
+        exprs.append(f"COALESCE(SUM({_q(c)}), 0) AS _a_sum_{i}")
+        exprs.append(f"CAST(COUNT({_q(c)}) AS BIGINT) AS _a_cnt_{i}")
+    con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
+    con.execute(
+        f"CREATE TABLE {_q(state)} AS "
+        f"SELECT {by_list}, {', '.join(exprs)}, {_ts(f)} AS {_q(F_COL)} FROM {_q(src)} GROUP BY {by_list}"
+    )
+
+
+def _agg_derive(metrics, sidx) -> str:
+    """The select list deriving the user-facing aggregate columns from the accumulator state."""
+    exprs = []
+    for out, (k, c) in metrics.items():
+        if k == "count":
+            exprs.append(f"_a_cnt AS {_q(out)}")
+        elif k == "sum":
+            i = sidx[c]
+            exprs.append(f"(CASE WHEN _a_cnt_{i} = 0 THEN NULL ELSE _a_sum_{i} END) AS {_q(out)}")
+        elif k == "mean":
+            i = sidx[c]
+            exprs.append(f"(CASE WHEN _a_cnt_{i} = 0 THEN NULL ELSE _a_sum_{i}::DOUBLE / _a_cnt_{i} END) AS {_q(out)}")
+        else:
+            raise DeltaError(f"aggregate metric '{out}': unsupported kind {k!r}")
+    return ", ".join(exprs)
 
 
 def _ensure_changelog(con, clog: str, schema_src: str) -> None:

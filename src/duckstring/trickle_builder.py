@@ -125,6 +125,8 @@ class TrickleBuilder:
         self._alias: str | None = None  # this node's name in .select/.filter and as the .sql() table
         self._spine_delta = _spine_delta  # set by an upstream .merge() → chained in-run operand
         self._materialised = None  # a full relation after .sql() → comprehensive mode (no incremental compute)
+        self._agg = None  # {"by": (...), "metrics": {out: (kind, col)}} after .aggregate() → grouped output
+        self._agg_by: tuple[str, ...] | None = None  # set by .group_by(), consumed by a following .aggregate()
 
     def alias(self, name: str) -> "TrickleBuilder":
         """Name this node. On a **source** the parent's ``.select``/``.filter`` reference it by name instead
@@ -179,6 +181,41 @@ class TrickleBuilder:
                 f".{op}() isn't available after .sql() (the result is materialised, no longer a Z-set) — "
                 f"compose joins/filters/projection before .sql(), or chain another .sql()"
             )
+        if self._agg is not None:
+            raise BuildError(
+                f".{op}() can't follow .aggregate() — aggregate is terminal-bound to .merge(); do further "
+                f"work in a downstream Trickle"
+            )
+
+    def group_by(self, by) -> "TrickleBuilder":
+        """Ibis-shaped alias: ``.group_by(by).aggregate(**metrics)`` ≡ ``.aggregate(by=by, **metrics)``."""
+        self._ensure_incremental("group_by")
+        self._agg_by = normalize_pk(by)
+        return self
+
+    def aggregate(self, by=None, **metrics) -> "TrickleBuilder":
+        """Group the composed output by ``by`` and maintain the ``metrics`` incrementally — a grouped merge
+        Trickle keyed by ``by`` (the output ``pk`` defaults to it). Metrics are :mod:`duckstring.agg` specs
+        (``agg.count()`` / ``agg.sum(col)`` / ``agg.mean(col)`` — the distributive/algebraic set, maintained
+        from the delta alone). Terminal-bound to :meth:`merge`; ``.append`` and further joins/filters/selects
+        after it are out of the op set (use a downstream Trickle)."""
+        self._ensure_incremental("aggregate")
+        from .agg import Metric
+
+        if self._agg is not None:
+            raise BuildError("one .aggregate() per builder")
+        by = normalize_pk(self._agg_by if by is None else by)
+        if not by:
+            raise BuildError(".aggregate() needs a group key — .aggregate(by=…) or .group_by(…).aggregate(…)")
+        if not metrics:
+            raise BuildError(".aggregate() needs ≥1 metric, e.g. total=agg.sum('revenue')")
+        spec = {}
+        for out, m in metrics.items():
+            if not isinstance(m, Metric):
+                raise BuildError(f"aggregate metric '{out}' must be an agg.* spec (agg.count/agg.sum/agg.mean)")
+            spec[out] = (m.kind, m.col)
+        self._agg = {"by": by, "metrics": spec}
+        return self
 
     def sql(self, query) -> "TrickleBuilder":
         """**The comprehensive escape hatch.** Collapse everything composed so far into one relation, expose
@@ -192,6 +229,8 @@ class TrickleBuilder:
         ``query`` is a SQL string, or — if you have Ibis installed — an Ibis expression, compiled lazily via
         ``ibis.to_sql(..., dialect="duckdb")`` (see :meth:`to_ibis_schema`)."""
         pond = self.pond
+        if self._agg is not None:
+            raise BuildError(".sql() can't follow .aggregate() — aggregate is terminal-bound to .merge()")
         if self._alias is None:
             raise BuildError(".sql() needs a table name to reference — call .alias('t') first, then '… FROM t'")
         if self._materialised is None and self._joins and self._projection is None:
@@ -225,11 +264,12 @@ class TrickleBuilder:
         dependency (returns a plain dict). Raises on a DuckDB type with no Ibis mapping."""
         return {c: _duckdb_to_ibis(t) for c, t in self.schema().items()}
 
-    def merge(self, name: str, *, pk, retain_t=None, retain_n=None) -> "TrickleBuilder":
+    def merge(self, name: str, *, pk=None, retain_t=None, retain_n=None) -> "TrickleBuilder":
         """Execute: compose ΔO from the changed sources' Z-sets (or recompute comprehensively) and apply it
-        to the output **merge** Trickle ``name`` (clean main + Z-set changelog). ``pk`` (**required**) is the
-        output identity / merge key — it must be genuinely unique in the output (a many-to-many join that
-        fans out past it corrupts the keyed main).
+        to the output **merge** Trickle ``name`` (clean main + Z-set changelog). ``pk`` (**required**, except
+        after :meth:`aggregate` where it defaults to the group key) is the output identity / merge key — it
+        must be genuinely unique in the output (a many-to-many join that fans out past it corrupts the keyed
+        main).
 
         Returns a :class:`TrickleBuilder` rooted at the just-materialised ``name``, so joins can be chained
         through intermediate materialisations **in one Ripple** —
@@ -240,6 +280,16 @@ class TrickleBuilder:
         explicitly sequential). The returned handle carries ``ab``'s in-run delta (read from the registry),
         so the downstream join composes without a round-trip through the not-yet-published data plane."""
         pond = self.pond
+        if self._agg is not None:  # grouped aggregate output (keyed by the group columns)
+            from . import trickle_io as trickle
+
+            by, metrics = self._agg["by"], self._agg["metrics"]
+            out_pk = normalize_pk(pk) if pk is not None else by
+            required = tuple(dict.fromkeys(by + tuple(c for _k, c in metrics.values() if c is not None)))
+            kind, rel = self._compute(required, name)
+            trickle.apply_aggregate(pond.con, name, by, metrics, kind, rel, pond.f,
+                                    retain_t=retain_t, retain_n=retain_n)
+            return self._chain(name, out_pk)
         out_pk = normalize_pk(pk)
         if not out_pk:
             raise BuildError(f"pond.trickle('{self.spine_ref}')...merge('{name}'): pass the output key, merge(pk=...)")
@@ -279,6 +329,8 @@ class TrickleBuilder:
         a verbatim ``s0.<pk>`` projection); anything else falls back to the general path, which is always
         correct."""
         pond = self.pond
+        if self._agg is not None:
+            raise BuildError(".append() can't follow .aggregate() — an aggregate updates groups; use .merge()")
         out_pk = normalize_pk(pk)
         from . import trickle_io as trickle
 

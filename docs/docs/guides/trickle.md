@@ -154,6 +154,28 @@ agg = pl.group_by("product_id").aggregate(total_revenue=pl.revenue.sum())
 priced.alias("pl").sql(agg).merge("revenue_by_product", pk="product_id")
 ```
 
+### Incremental aggregation
+
+The `.sql()` aggregate above re-scans the whole input each run (aggregation is comprehensive there). For the **distributive / algebraic** aggregates, `.aggregate()` maintains the result *incrementally* — only the groups a change touches are recomputed:
+
+```python
+from duckstring import agg
+
+(pond.trickle("orders.order_line").alias("o")
+     .join(pond.trickle("catalog.product").alias("p"), on="product_id")
+     .select("o.product_id, o.quantity, round(o.quantity * p.unit_price, 2) AS revenue")
+     .aggregate(by="product_id",
+                total_revenue=agg.sum("revenue"),
+                units=agg.sum("quantity"),
+                orders=agg.count(),
+                avg_revenue=agg.mean("revenue"))
+     .merge("revenue_by_product"))   # a merge Trickle keyed by `by`; pk defaults to product_id
+```
+
+- **Metrics** are [`duckstring.agg`](../reference/python-api.md#trickle-incremental-io) specs, not SQL — `agg.count()`, `agg.sum(col)`, `agg.mean(col)` (the distributive/algebraic set, maintainable from the delta alone; `min`/`max`/`var`/`stddev` are planned). `.group_by(by).aggregate(**metrics)` is the same operator, Ibis-shaped.
+- **Incremental in *and* out.** Raw accumulators (count, per-column running sum + non-NULL count) live in a registry-only companion; a new order or a reprice updates only the affected product's accumulators (O(δ)), and only the products whose values moved reach the changelog. Contrast `.sql()`, whose `GROUP BY` re-scans every run.
+- **Terminal-bound to `.merge()`** — `pk` defaults to `by`; `.append()` or a further join/select after `.aggregate()` is out of the op set (do it downstream). Anything outside count/sum/mean still goes through `.sql()`.
+
 ### Chaining through materialised intermediates
 
 `.merge(name, pk=…)` **returns a builder rooted at the table it just wrote**, so you can keep joining — materialising intermediates mid-chain, all in one Ripple:

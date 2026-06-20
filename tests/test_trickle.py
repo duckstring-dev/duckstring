@@ -536,8 +536,8 @@ def test_builder_build_time_errors(tmp_path):
     with pytest.raises(BuildError, match="select"):
         pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id").merge("x", pk="order_id")
 
-    # No pk passed to .merge(...) — pk is a required keyword arg (TypeError, like merge_table).
-    with pytest.raises(TypeError, match="pk"):
+    # No pk passed to a non-aggregate .merge(...) → BuildError (pk only defaults after .aggregate()).
+    with pytest.raises(BuildError, match="output key"):
         (pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id")
              .select("s0.order_id, s1.price").merge("x"))
 
@@ -1111,6 +1111,99 @@ def test_builder_outer_join_guards(tmp_path):
     with pytest.raises(BuildError, match="only join"):
         (pond.trickle("a.t").join(pond.trickle("b.u"), on="k", how="full")
              .join(pond.trickle("c.v"), on="k").select("s0.k").merge("x", pk="k"))
+    snk.close()
+
+
+# ─── incremental aggregation (distributive: count / sum / mean) ──────────────────
+
+
+def test_builder_aggregate_distributive_incremental(tmp_path):
+    from duckstring import agg
+
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "rev" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("rev", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line", p=1.0).alias("o")
+             .join(pond.trickle("catalog.product", p=1.0).alias("p"), on="product_id")
+             .select("o.product_id, o.qty * p.price AS revenue, o.qty AS units")
+             .aggregate(by="product_id",
+                        total_revenue=agg.sum("revenue"),
+                        units_sold=agg.sum("units"),
+                        n=agg.count(),
+                        avg_revenue=agg.mean("revenue"))
+             .merge("revenue_by_product"))   # pk defaults to product_id
+        publish(snk, snk_dir, f=f)
+
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p1", 3)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    run(ts(1), NEVER)   # bootstrap (comprehensive)
+    # p1: orders 10,12 → revenue 10+15=25, units 5, n 2, avg 12.5 ; p2: revenue 9, units 1, n 1, avg 9
+    assert rows(snk, snk_dir, "revenue_by_product",
+                "product_id, total_revenue, units_sold, n, avg_revenue") == [
+        ("p1", 25, 5, 2, 12.5), ("p2", 9, 1, 1, 9.0)]
+    assert T.load_sidecar(snk_dir)["revenue_by_product"]["mode"] == "merge"
+
+    # A NEW order for p2 (spine delta) — only p2's group recomputes, incrementally.
+    ol([(10, "p1", 2), (11, "p2", 1), (12, "p1", 3), (13, "p2", 4)], ts(2))
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "revenue_by_product",
+                "product_id, total_revenue, units_sold, n, avg_revenue") == [
+        ("p1", 25, 5, 2, 12.5), ("p2", 45, 5, 2, 22.5)]   # p2: rev 9+36=45, units 5, n 2, avg 22.5
+    # Incremental output: only p2 moved → only p2 in this run's changelog window.
+    latest = snk.sql('SELECT DISTINCT product_id FROM "revenue_by_product__changelog" '
+                     'WHERE _duckstring_f = (SELECT max(_duckstring_f) FROM "revenue_by_product__changelog")').fetchall()
+    assert latest == [("p2",)]
+
+    # A dimension change (p1 reprice) — only p1's group recomputes.
+    pr([("p1", 10), ("p2", 9)], ts(3))
+    run(ts(3), ts(2))
+    assert rows(snk, snk_dir, "revenue_by_product", "product_id, total_revenue") == [("p1", 50), ("p2", 45)]
+    snk.close()
+
+
+def test_builder_aggregate_group_emptied(tmp_path):
+    from duckstring import agg
+
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "rev" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("rev", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line", p=1.0).alias("o")
+             .join(pond.trickle("catalog.product", p=1.0).alias("p"), on="product_id")
+             .select("o.product_id, o.qty * p.price AS revenue")
+             .group_by("product_id").aggregate(total=agg.sum("revenue"), n=agg.count())
+             .merge("rev"))
+        publish(snk, snk_dir, f=f)
+
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    run(ts(1), NEVER)
+    assert rows(snk, snk_dir, "rev", "product_id, total, n") == [("p1", 10, 1), ("p2", 9, 1)]
+    # Remove p2's only order → its group empties out and is retracted.
+    ol([(10, "p1", 2)], ts(2))
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "rev", "product_id, total, n") == [("p1", 10, 1)]
+    snk.close()
+
+
+def test_builder_aggregate_guards(tmp_path):
+    from duckstring import agg
+
+    snk = duckdb.connect()
+    pond = Pond("x", "1.0.0", snk, root=tmp_path, source_majors={"a": 1}, f=ts(1))
+    with pytest.raises(BuildError, match="metric"):
+        pond.trickle("a.t").aggregate(by="k", bad="not a metric")
+    with pytest.raises(BuildError, match="group key|by"):
+        pond.trickle("a.t").aggregate(total=agg.sum("x"))
+    with pytest.raises(BuildError, match="aggregate"):
+        pond.trickle("a.t").aggregate(by="k", n=agg.count()).append("out")
+    with pytest.raises(BuildError, match="aggregate"):
+        pond.trickle("a.t").aggregate(by="k", n=agg.count()).select("k")
     snk.close()
 
 
