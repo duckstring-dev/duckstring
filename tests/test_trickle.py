@@ -1191,6 +1191,64 @@ def test_builder_aggregate_group_emptied(tmp_path):
     snk.close()
 
 
+def test_builder_aggregate_min_max_extend_and_rescan(tmp_path):
+    from duckstring import agg
+
+    _cons, ol, _pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "ext" / "m1" / "data"
+
+    def run(f, pf):  # bare-source aggregate (no join) → min/max of qty per product
+        pond = Pond("ext", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line", p=1.0)
+             .aggregate(by="product_id", max_qty=agg.max("qty"), min_qty=agg.min("qty"), n=agg.count())
+             .merge("ext"))
+        publish(snk, snk_dir, f=f)
+
+    ol([(10, "p1", 2), (11, "p1", 5), (12, "p2", 3)], ts(1))
+    run(ts(1), NEVER)
+    assert rows(snk, snk_dir, "ext", "product_id, max_qty, min_qty, n") == [("p1", 5, 2, 2), ("p2", 3, 3, 1)]
+
+    # Pure insert → extend in place (no rescan): p1 gains a qty=1, min drops to 1.
+    ol([(10, "p1", 2), (11, "p1", 5), (12, "p2", 3), (13, "p1", 1)], ts(2))
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "ext", "product_id, max_qty, min_qty, n") == [("p1", 5, 1, 3), ("p2", 3, 3, 1)]
+
+    # Retraction of the supporting max (order 11 qty 5→3) → p1 rescans: max falls to 3.
+    ol([(10, "p1", 2), (11, "p1", 3), (12, "p2", 3), (13, "p1", 1)], ts(3))
+    run(ts(3), ts(2))
+    assert rows(snk, snk_dir, "ext", "product_id, max_qty, min_qty, n") == [("p1", 3, 1, 3), ("p2", 3, 3, 1)]
+    snk.close()
+
+
+def test_builder_aggregate_var_stddev(tmp_path):
+    from duckstring import agg
+
+    _cons, ol, _pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "stat" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("stat", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line", p=1.0)
+             .aggregate(by="product_id",
+                        v=agg.var("qty"), sd=agg.stddev("qty"), vp=agg.var("qty", how="pop"))
+             .merge("stat"))
+        publish(snk, snk_dir, f=f)
+
+    ol([(10, "p1", 2), (11, "p1", 4), (12, "p1", 6)], ts(1))
+    run(ts(1), NEVER)   # qtys 2,4,6: sample var 4, stddev 2, pop var 8/3
+    got = snk.sql(f"SELECT v, sd, vp FROM ({ParquetDataPlane().read_select(snk_dir, 'stat')})").fetchone()
+    assert got[0] == pytest.approx(4.0) and got[1] == pytest.approx(2.0) and got[2] == pytest.approx(8 / 3)
+
+    # Incremental insert (additive sum-of-squares): qtys 2,4,6,8 → sample var 20/3.
+    ol([(10, "p1", 2), (11, "p1", 4), (12, "p1", 6), (13, "p1", 8)], ts(2))
+    run(ts(2), ts(1))
+    assert snk.sql(f"SELECT v FROM ({ParquetDataPlane().read_select(snk_dir, 'stat')})").fetchone()[0] \
+        == pytest.approx(20 / 3)
+    snk.close()
+
+
 def test_builder_aggregate_guards(tmp_path):
     from duckstring import agg
 

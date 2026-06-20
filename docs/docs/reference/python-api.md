@@ -192,15 +192,17 @@ See the [guide](../guides/trickle.md#the-builder-pondtrickle).
 
 ### Aggregate metrics
 
-`duckstring.agg` — the metric specs for `.aggregate(by, **metrics)`. Distributive/algebraic only (maintained from the delta alone):
+`duckstring.agg` — the metric specs for `.aggregate(by, **metrics)`. Distributive/algebraic (maintained from the delta alone — min/max rescan a group only on a retraction of the supporting row):
 
 | Spec | Result |
 |---|---|
 | `agg.count()` | rows in the group (`count(*)`) |
 | `agg.sum(col)` | running sum (NULLs ignored; all-NULL group → NULL) |
 | `agg.mean(col)` | `sum(col) / count(col)` over non-NULL values |
+| `agg.min(col)` / `agg.max(col)` | extreme of `col` (NULLs ignored); inserts extend in place, a retraction of the extreme rescans the group |
+| `agg.var(col, how=)` / `agg.stddev(col, how=)` | variance / std-dev over non-NULL values; `how` ∈ `"sample"` (default, Ibis-matching) / `"pop"` |
 
-`min`/`max` (retraction-aware) and `var`/`stddev` are planned. For anything else, aggregate via `.sql()`.
+For anything outside this set (window functions, `DISTINCT`, percentiles), aggregate via `.sql()`.
 
 ## Execution environment
 

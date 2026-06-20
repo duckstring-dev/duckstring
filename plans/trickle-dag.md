@@ -107,12 +107,12 @@ The one unknown that could invalidate the direction: **DuckDB's planner on a dee
 or blow up planning past some depth, and lose to a flat recompute. **Before the rewrite**, prototype one
 bushy/deep case and compare:
 
-1. inline views (planner optimises the whole DAG),
+1. inline views (planner optimises the whole DAG) - preferred if proven to not be a footgun,
 2. materialised intermediates (temp-table fence per node),
 3. full recompute (`ivm=False`).
 
 The result decides the **default materialisation strategy** (inline vs always-fence vs threshold) and
-whether the flags are convenience escape valves or load-bearing. Do not start the rewrite until this is run.
+whether the flags are convenience escape valves or load-bearing. Do not start the rewrite until this is run on a sufficiently complex, large test case, and a more typical star schema.
 
 ## Interactions
 
@@ -147,7 +147,7 @@ land whenever, and the only cost of waiting is integration churn against a large
 
 ## Open questions
 
-- **Default materialisation**: inline views, always-fence (temp table per node), or fence-past-a-size — set
+- **Default materialisation**: inline views, always-fence (temp table per node), or fence-past-a-size or past-a-depth — set
   by the prototype.
 - **Node identity for sharing**: detect a repeated sub-DAG (so `A⋈B` used twice is materialised once) by
   structural hashing of the op graph, or require the dev to share it explicitly (one Python handle reused)?

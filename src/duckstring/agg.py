@@ -1,15 +1,19 @@
 """Aggregate metric specs for the Trickle builder's ``.aggregate(by=…, name=agg.…)`` operator.
 
 Each metric is a small typed spec, not a SQL string, because the incremental engine needs to know its
-*kind* — which accumulators it maintains and how it updates from a delta. This first cut is the
-**distributive / algebraic** set, all maintainable from the delta alone (no rescan):
+*kind* — which accumulators it maintains and how it updates from a delta. The supported set:
 
-- ``count()`` — the group's row count.
-- ``sum(col)`` — running sum (SQL semantics: NULLs ignored; an all-NULL group sums to NULL).
-- ``mean(col)`` — algebraic: ``sum(col) / count(col)`` over non-NULL values.
+- **Distributive** — maintainable from the delta alone:
+  - ``count()`` — the group's row count.
+  - ``sum(col)`` — running sum (SQL semantics: NULLs ignored; an all-NULL group sums to NULL).
+  - ``min(col)`` / ``max(col)`` — the extreme; an insert extends it in place (O(δ)), but a retraction of
+    the supporting row triggers a **rescan** of the group's current membership.
+- **Algebraic** — derived from distributive accumulators:
+  - ``mean(col)`` — ``sum(col) / count(col)`` over non-NULL values.
+  - ``var(col)`` / ``stddev(col)`` — from ``count``, ``sum``, ``sum(x²)``. ``how`` ∈ ``"sample"`` (default,
+    matching Ibis; ``/(n-1)``, NULL for n<2) or ``"pop"`` (``/n``).
 
-``min`` / ``max`` (retraction-aware, need a rescan) and ``var`` / ``stddev`` are a later cut — see
-``plans/trickle-relational.md`` §5–6.
+``min``/``max`` need the current group membership on a retraction; everything else is pure ``O(δ)``.
 
 Usage::
 
@@ -18,7 +22,8 @@ Usage::
          .aggregate(by="product_id",
                     total_revenue=agg.sum("revenue"),
                     orders=agg.count(),
-                    avg_revenue=agg.mean("revenue"))
+                    top_price=agg.max("unit_price"),
+                    revenue_sd=agg.stddev("revenue"))
          .merge("revenue_by_product"))   # pk defaults to `by`
 """
 
@@ -26,15 +31,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-_DISTRIBUTIVE = {"count", "sum", "mean"}
-
 
 @dataclass(frozen=True)
 class Metric:
-    """One output aggregate: its ``kind`` and (for column metrics) the input column it reads."""
+    """One output aggregate: its ``kind``, the input column it reads (if any), and — for ``var``/``stddev``
+    — whether it's a ``sample`` or ``pop``ulation statistic."""
 
     kind: str
     col: str | None = None
+    how: str | None = None
 
 
 def count() -> Metric:
@@ -50,3 +55,32 @@ def sum(col: str) -> Metric:  # noqa: A001 - deliberate SQL-style name on the ag
 def mean(col: str) -> Metric:
     """Mean of ``col`` over its non-NULL values — algebraic, maintained as ``sum(col)/count(col)``."""
     return Metric("mean", col)
+
+
+def min(col: str) -> Metric:  # noqa: A001 - deliberate SQL-style name on the agg namespace
+    """Minimum of ``col`` (NULLs ignored). A retraction of the supporting row rescans the group."""
+    return Metric("min", col)
+
+
+def max(col: str) -> Metric:  # noqa: A001 - deliberate SQL-style name on the agg namespace
+    """Maximum of ``col`` (NULLs ignored). A retraction of the supporting row rescans the group."""
+    return Metric("max", col)
+
+
+def var(col: str, how: str = "sample") -> Metric:
+    """Variance of ``col`` over its non-NULL values. ``how`` ∈ ``"sample"`` (default) / ``"pop"``."""
+    return Metric("var", col, _check_how(how))
+
+
+def stddev(col: str, how: str = "sample") -> Metric:
+    """Standard deviation of ``col`` over its non-NULL values. ``how`` ∈ ``"sample"`` (default) / ``"pop"``."""
+    return Metric("stddev", col, _check_how(how))
+
+
+def _check_how(how: str) -> str:
+    h = how.lower()
+    if h in ("pop", "population"):
+        return "pop"
+    if h == "sample":
+        return "sample"
+    raise ValueError(f"agg how={how!r}: one of 'sample' / 'pop'")

@@ -168,12 +168,14 @@ from duckstring import agg
                 total_revenue=agg.sum("revenue"),
                 units=agg.sum("quantity"),
                 orders=agg.count(),
-                avg_revenue=agg.mean("revenue"))
+                avg_revenue=agg.mean("revenue"),
+                top_price=agg.max("unit_price"),
+                revenue_sd=agg.stddev("revenue"))
      .merge("revenue_by_product"))   # a merge Trickle keyed by `by`; pk defaults to product_id
 ```
 
-- **Metrics** are [`duckstring.agg`](../reference/python-api.md#trickle-incremental-io) specs, not SQL — `agg.count()`, `agg.sum(col)`, `agg.mean(col)` (the distributive/algebraic set, maintainable from the delta alone; `min`/`max`/`var`/`stddev` are planned). `.group_by(by).aggregate(**metrics)` is the same operator, Ibis-shaped.
-- **Incremental in *and* out.** Raw accumulators (count, per-column running sum + non-NULL count) live in a registry-only companion; a new order or a reprice updates only the affected product's accumulators (O(δ)), and only the products whose values moved reach the changelog. Contrast `.sql()`, whose `GROUP BY` re-scans every run.
+- **Metrics** are [`duckstring.agg`](../reference/python-api.md#aggregate-metrics) specs, not SQL — `count` / `sum` / `mean` / `min` / `max` / `var` / `stddev` (the distributive/algebraic set). `.group_by(by).aggregate(**metrics)` is the same operator, Ibis-shaped.
+- **Incremental in *and* out.** Raw accumulators (count, per-column running sum + non-NULL count + sum-of-squares; per extreme column a stored min/max) live in a registry-only companion; a new order or a reprice updates only the affected product's accumulators (O(δ)), and only the products whose values moved reach the changelog. Contrast `.sql()`, whose `GROUP BY` re-scans every run. The one non-O(δ) case is `min`/`max` when the supporting row is *retracted* — that group rescans its current membership (an append-only stream never does).
 - **Terminal-bound to `.merge()`** — `pk` defaults to `by`; `.append()` or a further join/select after `.aggregate()` is out of the op set (do it downstream). Anything outside count/sum/mean still goes through `.sql()`.
 
 ### Chaining through materialised intermediates

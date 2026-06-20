@@ -212,8 +212,8 @@ class TrickleBuilder:
         spec = {}
         for out, m in metrics.items():
             if not isinstance(m, Metric):
-                raise BuildError(f"aggregate metric '{out}' must be an agg.* spec (agg.count/agg.sum/agg.mean)")
-            spec[out] = (m.kind, m.col)
+                raise BuildError(f"aggregate metric '{out}' must be an agg.* spec (agg.count/sum/mean/min/max/var/stddev)")
+            spec[out] = (m.kind, m.col, m.how)
         self._agg = {"by": by, "metrics": spec}
         return self
 
@@ -285,9 +285,12 @@ class TrickleBuilder:
 
             by, metrics = self._agg["by"], self._agg["metrics"]
             out_pk = normalize_pk(pk) if pk is not None else by
-            required = tuple(dict.fromkeys(by + tuple(c for _k, c in metrics.values() if c is not None)))
+            required = tuple(dict.fromkeys(by + tuple(c for _k, c, _h in metrics.values() if c is not None)))
             kind, rel = self._compute(required, name)
-            trickle.apply_aggregate(pond.con, name, by, metrics, kind, rel, pond.f,
+            # min/max need the group's *current* membership to rescan on a retraction (the full join output).
+            needs_current = kind == "incremental" and any(k in ("min", "max") for k, _c, _h in metrics.values())
+            current = self._full_join() if needs_current else None
+            trickle.apply_aggregate(pond.con, name, by, metrics, kind, rel, current, pond.f,
                                     retain_t=retain_t, retain_n=retain_n)
             return self._chain(name, out_pk)
         out_pk = normalize_pk(pk)

@@ -613,60 +613,90 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
 # ─── write: incremental aggregation (distributive / algebraic) ──────────────────
 
 
-def apply_aggregate(con, name, by, metrics, kind, rel, f, *, retain_t=None, retain_n=None) -> None:
+def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=None, retain_n=None) -> None:
     """Maintain a grouped aggregate output ``name`` (a merge Trickle keyed by ``by``) incrementally.
 
-    ``metrics`` is ``{out_col: (kind, src_col)}`` with kind ∈ ``count`` / ``sum`` / ``mean`` (distributive
-    /algebraic — maintainable from the delta alone). Raw accumulators (count, and per summed/meaned column a
-    running sum + non-NULL count) live in a registry-only ``_duckstring_agg_{name}`` companion; the published
-    main holds only the derived user columns. ``kind`` is the builder's ``_compute`` class for the input:
-    ``incremental`` (a Z-set ΔO → fold weighted contributions into the accumulators, O(δ)), ``comprehensive``
-    (a full clean output → rebuild the accumulators wholesale), or ``empty`` (no-op)."""
+    ``metrics`` is ``{out_col: (kind, src_col, how)}`` over count / sum / mean / min / max / var / stddev.
+    Raw accumulators live in a registry-only ``_duckstring_agg_{name}`` companion (count; per additive column
+    a running sum, non-NULL count, sum-of-squares; per extreme column a stored min & max); the published main
+    holds only the derived user columns. ``kind`` is the builder's ``_compute`` class for the input:
+    ``incremental`` (a Z-set ΔO → fold weighted contributions, O(δ); min/max extend on insert and **rescan**
+    ``current`` — the full current join output — on a retraction of the supporting row), ``comprehensive`` (a
+    full clean output → rebuild the accumulators wholesale), or ``empty`` (no-op)."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if kind == "empty":
         return
     by = tuple(by)
     by_list = ", ".join(_q(b) for b in by)
-    sum_cols: list[str] = []
-    for _out, (k, c) in metrics.items():
-        if k in ("sum", "mean") and c not in sum_cols:
-            sum_cols.append(c)
-    sidx = {c: i for i, c in enumerate(sum_cols)}
+    add_cols, ext_cols = _agg_cols(metrics)              # additive (sum/mean/var/std) and extreme (min/max) cols
+    sidx = {c: i for i, c in enumerate(add_cols)}
+    eidx = {c: j for j, c in enumerate(ext_cols)}
     state = f"{AGG_STATE_PREFIX}{name}"
-    acc_order = ["_a_cnt"] + [col for i in range(len(sum_cols)) for col in (f"_a_sum_{i}", f"_a_cnt_{i}")]
+    acc_order = (
+        ["_a_cnt"]
+        + [col for i in range(len(add_cols)) for col in (f"_a_sum_{i}", f"_a_cnt_{i}", f"_a_sumsq_{i}")]
+        + [col for j in range(len(ext_cols)) for col in (f"_a_min_{j}", f"_a_max_{j}")]
+    )
 
     if kind == "comprehensive":
-        _agg_rebuild(con, state, rel, by_list, sum_cols, f)
-        derived = con.sql(f"SELECT {by_list}, {_agg_derive(metrics, sidx)} FROM {_q(state)} WHERE _a_cnt > 0")
+        _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, f)
+        derived = con.sql(f"SELECT {by_list}, {_agg_derive(metrics, sidx, eidx)} FROM {_q(state)} WHERE _a_cnt > 0")
         merge_table(con, name, derived, f, by, retain_t=retain_t, retain_n=retain_n)
         return
 
-    # Incremental: ΔO is a Z-set (user cols + _duckstring_d). Per-group accumulator delta (a +1/-1 row
-    # contributes ±x to the sum and ±1 to the counts — the distributive fold, O(δ)).
+    # Incremental. Per-group accumulator delta from ΔO (a +1/-1 row contributes ±x to sum, ±x² to sumsq, ±1
+    # to the counts — the distributive fold). For extremes: the min/max of the *inserted* (+1) rows, plus a
+    # per-group flag for whether the group has any retraction (which forces a rescan, below).
     delta = unique_name("aggd")
     rel.create_view(delta, replace=True)
     dexprs = [f"CAST(SUM({_q(D_COL)}) AS BIGINT) AS _a_cnt"]
-    for i, c in enumerate(sum_cols):
+    for i, c in enumerate(add_cols):
         dexprs.append(f"COALESCE(SUM({_q(D_COL)} * {_q(c)}), 0) AS _a_sum_{i}")
         dexprs.append(f"CAST(SUM(CASE WHEN {_q(c)} IS NOT NULL THEN {_q(D_COL)} ELSE 0 END) AS BIGINT) AS _a_cnt_{i}")
+        dexprs.append(f"COALESCE(SUM({_q(D_COL)} * {_q(c)} * {_q(c)}), 0) AS _a_sumsq_{i}")
+    for j, c in enumerate(ext_cols):
+        dexprs.append(f"MIN({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_minp_{j}")
+        dexprs.append(f"MAX({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_maxp_{j}")
+    if ext_cols:
+        dexprs.append(f"BOOL_OR({_q(D_COL)} < 0) AS _a_ret")
     dacc = unique_name("dacc")
     con.execute(
         f"CREATE OR REPLACE TEMP TABLE {_q(dacc)} AS "
         f"SELECT {by_list}, {', '.join(dexprs)} FROM {_q(delta)} GROUP BY {by_list}"
     )
 
-    # Merge the accumulator delta into the state — additive, for affected groups not already at this f (the
-    # replay guard: a group stamped with the current f was applied by a prior attempt, so leave it).
+    # Rescan the *current* membership for the extreme columns of groups that saw a retraction (the supporting
+    # min/max may be gone). Bounded by those groups; append-only groups never rescan.
+    rescan = None
+    if ext_cols and current is not None:
+        cur = unique_name("aggcur")
+        current.create_view(cur, replace=True)
+        rexprs = [f"MIN({_q(c)}) AS _a_min_{j}, MAX({_q(c)}) AS _a_max_{j}" for j, c in enumerate(ext_cols)]
+        rescan = unique_name("aggrs")
+        con.execute(
+            f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS "
+            f"SELECT {by_list}, {', '.join(rexprs)} FROM {_q(cur)} "
+            f"WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(dacc)} WHERE _a_ret) GROUP BY {by_list}"
+        )
+
+    # Merge the delta into the state — additive for the distributive accumulators; for extremes, extend in
+    # place from the inserts, or take the rescanned value when the group retracted. For affected groups not
+    # already at this f (the replay guard).
     macc = ["CAST(COALESCE(a._a_cnt, 0) + d._a_cnt AS BIGINT) AS _a_cnt"]
-    for i in range(len(sum_cols)):
+    for i in range(len(add_cols)):
         macc.append(f"COALESCE(a._a_sum_{i}, 0) + COALESCE(d._a_sum_{i}, 0) AS _a_sum_{i}")
         macc.append(f"CAST(COALESCE(a._a_cnt_{i}, 0) + COALESCE(d._a_cnt_{i}, 0) AS BIGINT) AS _a_cnt_{i}")
+        macc.append(f"COALESCE(a._a_sumsq_{i}, 0) + COALESCE(d._a_sumsq_{i}, 0) AS _a_sumsq_{i}")
+    for j in range(len(ext_cols)):
+        macc.append(f"(CASE WHEN d._a_ret THEN r._a_min_{j} ELSE least(a._a_min_{j}, d._a_minp_{j}) END) AS _a_min_{j}")
+        macc.append(f"(CASE WHEN d._a_ret THEN r._a_max_{j} ELSE greatest(a._a_max_{j}, d._a_maxp_{j}) END) AS _a_max_{j}")
+    rescan_join = f" LEFT JOIN {_q(rescan)} r USING ({by_list})" if rescan is not None else ""
     merged = unique_name("magg")
     con.execute(
         f"CREATE OR REPLACE TEMP TABLE {_q(merged)} AS "
         f"SELECT {', '.join(f'd.{_q(b)} AS {_q(b)}' for b in by)}, {', '.join(macc)} "
-        f"FROM {_q(dacc)} d LEFT JOIN {_q(state)} a USING ({by_list}) "
+        f"FROM {_q(dacc)} d LEFT JOIN {_q(state)} a USING ({by_list}){rescan_join} "
         f"WHERE a.{_q(F_COL)} IS DISTINCT FROM {_ts(f)}"
     )
     con.execute("BEGIN TRANSACTION")
@@ -687,7 +717,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, f, *, retain_t=None, reta
     affected = f"({by_list}) IN (SELECT {by_list} FROM {_q(dacc)})"
     out_cols = list(by) + list(metrics.keys())
     out_sel = ", ".join(_q(c) for c in out_cols)
-    new_out = f"SELECT {by_list}, {_agg_derive(metrics, sidx)} FROM {_q(state)} WHERE {affected} AND _a_cnt > 0"
+    new_out = f"SELECT {by_list}, {_agg_derive(metrics, sidx, eidx)} FROM {_q(state)} WHERE {affected} AND _a_cnt > 0"
     old_out = f"SELECT {out_sel} FROM {_q(name)} WHERE {affected}" if _table_exists(con, name) \
         else f"SELECT {out_sel} FROM {_q(state)} WHERE 1=0"
     delta_out = con.sql(
@@ -697,15 +727,31 @@ def apply_aggregate(con, name, by, metrics, kind, rel, f, *, retain_t=None, reta
     apply_zset(con, name, delta_out, f, by, retain_t=retain_t, retain_n=retain_n)
 
 
-def _agg_rebuild(con, state, rel, by_list, sum_cols, f) -> None:
+def _agg_cols(metrics):
+    """The columns needing **additive** accumulators (sum/mean/var/stddev) and **extreme** accumulators
+    (min/max), each de-duplicated and order-stable."""
+    add, ext = [], []
+    for _out, (k, c, _how) in metrics.items():
+        if k in ("sum", "mean", "var", "stddev") and c not in add:
+            add.append(c)
+        if k in ("min", "max") and c not in ext:
+            ext.append(c)
+    return add, ext
+
+
+def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, f) -> None:
     """(Re)build the accumulator state wholesale from a clean full output ``rel`` — the comprehensive path
     (bootstrap / coverage-miss). Idempotent: same input → same state."""
     src = unique_name("aggfull")
     rel.create_view(src, replace=True)
     exprs = ["CAST(count(*) AS BIGINT) AS _a_cnt"]
-    for i, c in enumerate(sum_cols):
+    for i, c in enumerate(add_cols):
         exprs.append(f"COALESCE(SUM({_q(c)}), 0) AS _a_sum_{i}")
         exprs.append(f"CAST(COUNT({_q(c)}) AS BIGINT) AS _a_cnt_{i}")
+        exprs.append(f"COALESCE(SUM({_q(c)} * {_q(c)}), 0) AS _a_sumsq_{i}")
+    for j, c in enumerate(ext_cols):
+        exprs.append(f"MIN({_q(c)}) AS _a_min_{j}")
+        exprs.append(f"MAX({_q(c)}) AS _a_max_{j}")
     con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
     con.execute(
         f"CREATE TABLE {_q(state)} AS "
@@ -713,20 +759,32 @@ def _agg_rebuild(con, state, rel, by_list, sum_cols, f) -> None:
     )
 
 
-def _agg_derive(metrics, sidx) -> str:
+def _agg_derive(metrics, sidx, eidx) -> str:
     """The select list deriving the user-facing aggregate columns from the accumulator state."""
     exprs = []
-    for out, (k, c) in metrics.items():
+    for out, (k, c, how) in metrics.items():
         if k == "count":
-            exprs.append(f"_a_cnt AS {_q(out)}")
+            e = "_a_cnt"
         elif k == "sum":
             i = sidx[c]
-            exprs.append(f"(CASE WHEN _a_cnt_{i} = 0 THEN NULL ELSE _a_sum_{i} END) AS {_q(out)}")
+            e = f"(CASE WHEN _a_cnt_{i} = 0 THEN NULL ELSE _a_sum_{i} END)"
         elif k == "mean":
             i = sidx[c]
-            exprs.append(f"(CASE WHEN _a_cnt_{i} = 0 THEN NULL ELSE _a_sum_{i}::DOUBLE / _a_cnt_{i} END) AS {_q(out)}")
+            e = f"(CASE WHEN _a_cnt_{i} = 0 THEN NULL ELSE _a_sum_{i}::DOUBLE / _a_cnt_{i} END)"
+        elif k == "min":
+            e = f"_a_min_{eidx[c]}"
+        elif k == "max":
+            e = f"_a_max_{eidx[c]}"
+        elif k in ("var", "stddev"):
+            i = sidx[c]
+            n, s, sq = f"_a_cnt_{i}", f"_a_sum_{i}::DOUBLE", f"_a_sumsq_{i}::DOUBLE"
+            min_n, denom = (2, f"({n} - 1)") if how == "sample" else (1, n)
+            v = f"GREATEST(({sq} - {s} * {s} / {n}) / {denom}, 0)"   # clamp float error to ≥ 0
+            inner = v if k == "var" else f"SQRT({v})"
+            e = f"(CASE WHEN _a_cnt_{i} < {min_n} THEN NULL ELSE {inner} END)"
         else:
             raise DeltaError(f"aggregate metric '{out}': unsupported kind {k!r}")
+        exprs.append(f"{e} AS {_q(out)}")
     return ", ".join(exprs)
 
 
