@@ -48,6 +48,7 @@ const sidebars: SidebarsConfig = {
       ],
     },
     'theory',
+    'incremental-theory',
     {
       type: 'category',
       label: 'Reference',
