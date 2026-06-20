@@ -376,36 +376,41 @@ def test_draw_route_includes_trickle_sidecar(tmp_path):
 
 
 def test_draw_route_windows_trickle_changelog_with_after(tmp_path):
-    # `?after=` makes a Trickle changelog transfer incremental: only rows newer than `after` ship; the
-    # merge main stays wholesale (current state).
+    # `?after=` makes a Trickle changelog transfer incremental: the changelog is a per-run parts directory,
+    # and only the parts newer than `after` ship; the merge main stays wholesale (current state).
     import duckdb
 
-    from duckstring.trickle_io import SIDECAR
+    from duckstring.trickle_io import SIDECAR, part_name
 
     db = connect(tmp_path / "duck.db")
     migrate(db)
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
     data_dir = pond_data_dir(tmp_path, "sales", 1)
-    data_dir.mkdir(parents=True)
+    clog_dir = data_dir / "sale__changelog"
+    clog_dir.mkdir(parents=True)
     con = duckdb.connect()
     con.execute("SET TimeZone='UTC'")
-    con.execute(
-        "COPY (SELECT * FROM (VALUES "
-        "(1,1,TIMESTAMPTZ '2026-06-16T01:00:00+00:00'), "
-        "(2,1,TIMESTAMPTZ '2026-06-16T02:00:00+00:00'), "
-        "(3,1,TIMESTAMPTZ '2026-06-16T03:00:00+00:00')) t(id,_duckstring_d,_duckstring_f)) "
-        f"TO '{data_dir / 'sale__changelog.parquet'}' (FORMAT PARQUET)"
-    )
+    for hour in (1, 2, 3):  # one per-run part per freshness
+        f = datetime(2026, 6, 16, hour, tzinfo=timezone.utc)
+        con.execute(
+            f"COPY (SELECT {hour} AS id, 1 AS _duckstring_d, TIMESTAMPTZ '{f.isoformat()}' AS _duckstring_f) "
+            f"TO '{clog_dir / part_name(f)}' (FORMAT PARQUET)"
+        )
     (data_dir / "sale.parquet").write_bytes(b"MAIN")  # wholesale
     (data_dir / SIDECAR).write_text('{"sale": {"mode": "merge", "pk": ["id"]}}')
 
     resp = _client(d).get("/api/draw/sales/1", params={"after": "2026-06-16T01:00:00+00:00"})
+    landed = tmp_path / "landed"
+    landed.mkdir()
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        (tmp_path / "clog.parquet").write_bytes(zf.read("sale__changelog.parquet"))
         assert zf.read("sale.parquet") == b"MAIN"  # main shipped wholesale
-    got = sorted(con.sql(f"SELECT id FROM read_parquet('{tmp_path / 'clog.parquet'}')").fetchall())
-    assert got == [(2,), (3,)]  # only rows newer than `after` (excludes id 1 at 01:00)
+        parts = [n for n in zf.namelist() if n.startswith("sale__changelog/")]
+        for n in parts:
+            (landed / n.split("/")[-1]).write_bytes(zf.read(n))
+    assert len(parts) == 2  # only the parts newer than `after` ship (excludes the 01:00 part)
+    got = sorted(con.sql(f"SELECT id FROM read_parquet('{landed}/*.parquet')").fetchall())
+    assert got == [(2,), (3,)]
 
 
 # ─── Recursive lineage view ────────────────────────────────────────────────────

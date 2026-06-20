@@ -61,27 +61,33 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
     the set — reserved for per-Ripple duct scope; default is every table.
 
     ``after`` (a consumer's already-landed ``_duckstring_f``) makes a Trickle transfer **incremental**:
-    an append history / merge changelog is windowed to its rows newer than ``after`` (the small delta);
-    a merge main and plain Ripple output are always wholesale (current state). Omit ``after`` (or for a
-    bootstrap) → the whole set, as before. The consumer merges the slices in (see poller ``_land_transfer``)."""
-    from ...trickle_io import SIDECAR, load_sidecar, window_parquet_bytes, windowable_tables
+    an append-only table (append history, ``__changelog``, ``__droplog``) is a directory of per-run parts,
+    and only the parts newer than ``after`` are shipped (the small delta); a merge main and plain Ripple
+    output are single files, always wholesale (current state). Omit ``after`` (or for a bootstrap) → the
+    whole set. The consumer drops the shipped parts into its own parts directory (see poller
+    ``_land_transfer``)."""
+    from datetime import datetime
+
+    from ...trickle_io import SIDECAR, part_f, part_tables, table_parts
 
     m = _resolve_major(request, name, major, None)
     data_dir = _data_dir(request, name, m)
     wanted = {t.strip() for t in tables.split(",")} if tables else None
+    after_dt = datetime.fromisoformat(after) if after else None
 
     files = sorted(p for p in data_dir.glob("*.parquet") if wanted is None or p.stem in wanted)
-    if not files and wanted is None and not data_dir.exists():
+    dirs = [t for t in part_tables(data_dir) if wanted is None or t in wanted]
+    if not files and not dirs and not data_dir.exists():
         raise HTTPException(status_code=404, detail=f"No exported data for '{name}' (major {m})")
 
-    windowable = windowable_tables(load_sidecar(data_dir)) if after else set()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for pq in files:
-            if pq.stem in windowable:
-                zf.writestr(pq.name, window_parquet_bytes(pq, after))  # the incremental slice
-            else:
-                zf.write(pq, pq.name)
+        for pq in files:  # wholesale single-file tables (merge main / plain output)
+            zf.write(pq, pq.name)
+        for table in dirs:  # append-only parts → ship only the parts newer than `after`
+            for part in table_parts(data_dir, table):
+                if after_dt is None or part_f(part.name) > after_dt:
+                    zf.write(part, f"{table}/{part.name}")
         # The Trickle mode/PK sidecar travels with the data so the consuming Catchment's read_delta can
         # resolve a Trickle source (mode/PK aren't in the downstream's duck.db). Harmless for plain Ponds.
         sidecar = data_dir / SIDECAR

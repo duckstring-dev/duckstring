@@ -1638,6 +1638,8 @@ def test_merge_ripple_via_local_runner(tmp_path):
 
 
 def test_incremental_draw_window_roundtrip(tmp_path):
+    """A merge changelog publishes as per-run parts (`dim__changelog/{f}.parquet`); a draw ships only the
+    parts newer than what the consumer has landed, and the consumer drops them into its parts directory."""
     import shutil
 
     prod, cons = tmp_path / "prod", tmp_path / "cons"
@@ -1650,25 +1652,24 @@ def test_incremental_draw_window_roundtrip(tmp_path):
 
     producer_run([(1, "a"), (2, "b")], 1)
     producer_run([(1, "A"), (3, "c")], 2)
-    cons.mkdir()
-    for f in prod.iterdir():
-        shutil.copy(f, cons / f.name)
+
+    # Initial (wholesale) draw: the consumer copies everything the producer has published.
+    shutil.copytree(prod, cons)
     assert T.landed_after(cons) == ts(2).isoformat()
 
     producer_run([(1, "A"), (3, "C"), (4, "d")], 3)
 
-    after = T.landed_after(cons)
-    shipped = T.window_parquet_bytes(prod / "dim__changelog.parquet", after)
+    # Incremental draw: ship only the changelog parts newer than the consumer's landed freshness, plus the
+    # wholesale main. Only the ts(3) part moves over the wire.
+    after = datetime.fromisoformat(T.landed_after(cons))
+    shipped = [p for p in T.table_parts(prod, "dim__changelog") if T.part_f(p.name) > after]
+    assert [T.part_f(p.name) for p in shipped] == [ts(3)]
+    for p in shipped:
+        shutil.copy(p, cons / "dim__changelog" / p.name)
+    shutil.copy(prod / "dim.parquet", cons / "dim.parquet")  # the merge main is wholesale
+
     rcon = duckdb.connect()
     rcon.execute("SET TimeZone='UTC'")
-    (tmp_path / "shipped.parquet").write_bytes(shipped)
-    assert rcon.sql(
-        f"SELECT DISTINCT {T.F_COL} FROM read_parquet('{tmp_path / 'shipped.parquet'}')"
-    ).fetchall() == [(ts(3),)]
-
-    T.land_windowed(cons / "dim__changelog.parquet", shipped, after)
-    shutil.copy(prod / "dim.parquet", cons / "dim.parquet")
-
     d = T.read_delta(rcon, cons, "dim", previous_f=ts(2), f=ts(3), dp=ParquetDataPlane())
     assert sorted(d.upserts.fetchall()) == [(3, "C"), (4, "d")]
     assert d.deletes.fetchall() == []

@@ -143,10 +143,14 @@ def publish_plan(con, data_dir: Path, f=None) -> list[str]:
 
 
 class ParquetDataPlane(DataPlane):
-    """The zero-dependency default: each table is one ``{table}.parquet`` file, written atomically
-    (tmp + replace) and overwritten wholesale per run."""
+    """The zero-dependency default. A wholesale table (plain overwrite output, or a merge Trickle *main*)
+    is one ``{table}.parquet`` file, written atomically (tmp + replace) and overwritten per run. An
+    **append-only** Trickle table (append history, ``__changelog``, ``__droplog``) is a *directory* of
+    per-run parts ``{table}/{f}.parquet`` — each run writes only its own ``_duckstring_f`` slice, so the
+    write is O(change), not O(history). Reads union the parts; see :func:`duckstring.trickle.io.part_name`."""
 
     def export(self, con, data_dir: Path, *, mode: str = "overwrite", f=None) -> None:
+        from . import trickle_io as trickle
         from .core import retry_on_lock
 
         _check_mode(mode)
@@ -154,30 +158,77 @@ class ParquetDataPlane(DataPlane):
         data_dir.mkdir(parents=True, exist_ok=True)
 
         tables = publish_plan(con, data_dir, f)
+        # Append-only tables publish incrementally (per-run parts); everything else is wholesale.
+        incremental = trickle.incremental_tables(trickle.read_meta(con)) if f is not None else set()
 
         def _export() -> None:
             for table in tables:
-                dest = data_dir / f"{table}.parquet"
-                tmp = data_dir / f"{table}.parquet.tmp"
-                con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')
-                tmp.replace(dest)
+                if table in incremental:
+                    _export_parts(con, data_dir, table, f)
+                else:
+                    dest = data_dir / f"{table}.parquet"
+                    tmp = data_dir / f"{table}.parquet.tmp"
+                    con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')
+                    tmp.replace(dest)
 
         retry_on_lock(_export)
 
     def read_select(self, data_dir: Path, table: str, *, as_of=None) -> str:
-        pq = self.table_path(data_dir, table)
-        if pq is None or not pq.exists():
-            raise FileNotFoundError(str(Path(data_dir) / f"{table}.parquet"))
+        from . import trickle_io as trickle
+
+        if trickle.table_parts(data_dir, table):  # append-only parts directory → union the parts
+            glob = str(Path(data_dir) / table / "*.parquet").replace("'", "''")
+            return f"SELECT * FROM read_parquet('{glob}')"
+        pq = Path(data_dir) / f"{table}.parquet"
+        if not pq.exists():
+            raise FileNotFoundError(str(pq))
         return f"SELECT * FROM read_parquet('{str(pq).replace(chr(39), chr(39) * 2)}')"
 
     def list_tables(self, data_dir: Path) -> list[str]:
+        from . import trickle_io as trickle
+
         data_dir = Path(data_dir)
         if not data_dir.exists():
             return []
-        return sorted(pq.stem for pq in data_dir.glob("*.parquet"))
+        files = {pq.stem for pq in data_dir.glob("*.parquet")}
+        return sorted(files | set(trickle.part_tables(data_dir)))
 
     def table_path(self, data_dir: Path, table: str) -> Path | None:
+        d = Path(data_dir) / table
+        if d.is_dir():
+            return d  # an append-only parts directory
         return Path(data_dir) / f"{table}.parquet"
+
+
+def _export_parts(con, data_dir: Path, table: str, f) -> None:
+    """Publish an append-only ``table`` as a directory of per-run Parquet parts. Writes one
+    ``_duckstring_f``-homogeneous file per registry freshness not already on disk (so a normal run writes
+    just its new slice, and a rebuild/restore backfills any missing parts), and drops parts whose freshness
+    is no longer in the registry (mirroring retention). Idempotent on replay.
+
+    When the table is **empty** (a bootstrap-only changelog with no rows yet), a schema-only marker part is
+    still written at the run's ``f`` so the table stays readable as an empty relation — a consumer covered
+    by the floor then sees an *empty* delta, not a coverage-miss full read."""
+    from . import trickle_io as trickle
+
+    part_dir = Path(data_dir) / table
+    part_dir.mkdir(parents=True, exist_ok=True)
+    reg_fs = {r[0] for r in con.execute(f'SELECT DISTINCT "{trickle.F_COL}" FROM "{table}"').fetchall()
+              if r[0] is not None}
+    if not reg_fs and f is not None:
+        reg_fs = {f}  # synthesize a 0-row marker part (the `WHERE = f` below selects nothing → empty part)
+    existing = {trickle.part_f(p.name): p for p in part_dir.glob("*.parquet")}
+    for fi in reg_fs - set(existing):  # write the missing parts (this run's slice + any backfill)
+        dest = part_dir / trickle.part_name(fi)
+        tmp = part_dir / (dest.name + ".tmp")
+        con.execute(
+            f'COPY (SELECT * FROM "{table}" WHERE "{trickle.F_COL}" = {trickle._ts(fi)}) '
+            f"TO '{str(tmp).replace(chr(39), chr(39) * 2)}' (FORMAT PARQUET)"
+        )
+        tmp.replace(dest)
+    for fi, p in existing.items():  # drop parts the registry no longer retains (or the superseded marker)
+        if fi not in reg_fs:
+            p.unlink()
 
 
 def get_data_plane() -> DataPlane:

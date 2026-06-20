@@ -31,17 +31,19 @@ from .io import (
     apply_aggregate,
     apply_zset,
     changelog_name,
-    land_windowed,
+    incremental_tables,
     landed_after,
     load_sidecar,
     merge_table,
     normalize_pk,
+    part_f,
+    part_name,
+    part_tables,
     read_delta,
     read_meta,
     read_registry_delta,
+    table_parts,
     unique_name,
-    window_parquet_bytes,
-    windowable_tables,
     write_sidecar,
 )
 
@@ -54,9 +56,9 @@ __all__ = [
     "Delta", "DeltaError",
     "append_table", "append_zset", "apply_zset", "merge_table", "apply_aggregate",
     "read_delta", "read_registry_delta", "read_meta", "normalize_pk", "changelog_name", "unique_name",
-    # io: sidecar / cross-catchment draw window
-    "write_sidecar", "load_sidecar", "windowable_tables", "landed_after",
-    "window_parquet_bytes", "land_windowed",
+    # io: sidecar / cross-catchment draw (per-run parts)
+    "write_sidecar", "load_sidecar", "landed_after", "incremental_tables",
+    "part_name", "part_f", "table_parts", "part_tables",
     # io: system-column / table-name constants
     "F_COL", "D_COL", "CHANGELOG_SUFFIX", "DROPLOG_SUFFIX", "AGG_STATE_PREFIX", "META_TABLE", "SIDECAR",
     # submodules

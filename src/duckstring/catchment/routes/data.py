@@ -102,7 +102,8 @@ def get_ripple(
     outlet: str, ripple_name: str, request: Request,
     major: Optional[int] = None, version: Optional[str] = None,
 ):
-    # Serve the published file directly — no DuckDB needed (Parquet backend has one file per table).
+    # Serve the published file directly — no DuckDB needed. A wholesale table is one file; an append-only
+    # Trickle table is a directory of per-run parts, zipped under "{ripple_name}/".
     from ...dataplane import get_data_plane
 
     m = _resolve_major(request, outlet, major, version)
@@ -111,7 +112,11 @@ def get_ripple(
         raise HTTPException(status_code=404, detail=f"No data for {outlet}.{ripple_name} (major {m})")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(pq, f"{ripple_name}.parquet")
+        if pq.is_dir():
+            for part in sorted(pq.glob("*.parquet")):
+                zf.write(part, f"{ripple_name}/{part.name}")
+        else:
+            zf.write(pq, f"{ripple_name}.parquet")
     return Response(content=buf.getvalue(), media_type="application/zip")
 
 

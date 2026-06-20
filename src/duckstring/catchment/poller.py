@@ -20,7 +20,6 @@ import asyncio
 import io
 import zipfile
 from datetime import datetime
-from pathlib import Path
 
 import httpx
 
@@ -47,12 +46,10 @@ async def _fetch_status(client: httpx.AsyncClient, url: str, auth: dict) -> dict
 async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, name: str, major: int) -> None:
     """Fetch an upstream Pond line's exported Parquet (+ the Trickle sidecar) and land it. **Incremental
     for Trickle sources**: the consumer sends the freshness it has already landed (``after``); the producer
-    windows each append history / merge changelog to its rows newer than that, and the consumer merges the
-    slice into its landed copy (keep ``<= after``, add the shipped ``> after``). A merge main / plain
-    Ripple output is wholesale (replace). ``after = None`` (bootstrap / no Trickle source) → whole set."""
-    import json
-
-    from ..trickle_io import SIDECAR, land_windowed, landed_after, windowable_tables
+    ships only the append-only parts newer than that (append history / ``__changelog`` / ``__droplog``),
+    which the consumer drops into its own parts directory. A merge main / plain Ripple output is a single
+    file, landed wholesale (replace). ``after = None`` (bootstrap / no Trickle source) → whole set."""
+    from ..trickle_io import SIDECAR, landed_after
 
     data_dir = pond_data_dir(root, name, major)
     after = landed_after(data_dir)  # what we already hold; None → wholesale (bootstrap)
@@ -61,21 +58,17 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
     resp.raise_for_status()
     data_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        names = set(zf.namelist())
-        # The shipped sidecar tells us which tables the producer windowed (so we merge those, replace the
-        # rest). Same mode classification both ends — mode is stable across runs.
-        sidecar = json.loads(zf.read(SIDECAR)) if SIDECAR in names else {}
-        windowable = windowable_tables(sidecar) if after else set()
+        # Each entry is written to its path atomically: a top-level "{table}.parquet" replaces a wholesale
+        # table; a nested "{table}/{f}.parquet" adds an append-only part (incremental — no merge needed,
+        # parts are immutable and idempotent by name).
         for info in zf.infolist():
             if not (info.filename.endswith(".parquet") or info.filename == SIDECAR):
                 continue
             dest = data_dir / info.filename
-            if Path(info.filename).stem in windowable:
-                land_windowed(dest, zf.read(info), after)  # merge the incremental slice
-            else:
-                tmp = dest.with_suffix(dest.suffix + ".tmp")
-                tmp.write_bytes(zf.read(info))
-                tmp.replace(dest)  # atomic wholesale publish
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_suffix(dest.suffix + ".tmp")
+            tmp.write_bytes(zf.read(info))
+            tmp.replace(dest)
 
 
 async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | None = None) -> None:

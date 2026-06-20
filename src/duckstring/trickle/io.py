@@ -207,114 +207,92 @@ def load_sidecar(data_dir: Path) -> dict[str, dict]:
         return {}
 
 
-# ─── incremental draw (cross-Catchment transfer) ──────────────────────────────
+# ─── incremental publish + draw (per-run parts) ────────────────────────────────
 #
-# The append-only history a draw can ship *incrementally*: an append Trickle's single table and every
-# merge Trickle's __changelog. A merge *main* is clean current state → always shipped wholesale.
+# Append-only published tables — an append Trickle's history and every merge Trickle's ``__changelog`` /
+# ``__droplog`` — are written **incrementally** as a *directory of per-run Parquet parts*
+# (``{data_dir}/{table}/{f}.parquet``, one ``_duckstring_f``-homogeneous file per run) rather than one
+# wholesale file rewritten each run. A run therefore writes only its own delta (O(change), not O(history)),
+# and a cross-Catchment draw ships only the new part files. A merge *main* and plain overwrite output stay
+# single-file wholesale (clean current state). The data plane reads either layout transparently
+# (``read_parquet('{table}/*.parquet')`` vs ``'{table}.parquet'``).
 
 
-def windowable_tables(sidecar: dict[str, dict]) -> set[str]:
-    """Published table names whose history a draw can window by ``_duckstring_f`` (append tables + merge
-    changelogs). The merge main and plain overwrite output are not windowable (wholesale)."""
+def incremental_tables(meta: dict[str, dict]) -> set[str]:
+    """The append-only published table names for a Pond whose Trickle ``meta`` is given — written as
+    per-run parts: every append base, plus each merge base's ``__changelog`` and each append base's
+    ``__droplog`` companion. (Droplog names are included unconditionally; a caller only acts on those that
+    actually exist in the registry.)"""
     out: set[str] = set()
-    for table, meta in sidecar.items():
-        if meta.get("mode") == "append":
-            out.add(table)
-        elif meta.get("mode") == "merge":
-            out.add(changelog_name(table))
+    for base, m in meta.items():
+        if m.get("mode") == "append":
+            out.add(base)
+            out.add(f"{base}{DROPLOG_SUFFIX}")
+        elif m.get("mode") == "merge":
+            out.add(changelog_name(base))
     return out
 
 
-def _con_utc():
-    import duckdb
+def part_name(f) -> str:
+    """The filename for the per-run part holding the rows stamped freshness ``f`` — the **UTC** ISO
+    timestamp with ``:`` swapped for ``_`` (filesystem-safe, lexically sortable, reversible by
+    :func:`part_f`). Normalised to UTC so the name is canonical regardless of the writer's session tz."""
+    from datetime import timezone
 
-    con = duckdb.connect()
-    con.execute("SET TimeZone='UTC'")
-    return con
+    return f.astimezone(timezone.utc).isoformat().replace(":", "_") + ".parquet"
+
+
+def part_f(name: str):
+    """Recover the freshness ``f`` a part file was stamped with from its :func:`part_name`."""
+    from datetime import datetime
+
+    stem = name[: -len(".parquet")] if name.endswith(".parquet") else name
+    return datetime.fromisoformat(stem.replace("_", ":"))
+
+
+def table_parts(data_dir: Path, table: str) -> list[Path]:
+    """The per-run part files of an append-only ``table`` (a directory), sorted oldest-first; ``[]`` if it
+    is not a parts directory (e.g. a wholesale single-file table, or absent)."""
+    d = Path(data_dir) / table
+    return sorted(d.glob("*.parquet")) if d.is_dir() else []
+
+
+def part_tables(data_dir: Path) -> list[str]:
+    """The names of the append-only (parts-directory) tables published under ``data_dir``."""
+    data_dir = Path(data_dir)
+    if not data_dir.is_dir():
+        return []
+    return sorted(p.name for p in data_dir.iterdir() if p.is_dir() and any(p.glob("*.parquet")))
 
 
 def landed_after(data_dir: Path) -> str | None:
-    """The freshness a consumer has fully landed = ``min`` over its windowable tables' high-water, where a
-    table's high-water is ``max(its floor, max(_duckstring_f))``. ``None`` means *transfer wholesale*."""
+    """The freshness a consumer has fully landed = ``min`` over its append-only tables of each table's
+    high-water ``max(floor, max part f)`` (read from the part filenames, no Parquet open). ``None`` means
+    *transfer wholesale* (no append-only tables landed yet — a bootstrap)."""
     from datetime import datetime
 
     data_dir = Path(data_dir)
     sidecar = load_sidecar(data_dir)
-    windowable = windowable_tables(sidecar)
-    if not windowable:
+    tables = part_tables(data_dir)
+    if not tables:
         return None
-    con = _con_utc()
-    try:
-        highs = []
-        for table in windowable:
-            base = table[: -len(CHANGELOG_SUFFIX)] if table.endswith(CHANGELOG_SUFFIX) else table
-            floor = sidecar.get(base, {}).get("floor")
-            high = datetime.fromisoformat(floor) if floor else None
-            pq = data_dir / f"{table}.parquet"
-            if pq.exists():
-                rows_max = con.execute(
-                    f"SELECT max({_q(F_COL)}) FROM read_parquet('{_sql_lit(pq)}')"
-                ).fetchone()[0]
-                if rows_max is not None and (high is None or rows_max > high):
-                    high = rows_max
-            if high is None:
-                return None  # nothing landed for this table → wholesale
-            highs.append(high)
-        return min(highs).isoformat() if highs else None
-    finally:
-        con.close()
-
-
-def window_parquet_bytes(pq_path: Path, after_iso: str) -> bytes:
-    """The rows of ``pq_path`` newer than ``after_iso`` (``_duckstring_f > after``), as Parquet bytes."""
-    import os
-    import tempfile
-
-    con = _con_utc()
-    fd, tmp = tempfile.mkstemp(suffix=".parquet")
-    os.close(fd)
-    try:
-        con.execute(
-            f"COPY (SELECT * FROM read_parquet('{_sql_lit(pq_path)}') "
-            f"WHERE {_q(F_COL)} > TIMESTAMPTZ '{after_iso}') TO '{_sql_lit(tmp)}' (FORMAT PARQUET)"
-        )
-        return Path(tmp).read_bytes()
-    finally:
-        con.close()
-        os.unlink(tmp)
-
-
-def land_windowed(dest_path: Path, shipped: bytes, after_iso: str) -> None:
-    """Land an incremental slice: keep the consumer's rows ``<= after`` and add the shipped rows
-    (``> after``) — idempotent. A brand-new table (no destination yet) is shipped whole."""
-    import os
-    import tempfile
-
-    dest_path = Path(dest_path)
-    if not dest_path.exists():
-        dest_path.write_bytes(shipped)
-        return
-    fd, ship_tmp = tempfile.mkstemp(suffix=".parquet")
-    os.close(fd)
-    Path(ship_tmp).write_bytes(shipped)
-    con = _con_utc()
-    out_tmp = dest_path.with_suffix(dest_path.suffix + ".tmp")
-    try:
-        con.execute(
-            f"COPY (SELECT * FROM read_parquet('{_sql_lit(dest_path)}') WHERE {_q(F_COL)} <= TIMESTAMPTZ '{after_iso}' "
-            f"UNION ALL BY NAME SELECT * FROM read_parquet('{_sql_lit(ship_tmp)}')) "
-            f"TO '{_sql_lit(out_tmp)}' (FORMAT PARQUET)"
-        )
-        out_tmp.replace(dest_path)  # atomic publish
-    finally:
-        con.close()
-        os.unlink(ship_tmp)
-        if out_tmp.exists():
-            out_tmp.unlink()
-
-
-def _sql_lit(path) -> str:
-    return str(path).replace("'", "''")
+    highs = []
+    for table in tables:
+        base = table
+        for suffix in (CHANGELOG_SUFFIX, DROPLOG_SUFFIX):
+            if table.endswith(suffix):
+                base = table[: -len(suffix)]
+                break
+        floor = sidecar.get(base, {}).get("floor")
+        high = datetime.fromisoformat(floor) if floor else None
+        for pq in table_parts(data_dir, table):
+            pf = part_f(pq.name)
+            if high is None or pf > high:
+                high = pf
+        if high is None:
+            return None
+        highs.append(high)
+    return min(highs).isoformat() if highs else None
 
 
 # ─── write: append ──────────────────────────────────────────────────────────────

@@ -161,17 +161,18 @@ def test_trickle_chain_runs_end_to_end(runtime):
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None), \
         "revenue never became fresh"
 
-    # The append inlet published an order_line history with the mode/PK sidecar.
+    # The append inlet published an order_line history (a per-run parts directory) + the mode/PK sidecar.
     orders_dir = root / "ponds" / "orders" / "m1" / "data"
     assert (orders_dir / "_trickle.json").exists()
     import json
     assert json.loads((orders_dir / "_trickle.json").read_text())["order_line"]["mode"] == "append"
+    assert list((orders_dir / "order_line").glob("*.parquet")), "orders: no append history parts"
 
-    # The merge lines published a clean main + a __changelog companion.
+    # The merge lines published a clean main (wholesale) + a __changelog companion (per-run parts directory).
     for name, table in (("catalog", "product"), ("priced", "priced_line"), ("revenue", "revenue_by_product")):
         data_dir = root / "ponds" / name / "m1" / "data"
         assert (data_dir / f"{table}.parquet").exists(), f"{name}: no main"
-        assert (data_dir / f"{table}__changelog.parquet").exists(), f"{name}: no changelog"
+        assert list((data_dir / f"{table}__changelog").glob("*.parquet")), f"{name}: no changelog parts"
         assert json.loads((data_dir / "_trickle.json").read_text())[table]["mode"] == "merge"
 
 
