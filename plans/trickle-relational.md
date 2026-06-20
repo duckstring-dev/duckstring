@@ -234,7 +234,10 @@ Effort: large. This is a new stateful operator. The distributive metrics (sum/co
    `.group_by(by).aggregate(...)` with `duckstring.agg` specs; additive accumulators in a registry-only
    `_duckstring_agg_{name}` companion (f-stamped for replay), derived main; comprehensive rebuild on
    bootstrap/coverage-miss. `trickle_io.apply_aggregate`.
-6. **Aggregation — min/max (rescan) + var/stddev.** Large; next.
+6. ✅ **Aggregation — min/max (rescan) + var/stddev.** min/max extend in place on insert and rescan a
+   group's current membership (the builder's `_full_join`) only on a retraction of the supporting row;
+   var/stddev are algebraic (count + sum + sum-of-squares), `how="sample"`(default)/`"pop"`. In
+   `trickle_io.apply_aggregate` / `_agg_derive`.
 7. ✅ **`how=` right/full/semi/anti.** Done together with (4): `left`/`semi`/`anti` are spine-grained and
    incremental (telescoping for all-inner, `_spine_recompute` for any non-inner star); `right`/`full` are
    solo-only and **comprehensive** (correct, **incremental still deferred** — the next join-side step).
