@@ -429,30 +429,34 @@ class Pond:
             fail_on_conflict=fail_on_conflict, retain_t=retain_t, retain_n=retain_n,
         )
 
-    def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None) -> None:
+    def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None,
+                    compact_threshold=None) -> None:
         """Merge the **complete current state** ``relation`` into the clean main table ``name`` + its Z-set
         changelog, stamped ``pond.f``. ``pk`` (the output identity) is **required** — it is the merge key.
         Duckstring diffs ``relation`` against the prior main as a full-row Z-set difference to derive
         inserts/updates/deletes automatically — so it is always safe to hand it the whole state. ``retain_t``
         / ``retain_n`` opt into bounding the kept changelog (the main, being the clean current state, is
-        never trimmed)."""
+        never trimmed). ``compact_threshold`` (bytes) overrides the catchment-level checkpoint size for this
+        main — the changelog must outgrow ``max(base, this)`` before the base is re-folded."""
         from . import trickle_io as trickle
 
         trickle.merge_table(
             self.con, name, relation, self.f, self._resolve_pk(pk),
-            retain_t=retain_t, retain_n=retain_n,
+            retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
         )
 
-    def apply_zset(self, name: str, zset, *, pk, retain_t=None, retain_n=None) -> None:
+    def apply_zset(self, name: str, zset, *, pk, retain_t=None, retain_n=None,
+                   compact_threshold=None) -> None:
         """Apply a **Z-set** change (a relation of user columns + ``_duckstring_d``) to the output Trickle
         ``name`` — the low-level primitive the builder uses for the incremental path. ``pk`` (the output
         identity) is **required**. Prefer :meth:`trickle` / :meth:`merge_table`; reach for this only for
-        hand-rolled incremental compute."""
+        hand-rolled incremental compute. ``compact_threshold`` overrides the checkpoint size (see
+        :meth:`merge_table`)."""
         from . import trickle_io as trickle
 
         trickle.apply_zset(
             self.con, name, zset, self.f, self._resolve_pk(pk),
-            retain_t=retain_t, retain_n=retain_n,
+            retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
         )
 
     def read_delta(self, ref: str):

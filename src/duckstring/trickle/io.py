@@ -145,12 +145,16 @@ def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
 def _ensure_meta(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
-        f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR)"
+        f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR, "
+        f"compact_threshold VARCHAR)"
     )
-    # Migrate an older meta table that predates f_base (the log-structured merge main fold watermark).
+    # Migrate an older meta table that predates a column: f_base (the log-structured merge main fold
+    # watermark) and compact_threshold (the per-table checkpoint-size override — see _compact_threshold).
     cols = [r[1] for r in con.execute(f'PRAGMA table_info({_q(META_TABLE)})').fetchall()]
     if "f_base" not in cols:
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN f_base VARCHAR')
+    if "compact_threshold" not in cols:
+        con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN compact_threshold VARCHAR')
 
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
@@ -204,12 +208,27 @@ def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
 
 
 def read_meta(con) -> dict[str, dict]:
-    """``{table: {"mode", "pk": [...], "floor": iso|None, "f_base": iso|None}}`` for every Trickle table."""
+    """``{table: {"mode", "pk": [...], "floor": iso|None, "f_base": iso|None,
+    "compact_threshold": int|None}}`` for every Trickle table."""
     if not _table_exists(con, META_TABLE):
         return {}
-    rows = con.execute(f'SELECT table_name, mode, pk, floor, f_base FROM {_q(META_TABLE)}').fetchall()
-    return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else []), "floor": r[3], "f_base": r[4]}
+    rows = con.execute(
+        f'SELECT table_name, mode, pk, floor, f_base, compact_threshold FROM {_q(META_TABLE)}'
+    ).fetchall()
+    return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else []), "floor": r[3], "f_base": r[4],
+                   "compact_threshold": (int(r[5]) if r[5] else None)}
             for r in rows}
+
+
+def _set_compact_threshold(con, table: str, n) -> None:
+    """Record a per-table checkpoint-size override (bytes) for a merge main — the changelog must outgrow
+    ``max(base, this)`` before a checkpoint folds. ``None`` leaves the catchment default in force."""
+    if n is None:
+        return
+    _ensure_meta(con)
+    con.execute(
+        f'UPDATE {_q(META_TABLE)} SET compact_threshold = ? WHERE table_name = ?', [str(int(n)), table]
+    )
 
 
 def write_sidecar(data_dir: Path, payload: dict[str, dict]) -> None:
@@ -582,7 +601,8 @@ def current_state(con, name: str):
     return _strip_system(con.sql(f'SELECT * FROM {_q(name)}'))
 
 
-def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None) -> None:
+def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
+               compact_threshold=None) -> None:
     """Append a Z-set ``zset`` (user columns + ``_duckstring_d``) to the merge main's append-only
     ``__changelog``. The main is **log-structured**: the changelog is the source of truth and the clean
     current state is reconstructed on read (:func:`reconstruct_current`) from a base table (written only by
@@ -631,11 +651,13 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
             con.execute("ROLLBACK")
             raise
     _record_meta(con, name, "merge", pk)
+    _set_compact_threshold(con, name, compact_threshold)
     cutoff = _apply_retention(con, clog, f, retain_t, retain_n)
     _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None), cutoff=cutoff)
 
 
-def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None) -> None:
+def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
+                compact_threshold=None) -> None:
     """Comprehensive merge: ``relation`` is the **complete current state**. Diff it against the
     reconstructed prior state (base ⊎ changelog) as a full-row Z-set (``new(+1) ⊎ prior(-1)``, consolidated)
     and append the diff to the changelog."""
@@ -661,7 +683,8 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
         )
     else:
         zset = con.sql(f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)}')
-    apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n)
+    apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n,
+               compact_threshold=compact_threshold)
 
 
 def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> None:

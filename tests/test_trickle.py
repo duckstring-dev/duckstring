@@ -169,6 +169,24 @@ def test_merge_main_checkpoint_folds_into_base(reg, tmp_path, monkeypatch):
     assert sorted(reg.sql("SELECT id, v FROM dim").fetchall()) == [(1, "A"), (3, "c")]  # 2 gone from the base
 
 
+def test_per_table_compact_threshold_overrides_catchment_default(reg, tmp_path, monkeypatch):
+    """A per-table ``compact_threshold`` (recorded at the merge write) overrides the catchment env default
+    for that main's checkpoint trigger: a huge env default would never checkpoint these tiny tables, but a
+    tiny per-table override folds the base on the first publish."""
+    monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", str(1 << 40))  # 1 TiB env → never fires by size
+    snk_dir = tmp_path / "data"
+    # No override → the env default holds, so no base is folded (the changelog is still the whole main).
+    T.merge_table(reg, "plain", _state(reg, [(1, "a")]), ts(1), ("id",))
+    publish(reg, snk_dir, f=ts(1))
+    assert T.load_sidecar(snk_dir)["plain"]["f_base"] is None
+    # A tiny per-table override → checkpoint fires and folds the base.
+    T.merge_table(reg, "over", _state(reg, [(1, "a")]), ts(1), ("id",), compact_threshold=1)
+    publish(reg, snk_dir, f=ts(1))
+    assert T.read_meta(reg)["over"]["compact_threshold"] == 1
+    assert T.load_sidecar(snk_dir)["over"]["f_base"] == ts(1).isoformat()
+    assert (snk_dir / "over.parquet").exists()
+
+
 def test_merge_idempotent_replay(reg, tmp_path):
     T.merge_table(reg, "dim", _state(reg, [(1, "a"), (2, "b")]), ts(1), ("id",))
     state2 = [(1, "a"), (2, "B")]

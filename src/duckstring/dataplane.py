@@ -289,12 +289,20 @@ def _export_parts(con, data_dir: Path, table: str, f) -> None:
             p.unlink()
 
 
-def _compact_threshold() -> int:
-    """The catchment-level checkpoint floor / target base-chunk size in bytes (``DUCKSTRING_COMPACT_THRESHOLD``,
-    default 256 MiB). A merge main checkpoints when its changelog-since-the-fold-watermark outgrows
-    ``max(base size, this)`` — so it never checkpoints below this, and otherwise at ~k=1 (changelog ≥ base)."""
+def _compact_threshold(con=None, main=None) -> int:
+    """The checkpoint floor / target base-chunk size in bytes. A merge main checkpoints when its
+    changelog-since-the-fold-watermark outgrows ``max(base size, this)`` — so it never checkpoints below
+    this, and otherwise at ~k=1 (changelog ≥ base). Resolution order: a per-table override recorded at the
+    merge write (``merge_table(..., compact_threshold=)``), else the catchment-level
+    ``DUCKSTRING_COMPACT_THRESHOLD`` env, else 256 MiB."""
     import os
 
+    if con is not None and main is not None:
+        from . import trickle_io as trickle
+
+        override = trickle.read_meta(con).get(main, {}).get("compact_threshold")
+        if override is not None:
+            return int(override)
     return int(os.environ.get("DUCKSTRING_COMPACT_THRESHOLD", str(256 * 1024 * 1024)))
 
 
@@ -312,7 +320,7 @@ def _checkpoint_and_publish_base(con, data_dir: Path, main: str, f) -> None:
     )
     base_pq = data_dir / f"{main}.parquet"
     base_bytes = base_pq.stat().st_size if base_pq.exists() else 0
-    if clog_bytes < max(base_bytes, _compact_threshold()):
+    if clog_bytes < max(base_bytes, _compact_threshold(con, main)):
         return
     trickle.checkpoint(con, main, f)  # registry fold: rewrites the base, advances f_base, applies retention
     if trickle._table_exists(con, main):
