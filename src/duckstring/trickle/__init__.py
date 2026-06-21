@@ -31,6 +31,8 @@ from .io import (
     apply_aggregate,
     apply_zset,
     changelog_name,
+    checkpoint,
+    current_state,
     incremental_tables,
     landed_after,
     load_sidecar,
@@ -42,6 +44,8 @@ from .io import (
     read_delta,
     read_meta,
     read_registry_delta,
+    reconstruct_current,
+    reconstruct_sql,
     table_parts,
     unique_name,
     write_sidecar,
@@ -55,6 +59,7 @@ __all__ = [
     # io: classes + the write/read API
     "Delta", "DeltaError",
     "append_table", "append_zset", "apply_zset", "merge_table", "apply_aggregate",
+    "checkpoint", "reconstruct_current", "reconstruct_sql", "current_state",
     "read_delta", "read_registry_delta", "read_meta", "normalize_pk", "changelog_name", "unique_name",
     # io: sidecar / cross-catchment draw (per-run parts)
     "write_sidecar", "load_sidecar", "landed_after", "incremental_tables",

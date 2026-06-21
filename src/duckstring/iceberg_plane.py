@@ -107,11 +107,18 @@ class IcebergDataPlane(DataPlane):
         con.execute("SET TimeZone='UTC'")
         cat = self._catalog(data_dir)
         meta = trickle_io.read_meta(con)
+        # A merge **main** is log-structured (a base + the changelog); its base is published/checkpointed by
+        # the flat layer (above) and its current state is reconstructed on read, so it is *not* committed to
+        # Iceberg as a wholesale table — only its changelog is (append-commit, below). Reads of the base fall
+        # back to the flat Parquet (it is never in the catalog).
+        merge_mains = {t for t, m in meta.items() if m.get("mode") == "merge"}
         for table in tables:
+            if table in merge_mains:
+                continue
             if self._is_incremental(table, meta):
                 # A Trickle history/changelog grows by **append** — commit only this run's new rows as one
-                # `_duckstring_f`-homogeneous data file, so the window read prunes by manifest stats. The
-                # clean merge *main* and plain Ripple output stay overwrite (see _commit).
+                # `_duckstring_f`-homogeneous data file, so the window read prunes by manifest stats. A plain
+                # Ripple output stays overwrite (see _commit).
                 self._append_commit(cat, table, con, f)
             else:
                 arrow = con.execute(f'SELECT * FROM "{table}"').fetch_arrow_table()
@@ -307,11 +314,12 @@ class IcebergDataPlane(DataPlane):
             con.execute("INSTALL iceberg")
             con.execute("LOAD iceberg")
 
-    def read_select(self, data_dir: Path, table: str, *, as_of=None) -> str:
+    def _raw_read_select(self, data_dir: Path, table: str, *, as_of=None) -> str:
         tbl = self._load(data_dir, table)
         if tbl is None:
-            # Transitional: a Source that hasn't re-exported to Iceberg → read its legacy flat Parquet.
-            return self._parquet.read_select(data_dir, table, as_of=as_of)
+            # Not in the catalog (a merge base, served from the flat layer; or a Source not yet re-exported
+            # to Iceberg) → read its flat Parquet. The base-class read_select handles merge reconstruction.
+            return self._parquet._raw_read_select(data_dir, table, as_of=as_of)
         ml = tbl.metadata_location.replace("'", "''")
         snap = self._snapshot_for(tbl, as_of) if as_of is not None else None
         if snap is not None:

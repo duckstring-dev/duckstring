@@ -162,12 +162,12 @@ def _trickle_base_sql(pond: str, table: str, mode: str, pk: list, f_lo, f_hi, fl
     """The browse query for a Trickle, windowed to ``[f_lo, f_hi]`` (inclusive, either bound optional):
 
     - **append** — the history table itself, filtered by ``_duckstring_f``.
-    - **merge** — the clean *main* (current state) **prejoined to its consolidated changelog**, plus the
-      records the changelog retired. Each row carries the most-recent ``_duckstring_f`` (the bootstrap
-      writes no changelog, so a row untouched since then falls back to the ``floor`` freshness — every
-      row has a freshness), ``_duckstring_active`` (``+1`` present / ``-1`` deleted — its last image is
-      shown), and ``_duckstring_updates`` (count of ``+1`` changelog events). With a window set, only
-      records changed inside it are shown (inner join); with none, every current row is (left join).
+    - **merge** — the reconstructed *main* (current state), which already carries each row's last-write
+      ``_duckstring_f``, joined to its consolidated changelog only for the **update count** and to surface
+      the records the changelog retired. Each row carries ``_duckstring_f``, ``_duckstring_active`` (``+1``
+      present / ``-1`` deleted — its last image is shown), and ``_duckstring_updates`` (count of ``+1``
+      changelog events). With a window set, only records changed inside it are shown (inner join); with
+      none, every current row is (left join).
       Ordered by PK — a stable total order for offset paging, and matching the append view, which can't
       be cheaply freshness-ordered (the viewer scans one wholesale Parquet / an ``iceberg_scan``, neither
       of which reverses without a per-page sort) — so neither view misleadingly claims a freshness order.
@@ -185,8 +185,7 @@ def _trickle_base_sql(pond: str, table: str, mode: str, pk: list, f_lo, f_hi, fl
     windowed = bool(conds)
     if mode == "append":
         return f"SELECT * FROM {sch}.{_qi(table)}{where}"
-    floor_lit = _ts_lit(floor) if floor else "NULL"
-    main = f"{sch}.{_qi(table)}"
+    main = f"{sch}.{_qi(table)}"  # the reconstructed merge main — already carries _duckstring_f per row
     clog = f"{sch}.{_qi(changelog_name(table))}"
     pkq = [_qi(c) for c in pk]
     part = ", ".join(pkq)
@@ -201,7 +200,8 @@ def _trickle_base_sql(pond: str, table: str, mode: str, pk: list, f_lo, f_hi, fl
         f"sum(CASE WHEN {dcol} > 0 THEN 1 ELSE 0 END) AS _ds_upd FROM _clw GROUP BY {part}), "
         f"_dl AS (SELECT *, row_number() OVER (PARTITION BY {part} "
         f"ORDER BY {fcol} DESC, {dcol} DESC) AS _ds_rn FROM _clw), "
-        f"_active AS (SELECT _m.*, coalesce(_a._ds_fmax, {floor_lit}) AS {fcol}, 1 AS \"_duckstring_active\", "
+        # The main carries _duckstring_f; the changelog join only supplies the update count now.
+        f"_active AS (SELECT _m.*, 1 AS \"_duckstring_active\", "
         f"coalesce(_a._ds_upd, 0) AS \"_duckstring_updates\" "
         f"FROM {main} _m {join} _a ON {on_ma}), "
         f"_deleted AS (SELECT _dl.* EXCLUDE ({dcol}, {fcol}, _ds_rn), _a._ds_fmax AS {fcol}, "

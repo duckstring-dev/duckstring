@@ -145,17 +145,42 @@ def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
 def _ensure_meta(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
-        f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR)"
+        f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR)"
     )
+    # Migrate an older meta table that predates f_base (the log-structured merge main fold watermark).
+    cols = [r[1] for r in con.execute(f'PRAGMA table_info({_q(META_TABLE)})').fetchall()]
+    if "f_base" not in cols:
+        con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN f_base VARCHAR')
 
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
     _ensure_meta(con)
-    # Preserve any existing floor (a normal incremental run must not reset it).
+    # Preserve any existing floor / f_base (a normal incremental run must not reset them).
     con.execute(
         f'INSERT INTO {_q(META_TABLE)} (table_name, mode, pk) VALUES (?, ?, ?) '
         f'ON CONFLICT (table_name) DO UPDATE SET mode=excluded.mode, pk=excluded.pk',
         [table, mode, ",".join(pk)],
+    )
+
+
+def _f_base(con, table: str):
+    """The merge main's **fold watermark** — the freshness up to which the ``__changelog`` has been folded
+    into the base table. ``None`` before the first checkpoint (the whole changelog is still the main)."""
+    from datetime import datetime
+
+    if not _table_exists(con, META_TABLE):
+        return None
+    row = con.execute(f'SELECT f_base FROM {_q(META_TABLE)} WHERE table_name = ?', [table]).fetchone()
+    return datetime.fromisoformat(row[0]) if (row and row[0]) else None
+
+
+def _set_f_base(con, table: str, f) -> None:
+    from datetime import timezone
+
+    _ensure_meta(con)
+    con.execute(
+        f'UPDATE {_q(META_TABLE)} SET f_base = ? WHERE table_name = ?',
+        [f.astimezone(timezone.utc).isoformat(), table],
     )
 
 
@@ -179,11 +204,12 @@ def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
 
 
 def read_meta(con) -> dict[str, dict]:
-    """``{table: {"mode", "pk": [...], "floor": iso|None}}`` for every Trickle table (``{}`` if none)."""
+    """``{table: {"mode", "pk": [...], "floor": iso|None, "f_base": iso|None}}`` for every Trickle table."""
     if not _table_exists(con, META_TABLE):
         return {}
-    rows = con.execute(f'SELECT table_name, mode, pk, floor FROM {_q(META_TABLE)}').fetchall()
-    return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else []), "floor": r[3]} for r in rows}
+    rows = con.execute(f'SELECT table_name, mode, pk, floor, f_base FROM {_q(META_TABLE)}').fetchall()
+    return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else []), "floor": r[3], "f_base": r[4]}
+            for r in rows}
 
 
 def write_sidecar(data_dir: Path, payload: dict[str, dict]) -> None:
@@ -491,16 +517,81 @@ def _log_drops(con, name, consol, user, pk, f, first_output) -> None:
 # ─── write: merge (Z-set apply) ───────────────────────────────────────────────
 
 
-def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None) -> None:
-    """Apply a Z-set ``zset`` (a relation of user columns + ``_duckstring_d``) to the clean *main* table
-    ``name`` and record it on the ``__changelog``. ``zset`` is the **change** to the output — its ``+1``
-    rows are the new/updated rows, its ``-1`` rows the retractions of superseded/deleted ones.
+_RECON_CTE = "_duckstring_recon"
 
-    The main is the materialised prior output (``O_old``); we update it in place (a copy-on-write upsert),
-    never recomputing it. Idempotent replay at the same ``f``: the apply re-deletes-and-re-inserts the same
-    keys (a no-op the second time), and an **empty** consolidated change leaves the changelog untouched (so
-    a comprehensive replay, whose diff against the already-advanced main is empty, preserves the first
-    attempt's changelog rows)."""
+
+def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) -> str:
+    """SQL for the **current state** of a log-structured merge main: latest-per-PK over the ``base`` (rows
+    folded up to the watermark ``f_base``) overlaid with the changelog window ``(f_base, upper]``. Produces
+    the user columns + ``_duckstring_f`` (each row's last-write freshness). ``base_sql`` is ``None`` before
+    the first checkpoint (the whole changelog is still the main); ``f_base`` ``None`` ⇒ window = all changelog.
+
+    The changelog ``≤ f_base`` is *already in the base*, so it is excluded here (it is retained only for a
+    lagging consumer's window read). An update a→b→c collapses to the surviving image with its latest ``f``;
+    a net retraction drops the PK; an unchanged base PK keeps its base row and base freshness. Column-agnostic
+    (``* EXCLUDE`` + ``GROUP BY ALL``) — needs only the PK, so it composes over any base/changelog SELECT
+    without inspecting schemas (the data plane builds it straight from the sidecar)."""
+    pksel = ", ".join(_q(c) for c in pk)
+    lo = f"{_q(F_COL)} > {_ts(f_base)}" if f_base is not None else "1=1"
+    hi = f" AND {_q(F_COL)} <= {_ts(upper)}" if upper is not None else ""
+    if before is not None:  # exclusive upper — the state strictly *before* a freshness (the merge prior)
+        hi += f" AND {_q(F_COL)} < {_ts(before)}"
+    consol = (
+        f"SELECT * EXCLUDE ({_q(D_COL)}, {_q(F_COL)}), MAX({_q(F_COL)}) AS {_q(F_COL)}, "
+        f"CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} "
+        f"FROM (SELECT * FROM ({clog_sql}) WHERE {lo}{hi}) GROUP BY ALL HAVING SUM({_q(D_COL)}) <> 0"
+    )
+    upserts = f"SELECT * EXCLUDE ({_q(D_COL)}) FROM {_RECON_CTE} WHERE {_q(D_COL)} > 0"
+    if base_sql is None:
+        return f"WITH {_RECON_CTE} AS ({consol}) {upserts}"
+    return (
+        f"WITH {_RECON_CTE} AS ({consol}) "
+        f"SELECT * FROM ({base_sql}) WHERE ({pksel}) NOT IN (SELECT {pksel} FROM {_RECON_CTE}) "
+        f"UNION ALL BY NAME {upserts}"
+    )
+
+
+def _reconstruct_sql_for(con, name: str, *, upper=None, before=None) -> str | None:
+    """Build :func:`reconstruct_sql` for a merge main ``name`` from the registry (base table ``name`` +
+    its ``__changelog``). ``None`` if the table has no changelog and no base (nothing written yet)."""
+    clog = changelog_name(name)
+    if not _table_exists(con, clog):
+        return f'SELECT * FROM {_q(name)}' if _table_exists(con, name) else None
+    pk = tuple(read_meta(con).get(name, {}).get("pk", ()))
+    base_sql = f'SELECT * FROM {_q(name)}' if _table_exists(con, name) else None
+    return reconstruct_sql(base_sql, f'SELECT * FROM {_q(clog)}', _f_base(con, name), pk,
+                           upper=upper, before=before)
+
+
+def reconstruct_current(con, name: str, *, upper=None, before=None):
+    """The current clean state of merge main ``name`` (registry) as a relation — user columns +
+    ``_duckstring_f`` — reconstructed from the base table + changelog. ``before`` (exclusive) gives the
+    state strictly before a freshness (the prior a same-run merge diffs against). ``None`` if nothing yet."""
+    sql = _reconstruct_sql_for(con, name, upper=upper, before=before)
+    return con.sql(sql) if sql is not None else None
+
+
+def current_state(con, name: str):
+    """The current clean state of a registry table as a user-column relation: a merge main is reconstructed
+    from its base ⊎ changelog; anything else (append history, plain output) is the table itself. System
+    columns are stripped (the user-facing view ``read_table`` returns)."""
+    if read_meta(con).get(name, {}).get("mode") == "merge":
+        rel = reconstruct_current(con, name)
+        if rel is not None:
+            return _strip_system(rel)
+    return _strip_system(con.sql(f'SELECT * FROM {_q(name)}'))
+
+
+def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None) -> None:
+    """Append a Z-set ``zset`` (user columns + ``_duckstring_d``) to the merge main's append-only
+    ``__changelog``. The main is **log-structured**: the changelog is the source of truth and the clean
+    current state is reconstructed on read (:func:`reconstruct_current`) from a base table (written only by
+    :func:`checkpoint`) overlaid with the changelog. So a run only ever *appends* its delta here (O(change));
+    the base is never touched per run.
+
+    Idempotent replay at the same ``f``: a non-empty change rewrites just this ``f``'s changelog window; an
+    empty consolidated change leaves it untouched (so a comprehensive replay, whose diff against the
+    already-advanced state is empty, preserves the first attempt's rows)."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if not pk:
@@ -515,13 +606,10 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     if missing:
         raise DeltaError(f"apply_zset('{name}', ...): primary key column(s) {missing} not in the relation")
     sel_user = ", ".join(_q(c) for c in user)
-    pk_list = ", ".join(_q(c) for c in pk)
     clog = changelog_name(name)
-    main_exists = _table_exists(con, name)
+    clog_existed = _table_exists(con, clog)
 
-    # Consolidate by full row: an update's old(-1)/new(+1) survive as distinct rows; a spurious +1/-1 of
-    # the same row cancels. This is the Z-set `distinct`/`consolidate` operator. The weight is cast to a
-    # BIGINT (the changelog's stored type — a DuckDB SUM widens to HUGEINT, which Iceberg can't hold).
+    # Consolidate by full row (the Z-set `distinct` operator); BIGINT weight (Iceberg can't hold a HUGEINT).
     consol = unique_name("consol")
     con.execute(
         f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
@@ -529,46 +617,28 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
         f'GROUP BY {sel_user} HAVING SUM({_q(D_COL)}) <> 0'
     )
     nonempty = con.execute(f'SELECT count(*) FROM {_q(consol)}').fetchone()[0] > 0
-    # The changelog table always exists before the apply — including a bootstrap, which writes no rows but
-    # must still publish an (empty) changelog and give retention a table to trim. Its schema is borrowed
-    # from the consolidated delta, so this works before the main exists.
-    _ensure_changelog(con, clog, consol)
-
-    # Apply the changelog and the main in ONE transaction, **changelog first**. A comprehensive merge
-    # derives its delta against the *current main*, so a crash that left the main advanced past a changelog
-    # missing this run's rows would make the replay diff against the already-advanced main, compute an empty
-    # delta, and lose the changelog entry for good. Committing both together (single-writer-per-line) means a
-    # replay sees either all-old — re-derive and apply — or all-new — an empty delta that no-ops. A bootstrap
-    # writes no changelog (a first consumer reads the main; no window predates this run); a normal run
-    # rewrites this F's window only when the change is non-empty (the replay-idempotency guard).
-    con.execute("BEGIN TRANSACTION")
-    try:
-        if main_exists:
-            if nonempty:
-                con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')
-                con.execute(
-                    f'INSERT INTO {_q(clog)} ({sel_user}, {_q(D_COL)}, {_q(F_COL)}) '
-                    f'SELECT {sel_user}, {_q(D_COL)}, {_ts(f)} FROM {_q(consol)}'
-                )
-            # CoW upsert: drop every key the change touches, re-insert the surviving positive rows.
-            con.execute(f'DELETE FROM {_q(name)} WHERE ({pk_list}) IN (SELECT {pk_list} FROM {_q(consol)})')
-            con.execute(f'INSERT INTO {_q(name)} SELECT {sel_user} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
-        else:  # bootstrap: stand up the clean main from the +1 rows
-            con.execute(f'CREATE TABLE {_q(name)} AS SELECT {sel_user} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
-        con.execute("COMMIT")
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
+    _ensure_changelog(con, clog, consol)  # borrows schema from the delta; works before any base exists
+    if nonempty:
+        con.execute("BEGIN TRANSACTION")
+        try:
+            con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')  # idempotent replay
+            con.execute(
+                f'INSERT INTO {_q(clog)} ({sel_user}, {_q(D_COL)}, {_q(F_COL)}) '
+                f'SELECT {sel_user}, {_q(D_COL)}, {_ts(f)} FROM {_q(consol)}'
+            )
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
     _record_meta(con, name, "merge", pk)
     cutoff = _apply_retention(con, clog, f, retain_t, retain_n)
-    _advance_floor(con, name, bootstrap_f=(f if not main_exists else None), cutoff=cutoff)
+    _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None), cutoff=cutoff)
 
 
 def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None) -> None:
-    """Comprehensive merge: ``relation`` is the **complete current state**. Diff it against the prior main
-    as a Z-set (``new(+1) ⊎ main(-1)``, consolidated by full row — rows present in both cancel, only-in-new
-    are inserts/updates ``+1``, only-in-main are retractions ``-1``) and apply it. No per-row hash needed;
-    the main holds pure user columns."""
+    """Comprehensive merge: ``relation`` is the **complete current state**. Diff it against the
+    reconstructed prior state (base ⊎ changelog) as a full-row Z-set (``new(+1) ⊎ prior(-1)``, consolidated)
+    and append the diff to the changelog."""
     if not pk:
         raise DeltaError(f"merge_table('{name}', ...) needs a primary key — pass pk=...")
     cols = list(relation.columns)
@@ -578,14 +648,39 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
     sel = ", ".join(_q(c) for c in cols)
     state = unique_name("state")
     relation.create_view(state, replace=True)
-    if _table_exists(con, name):
+    # The prior is the state *strictly before* this run's f — so a second merge at the same f (or a replay)
+    # diffs against the pre-f state and replaces this f's changelog window with the full net change, rather
+    # than diffing against its own earlier write at the same f and losing it.
+    prior = reconstruct_current(con, name, before=f)
+    if prior is not None:
+        pv = unique_name("prior")
+        _strip_system(prior).create_view(pv, replace=True)  # user columns only (drop _duckstring_f)
         zset = con.sql(
             f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)} '
-            f'UNION ALL BY NAME SELECT {sel}, -1 AS {_q(D_COL)} FROM {_q(name)}'
+            f'UNION ALL BY NAME SELECT {sel}, -1 AS {_q(D_COL)} FROM {_q(pv)}'
         )
     else:
         zset = con.sql(f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)}')
     apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n)
+
+
+def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> None:
+    """Fold the changelog into the base up to ``target_f`` and advance the fold watermark — the amortised
+    O(table) write that keeps the per-run cost O(change). The base is rewritten to the reconstructed state
+    (``base ⊎ changelog ≤ target_f``, latest-per-PK, dead versions/tombstones dropped). Crash-safe and
+    lock-free: ``f_base`` is advanced *after* the base is replaced, and reads are latest-per-PK over
+    ``base ⊎ changelog``, so an interrupted checkpoint just leaves a redundant (idempotent) changelog window."""
+    clog = changelog_name(name)
+    sql = _reconstruct_sql_for(con, name, upper=target_f)
+    if sql is None:
+        return
+    tmp = unique_name("ckpt")
+    con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(tmp)} AS {sql}')   # reads the OLD base + changelog
+    con.execute(f'CREATE OR REPLACE TABLE {_q(name)} AS SELECT * FROM {_q(tmp)}')  # replace the base
+    con.execute(f'DROP TABLE IF EXISTS {_q(tmp)}')
+    _set_f_base(con, name, target_f)
+    cutoff = _apply_retention(con, clog, target_f, retain_t, retain_n)
+    _advance_floor(con, name, cutoff=cutoff)
 
 
 # ─── write: incremental aggregation (distributive / algebraic) ──────────────────
@@ -696,7 +791,9 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     out_cols = list(by) + list(metrics.keys())
     out_sel = ", ".join(_q(c) for c in out_cols)
     new_out = f"SELECT {by_list}, {_agg_derive(metrics, sidx, eidx)} FROM {_q(state)} WHERE {affected} AND _a_cnt > 0"
-    old_out = f"SELECT {out_sel} FROM {_q(name)} WHERE {affected}" if _table_exists(con, name) \
+    # The prior published main is the reconstructed current state (the agg output is a log-structured merge).
+    recon = _reconstruct_sql_for(con, name)
+    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE {affected}" if recon \
         else f"SELECT {out_sel} FROM {_q(state)} WHERE 1=0"
     delta_out = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM ({new_out}) "
@@ -944,7 +1041,9 @@ def read_registry_delta(con, table, previous_f, f, pk) -> Delta:
         return _append_delta_from_sql(con, f'SELECT * FROM {_q(table)}', previous_f, f, out_pk, NEVER, floor)
     clog = changelog_name(table)
     clog_sql = f'SELECT * FROM {_q(clog)}' if _table_exists(con, clog) else None
-    return _merge_delta_from_sql(con, f'SELECT * FROM {_q(table)}', clog_sql, previous_f, f, out_pk, NEVER, floor)
+    # The full-read main is the *reconstructed* current state (base ⊎ changelog), not the bare base table.
+    main_sql = _reconstruct_sql_for(con, table) or f'SELECT * FROM {_q(table)}'
+    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, out_pk, NEVER, floor)
 
 
 def _strip_system(rel):

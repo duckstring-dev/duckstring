@@ -326,9 +326,11 @@ def test_freshness_lists_incremental_runs(catchment_client, tmp_path, monkeypatc
     monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     fr = catchment_client.get("/api/ponds/p/freshness?table=priced").json()
-    # The bootstrap writes no changelog, so only the f2 incremental run shows; floor anchors at f1.
-    assert len(fr["freshness"]) == 1
+    # The main is log-structured, so the bootstrap (f1) writes the changelog too — both runs show
+    # (newest first); floor anchors at f1.
+    assert len(fr["freshness"]) == 2
     assert fr["freshness"][0].startswith("2026-01-02")
+    assert fr["freshness"][1].startswith("2026-01-01")
     assert fr["floor"].startswith("2026-01-01")
 
 
@@ -345,12 +347,14 @@ def test_merge_consolidation_full_state(catchment_client, tmp_path, monkeypatch)
     ).json()
     idx, by = _rows_by_id(page)
     assert {"_duckstring_active", "_duckstring_updates", "_duckstring_f"} <= set(page["columns"])
-    # id1 updated (active), id3 inserted (active), id4 untouched (active, no changelog), id2 deleted.
+    # id1 updated (active), id3 inserted (active), id4 untouched since bootstrap (active), id2 deleted.
     assert [by[i][idx["_duckstring_active"]] for i in (1, 3, 4)] == [1, 1, 1]
     assert by[2][idx["_duckstring_active"]] == -1
     assert by[2][idx["name"]] == "b"  # the deleted row's last image survives for display
-    assert by[1][idx["_duckstring_updates"]] == 1 and by[4][idx["_duckstring_updates"]] == 0
-    # Untouched since bootstrap → falls back to the floor freshness (every row has a freshness).
+    # The bootstrap create counts as a +1 write event: id1 was created (f1) then updated (f2) → 2; id4 was
+    # only created → 1.
+    assert by[1][idx["_duckstring_updates"]] == 2 and by[4][idx["_duckstring_updates"]] == 1
+    # id4 carries its own last-write freshness (the bootstrap, f1) — every row has a freshness from the main.
     assert by[4][idx["_duckstring_f"]] is not None and by[4][idx["_duckstring_f"]].startswith("2026-01-01")
 
 
@@ -471,8 +475,9 @@ def test_merge_history_create_and_delete_events(catchment_client, tmp_path, monk
     # id3 was inserted at f2 → 'create'.
     h3 = catchment_client.post("/api/query/history", json={"pond": "p", "table": "priced", "pk": {"id": 3}}).json()
     assert [r[idx_of(h3)["_duckstring_event"]] for r in h3["rows"]] == ["create"]
-    # id2 was deleted at f2 → 'delete', showing the retracted image.
+    # id2 was created at bootstrap (f1) then deleted at f2 → 'delete' over 'create' (newest first), the
+    # delete showing the retracted image.
     h2 = catchment_client.post("/api/query/history", json={"pond": "p", "table": "priced", "pk": {"id": 2}}).json()
     i2 = idx_of(h2)
-    assert [r[i2["_duckstring_event"]] for r in h2["rows"]] == ["delete"]
+    assert [r[i2["_duckstring_event"]] for r in h2["rows"]] == ["delete", "create"]
     assert h2["rows"][0][i2["name"]] == "b"

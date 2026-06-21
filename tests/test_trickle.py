@@ -114,23 +114,59 @@ def test_merge_changelog_is_full_image_zset(reg, tmp_path):
     T.merge_table(reg, "dim", _state(reg, [(2, "B")]), ts(3), ("id",))                       # 1,3 del
 
     data_dir = publish(reg, tmp_path / "data", f=ts(3))
-    assert rows(reg, data_dir, "dim", "id, v") == [(2, "B")]  # clean main, no system columns
+    assert rows(reg, data_dir, "dim", "id, v") == [(2, "B")]  # reconstructed current state, no system columns
     clog = reg.sql(
         f"SELECT id, v, {T.D_COL}, {T.F_COL} FROM dim__changelog ORDER BY {T.F_COL}, id, {T.D_COL}"
     ).fetchall()
     assert clog == [
-        # run 1 (bootstrap) writes NO changelog (consumers bootstrap from the main; floor marks below).
+        # The main is log-structured: run 1 (bootstrap) writes the initial state to the changelog as +1s
+        # (it IS the main until a checkpoint folds it into a base).
+        (1, "a", 1, ts(1)), (2, "b", 1, ts(1)),                       # run 1: initial inserts
         (2, "b", -1, ts(2)), (2, "B", 1, ts(2)), (3, "c", 1, ts(2)),  # run 2: update 2 = -old +new; insert 3
         (1, "a", -1, ts(3)), (3, "c", -1, ts(3)),                      # run 3: delete 1 and 3 (retractions)
     ]
     assert T.load_sidecar(data_dir)["dim"]["floor"] == ts(1).isoformat()
 
 
-def test_merge_main_is_pure_user_columns(reg, tmp_path):
+def test_merge_main_carries_freshness_stripped_for_consumers(reg, tmp_path):
     T.merge_table(reg, "dim", _state(reg, [(1, "a")]), ts(1), ("id",))
     data_dir = publish(reg, tmp_path / "data", f=ts(1))
-    full = duckdb.connect().sql(ParquetDataPlane().read_select(data_dir, "dim"))
-    assert set(full.columns) == {"id", "v"}  # no _duckstring_* on the main
+    rcon = duckdb.connect()
+    full = rcon.sql(ParquetDataPlane().read_select(data_dir, "dim"))
+    # The (reconstructed) main carries _duckstring_f — each row's last-write freshness, for as-of reads and
+    # the data viewer — while every other column is a user column.
+    assert set(full.columns) == {"id", "v", "_duckstring_f"}
+    # A consumer strips the system column (read_table does this), seeing pure user columns + the right state.
+    assert set(T._strip_system(full).columns) == {"id", "v"}
+    assert full.filter("id = 1").fetchone()[2] == ts(1)  # _duckstring_f = the run that wrote it
+
+
+def test_merge_main_checkpoint_folds_into_base(reg, tmp_path, monkeypatch):
+    """At a checkpoint the changelog folds into a base file (current state, latest-per-PK with dead rows /
+    tombstones dropped); the fold watermark f_base advances; reads reconstruct base ⊎ changelog>f_base."""
+    monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", "1")  # tiny floor → checkpoint fires every publish
+    snk_dir = tmp_path / "data"
+
+    def run(state, f):
+        T.merge_table(reg, "dim", _state(reg, state), f, ("id",))
+        publish(reg, snk_dir, f=f)
+        return T.load_sidecar(snk_dir)["dim"]
+
+    sc = run([(1, "a"), (2, "b")], ts(1))           # bootstrap → checkpoint folds it into the base
+    assert (snk_dir / "dim.parquet").exists() and sc["f_base"] == ts(1).isoformat()
+    assert rows(reg, snk_dir, "dim", "id, v") == [(1, "a"), (2, "b")]
+    # The registry base table now holds the folded state and carries the freshness column.
+    assert sorted(reg.sql("SELECT id, v FROM dim").fetchall()) == [(1, "a"), (2, "b")]
+    assert "_duckstring_f" in reg.sql("SELECT * FROM dim LIMIT 0").columns
+
+    sc = run([(1, "A"), (2, "b"), (3, "c")], ts(2))  # update 1, insert 3, keep 2
+    assert sc["f_base"] == ts(2).isoformat()
+    assert rows(reg, snk_dir, "dim", "id, v") == [(1, "A"), (2, "b"), (3, "c")]
+
+    sc = run([(1, "A"), (3, "c")], ts(3))            # delete 2 → folded out of the base (dead-row GC)
+    assert sc["f_base"] == ts(3).isoformat()
+    assert rows(reg, snk_dir, "dim", "id, v") == [(1, "A"), (3, "c")]
+    assert sorted(reg.sql("SELECT id, v FROM dim").fetchall()) == [(1, "A"), (3, "c")]  # 2 gone from the base
 
 
 def test_merge_idempotent_replay(reg, tmp_path):
@@ -188,7 +224,7 @@ def test_merge_requires_primary_key(reg):
 
 class _CrashOn:
     """Proxy a DuckDB connection, raising when an executed statement contains ``needle`` — to inject a
-    crash mid-apply and prove the changelog + main commit/abort atomically."""
+    crash mid-apply and prove the changelog write commits/aborts atomically."""
 
     def __init__(self, con, needle):
         self._c, self._needle = con, needle
@@ -202,25 +238,27 @@ class _CrashOn:
         return getattr(self._c, name)
 
 
-def test_merge_apply_is_atomic_changelog_and_main(reg, tmp_path):
+def test_merge_apply_changelog_write_is_atomic(reg, tmp_path):
+    """The main is log-structured (changelog only; no main upsert), so a crash mid-apply can only affect the
+    changelog. The DELETE+INSERT of this f's window is one transaction: a crash rolls it back, the
+    reconstructed state is unchanged, and a clean replay recovers."""
     T.merge_table(reg, "dim", _state(reg, [(1, "a"), (2, "b")]), ts(1), ("id",))  # bootstrap
-    T.merge_table(reg, "dim", _state(reg, [(1, "A"), (2, "b")]), ts(2), ("id",))  # changelog now exists
+    T.merge_table(reg, "dim", _state(reg, [(1, "A"), (2, "b")]), ts(2), ("id",))
 
-    # Crash on the main CoW insert — after the changelog rows were inserted in the same transaction.
+    # Crash on the changelog INSERT — the DELETE that precedes it in the same transaction must roll back too.
     with pytest.raises(RuntimeError):
-        T.merge_table(_CrashOn(reg, 'INSERT INTO "dim" SELECT'),
+        T.merge_table(_CrashOn(reg, 'INSERT INTO "dim__changelog"'),
                       "dim", _state(reg, [(1, "Z"), (2, "b")]), ts(3), ("id",))
 
-    # The transaction rolled back: main is untouched AND the changelog has no ts(3) rows (never the
-    # main-advanced / changelog-missing state the old ordering could produce).
-    assert sorted(reg.execute("SELECT id, v FROM dim").fetchall()) == [(1, "A"), (2, "b")]
+    # Rolled back: no ts(3) changelog rows, and the reconstructed state is still the ts(2) state.
     assert reg.execute(
         f"SELECT count(*) FROM dim__changelog WHERE {T.F_COL} = {T._ts(ts(3))}"
     ).fetchone()[0] == 0
+    assert sorted(T.reconstruct_current(reg, "dim").fetchall()) == [(1, "A", ts(2)), (2, "b", ts(1))]
 
-    # A clean replay recovers fully — both the main and the changelog land.
+    # A clean replay recovers fully.
     T.merge_table(reg, "dim", _state(reg, [(1, "Z"), (2, "b")]), ts(3), ("id",))
-    assert sorted(reg.execute("SELECT id, v FROM dim").fetchall()) == [(1, "Z"), (2, "b")]
+    assert sorted(T._strip_system(T.reconstruct_current(reg, "dim")).fetchall()) == [(1, "Z"), (2, "b")]
     assert sorted(reg.execute(
         f"SELECT id, v, {T.D_COL} FROM dim__changelog WHERE {T.F_COL} = {T._ts(ts(3))}"
     ).fetchall()) == [(1, "A", -1), (1, "Z", 1)]
@@ -1629,9 +1667,10 @@ def test_merge_ripple_via_local_runner(tmp_path):
     assert _sc["mode"] == "merge" and _sc["pk"] == ["id"] and _sc["floor"] is not None
     con = duckdb.connect()
     assert rows(con, out, "loud", "id, v") == [(1, "A"), (2, "B")]
+    # The main is log-structured: the bootstrap state is the changelog (no base yet, no checkpoint).
     assert con.sql(
         f"SELECT count(*) FROM ({ParquetDataPlane().read_select(out, 'loud__changelog')})"
-    ).fetchone()[0] == 0  # bootstrap → empty changelog
+    ).fetchone()[0] == 2  # the two initial rows, as +1 changelog entries
 
 
 # ─── incremental draw (cross-Catchment transfer window) ──────────────────────────
@@ -1659,20 +1698,21 @@ def test_incremental_draw_window_roundtrip(tmp_path):
 
     producer_run([(1, "A"), (3, "C"), (4, "d")], 3)
 
-    # Incremental draw: ship only the changelog parts newer than the consumer's landed freshness, plus the
-    # wholesale main. Only the ts(3) part moves over the wire.
+    # Incremental draw: the merge main is log-structured (no base file until a checkpoint), so only the new
+    # changelog parts move — here just the ts(3) part.
     after = datetime.fromisoformat(T.landed_after(cons))
     shipped = [p for p in T.table_parts(prod, "dim__changelog") if T.part_f(p.name) > after]
     assert [T.part_f(p.name) for p in shipped] == [ts(3)]
     for p in shipped:
         shutil.copy(p, cons / "dim__changelog" / p.name)
-    shutil.copy(prod / "dim.parquet", cons / "dim.parquet")  # the merge main is wholesale
 
     rcon = duckdb.connect()
     rcon.execute("SET TimeZone='UTC'")
     d = T.read_delta(rcon, cons, "dim", previous_f=ts(2), f=ts(3), dp=ParquetDataPlane())
     assert sorted(d.upserts.fetchall()) == [(3, "C"), (4, "d")]
     assert d.deletes.fetchall() == []
+    # The reconstructed current state on the consumer reflects the whole history landed via parts.
+    assert rows(rcon, cons, "dim", "id, v") == [(1, "A"), (3, "C"), (4, "d")]
 
 
 def test_landed_after_bootstrap_is_none(tmp_path):

@@ -168,12 +168,20 @@ def test_trickle_chain_runs_end_to_end(runtime):
     assert json.loads((orders_dir / "_trickle.json").read_text())["order_line"]["mode"] == "append"
     assert list((orders_dir / "order_line").glob("*.parquet")), "orders: no append history parts"
 
-    # The merge lines published a clean main (wholesale) + a __changelog companion (per-run parts directory).
+    # The merge lines are log-structured: their main is the __changelog parts directory (the base
+    # `{table}.parquet` only appears once a checkpoint folds it, which this small run never reaches), and the
+    # current state is reconstructed on read.
+    import duckdb
+
+    from duckstring.dataplane import ParquetDataPlane
+    rcon = duckdb.connect()
     for name, table in (("catalog", "product"), ("priced", "priced_line"), ("revenue", "revenue_by_product")):
         data_dir = root / "ponds" / name / "m1" / "data"
-        assert (data_dir / f"{table}.parquet").exists(), f"{name}: no main"
         assert list((data_dir / f"{table}__changelog").glob("*.parquet")), f"{name}: no changelog parts"
         assert json.loads((data_dir / "_trickle.json").read_text())[table]["mode"] == "merge"
+        # The reconstructed main is readable (non-empty current state) even without a checkpointed base.
+        n = rcon.sql(f"SELECT count(*) FROM ({ParquetDataPlane().read_select(data_dir, table)})").fetchone()[0]
+        assert n > 0, f"{name}: empty reconstructed main"
 
 
 def test_refresh_flag_rebuilds_and_bumps_floor(runtime):

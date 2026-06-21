@@ -394,8 +394,15 @@ class Pond:
                 except Exception:
                     pass  # name taken by one of this Pond's own tables — the relation still works
                 return rel
-            return self.con.sql(f'SELECT * FROM "{table}"')
-        return self.con.sql(f'SELECT * FROM "{ref}"')
+            return self._own_current(table)
+        return self._own_current(ref)
+
+    def _own_current(self, name: str):
+        """Read one of this Pond's own registry tables as its current clean state — a merge Trickle is
+        reconstructed from its base ⊎ changelog (the main is log-structured); anything else is read directly."""
+        from . import trickle_io as trickle
+
+        return trickle.current_state(self.con, name)
 
     # ─── Trickle: incremental I/O (see duckstring.trickle_io / plans/trickle.md) ───
 

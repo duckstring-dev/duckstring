@@ -1,5 +1,12 @@
 # Plan: incremental merge *main* — log-structured base + changelog
 
+> **Status: implemented** (single-file base; chunked base + partition-granular checkpoint remain the deferred
+> optimisations noted below). `apply_zset`/`merge_table` append to the changelog only; `reconstruct_sql` +
+> `checkpoint` + the `f_base` meta live in `trickle/io.py`; reads reconstruct via `DataPlane.read_select`;
+> the trigger + base publish are in `dataplane._checkpoint_and_publish_base` (`DUCKSTRING_COMPACT_THRESHOLD`,
+> default 256 MiB); the data viewer reads freshness from the reconstructed main. Tests:
+> `test_merge_main_checkpoint_folds_into_base` + the migrated merge/viewer suites.
+
 A follow-up to the append/changelog incremental-publish work (per-run parts — see the Data plane section of
 `CLAUDE.md`). That work made every **append-only** published table (append history, `__changelog`,
 `__droplog`) grow by O(change). The remaining O(table)-per-run costs are on the merge **main**, and there are
