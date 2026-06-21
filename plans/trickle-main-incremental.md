@@ -1,91 +1,146 @@
-# Plan: incremental publish of the merge *main*
+# Plan: incremental merge *main* — log-structured base + changelog
 
 A follow-up to the append/changelog incremental-publish work (per-run parts — see the Data plane section of
 `CLAUDE.md`). That work made every **append-only** published table (append history, `__changelog`,
-`__droplog`) grow by O(change). The one remaining O(table)-per-run write is the merge **main**: it is the
-clean current state (one row per PK, `SELECT *` = the table), published by overwriting `{main}.parquet`
-wholesale every run. For a large dimension with localised changes this is the dominant run-completion
-latency cost. This plan is the way forward; it is **not yet implemented**.
+`__droplog`) grow by O(change). The remaining O(table)-per-run costs are on the merge **main**, and there are
+*two* of them:
 
-## The two proposals are the same idea
+1. the per-run **publish** of the whole main as Parquet (the expensive one — serialise + disk); and
+2. the per-run registry **upsert** that keeps the main clean — its `DELETE FROM main WHERE pk IN (…)` scans
+   the whole main every run (no PK index), even though only O(change) rows move.
 
-Both proposals turn the main into a **log you integrate on read** (merge-on-read), differing only in where
-the per-run delta comes from:
+This plan removes both by making a merge Trickle **log-structured**: the registry (and the published data)
+hold a **base** (a checkpoint of the state up to a watermark `f_base`) plus the **changelog** (the Z-set of
+everything after). Per run, only the changelog grows; the base is rewritten occasionally at a **checkpoint**.
+Not yet implemented.
 
-1. **Changelog-informed upsert** — apply the run's Z-set (already materialised in the `__changelog`) to the
-   published main as a row-level upsert: delete the touched PKs, insert their new images.
-2. **`_duckstring_f` on the main** — stamp each main row with the freshness at which it was last written, and
-   publish only `… WHERE _duckstring_f >= f` (the rows this run touched).
+## The model
 
-They carry the same information. Crucially, **neither is complete on its own for deletions**: a deleted PK
-has *no* row in the clean registry main, so "publish the changed rows" never emits anything for it, and a
-naive latest-per-PK reconstruction on the consumer would **resurrect** the deleted row from an older part.
-A delete must be published as an explicit **tombstone**, and the only place the deletion is recorded is the
-changelog (the `-1` retraction). So proposal 2 still needs the changelog's deletes — it converges with
-proposal 1. The real design question is not "which delta source" but **what substrate** carries a
-merge-on-read main.
+A merge Trickle is `(base, changelog)`:
 
-## What a merge-on-read main needs (independent of substrate)
+- **base** — the consolidated current state as of `f_base` (one row per PK), carrying `_duckstring_f`
+  (last-write freshness per row). Published as **size-bounded chunks** (~`compact_threshold`, default 256 MiB),
+  freshness-ordered. Rewritten only at a checkpoint.
+- **changelog** — the per-run Z-set parts (already incremental, from the append/changelog work),
+  `_duckstring_f`-stamped.
+- **`f_base`** — the **fold watermark**: the freshness up to which the changelog has been folded into the
+  base. Recorded in the meta/sidecar.
 
-- **Per-run delta of the main** — the changed/new rows (`_duckstring_f >= f`) *and* the deleted PKs
-  (tombstones from the changelog's retractions). O(change) to produce.
-- **Read-time reconstruction** — current state = the latest non-tombstoned image per PK across the parts:
-  `… QUALIFY row_number() OVER (PARTITION BY pk ORDER BY _duckstring_f DESC) = 1`, with tombstoned PKs
-  dropped. O(rows across live parts).
-- **Compaction** — periodically collapse the parts back into a fresh base so read cost (and part count)
-  stays bounded. A compaction re-introduces one O(table) write, but amortised over many runs.
+Current state is reconstructed, never materialised per run:
 
-The cost trade vs today: wholesale is **O(table) write / run, O(table) plain-scan read**. Merge-on-read is
-**O(change) write / run, O(live-parts) read + periodic compaction**. The win is real because **incremental
-runs do not full-read the main** — the consumer reads the *changelog* delta, not the main. A full main read
-happens only on the **comprehensive** path (bootstrap / coverage-miss / changed-overwrite / over-`p`) and on
-a genuine whole-table `read_table`, so the slower reconstruction read is paid on the exception, not the
-common path. That asymmetry is what makes trading a guaranteed per-run write for an occasional heavier read
-a good deal.
+```
+current = latest-per-PK( base  ⊎  changelog WHERE _duckstring_f > f_base )
+```
 
-## Recommendation
+— take the base, overlay the changelog *strictly after* `f_base` (consolidated to the latest non-retracted
+image per PK; retracted PKs dropped). The changelog `≤ f_base` is **already in the base** and must be
+excluded here (or it double-counts); it is retained only so a lagging consumer can still window-read it.
 
-**Build the main as a parts-based merge-on-read table, reusing the per-run-parts machinery already in the
-flat layer** (proposal 2's substrate, made delete-correct with changelog tombstones):
+### Reads
 
-1. **Stamp the registry main with `_duckstring_f`** (the last-write epoch per row). This is the portable
-   artifact proposal 2 wants — it also directly answers "what main rows changed since `f`?" without the
-   changelog, and is the seam any future plane needs. (Note: this relaxes the current "merge main is pure
-   user columns" invariant — `read_table` already strips `_duckstring_*`, so consumers are unaffected, but
-   the publish/contract code that special-cases the main must learn to exempt it like the changelog.)
-2. **Publish the main as per-run parts**: `main/{f}.parquet` = the rows with `_duckstring_f = f` (upserts)
-   **plus** tombstone rows for the PKs the changelog retracted this run (a `_duckstring_d = -1` marker
-   carrying just the PK). Exactly the `_export_parts` shape we already have, with a tombstone union.
-3. **Reconstruct on read** in `read_select`/`read_table` for a merge main: latest-per-PK over the parts,
-   dropping PKs whose latest row is a tombstone.
-4. **Compact** when the part count (or live/total row ratio) crosses a threshold: rewrite a single base
-   part at the current `f` and drop the rest. Amortised O(table); the only wholesale write, now occasional.
+- **`read_delta` (the IVM common path)** — unchanged. It is the changelog window `(previous_f, f]`; it never
+  touches the base. This is what the builder pulls every incremental run, so the hot path doesn't regress.
+- **`read_table` / the comprehensive path (full current state)** — the reconstruction above. Bounded to
+  `base + changelog-since-base`, which the checkpoint policy caps at ~2× base. Confined to comprehensive runs
+  and genuine whole-table reads, not the incremental path.
+- **Z-set shortcut** — where the builder wants a *state* for the join (`A_new` restricted to the affected
+  keys), it can feed `base(+1) ⊎ changelog(>f_base)` straight in as a Z-set and let the join's output
+  consolidation cancel the superseded versions — no separate latest-per-PK pass. (`A_old` stays the existing
+  `current ⊎ −δ`, or equivalently an as-of read; the data plane's `as_of` seam already exists if we later
+  want `A_old`/`A_new` purely via as-of reads and drop `_reconstruct_old`.)
 
-This reuses what we just built, stays **plane-agnostic** (flat Parquet benefits too, not just Iceberg),
-keeps the producer's per-run write O(change), and confines the heavier read to the comprehensive path.
+### Per-run cost
 
-### The Iceberg alternative (and why not to lead with it)
+| | per-run main publish | per-run main upsert (registry) | per-run total on the main |
+|---|---|---|---|
+| today | O(table) Parquet write | O(table) delete-scan | O(table) |
+| this plan | — (changelog part only, O(change)) | — (no main maintenance) | **O(change)** |
 
-On Iceberg the same merge-on-read is expressible natively — **equality-deletes + append** (write the changed
-PKs as a delete file + the new images as a data file, O(change), reader merges), or **copy-on-write upsert**
-(`tbl.upsert()` / `overwrite(filter=…)`, rewrites only the data files containing a touched PK). CoW gives
-plain-scan reads but its write is O(touched *files*) — for scattered PK changes that degrades to O(table)
-(it rewrites every file), so it does **not** guarantee the latency win; equality-delete MoR does, but
-pyiceberg's *writing* of equality deletes is less mature than its reading. Leading with Iceberg would also
-couple main incrementality to one plane and not help the flat opt-out. Keep the Iceberg-native path as a
-later optimisation (fast reads via CoW where changes are localised, or equality-deletes once pyiceberg's
-MoR-write support is solid), layered under the same `_duckstring_f`-on-main metadata.
+The O(table) work happens only at a checkpoint, amortised.
+
+## Checkpoint
+
+Fold the changelog into the base and advance `f_base`:
+
+```
+target_f = latest freshness to fold (≈ now)
+new_base = latest-per-PK( base ⊎ changelog WHERE _duckstring_f <= target_f )   -- drops dead versions + tombstoned PKs
+write new_base ORDER BY _duckstring_f into ~compact_threshold chunks
+f_base = target_f
+```
+
+- **Trigger (parameter-free):** checkpoint when `size(changelog since f_base) ≥ size(base)` (k=1). Self-tuning
+  — write-amp ≤ 2×, reconstruction window ≤ 2× base — with no magic constant. `compact_threshold` (default
+  256 MiB, catchment-level) is the **chunk size / floor**, not the trigger.
+- **Amortised O(change)/run.** A checkpoint costs O(base) but fires only every ~`base/Δ` runs, so amortised
+  ≈ O(Δ).
+- **Lock-free — the key property.** Because every main read is **latest-per-PK** over `base ⊎ changelog`,
+  rewriting/re-chunking the base is *idempotent* when a concurrent reader (or a draw) sees both the old and
+  the new chunks: the same `(pk, _duckstring_f)` appears twice and the window function picks an identical row.
+  So a checkpoint just writes the new chunks, swaps, and deletes the old — **no lock, no generation pointer**.
+- **Whole-base rewrite first.** The simple checkpoint rewrites the entire base (chunked, freshness-ordered).
+  A *partition-granular* checkpoint (rewrite only the chunks holding changed PKs, locate via `_duckstring_f`)
+  would shrink the per-checkpoint spike but needs a PK→chunk locator — deferred.
+
+## Retention vs checkpoint — two independent axes
+
+- **Retention** = the lag SLA: how far back the changelog is kept so a consumer can window-read before it
+  must full-read. **Pond-owned** (`retain_t` / `retain_n`). Sets the **floor**; trims changelog `< floor`.
+- **Checkpoint** = storage / write-amplification. **Catchment-owned** (`compact_threshold`, k=1).
+
+They interact but don't merge: `floor ≤ f_base` (the base covers up to `f_base`; the changelog is retained
+from `floor` for laggards; the `[floor, f_base]` slice is in *both* the base and the changelog, which is why
+reconstruction filters `> f_base`). A checkpoint is a convenient moment to also run the retention trim, but
+the cadences are governed separately — don't tie checkpoint cadence to the retention window, or a long SLA
+(e.g. 30 days) would let the changelog grow enormous before basing.
+
+## Partitioning order
+
+- **Default: freshness.** It's emergent and free — the checkpoint writes `ORDER BY _duckstring_f` into
+  size-bounded chunks, and recency correlates with read locality. For monotonic keys, freshness ≈ PK order.
+- **Reject PK-hash** as a default: it shreds the natural locality of real keys (monotonic ints / time-ish
+  codes), so a key-range filter or sort-merge join prunes nothing; hash only helps point lookups and even
+  load spread — not the scan-heavy analytics case.
+- **`.order_by(col)` — future knob, not now.** A custom clustering key turns the checkpoint into a
+  sorted-merge-with-splitting (LSM leveling) — real work. It is also the prerequisite for *order-dependent*
+  aggregates (first / last / cumsum / lag), which are a separate, much harder beast incrementally (no group
+  homomorphism; a cumsum change ripples to every later row) and are out of scope.
+
+## Append / changelog / droplog compaction — deferred
+
+The same *size* policy could merge their accumulated per-run parts into ~`compact_threshold` files, but:
+
+- it is pure **concatenate**-compaction (no base, no fold);
+- it is **low value** — append/changelog windowed reads already prune files by `_duckstring_f` min/max
+  stats, so file *count* is mostly a directory-listing cost; and the main's reconstruction window is already
+  bounded by the checkpoint;
+- it **lacks the main's idempotent-overlap safety** — these reads `UNION` / `SUM(_duckstring_d)`, so a
+  transient old+new overlap during a file-merge double-counts; it would need a generation-safe swap or a
+  `(row, _duckstring_f)` read-side dedup.
+
+So ship the **main checkpoint** now (the actual win, naturally lock-free) and leave append/changelog/droplog
+compaction as a later, optional tidy-up.
+
+## Surface changed
+
+- **`apply_zset`** — drop the main CoW-upsert; write only the changelog. (The base is touched only at
+  checkpoint.)
+- **Data plane `read_select` for a merge main** — reconstruct `latest-per-PK(base ⊎ changelog > f_base)`
+  instead of a plain file scan; base chunks read via the parts machinery.
+- **Checkpoint op** — new; consolidate `base ⊎ changelog ≤ target` → chunked freshness-ordered base, advance
+  `f_base`, run retention trim. Triggered at publish when `changelog ≥ base` (k=1). Run by the Duck inline
+  (amortised, its own cost) — or at quiesce if the spike matters.
+- **Meta / sidecar** — record `f_base`; exempt the base's `_duckstring_f` from the reserved-column publish
+  check and the schema contract (as the changelog already is).
+- **Builder** — largely unchanged: it still calls `read_table` (now reconstructing) and `read_delta`
+  (unchanged). The Z-set / as-of optimisations above are optional.
 
 ## Open questions
 
-- **Compaction policy** — by part count, by live/dead ratio, by age? And who runs it (the Duck at publish,
-  or a background sweep)? A bad cadence either lets reads rot or re-introduces frequent O(table) writes.
-- **Tombstone lifetime** — a tombstone can be dropped once no live part predates it for that PK (i.e. after
-  the next compaction). Until then it must travel in the draw like any other part.
-- **As-of reads** — latest-per-PK is "as of latest". An as-of-`f` read (the data plane's `read_select(...,
-  as_of=)` seam) becomes "latest per PK with `_duckstring_f <= f`" — naturally supported by the stamp, a
-  nice bonus of proposal 2.
-- **Contract/àpublish** — `_duckstring_f` on the main must be exempted from the reserved-column publish
-  check and the schema contract, exactly as the changelog already is.
-- **Draw** — main parts ship like changelog parts (newer-than-`after`), but the consumer must apply the
-  same latest-per-PK reconstruction; `landed_after` already covers part-tables generically.
+- **Partition-granular checkpoint** (rewrite only changed chunks via a PK→chunk locator) to remove the
+  per-checkpoint O(base) spike — worth it only if the spike is measured to matter.
+- **`compact_threshold` granularity** — catchment default with a per-pond override?
+- **Who runs the checkpoint** — Duck inline at publish (simple, amortised, spiky) vs a background/quiesce
+  sweep (smooth, a moving part). Lean inline.
+- **As-of unification** — adopt as-of reads for `A_old`/`A_new` and delete `_reconstruct_old`, now that the
+  source is log-structured? Tidy, optional.
