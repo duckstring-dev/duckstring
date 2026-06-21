@@ -19,6 +19,15 @@ alongside** each commit: it keeps the unchanged consumers working behaviour-neut
 file transfer, the direct file-serve, and the transitional read of a Source that hasn't re-exported to
 Iceberg yet. The ``catalog.json`` and the Iceberg metadata/data under ``data_dir`` are included in
 ``catchment archive`` by the existing root walk (download while quiescent).
+
+**Iceberg is only used for bounded *overwrite* tables** (plain Ripple output) — where its per-run
+snapshot + as-of read earn their keep at O(1) metadata cost. The **append-only** Trickle tables (an
+append history, a merge ``__changelog``, an ``__droplog``) and a merge **main** base are *not* committed
+to Iceberg: an append-only table's current snapshot must reference every data file ever appended, so an
+Iceberg commit's metadata grows O(runs) — unbounded — for no read benefit over the flat per-run parts,
+which prune just as well by Parquet file stats / ``_duckstring_f``. Those tables are served from the flat
+layer (the parts directory the sidecar export already writes), so their publish is O(change) per run, and
+``_raw_read_select`` falls back to the flat read whenever a table isn't in the catalog.
 """
 
 from __future__ import annotations
@@ -29,17 +38,13 @@ from .dataplane import DataPlane, ParquetDataPlane
 
 _NAMESPACE = "pond"  # the single namespace within each per-line catalog
 F_PROP = "duckstring.f"  # snapshot summary property carrying the Pond Run's freshness
-# Table properties for Trickle append/changelog tables (survive a retention delete-snapshot, unlike a
-# snapshot summary): the append cursor (max committed _duckstring_f) and the retained-history floor.
-LAST_F_PROP = "duckstring.last_f"
-FLOOR_PROP = "duckstring.floor"
 
 # Snapshot/metadata retention. Iceberg accrues a new data file + manifests + snapshot + metadata.json per
 # commit, and pyiceberg 0.11 expires snapshots from the *metadata* only (it leaves the files on disk), so
-# without an explicit prune every Pond Run leaks an overwrite table's previous full copy plus a pile of
-# manifest avros, forever. We keep the most-recent N snapshots (the as-of read seam can still reach that
-# far back) and reclaim everything no surviving snapshot references. The metadata.json files are bounded
-# by pyiceberg itself via the cleanup properties below, set at table creation.
+# without an explicit prune every overwrite Pond Run leaks the previous full copy plus a pile of manifest
+# avros, forever. We keep the most-recent N snapshots (the as-of read seam can still reach that far back)
+# and reclaim everything no surviving snapshot references. The metadata.json files are bounded by pyiceberg
+# itself via the cleanup properties below, set at table creation.
 _DEFAULT_KEEP_SNAPSHOTS = 5
 _CLEANUP_PROPS = {  # let pyiceberg delete superseded metadata.json files itself
     "write.metadata.delete-after-commit.enabled": "true",
@@ -107,22 +112,16 @@ class IcebergDataPlane(DataPlane):
         con.execute("SET TimeZone='UTC'")
         cat = self._catalog(data_dir)
         meta = trickle_io.read_meta(con)
-        # A merge **main** is log-structured (a base + the changelog); its base is published/checkpointed by
-        # the flat layer (above) and its current state is reconstructed on read, so it is *not* committed to
-        # Iceberg as a wholesale table — only its changelog is (append-commit, below). Reads of the base fall
-        # back to the flat Parquet (it is never in the catalog).
-        merge_mains = {t for t, m in meta.items() if m.get("mode") == "merge"}
+        # Only plain **overwrite** tables go to Iceberg. A merge **main** is log-structured (a base + the
+        # changelog) reconstructed on read; an **append-only** table (append history, ``__changelog``,
+        # ``__droplog``) grows unboundedly in Iceberg metadata (its current snapshot references every data
+        # file ever appended). Both are served from the flat parts layer the sidecar export already wrote
+        # above, so they are skipped here and ``_raw_read_select`` falls back to the flat read for them.
         for table in tables:
-            if table in merge_mains:
+            if self._is_incremental(table, meta) or meta.get(table, {}).get("mode") == "merge":
                 continue
-            if self._is_incremental(table, meta):
-                # A Trickle history/changelog grows by **append** — commit only this run's new rows as one
-                # `_duckstring_f`-homogeneous data file, so the window read prunes by manifest stats. A plain
-                # Ripple output stays overwrite (see _commit).
-                self._append_commit(cat, table, con, f)
-            else:
-                arrow = con.execute(f'SELECT * FROM "{table}"').fetch_arrow_table()
-                self._commit(cat, table, arrow, f)
+            arrow = con.execute(f'SELECT * FROM "{table}"').fetch_arrow_table()
+            self._commit(cat, table, arrow, f)
 
     @staticmethod
     def _is_incremental(table: str, meta: dict) -> bool:
@@ -137,69 +136,6 @@ class IcebergDataPlane(DataPlane):
             if table.endswith(suffix) and table[: -len(suffix)] in meta:
                 return True
         return False
-
-    def _append_commit(self, cat, table: str, con, f) -> None:
-        from pyiceberg.exceptions import NoSuchTableError
-
-        from .trickle_io import F_COL
-
-        ident = f"{_NAMESPACE}.{table}"
-        try:
-            tbl = cat.load_table(ident)
-        except NoSuchTableError:
-            tbl = None
-
-        if tbl is None:
-            arrow = con.execute(f'SELECT * FROM "{table}"').fetch_arrow_table()
-            tbl = self._create_table(cat, ident, arrow.schema)
-            if arrow.num_rows:
-                tbl.append(arrow, snapshot_properties=self._props(f))
-                self._set_props(tbl, **{LAST_F_PROP: f.isoformat()})
-            self._sync_retention(cat.load_table(ident), table, con)
-            self._prune(cat, table)
-            return
-        # Only the rows newer than the last committed run — its LAST_F_PROP cursor (a *table* property, not
-        # the snapshot summary, so a retention delete-snapshot below can't clobber it). For append/changelog
-        # that cursor equals the max _duckstring_f committed, so a replay at the same f appends nothing.
-        last = tbl.properties.get(LAST_F_PROP)
-        where = f"WHERE {F_COL} > TIMESTAMPTZ '{last}'" if last else ""
-        arrow = con.execute(f'SELECT * FROM "{table}" {where}').fetch_arrow_table()
-        if arrow.num_rows:
-            tbl.append(arrow, snapshot_properties=self._props(f))
-            self._set_props(tbl, **{LAST_F_PROP: f.isoformat()})
-        self._sync_retention(cat.load_table(ident), table, con)
-        self._prune(cat, table)
-
-    def _sync_retention(self, tbl, table: str, con) -> None:
-        """Mirror the registry's retention into the Iceberg history: the registry table was already
-        trimmed (``trickle_io._apply_retention``), so anything below its ``min(_duckstring_f)`` is expired
-        here too. Files are ``_duckstring_f``-homogeneous, so the delete drops whole files (metadata-only,
-        no Iceberg delete-files). A ``duckstring.floor`` property gates it so a no-retention run is a
-        cheap no-op. Space-only — correctness rides the consumer's window read + full-read fallback."""
-        from datetime import datetime
-
-        from .trickle_io import F_COL
-
-        reg_floor = con.execute(f'SELECT min({F_COL}) FROM "{table}"').fetchone()[0]
-        if reg_floor is None:
-            return
-        stored = tbl.properties.get(FLOOR_PROP)
-        if stored is None:  # first observation — record the floor, nothing to drop yet
-            self._set_props(tbl, **{FLOOR_PROP: reg_floor.isoformat()})
-            return
-        if reg_floor <= datetime.fromisoformat(stored):
-            return  # retention hasn't advanced the floor → nothing newly expired
-        tbl.delete(f"{F_COL} < '{reg_floor.isoformat()}'")  # drops whole expired files (metadata-only)
-        self._set_props(tbl, **{FLOOR_PROP: reg_floor.isoformat()})
-
-    @staticmethod
-    def _set_props(tbl, **props) -> None:
-        with tbl.transaction() as txn:
-            txn.set_properties(**props)
-
-    @staticmethod
-    def _props(f) -> dict:
-        return {F_PROP: f.isoformat()} if f is not None else {}
 
     def _commit(self, cat, table: str, arrow, f) -> None:
         import warnings
@@ -249,9 +185,8 @@ class IcebergDataPlane(DataPlane):
         """Keep only the most-recent ``_keep_snapshots()`` snapshots and physically remove any data /
         manifest files no surviving snapshot references. Space-only — correctness rides the current
         snapshot (always retained) and the consumer's window read — so any failure here is swallowed: a
-        Pond Run must never fail on housekeeping. An overwrite table sheds its old full data files; an
-        append history / changelog keeps every data file its *current* snapshot still references (the row
-        data is trimmed separately by :meth:`_sync_retention`), shedding only stale manifests/metadata."""
+        Pond Run must never fail on housekeeping. Only overwrite tables reach here now, so each pruned
+        snapshot sheds its superseded full data file plus the stale manifests/metadata."""
         try:
             ident = f"{_NAMESPACE}.{table}"
             tbl = cat.load_table(ident)

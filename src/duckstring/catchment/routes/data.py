@@ -158,7 +158,9 @@ def _sidecar(request: Request, name: str, major: int) -> dict:
     return load_sidecar(_data_dir(request, name, major))
 
 
-def _trickle_base_sql(pond: str, table: str, mode: str, pk: list, f_lo, f_hi, floor) -> str:
+def _trickle_base_sql(
+    pond: str, table: str, mode: str, pk: list, f_lo, f_hi, floor, *, main_ref=None, clog_ref=None
+) -> str:
     """The browse query for a Trickle, windowed to ``[f_lo, f_hi]`` (inclusive, either bound optional):
 
     - **append** — the history table itself, filtered by ``_duckstring_f``.
@@ -171,6 +173,11 @@ def _trickle_base_sql(pond: str, table: str, mode: str, pk: list, f_lo, f_hi, fl
       Ordered by PK — a stable total order for offset paging, and matching the append view, which can't
       be cheaply freshness-ordered (the viewer scans one wholesale Parquet / an ``iceberg_scan``, neither
       of which reverses without a per-page sort) — so neither view misleadingly claims a freshness order.
+
+    ``main_ref``/``clog_ref`` override the source identifiers for the main / changelog. The merge main is
+    now **log-structured** (base + changelog, reconstructed on read), and this query references it three
+    times — ``_active``, the ``_deleted`` anti-``EXISTS``, and the changelog twice — so the caller passes
+    pre-materialised temp tables (see :func:`_prepare_base`) to collapse the reconstruct to a single scan.
     """
     from ...trickle_io import changelog_name
 
@@ -184,9 +191,9 @@ def _trickle_base_sql(pond: str, table: str, mode: str, pk: list, f_lo, f_hi, fl
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
     windowed = bool(conds)
     if mode == "append":
-        return f"SELECT * FROM {sch}.{_qi(table)}{where}"
-    main = f"{sch}.{_qi(table)}"  # the reconstructed merge main — already carries _duckstring_f per row
-    clog = f"{sch}.{_qi(changelog_name(table))}"
+        return f"SELECT * FROM {main_ref or f'{sch}.{_qi(table)}'}{where}"
+    main = main_ref or f"{sch}.{_qi(table)}"  # reconstructed merge main — already carries _duckstring_f per row
+    clog = clog_ref or f"{sch}.{_qi(changelog_name(table))}"
     pkq = [_qi(c) for c in pk]
     part = ", ".join(pkq)
     join = "JOIN" if windowed else "LEFT JOIN"  # windowed → only records changed in the window
@@ -305,13 +312,33 @@ def _base_sql(body, floor=None) -> str:
     return f"SELECT * FROM {_qi(body.pond)}"
 
 
+def _prepare_base(con, body, floor=None) -> str:
+    """The base query for count/page, materialising a **merge** Trickle's reconstructed main + changelog
+    into temp tables first. The merge main is log-structured (base + changelog), so each reference in the
+    browse query re-runs the reconstruct (GROUP BY ALL over every changelog part + an anti-join + a UNION);
+    the browse references it three times. Folding it to two single-scan temps is what keeps a merge browse
+    as fast as the old flat-Parquet main was — without relying on the optimiser to dedupe a correlated
+    ``NOT EXISTS`` over a non-materialised reconstruct view. Other queries are unchanged (single scan)."""
+    if body.trickle != "merge":
+        return _base_sql(body, floor)
+    from ...trickle_io import changelog_name
+
+    sch = _qi(body.pond)
+    con.execute(f'CREATE OR REPLACE TEMP TABLE "_ds_main" AS SELECT * FROM {sch}.{_qi(body.table)}')
+    con.execute(f'CREATE OR REPLACE TEMP TABLE "_ds_clog" AS SELECT * FROM {sch}.{_qi(changelog_name(body.table))}')
+    return _trickle_base_sql(
+        body.pond, body.table, "merge", body.pk or [], body.f_lo, body.f_hi, floor,
+        main_ref='"_ds_main"', clog_ref='"_ds_clog"',
+    )
+
+
 @router.post("/query/count")
 def query_count(body: CountRequest, request: Request):
     """Total rows of the (default, custom, or Trickle) query — sizes the data viewer's virtual scroll. A
     bare ``COUNT(*)`` over a Parquet table is metadata-fast (no scan)."""
     m = _resolve_major(request, body.pond, body.major, body.version)
     con = _open_pond(request, body.pond, m)
-    base = _base_sql(body, _merge_floor(request, body, m))
+    base = _prepare_base(con, body, _merge_floor(request, body, m))
     try:
         (count,) = con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count").fetchone()
         return {"count": count}
@@ -356,7 +383,7 @@ def query_page(body: PageRequest, request: Request):
     con = _open_pond(request, body.pond, m)
     limit = max(1, min(body.limit, 5000))
     offset = max(0, body.offset)
-    base = _base_sql(body, _merge_floor(request, body, m))
+    base = _prepare_base(con, body, _merge_floor(request, body, m))
     # Opt-in column sort: applied only when requested (the default keeps the cheap base order). The
     # identifier is quoted (injection-safe); an unknown column just errors → 400.
     order = f" ORDER BY {_qi(body.order_by)} {'DESC' if body.order_desc else 'ASC'}" if body.order_by else ""

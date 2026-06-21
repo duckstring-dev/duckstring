@@ -224,7 +224,12 @@ class ParquetDataPlane(DataPlane):
 
         if trickle.table_parts(data_dir, table):  # append-only parts directory → union the parts
             glob = str(Path(data_dir) / table / "*.parquet").replace("'", "''")
-            return f"SELECT * FROM read_parquet('{glob}')"
+            sel = f"SELECT * FROM read_parquet('{glob}')"
+            # As-of read seam: keep only rows at/under the requested freshness. Parts are
+            # `_duckstring_f`-homogeneous and stat-pruned by DuckDB, so this drops whole part files.
+            if as_of is not None:
+                sel += f' WHERE "{trickle.F_COL}" <= {trickle._ts(as_of)}'
+            return sel
         pq = Path(data_dir) / f"{table}.parquet"
         if not pq.exists():
             raise FileNotFoundError(str(pq))

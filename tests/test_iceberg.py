@@ -1,6 +1,9 @@
 """The Iceberg data-plane backend (Phase 1 of plans/data-plane-iceberg.md): pyiceberg overwrite
 commits with an ``f``-stamped snapshot per run, DuckDB ``iceberg_scan`` reads, the as-of resolver, the
-reserved-namespace guard, and the flat-Parquet sidecar + legacy fallback. Skipped without the extra."""
+reserved-namespace guard, and the flat-Parquet sidecar + legacy fallback. Only *overwrite* tables go to
+Iceberg; append-only Trickle tables (append history, ``__changelog``, ``__droplog``) and a merge main
+base are served from the flat per-run parts layer (Iceberg metadata would grow O(runs) for them).
+Skipped without the extra."""
 
 from __future__ import annotations
 
@@ -66,6 +69,12 @@ def _data_files(tmp_path, table):
     return len(os.listdir(d)) if d.is_dir() else 0
 
 
+def _flat_parts(tmp_path, table):
+    """The append-only flat per-run part files of ``table`` (the layer that serves it now)."""
+    d = tmp_path / table
+    return sorted(p.name for p in d.glob("*.parquet")) if d.is_dir() else []
+
+
 def test_prune_bounds_overwrite_data_files_keeping_latest(tmp_path, monkeypatch):
     """An overwrite table (merge main / plain Ripple) rewrites a full data file each run; the prune keeps
     only the most-recent N snapshots and reclaims the superseded data files — so disk stays bounded while
@@ -83,9 +92,10 @@ def test_prune_bounds_overwrite_data_files_keeping_latest(tmp_path, monkeypatch)
     assert rcon.sql(f"SELECT DISTINCT v FROM ({dp.read_select(tmp_path, 't')})").fetchall() == [(7,)]
 
 
-def test_prune_keeps_all_append_history_data(tmp_path, monkeypatch):
-    """An append history's *current* snapshot references every appended data file, so the prune must keep
-    them all (only stale manifests/metadata are reclaimed) — the full history still reads."""
+def test_append_history_served_from_flat_parts_not_iceberg(tmp_path, monkeypatch):
+    """An append history is NOT committed to Iceberg (its current snapshot would reference every appended
+    file, so the metadata grows O(runs) — unbounded for no read benefit). It is served from the flat
+    per-run parts the sidecar export writes (one O(change) part per run), and the full history still reads."""
     from duckstring import trickle_io as T
 
     monkeypatch.setenv("DUCKSTRING_ICEBERG_KEEP_SNAPSHOTS", "2")
@@ -97,7 +107,8 @@ def test_prune_keeps_all_append_history_data(tmp_path, monkeypatch):
         T.append_table(con, "hist", batch, datetime(2026, 6, 16, k, tzinfo=UTC), ("id",))
         dp.export(con, tmp_path, f=datetime(2026, 6, 16, k, tzinfo=UTC))
 
-    assert _data_files(tmp_path, "hist") == 6, "append data files must not be reclaimed"
+    assert dp._load(tmp_path, "hist") is None, "append history must not be committed to Iceberg"
+    assert len(_flat_parts(tmp_path, "hist")) == 6, "one flat part per run"
     rcon = duckdb.connect()
     dp.prepare(rcon)
     assert rcon.sql(f"SELECT count(*) FROM ({dp.read_select(tmp_path, 'hist')})").fetchone() == (60,)
@@ -195,9 +206,9 @@ def test_read_table_pins_to_run_freshness_not_too_fresh(tmp_path, monkeypatch):
     assert _read_at(datetime(2026, 6, 18, tzinfo=UTC)) == [(1, "b")]
 
 
-def test_trickle_append_commits_are_incremental_and_window_reads(tmp_path):
-    # An append Trickle published over Iceberg commits one _duckstring_f-homogeneous data file per run
-    # (small writes), and the window read returns only the rows in (previous_f, f].
+def test_trickle_append_published_as_flat_parts_and_window_reads(tmp_path):
+    # An append Trickle is published as flat per-run parts (O(change), not an Iceberg commit), and the
+    # window read returns only the rows in (previous_f, f].
     from duckstring import trickle_io as T
 
     con = duckdb.connect()
@@ -213,9 +224,9 @@ def test_trickle_append_commits_are_incremental_and_window_reads(tmp_path):
     run(2, 2)
     run(3, 3)
 
-    # Three append commits → three snapshots (one per run), not a wholesale rewrite each time.
-    tbl = dp._load(tmp_path, "event")
-    assert len([s for s in tbl.snapshots() if s.summary and s.summary.additional_properties.get(F_PROP)]) == 3
+    # Three runs → three flat parts (one _duckstring_f-homogeneous file each), not an Iceberg table.
+    assert dp._load(tmp_path, "event") is None
+    assert len(_flat_parts(tmp_path, "event")) == 3
     # The sidecar travelled, so a fresh reader resolves the append mode and windows correctly.
     assert T.load_sidecar(tmp_path)["event"]["mode"] == "append"
     rcon = duckdb.connect()
@@ -226,9 +237,10 @@ def test_trickle_append_commits_are_incremental_and_window_reads(tmp_path):
     assert sorted(d.upserts.fetchall()) == [(2,), (3,)]  # excludes run 1, includes run 3
 
 
-def test_append_droplog_published_over_iceberg(tmp_path):
-    # A builder .append(fail_on_conflict=False)'s `{name}__droplog` companion publishes over Iceberg like a
-    # __changelog (append-commit), not a wholesale overwrite — and the main stays frozen on a dropped conflict.
+def test_append_droplog_published_as_flat_parts(tmp_path):
+    # A builder .append(fail_on_conflict=False)'s `{name}__droplog` companion is an append-only table, so
+    # it publishes as flat per-run parts (not an Iceberg commit) — and the main stays frozen on a dropped
+    # conflict (the past is never rewritten).
     from duckstring import trickle_io as T
 
     con = duckdb.connect()
@@ -253,9 +265,9 @@ def test_append_droplog_published_over_iceberg(tmp_path):
     assert main == [(1, "a"), (2, "b"), (3, "c")]  # id 1 stayed 'a' (the past was not rewritten)
     drops = sorted(rcon.sql(f"SELECT id, v, _duckstring_d FROM ({dp.read_select(tmp_path, 'enriched__droplog')})").fetchall())
     assert drops == [(1, "A", 1), (1, "a", -1)]
-    # The droplog took append commits (one per run that dropped), not a full overwrite.
-    tbl = dp._load(tmp_path, "enriched__droplog")
-    assert len([s for s in tbl.snapshots() if s.summary and s.summary.additional_properties.get(F_PROP)]) == 1
+    # The droplog is served from flat parts (one per run that dropped), never committed to Iceberg.
+    assert dp._load(tmp_path, "enriched__droplog") is None
+    assert len(_flat_parts(tmp_path, "enriched__droplog")) == 1  # only run 2 dropped
     assert "enriched__droplog" not in T.load_sidecar(tmp_path)  # companion, no sidecar entry
 
 
@@ -288,12 +300,11 @@ def test_trickle_merge_main_overwrite_changelog_append_over_iceberg(tmp_path):
     assert d.deletes.fetchall() == [(2,)]
 
 
-def test_trickle_retention_drops_expired_iceberg_files(tmp_path):
-    # Registry retention (retain_n) trims old changelog/history rows; the Iceberg history mirrors it by
-    # dropping whole expired files (floor advances), so it doesn't grow unbounded. Space-only — a reader
+def test_trickle_retention_drops_expired_flat_parts(tmp_path):
+    # Registry retention (retain_n) trims old changelog/history rows; the flat parts layer mirrors it by
+    # dropping the parts the registry no longer retains, so it doesn't grow unbounded. Space-only — a reader
     # behind the floor still reads correctly via the full-read fallback.
     from duckstring import trickle_io as T
-    from duckstring.iceberg_plane import FLOOR_PROP
 
     con = duckdb.connect()
     con.execute("SET TimeZone='UTC'")
@@ -303,8 +314,8 @@ def test_trickle_retention_drops_expired_iceberg_files(tmp_path):
                        datetime(2026, 6, 16, h, tzinfo=UTC), ("id",), retain_n=2)
         dp.export(con, tmp_path, f=datetime(2026, 6, 16, h, tzinfo=UTC))
 
-    tbl = dp._load(tmp_path, "event")
-    assert tbl.properties[FLOOR_PROP] == "2026-06-16T03:00:00+00:00"  # newest 2 runs retained
+    assert dp._load(tmp_path, "event") is None
+    assert len(_flat_parts(tmp_path, "event")) == 2  # newest 2 runs retained, expired parts dropped
     rcon = duckdb.connect()
     rcon.execute("SET TimeZone='UTC'")
     dp.prepare(rcon)
@@ -312,8 +323,8 @@ def test_trickle_retention_drops_expired_iceberg_files(tmp_path):
 
 
 def test_trickle_iceberg_replay_appends_no_duplicates(tmp_path):
-    # The append cursor is a table property, so a replay at the same f (or a re-export) adds nothing —
-    # even after a retention delete-snapshot (which must not clobber the cursor).
+    # Flat parts are named by their run freshness and are immutable, so a replay at the same f (or a
+    # re-export) overwrites the same part — it adds nothing, no duplicate rows.
     from duckstring import trickle_io as T
 
     con = duckdb.connect()
