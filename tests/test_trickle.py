@@ -153,7 +153,7 @@ def test_merge_main_checkpoint_folds_into_base(reg, tmp_path, monkeypatch):
         return T.load_sidecar(snk_dir)["dim"]
 
     sc = run([(1, "a"), (2, "b")], ts(1))           # bootstrap → checkpoint folds it into the base
-    assert (snk_dir / "dim.parquet").exists() and sc["f_base"] == ts(1).isoformat()
+    assert T.base_chunks(snk_dir, "dim") and sc["f_base"] == ts(1).isoformat()
     assert rows(reg, snk_dir, "dim", "id, v") == [(1, "a"), (2, "b")]
     # The registry base table now holds the folded state and carries the freshness column.
     assert sorted(reg.sql("SELECT id, v FROM dim").fetchall()) == [(1, "a"), (2, "b")]
@@ -184,7 +184,45 @@ def test_per_table_compact_threshold_overrides_catchment_default(reg, tmp_path, 
     publish(reg, snk_dir, f=ts(1))
     assert T.read_meta(reg)["over"]["compact_threshold"] == 1
     assert T.load_sidecar(snk_dir)["over"]["f_base"] == ts(1).isoformat()
-    assert (snk_dir / "over.parquet").exists()
+    assert T.base_chunks(snk_dir, "over")
+
+
+def test_chunked_base_splits_by_size_and_replaces_on_checkpoint(reg, tmp_path, monkeypatch):
+    """A merge base bigger than the chunk size splits into multiple freshness-ordered chunks; a later
+    checkpoint rewrites the base under a fresh token and drops the previous chunks (no stale chunk left to
+    resurrect a deleted PK). The reconstruct read sees the current state throughout, and the base directory
+    is never treated as incremental per-run parts."""
+    chunk = 512 * 1024
+    snk_dir = tmp_path / "data"
+    reg.execute("SET TimeZone='UTC'")
+
+    def state(pred, suffix=""):  # ~200k incompressible rows → several row groups, so FILE_SIZE_BYTES splits
+        return reg.sql(
+            f"SELECT i AS id, hash(i)::VARCHAR || hash(i*7)::VARCHAR || '{suffix}' AS v "
+            f"FROM range(200000) t(i) WHERE {pred}"
+        )
+
+    T.merge_table(reg, "dim", state("1=1"), ts(1), ("id",), compact_threshold=chunk)
+    publish(reg, snk_dir, f=ts(1))
+    chunks1 = T.base_chunks(snk_dir, "dim")
+    assert len(chunks1) > 1, "a base over the chunk size must split into multiple chunks"
+    assert "dim__base" not in T.part_tables(snk_dir)  # the base is not a per-run-parts table
+    assert rows(reg, snk_dir, "dim", "count(*)") == [(200000,)]
+
+    # A full re-write (every row updated → changelog > base) re-checkpoints: the base is rebuilt under a
+    # new token and the previous chunks are dropped.
+    T.merge_table(reg, "dim", state("1=1", "v2"), ts(2), ("id",), compact_threshold=chunk)
+    publish(reg, snk_dir, f=ts(2))
+    chunks2 = T.base_chunks(snk_dir, "dim")
+    assert {c.name for c in chunks1}.isdisjoint({c.name for c in chunks2}), "old-token chunks removed"
+    assert rows(reg, snk_dir, "dim", "count(*) FILTER (WHERE v LIKE '%v2')") == [(200000,)]  # all updated
+
+    # Delete the odd PKs WITHOUT re-checkpointing (the changelog covers it): no deleted PK is resurrected
+    # from a still-present base chunk — the reconstruct read drops them.
+    T.merge_table(reg, "dim", state("i % 2 = 0", "v2"), ts(3), ("id",))
+    publish(reg, snk_dir, f=ts(3))
+    assert rows(reg, snk_dir, "dim", "count(*)") == [(100000,)]
+    assert rows(reg, snk_dir, "dim", "count(*) FILTER (WHERE id % 2 = 1)") == [(0,)]
 
 
 def test_merge_idempotent_replay(reg, tmp_path):

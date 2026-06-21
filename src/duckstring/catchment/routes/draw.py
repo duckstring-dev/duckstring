@@ -68,7 +68,7 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
     ``_land_transfer``)."""
     from datetime import datetime
 
-    from ...trickle_io import SIDECAR, part_f, part_tables, table_parts
+    from ...trickle_io import BASE_SUFFIX, SIDECAR, base_chunks, part_f, part_tables, table_parts
 
     m = _resolve_major(request, name, major, None)
     data_dir = _data_dir(request, name, m)
@@ -77,13 +77,20 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
 
     files = sorted(p for p in data_dir.glob("*.parquet") if wanted is None or p.stem in wanted)
     dirs = [t for t in part_tables(data_dir) if wanted is None or t in wanted]
-    if not files and not dirs and not data_dir.exists():
+    base_dirs = sorted(
+        d.name[: -len(BASE_SUFFIX)] for d in data_dir.glob(f"*{BASE_SUFFIX}")
+        if d.is_dir() and (wanted is None or d.name[: -len(BASE_SUFFIX)] in wanted)
+    ) if data_dir.exists() else []
+    if not files and not dirs and not base_dirs and not data_dir.exists():
         raise HTTPException(status_code=404, detail=f"No exported data for '{name}' (major {m})")
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for pq in files:  # wholesale single-file tables (merge main / plain output)
+        for pq in files:  # wholesale single-file tables (legacy merge base / plain output)
             zf.write(pq, pq.name)
+        for main in base_dirs:  # a merge main's log-structured base → ship every chunk (wholesale)
+            for chunk in base_chunks(data_dir, main):
+                zf.write(chunk, f"{main}{BASE_SUFFIX}/{chunk.name}")
         for table in dirs:  # append-only parts → ship only the parts newer than `after`
             for part in table_parts(data_dir, table):
                 if after_dt is None or part_f(part.name) > after_dt:

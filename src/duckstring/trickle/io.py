@@ -65,6 +65,12 @@ CHANGELOG_SUFFIX = "__changelog"
 # conflicts under ``fail_on_conflict=False``) in a ``{table}__droplog`` companion — an append-only diagnostic
 # published alongside the table (like ``__changelog``), one growing record of what each run dropped.
 DROPLOG_SUFFIX = "__droplog"
+# A merge main is log-structured: its folded **base** (the checkpointed state up to ``f_base``) is published
+# as a directory of size-bounded, freshness-ordered Parquet **chunks** under ``{table}__base/`` (so a single
+# base can hold far more than one Parquet file's worth, and a partition-granular checkpoint can rewrite just
+# the chunks holding changed PKs — see plans/trickle-main-incremental.md). The base is wholesale (rewritten
+# at a checkpoint), distinct from the per-run append parts; ``part_tables`` excludes it for that reason.
+BASE_SUFFIX = "__base"
 # A ``.aggregate(...)`` output keeps its raw accumulators (count + per-summed-col sum & non-NULL count) in a
 # ``_duckstring_agg_{name}`` companion. Reserved prefix → ``registry_tables`` hides it from publish; the
 # published main holds only the derived user columns.
@@ -82,6 +88,18 @@ class DeltaError(ValueError):
 
 def changelog_name(table: str) -> str:
     return f"{table}{CHANGELOG_SUFFIX}"
+
+
+def base_dir_name(table: str) -> str:
+    """The published-base directory name for a log-structured merge main ``table``."""
+    return f"{table}{BASE_SUFFIX}"
+
+
+def base_chunks(data_dir: Path, table: str) -> list[Path]:
+    """The published base chunk files of a merge main ``table`` (its ``{table}__base/`` directory), sorted;
+    ``[]`` when the base has not been chunk-published (no checkpoint yet, or a legacy single-file base)."""
+    d = Path(data_dir) / base_dir_name(table)
+    return sorted(d.glob("*.parquet")) if d.is_dir() else []
 
 
 def normalize_pk(pk) -> tuple[str, ...]:
@@ -303,11 +321,14 @@ def table_parts(data_dir: Path, table: str) -> list[Path]:
 
 
 def part_tables(data_dir: Path) -> list[str]:
-    """The names of the append-only (parts-directory) tables published under ``data_dir``."""
+    """The names of the append-only (parts-directory) tables published under ``data_dir``. A merge main's
+    ``{table}__base/`` directory is **excluded** — it is a wholesale base (rewritten at a checkpoint), not
+    a per-run-parts table, so the incremental-draw / ``landed_after`` machinery must not treat it as one."""
     data_dir = Path(data_dir)
     if not data_dir.is_dir():
         return []
-    return sorted(p.name for p in data_dir.iterdir() if p.is_dir() and any(p.glob("*.parquet")))
+    return sorted(p.name for p in data_dir.iterdir()
+                  if p.is_dir() and not p.name.endswith(BASE_SUFFIX) and any(p.glob("*.parquet")))
 
 
 def landed_after(data_dir: Path) -> str | None:

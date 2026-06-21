@@ -49,7 +49,7 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
     ships only the append-only parts newer than that (append history / ``__changelog`` / ``__droplog``),
     which the consumer drops into its own parts directory. A merge main / plain Ripple output is a single
     file, landed wholesale (replace). ``after = None`` (bootstrap / no Trickle source) → whole set."""
-    from ..trickle_io import SIDECAR, landed_after
+    from ..trickle_io import BASE_SUFFIX, SIDECAR, landed_after
 
     data_dir = pond_data_dir(root, name, major)
     after = landed_after(data_dir)  # what we already hold; None → wholesale (bootstrap)
@@ -60,7 +60,10 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         # Each entry is written to its path atomically: a top-level "{table}.parquet" replaces a wholesale
         # table; a nested "{table}/{f}.parquet" adds an append-only part (incremental — no merge needed,
-        # parts are immutable and idempotent by name).
+        # parts are immutable and idempotent by name). A "{table}__base/{chunk}" is a chunk of a merge
+        # main's wholesale log-structured base — shipped in full, so after landing we drop any stale chunk
+        # the producer no longer has (its names change every checkpoint; a leftover would resurrect rows).
+        landed_base: dict[str, set[str]] = {}
         for info in zf.infolist():
             if not (info.filename.endswith(".parquet") or info.filename == SIDECAR):
                 continue
@@ -69,6 +72,13 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
             tmp = dest.with_suffix(dest.suffix + ".tmp")
             tmp.write_bytes(zf.read(info))
             tmp.replace(dest)
+            head = info.filename.split("/", 1)[0]
+            if "/" in info.filename and head.endswith(BASE_SUFFIX):
+                landed_base.setdefault(head, set()).add(dest.name)
+        for base_name, kept in landed_base.items():  # prune the previous checkpoint's chunks (overlap-safe)
+            for old in (data_dir / base_name).glob("*.parquet"):
+                if old.name not in kept:
+                    old.unlink()
 
 
 async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | None = None) -> None:

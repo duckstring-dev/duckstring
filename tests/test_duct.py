@@ -413,6 +413,31 @@ def test_draw_route_windows_trickle_changelog_with_after(tmp_path):
     assert got == [(2,), (3,)]
 
 
+def test_draw_route_ships_chunked_base_wholesale(tmp_path):
+    # A merge main's log-structured base lives in a `{main}__base/` chunk directory. It is wholesale
+    # (rewritten at a checkpoint), so the draw ships every chunk regardless of `after` — and it must NOT
+    # be treated as an incremental per-run-parts directory (that would window it away).
+    from duckstring.trickle_io import SIDECAR
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    base_dir = data_dir / "sale__base"
+    base_dir.mkdir(parents=True)
+    (base_dir / "2026-06-16T03_00_00+00_00__0.parquet").write_bytes(b"CHUNK0")
+    (base_dir / "2026-06-16T03_00_00+00_00__1.parquet").write_bytes(b"CHUNK1")
+    (data_dir / SIDECAR).write_text('{"sale": {"mode": "merge", "pk": ["id"], "f_base": "2026-06-16T03:00:00+00:00"}}')
+
+    # Even with an `after` past the base's freshness, both chunks ship (wholesale, not windowed).
+    resp = _client(d).get("/api/draw/sales/1", params={"after": "2026-06-16T09:00:00+00:00"})
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        chunks = sorted(n for n in zf.namelist() if n.startswith("sale__base/"))
+    assert chunks == ["sale__base/2026-06-16T03_00_00+00_00__0.parquet",
+                      "sale__base/2026-06-16T03_00_00+00_00__1.parquet"]
+
+
 # ─── Recursive lineage view ────────────────────────────────────────────────────
 
 

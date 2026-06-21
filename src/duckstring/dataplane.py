@@ -100,6 +100,19 @@ class DataPlane:
         return None
 
 
+def _read_parquet_glob(glob: str, as_of=None) -> str:
+    """A ``SELECT`` over a glob of Parquet parts/chunks, optionally clamped to the **as-of** freshness
+    (``_duckstring_f <= as_of``) — a row-level predicate DuckDB stat-prunes to whole files where the parts
+    are ``_duckstring_f``-homogeneous (the append/changelog case) and a partial scan otherwise (a base
+    chunk spans a freshness range)."""
+    from .trickle.io import F_COL, _ts
+
+    sel = f"SELECT * FROM read_parquet('{glob}')"
+    if as_of is not None:
+        sel += f' WHERE "{F_COL}" <= {_ts(as_of)}'
+    return sel
+
+
 def _check_mode(mode: str) -> None:
     if mode == "overwrite":
         return
@@ -224,12 +237,10 @@ class ParquetDataPlane(DataPlane):
 
         if trickle.table_parts(data_dir, table):  # append-only parts directory → union the parts
             glob = str(Path(data_dir) / table / "*.parquet").replace("'", "''")
-            sel = f"SELECT * FROM read_parquet('{glob}')"
-            # As-of read seam: keep only rows at/under the requested freshness. Parts are
-            # `_duckstring_f`-homogeneous and stat-pruned by DuckDB, so this drops whole part files.
-            if as_of is not None:
-                sel += f' WHERE "{trickle.F_COL}" <= {trickle._ts(as_of)}'
-            return sel
+            return _read_parquet_glob(glob, as_of)
+        if trickle.base_chunks(data_dir, table):  # log-structured merge-main base → union its chunks
+            glob = str(Path(data_dir) / trickle.base_dir_name(table) / "*.parquet").replace("'", "''")
+            return _read_parquet_glob(glob, as_of)
         pq = Path(data_dir) / f"{table}.parquet"
         if not pq.exists():
             raise FileNotFoundError(str(pq))
@@ -249,9 +260,14 @@ class ParquetDataPlane(DataPlane):
         return sorted(files | parts | mains)
 
     def table_path(self, data_dir: Path, table: str) -> Path | None:
+        from . import trickle_io as trickle
+
         d = Path(data_dir) / table
         if d.is_dir():
             return d  # an append-only parts directory
+        base = Path(data_dir) / trickle.base_dir_name(table)
+        if base.is_dir():
+            return base  # a log-structured merge-main base (chunk directory)
         return Path(data_dir) / f"{table}.parquet"
 
 
@@ -306,10 +322,23 @@ def _compact_threshold(con=None, main=None) -> int:
     return int(os.environ.get("DUCKSTRING_COMPACT_THRESHOLD", str(256 * 1024 * 1024)))
 
 
+def _base_bytes(data_dir: Path, main: str) -> int:
+    """The on-disk size of a merge main's published base — the sum of its ``{main}__base/`` chunks, or the
+    legacy single ``{main}.parquet`` file. ``0`` when no base has been published yet."""
+    from . import trickle_io as trickle
+
+    chunks = trickle.base_chunks(data_dir, main)
+    if chunks:
+        return sum(p.stat().st_size for p in chunks)
+    legacy = data_dir / f"{main}.parquet"
+    return legacy.stat().st_size if legacy.exists() else 0
+
+
 def _checkpoint_and_publish_base(con, data_dir: Path, main: str, f) -> None:
     """For a merge main: trigger a checkpoint when the published changelog parts newer than the fold
-    watermark outgrow the base (past the floor), then — only if a checkpoint folded — republish the base
-    ``{main}.parquet`` from the registry and re-prune the changelog parts (retention may have trimmed)."""
+    watermark outgrow the base (past the floor), then — only if a checkpoint folded — republish the base as
+    size-bounded freshness-ordered chunks (``{main}__base/``) from the registry and re-prune the changelog
+    parts (retention may have trimmed)."""
     from . import trickle_io as trickle
 
     clog = trickle.changelog_name(main)
@@ -318,16 +347,49 @@ def _checkpoint_and_publish_base(con, data_dir: Path, main: str, f) -> None:
         p.stat().st_size for p in trickle.table_parts(data_dir, clog)
         if f_base is None or trickle.part_f(p.name) > f_base
     )
-    base_pq = data_dir / f"{main}.parquet"
-    base_bytes = base_pq.stat().st_size if base_pq.exists() else 0
-    if clog_bytes < max(base_bytes, _compact_threshold(con, main)):
+    if clog_bytes < max(_base_bytes(data_dir, main), _compact_threshold(con, main)):
         return
     trickle.checkpoint(con, main, f)  # registry fold: rewrites the base, advances f_base, applies retention
     if trickle._table_exists(con, main):
-        tmp = base_pq.with_suffix(".parquet.tmp")
-        con.execute(f'COPY "{main}" TO \'{tmp}\' (FORMAT PARQUET)')
-        tmp.replace(base_pq)
+        _publish_base_chunks(con, data_dir, main, f, _compact_threshold(con, main))
     _export_parts(con, data_dir, clog, f)  # re-sync the changelog parts after any retention trim
+
+
+def _publish_base_chunks(con, data_dir: Path, main: str, f, chunk_bytes: int) -> None:
+    """Publish the registry base table ``main`` as a directory of size-bounded, freshness-ordered Parquet
+    chunks (``{main}__base/``). **Lock-free, overlap-safe**: the new chunks are written under this
+    checkpoint's unique token, then the chunks of any *other* token are removed — a concurrent reader that
+    momentarily sees both old and new chunks reconstructs latest-per-PK over base ⊎ changelog, which is
+    idempotent (the published sidecar's ``f_base`` only advances *after* this returns, so the changelog
+    still covers any row a stale chunk would otherwise resurrect). Replaces a legacy single-file base."""
+    import shutil
+
+    from . import trickle_io as trickle
+
+    base_dir = data_dir / trickle.base_dir_name(main)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    token = trickle.part_name(f)[: -len(".parquet")]  # unique per checkpoint, freshness-ordered
+    staging = data_dir / (trickle.base_dir_name(main) + ".tmp")
+    if staging.exists():
+        shutil.rmtree(staging)
+    fb = trickle._q(trickle.F_COL)
+    size = max(1, int(chunk_bytes))
+    con.execute(
+        f'COPY (SELECT * FROM "{main}" ORDER BY {fb}) '
+        f"TO '{str(staging).replace(chr(39), chr(39) * 2)}' (FORMAT PARQUET, FILE_SIZE_BYTES {size})"
+    )
+    written = []
+    for i, src in enumerate(sorted(staging.glob("*.parquet"))):
+        dest = base_dir / f"{token}__{i}.parquet"
+        src.replace(dest)
+        written.append(dest.name)
+    shutil.rmtree(staging, ignore_errors=True)
+    for old in base_dir.glob("*.parquet"):  # drop the previous checkpoint's chunks (different token)
+        if old.name not in written:
+            old.unlink()
+    legacy = data_dir / f"{main}.parquet"  # supersede a legacy single-file base
+    if legacy.exists():
+        legacy.unlink()
 
 
 def get_data_plane() -> DataPlane:
