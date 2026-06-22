@@ -404,6 +404,30 @@ class Pond:
 
         return trickle.current_state(self.con, name)
 
+    def count_table(self, ref: str) -> int:
+        """The current **active row count** of a table — own (``"name"``) or a Source's (``"source.table"``) —
+        via metadata + the changelog's net Z-set weight, **without scanning** it. This is the host fast path the
+        Trickle builder's ``.count()`` reaches for on a bare stored source: a Source's published count comes
+        from the data plane (base-file metadata + the post-``f_base`` changelog delta, pinned to this run's
+        as-of ``f``); an own registry table goes through :func:`duckstring.trickle_io.count_current`."""
+        from . import trickle_io as trickle
+
+        if "." in ref:
+            source_pond, table = ref.split(".", 1)
+            if source_pond != self.name:
+                from .dataplane import get_data_plane
+
+                data_dir = self._source_data_dir(source_pond)
+                dp = get_data_plane()
+                dp.prepare(self.con)
+                meta = trickle.load_sidecar(data_dir).get(table, {})
+                (n,) = self.con.execute(
+                    dp.consolidated_count_select(data_dir, table, meta, as_of=self.f)
+                ).fetchone()
+                return int(n)
+            ref = table
+        return trickle.count_current(self.con, ref)
+
     # ─── Trickle: incremental I/O (see duckstring.trickle_io / plans/trickle.md) ───
 
     def _resolve_pk(self, pk):

@@ -510,6 +510,92 @@ def test_builder_fact_and_dim_both_change(tmp_path):
     snk.close()
 
 
+def test_builder_count(tmp_path):
+    """``.count()``: a bare stored Trickle counts via metadata + changelog net weight (no scan); a composed
+    query is evaluated in full and counted. Both track inserts and deletes, and the merge-main count matches
+    the rows actually written."""
+    f_con, f_dir = _producer(tmp_path, "fact")
+    d_con, d_dir = _producer(tmp_path, "dim")
+    T.merge_table(d_con, "d", d_con.sql("SELECT * FROM (VALUES ('A',100),('B',200)) v(k,price)"), ts(1), ("k",))
+    publish(d_con, d_dir, f=ts(1))
+
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "o" / "m1" / "data"
+    seen = {}
+
+    def run(f, pf):
+        p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1, "dim": 1}, f=f, previous_f=pf)
+        proj = "s0.id, s0.k, s0.qty, s1.price"
+        (p.trickle("fact.f").join(p.trickle("dim.d"), on="k").select(proj).merge("o", pk="id"))
+        seen["merge"] = p.trickle("o").count()  # bare local merge main → metadata fast path
+        seen["source"] = p.trickle("fact.f").count()  # bare cross-pond source → host count_table (data plane)
+        seen["query"] = p.trickle("fact.f").join(p.trickle("dim.d"), on="k").select(proj).count()  # full eval
+        publish(snk, snk_dir, f=f)
+
+    facts = "SELECT * FROM (VALUES {}) v(id,k,qty)".format
+    T.merge_table(f_con, "f", f_con.sql(facts("(1,'A',10),(2,'A',5),(3,'B',7)")), ts(1), ("id",))
+    publish(f_con, f_dir, f=ts(1))
+    run(ts(1), NEVER)
+    assert seen == {"merge": 3, "source": 3, "query": 3}  # ids 1,2,3
+
+    T.merge_table(f_con, "f", f_con.sql(facts("(1,'A',10),(2,'A',8),(3,'B',7),(4,'B',2)")), ts(2), ("id",))
+    publish(f_con, f_dir, f=ts(2))
+    run(ts(2), ts(1))
+    assert seen == {"merge": 4, "source": 4, "query": 4}  # +insert id4
+
+    T.merge_table(f_con, "f", f_con.sql(facts("(1,'A',10),(3,'B',7),(4,'B',2)")), ts(3), ("id",))
+    publish(f_con, f_dir, f=ts(3))
+    run(ts(3), ts(2))
+    assert seen == {"merge": 3, "source": 3, "query": 3}  # -delete id2 (net Z-set weight goes negative)
+    assert seen["merge"] == len(rows(snk, snk_dir, "o", "id"))  # count == rows actually written
+    snk.close()
+
+
+def test_builder_count_after_aggregate_is_group_count(tmp_path):
+    """``.aggregate(by).count()`` shortcuts to the number of groups (count distinct ``by``), without running
+    the metric aggregations."""
+    f_con, f_dir = _producer(tmp_path, "fact")
+    # k has 2 distinct groups (A,B) across 3 rows.
+    T.merge_table(f_con, "f", f_con.sql("SELECT * FROM (VALUES (1,'A',10),(2,'A',5),(3,'B',7)) v(id,k,qty)"),
+                  ts(1), ("id",))
+    publish(f_con, f_dir, f=ts(1))
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1}, f=ts(1), previous_f=NEVER)
+    from duckstring import agg
+
+    n_groups = p.trickle("fact.f").aggregate(by="k", qty=agg.sum("qty")).count()
+    assert n_groups == 2  # groups A, B — not the 3 underlying rows
+    snk.close()
+
+
+def test_agg_count_metric_is_incremental(tmp_path):
+    """``agg.count()`` is a maintained distributive metric (the per-group net Z-set weight ``_a_cnt``): the
+    grouped row count updates incrementally across inserts and deletes."""
+    from duckstring import agg
+
+    f_con, f_dir = _producer(tmp_path, "fact")
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "o" / "m1" / "data"
+
+    def run(f, pf):
+        p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1}, f=f, previous_f=pf)
+        p.trickle("fact.f").aggregate(by="k", n=agg.count()).merge("by_k", pk="k")
+        publish(snk, snk_dir, f=f)
+
+    T.merge_table(f_con, "f", f_con.sql("SELECT * FROM (VALUES (1,'A'),(2,'A'),(3,'B')) v(id,k)"), ts(1), ("id",))
+    publish(f_con, f_dir, f=ts(1))
+    run(ts(1), NEVER)
+    assert rows(snk, snk_dir, "by_k", "k, n") == [("A", 2), ("B", 1)]
+
+    # +insert two B rows, delete one A → A:1, B:3 (maintained from the delta, no rescan).
+    T.merge_table(f_con, "f", f_con.sql("SELECT * FROM (VALUES (1,'A'),(3,'B'),(4,'B'),(5,'B')) v(id,k)"),
+                  ts(2), ("id",))
+    publish(f_con, f_dir, f=ts(2))
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "by_k", "k, n") == [("A", 1), ("B", 3)]
+    snk.close()
+
+
 def test_builder_filter_applies_to_delta_and_crosses_boundary(tmp_path):
     """`.filter()` distributes over the Z-set delta: a dimension change that pushes a row across the filter
     boundary inserts/retracts it incrementally (the old image passes/fails the filter on its own side)."""

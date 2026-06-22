@@ -446,6 +446,47 @@ class TrickleBuilder:
             )
         return self._chain(name, out_pk)
 
+    def count(self) -> int:
+        """Terminal: the current **active row count** of what this builder represents — an ``int``, computed now.
+
+        - A **bare stored Trickle** — a source, or a just-written ``.merge()``/``.append()`` whose returned
+          handle is rooted at it — counts via metadata + the changelog's net Z-set weight, no base/history scan
+          (:func:`duckstring.trickle.io.count_current` for a registry table; an external source uses the host's
+          optional ``count_table`` if it offers one, else a plain ``count(*)``).
+        - A **composed query** (any ``.join()``/``.filter()``/``.select()``/``.sql()``) is evaluated to its full
+          current result and counted. **Each source is consolidated to its current state first, then the
+          joins/filters/projection run, then the rows are counted** — the comprehensive recompute. A count needs
+          the whole result and has no stored prior to increment, so neither IVM nor the key filter applies
+          (``ivm`` and ``key_filter`` are both effectively ``False``).
+        - After **``.aggregate()``** it shortcuts to the **number of groups** (``count(distinct by)`` over the
+          composed state) — the metric aggregations are never computed."""
+        from . import io as trickle
+
+        con = self.ctx.con
+        bare = (isinstance(self._root, _Source) and not self._filters and self._projection is None
+                and self._materialised is None and self._agg is None)
+        if bare:
+            ref = self._root.ref
+            if (trickle.read_meta(con).get(ref) or {}).get("mode") in ("merge", "append"):
+                return trickle.count_current(con, ref)  # local registry Trickle → metadata-fast
+            counter = getattr(self.ctx, "count_table", None)  # external source → host's fast path if any
+            if counter is not None:
+                return int(counter(ref))
+            return int(self.ctx.read_table(ref).aggregate("count(*)").fetchone()[0])  # correct fallback
+        if isinstance(self._root, _Join) and self._projection is None:
+            raise BuildError(
+                f"pond.trickle('{self.spine_ref}').join(...).count(): a joined DAG needs .select(...) first"
+            )
+        view = trickle.unique_name("count")
+        if self._agg is not None:
+            # group count: distinct groups in the current composed state — never runs the metric aggregations.
+            by = ", ".join(_q(c) for c in self._agg["by"])
+            self._full_join().create_view(view, replace=True)
+            return int(con.execute(f'SELECT count(*) FROM (SELECT DISTINCT {by} FROM {_q(view)})').fetchone()[0])
+        rel = self._materialised if self._materialised is not None else self._full_join()
+        rel.create_view(view, replace=True)
+        return int(con.execute(f'SELECT count(*) FROM {_q(view)}').fetchone()[0])
+
     # ─── the append spine-PK fast path (output keyed by the spine's own identity) ──
 
     def _spine_pk_passthrough(self, out_pk, spine_pk):

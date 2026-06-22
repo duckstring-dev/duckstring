@@ -38,6 +38,10 @@ class Context(Protocol):
       (system columns stripped).
     - ``read_delta(ref)`` — the source's **Z-set change** over ``(previous_f, f]`` as a
       :class:`~duckstring.trickle.io.Delta`.
+
+    A host **may** also offer ``count_table(ref) -> int`` — a metadata-fast current-row count of a source
+    (no scan). It is optional: the builder's ``.count()`` uses it when present and otherwise falls back to
+    ``count(*)`` over :meth:`read_table`.
     """
 
     con: object

@@ -669,6 +669,30 @@ def current_state(con, name: str):
     return _strip_system(con.sql(f'SELECT * FROM {_q(name)}'))
 
 
+def count_current(con, name: str) -> int:
+    """The current **active row count** of a registry Trickle table — via metadata + the changelog's net
+    Z-set weight, **without scanning** the base/history. The counting twin of :func:`reconstruct_current`:
+
+    - **merge** main: ``count(cold base)`` (a base-table row count, not a scan) **+** ``Σ _duckstring_d`` over
+      the (warm ⊎ hot) changelog above ``f_base``. In a valid merge log every present row nets to weight
+      ``+1``, an update to ``0`` and a delete to ``-1``, so the sum is exactly the row-count change since the
+      fold — making this equal to ``count(*)`` over the reconstruct, but as metadata + a small delta scan.
+    - **append** history (and plain output): a direct ``count(*)`` — insert-only, no retractions.
+    - nothing written yet: ``0``."""
+    if not _table_exists(con, name) and not _table_exists(con, changelog_name(name)):
+        return 0
+    if read_meta(con).get(name, {}).get("mode") == "merge":
+        base = con.execute(f'SELECT count(*) FROM {_q(name)}').fetchone()[0] if _table_exists(con, name) else 0
+        clog_sql = _clog_union_sql(con, name)
+        if clog_sql is None:
+            return int(base)
+        f_base = _f_base(con, name)
+        lo = f' WHERE {_q(F_COL)} > {_ts(f_base)}' if f_base is not None else ''
+        (delta,) = con.execute(f'SELECT coalesce(sum({_q(D_COL)}), 0) FROM ({clog_sql}){lo}').fetchone()
+        return int(base) + int(delta)
+    return int(con.execute(f'SELECT count(*) FROM {_q(name)}').fetchone()[0])
+
+
 def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
                compact_threshold=None) -> None:
     """Append a Z-set ``zset`` (user columns + ``_duckstring_d``) to the merge main's append-only
