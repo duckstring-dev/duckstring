@@ -19,7 +19,8 @@ const ACTIVE = '_duckstring_active'; // +1 present / -1 deleted — drives row c
 const FRESH = '_duckstring_f'; // most-recent run freshness
 const UPDATES = '_duckstring_updates'; // count of +1 changelog events
 const EVENT = '_duckstring_event'; // create | update | delete (per-record history)
-const COL_LABELS: Record<string, string> = { [FRESH]: 'freshness', [UPDATES]: 'updates', [EVENT]: 'event' };
+const DELTA = '_duckstring_d'; // Z-set weight: +1 insert / -1 retraction — shown on raw __changelog views
+const COL_LABELS: Record<string, string> = { [FRESH]: 'freshness', [UPDATES]: 'updates', [EVENT]: 'event', [DELTA]: 'Δ' };
 // History event → label colour (reusing the theme): create = white, update = brand cyan, delete = blocked red.
 const EVENT_COLOR: Record<string, string> = { create: '#f4f4f5', update: THEME_BRAND, delete: THEME_BLOCKED };
 
@@ -384,32 +385,43 @@ function VirtualGrid({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const reqId = useRef(0);
-  const pendingStart = useRef(-1);
+  const inFlight = useRef(false);
+  const queued = useRef<number | null>(null);
   const loaded = useRef({ start: 0, end: 0 });
+  const fetchWindowRef = useRef<(start: number) => void>(() => {});
 
   const fetchWindow = useCallback(
     async (start: number) => {
-      if (start === pendingStart.current) return;
-      pendingStart.current = start;
-      const id = ++reqId.current;
+      // Serialise: one /page request in flight at a time. While one runs, keep only the latest window
+      // the user has scrolled to — a fast scroll (or scrollbar drag) collapses to the in-flight request
+      // plus a single follow-up, instead of one request per row crossed (which hung the page).
+      if (inFlight.current) {
+        queued.current = start;
+        return;
+      }
+      inFlight.current = true;
       try {
         const res = await fetchPage({ ...query, limit: CHUNK, offset: start });
-        if (id !== reqId.current) return;
         setColumns((prev) => (res.columns.length ? res.columns : prev));
         setRows(res.rows);
         setWindowStart(start);
         loaded.current = { start, end: start + res.rows.length };
       } catch (e) {
-        if (id !== reqId.current) return;
         on401(e);
         setError(e instanceof Error ? e.message : String(e));
       } finally {
-        if (id === reqId.current) pendingStart.current = -1;
+        inFlight.current = false;
+        // Land the most recent window scrolled to while this request was in flight.
+        const next = queued.current;
+        queued.current = null;
+        if (next !== null && next !== loaded.current.start) void fetchWindowRef.current(next);
       }
     },
     [query]
   );
+  useEffect(() => {
+    fetchWindowRef.current = fetchWindow;
+  }, [fetchWindow]);
 
   useEffect(() => {
     const t = setTimeout(async () => {
@@ -453,7 +465,10 @@ function VirtualGrid({
   if (rows.length === 0 || columns.length === 0) return <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>No rows.</div>;
 
   // Hide the active-flag column; it drives row colour instead. Merge rows are clickable (→ history).
+  // On a raw __changelog view the Z-set weight column is kept visible (relabelled Δ) but also tints
+  // retractions (d < 0) in the BLOCKED theme.
   const activeIdx = columns.indexOf(ACTIVE);
+  const deltaIdx = columns.indexOf(DELTA);
   const display = columns.map((_, i) => i).filter((i) => i !== activeIdx);
   const clickable = query.trickle === 'merge';
   const pkCols = query.pk ?? [];
@@ -494,7 +509,8 @@ function VirtualGrid({
           )}
           {rows.map((row, i) => {
             const idx = windowStart + i;
-            const inactive = activeIdx >= 0 && Number(row[activeIdx]) < 0;
+            const inactive =
+              (activeIdx >= 0 && Number(row[activeIdx]) < 0) || (deltaIdx >= 0 && Number(row[deltaIdx]) < 0);
             return (
               <tr
                 key={idx}
