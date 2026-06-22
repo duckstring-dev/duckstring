@@ -1,7 +1,9 @@
 # Plan: incremental merge *main* — log-structured base + changelog
 
-> **Status: log-structured main + chunked base implemented; tiered base (partition-granular checkpoint) is
-> the next build — designed in "Tiered base" below.** `apply_zset`/`merge_table` append to the changelog
+> **Status: fully implemented** — log-structured main, chunked base, per-table `compact_threshold`, the
+> tiered base (warm Z-set bands + k=1 cold compaction) with banded reconstruct, and the incremental
+> cold-base transfer. The only remaining item, append/droplog part compaction, is deferred (low-value /
+> hazard-prone — see its section). `apply_zset`/`merge_table` append to the changelog
 > only; `reconstruct_sql` + `checkpoint` + the `f_base` meta live in `trickle/io.py`; reads reconstruct via
 > `DataPlane.read_select`; the trigger + base publish are in `dataplane._checkpoint_and_publish_base`
 > (`DUCKSTRING_COMPACT_THRESHOLD`, default 256 MiB — now also a per-table override recorded at the merge
@@ -199,23 +201,34 @@ extraction for insert-only bands.
 retraction-key pruning for reconstruct, and **incremental base transfer** — the draw ships only the bands a
 consumer's manifest lacks (by `f`-range), retiring the wholesale-base draw above.
 
-**Build order:** (1) banded reconstruct + warm/cold compaction (registry + publish), keeping the suite
-green; (2) the manifest-driven incremental transfer (draw/poller).
+**Build order (both done):** (1) banded reconstruct + warm/cold compaction (registry + publish); (2) the
+incremental cold-base transfer (draw `base_after` gate + poller subsumed-part reclaim). Implementation:
+`fold_warm`/`checkpoint`/`_clog_union_sql` in `trickle/io.py`; `_publish_tiered_main`/`_export_bands` in
+`dataplane.py`; the `base_after` gate in `routes/draw.py` + the poller reclaim in `poller.py`. Tests:
+`test_warm_tier_folds_changelog_and_reconstructs_across_all_tiers`,
+`test_stale_warm_band_below_f_base_does_not_corrupt_read`, `test_draw_route_skips_unchanged_cold_base`,
+and the updated checkpoint/chunked-base cases.
 
-## Append / changelog / droplog compaction — deferred
+> Note: the per-band `f`-range + `has_deletes` manifest from the section above is **not** materialised as a
+> separate sidecar — the band *files are named by their upper `f`* (so the draw's `after`/`landed_after`
+> machinery skips by range for free) and reconstruct simply unions `__band ⊎ __changelog` and lets the
+> `> f_base` filter + the consolidation drop subsumed/retracted rows. The dedicated `has_deletes` pruning
+> stat is deferred until a workload shows the retraction-key extraction over insert-only bands costs enough
+> to matter.
 
-The same *size* policy could merge their accumulated per-run parts into ~`compact_threshold` files, but:
+## Append / changelog / droplog compaction — changelog done (warm tier); append/droplog deferred
 
-- it is pure **concatenate**-compaction (no base, no fold);
-- it is **low value** — append/changelog windowed reads already prune files by `_duckstring_f` min/max
-  stats, so file *count* is mostly a directory-listing cost; and the main's reconstruction window is already
-  bounded by the checkpoint;
-- it **lacks the main's idempotent-overlap safety** — these reads `UNION` / `SUM(_duckstring_d)`, so a
-  transient old+new overlap during a file-merge double-counts; it would need a generation-safe swap or a
-  `(row, _duckstring_f)` read-side dedup.
+The **changelog** case is now **subsumed by the warm tier**: a merge main's `__changelog` parts are folded
+into consolidated warm bands (`fold_warm`), which *is* changelog compaction — done with the safe
+overlap semantics (latest-per-PK consolidation + the `> f_base` reconstruct filter), not a raw concatenate.
 
-So ship the **main checkpoint** now (the actual win, naturally lock-free) and leave append/changelog/droplog
-compaction as a later, optional tidy-up.
+The residual — compacting **append-history** and **`__droplog`** parts (insert-only tables that never fold)
+— stays deferred (decided 2026-06-22). It is the plan's low-value, hazard-prone case: those reads are a
+plain `UNION` of immutable, idempotent-by-name parts with **no** latest-per-PK safety, so a file-merge needs
+a generation-safe swap to avoid a transient double-count *and* would break the incremental draw (a compacted
+file renamed off its per-run `f` re-ships rows a consumer already holds, and append tables can't dedup on
+land). Against a benefit the plan rates "mostly a directory-listing cost" (windowed reads already prune by
+`_duckstring_f` stats), that machinery isn't worth it yet.
 
 ## Surface changed
 
