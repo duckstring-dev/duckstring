@@ -1,11 +1,21 @@
 # Plan: incremental merge *main* — log-structured base + changelog
 
-> **Status: implemented** (single-file base; chunked base + partition-granular checkpoint remain the deferred
-> optimisations noted below). `apply_zset`/`merge_table` append to the changelog only; `reconstruct_sql` +
-> `checkpoint` + the `f_base` meta live in `trickle/io.py`; reads reconstruct via `DataPlane.read_select`;
-> the trigger + base publish are in `dataplane._checkpoint_and_publish_base` (`DUCKSTRING_COMPACT_THRESHOLD`,
-> default 256 MiB); the data viewer reads freshness from the reconstructed main. Tests:
-> `test_merge_main_checkpoint_folds_into_base` + the migrated merge/viewer suites.
+> **Status: log-structured main + chunked base implemented; tiered base (partition-granular checkpoint) is
+> the next build — designed in "Tiered base" below.** `apply_zset`/`merge_table` append to the changelog
+> only; `reconstruct_sql` + `checkpoint` + the `f_base` meta live in `trickle/io.py`; reads reconstruct via
+> `DataPlane.read_select`; the trigger + base publish are in `dataplane._checkpoint_and_publish_base`
+> (`DUCKSTRING_COMPACT_THRESHOLD`, default 256 MiB — now also a per-table override recorded at the merge
+> write). The base is published as **size-bounded freshness-ordered chunks** (`{main}__base/`, DuckDB
+> `FILE_SIZE_BYTES`) — see "Chunked base". The data viewer reads freshness from the reconstructed main.
+> Tests: `test_merge_main_checkpoint_folds_into_base`, `test_chunked_base_splits_by_size_and_replaces_on_checkpoint`,
+> `test_per_table_compact_threshold_overrides_catchment_default`, the draw/poller transfer tests, and the
+> migrated merge/viewer suites.
+>
+> **Dropped:** the "as-of unification" tidy-up (use as-of reads for `A_old`/`A_new`, delete the builder's
+> `_reconstruct_old`). On inspection it is a *regression*, not a tidy-up: `_reconstruct_old` computes
+> `consolidate(current ⊎ −δ)` (delta-sized), whereas an as-of read reconstructs the full prior state before
+> the key-filter — heavier on the incremental hot path (worse still with `key_filter=False`). Keep
+> `_reconstruct_old`.
 
 A follow-up to the append/changelog incremental-publish work (per-run parts — see the Data plane section of
 `CLAUDE.md`). That work made every **append-only** published table (append history, `__changelog`,
@@ -85,9 +95,12 @@ f_base = target_f
   rewriting/re-chunking the base is *idempotent* when a concurrent reader (or a draw) sees both the old and
   the new chunks: the same `(pk, _duckstring_f)` appears twice and the window function picks an identical row.
   So a checkpoint just writes the new chunks, swaps, and deletes the old — **no lock, no generation pointer**.
-- **Whole-base rewrite first.** The simple checkpoint rewrites the entire base (chunked, freshness-ordered).
-  A *partition-granular* checkpoint (rewrite only the chunks holding changed PKs, locate via `_duckstring_f`)
-  would shrink the per-checkpoint spike but needs a PK→chunk locator — deferred.
+- **Whole-base rewrite first (done); tiered base next.** The shipped checkpoint rewrites the entire base
+  into freshness-ordered chunks. The follow-up — removing the per-checkpoint O(base) spike — is the
+  **tiered base** below: it does *not* use a per-PK→chunk locator (rejected: a small delta scatters across
+  all freshness-ordered chunks, so any in-place partial rewrite degrades to O(base) anyway). Instead it
+  defers deletes — append new freshness bands, supersede at read by latest-per-PK, reclaim lazily by
+  compaction.
 
 ## Retention vs checkpoint — two independent axes
 
@@ -112,6 +125,82 @@ the cadences are governed separately — don't tie checkpoint cadence to the ret
   sorted-merge-with-splitting (LSM leveling) — real work. It is also the prerequisite for *order-dependent*
   aggregates (first / last / cumsum / lag), which are a separate, much harder beast incrementally (no group
   homomorphism; a cumsum change ripples to every later row) and are out of scope.
+
+## Chunked base (implemented)
+
+The published base is a directory of size-bounded, freshness-ordered Parquet **chunks** —
+`{main}__base/{token}__{i}.parquet`, written by `dataplane._publish_base_chunks` from the registry base
+(`COPY … ORDER BY _duckstring_f … FILE_SIZE_BYTES <threshold>`). So a single base holds far more than one
+Parquet file's worth (the large-table / small-delta case), and the chunk size is the `compact_threshold`.
+
+- **Read** — `ParquetDataPlane._raw_read_select` is base-dir-aware (`read_parquet('{main}__base/*.parquet')`
+  + the as-of predicate); Iceberg inherits it via its non-catalog flat-read fallback; the viewer/reconstruct
+  flow through `read_select` unchanged.
+- **Lock-free swap** — each checkpoint writes its chunks under a fresh `token` (the run `f`), then drops the
+  previous token's chunks. A reader that momentarily sees both reconstructs latest-per-PK over base ⊎
+  changelog (idempotent); the published sidecar `f_base` advances only *after*, so the changelog still
+  covers any row a stale chunk would resurrect.
+- **Transfer** — `part_tables` excludes `__base` (the wholesale base must never be mistaken for incremental
+  per-run parts / counted by `landed_after`); the draw ships every base chunk wholesale; the poller
+  wholesale-replaces the base dir on land (pruning stale-token chunks, else a deleted PK resurrects
+  downstream). The **tiered base** below makes this transfer incremental.
+
+## Tiered base (partition-granular checkpoint)
+
+The remaining O(base) cost is the checkpoint's whole-base rewrite. A per-PK→chunk locator can't remove it:
+because chunks are freshness-ordered and a small delta's PKs are uncorrelated with *freshness order* (though
+they *are* correlated with **time**, and freshness ≈ time — see below), an in-place partial rewrite scatters
+across all chunks → O(base). The fix is to **defer deletes** and let reads supersede + compaction reclaim —
+i.e. make the main a small log-structured merge tree, with the changelog as its bottom level.
+
+**Three tiers (the main as an LSM):**
+
+- **L0 — hot changelog.** The per-run `{main}__changelog/{f}.parquet` parts (unchanged). `read_delta` (the
+  incremental hot path) still reads only these over its window — untouched.
+- **L1 — warm bands.** Freshness-partitioned Z-set bands (carry `_duckstring_d`, incl. `−1` tombstones that
+  suppress older tiers). A **warm merge** folds L0 → a warm band and merges adjacent warm bands at the chunk
+  threshold; cost O(recent change). Because updates are time-correlated, recent churn cancels **locally**
+  (a re-updated recent PK's prior image is also in the warm region → `−old/+new` annihilate → no tombstone
+  reaches cold).
+- **L2 — cold base.** The strictly-`d=+1`, one-row-per-PK clean base (the chunked base above). Rewritten
+  only by a **cold compaction**.
+
+**Reconstruct (cold stays clean ⇒ never grouped):** because L2 is single-version by construction, the read
+keeps today's `reconstruct_sql` shape, generalised to tiers — consolidate only warm⊎hot (the small changed
+set), then anti-join cold by the **retraction keys** and union the present side:
+
+```
+tombstone_keys = DISTINCT pk WHERE d < 0  over (warm ⊎ hot)        -- small
+current = ( cold WHERE pk NOT IN tombstone_keys )                  -- a scan, never a GROUP BY
+        UNION ALL
+          ( consolidate(warm ⊎ hot) WHERE net d > 0 )              -- GROUP BY over the changed 5%, not 95%
+```
+
+The anti-join keys *are* exactly the retraction keys (a delete is `−old`; an update is `−old/+new`, same PK;
+a pure insert has no `−1` and isn't in cold). The 95% cold majority is a plain scan (unavoidable on a full
+read — you return those rows) but never grouped. Don't split warm deletes into a separate file (the present
+side already reads warm⊎hot, so extracting `d<0` keys from that pass is ~free); instead carry a cheap
+per-band **`has_deletes`** (and delete-key min/max) stat in the manifest so reconstruct skips retraction-key
+extraction for insert-only bands.
+
+**Compaction triggers (self-tuning, no new constant — the existing k=1, applied per tier):**
+
+- **Warm merge** — frequent/cheap: at the chunk threshold, fold L0 + merge adjacent warm bands.
+- **Cold compaction** — rare/expensive: when **total warm ≥ cold base** (k=1, the same invariant as today's
+  `changelog ≥ base`), merge warm+cold → a fresh clean cold base. Temporal locality keeps warm small (local
+  cancellation), so this fires roughly **proportional to total data size** — ~never for settled data, and
+  exactly when old-data churn has accumulated enough dead weight to justify reclaiming it. (Imprecision: the
+  size trigger can't tell insert-growth from old-PK-tombstone growth, so a pure-append workload occasionally
+  re-chunks unchanged cold data — same wasted rewrite the current whole-base checkpoint already does, so no
+  regression; a "tombstones whose `f` predates the warm floor" counter would make it precise without a
+  per-PK map, if measured to matter.)
+
+**Manifest (per-band `f`-range + `has_deletes`) does triple duty:** band-skip for windowed/as-of reads,
+retraction-key pruning for reconstruct, and **incremental base transfer** — the draw ships only the bands a
+consumer's manifest lacks (by `f`-range), retiring the wholesale-base draw above.
+
+**Build order:** (1) banded reconstruct + warm/cold compaction (registry + publish), keeping the suite
+green; (2) the manifest-driven incremental transfer (draw/poller).
 
 ## Append / changelog / droplog compaction — deferred
 
@@ -144,10 +233,13 @@ compaction as a later, optional tidy-up.
 
 ## Open questions
 
-- **Partition-granular checkpoint** (rewrite only changed chunks via a PK→chunk locator) to remove the
-  per-checkpoint O(base) spike — worth it only if the spike is measured to matter.
-- **`compact_threshold` granularity** — catchment default with a per-pond override?
+- **Partition-granular checkpoint** — *resolved*: the **tiered base** above (defer deletes → append warm
+  bands + merge-on-read + k=1 cold compaction), not a per-PK→chunk locator.
+- **`compact_threshold` granularity** — *resolved*: catchment default (`DUCKSTRING_COMPACT_THRESHOLD`) +
+  a per-table override recorded at the merge write (`merge_table(..., compact_threshold=)`).
+- **As-of unification** — *dropped* (a regression, see Status).
 - **Who runs the checkpoint** — Duck inline at publish (simple, amortised, spiky) vs a background/quiesce
   sweep (smooth, a moving part). Lean inline.
-- **As-of unification** — adopt as-of reads for `A_old`/`A_new` and delete `_reconstruct_old`, now that the
-  source is log-structured? Tidy, optional.
+- **Precise cold-compaction trigger** — a "tombstones whose `f` predates the warm floor" counter would
+  distinguish insert-growth from old-PK-tombstone-growth, sparing the occasional unneeded cold re-chunk.
+  Deferred until the size-proxy trigger is measured to misfire.
