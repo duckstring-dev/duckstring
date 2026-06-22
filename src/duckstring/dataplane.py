@@ -109,10 +109,16 @@ def _read_parquet_glob(glob: str, as_of=None) -> str:
     """A ``SELECT`` over a glob of Parquet parts/chunks, optionally clamped to the **as-of** freshness
     (``_duckstring_f <= as_of``) — a row-level predicate DuckDB stat-prunes to whole files where the parts
     are ``_duckstring_f``-homogeneous (the append/changelog case) and a partial scan otherwise (a base
-    chunk spans a freshness range)."""
+    chunk spans a freshness range).
+
+    ``union_by_name`` is **required**: the parts in a directory are written independently across runs (and
+    across redeploys/rebuilds), so their column order can drift. Without it ``read_parquet`` aligns a glob
+    **positionally** (first file's schema wins), which silently reads a user column's values into the
+    ``_duckstring_d`` slot — a corruption that surfaces as an absurd ``SUM(_duckstring_d)`` (BIGINT overflow)
+    on the reconstruct. By name, columns always bind correctly and a missing column reads as NULL."""
     from .trickle.io import F_COL, _ts
 
-    sel = f"SELECT * FROM read_parquet('{glob}')"
+    sel = f"SELECT * FROM read_parquet('{glob}', union_by_name=true)"
     if as_of is not None:
         sel += f' WHERE "{F_COL}" <= {_ts(as_of)}'
     return sel

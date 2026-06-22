@@ -159,7 +159,7 @@ def _sidecar(request: Request, name: str, major: int) -> dict:
 
 
 def _trickle_base_sql(
-    pond: str, table: str, mode: str, pk: list, f_lo, f_hi, floor, *, main_ref=None, clog_ref=None
+    pond: str, table: str, mode: str, pk: list, f_lo, f_hi, *, f_base=None, main_ref=None, clog_ref=None
 ) -> str:
     """The browse query for a Trickle, windowed to ``[f_lo, f_hi]`` (inclusive, either bound optional):
 
@@ -170,14 +170,23 @@ def _trickle_base_sql(
       present / ``-1`` deleted — its last image is shown), and ``_duckstring_updates`` (count of ``+1``
       changelog events). With a window set, only records changed inside it are shown (inner join); with
       none, every current row is (left join).
-      Ordered by PK — a stable total order for offset paging, and matching the append view, which can't
-      be cheaply freshness-ordered (the viewer scans one wholesale Parquet / an ``iceberg_scan``, neither
-      of which reverses without a per-page sort) — so neither view misleadingly claims a freshness order.
+      The result is emitted **unordered**: the pager (:func:`query_page`) applies ``ORDER BY pk`` next to its
+      ``LIMIT/OFFSET`` so DuckDB plans a memory-bounded Top-N rather than fully sorting (and spilling) a
+      gigabyte-scale base. PK is the default order — a stable total order for offset paging, matching the
+      append view (which can't be cheaply freshness-ordered) — so neither view claims a freshness order.
 
     ``main_ref``/``clog_ref`` override the source identifiers for the main / changelog. The merge main is
-    now **log-structured** (base + changelog, reconstructed on read), and this query references it three
-    times — ``_active``, the ``_deleted`` anti-``EXISTS``, and the changelog twice — so the caller passes
-    pre-materialised temp tables (see :func:`_prepare_base`) to collapse the reconstruct to a single scan.
+    **log-structured** (base + changelog, reconstructed on read) and **expensive to scan** at scale, so this
+    query references it **exactly once** (``_active``): the current rows come straight from the reconstructed
+    main, while the deleted records and the update counts are derived from the changelog alone. A record is
+    *deleted* iff its latest changelog event (by freshness, retractions last) is a retraction ``d < 0``; the
+    reconstruct has already dropped exactly those PKs from the main, so surfacing them needs no second pass.
+
+    ``f_base`` is the cold-base watermark: the changelog ``<= f_base`` is already folded into the base, so the
+    changelog read is filtered to ``> f_base`` (mirroring the reconstruct). Without this a large, *checkpointed*
+    main re-scans its whole **retained** changelog history (still on disk inside the retention window) for the
+    update count / delete detection, when only the post-base slice matters — so the counts and delete tombstones
+    are *since the last checkpoint*. ``None`` (not-yet-checkpointed) reads the changelog in full (it is the main).
     """
     from ...trickle_io import changelog_name
 
@@ -189,20 +198,23 @@ def _trickle_base_sql(
     if f_hi:
         conds.append(f"{fcol} <= {_ts_lit(f_hi)}")
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
-    windowed = bool(conds)
+    windowed = bool(conds)  # a *user* freshness window (drives inner vs left join) — f_base is not one
     if mode == "append":
         return f"SELECT * FROM {main_ref or f'{sch}.{_qi(table)}'}{where}"
     main = main_ref or f"{sch}.{_qi(table)}"  # reconstructed merge main — already carries _duckstring_f per row
     clog = clog_ref or f"{sch}.{_qi(changelog_name(table))}"
+    # Read only the changelog above the cold base — the rest is retained history already folded into it.
+    clw_conds = list(conds)
+    if f_base:
+        clw_conds.append(f"{fcol} > {_ts_lit(f_base)}")
+    clw_where = (" WHERE " + " AND ".join(clw_conds)) if clw_conds else ""
     pkq = [_qi(c) for c in pk]
     part = ", ".join(pkq)
     join = "JOIN" if windowed else "LEFT JOIN"  # windowed → only records changed in the window
     on_ma = " AND ".join(f"_m.{c} IS NOT DISTINCT FROM _a.{c}" for c in pkq)
     on_da = " AND ".join(f"_dl.{c} IS NOT DISTINCT FROM _a.{c}" for c in pkq)
-    not_in_main = " AND ".join(f"_mm.{c} IS NOT DISTINCT FROM _dl.{c}" for c in pkq)
-    order = ", ".join(pkq)
     return (
-        f"WITH _clw AS (SELECT * FROM {clog}{where}), "
+        f"WITH _clw AS (SELECT * FROM {clog}{clw_where}), "
         f"_a AS (SELECT {part}, max({fcol}) AS _ds_fmax, "
         f"sum(CASE WHEN {dcol} > 0 THEN 1 ELSE 0 END) AS _ds_upd FROM _clw GROUP BY {part}), "
         f"_dl AS (SELECT *, row_number() OVER (PARTITION BY {part} "
@@ -213,10 +225,8 @@ def _trickle_base_sql(
         f"FROM {main} _m {join} _a ON {on_ma}), "
         f"_deleted AS (SELECT _dl.* EXCLUDE ({dcol}, {fcol}, _ds_rn), _a._ds_fmax AS {fcol}, "
         f"-1 AS \"_duckstring_active\", _a._ds_upd AS \"_duckstring_updates\" "
-        f"FROM _dl JOIN _a ON {on_da} WHERE _dl._ds_rn = 1 "
-        f"AND NOT EXISTS (SELECT 1 FROM {main} _mm WHERE {not_in_main})) "
-        f"SELECT * FROM (SELECT * FROM _active UNION ALL BY NAME SELECT * FROM _deleted) "
-        f"ORDER BY {order}"
+        f"FROM _dl JOIN _a ON {on_da} WHERE _dl._ds_rn = 1 AND _dl.{dcol} < 0) "
+        f"SELECT * FROM _active UNION ALL BY NAME SELECT * FROM _deleted"
     )
 
 
@@ -292,44 +302,31 @@ class CountRequest(BaseModel):
     f_hi: Optional[str] = None  # inclusive upper freshness bound (ISO), or None = unbounded
 
 
-def _merge_floor(request: Request, body, major: int):
-    """The coverage floor (bootstrap freshness) of a merge Trickle table — the freshness a row untouched
-    since bootstrap reports. ``None`` for non-merge queries."""
+def _merge_f_base(request: Request, body, major: int):
+    """The cold-base watermark ``f_base`` of a merge Trickle main — the freshness up to which the changelog
+    is already folded into the clean base. The browse only needs changelog rows **newer** than this; the
+    retained history ``<= f_base`` is redundant (it lives in the base) and re-reading it is what made a large,
+    *checkpointed* table's browse scan its whole retained log. ``None`` for non-merge or a not-yet-checkpointed
+    main (then the changelog is the whole main and is read in full)."""
     if body.trickle != "merge":
         return None
-    return (_sidecar(request, body.pond, major).get(body.table) or {}).get("floor")
+    return (_sidecar(request, body.pond, major).get(body.table) or {}).get("f_base")
 
 
-def _base_sql(body, floor=None) -> str:
-    """The query a count/page operates on: a Trickle's windowed/consolidated view, a custom ``sql``, or
-    a plain ``SELECT *`` of a table."""
+def _base_sql(body, *, f_base=None) -> str:
+    """The query a count/page operates on: a Trickle's windowed/consolidated view (its changelog read clamped
+    to ``> f_base``), a custom ``sql``, or a plain ``SELECT *`` of a table. The reconstructed merge main is
+    referenced as a view — never materialised — so the pager's Top-N streams it instead of spilling a
+    gigabyte-scale copy to temp."""
     if body.trickle in ("append", "merge"):
-        return _trickle_base_sql(body.pond, body.table, body.trickle, body.pk or [], body.f_lo, body.f_hi, floor)
+        return _trickle_base_sql(
+            body.pond, body.table, body.trickle, body.pk or [], body.f_lo, body.f_hi, f_base=f_base
+        )
     if body.sql:
         return body.sql
     if body.table:
         return f"SELECT * FROM {_qi(body.pond)}.{_qi(body.table)}"
     return f"SELECT * FROM {_qi(body.pond)}"
-
-
-def _prepare_base(con, body, floor=None) -> str:
-    """The base query for count/page, materialising a **merge** Trickle's reconstructed main + changelog
-    into temp tables first. The merge main is log-structured (base + changelog), so each reference in the
-    browse query re-runs the reconstruct (GROUP BY ALL over every changelog part + an anti-join + a UNION);
-    the browse references it three times. Folding it to two single-scan temps is what keeps a merge browse
-    as fast as the old flat-Parquet main was — without relying on the optimiser to dedupe a correlated
-    ``NOT EXISTS`` over a non-materialised reconstruct view. Other queries are unchanged (single scan)."""
-    if body.trickle != "merge":
-        return _base_sql(body, floor)
-    from ...trickle_io import changelog_name
-
-    sch = _qi(body.pond)
-    con.execute(f'CREATE OR REPLACE TEMP TABLE "_ds_main" AS SELECT * FROM {sch}.{_qi(body.table)}')
-    con.execute(f'CREATE OR REPLACE TEMP TABLE "_ds_clog" AS SELECT * FROM {sch}.{_qi(changelog_name(body.table))}')
-    return _trickle_base_sql(
-        body.pond, body.table, "merge", body.pk or [], body.f_lo, body.f_hi, floor,
-        main_ref='"_ds_main"', clog_ref='"_ds_clog"',
-    )
 
 
 @router.post("/query/count")
@@ -338,7 +335,7 @@ def query_count(body: CountRequest, request: Request):
     bare ``COUNT(*)`` over a Parquet table is metadata-fast (no scan)."""
     m = _resolve_major(request, body.pond, body.major, body.version)
     con = _open_pond(request, body.pond, m)
-    base = _prepare_base(con, body, _merge_floor(request, body, m))
+    base = _base_sql(body, f_base=_merge_f_base(request, body, m))
     try:
         (count,) = con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count").fetchone()
         return {"count": count}
@@ -383,10 +380,17 @@ def query_page(body: PageRequest, request: Request):
     con = _open_pond(request, body.pond, m)
     limit = max(1, min(body.limit, 5000))
     offset = max(0, body.offset)
-    base = _prepare_base(con, body, _merge_floor(request, body, m))
-    # Opt-in column sort: applied only when requested (the default keeps the cheap base order). The
-    # identifier is quoted (injection-safe); an unknown column just errors → 400.
-    order = f" ORDER BY {_qi(body.order_by)} {'DESC' if body.order_desc else 'ASC'}" if body.order_by else ""
+    base = _base_sql(body, f_base=_merge_f_base(request, body, m))
+    # Order + page at this single level (ORDER BY adjacent to LIMIT) so DuckDB plans a memory-bounded Top-N
+    # rather than fully sorting a gigabyte-scale merge base and spilling to temp. Opt-in column sort wins
+    # (identifier quoted → injection-safe; an unknown column errors → 400); otherwise a merge Trickle keeps
+    # its stable PK order for offset paging, and everything else keeps the cheap base/scan order.
+    if body.order_by:
+        order = f" ORDER BY {_qi(body.order_by)} {'DESC' if body.order_desc else 'ASC'}"
+    elif body.trickle == "merge" and body.pk:
+        order = " ORDER BY " + ", ".join(_qi(c) for c in body.pk)
+    else:
+        order = ""
     try:
         rel = con.execute(f"SELECT * FROM ({base}) AS _ds_page{order} LIMIT {limit + 1} OFFSET {offset}")
         cols = [d[0] for d in rel.description] if rel.description else []

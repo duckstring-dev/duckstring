@@ -608,9 +608,12 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
     hi = f" AND {_q(F_COL)} <= {_ts(upper)}" if upper is not None else ""
     if before is not None:  # exclusive upper — the state strictly *before* a freshness (the merge prior)
         hi += f" AND {_q(F_COL)} < {_ts(before)}"
+    # The consolidated weight is only sign-tested (``> 0`` in ``upserts``, below) and then dropped — it never
+    # reaches the output — so leave it as DuckDB's native SUM (HUGEINT) rather than ``CAST(... AS BIGINT)``: a
+    # discarded value must not be able to overflow and crash a read.
     consol = (
         f"SELECT * EXCLUDE ({_q(D_COL)}, {_q(F_COL)}), MAX({_q(F_COL)}) AS {_q(F_COL)}, "
-        f"CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} "
+        f"SUM({_q(D_COL)}) AS {_q(D_COL)} "
         f"FROM (SELECT * FROM ({clog_sql}) WHERE {lo}{hi}) GROUP BY ALL HAVING SUM({_q(D_COL)}) <> 0"
     )
     upserts = f"SELECT * EXCLUDE ({_q(D_COL)}) FROM {_RECON_CTE} WHERE {_q(D_COL)} > 0"
