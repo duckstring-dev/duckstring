@@ -56,24 +56,27 @@ async def draw_wait(
 
 
 @router.get("/draw/{name}/{major}")
-def draw(name: str, major: int, request: Request, tables: Optional[str] = None, after: Optional[str] = None):
+def draw(name: str, major: int, request: Request, tables: Optional[str] = None, after: Optional[str] = None,
+         base_after: Optional[str] = None):
     """Stream a Pond line's exported Parquet as a zip. ``tables`` (comma-separated) optionally restricts
     the set — reserved for per-Ripple duct scope; default is every table.
 
     ``after`` (a consumer's already-landed ``_duckstring_f``) makes a Trickle transfer **incremental**:
-    an append-only table (append history, ``__changelog``, ``__droplog``) is a directory of per-run parts,
-    and only the parts newer than ``after`` are shipped (the small delta); a merge main and plain Ripple
-    output are single files, always wholesale (current state). Omit ``after`` (or for a bootstrap) → the
-    whole set. The consumer drops the shipped parts into its own parts directory (see poller
-    ``_land_transfer``)."""
+    an append-only table (append history, ``__changelog``, ``__band`` warm bands, ``__droplog``) is a
+    directory of per-run parts, and only the parts newer than ``after`` are shipped (the small delta); a
+    plain Ripple output is a single file, always wholesale. A merge main's **cold base** (``__base/`` chunks)
+    is wholesale but rewritten only at a rare cold compaction, so it ships only when its fold watermark
+    ``f_base`` advanced past ``base_after`` (the consumer's held cold-base freshness) — otherwise the large
+    base is not re-sent. Omit ``after``/``base_after`` (bootstrap) → the whole set."""
     from datetime import datetime
 
-    from ...trickle_io import BASE_SUFFIX, SIDECAR, base_chunks, part_f, part_tables, table_parts
+    from ...trickle_io import BASE_SUFFIX, SIDECAR, base_chunks, load_sidecar, part_f, part_tables, table_parts
 
     m = _resolve_major(request, name, major, None)
     data_dir = _data_dir(request, name, m)
     wanted = {t.strip() for t in tables.split(",")} if tables else None
     after_dt = datetime.fromisoformat(after) if after else None
+    base_after_dt = datetime.fromisoformat(base_after) if base_after else None
 
     files = sorted(p for p in data_dir.glob("*.parquet") if wanted is None or p.stem in wanted)
     dirs = [t for t in part_tables(data_dir) if wanted is None or t in wanted]
@@ -83,12 +86,16 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
     ) if data_dir.exists() else []
     if not files and not dirs and not base_dirs and not data_dir.exists():
         raise HTTPException(status_code=404, detail=f"No exported data for '{name}' (major {m})")
+    sidecar_meta = load_sidecar(data_dir)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for pq in files:  # wholesale single-file tables (legacy merge base / plain output)
             zf.write(pq, pq.name)
-        for main in base_dirs:  # a merge main's log-structured base → ship every chunk (wholesale)
+        for main in base_dirs:  # cold base chunks — wholesale, but only if f_base advanced past the consumer's
+            fb = sidecar_meta.get(main, {}).get("f_base")
+            if base_after_dt is not None and fb is not None and datetime.fromisoformat(fb) <= base_after_dt:
+                continue  # the consumer already holds this cold base — don't re-ship it
             for chunk in base_chunks(data_dir, main):
                 zf.write(chunk, f"{main}{BASE_SUFFIX}/{chunk.name}")
         for table in dirs:  # append-only parts → ship only the parts newer than `after`

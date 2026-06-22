@@ -438,6 +438,34 @@ def test_draw_route_ships_chunked_base_wholesale(tmp_path):
                       "sale__base/2026-06-16T03_00_00+00_00__1.parquet"]
 
 
+def test_draw_route_skips_unchanged_cold_base(tmp_path):
+    # The cold base is wholesale but rewritten only at a rare compaction, so it ships only when its fold
+    # watermark f_base advanced past the consumer's `base_after` — the large base isn't re-sent every draw.
+    from duckstring.trickle_io import SIDECAR
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    base_dir = data_dir / "sale__base"
+    base_dir.mkdir(parents=True)
+    (base_dir / "2026-06-16T03_00_00+00_00__0.parquet").write_bytes(b"CHUNK0")
+    (data_dir / SIDECAR).write_text('{"sale": {"mode": "merge", "pk": ["id"], "f_base": "2026-06-16T03:00:00+00:00"}}')
+
+    def base_chunks_in(params):
+        resp = _client(d).get("/api/draw/sales/1", params=params)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            return [n for n in zf.namelist() if n.startswith("sale__base/")]
+
+    # Consumer already holds this cold base (base_after == f_base) → it is NOT re-shipped.
+    assert base_chunks_in({"base_after": "2026-06-16T03:00:00+00:00"}) == []
+    # Consumer behind it (base_after < f_base) → the base ships.
+    assert base_chunks_in({"base_after": "2026-06-16T02:00:00+00:00"}) == ["sale__base/2026-06-16T03_00_00+00_00__0.parquet"]
+    # Bootstrap (no base_after) → the base ships.
+    assert base_chunks_in({}) == ["sale__base/2026-06-16T03_00_00+00_00__0.parquet"]
+
+
 # ─── Recursive lineage view ────────────────────────────────────────────────────
 
 

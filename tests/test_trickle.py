@@ -265,6 +265,28 @@ def test_warm_tier_folds_changelog_and_reconstructs_across_all_tiers(reg, tmp_pa
     assert behind.is_full and floor > ts(1)
 
 
+def test_stale_warm_band_below_f_base_does_not_corrupt_read(reg, tmp_path, monkeypatch):
+    """A consumer that has not yet pruned warm bands subsumed by an advanced cold base stays correct: a band
+    file stamped ``≤ f_base`` is ignored by reconstruct (it filters ``> f_base``), so no superseded/deleted
+    row resurfaces. This is what lets the cross-Catchment draw ship the base only when it changes."""
+    monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", "1")  # force a cold base
+    snk = tmp_path / "data"
+    T.merge_table(reg, "dim", _state(reg, [(1, "a"), (2, "b")]), ts(5), ("id",))
+    publish(reg, snk, f=ts(5))  # bootstrap → cold base at f_base = ts5
+    assert T.load_sidecar(snk)["dim"]["f_base"] == ts(5).isoformat()
+
+    # Inject a stale warm band (f = ts3 ≤ f_base) that, if read, would delete id=1 and add a bogus id=9.
+    band_dir = snk / "dim__band"
+    band_dir.mkdir(exist_ok=True)
+    reg.execute(
+        f"COPY (SELECT * FROM (VALUES (1,'a',-1,TIMESTAMPTZ '{ts(3).isoformat()}'), "
+        f"(9,'zz',1,TIMESTAMPTZ '{ts(3).isoformat()}')) AS s(id,v,_duckstring_d,_duckstring_f)) "
+        f"TO '{band_dir / T.part_name(ts(3))}' (FORMAT PARQUET)"
+    )
+    # The stale band is below f_base → ignored; the read is exactly the cold base state.
+    assert rows(reg, snk, "dim", "id, v") == [(1, "a"), (2, "b")]
+
+
 def test_merge_idempotent_replay(reg, tmp_path):
     T.merge_table(reg, "dim", _state(reg, [(1, "a"), (2, "b")]), ts(1), ("id",))
     state2 = [(1, "a"), (2, "B")]
