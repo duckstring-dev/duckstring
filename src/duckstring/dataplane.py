@@ -69,24 +69,29 @@ class DataPlane:
         raise NotImplementedError
 
     def _reconstruct_select(self, data_dir: Path, table: str, meta: dict, as_of=None) -> str:
-        """Reconstruct a merge main's current state from its base + ``__changelog`` (both read via
-        :meth:`_raw_read_select`), per :func:`duckstring.trickle.io.reconstruct_sql`."""
+        """Reconstruct a merge main's current state from its cold base + the warm tier (``__band``) ⊎ hot
+        ``__changelog`` (all read via :meth:`_raw_read_select`), per
+        :func:`duckstring.trickle.io.reconstruct_sql`. The warm + hot freshness ranges are disjoint, so their
+        union is the changelog above the cold-base watermark with no double-count."""
         from datetime import datetime
 
-        from .trickle.io import changelog_name, reconstruct_sql
+        from .trickle.io import changelog_name, reconstruct_sql, warm_name
 
-        try:
-            clog_sql = self._raw_read_select(data_dir, changelog_name(table), as_of=as_of)
-        except FileNotFoundError:
-            clog_sql = None
+        clogs = []
+        for companion in (changelog_name(table), warm_name(table)):
+            try:
+                clogs.append(self._raw_read_select(data_dir, companion, as_of=as_of))
+            except FileNotFoundError:
+                pass
         try:
             base_sql = self._raw_read_select(data_dir, table, as_of=as_of)
         except FileNotFoundError:
             base_sql = None
-        if clog_sql is None:
+        if not clogs:
             if base_sql is None:
                 raise FileNotFoundError(str(Path(data_dir) / table))
             return base_sql
+        clog_sql = " UNION ALL BY NAME ".join(f"({c})" for c in clogs)
         f_base = datetime.fromisoformat(meta["f_base"]) if meta.get("f_base") else None
         return reconstruct_sql(base_sql, clog_sql, f_base, tuple(meta.get("pk", ())), upper=as_of)
 
@@ -175,13 +180,14 @@ def publish_plan(con, data_dir: Path, f=None) -> list[str]:
     meta = trickle.read_meta(con)
     changelogs = {trickle.changelog_name(t) for t in meta}
     droplogs = {f"{t}{trickle.DROPLOG_SUFFIX}" for t in meta}
+    warms = {trickle.warm_name(t) for t in meta}
     tables = registry_tables(con)
     f_iso = f.astimezone(timezone.utc).isoformat() if f is not None else None
     payload: dict[str, dict] = {}
     for table in tables:
-        if table in meta or table in changelogs or table in droplogs:
-            continue  # Trickle base/companion — base added below; the __changelog/__droplog companions are
-            #            exported as files (they carry reserved system columns) but take no sidecar entry.
+        if table in meta or table in changelogs or table in droplogs or table in warms:
+            continue  # Trickle base/companion — base added below; the __changelog/__band/__droplog
+            #            companions are exported as files (reserved system columns) but take no sidecar entry.
         validate_publish(con, table)
         payload[table] = {"mode": "overwrite", "f": f_iso}
     for base, m in meta.items():
@@ -226,7 +232,7 @@ class ParquetDataPlane(DataPlane):
                     con.execute(f'COPY "{table}" TO \'{tmp}\' (FORMAT PARQUET)')
                     tmp.replace(dest)
             for main in merge_mains:
-                _checkpoint_and_publish_base(con, data_dir, main, f)
+                _publish_tiered_main(con, data_dir, main, f)
             if merge_mains:  # a checkpoint may have advanced f_base → refresh the sidecar
                 publish_plan(con, data_dir, f)
 
@@ -334,25 +340,81 @@ def _base_bytes(data_dir: Path, main: str) -> int:
     return legacy.stat().st_size if legacy.exists() else 0
 
 
-def _checkpoint_and_publish_base(con, data_dir: Path, main: str, f) -> None:
-    """For a merge main: trigger a checkpoint when the published changelog parts newer than the fold
-    watermark outgrow the base (past the floor), then — only if a checkpoint folded — republish the base as
-    size-bounded freshness-ordered chunks (``{main}__base/``) from the registry and re-prune the changelog
-    parts (retention may have trimmed)."""
+def _publish_tiered_main(con, data_dir: Path, main: str, f) -> None:
+    """Maintain a merge main's tiered storage at publish time (see plans/trickle-main-incremental.md):
+
+    - **Cold compaction** (rare, O(base)) when the warm tier has grown to match the cold base (k=1): fold
+      base + warm + hot ``≤ f`` into a fresh clean base, republish the base chunks, and clear the warm bands.
+    - **Warm fold** (frequent, cheap) otherwise, once the hot changelog has accumulated past ``2×`` the chunk
+      threshold: move its older slice into a warm band, leaving a ``~threshold`` hot window for caught-up
+      consumers' delta reads, and publish the new band.
+
+    The hot changelog parts themselves are exported by the main publish loop; here we only re-sync them after
+    a fold/compaction trims the registry changelog."""
+    import shutil
+
     from . import trickle_io as trickle
 
-    clog = trickle.changelog_name(main)
-    f_base = trickle._f_base(con, main)
-    clog_bytes = sum(
-        p.stat().st_size for p in trickle.table_parts(data_dir, clog)
-        if f_base is None or trickle.part_f(p.name) > f_base
-    )
-    if clog_bytes < max(_base_bytes(data_dir, main), _compact_threshold(con, main)):
+    threshold = _compact_threshold(con, main)
+    clog, warm = trickle.changelog_name(main), trickle.warm_name(main)
+    warm_bytes = sum(p.stat().st_size for p in trickle.table_parts(data_dir, warm))
+    cold_bytes = _base_bytes(data_dir, main)
+
+    f_warm = trickle._f_warm(con, main) or trickle._f_base(con, main)
+    hot = [p for p in trickle.table_parts(data_dir, clog)
+           if f_warm is None or trickle.part_f(p.name) > f_warm]
+    hot_bytes = sum(p.stat().st_size for p in hot)
+
+    # Cold compaction (k=1: warm ≥ cold), or the **bootstrap** of the very first base directly from the hot
+    # changelog (no warm tier yet) so a fresh main folds straight to cold rather than via a warm round-trip.
+    bootstrap = cold_bytes == 0 and (warm_bytes + hot_bytes) >= threshold
+    if warm_bytes >= max(cold_bytes, threshold) or bootstrap:  # cold compaction (k=1: warm ≥ cold)
+        trickle.checkpoint(con, main, f)  # fold base+warm+hot≤f → clean base; clear warm; advance f_base/f_warm
+        if trickle._table_exists(con, main):
+            _publish_base_chunks(con, data_dir, main, f, threshold)
+        if (data_dir / warm).is_dir():
+            shutil.rmtree(data_dir / warm)  # the warm bands are now folded into the cold base
+        _export_parts(con, data_dir, clog, f)  # re-sync the hot parts after retention trim
         return
-    trickle.checkpoint(con, main, f)  # registry fold: rewrites the base, advances f_base, applies retention
-    if trickle._table_exists(con, main):
-        _publish_base_chunks(con, data_dir, main, f, _compact_threshold(con, main))
-    _export_parts(con, data_dir, clog, f)  # re-sync the changelog parts after any retention trim
+
+    if hot_bytes >= 2 * threshold:  # warm fold: pack the oldest hot parts, leaving a ~threshold hot window
+        warm_target, remaining = None, hot_bytes
+        for p in hot[:-1]:  # oldest-first; never the newest part → a caught-up consumer's latest delta stays
+            if remaining <= threshold:
+                break
+            remaining -= p.stat().st_size
+            warm_target = trickle.part_f(p.name)
+        if warm_target is not None:
+            trickle.fold_warm(con, main, warm_target)
+            _export_bands(con, data_dir, main)
+            _export_parts(con, data_dir, clog, f)  # drop the folded hot parts (now in the warm band)
+
+
+def _export_bands(con, data_dir: Path, main: str) -> None:
+    """Publish the merge main's warm tier as freshness-range **band** files (``{main}__band/{f}.parquet``),
+    one per fold, append-only. Each band keeps its rows' original ``_duckstring_f`` (so as-of reads stay
+    correct) and is named by its upper freshness. Idempotent: a band already on disk is not rewritten."""
+    from . import trickle_io as trickle
+
+    warm = trickle.warm_name(main)
+    f_warm = trickle._f_warm(con, main)
+    if not trickle._table_exists(con, warm) or f_warm is None:
+        return
+    band_dir = data_dir / warm
+    band_dir.mkdir(parents=True, exist_ok=True)
+    dest = band_dir / trickle.part_name(f_warm)
+    if dest.exists():  # replay-idempotent
+        return
+    published = [trickle.part_f(p.name) for p in band_dir.glob("*.parquet")]
+    last_hi = max(published) if published else None
+    fb = f'"{trickle.F_COL}"'
+    lo = f"{fb} > {trickle._ts(last_hi)} AND " if last_hi is not None else ""
+    tmp = band_dir / (dest.name + ".tmp")
+    con.execute(
+        f'COPY (SELECT * FROM "{warm}" WHERE {lo}{fb} <= {trickle._ts(f_warm)}) '
+        f"TO '{str(tmp).replace(chr(39), chr(39) * 2)}' (FORMAT PARQUET)"
+    )
+    tmp.replace(dest)
 
 
 def _publish_base_chunks(con, data_dir: Path, main: str, f, chunk_bytes: int) -> None:

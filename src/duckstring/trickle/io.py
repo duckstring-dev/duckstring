@@ -71,6 +71,9 @@ DROPLOG_SUFFIX = "__droplog"
 # the chunks holding changed PKs — see plans/trickle-main-incremental.md). The base is wholesale (rewritten
 # at a checkpoint), distinct from the per-run append parts; ``part_tables`` excludes it for that reason.
 BASE_SUFFIX = "__base"
+# The warm tier (see :func:`warm_name`): consolidated freshness-range bands between the cold base and the
+# hot per-run changelog. Published as ``{table}__band/`` parts, one file per fold.
+WARM_SUFFIX = "__band"
 # A ``.aggregate(...)`` output keeps its raw accumulators (count + per-summed-col sum & non-NULL count) in a
 # ``_duckstring_agg_{name}`` companion. Reserved prefix → ``registry_tables`` hides it from publish; the
 # published main holds only the derived user columns.
@@ -93,6 +96,14 @@ def changelog_name(table: str) -> str:
 def base_dir_name(table: str) -> str:
     """The published-base directory name for a log-structured merge main ``table``."""
     return f"{table}{BASE_SUFFIX}"
+
+
+def warm_name(table: str) -> str:
+    """The **warm tier** companion of a merge main ``table`` — consolidated freshness-range Z-set bands
+    between the cold base and the hot ``__changelog``. A ``fold_warm`` moves an older slice of the changelog
+    into here (collapsing a→b→c→d to its net change), so reconstruct reads fewer, denser files and the
+    cold base is rewritten only at the rare k=1 cold compaction. Published as ``{table}__band/`` parts."""
+    return f"{table}{WARM_SUFFIX}"
 
 
 def base_chunks(data_dir: Path, table: str) -> list[Path]:
@@ -164,15 +175,17 @@ def _ensure_meta(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
         f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR, "
-        f"compact_threshold VARCHAR)"
+        f"compact_threshold VARCHAR, f_warm VARCHAR)"
     )
-    # Migrate an older meta table that predates a column: f_base (the log-structured merge main fold
-    # watermark) and compact_threshold (the per-table checkpoint-size override — see _compact_threshold).
+    # Migrate an older meta table that predates a column: f_base (the cold-base fold watermark),
+    # compact_threshold (the per-table checkpoint-size override), f_warm (the warm-tier fold watermark).
     cols = [r[1] for r in con.execute(f'PRAGMA table_info({_q(META_TABLE)})').fetchall()]
     if "f_base" not in cols:
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN f_base VARCHAR')
     if "compact_threshold" not in cols:
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN compact_threshold VARCHAR')
+    if "f_warm" not in cols:
+        con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN f_warm VARCHAR')
 
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
@@ -206,6 +219,25 @@ def _set_f_base(con, table: str, f) -> None:
     )
 
 
+def _f_warm(con, table: str):
+    """The merge main's **warm watermark** — the freshness up to which the ``__changelog`` has been folded
+    into the warm tier (:func:`warm_name`). ``None`` ⇒ no warm fold yet (the whole changelog is still hot)."""
+    from datetime import datetime
+
+    if not _table_exists(con, META_TABLE):
+        return None
+    row = con.execute(f'SELECT f_warm FROM {_q(META_TABLE)} WHERE table_name = ?', [table]).fetchone()
+    return datetime.fromisoformat(row[0]) if (row and row[0]) else None
+
+
+def _set_f_warm(con, table: str, f) -> None:
+    from datetime import timezone
+
+    _ensure_meta(con)
+    val = f.astimezone(timezone.utc).isoformat() if f is not None else None
+    con.execute(f'UPDATE {_q(META_TABLE)} SET f_warm = ? WHERE table_name = ?', [val, table])
+
+
 def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
     """Maintain a Trickle table's coverage **floor** — the earliest freshness a windowed read can rely on
     (below it, a consumer full-reads the clean state). A bootstrap/refresh **sets** it to that run's ``f``;
@@ -231,10 +263,10 @@ def read_meta(con) -> dict[str, dict]:
     if not _table_exists(con, META_TABLE):
         return {}
     rows = con.execute(
-        f'SELECT table_name, mode, pk, floor, f_base, compact_threshold FROM {_q(META_TABLE)}'
+        f'SELECT table_name, mode, pk, floor, f_base, compact_threshold, f_warm FROM {_q(META_TABLE)}'
     ).fetchall()
     return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else []), "floor": r[3], "f_base": r[4],
-                   "compact_threshold": (int(r[5]) if r[5] else None)}
+                   "compact_threshold": (int(r[5]) if r[5] else None), "f_warm": r[6]}
             for r in rows}
 
 
@@ -591,16 +623,28 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
     )
 
 
+def _clog_union_sql(con, name: str) -> str | None:
+    """The full Z-set log of merge main ``name`` above the cold base — the **warm tier** (consolidated
+    bands, :func:`warm_name`) ⊎ the **hot** ``__changelog`` (per-run). Their freshness ranges are disjoint
+    (a ``fold_warm`` moves a slice from hot to warm), so the union is the changelog ``> f_base`` with no
+    double-count. ``None`` when neither exists."""
+    clog, warm = changelog_name(name), warm_name(name)
+    parts = [f'SELECT * FROM {_q(t)}' for t in (clog, warm) if _table_exists(con, t)]
+    if not parts:
+        return None
+    return " UNION ALL BY NAME ".join(parts)
+
+
 def _reconstruct_sql_for(con, name: str, *, upper=None, before=None) -> str | None:
-    """Build :func:`reconstruct_sql` for a merge main ``name`` from the registry (base table ``name`` +
-    its ``__changelog``). ``None`` if the table has no changelog and no base (nothing written yet)."""
-    clog = changelog_name(name)
-    if not _table_exists(con, clog):
+    """Build :func:`reconstruct_sql` for a merge main ``name`` from the registry — the cold base table
+    ``name`` overlaid by the warm tier ⊎ hot ``__changelog`` (:func:`_clog_union_sql`). ``None`` if nothing
+    has been written yet (no base, no warm, no changelog)."""
+    clog_sql = _clog_union_sql(con, name)
+    if clog_sql is None:
         return f'SELECT * FROM {_q(name)}' if _table_exists(con, name) else None
     pk = tuple(read_meta(con).get(name, {}).get("pk", ()))
     base_sql = f'SELECT * FROM {_q(name)}' if _table_exists(con, name) else None
-    return reconstruct_sql(base_sql, f'SELECT * FROM {_q(clog)}', _f_base(con, name), pk,
-                           upper=upper, before=before)
+    return reconstruct_sql(base_sql, clog_sql, _f_base(con, name), pk, upper=upper, before=before)
 
 
 def reconstruct_current(con, name: str, *, upper=None, before=None):
@@ -708,21 +752,57 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
                compact_threshold=compact_threshold)
 
 
+def fold_warm(con, name: str, target_f) -> None:
+    """**Warm fold** — move the hot ``__changelog`` slice ``(f_warm, target_f]`` into the warm tier
+    (:func:`warm_name`), consolidated by full row (a→b→c→d collapses to its net `−a +d`, with each surviving
+    image's latest ``_duckstring_f`` preserved). This is the cheap, frequent compaction: it keeps reconstruct
+    reading few dense files and defers the O(base) cold rewrite. It **raises the delta floor** to ``target_f``
+    — the folded per-run windows are no longer available, so a consumer behind ``target_f`` full-reads (a
+    caught-up consumer reading the still-hot ``> target_f`` window is unaffected). Idempotent at ``target_f``."""
+    clog, warm = changelog_name(name), warm_name(name)
+    if not _table_exists(con, clog):
+        return
+    lo = _f_warm(con, name) or _f_base(con, name)
+    locond = f"{_q(F_COL)} > {_ts(lo)} AND " if lo is not None else ""
+    cols = [r[1] for r in con.execute(f'PRAGMA table_info({_q(clog)})').fetchall()]
+    user = ", ".join(_q(c) for c in cols if c not in (D_COL, F_COL))
+    band = unique_name("band")
+    con.execute(
+        f'CREATE OR REPLACE TEMP TABLE {_q(band)} AS '
+        f'SELECT {user}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)}, MAX({_q(F_COL)}) AS {_q(F_COL)} '
+        f'FROM {_q(clog)} WHERE {locond}{_q(F_COL)} <= {_ts(target_f)} GROUP BY {user} HAVING SUM({_q(D_COL)}) <> 0'
+    )
+    if con.execute(f'SELECT count(*) FROM {_q(band)}').fetchone()[0] == 0:
+        con.execute(f'DROP TABLE IF EXISTS {_q(band)}')
+        # Still advance the watermark/floor: an empty net change over the slice is fully folded (nothing to keep).
+    else:
+        if not _table_exists(con, warm):
+            con.execute(f'CREATE TABLE {_q(warm)} AS SELECT * FROM {_q(band)} LIMIT 0')
+        con.execute(f'INSERT INTO {_q(warm)} SELECT * FROM {_q(band)}')
+        con.execute(f'DROP TABLE IF EXISTS {_q(band)}')
+    # Remove the folded slice from the hot changelog (it now lives, consolidated, in the warm tier).
+    con.execute(f'DELETE FROM {_q(clog)} WHERE {locond}{_q(F_COL)} <= {_ts(target_f)}')
+    _set_f_warm(con, name, target_f)
+    _advance_floor(con, name, cutoff=target_f)  # the delta floor rises to the warm watermark
+
+
 def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> None:
-    """Fold the changelog into the base up to ``target_f`` and advance the fold watermark — the amortised
-    O(table) write that keeps the per-run cost O(change). The base is rewritten to the reconstructed state
-    (``base ⊎ changelog ≤ target_f``, latest-per-PK, dead versions/tombstones dropped). Crash-safe and
-    lock-free: ``f_base`` is advanced *after* the base is replaced, and reads are latest-per-PK over
-    ``base ⊎ changelog``, so an interrupted checkpoint just leaves a redundant (idempotent) changelog window."""
-    clog = changelog_name(name)
+    """**Cold compaction** — fold the cold base + warm tier + hot changelog ``≤ target_f`` into a fresh clean
+    base (strictly ``d=+1``, one row per PK; dead versions/tombstones dropped) and clear the warm tier. The
+    amortised O(base) write that keeps the per-run cost O(change); triggered at k=1 (warm ≥ base). Crash-safe
+    and lock-free: ``f_base`` is advanced *after* the base is replaced, and reads are latest-per-PK over
+    ``base ⊎ warm ⊎ changelog``, so an interrupted checkpoint just leaves a redundant (idempotent) window."""
+    clog, warm = changelog_name(name), warm_name(name)
     sql = _reconstruct_sql_for(con, name, upper=target_f)
     if sql is None:
         return
     tmp = unique_name("ckpt")
-    con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(tmp)} AS {sql}')   # reads the OLD base + changelog
+    con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(tmp)} AS {sql}')   # reads the OLD base + warm + changelog
     con.execute(f'CREATE OR REPLACE TABLE {_q(name)} AS SELECT * FROM {_q(tmp)}')  # replace the base
     con.execute(f'DROP TABLE IF EXISTS {_q(tmp)}')
+    con.execute(f'DROP TABLE IF EXISTS {_q(warm)}')  # the warm tier is now folded into the cold base
     _set_f_base(con, name, target_f)
+    _set_f_warm(con, name, target_f)  # warm is empty; its watermark tracks the cold base
     cutoff = _apply_retention(con, clog, target_f, retain_t, retain_n)
     _advance_floor(con, name, cutoff=cutoff)
 

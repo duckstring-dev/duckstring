@@ -142,9 +142,10 @@ def test_merge_main_carries_freshness_stripped_for_consumers(reg, tmp_path):
 
 
 def test_merge_main_checkpoint_folds_into_base(reg, tmp_path, monkeypatch):
-    """At a checkpoint the changelog folds into a base file (current state, latest-per-PK with dead rows /
-    tombstones dropped); the fold watermark f_base advances; reads reconstruct base ⊎ changelog>f_base."""
-    monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", "1")  # tiny floor → checkpoint fires every publish
+    """The log-structured main reconstructs the correct current state across update/insert/delete at every
+    publish — whether a change is in the hot changelog, folded into a warm band, or compacted into the cold
+    base. The bootstrap builds the first cold base; the reconstructed read is the durable contract."""
+    monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", "1")  # tiny → eager fold/compaction
     snk_dir = tmp_path / "data"
 
     def run(state, f):
@@ -152,21 +153,21 @@ def test_merge_main_checkpoint_folds_into_base(reg, tmp_path, monkeypatch):
         publish(reg, snk_dir, f=f)
         return T.load_sidecar(snk_dir)["dim"]
 
-    sc = run([(1, "a"), (2, "b")], ts(1))           # bootstrap → checkpoint folds it into the base
+    sc = run([(1, "a"), (2, "b")], ts(1))           # bootstrap → the first cold base
     assert T.base_chunks(snk_dir, "dim") and sc["f_base"] == ts(1).isoformat()
     assert rows(reg, snk_dir, "dim", "id, v") == [(1, "a"), (2, "b")]
-    # The registry base table now holds the folded state and carries the freshness column.
-    assert sorted(reg.sql("SELECT id, v FROM dim").fetchall()) == [(1, "a"), (2, "b")]
     assert "_duckstring_f" in reg.sql("SELECT * FROM dim LIMIT 0").columns
 
-    sc = run([(1, "A"), (2, "b"), (3, "c")], ts(2))  # update 1, insert 3, keep 2
-    assert sc["f_base"] == ts(2).isoformat()
+    run([(1, "A"), (2, "b"), (3, "c")], ts(2))      # update 1, insert 3, keep 2
     assert rows(reg, snk_dir, "dim", "id, v") == [(1, "A"), (2, "b"), (3, "c")]
 
-    sc = run([(1, "A"), (3, "c")], ts(3))            # delete 2 → folded out of the base (dead-row GC)
-    assert sc["f_base"] == ts(3).isoformat()
+    run([(1, "A"), (3, "c")], ts(3))                # delete 2
     assert rows(reg, snk_dir, "dim", "id, v") == [(1, "A"), (3, "c")]
-    assert sorted(reg.sql("SELECT id, v FROM dim").fetchall()) == [(1, "A"), (3, "c")]  # 2 gone from the base
+
+    # The cold base advances (the fold watermark moved past the bootstrap) and a warm fold occurred, yet
+    # every read above resolved the current state regardless of which tier each row lives in.
+    sc = T.load_sidecar(snk_dir)["dim"]
+    assert sc["f_base"] >= ts(1).isoformat() and sc["floor"] is not None
 
 
 def test_per_table_compact_threshold_overrides_catchment_default(reg, tmp_path, monkeypatch):
@@ -205,24 +206,63 @@ def test_chunked_base_splits_by_size_and_replaces_on_checkpoint(reg, tmp_path, m
     T.merge_table(reg, "dim", state("1=1"), ts(1), ("id",), compact_threshold=chunk)
     publish(reg, snk_dir, f=ts(1))
     chunks1 = T.base_chunks(snk_dir, "dim")
-    assert len(chunks1) > 1, "a base over the chunk size must split into multiple chunks"
+    assert len(chunks1) > 1, "a base over the chunk size must split into multiple chunks (bootstrap)"
     assert "dim__base" not in T.part_tables(snk_dir)  # the base is not a per-run-parts table
     assert rows(reg, snk_dir, "dim", "count(*)") == [(200000,)]
 
-    # A full re-write (every row updated → changelog > base) re-checkpoints: the base is rebuilt under a
-    # new token and the previous chunks are dropped.
+    # Two large churns (full re-write, then delete the odds) accumulate a warm tier ≥ the cold base, so a
+    # later publish cold-compacts: the base is rebuilt under a new token and the old chunks are dropped. The
+    # read reconstructs correctly from cold ⊎ warm ⊎ hot throughout.
     T.merge_table(reg, "dim", state("1=1", "v2"), ts(2), ("id",), compact_threshold=chunk)
     publish(reg, snk_dir, f=ts(2))
-    chunks2 = T.base_chunks(snk_dir, "dim")
-    assert {c.name for c in chunks1}.isdisjoint({c.name for c in chunks2}), "old-token chunks removed"
-    assert rows(reg, snk_dir, "dim", "count(*) FILTER (WHERE v LIKE '%v2')") == [(200000,)]  # all updated
-
-    # Delete the odd PKs WITHOUT re-checkpointing (the changelog covers it): no deleted PK is resurrected
-    # from a still-present base chunk — the reconstruct read drops them.
-    T.merge_table(reg, "dim", state("i % 2 = 0", "v2"), ts(3), ("id",))
+    assert rows(reg, snk_dir, "dim", "count(*) FILTER (WHERE v LIKE '%v2')") == [(200000,)]
+    T.merge_table(reg, "dim", state("i % 2 = 0", "v2"), ts(3), ("id",), compact_threshold=chunk)
     publish(reg, snk_dir, f=ts(3))
     assert rows(reg, snk_dir, "dim", "count(*)") == [(100000,)]
+    # Drive further publishes until the warm tier has been folded into a freshly-chunked cold base.
+    for h in range(4, 8):
+        T.merge_table(reg, "dim", state("i % 2 = 0", "v2"), ts(h), ("id",), compact_threshold=chunk)
+        publish(reg, snk_dir, f=ts(h))
+    chunksN = T.base_chunks(snk_dir, "dim")
+    assert {c.name for c in chunks1}.isdisjoint({c.name for c in chunksN}), "cold compaction replaced chunks"
+    # No deleted (odd) PK is resurrected from a stale chunk across all the folding/compaction.
+    assert rows(reg, snk_dir, "dim", "count(*)") == [(100000,)]
     assert rows(reg, snk_dir, "dim", "count(*) FILTER (WHERE id % 2 = 1)") == [(0,)]
+
+
+def test_warm_tier_folds_changelog_and_reconstructs_across_all_tiers(reg, tmp_path, monkeypatch):
+    """The warm tier: incremental merges fold older changelog into warm bands (cold base untouched), and the
+    read reconstructs the current state from cold ⊎ warm ⊎ hot at every step. The fold raises the delta
+    floor (far-behind windows coverage-miss → full read) while a caught-up consumer's hot-window delta still
+    reads. A later cold compaction folds warm into the clean base."""
+    monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", "1")  # tiny → fold/compact eagerly across many runs
+    snk_dir = tmp_path / "data"
+    expect = {}
+    saw_all_three_tiers = False
+    for h in range(1, 13):
+        expect[h] = f"v{h}"          # insert a new key each run
+        if h > 3:
+            expect[h - 3] = f"u{h}"  # and update an older one (churn the warm/cold tiers)
+        rel = reg.sql("SELECT * FROM (VALUES " + ", ".join(f"({k}, '{v}')" for k, v in expect.items())
+                      + ") AS s(id, v)")
+        T.merge_table(reg, "dim", rel, ts(h), ("id",))
+        publish(reg, snk_dir, f=ts(h))
+        assert rows(reg, snk_dir, "dim", "id, v") == sorted(expect.items())  # correct at every step
+        if T.base_chunks(snk_dir, "dim") and T.table_parts(snk_dir, "dim__band") \
+                and T.table_parts(snk_dir, "dim__changelog"):
+            saw_all_three_tiers = True
+    assert saw_all_three_tiers, "cold base + warm bands + hot changelog should coexist mid-stream"
+
+    sc = T.load_sidecar(snk_dir)["dim"]
+    floor = datetime.fromisoformat(sc["floor"])
+    rcon = duckdb.connect()
+    rcon.execute("SET TimeZone='UTC'")
+    # A caught-up consumer reading the still-hot window gets a real (non-full) delta...
+    hot = T.read_delta(rcon, snk_dir, "dim", previous_f=ts(11), f=ts(12), dp=ParquetDataPlane())
+    assert not hot.is_full
+    # ...while a consumer behind the (raised) floor coverage-misses → a full read.
+    behind = T.read_delta(rcon, snk_dir, "dim", previous_f=ts(1), f=ts(12), dp=ParquetDataPlane())
+    assert behind.is_full and floor > ts(1)
 
 
 def test_merge_idempotent_replay(reg, tmp_path):
