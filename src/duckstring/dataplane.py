@@ -95,6 +95,35 @@ class DataPlane:
         f_base = datetime.fromisoformat(meta["f_base"]) if meta.get("f_base") else None
         return reconstruct_sql(base_sql, clog_sql, f_base, tuple(meta.get("pk", ())), upper=as_of)
 
+    def consolidated_count_select(self, data_dir: Path, table: str, meta: dict, as_of=None) -> str:
+        """A scalar ``SELECT`` for the merge main's **current-state row count**, computed *without scanning the
+        base data*: ``count(cold base)`` (Parquet metadata, no scan) **+** the net Z-set weight
+        ``sum(_duckstring_d)`` of the changelog (warm ⊎ hot) above the fold watermark ``f_base``. For a valid
+        merge log each present row nets to weight ``+1``, an update to ``0`` and a delete to ``-1``, so this
+        equals ``count(*)`` over :meth:`_reconstruct_select` — but as metadata + a small delta scan instead of
+        a full base scan. ``as_of`` clamps both tiers (the read seam), same as the reconstruct."""
+        from datetime import datetime
+
+        from .trickle.io import D_COL, F_COL, _ts, changelog_name, warm_name
+
+        clogs = []
+        for companion in (changelog_name(table), warm_name(table)):
+            try:
+                clogs.append(self._raw_read_select(data_dir, companion, as_of=as_of))
+            except FileNotFoundError:
+                pass
+        try:
+            base_sql = self._raw_read_select(data_dir, table, as_of=as_of)
+        except FileNotFoundError:
+            base_sql = None
+        base_cnt = f"(SELECT count(*) FROM ({base_sql}))" if base_sql else "0"
+        if not clogs:
+            return f"SELECT {base_cnt}"
+        clog_sql = " UNION ALL BY NAME ".join(f"({c})" for c in clogs)
+        lo = f' WHERE "{F_COL}" > {_ts(datetime.fromisoformat(meta["f_base"]))}' if meta.get("f_base") else ""
+        delta = f'(SELECT coalesce(sum("{D_COL}"), 0) FROM ({clog_sql}){lo})'
+        return f"SELECT {base_cnt} + {delta}"
+
     def list_tables(self, data_dir: Path) -> list[str]:
         """The names of the tables a Pond has published into ``data_dir``."""
         raise NotImplementedError

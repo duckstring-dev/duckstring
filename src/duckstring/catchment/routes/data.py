@@ -170,10 +170,11 @@ def _trickle_base_sql(
       present / ``-1`` deleted — its last image is shown), and ``_duckstring_updates`` (count of ``+1``
       changelog events). With a window set, only records changed inside it are shown (inner join); with
       none, every current row is (left join).
-      The result is emitted **unordered**: the pager (:func:`query_page`) applies ``ORDER BY pk`` next to its
-      ``LIMIT/OFFSET`` so DuckDB plans a memory-bounded Top-N rather than fully sorting (and spilling) a
-      gigabyte-scale base. PK is the default order — a stable total order for offset paging, matching the
-      append view (which can't be cheaply freshness-ordered) — so neither view claims a freshness order.
+      The result is emitted **unordered**, and the pager (:func:`query_page`) leaves it that way by default so
+      the ``LIMIT/OFFSET`` pushes down to the Parquet scan — a page reads only its own rows (row groups skipped
+      by count) and the changelog join touches only those, instead of scanning the whole base. A column sort is
+      **opt-in** (the user clicking a header): only then does the pager add an ``ORDER BY`` and pay the
+      full-scan Top-N. This matches the append view, which is likewise scan-ordered.
 
     ``main_ref``/``clog_ref`` override the source identifiers for the main / changelog. The merge main is
     **log-structured** (base + changelog, reconstructed on read) and **expensive to scan** at scale, so this
@@ -329,14 +330,43 @@ def _base_sql(body, *, f_base=None) -> str:
     return f"SELECT * FROM {_qi(body.pond)}"
 
 
+def _merge_deleted_count_sql(pond: str, table: str, pk: list, f_base) -> str:
+    """Count the deleted tombstones the browse shows — distinct PKs in the hot changelog above ``f_base`` whose
+    latest event (freshness desc, retractions last) is a retraction ``d < 0`` — matching :func:`_trickle_base_sql`'s
+    ``_deleted``. A small scan of the post-base changelog (not the base)."""
+    from ...trickle_io import changelog_name
+
+    clog = f"{_qi(pond)}.{_qi(changelog_name(table))}"
+    fcol, dcol = _qi(_F), _qi(_D)
+    part = ", ".join(_qi(c) for c in pk)
+    where = f" WHERE {fcol} > {_ts_lit(f_base)}" if f_base else ""
+    return (
+        f"SELECT count(*) FROM (SELECT {dcol}, row_number() OVER (PARTITION BY {part} "
+        f"ORDER BY {fcol} DESC, {dcol} DESC) AS _ds_rn FROM {clog}{where}) WHERE _ds_rn = 1 AND {dcol} < 0"
+    )
+
+
 @router.post("/query/count")
 def query_count(body: CountRequest, request: Request):
     """Total rows of the (default, custom, or Trickle) query — sizes the data viewer's virtual scroll. A
-    bare ``COUNT(*)`` over a Parquet table is metadata-fast (no scan)."""
+    bare ``COUNT(*)`` over a Parquet table is metadata-fast (no scan).
+
+    The **unwindowed current state of a merge** main is counted *without scanning the base*: the active count is
+    ``count(cold base)`` (metadata) + the changelog's net Z-set weight (:meth:`DataPlane.consolidated_count_select`),
+    plus the small deleted-tombstone count — so the scrollbar sizes near-instantly even at hundreds of millions of
+    rows. A *windowed* merge count falls through to the (already small) windowed changelog query."""
     m = _resolve_major(request, body.pond, body.major, body.version)
     con = _open_pond(request, body.pond, m)
-    base = _base_sql(body, f_base=_merge_f_base(request, body, m))
     try:
+        if body.trickle == "merge" and body.pk and not (body.f_lo or body.f_hi):
+            from ...dataplane import get_data_plane
+
+            meta = _sidecar(request, body.pond, m).get(body.table) or {}
+            active_sql = get_data_plane().consolidated_count_select(_data_dir(request, body.pond, m), body.table, meta)
+            active = con.execute(active_sql).fetchone()[0]
+            deleted = con.execute(_merge_deleted_count_sql(body.pond, body.table, body.pk, meta.get("f_base"))).fetchone()[0]
+            return {"count": int(active) + int(deleted)}
+        base = _base_sql(body, f_base=_merge_f_base(request, body, m))
         (count,) = con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count").fetchone()
         return {"count": count}
     except Exception as exc:
@@ -381,16 +411,12 @@ def query_page(body: PageRequest, request: Request):
     limit = max(1, min(body.limit, 5000))
     offset = max(0, body.offset)
     base = _base_sql(body, f_base=_merge_f_base(request, body, m))
-    # Order + page at this single level (ORDER BY adjacent to LIMIT) so DuckDB plans a memory-bounded Top-N
-    # rather than fully sorting a gigabyte-scale merge base and spilling to temp. Opt-in column sort wins
-    # (identifier quoted → injection-safe; an unknown column errors → 400); otherwise a merge Trickle keeps
-    # its stable PK order for offset paging, and everything else keeps the cheap base/scan order.
-    if body.order_by:
-        order = f" ORDER BY {_qi(body.order_by)} {'DESC' if body.order_desc else 'ASC'}"
-    elif body.trickle == "merge" and body.pk:
-        order = " ORDER BY " + ", ".join(_qi(c) for c in body.pk)
-    else:
-        order = ""
+    # Order (if asked) + page at this single level. The default is the **cheap scan order**: with no ORDER BY
+    # the LIMIT/OFFSET pushes down to the Parquet scan (row groups skipped by count), so a page reads only its
+    # ~CHUNK rows and the changelog join touches only those — O(page), not O(table). An explicit column sort
+    # (the user clicking a header — quoted → injection-safe; unknown column → 400) pays the full-scan Top-N it
+    # genuinely needs. So a merge Trickle no longer force-sorts its (gigabyte-scale) base by PK on every page.
+    order = f" ORDER BY {_qi(body.order_by)} {'DESC' if body.order_desc else 'ASC'}" if body.order_by else ""
     try:
         rel = con.execute(f"SELECT * FROM ({base}) AS _ds_page{order} LIMIT {limit + 1} OFFSET {offset}")
         cols = [d[0] for d in rel.description] if rel.description else []

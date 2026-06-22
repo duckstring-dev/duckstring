@@ -358,13 +358,25 @@ def test_merge_consolidation_full_state(catchment_client, tmp_path, monkeypatch)
     assert by[4][idx["_duckstring_f"]] is not None and by[4][idx["_duckstring_f"]].startswith("2026-01-01")
 
 
-def test_merge_view_orders_by_pk(catchment_client, tmp_path, monkeypatch):
-    # The main view is PK-ordered: a stable total order for offset paging, and consistent with the
-    # append view (which can't be cheaply freshness-ordered).
+def test_merge_default_is_scan_order_all_rows(catchment_client, tmp_path, monkeypatch):
+    # The default page is the cheap scan order (no ORDER BY) so the LIMIT pushes down to the Parquet scan —
+    # a big merge main is never force-sorted per page. Every current + deleted row is still present.
     monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     page = catchment_client.post(
         "/api/query/page", json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"], "limit": 100}
+    ).json()
+    idx = {c: i for i, c in enumerate(page["columns"])}
+    assert {r[idx["id"]] for r in page["rows"]} == {1, 2, 3, 4}  # all rows (incl. the deleted id2), any order
+
+
+def test_merge_order_by_pk_is_opt_in(catchment_client, tmp_path, monkeypatch):
+    # PK order is available on demand (clicking the header) — only then is the full-scan sort paid.
+    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
+    _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
+    page = catchment_client.post(
+        "/api/query/page",
+        json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"], "order_by": "id", "limit": 100},
     ).json()
     idx = {c: i for i, c in enumerate(page["columns"])}
     ids = [r[idx["id"]] for r in page["rows"]]
@@ -405,6 +417,48 @@ def test_merge_count_matches(catchment_client, tmp_path, monkeypatch):
         "/api/query/count", json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"]}
     ).json()["count"]
     assert n == 4  # 3 active + 1 deleted
+
+
+def test_merge_count_fast_path_matches_checkpointed(catchment_client, tmp_path, monkeypatch):
+    """The fast count (base metadata + changelog net weight + tombstones) must equal the page's total even
+    once the main is checkpointed (a real f_base, with retained pre-base changelog history)."""
+    from datetime import datetime
+
+    import duckdb
+
+    from duckstring import trickle_io
+    from duckstring.dataplane import ParquetDataPlane
+
+    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
+    monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", "1024")  # tiny → force a checkpoint (real base + f_base)
+    data_dir = tmp_path / "ponds" / "p" / "m1" / "data"
+    data_dir.mkdir(parents=True)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    dp = ParquetDataPlane()
+    runs = [
+        ("2026-01-01T00:00:00+00:00", [(1, 10), (2, 20), (3, 30), (4, 40)]),
+        ("2026-01-02T00:00:00+00:00", [(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)]),  # +insert 5 → checkpoint
+        ("2026-01-03T00:00:00+00:00", [(1, 11), (2, 20), (3, 30), (4, 40), (5, 50)]),  # update 1
+        ("2026-01-04T00:00:00+00:00", [(1, 11), (3, 30), (4, 40), (5, 50)]),           # delete 2
+    ]
+    for f_iso, rows in runs:
+        con.execute("CREATE OR REPLACE TEMP TABLE _s(id BIGINT, v BIGINT)")
+        con.executemany("INSERT INTO _s VALUES (?, ?)", rows)
+        f = datetime.fromisoformat(f_iso)
+        trickle_io.merge_table(con, "t", con.sql("SELECT * FROM _s"), f, ("id",), retain_n=10**9)
+        dp.export(con, data_dir, f=f)
+    con.close()
+    assert trickle_io.load_sidecar(data_dir).get("t", {}).get("f_base")  # actually checkpointed
+
+    body = {"pond": "p", "table": "t", "trickle": "merge", "pk": ["id"]}
+    count = catchment_client.post("/api/query/count", json=body).json()["count"]
+    page = catchment_client.post("/api/query/page", json={**body, "limit": 1000}).json()
+    idx = {c: i for i, c in enumerate(page["columns"])}
+    # The fast count (base metadata + changelog net weight + tombstones) must equal the rows the page shows.
+    assert count == len(page["rows"])
+    active = {r[idx["id"]] for r in page["rows"] if r[idx["_duckstring_active"]] > 0}
+    assert active == {1, 3, 4, 5}  # current state (id2 deleted)
 
 
 def _seed_append_trickle(root, pond, table, runs):
