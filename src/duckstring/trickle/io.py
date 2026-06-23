@@ -859,7 +859,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     state = f"{AGG_STATE_PREFIX}{name}"
     acc_order = (
         ["_a_cnt"]
-        + [col for i in range(len(add_cols)) for col in (f"_a_sum_{i}", f"_a_cnt_{i}", f"_a_sumsq_{i}")]
+        + [col for i in range(len(add_cols)) for col in (f"_a_sum_{i}", f"_a_cnt_{i}", f"_a_m2_{i}")]
         + [col for j in range(len(ext_cols)) for col in (f"_a_min_{j}", f"_a_max_{j}")]
     )
 
@@ -869,26 +869,43 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         merge_table(con, name, derived, f, by, retain_t=retain_t, retain_n=retain_n)
         return
 
-    # Incremental. Per-group accumulator delta from ΔO (a +1/-1 row contributes ±x to sum, ±x² to sumsq, ±1
-    # to the counts — the distributive fold). For extremes: the min/max of the *inserted* (+1) rows, plus a
+    # Incremental. Per-group accumulator delta from ΔO: the distributive sums/counts fold additively (a ±1
+    # row contributes ±x to Σx, ±1 to the counts), and the centred second moment M2 is maintained by merging
+    # the insert/delete partitions in and out (a two-pass partition-moment computation; see below + the
+    # _agg_part_* / _m2_merge_expr helpers). For extremes: the min/max of the *inserted* (+1) rows, plus a
     # per-group flag for whether the group has any retraction (which forces a rescan, below).
     delta = unique_name("aggd")
     rel.create_view(delta, replace=True)
-    dexprs = [f"CAST(SUM({_q(D_COL)}) AS BIGINT) AS _a_cnt"]
-    for i, c in enumerate(add_cols):
-        dexprs.append(f"COALESCE(SUM({_q(D_COL)} * {_q(c)}), 0) AS _a_sum_{i}")
-        dexprs.append(f"CAST(SUM(CASE WHEN {_q(c)} IS NOT NULL THEN {_q(D_COL)} ELSE 0 END) AS BIGINT) AS _a_cnt_{i}")
-        dexprs.append(f"COALESCE(SUM({_q(D_COL)} * {_q(c)} * {_q(c)}), 0) AS _a_sumsq_{i}")
+    # First pass: per-group distributive sums (group count, per-column Σx & non-NULL counts, the insert/delete
+    # partition Σx & counts) and the extreme inserts. The partition means it carries seed the second pass.
+    pexprs = [f"CAST(SUM({_q(D_COL)}) AS BIGINT) AS _a_cnt"]
+    pexprs += _agg_part_sum_exprs(add_cols)
     for j, c in enumerate(ext_cols):
-        dexprs.append(f"MIN({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_minp_{j}")
-        dexprs.append(f"MAX({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_maxp_{j}")
+        pexprs.append(f"MIN({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_minp_{j}")
+        pexprs.append(f"MAX({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_maxp_{j}")
     if ext_cols:
-        dexprs.append(f"BOOL_OR({_q(D_COL)} < 0) AS _a_ret")
-    dacc = unique_name("dacc")
+        pexprs.append(f"BOOL_OR({_q(D_COL)} < 0) AS _a_ret")
+    pm = unique_name("aggpm")
     con.execute(
-        f"CREATE OR REPLACE TEMP TABLE {_q(dacc)} AS "
-        f"SELECT {by_list}, {', '.join(dexprs)} FROM {_q(delta)} GROUP BY {by_list}"
+        f"CREATE OR REPLACE TEMP TABLE {_q(pm)} AS "
+        f"SELECT {by_list}, {', '.join(pexprs)} FROM {_q(delta)} GROUP BY {by_list}"
     )
+    dacc = unique_name("dacc")
+    if add_cols:
+        # Second pass: the partition central moments Σ d·(x − x̄)² about each partition mean from `pm` — the
+        # numerically stable form (deviations are O(spread), not O(value)). Joined back onto `pm` → `dacc`.
+        dev = unique_name("aggdev")
+        con.execute(
+            f"CREATE OR REPLACE TEMP TABLE {_q(dev)} AS "
+            f"SELECT {by_list}, {', '.join(_agg_part_moment_exprs(add_cols, pm))} "
+            f"FROM {_q(delta)} JOIN {_q(pm)} USING ({by_list}) GROUP BY {by_list}"
+        )
+        con.execute(
+            f"CREATE OR REPLACE TEMP TABLE {_q(dacc)} AS "
+            f"SELECT * FROM {_q(pm)} JOIN {_q(dev)} USING ({by_list})"
+        )
+    else:
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(dacc)} AS SELECT * FROM {_q(pm)}")
 
     # Rescan the *current* membership for the extreme columns of groups that saw a retraction (the supporting
     # min/max may be gone). Bounded by those groups; append-only groups never rescan.
@@ -909,9 +926,9 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     # already at this f (the replay guard).
     macc = ["CAST(COALESCE(a._a_cnt, 0) + d._a_cnt AS BIGINT) AS _a_cnt"]
     for i in range(len(add_cols)):
-        macc.append(f"COALESCE(a._a_sum_{i}, 0) + COALESCE(d._a_sum_{i}, 0) AS _a_sum_{i}")
-        macc.append(f"CAST(COALESCE(a._a_cnt_{i}, 0) + COALESCE(d._a_cnt_{i}, 0) AS BIGINT) AS _a_cnt_{i}")
-        macc.append(f"COALESCE(a._a_sumsq_{i}, 0) + COALESCE(d._a_sumsq_{i}, 0) AS _a_sumsq_{i}")
+        macc.append(f"COALESCE(a._a_sum_{i}, 0) + d._a_sum_{i} AS _a_sum_{i}")
+        macc.append(f"CAST(COALESCE(a._a_cnt_{i}, 0) + d._a_cnt_{i} AS BIGINT) AS _a_cnt_{i}")
+        macc.append(f"{_m2_merge_expr(i)} AS _a_m2_{i}")
     for j in range(len(ext_cols)):
         macc.append(f"(CASE WHEN d._a_ret THEN r._a_min_{j} ELSE least(a._a_min_{j}, d._a_minp_{j}) END) AS _a_min_{j}")
         macc.append(f"(CASE WHEN d._a_ret THEN r._a_max_{j} ELSE greatest(a._a_max_{j}, d._a_maxp_{j}) END) AS _a_max_{j}")
@@ -965,6 +982,77 @@ def _agg_cols(metrics):
     return add, ext
 
 
+def _agg_part_sum_exprs(add_cols: list[str]) -> list[str]:
+    """The per-additive-column partition **sums** for the ``dacc`` first pass. For each column: the
+    full-delta running sum & non-NULL count (the distributive part, additive under retraction), plus the
+    **insert** (``d > 0``) and **delete** (``d < 0``) partition non-NULL counts and Σx. Their means
+    (``Σx / n``) seed the *second* pass that forms the partition central moments stably as ``Σ d·(x − mean)²``
+    (see :func:`_agg_part_moment_exprs`) — never ``Σx² − (Σx)²/n``, which cancels at large value magnitude
+    regardless of batch size (``plans/trickle-agg.md``)."""
+    d = _q(D_COL)
+    out: list[str] = []
+    for i, col in enumerate(add_cols):
+        c = _q(col)
+        out += [
+            f"COALESCE(SUM({d} * {c}), 0) AS _a_sum_{i}",
+            f"CAST(SUM(CASE WHEN {c} IS NOT NULL THEN {d} ELSE 0 END) AS BIGINT) AS _a_cnt_{i}",
+            f"COALESCE(SUM(CASE WHEN {d} > 0 THEN {d} * {c} END), 0) AS _a_si_{i}",
+            f"CAST(SUM(CASE WHEN {d} > 0 AND {c} IS NOT NULL THEN {d} ELSE 0 END) AS BIGINT) AS _a_ni_{i}",
+            f"COALESCE(SUM(CASE WHEN {d} < 0 THEN -{d} * {c} END), 0) AS _a_sd_{i}",
+            f"CAST(SUM(CASE WHEN {d} < 0 AND {c} IS NOT NULL THEN -{d} ELSE 0 END) AS BIGINT) AS _a_nd_{i}",
+        ]
+    return out
+
+
+def _agg_part_moment_exprs(add_cols: list[str], pm: str) -> list[str]:
+    """The per-additive-column partition **central moments** for the ``dacc`` second pass — ``Σ d·(x − x̄)²``
+    over the insert and delete partitions, with each partition's mean ``x̄`` taken from the first pass ``pm``
+    (``_a_si / _a_ni`` and ``_a_sd / _a_nd``). Deviations ``x − x̄`` are O(spread), so this is well-conditioned
+    even when ``x`` is a huge offset. NULL ``x`` rows contribute NULL → dropped by ``SUM`` (consistent with
+    the non-NULL partition counts)."""
+    d = _q(D_COL)
+    pmq = _q(pm)
+    out: list[str] = []
+    for i, col in enumerate(add_cols):
+        c = _q(col)
+        mean_i = f"{pmq}._a_si_{i} / NULLIF({pmq}._a_ni_{i}, 0)"
+        mean_d = f"{pmq}._a_sd_{i} / NULLIF({pmq}._a_nd_{i}, 0)"
+        out += [
+            f"COALESCE(SUM(CASE WHEN {d} > 0 THEN {d} * pow({c} - {mean_i}, 2) END), 0) AS _a_m2i_{i}",
+            f"COALESCE(SUM(CASE WHEN {d} < 0 THEN -{d} * pow({c} - {mean_d}, 2) END), 0) AS _a_m2d_{i}",
+        ]
+    return out
+
+
+def _m2_merge_expr(i: int) -> str:
+    """The merged centred second moment ``_a_m2_{i}`` for additive column ``i`` — the SQL behind the
+    parallel (Chan/Pébay) maintenance: take the prior state ``a`` = ``(n, Σx, M2)``, **merge in** the insert
+    partition then **merge out** the delete partition, by ``M2 = M2A + M2B + δ²·nA·nB/n`` and its inverse.
+    ``a`` is the old accumulator row (NULL for a new group → treated as empty), ``d`` the per-group delta
+    accumulators (partition counts, Σx and the stable central moments ``_a_m2i``/``_a_m2d``). Well-conditioned:
+    the running M2 is never a power-sum subtraction, and δ is a difference of partition means."""
+    nA, sA, m2A = f"COALESCE(a._a_cnt_{i}, 0)", f"CAST(COALESCE(a._a_sum_{i}, 0) AS DOUBLE)", \
+        f"COALESCE(a._a_m2_{i}, 0.0)"
+    nI, sI, m2I = f"d._a_ni_{i}", f"CAST(d._a_si_{i} AS DOUBLE)", f"d._a_m2i_{i}"
+    nD, sD, m2D = f"d._a_nd_{i}", f"CAST(d._a_sd_{i} AS DOUBLE)", f"d._a_m2d_{i}"
+    nC = f"({nA} + {nI})"                                       # count after the merge-in
+    # step 1 — C = A ⊕ inserts
+    m2C = (
+        f"{m2A} + CASE WHEN {nI} > 0 THEN {m2I} ELSE 0 END"
+        f" + CASE WHEN {nA} > 0 AND {nI} > 0"
+        f" THEN pow({sI} / {nI} - {sA} / {nA}, 2) * {nA} * {nI} / {nC} ELSE 0 END"
+    )
+    nNew = f"({nC} - {nD})"                                     # count after the merge-out
+    sNew = f"({sA} + {sI} - {sD})"
+    # step 2 — New = C ⊖ deletes
+    m2New = (
+        f"({m2C}) - CASE WHEN {nD} > 0 THEN {m2D} ELSE 0 END"
+        f" - CASE WHEN {nD} > 0 AND {nNew} > 0"
+        f" THEN pow({sD} / {nD} - {sNew} / {nNew}, 2) * {nNew} * {nD} / {nC} ELSE 0 END"
+    )
+    return f"GREATEST({m2New}, 0.0)"
+
+
 def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, f) -> None:
     """(Re)build the accumulator state wholesale from a clean full output ``rel`` — the comprehensive path
     (bootstrap / coverage-miss). Idempotent: same input → same state."""
@@ -974,7 +1062,9 @@ def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, f) -> None:
     for i, c in enumerate(add_cols):
         exprs.append(f"COALESCE(SUM({_q(c)}), 0) AS _a_sum_{i}")
         exprs.append(f"CAST(COUNT({_q(c)}) AS BIGINT) AS _a_cnt_{i}")
-        exprs.append(f"COALESCE(SUM({_q(c)} * {_q(c)}), 0) AS _a_sumsq_{i}")
+        # The centred second moment M2 = Σ(x − x̄)², via DuckDB's numerically stable var_pop (× the non-NULL
+        # count) — the clean single-pass rebuild that seeds the incremental merge-in/merge-out maintenance.
+        exprs.append(f"COALESCE(var_pop({_q(c)}) * COUNT({_q(c)}), 0)::DOUBLE AS _a_m2_{i}")
     for j, c in enumerate(ext_cols):
         exprs.append(f"MIN({_q(c)}) AS _a_min_{j}")
         exprs.append(f"MAX({_q(c)}) AS _a_max_{j}")
@@ -1003,11 +1093,11 @@ def _agg_derive(metrics, sidx, eidx) -> str:
             e = f"_a_max_{eidx[c]}"
         elif k in ("var", "stddev"):
             i = sidx[c]
-            n, s, sq = f"_a_cnt_{i}", f"_a_sum_{i}::DOUBLE", f"_a_sumsq_{i}::DOUBLE"
+            n, m2 = f"_a_cnt_{i}", f"_a_m2_{i}::DOUBLE"
             min_n, denom = (2, f"({n} - 1)") if how == "sample" else (1, n)
-            v = f"GREATEST(({sq} - {s} * {s} / {n}) / {denom}, 0)"   # clamp float error to ≥ 0
+            v = f"GREATEST({m2} / {denom}, 0)"   # M2 is already centred — divide by the d.o.f.; clamp ≥ 0
             inner = v if k == "var" else f"SQRT({v})"
-            e = f"(CASE WHEN _a_cnt_{i} < {min_n} THEN NULL ELSE {inner} END)"
+            e = f"(CASE WHEN {n} < {min_n} THEN NULL ELSE {inner} END)"
         else:
             raise DeltaError(f"aggregate metric '{out}': unsupported kind {k!r}")
         exprs.append(f"{e} AS {_q(out)}")

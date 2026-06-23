@@ -10,8 +10,10 @@ Each metric is a small typed spec, not a SQL string, because the incremental eng
     the supporting row triggers a **rescan** of the group's current membership.
 - **Algebraic** — derived from distributive accumulators:
   - ``mean(col)`` — ``sum(col) / count(col)`` over non-NULL values.
-  - ``var(col)`` / ``stddev(col)`` — from ``count``, ``sum``, ``sum(x²)``. ``how`` ∈ ``"sample"`` (default,
-    matching Ibis; ``/(n-1)``, NULL for n<2) or ``"pop"`` (``/n``).
+  - ``var(col)`` / ``stddev(col)`` — from ``count`` and the **centred second moment** ``M2 = Σ(x − x̄)²``,
+    maintained by the parallel (Chan/Pébay) merge-in/merge-out form (retractable *and* well-conditioned —
+    never the cancellation-prone ``Σx² − (Σx)²/n``; see ``plans/trickle-agg.md``). ``how`` ∈ ``"sample"``
+    (default, matching Ibis; ``/(n-1)``, NULL for n<2) or ``"pop"`` (``/n``).
 
 ``min``/``max`` need the current group membership on a retraction; everything else is pure ``O(δ)``.
 
@@ -35,11 +37,19 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Metric:
     """One output aggregate: its ``kind``, the input column it reads (if any), and — for ``var``/``stddev``
-    — whether it's a ``sample`` or ``pop``ulation statistic."""
+    — whether it's a ``sample`` or ``pop``ulation statistic.
+
+    ``col2`` carries a second input column for the two-variable metrics landing in Phase 1 (covariance,
+    correlation, weighted, OLS); ``ordered`` flags an order-dependent metric (cumsum / ema / running_*),
+    which the builder will only accept on ``.append()`` and only with an ``.along(...)`` axis declared.
+    Both default to the single-variable, order-independent case and are not yet consumed — they are the
+    foundation the later phases build on (see ``plans/trickle-agg.md``)."""
 
     kind: str
     col: str | None = None
     how: str | None = None
+    col2: str | None = None
+    ordered: bool = False
 
 
 def count() -> Metric:

@@ -1740,11 +1740,56 @@ def test_builder_aggregate_var_stddev(tmp_path):
     got = snk.sql(f"SELECT v, sd, vp FROM ({ParquetDataPlane().read_select(snk_dir, 'stat')})").fetchone()
     assert got[0] == pytest.approx(4.0) and got[1] == pytest.approx(2.0) and got[2] == pytest.approx(8 / 3)
 
-    # Incremental insert (additive sum-of-squares): qtys 2,4,6,8 → sample var 20/3.
+    # Incremental insert (centred-moment merge-in): qtys 2,4,6,8 → sample var 20/3.
     ol([(10, "p1", 2), (11, "p1", 4), (12, "p1", 6), (13, "p1", 8)], ts(2))
     run(ts(2), ts(1))
     assert snk.sql(f"SELECT v FROM ({ParquetDataPlane().read_select(snk_dir, 'stat')})").fetchone()[0] \
         == pytest.approx(20 / 3)
+    snk.close()
+
+
+def test_builder_aggregate_variance_numerical_stability(tmp_path):
+    """The centred-moment (Chan/Pébay) maintenance stays accurate where the naive ``Σx² − (Σx)²/n`` form
+    catastrophically cancels: a large offset with a tiny spread, grown incrementally across inserts **and**
+    a retraction (a merge that changes a value = −old +new). The incremental result must match DuckDB's own
+    stable ``var_samp`` over the reconstructed full set."""
+    from duckstring import agg
+
+    _cons, ol, _pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "stat" / "m1" / "data"
+    base = 1_000_000_000  # a billion-ish offset: Σx² dwarfs the variance signal
+
+    def run(f, pf):
+        pond = Pond("stat", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line", p=1.0)   # force the incremental merge path on every non-bootstrap run
+             .aggregate(by="product_id", v=agg.var("qty"))
+             .merge("stat"))
+        publish(snk, snk_dir, f=f)
+
+    def expected(rows):
+        vals = ", ".join(f"({q})" for _id, _p, q in rows)
+        return snk.sql(f"SELECT var_samp(q) FROM (VALUES {vals}) t(q)").fetchone()[0]
+
+    def got():
+        return snk.sql(f"SELECT v FROM ({ParquetDataPlane().read_select(snk_dir, 'stat')})").fetchone()[0]
+
+    r1 = [(i, "p1", base + d) for i, d in enumerate([1, 2, 3, 4, 5])]
+    ol(r1, ts(1))
+    run(ts(1), NEVER)
+    assert got() == pytest.approx(expected(r1), rel=1e-6)
+
+    # Incremental inserts — same tiny spread, more rows: the running M2 must not have lost precision.
+    r2 = r1 + [(i, "p1", base + d) for i, d in enumerate([6, 7, 8, 9, 10], start=5)]
+    ol(r2, ts(2))
+    run(ts(2), ts(1))
+    assert got() == pytest.approx(expected(r2), rel=1e-6)
+
+    # A retraction: change one value (merge diffs to −old +new) — exercises the merge-out branch.
+    r3 = [(0, "p1", base + 100)] + r2[1:]
+    ol(r3, ts(3))
+    run(ts(3), ts(2))
+    assert got() == pytest.approx(expected(r3), rel=1e-6)
     snk.close()
 
 
