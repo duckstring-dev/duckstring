@@ -1793,6 +1793,66 @@ def test_builder_aggregate_variance_numerical_stability(tmp_path):
     snk.close()
 
 
+def test_builder_aggregate_weighted_and_comoment(tmp_path):
+    """Phase-1 breadth: the weighted family (weight_total / weighted_sum / weighted_average) and the paired
+    co-moments (covariance / correlation / ols_slope / ols_intercept), maintained incrementally across a
+    bootstrap, an insert, and a retraction — checked against DuckDB's native aggregates over the full set."""
+    from duckstring import agg
+
+    fc = duckdb.connect(str(tmp_path / "facts.duckdb"))
+    fc_dir = tmp_path / "ponds" / "facts" / "m1" / "data"
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "stat" / "m1" / "data"
+
+    def fct(rows, f):
+        vals = ", ".join(f"({i}, '{g}', {x}, {y}, {w})" for i, g, x, y, w in rows)
+        T.merge_table(fc, "f", fc.sql(f"SELECT * FROM (VALUES {vals}) v(id, g, x, y, w)"), f, ("id",))
+        publish(fc, fc_dir, f=f)
+
+    def run(f, pf):
+        pond = Pond("stat", "1.0.0", snk, root=tmp_path, source_majors={"facts": 1}, f=f, previous_f=pf)
+        (pond.trickle("facts.f", p=1.0)   # p=1.0 → force the incremental merge path on every non-bootstrap run
+             .aggregate(by="g",
+                        wt=agg.weight_total("w"), ws=agg.weighted_sum("x", "w"), wa=agg.weighted_average("x", "w"),
+                        cov=agg.covariance("x", "y"), cor=agg.pearson_correlation("x", "y"),
+                        slope=agg.ols_slope("x", "y"), icpt=agg.ols_intercept("x", "y"))
+             .merge("stat"))
+        publish(snk, snk_dir, f=f)
+
+    def expected(rows, g):
+        vals = ", ".join(f"({x}, {y}, {w})" for _i, gg, x, y, w in rows if gg == g)
+        return snk.sql(
+            f"SELECT sum(w), sum(w*x), sum(w*x)/sum(w), covar_samp(y, x), corr(y, x), "
+            f"regr_slope(y, x), regr_intercept(y, x) FROM (VALUES {vals}) t(x, y, w)"
+        ).fetchone()
+
+    def got(g):
+        return snk.sql(
+            f"SELECT wt, ws, wa, cov, cor, slope, icpt "
+            f"FROM ({ParquetDataPlane().read_select(snk_dir, 'stat')}) WHERE g = '{g}'"
+        ).fetchone()
+
+    r1 = [(1, "a", 1.0, 2.0, 1.0), (2, "a", 2.0, 4.0, 2.0), (3, "a", 3.0, 5.0, 1.0),
+          (4, "b", 10.0, 1.0, 3.0), (5, "b", 20.0, 3.0, 2.0), (6, "b", 30.0, 8.0, 1.0)]
+    fct(r1, ts(1))
+    run(ts(1), NEVER)
+    assert got("a") == pytest.approx(expected(r1, "a"))
+
+    # Incremental insert into group 'a'.
+    r2 = r1 + [(7, "a", 4.0, 9.0, 2.0)]
+    fct(r2, ts(2))
+    run(ts(2), ts(1))
+    assert got("a") == pytest.approx(expected(r2, "a"))
+
+    # A retraction: change row 2's y and w (merge diffs to −old +new) — the merge-out branch.
+    r3 = [(2, "a", 2.0, 4.5, 3.0) if row[0] == 2 else row for row in r2]
+    fct(r3, ts(3))
+    run(ts(3), ts(2))
+    assert got("a") == pytest.approx(expected(r3, "a"))
+    assert got("b") == pytest.approx(expected(r3, "b"))
+    snk.close()
+
+
 def test_builder_aggregate_guards(tmp_path):
     from duckstring import agg
 

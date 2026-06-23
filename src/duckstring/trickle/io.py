@@ -840,10 +840,13 @@ def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> Non
 def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=None, retain_n=None) -> None:
     """Maintain a grouped aggregate output ``name`` (a merge Trickle keyed by ``by``) incrementally.
 
-    ``metrics`` is ``{out_col: (kind, src_col, how)}`` over count / sum / mean / min / max / var / stddev.
-    Raw accumulators live in a registry-only ``_duckstring_agg_{name}`` companion (count; per additive column
-    a running sum, non-NULL count, sum-of-squares; per extreme column a stored min & max); the published main
-    holds only the derived user columns. ``kind`` is the builder's ``_compute`` class for the input:
+    ``metrics`` is ``{out_col: agg.Metric}`` over count / sum / mean / min / max / var / stddev / the weighted
+    family (weight_total / weighted_sum / weighted_average) and the two-variable co-moments (covariance /
+    pearson_correlation / ols_slope / ols_intercept). Raw accumulators live in a registry-only
+    ``_duckstring_agg_{name}`` companion (count; per additive column a running sum, non-NULL count and centred
+    moment M2; per extreme column a stored min & max; per co-moment pair the paired n/Σx/Σy/M2x/M2y/Cxy; per
+    weighted unit Σ(w·x) & Σw); the published main holds only the derived user columns. ``kind`` is the
+    builder's ``_compute`` class for the input:
     ``incremental`` (a Z-set ΔO → fold weighted contributions, O(δ); min/max extend on insert and **rescan**
     ``current`` — the full current join output — on a retraction of the supporting row), ``comprehensive`` (a
     full clean output → rebuild the accumulators wholesale), or ``empty`` (no-op)."""
@@ -853,19 +856,25 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         return
     by = tuple(by)
     by_list = ", ".join(_q(b) for b in by)
-    add_cols, ext_cols = _agg_cols(metrics)              # additive (sum/mean/var/std) and extreme (min/max) cols
+    add_cols, ext_cols, co_pairs, wgt_units = _agg_families(metrics)
     sidx = {c: i for i, c in enumerate(add_cols)}
     eidx = {c: j for j, c in enumerate(ext_cols)}
+    cidx = {p: k for k, p in enumerate(co_pairs)}
+    widx = {u: m for m, u in enumerate(wgt_units)}
+    idx = (sidx, eidx, cidx, widx)
     state = f"{AGG_STATE_PREFIX}{name}"
     acc_order = (
         ["_a_cnt"]
         + [col for i in range(len(add_cols)) for col in (f"_a_sum_{i}", f"_a_cnt_{i}", f"_a_m2_{i}")]
         + [col for j in range(len(ext_cols)) for col in (f"_a_min_{j}", f"_a_max_{j}")]
+        + [col for k in range(len(co_pairs))
+           for col in (f"_c_n_{k}", f"_c_sx_{k}", f"_c_sy_{k}", f"_c_m2x_{k}", f"_c_m2y_{k}", f"_c_cxy_{k}")]
+        + [col for m in range(len(wgt_units)) for col in (f"_w_num_{m}", f"_w_den_{m}")]
     )
 
     if kind == "comprehensive":
-        _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, f)
-        derived = con.sql(f"SELECT {by_list}, {_agg_derive(metrics, sidx, eidx)} FROM {_q(state)} WHERE _a_cnt > 0")
+        _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_units, f)
+        derived = con.sql(f"SELECT {by_list}, {_agg_derive(metrics, idx)} FROM {_q(state)} WHERE _a_cnt > 0")
         merge_table(con, name, derived, f, by, retain_t=retain_t, retain_n=retain_n)
         return
 
@@ -880,6 +889,8 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     # partition Σx & counts) and the extreme inserts. The partition means it carries seed the second pass.
     pexprs = [f"CAST(SUM({_q(D_COL)}) AS BIGINT) AS _a_cnt"]
     pexprs += _agg_part_sum_exprs(add_cols)
+    pexprs += _co_part_sum_exprs(co_pairs)
+    pexprs += _wgt_delta_exprs(wgt_units)
     for j, c in enumerate(ext_cols):
         pexprs.append(f"MIN({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_minp_{j}")
         pexprs.append(f"MAX({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_maxp_{j}")
@@ -891,13 +902,14 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         f"SELECT {by_list}, {', '.join(pexprs)} FROM {_q(delta)} GROUP BY {by_list}"
     )
     dacc = unique_name("dacc")
-    if add_cols:
-        # Second pass: the partition central moments Σ d·(x − x̄)² about each partition mean from `pm` — the
-        # numerically stable form (deviations are O(spread), not O(value)). Joined back onto `pm` → `dacc`.
+    mom_exprs = _agg_part_moment_exprs(add_cols, pm) + _co_part_moment_exprs(co_pairs, pm)
+    if mom_exprs:
+        # Second pass: the partition central (co-)moments Σ d·(x − x̄)(…) about each partition mean from `pm` —
+        # the numerically stable form (deviations are O(spread), not O(value)). Joined back onto `pm` → `dacc`.
         dev = unique_name("aggdev")
         con.execute(
             f"CREATE OR REPLACE TEMP TABLE {_q(dev)} AS "
-            f"SELECT {by_list}, {', '.join(_agg_part_moment_exprs(add_cols, pm))} "
+            f"SELECT {by_list}, {', '.join(mom_exprs)} "
             f"FROM {_q(delta)} JOIN {_q(pm)} USING ({by_list}) GROUP BY {by_list}"
         )
         con.execute(
@@ -932,6 +944,9 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     for j in range(len(ext_cols)):
         macc.append(f"(CASE WHEN d._a_ret THEN r._a_min_{j} ELSE least(a._a_min_{j}, d._a_minp_{j}) END) AS _a_min_{j}")
         macc.append(f"(CASE WHEN d._a_ret THEN r._a_max_{j} ELSE greatest(a._a_max_{j}, d._a_maxp_{j}) END) AS _a_max_{j}")
+    for k in range(len(co_pairs)):
+        macc += _co_merge_exprs(k)
+    macc += _wgt_merge_exprs(len(wgt_units))
     rescan_join = f" LEFT JOIN {_q(rescan)} r USING ({by_list})" if rescan is not None else ""
     merged = unique_name("magg")
     con.execute(
@@ -958,7 +973,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     affected = f"({by_list}) IN (SELECT {by_list} FROM {_q(dacc)})"
     out_cols = list(by) + list(metrics.keys())
     out_sel = ", ".join(_q(c) for c in out_cols)
-    new_out = f"SELECT {by_list}, {_agg_derive(metrics, sidx, eidx)} FROM {_q(state)} WHERE {affected} AND _a_cnt > 0"
+    new_out = f"SELECT {by_list}, {_agg_derive(metrics, idx)} FROM {_q(state)} WHERE {affected} AND _a_cnt > 0"
     # The prior published main is the reconstructed current state (the agg output is a log-structured merge).
     recon = _reconstruct_sql_for(con, name)
     old_out = f"SELECT {out_sel} FROM ({recon}) WHERE {affected}" if recon \
@@ -970,16 +985,41 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     apply_zset(con, name, delta_out, f, by, retain_t=retain_t, retain_n=retain_n)
 
 
-def _agg_cols(metrics):
-    """The columns needing **additive** accumulators (sum/mean/var/stddev) and **extreme** accumulators
-    (min/max), each de-duplicated and order-stable."""
-    add, ext = [], []
-    for _out, (k, c, _how) in metrics.items():
-        if k in ("sum", "mean", "var", "stddev") and c not in add:
-            add.append(c)
-        if k in ("min", "max") and c not in ext:
-            ext.append(c)
-    return add, ext
+def _agg_families(metrics):
+    """Group the metric specs (``agg.Metric`` objects) by the accumulator **family** each needs, so the
+    accumulator column indices are deterministic. Returns ``(add_cols, ext_cols, co_pairs, wgt_units)``:
+
+    - ``add_cols`` — single columns with ``(Σx, n, M2)`` (sum / mean / var / stddev).
+    - ``ext_cols`` — min / max columns.
+    - ``co_pairs`` — ``(x, y)`` pairs with the paired co-moment accumulator ``(n, Σx, Σy, M2x, M2y, Cxy)``
+      (covariance / pearson_correlation / ols_slope / ols_intercept).
+    - ``wgt_units`` — weighted units ``("wt", None, w)`` (Σw, for weight_total) or ``("wp", x, w)``
+      (Σ(w·x) & Σw, for weighted_sum / weighted_average).
+
+    Each list is de-duplicated and order-stable."""
+    add, ext, co, wgt = [], [], [], []
+    for m in metrics.values():
+        k = m.kind
+        if k == "count":  # reads the group cardinality _a_cnt directly — no per-column family
+            continue
+        if k in ("sum", "mean", "var", "stddev"):
+            if m.col not in add:
+                add.append(m.col)
+        elif k in ("min", "max"):
+            if m.col not in ext:
+                ext.append(m.col)
+        elif k in ("covariance", "pearson_correlation", "ols_slope", "ols_intercept"):
+            if (m.col, m.col2) not in co:
+                co.append((m.col, m.col2))
+        elif k == "weight_total":
+            if ("wt", None, m.col) not in wgt:
+                wgt.append(("wt", None, m.col))
+        elif k in ("weighted_sum", "weighted_average"):
+            if ("wp", m.col, m.col2) not in wgt:
+                wgt.append(("wp", m.col, m.col2))
+        else:
+            raise DeltaError(f"aggregate: unsupported metric kind {k!r}")
+    return add, ext, co, wgt
 
 
 def _agg_part_sum_exprs(add_cols: list[str]) -> list[str]:
@@ -1053,7 +1093,167 @@ def _m2_merge_expr(i: int) -> str:
     return f"GREATEST({m2New}, 0.0)"
 
 
-def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, f) -> None:
+# ─── weighted family (additive — Σ(w·x), Σw) ─────────────────────────────────────
+
+
+def _wgt_rebuild_exprs(wgt_units) -> list[str]:
+    """Comprehensive accumulators per weighted unit: ``_w_num`` (Σ(w·x), or Σw for weight_total) and
+    ``_w_den`` (Σw), each over the unit's non-NULL rows."""
+    out: list[str] = []
+    for m, (ut, x, w) in enumerate(wgt_units):
+        wq = _q(w)
+        if ut == "wt":
+            out += [f"COALESCE(SUM({wq}), 0) AS _w_num_{m}", f"COALESCE(SUM({wq}), 0) AS _w_den_{m}"]
+        else:
+            xq = _q(x)
+            paired = f"{xq} IS NOT NULL AND {wq} IS NOT NULL"
+            out += [
+                f"COALESCE(SUM(CASE WHEN {paired} THEN {wq} * {xq} END), 0) AS _w_num_{m}",
+                f"COALESCE(SUM(CASE WHEN {paired} THEN {wq} END), 0) AS _w_den_{m}",
+            ]
+    return out
+
+
+def _wgt_delta_exprs(wgt_units) -> list[str]:
+    """The per-unit ``dacc`` delta sums (signed by the Z-set weight ``d``) — additive, so a retraction is a
+    plain ``−`` (no partition/moment machinery)."""
+    d = _q(D_COL)
+    out: list[str] = []
+    for m, (ut, x, w) in enumerate(wgt_units):
+        wq = _q(w)
+        if ut == "wt":
+            out += [f"COALESCE(SUM({d} * {wq}), 0) AS _w_num_{m}", f"COALESCE(SUM({d} * {wq}), 0) AS _w_den_{m}"]
+        else:
+            xq = _q(x)
+            paired = f"{xq} IS NOT NULL AND {wq} IS NOT NULL"
+            out += [
+                f"COALESCE(SUM(CASE WHEN {paired} THEN {d} * {wq} * {xq} END), 0) AS _w_num_{m}",
+                f"COALESCE(SUM(CASE WHEN {paired} THEN {d} * {wq} END), 0) AS _w_den_{m}",
+            ]
+    return out
+
+
+def _wgt_merge_exprs(n_wgt: int) -> list[str]:
+    """The ``macc`` merge for the weighted units — additive (old ⊞ delta)."""
+    out: list[str] = []
+    for m in range(n_wgt):
+        out += [
+            f"COALESCE(a._w_num_{m}, 0) + d._w_num_{m} AS _w_num_{m}",
+            f"COALESCE(a._w_den_{m}, 0) + d._w_den_{m} AS _w_den_{m}",
+        ]
+    return out
+
+
+# ─── two-variable co-moment family (paired n, Σx, Σy, M2x, M2y, Cxy) ──────────────
+
+
+def _co_rebuild_exprs(co_pairs) -> list[str]:
+    """Comprehensive co-moment accumulators per ``(x, y)`` pair, over rows where **both** are non-NULL
+    (pairwise deletion). The centred sums use DuckDB's stable regression aggregates: ``regr_sxx`` = M2x =
+    Σ(x−x̄)², ``regr_syy`` = M2y, ``regr_sxy`` = Cxy = Σ(x−x̄)(y−ȳ)."""
+    out: list[str] = []
+    for k, (x, y) in enumerate(co_pairs):
+        xq, yq = _q(x), _q(y)
+        paired = f"{xq} IS NOT NULL AND {yq} IS NOT NULL"
+        out += [
+            f"CAST(regr_count({yq}, {xq}) AS BIGINT) AS _c_n_{k}",
+            f"COALESCE(SUM(CASE WHEN {paired} THEN {xq} END), 0) AS _c_sx_{k}",
+            f"COALESCE(SUM(CASE WHEN {paired} THEN {yq} END), 0) AS _c_sy_{k}",
+            f"COALESCE(regr_sxx({yq}, {xq}), 0)::DOUBLE AS _c_m2x_{k}",
+            f"COALESCE(regr_syy({yq}, {xq}), 0)::DOUBLE AS _c_m2y_{k}",
+            f"COALESCE(regr_sxy({yq}, {xq}), 0)::DOUBLE AS _c_cxy_{k}",
+        ]
+    return out
+
+
+def _co_part_sum_exprs(co_pairs) -> list[str]:
+    """First-pass partition counts & Σx, Σy per pair over paired insert / delete rows — the means that seed
+    the second pass."""
+    d = _q(D_COL)
+    out: list[str] = []
+    for k, (x, y) in enumerate(co_pairs):
+        xq, yq = _q(x), _q(y)
+        pr = f"{xq} IS NOT NULL AND {yq} IS NOT NULL"
+        out += [
+            f"CAST(SUM(CASE WHEN {d} > 0 AND {pr} THEN {d} ELSE 0 END) AS BIGINT) AS _c_ni_{k}",
+            f"COALESCE(SUM(CASE WHEN {d} > 0 AND {pr} THEN {d} * {xq} END), 0) AS _c_sxi_{k}",
+            f"COALESCE(SUM(CASE WHEN {d} > 0 AND {pr} THEN {d} * {yq} END), 0) AS _c_syi_{k}",
+            f"CAST(SUM(CASE WHEN {d} < 0 AND {pr} THEN -{d} ELSE 0 END) AS BIGINT) AS _c_nd_{k}",
+            f"COALESCE(SUM(CASE WHEN {d} < 0 AND {pr} THEN -{d} * {xq} END), 0) AS _c_sxd_{k}",
+            f"COALESCE(SUM(CASE WHEN {d} < 0 AND {pr} THEN -{d} * {yq} END), 0) AS _c_syd_{k}",
+        ]
+    return out
+
+
+def _co_part_moment_exprs(co_pairs, pm: str) -> list[str]:
+    """Second-pass partition central co-moments ``Σ d·(x−x̄)(y−ȳ)`` (and the two variances) about each
+    partition's means from ``pm`` — deviations are O(spread), so this is well-conditioned at any value scale."""
+    d = _q(D_COL)
+    p = _q(pm)
+    out: list[str] = []
+    for k, (x, y) in enumerate(co_pairs):
+        xq, yq = _q(x), _q(y)
+        pr = f"{xq} IS NOT NULL AND {yq} IS NOT NULL"
+        mxi, myi = f"{p}._c_sxi_{k} / NULLIF({p}._c_ni_{k}, 0)", f"{p}._c_syi_{k} / NULLIF({p}._c_ni_{k}, 0)"
+        mxd, myd = f"{p}._c_sxd_{k} / NULLIF({p}._c_nd_{k}, 0)", f"{p}._c_syd_{k} / NULLIF({p}._c_nd_{k}, 0)"
+        out += [
+            f"COALESCE(SUM(CASE WHEN {d} > 0 AND {pr} THEN {d} * pow({xq} - {mxi}, 2) END), 0) AS _c_m2xi_{k}",
+            f"COALESCE(SUM(CASE WHEN {d} > 0 AND {pr} THEN {d} * pow({yq} - {myi}, 2) END), 0) AS _c_m2yi_{k}",
+            f"COALESCE(SUM(CASE WHEN {d} > 0 AND {pr} THEN {d} * ({xq} - {mxi}) * ({yq} - {myi}) END), 0) "
+            f"AS _c_cxyi_{k}",
+            f"COALESCE(SUM(CASE WHEN {d} < 0 AND {pr} THEN -{d} * pow({xq} - {mxd}, 2) END), 0) AS _c_m2xd_{k}",
+            f"COALESCE(SUM(CASE WHEN {d} < 0 AND {pr} THEN -{d} * pow({yq} - {myd}, 2) END), 0) AS _c_m2yd_{k}",
+            f"COALESCE(SUM(CASE WHEN {d} < 0 AND {pr} THEN -{d} * ({xq} - {mxd}) * ({yq} - {myd}) END), 0) "
+            f"AS _c_cxyd_{k}",
+        ]
+    return out
+
+
+def _co2_merge(nA, sA1, sA2, m2A, ni, si1, si2, m2i, nd, sd1, sd2, m2d, *, clamp: bool) -> str:
+    """The merged second-order (co-)moment by the parallel form ``M = MA + MB + δ1·δ2·nA·nB/n`` and its
+    inverse — merge in the insert partition, then merge out the delete partition. With ``sA1 == sA2`` (and
+    likewise the partition sums) this is a variance ``M2`` (``clamp`` to ≥0); with two distinct coordinates it
+    is the covariance ``Cxy`` (no clamp — it may be negative). ``δ`` terms are differences of partition
+    means, so well-conditioned."""
+    nC = f"({nA} + {ni})"
+    m2C = (
+        f"{m2A} + CASE WHEN {ni} > 0 THEN {m2i} ELSE 0 END"
+        f" + CASE WHEN {nA} > 0 AND {ni} > 0"
+        f" THEN ({si1} / {ni} - {sA1} / {nA}) * ({si2} / {ni} - {sA2} / {nA}) * {nA} * {ni} / {nC} ELSE 0 END"
+    )
+    nNew = f"({nC} - {nd})"
+    sN1, sN2 = f"({sA1} + {si1} - {sd1})", f"({sA2} + {si2} - {sd2})"
+    mNew = (
+        f"({m2C}) - CASE WHEN {nd} > 0 THEN {m2d} ELSE 0 END"
+        f" - CASE WHEN {nd} > 0 AND {nNew} > 0"
+        f" THEN ({sd1} / {nd} - {sN1} / {nNew}) * ({sd2} / {nd} - {sN2} / {nNew}) * {nNew} * {nd} / {nC} ELSE 0 END"
+    )
+    return f"GREATEST({mNew}, 0.0)" if clamp else f"({mNew})"
+
+
+def _co_merge_exprs(k: int) -> list[str]:
+    """The ``macc`` merge for co-moment pair ``k``: ``n``, ``Σx``, ``Σy`` additive; ``M2x``, ``M2y``, ``Cxy``
+    via :func:`_co2_merge`."""
+    nA = f"COALESCE(a._c_n_{k}, 0)"
+    sxA, syA = f"CAST(COALESCE(a._c_sx_{k}, 0) AS DOUBLE)", f"CAST(COALESCE(a._c_sy_{k}, 0) AS DOUBLE)"
+    m2xA, m2yA, cxyA = f"COALESCE(a._c_m2x_{k}, 0.0)", f"COALESCE(a._c_m2y_{k}, 0.0)", f"COALESCE(a._c_cxy_{k}, 0.0)"
+    ni, nd = f"d._c_ni_{k}", f"d._c_nd_{k}"
+    sxi, syi = f"CAST(d._c_sxi_{k} AS DOUBLE)", f"CAST(d._c_syi_{k} AS DOUBLE)"
+    sxd, syd = f"CAST(d._c_sxd_{k} AS DOUBLE)", f"CAST(d._c_syd_{k} AS DOUBLE)"
+    return [
+        f"CAST({nA} + {ni} - {nd} AS BIGINT) AS _c_n_{k}",
+        f"{sxA} + {sxi} - {sxd} AS _c_sx_{k}",
+        f"{syA} + {syi} - {syd} AS _c_sy_{k}",
+        f"{_co2_merge(nA, sxA, sxA, m2xA, ni, sxi, sxi, f'd._c_m2xi_{k}', nd, sxd, sxd, f'd._c_m2xd_{k}', clamp=True)}"
+        f" AS _c_m2x_{k}",
+        f"{_co2_merge(nA, syA, syA, m2yA, ni, syi, syi, f'd._c_m2yi_{k}', nd, syd, syd, f'd._c_m2yd_{k}', clamp=True)}"
+        f" AS _c_m2y_{k}",
+        f"{_co2_merge(nA, sxA, syA, cxyA, ni, sxi, syi, f'd._c_cxyi_{k}', nd, sxd, syd, f'd._c_cxyd_{k}', clamp=False)}"
+        f" AS _c_cxy_{k}",
+    ]
+
+
+def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_units, f) -> None:
     """(Re)build the accumulator state wholesale from a clean full output ``rel`` — the comprehensive path
     (bootstrap / coverage-miss). Idempotent: same input → same state."""
     src = unique_name("aggfull")
@@ -1068,6 +1268,8 @@ def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, f) -> None:
     for j, c in enumerate(ext_cols):
         exprs.append(f"MIN({_q(c)}) AS _a_min_{j}")
         exprs.append(f"MAX({_q(c)}) AS _a_max_{j}")
+    exprs += _co_rebuild_exprs(co_pairs)
+    exprs += _wgt_rebuild_exprs(wgt_units)
     con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
     con.execute(
         f"CREATE TABLE {_q(state)} AS "
@@ -1075,10 +1277,13 @@ def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, f) -> None:
     )
 
 
-def _agg_derive(metrics, sidx, eidx) -> str:
-    """The select list deriving the user-facing aggregate columns from the accumulator state."""
+def _agg_derive(metrics, idx) -> str:
+    """The select list deriving the user-facing aggregate columns from the accumulator state. ``idx`` is the
+    ``(sidx, eidx, cidx, widx)`` tuple mapping each metric's column(s) to its accumulator index."""
+    sidx, eidx, cidx, widx = idx
     exprs = []
-    for out, (k, c, how) in metrics.items():
+    for out, m in metrics.items():
+        k, c, how = m.kind, m.col, m.how
         if k == "count":
             e = "_a_cnt"
         elif k == "sum":
@@ -1098,6 +1303,27 @@ def _agg_derive(metrics, sidx, eidx) -> str:
             v = f"GREATEST({m2} / {denom}, 0)"   # M2 is already centred — divide by the d.o.f.; clamp ≥ 0
             inner = v if k == "var" else f"SQRT({v})"
             e = f"(CASE WHEN {n} < {min_n} THEN NULL ELSE {inner} END)"
+        elif k == "weight_total":
+            e = f"_w_den_{widx[('wt', None, c)]}"
+        elif k == "weighted_sum":
+            e = f"_w_num_{widx[('wp', c, m.col2)]}"
+        elif k == "weighted_average":
+            w = widx[("wp", c, m.col2)]
+            e = f"(_w_num_{w}::DOUBLE / NULLIF(_w_den_{w}, 0))"
+        elif k in ("covariance", "pearson_correlation", "ols_slope", "ols_intercept"):
+            kk = cidx[(c, m.col2)]
+            n = f"_c_n_{kk}"
+            cxy, m2x, m2y = f"_c_cxy_{kk}", f"_c_m2x_{kk}", f"_c_m2y_{kk}"
+            if k == "covariance":
+                min_n, denom = (2, f"({n} - 1)") if how == "sample" else (1, n)
+                e = f"(CASE WHEN {n} < {min_n} THEN NULL ELSE {cxy} / {denom} END)"
+            elif k == "pearson_correlation":
+                e = f"(CASE WHEN {n} < 2 OR {m2x} <= 0 OR {m2y} <= 0 THEN NULL ELSE {cxy} / SQRT({m2x} * {m2y}) END)"
+            elif k == "ols_slope":
+                e = f"(CASE WHEN {m2x} <= 0 THEN NULL ELSE {cxy} / {m2x} END)"
+            else:  # ols_intercept = ȳ − slope·x̄
+                e = (f"(CASE WHEN {n} < 1 OR {m2x} <= 0 THEN NULL "
+                     f"ELSE _c_sy_{kk}::DOUBLE / {n} - ({cxy} / {m2x}) * (_c_sx_{kk}::DOUBLE / {n}) END)")
         else:
             raise DeltaError(f"aggregate metric '{out}': unsupported kind {k!r}")
         exprs.append(f"{e} AS {_q(out)}")

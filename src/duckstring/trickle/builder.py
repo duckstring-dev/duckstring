@@ -223,7 +223,7 @@ class TrickleBuilder:
         self._projection: str | None = None
         self._alias: str | None = None  # this node's alias (the spine's, for .select refs / the .sql table)
         self._materialised = None  # a full relation after .sql() → comprehensive mode (no incremental compute)
-        self._agg = None  # {"by": (...), "metrics": {out: (kind, col, how)}} after .aggregate()
+        self._agg = None  # {"by": (...), "metrics": {out: agg.Metric}} after .aggregate()
         self._agg_by: tuple[str, ...] | None = None
         self._key_filter = True  # set per-terminal from the .merge()/.append() key_filter flag
         # compile-scoped caches (rebuilt per terminal): leaf → alias, leaf → bare cols
@@ -299,7 +299,8 @@ class TrickleBuilder:
     def aggregate(self, by=None, **metrics) -> "TrickleBuilder":
         """Group the composed output by ``by`` and maintain the ``metrics`` incrementally — a grouped merge
         Trickle keyed by ``by`` (the output ``pk`` defaults to it). Metrics are :mod:`duckstring.agg` specs
-        (count / sum / mean / min / max / var / stddev). Terminal-bound to :meth:`merge`."""
+        (count / sum / mean / min / max / var / stddev / weight_total / weighted_sum / weighted_average /
+        covariance / pearson_correlation / ols_slope / ols_intercept). Terminal-bound to :meth:`merge`."""
         self._ensure_incremental("aggregate")
         from .agg import Metric
 
@@ -313,8 +314,8 @@ class TrickleBuilder:
         spec = {}
         for out, m in metrics.items():
             if not isinstance(m, Metric):
-                raise BuildError(f"aggregate metric '{out}' must be an agg.* spec (agg.count/sum/mean/min/max/var/stddev)")
-            spec[out] = (m.kind, m.col, m.how)
+                raise BuildError(f"aggregate metric '{out}' must be an agg.* spec (e.g. agg.sum/mean/var/covariance)")
+            spec[out] = m
         self._agg = {"by": by, "metrics": spec}
         return self
 
@@ -380,9 +381,10 @@ class TrickleBuilder:
 
             by, metrics = self._agg["by"], self._agg["metrics"]
             out_pk = normalize_pk(pk) if pk is not None else by
-            required = tuple(dict.fromkeys(by + tuple(c for _k, c, _h in metrics.values() if c is not None)))
+            required = tuple(dict.fromkeys(
+                by + tuple(c for m in metrics.values() for c in (m.col, m.col2) if c is not None)))
             kind, rel = self._compute(required, name, ivm=ivm, key_filter=key_filter)
-            needs_current = kind == "incremental" and any(k in ("min", "max") for k, _c, _h in metrics.values())
+            needs_current = kind == "incremental" and any(m.kind in ("min", "max") for m in metrics.values())
             current = self._full_join() if needs_current else None
             trickle.apply_aggregate(ctx.con, name, by, metrics, kind, rel, current, ctx.f,
                                     retain_t=retain_t, retain_n=retain_n)

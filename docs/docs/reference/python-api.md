@@ -180,7 +180,7 @@ A fluent builder that composes an incremental join from its sources' Z-set delta
 - **`on`** is a shared column name (or list), or a `{left_col: right_col}` dict — **any** equi-join key (no FK=PK requirement); qualify as `alias.col` if a bare name is ambiguous across sources. **`how`** ∈ `inner` (default) / `left` / `right` / `full` / `semi` / `anti` — **all maintained incrementally**, including the outer joins' NULL-padded incomparables. The join operand may itself be a join DAG, so bushy `(a⋈b)⋈(c⋈d)` and snowflake shapes are expressible (each composed by a binary affected-key recompute).
 - **`.merge(name, pk=…)`** — `pk` is **required** (the output identity; must be unique in the output). **`.select`** is required once there's a join and must include the PK; computed columns are allowed.
 - The spine is `s0`, dimensions `s1`, `s2`, … in the projection — or name each source with **`.alias(name)`** and reference that (`o.id`, `p."col"`). `s0`/`s1` stay the fallback; aliasing makes the select reorder-safe.
-- **`.aggregate(by, **metrics)`** (and the Ibis-shaped **`.group_by(by).aggregate(**metrics)`**) — a grouped aggregate maintained **incrementally**: a merge Trickle keyed by `by` (`pk` defaults to `by`). Metrics are [`duckstring.agg`](#aggregate-metrics) specs — `agg.count()`, `agg.sum(col)`, `agg.mean(col)` (distributive/algebraic, maintained from the delta alone; raw accumulators in a registry-only companion, only changed groups emitted). Terminal-bound to `.merge()`; `.append`/further joins after it raise (do it downstream). Anything outside this metric set → `.sql()`.
+- **`.aggregate(by, **metrics)`** (and the Ibis-shaped **`.group_by(by).aggregate(**metrics)`**) — a grouped aggregate maintained **incrementally**: a merge Trickle keyed by `by` (`pk` defaults to `by`). Metrics are [`duckstring.agg`](#aggregate-metrics) specs — `agg.count/sum/mean/min/max/var/stddev`, the weighted family (`weight_total`/`weighted_sum`/`weighted_average`) and two-variable co-moments (`covariance`/`pearson_correlation`/`ols_slope`/`ols_intercept`), all maintained from the delta alone (raw accumulators in a registry-only companion, only changed groups emitted). Terminal-bound to `.merge()`; `.append`/further joins after it raise (do it downstream). Anything outside this metric set → `.sql()`.
 - **`.sql(query)`** — the comprehensive escape hatch for anything outside the incremental op set (non-distributive aggregation, windows, `DISTINCT`, set ops). Name the builder with `.alias()`, then `.sql("… FROM that_name")`. It materialises (no incremental compute, no fast path after it — `.join`/`.select`/`.filter` raise) but the terminal `.merge()` still diffs → incremental delta out. Accepts a SQL string or, if Ibis is installed, an Ibis expression (compiled lazily). See **`.to_ibis_schema()`** (and **`.schema()`**) → a `{column: type}` dict for `ibis.table(...)`.
 - Any table is a valid source (Trickle or overwrite Ripple).
 - **`p`** (per source, default `0.3`) is the change-fraction threshold: past that share of a source's rows the builder recomputes comprehensively for that run; `p=1.0` disables the check.
@@ -202,8 +202,16 @@ See the [guide](../guides/trickle.md#the-builder-pondtrickle).
 | `agg.mean(col)` | `sum(col) / count(col)` over non-NULL values |
 | `agg.min(col)` / `agg.max(col)` | extreme of `col` (NULLs ignored); inserts extend in place, a retraction of the extreme rescans the group |
 | `agg.var(col, how=)` / `agg.stddev(col, how=)` | variance / std-dev over non-NULL values; `how` ∈ `"sample"` (default, Ibis-matching) / `"pop"` |
+| `agg.weight_total(w)` | `Σw` over rows where `w` is non-NULL |
+| `agg.weighted_sum(x, w)` | `Σ(w·x)` over rows where both are non-NULL |
+| `agg.weighted_average(x, w)` | `Σ(w·x) / Σw` (NULL when `Σw` = 0) |
+| `agg.covariance(x, y, how=)` | covariance over paired (both-non-NULL) rows; `how` ∈ `"sample"` (default) / `"pop"` |
+| `agg.pearson_correlation(x, y)` | Pearson correlation `Cxy / √(M2x·M2y)` |
+| `agg.ols_slope(x, y)` / `agg.ols_intercept(x, y)` | least-squares fit of `y` on `x` (slope `Cxy/M2x`, intercept `ȳ − slope·x̄`) |
 
-For anything outside this set (window functions, `DISTINCT`, percentiles), aggregate via `.sql()`.
+`var`/`stddev`/`covariance`/`correlation`/`ols` are maintained as **centred (co-)moments** by a numerically stable parallel merge (never the cancellation-prone `Σx²−(Σx)²/n`), so they stay accurate at any value scale and under retraction.
+
+For anything outside this set (window functions, `DISTINCT`, percentiles, order-dependent running aggregates), aggregate via `.sql()`.
 
 ## Execution environment
 

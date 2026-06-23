@@ -74,19 +74,27 @@ is **`_a_sumsq_{i}` → `_a_m2_{i}`** (the centred second moment).
 *(Note: M2 is currently maintained for every additive column, including `sum`/`mean`-only ones. A later
 optimisation can skip it where no `var`/`stddev`/moment metric reads the column.)*
 
-### Phase 1 — flavour 1 breadth (retractable, order-independent)
+### Phase 1 — flavour 1 breadth (retractable, order-independent) — **done**
 
 Built on the Phase-0 moment subsystem; all O(δ) for small deltas, comprehensive rebuild beyond `p`.
+Delivered:
 
-- `weighted_sum(x, w)`, `weight_total(w)`, `weighted_average(x, w)` — additive `Σw`, `Σwx`.
-- `covariance(x, y)`, `pearson_correlation(x, y)` — co-moment `Cxy` (Pébay) + `M2x`, `M2y`.
-- `ols_slope(x, y)`, `ols_intercept(x, y)` — **two separate specs** (flat columns), derived from
-  `(n, x̄, ȳ, M2x, Cxy)`.
-- `skewness(x)` — third central moment `M3` (Pébay update).
-- `product(x)` (with a zero-count, since 0 has no multiplicative inverse) and `bit_xor(x)` (self-inverse) —
-  cheap genuine groups.
+- `weight_total(w)`, `weighted_sum(x, w)`, `weighted_average(x, w)` — additive `Σw`, `Σwx` (`_w_num`/`_w_den`).
+- `covariance(x, y, how)`, `pearson_correlation(x, y)` — paired co-moment `Cxy` + `M2x`, `M2y` (the
+  `_c_*` accumulator), maintained by the generalised parallel merge `_co2_merge` (a two-pass `dacc` for the
+  partition co-moments; comprehensive rebuild via DuckDB `regr_sxx/syy/sxy`).
+- `ols_slope(x, y)`, `ols_intercept(x, y)` — **two separate specs**, derived from `(n, Σx, Σy, M2x, Cxy)`.
 
 `z_score`, `naive_bayes_update` are **recipes** over the above, not metrics (§ "Out of scope").
+
+**Deferred from this phase** (kept out rather than shipped unsafe — the library's promise is that anything in
+the namespace is sound):
+
+- `skewness(x)` — the third moment `M3`'s *merge-out* (retraction) is numerically fragile; the safe form is
+  rescan-on-retraction (extend the membership-rescan plumbing that min/max use). → a follow-up.
+- `product(x)` — a running multiply/divide drifts and overflows; the safe form is `sign · exp(Σ log|x|)`
+  with a zero-count (the additive `Σ log` *is* retractable). → a follow-up.
+- `bit_xor(x)` — trivially safe (self-inverse) but niche; rolled forward to avoid scope creep here.
 
 ### Phase 2 — flavour 2 (extremes with a payload)
 
