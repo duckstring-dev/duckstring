@@ -233,6 +233,8 @@ The `acc.` prefix is what marks a metric as *accumulated*, so `acc.sum` is a run
 | `acc.min(col)` / `acc.max(col)` | running extreme so far |
 | `acc.first(col)` | first non-NULL value in the group (frozen once set) |
 | `acc.product(col)` | running product (float; a 0 makes it stay 0) |
+| `acc.prev(col)` / `acc.lag(col, n)` | the value `n` rows back (NULL until `n` prior rows); a length-`n` FIFO buffer, so it reaches across run boundaries |
+| `acc.convolution(col, kernel)` | 1-D FIR filter — dot product of `kernel` with the last `len(kernel)` values (NULL until filled; NULL inputs → 0) |
 | `acc.ema(col, alpha)` | discrete EMA `α·x + (1−α)·ema_prev` (`0 < α ≤ 1`) |
 | `acc.tema(col, lam)` | time-decayed EMA `α_t = 1 − exp(−lam·Δt)`, Δt the gap in the (numeric) `.along` value |
 | `acc.scan(fn, init, dtype=)` | custom fold `fn(state, row) -> (new_state, output)`; `row` is a `{col: value}` dict, `state` is carried (persisted as JSON between runs), `output` (type `dtype`) is appended |

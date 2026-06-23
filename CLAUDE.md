@@ -37,7 +37,7 @@ src/duckstring/
     io.py                  #   Z-set incremental I/O (append/merge writes, apply_zset, full-row-diff merge_table, read_delta, retention)
     builder.py             #   the pond.trickle(...) builder: a DAG of binary incremental joins (any-key, any how, bushy) over Trickle/Ripple sources
     agg.py                 #   order-INDEPENDENT aggregate specs for .aggregate() (count/sum/mean/min/max/var/stddev/product/weighted*/covariance/correlation/ols_*/argmin/argmax/bool_and/bool_or/bit_and/bit_or)
-    acc.py                 #   order-DEPENDENT scan specs for .accumulate() (sum/count/min/max/first/product/ema/tema/scan)
+    acc.py                 #   order-DEPENDENT scan specs for .accumulate() (sum/count/min/max/first/product/prev/lag/convolution/ema/tema/scan)
   trickle_io.py            # compat shim → duckstring.trickle.io (PEP-562 __getattr__ forward; preserves the public name)
   trickle_builder.py       # compat shim → duckstring.trickle.builder
   agg.py                   # compat shim → duckstring.trickle.agg (so `from duckstring import agg` still works)

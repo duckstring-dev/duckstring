@@ -1090,6 +1090,10 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
     _save_acc_state(con, state, by, along, metric_list, group, f, type_of)
 
 
+# The metric kinds whose carried state is non-scalar (a fold state / FIFO buffer) → persisted as JSON text.
+_ACC_JSON_STATE = frozenset({"scan", "lag", "conv"})
+
+
 def _acc_fresh(metric_list) -> dict:
     st = {"_along": None}
     for out, m in metric_list:
@@ -1097,6 +1101,8 @@ def _acc_fresh(metric_list) -> dict:
             st[out] = 0
         elif m.kind == "scan":
             st[out] = json.loads(json.dumps(m.init))   # JSON-normalised so it matches the cross-run reload
+        elif m.kind in ("lag", "conv"):
+            st[out] = []                                # a FIFO buffer of the last n / K values
         else:
             st[out] = None
     return st
@@ -1108,6 +1114,18 @@ def _acc_step(m, st, out, row, idx, av):
     running statistic; the first non-NULL seeds an ema / ``first`` / ``product``."""
     k = m.kind
     val = row[idx[m.col]] if m.col is not None else None
+    if k == "lag":
+        n, buf = m.param, st[out]
+        out_val = buf[0] if len(buf) == n else None      # the value n rows back (None until the buffer fills)
+        st[out] = (buf + [val])[-n:]                      # push the current value, keep the last n
+        return out_val
+    if k == "conv":
+        kernel = m.init
+        buf = (st[out] + [val])[-len(kernel):]
+        st[out] = buf
+        if len(buf) < len(kernel):
+            return None
+        return sum(kernel[j] * (buf[j] if buf[j] is not None else 0) for j in range(len(kernel)))
     if k == "sum":
         if val is not None:
             st[out] = st[out] + val
@@ -1160,17 +1178,17 @@ def _acc_out_type(m, type_of) -> str:
     """The type of the metric's **output** column in the append table."""
     if m.kind == "count":
         return "BIGINT"
-    if m.kind in ("min", "max", "first"):
+    if m.kind in ("min", "max", "first", "lag"):
         return type_of[m.col]
     if m.kind == "scan":
         return m.dtype or "DOUBLE"
-    return "DOUBLE"   # sum (running product/sum) / product / ema / tema
+    return "DOUBLE"   # sum / product / ema / tema / conv
 
 
 def _acc_state_type(m, type_of) -> str:
     """The type of the metric's **carried-state** column in the ``_duckstring_acc_`` companion — the same as
-    the output, except a custom :func:`acc.scan` persists its (arbitrary) state as JSON text."""
-    return "VARCHAR" if m.kind == "scan" else _acc_out_type(m, type_of)
+    the output, except a non-scalar fold state / FIFO buffer (scan / lag / conv) persists as JSON text."""
+    return "VARCHAR" if m.kind in _ACC_JSON_STATE else _acc_out_type(m, type_of)
 
 
 def _load_acc_state(con, state, by, metric_list, f):
@@ -1189,7 +1207,7 @@ def _load_acc_state(con, state, by, metric_list, f):
         st = {"_along": r[nby]}
         for i, (out, m) in enumerate(metric_list):
             v = r[nby + 1 + i]
-            st[out] = json.loads(v) if m.kind == "scan" and v is not None else v
+            st[out] = json.loads(v) if m.kind in _ACC_JSON_STATE and v is not None else v
         carried[gk] = st
     return carried, done
 
@@ -1205,7 +1223,7 @@ def _save_acc_state(con, state, by, along, metric_list, group, f, type_of) -> No
     statecols = [_q(b) for b in by] + ["_k_along"] + [f"_acc_{out}" for out, _ in metric_list] + [_q(F_COL)]
 
     def _stval(out, m, st):
-        return json.dumps(st[out]) if m.kind == "scan" else st[out]
+        return json.dumps(st[out]) if m.kind in _ACC_JSON_STATE else st[out]
 
     new_rows = [(*gk, st["_along"], *[_stval(out, m, st) for out, m in metric_list], f)
                 for gk, st in group.items()]

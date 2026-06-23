@@ -2078,6 +2078,51 @@ def test_builder_accumulate_product_and_scan(tmp_path):
     snk.close()
 
 
+def test_builder_accumulate_lag_and_convolution(tmp_path):
+    """`acc.prev` / `acc.lag(n)` (FIFO-buffer lag, reaching across the run boundary) and `acc.convolution`
+    (FIR over the last K values), checked vs DuckDB's native LAG and a hand-computed convolution."""
+    from duckstring import acc
+
+    ev = duckdb.connect(str(tmp_path / "stream.duckdb"))
+    ev_dir = tmp_path / "ponds" / "stream" / "m1" / "data"
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "scored" / "m1" / "data"
+
+    def emit(rows, f):
+        vals = ", ".join(f"({i}, '{g}', {t}, {x})" for i, g, t, x in rows)
+        T.append_table(ev, "ev", ev.sql(f"SELECT * FROM (VALUES {vals}) v(id, g, t, x)"), f, ("id",))
+        publish(ev, ev_dir, f=f)
+
+    def run(f, pf):
+        pond = Pond("scored", "1.0.0", snk, root=tmp_path, source_majors={"stream": 1}, f=f, previous_f=pf)
+        (pond.trickle("stream.ev")
+             .along("t")
+             .accumulate(by="g", p1=acc.prev("x"), p2=acc.lag("x", 2),
+                         smooth=acc.convolution("x", [1, 1, 1]))   # rolling sum-of-3
+             .append("scored", pk="id"))
+        publish(snk, snk_dir, f=f)
+
+    def scored():
+        return {r[0]: (r[1], r[2], r[3]) for r in snk.sql(
+            f"SELECT id, p1, p2, smooth FROM ({ParquetDataPlane().read_select(snk_dir, 'scored')})"
+        ).fetchall()}
+
+    emit([(1, "a", 1, 10), (2, "a", 2, 20), (3, "a", 3, 30)], ts(1))
+    run(ts(1), NEVER)
+    got = scored()
+    assert got[1] == (None, None, None)        # nothing behind row 1
+    assert got[2] == (10, None, None)          # prev=10, lag2 not yet, conv needs 3
+    assert got[3] == (20, 10, 60)              # prev=20, lag2=10, conv=10+20+30
+
+    # Incremental tail rows: lag/conv must reach back into run 1's buffer, not restart.
+    emit([(4, "a", 4, 40), (5, "a", 5, 50)], ts(2))
+    run(ts(2), ts(1))
+    got = scored()
+    assert got[4] == (30, 20, 90)              # prev=30, lag2=20, conv=20+30+40
+    assert got[5] == (40, 30, 120)             # prev=40, lag2=30, conv=30+40+50
+    snk.close()
+
+
 def test_builder_accumulate_guards(tmp_path):
     from duckstring import acc
 

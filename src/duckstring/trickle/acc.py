@@ -19,6 +19,9 @@ Supported:
 - ``min(col)`` / ``max(col)`` — running extreme so far.
 - ``first(col)`` — the first non-NULL value seen in the group (frozen once set; emitted on every later row).
 - ``product(col)`` — running product (float output; a 0 makes it stay 0).
+- ``prev(col)`` / ``lag(col, n)`` — the value ``n`` rows back (a length-``n`` FIFO buffer of carried state,
+  so it reaches across run boundaries).
+- ``convolution(col, kernel)`` — a 1-D FIR filter over the last ``len(kernel)`` values.
 - ``ema(col, alpha)`` — discrete exponential moving average ``α·x + (1−α)·ema_prev`` (each row one step).
 - ``tema(col, lam)`` — time-decayed (continuous) EMA whose decay scales with the **gap** in the ``.along``
   value: ``α_t = 1 − exp(−lam·Δt)`` (so ``.along`` must be numeric — e.g. an epoch). The first row in a group
@@ -101,6 +104,30 @@ def product(col: str) -> AccMetric:  # noqa: A001 - mirrors agg.product on the s
     """Running product of ``col`` along the axis (NULLs ignored; the first non-NULL seeds it; once a 0 is
     seen the running product stays 0). Output is a float (DOUBLE) — large products overflow to ±inf."""
     return AccMetric("product", col)
+
+
+def prev(col: str) -> AccMetric:
+    """The value of ``col`` one row back in the group (``lag`` 1) — NULL on the first row. ``prev`` reaches
+    across the run boundary into the previous run's tail (the one-slot buffer is carried state)."""
+    return AccMetric("lag", col, 1)
+
+
+def lag(col: str, n: int = 1) -> AccMetric:
+    """The value of ``col`` ``n`` rows back in the group (NULL until the group has ``n`` prior rows). Carried
+    as a length-``n`` FIFO buffer, so it reaches back across run boundaries."""
+    if not isinstance(n, int) or n < 1:
+        raise ValueError(f"lag(n={n!r}): need a positive integer")
+    return AccMetric("lag", col, n)
+
+
+def convolution(col: str, kernel) -> AccMetric:
+    """A 1-D convolution / FIR filter: the dot product of ``kernel`` with the last ``len(kernel)`` values of
+    ``col`` (oldest·``kernel[0]`` … current·``kernel[-1]``), in ``.along`` order — NULL until the group has
+    ``len(kernel)`` rows; NULL inputs count as 0. Carried as a length-``K`` FIFO buffer; output is a float."""
+    kernel = tuple(kernel)
+    if not kernel:
+        raise ValueError("convolution(kernel=...): the kernel must be non-empty")
+    return AccMetric("conv", col, init=kernel)
 
 
 def scan(fn, init, dtype: str = "DOUBLE") -> AccMetric:
