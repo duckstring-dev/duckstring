@@ -87,13 +87,14 @@ Delivered:
 
 `z_score`, `naive_bayes_update` are **recipes** over the above, not metrics (§ "Out of scope").
 
+`agg.product(col)` is **done** — the retractable log-sum-exp form (additive `count`, `n_zero`, `n_neg`,
+`Σ log|x|` → `(−1)^n_neg · exp(Σ log|x|)`; a float, not bit-exact for big integer products).
+
 **Deferred from this phase** (kept out rather than shipped unsafe — the library's promise is that anything in
 the namespace is sound):
 
 - `skewness(x)` — the third moment `M3`'s *merge-out* (retraction) is numerically fragile; the safe form is
   rescan-on-retraction (extend the membership-rescan plumbing that min/max use). → a follow-up.
-- `product(x)` — a running multiply/divide drifts and overflows; the safe form is `sign · exp(Σ log|x|)`
-  with a zero-count (the additive `Σ log` *is* retractable). → a follow-up.
 - `bit_xor(x)` — trivially safe (self-inverse) but niche; rolled forward to avoid scope creep here.
 
 ### Phase 2 — flavour 2 (extremes with a payload) — **done**
@@ -126,18 +127,37 @@ their own **`acc.*`** namespace (alongside `agg.*`), applied by **`.accumulate(b
 - **Late-arrival**: a row below its group's `.along` high-water mark raises (the monotonic contract); a
   retraction reaching the scan raises (append-only contract). Droplog-diversion deferred.
 
-`first` (running first non-NULL) is included. Deferred: a one-pass **SQL-window** fast path for the linear
-metrics (`sum`/`count`/`min`/`max`) — it is *also incremental* (a window over the new tail batch + a carried
-per-group seed), it only drops the Python row-loop; `acc.scan(fn, init)` (a user-supplied custom fold —
-another `acc` spec, not a builder method); a `prev`/`lag` metric (the useful, non-identity reading of "last",
-since running-last is just the current row); the droplog late-arrival diversion.
+Also done: `first` (running first non-NULL), `product` (running product), and **`acc.scan(fn, init, dtype)`**
+— the custom fold (`fn(state, row) -> (new_state, output)`, `row` a `{col: value}` dict; state JSON-persisted
+in the carried-state companion; a spec, not a builder method, exactly as designed). Deferred: a one-pass
+**SQL-window** fast path for the linear metrics (`sum`/`count`/`min`/`max`) — it is *also incremental* (a
+window over the new tail batch + a carried per-group seed), it only drops the Python row-loop; a `prev`/`lag`
+metric (the useful, non-identity reading of "last", since running-last is just the current row); the droplog
+late-arrival diversion.
+
+### Phase 5 — `.merge()` for ordered operations (retraction-aware scans) — **future goal**
+
+Today the order-dependent scans (`acc.*` / `.accumulate()`) are `.append()`-only: a retraction would
+invalidate every later value in the sequence, so they refuse one. The next body of work lifts that to
+support **`.merge()`** for ordered operations by handling retractions — recomputing the affected suffix of a
+group's sequence when a row in its past changes (an edit at position *i* re-folds *i…end* for that group).
+This still requires an `.along` axis (the order is intrinsic), but no longer requires append-only history.
+
+It also brings the aggregation-side counterpart of the custom scan — **`agg.reduce(...)`**:
+
+- Given **only a forward expression** (the reducer), `agg.reduce` mandates `.along` + `.append()` (same
+  constraint as `acc.scan` — no inverse, so no retraction, so append-only).
+- Given **also an inverse expression**, it can support `.merge()` too (retractions undo via the inverse),
+  while still requiring `.along` (order is intrinsic to the fold).
+
+So the matrix becomes: forward-only → append-only; forward + inverse → merge-capable; both ordered. This
+generalises the retractable-vs-not distinction (the whole `agg`/`acc` split) into a single user-extensible
+operator pair, and is the natural home for retraction-aware EMAs and cumulative sums.
 
 ### Phase 4 — later / optional
 
 - Approximate holistic metrics as **explicitly-approximate** specs: `approx_count_distinct` (HyperLogLog),
   `approx_quantile` (t-digest) — both mergeable sketches, so they fit the additive mechanism.
-- A general **custom-fold `acc.scan(fn, init)`** spec (not a builder method — it rides `.accumulate()` like
-  any other `acc.*`, taking a user reducer `(state, row) -> (state, output)`; the fold is already in Python).
 
 ## The `.along` axis
 

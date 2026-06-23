@@ -211,6 +211,7 @@ See the [guide](../guides/trickle.md#the-builder-pondtrickle).
 | `agg.argmin(arg, by)` / `agg.argmax(arg, by)` | the `arg` value at the row minimising / maximising `by` (a retraction of the supporting row rescans the group) |
 | `agg.bool_and(col)` / `agg.bool_or(col)` | logical AND / OR over `col` (rescan on retraction) |
 | `agg.bit_and(col)` / `agg.bit_or(col)` | bitwise AND / OR over an integer `col` (rescan on retraction) |
+| `agg.product(col)` | product of `col` (NULLs ignored; any 0 → 0). Retractable via log-sum-exp — returns a **float**, not bit-exact for large integer products |
 
 `var`/`stddev`/`covariance`/`correlation`/`ols` are maintained as **centred (co-)moments** by a numerically stable parallel merge (never the cancellation-prone `Σx²−(Σx)²/n`), so they stay accurate at any value scale and under retraction.
 
@@ -231,8 +232,10 @@ The `acc.` prefix is what marks a metric as *accumulated*, so `acc.sum` is a run
 | `acc.count()` | running row count (1, 2, 3, …) |
 | `acc.min(col)` / `acc.max(col)` | running extreme so far |
 | `acc.first(col)` | first non-NULL value in the group (frozen once set) |
+| `acc.product(col)` | running product (float; a 0 makes it stay 0) |
 | `acc.ema(col, alpha)` | discrete EMA `α·x + (1−α)·ema_prev` (`0 < α ≤ 1`) |
 | `acc.tema(col, lam)` | time-decayed EMA `α_t = 1 − exp(−lam·Δt)`, Δt the gap in the (numeric) `.along` value |
+| `acc.scan(fn, init, dtype=)` | custom fold `fn(state, row) -> (new_state, output)`; `row` is a `{col: value}` dict, `state` is carried (persisted as JSON between runs), `output` (type `dtype`) is appended |
 
 ```python
 from duckstring import acc

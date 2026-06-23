@@ -95,6 +95,16 @@ def stddev(col: str, how: str = "sample") -> Metric:
     return Metric("stddev", col, _check_how(how))
 
 
+def product(col: str) -> Metric:
+    """Product of ``col`` over its non-NULL values (NULLs ignored; all-NULL group → NULL; any 0 → 0).
+
+    Maintained retractably via additive accumulators — a zero count, a negative count (→ sign), and
+    ``Σ log|x|`` over the non-zero values — so the result is ``(−1)^n_neg · exp(Σ log|x|)``. This avoids the
+    running multiply/divide's division-by-zero and drift, but means the result is a **float** (DOUBLE), not
+    bit-exact for large integer products."""
+    return Metric("product", col)
+
+
 # ─── weighted (additive — pure Σ, trivially retractable) ─────────────────────────
 
 

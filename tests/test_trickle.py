@@ -1989,6 +1989,95 @@ def test_builder_accumulate_scan(tmp_path):
     snk.close()
 
 
+def test_builder_aggregate_product(tmp_path):
+    """`agg.product` via the retractable log-sum-exp accumulators (count / n_zero / n_neg / Σ log|x|) — checked
+    vs DuckDB's native `product`, across a bootstrap, an insert, and a retraction including a sign flip."""
+    from duckstring import agg
+
+    _cons, ol, _pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "stat" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("stat", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1}, f=f, previous_f=pf)
+        pond.trickle("sales.order_line", p=1.0).aggregate(by="product_id", p=agg.product("qty")).merge("stat")
+        publish(snk, snk_dir, f=f)
+
+    def expected(rows, g):
+        vals = ", ".join(str(q) for _o, gg, q in rows if gg == g)
+        return snk.sql(f"SELECT product(v) FROM (VALUES ({'), ('.join(vals.split(', '))})) t(v)").fetchone()[0]
+
+    def got(g):
+        return snk.sql(
+            f"SELECT p FROM ({ParquetDataPlane().read_select(snk_dir, 'stat')}) WHERE product_id = '{g}'"
+        ).fetchone()[0]
+
+    r1 = [(1, "a", 2), (2, "a", 3), (3, "a", -4)]   # product -24
+    ol(r1, ts(1))
+    run(ts(1), NEVER)
+    assert got("a") == pytest.approx(expected(r1, "a"))
+
+    r2 = r1 + [(4, "a", 5)]   # product -120
+    ol(r2, ts(2))
+    run(ts(2), ts(1))
+    assert got("a") == pytest.approx(expected(r2, "a"))
+
+    # Retract the negative (change row 3 to +4): sign flips, product 2·3·4·5 = 120.
+    r3 = [(3, "a", 4) if o == 3 else (o, g, q) for o, g, q in r2]
+    ol(r3, ts(3))
+    run(ts(3), ts(2))
+    assert got("a") == pytest.approx(expected(r3, "a"))
+    snk.close()
+
+
+def test_builder_accumulate_product_and_scan(tmp_path):
+    """`acc.product` (running product) and `acc.scan` (a custom fold with JSON-persisted state) across a
+    bootstrap and an incremental tail run."""
+    from duckstring import acc
+
+    ev = duckdb.connect(str(tmp_path / "stream.duckdb"))
+    ev_dir = tmp_path / "ponds" / "stream" / "m1" / "data"
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "scored" / "m1" / "data"
+
+    def emit(rows, f):
+        vals = ", ".join(f"({i}, '{g}', {t}, {x})" for i, g, t, x in rows)
+        T.append_table(ev, "ev", ev.sql(f"SELECT * FROM (VALUES {vals}) v(id, g, t, x)"), f, ("id",))
+        publish(ev, ev_dir, f=f)
+
+    # a custom fold: running max-so-far minus running min-so-far (the running range), state = [min, max].
+    def range_fold(state, row):
+        x = row["x"]
+        lo = x if state[0] is None else min(state[0], x)
+        hi = x if state[1] is None else max(state[1], x)
+        return [lo, hi], hi - lo
+
+    def run(f, pf):
+        pond = Pond("scored", "1.0.0", snk, root=tmp_path, source_majors={"stream": 1}, f=f, previous_f=pf)
+        (pond.trickle("stream.ev")
+             .along("t")
+             .accumulate(by="g", prod=acc.product("x"),
+                         rng=acc.scan(range_fold, [None, None], dtype="BIGINT"))
+             .append("scored", pk="id"))
+        publish(snk, snk_dir, f=f)
+
+    def scored():
+        return {r[0]: (r[1], r[2]) for r in snk.sql(
+            f"SELECT id, prod, rng FROM ({ParquetDataPlane().read_select(snk_dir, 'scored')})"
+        ).fetchall()}
+
+    emit([(1, "a", 1, 2), (2, "a", 2, 5), (3, "a", 3, 3)], ts(1))
+    run(ts(1), NEVER)
+    got = scored()
+    assert got[1] == (2, 0) and got[2] == (10, 3) and got[3] == (30, 3)   # prod 2/10/30; range 0/3/3
+
+    emit([(4, "a", 4, 4)], ts(2))   # continues: prod 30·4=120, range max5-min2=3
+    run(ts(2), ts(1))
+    got = scored()
+    assert got[4] == (120, 3)
+    snk.close()
+
+
 def test_builder_accumulate_guards(tmp_path):
     from duckstring import acc
 

@@ -862,14 +862,15 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         return
     by = tuple(by)
     by_list = ", ".join(_q(b) for b in by)
-    add_cols, ext_cols, co_pairs, wgt_units, arg_specs, sg_specs = _agg_families(metrics)
+    add_cols, ext_cols, co_pairs, wgt_units, arg_specs, sg_specs, prod_cols = _agg_families(metrics)
     sidx = {c: i for i, c in enumerate(add_cols)}
     eidx = {c: j for j, c in enumerate(ext_cols)}
     cidx = {p: k for k, p in enumerate(co_pairs)}
     widx = {u: m for m, u in enumerate(wgt_units)}
     aidx = {s: a for a, s in enumerate(arg_specs)}
     gidx = {s: g for g, s in enumerate(sg_specs)}
-    idx = (sidx, eidx, cidx, widx, aidx, gidx)
+    pidx = {c: p for p, c in enumerate(prod_cols)}
+    idx = (sidx, eidx, cidx, widx, aidx, gidx, pidx)
     needs_rescan = bool(ext_cols or arg_specs or sg_specs)  # families that rescan a group on a retraction
     state = f"{AGG_STATE_PREFIX}{name}"
     acc_order = (
@@ -881,10 +882,12 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         + [col for m in range(len(wgt_units)) for col in (f"_w_num_{m}", f"_w_den_{m}")]
         + [col for a in range(len(arg_specs)) for col in (f"_g_key_{a}", f"_g_arg_{a}")]
         + [f"_s_val_{g}" for g in range(len(sg_specs))]
+        + [col for p in range(len(prod_cols)) for col in (f"_p_cnt_{p}", f"_p_nz_{p}", f"_p_nn_{p}", f"_p_sl_{p}")]
     )
 
     if kind == "comprehensive":
-        _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_units, arg_specs, sg_specs, f)
+        _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_units, arg_specs, sg_specs,
+                     prod_cols, f)
         derived = con.sql(f"SELECT {by_list}, {_agg_derive(metrics, idx)} FROM {_q(state)} WHERE _a_cnt > 0")
         merge_table(con, name, derived, f, by, retain_t=retain_t, retain_n=retain_n)
         return
@@ -902,6 +905,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     pexprs += _agg_part_sum_exprs(add_cols)
     pexprs += _co_part_sum_exprs(co_pairs)
     pexprs += _wgt_delta_exprs(wgt_units)
+    pexprs += _prod_delta_exprs(prod_cols)
     pexprs += _arg_part_exprs(arg_specs)
     pexprs += _sg_part_exprs(sg_specs)
     for j, c in enumerate(ext_cols):
@@ -962,6 +966,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     for k in range(len(co_pairs)):
         macc += _co_merge_exprs(k)
     macc += _wgt_merge_exprs(len(wgt_units))
+    macc += _prod_merge_exprs(len(prod_cols))
     macc += _arg_merge_exprs(arg_specs)
     macc += _sg_merge_exprs(sg_specs)
     rescan_join = f" LEFT JOIN {_q(rescan)} r USING ({by_list})" if rescan is not None else ""
@@ -1066,7 +1071,7 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
                 f".accumulate('{name}'): a row arrived below its group's .along('{along}') high-water mark "
                 f"({av!r} < {st['_along']!r}) — the axis must be non-decreasing with freshness."
             )
-        outvals = [_acc_step(m, st, out, row[idx[m.col]] if m.col else None, av) for out, m in metric_list]
+        outvals = [_acc_step(m, st, out, row, idx, av) for out, m in metric_list]
         if av is not None:
             st["_along"] = av
         out_rows.append((*row, *outvals))
@@ -1088,14 +1093,21 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
 def _acc_fresh(metric_list) -> dict:
     st = {"_along": None}
     for out, m in metric_list:
-        st[out] = 0 if m.kind in ("sum", "count") else None
+        if m.kind in ("sum", "count"):
+            st[out] = 0
+        elif m.kind == "scan":
+            st[out] = json.loads(json.dumps(m.init))   # JSON-normalised so it matches the cross-run reload
+        else:
+            st[out] = None
     return st
 
 
-def _acc_step(m, st, out, val, av):
-    """Advance accumulator ``out`` by one row (value ``val``, axis value ``av``) and return the running
-    output. NULL values don't move a running statistic; the first non-NULL seeds an ema / ``first``."""
+def _acc_step(m, st, out, row, idx, av):
+    """Advance accumulator ``out`` by one row and return the running output. ``row``/``idx`` give the row and
+    its column→position map (so a custom :func:`acc.scan` fold can read any column). NULL values don't move a
+    running statistic; the first non-NULL seeds an ema / ``first`` / ``product``."""
     k = m.kind
+    val = row[idx[m.col]] if m.col is not None else None
     if k == "sum":
         if val is not None:
             st[out] = st[out] + val
@@ -1115,6 +1127,10 @@ def _acc_step(m, st, out, val, av):
         if st[out] is None and val is not None:
             st[out] = val
         return st[out]
+    if k == "product":
+        if val is not None:
+            st[out] = val if st[out] is None else st[out] * val
+        return st[out]
     if k == "ema":
         if val is None:
             return st[out]
@@ -1133,15 +1149,28 @@ def _acc_step(m, st, out, val, av):
             a = 1 - math.exp(-m.param * dt)
             st[out] = a * v + (1 - a) * prev
         return st[out]
+    if k == "scan":
+        new_state, output = m.fn(st[out], {c: row[i] for c, i in idx.items()})
+        st[out] = new_state
+        return output
     raise DeltaError(f"accumulate metric '{out}': unsupported kind {m.kind!r}")
 
 
 def _acc_out_type(m, type_of) -> str:
+    """The type of the metric's **output** column in the append table."""
     if m.kind == "count":
         return "BIGINT"
     if m.kind in ("min", "max", "first"):
         return type_of[m.col]
-    return "DOUBLE"   # sum (running sum) / ema / tema
+    if m.kind == "scan":
+        return m.dtype or "DOUBLE"
+    return "DOUBLE"   # sum (running product/sum) / product / ema / tema
+
+
+def _acc_state_type(m, type_of) -> str:
+    """The type of the metric's **carried-state** column in the ``_duckstring_acc_`` companion — the same as
+    the output, except a custom :func:`acc.scan` persists its (arbitrary) state as JSON text."""
+    return "VARCHAR" if m.kind == "scan" else _acc_out_type(m, type_of)
 
 
 def _load_acc_state(con, state, by, metric_list, f):
@@ -1158,8 +1187,9 @@ def _load_acc_state(con, state, by, metric_list, f):
             done.add(gk)
             continue
         st = {"_along": r[nby]}
-        for i, (out, _m) in enumerate(metric_list):
-            st[out] = r[nby + 1 + i]
+        for i, (out, m) in enumerate(metric_list):
+            v = r[nby + 1 + i]
+            st[out] = json.loads(v) if m.kind == "scan" and v is not None else v
         carried[gk] = st
     return carried, done
 
@@ -1169,11 +1199,16 @@ def _save_acc_state(con, state, by, along, metric_list, group, f, type_of) -> No
         return
     if not _table_exists(con, state):
         coldefs = [f"{_q(b)} {type_of[b]}" for b in by] + [f"_k_along {type_of[along]}"] + \
-                  [f"_acc_{out} {_acc_out_type(m, type_of)}" for out, m in metric_list] + \
+                  [f"_acc_{out} {_acc_state_type(m, type_of)}" for out, m in metric_list] + \
                   [f"{_q(F_COL)} TIMESTAMP WITH TIME ZONE"]
         con.execute(f"CREATE TABLE {_q(state)} ({', '.join(coldefs)})")
     statecols = [_q(b) for b in by] + ["_k_along"] + [f"_acc_{out}" for out, _ in metric_list] + [_q(F_COL)]
-    new_rows = [(*gk, st["_along"], *[st[out] for out, _ in metric_list], f) for gk, st in group.items()]
+
+    def _stval(out, m, st):
+        return json.dumps(st[out]) if m.kind == "scan" else st[out]
+
+    new_rows = [(*gk, st["_along"], *[_stval(out, m, st) for out, m in metric_list], f)
+                for gk, st in group.items()]
     con.execute("BEGIN TRANSACTION")
     try:
         if by:
@@ -1203,14 +1238,18 @@ def _agg_families(metrics):
       ``key`` plus the ``arg`` at that row (rescan-on-retraction, like min/max).
     - ``sg_specs`` — semigroup reductions ``(kind, col)`` (bool_and / bool_or / bit_and / bit_or):
       a single reduced value (rescan-on-retraction).
+    - ``prod_cols`` — product columns (additive ``(count, n_zero, n_neg, Σ log|x|)`` → log-sum-exp).
 
     Each list is de-duplicated and order-stable."""
-    add, ext, co, wgt, arg, sg = [], [], [], [], [], []
+    add, ext, co, wgt, arg, sg, prod = [], [], [], [], [], [], []
     for m in metrics.values():
         k = m.kind
         if k == "count":  # reads the group cardinality _a_cnt directly — no per-column family
             continue
-        if k in ("sum", "mean", "var", "stddev"):
+        if k == "product":
+            if m.col not in prod:
+                prod.append(m.col)
+        elif k in ("sum", "mean", "var", "stddev"):
             if m.col not in add:
                 add.append(m.col)
         elif k in ("min", "max"):
@@ -1233,7 +1272,7 @@ def _agg_families(metrics):
                 sg.append((k, m.col))
         else:
             raise DeltaError(f"aggregate: unsupported metric kind {k!r}")
-    return add, ext, co, wgt, arg, sg
+    return add, ext, co, wgt, arg, sg, prod
 
 
 def _agg_part_sum_exprs(add_cols: list[str]) -> list[str]:
@@ -1354,6 +1393,53 @@ def _wgt_merge_exprs(n_wgt: int) -> list[str]:
         out += [
             f"COALESCE(a._w_num_{m}, 0) + d._w_num_{m} AS _w_num_{m}",
             f"COALESCE(a._w_den_{m}, 0) + d._w_den_{m} AS _w_den_{m}",
+        ]
+    return out
+
+
+# ─── product family (additive count / n_zero / n_neg / Σ log|x| → log-sum-exp) ────
+
+
+def _prod_rebuild_exprs(prod_cols) -> list[str]:
+    """Comprehensive product accumulators per column: non-NULL count, zero count, negative count, and
+    ``Σ log|x|`` over the non-zero values — the retractable log-sum-exp form (never a running multiply)."""
+    out: list[str] = []
+    for p, col in enumerate(prod_cols):
+        c = _q(col)
+        out += [
+            f"CAST(COUNT({c}) AS BIGINT) AS _p_cnt_{p}",
+            f"CAST(SUM(CASE WHEN {c} = 0 THEN 1 ELSE 0 END) AS BIGINT) AS _p_nz_{p}",
+            f"CAST(SUM(CASE WHEN {c} < 0 THEN 1 ELSE 0 END) AS BIGINT) AS _p_nn_{p}",
+            f"COALESCE(SUM(CASE WHEN {c} <> 0 THEN ln(abs({c})) END), 0)::DOUBLE AS _p_sl_{p}",
+        ]
+    return out
+
+
+def _prod_delta_exprs(prod_cols) -> list[str]:
+    """The per-column ``dacc`` product accumulators (signed by the Z-set weight ``d``) — all additive, so a
+    retraction is a plain subtraction."""
+    d = _q(D_COL)
+    out: list[str] = []
+    for p, col in enumerate(prod_cols):
+        c = _q(col)
+        out += [
+            f"CAST(SUM(CASE WHEN {c} IS NOT NULL THEN {d} ELSE 0 END) AS BIGINT) AS _p_cnt_{p}",
+            f"CAST(SUM(CASE WHEN {c} = 0 THEN {d} ELSE 0 END) AS BIGINT) AS _p_nz_{p}",
+            f"CAST(SUM(CASE WHEN {c} < 0 THEN {d} ELSE 0 END) AS BIGINT) AS _p_nn_{p}",
+            f"COALESCE(SUM(CASE WHEN {c} <> 0 THEN {d} * ln(abs({c})) END), 0)::DOUBLE AS _p_sl_{p}",
+        ]
+    return out
+
+
+def _prod_merge_exprs(n_prod: int) -> list[str]:
+    """The ``macc`` merge for the product accumulators — additive (old ⊞ delta)."""
+    out: list[str] = []
+    for p in range(n_prod):
+        out += [
+            f"CAST(COALESCE(a._p_cnt_{p}, 0) + d._p_cnt_{p} AS BIGINT) AS _p_cnt_{p}",
+            f"CAST(COALESCE(a._p_nz_{p}, 0) + d._p_nz_{p} AS BIGINT) AS _p_nz_{p}",
+            f"CAST(COALESCE(a._p_nn_{p}, 0) + d._p_nn_{p} AS BIGINT) AS _p_nn_{p}",
+            f"COALESCE(a._p_sl_{p}, 0) + d._p_sl_{p} AS _p_sl_{p}",
         ]
     return out
 
@@ -1566,7 +1652,7 @@ def _sg_merge_exprs(sg_specs) -> list[str]:
 
 
 def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_units, arg_specs, sg_specs,
-                 f) -> None:
+                 prod_cols, f) -> None:
     """(Re)build the accumulator state wholesale from a clean full output ``rel`` — the comprehensive path
     (bootstrap / coverage-miss). Idempotent: same input → same state."""
     src = unique_name("aggfull")
@@ -1585,6 +1671,7 @@ def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_uni
     exprs += _wgt_rebuild_exprs(wgt_units)
     exprs += _arg_rebuild_exprs(arg_specs)
     exprs += _sg_rebuild_exprs(sg_specs)
+    exprs += _prod_rebuild_exprs(prod_cols)
     con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
     con.execute(
         f"CREATE TABLE {_q(state)} AS "
@@ -1594,8 +1681,8 @@ def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_uni
 
 def _agg_derive(metrics, idx) -> str:
     """The select list deriving the user-facing aggregate columns from the accumulator state. ``idx`` is the
-    ``(sidx, eidx, cidx, widx, aidx, gidx)`` tuple mapping each metric's column(s) to its accumulator index."""
-    sidx, eidx, cidx, widx, aidx, gidx = idx
+    ``(sidx, eidx, cidx, widx, aidx, gidx, pidx)`` tuple mapping each metric's column(s) to its index."""
+    sidx, eidx, cidx, widx, aidx, gidx, pidx = idx
     exprs = []
     for out, m in metrics.items():
         k, c, how = m.kind, m.col, m.how
@@ -1643,6 +1730,10 @@ def _agg_derive(metrics, idx) -> str:
             e = f"_g_arg_{aidx[(k, c, m.col2)]}"
         elif k in ("bool_and", "bool_or", "bit_and", "bit_or"):
             e = f"_s_val_{gidx[(k, c)]}"
+        elif k == "product":
+            p = pidx[c]
+            e = (f"(CASE WHEN _p_cnt_{p} = 0 THEN NULL WHEN _p_nz_{p} > 0 THEN 0 "
+                 f"ELSE (CASE WHEN _p_nn_{p} % 2 <> 0 THEN -1 ELSE 1 END) * exp(_p_sl_{p}) END)")
         else:
             raise DeltaError(f"aggregate metric '{out}': unsupported kind {k!r}")
         exprs.append(f"{e} AS {_q(out)}")

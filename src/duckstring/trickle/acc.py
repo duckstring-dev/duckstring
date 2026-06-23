@@ -18,10 +18,13 @@ Supported:
 - ``count()`` — running row count (1, 2, 3, …).
 - ``min(col)`` / ``max(col)`` — running extreme so far.
 - ``first(col)`` — the first non-NULL value seen in the group (frozen once set; emitted on every later row).
+- ``product(col)`` — running product (float output; a 0 makes it stay 0).
 - ``ema(col, alpha)`` — discrete exponential moving average ``α·x + (1−α)·ema_prev`` (each row one step).
 - ``tema(col, lam)`` — time-decayed (continuous) EMA whose decay scales with the **gap** in the ``.along``
   value: ``α_t = 1 − exp(−lam·Δt)`` (so ``.along`` must be numeric — e.g. an epoch). The first row in a group
   is the seed (``α_t = 1``).
+- ``scan(fn, init, dtype)`` — a custom fold ``fn(state, row) -> (new_state, output)`` (JSON-serializable
+  state).
 
 Usage::
 
@@ -42,12 +45,16 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class AccMetric:
-    """One scan output: its ``kind``, the input column it reads (if any), and the scalar parameter ``param``
-    (``alpha`` for ema / ``lam`` for tema)."""
+    """One scan output: its ``kind``, the input column it reads (if any), the scalar parameter ``param``
+    (``alpha`` for ema / ``lam`` for tema), and — for the custom :func:`scan` fold — the reducer ``fn``, its
+    ``init`` state, and the output ``dtype``."""
 
     kind: str
     col: str | None = None
     param: float | None = None
+    fn: object = None
+    init: object = None
+    dtype: str | None = None
 
 
 def sum(col: str) -> AccMetric:  # noqa: A001 - deliberate SQL-style name on the acc namespace
@@ -88,3 +95,18 @@ def tema(col: str, lam: float) -> AccMetric:
     if lam <= 0:
         raise ValueError(f"tema(lam={lam!r}): need lam > 0")
     return AccMetric("tema", col, float(lam))
+
+
+def product(col: str) -> AccMetric:  # noqa: A001 - mirrors agg.product on the scan namespace
+    """Running product of ``col`` along the axis (NULLs ignored; the first non-NULL seeds it; once a 0 is
+    seen the running product stays 0). Output is a float (DOUBLE) — large products overflow to ±inf."""
+    return AccMetric("product", col)
+
+
+def scan(fn, init, dtype: str = "DOUBLE") -> AccMetric:
+    """A **custom fold**: ``fn(state, row) -> (new_state, output)`` applied per row in ``.along`` order, with
+    ``init`` the per-group starting state and ``row`` a ``{column: value}`` dict of that row's output columns.
+    ``output`` (the per-row value, ``dtype``) is appended; ``new_state`` is carried to the next row. The state
+    is persisted between runs as **JSON**, so it must be JSON-serializable (prefer lists/dicts/numbers — a
+    tuple round-trips to a list); ``output`` must be a scalar compatible with ``dtype``."""
+    return AccMetric("scan", None, None, fn=fn, init=init, dtype=dtype)
