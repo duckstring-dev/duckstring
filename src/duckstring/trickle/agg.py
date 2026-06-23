@@ -48,7 +48,7 @@ class Metric:
     — whether it's a ``sample`` or ``pop``ulation statistic.
 
     ``col2`` carries a second input column for the two-variable metrics landing in Phase 1 (covariance,
-    correlation, weighted, OLS); ``ordered`` flags an order-dependent metric (cumsum / ema / running_*),
+    correlation, weighted, OLS); ``ordered`` flags an order-dependent metric (the ``acc.*`` scans),
     which the builder will only accept on ``.append()`` and only with an ``.along(...)`` axis declared.
     Both default to the single-variable, order-independent case and are not yet consumed — they are the
     foundation the later phases build on (see ``plans/trickle-agg.md``)."""

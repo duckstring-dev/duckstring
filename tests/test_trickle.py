@@ -1913,9 +1913,9 @@ def test_builder_aggregate_argmax_and_semigroup(tmp_path):
 
 def test_builder_accumulate_scan(tmp_path):
     """Phase-3: order-dependent scans via .along(...).accumulate(...).append(...). The running values
-    (cumsum / running_count / running_max / ema / time_decayed_ema) continue from carried fold-state across an
-    incremental run that appends new tail rows. Linear metrics checked vs DuckDB window functions; ema vs an
-    independent Python fold."""
+    (sum / count / max / first / ema / tema) continue from carried fold-state across an incremental run that
+    appends new tail rows. Linear metrics checked vs DuckDB window functions; ema vs an independent Python
+    fold."""
     import math
 
     from duckstring import acc
@@ -1935,17 +1935,18 @@ def test_builder_accumulate_scan(tmp_path):
         (pond.trickle("stream.ev")
              .along("t")
              .accumulate(by="g",
-                         cs=acc.cumsum("x"), rc=acc.running_count(), rmax=acc.running_max("x"),
-                         e=acc.ema("x", 0.5), td=acc.time_decayed_ema("x", lam=0.1))
+                         cs=acc.sum("x"), rc=acc.count(), rmax=acc.max("x"), f0=acc.first("x"),
+                         e=acc.ema("x", 0.5), td=acc.tema("x", lam=0.1))
              .append("scored", pk="id"))
         publish(snk, snk_dir, f=f)
 
     def scored():
         return {r[0]: r for r in snk.sql(
-            f"SELECT id, g, t, x, cs, rc, rmax, e, td FROM ({ParquetDataPlane().read_select(snk_dir, 'scored')})"
+            f"SELECT id, g, t, x, cs, rc, rmax, f0, e, td "
+            f"FROM ({ParquetDataPlane().read_select(snk_dir, 'scored')})"
         ).fetchall()}
 
-    def ema_ref(all_rows):   # independent per-group folds for ema / time_decayed_ema, keyed by id
+    def ema_ref(all_rows):   # independent per-group folds for ema / tema, keyed by id
         out = {}
         st = {}
         for i, g, t, x in sorted(all_rows, key=lambda r: (r[1], r[2])):
@@ -1965,12 +1966,12 @@ def test_builder_accumulate_scan(tmp_path):
     run(ts(1), NEVER)
     got = scored()
     assert len(got) == 5
-    # group a ordered by t: cumsum 10/30/60, count 1/2/3, max 10/20/30
-    assert got[1][4:7] == (10, 1, 10) and got[3][4:7] == (60, 3, 30)
-    assert got[4][4:7] == (5, 1, 5) and got[5][4:7] == (20, 2, 15)   # b cumsum 5→20, max 5→15
+    # group a ordered by t: sum 10/30/60, count 1/2/3, max 10/20/30, first=10 throughout
+    assert got[1][4:8] == (10, 1, 10, 10) and got[3][4:8] == (60, 3, 30, 10)
+    assert got[4][4:8] == (5, 1, 5, 5) and got[5][4:8] == (20, 2, 15, 5)   # b sum 5→20, max 5→15, first=5
     ref = ema_ref(all_rows)
     for i, (e, td) in ref.items():
-        assert got[i][7] == pytest.approx(e) and got[i][8] == pytest.approx(td)
+        assert got[i][8] == pytest.approx(e) and got[i][9] == pytest.approx(td)
 
     # Incremental run: append new tail rows; the scan must continue from carried state, not restart.
     new = [(6, "a", 4, 40), (7, "b", 3, 25)]
@@ -1978,13 +1979,13 @@ def test_builder_accumulate_scan(tmp_path):
     run(ts(2), ts(1))
     got = scored()
     assert len(got) == 7
-    assert got[6][4:7] == (100, 4, 40)   # cumsum 60+40, count 4, max 40 — continued, not reset
-    assert got[7][4:7] == (45, 3, 25)
+    assert got[6][4:8] == (100, 4, 40, 10)   # sum 60+40, count 4, max 40, first still 10 — continued
+    assert got[7][4:8] == (45, 3, 25, 5)
     ref = ema_ref(all_rows + new)
     for i in (6, 7):
-        assert got[i][7] == pytest.approx(ref[i][0]) and got[i][8] == pytest.approx(ref[i][1])
+        assert got[i][8] == pytest.approx(ref[i][0]) and got[i][9] == pytest.approx(ref[i][1])
     # earlier rows are unchanged (append history is frozen)
-    assert got[1][4:7] == (10, 1, 10)
+    assert got[1][4:8] == (10, 1, 10, 10)
     snk.close()
 
 
@@ -1994,9 +1995,9 @@ def test_builder_accumulate_guards(tmp_path):
     snk = duckdb.connect()
     pond = Pond("x", "1.0.0", snk, root=tmp_path, source_majors={"a": 1}, f=ts(1))
     with pytest.raises(BuildError, match="order axis|along"):
-        pond.trickle("a.t").accumulate(by="g", cs=acc.cumsum("x"))
+        pond.trickle("a.t").accumulate(by="g", cs=acc.sum("x"))
     with pytest.raises(BuildError, match="append-only|merge"):
-        pond.trickle("a.t").along("t").accumulate(by="g", cs=acc.cumsum("x")).merge("o", pk="g")
+        pond.trickle("a.t").along("t").accumulate(by="g", cs=acc.sum("x")).merge("o", pk="g")
     with pytest.raises(BuildError, match="acc"):
         pond.trickle("a.t").along("t").accumulate(by="g", bad="nope")
     snk.close()

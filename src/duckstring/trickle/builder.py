@@ -307,21 +307,21 @@ class TrickleBuilder:
 
     def accumulate(self, by=None, **metrics) -> "TrickleBuilder":
         """Enrich **each** row with order-dependent **running** values — a per-row scan in :meth:`along` order
-        partitioned by ``by`` — using :mod:`duckstring.acc` specs (cumsum / running_count / running_min /
-        running_max / ema / time_decayed_ema). It is **not a reduction** (output cardinality = input) and
-        **not terminal**: it returns a builder you finish with :meth:`append`. Append-only — a retraction
-        would invalidate the running values, so :meth:`merge` after it raises and :meth:`along` is required."""
+        partitioned by ``by`` — using :mod:`duckstring.acc` specs (sum / count / min / max / first / ema /
+        tema). It is **not a reduction** (output cardinality = input) and **not terminal**: it returns a
+        builder you finish with :meth:`append`. Append-only — a retraction would invalidate the running
+        values, so :meth:`merge` after it raises and :meth:`along` is required."""
         self._ensure_incremental("accumulate")
         from .acc import AccMetric
 
         if self._along is None:
             raise BuildError(".accumulate() needs an order axis — call .along('col') first")
         if not metrics:
-            raise BuildError(".accumulate() needs ≥1 metric, e.g. total=acc.cumsum('qty')")
+            raise BuildError(".accumulate() needs ≥1 metric, e.g. total=acc.sum('qty')")
         spec = {}
         for out, m in metrics.items():
             if not isinstance(m, AccMetric):
-                raise BuildError(f"accumulate metric '{out}' must be an acc.* spec (acc.cumsum/ema/running_*/…)")
+                raise BuildError(f"accumulate metric '{out}' must be an acc.* spec (acc.sum/count/min/max/ema/tema)")
             spec[out] = m
         self._acc = {"by": normalize_pk(by) if by else (), "metrics": spec}
         return self

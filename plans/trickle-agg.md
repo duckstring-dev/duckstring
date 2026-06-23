@@ -13,7 +13,7 @@ maintain, or it stays out of the namespace (→ `.sql()` comprehensive).
 |---|---|---|---|
 | 1. Retractable, order-independent (sum, mean, var, cov, …) | commutative **group** (has an inverse) | additive accumulator vector; a retraction is `−x` | `.merge()` + `.append()` |
 | 2. Non-retractable, order-independent (min, max, argmax, …) | commutative **semigroup** (no inverse) | accumulator + **rescan the group on a retraction** (the existing min/max path) | `.merge()` + `.append()` |
-| 3. Discrete order-dependent (cumsum, ema, running_*) | sequential fold over rank | per-group **carried fold-state**, tail-extended | **`.append()` only** |
+| 3. Discrete order-dependent (acc.sum, acc.ema, …) | sequential fold over rank | per-group **carried fold-state**, tail-extended | **`.append()` only** |
 | 4. Continuous order-dependent (time-decayed ema) | sequential fold over a gap | same, the fold reads the order-column *value* | **`.append()` only** |
 
 Mechanisms 3 and 4 are one implementation: a per-group state carried across runs, folded forward by this
@@ -115,26 +115,29 @@ their own **`acc.*`** namespace (alongside `agg.*`), applied by **`.accumulate(b
 `.merge()` after it raises; `.along()` is required.
 
 - **`.along(col)`** — the monotonic order axis (non-decreasing with freshness; distinct from a generic sort).
-- **`acc.*`** (`trickle/acc.py`, top-level `acc.py` shim): `cumsum`, `running_count`, `running_min`/`max`,
-  `ema(col, alpha)` [discrete], `time_decayed_ema(col, lam)` [continuous — uses the `.along` value as `t`,
-  `α_t = 1 − exp(−lam·Δt)`].
+- **`acc.*`** (`trickle/acc.py`, top-level `acc.py` shim — the `acc.` prefix marks a metric as *accumulated*):
+  `sum`, `count`, `min`/`max`, `first`, `ema(col, alpha)` [discrete], `tema(col, lam)` [continuous — uses the
+  `.along` value as `t`, `α_t = 1 − exp(−lam·Δt)`].
 - **Per-group carried fold-state** in `_duckstring_acc_{name}` (the accumulators + last `.along` value,
   f-stamped). The scan is a **Python fold** continued from the tail — uniform across every metric (incl. the
-  recursive `ema`/`time_decayed_ema`, where the closed-form window overflows), `O(new rows)` per run.
+  recursive `ema`/`tema`, where the closed-form window overflows), `O(new rows)` per run.
 - **f-stamped replay guard** (a group already at this `f` is skipped); **bootstrap/coverage-miss** re-folds
   from scratch and `append_zset`'s conflict-skip makes the re-derivation idempotent.
 - **Late-arrival**: a row below its group's `.along` high-water mark raises (the monotonic contract); a
   retraction reaching the scan raises (append-only contract). Droplog-diversion deferred.
 
-Deferred: a one-pass **SQL-window** fast path for the linear metrics (cumsum/running_*); `first`/`last`
-(arrival-order) and a `lag`/buffer/`convolution` family; the droplog late-arrival diversion.
+`first` (running first non-NULL) is included. Deferred: a one-pass **SQL-window** fast path for the linear
+metrics (`sum`/`count`/`min`/`max`) — it is *also incremental* (a window over the new tail batch + a carried
+per-group seed), it only drops the Python row-loop; `acc.scan(fn, init)` (a user-supplied custom fold —
+another `acc` spec, not a builder method); a `prev`/`lag` metric (the useful, non-identity reading of "last",
+since running-last is just the current row); the droplog late-arrival diversion.
 
 ### Phase 4 — later / optional
 
 - Approximate holistic metrics as **explicitly-approximate** specs: `approx_count_distinct` (HyperLogLog),
   `approx_quantile` (t-digest) — both mergeable sketches, so they fit the additive mechanism.
-- A general **custom-fold / `.scan()`** primitive for power users (the escape hatch for order-dependent work
-  not worth a first-class metric).
+- A general **custom-fold `acc.scan(fn, init)`** spec (not a builder method — it rides `.accumulate()` like
+  any other `acc.*`, taking a user reducer `(state, row) -> (state, output)`; the fold is already in Python).
 
 ## The `.along` axis
 
@@ -144,9 +147,8 @@ precondition, not a sort) and not required to be a key (flavours 3/4 don't need 
 ```python
 (pond.trickle("orders")
      .along("event_time")
-     .group_by("product")
-     .aggregate(ma=agg.time_decayed_ema("price", t="event_time", lam=0.1))
-     .append("ema_by_product"))
+     .accumulate(by="product", ma=acc.tema("price", lam=0.1))
+     .append("orders_scored", pk="order_id"))
 ```
 
 ## Out of scope (stays `.sql()` / recipes)

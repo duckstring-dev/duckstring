@@ -1015,8 +1015,8 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
     output — re-fold from scratch; the append's conflict-skip makes the re-derivation idempotent), or
     ``empty``. The scan is sound only while history is **tail-only**: a retraction in the input, or a row
     below its group's ``along`` high-water mark, raises (the monotonic contract). The fold is in Python so
-    every metric — including the recursive ``ema`` / ``time_decayed_ema`` — is handled uniformly at
-    ``O(new rows)`` per run."""
+    every metric — including the recursive ``ema`` / ``tema`` — is handled uniformly at ``O(new rows)`` per
+    run."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if kind == "empty":
@@ -1088,28 +1088,32 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
 def _acc_fresh(metric_list) -> dict:
     st = {"_along": None}
     for out, m in metric_list:
-        st[out] = 0 if m.kind in ("cumsum", "running_count") else None
+        st[out] = 0 if m.kind in ("sum", "count") else None
     return st
 
 
 def _acc_step(m, st, out, val, av):
     """Advance accumulator ``out`` by one row (value ``val``, axis value ``av``) and return the running
-    output. NULL values don't move a running statistic; the first non-NULL seeds an ema."""
+    output. NULL values don't move a running statistic; the first non-NULL seeds an ema / ``first``."""
     k = m.kind
-    if k == "cumsum":
+    if k == "sum":
         if val is not None:
             st[out] = st[out] + val
         return st[out]
-    if k == "running_count":
+    if k == "count":
         st[out] += 1
         return st[out]
-    if k == "running_min":
+    if k == "min":
         if val is not None:
             st[out] = val if st[out] is None else min(st[out], val)
         return st[out]
-    if k == "running_max":
+    if k == "max":
         if val is not None:
             st[out] = val if st[out] is None else max(st[out], val)
+        return st[out]
+    if k == "first":
+        if st[out] is None and val is not None:
+            st[out] = val
         return st[out]
     if k == "ema":
         if val is None:
@@ -1117,7 +1121,7 @@ def _acc_step(m, st, out, val, av):
         v, prev = float(val), st[out]
         st[out] = v if prev is None else m.param * v + (1 - m.param) * prev
         return st[out]
-    if k == "time_decayed_ema":
+    if k == "tema":
         if val is None:
             return st[out]
         v, prev = float(val), st[out]
@@ -1133,11 +1137,11 @@ def _acc_step(m, st, out, val, av):
 
 
 def _acc_out_type(m, type_of) -> str:
-    if m.kind == "running_count":
+    if m.kind == "count":
         return "BIGINT"
-    if m.kind in ("running_min", "running_max"):
+    if m.kind in ("min", "max", "first"):
         return type_of[m.col]
-    return "DOUBLE"   # cumsum (running sum) / ema / time_decayed_ema
+    return "DOUBLE"   # sum (running sum) / ema / tema
 
 
 def _load_acc_state(con, state, by, metric_list, f):

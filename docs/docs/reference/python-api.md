@@ -223,20 +223,23 @@ For anything outside this set (window functions, `DISTINCT`, percentiles), aggre
 - **`.along(col)`** declares the **monotonic order axis**: a column that is non-decreasing with freshness (each run's new rows sit at the tail). This is a *precondition*, not a generic sort — a row arriving below its group's high-water mark raises.
 - **`.accumulate(by=None, **metrics)`** is a **transform, not a reduction or a terminal**: it enriches *every* row with its running value (output cardinality = input), in `.along` order within each `by` group, then returns a builder you finish with **`.append(name, pk=…)`**. It is append-only — `.merge()` after it raises (a scan can't be retracted). Maintained by a per-group carried fold-state continued from the tail (`O(new rows)` per run).
 
+The `acc.` prefix is what marks a metric as *accumulated*, so `acc.sum` is a running sum — the order-dependent counterpart of `agg.sum`.
+
 | Spec | Result (running, in `.along` order, per `by` group) |
 |---|---|
-| `acc.cumsum(col)` | running sum |
-| `acc.running_count()` | running row count (1, 2, 3, …) |
-| `acc.running_min(col)` / `acc.running_max(col)` | running extreme so far |
+| `acc.sum(col)` | running sum |
+| `acc.count()` | running row count (1, 2, 3, …) |
+| `acc.min(col)` / `acc.max(col)` | running extreme so far |
+| `acc.first(col)` | first non-NULL value in the group (frozen once set) |
 | `acc.ema(col, alpha)` | discrete EMA `α·x + (1−α)·ema_prev` (`0 < α ≤ 1`) |
-| `acc.time_decayed_ema(col, lam)` | continuous EMA `α_t = 1 − exp(−lam·Δt)`, Δt the gap in the (numeric) `.along` value |
+| `acc.tema(col, lam)` | time-decayed EMA `α_t = 1 − exp(−lam·Δt)`, Δt the gap in the (numeric) `.along` value |
 
 ```python
 from duckstring import acc
 (pond.trickle("orders.order_line")
      .along("event_time")
      .accumulate(by="product_id",
-                 run_total=acc.cumsum("qty"),
+                 run_total=acc.sum("qty"),
                  smoothed=acc.ema("unit_price", 0.3))
      .append("order_line_scored", pk="order_id"))
 ```
