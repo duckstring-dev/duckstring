@@ -107,20 +107,27 @@ the namespace is sound):
 `first_by`/`last_by` in the *arrival-order* sense are order-dependent → Phase 3 (the value-keyed "by" forms
 are just `argmin`/`argmax`).
 
-### Phase 3 — flavours 3 & 4 (order-dependent), `.append()`-only
+### Phase 3 — flavours 3 & 4 (order-dependent), `.append()`-only — **done**
 
-- `.along(col)` axis declaration + validation: **required** for any order-dependent metric, **rejected on
-  `.merge()`** with a clear error.
-- A per-group **carried fold-state companion** (sibling of `_duckstring_agg_{name}`): `last`, `ema_old`,
-  `cumsum_total`, `running_count`, `last_order_value`, `running_min`/`running_max`.
-- Metrics: `cumsum`, `running_count`, `running_min`/`running_max`, `first`, `last`, `ema(alpha)` [discrete],
-  `time_decayed_ema(t, lambda)` [continuous — reads the Δ of the order column].
-- Two landmines to encode:
-  - an **f-stamped replay guard** on the fold-state (fold this run's tail in only if not already applied at
-    this `f`) — else a crash replay double-applies;
-  - a **late-arrival policy** when a row violates the monotonic contract (order value below a group's
-    processed high-water mark): document the contract as a precondition (like the determinism contract), and
-    optionally detect-and-divert to the existing `__droplog`.
+Resolved design (the author's): order-dependent ops are a **per-row scan** (output cardinality = input), in
+their own **`acc.*`** namespace (alongside `agg.*`), applied by **`.accumulate(by, **metrics)`** — a
+**non-terminal transform** (it enriches rows, doesn't reduce or write) finished by `.append()`. Append-only:
+`.merge()` after it raises; `.along()` is required.
+
+- **`.along(col)`** — the monotonic order axis (non-decreasing with freshness; distinct from a generic sort).
+- **`acc.*`** (`trickle/acc.py`, top-level `acc.py` shim): `cumsum`, `running_count`, `running_min`/`max`,
+  `ema(col, alpha)` [discrete], `time_decayed_ema(col, lam)` [continuous — uses the `.along` value as `t`,
+  `α_t = 1 − exp(−lam·Δt)`].
+- **Per-group carried fold-state** in `_duckstring_acc_{name}` (the accumulators + last `.along` value,
+  f-stamped). The scan is a **Python fold** continued from the tail — uniform across every metric (incl. the
+  recursive `ema`/`time_decayed_ema`, where the closed-form window overflows), `O(new rows)` per run.
+- **f-stamped replay guard** (a group already at this `f` is skipped); **bootstrap/coverage-miss** re-folds
+  from scratch and `append_zset`'s conflict-skip makes the re-derivation idempotent.
+- **Late-arrival**: a row below its group's `.along` high-water mark raises (the monotonic contract); a
+  retraction reaching the scan raises (append-only contract). Droplog-diversion deferred.
+
+Deferred: a one-pass **SQL-window** fast path for the linear metrics (cumsum/running_*); `first`/`last`
+(arrival-order) and a `lag`/buffer/`convolution` family; the droplog late-arrival diversion.
 
 ### Phase 4 — later / optional
 

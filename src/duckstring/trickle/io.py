@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 from pathlib import Path
 
 _uid = itertools.count()
@@ -78,6 +79,11 @@ WARM_SUFFIX = "__band"
 # ``_duckstring_agg_{name}`` companion. Reserved prefix → ``registry_tables`` hides it from publish; the
 # published main holds only the derived user columns.
 AGG_STATE_PREFIX = "_duckstring_agg_"
+# A ``.accumulate(...)`` (order-dependent scan) output keeps its per-group **carried fold-state** (the running
+# accumulators after the last row + that row's ``.along`` value, f-stamped for replay) in a
+# ``_duckstring_acc_{name}`` companion. Reserved prefix → hidden from publish; the output append table holds
+# the scan-enriched rows.
+ACC_STATE_PREFIX = "_duckstring_acc_"
 # The mode/PK registry: one row per Trickle output table. Named in the reserved namespace so
 # ``registry_tables`` hides it from the publish set.
 META_TABLE = "_duckstring_trickle"
@@ -994,6 +1000,189 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         f"UNION ALL BY NAME SELECT {out_sel}, -1 AS {_q(D_COL)} FROM ({old_out})"
     )
     apply_zset(con, name, delta_out, f, by, retain_t=retain_t, retain_n=retain_n)
+
+
+# ─── order-dependent scans (.accumulate → acc.*) ─────────────────────────────────
+
+
+def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
+                     fail_on_conflict=True, log_drops=True, retain_t=None, retain_n=None) -> None:
+    """Maintain a per-row **scan** output ``name`` (an append Trickle): enrich each row with its running value
+    in ``along`` order within its ``by`` group, continuing each group's **carried fold-state** from the tail.
+
+    ``metrics`` is ``{out: acc.AccMetric}``. ``kind`` is the builder's ``_compute`` class: ``incremental``
+    (a Z-set ΔO, all ``+1`` — fold the new tail rows on from carried state), ``comprehensive`` (a full clean
+    output — re-fold from scratch; the append's conflict-skip makes the re-derivation idempotent), or
+    ``empty``. The scan is sound only while history is **tail-only**: a retraction in the input, or a row
+    below its group's ``along`` high-water mark, raises (the monotonic contract). The fold is in Python so
+    every metric — including the recursive ``ema`` / ``time_decayed_ema`` — is handled uniformly at
+    ``O(new rows)`` per run."""
+    if f is None:
+        raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
+    if kind == "empty":
+        return
+    by = tuple(by)
+    metric_list = list(metrics.items())
+    state = f"{ACC_STATE_PREFIX}{name}"
+
+    src = unique_name("accsrc")
+    rel.create_view(src, replace=True)
+    type_of = {c: str(t) for c, t in zip(rel.columns, rel.types, strict=True)}
+    usercols = [c for c in rel.columns if c != D_COL]
+    if along not in usercols:
+        raise DeltaError(f".accumulate('{name}'): the .along('{along}') column is not in the scan input")
+
+    if kind == "comprehensive":
+        con.execute(f"DROP TABLE IF EXISTS {_q(state)}")   # re-fold from scratch (idempotent via append-skip)
+        carried, done, where = {}, set(), ""
+    else:
+        neg = con.execute(f"SELECT count(*) FROM {_q(src)} WHERE {_q(D_COL)} < 0").fetchone()[0]
+        if neg:
+            raise DeltaError(
+                f".accumulate('{name}'): {neg} retracted row(s) reached an order-dependent scan — its input "
+                f"must be append-only (monotonic in .along('{along}'))."
+            )
+        carried, done = _load_acc_state(con, state, by, metric_list, f)
+        where = f" WHERE {_q(D_COL)} > 0"
+
+    order_by = ", ".join(_q(c) for c in (*by, along))
+    sel = ", ".join(_q(c) for c in usercols)
+    rows = con.execute(f"SELECT {sel} FROM {_q(src)}{where} ORDER BY {order_by}").fetchall()
+    idx = {c: i for i, c in enumerate(usercols)}
+
+    group: dict = {}
+    out_rows = []
+    for row in rows:
+        gk = tuple(row[idx[b]] for b in by)
+        if gk in done:
+            continue
+        st = group.get(gk)
+        if st is None:
+            st = carried.pop(gk, None) or _acc_fresh(metric_list)
+            group[gk] = st
+        av = row[idx[along]]
+        if st["_along"] is not None and av is not None and av < st["_along"]:
+            raise DeltaError(
+                f".accumulate('{name}'): a row arrived below its group's .along('{along}') high-water mark "
+                f"({av!r} < {st['_along']!r}) — the axis must be non-decreasing with freshness."
+            )
+        outvals = [_acc_step(m, st, out, row[idx[m.col]] if m.col else None, av) for out, m in metric_list]
+        if av is not None:
+            st["_along"] = av
+        out_rows.append((*row, *outvals))
+
+    if out_rows:
+        out_cols = usercols + [out for out, _ in metric_list]
+        coldefs = [f"{_q(c)} {type_of[c]}" for c in usercols] + \
+                  [f"{_q(out)} {_acc_out_type(m, type_of)}" for out, m in metric_list]
+        tmp = unique_name("accout")
+        con.execute(f"CREATE TEMP TABLE {_q(tmp)} ({', '.join(coldefs)})")
+        ph = ", ".join("?" for _ in out_cols)
+        con.executemany(f"INSERT INTO {_q(tmp)} VALUES ({ph})", out_rows)
+        append_zset(con, name, _as_zset(con.sql(f"SELECT * FROM {_q(tmp)}"), 1), f, normalize_pk(pk),
+                    fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
+
+    _save_acc_state(con, state, by, along, metric_list, group, f, type_of)
+
+
+def _acc_fresh(metric_list) -> dict:
+    st = {"_along": None}
+    for out, m in metric_list:
+        st[out] = 0 if m.kind in ("cumsum", "running_count") else None
+    return st
+
+
+def _acc_step(m, st, out, val, av):
+    """Advance accumulator ``out`` by one row (value ``val``, axis value ``av``) and return the running
+    output. NULL values don't move a running statistic; the first non-NULL seeds an ema."""
+    k = m.kind
+    if k == "cumsum":
+        if val is not None:
+            st[out] = st[out] + val
+        return st[out]
+    if k == "running_count":
+        st[out] += 1
+        return st[out]
+    if k == "running_min":
+        if val is not None:
+            st[out] = val if st[out] is None else min(st[out], val)
+        return st[out]
+    if k == "running_max":
+        if val is not None:
+            st[out] = val if st[out] is None else max(st[out], val)
+        return st[out]
+    if k == "ema":
+        if val is None:
+            return st[out]
+        v, prev = float(val), st[out]
+        st[out] = v if prev is None else m.param * v + (1 - m.param) * prev
+        return st[out]
+    if k == "time_decayed_ema":
+        if val is None:
+            return st[out]
+        v, prev = float(val), st[out]
+        if prev is None or st["_along"] is None:
+            st[out] = v
+        else:
+            dt = av - st["_along"]
+            dt = dt.total_seconds() if hasattr(dt, "total_seconds") else float(dt)
+            a = 1 - math.exp(-m.param * dt)
+            st[out] = a * v + (1 - a) * prev
+        return st[out]
+    raise DeltaError(f"accumulate metric '{out}': unsupported kind {m.kind!r}")
+
+
+def _acc_out_type(m, type_of) -> str:
+    if m.kind == "running_count":
+        return "BIGINT"
+    if m.kind in ("running_min", "running_max"):
+        return type_of[m.col]
+    return "DOUBLE"   # cumsum (running sum) / ema / time_decayed_ema
+
+
+def _load_acc_state(con, state, by, metric_list, f):
+    """The carried fold-state per group (``_along`` + the accumulators), and the set of groups already at
+    this ``f`` (a replay — skip them)."""
+    if not _table_exists(con, state):
+        return {}, set()
+    cols = [_q(b) for b in by] + ["_k_along"] + [f"_acc_{out}" for out, _ in metric_list] + [_q(F_COL)]
+    nby = len(by)
+    carried, done = {}, set()
+    for r in con.execute(f"SELECT {', '.join(cols)} FROM {_q(state)}").fetchall():
+        gk = tuple(r[:nby])
+        if r[-1] == f:
+            done.add(gk)
+            continue
+        st = {"_along": r[nby]}
+        for i, (out, _m) in enumerate(metric_list):
+            st[out] = r[nby + 1 + i]
+        carried[gk] = st
+    return carried, done
+
+
+def _save_acc_state(con, state, by, along, metric_list, group, f, type_of) -> None:
+    if not group:
+        return
+    if not _table_exists(con, state):
+        coldefs = [f"{_q(b)} {type_of[b]}" for b in by] + [f"_k_along {type_of[along]}"] + \
+                  [f"_acc_{out} {_acc_out_type(m, type_of)}" for out, m in metric_list] + \
+                  [f"{_q(F_COL)} TIMESTAMP WITH TIME ZONE"]
+        con.execute(f"CREATE TABLE {_q(state)} ({', '.join(coldefs)})")
+    statecols = [_q(b) for b in by] + ["_k_along"] + [f"_acc_{out}" for out, _ in metric_list] + [_q(F_COL)]
+    new_rows = [(*gk, st["_along"], *[st[out] for out, _ in metric_list], f) for gk, st in group.items()]
+    con.execute("BEGIN TRANSACTION")
+    try:
+        if by:
+            cond = " AND ".join(f"{_q(b)} IS NOT DISTINCT FROM ?" for b in by)
+            con.executemany(f"DELETE FROM {_q(state)} WHERE {cond}", [gk for gk in group])
+        else:
+            con.execute(f"DELETE FROM {_q(state)}")
+        ph = ", ".join("?" for _ in statecols)
+        con.executemany(f"INSERT INTO {_q(state)} ({', '.join(statecols)}) VALUES ({ph})", new_rows)
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
 
 
 def _agg_families(metrics):

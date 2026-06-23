@@ -225,6 +225,8 @@ class TrickleBuilder:
         self._materialised = None  # a full relation after .sql() → comprehensive mode (no incremental compute)
         self._agg = None  # {"by": (...), "metrics": {out: agg.Metric}} after .aggregate()
         self._agg_by: tuple[str, ...] | None = None
+        self._along: str | None = None  # the monotonic order axis for .accumulate() (set by .along())
+        self._acc = None  # {"by": (...), "metrics": {out: acc.AccMetric}} after .accumulate()
         self._key_filter = True  # set per-terminal from the .merge()/.append() key_filter flag
         # compile-scoped caches (rebuilt per terminal): leaf → alias, leaf → bare cols
         self._alias_of: dict[int, str] = {}
@@ -289,6 +291,40 @@ class TrickleBuilder:
                 f".{op}() can't follow .aggregate() — aggregate is terminal-bound to .merge(); do further "
                 f"work in a downstream Trickle"
             )
+        if self._acc is not None:
+            raise BuildError(
+                f".{op}() can't follow .accumulate() — finish the scan with .append(); do further work in a "
+                f"downstream Trickle"
+            )
+
+    def along(self, col: str) -> "TrickleBuilder":
+        """Declare the **monotonic order axis** for an order-dependent :meth:`accumulate` scan — a column
+        non-decreasing with freshness (so each run's new rows sit at the tail). Distinct from a generic sort:
+        it's a precondition the scan relies on, not an ordering of a finished result."""
+        self._ensure_incremental("along")
+        self._along = col
+        return self
+
+    def accumulate(self, by=None, **metrics) -> "TrickleBuilder":
+        """Enrich **each** row with order-dependent **running** values — a per-row scan in :meth:`along` order
+        partitioned by ``by`` — using :mod:`duckstring.acc` specs (cumsum / running_count / running_min /
+        running_max / ema / time_decayed_ema). It is **not a reduction** (output cardinality = input) and
+        **not terminal**: it returns a builder you finish with :meth:`append`. Append-only — a retraction
+        would invalidate the running values, so :meth:`merge` after it raises and :meth:`along` is required."""
+        self._ensure_incremental("accumulate")
+        from .acc import AccMetric
+
+        if self._along is None:
+            raise BuildError(".accumulate() needs an order axis — call .along('col') first")
+        if not metrics:
+            raise BuildError(".accumulate() needs ≥1 metric, e.g. total=acc.cumsum('qty')")
+        spec = {}
+        for out, m in metrics.items():
+            if not isinstance(m, AccMetric):
+                raise BuildError(f"accumulate metric '{out}' must be an acc.* spec (acc.cumsum/ema/running_*/…)")
+            spec[out] = m
+        self._acc = {"by": normalize_pk(by) if by else (), "metrics": spec}
+        return self
 
     def group_by(self, by) -> "TrickleBuilder":
         """Ibis-shaped alias: ``.group_by(by).aggregate(**metrics)`` ≡ ``.aggregate(by=by, **metrics)``."""
@@ -376,6 +412,9 @@ class TrickleBuilder:
         intermediate materialisations **in one Ripple** — each ``.merge()`` persists the intermediate as a
         cross-run trace (the explicit short-circuit to per-run recomputation)."""
         ctx = self.ctx
+        if self._acc is not None:
+            raise BuildError(".accumulate() is append-only (a scan can't be retracted) — finish it with "
+                             ".append(), not .merge()")
         if self._agg is not None:
             from . import io as trickle
 
@@ -417,6 +456,9 @@ class TrickleBuilder:
         (``log_drops=False``), a dimension delta cannot affect the result, so the builder enriches only the
         **new spine rows** with the **current** dimension states (an O(spine delta) lookup)."""
         ctx = self.ctx
+        if self._acc is not None:
+            return self._append_accumulate(name, pk=pk, fail_on_conflict=fail_on_conflict, log_drops=log_drops,
+                                            retain_t=retain_t, retain_n=retain_n)
         if self._agg is not None:
             raise BuildError(".append() can't follow .aggregate() — an aggregate updates groups; use .merge()")
         out_pk = normalize_pk(pk)
@@ -446,6 +488,22 @@ class TrickleBuilder:
                 ctx.con, name, zset, ctx.f, out_pk,
                 fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
             )
+        return self._chain(name, out_pk)
+
+    def _append_accumulate(self, name, *, pk, fail_on_conflict, log_drops, retain_t, retain_n):
+        """The ``.accumulate(...).append(...)`` path: compose ΔO, then fold the per-row scan on from each
+        group's carried state and append the enriched rows (:func:`duckstring.trickle.io.apply_accumulate`)."""
+        from . import io as trickle
+
+        by, metrics, along = self._acc["by"], self._acc["metrics"], self._along
+        out_pk = normalize_pk(pk)
+        # the scan needs by + along + each metric's input column + the output PK present in the composed rows.
+        required = tuple(dict.fromkeys((*by, along, *out_pk) + tuple(m.col for m in metrics.values() if m.col)))
+        kind, rel = self._compute(required, name, ivm=True, key_filter=True)
+        trickle.apply_accumulate(
+            self.ctx.con, name, by, along, metrics, kind, rel, self.ctx.f, pk,
+            fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
+        )
         return self._chain(name, out_pk)
 
     def count(self) -> int:
