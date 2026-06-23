@@ -1090,17 +1090,161 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
         out_rows.append((*row, *outvals))
 
     if out_rows:
-        out_cols = usercols + [out for out, _ in metric_list]
-        coldefs = [f"{_q(c)} {type_of[c]}" for c in usercols] + \
-                  [f"{_q(out)} {_acc_out_type(m, type_of)}" for out, m in metric_list]
-        tmp = unique_name("accout")
-        con.execute(f"CREATE TEMP TABLE {_q(tmp)} ({', '.join(coldefs)})")
-        ph = ", ".join("?" for _ in out_cols)
-        con.executemany(f"INSERT INTO {_q(tmp)} VALUES ({ph})", out_rows)
+        tmp = _acc_out_table(con, out_rows, usercols, metric_list, type_of)
         append_zset(con, name, _as_zset(con.sql(f"SELECT * FROM {_q(tmp)}"), 1), f, normalize_pk(pk),
                     fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
 
     _save_acc_state(con, state, by, along, metric_list, group, f, type_of)
+
+
+def _acc_out_table(con, out_rows, usercols, metric_list, type_of) -> str:
+    """Materialise scan-enriched rows into a temp table (the user columns + the typed metric columns) and
+    return its name. Created with the schema even when ``out_rows`` is empty (a 0-row operand for a diff)."""
+    coldefs = [f"{_q(c)} {type_of[c]}" for c in usercols] + \
+              [f"{_q(out)} {_acc_out_type(m, type_of)}" for out, m in metric_list]
+    tmp = unique_name("accout")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(tmp)} ({', '.join(coldefs)})")
+    if out_rows:
+        ph = ", ".join("?" for _ in range(len(usercols) + len(metric_list)))
+        con.executemany(f"INSERT INTO {_q(tmp)} VALUES ({ph})", out_rows)
+    return tmp
+
+
+def _scan_refold(rows, idx, by, along, metric_list) -> list:
+    """Fold each group from a **fresh** state over its full ordered membership — merge mode re-derives the
+    scan (rather than continuing carried state), so a retraction or an out-of-order insert anywhere in a
+    group's past is handled by simply re-folding it. Returns the per-row scan outputs."""
+    group: dict = {}
+    out_rows = []
+    for row in rows:
+        gk = tuple(row[idx[b]] for b in by)
+        st = group.get(gk)
+        if st is None:
+            st = _acc_fresh(metric_list)
+            group[gk] = st
+        av = row[idx[along]]
+        outvals = [_acc_step(m, st, out, row, idx, av) for out, m in metric_list]
+        out_rows.append((*row, *outvals))
+    return out_rows
+
+
+def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f, pk, *,
+                           retain_t=None, retain_n=None) -> None:
+    """Merge-mode ordered scan: maintain a per-row scan output ``name`` as a **merge** Trickle, handling
+    retractions / out-of-order edits. A change anywhere in a group's sequence invalidates the fold from that
+    point, so the affected groups are **re-folded over their current membership** (``current``) and the result
+    is diffed against the prior main (merge semantics) — no append-only / monotonic constraint. ``O(affected
+    membership)`` per run (a future optimisation can carry state and re-fold only the changed suffix)."""
+    if f is None:
+        raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
+    if kind == "empty":
+        return
+    by = tuple(by)
+    pk = normalize_pk(pk)
+    by_list = ", ".join(_q(b) for b in by)
+    metric_list = list(metrics.items())
+    cur = unique_name("amcur")
+    current.create_view(cur, replace=True)
+    type_of = {c: str(t) for c, t in zip(current.columns, current.types, strict=True)}
+    usercols = list(current.columns)
+    if along not in usercols:
+        raise DeltaError(f".accumulate('{name}'): the .along('{along}') column is not in the scan input")
+    idx = {c: i for i, c in enumerate(usercols)}
+    ucols_sql = ", ".join(_q(c) for c in usercols)
+    order_by = ", ".join(_q(c) for c in (*by, along))
+    out_sel = ", ".join(_q(c) for c in usercols + [o for o, _ in metric_list])
+
+    if kind == "comprehensive":   # bootstrap / coverage-miss → re-fold everything, full merge-diff vs prior
+        rows = con.execute(f"SELECT {ucols_sql} FROM {_q(cur)} ORDER BY {order_by}").fetchall()
+        tmp = _acc_out_table(con, _scan_refold(rows, idx, by, along, metric_list), usercols, metric_list, type_of)
+        merge_table(con, name, con.sql(f"SELECT * FROM {_q(tmp)}"), f, pk, retain_t=retain_t, retain_n=retain_n)
+        return
+
+    delta = unique_name("amd")
+    rel.create_view(delta, replace=True)
+    affected = f"({by_list}) IN (SELECT DISTINCT {by_list} FROM {_q(delta)})"
+    rows = con.execute(f"SELECT {ucols_sql} FROM {_q(cur)} WHERE {affected} ORDER BY {order_by}").fetchall()
+    tmp = _acc_out_table(con, _scan_refold(rows, idx, by, along, metric_list), usercols, metric_list, type_of)
+    recon = _reconstruct_sql_for(con, name)
+    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE {affected}" if recon \
+        else f"SELECT {out_sel} FROM {_q(tmp)} WHERE 1=0"
+    zset = con.sql(
+        f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM (SELECT {out_sel} FROM {_q(tmp)}) "
+        f"UNION ALL BY NAME SELECT {out_sel}, -1 AS {_q(D_COL)} FROM ({old_out})"
+    )
+    apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n)
+
+
+def _reduce_finals(rows, idx, by, along, metric_list) -> dict:
+    """Fold each group from a fresh state in ``along`` order, keeping the **last** output per group — the
+    order-dependent reduction value(s)."""
+    group: dict = {}
+    finals: dict = {}
+    for row in rows:
+        gk = tuple(row[idx[b]] for b in by)
+        st = group.get(gk)
+        if st is None:
+            st = _acc_fresh(metric_list)
+            group[gk] = st
+        av = row[idx[along]]
+        finals[gk] = [_acc_step(m, st, out, row, idx, av) for out, m in metric_list]
+    return finals
+
+
+def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *,
+                         retain_t=None, retain_n=None) -> None:
+    """Maintain an order-dependent **custom reduction** ``name`` (``agg.reduce``) — one value per group, the
+    final fold over the group's rows in ``along`` order. Like merge-mode accumulate, but collapsed to one row
+    per group (keyed by ``by``): affected groups are re-folded over their current membership and merge-diffed
+    against the prior main, so a change anywhere in a group is handled (no inverse needed)."""
+    if f is None:
+        raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
+    if kind == "empty":
+        return
+    by = tuple(by)
+    by_list = ", ".join(_q(b) for b in by)
+    metric_list = list(metrics.items())
+    cur = unique_name("orcur")
+    current.create_view(cur, replace=True)
+    type_of = {c: str(t) for c, t in zip(current.columns, current.types, strict=True)}
+    usercols = list(current.columns)
+    if along not in usercols:
+        raise DeltaError(f".aggregate(agg.reduce): the .along('{along}') column is not in the input")
+    idx = {c: i for i, c in enumerate(usercols)}
+    ucols_sql = ", ".join(_q(c) for c in usercols)
+    order_by = ", ".join(_q(c) for c in (*by, along))
+    out_cols = list(by) + [o for o, _ in metric_list]
+    out_sel = ", ".join(_q(c) for c in out_cols)
+
+    def _build(finals):
+        coldefs = [f"{_q(b)} {type_of[b]}" for b in by] + \
+                  [f"{_q(o)} {_acc_out_type(m, type_of)}" for o, m in metric_list]
+        t = unique_name("orout")
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(t)} ({', '.join(coldefs)})")
+        if finals:
+            ph = ", ".join("?" for _ in range(len(by) + len(metric_list)))
+            con.executemany(f"INSERT INTO {_q(t)} VALUES ({ph})", [(*gk, *v) for gk, v in finals.items()])
+        return t
+
+    if kind == "comprehensive":
+        rows = con.execute(f"SELECT {ucols_sql} FROM {_q(cur)} ORDER BY {order_by}").fetchall()
+        t = _build(_reduce_finals(rows, idx, by, along, metric_list))
+        merge_table(con, name, con.sql(f"SELECT * FROM {_q(t)}"), f, by, retain_t=retain_t, retain_n=retain_n)
+        return
+
+    delta = unique_name("ord")
+    rel.create_view(delta, replace=True)
+    affected = f"({by_list}) IN (SELECT DISTINCT {by_list} FROM {_q(delta)})"
+    rows = con.execute(f"SELECT {ucols_sql} FROM {_q(cur)} WHERE {affected} ORDER BY {order_by}").fetchall()
+    t = _build(_reduce_finals(rows, idx, by, along, metric_list))
+    recon = _reconstruct_sql_for(con, name)
+    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE {affected}" if recon \
+        else f"SELECT {out_sel} FROM {_q(t)} WHERE 1=0"
+    zset = con.sql(
+        f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM (SELECT {out_sel} FROM {_q(t)}) "
+        f"UNION ALL BY NAME SELECT {out_sel}, -1 AS {_q(D_COL)} FROM ({old_out})"
+    )
+    apply_zset(con, name, zset, f, by, retain_t=retain_t, retain_n=retain_n)
 
 
 # The scan kinds maintainable as a scalar-seeded SQL window aggregate (the fast path) — no per-row Python.
@@ -1186,7 +1330,9 @@ def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols
 
 
 # The metric kinds whose carried state is non-scalar (a fold state / FIFO buffer) → persisted as JSON text.
-_ACC_JSON_STATE = frozenset({"scan", "lag", "conv"})
+# ``reduce`` is the agg.reduce custom reduction — it folds exactly like ``scan`` (only the *terminal* differs:
+# scan emits per row, reduce keeps the last value per group).
+_ACC_JSON_STATE = frozenset({"scan", "lag", "conv", "reduce"})
 
 
 def _acc_fresh(metric_list) -> dict:
@@ -1194,7 +1340,7 @@ def _acc_fresh(metric_list) -> dict:
     for out, m in metric_list:
         if m.kind in ("sum", "count"):
             st[out] = 0
-        elif m.kind == "scan":
+        elif m.kind in ("scan", "reduce"):
             st[out] = json.loads(json.dumps(m.init))   # JSON-normalised so it matches the cross-run reload
         elif m.kind in ("lag", "conv"):
             st[out] = []                                # a FIFO buffer of the last n / K values
@@ -1262,7 +1408,7 @@ def _acc_step(m, st, out, row, idx, av):
             a = 1 - math.exp(-m.param * dt)
             st[out] = a * v + (1 - a) * prev
         return st[out]
-    if k == "scan":
+    if k in ("scan", "reduce"):
         new_state, output = m.fn(st[out], {c: row[i] for c, i in idx.items()})
         st[out] = new_state
         return output
@@ -1275,7 +1421,7 @@ def _acc_out_type(m, type_of) -> str:
         return "BIGINT"
     if m.kind in ("min", "max", "first", "lag"):
         return type_of[m.col]
-    if m.kind == "scan":
+    if m.kind in ("scan", "reduce"):
         return m.dtype or "DOUBLE"
     return "DOUBLE"   # sum / product / ema / tema / conv
 

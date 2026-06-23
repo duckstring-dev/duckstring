@@ -215,6 +215,8 @@ See the [guide](../guides/trickle.md#the-builder-pondtrickle).
 
 `var`/`stddev`/`covariance`/`correlation`/`ols` are maintained as **centred (co-)moments** by a numerically stable parallel merge (never the cancellation-prone `Σx²−(Σx)²/n`), so they stay accurate at any value scale and under retraction.
 
+`agg.reduce(fn, init, *, dtype=)` is a **custom order-dependent reduction** — one value per group, the final fold of the group's rows in `.along` order (`fn(state, row) -> (new_state, output)`, `row` a `{col: value}` dict). It's the reducing counterpart of [`acc.scan`](#order-dependent-scans--alongaccumulate): use `.along(col).aggregate(by, m=agg.reduce(...)).merge(name)`. Retraction-aware (a change anywhere re-folds the group); can't share an `.aggregate()` with the order-independent metrics above.
+
 For anything outside this set (window functions, `DISTINCT`, percentiles), aggregate via `.sql()`.
 
 ### Order-dependent scans — `.along(...).accumulate(...)`
@@ -222,7 +224,9 @@ For anything outside this set (window functions, `DISTINCT`, percentiles), aggre
 `.aggregate(...)` reductions are order-*independent*. For **order-dependent** running values — a value per row, computed in sequence — use **`.along(col).accumulate(by, **metrics)`** with `duckstring.acc` specs, finished by `.append()`:
 
 - **`.along(col)`** declares the **monotonic order axis**: a column that is non-decreasing with freshness (each run's new rows sit at the tail). This is a *precondition*, not a generic sort — a row arriving below its group's high-water mark raises.
-- **`.accumulate(by=None, **metrics)`** is a **transform, not a reduction or a terminal**: it enriches *every* row with its running value (output cardinality = input), in `.along` order within each `by` group, then returns a builder you finish with **`.append(name, pk=…)`**. It is append-only — `.merge()` after it raises (a scan can't be retracted). Maintained by a per-group carried fold-state continued from the tail (`O(new rows)` per run).
+- **`.accumulate(by=None, **metrics)`** is a **transform, not a reduction or a terminal**: it enriches *every* row with its running value (output cardinality = input), in `.along` order within each `by` group, then returns a builder you finish with a terminal:
+  - **`.append(name, pk=…)`** — append-only; the input must stay monotonic in `.along`. Maintained by a per-group carried fold-state continued from the tail (`O(new rows)`/run).
+  - **`.merge(name, pk=…)`** — **retraction-aware**: an edit or out-of-order insert anywhere re-folds the affected group's sequence over its current membership and diffs against the prior main (no monotonic constraint; `O(affected membership)`/run).
 
 The `acc.` prefix is what marks a metric as *accumulated*, so `acc.sum` is a running sum — the order-dependent counterpart of `agg.sum`.
 

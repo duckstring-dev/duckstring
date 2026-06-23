@@ -135,24 +135,26 @@ for an all-scalar-seed scan (`sum`/`count`/`min`/`max`/`first` with a `by`) — 
 the carried per-group seed (so it's *incremental*, not just bootstrap; the recursive/buffer/custom folds keep
 the Python path). Deferred: the droplog late-arrival diversion.
 
-### Phase 5 — `.merge()` for ordered operations (retraction-aware scans) — **future goal**
+### Phase 5 — `.merge()` for ordered operations (retraction-aware scans) — **done**
 
-Today the order-dependent scans (`acc.*` / `.accumulate()`) are `.append()`-only: a retraction would
-invalidate every later value in the sequence, so they refuse one. The next body of work lifts that to
-support **`.merge()`** for ordered operations by handling retractions — recomputing the affected suffix of a
-group's sequence when a row in its past changes (an edit at position *i* re-folds *i…end* for that group).
-This still requires an `.along` axis (the order is intrinsic), but no longer requires append-only history.
+The order-dependent scans now support **`.merge()`** as well as `.append()`. `.accumulate(...).merge(name,
+pk=…)` (`apply_accumulate_merge`) handles retractions / out-of-order edits by **re-folding the affected
+group(s) over their current membership** (the builder's `_full_join()`) and merge-diffing against the prior
+main — so a change anywhere in a group's sequence is correct, with **no append-only / monotonic constraint**.
+`O(affected membership)` per run; a future optimisation can carry per-group state and re-fold only the changed
+suffix (the `inverse` hook below is reserved for that). Append-mode is unchanged (carried state, monotonic).
 
-It also brings the aggregation-side counterpart of the custom scan — **`agg.reduce(...)`**:
+The aggregation-side custom reduction landed as **`agg.reduce(fn, init, *, inverse=None)`** — one value per
+group, the final fold in `.along` order (`fn(state, row) -> (new_state, output)`), used via
+`.along(col).aggregate(by, m=agg.reduce(...)).merge(name)` (`apply_ordered_reduce` = the same re-fold,
+collapsed to the last value per group, keyed by `by`). It requires `.along` and can't share an `.aggregate()`
+with the order-independent metrics.
 
-- Given **only a forward expression** (the reducer), `agg.reduce` mandates `.along` + `.append()` (same
-  constraint as `acc.scan` — no inverse, so no retraction, so append-only).
-- Given **also an inverse expression**, it can support `.merge()` too (retractions undo via the inverse),
-  while still requiring `.along` (order is intrinsic to the fold).
-
-So the matrix becomes: forward-only → append-only; forward + inverse → merge-capable; both ordered. This
-generalises the retractable-vs-not distinction (the whole `agg`/`acc` split) into a single user-extensible
-operator pair, and is the natural home for retraction-aware EMAs and cumulative sums.
+Note on the original forward/inverse → append/merge sketch: because the merge path **re-folds** (rather than
+undoing via an inverse), `.merge()` works for *any* fold without an inverse — so `agg.reduce` is merge-capable
+as-is, and `acc.scan` (forward-only) now works under `.merge()` too. The `inverse` argument is therefore
+**reserved** for the carried-state suffix-refold optimisation (cheaper than a full re-fold on a tail
+retraction), not required for correctness.
 
 ### Phase 4 — later / optional
 

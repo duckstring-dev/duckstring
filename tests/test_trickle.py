@@ -2175,6 +2175,96 @@ def test_builder_accumulate_lag_and_convolution(tmp_path):
     snk.close()
 
 
+def test_builder_accumulate_merge_retraction(tmp_path):
+    """Merge-mode ordered scan (`.accumulate(...).merge(...)`): an edit to a row in a group's *past* re-folds
+    that group's suffix (running values from the edit onward all change), and a deletion drops + re-folds —
+    neither of which append-mode allows. Checked against a from-scratch fold over the current membership."""
+    from duckstring import acc
+
+    ev = duckdb.connect(str(tmp_path / "stream.duckdb"))
+    ev_dir = tmp_path / "ponds" / "stream" / "m1" / "data"
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "scored" / "m1" / "data"
+
+    def emit(rows, f):   # a MERGE source — editing/removing a row produces retractions in its delta
+        vals = ", ".join(f"({i}, '{g}', {t}, {x})" for i, g, t, x in rows)
+        T.merge_table(ev, "ev", ev.sql(f"SELECT * FROM (VALUES {vals}) v(id, g, t, x)"), f, ("id",))
+        publish(ev, ev_dir, f=f)
+
+    def run(f, pf):
+        pond = Pond("scored", "1.0.0", snk, root=tmp_path, source_majors={"stream": 1}, f=f, previous_f=pf)
+        (pond.trickle("stream.ev")
+             .along("t").accumulate(by="g", cs=acc.sum("x")).merge("scored", pk="id"))
+        publish(snk, snk_dir, f=f)
+
+    def scored():
+        return {r[0]: r[1] for r in snk.sql(
+            f"SELECT id, cs FROM ({ParquetDataPlane().read_select(snk_dir, 'scored')})"
+        ).fetchall()}
+
+    emit([(1, "a", 1, 10), (2, "a", 2, 20), (3, "a", 3, 30)], ts(1))
+    run(ts(1), NEVER)
+    assert scored() == {1: 10, 2: 30, 3: 60}
+
+    # Edit row 2 (a past row): 20 -> 25. The running sum re-folds from t=2 on: 10, 35, 65.
+    emit([(1, "a", 1, 10), (2, "a", 2, 25), (3, "a", 3, 30)], ts(2))
+    run(ts(2), ts(1))
+    assert scored() == {1: 10, 2: 35, 3: 65}
+
+    # Delete row 2: membership becomes {1,3}; sum re-folds to 10, 40 and row 2 is gone.
+    emit([(1, "a", 1, 10), (3, "a", 3, 30)], ts(3))
+    run(ts(3), ts(2))
+    assert scored() == {1: 10, 3: 40}
+    snk.close()
+
+
+def test_builder_agg_reduce_ordered(tmp_path):
+    """`agg.reduce` — a custom order-dependent reduction (one value per group, the final fold in `.along`
+    order). Here `net = last − first`, so an edit to the *first* row, or a deletion, re-folds the group and
+    changes the reduced value (order-independent reductions couldn't express this)."""
+    from duckstring import agg
+
+    ev = duckdb.connect(str(tmp_path / "stream.duckdb"))
+    ev_dir = tmp_path / "ponds" / "stream" / "m1" / "data"
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "red" / "m1" / "data"
+
+    def emit(rows, f):
+        vals = ", ".join(f"({i}, '{g}', {t}, {x})" for i, g, t, x in rows)
+        T.merge_table(ev, "ev", ev.sql(f"SELECT * FROM (VALUES {vals}) v(id, g, t, x)"), f, ("id",))
+        publish(ev, ev_dir, f=f)
+
+    def net(state, row):   # state = [first-seen value]; output = current − first
+        first = state[0] if state[0] is not None else row["x"]
+        return [first], row["x"] - first
+
+    def run(f, pf):
+        pond = Pond("red", "1.0.0", snk, root=tmp_path, source_majors={"stream": 1}, f=f, previous_f=pf)
+        (pond.trickle("stream.ev")
+             .along("t").aggregate(by="g", chg=agg.reduce(net, [None])).merge("red"))
+        publish(snk, snk_dir, f=f)
+
+    def reduced():
+        return {r[0]: r[1] for r in snk.sql(
+            f"SELECT g, chg FROM ({ParquetDataPlane().read_select(snk_dir, 'red')})"
+        ).fetchall()}
+
+    emit([(1, "a", 1, 10), (2, "a", 2, 20), (3, "a", 3, 30), (4, "b", 1, 5), (5, "b", 2, 8)], ts(1))
+    run(ts(1), NEVER)
+    assert reduced() == {"a": 20, "b": 3}      # a: 30−10, b: 8−5
+
+    # Edit the first row of a (10 -> 4): net re-folds to 30 − 4 = 26; b untouched.
+    emit([(1, "a", 1, 4), (2, "a", 2, 20), (3, "a", 3, 30), (4, "b", 1, 5), (5, "b", 2, 8)], ts(2))
+    run(ts(2), ts(1))
+    assert reduced() == {"a": 26, "b": 3}
+
+    # Delete the last row of a: membership {1:4, 2:20} → 20 − 4 = 16.
+    emit([(1, "a", 1, 4), (2, "a", 2, 20), (4, "b", 1, 5), (5, "b", 2, 8)], ts(3))
+    run(ts(3), ts(2))
+    assert reduced() == {"a": 16, "b": 3}
+    snk.close()
+
+
 def test_builder_accumulate_guards(tmp_path):
     from duckstring import acc
 
@@ -2182,8 +2272,8 @@ def test_builder_accumulate_guards(tmp_path):
     pond = Pond("x", "1.0.0", snk, root=tmp_path, source_majors={"a": 1}, f=ts(1))
     with pytest.raises(BuildError, match="order axis|along"):
         pond.trickle("a.t").accumulate(by="g", cs=acc.sum("x"))
-    with pytest.raises(BuildError, match="append-only|merge"):
-        pond.trickle("a.t").along("t").accumulate(by="g", cs=acc.sum("x")).merge("o", pk="g")
+    with pytest.raises(BuildError, match="pk"):   # merge mode needs an output pk
+        pond.trickle("a.t").along("t").accumulate(by="g", cs=acc.sum("x")).merge("o")
     with pytest.raises(BuildError, match="acc"):
         pond.trickle("a.t").along("t").accumulate(by="g", bad="nope")
     snk.close()

@@ -58,6 +58,9 @@ class Metric:
     how: str | None = None
     col2: str | None = None
     ordered: bool = False
+    fn: object = None       # the reducer for agg.reduce — fn(state, row) -> (new_state, output)
+    init: object = None     # its per-group initial state
+    dtype: str | None = None
 
 
 def count() -> Metric:
@@ -148,6 +151,18 @@ def ols_slope(x: str, y: str) -> Metric:
 def ols_intercept(x: str, y: str) -> Metric:
     """Ordinary-least-squares intercept of ``y`` on ``x`` — ``ȳ − slope·x̄`` (NULL when ``x`` has no spread)."""
     return Metric("ols_intercept", x, col2=y)
+
+
+def reduce(fn, init, *, inverse=None, dtype: str = "DOUBLE") -> Metric:  # noqa: A001 - the reduce primitive
+    """A **custom order-dependent reduction** — one value per group, the final result of folding the group's
+    rows in ``.along`` order: ``fn(state, row) -> (new_state, output)``, ``init`` the per-group start, ``row``
+    a ``{column: value}`` dict; the group's value is the last ``output``. The order-dependent counterpart of
+    the order-independent ``agg.*`` reductions, and the reducing counterpart of :func:`acc.scan`.
+
+    Requires ``.along(...)``; terminal-bound to ``.merge()``. Retraction-aware: a change anywhere in a group
+    re-folds it over current membership (so an ``inverse`` isn't needed for correctness — it's reserved for a
+    future carried-state optimisation that would undo the most-recent step instead of re-folding)."""
+    return Metric("reduce", fn=fn, init=init, dtype=dtype)
 
 
 # ─── payload extremes & semigroup reductions (rescan a group on a retraction) ─────

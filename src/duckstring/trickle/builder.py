@@ -309,8 +309,9 @@ class TrickleBuilder:
         """Enrich **each** row with order-dependent **running** values — a per-row scan in :meth:`along` order
         partitioned by ``by`` — using :mod:`duckstring.acc` specs (sum / count / min / max / first / ema /
         tema). It is **not a reduction** (output cardinality = input) and **not terminal**: it returns a
-        builder you finish with :meth:`append`. Append-only — a retraction would invalidate the running
-        values, so :meth:`merge` after it raises and :meth:`along` is required."""
+        builder you finish with :meth:`append` (append-only — the input must stay monotonic in :meth:`along`)
+        or :meth:`merge` (**retraction-aware** — an edit anywhere re-folds the affected group's sequence, no
+        monotonic constraint). :meth:`along` is required either way."""
         self._ensure_incremental("accumulate")
         from .acc import AccMetric
 
@@ -352,6 +353,11 @@ class TrickleBuilder:
             if not isinstance(m, Metric):
                 raise BuildError(f"aggregate metric '{out}' must be an agg.* spec (e.g. agg.sum/mean/var/covariance)")
             spec[out] = m
+        if any(m.kind == "reduce" for m in spec.values()):
+            if self._along is None:
+                raise BuildError("agg.reduce(...) is order-dependent — call .along('col') before .aggregate()")
+            if not all(m.kind == "reduce" for m in spec.values()):
+                raise BuildError("agg.reduce(...) can't share an .aggregate() with other metrics — split them")
         self._agg = {"by": by, "metrics": spec}
         return self
 
@@ -413,12 +419,16 @@ class TrickleBuilder:
         cross-run trace (the explicit short-circuit to per-run recomputation)."""
         ctx = self.ctx
         if self._acc is not None:
-            raise BuildError(".accumulate() is append-only (a scan can't be retracted) — finish it with "
-                             ".append(), not .merge()")
+            return self._merge_accumulate(name, pk=pk, retain_t=retain_t, retain_n=retain_n)
         if self._agg is not None:
             from . import io as trickle
 
             by, metrics = self._agg["by"], self._agg["metrics"]
+            if any(m.kind == "reduce" for m in metrics.values()):   # order-dependent custom reduction
+                kind, rel = self._compute((*by, self._along), name, ivm=ivm, key_filter=key_filter)
+                trickle.apply_ordered_reduce(ctx.con, name, by, self._along, metrics, kind, rel,
+                                             self._full_join(), ctx.f, retain_t=retain_t, retain_n=retain_n)
+                return self._chain(name, by)
             out_pk = normalize_pk(pk) if pk is not None else by
             required = tuple(dict.fromkeys(
                 by + tuple(c for m in metrics.values() for c in (m.col, m.col2) if c is not None)))
@@ -490,6 +500,13 @@ class TrickleBuilder:
             )
         return self._chain(name, out_pk)
 
+    def _acc_required(self, out_pk):
+        """The columns the scan needs present in the composed rows: ``by`` + ``along`` + each metric's input
+        column + the output PK. (A custom ``acc.scan`` reads the whole row, so its columns must be in the
+        composed output too — that's the user's responsibility via ``.select`` on a joined build.)"""
+        by, metrics, along = self._acc["by"], self._acc["metrics"], self._along
+        return tuple(dict.fromkeys((*by, along, *out_pk) + tuple(m.col for m in metrics.values() if m.col)))
+
     def _append_accumulate(self, name, *, pk, fail_on_conflict, log_drops, retain_t, retain_n):
         """The ``.accumulate(...).append(...)`` path: compose ΔO, then fold the per-row scan on from each
         group's carried state and append the enriched rows (:func:`duckstring.trickle.io.apply_accumulate`)."""
@@ -497,12 +514,27 @@ class TrickleBuilder:
 
         by, metrics, along = self._acc["by"], self._acc["metrics"], self._along
         out_pk = normalize_pk(pk)
-        # the scan needs by + along + each metric's input column + the output PK present in the composed rows.
-        required = tuple(dict.fromkeys((*by, along, *out_pk) + tuple(m.col for m in metrics.values() if m.col)))
-        kind, rel = self._compute(required, name, ivm=True, key_filter=True)
+        kind, rel = self._compute(self._acc_required(out_pk), name, ivm=True, key_filter=True)
         trickle.apply_accumulate(
             self.ctx.con, name, by, along, metrics, kind, rel, self.ctx.f, pk,
             fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
+        )
+        return self._chain(name, out_pk)
+
+    def _merge_accumulate(self, name, *, pk, retain_t, retain_n):
+        """The ``.accumulate(...).merge(...)`` path: a **retraction-aware** ordered scan. Compose ΔO (which may
+        carry retractions / out-of-order edits) and re-fold the affected groups over their current membership,
+        diffing against the prior main (:func:`duckstring.trickle.io.apply_accumulate_merge`)."""
+        from . import io as trickle
+
+        by, metrics, along = self._acc["by"], self._acc["metrics"], self._along
+        out_pk = normalize_pk(pk)
+        if not out_pk:
+            raise BuildError(f"pond.trickle('{self.spine_ref}')...accumulate(...).merge('{name}'): pass merge(pk=...)")
+        kind, rel = self._compute(self._acc_required(out_pk), name, ivm=True, key_filter=True)
+        trickle.apply_accumulate_merge(
+            self.ctx.con, name, by, along, metrics, kind, rel, self._full_join(), self.ctx.f, pk,
+            retain_t=retain_t, retain_n=retain_n,
         )
         return self._chain(name, out_pk)
 
