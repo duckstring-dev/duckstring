@@ -140,6 +140,41 @@ def ols_intercept(x: str, y: str) -> Metric:
     return Metric("ols_intercept", x, col2=y)
 
 
+# ─── payload extremes & semigroup reductions (rescan a group on a retraction) ─────
+
+
+def argmin(arg: str, by: str) -> Metric:
+    """The ``arg`` value at the row where ``by`` is **minimal** (DuckDB ``arg_min``; ties resolved
+    arbitrarily). A retraction of the supporting row rescans the group."""
+    return Metric("argmin", arg, col2=by)
+
+
+def argmax(arg: str, by: str) -> Metric:
+    """The ``arg`` value at the row where ``by`` is **maximal** (DuckDB ``arg_max``; ties resolved
+    arbitrarily). A retraction of the supporting row rescans the group."""
+    return Metric("argmax", arg, col2=by)
+
+
+def bool_and(col: str) -> Metric:
+    """Logical AND over ``col`` (NULLs ignored). A retraction rescans the group."""
+    return Metric("bool_and", col)
+
+
+def bool_or(col: str) -> Metric:
+    """Logical OR over ``col`` (NULLs ignored). A retraction rescans the group."""
+    return Metric("bool_or", col)
+
+
+def bit_and(col: str) -> Metric:
+    """Bitwise AND over an integer ``col`` (NULLs ignored). A retraction rescans the group."""
+    return Metric("bit_and", col)
+
+
+def bit_or(col: str) -> Metric:
+    """Bitwise OR over an integer ``col`` (NULLs ignored). A retraction rescans the group."""
+    return Metric("bit_or", col)
+
+
 def _check_how(how: str) -> str:
     h = how.lower()
     if h in ("pop", "population"):

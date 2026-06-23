@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import re
 
-from .io import D_COL, _q, _table_exists, normalize_pk, read_registry_delta, unique_name
+from .io import D_COL, RESCAN_KINDS, _q, _table_exists, normalize_pk, read_registry_delta, unique_name
 
 _W = "_duckstring_w"  # scratch weight column for prior-state reconstruction (distinct from the Z-set D_COL)
 
@@ -384,7 +384,7 @@ class TrickleBuilder:
             required = tuple(dict.fromkeys(
                 by + tuple(c for m in metrics.values() for c in (m.col, m.col2) if c is not None)))
             kind, rel = self._compute(required, name, ivm=ivm, key_filter=key_filter)
-            needs_current = kind == "incremental" and any(m.kind in ("min", "max") for m in metrics.values())
+            needs_current = kind == "incremental" and any(m.kind in RESCAN_KINDS for m in metrics.values())
             current = self._full_join() if needs_current else None
             trickle.apply_aggregate(ctx.con, name, by, metrics, kind, rel, current, ctx.f,
                                     retain_t=retain_t, retain_n=retain_n)

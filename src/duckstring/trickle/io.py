@@ -856,12 +856,15 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         return
     by = tuple(by)
     by_list = ", ".join(_q(b) for b in by)
-    add_cols, ext_cols, co_pairs, wgt_units = _agg_families(metrics)
+    add_cols, ext_cols, co_pairs, wgt_units, arg_specs, sg_specs = _agg_families(metrics)
     sidx = {c: i for i, c in enumerate(add_cols)}
     eidx = {c: j for j, c in enumerate(ext_cols)}
     cidx = {p: k for k, p in enumerate(co_pairs)}
     widx = {u: m for m, u in enumerate(wgt_units)}
-    idx = (sidx, eidx, cidx, widx)
+    aidx = {s: a for a, s in enumerate(arg_specs)}
+    gidx = {s: g for g, s in enumerate(sg_specs)}
+    idx = (sidx, eidx, cidx, widx, aidx, gidx)
+    needs_rescan = bool(ext_cols or arg_specs or sg_specs)  # families that rescan a group on a retraction
     state = f"{AGG_STATE_PREFIX}{name}"
     acc_order = (
         ["_a_cnt"]
@@ -870,10 +873,12 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         + [col for k in range(len(co_pairs))
            for col in (f"_c_n_{k}", f"_c_sx_{k}", f"_c_sy_{k}", f"_c_m2x_{k}", f"_c_m2y_{k}", f"_c_cxy_{k}")]
         + [col for m in range(len(wgt_units)) for col in (f"_w_num_{m}", f"_w_den_{m}")]
+        + [col for a in range(len(arg_specs)) for col in (f"_g_key_{a}", f"_g_arg_{a}")]
+        + [f"_s_val_{g}" for g in range(len(sg_specs))]
     )
 
     if kind == "comprehensive":
-        _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_units, f)
+        _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_units, arg_specs, sg_specs, f)
         derived = con.sql(f"SELECT {by_list}, {_agg_derive(metrics, idx)} FROM {_q(state)} WHERE _a_cnt > 0")
         merge_table(con, name, derived, f, by, retain_t=retain_t, retain_n=retain_n)
         return
@@ -891,10 +896,12 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     pexprs += _agg_part_sum_exprs(add_cols)
     pexprs += _co_part_sum_exprs(co_pairs)
     pexprs += _wgt_delta_exprs(wgt_units)
+    pexprs += _arg_part_exprs(arg_specs)
+    pexprs += _sg_part_exprs(sg_specs)
     for j, c in enumerate(ext_cols):
         pexprs.append(f"MIN({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_minp_{j}")
         pexprs.append(f"MAX({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_maxp_{j}")
-    if ext_cols:
+    if needs_rescan:
         pexprs.append(f"BOOL_OR({_q(D_COL)} < 0) AS _a_ret")
     pm = unique_name("aggpm")
     con.execute(
@@ -922,10 +929,12 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     # Rescan the *current* membership for the extreme columns of groups that saw a retraction (the supporting
     # min/max may be gone). Bounded by those groups; append-only groups never rescan.
     rescan = None
-    if ext_cols and current is not None:
+    if needs_rescan and current is not None:
         cur = unique_name("aggcur")
         current.create_view(cur, replace=True)
         rexprs = [f"MIN({_q(c)}) AS _a_min_{j}, MAX({_q(c)}) AS _a_max_{j}" for j, c in enumerate(ext_cols)]
+        rexprs += _arg_rescan_exprs(arg_specs)
+        rexprs += _sg_rescan_exprs(sg_specs)
         rescan = unique_name("aggrs")
         con.execute(
             f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS "
@@ -947,6 +956,8 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     for k in range(len(co_pairs)):
         macc += _co_merge_exprs(k)
     macc += _wgt_merge_exprs(len(wgt_units))
+    macc += _arg_merge_exprs(arg_specs)
+    macc += _sg_merge_exprs(sg_specs)
     rescan_join = f" LEFT JOIN {_q(rescan)} r USING ({by_list})" if rescan is not None else ""
     merged = unique_name("magg")
     con.execute(
@@ -995,9 +1006,13 @@ def _agg_families(metrics):
       (covariance / pearson_correlation / ols_slope / ols_intercept).
     - ``wgt_units`` — weighted units ``("wt", None, w)`` (Σw, for weight_total) or ``("wp", x, w)``
       (Σ(w·x) & Σw, for weighted_sum / weighted_average).
+    - ``arg_specs`` — payload-extreme specs ``(kind, arg, key)`` (argmin / argmax): the stored extreme of
+      ``key`` plus the ``arg`` at that row (rescan-on-retraction, like min/max).
+    - ``sg_specs`` — semigroup reductions ``(kind, col)`` (bool_and / bool_or / bit_and / bit_or):
+      a single reduced value (rescan-on-retraction).
 
     Each list is de-duplicated and order-stable."""
-    add, ext, co, wgt = [], [], [], []
+    add, ext, co, wgt, arg, sg = [], [], [], [], [], []
     for m in metrics.values():
         k = m.kind
         if k == "count":  # reads the group cardinality _a_cnt directly — no per-column family
@@ -1017,9 +1032,15 @@ def _agg_families(metrics):
         elif k in ("weighted_sum", "weighted_average"):
             if ("wp", m.col, m.col2) not in wgt:
                 wgt.append(("wp", m.col, m.col2))
+        elif k in ("argmin", "argmax"):
+            if (k, m.col, m.col2) not in arg:
+                arg.append((k, m.col, m.col2))
+        elif k in ("bool_and", "bool_or", "bit_and", "bit_or"):
+            if (k, m.col) not in sg:
+                sg.append((k, m.col))
         else:
             raise DeltaError(f"aggregate: unsupported metric kind {k!r}")
-    return add, ext, co, wgt
+    return add, ext, co, wgt, arg, sg
 
 
 def _agg_part_sum_exprs(add_cols: list[str]) -> list[str]:
@@ -1253,7 +1274,106 @@ def _co_merge_exprs(k: int) -> list[str]:
     ]
 
 
-def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_units, f) -> None:
+# ─── payload extremes (argmin/argmax) & semigroup reductions (bool/bit) ──────────
+#
+# Both rescan a group's current membership on a retraction (the supporting extreme / a removed contributor
+# may be gone), exactly like min/max — so they share the rescan plumbing and need ``current`` passed in.
+
+# The kinds whose maintenance can require a current-membership rescan (so the builder must pass ``current``).
+RESCAN_KINDS = frozenset({"min", "max", "argmin", "argmax", "bool_and", "bool_or", "bit_and", "bit_or"})
+
+# Semigroup reductions → (the DuckDB aggregate, the binary combine of the stored value ``a`` and an insert
+# partition value ``i``). NULL-handling (a new group / an all-NULL insert) is layered on in the merge.
+_SG = {
+    "bool_and": ("bool_and", "{a} AND {i}"),
+    "bool_or": ("bool_or", "{a} OR {i}"),
+    "bit_and": ("bit_and", "{a} & {i}"),
+    "bit_or": ("bit_or", "{a} | {i}"),
+}
+
+
+def _arg_extreme(kind: str):
+    """``(scalar-extreme, arg-extreme)`` DuckDB aggregates for an ``argmin``/``argmax`` spec."""
+    return ("min", "arg_min") if kind == "argmin" else ("max", "arg_max")
+
+
+def _arg_rebuild_exprs(arg_specs) -> list[str]:
+    out: list[str] = []
+    for a, (kind, arg, key) in enumerate(arg_specs):
+        ext, argf = _arg_extreme(kind)
+        out += [f"{ext}({_q(key)}) AS _g_key_{a}", f"{argf}({_q(arg)}, {_q(key)}) AS _g_arg_{a}"]
+    return out
+
+
+def _sg_rebuild_exprs(sg_specs) -> list[str]:
+    return [f"{_SG[kind][0]}({_q(col)}) AS _s_val_{g}" for g, (kind, col) in enumerate(sg_specs)]
+
+
+def _arg_part_exprs(arg_specs) -> list[str]:
+    """First-pass insert-partition extremes — the candidate to extend the stored extreme in place (a
+    retraction takes the rescanned value instead)."""
+    d = _q(D_COL)
+    out: list[str] = []
+    for a, (kind, arg, key) in enumerate(arg_specs):
+        ext, argf = _arg_extreme(kind)
+        out += [
+            f"{ext}({_q(key)}) FILTER (WHERE {d} > 0) AS _g_keyp_{a}",
+            f"{argf}({_q(arg)}, {_q(key)}) FILTER (WHERE {d} > 0) AS _g_argp_{a}",
+        ]
+    return out
+
+
+def _sg_part_exprs(sg_specs) -> list[str]:
+    d = _q(D_COL)
+    return [f"{_SG[kind][0]}({_q(col)}) FILTER (WHERE {d} > 0) AS _s_valp_{g}"
+            for g, (kind, col) in enumerate(sg_specs)]
+
+
+def _arg_rescan_exprs(arg_specs) -> list[str]:
+    out: list[str] = []
+    for a, (kind, arg, key) in enumerate(arg_specs):
+        ext, argf = _arg_extreme(kind)
+        out += [f"{ext}({_q(key)}) AS _g_key_{a}", f"{argf}({_q(arg)}, {_q(key)}) AS _g_arg_{a}"]
+    return out
+
+
+def _sg_rescan_exprs(sg_specs) -> list[str]:
+    return [f"{_SG[kind][0]}({_q(col)}) AS _s_val_{g}" for g, (kind, col) in enumerate(sg_specs)]
+
+
+def _arg_merge_exprs(arg_specs) -> list[str]:
+    """Merge: on a retraction take the rescanned ``r`` value; else extend the stored extreme with the insert
+    partition (and carry the matching ``arg`` — keeping the old one on a tie or when the group is new only via
+    the key comparison)."""
+    out: list[str] = []
+    for a, (kind, _arg, _key) in enumerate(arg_specs):
+        better = "<" if kind == "argmin" else ">"
+        ext = "least" if kind == "argmin" else "greatest"
+        out.append(f"(CASE WHEN d._a_ret THEN r._g_key_{a} ELSE {ext}(a._g_key_{a}, d._g_keyp_{a}) END) "
+                   f"AS _g_key_{a}")
+        out.append(
+            f"(CASE WHEN d._a_ret THEN r._g_arg_{a} "
+            f"WHEN a._g_key_{a} IS NULL OR d._g_keyp_{a} {better} a._g_key_{a} THEN d._g_argp_{a} "
+            f"ELSE a._g_arg_{a} END) AS _g_arg_{a}"
+        )
+    return out
+
+
+def _sg_merge_exprs(sg_specs) -> list[str]:
+    out: list[str] = []
+    for g, (kind, _col) in enumerate(sg_specs):
+        combine = _SG[kind][1].format(a=f"a._s_val_{g}", i=f"d._s_valp_{g}")
+        out.append(
+            f"(CASE WHEN d._a_ret THEN r._s_val_{g} "
+            f"WHEN a._s_val_{g} IS NULL THEN d._s_valp_{g} "
+            f"WHEN d._s_valp_{g} IS NULL THEN a._s_val_{g} "
+            f"ELSE ({combine}) END) AS _s_val_{g}"
+        )
+    return out
+
+
+def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_units, arg_specs, sg_specs,
+                 f) -> None:
     """(Re)build the accumulator state wholesale from a clean full output ``rel`` — the comprehensive path
     (bootstrap / coverage-miss). Idempotent: same input → same state."""
     src = unique_name("aggfull")
@@ -1270,6 +1390,8 @@ def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_uni
         exprs.append(f"MAX({_q(c)}) AS _a_max_{j}")
     exprs += _co_rebuild_exprs(co_pairs)
     exprs += _wgt_rebuild_exprs(wgt_units)
+    exprs += _arg_rebuild_exprs(arg_specs)
+    exprs += _sg_rebuild_exprs(sg_specs)
     con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
     con.execute(
         f"CREATE TABLE {_q(state)} AS "
@@ -1279,8 +1401,8 @@ def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_uni
 
 def _agg_derive(metrics, idx) -> str:
     """The select list deriving the user-facing aggregate columns from the accumulator state. ``idx`` is the
-    ``(sidx, eidx, cidx, widx)`` tuple mapping each metric's column(s) to its accumulator index."""
-    sidx, eidx, cidx, widx = idx
+    ``(sidx, eidx, cidx, widx, aidx, gidx)`` tuple mapping each metric's column(s) to its accumulator index."""
+    sidx, eidx, cidx, widx, aidx, gidx = idx
     exprs = []
     for out, m in metrics.items():
         k, c, how = m.kind, m.col, m.how
@@ -1324,6 +1446,10 @@ def _agg_derive(metrics, idx) -> str:
             else:  # ols_intercept = ȳ − slope·x̄
                 e = (f"(CASE WHEN {n} < 1 OR {m2x} <= 0 THEN NULL "
                      f"ELSE _c_sy_{kk}::DOUBLE / {n} - ({cxy} / {m2x}) * (_c_sx_{kk}::DOUBLE / {n}) END)")
+        elif k in ("argmin", "argmax"):
+            e = f"_g_arg_{aidx[(k, c, m.col2)]}"
+        elif k in ("bool_and", "bool_or", "bit_and", "bit_or"):
+            e = f"_s_val_{gidx[(k, c)]}"
         else:
             raise DeltaError(f"aggregate metric '{out}': unsupported kind {k!r}")
         exprs.append(f"{e} AS {_q(out)}")

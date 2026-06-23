@@ -208,6 +208,9 @@ See the [guide](../guides/trickle.md#the-builder-pondtrickle).
 | `agg.covariance(x, y, how=)` | covariance over paired (both-non-NULL) rows; `how` ∈ `"sample"` (default) / `"pop"` |
 | `agg.pearson_correlation(x, y)` | Pearson correlation `Cxy / √(M2x·M2y)` |
 | `agg.ols_slope(x, y)` / `agg.ols_intercept(x, y)` | least-squares fit of `y` on `x` (slope `Cxy/M2x`, intercept `ȳ − slope·x̄`) |
+| `agg.argmin(arg, by)` / `agg.argmax(arg, by)` | the `arg` value at the row minimising / maximising `by` (a retraction of the supporting row rescans the group) |
+| `agg.bool_and(col)` / `agg.bool_or(col)` | logical AND / OR over `col` (rescan on retraction) |
+| `agg.bit_and(col)` / `agg.bit_or(col)` | bitwise AND / OR over an integer `col` (rescan on retraction) |
 
 `var`/`stddev`/`covariance`/`correlation`/`ols` are maintained as **centred (co-)moments** by a numerically stable parallel merge (never the cancellation-prone `Σx²−(Σx)²/n`), so they stay accurate at any value scale and under retraction.
 

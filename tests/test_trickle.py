@@ -1853,6 +1853,64 @@ def test_builder_aggregate_weighted_and_comoment(tmp_path):
     snk.close()
 
 
+def test_builder_aggregate_argmax_and_semigroup(tmp_path):
+    """Phase-2: payload extremes (argmin/argmax) and the boolean/bitwise semigroups, maintained via the
+    rescan-on-retraction path. Includes a retraction of the *supporting* extreme (forcing a group rescan),
+    checked against DuckDB's native arg_max / arg_min / bool_or / bit_or over the full set."""
+    from duckstring import agg
+
+    fc = duckdb.connect(str(tmp_path / "facts.duckdb"))
+    fc_dir = tmp_path / "ponds" / "facts" / "m1" / "data"
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "stat" / "m1" / "data"
+
+    def fct(rows, f):
+        vals = ", ".join(f"({i}, '{g}', {k}, '{lbl}', {flag}, {bits})" for i, g, k, lbl, flag, bits in rows)
+        T.merge_table(fc, "f", fc.sql(f"SELECT * FROM (VALUES {vals}) v(id, g, k, lbl, flag, bits)"), f, ("id",))
+        publish(fc, fc_dir, f=f)
+
+    def run(f, pf):
+        pond = Pond("stat", "1.0.0", snk, root=tmp_path, source_majors={"facts": 1}, f=f, previous_f=pf)
+        (pond.trickle("facts.f", p=1.0)
+             .aggregate(by="g",
+                        top=agg.argmax("lbl", "k"), bot=agg.argmin("lbl", "k"),
+                        peak=agg.max("k"), anyflag=agg.bool_or("flag"), allflag=agg.bool_and("flag"),
+                        orbits=agg.bit_or("bits"))
+             .merge("stat"))
+        publish(snk, snk_dir, f=f)
+
+    def expected(rows, g):
+        vals = ", ".join(f"({k}, '{lbl}', {flag}, {bits})" for _i, gg, k, lbl, flag, bits in rows if gg == g)
+        return snk.sql(
+            f"SELECT arg_max(lbl, k), arg_min(lbl, k), max(k), bool_or(flag), bool_and(flag), bit_or(bits) "
+            f"FROM (VALUES {vals}) t(k, lbl, flag, bits)"
+        ).fetchone()
+
+    def got(g):
+        return snk.sql(
+            f"SELECT top, bot, peak, anyflag, allflag, orbits "
+            f"FROM ({ParquetDataPlane().read_select(snk_dir, 'stat')}) WHERE g = '{g}'"
+        ).fetchone()
+
+    r1 = [(1, "a", 10, "lo", False, 1), (2, "a", 30, "hi", True, 2), (3, "a", 20, "mid", False, 4)]
+    fct(r1, ts(1))
+    run(ts(1), NEVER)
+    assert got("a") == expected(r1, "a")   # top='hi' (k=30), bot='lo' (k=10), peak=30, any=T, all=F, bit_or=7
+
+    # Insert a new max — extends the extreme in place (no rescan).
+    r2 = r1 + [(4, "a", 40, "top", True, 8)]
+    fct(r2, ts(2))
+    run(ts(2), ts(1))
+    assert got("a") == expected(r2, "a")
+
+    # Retract the supporting max (drop row 4) → the argmax/max/bit_or must rescan the group.
+    r3 = r2[:-1]
+    fct(r3, ts(3))
+    run(ts(3), ts(2))
+    assert got("a") == expected(r3, "a")
+    snk.close()
+
+
 def test_builder_aggregate_guards(tmp_path):
     from duckstring import agg
 

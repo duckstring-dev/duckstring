@@ -96,11 +96,16 @@ the namespace is sound):
   with a zero-count (the additive `Σ log` *is* retractable). → a follow-up.
 - `bit_xor(x)` — trivially safe (self-inverse) but niche; rolled forward to avoid scope creep here.
 
-### Phase 2 — flavour 2 (extremes with a payload)
+### Phase 2 — flavour 2 (extremes with a payload) — **done**
 
-- `argmin(by, val)`, `argmax(by, val)`, `first_by(val, key)` / `last_by(val, key)` — carry a payload column
-  with the stored extreme; reuse the existing retraction-rescan path.
-- `bool_and`/`bool_or`/`bit_and`/`bit_or` ride the same rescan-on-retraction mechanism (semigroups).
+- `argmin(arg, by)`, `argmax(arg, by)` — carry a payload column (`_g_arg`) alongside the stored extreme
+  (`_g_key`); reuse the retraction-rescan path (extended to recompute `arg_max`/`arg_min` over current
+  membership). The rescan-family set is `RESCAN_KINDS` (drives `needs_current`).
+- `bool_and`/`bool_or`/`bit_and`/`bit_or` — single reduced value (`_s_val`) via the same rescan-on-retraction
+  mechanism (semigroups), combiner-parameterised (`_SG`).
+
+`first_by`/`last_by` in the *arrival-order* sense are order-dependent → Phase 3 (the value-keyed "by" forms
+are just `argmin`/`argmax`).
 
 ### Phase 3 — flavours 3 & 4 (order-dependent), `.append()`-only
 
