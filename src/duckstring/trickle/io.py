@@ -1110,31 +1110,76 @@ def _acc_out_table(con, out_rows, usercols, metric_list, type_of) -> str:
     return tmp
 
 
-def _scan_refold(rows, idx, by, along, metric_list) -> list:
-    """Fold each group from a **fresh** state over its full ordered membership — merge mode re-derives the
-    scan (rather than continuing carried state), so a retraction or an out-of-order insert anywhere in a
-    group's past is handled by simply re-folding it. Returns the per-row scan outputs."""
+def _fold(rows, idx, by, along, metric_list, init_states) -> tuple:
+    """Fold ``rows`` (ordered by group then ``along``) per group, each group **resuming from**
+    ``init_states[gk]`` if present (the carried end-state — the suffix-refold optimisation) else a fresh
+    state. Returns ``(out_rows, group_states, finals)``: the per-row scan outputs, the final state per group
+    (to carry forward), and the last output per group (the reduction value)."""
     group: dict = {}
-    out_rows = []
+    out_rows, finals = [], {}
     for row in rows:
         gk = tuple(row[idx[b]] for b in by)
         st = group.get(gk)
         if st is None:
-            st = _acc_fresh(metric_list)
+            src = init_states.get(gk)
+            st = src if src is not None else _acc_fresh(metric_list)
             group[gk] = st
         av = row[idx[along]]
-        outvals = [_acc_step(m, st, out, row, idx, av) for out, m in metric_list]
-        out_rows.append((*row, *outvals))
-    return out_rows
+        vals = [_acc_step(m, st, out, row, idx, av) for out, m in metric_list]
+        if av is not None:
+            st["_along"] = av
+        out_rows.append((*row, *vals))
+        finals[gk] = vals
+    return out_rows, group, finals
+
+
+def _keys_table(con, by, type_of, keys) -> str:
+    """A temp table holding a set of group keys (for an ``(by) IN (...)`` filter)."""
+    t = unique_name("amk")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(t)} ({', '.join(f'{_q(b)} {type_of[b]}' for b in by)})")
+    if keys:
+        con.executemany(f"INSERT INTO {_q(t)} VALUES ({', '.join('?' for _ in by)})", [list(k) for k in keys])
+    return t
+
+
+def _delete_acc_keys(con, state, by, keys) -> None:
+    """Drop the carried state of ``keys`` (e.g. groups whose membership became empty)."""
+    if not keys or not _table_exists(con, state):
+        return
+    cond = " AND ".join(f"{_q(b)} IS NOT DISTINCT FROM ?" for b in by)
+    con.executemany(f"DELETE FROM {_q(state)} WHERE {cond}", [list(k) for k in keys])
+
+
+def _classify_affected(con, by, along, delta, carried, done) -> tuple:
+    """Split the affected groups (those with a changed row in ``delta``) into **tail-only** — no retraction
+    and every change strictly beyond the carried high-water mark (or a brand-new group), so the fold can
+    **resume** from carried state — and **past-changed** — a retraction or an edit at/below the high-water,
+    needing a full re-fold. Skips groups already at this ``f`` (replay)."""
+    by_list = ", ".join(_q(b) for b in by)
+    nby = len(by)
+    rows = con.execute(
+        f"SELECT {by_list}, min({_q(along)}) AS mn, bool_or({_q(D_COL)} < 0) AS ret "
+        f"FROM {_q(delta)} GROUP BY {by_list}"
+    ).fetchall()
+    tail, past = [], []
+    for r in rows:
+        gk = tuple(r[:nby])
+        if gk in done:
+            continue
+        mn, ret = r[nby], r[nby + 1]
+        c = carried.get(gk)
+        hw = c["_along"] if c else None
+        (tail if (not ret and (hw is None or mn > hw)) else past).append(gk)
+    return tail, past
 
 
 def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f, pk, *,
                            retain_t=None, retain_n=None) -> None:
     """Merge-mode ordered scan: maintain a per-row scan output ``name`` as a **merge** Trickle, handling
-    retractions / out-of-order edits. A change anywhere in a group's sequence invalidates the fold from that
-    point, so the affected groups are **re-folded over their current membership** (``current``) and the result
-    is diffed against the prior main (merge semantics) — no append-only / monotonic constraint. ``O(affected
-    membership)`` per run (a future optimisation can carry state and re-fold only the changed suffix)."""
+    retractions / out-of-order edits. **Tail-only** groups (pure appends beyond the carried high-water) resume
+    from carried per-group state and emit only the new rows — ``O(new)``, the common streaming case.
+    **Past-changed** groups (a retraction or an edit in the past) are re-folded over their current membership
+    (``current``) and merge-diffed against the prior main — ``O(group)``. No monotonic constraint."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if kind == "empty":
@@ -1143,6 +1188,7 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     pk = normalize_pk(pk)
     by_list = ", ".join(_q(b) for b in by)
     metric_list = list(metrics.items())
+    state = f"{ACC_STATE_PREFIX}{name}"
     cur = unique_name("amcur")
     current.create_view(cur, replace=True)
     type_of = {c: str(t) for c, t in zip(current.columns, current.types, strict=True)}
@@ -1154,49 +1200,63 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     order_by = ", ".join(_q(c) for c in (*by, along))
     out_sel = ", ".join(_q(c) for c in usercols + [o for o, _ in metric_list])
 
-    if kind == "comprehensive":   # bootstrap / coverage-miss → re-fold everything, full merge-diff vs prior
+    if kind == "comprehensive":   # bootstrap / coverage-miss → re-fold everything, full merge-diff + reseed
         rows = con.execute(f"SELECT {ucols_sql} FROM {_q(cur)} ORDER BY {order_by}").fetchall()
-        tmp = _acc_out_table(con, _scan_refold(rows, idx, by, along, metric_list), usercols, metric_list, type_of)
+        out_rows, group, _ = _fold(rows, idx, by, along, metric_list, {})
+        tmp = _acc_out_table(con, out_rows, usercols, metric_list, type_of)
         merge_table(con, name, con.sql(f"SELECT * FROM {_q(tmp)}"), f, pk, retain_t=retain_t, retain_n=retain_n)
+        con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
+        _save_acc_state(con, state, by, along, metric_list, group, f, type_of)
         return
 
     delta = unique_name("amd")
     rel.create_view(delta, replace=True)
-    affected = f"({by_list}) IN (SELECT DISTINCT {by_list} FROM {_q(delta)})"
-    rows = con.execute(f"SELECT {ucols_sql} FROM {_q(cur)} WHERE {affected} ORDER BY {order_by}").fetchall()
-    tmp = _acc_out_table(con, _scan_refold(rows, idx, by, along, metric_list), usercols, metric_list, type_of)
+    carried, done = _load_acc_state(con, state, by, metric_list, f)
+    tail_keys, past_keys = _classify_affected(con, by, along, delta, carried, done)
+    if not tail_keys and not past_keys:
+        return
+
+    out_rows, states = [], {}
+    if tail_keys:   # resume from carried state, fold only this run's new (d>0) rows
+        tk = _keys_table(con, by, type_of, tail_keys)
+        trows = con.execute(
+            f"SELECT {ucols_sql} FROM {_q(delta)} WHERE {_q(D_COL)} > 0 "
+            f"AND ({by_list}) IN (SELECT {by_list} FROM {_q(tk)}) ORDER BY {order_by}"
+        ).fetchall()
+        t_out, t_group, _ = _fold(trows, idx, by, along, metric_list,
+                                  {gk: carried[gk] for gk in tail_keys if gk in carried})
+        out_rows += t_out
+        states.update(t_group)
+    if past_keys:   # full re-fold of the current membership
+        pkt = _keys_table(con, by, type_of, past_keys)
+        prows = con.execute(
+            f"SELECT {ucols_sql} FROM {_q(cur)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(pkt)}) "
+            f"ORDER BY {order_by}"
+        ).fetchall()
+        p_out, p_group, _ = _fold(prows, idx, by, along, metric_list, {})
+        out_rows += p_out
+        states.update(p_group)
+
+    tmp = _acc_out_table(con, out_rows, usercols, metric_list, type_of)
     recon = _reconstruct_sql_for(con, name)
-    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE {affected}" if recon \
-        else f"SELECT {out_sel} FROM {_q(tmp)} WHERE 1=0"
+    # only the past-changed groups have prior output rows that may change (tail groups only add new rows).
+    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(pkt)})" \
+        if (past_keys and recon) else f"SELECT {out_sel} FROM {_q(tmp)} WHERE 1=0"
     zset = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM (SELECT {out_sel} FROM {_q(tmp)}) "
         f"UNION ALL BY NAME SELECT {out_sel}, -1 AS {_q(D_COL)} FROM ({old_out})"
     )
     apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n)
-
-
-def _reduce_finals(rows, idx, by, along, metric_list) -> dict:
-    """Fold each group from a fresh state in ``along`` order, keeping the **last** output per group — the
-    order-dependent reduction value(s)."""
-    group: dict = {}
-    finals: dict = {}
-    for row in rows:
-        gk = tuple(row[idx[b]] for b in by)
-        st = group.get(gk)
-        if st is None:
-            st = _acc_fresh(metric_list)
-            group[gk] = st
-        av = row[idx[along]]
-        finals[gk] = [_acc_step(m, st, out, row, idx, av) for out, m in metric_list]
-    return finals
+    _delete_acc_keys(con, state, by, [gk for gk in past_keys if gk not in states])   # emptied groups
+    _save_acc_state(con, state, by, along, metric_list, states, f, type_of)
 
 
 def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *,
                          retain_t=None, retain_n=None) -> None:
     """Maintain an order-dependent **custom reduction** ``name`` (``agg.reduce``) — one value per group, the
-    final fold over the group's rows in ``along`` order. Like merge-mode accumulate, but collapsed to one row
-    per group (keyed by ``by``): affected groups are re-folded over their current membership and merge-diffed
-    against the prior main, so a change anywhere in a group is handled (no inverse needed)."""
+    final fold over the group's rows in ``along`` order. Like merge-mode accumulate (same tail-resume /
+    past-refold split via carried state), collapsed to one row per group (keyed by ``by``); a tail append
+    changes the group's value, so every affected group emits a merge-diff."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if kind == "empty":
@@ -1204,6 +1264,7 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     by = tuple(by)
     by_list = ", ".join(_q(b) for b in by)
     metric_list = list(metrics.items())
+    state = f"{ACC_STATE_PREFIX}{name}"
     cur = unique_name("orcur")
     current.create_view(cur, replace=True)
     type_of = {c: str(t) for c, t in zip(current.columns, current.types, strict=True)}
@@ -1228,23 +1289,53 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
 
     if kind == "comprehensive":
         rows = con.execute(f"SELECT {ucols_sql} FROM {_q(cur)} ORDER BY {order_by}").fetchall()
-        t = _build(_reduce_finals(rows, idx, by, along, metric_list))
-        merge_table(con, name, con.sql(f"SELECT * FROM {_q(t)}"), f, by, retain_t=retain_t, retain_n=retain_n)
+        _out, group, finals = _fold(rows, idx, by, along, metric_list, {})
+        merge_table(con, name, con.sql(f"SELECT * FROM {_q(_build(finals))}"), f, by,
+                    retain_t=retain_t, retain_n=retain_n)
+        con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
+        _save_acc_state(con, state, by, along, metric_list, group, f, type_of)
         return
 
     delta = unique_name("ord")
     rel.create_view(delta, replace=True)
-    affected = f"({by_list}) IN (SELECT DISTINCT {by_list} FROM {_q(delta)})"
-    rows = con.execute(f"SELECT {ucols_sql} FROM {_q(cur)} WHERE {affected} ORDER BY {order_by}").fetchall()
-    t = _build(_reduce_finals(rows, idx, by, along, metric_list))
+    carried, done = _load_acc_state(con, state, by, metric_list, f)
+    tail_keys, past_keys = _classify_affected(con, by, along, delta, carried, done)
+    if not tail_keys and not past_keys:
+        return
+
+    finals, states = {}, {}
+    if tail_keys:
+        tk = _keys_table(con, by, type_of, tail_keys)
+        trows = con.execute(
+            f"SELECT {ucols_sql} FROM {_q(delta)} WHERE {_q(D_COL)} > 0 "
+            f"AND ({by_list}) IN (SELECT {by_list} FROM {_q(tk)}) ORDER BY {order_by}"
+        ).fetchall()
+        _o, t_group, t_finals = _fold(trows, idx, by, along, metric_list,
+                                      {gk: carried[gk] for gk in tail_keys if gk in carried})
+        finals.update(t_finals)
+        states.update(t_group)
+    if past_keys:
+        pkt = _keys_table(con, by, type_of, past_keys)
+        prows = con.execute(
+            f"SELECT {ucols_sql} FROM {_q(cur)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(pkt)}) "
+            f"ORDER BY {order_by}"
+        ).fetchall()
+        _o, p_group, p_finals = _fold(prows, idx, by, along, metric_list, {})
+        finals.update(p_finals)
+        states.update(p_group)
+
+    akt = _keys_table(con, by, type_of, tail_keys + past_keys)   # a reduction value changes for any affected group
     recon = _reconstruct_sql_for(con, name)
-    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE {affected}" if recon \
-        else f"SELECT {out_sel} FROM {_q(t)} WHERE 1=0"
+    t = _build(finals)
+    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(akt)})" \
+        if recon else f"SELECT {out_sel} FROM {_q(t)} WHERE 1=0"
     zset = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM (SELECT {out_sel} FROM {_q(t)}) "
         f"UNION ALL BY NAME SELECT {out_sel}, -1 AS {_q(D_COL)} FROM ({old_out})"
     )
     apply_zset(con, name, zset, f, by, retain_t=retain_t, retain_n=retain_n)
+    _delete_acc_keys(con, state, by, [gk for gk in past_keys if gk not in states])
+    _save_acc_state(con, state, by, along, metric_list, states, f, type_of)
 
 
 # The scan kinds maintainable as a scalar-seeded SQL window aggregate (the fast path) — no per-row Python.

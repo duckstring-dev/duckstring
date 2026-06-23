@@ -138,11 +138,15 @@ the Python path). Deferred: the droplog late-arrival diversion.
 ### Phase 5 — `.merge()` for ordered operations (retraction-aware scans) — **done**
 
 The order-dependent scans now support **`.merge()`** as well as `.append()`. `.accumulate(...).merge(name,
-pk=…)` (`apply_accumulate_merge`) handles retractions / out-of-order edits by **re-folding the affected
-group(s) over their current membership** (the builder's `_full_join()`) and merge-diffing against the prior
-main — so a change anywhere in a group's sequence is correct, with **no append-only / monotonic constraint**.
-`O(affected membership)` per run; a future optimisation can carry per-group state and re-fold only the changed
-suffix (the `inverse` hook below is reserved for that). Append-mode is unchanged (carried state, monotonic).
+pk=…)` (`apply_accumulate_merge`) handles retractions / out-of-order edits, with **no monotonic constraint**.
+It carries per-group end-state (in the `_duckstring_acc_{name}` companion) and **splits affected groups**
+(`_classify_affected`): a **tail-only** group (no retraction, every change strictly beyond the carried
+high-water — the common streaming append) **resumes from carried state and folds only the new rows** —
+`O(new)`, emitting just the new output rows; a **past-changed** group (a retraction or an edit at/below the
+high-water) is **re-folded over its current membership** (the builder's `_full_join()`) and merge-diffed
+against the prior main — `O(group)`. (`_fold` does both, resuming from supplied init-states.) The `inverse`
+hook is reserved for the further refinement of resuming from a *mid-sequence* checkpoint rather than re-folding
+the whole past-changed group. Append-mode is unchanged.
 
 The aggregation-side custom reduction landed as **`agg.reduce(fn, init, *, inverse=None)`** — one value per
 group, the final fold in `.along` order (`fn(state, row) -> (new_state, output)`), used via

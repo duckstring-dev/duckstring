@@ -2206,15 +2206,21 @@ def test_builder_accumulate_merge_retraction(tmp_path):
     run(ts(1), NEVER)
     assert scored() == {1: 10, 2: 30, 3: 60}
 
-    # Edit row 2 (a past row): 20 -> 25. The running sum re-folds from t=2 on: 10, 35, 65.
-    emit([(1, "a", 1, 10), (2, "a", 2, 25), (3, "a", 3, 30)], ts(2))
+    # Tail append (row 4, beyond the high-water): the *fast path* — resume from carried state, O(new),
+    # emitting only the new row; rows 1-3 are untouched.
+    emit([(1, "a", 1, 10), (2, "a", 2, 20), (3, "a", 3, 30), (4, "a", 4, 40)], ts(2))
     run(ts(2), ts(1))
-    assert scored() == {1: 10, 2: 35, 3: 65}
+    assert scored() == {1: 10, 2: 30, 3: 60, 4: 100}
 
-    # Delete row 2: membership becomes {1,3}; sum re-folds to 10, 40 and row 2 is gone.
-    emit([(1, "a", 1, 10), (3, "a", 3, 30)], ts(3))
+    # Edit row 2 (a past row): 20 -> 25. The past path re-folds the group from t=2 on: 10, 35, 65, 105.
+    emit([(1, "a", 1, 10), (2, "a", 2, 25), (3, "a", 3, 30), (4, "a", 4, 40)], ts(3))
     run(ts(3), ts(2))
-    assert scored() == {1: 10, 3: 40}
+    assert scored() == {1: 10, 2: 35, 3: 65, 4: 105}
+
+    # Delete row 3: membership {1,2,4}; re-folds to 10, 35, 75 and row 3 is gone.
+    emit([(1, "a", 1, 10), (2, "a", 2, 25), (4, "a", 4, 40)], ts(4))
+    run(ts(4), ts(3))
+    assert scored() == {1: 10, 2: 35, 4: 75}
     snk.close()
 
 
@@ -2249,19 +2255,24 @@ def test_builder_agg_reduce_ordered(tmp_path):
             f"SELECT g, chg FROM ({ParquetDataPlane().read_select(snk_dir, 'red')})"
         ).fetchall()}
 
-    emit([(1, "a", 1, 10), (2, "a", 2, 20), (3, "a", 3, 30), (4, "b", 1, 5), (5, "b", 2, 8)], ts(1))
+    emit([(1, "a", 1, 10), (2, "a", 2, 20), (3, "a", 3, 30), (6, "b", 1, 5), (7, "b", 2, 8)], ts(1))
     run(ts(1), NEVER)
     assert reduced() == {"a": 20, "b": 3}      # a: 30−10, b: 8−5
 
-    # Edit the first row of a (10 -> 4): net re-folds to 30 − 4 = 26; b untouched.
-    emit([(1, "a", 1, 4), (2, "a", 2, 20), (3, "a", 3, 30), (4, "b", 1, 5), (5, "b", 2, 8)], ts(2))
+    # Tail append a row 4 (t=4, x=50): the tail path resumes from carried state → net 50 − 10 = 40.
+    emit([(1, "a", 1, 10), (2, "a", 2, 20), (3, "a", 3, 30), (4, "a", 4, 50), (6, "b", 1, 5), (7, "b", 2, 8)], ts(2))
     run(ts(2), ts(1))
-    assert reduced() == {"a": 26, "b": 3}
+    assert reduced() == {"a": 40, "b": 3}
 
-    # Delete the last row of a: membership {1:4, 2:20} → 20 − 4 = 16.
-    emit([(1, "a", 1, 4), (2, "a", 2, 20), (4, "b", 1, 5), (5, "b", 2, 8)], ts(3))
+    # Edit the first row of a (10 -> 4): the past path re-folds → net 50 − 4 = 46; b untouched.
+    emit([(1, "a", 1, 4), (2, "a", 2, 20), (3, "a", 3, 30), (4, "a", 4, 50), (6, "b", 1, 5), (7, "b", 2, 8)], ts(3))
     run(ts(3), ts(2))
-    assert reduced() == {"a": 16, "b": 3}
+    assert reduced() == {"a": 46, "b": 3}
+
+    # Delete the last row of a (row 4): membership {1:4, 2:20, 3:30} → 30 − 4 = 26.
+    emit([(1, "a", 1, 4), (2, "a", 2, 20), (3, "a", 3, 30), (6, "b", 1, 5), (7, "b", 2, 8)], ts(4))
+    run(ts(4), ts(3))
+    assert reduced() == {"a": 26, "b": 3}
     snk.close()
 
 
