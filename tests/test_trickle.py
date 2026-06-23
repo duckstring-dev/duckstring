@@ -2078,6 +2078,58 @@ def test_builder_accumulate_product_and_scan(tmp_path):
     snk.close()
 
 
+def test_builder_accumulate_fast_path(tmp_path):
+    """The SQL-window fast path (all metrics scalar-seed window aggregates): the result must match a
+    from-scratch DuckDB window over the full set, and the incremental run must continue from the carried seed
+    (not restart) — proving the fast path is correct both at bootstrap and incrementally."""
+    from duckstring import acc
+
+    ev = duckdb.connect(str(tmp_path / "stream.duckdb"))
+    ev_dir = tmp_path / "ponds" / "stream" / "m1" / "data"
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "scored" / "m1" / "data"
+
+    def emit(rows, f):
+        vals = ", ".join(f"({i}, '{g}', {t}, {x})" for i, g, t, x in rows)
+        T.append_table(ev, "ev", ev.sql(f"SELECT * FROM (VALUES {vals}) v(id, g, t, x)"), f, ("id",))
+        publish(ev, ev_dir, f=f)
+
+    def run(f, pf):
+        pond = Pond("scored", "1.0.0", snk, root=tmp_path, source_majors={"stream": 1}, f=f, previous_f=pf)
+        (pond.trickle("stream.ev")
+             .along("t")
+             .accumulate(by="g", cs=acc.sum("x"), rc=acc.count(), mn=acc.min("x"),
+                         mx=acc.max("x"), f0=acc.first("x"))
+             .append("scored", pk="id"))
+        publish(snk, snk_dir, f=f)
+
+    def scored():
+        return {r[0]: r[1:] for r in snk.sql(
+            f"SELECT id, cs, rc, mn, mx, f0 FROM ({ParquetDataPlane().read_select(snk_dir, 'scored')})"
+        ).fetchall()}
+
+    def expected(all_rows):
+        vals = ", ".join(f"({i}, '{g}', {t}, {x})" for i, g, t, x in all_rows)
+        return {r[0]: r[1:] for r in snk.sql(
+            f"SELECT id, sum(x) OVER w, CAST(count(*) OVER w AS BIGINT), min(x) OVER w, max(x) OVER w, "
+            f"first_value(x) OVER w FROM (VALUES {vals}) v(id, g, t, x) "
+            f"WINDOW w AS (PARTITION BY g ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+        ).fetchall()}
+
+    r1 = [(1, "a", 1, 10), (2, "a", 2, 5), (3, "a", 3, 20), (4, "b", 1, 3), (5, "b", 2, 8)]
+    emit(r1, ts(1))
+    run(ts(1), NEVER)
+    assert scored() == expected(r1)
+
+    new = [(6, "a", 4, 2), (7, "b", 3, 1)]
+    emit(new, ts(2))
+    run(ts(2), ts(1))
+    got = scored()
+    assert got == expected(r1 + new)
+    assert got[6] == (37, 4, 2, 20, 10)   # continued from the seed (sum 35+2, min 2, max 20, first 10)
+    snk.close()
+
+
 def test_builder_accumulate_lag_and_convolution(tmp_path):
     """`acc.prev` / `acc.lag(n)` (FIFO-buffer lag, reaching across the run boundary) and `acc.convolution`
     (FIR over the last K values), checked vs DuckDB's native LAG and a hand-computed convolution."""

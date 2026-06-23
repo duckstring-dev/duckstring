@@ -1037,18 +1037,31 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
     if along not in usercols:
         raise DeltaError(f".accumulate('{name}'): the .along('{along}') column is not in the scan input")
 
-    if kind == "comprehensive":
-        con.execute(f"DROP TABLE IF EXISTS {_q(state)}")   # re-fold from scratch (idempotent via append-skip)
-        carried, done, where = {}, set(), ""
-    else:
+    if kind == "incremental":
         neg = con.execute(f"SELECT count(*) FROM {_q(src)} WHERE {_q(D_COL)} < 0").fetchone()[0]
         if neg:
             raise DeltaError(
                 f".accumulate('{name}'): {neg} retracted row(s) reached an order-dependent scan — its input "
                 f"must be append-only (monotonic in .along('{along}'))."
             )
-        carried, done = _load_acc_state(con, state, by, metric_list, f)
         where = f" WHERE {_q(D_COL)} > 0"
+    else:
+        where = ""
+
+    # Fast path: when every metric is a scalar-seed window aggregate (and there's a `by` to partition on),
+    # compute the whole scan in one SQL pass (a window over this run's batch + the carried per-group seed) —
+    # no Python row-loop. Recursive / buffer / custom folds (ema/tema/product/lag/conv/scan) use the fold.
+    if by and all(m.kind in _ACC_WINDOWABLE for _, m in metric_list):
+        _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols, kind, f, pk,
+                             fail_on_conflict=fail_on_conflict, log_drops=log_drops,
+                             retain_t=retain_t, retain_n=retain_n)
+        return
+
+    if kind == "comprehensive":
+        con.execute(f"DROP TABLE IF EXISTS {_q(state)}")   # re-fold from scratch (idempotent via append-skip)
+        carried, done = {}, set()
+    else:
+        carried, done = _load_acc_state(con, state, by, metric_list, f)
 
     order_by = ", ".join(_q(c) for c in (*by, along))
     sel = ", ".join(_q(c) for c in usercols)
@@ -1088,6 +1101,88 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
                     fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
 
     _save_acc_state(con, state, by, along, metric_list, group, f, type_of)
+
+
+# The scan kinds maintainable as a scalar-seeded SQL window aggregate (the fast path) — no per-row Python.
+_ACC_WINDOWABLE = frozenset({"sum", "count", "min", "max", "first"})
+
+
+def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols, kind, f, pk, *,
+                         fail_on_conflict, log_drops, retain_t, retain_n) -> None:
+    """The SQL-window fast path for an all-scalar-seed scan: a window over this run's batch plus the carried
+    per-group seed (``carried + sum() over w``, ``least(carried, min() over w)``, …). Fully incremental — the
+    seed is the running value at the end of the previous run; the new per-group seed is the old value combined
+    with this run's batch aggregate. ``f``-stamped replay + the non-decreasing-``along`` check are kept."""
+    state = f"{ACC_STATE_PREFIX}{name}"
+    by_list = ", ".join(_q(b) for b in by)
+    alq = _q(along)
+    win = f"PARTITION BY {by_list} ORDER BY {alq} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
+    b = unique_name("accb")
+    con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(b)} AS "
+                f"SELECT {', '.join(_q(c) for c in usercols)} FROM {_q(src)}{where}")
+
+    if kind == "comprehensive":
+        con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
+    seeded = _table_exists(con, state)
+    join = f" LEFT JOIN {_q(state)} ss USING ({by_list})" if seeded else ""
+    skip = f" WHERE ss.{_q(F_COL)} IS DISTINCT FROM {_ts(f)}" if seeded else ""   # replay: skip groups at this f
+
+    if seeded:
+        bad = con.execute(
+            f"SELECT count(*) FROM {_q(b)} bb JOIN {_q(state)} ss USING ({by_list}) WHERE bb.{alq} < ss._k_along"
+        ).fetchone()[0]
+        if bad:
+            raise DeltaError(
+                f".accumulate('{name}'): {bad} row(s) arrived below their group's .along('{along}') high-water "
+                f"mark — the axis must be non-decreasing with freshness."
+            )
+
+    out_exprs, seed_exprs = [], []
+    for out, m in metric_list:
+        c = _q(m.col) if m.col else None
+        s = f"ss._acc_{out}" if seeded else "NULL"   # the carried seed (NULL = new group / bootstrap)
+        if m.kind == "sum":
+            out_exprs.append(f"COALESCE({s}, 0) + sum({c}) OVER w AS {_q(out)}")
+            seed_exprs.append(f"COALESCE(any_value({s}), 0) + COALESCE(sum({c}), 0) AS _acc_{out}")
+        elif m.kind == "count":
+            out_exprs.append(f"CAST(COALESCE({s}, 0) + row_number() OVER w AS BIGINT) AS {_q(out)}")
+            seed_exprs.append(f"CAST(COALESCE(any_value({s}), 0) + count(*) AS BIGINT) AS _acc_{out}")
+        elif m.kind == "min":
+            out_exprs.append(f"least({s}, min({c}) OVER w) AS {_q(out)}")
+            seed_exprs.append(f"least(any_value({s}), min({c})) AS _acc_{out}")
+        elif m.kind == "max":
+            out_exprs.append(f"greatest({s}, max({c}) OVER w) AS {_q(out)}")
+            seed_exprs.append(f"greatest(any_value({s}), max({c})) AS _acc_{out}")
+        else:  # first — first non-NULL, frozen once set
+            out_exprs.append(f"COALESCE({s}, first_value({c} IGNORE NULLS) OVER w) AS {_q(out)}")
+            seed_exprs.append(
+                f"COALESCE(any_value({s}), arg_min({c}, {alq}) FILTER (WHERE {c} IS NOT NULL)) AS _acc_{out}")
+
+    outt = unique_name("accout")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(outt)} AS "
+                f"SELECT {_q(b)}.*, {', '.join(out_exprs)} FROM {_q(b)}{join}{skip} WINDOW w AS ({win})")
+    if con.execute(f"SELECT count(*) FROM {_q(outt)}").fetchone()[0] == 0:
+        return
+    append_zset(con, name, _as_zset(con.sql(f"SELECT * FROM {_q(outt)}"), 1), f, normalize_pk(pk),
+                fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
+
+    hw = f"greatest(any_value(ss._k_along), max({alq}))" if seeded else f"max({alq})"
+    seedt = unique_name("accseed")
+    con.execute(
+        f"CREATE OR REPLACE TEMP TABLE {_q(seedt)} AS "
+        f"SELECT {by_list}, {', '.join(seed_exprs)}, {hw} AS _k_along, {_ts(f)} AS {_q(F_COL)} "
+        f"FROM {_q(b)}{join}{skip} GROUP BY {by_list}"
+    )
+    if not _table_exists(con, state):
+        con.execute(f"CREATE TABLE {_q(state)} AS SELECT * FROM {_q(seedt)} WHERE false")
+    con.execute("BEGIN TRANSACTION")
+    try:
+        con.execute(f"DELETE FROM {_q(state)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(seedt)})")
+        con.execute(f"INSERT INTO {_q(state)} SELECT * FROM {_q(seedt)}")
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
 
 
 # The metric kinds whose carried state is non-scalar (a fold state / FIFO buffer) → persisted as JSON text.

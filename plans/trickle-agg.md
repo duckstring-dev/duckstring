@@ -127,13 +127,13 @@ their own **`acc.*`** namespace (alongside `agg.*`), applied by **`.accumulate(b
 - **Late-arrival**: a row below its group's `.along` high-water mark raises (the monotonic contract); a
   retraction reaching the scan raises (append-only contract). Droplog-diversion deferred.
 
-Also done: `first` (running first non-NULL), `product` (running product), and **`acc.scan(fn, init, dtype)`**
-— the custom fold (`fn(state, row) -> (new_state, output)`, `row` a `{col: value}` dict; state JSON-persisted
-in the carried-state companion; a spec, not a builder method, exactly as designed). Deferred: a one-pass
-**SQL-window** fast path for the linear metrics (`sum`/`count`/`min`/`max`) — it is *also incremental* (a
-window over the new tail batch + a carried per-group seed), it only drops the Python row-loop; a `prev`/`lag`
-metric (the useful, non-identity reading of "last", since running-last is just the current row); the droplog
-late-arrival diversion.
+Also done: `first` (running first non-NULL); `product` (running product); `prev`/`lag(n)`/`convolution`
+(FIFO-buffer folds, state carried as JSON, reaching across run boundaries); **`acc.scan(fn, init, dtype)`**
+— the custom fold (`fn(state, row) -> (new_state, output)`, `row` a `{col: value}` dict; state JSON-persisted;
+a spec, not a builder method, exactly as designed); and the **SQL-window fast path** (`_accumulate_windowed`)
+for an all-scalar-seed scan (`sum`/`count`/`min`/`max`/`first` with a `by`) — one window pass over the batch +
+the carried per-group seed (so it's *incremental*, not just bootstrap; the recursive/buffer/custom folds keep
+the Python path). Deferred: the droplog late-arrival diversion.
 
 ### Phase 5 — `.merge()` for ordered operations (retraction-aware scans) — **future goal**
 
