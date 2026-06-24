@@ -98,9 +98,32 @@ The **spine** (the first source) is `s0`; joined dimensions are `s1`, `s2`, … 
 
 - **`.alias(name)`** — name a source so `.select`/`.filter` read `o.order_id` / `p.unit_price` instead of `s0`/`s1`. `s0`/`s1` stay the fallback for unaliased sources. Aliasing also makes the select *reorder-safe* — the name follows the source, so reordering `.join()` calls (which you might do for cost) no longer silently remaps positional references.
 - **`.join(pond.trickle(dim), on=…, how="inner")`** — equi-join another operand on **any** column(s). `on` is a shared column name (or list), or a `{left_col: right_col}` dict when the names differ (qualify a bare name as `alias.col` if it's ambiguous across sources). There's no FK=PK requirement: deletions are full-row retractions, so a change on any join key propagates soundly. Any table is a valid source — a Trickle or a plain overwrite Ripple. `how` ∈ `inner` / `left` / `right` / `full` / `semi` / `anti` — **all maintained incrementally**, including the outer joins' NULL-padded incomparables (reference those columns with care in `.select`). The operand may itself be a join DAG, so bushy `(a⋈b)⋈(c⋈d)` and snowflake shapes compose directly (each binary join is maintained by an affected-key recompute, with no privileged spine).
-- **`.filter(predicate)`** — a SQL boolean over the joined sources.
-- **`.select(projection)`** — the output columns (required once there's a join); must include the PK. Computed columns are fine (`o.a || '-' || o.b AS key`).
-- **`.merge(name, *, pk=, retain_t=, retain_n=)`** — execute. `pk` is **required**: the output identity (a column or tuple), which must be genuinely unique in the output.
+- **`.filter(predicate)`** — a SQL boolean. Evaluated at its **position** in the pipeline: a filter after a `.mutate()` may reference the mutated column; one before it sees only the source columns.
+- **`.mutate(name=expr, …)`** — add computed columns while keeping the rest (see below).
+- **`.select(projection)`** — choose the output columns, replacing the set. Optional: with no `.select`, the output is the bare `*` (all source columns, equi-join keys deduplicated; any other name collision raises). Computed columns are fine (`o.a || '-' || o.b AS key`).
+- **`.merge(name, *, pk=, retain_t=, retain_n=)`** — execute. `pk` is **required**: the output identity (a column or tuple), which must be genuinely unique in the output. A computed `.select`/`.mutate` column (e.g. a synthetic id) is a valid PK as long as it's deterministic.
+
+#### Defining columns: `.mutate()`
+
+`.select()` *replaces* the column list; `.mutate()` *extends* it — the `*`-preserving way to add a computed column without listing every column you want to keep. It's the natural place to synthesize an `id` for the `pk`:
+
+```python
+(pond.trickle("orders.order_line").alias("o")
+     .join(pond.trickle("catalog.product").alias("p"), on="product_id")
+     .mutate(line_id="o.order_id || '-' || o.product_id",      # parallel: both see the input
+             revenue="round(o.quantity * p.unit_price, 2)")
+     .mutate(revenue_with_tax="revenue * 1.1")                 # chained: builds on the new column
+     .filter("revenue >= 10")                                  # filter on a mutated column
+     .merge("priced_line", pk="line_id"))                      # the synthetic id is the pk
+```
+
+The rules:
+
+- Each `name=expr` is a SQL scalar expression. Columns in **one** `.mutate()` call are computed in **parallel** (siblings see the input, not each other); **chain** `.mutate()` calls to build on a fresh column. A name matching an existing column **replaces** it.
+- A mutated column is a projection-layer value — it can be a `pk`, but it **cannot be a join key** (join keys must be source columns). This is the one boundary: compute it, then join on it through a downstream `.merge()` if you need to.
+- Expressions must be **deterministic** (no `random()` / `now()`). Retractions cancel by full-row identity, so a non-deterministic value would break incremental maintenance — the same rule that applies to any computed column or PK.
+
+Because `.mutate()`, `.filter()`, and `.select()` are all row-local deterministic maps, the whole pipeline distributes over the Z-set delta — it's incrementally free, exactly like a computed `.select`.
 
 Here the same join with aliases:
 
@@ -117,9 +140,9 @@ When one side of a join changes, the builder pre-filters **both** inputs to that
 
 **Strategy escapes** (rarely needed — measure first). Two flags on `.merge()`/`.append()`, both default `True`, let you override the engine's choices for a specific build without dropping to raw SQL: `ivm=False` ignores deltas entirely and recomputes the whole output with plain full-table joins, diffed against the stored main — the escape for when the incremental machinery turns out counterproductive. `key_filter=False` keeps the incremental delta but skips the key pre-filter — for when the change is large enough to trip `p` anyway, so filtering buys nothing.
 
-The op set is deliberately small — `join` / `filter` / `select` over sources — and **closed**: a builder method exists *only* when the engine maintains it incrementally. A join operand carrying its own `.filter()`/`.select()`/`.aggregate()`/`.sql()`, a missing merge key, an ambiguous join key, or a joined graph with no `.select` raises at *build time* rather than degrading silently. Anything outside that set — aggregation, window functions, `DISTINCT`, set ops — goes through **`.sql()`** (below).
+The op set is deliberately small — `join` / `filter` / `mutate` / `select` over sources, plus the `.aggregate()` and `.along().accumulate()` operators ([below](#incremental-aggregation)) — and **closed**: a builder method exists *only* when the engine maintains it incrementally. A join operand carrying its own `.filter()`/`.mutate()`/`.select()`/`.aggregate()`/`.sql()`, a missing merge key, an ambiguous join key, or a `*` output with an unresolvable name collision raises at *build time* rather than degrading silently. Anything outside that set — window functions, holistic aggregates (`DISTINCT`, median, percentile), set ops — goes through **`.sql()`** (below).
 
-A single-source transform (no join — just filter/project a stream) is the builder with no `.join()`: `pond.trickle("src.dim").select("id, upper(v) AS v").merge("loud", pk="id")`. For a shape outside the op set entirely, the low-level escape is `pond.apply_zset(name, zset, pk=…)` — apply a hand-built Z-set (user columns + `_duckstring_d`) directly — but that's rare; prefer `.sql()` or a downstream node.
+A single-source transform (no join — just filter/project a stream) is the builder with no `.join()`: `pond.trickle("src.dim").mutate(v="upper(v)").merge("loud", pk="id")`. For a shape outside the op set entirely, the low-level escape is `pond.apply_zset(name, zset, pk=…)` — apply a hand-built Z-set (user columns + `_duckstring_d`) directly — but that's rare; prefer `.sql()` or a downstream node.
 
 ### Beyond the op set: `.sql()`
 
@@ -142,7 +165,7 @@ priced = (
 
 This is the whole `priced → revenue` pipeline in one Ripple. Two things to understand about `.sql()`:
 
-- It **breaks incremental compute** — after `.sql()` the data is fully materialised; there are no joins, key pre-filter, or fast-path shortcuts left (`.join`/`.select`/`.filter` after it raise). Aggregation isn't in the DBSP core, so the `GROUP BY` *does* re-scan `priced_line` each run — the same cost the separate `revenue` Pond pays. The `.merge()` before `.sql()` is load-bearing: it's what keeps the *join* incremental.
+- It **breaks incremental compute** — after `.sql()` the data is fully materialised; there are no joins, key pre-filter, or fast-path shortcuts left (`.join`/`.select`/`.filter` after it raise). Because `.sql()` materialises, its `GROUP BY` *does* re-scan `priced_line` each run — the same cost the separate `revenue` Pond pays. (When the aggregation is distributive, prefer the native [`.aggregate()`](#incremental-aggregation), which maintains the result incrementally instead.) The `.merge()` before `.sql()` is load-bearing: it's what keeps the *join* incremental.
 - It **keeps incremental output** — the terminal `.merge()` still diffs the aggregate against last run's totals, so only products whose revenue actually moved reach the changelog. The win is the small delta *out*, not less compute in.
 
 So `.sql()` collapses the `priced→revenue` Ripple boundary into one node — an *ergonomic* win (one deployment unit), not a compute one. Keep them as separate Ponds when `priced_line` is a reuse/parallelism boundary (which is why the demo does).

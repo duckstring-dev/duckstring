@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import textwrap
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import duckdb
@@ -627,6 +628,87 @@ def test_builder_filter_applies_to_delta_and_crosses_boundary(tmp_path):
     snk.close()
 
 
+def test_builder_mutate_computed_column_and_pk(tmp_path):
+    """`.mutate()` adds computed columns while preserving the others (the `*` default), supports parallel
+    columns in one call and a chained mutate referencing an earlier one, and a (deterministic) mutated column
+    can be the merge pk. Verified across a bootstrap and an incremental dimension change."""
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "m" / "data"
+
+    def run(f, pf):
+        pond = Pond("m", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line").alias("o")
+             .join(pond.trickle("catalog.product").alias("p"), on="product_id")
+             # parallel mutates (both see the input), then a chained mutate building on `total`
+             .mutate(line_id="o.order_id || '-' || o.product_id", total="o.qty * p.price")
+             .mutate(total_with_tax="total * 1.1")
+             .merge("m", pk="line_id"))   # the synthetic id is the pk
+        publish(snk, snk_dir, f=f)
+
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    run(ts(1), NEVER)
+    assert rows(snk, snk_dir, "m", "line_id, total, total_with_tax") == [
+        ("10-p1", 10, Decimal("11.0")), ("11-p2", 9, Decimal("9.9"))]
+    # the `*` kept the source columns alongside the mutated ones
+    assert rows(snk, snk_dir, "m", "order_id, product_id, qty, price") == [
+        (10, "p1", 2, 5), (11, "p2", 1, 9)]
+
+    pr([("p1", 50), ("p2", 9)], ts(2))   # p1 reprice → only 10-p1 recomputes incrementally
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "m", "line_id, total, total_with_tax") == [
+        ("10-p1", 100, Decimal("110.0")), ("11-p2", 9, Decimal("9.9"))]
+    snk.close()
+
+
+def test_builder_filter_on_mutated_column(tmp_path):
+    """A `.filter()` placed after a `.mutate()` references the mutated column — the pipeline is call-ordered.
+    The filter still distributes over the delta: a dim change that pushes a row across the boundary on the
+    mutated value inserts/retracts it incrementally."""
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "fm" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("fm", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        (pond.trickle("sales.order_line", p=1.0).alias("o")
+             .join(pond.trickle("catalog.product", p=1.0).alias("p"), on="product_id")
+             .mutate(total="o.qty * p.price")
+             .filter("total >= 10")              # ← references the mutated column
+             .select("o.order_id, total")
+             .merge("fm", pk="order_id"))
+        publish(snk, snk_dir, f=f)
+
+    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
+    pr([("p1", 5), ("p2", 9)], ts(1))
+    run(ts(1), NEVER)   # totals 10, 9 → only order 10 passes
+    assert rows(snk, snk_dir, "fm", "order_id, total") == [(10, 10)]
+
+    pr([("p1", 5), ("p2", 20)], ts(2))   # p2 reprice → order 11 total 20 crosses in
+    run(ts(2), ts(1))
+    assert rows(snk, snk_dir, "fm", "order_id, total") == [(10, 10), (11, 20)]
+
+    pr([("p1", 3), ("p2", 20)], ts(3))   # p1 reprice → order 10 total 6 drops out (retracted)
+    run(ts(3), ts(2))
+    assert rows(snk, snk_dir, "fm", "order_id, total") == [(11, 20)]
+    snk.close()
+
+
+def test_builder_mutate_errors(tmp_path):
+    snk = duckdb.connect()
+    pond = Pond("e", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=ts(1))
+    with pytest.raises(BuildError, match="at least one"):
+        pond.trickle("sales.order_line").mutate()
+    with pytest.raises(BuildError, match="reserved"):
+        pond.trickle("sales.order_line").mutate(_duckstring_x="1")
+    # a join operand can't carry a .mutate() — attach it to the result
+    with pytest.raises(BuildError, match="operand"):
+        dim = pond.trickle("catalog.product").mutate(x="price * 2")
+        pond.trickle("sales.order_line").join(dim, on="product_id")
+    snk.close()
+
+
 def test_builder_matches_comprehensive_row_for_row(tmp_path):
     _cons, ol, pr = _star_sources(tmp_path)
     ol([(10, "p1", 2), (11, "p2", 1), (12, "p1", 3)], ts(1))
@@ -875,9 +957,20 @@ def test_builder_build_time_errors(tmp_path):
         dim_with_select = pond.trickle("catalog.product").select("product_id")
         pond.trickle("sales.order_line").join(dim_with_select, on="product_id")
 
-    # A joined graph with no .select(...).
-    with pytest.raises(BuildError, match="select"):
-        pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id").merge("x", pk="order_id")
+    # A joined graph with no .select(...) now resolves via the bare `*` (the join key product_id is
+    # deduplicated), so this composes and runs.
+    snk_dir = tmp_path / "ponds" / "priced" / "m1" / "data"
+    (pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id")
+         .merge("x", pk="order_id"))
+    publish(con, snk_dir, f=ts(1))
+    assert rows(con, snk_dir, "x", "order_id, price") == [(10, 5)]
+
+    # But a `*` with a genuine (non-join-key) name collision raises: the snowflake p1⋈p2 both carry `price`.
+    with pytest.raises(BuildError, match="ambiguous"):
+        (pond.trickle("sales.order_line")
+             .join(pond.trickle("catalog.product").alias("p1").join(
+                 pond.trickle("catalog.product").alias("p2"), on="product_id"), on="product_id")
+             .merge("y", pk="order_id"))
 
     # No pk passed to a non-aggregate .merge(...) → BuildError (pk only defaults after .aggregate()).
     with pytest.raises(BuildError, match="output key"):
@@ -1102,7 +1195,7 @@ def test_spine_pk_passthrough_detection():
 
     def detect(projection, out_pk, spine_pk, spine_alias=None):
         b = TrickleBuilder(None, "spine")
-        b._projection = projection
+        b._ops = [("select", projection)]
         b._alias = spine_alias
         return b._spine_pk_passthrough(out_pk, spine_pk)
 
@@ -1220,13 +1313,22 @@ def test_builder_sql_aggregation_keeps_incremental_output(tmp_path):
     snk.close()
 
 
-def test_builder_sql_requires_alias_and_select(tmp_path):
-    snk = duckdb.connect()
-    pond = Pond("x", "1.0.0", snk, root=tmp_path, source_majors={"a": 1, "b": 1}, f=ts(1))
+def test_builder_sql_requires_alias_and_uses_star(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    ol([(10, "p1", 2)], ts(1))
+    pr([("p1", 5)], ts(1))
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    pond = Pond("x", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=ts(1), previous_f=NEVER)
+    # .sql() still needs an alias to name the table it runs over.
     with pytest.raises(BuildError, match="alias"):
-        pond.trickle("a.t").sql("SELECT 1")
-    with pytest.raises(BuildError, match="select"):
-        pond.trickle("a.t").join(pond.trickle("b.u"), on="k").alias("x").sql("SELECT 1 FROM x")
+        pond.trickle("sales.order_line").sql("SELECT 1")
+    # A joined DAG with no .select() now resolves its columns via the bare `*` (the join key is deduplicated),
+    # so .sql() can reference them by name directly — no explicit projection required first.
+    snk_dir = tmp_path / "ponds" / "x" / "m1" / "data"
+    (pond.trickle("sales.order_line").join(pond.trickle("catalog.product"), on="product_id").alias("j")
+         .sql("SELECT order_id, qty * price AS total FROM j").merge("x", pk="order_id"))
+    publish(snk, snk_dir, f=ts(1))
+    assert rows(snk, snk_dir, "x", "order_id, total") == [(10, 10)]
     snk.close()
 
 

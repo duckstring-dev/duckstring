@@ -1,7 +1,8 @@
 """The ``pond.trickle(...)`` builder — a DBSP-style **DAG of binary incremental joins** over Z-set sources.
 
-A fluent builder that records an **operator DAG** (sources + binary equi-joins of any ``how``, plus a final
-filter and projection) and maintains its output incrementally. Each join node is maintained by the single
+A fluent builder that records an **operator DAG** (sources + binary equi-joins of any ``how``, plus an
+ordered ``filter``/``mutate``/``select`` output pipeline) and maintains its output incrementally. Each join
+node is maintained by the single
 **affected-key recompute** rule (``plans/trickle-dag.md``): for ``O = A ⋈ₖ B`` with deltas ``δA``, ``δB``,
 
     K = πₖ(δA) ∪ πₖ(δB)                 -- the join-key values that changed on either side
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import re
 
+from .context import SYSTEM_PREFIX
 from .io import D_COL, RESCAN_KINDS, _q, _table_exists, normalize_pk, read_registry_delta, unique_name
 
 _W = "_duckstring_w"  # scratch weight column for prior-state reconstruction (distinct from the Z-set D_COL)
@@ -211,16 +213,20 @@ class _NodeState:
 
 class TrickleBuilder:
     """One handle into the build DAG. ``pond.trickle(ref)`` starts a DAG rooted at a source; :meth:`join`
-    composes another (possibly itself composed) ``pond.trickle(...)`` operand as a binary join. ``.filter``/
-    ``.select`` attach to the composed result; the terminals are :meth:`merge` / :meth:`append`."""
+    composes another (possibly itself composed) ``pond.trickle(...)`` operand as a binary join. The
+    ``.filter``/``.mutate``/``.select`` pipeline attaches to the composed result, applied in **call order**
+    (so a filter may reference an earlier mutate's column); the terminals are :meth:`merge` / :meth:`append`.
+    With no ``.select``, the output is the bare ``*`` (equi-join keys deduplicated)."""
 
     def __init__(self, ctx, spine_ref: str, *, p: float = 0.3, _spine_delta=None) -> None:
         self.ctx = ctx
         self.spine_ref = spine_ref
         self.p = p
         self._root = _Source(spine_ref, p, threaded_delta=_spine_delta)
-        self._filters: list[str] = []
-        self._projection: str | None = None
+        # The output pipeline: an ordered list of ("filter", pred) / ("mutate", {name: expr}) / ("select",
+        # projection) stages, applied (in call order) to the composed DAG result. Each is a row-local,
+        # deterministic map, so the whole pipeline distributes over the Z-set delta — incrementally free.
+        self._ops: list[tuple[str, object]] = []
         self._alias: str | None = None  # this node's alias (the spine's, for .select refs / the .sql table)
         self._materialised = None  # a full relation after .sql() → comprehensive mode (no incremental compute)
         self._agg = None  # {"by": (...), "metrics": {out: agg.Metric}} after .aggregate()
@@ -258,27 +264,65 @@ class TrickleBuilder:
             raise BuildError("join() takes another pond.trickle(...) operand")
         if dimension._materialised is not None or dimension._agg is not None:
             raise BuildError("join(): a .sql()/.aggregate() result can't be a join operand — do it downstream")
-        if dimension._filters or dimension._projection is not None:
+        if dimension._ops:
             raise BuildError(
-                f"join('{dimension.spine_ref}'): a join operand can't carry its own .filter()/.select() — "
-                f"attach those to the composed result, or materialise it with a downstream .merge()"
+                f"join('{dimension.spine_ref}'): a join operand can't carry its own .filter()/.mutate()/"
+                f".select() — attach those to the composed result, or materialise it with a downstream .merge()"
             )
         self._root = _Join(self._root, dimension._root, _join_pairs(on), how)
         return self
 
     def filter(self, predicate: str) -> "TrickleBuilder":
-        """Restrict the output with a SQL boolean ``predicate`` over the composed sources (by ``s0``/``s1``/…
-        or their ``.alias()`` names)."""
+        """Restrict the output with a SQL boolean ``predicate``. Evaluated at its **position** in the
+        filter/mutate/select pipeline (call order): a filter placed after a ``.mutate(...)`` may reference the
+        mutated column; one before it sees only the source columns (``s0``/``s1``/… or ``.alias()`` names)."""
         self._ensure_incremental("filter")
-        self._filters.append(predicate)
+        self._ops.append(("filter", predicate))
+        return self
+
+    def mutate(self, **columns: str) -> "TrickleBuilder":
+        """Add computed columns to the output **without dropping the others** — the ``*``-preserving sibling of
+        :meth:`select`. Each ``name=expr`` is a SQL scalar expression over the columns available at this point:
+        the source columns (``s0``/``s1``/… or ``.alias()`` names) and any column an **earlier** ``.mutate()``
+        added. Columns in one call are computed in **parallel** (siblings see the input, not each other); chain
+        ``.mutate()`` calls to build on a fresh column. A name matching an existing column **replaces** it.
+
+        A mutated column is a projection-layer value — it can be a ``pk`` (handy for a synthetic id) but it
+        **cannot be a join key** (join keys must be source columns). Expressions must be **deterministic** (no
+        ``random()`` / ``now()``): retractions cancel by full-row identity, so a non-deterministic value breaks
+        incremental maintenance."""
+        self._ensure_incremental("mutate")
+        if not columns:
+            raise BuildError("mutate() needs at least one name=expr column")
+        for name in columns:
+            if name.startswith(SYSTEM_PREFIX):
+                raise BuildError(f"mutate(): column '{name}' uses the reserved '{SYSTEM_PREFIX}' prefix")
+        self._ops.append(("mutate", dict(columns)))
         return self
 
     def select(self, projection: str) -> "TrickleBuilder":
-        """The output column list (a SQL select list). Required when the DAG has joins; it must include the
-        output PK. Reference sources by ``s{i}`` (left-to-right leaf order) or their ``.alias()`` names."""
+        """Choose the output column list (a SQL select list), **replacing** the column set at this point in the
+        pipeline. Required when a joined DAG's ``*`` would be ambiguous; it must include the output PK.
+        Reference columns by ``s{i}`` (left-to-right leaf order) / ``.alias()`` names, and any prior mutated
+        column by name. Computed items are allowed (``expr AS name``) — a deterministic computed column may be
+        the ``pk``."""
         self._ensure_incremental("select")
-        self._projection = projection
+        self._ops.append(("select", projection))
         return self
+
+    # Compat views over the pipeline for the guards/fast-paths that predate it.
+    @property
+    def _filters(self) -> list[str]:
+        return [p for kind, p in self._ops if kind == "filter"]
+
+    @property
+    def _projection(self) -> str | None:
+        sels = [p for kind, p in self._ops if kind == "select"]
+        return sels[-1] if sels else None
+
+    @property
+    def _has_mutate(self) -> bool:
+        return any(kind == "mutate" for kind, _ in self._ops)
 
     def _ensure_incremental(self, op: str) -> None:
         if self._materialised is not None:
@@ -375,11 +419,8 @@ class TrickleBuilder:
             raise BuildError(".sql() can't follow .aggregate() — aggregate is terminal-bound to .merge()")
         if self._alias is None:
             raise BuildError(".sql() needs a table name to reference — call .alias('t') first, then '… FROM t'")
-        if self._materialised is None and isinstance(self._root, _Join) and self._projection is None:
-            raise BuildError(
-                "pond.trickle(...).join(...).sql(...): add .select(...) before .sql() so the joined columns "
-                "are named for the query"
-            )
+        # A joined DAG with no .select() resolves via the bare `*` (join keys deduplicated); a genuine name
+        # collision raises a precise BuildError from _star_output when _full_join projects.
         base = self._materialised if self._materialised is not None else self._full_join()
         table = self._alias
         base.create_view(table, replace=True)
@@ -555,7 +596,7 @@ class TrickleBuilder:
         from . import io as trickle
 
         con = self.ctx.con
-        bare = (isinstance(self._root, _Source) and not self._filters and self._projection is None
+        bare = (isinstance(self._root, _Source) and not self._ops
                 and self._materialised is None and self._agg is None)
         if bare:
             ref = self._root.ref
@@ -565,10 +606,6 @@ class TrickleBuilder:
             if counter is not None:
                 return int(counter(ref))
             return int(self.ctx.read_table(ref).aggregate("count(*)").fetchone()[0])  # correct fallback
-        if isinstance(self._root, _Join) and self._projection is None:
-            raise BuildError(
-                f"pond.trickle('{self.spine_ref}').join(...).count(): a joined DAG needs .select(...) first"
-            )
         view = trickle.unique_name("count")
         if self._agg is not None:
             # group count: distinct groups in the current composed state — never runs the metric aggregations.
@@ -635,11 +672,6 @@ class TrickleBuilder:
           join inputs to ``key ∈ K`` (the affected keys). ``False`` keeps the delta composition but skips the
           ``IN (…)`` restriction (joins the full new/old states and diffs) — useful when the change is large
           enough to trip ``p`` anyway, so the filter buys nothing. (No effect when ``ivm=False``.)"""
-        if isinstance(self._root, _Join) and self._projection is None:
-            raise BuildError(
-                f"pond.trickle('{self.spine_ref}').join(...): a joined DAG needs .select(...) to name the "
-                f"output columns (and include the PK)"
-            )
         if not ivm:
             # ivm=False escape: ignore deltas, recompute the whole output and diff vs the stored main.
             o_prime = self._full_join()
@@ -883,57 +915,137 @@ class TrickleBuilder:
             )
         return f"{self._alias_for(hits[0])}.{name}"
 
-    # ─── projection / filter ──────────────────────────────────────────────────────
+    # ─── the output pipeline: filter / mutate / select ────────────────────────────
+    #
+    # The DAG (``self._root``) is compiled to a relation whose columns are leaf-qualified ``"alias.col"``; the
+    # pipeline is then layered on top as nested subqueries (one per stage that a later stage references; it
+    # collapses to a flat SELECT otherwise). Source columns stay ``alias.col``-qualified through the pipeline;
+    # a mutated column is a bare name — the two namespaces never collide (``_qualify`` rewrites ``alias.col``
+    # refs, leaves bare names alone). Every stage is a row-local deterministic map, so applying the pipeline
+    # to the Z-set delta is identical to applying it to the full output and re-diffing — incrementally free.
 
-    def _filter_clause(self) -> str:
-        if not self._filters:
-            return ""
-        aliases = self._aliases_set()
-        return " WHERE " + " AND ".join(_qualify(p, aliases) for p in self._filters)
+    _STAR_RE = re.compile(r"^(\w+)\.\*$")
+    _BARE_RE = re.compile(r'^(\w+)\.("?)(\w+)\2$')
+    _AS_RE = re.compile(r'\bAS\s+("?)([A-Za-z_]\w*)\1\s*$', re.IGNORECASE)
 
-    def _projection_sql(self, state: _NodeState) -> str:
-        """The output select list: qualified internal columns mapped to **bare** output names. With no
-        ``.select`` (a single-source build) the leftmost leaf's columns pass through bare."""
+    @staticmethod
+    def _bare_of(col: str) -> str:
+        """The output name a frame column maps to: the part after the dot for a qualified ``alias.col``, the
+        name itself for a bare (mutated) column."""
+        return col.split(".", 1)[1] if "." in col else col
+
+    def _pipeline_sql(self, source_view: str, state_cols: list[str], *, is_delta: bool) -> str:
+        """Apply the filter/mutate/select pipeline over ``source_view`` (columns = the qualified
+        ``state_cols`` plus ``_duckstring_d`` when ``is_delta``) and return SQL yielding **bare-named** output
+        columns (and ``_duckstring_d`` for a delta)."""
         aliases = self._aliases_set()
-        if self._projection is None:
-            spine = self._spine
-            a = self._alias_for(spine)
-            return ", ".join(f'{_q(f"{a}.{c}")} AS {_q(c)}' for c in self._bare_cols(spine))
-        out = []
-        star = re.compile(r"^(\w+)\.\*$")
-        bare = re.compile(r'^(\w+)\.("?)(\w+)\2$')
-        for item in _select_items(self._projection):
+        frame = _q(source_view)
+        cols = list(state_cols)  # frame columns: qualified "alias.col" plus bare mutated names
+        dd = f", {_q(D_COL)}" if is_delta else ""
+        terminal_select = False
+        for kind, payload in self._ops:
+            if kind == "filter":
+                frame = f"(SELECT * FROM {frame} WHERE {_qualify(payload, aliases)})"
+                terminal_select = False
+            elif kind == "mutate":
+                replaced = [c for c in cols if self._bare_of(c) in payload]
+                excl = f" EXCLUDE ({', '.join(_q(c) for c in replaced)})" if replaced else ""
+                adds = ", ".join(f"{_qualify(e, aliases)} AS {_q(n)}" for n, e in payload.items())
+                frame = f"(SELECT *{excl}, {adds} FROM {frame})"
+                cols = [c for c in cols if c not in replaced] + list(payload)
+                terminal_select = False
+            else:  # select — replaces the column set with the chosen (bare-named) list
+                proj, cols = self._select_stage(payload, aliases)
+                frame = f"(SELECT {proj}{dd} FROM {frame})"
+                terminal_select = True
+        if terminal_select:
+            return f"SELECT * FROM {frame}"  # the select stage already bare-named the columns
+        return f"SELECT {self._star_output(cols)}{dd} FROM {frame}"
+
+    def _select_stage(self, projection: str, aliases: set[str]):
+        """Compile one ``.select`` projection to ``(select_list_sql, output_bare_names)``: ``alias.col`` →
+        bare ``col``, ``alias.*`` expands the leaf's columns, a computed item passes through (its name taken
+        from a trailing ``AS``)."""
+        out, names = [], []
+        for item in _select_items(projection):
             s = item.strip()
-            sm = star.match(s)
+            sm = self._STAR_RE.match(s)
             if sm and sm.group(1) in aliases:
                 a = sm.group(1)
                 leaf = next(leaf for leaf in self._leaves() if self._alias_for(leaf) == a)
-                out += [f'{_q(f"{a}.{c}")} AS {_q(c)}' for c in self._bare_cols(leaf)]
+                for c in self._bare_cols(leaf):
+                    out.append(f'{_q(f"{a}.{c}")} AS {_q(c)}')
+                    names.append(c)
                 continue
             q = _qualify(item, aliases)
-            bm = bare.match(s)
+            bm = self._BARE_RE.match(s)
             if bm and bm.group(1) in aliases:
                 out.append(f"{q} AS {_q(bm.group(3))}")
+                names.append(bm.group(3))
             else:
                 out.append(q)
+                am = self._AS_RE.search(s)
+                names.append(am.group(2) if am else s)  # best-effort name (used only if a stage follows)
+        return ", ".join(out), names
+
+    def _join_key_finder(self):
+        """Union-find over the qualified columns equated by every ``on=`` in the DAG, so the ``*`` output can
+        deduplicate equi-join keys (which carry the same value on both sides) while still rejecting any other
+        name collision."""
+        parent: dict[str, str] = {}
+
+        def find(x: str) -> str:
+            parent.setdefault(x, x)
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def walk(node) -> None:
+            if isinstance(node, _Join):
+                for lq, rq in self._resolve_pairs(node):
+                    parent[find(lq)] = find(rq)
+                walk(node.left)
+                walk(node.right)
+
+        walk(self._root)
+        return find
+
+    def _star_output(self, cols: list[str]) -> str:
+        """Bare-name the surviving frame columns for the implicit ``*``: a qualified ``alias.col`` → bare
+        ``col``, a mutated column passes through. Equi-join keys colliding on the bare name fold to the
+        leftmost copy; any other bare-name collision raises (the dedup-keys rule)."""
+        find = self._join_key_finder()
+        by_bare: dict[str, list[str]] = {}
+        for c in cols:
+            by_bare.setdefault(self._bare_of(c), []).append(c)
+        out = []
+        for bare, members in by_bare.items():
+            if len(members) > 1 and len({find(m) for m in members}) != 1:
+                where = [m.split(".", 1)[0] for m in members if "." in m] or members
+                raise BuildError(
+                    f"column '{bare}' is ambiguous across {where} — name the survivors with .select(...) or "
+                    f"rename via .mutate(); only equi-join keys are auto-deduplicated"
+                )
+            c = members[0]  # cols is left-to-right (leaf order), so this is the leftmost copy
+            out.append(_q(c) if "." not in c else f"{_q(c)} AS {_q(bare)}")
         return ", ".join(out)
 
     def _project_current(self, state: _NodeState):
-        proj = self._projection_sql(state)
-        return self.ctx.con.sql(f"SELECT {proj} FROM {_q(state.current)}{self._filter_clause()}")
+        return self.ctx.con.sql(self._pipeline_sql(state.current, state.cols, is_delta=False))
 
     def _project_delta(self, state: _NodeState):
-        proj = self._projection_sql(state)
-        return self.ctx.con.sql(
-            f"SELECT {proj}, {_q(D_COL)} FROM {_q(state.delta)}{self._filter_clause()}"
-        )
+        return self.ctx.con.sql(self._pipeline_sql(state.delta, state.cols, is_delta=True))
 
     # ─── misc ─────────────────────────────────────────────────────────────────────
 
     def _require_pk(self, out_pk, cols) -> None:
         missing = [c for c in out_pk if c not in cols]
         if missing:
-            raise BuildError(f".select(...) must include the PK column(s) {missing}")
+            raise BuildError(
+                f"the output is missing the PK column(s) {missing} — add them via .select(...), .mutate(...), "
+                f"or leave the column in the bare * output"
+            )
 
     def _chain(self, name: str, out_pk) -> "TrickleBuilder":
         """Thread the just-materialised output forward as a chainable in-run operand — its delta read back

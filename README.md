@@ -14,6 +14,7 @@ The main elements:
 - **Catchment**: Control environment (FastAPI + UI + CLI)
 - **Pond**: Versioned container with declared upstream dependencies
 - **Ripple**: Unit operation within a Pond (e.g. a single transformation producing a table)
+- **Trickle**: DBSP-based incremental engine operating within a Ripple
 
 Ponds are typed or referred to in context:
 
@@ -61,10 +62,6 @@ Ponds execute on demand signals sent to an Outlet, in two flavours — **push** 
 | **Pull** | Tap | Wave |
 
 A Tide keeps an Outlet no staler than a bound (`duckstring trigger tide reports 1d`); a Wave keeps it as fresh as the pipeline can supply. See [Triggers](https://docs.duckstring.com/guides/triggers) for the full semantics.
-
-## Scope & maturity
-
-Duckstring targets single-node workloads (DuckDB under the hood) — pipelines in the tens of millions of rows, not big-data scale. A first-class incremental construct (**Trickle**) is not yet built; incremental processing today is a [documented self-read pattern](https://docs.duckstring.com/guides/incremental-ripples). Pipelines that run on external engines can be orchestrated as [proxy Ponds](https://docs.duckstring.com/guides/external-pipelines).
 
 ## Going further
 
