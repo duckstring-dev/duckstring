@@ -26,6 +26,10 @@ dependencies = [
   # (duckstring.iceberg_catalog) rather than pyiceberg's SqlCatalog, so SQLAlchemy is NOT pulled in.
   "pyiceberg>=0.7",
   "pyarrow>=14",
+  # DuckDB requires pytz to convert TIMESTAMPTZ columns to Python datetimes on fetch
+  # (our _duckstring_f freshness column is TIMESTAMPTZ, read back in dataplane/trickle export).
+  # It is otherwise only present transitively (pandas), so a clean install lacks it.
+  "pytz",
 ]
 
 [project.optional-dependencies]
