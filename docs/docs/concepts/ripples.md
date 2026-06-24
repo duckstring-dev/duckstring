@@ -56,6 +56,10 @@ When the Catchment starts a Pond Run, the Pond's worker executes every Ripple to
 
 Ripples are also the resolution at which the pull model operates. Demand propagates Ripple-to-Ripple, not just Pond-to-Pond — which is why a continuously-pulled pipeline throttles itself to the slowest *Ripple*, not the slowest Pond. [Freshness & Demand](freshness.md) explains the mechanics.
 
+## The incremental capability: Trickles
+
+A Ripple overwrites its tables wholesale each run. When you'd rather preserve history — so a consumer reads only what changed — publish a [**Trickle**](trickle.md) table instead: write it with `pond.append_table` / `pond.merge_table` rather than `pond.write_table`. A Trickle is a *capability*, not a separate node type — there's no special decorator, and one Ripple can publish plain and Trickle tables side by side. The orchestration is identical (a node in the graph, run and retried the same way); only the I/O differs, writing an append history or a merge changelog rather than a full overwrite.
+
 ## Granularity
 
 A good Ripple is one logical output: a table and the transformation that produces it. Splitting work into Ripples buys parallelism (independent Ripples run concurrently), precise retry scope (a retry re-runs the failed Ripple, not the whole Pond), and a legible run history. Work that always changes together belongs in one Ripple; work that can usefully run, fail, or be timed separately belongs in separate ones.

@@ -174,6 +174,44 @@ function StatusPanel() {
   );
 }
 
+// Top-right control: collapse every Pond's Ripples to a header-only box, or expand them back. The
+// label flips to "Expand all" once every collapsible Pond (one that owns Ripples) is collapsed.
+function CollapsePanel() {
+  const collapsedPonds = useLiveStore((s) => s.collapsedPonds);
+  const setAllCollapsed = useLiveStore((s) => s.setAllCollapsed);
+  // A Pond is collapsible only if it owns Ripples (a Draw has none to hide). Select a stable joined
+  // key — not a fresh array — so the panel doesn't re-render on every poll.
+  const collapsibleKey = useLiveStore((s) =>
+    [...new Set(Object.values(s.ripples).map((r) => r.pondId))].sort().join(',')
+  );
+
+  if (!collapsibleKey) return null;
+  const collapsibleIds = collapsibleKey.split(',');
+  const allCollapsed = collapsibleIds.every((id) => collapsedPonds[id]);
+
+  return (
+    <button
+      onClick={() => setAllCollapsed(!allCollapsed)}
+      style={{
+        background: '#15151a',
+        border: '1px solid #27272a',
+        borderRadius: 8,
+        padding: '7px 12px',
+        fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+        fontSize: 12,
+        color: '#a1a1aa',
+        cursor: 'pointer',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 7,
+      }}
+    >
+      <span style={{ fontSize: 11, color: '#71717a' }}>{allCollapsed ? '▸' : '▾'}</span>
+      {allCollapsed ? 'Expand all' : 'Collapse all'}
+    </button>
+  );
+}
+
 // ─── Main canvas ─────────────────────────────────────────────────────────────
 
 export function DagCanvas() {
@@ -256,6 +294,14 @@ export function DagCanvas() {
     return `${enc(floors.ripples ?? {})}|${enc(floors.ponds ?? {})}`;
   }, [floors]);
 
+  const collapsedPonds = useLiveStore((s) => s.collapsedPonds);
+  // Stable key over just the *collapsed* pond ids — relayout fires when a Pond is collapsed/expanded,
+  // not on every poll. The Set fed to computeLayout is rebuilt from it inside the layout memo.
+  const collapsedKey = useMemo(
+    () => Object.keys(collapsedPonds).filter((id) => collapsedPonds[id]).sort().join(','),
+    [collapsedPonds]
+  );
+
   const lineage = useLiveStore((s) => s.lineage);
   const selfId = useLiveStore((s) => s.catchment?.id ?? null);
   // Lineage layout changes only when the upstream topology does (not on every freshness tick) — key
@@ -268,9 +314,10 @@ export function DagCanvas() {
   }, [lineage]);
 
   const { nodes, edges } = useMemo(() => {
-    return computeLayout(ponds, ripples, triggers, floors, isMobile ? 'TB' : 'LR', lineage, selfId);
+    const collapsed = new Set(collapsedKey ? collapsedKey.split(',') : []);
+    return computeLayout(ponds, ripples, triggers, floors, isMobile ? 'TB' : 'LR', lineage, selfId, collapsed);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layoutKey, widthKey, isMobile, lineageKey, selfId]);
+  }, [layoutKey, widthKey, isMobile, lineageKey, selfId, collapsedKey]);
 
   // Handle positions move between the LR and TB layouts; nudge React Flow to re-measure them
   // when the orientation flips, or edges keep their old anchors. Then re-frame: the fitView prop
@@ -308,6 +355,9 @@ export function DagCanvas() {
         <Background color="#2a2a35" gap={24} size={1} />
         <Panel position="top-left">
           <StatusPanel />
+        </Panel>
+        <Panel position="top-right">
+          <CollapsePanel />
         </Panel>
         <Controls style={{ background: '#1a1a1f', border: '1px solid #3f3f46', borderRadius: 6 }} />
       </ReactFlow>

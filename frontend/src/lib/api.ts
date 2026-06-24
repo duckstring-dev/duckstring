@@ -68,7 +68,8 @@ export interface RawPond {
   kind: string;
   is_draw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment, not run by a Duck
   version: string;
-  status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked';
+  has_tables: boolean; // this major line has published at least one table — the data viewer is offered
+  status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
   gen: number;
   runs_completed: number;
   has_pull: boolean;
@@ -80,6 +81,8 @@ export interface RawPond {
   is_failed: boolean;
   is_blocked: boolean;
   is_killed: boolean;
+  refresh_pending: boolean; // next run is a cold wipe-and-rebuild (control refresh)
+  repairing: boolean; // in an active repair plan — blocked from normal demand
   failed_f: string | null;
   failures: number;
   missing_sources: string[]; // declared Sources absent from the Catchment (pond keys "name@major")
@@ -207,6 +210,31 @@ export function postTrigger(pond: string, endpoint: string, body: unknown = {}):
   return postJSON(pondPath(pond, endpoint), body);
 }
 
+// Refresh: flag a Pond so its next run is a cold wipe-and-rebuild (or `clear` to un-flag).
+export function refreshPond(pond: string, clear = false): Promise<void> {
+  return postJSON(pondPath(pond, clear ? 'refresh?clear=true' : 'refresh'));
+}
+
+// Repair: force-rebuild a connected set of Ponds now (ids "name@major"). Throws the server's detail
+// (e.g. a disconnected set) on a 4xx so the caller can surface it.
+export async function repairPonds(
+  ids: string[],
+  downstream: boolean,
+): Promise<{ scope: string[] }> {
+  const ponds = ids.map((id) => {
+    const at = id.lastIndexOf('@');
+    return { name: at === -1 ? id : id.slice(0, at), major: at === -1 ? null : Number(id.slice(at + 1)) };
+  });
+  const res = await fetch(`${apiBase()}/repair`, {
+    method: 'POST',
+    headers: authHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify({ ponds, downstream }),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `repair failed (${res.status})`);
+  return res.json();
+}
+
 // Failure management.
 export function clearFailure(pond: string): Promise<void> {
   return postJSON(pondPath(pond, 'clear'));
@@ -216,6 +244,95 @@ export function setBudget(pond: string, immediateRetries: number, sourceRetries:
   return postJSON(pondPath(pond, 'budget'), {
     immediate_retries: immediateRetries,
     source_retries: sourceRetries,
+  });
+}
+
+// ─── Data viewer (windowed read of a Pond's exported tables) ─────────────────
+
+export interface PageResult {
+  columns: string[];
+  rows: unknown[][];
+  has_more: boolean;
+}
+
+export type TrickleMode = 'append' | 'merge';
+
+// A published table, with its Trickle mode (if any) and primary key.
+export interface TableInfo {
+  name: string;
+  trickle: TrickleMode | null;
+  pk: string[];
+}
+
+// A query against a Pond's exported data: a named `table` (browse), a custom `sql`, or — for a Trickle
+// — a server-built windowed/consolidated view (`trickle` + `pk` + the freshness window `fLo`..`fHi`).
+export interface DataQuery {
+  pond: string; // pond id ("name@major")
+  table?: string;
+  sql?: string;
+  trickle?: TrickleMode;
+  pk?: string[];
+  fLo?: string | null; // inclusive lower freshness bound (ISO), null = unbounded
+  fHi?: string | null; // inclusive upper freshness bound (ISO), null = unbounded
+  orderBy?: string | null; // opt-in sort column (null = base order); only affects /page
+  orderDesc?: boolean;
+}
+
+// Split a pond id ("name@major") into the name + major the data routes expect.
+function splitPond(pond: string): { name: string; major: number | undefined } {
+  const at = pond.lastIndexOf('@');
+  return { name: at === -1 ? pond : pond.slice(0, at), major: at === -1 ? undefined : Number(pond.slice(at + 1)) };
+}
+
+async function postData<T>(path: string, body: object): Promise<T> {
+  const res = await fetch(`${apiBase()}${path}`, {
+    method: 'POST',
+    headers: authHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `${path} → ${res.status}`);
+  return res.json() as Promise<T>;
+}
+
+// The query body shared by /query/count and /query/page: maps the client DataQuery onto the backend's
+// snake_case fields, adding the pond name + major.
+function queryBody(q: DataQuery): object {
+  const { name, major } = splitPond(q.pond);
+  return { pond: name, major, table: q.table, sql: q.sql, trickle: q.trickle, pk: q.pk, f_lo: q.fLo, f_hi: q.fHi };
+}
+
+// The tables this Pond's major line has published — the viewer's table picker (with Trickle mode + pk).
+export async function fetchTables(pond: string): Promise<TableInfo[]> {
+  const { name, major } = splitPond(pond);
+  const qs = major === undefined ? '' : `?major=${major}`;
+  return getJSON<{ tables: TableInfo[] }>(`/ponds/${encodeURIComponent(name)}/tables${qs}`).then((d) => d.tables);
+}
+
+// The distinct run freshnesses (newest-first) of a Trickle table — the window selector's options.
+export async function fetchFreshness(pond: string, table: string): Promise<{ freshness: string[]; floor: string | null }> {
+  const { name, major } = splitPond(pond);
+  const params = new URLSearchParams({ table });
+  if (major !== undefined) params.set('major', String(major));
+  return getJSON(`/ponds/${encodeURIComponent(name)}/freshness?${params}`);
+}
+
+// The full changelog history of one record (merge Trickle), for the per-row history view.
+export async function fetchHistory(pond: string, table: string, pk: Record<string, unknown>): Promise<PageResult> {
+  const { name, major } = splitPond(pond);
+  return postData<PageResult>('/query/history', { pond: name, major, table, pk });
+}
+
+// Total rows of a query — sizes the viewer's virtual scroll.
+export async function fetchCount(q: DataQuery): Promise<number> {
+  return postData<{ count: number }>('/query/count', queryBody(q)).then((d) => d.count);
+}
+
+// A windowed read [offset, offset+limit) for the virtual grid. The server wraps the query in a subquery
+// with LIMIT/OFFSET; a static Parquet scan is deterministic, so windows are stable.
+export async function fetchPage(q: DataQuery & { limit: number; offset: number }): Promise<PageResult> {
+  return postData<PageResult>('/query/page', {
+    ...queryBody(q), order_by: q.orderBy, order_desc: q.orderDesc, limit: q.limit, offset: q.offset,
   });
 }
 

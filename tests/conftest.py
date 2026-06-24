@@ -17,11 +17,15 @@ from typer.testing import CliRunner
 def fast_demo_sleep():
     """Set env vars for the test session:
     - DUCKSTRING_SLEEP_MULTIPLIER=0.01: demo-pond sleeps become negligible
+    - DUCKSTRING_DEMO_*: shrink the (deliberately large, ~50 MB) Trickle demo to a few thousand rows so
+      the e2e suites stay quick — the production-scale defaults live in the demo pond code
     - NO_COLOR=1: prevent Rich/Typer from emitting ANSI codes in captured output
     """
     to_restore = {}
     for key, val in [("DUCKSTRING_SLEEP_MULTIPLIER", "0.01"), ("NO_COLOR", "1"),
-                     ("DUCKSTRING_DISABLE_DUCKS", "1")]:
+                     ("DUCKSTRING_DISABLE_DUCKS", "1"),
+                     ("DUCKSTRING_DEMO_ORDERS", "4000"), ("DUCKSTRING_DEMO_BATCH", "200"),
+                     ("DUCKSTRING_DEMO_PRODUCTS", "500"), ("DUCKSTRING_DEMO_PRICE_CHANGES", "10")]:
         to_restore[key] = os.environ.get(key)
         os.environ[key] = val
     yield

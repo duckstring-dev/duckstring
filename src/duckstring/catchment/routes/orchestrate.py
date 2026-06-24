@@ -138,6 +138,38 @@ def force(name: str, request: Request, major: int | None = None, version: str | 
     return {"ok": True}
 
 
+@router.post("/ponds/{name}/refresh")
+def refresh(
+    name: str, request: Request, clear: bool = False,
+    major: int | None = None, version: str | None = None,
+):
+    """Refresh a Pond — flag its next run to be a cold wipe-and-rebuild (lazy; runs nothing now).
+    ``clear=true`` un-sets a pending refresh."""
+    _driver(request).refresh(_resolve(request, name, major, version), clear=clear)
+    return {"ok": True}
+
+
+class _RepairPond(BaseModel):
+    name: str
+    major: Optional[int] = None
+
+
+class _RepairBody(BaseModel):
+    ponds: list[_RepairPond]
+    downstream: bool = False
+
+
+@router.post("/repair")
+def repair(request: Request, body: _RepairBody):
+    """Repair — force-rebuild a connected set of Ponds now, in topological order. ``downstream`` extends
+    the scope to all descendants. 422 if the set is disconnected (a skipped Pond in a sequence)."""
+    try:
+        plan = _driver(request).repair([(p.name, p.major) for p in body.ponds], downstream=body.downstream)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, **plan}
+
+
 @router.post("/ponds/{name}/kill")
 def kill(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Kill a Pond — terminate its Duck and park it in a terminal killed state (cancels its Run)."""

@@ -5,7 +5,7 @@
 export type PondId = string; // the pond key "name@major" — one live major line
 export type RippleId = string; // `${pondId}.${ripple}`
 
-export type DemandStatus = 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked';
+export type DemandStatus = 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
 export type FreqUnit = 'SECOND' | 'MINUTE' | 'HOUR' | 'DAY' | 'WEEK';
 export type Weekday = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI' | 'SAT' | 'SUN';
 export type TriggerKind = 'wave' | 'tide';
@@ -51,10 +51,13 @@ export interface PondInfo {
   version: string;
   major: number;
   kind: string;
+  hasTables: boolean; // this major line has published tables — the data viewer is offered
   // Fault tolerance + control (Ponds only).
   isFailed: boolean;
   isBlocked: boolean;
   isKilled: boolean;
+  refreshPending: boolean; // next run is a cold wipe-and-rebuild (control refresh)
+  repairing: boolean; // in an active repair plan
   failedF: string | null; // freshness the failed Run was reaching
   failures: number; // failed Runs this episode (vs sourceRetries)
   missingSources: string[]; // declared Sources absent from the Catchment (pond keys "name@major")

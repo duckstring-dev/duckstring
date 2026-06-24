@@ -44,19 +44,65 @@ async def _fetch_status(client: httpx.AsyncClient, url: str, auth: dict) -> dict
 
 
 async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, name: str, major: int) -> None:
-    """Fetch all of an upstream Pond line's exported Parquet and land it in the landing zone."""
-    resp = await client.get(f"{url}/api/draw/{name}/{major}", headers=auth)
-    resp.raise_for_status()
+    """Fetch an upstream Pond line's exported Parquet (+ the Trickle sidecar) and land it. **Incremental
+    for Trickle sources**: the consumer sends the freshness it has already landed (``after``); the producer
+    ships only the append-only parts newer than that (append history / ``__changelog`` / ``__droplog``),
+    which the consumer drops into its own parts directory. A merge main / plain Ripple output is a single
+    file, landed wholesale (replace). ``after = None`` (bootstrap / no Trickle source) → whole set."""
+    from ..trickle_io import (
+        BASE_SUFFIX,
+        SIDECAR,
+        changelog_name,
+        landed_after,
+        load_sidecar,
+        part_f,
+        warm_name,
+    )
+
     data_dir = pond_data_dir(root, name, major)
+    after = landed_after(data_dir)  # what we already hold; None → wholesale (bootstrap)
+    # The cold base is wholesale but rewritten rarely — tell the producer the oldest cold-base freshness we
+    # already hold so it re-ships a base only when its fold watermark has advanced past it.
+    held = load_sidecar(data_dir)
+    f_bases = [m.get("f_base") for m in held.values() if m.get("mode") == "merge"]
+    base_after = min(f_bases) if f_bases and all(f_bases) else None
+    params = {k: v for k, v in (("after", after), ("base_after", base_after)) if v}
+    resp = await client.get(f"{url}/api/draw/{name}/{major}", params=params, headers=auth)
+    resp.raise_for_status()
     data_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        # Each entry is written to its path atomically: a top-level "{table}.parquet" replaces a wholesale
+        # table; a nested "{table}/{f}.parquet" adds an append-only part (incremental — no merge needed,
+        # parts are immutable and idempotent by name). A "{table}__base/{chunk}" is a chunk of a merge
+        # main's wholesale cold base — shipped in full only when it changed, so after landing we drop any
+        # stale chunk the producer no longer has (its names change every compaction; a leftover resurrects).
+        landed_base: dict[str, set[str]] = {}
         for info in zf.infolist():
-            if not info.filename.endswith(".parquet"):
+            if not (info.filename.endswith(".parquet") or info.filename == SIDECAR):
                 continue
             dest = data_dir / info.filename
+            dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_suffix(dest.suffix + ".tmp")
             tmp.write_bytes(zf.read(info))
-            tmp.replace(dest)  # atomic publish
+            tmp.replace(dest)
+            head = info.filename.split("/", 1)[0]
+            if "/" in info.filename and head.endswith(BASE_SUFFIX):
+                landed_base.setdefault(head, set()).add(dest.name)
+        for base_name, kept in landed_base.items():  # prune the previous compaction's chunks (overlap-safe)
+            for old in (data_dir / base_name).glob("*.parquet"):
+                if old.name not in kept:
+                    old.unlink()
+    # Reclaim warm bands / hot changelog parts now subsumed by the (possibly advanced) cold base: anything
+    # at-or-below a merge main's published f_base is folded into the base, so reconstruct ignores it
+    # (it filters `> f_base`). Storage-only — correctness already holds via that filter.
+    for main, m in load_sidecar(data_dir).items():
+        if m.get("mode") != "merge" or not m.get("f_base"):
+            continue
+        f_base = datetime.fromisoformat(m["f_base"])
+        for companion in (warm_name(main), changelog_name(main)):
+            for part in (data_dir / companion).glob("*.parquet"):
+                if part_f(part.name) <= f_base:
+                    part.unlink()
 
 
 async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | None = None) -> None:

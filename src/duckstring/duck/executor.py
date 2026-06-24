@@ -37,14 +37,16 @@ def _import_ripples(source_dir: Path) -> list[dict]:
     return collect_ripples()
 
 
-def _load_ripple_func(source_path: str, root: str, ripple_name: str):
-    from ..core import collect_ripples, import_pond_module, pond_entrypoints, read_pond_toml
+def _load_ripple(source_path: str, root: str, ripple_name: str):
+    """Load ``ripple_name``'s function from the deployed code. Importing here (lazily, per run) keeps
+    executor construction free of the Pond's code, so an executor can be stood up for export-only paths
+    that never import a ripple."""
+    from ..core import import_pond_module, pond_entrypoints, read_pond_toml
 
     source_dir = Path(root) / source_path
     with _import_lock:
         ripples_entry, _ = pond_entrypoints(read_pond_toml(source_dir))
         mod = import_pond_module(source_dir, ripples_entry)
-        collect_ripples()
         return getattr(mod, ripple_name)
 
 
@@ -128,7 +130,7 @@ class RippleExecutor:
 
         def _task():
             timing["started"] = datetime.now(timezone.utc)
-            func = _load_ripple_func(self.source_path, str(self.root), ripple_name)
+            func = _load_ripple(self.source_path, str(self.root), ripple_name)
             _run_ripple(
                 func, self.pond_name, self.version, self._cursor(), str(self.root),
                 self.source_majors, f, previous_f,
@@ -154,6 +156,31 @@ class RippleExecutor:
         additive contract — a violation raises :class:`ContractViolation` *before* publishing (last-good
         is left intact). Returns the published output schema (for the Catchment to capture)."""
         return _export_data(self._cursor(), self.registry_path, f, contract)
+
+    def wipe(self) -> None:
+        """Drop every table in the Pond's registry — a Refresh's cold reset. The next run then reads its
+        Sources in full (``previous_f = NEVER``) and rebuilds from scratch: a Trickle re-bootstraps (clean
+        main + empty changelog + floor at this run's freshness), so downstream coverage-misses and reloads.
+        The published snapshot is untouched until the rebuild re-exports."""
+        from ..core import retry_on_lock
+
+        def _drop() -> None:
+            cur = self._cursor()
+            try:
+                # Views first (a view may depend on a table), then tables. SHOW TABLES lists both, and a
+                # registry can hold leftover scratch views from a Trickle write (`relation.create_view`).
+                for (v,) in cur.execute(
+                    "SELECT view_name FROM duckdb_views() WHERE schema_name = 'main' AND NOT internal"
+                ).fetchall():
+                    cur.execute(f'DROP VIEW IF EXISTS "{v}"')
+                for (t,) in cur.execute(
+                    "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'"
+                ).fetchall():
+                    cur.execute(f'DROP TABLE IF EXISTS "{t}"')
+            finally:
+                cur.close()
+
+        retry_on_lock(_drop)
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=True)

@@ -23,7 +23,15 @@ def retry_on_lock(fn, attempts: int = 12, base: float = 0.05):
 
 
 def ripple(func=None, *, parents=None, name=None):
-    """Decorator that registers a function as a Ripple in a Pond.
+    """Decorator that registers a function as a Ripple — a named unit of code in a Pond. A Ripple has no
+    tabular expectations: it may write zero, one, or many tables (in call order — sequential within the
+    Ripple; split across Ripples for parallelism), or none at all. ``parents`` are the *within-Pond*
+    Ripples it runs after, given by function reference; cross-Pond dependencies are declared in
+    ``pond.toml [sources]``, not here.
+
+    Incremental I/O is a capability, not a separate node type: any Ripple may read a Source's change-set
+    (:meth:`Pond.read_delta` / :meth:`Pond.trickle`) and publish history-preserving **Trickle** tables
+    (:meth:`Pond.append_table` / :meth:`Pond.merge_table`) — the mode is chosen per write.
 
     Usage:
         @ripple
@@ -342,45 +350,176 @@ class Pond:
 
         retry_on_lock(_write)  # a concurrent write conflict queues + retries rather than failing
 
+    def _source_data_dir(self, source_pond: str):
+        """The published ``data_dir`` for a foreign Source, honouring this Pond's major pin (or the flat
+        puddles layout in local runs, which have no majors)."""
+        from pathlib import Path as _Path
+
+        base = _Path(self.root) / "ponds" / source_pond
+        major = self.source_majors.get(source_pond)
+        return base / f"m{major}" / "data" if major is not None else base / "data"
+
     def read_table(self, ref: str):
         """A relation over a table — own (``"name"``) or a Source's (``"source.table"``). A Source
         table is also registered as a temp view under its own name, so SQL can reference it directly
         (``FROM table``). Prefer that over naming the returned relation's Python variable in SQL:
-        that resolves by scanning Python frames, which is unreliable under the threaded executor."""
+        that resolves by scanning Python frames, which is unreliable under the threaded executor.
+
+        For a Trickle source this is the **clean current state** (the merge *main* / the full append
+        history); its ``_duckstring_*`` system columns are projected out so the read is user-facing."""
         if "." in ref:
             source_pond, table = ref.split(".", 1)
             if source_pond != self.name:
-                from pathlib import Path as _Path
-
                 from .dataplane import get_data_plane
-                base = _Path(self.root) / "ponds" / source_pond
-                # Deployed Sources publish per major line; puddles (local runs) are flat.
-                major = self.source_majors.get(source_pond)
-                data_dir = base / f"m{major}" / "data" if major is not None else base / "data"
+                from .trickle_io import _strip_system
+
+                data_dir = self._source_data_dir(source_pond)
                 dp = get_data_plane()
                 dp.prepare(self.con)  # ready the connection to read the Source's published format
                 try:
-                    select = dp.read_select(data_dir, table)
+                    # As-of pin: read the Source snapshot at this run's freshness, NOT latest. A Pond Run
+                    # spans wall-clock time over several Ripples; an upstream Source can republish mid-run.
+                    # Pinning to `self.f` gives every Ripple the same consistent as-of-F view of the Source
+                    # (no intra-run read skew / too-fresh data). Honoured by the Iceberg plane (retained
+                    # snapshots); the Parquet plane has no history and reads latest regardless.
+                    select = dp.read_select(data_dir, table, as_of=self.f)
                 except FileNotFoundError as exc:
                     raise FileNotFoundError(
                         f"No exported data found for '{source_pond}.{table}' — "
                         f"has {source_pond} completed a successful run?"
                     ) from exc
-                rel = self.con.sql(select)
+                rel = _strip_system(self.con.sql(select))
                 try:
                     rel.create_view(table, replace=True)
                 except Exception:
                     pass  # name taken by one of this Pond's own tables — the relation still works
                 return rel
-            return self.con.sql(f'SELECT * FROM "{table}"')
-        return self.con.sql(f'SELECT * FROM "{ref}"')
+            return self._own_current(table)
+        return self._own_current(ref)
+
+    def _own_current(self, name: str):
+        """Read one of this Pond's own registry tables as its current clean state — a merge Trickle is
+        reconstructed from its base ⊎ changelog (the main is log-structured); anything else is read directly."""
+        from . import trickle_io as trickle
+
+        return trickle.current_state(self.con, name)
+
+    def count_table(self, ref: str) -> int:
+        """The current **active row count** of a table — own (``"name"``) or a Source's (``"source.table"``) —
+        via metadata + the changelog's net Z-set weight, **without scanning** it. This is the host fast path the
+        Trickle builder's ``.count()`` reaches for on a bare stored source: a Source's published count comes
+        from the data plane (base-file metadata + the post-``f_base`` changelog delta, pinned to this run's
+        as-of ``f``); an own registry table goes through :func:`duckstring.trickle_io.count_current`."""
+        from . import trickle_io as trickle
+
+        if "." in ref:
+            source_pond, table = ref.split(".", 1)
+            if source_pond != self.name:
+                from .dataplane import get_data_plane
+
+                data_dir = self._source_data_dir(source_pond)
+                dp = get_data_plane()
+                dp.prepare(self.con)
+                meta = trickle.load_sidecar(data_dir).get(table, {})
+                (n,) = self.con.execute(
+                    dp.consolidated_count_select(data_dir, table, meta, as_of=self.f)
+                ).fetchone()
+                return int(n)
+            ref = table
+        return trickle.count_current(self.con, ref)
+
+    # ─── Trickle: incremental I/O (see duckstring.trickle_io / plans/trickle.md) ───
+
+    def _resolve_pk(self, pk):
+        from .trickle_io import normalize_pk
+
+        return normalize_pk(pk) if pk is not None else ()
+
+    def append_table(
+        self, name: str, relation, *, pk=None, fail_on_conflict=True, retain_t=None, retain_n=None
+    ) -> None:
+        """Append ``relation`` to the history table ``name`` (insert-only; each row stamped with the
+        run's freshness ``pond.f``). The fast path for event/fact logs whose identity is unique by
+        construction — no diff, no deletes; idempotent on replay at the same ``f``. ``pk`` is optional
+        (recorded as the table's declared key, for downstream/the data viewer); when it is set,
+        ``fail_on_conflict=True`` (the default) asserts ``pk`` is unique across the appended rows and the
+        existing history (raising before any write). Pass ``fail_on_conflict=False`` for the trust-the-writer
+        fast path (no check); with ``pk`` unset the check is a no-op regardless. ``retain_t`` (a
+        ``timedelta``) / ``retain_n`` (a count) opt into bounding the kept history."""
+        from . import trickle_io as trickle
+
+        trickle.append_table(
+            self.con, name, relation, self.f, self._resolve_pk(pk),
+            fail_on_conflict=fail_on_conflict, retain_t=retain_t, retain_n=retain_n,
+        )
+
+    def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None,
+                    compact_threshold=None) -> None:
+        """Merge the **complete current state** ``relation`` into the clean main table ``name`` + its Z-set
+        changelog, stamped ``pond.f``. ``pk`` (the output identity) is **required** — it is the merge key.
+        Duckstring diffs ``relation`` against the prior main as a full-row Z-set difference to derive
+        inserts/updates/deletes automatically — so it is always safe to hand it the whole state. ``retain_t``
+        / ``retain_n`` opt into bounding the kept changelog (the main, being the clean current state, is
+        never trimmed). ``compact_threshold`` (bytes) overrides the catchment-level checkpoint size for this
+        main — the changelog must outgrow ``max(base, this)`` before the base is re-folded."""
+        from . import trickle_io as trickle
+
+        trickle.merge_table(
+            self.con, name, relation, self.f, self._resolve_pk(pk),
+            retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
+        )
+
+    def apply_zset(self, name: str, zset, *, pk, retain_t=None, retain_n=None,
+                   compact_threshold=None) -> None:
+        """Apply a **Z-set** change (a relation of user columns + ``_duckstring_d``) to the output Trickle
+        ``name`` — the low-level primitive the builder uses for the incremental path. ``pk`` (the output
+        identity) is **required**. Prefer :meth:`trickle` / :meth:`merge_table`; reach for this only for
+        hand-rolled incremental compute. ``compact_threshold`` overrides the checkpoint size (see
+        :meth:`merge_table`)."""
+        from . import trickle_io as trickle
+
+        trickle.apply_zset(
+            self.con, name, zset, self.f, self._resolve_pk(pk),
+            retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
+        )
+
+    def read_delta(self, ref: str):
+        """A Source's change over this run's window ``(pond.previous_f, pond.f]`` as a **Z-set** — a
+        :class:`~duckstring.trickle_io.Delta` (``.zset`` + ``.is_full``; ``.upserts`` / ``.deletes`` are
+        derived conveniences). Resolves the source's declared mode (append → history window all ``+1``;
+        merge → changelog window consolidated; overwrite → full read if it advanced, else an empty delta)
+        and falls back to a full read on a coverage miss / bootstrap."""
+        from . import trickle_io as trickle
+        from .dataplane import get_data_plane
+
+        if "." not in ref:
+            raise ValueError(f"read_delta needs a 'source.table' reference, got '{ref}'")
+        source_pond, table = ref.split(".", 1)
+        data_dir = self._source_data_dir(source_pond)
+        dp = get_data_plane()
+        dp.prepare(self.con)
+        return trickle.read_delta(self.con, data_dir, table, self.previous_f, self.f, dp=dp)
+
+    def trickle(self, spine_ref: str, *, p: float = 0.3):
+        """Start a :class:`~duckstring.trickle_builder.TrickleBuilder` rooted at the **spine** source
+        ``spine_ref``. Chain ``.join(pond.trickle(dim), on=…)`` / ``.filter(...)`` / ``.select(...)``
+        then ``.merge(name, pk=…)`` (the merge key is the output identity). The builder composes each
+        changed source's Z-set delta through
+        the join (DBSP-style), so a join can be on **any** key and a deletion propagates by full-row
+        retraction — there is one ``.join()`` and no FK=PK constraint. Any table is a valid source
+        (Trickle or plain overwrite Ripple): an unchanged Ripple is a free stable operand, a changed one
+        forces a comprehensive recompute.
+
+        ``p`` is this source's **change-fraction threshold**: if its delta touches more than ``p`` of the
+        source's current rows, the incremental slice stops paying off, so ``.merge()`` recomputes
+        comprehensively for that run. Per source: ``p=0.3`` (default) caps a source that drives the output
+        row count; ``p=1.0`` disables the check (and skips the count). Applies to the spine
+        (``pond.trickle(spine, p=…)``) and each joined dimension (``.join(pond.trickle(dim, p=…), on=…)``)."""
+        from .trickle_builder import TrickleBuilder
+
+        return TrickleBuilder(self, spine_ref, p=p)
 
 
 class Ripple:
     # TODO: runtime wrapper around a registered ripple function — name, func, parents list
-    pass
-
-
-class Trickle:
-    # TODO: deferred — incremental/stateful Ripple variant with watermarks and merge semantics
     pass

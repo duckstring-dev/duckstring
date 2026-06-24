@@ -57,6 +57,7 @@ Execution is **freshness-based**, not schedule-based. Instead of cron expression
 |---|---|
 | **Pond** | A versioned package of transforms — the unit of ownership, versioning, and deployment |
 | **Ripple** | A single operation within a Pond, typically producing one table |
+| **Trickle** | A Ripple variant that works [incrementally](guides/trickle.md) — preserving history so consumers read only what changed |
 | **Catchment** | The reference runtime: a server that receives deployed Ponds and executes them |
 | **Source** / **Sink** | A Pond's parent / child |
 | **Inlet** | A Pond with no Sources — it ingests from external systems |

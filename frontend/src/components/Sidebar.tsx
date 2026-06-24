@@ -177,6 +177,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const removeTrigger = useLiveStore((s) => s.removeTrigger);
   const clearFailure = useLiveStore((s) => s.clearFailure);
   const setBudget = useLiveStore((s) => s.setBudget);
+  const refreshPond = useLiveStore((s) => s.refreshPond);
+  const enterRepair = useLiveStore((s) => s.enterRepair);
+  const repairMode = useLiveStore((s) => s.repairMode);
 
   const [tideBound, setTideBound] = useState('2');
   const [tideUnit, setTideUnit] = useState<FreqUnit>('SECOND');
@@ -334,6 +337,16 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               <Btn block onClick={() => sleep(selectedPond.id)} color={THEME_BLOCKED}>Sleep</Btn>
               <Btn block onClick={() => kill(selectedPond.id)} color={THEME_DANGER}>Kill</Btn>
             </div>
+            {/* Refresh: flag the next run to rebuild from scratch (lazy). Toggles when pending. */}
+            <div style={{ marginTop: 6 }}>
+              <Btn
+                block
+                color={THEME_PULL}
+                onClick={() => refreshPond(selectedPond.id, !!selectedInfo?.refreshPending)}
+              >
+                {selectedInfo?.refreshPending ? 'Cancel Refresh' : 'Refresh on next run'}
+              </Btn>
+            </div>
           </Section>
 
           {/* Failures: retry budgets + clearing a failed Pond */}
@@ -360,6 +373,10 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
                 <Btn onClick={() => clearFailure(selectedPond.id)} color={THEME_SUCCESS}>Clear Failure</Btn>
               </div>
             )}
+            {/* Repair: enter canvas-selection mode to force-rebuild a connected set of Ponds now. */}
+            <div style={{ marginTop: 8 }}>
+              <Btn onClick={() => enterRepair()} color={THEME_DANGER} disabled={repairMode}>Repair…</Btn>
+            </div>
           </Section>
 
           <Section>

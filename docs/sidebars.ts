@@ -20,6 +20,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'concepts/ponds',
         'concepts/ripples',
+        'concepts/trickle',
         'concepts/puddles',
         'concepts/catchment',
         'concepts/freshness',
@@ -38,6 +39,7 @@ const sidebars: SidebarsConfig = {
         'guides/windows',
         'guides/control',
         'guides/fault-tolerance',
+        'guides/trickle',
         'guides/incremental-ripples',
         'guides/external-pipelines',
         'guides/connecting-catchments',
@@ -46,6 +48,7 @@ const sidebars: SidebarsConfig = {
       ],
     },
     'theory',
+    'incremental-theory',
     {
       type: 'category',
       label: 'Reference',

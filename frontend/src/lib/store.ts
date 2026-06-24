@@ -17,6 +17,8 @@ import {
   fetchRuns,
   fetchWindows,
   postTrigger,
+  refreshPond,
+  repairPonds,
   clearFailure,
   setBudget,
   addWindow,
@@ -124,9 +126,12 @@ function transformStatus(payload: StatusPayload): StatusSlice {
       version: p.version,
       major: p.major,
       kind: p.kind,
+      hasTables: p.has_tables ?? false,
       isFailed: p.is_failed,
       isBlocked: p.is_blocked,
       isKilled: p.is_killed,
+      refreshPending: p.refresh_pending ?? false,
+      repairing: p.repairing ?? false,
       failedF: p.failed_f,
       failures: p.failures,
       missingSources: p.missing_sources ?? [],
@@ -179,6 +184,18 @@ export interface LiveState extends StatusSlice {
   selectedRippleId: RippleId | null;
   selectedTriggerId: PondId | null;
 
+  // Collapsed Ponds hide their Ripples/Trickles in the canvas (header-only). Purely client-side view
+  // state — keyed by pond id, `true` = collapsed.
+  collapsedPonds: Record<PondId, boolean>;
+  toggleCollapse(id: PondId): void;
+  setAllCollapsed(collapsed: boolean): void;
+
+  // The Pond whose exported tables are open in the full-screen data viewer (null = closed). The modal
+  // owns its own table-selection / SQL / windowing state; the store just tracks the target.
+  dataViewerPondId: PondId | null;
+  openDataViewer(id: PondId): void;
+  closeDataViewer(): void;
+
   runs: PondRun[]; // run-history feed (filtered by selection + filters)
   selectedRun: PondRun | null; // the run open in the detail pane (enriched with ripples on select)
   runFilters: RunFilters;
@@ -211,6 +228,17 @@ export interface LiveState extends StatusSlice {
   sleep(pond: PondId, upstream?: boolean): Promise<void>;
   force(pond: PondId): Promise<void>;
   kill(pond: PondId): Promise<void>;
+  refreshPond(pond: PondId, clear?: boolean): Promise<void>;
+
+  // Repair (D3): a canvas selection mode that force-rebuilds a connected set of Ponds now.
+  repairMode: boolean;
+  repairScope: PondId[];
+  repairError: string | null;
+  enterRepair(): void;
+  exitRepair(): void;
+  toggleRepair(id: PondId): void;
+  addRepairDownstream(): void;
+  submitRepair(): Promise<void>;
 
   clearFailure(pond: PondId): Promise<void>;
   setBudget(pond: PondId, immediateRetries: number, sourceRetries: number): Promise<void>;
@@ -254,6 +282,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   selectedPondId: null,
   selectedRippleId: null,
   selectedTriggerId: null,
+  collapsedPonds: {},
+  dataViewerPondId: null,
 
   runs: [],
   selectedRun: null,
@@ -377,6 +407,24 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     set({ selectedPondId: null, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
   },
 
+  toggleCollapse(id) {
+    set((s) => ({ collapsedPonds: { ...s.collapsedPonds, [id]: !s.collapsedPonds[id] } }));
+  },
+  openDataViewer(id) {
+    set({ dataViewerPondId: id });
+  },
+  closeDataViewer() {
+    set({ dataViewerPondId: null });
+  },
+  setAllCollapsed(collapsed) {
+    // Only Ponds that actually own Ripples can collapse — a Draw (ripple-less) has nothing to hide.
+    const next: Record<PondId, boolean> = {};
+    if (collapsed) {
+      for (const r of Object.values(get().ripples)) next[r.pondId] = true;
+    }
+    set({ collapsedPonds: next });
+  },
+
   tap: (pond) => act(get, set, () => postTrigger(pond, 'tap')),
   pulse: (pond) => act(get, set, () => postTrigger(pond, 'pulse')),
   wave: (pond) => act(get, set, () => postTrigger(pond, 'wave')),
@@ -387,6 +435,41 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   sleep: (pond, upstream = false) => act(get, set, () => postTrigger(pond, 'sleep', { upstream })),
   force: (pond) => act(get, set, () => postTrigger(pond, 'force')),
   kill: (pond) => act(get, set, () => postTrigger(pond, 'kill')),
+  refreshPond: (pond, clear = false) => act(get, set, () => refreshPond(pond, clear)),
+
+  repairMode: false,
+  repairScope: [],
+  repairError: null,
+  enterRepair: () => set({ repairMode: true, repairScope: [], repairError: null }),
+  exitRepair: () => set({ repairMode: false, repairScope: [], repairError: null }),
+  toggleRepair: (id) =>
+    set((s) => ({
+      repairError: null,
+      repairScope: s.repairScope.includes(id)
+        ? s.repairScope.filter((x) => x !== id)
+        : [...s.repairScope, id],
+    })),
+  addRepairDownstream: () =>
+    set((s) => {
+      // Downward closure over the topology (children = ponds that list me as a source).
+      const children: Record<string, string[]> = {};
+      for (const p of Object.values(s.ponds)) for (const src of p.sources) (children[src] ??= []).push(p.id);
+      const scope = new Set(s.repairScope);
+      const stack = [...s.repairScope];
+      while (stack.length) for (const c of children[stack.pop()!] ?? []) if (!scope.has(c)) { scope.add(c); stack.push(c); }
+      return { repairScope: [...scope], repairError: null };
+    }),
+  submitRepair: async () => {
+    const { repairScope } = get();
+    if (repairScope.length === 0) return;
+    try {
+      await repairPonds(repairScope, false);
+      set({ repairMode: false, repairScope: [], repairError: null });
+      await get().refresh();
+    } catch (e) {
+      set({ repairError: e instanceof Error ? e.message : 'repair failed' });
+    }
+  },
 
   clearFailure: (pond) => act(get, set, () => clearFailure(pond)),
   setBudget: (pond, immediateRetries, sourceRetries) =>
@@ -477,6 +560,7 @@ export const STATE_COLORS: Record<string, string> = {
   failed: THEME_DANGER,
   killed: THEME_DANGER, // killed reads as red, like failed
   blocked: THEME_BLOCKED,
+  repairing: THEME_WAKE, // mid-rebuild — a deliberate operator action, the soft "go" green
 };
 
 // Border colour for a node. Running is always the brand cyan and idle is grey; a *queued* node is

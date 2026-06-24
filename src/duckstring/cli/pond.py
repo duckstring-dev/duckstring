@@ -95,12 +95,30 @@ def init(
     console.print("  [dim]pond.toml[/dim]        — Pond name, version, and Sources")
 
 
-_DEMO_PONDS = ("transactions", "products", "sales", "reports")
+# The two demo pipelines: the overwrite-Ripple set (the default) and the incremental-Trickle set. Each
+# entry is (pond name, deploy-order + one-line role); the command copies one set or the other.
+_RIPPLE_DEMO = (
+    ("transactions", "deploy first  (POS event log, grows each run)"),
+    ("products", "deploy second (product catalogue, grows each run)"),
+    ("sales", "deploy third  (3 Ripples: daily_sales → price_tiers → join_lines)"),
+    ("reports", "deploy fourth, then: [dim]duckstring trigger pulse reports[/dim]"),
+)
+_TRICKLE_DEMO = (
+    ("orders", "deploy first  (append Trickle: insert-only order-line history)"),
+    ("catalog", "deploy second (merge Trickle: catalogue with CDC on price changes)"),
+    ("priced", "deploy third  (pond.trickle builder: incremental star enrichment)"),
+    ("revenue", "deploy fourth, then: [dim]duckstring trigger pulse revenue[/dim]"),
+)
+_DEMO_PONDS = tuple(name for name, _ in _RIPPLE_DEMO)  # the default set (back-compat)
 
 
 @app.command()
-def demo() -> None:
-    """Create the transactions, products, sales, and reports demo projects as subdirectories."""
+def demo(
+    ripple: bool = typer.Option(False, "--ripple", help="The overwrite-Ripple pipeline (the default set)."),
+    trickle: bool = typer.Option(False, "--trickle", help="The incremental-Trickle pipeline."),
+) -> None:
+    """Create a demo pipeline as subdirectories: the overwrite-Ripple set (default / --ripple) or the
+    incremental-Trickle set (--trickle)."""
     import shutil
 
     from rich.console import Console
@@ -108,24 +126,28 @@ def demo() -> None:
     console = Console()
     cwd = Path.cwd()
 
-    existing = [name for name in _DEMO_PONDS if (cwd / name).exists()]
+    if ripple and trickle:
+        typer.echo("Error: pass only one of --ripple / --trickle.", err=True)
+        raise typer.Exit(1)
+    ponds = _TRICKLE_DEMO if trickle else _RIPPLE_DEMO  # default (neither flag) = the Ripple set
+
+    existing = [name for name, _ in ponds if (cwd / name).exists()]
     if existing:
         for name in existing:
             typer.echo(f"Error: '{name}' already exists in this directory.", err=True)
         raise typer.Exit(1)
 
-    pond_list = ", ".join(f"[bold]{p}/[/bold]" for p in _DEMO_PONDS)
+    pond_list = ", ".join(f"[bold]{name}/[/bold]" for name, _ in ponds)
     console.print(f"Will create {pond_list} in {cwd}")
     typer.confirm("Continue?", default=True, abort=True)
 
-    for name in _DEMO_PONDS:
+    for name, _ in ponds:
         shutil.copytree(_DEMO_DIR / name, cwd / name)
 
-    console.print("[green]Created[/green] demo pipeline:")
-    console.print("  [bold]transactions/[/bold]  — deploy first  (POS event log, grows each run)")
-    console.print("  [bold]products/[/bold]      — deploy second (product catalogue, grows each run)")
-    console.print("  [bold]sales/[/bold]         — deploy third  (3 Ripples: daily_sales → price_tiers → join_lines)")
-    console.print("  [bold]reports/[/bold]       — deploy fourth, then: [dim]duckstring trigger pulse reports[/dim]")
+    kind = "Trickle (incremental)" if trickle else "Ripple"
+    console.print(f"[green]Created[/green] {kind} demo pipeline:")
+    for name, role in ponds:
+        console.print(f"  [bold]{name}/[/bold] — {role}")
 
 
 @app.command()

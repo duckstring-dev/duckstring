@@ -1,6 +1,6 @@
 [project]
 name = "duckstring"
-version = "0.2.0"
+version = "0.3.0"
 description = "Build data pipelines the way you build software: version each transform, declare its dependencies, and Duckstring resolves the execution DAG automatically."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,6 +26,10 @@ dependencies = [
   # (duckstring.iceberg_catalog) rather than pyiceberg's SqlCatalog, so SQLAlchemy is NOT pulled in.
   "pyiceberg>=0.7",
   "pyarrow>=14",
+  # DuckDB requires pytz to convert TIMESTAMPTZ columns to Python datetimes on fetch
+  # (our _duckstring_f freshness column is TIMESTAMPTZ, read back in dataplane/trickle export).
+  # It is otherwise only present transitively (pandas), so a clean install lacks it.
+  "pytz",
 ]
 
 [project.optional-dependencies]

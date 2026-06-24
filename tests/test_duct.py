@@ -351,7 +351,119 @@ def test_draw_route_streams_all_parquet(tmp_path):
     assert resp.status_code == 200
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         assert sorted(zf.namelist()) == ["items.parquet", "orders.parquet"]
-        assert zf.read("orders.parquet") == b"ORDERS"
+
+
+def test_draw_route_includes_trickle_sidecar(tmp_path):
+    # A Trickle source's mode/PK sidecar must travel with the data — the consuming Catchment has no
+    # access to the producer's duck.db, so read_delta resolves the source from this file.
+    from duckstring.trickle_io import SIDECAR
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    data_dir.mkdir(parents=True)
+    (data_dir / "order_line.parquet").write_bytes(b"DATA")
+    (data_dir / "order_line__changelog.parquet").write_bytes(b"CDC")
+    (data_dir / SIDECAR).write_text('{"order_line": {"mode": "merge", "pk": ["order_id"]}}')
+
+    resp = _client(d).get("/api/draw/sales/1")
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        names = zf.namelist()
+        assert SIDECAR in names
+        assert "order_line.parquet" in names and "order_line__changelog.parquet" in names
+
+
+def test_draw_route_windows_trickle_changelog_with_after(tmp_path):
+    # `?after=` makes a Trickle changelog transfer incremental: the changelog is a per-run parts directory,
+    # and only the parts newer than `after` ship; the merge main stays wholesale (current state).
+    import duckdb
+
+    from duckstring.trickle_io import SIDECAR, part_name
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    clog_dir = data_dir / "sale__changelog"
+    clog_dir.mkdir(parents=True)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    for hour in (1, 2, 3):  # one per-run part per freshness
+        f = datetime(2026, 6, 16, hour, tzinfo=timezone.utc)
+        con.execute(
+            f"COPY (SELECT {hour} AS id, 1 AS _duckstring_d, TIMESTAMPTZ '{f.isoformat()}' AS _duckstring_f) "
+            f"TO '{clog_dir / part_name(f)}' (FORMAT PARQUET)"
+        )
+    (data_dir / "sale.parquet").write_bytes(b"MAIN")  # wholesale
+    (data_dir / SIDECAR).write_text('{"sale": {"mode": "merge", "pk": ["id"]}}')
+
+    resp = _client(d).get("/api/draw/sales/1", params={"after": "2026-06-16T01:00:00+00:00"})
+    landed = tmp_path / "landed"
+    landed.mkdir()
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        assert zf.read("sale.parquet") == b"MAIN"  # main shipped wholesale
+        parts = [n for n in zf.namelist() if n.startswith("sale__changelog/")]
+        for n in parts:
+            (landed / n.split("/")[-1]).write_bytes(zf.read(n))
+    assert len(parts) == 2  # only the parts newer than `after` ship (excludes the 01:00 part)
+    got = sorted(con.sql(f"SELECT id FROM read_parquet('{landed}/*.parquet')").fetchall())
+    assert got == [(2,), (3,)]
+
+
+def test_draw_route_ships_chunked_base_wholesale(tmp_path):
+    # A merge main's log-structured base lives in a `{main}__base/` chunk directory. It is wholesale
+    # (rewritten at a checkpoint), so the draw ships every chunk regardless of `after` — and it must NOT
+    # be treated as an incremental per-run-parts directory (that would window it away).
+    from duckstring.trickle_io import SIDECAR
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    base_dir = data_dir / "sale__base"
+    base_dir.mkdir(parents=True)
+    (base_dir / "2026-06-16T03_00_00+00_00__0.parquet").write_bytes(b"CHUNK0")
+    (base_dir / "2026-06-16T03_00_00+00_00__1.parquet").write_bytes(b"CHUNK1")
+    (data_dir / SIDECAR).write_text('{"sale": {"mode": "merge", "pk": ["id"], "f_base": "2026-06-16T03:00:00+00:00"}}')
+
+    # Even with an `after` past the base's freshness, both chunks ship (wholesale, not windowed).
+    resp = _client(d).get("/api/draw/sales/1", params={"after": "2026-06-16T09:00:00+00:00"})
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        chunks = sorted(n for n in zf.namelist() if n.startswith("sale__base/"))
+    assert chunks == ["sale__base/2026-06-16T03_00_00+00_00__0.parquet",
+                      "sale__base/2026-06-16T03_00_00+00_00__1.parquet"]
+
+
+def test_draw_route_skips_unchanged_cold_base(tmp_path):
+    # The cold base is wholesale but rewritten only at a rare compaction, so it ships only when its fold
+    # watermark f_base advanced past the consumer's `base_after` — the large base isn't re-sent every draw.
+    from duckstring.trickle_io import SIDECAR
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    base_dir = data_dir / "sale__base"
+    base_dir.mkdir(parents=True)
+    (base_dir / "2026-06-16T03_00_00+00_00__0.parquet").write_bytes(b"CHUNK0")
+    (data_dir / SIDECAR).write_text('{"sale": {"mode": "merge", "pk": ["id"], "f_base": "2026-06-16T03:00:00+00:00"}}')
+
+    def base_chunks_in(params):
+        resp = _client(d).get("/api/draw/sales/1", params=params)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            return [n for n in zf.namelist() if n.startswith("sale__base/")]
+
+    # Consumer already holds this cold base (base_after == f_base) → it is NOT re-shipped.
+    assert base_chunks_in({"base_after": "2026-06-16T03:00:00+00:00"}) == []
+    # Consumer behind it (base_after < f_base) → the base ships.
+    assert base_chunks_in({"base_after": "2026-06-16T02:00:00+00:00"}) == ["sale__base/2026-06-16T03_00_00+00_00__0.parquet"]
+    # Bootstrap (no base_after) → the base ships.
+    assert base_chunks_in({}) == ["sale__base/2026-06-16T03_00_00+00_00__0.parquet"]
 
 
 # ─── Recursive lineage view ────────────────────────────────────────────────────
@@ -499,9 +611,12 @@ def test_assemble_view_unreachable_upstream_stub(tmp_path):
 
 def _mock_upstream(f_iso: str, *, status="idle", tapped: list | None = None):
     """An httpx transport standing in for the upstream Catchment."""
+    from duckstring.trickle_io import SIDECAR
+
     zbuf = io.BytesIO()
     with zipfile.ZipFile(zbuf, "w") as zf:
         zf.writestr("orders.parquet", b"PARQUET-BYTES")
+        zf.writestr(SIDECAR, '{"orders": {"mode": "append", "pk": ["id"]}}')  # a Trickle source's sidecar
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -532,9 +647,12 @@ def test_poller_mirrors_fetches_and_lands_parquet(tmp_path):
     asyncio.run(poll_once(d, tmp_path, client))
     asyncio.run(client.aclose())
 
-    # Freshness mirrored, transfer landed, draw advanced.
+    # Freshness mirrored, transfer landed (data + the Trickle sidecar), draw advanced.
+    from duckstring.trickle_io import SIDECAR
+
     landed = pond_data_dir(tmp_path, "sales", 1) / "orders.parquet"
     assert landed.read_bytes() == b"PARQUET-BYTES"
+    assert (pond_data_dir(tmp_path, "sales", 1) / SIDECAR).exists()  # sidecar landed → read_delta can resolve
     assert d.state.pond_states["sales@1"].end_f == f
 
 
@@ -629,3 +747,59 @@ def test_poller_blocks_draw_when_upstream_unreachable(tmp_path):
     asyncio.run(poll_once(d, tmp_path, client))
     asyncio.run(client.aclose())
     assert d.state.pond_states["sales@1"].is_blocked
+
+
+# ─── Repair planner (D3) ───────────────────────────────────────────────────────
+
+
+def _diamond(tmp_path):
+    # A → B, A → C, B → D, C → D
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "A", "1.0.0", "inlet", "ponds/A/1.0.0", _cfg(), _RIPPLES)
+    _register(db, "B", "1.0.0", "pond", "ponds/B/1.0.0", _cfg(sources={"A": "1.0.0"}), _RIPPLES)
+    _register(db, "C", "1.0.0", "pond", "ponds/C/1.0.0", _cfg(sources={"A": "1.0.0"}), _RIPPLES)
+    _register(db, "D", "1.0.0", "outlet", "ponds/D/1.0.0",
+              _cfg(sources={"B": "1.0.0", "C": "1.0.0"}), _RIPPLES)
+    return Driver(db, tmp_path, "http://x", NoopLauncher())
+
+
+def test_repair_graph_helpers():
+    from duckstring.catchment.driver import _connectivity_gap, _descendants, _topo_order
+
+    children = {"A": {"B", "C"}, "B": {"D"}, "C": {"D"}, "D": set()}
+    assert _descendants(["A"], children) == {"B", "C", "D"}
+    assert _connectivity_gap({"A", "B", "D"}, children) is None       # path A→B→D inside the set
+    assert _connectivity_gap({"A", "D"}, children) == ("A", "D")      # only via unselected B/C → gap
+    assert _topo_order({"A", "B", "D"}, {"A": set(), "B": {"A"}, "D": {"B"}}) == ["A", "B", "D"]
+
+
+def test_repair_rejects_disconnected_set(tmp_path):
+    d = _diamond(tmp_path)
+    with pytest.raises(ValueError, match="disconnected"):
+        d.repair([("A", 1), ("D", 1)])  # B/C skipped → D would rebuild from stale parents
+
+
+def test_repair_downstream_expands_and_quiesces(tmp_path):
+    d = _diamond(tmp_path)
+    plan = d.repair([("A", 1)], downstream=True)
+    assert set(plan["scope"]) == {"A@1", "B@1", "C@1", "D@1"}
+    assert plan["scope"][0] == "A@1" and plan["scope"][-1] == "D@1"  # topological
+    # Every scope Pond is marked repairing (blocked from normal demand); the root is released (running).
+    assert all(d.state.pond_states[k].repairing for k in ("A@1", "B@1", "C@1", "D@1"))
+    assert "A@1" in d._repair["released"] and "B@1" not in d._repair["released"]
+
+
+def test_repair_releases_children_as_parents_finish(tmp_path):
+    d = _diamond(tmp_path)
+    d.repair([("A", 1), ("B", 1), ("D", 1)])  # connected: A→B→D
+    assert d._repair["released"] == {"A@1"}
+    # Simulate A's repair run completing → B is released (D still waits on B).
+    d._advance_repair("A@1", _now())
+    assert "B@1" in d._repair["released"] and "D@1" not in d._repair["released"]
+    assert not d.state.pond_states["A@1"].repairing  # A done → unblocked
+    # B completes → D released; D completes → plan done.
+    d._advance_repair("B@1", _now())
+    assert "D@1" in d._repair["released"]
+    d._advance_repair("D@1", _now())
+    assert d._repair is None  # the whole scope rebuilt

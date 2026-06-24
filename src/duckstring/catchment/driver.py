@@ -40,6 +40,8 @@ from ..engine import (
     kill_pond,
     next_wake,
     pulse_pond,
+    refresh_pond,
+    repair_pond,
     sentinel,
     sleep_pond,
     tap_pond,
@@ -69,6 +71,57 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+# ─── Repair scope graph helpers (D3 — see plans/refresh.md) ────────────────────
+
+
+def _reach(start: str, children: dict[str, set[str]], within: set[str] | None = None) -> set[str]:
+    """Forward reachability from ``start`` (excluding itself). ``within`` restricts traversal to a subset
+    (edges only into nodes in ``within``) — used to ask "reachable *through the selection*"."""
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        for c in children.get(stack.pop(), ()):
+            if (within is None or c in within) and c not in seen:
+                seen.add(c)
+                stack.append(c)
+    return seen
+
+
+def _descendants(seeds: list[str], children: dict[str, set[str]]) -> set[str]:
+    out: set[str] = set()
+    for s in seeds:
+        out |= _reach(s, children)
+    return out
+
+
+def _connectivity_gap(scope: set[str], children: dict[str, set[str]]) -> tuple[str, str] | None:
+    """The relaxed connectivity rule: any two selected Ponds connected in the full graph must stay
+    connected **within the selection**. Returns the first ``(X, Z)`` where ``Z`` is reachable from ``X``
+    in the full graph but not via a path inside ``scope`` (a skipped intermediate), else ``None``."""
+    for x in scope:
+        reachable_in_scope = _reach(x, children, within=scope)
+        for z in _reach(x, children):
+            if z in scope and z not in reachable_in_scope:
+                return (x, z)
+    return None
+
+
+def _topo_order(scope: set[str], parents: dict[str, set[str]]) -> list[str]:
+    """A topological order of the induced subgraph (parents = in-scope sources). Deterministic (sorted)."""
+    done: list[str] = []
+    seen: set[str] = set()
+    remaining = set(scope)
+    while remaining:
+        ready = sorted(k for k in remaining if parents[k] <= seen)
+        if not ready:  # a cycle is impossible (the pond graph is a DAG), but guard anyway
+            ready = sorted(remaining)
+        for k in ready:
+            done.append(k)
+            seen.add(k)
+            remaining.discard(k)
+    return done
+
+
 class Driver:
     def __init__(self, db, root, base_url: str | None, launcher):
         self.db = db
@@ -85,6 +138,9 @@ class Driver:
         # Pond Draw transfers awaiting the poller: (pond_key, F). A Draw run is not dispatched to a
         # Duck — the poller performs the parquet fetch out-of-lock, then reports completion.
         self._pending_transfers: list[tuple[str, datetime]] = []
+        # An in-progress repair plan (D3) or None: {scope, parents (in-scope), done, released}. The Driver
+        # walks it imperatively in topological order, releasing each node once its in-scope parents finish.
+        self._repair: dict | None = None
         # Set by the app to a thread-safe callback that wakes the duct poller. Called from _process on
         # demand-bearing operations (tap/pulse/wave/…/Duck events) so a Draw solicits its upstream
         # immediately, not on the next poll. NOT called from the poller's own observe/transfer paths.
@@ -166,7 +222,9 @@ class Driver:
                 )
                 pond_states[key] = self._load_pond_state(pond_id)
 
-                rip_rows = db.execute("SELECT id, name FROM ripple WHERE pond_version_id = ?", (pv_id,)).fetchall()
+                rip_rows = db.execute(
+                    "SELECT id, name FROM ripple WHERE pond_version_id = ?", (pv_id,)
+                ).fetchall()
                 rid_to_rname = {rid: rname for rid, rname in rip_rows}
                 for rid, rname in rip_rows:
                     self.meta[key]["ripple_ids"][rname] = rid
@@ -225,15 +283,18 @@ class Driver:
     def _load_pond_state(self, pond_id: int) -> PondState:
         row = self.db.execute(
             "SELECT start_f, end_f, d_ms, has_pull, has_received_pull, is_failed, is_blocked, failed_f, "
-            "failures, is_killed, pull_local, pull_m FROM pond_state WHERE pond_id = ?",
+            "failures, is_killed, pull_local, pull_m, refresh_pending, repairing "
+            "FROM pond_state WHERE pond_id = ?",
             (pond_id,),
         ).fetchone()
         ps = PondState()
         if row:
             (sf, ef, d_ms, hp, hrp, is_failed, is_blocked, failed_f, failures, is_killed, pull_local,
-             pull_m) = row
+             pull_m, refresh_pending, repairing) = row
             ps.is_killed = bool(is_killed)
             ps.pull_local = bool(pull_local)
+            ps.refresh_pending = bool(refresh_pending)
+            ps.repairing = bool(repairing)
             ps.pull_m = datetime.fromisoformat(pull_m) if pull_m else NEVER
             ps.start_f = datetime.fromisoformat(sf) if sf else NEVER
             ps.end_f = datetime.fromisoformat(ef) if ef else NEVER
@@ -323,6 +384,80 @@ class Driver:
         with self.lock:
             self.state = force_pond(self.state, pond, _now())
             self._process(_now())
+
+    def refresh(self, pond: str, clear: bool = False) -> None:
+        """Refresh — flag the Pond so its next run is a cold wipe-and-rebuild. Lazy: persists the flag
+        but starts nothing; the rebuild happens on the next natural run. ``clear`` un-sets it."""
+        with self.lock:
+            self.state = refresh_pond(self.state, pond, clear=clear)
+            self._persist_state()
+            self.state_version += 1
+
+    def repair(self, ponds: list[tuple[str, int | None]], downstream: bool = False) -> dict:
+        """Repair — force-rebuild a **connected** set of Ponds now, in topological order (steps out of
+        the demand model; see ``plans/refresh.md``). Each node is wiped and rebuilt (refresh + force) once
+        its in-scope parents finish, so it reads their freshly-rebuilt output. The scope is marked
+        ``repairing`` (blocked from normal demand) until each node's turn. Rejects a disconnected set."""
+        with self.lock:
+            now = _now()
+            if self._repair is not None:
+                raise ValueError("a repair is already in progress on this Catchment")
+            seeds = [self.resolve(n, m, None) for n, m in ponds]
+            children = self._children_graph()
+            scope = set(seeds)
+            if downstream:
+                scope |= _descendants(seeds, children)
+            gap = _connectivity_gap(scope, children)
+            if gap is not None:
+                raise ValueError(
+                    f"disconnected repair set: '{gap[0]}' reaches '{gap[1]}' only through unselected Ponds "
+                    f"— include the connecting Pond(s) or pass downstream=true"
+                )
+            parents = {k: {p for p in self.state.ponds[k].sources if p in scope} for k in scope}
+            order = _topo_order(scope, parents)
+            for k in scope:  # quiesce: block normal demand, abandon any in-flight run cleanly
+                ps = self.state.pond_states[k]
+                if ps.start_f > ps.end_f:
+                    self.launcher.terminate(k)
+                    self.jobs[k] = []
+                    ps.start_f = ps.end_f
+                ps.repairing = True
+            for k in scope:
+                derive_blocked(self.state, k)
+            self._repair = {"scope": scope, "parents": parents, "done": set(), "released": set()}
+            for k in scope:  # release the roots (no in-scope parent)
+                if not parents[k]:
+                    self._release_repair(k, now)
+            self._process(now)
+            return {"scope": order, "downstream": downstream}
+
+    def _release_repair(self, key: str, now: datetime) -> None:
+        self.state = repair_pond(self.state, key, now)  # force + refresh: a cold rebuild at current f
+        self._repair["released"].add(key)
+
+    def _advance_repair(self, pond: str, now: datetime) -> None:
+        """A scope Pond's repair run completed: mark it done, unblock it, and release any child whose
+        in-scope parents are now all done. When the whole scope is done, the plan ends."""
+        r = self._repair
+        if r is None or pond not in r["released"] or pond in r["done"]:
+            return
+        r["done"].add(pond)
+        self.state.pond_states[pond].repairing = False
+        derive_blocked(self.state, pond)
+        for k in r["scope"]:
+            if k not in r["released"] and r["parents"][k] <= r["done"]:
+                self._release_repair(k, now)
+        if r["done"] >= r["scope"]:
+            self._repair = None  # the repair plan is complete
+        self._process(now)
+
+    def _children_graph(self) -> dict[str, set[str]]:
+        children: dict[str, set[str]] = {k: set() for k in self.state.ponds}
+        for k, pond in self.state.ponds.items():
+            for sp in pond.sources:
+                if sp in children:
+                    children[sp].add(k)
+        return children
 
     def kill(self, pond: str) -> None:
         """Kill — terminate the Duck and park the Pond in a terminal killed state (cancels its Run)."""
@@ -534,6 +669,7 @@ class Driver:
                 if payload.get("schema"):
                     self._capture_schema(pond, payload["schema"])
                 self._process(now)
+                self._advance_repair(pond, now)  # if this Pond was a repair step, release its children
             elif kind == "contract_failed":
                 # The Duck refused to publish: the output broke the major line's additive contract.
                 # Fail the Pond at this Run (keeping last-good data) and block downstream, like any failure.
@@ -895,7 +1031,7 @@ class Driver:
     def _process(self, now: datetime, notify: bool = True) -> None:
         self.state, _started = sentinel(now, self.state)
         for cmd in drain_begin_runs(self.state):
-            self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force)
+            self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force, refresh=cmd.refresh)
         self._persist_state()
         self._reap_idle()
         self.state_version += 1  # state moved → release any /api/status long-poll
@@ -904,7 +1040,9 @@ class Driver:
         if notify and self._notify_cb is not None:
             self._notify_cb()
 
-    def _dispatch_begin_run(self, pond: str, f: datetime, now: datetime, force: bool = False) -> None:
+    def _dispatch_begin_run(
+        self, pond: str, f: datetime, now: datetime, force: bool = False, refresh: bool = False
+    ) -> None:
         meta = self.meta[pond]
         # A Pond Draw is not run by a Duck: record the Run as running and hand the parquet transfer to
         # the poller (it fetches out-of-lock, then reports completion via complete_draw_transfer).
@@ -924,11 +1062,11 @@ class Driver:
         # Cancel any not-yet-collected shutdown: this Pond is running again, so the Duck must not exit.
         self.jobs[pond] = [j for j in self.jobs.get(pond, []) if j.get("kind") != "shutdown"]
         self.jobs[pond].append({
-            "kind": "begin_run", "f": _iso(f), "force": force,
+            "kind": "begin_run", "f": _iso(f), "force": force, "refresh": refresh,
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
             # The prior completed run's freshness (the pond's end_f *before* this run advances it),
-            # carried to the Ripples as pond.previous_f. NEVER on the first run.
-            "previous_f": _iso(self.state.pond_states[pond].end_f),
+            # carried to the Ripples as pond.previous_f. A Refresh reads its Sources in full, so NEVER.
+            "previous_f": _iso(NEVER) if refresh else _iso(self.state.pond_states[pond].end_f),
             # The major line's additive schema contract this Run must keep (vetted by the Duck before
             # publishing); None for a first run or a deliberate rollback (governed by min_version).
             "contract": self._contract_for(pond),
@@ -1088,13 +1226,15 @@ class Driver:
             pond_id = self.meta[name]["pond_id"]
             self.db.execute(
                 "INSERT INTO pond_state (pond_id, start_f, end_f, d_ms, has_pull, has_received_pull, "
-                "is_failed, is_blocked, failed_f, failures, is_killed, pull_local, pull_m) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
+                "is_failed, is_blocked, failed_f, failures, is_killed, pull_local, pull_m, "
+                "refresh_pending, repairing) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
                 "start_f = excluded.start_f, end_f = excluded.end_f, d_ms = excluded.d_ms, "
                 "has_pull = excluded.has_pull, has_received_pull = excluded.has_received_pull, "
                 "is_failed = excluded.is_failed, is_blocked = excluded.is_blocked, "
                 "failed_f = excluded.failed_f, failures = excluded.failures, "
-                "is_killed = excluded.is_killed, pull_local = excluded.pull_local, pull_m = excluded.pull_m",
+                "is_killed = excluded.is_killed, pull_local = excluded.pull_local, pull_m = excluded.pull_m, "
+                "refresh_pending = excluded.refresh_pending, repairing = excluded.repairing",
                 (
                     pond_id,
                     _iso(ps.start_f) if ps.start_f != NEVER else None,
@@ -1109,6 +1249,8 @@ class Driver:
                     int(ps.is_killed),
                     int(ps.pull_local),
                     _iso(ps.pull_m) if ps.pull_m != NEVER else None,
+                    int(ps.refresh_pending),
+                    int(ps.repairing),
                 ),
             )
             self.db.execute("DELETE FROM pond_target WHERE pond_id = ?", (pond_id,))
@@ -1119,6 +1261,24 @@ class Driver:
         self.db.commit()
 
     # ─── Status ───────────────────────────────────────────────────────────────
+
+    def _exported_tables(self, key: str) -> set[str]:
+        """Names of the tables this major line has published to its data dir (the exported Parquet/
+        Iceberg snapshot). Best-effort — a data-read hiccup must never break ``status()``; a Draw has
+        no local output. ``list_tables`` globs the flat sidecar, so it needs no Iceberg extension."""
+        from pathlib import Path
+
+        from ..dataplane import get_data_plane
+        from .registry import pond_data_dir
+
+        meta = self.meta.get(key, {})
+        if meta.get("is_draw"):
+            return set()
+        try:
+            data_dir = pond_data_dir(Path(self.root), meta["name"], meta["major"])
+            return set(get_data_plane().list_tables(data_dir))
+        except Exception:
+            return set()
 
     def status(self) -> dict:
         with self.lock:
@@ -1135,6 +1295,8 @@ class Driver:
             ponds = []
             for key in self.state.ponds:
                 ps = self.state.pond_states[key]
+                # Whether this major line has published any tables — gates the Pond's data viewer.
+                has_tables = bool(self._exported_tables(key))
                 # Ripples belonging to this Pond, with their live per-Ripple state and intra-Pond edges.
                 ripples = []
                 ripple_edges = []
@@ -1163,6 +1325,8 @@ class Driver:
                     st = "failed"
                 elif ps.is_killed:
                     st = "killed"
+                elif ps.repairing:
+                    st = "repairing"
                 elif ps.is_blocked:
                     st = "blocked"
                 else:
@@ -1201,6 +1365,7 @@ class Driver:
                     "kind": self.meta[key]["kind"],
                     "is_draw": self.meta[key].get("is_draw", False),
                     "version": self.meta[key]["version"],
+                    "has_tables": has_tables,
                     "status": st,
                     "gen": ps.runs_started,
                     "runs_completed": ps.runs_completed,
@@ -1213,6 +1378,8 @@ class Driver:
                     "is_failed": ps.is_failed,
                     "is_blocked": ps.is_blocked,
                     "is_killed": ps.is_killed,
+                    "refresh_pending": ps.refresh_pending,
+                    "repairing": ps.repairing,
                     "failed_f": ts(ps.failed_f),
                     "failures": ps.failures,
                     "missing_sources": self.meta[key].get("missing_sources", []),
