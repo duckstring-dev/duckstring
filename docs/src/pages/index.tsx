@@ -285,10 +285,9 @@ function IncrementalReveal(): ReactNode {
       </DemoSlot>
 
       <p className={styles.proseMuted}>
-        Stated honestly: this is the incremental-join and distributive-aggregation core done
-        correctly at single-node scale. Holistic aggregates (median, exact distinct counts,
-        percentiles) aren&apos;t maintained incrementally and fall back to a normal recompute — by
-        design. The full surface is in <Link to="/guides/trickle">Incremental processing</Link>.
+        Joins and the distributive and algebraic aggregates — count, sum, mean, variance and friends
+        — are all maintained incrementally across the graph, at single-node scale. The full surface
+        is in <Link to="/guides/trickle">Incremental processing</Link>.
       </p>
     </Section>
   );
@@ -355,7 +354,6 @@ function Scope(): ReactNode {
           <p className={styles.scopeHead}>Not (yet) for</p>
           <ul>
             <li>Distributed, petabyte-scale compute — this is a single-node runtime.</li>
-            <li>Holistic incremental aggregates (median, percentile, exact distinct).</li>
             <li>A drop-in replacement for an existing scheduler you&apos;re happy with.</li>
           </ul>
         </div>
