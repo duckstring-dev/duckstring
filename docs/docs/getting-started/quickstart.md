@@ -44,6 +44,7 @@ flowchart LR
         p.ingest[ingest: 2s]
     end
     subgraph sales [sales]
+        direction LR
         daily_sales[daily_sales: 2s] --> join_lines[join_lines: 3s]
         price_tiers[price_tiers: 1s] --> join_lines
     end

@@ -10,12 +10,14 @@ import styles from './index.module.css';
 // dark canvas regardless of the site colour mode — the palette follows frontend/src/lib/store.ts.
 //
 // POSITIONING (settled — keep this order):
-//   1. Brand statement + one-line "what is this".
+//   1. Brand statement + one-line "what is this". pip install is the primary conversion — weight it.
 //   2. Lead with the ENGINE'S BEHAVIOUR — the bidirectional throttle. The moat, and the wow.
 //   3. Ground it in the package format (the mechanism that makes it need no config).
 //   4. Close on the seamless upgrade (the daily-pain payoff), then Trickle as the reveal.
 //   5. The lightweight on-ramp (wrap work you already run) + honest scope.
 // Never call it an "orchestration framework"; never name competitors; don't lead with the Catchment.
+// FRAMING: lead with the positive value (implicit architecture, demand-driven, incremental) rather
+// than the "things you stop doing" negation — the payoff, not the absence.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // A media placeholder. Drop a GIF/MP4/embed in where marked; the caption stays as the description
@@ -81,6 +83,12 @@ function Hero(): ReactNode {
       <img src={useBaseUrl('/img/logo-mark.svg')} alt="" className={styles.mark} />
       <p className={styles.wordmark}>Duckstring</p>
       <h1 className={styles.tagline}>There is no DAG.</h1>
+      <div className={styles.install}>
+        <span className={styles.installPrompt} aria-hidden>
+          $
+        </span>
+        <code className={styles.installCmd}>pip install duckstring</code>
+      </div>
       <p className={styles.lead}>
         Build data pipelines the way you build software: version each transform, declare its
         dependencies, and Duckstring resolves the execution DAG automatically — then runs it on
@@ -88,46 +96,49 @@ function Hero(): ReactNode {
       </p>
       <div className={styles.ctaRow}>
         <Link className={styles.ctaPrimary} to="/getting-started/quickstart">
-          Quickstart
+          Quickstart →
         </Link>
         <Link className={styles.ctaGhost} href="https://playground.duckstring.com">
           Try the playground
         </Link>
       </div>
-      <code className={styles.pipInstall}>pip install duckstring</code>
+      <p className={styles.heroNote}>Apache-2.0 · pure Python · no service to stand up</p>
     </header>
   );
 }
 
-// The 30-second "what is this", in prose. The unifying thesis: one decision, three payoffs.
+// The 30-second "what is this", in prose. The unifying thesis: one decision, three payoffs — framed
+// as what you gain, not what you give up.
 function WhatIsThis(): ReactNode {
   return (
-    <Section kicker="What is this?" title="One idea, three things you stop doing by hand.">
+    <Section kicker="What is this?" title="One decision. Three advantages.">
       <p className={styles.prose}>
         Duckstring is a runtime for data pipelines built on a single decision:{' '}
         <strong>treat each transform as a versioned package</strong> that declares its upstream
         dependencies, exactly the way a library declares the packages it imports. Make that one
-        decision and three problems you normally solve by hand just dissolve:
+        decision and you get three things that are normally hand-built and hand-tended for free:
       </p>
       <ul className={styles.payoffs}>
         <li>
-          <strong>You stop building the DAG.</strong> The pipeline is the union of every package&apos;s
-          declared dependencies — implicit in the graph, never written down or governed centrally.
+          <strong>Implicit architecture.</strong> The pipeline is the union of every package&apos;s
+          declared dependencies. There&apos;s no central DAG to build, wire, or govern — it&apos;s
+          already in the graph.
         </li>
         <li>
-          <strong>You stop writing schedules.</strong> Execution is driven by <em>demand</em> and{' '}
-          <em>freshness</em>, not cron. You say how fresh an output must be; the runtime works out what
-          to run and when, and throttles everything to its actual bottleneck.
+          <strong>Demand-driven execution.</strong> Runs follow <em>freshness</em>, not cron. You say
+          how fresh an output must be; the runtime resolves what to run and when, and throttles
+          everything to its actual bottleneck.
         </li>
         <li>
-          <strong>You stop recomputing unchanged data.</strong> Because each package boundary can keep
-          history, downstream transforms can read only the rows that changed since they last ran.
+          <strong>Native incremental processing.</strong> Each package boundary keeps history, so
+          downstream transforms read only the rows that changed since they last ran — automatically.
         </li>
       </ul>
       <p className={styles.proseMuted}>
         It&apos;s built for <strong>new pipelines</strong> — greenfield ETL especially — where you get
-        these properties for free instead of bolting them onto an existing scheduler. The packaging
-        format is an open on-ramp; the demand-driven engine is the part worth showing first.
+        these properties from the start instead of bolting them onto an existing scheduler. The
+        packaging format is the open on-ramp; the demand-driven engine is the part worth showing
+        first.
       </p>
     </Section>
   );
@@ -139,14 +150,14 @@ function ThrottleDemo(): ReactNode {
   return (
     <Section
       kicker="The part nothing else does"
-      title="A pipeline that re-paces itself — upstream and down."
+      title="Bottleneck-aware execution. No wasted compute."
       alt>
       <p className={styles.prose}>
-        Everyone&apos;s scheduler can throttle work <em>downstream</em> of a slow step. Duckstring
-        also throttles everything <em>upstream</em> of it. Demand flows back through the graph like
-        Kanban cards, so a transform only runs when something downstream has actually asked for fresh
-        output and there&apos;s new input to consume. Nothing over-produces results no one is waiting
-        for.
+        A scheduler can throttle work <em>downstream</em> of a slow step. Duckstring throttles
+        everything <em>upstream</em> of it too. Execution is strictly demand-driven: a transform runs
+        only when something downstream has actually asked for fresh output and there&apos;s new input
+        to consume. The result is a pipeline that re-paces itself to its real bottleneck — and never
+        over-produces results no one is waiting for.
       </p>
 
       <DemoSlot badge="Demo · hero clip" frameLabel="Live re-pacing when one Pond slows down">
@@ -174,7 +185,7 @@ function ThrottleDemo(): ReactNode {
 // reference/pond-toml.md.)
 function HowItWorks(): ReactNode {
   return (
-    <Section kicker="Why it needs no configuration" title="The whole pipeline is in the manifests.">
+    <Section kicker="Why it needs no configuration" title="Declare dependencies and freshness. We resolve the rest.">
       <div className={styles.manifestRow}>
         <pre className={styles.toml}>
           <span className={styles.tomlSection}>[pond]</span>{'\n'}
@@ -195,9 +206,9 @@ function HowItWorks(): ReactNode {
       </div>
 
       <p className={styles.prose}>
-        You never schedule a run. You attach <strong>demand</strong> to the output you care about, in
-        one of four shapes — pull (keep me supplied) or push (bring me to this freshness), each as a
-        one-shot or a standing request:
+        You never schedule a run. Instead you attach a <strong>freshness requirement</strong> to the
+        output you care about, in one of four shapes — pull (keep me supplied) or push (bring me to
+        this freshness), each as a one-shot or a standing request:
       </p>
       <div className={styles.triggers}>
         <div className={styles.triggerCell}>
@@ -267,14 +278,13 @@ function UpgradeDemo(): ReactNode {
 // the boundary of what's incremental.
 function IncrementalReveal(): ReactNode {
   return (
-    <Section kicker="And, because boundaries carry history…" title="Recompute only what changed.">
+    <Section kicker="And, because boundaries carry history…" title="Process deltas, not entire tables.">
       <p className={styles.prose}>
         Because a Pond is a real package boundary, it can publish <strong>history</strong> instead of
         overwriting its tables. A downstream transform then reads only the rows that changed since it
         last ran — a small delta, not a full table — and the built-in incremental engine composes
-        those deltas through joins and aggregations, so it recomputes just the output a change
-        touches. It&apos;s incremental view maintenance (Z-sets / DBSP), wired straight into the
-        package model.
+        those deltas through joins and aggregations. Your compute time and cost scale with the size of
+        the <em>change</em>, not the historical size of your data.
       </p>
 
       <DemoSlot badge="Demo" frameLabel="A reprice touches one row, not the whole table">
@@ -286,8 +296,8 @@ function IncrementalReveal(): ReactNode {
 
       <p className={styles.proseMuted}>
         Joins and the distributive and algebraic aggregates — count, sum, mean, variance and friends
-        — are all maintained incrementally across the graph, so a run&apos;s work tracks the change,
-        not the size of the history behind it. The full surface is in{' '}
+        — are all maintained incrementally across the graph (it&apos;s incremental view maintenance,
+        wired straight into the package model). The full surface is in{' '}
         <Link to="/guides/trickle">Incremental processing</Link>.
       </p>
     </Section>
@@ -300,15 +310,15 @@ function OnRamp(): ReactNode {
   return (
     <Section
       kicker="Start small"
-      title="Or wrap work you already run — and stop re-running it."
+      title="Drop it into the stack you already run."
       alt>
       <p className={styles.prose}>
-        A Ripple is just Python, so a Pond doesn&apos;t have to do the compute itself. It can wrap
-        anything: a SQL transform, a local script, or a call out to a remote system that it kicks off
-        and polls to completion. Point Duckstring at a sequence you already run and it becomes the
-        coordinator — running each step only when its inputs have actually changed and something
-        downstream wants the result. The immediate payoff is the redundant compute you stop paying
-        for, with no rewrite.
+        You don&apos;t have to move your compute to get value. A Ripple is just Python, so a Pond can
+        wrap anything: a SQL transform, a local script, or a call out to a remote system that it kicks
+        off and polls to completion. Point Duckstring at a sequence you already run and it becomes the
+        coordinator — firing each step only when its inputs have actually changed and something
+        downstream wants the result. The redundant compute you stop paying for lands on day one, with
+        no rewrite.
       </p>
       <div className={styles.useCases}>
         <div className={styles.useCase}>
