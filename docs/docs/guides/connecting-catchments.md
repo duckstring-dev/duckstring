@@ -60,5 +60,5 @@ duckstring catchment close reports
 ## What to know
 
 - **A duct is a full-trust link.** It holds the upstream's credentials, which under the built-in API key grant full access. So today's ducts are for Catchments within one trust domain — your own machines, or a team you'd hand a key. Scoped per-link credentials are a future step; until then, don't duct in a Catchment you wouldn't share a key with.
-- **Transfers copy the whole table.** Each refresh pulls the upstream Pond's full exported Parquet (no incremental delta yet). At Duckstring's single-node scale that's seconds; the `--incremental` flag on `duct add` is reserved for when delta transfer lands.
+- **Transfers copy the whole table.** Each refresh pulls the upstream Pond's full exported Parquet (no incremental delta yet). For typical tables that's quick; the `--incremental` flag on `duct add` is reserved for when delta transfer lands.
 - **Names share a namespace.** A drawn Pond can't share a `name@major` with a local Pond — remove or rename one. Cross-Catchment dependency cycles aren't detected centrally (no Catchment sees the whole mesh); the freshness model doesn't deadlock on them, but they're yours to avoid.

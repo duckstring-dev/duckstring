@@ -365,6 +365,10 @@ function Scope(): ReactNode {
           </ul>
         </div>
       </div>
+      <p className={styles.proseMuted} style={{marginTop: 20}}>
+        And most pipelines never need a cluster — they&apos;ve just been upsold into one. Duckstring
+        is built to make the heavy, distributed jobs the exception, not the rule.
+      </p>
     </Section>
   );
 }
