@@ -286,8 +286,9 @@ function IncrementalReveal(): ReactNode {
 
       <p className={styles.proseMuted}>
         Joins and the distributive and algebraic aggregates — count, sum, mean, variance and friends
-        — are all maintained incrementally across the graph, at single-node scale. The full surface
-        is in <Link to="/guides/trickle">Incremental processing</Link>.
+        — are all maintained incrementally across the graph, so a run&apos;s work tracks the change,
+        not the size of the history behind it. The full surface is in{' '}
+        <Link to="/guides/trickle">Incremental processing</Link>.
       </p>
     </Section>
   );
@@ -345,7 +346,10 @@ function Scope(): ReactNode {
           <p className={styles.scopeHead}>Built for</p>
           <ul>
             <li>New pipelines, ETL especially, where you want the model from the start.</li>
-            <li>Single-node transforms — comfortably into the tens of millions of rows.</li>
+            <li>
+              Compute that runs on a single machine — the Catchment, local or remote. DuckDB works
+              through large data progressively, and Trickle keeps each run to the delta.
+            </li>
             <li>Teams that have felt the coordination wall of a large or mesh pipeline.</li>
             <li>Coordinating sequences of jobs to cut redundant compute, without a rewrite.</li>
           </ul>
@@ -353,7 +357,10 @@ function Scope(): ReactNode {
         <div className={styles.scopeBad}>
           <p className={styles.scopeHead}>Not (yet) for</p>
           <ul>
-            <li>Distributed, petabyte-scale compute — this is a single-node runtime.</li>
+            <li>
+              Multi-node cluster compute — a Catchment is one machine (local or remote), not a
+              distributed cluster.
+            </li>
             <li>A drop-in replacement for an existing scheduler you&apos;re happy with.</li>
           </ul>
         </div>
