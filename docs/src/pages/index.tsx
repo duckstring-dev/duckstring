@@ -154,6 +154,10 @@ function ThrottleDemo(): ReactNode {
 
       <DemoSlot badge="Demo · hero clip" frameLabel="Live re-pacing when one Pond slows down">
       </DemoSlot>
+      <p className={styles.proseMuted}>
+        No sophisticated prediction of run times is required - simply flipping to control by consumers and not suppliers means the entire path naturally throttles to the slowest process.
+See{' '}
+        <Link to="/orchestration_theory">Orchestration Theory</Link>.
     </Section>
   );
 }
@@ -182,8 +186,7 @@ function UpgradeDemo(): ReactNode {
       </DemoSlot>
 
       <p className={styles.proseMuted}>
-        This is the step a mesh of domain-owned pipelines usually stops short of: decentralised
-        ownership without concurrent versions still forces every consumer to move together. See{' '}
+        Upgrading a complex sequence of transformations can paralyze development, especially if upstream changes are needed. Just deploy breaks as a separate Pond, know that it won't run until downstream also upgrades, and be sure you won't have broken anything. See{' '}
         <Link to="/concepts/versioning">Versioning</Link>.
       </p>
     </Section>
@@ -194,13 +197,9 @@ function UpgradeDemo(): ReactNode {
 // the boundary of what's incremental.
 function IncrementalReveal(): ReactNode {
   return (
-    <Section kicker="And, because boundaries carry history…" title="Process deltas, not entire tables.">
+    <Section kicker="Keep tasks small with deltas" title="Discrete stages for seamless incremental processing">
       <p className={styles.prose}>
-        Because a Pond is a real package boundary, it can publish <strong>history</strong> instead of
-        overwriting its tables. A downstream transform then reads only the rows that changed since it
-        last ran — a small delta, not a full table — and the built-in incremental engine composes
-        those deltas through joins and aggregations. Your compute time and cost scale with the size of
-        the <em>change</em>, not the historical size of your data.
+        Incremental processing becomes very natural once a Pond has a clear lineage, runs only when parents change, and tracks an epoch throughout. Bundled with Duckstring is the Trickle engine - a DBSP implementation over DuckDB that cuts processing to the absolute minimum by focussing only on changes.
       </p>
 
       <DemoSlot badge="Demo" frameLabel="A reprice touches one row, not the whole table">
@@ -211,9 +210,8 @@ function IncrementalReveal(): ReactNode {
       </DemoSlot>
 
       <p className={styles.proseMuted}>
-        Joins and the distributive and algebraic aggregates — count, sum, mean, variance and friends
-        — are all maintained incrementally across the graph (it&apos;s incremental view maintenance,
-        wired straight into the package model). The full surface is in{' '}
+        Done well, incremental processing allows you to stay single-node, in-memory and blazing fast - real streaming performance with minimal infrastructure.
+See {' '}
         <Link to="/guides/trickle">Incremental processing</Link>.
       </p>
     </Section>
@@ -229,7 +227,7 @@ function OnRamp(): ReactNode {
       title="Drop it into the stack you already run."
       alt>
       <p className={styles.prose}>
-        You don&apos;t have to move your compute to get value. A Ripple is just Python, so a Pond can
+        You don&apos;t have to move your compute to get value. A Pond is just python, so can
         wrap anything: a SQL transform, a local script, or a call out to a remote system that it kicks
         off and polls to completion. Point Duckstring at a sequence you already run and it becomes the
         coordinator — firing each step only when its inputs have actually changed and something
@@ -259,42 +257,6 @@ function OnRamp(): ReactNode {
           </span>
         </div>
       </div>
-    </Section>
-  );
-}
-
-// HONEST SCOPE — what it is and isn't for. Candour is a credibility asset with this audience.
-function Scope(): ReactNode {
-  return (
-    <Section kicker="The honest boundary" title="What it&apos;s for — and what it isn&apos;t.">
-      <div className={styles.scopeGrid}>
-        <div className={styles.scopeGood}>
-          <p className={styles.scopeHead}>Built for</p>
-          <ul>
-            <li>New pipelines, ETL especially, where you want the model from the start.</li>
-            <li>
-              Compute that runs on a single machine — the Catchment, local or remote. DuckDB works
-              through large data progressively, and Trickle keeps each run to the delta.
-            </li>
-            <li>Teams that have felt the coordination wall of a large or mesh pipeline.</li>
-            <li>Coordinating sequences of jobs to cut redundant compute, without a rewrite.</li>
-          </ul>
-        </div>
-        <div className={styles.scopeBad}>
-          <p className={styles.scopeHead}>Not (yet) for</p>
-          <ul>
-            <li>
-              Multi-node cluster compute — a Catchment is one machine (local or remote), not a
-              distributed cluster.
-            </li>
-            <li>A drop-in replacement for an existing scheduler you&apos;re happy with.</li>
-          </ul>
-        </div>
-      </div>
-      <p className={styles.proseMuted} style={{marginTop: 20}}>
-        And most pipelines never need a cluster — they&apos;ve just been upsold into one. Duckstring
-        is built to make the heavy, distributed jobs the exception, not the rule.
-      </p>
     </Section>
   );
 }
