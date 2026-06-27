@@ -183,58 +183,6 @@
   margin: 0;
 }
 
-/* ── The manifest (pond.toml) ─────────────────────────────────────────────── */
-
-.manifestRow {
-  display: flex;
-  align-items: center;
-  gap: 32px;
-  padding: 22px 26px;
-  margin-bottom: 36px;
-  background: #15151acc;
-  border: 1px solid #27272a;
-  border-radius: 12px;
-}
-
-.toml {
-  background: #0c0c10;
-  border: 1px solid #27272a;
-  border-radius: 8px;
-  padding: 14px 18px;
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.7;
-  color: #e4e4e7;
-  flex-shrink: 0;
-}
-
-.tomlSection {
-  color: #06c4e6;
-  font-weight: 700;
-}
-
-.tomlString {
-  color: #ee9333;
-}
-
-.manifestCaption {
-  font-size: 14px;
-  line-height: 1.7;
-  color: #a1a1aa;
-  margin: 0;
-}
-
-.manifestCaption strong {
-  color: #e4e4e7;
-}
-
-@media (max-width: 700px) {
-  .manifestRow {
-    flex-direction: column;
-    align-items: stretch;
-  }
-}
-
 /* ── Route cards ──────────────────────────────────────────────────────────── */
 
 .routes {
@@ -313,6 +261,7 @@
   justify-content: center;
   padding: 64px 0;
   border-top: 1px solid #1c1c22;
+  scroll-margin-top: var(--ifm-navbar-height);
 }
 
 /* The alternating band — a faint tint so the demo sections read as their own beats. */
@@ -406,6 +355,25 @@
   color: #f4f4f5;
 }
 
+/* The bold lead of each payoff is an anchor link down to the section that demonstrates it. */
+.payoffLink {
+  color: inherit;
+  text-decoration: none;
+}
+
+.payoffLink:hover {
+  text-decoration: none;
+}
+
+.payoffLink:hover strong {
+  color: #06c4e6;
+}
+
+.payoffArrow {
+  color: #06c4e6;
+  font-size: 0.85em;
+}
+
 /* ── Demo slots (media placeholders) ──────────────────────────────────────── */
 
 .demo {
@@ -467,79 +435,6 @@
   padding-left: 4px;
 }
 
-.demoLabel {
-  font-size: 14px;
-  color: #71717a;
-  max-width: 70%;
-  text-align: center;
-}
-
-.demoCaption {
-  margin: 14px 2px 0;
-  font-size: 14px;
-  line-height: 1.65;
-  color: #8b8b93;
-}
-
-.demoCaption strong {
-  color: #d4d4d8;
-}
-
-.demoCaption code {
-  background: #0c0c10;
-  border: 1px solid #27272a;
-  border-radius: 5px;
-  padding: 1px 6px;
-  font-size: 0.86em;
-  color: #e4e4e7;
-}
-
-/* ── How it works: manifest row reuses .toml/.manifestCaption above ───────── */
-
-/* The four triggers. */
-.triggers {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-  margin: 6px 0 20px;
-}
-
-@media (max-width: 720px) {
-  .triggers {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-.triggerCell {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  background: #15151a;
-  border: 1px solid #27272a;
-  border-radius: 10px;
-  padding: 14px 16px;
-}
-
-.triggerName {
-  font-size: 16px;
-  font-weight: 700;
-  color: #f4f4f5;
-}
-
-.triggerKind {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #ee9333;
-}
-
-.triggerBody {
-  font-size: 13px;
-  line-height: 1.5;
-  color: #a1a1aa;
-}
-
 /* ── On-ramp use cases ────────────────────────────────────────────────────── */
 
 .useCases {
@@ -575,62 +470,4 @@
   font-size: 13px;
   line-height: 1.6;
   color: #a1a1aa;
-}
-
-/* ── Scope (built for / not for) ──────────────────────────────────────────── */
-
-.scopeGrid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
-
-@media (max-width: 720px) {
-  .scopeGrid {
-    grid-template-columns: 1fr;
-  }
-}
-
-.scopeGood,
-.scopeBad {
-  background: #15151a;
-  border: 1px solid #27272a;
-  border-radius: 12px;
-  padding: 20px 22px;
-}
-
-.scopeGood {
-  border-color: rgba(6, 196, 230, 0.3);
-}
-
-.scopeHead {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  margin: 0 0 12px;
-}
-
-.scopeGood .scopeHead {
-  color: #06c4e6;
-}
-
-.scopeBad .scopeHead {
-  color: #8b8b93;
-}
-
-.scopeGood ul,
-.scopeBad ul {
-  margin: 0;
-  padding-left: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
-
-.scopeGood li,
-.scopeBad li {
-  font-size: 14px;
-  line-height: 1.55;
-  color: #c0c0c7;
 }
