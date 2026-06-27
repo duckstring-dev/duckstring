@@ -29,7 +29,7 @@ function DemoSlot({
 }: {
   badge: string;
   frameLabel: string;
-  children: ReactNode;
+  children?: ReactNode;
 }): ReactNode {
   return (
     <figure className={styles.demo}>
@@ -48,7 +48,7 @@ function DemoSlot({
         </span>
         <span className={styles.demoLabel}>{frameLabel}</span>
       </div>
-      <figcaption className={styles.demoCaption}>{children}</figcaption>
+      {children && <figcaption className={styles.demoCaption}>{children}</figcaption>}
     </figure>
   );
 }
@@ -124,14 +124,22 @@ function WhatIsThis(): ReactNode {
           already in the graph.
         </li>
         <li>
-          <strong>Demand-driven execution.</strong> Run from the <outputs>, not inputs, and paths with no downstream consumers sit idle. Each path runs only as often as its bottleneck - both downstream <and upstream>. Adding new Ponds (or adding breaking changes to an old one) will not execute until there are consumers ready to use it.
+          <strong>Demand-driven execution.</strong> Runs are driven from the <em>outputs</em>, not
+          the inputs — paths with no downstream consumers sit idle, and each path runs only as often
+          as its bottleneck, throttled both downstream <em>and upstream</em>. A new Pond (or a
+          breaking change to an existing one) won&apos;t execute until there&apos;s a consumer ready
+          to use it.
         </li>
         <li>
-          <strong>Native incremental processing.</strong> Run history is metadata, making change detection and incremental processing trivial. Duckstring bundles Trickle: a DBSP-based incremental engine running on DuckDB. Blazing fast execution on a single node - perfect for the 90% of cases where you don't *actually need* distributed compute.
+          <strong>Native incremental processing.</strong> Run history is metadata, which makes change
+          detection and incremental processing trivial. Duckstring bundles Trickle: a DBSP-based
+          incremental engine over DuckDB. Blazing-fast execution on a single node — perfect for the
+          90% of cases where you don&apos;t <em>actually</em> need distributed compute.
         </li>
       </ul>
       <p className={styles.proseMuted}>
-        The framework is generic - attach any python code (even calls to external services) and get all the orchestration benefits immediately.
+        The framework is generic — attach any Python code (even calls out to external services) and
+        get the full benefit immediately.
       </p>
     </Section>
   );
@@ -148,16 +156,79 @@ function ThrottleDemo(): ReactNode {
       <p className={styles.prose}>
         Most schedulers can throttle work <em>downstream</em> of a slow step. Duckstring throttles
         everything <em>upstream</em> of it too. Execution is strictly demand-driven: a transform runs
-        only when something downstream has actually asked for it. The result is a pipeline that re-paces itself to its real bottleneck — and never
-        over-produces results no one is waiting for.
+        only when something downstream has actually asked for it. The result is a pipeline that
+        re-paces itself to its real bottleneck — and never over-produces results no one is waiting
+        for.
       </p>
 
-      <DemoSlot badge="Demo · hero clip" frameLabel="Live re-pacing when one Pond slows down">
-      </DemoSlot>
+      <DemoSlot badge="Demo · hero clip" frameLabel="Live re-pacing when one Pond slows down" />
+
       <p className={styles.proseMuted}>
-        No sophisticated prediction of run times is required - simply flipping to control by consumers and not suppliers means the entire path naturally throttles to the slowest process.
-See{' '}
-        <Link to="/orchestration_theory">Orchestration Theory</Link>.
+        No sophisticated prediction of run times is required — flipping to control by consumers rather
+        than suppliers means the entire path naturally throttles to its slowest process. See{' '}
+        <Link to="/theory">Orchestration Theory</Link>.
+      </p>
+    </Section>
+  );
+}
+
+// The grounding: a hand-tinted pond.toml + the four triggers. (Manifest kept in sync with
+// reference/pond-toml.md.)
+function HowItWorks(): ReactNode {
+  return (
+    <Section kicker="Why it needs no configuration" title="The whole pipeline is in the manifests.">
+      <div className={styles.manifestRow}>
+        <pre className={styles.toml}>
+          <span className={styles.tomlSection}>[pond]</span>{'\n'}
+          name = <span className={styles.tomlString}>&quot;sales&quot;</span>{'\n'}
+          version = <span className={styles.tomlString}>&quot;1.2.0&quot;</span>{'\n'}
+          {'\n'}
+          <span className={styles.tomlSection}>[sources]</span>{'\n'}
+          transactions = <span className={styles.tomlString}>&quot;1.0.0&quot;</span>{'\n'}
+          products = <span className={styles.tomlString}>&quot;1.1.0&quot;</span>
+        </pre>
+        <p className={styles.manifestCaption}>
+          A transform is a <strong>Pond</strong>: a versioned Python package that declares its
+          parents. Inside it, the individual operations are <strong>Ripples</strong> — ordinary
+          Python functions, usually one per output table. Deploys are independent and atomic, like
+          publishing a package; the pipeline is the union of every Pond&apos;s declared sources, so
+          there is nothing to wire up and nothing global to maintain.
+        </p>
+      </div>
+
+      <p className={styles.prose}>
+        You never schedule a run. You attach <strong>demand</strong> to the output you care about, in
+        one of four shapes — pull (keep me supplied) or push (bring me to this freshness), each as a
+        one-shot or a standing request:
+      </p>
+      <div className={styles.triggers}>
+        <div className={styles.triggerCell}>
+          <span className={styles.triggerName}>Tap</span>
+          <span className={styles.triggerKind}>pull · once</span>
+          <span className={styles.triggerBody}>One resupply, propagated upstream.</span>
+        </div>
+        <div className={styles.triggerCell}>
+          <span className={styles.triggerName}>Wave</span>
+          <span className={styles.triggerKind}>pull · standing</span>
+          <span className={styles.triggerBody}>Stay as fresh as the bottleneck allows.</span>
+        </div>
+        <div className={styles.triggerCell}>
+          <span className={styles.triggerName}>Pulse</span>
+          <span className={styles.triggerKind}>push · once</span>
+          <span className={styles.triggerBody}>Run the lineage to <em>now</em>.</span>
+        </div>
+        <div className={styles.triggerCell}>
+          <span className={styles.triggerName}>Tide</span>
+          <span className={styles.triggerKind}>push · standing</span>
+          <span className={styles.triggerBody}>Keep staleness under a bound (e.g. 1&nbsp;day).</span>
+        </div>
+      </div>
+      <p className={styles.proseMuted}>
+        A Tide is a staleness <em>bound</em>, not a cron line — &ldquo;never more than an hour
+        old&rdquo;, and the runtime decides when to start work to honour it. A Wave isn&apos;t
+        &ldquo;every N seconds&rdquo; at all; its frequency emerges from the pipeline&apos;s real
+        bottleneck. Full semantics in <Link to="/guides/triggers">Triggers</Link>.
+      </p>
     </Section>
   );
 }
@@ -210,8 +281,8 @@ function IncrementalReveal(): ReactNode {
       </DemoSlot>
 
       <p className={styles.proseMuted}>
-        Done well, incremental processing allows you to stay single-node, in-memory and blazing fast - real streaming performance with minimal infrastructure.
-See {' '}
+        Done well, incremental processing lets you stay single-node, in-memory and blazing fast —
+        real streaming performance with minimal infrastructure. See{' '}
         <Link to="/guides/trickle">Incremental processing</Link>.
       </p>
     </Section>
@@ -257,6 +328,42 @@ function OnRamp(): ReactNode {
           </span>
         </div>
       </div>
+    </Section>
+  );
+}
+
+// HONEST SCOPE — what it is and isn't for. Candour is a credibility asset with this audience.
+function Scope(): ReactNode {
+  return (
+    <Section kicker="The honest boundary" title="What it&apos;s for — and what it isn&apos;t.">
+      <div className={styles.scopeGrid}>
+        <div className={styles.scopeGood}>
+          <p className={styles.scopeHead}>Built for</p>
+          <ul>
+            <li>New pipelines, ETL especially, where you want the model from the start.</li>
+            <li>
+              Compute that runs on a single machine — the Catchment, local or remote. DuckDB works
+              through large data progressively, and Trickle keeps each run to the delta.
+            </li>
+            <li>Teams that have felt the coordination wall of a large or mesh pipeline.</li>
+            <li>Coordinating sequences of jobs to cut redundant compute, without a rewrite.</li>
+          </ul>
+        </div>
+        <div className={styles.scopeBad}>
+          <p className={styles.scopeHead}>Not (yet) for</p>
+          <ul>
+            <li>
+              Multi-node cluster compute — a Catchment is one machine (local or remote), not a
+              distributed cluster.
+            </li>
+            <li>A drop-in replacement for an existing scheduler you&apos;re happy with.</li>
+          </ul>
+        </div>
+      </div>
+      <p className={styles.proseMuted} style={{marginTop: 20}}>
+        And most pipelines never need a cluster — they&apos;ve just been upsold into one. Duckstring
+        is built to make the heavy, distributed jobs the exception, not the rule.
+      </p>
     </Section>
   );
 }
