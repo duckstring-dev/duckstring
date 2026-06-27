@@ -81,8 +81,9 @@ function Hero(): ReactNode {
         <code className={styles.installCmd}>pip install duckstring</code>
       </div>
       <p className={styles.lead}>
-        Build data pipelines the way you build software: version each transform, declare its
-        dependencies, and Duckstring forms and runs only the DAG paths that are demanded.
+        Build data pipelines the way you build software. 
+        Version your transforms, declare your dependencies, and let Duckstring 
+        execute only the paths your data demands.
       </p>
       <div className={styles.ctaRow}>
         <Link className={styles.ctaPrimary} to="/getting-started/quickstart">
@@ -101,21 +102,23 @@ function Hero(): ReactNode {
 // the section that demonstrates it.
 function WhatIsThis(): ReactNode {
   return (
-    <Section kicker="Declare, don't govern" title="You should only care about who you consume from">
+    <Section kicker="Declare, don't govern" title="Know your family, not the world.">
       <p className={styles.prose}>
         Duckstring operates on a core decision:{' '}
         <strong>treat each transform as a versioned package</strong> (a Pond) that declares its
-        upstream dependencies, exactly the way a library declares the packages it imports. Make that
-        one decision and you get three things that are normally hand-built and hand-tended for free:
+        upstream dependencies, exactly the way a library declares the packages it imports. 
+        You need only work with your immediate sources and consumers - not the entire lineage. 
+        Make that one decision and you get three things that are normally hand-built and hand-tended for free:
       </p>
       <ul className={styles.payoffs}>
         <li>
           <a className={styles.payoffLink} href="#upgrade">
-            <strong>DAG is implied.</strong>
+            <strong>DAG is implied — upgrade atomically.</strong>
             <span className={styles.payoffArrow}> ↓</span>
           </a>{' '}
           The pipeline is the union of every Pond&apos;s declared dependencies. There&apos;s no
-          central DAG to build, wire, or govern — it&apos;s already in the graph.
+          central DAG to build, wire, or govern — it&apos;s already in the graph. A new Pond (or a breaking change to an existing one)
+          won&apos;t execute until there&apos;s a consumer ready to use it.
         </li>
         <li>
           <a className={styles.payoffLink} href="#demand">
@@ -124,8 +127,7 @@ function WhatIsThis(): ReactNode {
           </a>{' '}
           Runs are driven from the <em>outputs</em>, not the inputs — paths with no downstream
           consumers sit idle, and each path runs only as often as its bottleneck, throttled both
-          downstream <em>and upstream</em>. A new Pond (or a breaking change to an existing one)
-          won&apos;t execute until there&apos;s a consumer ready to use it.
+          downstream <em>and upstream</em>. 
         </li>
         <li>
           <a className={styles.payoffLink} href="#incremental">
@@ -139,7 +141,11 @@ function WhatIsThis(): ReactNode {
         </li>
       </ul>
       <p className={styles.proseMuted}>
-        Duckstring is generic — attach any Python code (even calls out to external services) and get
+        <a className={styles.payoffLink} href="#start">
+          <strong>Duckstring is generic</strong>
+          <span className={styles.payoffArrow}> ↓</span>
+        </a>{' '}
+         — attach any Python code (even calls out to external services) and get
         the full benefit immediately.
       </p>
     </Section>
@@ -205,7 +211,7 @@ function IncrementalReveal(): ReactNode {
     <Section
       id="incremental"
       kicker="Keep tasks small with deltas"
-      title="Discrete stages for seamless incremental processing">
+      title="Discrete stages for incremental processing.">
       <p className={styles.prose}>
         Incremental processing becomes very natural once a Pond has a clear lineage, runs only when
         parents change, and tracks an epoch throughout. Bundled with Duckstring is the Trickle engine
@@ -228,7 +234,7 @@ function IncrementalReveal(): ReactNode {
 // already run on other systems and simply stop re-running the parts that don't need it.
 function OnRamp(): ReactNode {
   return (
-    <Section kicker="Start small" title="Drop it into the stack you already run." alt>
+    <Section id="start" kicker="Start small" title="Drop it into the stack you already run." alt>
       <p className={styles.prose}>
         You don&apos;t have to move your compute to get value. A Pond is just Python, so it can wrap
         anything: a SQL transform, a local script, or a call out to a remote system that it kicks off
@@ -241,22 +247,22 @@ function OnRamp(): ReactNode {
         <div className={styles.useCase}>
           <span className={styles.useCaseTitle}>Coordinate, don&apos;t migrate</span>
           <span className={styles.useCaseBody}>
-            Wrap remote jobs behind a start-and-poll Ripple; Duckstring sequences them by demand and
-            freshness, skipping the runs whose inputs are unchanged.
+            Wrap remote jobs behind a start-and-poll code chunk; Duckstring sequences them by demand, 
+            skipping the runs whose inputs are unchanged.
           </span>
         </div>
         <div className={styles.useCase}>
           <span className={styles.useCaseTitle}>Cut wasted runs</span>
           <span className={styles.useCaseBody}>
-            The same change-gating that paces the demo means an expensive step doesn&apos;t fire when
-            nothing upstream moved — the compute saving lands on day one.
+            No part of the pipeline runs unless a consumer actually needs it. If
+            nothing upstream moved, nothing runs — the compute saving lands on day one.
           </span>
         </div>
         <div className={styles.useCase}>
           <span className={styles.useCaseTitle}>Grow into the model</span>
           <span className={styles.useCaseBody}>
-            Promote a wrapped step to a native transform when it earns it; consumers don&apos;t
-            change. The package boundary is the same either way.
+            Promote a wrapped step to a native transform when it earns it; start with API
+            calls to existing systems and shift it to Duckstring whenever you feel.
           </span>
         </div>
       </div>
@@ -322,8 +328,8 @@ export default function Home(): ReactNode {
       <main className={styles.canvas}>
         <Hero />
         <WhatIsThis />
-        <ThrottleDemo />
         <UpgradeDemo />
+        <ThrottleDemo />
         <IncrementalReveal />
         <OnRamp />
         <Routes />
