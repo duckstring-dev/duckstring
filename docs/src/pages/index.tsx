@@ -112,22 +112,22 @@ function WhatIsThis(): ReactNode {
   return (
     <Section kicker="Effortless Governance" title="You should only care about who you consume from">
       <p className={styles.prose}>
-        Duckstring is a runtime for data pipelines built on a core decision:{' '}
-        <strong>treat each transform as a versioned package</strong> that declares its upstream
+        Duckstring operates on a core decision:{' '}
+        <strong>treat each transform as a versioned package</strong> (a Pond) that declares its upstream
         dependencies, exactly the way a library declares the packages it imports. Make that one
         decision and you get three things that are normally hand-built and hand-tended for free:
       </p>
       <ul className={styles.payoffs}>
         <li>
-          <strong>DAG is implied.</strong> The pipeline is the union of every package&apos;s
+          <strong>DAG is implied.</strong> The pipeline is the union of every Pond&apos;s
           declared dependencies. There&apos;s no central DAG to build, wire, or govern — it&apos;s
           already in the graph.
         </li>
         <li>
-          <strong>Demand-driven execution.</strong> Run from the <outputs>, not inputs, and paths with no downstream consumers sit idle. Each path runs only as fast as its bottleneck - both downstream <and upstream>.
+          <strong>Demand-driven execution.</strong> Run from the <outputs>, not inputs, and paths with no downstream consumers sit idle. Each path runs only as often as its bottleneck - both downstream <and upstream>. Adding new Ponds (or adding breaking changes to an old one) will not execute until there are consumers ready to use it.
         </li>
         <li>
-          <strong>Native incremental processing.</strong> Run history is metadata, making change detection and incremental processing trivial.
+          <strong>Native incremental processing.</strong> Run history is metadata, making change detection and incremental processing trivial. Duckstring bundles Trickle: a DBSP-based incremental engine running on DuckDB. Blazing fast execution on a single node - perfect for the 90% of cases where you don't *actually need* distributed compute.
         </li>
       </ul>
       <p className={styles.proseMuted}>
@@ -142,95 +142,18 @@ function WhatIsThis(): ReactNode {
 function ThrottleDemo(): ReactNode {
   return (
     <Section
-      kicker="The part nothing else does"
+      kicker="Benefits of demand-driven control"
       title="Bottleneck-aware execution. No wasted compute."
       alt>
       <p className={styles.prose}>
-        A scheduler can throttle work <em>downstream</em> of a slow step. Duckstring throttles
+        Most schedulers can throttle work <em>downstream</em> of a slow step. Duckstring throttles
         everything <em>upstream</em> of it too. Execution is strictly demand-driven: a transform runs
-        only when something downstream has actually asked for fresh output and there&apos;s new input
-        to consume. The result is a pipeline that re-paces itself to its real bottleneck — and never
+        only when something downstream has actually asked for it. The result is a pipeline that re-paces itself to its real bottleneck — and never
         over-produces results no one is waiting for.
       </p>
 
       <DemoSlot badge="Demo · hero clip" frameLabel="Live re-pacing when one Pond slows down">
-        A streaming pipeline running at a steady cadence. We inject latency into a single Pond in the
-        <em> middle</em> of the graph — and the whole pipeline, both upstream and downstream, re-paces
-        to the new bottleneck in real time. No config is touched; nothing piles up or is dropped.
-        Remove the latency and it speeds straight back up. <strong>Watch the upstream slow down too</strong>{' '}
-        — that&apos;s the beat to call out; it&apos;s the part people don&apos;t expect.
       </DemoSlot>
-
-      <p className={styles.proseMuted}>
-        The receipts: a chain <code>A&nbsp;(1s) → B&nbsp;(3s) → C&nbsp;(1s)</code> under continuous
-        demand. A naïve parallel scheme runs the one-second <code>A</code> three times for every run
-        of <code>B</code> and throws two results away. Under Duckstring, <code>A</code> runs{' '}
-        <em>once</em> per cycle — re-armed only when <code>B</code> actually consumes its output. The
-        bottleneck sets the rhythm for the entire chain, with no rate limit configured anywhere. The
-        full worked trace is in{' '}
-        <Link to="/theory">the orchestration theory</Link>.
-      </p>
-    </Section>
-  );
-}
-
-// The grounding: a hand-tinted pond.toml + the four triggers. (Manifest kept in sync with
-// reference/pond-toml.md.)
-function HowItWorks(): ReactNode {
-  return (
-    <Section kicker="Why it needs no configuration" title="Declare dependencies and freshness. We resolve the rest.">
-      <div className={styles.manifestRow}>
-        <pre className={styles.toml}>
-          <span className={styles.tomlSection}>[pond]</span>{'\n'}
-          name = <span className={styles.tomlString}>&quot;sales&quot;</span>{'\n'}
-          version = <span className={styles.tomlString}>&quot;1.2.0&quot;</span>{'\n'}
-          {'\n'}
-          <span className={styles.tomlSection}>[sources]</span>{'\n'}
-          transactions = <span className={styles.tomlString}>&quot;1.0.0&quot;</span>{'\n'}
-          products = <span className={styles.tomlString}>&quot;1.1.0&quot;</span>
-        </pre>
-        <p className={styles.manifestCaption}>
-          A transform is a <strong>Pond</strong>: a versioned Python package that declares its
-          parents. Inside it, the individual operations are <strong>Ripples</strong> — ordinary
-          Python functions, usually one per output table. Deploys are independent and atomic, like
-          publishing a package; the pipeline is the union of every Pond&apos;s declared sources, so
-          there is nothing to wire up and nothing global to maintain.
-        </p>
-      </div>
-
-      <p className={styles.prose}>
-        You never schedule a run. Instead you attach a <strong>freshness requirement</strong> to the
-        output you care about, in one of four shapes — pull (keep me supplied) or push (bring me to
-        this freshness), each as a one-shot or a standing request:
-      </p>
-      <div className={styles.triggers}>
-        <div className={styles.triggerCell}>
-          <span className={styles.triggerName}>Tap</span>
-          <span className={styles.triggerKind}>pull · once</span>
-          <span className={styles.triggerBody}>One resupply, propagated upstream.</span>
-        </div>
-        <div className={styles.triggerCell}>
-          <span className={styles.triggerName}>Wave</span>
-          <span className={styles.triggerKind}>pull · standing</span>
-          <span className={styles.triggerBody}>Stay as fresh as the bottleneck allows.</span>
-        </div>
-        <div className={styles.triggerCell}>
-          <span className={styles.triggerName}>Pulse</span>
-          <span className={styles.triggerKind}>push · once</span>
-          <span className={styles.triggerBody}>Run the lineage to <em>now</em>.</span>
-        </div>
-        <div className={styles.triggerCell}>
-          <span className={styles.triggerName}>Tide</span>
-          <span className={styles.triggerKind}>push · standing</span>
-          <span className={styles.triggerBody}>Keep staleness under a bound (e.g. 1&nbsp;day).</span>
-        </div>
-      </div>
-      <p className={styles.proseMuted}>
-        A Tide is a staleness <em>bound</em>, not a cron line — &ldquo;never more than an hour
-        old&rdquo;, and the runtime decides when to start work to honour it. A Wave isn&apos;t
-        &ldquo;every N seconds&rdquo; at all; its frequency emerges from the pipeline&apos;s real
-        bottleneck. Full semantics in <Link to="/guides/triggers">Triggers</Link>.
-      </p>
     </Section>
   );
 }
@@ -240,7 +163,7 @@ function HowItWorks(): ReactNode {
 function UpgradeDemo(): ReactNode {
   return (
     <Section
-      kicker="The daily-pain payoff"
+      kicker="Upgrade atomically"
       title="Ship a breaking change without a meeting."
       alt>
       <p className={styles.prose}>
