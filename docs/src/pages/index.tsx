@@ -91,8 +91,7 @@ function Hero(): ReactNode {
       </div>
       <p className={styles.lead}>
         Build data pipelines the way you build software: version each transform, declare its
-        dependencies, and Duckstring resolves the execution DAG automatically — then runs it on
-        demand, with no schedules to write and no graph to govern.
+        dependencies, and Duckstring forms and runs only the DAG paths that are demanded.
       </p>
       <div className={styles.ctaRow}>
         <Link className={styles.ctaPrimary} to="/getting-started/quickstart">
@@ -111,34 +110,28 @@ function Hero(): ReactNode {
 // as what you gain, not what you give up.
 function WhatIsThis(): ReactNode {
   return (
-    <Section kicker="What is this?" title="One decision. Three advantages.">
+    <Section kicker="Effortless Governance" title="You should only care about who you consume from">
       <p className={styles.prose}>
-        Duckstring is a runtime for data pipelines built on a single decision:{' '}
+        Duckstring is a runtime for data pipelines built on a core decision:{' '}
         <strong>treat each transform as a versioned package</strong> that declares its upstream
         dependencies, exactly the way a library declares the packages it imports. Make that one
         decision and you get three things that are normally hand-built and hand-tended for free:
       </p>
       <ul className={styles.payoffs}>
         <li>
-          <strong>Implicit architecture.</strong> The pipeline is the union of every package&apos;s
+          <strong>DAG is implied.</strong> The pipeline is the union of every package&apos;s
           declared dependencies. There&apos;s no central DAG to build, wire, or govern — it&apos;s
           already in the graph.
         </li>
         <li>
-          <strong>Demand-driven execution.</strong> Runs follow <em>freshness</em>, not cron. You say
-          how fresh an output must be; the runtime resolves what to run and when, and throttles
-          everything to its actual bottleneck.
+          <strong>Demand-driven execution.</strong> Run from the <outputs>, not inputs, and paths with no downstream consumers sit idle. Each path runs only as fast as its bottleneck - both downstream <and upstream>.
         </li>
         <li>
-          <strong>Native incremental processing.</strong> Each package boundary keeps history, so
-          downstream transforms read only the rows that changed since they last ran — automatically.
+          <strong>Native incremental processing.</strong> Run history is metadata, making change detection and incremental processing trivial.
         </li>
       </ul>
       <p className={styles.proseMuted}>
-        It&apos;s built for <strong>new pipelines</strong> — greenfield ETL especially — where you get
-        these properties from the start instead of bolting them onto an existing scheduler. The
-        packaging format is the open on-ramp; the demand-driven engine is the part worth showing
-        first.
+        The framework is generic - attach any python code (even calls to external services) and get all the orchestration benefits immediately.
       </p>
     </Section>
   );
