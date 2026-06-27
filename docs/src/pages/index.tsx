@@ -169,7 +169,7 @@ function ThrottleDemo(): ReactNode {
         for.
       </p>
 
-      <DemoSlot badge="Demo" />
+      <DemoSlot badge="Demo - TODO" />
 
       <p className={styles.proseMuted}>
         No sophisticated prediction of run times is required — flipping to control by consumers rather
@@ -193,7 +193,7 @@ function UpgradeDemo(): ReactNode {
         major retires when nothing depends on it. No lockstep, no choreographed release, no freeze.
       </p>
 
-      <DemoSlot badge="Demo" />
+      <DemoSlot badge="Demo - TODO" />
 
       <p className={styles.proseMuted}>
         Upgrading a complex sequence of transformations can paralyze development, especially if
@@ -219,7 +219,7 @@ function IncrementalReveal(): ReactNode {
         only on changes.
       </p>
 
-      <DemoSlot badge="Demo" />
+      <DemoSlot badge="Demo - TODO" />
 
       <p className={styles.proseMuted}>
         Done well, incremental processing lets you stay single-node, in-memory and blazing fast —
