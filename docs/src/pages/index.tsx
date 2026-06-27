@@ -13,9 +13,9 @@ import styles from './index.module.css';
 //   1. Brand statement + one-line "what is this". pip install is the primary conversion — weight it.
 //   2. WhatIsThis: the one decision (transforms as packages) and its three payoffs — the intro
 //      bullets anchor-link down to the section that demonstrates each.
-//   3. Lead with the ENGINE'S BEHAVIOUR — the bidirectional throttle (#demand). The moat, the wow.
-//   4. Atomic concurrent-version upgrade (#upgrade), then incremental as the reveal (#incremental).
-//   5. The lightweight on-ramp — wrap work you already run.
+//   3. The payoff sections, in bullet order: atomic concurrent-version upgrade (#upgrade), the
+//      bidirectional throttle (#demand — the moat/wow), then incremental as the reveal (#incremental).
+//   4. The lightweight on-ramp — wrap work you already run (#start).
 // Demos are show-don't-tell: each DemoSlot is a placeholder for a video the author drops in.
 // Never call it an "orchestration framework"; never name competitors; don't lead with the Catchment.
 
@@ -81,8 +81,8 @@ function Hero(): ReactNode {
         <code className={styles.installCmd}>pip install duckstring</code>
       </div>
       <p className={styles.lead}>
-        Build data pipelines the way you build software. 
-        Version your transforms, declare your dependencies, and let Duckstring 
+        Build data pipelines the way you build software.
+        Version your transforms, declare your dependencies, and let Duckstring
         execute only the paths your data demands.
       </p>
       <div className={styles.ctaRow}>
@@ -106,8 +106,8 @@ function WhatIsThis(): ReactNode {
       <p className={styles.prose}>
         Duckstring operates on a core decision:{' '}
         <strong>treat each transform as a versioned package</strong> (a Pond) that declares its
-        upstream dependencies, exactly the way a library declares the packages it imports. 
-        You need only work with your immediate sources and consumers - not the entire lineage. 
+        upstream dependencies, exactly the way a library declares the packages it imports.
+        You need only work with your immediate sources and consumers — not the entire lineage.
         Make that one decision and you get three things that are normally hand-built and hand-tended for free:
       </p>
       <ul className={styles.payoffs}>
@@ -127,7 +127,7 @@ function WhatIsThis(): ReactNode {
           </a>{' '}
           Runs are driven from the <em>outputs</em>, not the inputs — paths with no downstream
           consumers sit idle, and each path runs only as often as its bottleneck, throttled both
-          downstream <em>and upstream</em>. 
+          downstream <em>and upstream</em>.
         </li>
         <li>
           <a className={styles.payoffLink} href="#incremental">
@@ -247,7 +247,7 @@ function OnRamp(): ReactNode {
         <div className={styles.useCase}>
           <span className={styles.useCaseTitle}>Coordinate, don&apos;t migrate</span>
           <span className={styles.useCaseBody}>
-            Wrap remote jobs behind a start-and-poll code chunk; Duckstring sequences them by demand, 
+            Wrap remote jobs behind a start-and-poll code chunk; Duckstring sequences them by demand,
             skipping the runs whose inputs are unchanged.
           </span>
         </div>
