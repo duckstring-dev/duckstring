@@ -17,8 +17,11 @@ import tempfile
 import threading
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from .. import auth
 
 router = APIRouter()
 
@@ -35,12 +38,28 @@ def health(request: Request):
     return {"status": "ok"}
 
 
-@router.get("/catchment/identity")
+@router.get("/catchment/identity", dependencies=[auth.read])
 def identity(request: Request):
     """This Catchment's stable id + optional display name — how a downstream resolves cross-mesh
     identity (which upstream a duct points at, and cutting cycles in the recursive lineage view)."""
     rows = dict(_db(request).execute("SELECT key, value FROM catchment_meta").fetchall())
     return {"id": rows.get("id"), "name": rows.get("name")}
+
+
+class _RotateBody(BaseModel):
+    levels: list[str] | None = None  # subset to reroll; None = all three
+
+
+@router.post("/catchment/keys/rotate", dependencies=[auth.full])
+def rotate_keys(request: Request, body: _RotateBody = _RotateBody()):
+    """Reroll the API keys for the given access levels (default all), returning the new plaintext keys
+    **once** — they are stored only as hashes. The internal Duck token is untouched, so running Ducks
+    keep authenticating. Requires full access (so a leaked read/demand key can't escalate)."""
+    try:
+        keys = auth.generate(_db(request), body.levels)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"keys": keys}
 
 
 def _root_files(root: Path) -> list[tuple[Path, str]]:
@@ -60,7 +79,7 @@ def _tar_size(file_sizes: list[int]) -> int:
     return total + 1024
 
 
-@router.get("/catchment/usage")
+@router.get("/catchment/usage", dependencies=[auth.full])
 def usage(request: Request):
     """The root's total state size — what `catchment download` would pull. ``archive_bytes`` is a
     close estimate of the tar the archive endpoint streams (SQLite snapshots and long path headers
@@ -98,7 +117,7 @@ class _QueueWriter(io.RawIOBase):
         return len(b)
 
 
-@router.get("/catchment/archive")
+@router.get("/catchment/archive", dependencies=[auth.full])
 def archive(request: Request):
     """Stream the Catchment root as an uncompressed tar (no server-side temp copy of the data;
     SQLite files are snapshotted one at a time)."""

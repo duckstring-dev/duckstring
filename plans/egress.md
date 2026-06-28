@@ -14,7 +14,7 @@ it is crippleware that poisons adoption. Specifically OSS:
 - the **Spout** construct + the pluggable egress-driver seam (no product noun);
 - two reference drivers: **object store** (S3/GCS/local, the baseline) and **Postgres** (the flagship
   *incremental* destination);
-- the **secrets** store the drivers need for credentials.
+- **credential resolution** the drivers need — env-var-first (`${env:NAME}`), no bespoke vault (see Secrets).
 
 Reserved for **duckstring-cloud** (it's *maintenance, credentials, and support*, not the mechanism): the
 curated **managed connector catalog** (Snowflake / BigQuery / Redshift / SaaS destinations with managed,
@@ -167,17 +167,80 @@ delete: True, transactional: True}`.
 This is the row that earns the feature: **continuous, incremental sync of modeled tables into an
 application's transactional database**, exactly-once, from the changelog.
 
-## Secrets
+## Access levels & key management (a prerequisite, broader than egress)
 
-Drivers need credentials; egress is dead without a place to put them. A minimal store:
+Egress makes the single-key model insufficient — you want to hand a downstream Catchment's operator the
+ability to solicit demand and read, *without* giving them deploy/kill/delete. So before egress lands, split
+the one key into a **total-ordered** ladder (not independent scopes — `read ⊂ demand ⊂ full`), so the check
+stays one integer comparison:
 
-- `duckstring secret set NAME` (prompts, or `--value`) → encrypted at rest in `secrets.db` under the
-  Catchment root (AES-GCM/Fernet with a key from `DUCKSTRING_SECRET_KEY`; **refuse to store without a
-  key** rather than pretend), `chmod 0600` like `config.toml`. `secret ls` (names only), `secret rm`.
-- Referenced from a Spout destination as `${secret:NAME}` (in the URI or a credential field), resolved
-  only at egress time, never logged, never returned by the API.
-- Cloud extends this to a managed vault with rotation + per-team scoping; the OSS store is the local,
-  single-key version.
+- **read** — read & query data only (no ducts, no demand).
+- **demand** — read/query + create demand (tap/wave/pulse/tide) + connect a downstream duct. The key you
+  hand a downstream Catchment operator.
+- **full** — everything: deploy, delete, the control verbs (wake/force/sleep/kill/clear/repair,
+  failure-budget), window management, spouts, key rotation.
+
+Design:
+
+- Each key maps to a level (1/2/3); each route declares a **minimum** level; a request's level = the
+  matched key's level. **Fail closed**: a route with no level annotation requires *full* — a new route
+  added without classification locks down, never leaks. Prefer a per-route FastAPI dependency over
+  extending the path-prefix middleware (keeps the requirement local to the route).
+- **The `orchestrate` router straddles two levels** — its *demand* verbs (tap/wave/pulse/tide) are
+  level `demand`; its *control* verbs (wake/force/sleep/kill/clear/repair/failure-budget) and *window*
+  management are level `full`. So classify per-route there, not per-router. `data` → read; `deploy` → full;
+  the duct *connection* routes → demand.
+- **Backward compatibility:** a single `DUCKSTRING_API_KEY` (or `init --key`) still works and means **full**
+  — the bare self-hosting floor is unchanged. The three-key ladder layers on top via init/registration.
+- **Decouple the Duck's internal token from the user keys** (worth doing while in here): the Duck dial-back
+  gets its **own ephemeral token** (generated at boot, in-memory, never user-facing) instead of reusing the
+  api_key (today `launcher.py` → `X-Duck-Token` *is* the api_key). Then the three user keys are stored **as
+  hashes** in `duck.db` (a small `catchment_key(level, hash)` table), not plaintext, and rerolling a user
+  key never disrupts running Ducks.
+- **Reroll** — `duckstring catchment rotate-keys [--level read|demand|full|all]` regenerates the level's
+  key, replaces the `catchment_key` row, prints once. (Today rotating a key means recreating the Catchment;
+  this fixes that.) The hash-table persistence the reroll needs is the same we're adding for the ladder.
+
+**Status: built** (`catchment/auth.py`, migration `007_catchment_key.sql`; the guard is per-route deps +
+`audit_routes` fail-closed at `create_app`; the Duck token is *persisted* in `catchment_meta`, not
+ephemeral — a Duck must survive a Catchment restart). **Still TODO — UI graceful downgrade:**
+- The web UI currently carries one key and assumes full access — a `read`/`demand` key gets bare `403`s on
+  control actions (and a `403` shouldn't be swallowed like the `401`-reprompt is). The UI needs to **degrade
+  gracefully**: hide/disable the actions a key can't perform rather than letting them fail.
+- That needs a **response mechanism to surface the caller's level** — a lightweight signal the UI reads
+  once (e.g. a `level` field on `/api/status`, or a dedicated `GET /api/whoami` → `{level}`) and gates its
+  controls on. Pick one when building the UI pass; `/api/status` is the cheapest since the UI already polls
+  it (it's `read`-gated, so every authenticated UI key can read its own level there).
+
+## Secrets — env-var-first, no bespoke vault
+
+Drivers need credentials, but the OSS posture is **lean on the environment, don't reinvent a secret
+store**. A bespoke encrypted `secrets.db` is theatre here: its root of trust is still an env var
+(`DUCKSTRING_SECRET_KEY` guarding the file), so the encryption buys little, and — concretely — a secrets
+file under the Catchment root would either leak into every `catchment archive`/`download` bundle (which
+streams the whole root) or need special-case exclusion. Every platform that matters (systemd, docker, k8s,
+Posit Connect, the cloud hosts) already injects secrets as env vars; that's the 12-factor path and it's
+better than anything we'd ship.
+
+So, v1:
+
+- A Spout destination references a credential as **`${env:NAME}`** (in the URI or a credential field),
+  resolved from the process environment **at egress time only** — never logged, never returned by the API.
+- **No generic env-var get/set endpoint.** A *get* is an exfiltration surface (the process env holds far
+  more than Duckstring's own config); a *set* mutates only the running process, doesn't survive a restart,
+  and to persist it you'd rebuild the very store we're cutting. Set env the way the host platform wants.
+- **Tradeoff (accepted):** a Spout to a *new* destination needs its credential present in the environment,
+  so introducing one is a deploy/restart-time act, not fully runtime-dynamic. Cheap on every real target.
+
+**Reserved escape hatch (`${secret:NAME}`, fast-follow — build only if "never SSH in" is a hard
+requirement):** a *write-only* credential store closing the runtime/no-SSH gap without becoming the vault
+we rejected. `duckstring secret set NAME` (prompts / `--value`) persists to a **plaintext `chmod 0600`**
+file under the root (same posture as `config.toml`'s auth headers — **no encryption**, dropping the
+`DUCKSTRING_SECRET_KEY` circularity), **excluded from the archive walk** (so it never leaks into a bundle).
+`secret ls` shows **names only**; there is **no read-back endpoint** (write-only ⇒ not an exfil surface);
+`secret rm`. Resolved as `${secret:NAME}` at egress, never logged. The `${secret:}` syntax is parsed-and-
+reserved from v1 so adding the store later breaks nothing. Cloud extends this to a managed vault with
+rotation + per-team scoping.
 
 ## Alerting (adjacent track — *not* egress, sequenced alongside)
 
@@ -195,7 +258,8 @@ These are the cheapest large credibility win; build them in the same milestone b
 
 - `duckstring spout add {pond} --to <uri> [--table T | --all] [--mode auto|full|append] [--every 30m] [--secret NAME]`
 - `duckstring spout ls|rm {pond}`; `duckstring spout resync {pond} [--table T]` (force a full re-egress)
-- `duckstring secret set|ls|rm`
+- `duckstring secret set|ls|rm` (the reserved write-only store — fast-follow; `ls` = names only, no get)
+- `duckstring catchment rotate-keys [--level read|demand|full|all]` (regenerate + print once)
 - `/api/ponds/{name}/spouts` (CRUD) + Spout state in `/api/status` (delivery lag, `is_failed`)
 - Web UI: a Spout shows on its Pond as an outbound edge with a freshness-lag badge (read-mostly, like the
   rest of the UI).
@@ -220,7 +284,8 @@ These are the cheapest large credibility win; build them in the same milestone b
   the scale path). Confirm the failure/retry budget mirrors `pond_retry`.
 - Watermark home confirmed per destination (in-destination for transactional, `duck.db` for object store).
 - Demand-aware egress (a Tide-shaped staleness bound) — reserve the schedule slot, build `on-run` first.
-- Secret encryption: key from `DUCKSTRING_SECRET_KEY` env vs. OS keyring; behaviour when no key is set.
+- Whether the write-only `${secret:}` store ships in v1 or stays reserved — decided: **reserved**
+  (env-var-first; the restart-to-add-credential tradeoff is accepted). Build only if "never SSH in" hardens.
 
 ## Testing
 

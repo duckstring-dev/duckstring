@@ -7,7 +7,7 @@ description: The Catchment's REST surface.
 
 Everything the CLI and [web UI](../guides/web-ui.md) do goes through this API, served by the Catchment under `/api`. All timestamps are UTC ISO-8601 strings; all bodies are JSON unless noted.
 
-When the Catchment is started with an API key (`duckstring catchment init --key …` / `--generate-key`, or the `DUCKSTRING_API_KEY` environment variable), every `/api` request except `/api/health` must carry it — `Authorization: Bearer {key}` — and is `401` otherwise. The CLI sends the credentials registered against the Catchment (`catchment connect --key …`, or arbitrary `--header` pairs for a platform gate in front) automatically; the web UI prompts for the key on a `401`. See [Authentication](../guides/running-a-catchment.md#authentication).
+When the Catchment is started with API keys (`duckstring catchment init --key …` / `--generate-key`, or the `DUCKSTRING_API_KEY` environment variable), every `/api` request except `/api/health` must carry one — `Authorization: Bearer {key}` — and is `401` when missing/invalid. Keys come in a total-ordered ladder (**read ⊂ demand ⊂ full**); each route declares a minimum level, and a valid key whose level is too low gets `403`. Read routes (status, runs, data, draw) need `read`; demand routes (tap/wave/pulse/tide, the duct connection) need `demand`; deploy, the control verbs, windows, ducts and key rotation need `full`. A single `--key`/`DUCKSTRING_API_KEY` means `full`. The CLI sends the credentials registered against the Catchment (`catchment connect --key …`, or arbitrary `--header` pairs for a platform gate in front) automatically; the web UI prompts for a key on a `401`. The worker (`/api/duck/*`) channel uses a separate internal token, not a user key. See [Authentication](../guides/running-a-catchment.md#authentication).
 
 ## Health
 
@@ -36,6 +36,12 @@ GET /api/catchment/identity
 ```
 
 `{"id", "name"}` — this Catchment's stable UUID (minted once on first start) and optional display name. How a downstream resolves cross-Catchment identity over a [duct](../guides/connecting-catchments.md).
+
+```
+POST /api/catchment/keys/rotate     {"levels": ["read", "demand", "full"]?}    (full)
+```
+
+Reroll the access keys for the given levels (omit `levels` for all three), returning `{"keys": {level: plaintext}}` **once** — only hashes are stored. The internal Duck token is untouched. Backs `duckstring catchment rotate-keys`.
 
 ## Deploy
 

@@ -18,6 +18,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
+from .. import auth
 from .data import _data_dir, _resolve_major
 
 router = APIRouter()
@@ -25,7 +26,7 @@ router = APIRouter()
 _WAIT_TICK = 0.1  # how often the long-poll re-checks the Pond's freshness
 
 
-@router.get("/draw/{name}/{major}/wait")
+@router.get("/draw/{name}/{major}/wait", dependencies=[auth.read])
 async def draw_wait(
     name: str, major: int, request: Request,
     after: Optional[str] = None, down: bool = False, timeout: float = 20.0,
@@ -55,7 +56,7 @@ async def draw_wait(
     return driver.pond_observation(key)
 
 
-@router.get("/draw/{name}/{major}")
+@router.get("/draw/{name}/{major}", dependencies=[auth.read])
 def draw(name: str, major: int, request: Request, tables: Optional[str] = None, after: Optional[str] = None,
          base_after: Optional[str] = None):
     """Stream a Pond line's exported Parquet as a zip. ``tables`` (comma-separated) optionally restricts

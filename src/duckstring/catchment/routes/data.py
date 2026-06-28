@@ -15,6 +15,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from .. import auth
+
 router = APIRouter()
 
 
@@ -70,7 +72,7 @@ def _open_pond(request: Request, pond_name: str, major: int):
     return con
 
 
-@router.get("/ponds/{name}/versions/{version}")
+@router.get("/ponds/{name}/versions/{version}", dependencies=[auth.read])
 def get_pond_version(name: str, version: str, request: Request):
     db = request.app.state.db
     row = db.execute(
@@ -97,7 +99,7 @@ class QueryRequest(BaseModel):
     format: Optional[str] = None
 
 
-@router.get("/ponds/{outlet}/ripples/{ripple_name}")
+@router.get("/ponds/{outlet}/ripples/{ripple_name}", dependencies=[auth.read])
 def get_ripple(
     outlet: str, ripple_name: str, request: Request,
     major: Optional[int] = None, version: Optional[str] = None,
@@ -231,7 +233,7 @@ def _trickle_base_sql(
     )
 
 
-@router.get("/ponds/{name}/tables")
+@router.get("/ponds/{name}/tables", dependencies=[auth.read])
 def list_pond_tables(
     name: str, request: Request, major: Optional[int] = None, version: Optional[str] = None,
 ):
@@ -259,7 +261,7 @@ def list_pond_tables(
     return {"tables": out}
 
 
-@router.get("/ponds/{name}/freshness")
+@router.get("/ponds/{name}/freshness", dependencies=[auth.read])
 def pond_freshness(
     name: str, request: Request, table: str,
     major: Optional[int] = None, version: Optional[str] = None,
@@ -346,7 +348,7 @@ def _merge_deleted_count_sql(pond: str, table: str, pk: list, f_base) -> str:
     )
 
 
-@router.post("/query/count")
+@router.post("/query/count", dependencies=[auth.read])
 def query_count(body: CountRequest, request: Request):
     """Total rows of the (default, custom, or Trickle) query — sizes the data viewer's virtual scroll. A
     bare ``COUNT(*)`` over a Parquet table is metadata-fast (no scan).
@@ -399,7 +401,7 @@ def _json_safe(v):
     return str(v)
 
 
-@router.post("/query/page")
+@router.post("/query/page", dependencies=[auth.read])
 def query_page(body: PageRequest, request: Request):
     """A paged read for the data viewer: runs the (default or custom) query as a subquery with
     ``LIMIT/OFFSET`` and returns ordered columns + row arrays + a ``has_more`` flag. Wrapping means a
@@ -438,7 +440,7 @@ class HistoryRequest(BaseModel):
     pk: dict  # {pk_column: value} identifying the record
 
 
-@router.post("/query/history")
+@router.post("/query/history", dependencies=[auth.read])
 def query_history(body: HistoryRequest, request: Request):
     """The changelog history of one record (merge Trickle), **newest freshness first**, one row per run
     it changed in, labelled with a ``_duckstring_event``: ``create`` (a ``+1`` only), ``update`` (a
@@ -496,7 +498,7 @@ def query_history(body: HistoryRequest, request: Request):
         con.close()
 
 
-@router.post("/query")
+@router.post("/query", dependencies=[auth.read])
 def query(body: QueryRequest, request: Request):
     _maybe_tap_on_get(request, body.pond, body.major, body.version)
     con = _open_pond(request, body.pond, _resolve_major(request, body.pond, body.major, body.version))

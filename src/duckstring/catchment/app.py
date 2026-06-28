@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import os
-import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import auth
 from .db import connect, ensure_identity, migrate
 from .driver import Driver
 from .launcher import NoopLauncher, SubprocessLauncher
@@ -38,10 +37,11 @@ async def _lifespan(app: FastAPI):
     if os.environ.get("DUCKSTRING_DISABLE_DUCKS"):
         launcher = NoopLauncher()
     else:
-        # Ducks dial back over the same authenticated surface — they present the API key as their token.
+        # Ducks dial back over the duck channel with the internal worker token (decoupled from the user
+        # keys, so rotating those never disrupts running Ducks).
         # base_url None = unknown (the platform picked the bind address): the launcher defers spawns
         # until the dial-back middleware learns the address from the first request.
-        launcher = SubprocessLauncher(app.state.root, base_url, token=app.state.api_key or "")
+        launcher = SubprocessLauncher(app.state.root, base_url, token=app.state.duck_token)
     driver = Driver(app.state.db, app.state.root, base_url, launcher)
     app.state.driver = driver
     app.state.launcher = launcher
@@ -82,9 +82,12 @@ def create_app(
     app = FastAPI(title="Duckstring Catchment", lifespan=_lifespan)
     app.state.root = root
     app.state.db = con
-    # API key: explicit argument, or the environment (useful for containers/remote serving). When
-    # set, every /api request (except /api/health) must present it — Bearer header or X-Duck-Token.
+    # Built-in single API key (legacy / bare self-hosting): explicit argument or the environment. It
+    # means full access. The tiered read/demand/full keys live in `catchment_key` (see auth.py); either
+    # may gate the API. With neither configured, the Catchment is fully open.
     app.state.api_key = api_key or os.environ.get("DUCKSTRING_API_KEY") or None
+    # The internal token Ducks present on the duck channel (persisted, decoupled from the user keys).
+    app.state.duck_token = auth.ensure_duck_token(con)
     # The address Ducks dial back to: explicit argument (the CLI passes its bind address), or the
     # environment, or None — unknown, because the host platform picks the bind address (e.g. Posit
     # Connect). When None it is learned from the first request's ASGI scope below.
@@ -103,19 +106,8 @@ def create_app(
                 launcher.set_base_url(url)  # spawns any Ducks that were waiting on the address
         return await call_next(request)
 
-    @app.middleware("http")
-    async def _require_api_key(request, call_next):
-        key = app.state.api_key
-        path = request.url.path
-        if key and path.startswith("/api") and path != "/api/health":
-            auth = request.headers.get("authorization", "")
-            supplied = auth[7:] if auth.lower().startswith("bearer ") else ""
-            supplied = supplied or request.headers.get("x-duck-token", "")
-            if not secrets.compare_digest(supplied, key):
-                return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
-        return await call_next(request)
-
     app.include_router(router, prefix="/api")
+    auth.audit_routes(app)  # fail-closed: every /api route must declare an access level
 
     if _STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="frontend")

@@ -18,6 +18,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
+from .. import auth
+
 router = APIRouter()
 
 _STATUS_WAIT_TICK = 0.05  # how often the status long-poll re-checks the state version
@@ -48,7 +50,7 @@ def _resolve(request: Request, name: str, major: int | None, version: str | None
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.get("/status")
+@router.get("/status", dependencies=[auth.read])
 async def status(request: Request, since: Optional[int] = None):
     """Live state. Without ``since``, returns immediately (the CLI / first load). With ``since``, it
     **long-polls**: holds until the engine state moves past that version (or a heartbeat timeout), so
@@ -65,7 +67,7 @@ async def status(request: Request, since: Optional[int] = None):
     return await run_in_threadpool(driver.status)
 
 
-@router.get("/runs")
+@router.get("/runs", dependencies=[auth.read])
 def runs(
     request: Request,
     pond: str | None = None,
@@ -82,7 +84,7 @@ def runs(
     return {"runs": _driver(request).run_history(key, lineage, ripples, limit)}
 
 
-@router.post("/ponds/{name}/tap")
+@router.post("/ponds/{name}/tap", dependencies=[auth.demand])
 def tap(
     name: str, request: Request, major: int | None = None, version: str | None = None,
     m: str | None = None,
@@ -92,7 +94,7 @@ def tap(
     return {"ok": True}
 
 
-@router.post("/ponds/{name}/pulse")
+@router.post("/ponds/{name}/pulse", dependencies=[auth.demand])
 def pulse(
     name: str, request: Request, major: int | None = None, version: str | None = None,
     at: str | None = None,
@@ -102,7 +104,7 @@ def pulse(
     return {"ok": True}
 
 
-@router.post("/ponds/{name}/wave")
+@router.post("/ponds/{name}/wave", dependencies=[auth.demand])
 def wave(name: str, request: Request, major: int | None = None, version: str | None = None):
     _driver(request).wave(_resolve(request, name, major, version))
     return {"ok": True}
@@ -112,7 +114,7 @@ class _TideBody(BaseModel):
     bound_seconds: float
 
 
-@router.post("/ponds/{name}/tide")
+@router.post("/ponds/{name}/tide", dependencies=[auth.demand])
 def tide(name: str, body: _TideBody, request: Request, major: int | None = None, version: str | None = None):
     key = _resolve(request, name, major, version)
     if body.bound_seconds <= 0:
@@ -124,21 +126,21 @@ def tide(name: str, body: _TideBody, request: Request, major: int | None = None,
 # ─── Control (Wake / Sleep / Force / Kill) ───────────────────────────────────
 
 
-@router.post("/ponds/{name}/wake")
+@router.post("/ponds/{name}/wake", dependencies=[auth.full])
 def wake(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Wake a Pond — a one-shot non-propagating pull: run once on fresh input, no upstream solicit."""
     _driver(request).wake(_resolve(request, name, major, version))
     return {"ok": True}
 
 
-@router.post("/ponds/{name}/force")
+@router.post("/ponds/{name}/force", dependencies=[auth.full])
 def force(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Force a Pond to recompute now at its current freshness, even with no upstream change."""
     _driver(request).force(_resolve(request, name, major, version))
     return {"ok": True}
 
 
-@router.post("/ponds/{name}/refresh")
+@router.post("/ponds/{name}/refresh", dependencies=[auth.full])
 def refresh(
     name: str, request: Request, clear: bool = False,
     major: int | None = None, version: str | None = None,
@@ -159,7 +161,7 @@ class _RepairBody(BaseModel):
     downstream: bool = False
 
 
-@router.post("/repair")
+@router.post("/repair", dependencies=[auth.full])
 def repair(request: Request, body: _RepairBody):
     """Repair — force-rebuild a connected set of Ponds now, in topological order. ``downstream`` extends
     the scope to all descendants. 422 if the set is disconnected (a skipped Pond in a sequence)."""
@@ -170,7 +172,7 @@ def repair(request: Request, body: _RepairBody):
     return {"ok": True, **plan}
 
 
-@router.post("/ponds/{name}/kill")
+@router.post("/ponds/{name}/kill", dependencies=[auth.full])
 def kill(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Kill a Pond — terminate its Duck and park it in a terminal killed state (cancels its Run)."""
     _driver(request).kill(_resolve(request, name, major, version))
@@ -181,7 +183,7 @@ class _SleepBody(BaseModel):
     upstream: bool = False
 
 
-@router.post("/ponds/{name}/sleep")
+@router.post("/ponds/{name}/sleep", dependencies=[auth.full])
 def sleep(
     name: str, request: Request, body: _SleepBody = _SleepBody(),
     major: int | None = None, version: str | None = None,
@@ -192,7 +194,7 @@ def sleep(
     return {"ok": True}
 
 
-@router.post("/ponds/{name}/untrigger")
+@router.post("/ponds/{name}/untrigger", dependencies=[auth.demand])
 def untrigger(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Remove the standing Wave/Tide trigger from a Pond (existing work drains)."""
     _driver(request).remove_trigger(_resolve(request, name, major, version))
@@ -202,7 +204,7 @@ def untrigger(name: str, request: Request, major: int | None = None, version: st
 # ─── Failure management ──────────────────────────────────────────────────────
 
 
-@router.post("/ponds/{name}/clear")
+@router.post("/ponds/{name}/clear", dependencies=[auth.full])
 def clear(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Clear a failed Pond (the operator okay): resets its failure and unblocks downstream. No run."""
     _driver(request).clear(_resolve(request, name, major, version))
@@ -214,7 +216,7 @@ class _BudgetBody(BaseModel):
     source_retries: int = 0
 
 
-@router.post("/ponds/{name}/budget")
+@router.post("/ponds/{name}/budget", dependencies=[auth.full])
 def set_budget(
     name: str, body: _BudgetBody, request: Request,
     major: int | None = None, version: str | None = None,
@@ -227,7 +229,7 @@ def set_budget(
     return {"ok": True}
 
 
-@router.get("/ponds/{name}/budget")
+@router.get("/ponds/{name}/budget", dependencies=[auth.read])
 def get_budget(name: str, request: Request, major: int | None = None, version: str | None = None):
     return _driver(request).retry_config(_resolve(request, name, major, version))
 
@@ -239,7 +241,7 @@ class _OpenBody(BaseModel):
     tap_on_get: bool = False
 
 
-@router.post("/ponds/{name}/open")
+@router.post("/ponds/{name}/open", dependencies=[auth.full])
 def open_pond(
     name: str, request: Request, body: _OpenBody = _OpenBody(),
     major: int | None = None, version: str | None = None,
@@ -250,7 +252,7 @@ def open_pond(
     return {"ok": True}
 
 
-@router.post("/ponds/{name}/close")
+@router.post("/ponds/{name}/close", dependencies=[auth.full])
 def close_pond(name: str, request: Request, major: int | None = None, version: str | None = None):
     """Close a Pond — remove its open flag (and tap-on-get)."""
     _driver(request).unset_pond_open(_resolve(request, name, major, version))
@@ -270,7 +272,7 @@ class _WindowBody(BaseModel):
     until_time: str | None = None
 
 
-@router.post("/ponds/{name}/windows")
+@router.post("/ponds/{name}/windows", dependencies=[auth.full])
 def add_window(
     name: str, body: _WindowBody, request: Request,
     major: int | None = None, version: str | None = None,
@@ -286,12 +288,12 @@ def add_window(
     return {"ok": True}
 
 
-@router.get("/ponds/{name}/windows")
+@router.get("/ponds/{name}/windows", dependencies=[auth.read])
 def list_windows(name: str, request: Request, major: int | None = None, version: str | None = None):
     return {"windows": _driver(request).list_windows(_resolve(request, name, major, version))}
 
 
-@router.post("/ponds/{name}/windows/{window_name}/remove")
+@router.post("/ponds/{name}/windows/{window_name}/remove", dependencies=[auth.full])
 def remove_window(
     name: str, window_name: str, request: Request,
     major: int | None = None, version: str | None = None,

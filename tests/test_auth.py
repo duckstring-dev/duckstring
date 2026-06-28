@@ -243,9 +243,20 @@ def test_init_generate_key(runner, tmp_path, mock_uvicorn):
         ["catchment", "init", "--name", "gen", "--root", str(tmp_path / "gen"), "--generate-key", "--yes"],
     )
     assert result.exit_code == 0, result.output
-    assert "Generated API key" in result.output
+    assert "Access keys" in result.output
+    # The ladder prints all three levels; the full key is stored so `catchment start gen` reuses it.
+    for level in ("full", "demand", "read"):
+        assert level in result.output
     stored = load_config()["catchments"]["gen"].get("key")
-    assert stored and len(stored) >= 24  # generated, stored — `catchment start gen` reuses it
+    assert stored and len(stored) >= 24
+
+    # The full key authenticates; the three hashes are persisted in the Catchment db.
+    from duckstring.catchment import auth
+    from duckstring.catchment.db import connect
+
+    con = connect(tmp_path / "gen" / "duck.db")
+    levels = {row[0] for row in con.execute("SELECT level FROM catchment_key")}
+    assert levels == set(auth.NAME_TO_LEVEL)
 
 
 def test_init_generate_key_conflicts_with_key(runner, tmp_path):

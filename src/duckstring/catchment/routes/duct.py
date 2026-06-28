@@ -12,6 +12,8 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from .. import auth
+
 router = APIRouter()
 
 
@@ -26,7 +28,7 @@ class _CreateDuctBody(BaseModel):
     upstream_id: str | None = None
 
 
-@router.post("/duct")
+@router.post("/duct", dependencies=[auth.full])
 def create_duct(body: _CreateDuctBody, request: Request):
     """Register (or update) a conduit from an upstream Catchment."""
     _driver(request).create_duct(
@@ -35,12 +37,12 @@ def create_duct(body: _CreateDuctBody, request: Request):
     return {"ok": True}
 
 
-@router.get("/duct")
+@router.get("/duct", dependencies=[auth.full])
 def list_ducts(request: Request):
     return {"ducts": _driver(request).list_ducts()}
 
 
-@router.delete("/duct/{origin}")
+@router.delete("/duct/{origin}", dependencies=[auth.full])
 def destroy_duct(origin: str, request: Request):
     if not _driver(request).destroy_duct(origin):
         raise HTTPException(status_code=404, detail=f"No duct from '{origin}'")
@@ -53,7 +55,7 @@ class _AddPondBody(BaseModel):
     incremental: bool = False
 
 
-@router.post("/duct/{origin}/ponds")
+@router.post("/duct/{origin}/ponds", dependencies=[auth.full])
 def add_pond(origin: str, body: _AddPondBody, request: Request):
     """Draw one upstream Pond over the duct (materialises a Pond Draw)."""
     try:
@@ -65,14 +67,14 @@ def add_pond(origin: str, body: _AddPondBody, request: Request):
     return {"ok": True}
 
 
-@router.delete("/duct/{origin}/ponds/{pond}")
+@router.delete("/duct/{origin}/ponds/{pond}", dependencies=[auth.full])
 def remove_pond(origin: str, pond: str, request: Request, major: int = 1):
     if not _driver(request).remove_duct_pond(origin, pond, major):
         raise HTTPException(status_code=404, detail=f"'{pond}@{major}' is not drawn from '{origin}'")
     return {"ok": True}
 
 
-@router.post("/duct/{origin}/sync")
+@router.post("/duct/{origin}/sync", dependencies=[auth.full])
 async def sync_duct(origin: str, request: Request):
     """Reflect the upstream's current Ponds into this duct — draw every Pond it exposes. Additive:
     Ponds removed upstream are left as Draws until removed explicitly."""
