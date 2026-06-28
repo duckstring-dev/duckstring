@@ -172,7 +172,7 @@ All full-gated. A Spout publishes a Pond's output to an external destination; it
 | `POST /api/ponds/{name}/spouts/{spout}/remove` | Remove a Spout (`404` if absent). |
 | `POST /api/ponds/{name}/spouts/{spout}/{action}` | Control a Spout's standing Wake. `action` ∈ `wake`/`force` (re-arm; force re-delivers now), `sleep`/`kill` (disarm; kill parks), `clear` (reset a fault), `resync` (full re-egress). |
 
-Spouts also appear in `GET /api/status` as their own nodes: `"spouts": [{"id", "source", "name", "destination", "table", "mode", "status", "source_f", "delivered_f", "standing_wake", "is_failed", "is_killed", "failures", "error"}]` — `status` ∈ `delivering`/`queued`/`delivered`/`asleep`/`failed`/`killed`, with an edge from each Spout's `source` Pond.
+A Spout is a **real node**, so it appears in `GET /api/status` `ponds[]` with `"is_spout": true` (its key is `{source}#{spout}@{major}`), and its source→spout edge rides the normal `edges` list. Its run history (including failed runs with tracebacks) is in `GET /api/runs` like any Pond.
 
 ## Data
 

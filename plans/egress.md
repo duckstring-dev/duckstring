@@ -129,25 +129,22 @@ because it's a **Wake, not a Wave** — it **never solicits the source** (adds n
 **terminal**, **never blocks anything** (a downstream Pond reads the source's *published* freshness, which
 advanced at publish; a sibling Spout's failure is irrelevant). It has its own freshness/run/fault log. This
 is the mirror of a **Draw** (an ingress node the *poller* runs); the **egress worker** is "the Spout's
-Duck." *Status: built — implemented Driver-side (`pond_spout` + `Driver.egress_pending`/`mark_egress_running`
-+ the worker), deliberately **not** woven into the validated core propagation engine, since the node is
-isolated by construction (non-propagating up, terminal down).* The **Control set applies, the Demand set
-does not**: **Sleep**/**Kill** disarm the standing Wake (`standing_wake=0`; Kill also parks), **Wake**/**Force**
-re-arm it (Force also clears the watermark to re-deliver now), **Clear** resets a fault — `Driver.spout_*`,
+Duck." *Status: built as a **real engine node** (migration `012`) — `_create_spout` mirrors `_create_draw`
+(identity rows, `pond.is_spout=1`, wired via `pond_to_pond`); the engine `standing_wake` primitive re-arms a
+non-propagating pull (`PondState.standing_wake`/`Pond.is_spout`); `_dispatch_begin_run` routes its `BeginRun`
+to the egress worker (the `is_draw` branch is the template); and completion flows through the normal
+`pond_run`/`ripple_run` path — so **failure logging, tracebacks and `/api/runs` come for free** and the
+earlier Driver-side clone is gone.* The **Control set applies, the Demand set does not**: **Sleep**/**Kill**
+disarm the standing Wake (Kill also parks via `kill_pond`), **Wake**/**Force** re-arm it (reusing
+`clear_pond`; Force re-delivers from scratch), **Clear** resets a fault — `Driver.spout_*`,
 `POST /api/ponds/{name}/spouts/{spout}/{wake|force|sleep|kill|clear|resync}` (full-gated), `duckstring spout
-wake|force|sleep|kill|clear|resync`. **An egress failure never fails the Pond Run** — it parks the Spout
-(its own `is_failed`/`failures`/retry budget) and raises an [alert](#alerting-adjacent-track). Spouts are
-surfaced in `/api/status` as their own nodes (`spouts[]` + a source→spout edge; `status` ∈ delivering /
-queued / delivered / asleep / failed / killed; `windowed`) for the dashed-node UI. **Windows on a Spout**
-throttle its Wake (`spout_window` table, migration `011`; `Driver.add/list/remove_spout_window`,
-`/api/ponds/{name}/spouts/{spout}/windows`, `duckstring spout window {pond} {spout} add|list|remove`):
-when it delivers, the recorded delivered-freshness is clamped to the **active window's end** (`gate_f`, not
-the source freshness) so it won't re-deliver until the source passes that — at most once per window; in a
-window gap it holds. The **data + CDC cursor still ride the true `sourceF`** (so a Postgres sink loses no
-changelog rows that land late within a window). **Parity gap (not yet closed):** a Spout's *failures* are
-state-only (`is_failed`/`failures`/`error` in `pond_spout`, shown in `status`/`ls`) — there is **no
-per-delivery run-history ledger, no traceback capture, and no `/api/runs` integration** like a real Pond.
-A `spout_run` log mirroring `pond_run` (+ traceback + RunHistory surfacing) is the follow-up.
+wake|force|sleep|kill|clear|resync`. **An egress failure fails only the Spout's run** (a real failed
+`pond_run` with traceback, in `/api/runs`) and never the terminal source. A Spout rides `/api/status`
+`ponds[]` with `is_spout` (its source→spout edge in `edges`) — dashed in the UI like a Draw. The Postgres
+**data + CDC cursor ride the true `sourceF`** (the in-destination watermark), exactly-once. **Windows on a
+Spout** were dropped in the flip — the windowed-CDC throttle (fire on source-advance but stamp the window
+end) doesn't fit the engine's single-freshness `pond_source_f`, so it is to be **re-derived natively** on
+the node model next.
 
 ## The egress-driver seam
 
