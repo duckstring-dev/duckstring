@@ -323,3 +323,44 @@ def remove_window(
     if not _driver(request).remove_window(key, window_name):
         raise HTTPException(status_code=404, detail=f"No window '{window_name}' on '{name}'")
     return {"ok": True}
+
+
+# ─── Spouts (egress bindings) ────────────────────────────────────────────────────
+
+
+class _SpoutBody(BaseModel):
+    destination: str
+    name: str | None = None
+    table: str | None = None  # None = all of the Pond's published tables
+    mode: str = "auto"
+
+
+@router.post("/ponds/{name}/spouts", dependencies=[auth.full])
+def add_spout(
+    name: str, body: _SpoutBody, request: Request,
+    major: int | None = None, version: str | None = None,
+):
+    """Bind a Spout to a Pond (egress its output to an external destination). 422 on a bad
+    destination/mode or a duplicate name. Returns the Spout's (possibly generated) name."""
+    key = _resolve(request, name, major, version)
+    try:
+        final = _driver(request).add_spout(key, body.name, body.table, body.destination, body.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "name": final}
+
+
+@router.get("/ponds/{name}/spouts", dependencies=[auth.full])
+def list_spouts(name: str, request: Request, major: int | None = None, version: str | None = None):
+    return {"spouts": _driver(request).list_spouts(_resolve(request, name, major, version))}
+
+
+@router.post("/ponds/{name}/spouts/{spout_name}/remove", dependencies=[auth.full])
+def remove_spout(
+    name: str, spout_name: str, request: Request,
+    major: int | None = None, version: str | None = None,
+):
+    key = _resolve(request, name, major, version)
+    if not _driver(request).remove_spout(key, spout_name):
+        raise HTTPException(status_code=404, detail=f"No spout '{spout_name}' on '{name}'")
+    return {"ok": True}

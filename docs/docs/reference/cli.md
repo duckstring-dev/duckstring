@@ -93,6 +93,16 @@ See [Windows](../guides/windows.md). The Pond name comes directly after `window`
 | `trigger window {pond} list` | List the Pond's windows. |
 | `trigger window {pond} remove {name}` | Remove a window rule. |
 
+## `duckstring spout` — egress bindings
+
+Publish a Pond's output to external systems. A Spout is operational config (persisted, survives redeploys), not declared in `pond.toml`. Credentials go in the destination URI as `${env:NAME}` references, resolved only at egress time. *(Egress execution is in progress; this manages the bindings.)*
+
+| Command | Description |
+|---|---|
+| `spout add {pond} --to {uri} [--table T \| --all] [--mode auto\|full\|append] [--name N]` | Bind a Spout. `--to` is a `file://`/`s3://`/`gs://`/`postgres://` URI (credentials as `${env:NAME}`); `--table` egresses one table, default all; `--mode` defaults `auto`; `--name` defaults to the table (or scheme), `-2`/`-3` on collision. |
+| `spout ls {pond}` | List the Pond's Spouts. |
+| `spout rm {pond} {name}` | Remove a Spout. |
+
 ## `duckstring control` — execution & health
 
 See [Control](../guides/control.md) and [Fault Tolerance](../guides/fault-tolerance.md).

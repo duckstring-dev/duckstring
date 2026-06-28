@@ -615,6 +615,68 @@ class Driver:
             self.reload()
             return cur.rowcount > 0
 
+    # ─── Spouts (egress bindings) ──────────────────────────────────────────────
+
+    def _default_spout_name(self, pond_id: int, scheme: str, table: str | None) -> str:
+        """A friendly, unique-per-Pond name when the operator gives none: the table (or the scheme for an
+        all-tables Spout), suffixed ``-2``, ``-3`` on collision."""
+        base = table or scheme
+        existing = {r[0] for r in self.db.execute(
+            "SELECT name FROM pond_spout WHERE pond_id = ?", (pond_id,)
+        )}
+        if base not in existing:
+            return base
+        i = 2
+        while f"{base}-{i}" in existing:
+            i += 1
+        return f"{base}-{i}"
+
+    def add_spout(self, pond: str, name: str | None, table: str | None,
+                  destination: str, mode: str = "auto") -> str:
+        """Bind a Spout to a Pond: egress ``table`` (or all tables) to ``destination`` in ``mode``.
+        Validates the destination scheme + credential-reference syntax and the mode; the credentials
+        themselves are resolved only at egress time. Returns the Spout's (possibly generated) name.
+        Raises ValueError on a bad destination/mode or a duplicate name."""
+        from ..egress.destination import parse_destination, validate_mode
+
+        dest = parse_destination(destination)
+        validate_mode(mode)
+        with self.lock:
+            pond_id = self.meta[pond]["pond_id"]
+            final = name or self._default_spout_name(pond_id, dest.scheme, table)
+            if self.db.execute(
+                "SELECT 1 FROM pond_spout WHERE pond_id = ? AND name = ?", (pond_id, final)
+            ).fetchone():
+                raise ValueError(f"A spout named '{final}' already exists on '{pond}'")
+            self.db.execute(
+                "INSERT INTO pond_spout (pond_id, name, table_name, destination, mode, schedule) "
+                "VALUES (?, ?, ?, ?, ?, 'on-run')",
+                (pond_id, final, table, destination, mode),
+            )
+            self.db.commit()
+            return final
+
+    def list_spouts(self, pond: str) -> list[dict]:
+        with self.lock:
+            pond_id = self.meta[pond]["pond_id"]
+            rows = self.db.execute(
+                "SELECT name, table_name, destination, mode, schedule FROM pond_spout "
+                "WHERE pond_id = ? ORDER BY name", (pond_id,)
+            ).fetchall()
+            return [
+                {"name": n, "table": t, "destination": d, "mode": m, "schedule": s}
+                for (n, t, d, m, s) in rows
+            ]
+
+    def remove_spout(self, pond: str, name: str) -> bool:
+        with self.lock:
+            pond_id = self.meta[pond]["pond_id"]
+            cur = self.db.execute(
+                "DELETE FROM pond_spout WHERE pond_id = ? AND name = ?", (pond_id, name)
+            )
+            self.db.commit()
+            return cur.rowcount > 0
+
     # ─── Duck events ──────────────────────────────────────────────────────────
 
     def on_event(self, pond: str, payload: dict) -> None:

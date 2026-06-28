@@ -161,6 +161,16 @@ All under `/api/ponds/{name}/…`, all returning `{"ok": true}`; `404` for unkno
 | `POST /api/ponds/{name}/windows` | Add a rule: `{"name", "start_anchor", "duration_seconds", "freq_unit", "freq_interval", "valid_days", "until_time"}`. `freq_unit` ∈ `SECOND \| MINUTE \| HOUR \| DAY \| WEEK`; `valid_days` like `"MON,WED,FRI"` or `null`; `422` on overlap. |
 | `POST /api/ponds/{name}/windows/{window}/remove` | Remove a rule (`404` if absent). |
 
+## Spouts (egress)
+
+All full-gated. A Spout publishes a Pond's output to an external destination; it is operational config (persisted, survives redeploys). Credentials live in the destination URI as `${env:NAME}` references, resolved only at egress time. *(Egress execution is in progress; these manage the bindings.)*
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/ponds/{name}/spouts` | `{"spouts": [{"name", "table", "destination", "mode", "schedule"}]}` |
+| `POST /api/ponds/{name}/spouts` | Bind a Spout: `{"destination", "name"?, "table"?, "mode"?}`. `destination` scheme ∈ `file/s3/gs/postgres`; `mode` ∈ `auto/full/append` (default `auto`); `table` null = all. Returns `{"name"}`. `422` on a bad destination/mode or duplicate name. |
+| `POST /api/ponds/{name}/spouts/{spout}/remove` | Remove a Spout (`404` if absent). |
+
 ## Data
 
 See [Querying Data](../guides/querying-data.md). Reads always hit the exported Parquet snapshots, never live state.
