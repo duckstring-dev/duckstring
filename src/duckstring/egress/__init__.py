@@ -8,10 +8,12 @@ time. See :mod:`duckstring.egress.credentials`.
 
 from __future__ import annotations
 
+from .base import Capabilities, EgressDriver, get_egress, register
 from .credentials import CredentialError, references, resolve
 from .destination import Destination, DestinationError, parse_destination, validate_mode
 
 __all__ = [
     "CredentialError", "references", "resolve",
     "Destination", "DestinationError", "parse_destination", "validate_mode",
+    "Capabilities", "EgressDriver", "get_egress", "register",
 ]

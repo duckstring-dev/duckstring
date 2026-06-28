@@ -49,6 +49,7 @@ async def _lifespan(app: FastAPI):
     # Restore: resume any Pond Runs that were in flight when the Catchment last stopped.
     driver.resume_incomplete()
 
+    from .egress_worker import run_egress_worker
     from .poller import run_poller
 
     # The poller wakes immediately when a Draw acquires demand (so it solicits its upstream at once),
@@ -57,12 +58,17 @@ async def _lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     driver.set_notify(lambda: loop.call_soon_threadsafe(wake.set))
 
+    # The egress worker wakes when a Pond publishes (its Spouts may have work) or a Spout is resynced.
+    egress_wake = asyncio.Event()
+    driver.set_egress_notify(lambda: loop.call_soon_threadsafe(egress_wake.set))
+
     scheduler = asyncio.create_task(_scheduler(driver))
     poller = asyncio.create_task(run_poller(driver, app.state.root, wake))
+    egress = asyncio.create_task(run_egress_worker(driver, app.state.root, egress_wake))
     try:
         yield
     finally:
-        for task in (scheduler, poller):
+        for task in (scheduler, poller, egress):
             task.cancel()
             try:
                 await task

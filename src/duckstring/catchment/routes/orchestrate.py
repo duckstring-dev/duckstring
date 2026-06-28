@@ -364,3 +364,15 @@ def remove_spout(
     if not _driver(request).remove_spout(key, spout_name):
         raise HTTPException(status_code=404, detail=f"No spout '{spout_name}' on '{name}'")
     return {"ok": True}
+
+
+@router.post("/ponds/{name}/spouts/{spout_name}/resync", dependencies=[auth.full])
+def resync_spout(
+    name: str, spout_name: str, request: Request,
+    major: int | None = None, version: str | None = None,
+):
+    """Force a full re-egress: clear the Spout's watermark + failure so it re-delivers next pass."""
+    key = _resolve(request, name, major, version)
+    if not _driver(request).resync_spout(key, spout_name):
+        raise HTTPException(status_code=404, detail=f"No spout '{spout_name}' on '{name}'")
+    return {"ok": True}

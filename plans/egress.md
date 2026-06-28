@@ -73,15 +73,21 @@ second Spout, a downstream incremental Pond, and an incremental draw all reuse f
 
 ## The Spout construct
 
-**Status: the construct + config is built** (migration `008_spout.sql` `pond_spout` keyed on `pond`;
-`Driver.add_spout`/`list_spouts`/`remove_spout`; `/api/ponds/{name}/spouts` CRUD, full-gated; CLI
-`duckstring spout add|ls|rm {pond}`; destination/mode validation via `egress/destination.py`
-`parse_destination`/`validate_mode`; `tests/test_spout.py`). **Not yet built: execution** — the
-egress-driver seam's concrete drivers, the worker, watermarks, and Spout fault state (the sections below).
-A Spout name defaults to the table (or scheme for an all-tables Spout), `-2`/`-3` on collision; `rm` takes
-the name (mild deviation from the plan's by-pond `rm`, needed for multiple Spouts per Pond). `--every`/the
-demand-aware schedule is reserved (the `schedule` column defaults `on-run`); the transactional-PK gate is
-deferred to the Postgres driver.
+**Status: built — the construct + the `file://` snapshot driver, end-to-end.** Config: migration
+`008_spout.sql` `pond_spout` keyed on `pond`; `Driver.add_spout`/`list_spouts`/`remove_spout`/`resync_spout`;
+`/api/ponds/{name}/spouts` CRUD + `/resync`, full-gated; CLI `duckstring spout add|ls|rm|resync {pond}`;
+destination/mode validation via `egress/destination.py`. Execution: the egress-driver **seam**
+(`egress/base.py` `EgressDriver`/`Capabilities`/`get_egress` scheme registry), the **object-store driver**
+(`egress/object_store.py`, `file://` snapshot `write_full`, `supports_delta=False`), and the **worker**
+(`catchment/egress_worker.py`, a reconciliation loop woken on run-completion/resync — `Driver.egress_pending`
+keyed off the engine `end_f` vs a per-Spout **watermark** in `pond_spout`, migration `009_spout_state.sql`,
+with Spout fault/retry that never fails the Pond). Tests: `test_spout.py`, `test_egress_file.py` (+ a real
+Duck e2e). **Not yet built:** the incremental object-store path (per-run parts / Iceberg-in-bucket), the
+**s3/gs** drivers (httpfs — a known scheme with no driver parks the Spout with a clear error), and the
+**Postgres** CDC driver (`apply_delta` + the transactional-PK gate). A Spout name defaults to the table
+(or scheme for an all-tables Spout), `-2`/`-3` on collision; `rm`/`resync` take the name (mild deviation
+from the plan's by-pond `rm`, needed for multiple Spouts per Pond). `--every`/the demand-aware schedule is
+reserved (the `schedule` column defaults `on-run`).
 
 A **Spout** is a Pond's egress binding — "pour this table out to there." It is **operational config**
 (created via CLI/API, persisted, survives redeploys), exactly like windows — *not* declared in

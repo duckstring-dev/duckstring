@@ -145,6 +145,9 @@ class Driver:
         # demand-bearing operations (tap/pulse/wave/…/Duck events) so a Draw solicits its upstream
         # immediately, not on the next poll. NOT called from the poller's own observe/transfer paths.
         self._notify_cb = None
+        # Wakes the egress worker (a Pond Run published → its Spouts may have work). Same cross-thread
+        # shape as _notify_cb; None when no worker is attached (NoopLauncher tests).
+        self._egress_cb = None
         # Monotonic counter bumped on every state change — the UI long-polls /api/status against it, so
         # the display updates the instant the engine state moves rather than on a fixed timer.
         self.state_version = 0
@@ -152,6 +155,13 @@ class Driver:
 
     def set_notify(self, cb) -> None:
         self._notify_cb = cb
+
+    def set_egress_notify(self, cb) -> None:
+        self._egress_cb = cb
+
+    def _signal_egress(self) -> None:
+        if self._egress_cb is not None:
+            self._egress_cb()
 
     def identity(self) -> dict:
         """This Catchment's stable id + optional display name (see plans/cross-catchment-visibility.md)."""
@@ -660,12 +670,13 @@ class Driver:
         with self.lock:
             pond_id = self.meta[pond]["pond_id"]
             rows = self.db.execute(
-                "SELECT name, table_name, destination, mode, schedule FROM pond_spout "
-                "WHERE pond_id = ? ORDER BY name", (pond_id,)
+                "SELECT name, table_name, destination, mode, schedule, watermark, is_failed, failures, error "
+                "FROM pond_spout WHERE pond_id = ? ORDER BY name", (pond_id,)
             ).fetchall()
             return [
-                {"name": n, "table": t, "destination": d, "mode": m, "schedule": s}
-                for (n, t, d, m, s) in rows
+                {"name": n, "table": t, "destination": d, "mode": m, "schedule": s,
+                 "watermark": wm, "is_failed": bool(failed), "failures": failures, "error": err}
+                for (n, t, d, m, s, wm, failed, failures, err) in rows
             ]
 
     def remove_spout(self, pond: str, name: str) -> bool:
@@ -676,6 +687,68 @@ class Driver:
             )
             self.db.commit()
             return cur.rowcount > 0
+
+    def resync_spout(self, pond: str, name: str) -> bool:
+        """Force a full re-egress: clear the watermark and any failure so the worker re-delivers the
+        Pond's current state on its next pass."""
+        with self.lock:
+            pond_id = self.meta[pond]["pond_id"]
+            cur = self.db.execute(
+                "UPDATE pond_spout SET watermark = NULL, is_failed = 0, failures = 0, error = NULL "
+                "WHERE pond_id = ? AND name = ?", (pond_id, name)
+            )
+            self.db.commit()
+        if cur.rowcount > 0:
+            self._signal_egress()
+        return cur.rowcount > 0
+
+    # ─── Egress worker support ──────────────────────────────────────────────────
+
+    def egress_pending(self) -> list[dict]:
+        """Every Spout with work to do: its Pond has published a freshness past the Spout's watermark,
+        and the Spout isn't parked. Each job carries what the worker needs to read + write."""
+        with self.lock:
+            jobs = []
+            for key, m in self.meta.items():
+                ps = self.state.pond_states.get(key)
+                if ps is None or ps.end_f <= NEVER:
+                    continue
+                end_f = ps.end_f
+                for name, table, dest, mode, wm in self.db.execute(
+                    "SELECT name, table_name, destination, mode, watermark FROM pond_spout "
+                    "WHERE pond_id = ? AND is_failed = 0", (m["pond_id"],)
+                ).fetchall():
+                    if end_f <= (datetime.fromisoformat(wm) if wm else NEVER):
+                        continue
+                    jobs.append({
+                        "pond_id": m["pond_id"], "pond_name": m["name"], "major": m["major"],
+                        "spout": name, "table": table, "destination": dest, "mode": mode, "f": end_f,
+                    })
+            return jobs
+
+    def record_egress_success(self, pond_id: int, spout: str, f: datetime) -> None:
+        with self.lock:
+            self.db.execute(
+                "UPDATE pond_spout SET watermark = ?, failures = 0, is_failed = 0, error = NULL "
+                "WHERE pond_id = ? AND name = ?", (_iso(f), pond_id, spout)
+            )
+            self.db.commit()
+
+    def record_egress_failure(self, pond_id: int, spout: str, error: str) -> None:
+        """Count a failed delivery; park the Spout (is_failed) once it exhausts its retry budget. Never
+        touches the Pond — egress is downstream of the published boundary."""
+        with self.lock:
+            row = self.db.execute(
+                "SELECT failures, retries FROM pond_spout WHERE pond_id = ? AND name = ?", (pond_id, spout)
+            ).fetchone()
+            if row is None:
+                return
+            failures = row[0] + 1
+            self.db.execute(
+                "UPDATE pond_spout SET failures = ?, is_failed = ?, error = ? WHERE pond_id = ? AND name = ?",
+                (failures, 1 if failures > row[1] else 0, (error or "")[:500], pond_id, spout),
+            )
+            self.db.commit()
 
     # ─── Duck events ──────────────────────────────────────────────────────────
 
@@ -732,6 +805,7 @@ class Driver:
                     self._capture_schema(pond, payload["schema"])
                 self._process(now)
                 self._advance_repair(pond, now)  # if this Pond was a repair step, release its children
+                self._signal_egress()  # the Pond published → wake the egress worker for its Spouts
             elif kind == "contract_failed":
                 # The Duck refused to publish: the output broke the major line's additive contract.
                 # Fail the Pond at this Run (keeping last-good data) and block downstream, like any failure.

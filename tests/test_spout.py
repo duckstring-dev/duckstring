@@ -76,8 +76,10 @@ def test_driver_spout_add_list_remove(tmp_path):
     assert name == "revenue"  # default name = the table
     spouts = d.list_spouts("sales@1")
     assert len(spouts) == 1
-    assert spouts[0] == {"name": "revenue", "table": "revenue", "destination": "s3://bucket/sales",
-                         "mode": "auto", "schedule": "on-run"}
+    s = spouts[0]
+    assert (s["name"], s["table"], s["destination"], s["mode"], s["schedule"]) == \
+        ("revenue", "revenue", "s3://bucket/sales", "auto", "on-run")
+    assert s["watermark"] is None and s["is_failed"] is False and s["failures"] == 0
     assert d.remove_spout("sales@1", "revenue") is True
     assert d.list_spouts("sales@1") == []
     assert d.remove_spout("sales@1", "revenue") is False  # already gone

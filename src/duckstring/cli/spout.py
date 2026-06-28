@@ -73,11 +73,39 @@ def ls(
         return
 
     table = Table(show_header=True, header_style="bold dim", box=None, padding=(0, 1))
-    for col in ("Name", "Table", "Destination", "Mode"):
+    for col in ("Name", "Table", "Destination", "Mode", "Delivered", "State"):
         table.add_column(col)
     for s in spouts:
-        table.add_row(s["name"], s.get("table") or "[dim]all[/dim]", s["destination"], s["mode"])
+        if s.get("is_failed"):
+            state = f"[red]failed[/red] [dim]{s.get('error') or ''}[/dim]"
+        elif s.get("failures"):
+            state = f"[yellow]retrying ({s['failures']})[/yellow]"
+        else:
+            state = "[green]ok[/green]"
+        table.add_row(
+            s["name"], s.get("table") or "[dim]all[/dim]", s["destination"], s["mode"],
+            s.get("watermark") or "[dim]never[/dim]", state,
+        )
     Console().print(table)
+
+
+@app.command("resync")
+def resync(
+    pond: str = typer.Argument(..., help="The Pond the Spout is on."),
+    name: str = typer.Argument(..., help="The Spout's name (see `spout ls`)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
+) -> None:
+    """Force a full re-egress (clears the Spout's watermark + any failure)."""
+    from . import _http
+
+    url, cfg = _resolve(catchment)
+    _http.post(
+        f"{url}/api/ponds/{pond}/spouts/{name}/resync", auth=cfg,
+        params=_http.pond_params(major, version), json={},
+    )
+    typer.echo(f"Spout '{name}' on '{pond}' will re-egress.")
 
 
 @app.command("rm")

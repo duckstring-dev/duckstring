@@ -95,13 +95,14 @@ See [Windows](../guides/windows.md). The Pond name comes directly after `window`
 
 ## `duckstring spout` — egress bindings
 
-Publish a Pond's output to external systems. A Spout is operational config (persisted, survives redeploys), not declared in `pond.toml`. Credentials go in the destination URI as `${env:NAME}` references, resolved only at egress time. *(Egress execution is in progress; this manages the bindings.)*
+Publish a Pond's output to external systems. A Spout is operational config (persisted, survives redeploys), not declared in `pond.toml`. Credentials go in the destination URI as `${env:NAME}` references, resolved only at egress time. After each successful Pond Run, the egress worker delivers the Pond's published tables to the destination. *(`file://` snapshot delivery works today; `s3://`/`gs://` and the incremental Postgres sink are landing — a destination whose driver isn't built yet parks the Spout with a clear error.)*
 
 | Command | Description |
 |---|---|
 | `spout add {pond} --to {uri} [--table T \| --all] [--mode auto\|full\|append] [--name N]` | Bind a Spout. `--to` is a `file://`/`s3://`/`gs://`/`postgres://` URI (credentials as `${env:NAME}`); `--table` egresses one table, default all; `--mode` defaults `auto`; `--name` defaults to the table (or scheme), `-2`/`-3` on collision. |
-| `spout ls {pond}` | List the Pond's Spouts. |
+| `spout ls {pond}` | List the Pond's Spouts with their delivery watermark and state (ok / retrying / failed). |
 | `spout rm {pond} {name}` | Remove a Spout. |
+| `spout resync {pond} {name}` | Force a full re-egress (clears the watermark + any failure). |
 
 ## `duckstring control` — execution & health
 

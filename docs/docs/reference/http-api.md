@@ -163,13 +163,14 @@ All under `/api/ponds/{name}/…`, all returning `{"ok": true}`; `404` for unkno
 
 ## Spouts (egress)
 
-All full-gated. A Spout publishes a Pond's output to an external destination; it is operational config (persisted, survives redeploys). Credentials live in the destination URI as `${env:NAME}` references, resolved only at egress time. *(Egress execution is in progress; these manage the bindings.)*
+All full-gated. A Spout publishes a Pond's output to an external destination; it is operational config (persisted, survives redeploys). Credentials live in the destination URI as `${env:NAME}` references, resolved only at egress time. After each Pond Run the egress worker delivers to the destination. *(`file://` snapshot delivery works today; other drivers are landing — an unbuilt driver parks the Spout.)*
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/ponds/{name}/spouts` | `{"spouts": [{"name", "table", "destination", "mode", "schedule"}]}` |
+| `GET /api/ponds/{name}/spouts` | `{"spouts": [{"name", "table", "destination", "mode", "schedule", "watermark", "is_failed", "failures", "error"}]}` |
 | `POST /api/ponds/{name}/spouts` | Bind a Spout: `{"destination", "name"?, "table"?, "mode"?}`. `destination` scheme ∈ `file/s3/gs/postgres`; `mode` ∈ `auto/full/append` (default `auto`); `table` null = all. Returns `{"name"}`. `422` on a bad destination/mode or duplicate name. |
 | `POST /api/ponds/{name}/spouts/{spout}/remove` | Remove a Spout (`404` if absent). |
+| `POST /api/ponds/{name}/spouts/{spout}/resync` | Force a full re-egress: clear the watermark + failure (`404` if absent). |
 
 ## Data
 
