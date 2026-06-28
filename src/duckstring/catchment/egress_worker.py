@@ -44,7 +44,7 @@ def _egress_spout(root: Path, job: dict) -> None:
         for table in tables:
             relation = con.sql(dp.read_select(data_dir, table))
             pk = sidecar.get(table, {}).get("pk") or None
-            driver.write_full(relation, table=table, pk=pk, f=job["f"])
+            driver.write_full(con, relation, table=table, pk=pk, f=job["f"])
     finally:
         con.close()
 

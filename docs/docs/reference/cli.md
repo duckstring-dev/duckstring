@@ -95,7 +95,9 @@ See [Windows](../guides/windows.md). The Pond name comes directly after `window`
 
 ## `duckstring spout` — egress bindings
 
-Publish a Pond's output to external systems. A Spout is operational config (persisted, survives redeploys), not declared in `pond.toml`. Credentials go in the destination URI as `${env:NAME}` references, resolved only at egress time. After each successful Pond Run, the egress worker delivers the Pond's published tables to the destination. *(`file://` snapshot delivery works today; `s3://`/`gs://` and the incremental Postgres sink are landing — a destination whose driver isn't built yet parks the Spout with a clear error.)*
+Publish a Pond's output to external systems. A Spout is operational config (persisted, survives redeploys), not declared in `pond.toml`. Credentials go in the destination URI as `${env:NAME}` references, resolved only at egress time. After each successful Pond Run, the egress worker delivers the Pond's published tables to the destination as snapshot Parquet (`{prefix}/{table}.parquet`).
+
+`file://`, `s3://`, and `gs://` work today. Object-store credentials go in the URI query: `s3://bucket/prefix?key_id=${env:AWS_KEY}&secret=${env:AWS_SECRET}&region=us-east-1` (also `endpoint`, `url_style`, `use_ssl`, `session_token`); `s3://` with no key falls back to the AWS credential chain (env / instance profile); `gs://` needs HMAC `key_id`+`secret`. *(The incremental Postgres sink is landing — a destination whose driver isn't built yet parks the Spout with a clear error.)*
 
 | Command | Description |
 |---|---|

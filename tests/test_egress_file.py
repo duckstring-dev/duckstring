@@ -41,17 +41,18 @@ def test_get_egress_resolves_file_driver():
 
 
 def test_get_egress_unimplemented_scheme_is_clear():
-    with pytest.raises(DestinationError, match="not implemented yet"):
-        get_egress("s3://bucket/prefix")
+    # postgres is a known scheme with no driver yet; s3/gs now resolve (object-store driver).
     with pytest.raises(DestinationError, match="not implemented yet"):
         get_egress("postgres://u@h/db")
+    assert get_egress("s3://bucket/prefix").capabilities().supports_delta is False
+    assert get_egress("gs://bucket/prefix").capabilities().transactional is False
 
 
 def test_file_driver_write_full(tmp_path):
     drv = get_egress(f"file://{tmp_path / 'out'}")
     con = duckdb.connect()
     rel = con.sql("SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS t(id, name)")
-    drv.write_full(rel, table="revenue", pk=["id"], f=datetime(2026, 1, 1, tzinfo=UTC))
+    drv.write_full(con, rel, table="revenue", pk=["id"], f=datetime(2026, 1, 1, tzinfo=UTC))
 
     out = tmp_path / "out" / "revenue.parquet"
     assert out.exists()
@@ -63,7 +64,64 @@ def test_file_driver_rejects_remote_file_host():
     drv = get_egress("file://remotehost/path")
     con = duckdb.connect()
     with pytest.raises(ValueError, match="absolute local path"):
-        drv.write_full(con.sql("SELECT 1 AS id"), table="t", pk=None, f=datetime(2026, 1, 1, tzinfo=UTC))
+        drv.write_full(con, con.sql("SELECT 1 AS id"), table="t", pk=None, f=datetime(2026, 1, 1, tzinfo=UTC))
+
+
+# ─── s3:// / gs:// target + secret construction (no network) ──────────────────
+
+
+def test_s3_remote_target_strips_slashes_and_omits_query():
+    drv = get_egress("s3://bucket/data/sales/?region=us-east-1&key_id=AK&secret=SK")
+    target = drv._remote_target("revenue")
+    assert target == "s3://bucket/data/sales/revenue.parquet"
+    assert "key_id" not in target and "secret" not in target  # creds never travel in the target URI
+
+
+def test_s3_remote_target_no_prefix():
+    assert get_egress("s3://bucket")._remote_target("t") == "s3://bucket/t.parquet"
+
+
+def test_s3_secret_sql_with_explicit_credentials():
+    drv = get_egress("s3://b/p?key_id=AKIA&secret=shh&region=eu-west-1&url_style=path&use_ssl=false")
+    sql = drv._secret_sql()
+    assert sql.startswith("CREATE OR REPLACE SECRET __duckstring_egress (TYPE s3")
+    for frag in ("KEY_ID 'AKIA'", "SECRET 'shh'", "REGION 'eu-west-1'", "URL_STYLE 'path'", "USE_SSL false"):
+        assert frag in sql
+    assert "credential_chain" not in sql
+
+
+def test_s3_secret_sql_falls_back_to_credential_chain():
+    sql = get_egress("s3://bucket/prefix")._secret_sql()
+    assert "PROVIDER credential_chain" in sql and "KEY_ID" not in sql
+
+
+def test_gs_secret_sql_requires_hmac_credentials():
+    assert "TYPE gcs" in get_egress("gs://b/p?key_id=GK&secret=GS")._secret_sql()
+    with pytest.raises(ValueError, match="HMAC credentials"):
+        get_egress("gs://bucket/prefix")._secret_sql()
+
+
+def test_remote_credentials_resolved_from_env_at_egress_time(monkeypatch):
+    monkeypatch.setenv("AWS_KEY", "AKIARESOLVED")
+    monkeypatch.setenv("AWS_SECRET", "topsecret")
+    drv = get_egress("s3://bucket/out?key_id=${env:AWS_KEY}&secret=${env:AWS_SECRET}")
+    sql = drv._secret_sql()
+    assert "KEY_ID 'AKIARESOLVED'" in sql and "SECRET 'topsecret'" in sql
+    # The stored destination still holds only the reference, never the resolved value.
+    assert "${env:AWS_KEY}" in drv.dest.raw
+
+
+def test_remote_missing_env_credential_surfaces_clearly():
+    from duckstring.egress import CredentialError
+
+    drv = get_egress("s3://bucket/out?key_id=${env:NOPE_UNSET}&secret=x")
+    with pytest.raises(CredentialError, match="NOPE_UNSET"):
+        drv._secret_sql()
+
+
+def test_sql_quote_escapes_embedded_quote():
+    sql = get_egress("s3://b/p?key_id=a'b&secret=x")._secret_sql()
+    assert "KEY_ID 'a''b'" in sql  # doubled to neutralise injection
 
 
 # ─── The worker against a published Pond ─────────────────────────────────────
@@ -127,8 +185,8 @@ def test_worker_redelivers_when_pond_advances(tmp_path):
 
 def test_worker_failure_parks_spout_then_resync_rearms(tmp_path):
     d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
-    # A known scheme with no driver yet → delivery fails; budget 0 → parks immediately.
-    d.add_spout("sales@1", "lake", None, "s3://bucket/sales", "full")
+    # A known scheme with no driver yet → delivery fails fast (no network); budget 0 → parks.
+    d.add_spout("sales@1", "lake", None, "postgres://u@h/db", "full")
     asyncio.run(_drain(d, tmp_path))
 
     s = next(x for x in d.list_spouts("sales@1") if x["name"] == "lake")
@@ -143,7 +201,7 @@ def test_worker_failure_parks_spout_then_resync_rearms(tmp_path):
 
 def test_worker_retry_budget(tmp_path):
     d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
-    d.add_spout("sales@1", "lake", None, "s3://bucket/sales", "full")
+    d.add_spout("sales@1", "lake", None, "postgres://u@h/db", "full")
     d.db.execute("UPDATE pond_spout SET retries = 2 WHERE name = 'lake'")
     d.db.commit()
 

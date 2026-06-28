@@ -163,7 +163,7 @@ All under `/api/ponds/{name}/…`, all returning `{"ok": true}`; `404` for unkno
 
 ## Spouts (egress)
 
-All full-gated. A Spout publishes a Pond's output to an external destination; it is operational config (persisted, survives redeploys). Credentials live in the destination URI as `${env:NAME}` references, resolved only at egress time. After each Pond Run the egress worker delivers to the destination. *(`file://` snapshot delivery works today; other drivers are landing — an unbuilt driver parks the Spout.)*
+All full-gated. A Spout publishes a Pond's output to an external destination; it is operational config (persisted, survives redeploys). Credentials live in the destination URI as `${env:NAME}` references, resolved only at egress time (for object stores, in the query: `?key_id=${env:..}&secret=${env:..}&region=..`). After each Pond Run the egress worker delivers snapshot Parquet to the destination. *(`file://`/`s3://`/`gs://` work today; the Postgres sink is landing — an unbuilt driver parks the Spout.)*
 
 | Endpoint | Description |
 |---|---|

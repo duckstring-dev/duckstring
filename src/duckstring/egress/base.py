@@ -45,9 +45,10 @@ class EgressDriver(Protocol):
         destinations (object store); creates the table + PK for a transactional one."""
         ...
 
-    def write_full(self, relation: "duckdb.DuckDBPyRelation", *, table: str,
-                   pk: list[str] | None, f: datetime) -> None:
-        """Snapshot/replace ``table`` at the destination with the relation's current rows."""
+    def write_full(self, con: "duckdb.DuckDBPyConnection", relation: "duckdb.DuckDBPyRelation",
+                   *, table: str, pk: list[str] | None, f: datetime) -> None:
+        """Snapshot/replace ``table`` at the destination with the relation's current rows. ``con`` is
+        the relation's connection (a driver may need it to load an extension / register credentials)."""
         ...
 
     def apply_delta(self, delta, *, table: str, pk: list[str] | None, f: datetime) -> None:
