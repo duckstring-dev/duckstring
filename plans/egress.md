@@ -138,8 +138,16 @@ re-arm it (Force also clears the watermark to re-deliver now), **Clear** resets 
 wake|force|sleep|kill|clear|resync`. **An egress failure never fails the Pond Run** — it parks the Spout
 (its own `is_failed`/`failures`/retry budget) and raises an [alert](#alerting-adjacent-track). Spouts are
 surfaced in `/api/status` as their own nodes (`spouts[]` + a source→spout edge; `status` ∈ delivering /
-queued / delivered / asleep / failed / killed) for the dashed-node UI. **Windows on a Spout** (throttle the
-Wake to a frequency) are designed but not yet built.
+queued / delivered / asleep / failed / killed; `windowed`) for the dashed-node UI. **Windows on a Spout**
+throttle its Wake (`spout_window` table, migration `011`; `Driver.add/list/remove_spout_window`,
+`/api/ponds/{name}/spouts/{spout}/windows`, `duckstring spout window {pond} {spout} add|list|remove`):
+when it delivers, the recorded delivered-freshness is clamped to the **active window's end** (`gate_f`, not
+the source freshness) so it won't re-deliver until the source passes that — at most once per window; in a
+window gap it holds. The **data + CDC cursor still ride the true `sourceF`** (so a Postgres sink loses no
+changelog rows that land late within a window). **Parity gap (not yet closed):** a Spout's *failures* are
+state-only (`is_failed`/`failures`/`error` in `pond_spout`, shown in `status`/`ls`) — there is **no
+per-delivery run-history ledger, no traceback capture, and no `/api/runs` integration** like a real Pond.
+A `spout_run` log mirroring `pond_run` (+ traceback + RunHistory surfacing) is the follow-up.
 
 ## The egress-driver seam
 

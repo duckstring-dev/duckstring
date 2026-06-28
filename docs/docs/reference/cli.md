@@ -110,8 +110,10 @@ Publish a Pond's output to external systems. A Spout is operational config (pers
 | `spout sleep \| wake {pond} {name}` | Disarm / re-arm the Spout's standing Wake (it delivers on each source advance). |
 | `spout force {pond} {name}` | Re-arm and re-deliver the current freshness now. |
 | `spout kill \| clear {pond} {name}` | Park the Spout (terminal) / clear a failed-or-killed Spout. |
+| `spout window {pond} {spout} add -n {name} -e {every} [-s START] [-d DUR] [-o DAYS] [-u UNTIL]` | Throttle the Spout to deliver at most once per window (same options as `trigger window`). |
+| `spout window {pond} {spout} list \| remove {name}` | List / remove a Spout's throttle windows. |
 
-A Spout is a passive **standing-Wake** node hanging off its Pond — it delivers whenever the Pond's freshness advances, never pulls on the Pond, and never blocks anything (its failures are its own). The **Control** verbs above apply to it; the **Demand** verbs (tap/wave/pulse/tide) do not.
+A Spout is a passive **standing-Wake** node hanging off its Pond — it delivers whenever the Pond's freshness advances, never pulls on the Pond, and never blocks anything (its failures are its own). The **Control** verbs above apply to it; the **Demand** verbs (tap/wave/pulse/tide) do not. A **window** throttles it: when it delivers, the freshness it records is clamped to the window's end, so it won't deliver again until the Pond's freshness passes that end — at most once per window.
 
 ## `duckstring control` — execution & health
 

@@ -757,12 +757,76 @@ class Driver:
         return self._spout_control(pond, name, "UPDATE pond_spout SET watermark = NULL, is_failed = 0, "
                                                "failures = 0, error = NULL")
 
+    # ─── Spout windows (throttle the standing Wake) ─────────────────────────────
+
+    def add_spout_window(self, pond: str, spout: str, name: str, start_anchor: str, duration_seconds: int,
+                         freq_unit: str, freq_interval: int, valid_days: str | None = None,
+                         until_time: str | None = None) -> None:
+        with self.lock:
+            pond_id = self.meta[pond]["pond_id"]
+            if not self.db.execute(
+                "SELECT 1 FROM pond_spout WHERE pond_id = ? AND name = ?", (pond_id, spout)
+            ).fetchone():
+                raise ValueError(f"No spout '{spout}' on '{pond}'")
+            if self.db.execute(
+                "SELECT 1 FROM spout_window WHERE pond_id = ? AND spout_name = ? AND name = ?",
+                (pond_id, spout, name),
+            ).fetchone():
+                raise ValueError(f"A window named '{name}' already exists on spout '{spout}'")
+            self.db.execute(
+                "INSERT INTO spout_window (pond_id, spout_name, name, start_anchor, duration_seconds, "
+                "freq_unit, freq_interval, valid_days, until_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (pond_id, spout, name, start_anchor, duration_seconds, freq_unit, freq_interval,
+                 valid_days, until_time),
+            )
+            self.db.commit()
+        self._signal_egress()
+
+    def list_spout_windows(self, pond: str, spout: str) -> list[dict]:
+        with self.lock:
+            pond_id = self.meta[pond]["pond_id"]
+            rows = self.db.execute(
+                "SELECT name, start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, "
+                "until_time FROM spout_window WHERE pond_id = ? AND spout_name = ? ORDER BY name",
+                (pond_id, spout),
+            ).fetchall()
+            return [
+                {"name": n, "start_anchor": sa, "duration_seconds": d, "freq_unit": u,
+                 "freq_interval": i, "valid_days": vd, "until_time": ut}
+                for (n, sa, d, u, i, vd, ut) in rows
+            ]
+
+    def remove_spout_window(self, pond: str, spout: str, name: str) -> bool:
+        with self.lock:
+            pond_id = self.meta[pond]["pond_id"]
+            cur = self.db.execute(
+                "DELETE FROM spout_window WHERE pond_id = ? AND spout_name = ? AND name = ?",
+                (pond_id, spout, name),
+            )
+            self.db.commit()
+        return cur.rowcount > 0
+
     # ─── Egress worker support ──────────────────────────────────────────────────
+
+    def _spout_window_end(self, pond_id: int, spout: str, now: datetime):
+        """For a windowed Spout: ('active', window_end) when ``now`` is inside a window, ('gap', None)
+        when it has windows but none is active. ('open', None) when it has no windows (unthrottled)."""
+        rows = self.db.execute(
+            "SELECT start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time "
+            "FROM spout_window WHERE pond_id = ? AND spout_name = ?", (pond_id, spout)
+        ).fetchall()
+        if not rows:
+            return "open", None
+        ends = [e for e in (self._row_to_window(r).active_end(now) for r in rows) if e is not None]
+        return ("active", max(ends)) if ends else ("gap", None)
 
     def egress_pending(self) -> list[dict]:
         """Every armed Spout whose source Pond has advanced past what it has delivered and that isn't
-        parked or already mid-delivery — the standing-Wake firing condition (run when ``sourceF > end_f``,
-        non-propagating). Each job carries what the worker needs to read + write."""
+        parked or already mid-delivery — the standing-Wake firing condition (run when ``sourceF > deliveredF``,
+        non-propagating). A **windowed** Spout fires only inside an active window and records the window's
+        end as delivered (`gate_f`), so it delivers at most once per window. Each job carries what the
+        worker needs to read + write, plus `gate_f` (the watermark to set; the data still rides `f`)."""
+        now = _now()
         with self.lock:
             jobs = []
             for key, m in self.meta.items():
@@ -777,11 +841,18 @@ class Driver:
                 ).fetchall():
                     if (m["pond_id"], name) in self._egress_running:  # not already delivering
                         continue
-                    if source_f <= (datetime.fromisoformat(wm) if wm else NEVER):  # already delivered this F
+                    if source_f <= (datetime.fromisoformat(wm) if wm else NEVER):  # already delivered
                         continue
+                    wstate, wend = self._spout_window_end(m["pond_id"], name, now)
+                    if wstate == "gap":  # windowed but between windows — hold delivery
+                        continue
+                    # gate_f throttles the next fire (window end, in the future vs source_f → no re-fire
+                    # until the source passes it); the data + CDC cursor still use source_f.
+                    gate_f = wend if wstate == "active" else source_f
                     jobs.append({
                         "pond_id": m["pond_id"], "pond_name": m["name"], "major": m["major"],
-                        "spout": name, "table": table, "destination": dest, "mode": mode, "f": source_f,
+                        "spout": name, "table": table, "destination": dest, "mode": mode,
+                        "f": source_f, "gate_f": gate_f,
                     })
             return jobs
 
@@ -1599,6 +1670,9 @@ class Driver:
             # Each carries its own delivery freshness/state; an edge runs from its source Pond to it.
             spouts = []
             by_id = {m["pond_id"]: key for key, m in self.meta.items()}
+            windowed = {(p, s) for p, s in self.db.execute(
+                "SELECT DISTINCT pond_id, spout_name FROM spout_window"
+            ).fetchall()}
             for pond_id, name, table, dest, mode, wm, failed, failures, err, wake, killed in self.db.execute(
                 "SELECT pond_id, name, table_name, destination, mode, watermark, is_failed, failures, "
                 "error, standing_wake, is_killed FROM pond_spout ORDER BY pond_id, name"
@@ -1626,6 +1700,7 @@ class Driver:
                     "table": table, "mode": mode, "status": sstat, "source_f": ts(source_f),
                     "delivered_f": ts(delivered), "standing_wake": bool(wake), "is_failed": bool(failed),
                     "is_killed": bool(killed), "failures": failures, "error": err,
+                    "windowed": (pond_id, name) in windowed,
                 })
 
             rows = dict(self.db.execute("SELECT key, value FROM catchment_meta").fetchall())

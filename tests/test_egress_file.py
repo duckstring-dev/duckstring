@@ -289,6 +289,72 @@ def test_status_surfaces_spout_nodes(tmp_path):
     assert d.status()["spouts"][0]["status"] == "asleep"
 
 
+# ─── Windows on a Spout: throttle the standing Wake to a window cadence ────────
+
+
+def test_spout_window_throttles_to_window_end(tmp_path, monkeypatch):
+    import duckstring.catchment.driver as drv_mod
+
+    clock = [datetime(2026, 6, 10, 12, 0, tzinfo=UTC)]  # inside the daily window [06-10, 06-11)
+    monkeypatch.setattr(drv_mod, "_now", lambda: clock[0])
+
+    d = _driver_with_published(tmp_path, clock[0])  # source fresh "now"
+    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
+    # Back-to-back daily windows → always inside one; the active window ends at the next midnight.
+    d.add_spout_window("sales@1", "file", "daily", "2026-06-01T00:00:00+00:00", 86400, "DAY", 1)
+    pid = d.meta["sales@1"]["pond_id"]
+
+    jobs = d.egress_pending()
+    assert len(jobs) == 1
+    gate, src = jobs[0]["gate_f"], jobs[0]["f"]
+    assert gate == datetime(2026, 6, 11, 0, 0, tzinfo=UTC)  # delivered freshness clamps to the window end
+    assert gate > src                                       # …which is in the future vs the source freshness
+
+    d.record_egress_success(pid, "file", gate)
+    # Throttled: the source keeps advancing within the window, but the Spout won't re-deliver.
+    d.state.pond_states["sales@1"].end_f = datetime(2026, 6, 10, 23, 0, tzinfo=UTC)
+    assert d.egress_pending() == []
+
+    # Time + source cross the window boundary → it fires again, into the next window.
+    clock[0] = datetime(2026, 6, 11, 1, 0, tzinfo=UTC)
+    d.state.pond_states["sales@1"].end_f = clock[0]
+    jobs = d.egress_pending()
+    assert len(jobs) == 1
+    assert jobs[0]["gate_f"] == datetime(2026, 6, 12, 0, 0, tzinfo=UTC)  # the next window's end
+
+
+def test_spout_window_gap_holds_delivery(tmp_path, monkeypatch):
+    import duckstring.catchment.driver as drv_mod
+
+    clock = [datetime(2026, 6, 10, 12, 0, tzinfo=UTC)]
+    monkeypatch.setattr(drv_mod, "_now", lambda: clock[0])
+
+    d = _driver_with_published(tmp_path, clock[0])
+    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
+    # A window that only opens in 2030 → no active window now → in a gap.
+    d.add_spout_window("sales@1", "file", "future", "2030-01-01T00:00:00+00:00", 3600, "DAY", 1)
+    assert d.egress_pending() == []  # windowed + in a gap → delivery held
+
+    # Remove the window → unthrottled again.
+    assert d.remove_spout_window("sales@1", "file", "future") is True
+    assert len(d.egress_pending()) == 1
+
+
+def test_spout_window_crud(tmp_path):
+    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
+    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
+    d.add_spout_window("sales@1", "file", "nightly", "2026-06-01T02:00:00+00:00", 3600, "DAY", 1)
+    ws = d.list_spout_windows("sales@1", "file")
+    assert len(ws) == 1 and ws[0]["name"] == "nightly" and ws[0]["freq_unit"] == "DAY"
+    assert d.status()["spouts"][0]["windowed"] is True
+    with pytest.raises(ValueError, match="already exists"):
+        d.add_spout_window("sales@1", "file", "nightly", "2026-06-01T05:00:00+00:00", 600, "DAY", 1)
+    with pytest.raises(ValueError, match="No spout"):
+        d.add_spout_window("sales@1", "ghost", "w", "2026-06-01T00:00:00+00:00", 600, "DAY", 1)
+    assert d.remove_spout_window("sales@1", "file", "nightly") is True
+    assert d.list_spout_windows("sales@1", "file") == []
+
+
 @pytest.mark.timeout(60)
 def test_egress_e2e_file_snapshot(tmp_path_factory, monkeypatch):
     """A real Catchment + Duck: deploy a Pond, add a file:// Spout, run it — the egress worker delivers

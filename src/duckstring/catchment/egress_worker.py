@@ -76,7 +76,8 @@ async def _drain(driver, root: Path) -> None:
         except Exception as exc:  # noqa: BLE001 — any delivery error parks the Spout, never the Pond
             driver.record_egress_failure(job["pond_id"], job["spout"], f"{type(exc).__name__}: {exc}")
         else:
-            driver.record_egress_success(job["pond_id"], job["spout"], job["f"])
+            # gate_f is the throttle watermark (window end, when windowed); the data rode job["f"].
+            driver.record_egress_success(job["pond_id"], job["spout"], job["gate_f"])
         finally:
             driver.mark_egress_running(job["pond_id"], job["spout"], False)
 
