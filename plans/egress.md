@@ -213,8 +213,9 @@ ephemeral — a Duck must survive a Catchment restart). **UI graceful downgrade:
 - **Tracebacks are full-only**, redacted server-side in `/api/runs` (`_redact_tracebacks`) — they can leak
   paths/connection strings, so read+demand get the error *message* but a null `traceback`. (Backend
   redaction, not just UI hiding — a read key hitting `/api/runs` directly is covered.)
-- Still optional (not built): a small visible badge telling the user *which* level they hold (so missing
-  controls read as "your key can't do this", not "broken UI"). Cheap follow-up if wanted.
+- A small **access-level badge** sits under the catchment name in the brand panel (`DagCanvas`
+  `AccessBadge`: full=green / demand=amber / read-only=grey, with a capability tooltip) so missing
+  controls read as "your key can't do this", not "broken UI".
 
 ## Secrets — env-var-first, no bespoke vault
 

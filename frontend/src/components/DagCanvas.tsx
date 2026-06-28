@@ -17,6 +17,7 @@ import {
 import '@xyflow/react/dist/style.css';
 
 import { useLiveStore, consumeEdgeColor, formatAge, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER } from '@/lib/store';
+import type { AccessLevel } from '@/lib/api';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { PondNode } from './PondNode';
@@ -73,6 +74,25 @@ const edgeTypes: EdgeTypes = {
 
 // ─── Status / legend panel ───────────────────────────────────────────────────
 
+// The caller's API access level, shown under the catchment name so a read/demand key reads as
+// "your key can't do this" rather than a broken UI. Matched to the route gating in the Sidebar.
+const LEVEL_META: Record<AccessLevel, { label: string; color: string; hint: string }> = {
+  full: { label: 'full access', color: THEME_SUCCESS, hint: 'Deploy, control, demand, and read.' },
+  demand: { label: 'demand access', color: THEME_PULL, hint: 'Create demand (tap/wave/pulse/tide) and read.' },
+  read: { label: 'read-only', color: '#71717a', hint: 'Read & query data only.' },
+};
+
+function AccessBadge() {
+  const level = useLiveStore((s) => s.accessLevel);
+  const { label, color, hint } = LEVEL_META[level];
+  return (
+    <span title={hint} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color, letterSpacing: '0.04em' }}>
+      <span style={{ width: 6, height: 6, flexShrink: 0, borderRadius: '50%', background: color }} />
+      {label}
+    </span>
+  );
+}
+
 // Top-left panel: the Duckstring brand mark (and natural home for catchment navigation later),
 // over the live connection status.
 function StatusPanel() {
@@ -121,6 +141,8 @@ function StatusPanel() {
         <span style={{ color: '#71717a' }}>
           {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
         </span>
+        <span style={{ color: '#3f3f46' }}>·</span>
+        <AccessBadge />
       </div>
     );
   }
@@ -169,6 +191,9 @@ function StatusPanel() {
           <span style={{ color: '#3f3f46' }}> · </span>
           {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
         </span>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', paddingLeft: 15 }}>
+        <AccessBadge />
       </div>
     </div>
   );
