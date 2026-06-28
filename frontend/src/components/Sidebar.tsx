@@ -423,12 +423,20 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
       {selectedPond && !selectedRippleId && (
         <>
           <Section>
-            <Label>Pond: {selectedPond.name}</Label>
+            <Label>
+              {selectedPond.isSpout ? 'Spout' : 'Pond'}: {selectedPond.isSpout
+                ? selectedPond.name.split('#').slice(1).join('#') || selectedPond.name
+                : selectedPond.name}
+            </Label>
             <div style={{ fontSize: 11, color: '#71717a', marginBottom: 8, lineHeight: 1.7 }}>
               <div>
-                {pondInfo[selectedPond.id]?.kind ?? 'pond'}
-                <span style={{ color: '#52525b' }}> · </span>
-                v<span style={{ color: '#a1a1aa' }}>{pondInfo[selectedPond.id]?.version ?? '—'}</span>
+                {selectedPond.isSpout ? 'egress' : (pondInfo[selectedPond.id]?.kind ?? 'pond')}
+                {!selectedPond.isSpout && (
+                  <>
+                    <span style={{ color: '#52525b' }}> · </span>
+                    v<span style={{ color: '#a1a1aa' }}>{pondInfo[selectedPond.id]?.version ?? '—'}</span>
+                  </>
+                )}
               </div>
               <div>
                 Runs: <span style={{ color: '#a1a1aa' }}>{pondViews[selectedPond.id]?.runsCompleted ?? 0}</span>
