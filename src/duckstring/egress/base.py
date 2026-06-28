@@ -79,9 +79,11 @@ def get_egress(destination: str) -> EgressDriver:
 # Register the bundled drivers. Imported here (not at package import) to keep the dependency one-way.
 def _register_builtins() -> None:
     from .object_store import ObjectStoreEgressDriver
+    from .postgres import PostgresEgressDriver
 
-    for scheme in ObjectStoreEgressDriver.SCHEMES:
-        register(scheme, ObjectStoreEgressDriver)
+    for driver in (ObjectStoreEgressDriver, PostgresEgressDriver):
+        for scheme in driver.SCHEMES:
+            register(scheme, driver)
 
 
 _register_builtins()

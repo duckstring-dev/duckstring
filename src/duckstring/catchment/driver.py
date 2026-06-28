@@ -652,7 +652,13 @@ class Driver:
         dest = parse_destination(destination)
         validate_mode(mode)
         with self.lock:
-            pond_id = self.meta[pond]["pond_id"]
+            m = self.meta[pond]
+            pond_id = m["pond_id"]
+            if dest.transactional:
+                # A transactional destination does identity-based upsert/delete → it needs a primary key,
+                # which only a merge Trickle declares. Reject what we can see now (the Pond has published a
+                # plain/overwrite table); a not-yet-published source is caught at egress instead.
+                self._assert_transactional_pk(m["name"], m["major"], table)
             final = name or self._default_spout_name(pond_id, dest.scheme, table)
             if self.db.execute(
                 "SELECT 1 FROM pond_spout WHERE pond_id = ? AND name = ?", (pond_id, final)
@@ -665,6 +671,25 @@ class Driver:
             )
             self.db.commit()
             return final
+
+    def _assert_transactional_pk(self, name: str, major: int, table: str | None) -> None:
+        """Reject a Spout to a transactional destination whose source table is already published without a
+        primary key (a plain/overwrite Ripple). A table not yet published passes here — the worker enforces
+        the requirement at egress time."""
+        from pathlib import Path
+
+        from ..trickle_io import load_sidecar
+        from .registry import pond_data_dir
+
+        sidecar = load_sidecar(pond_data_dir(Path(self.root), name, major))
+        targets = [table] if table else list(sidecar)
+        for t in targets:
+            meta = sidecar.get(t)
+            if meta is not None and (meta.get("mode") != "merge" or not meta.get("pk")):
+                raise ValueError(
+                    f"egress to a transactional destination needs a primary key — table '{t}' on '{name}' "
+                    "is not a merge Trickle with a declared pk. Put a merge Trickle (.merge(pk=…)) upstream."
+                )
 
     def list_spouts(self, pond: str) -> list[dict]:
         with self.lock:

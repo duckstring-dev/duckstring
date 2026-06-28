@@ -23,17 +23,24 @@ _PER_SPOUT_TIMEOUT = 60.0  # ceiling on one Spout's delivery, so a slow destinat
 
 def _egress_spout(root: Path, job: dict) -> None:
     """Deliver one Spout (blocking — runs in the thread pool). Reads the Pond's published tables via the
-    data plane and snapshots each to the destination. Raises on any failure (the caller records it)."""
+    data plane and writes each to the destination. Raises on any failure (the caller records it).
+
+    A **transactional, delta-capable** destination (Postgres) syncs *incrementally*: read the changelog
+    delta over ``(destination watermark, f]`` and ``apply_delta`` (upserts + deletes), falling back to a
+    full reload on a full read (bootstrap / coverage-miss / a changed overwrite source). Others snapshot."""
     import duckdb
 
     from ..dataplane import get_data_plane
     from ..egress.base import get_egress
-    from ..trickle_io import load_sidecar
+    from ..trickle.context import NEVER
+    from ..trickle_io import load_sidecar, read_delta
     from .registry import pond_data_dir
 
     driver = get_egress(job["destination"])  # resolves the scheme's driver (+ validates the URI)
+    caps = driver.capabilities()
     data_dir = pond_data_dir(Path(root), job["pond_name"], job["major"])
     dp = get_data_plane()
+    f = job["f"]
 
     con = duckdb.connect()  # in-memory: reads the exported snapshot, never the live registry
     try:
@@ -42,9 +49,21 @@ def _egress_spout(root: Path, job: dict) -> None:
         sidecar = load_sidecar(data_dir)
         tables = [job["table"]] if job["table"] else dp.list_tables(data_dir)
         for table in tables:
-            relation = con.sql(dp.read_select(data_dir, table))
             pk = sidecar.get(table, {}).get("pk") or None
-            driver.write_full(con, relation, table=table, pk=pk, f=job["f"])
+            if caps.supports_delta and caps.transactional:
+                if not pk:  # the transactional-PK requirement, enforced at egress for a not-yet-checked source
+                    raise ValueError(
+                        f"egress to a transactional destination needs a primary key — table {table!r} is "
+                        "not a merge Trickle with a declared pk (put a .merge(pk=…) before this Spout)"
+                    )
+                previous_f = driver.watermark(con, table) or NEVER  # the in-destination cursor (exactly-once)
+                delta = read_delta(con, data_dir, table, previous_f, f, dp=dp)
+                if delta.is_full:  # bootstrap / coverage-miss / changed overwrite source → reload
+                    driver.write_full(con, con.sql(dp.read_select(data_dir, table)), table=table, pk=pk, f=f)
+                else:
+                    driver.apply_delta(con, delta, table=table, pk=pk, f=f)
+            else:
+                driver.write_full(con, con.sql(dp.read_select(data_dir, table)), table=table, pk=pk, f=f)
     finally:
         con.close()
 

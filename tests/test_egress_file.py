@@ -40,12 +40,11 @@ def test_get_egress_resolves_file_driver():
     assert caps == Capabilities(supports_delta=False, supports_delete=False, transactional=False)
 
 
-def test_get_egress_unimplemented_scheme_is_clear():
-    # postgres is a known scheme with no driver yet; s3/gs now resolve (object-store driver).
-    with pytest.raises(DestinationError, match="not implemented yet"):
-        get_egress("postgres://u@h/db")
-    assert get_egress("s3://bucket/prefix").capabilities().supports_delta is False
-    assert get_egress("gs://bucket/prefix").capabilities().transactional is False
+def test_get_egress_rejects_unknown_scheme_and_resolves_known():
+    with pytest.raises(DestinationError, match="unsupported destination scheme"):
+        get_egress("ftp://host/path")
+    for uri in ("file:///tmp/x", "s3://bucket/p", "gs://bucket/p", "postgres://u@h/db"):
+        assert get_egress(uri) is not None  # every bundled scheme resolves to a driver
 
 
 def test_file_driver_write_full(tmp_path):
@@ -185,12 +184,12 @@ def test_worker_redelivers_when_pond_advances(tmp_path):
 
 def test_worker_failure_parks_spout_then_resync_rearms(tmp_path):
     d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
-    # A known scheme with no driver yet → delivery fails fast (no network); budget 0 → parks.
-    d.add_spout("sales@1", "lake", None, "postgres://u@h/db", "full")
+    # An unwritable destination → delivery fails fast (mkdir under a file, no network); budget 0 → parks.
+    d.add_spout("sales@1", "lake", None, "file:///dev/null/nope", "full")
     asyncio.run(_drain(d, tmp_path))
 
     s = next(x for x in d.list_spouts("sales@1") if x["name"] == "lake")
-    assert s["is_failed"] is True and s["failures"] == 1 and "not implemented" in (s["error"] or "")
+    assert s["is_failed"] is True and s["failures"] == 1 and s["error"]
     assert d.egress_pending() == []  # parked → not retried
 
     assert d.resync_spout("sales@1", "lake") is True
@@ -201,7 +200,7 @@ def test_worker_failure_parks_spout_then_resync_rearms(tmp_path):
 
 def test_worker_retry_budget(tmp_path):
     d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
-    d.add_spout("sales@1", "lake", None, "postgres://u@h/db", "full")
+    d.add_spout("sales@1", "lake", None, "file:///dev/null/nope", "full")
     d.db.execute("UPDATE pond_spout SET retries = 2 WHERE name = 'lake'")
     d.db.commit()
 

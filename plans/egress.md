@@ -84,13 +84,26 @@ credentials from the URI query `?key_id=${env:..}&secret=${env:..}&region=..`, r
 the AWS credential chain for `s3://` with no key; the secret-`CREATE` error is masked so it can't echo a
 credential) — and the **worker** (`catchment/egress_worker.py`, a reconciliation loop woken on
 run-completion/resync — `Driver.egress_pending` keyed off the engine `end_f` vs a per-Spout **watermark**
-in `pond_spout`, migration `009_spout_state.sql`, with Spout fault/retry that never fails the Pond). Tests:
-`test_spout.py`, `test_egress_file.py` (file:// e2e + real Duck; s3/gs secret/target construction unit —
-a MinIO/moto write e2e is the CI follow-up). **Not yet built:** the incremental object-store path (per-run
-parts / Iceberg-in-bucket) and the **Postgres** CDC driver (`apply_delta` + the transactional-PK gate). A
-Spout name defaults to the table (or scheme for an all-tables Spout), `-2`/`-3` on collision; `rm`/`resync`
-take the name (mild deviation from the plan's by-pond `rm`, needed for multiple Spouts per Pond). `--every`/the
-demand-aware schedule is reserved (the `schedule` column defaults `on-run`).
+in `pond_spout`, migration `009_spout_state.sql`, with Spout fault/retry that never fails the Pond). The **Postgres CDC driver** (`egress/postgres.py`, `postgres://`/`postgresql://`, `capabilities = {delta,
+delete, transactional}`) is built: transport is the **DuckDB `postgres` extension** (`ATTACH`, then plain
+DuckDB SQL against the attached tables — no SQLAlchemy/psycopg); **apply = delete-then-insert in one
+transaction** (not `INSERT … ON CONFLICT` — more portable, identical Z-set net effect: delete the changed
+∪ removed keys, re-insert the present rows); the **watermark lives in the destination**
+(`_duckstring_egress(table_name, f)`) and is **set in the same transaction** → **exactly-once** across
+Catchment crashes (a re-read after a crash is an empty/idempotent window). The worker's incremental path
+reads the changelog delta over `(in-dest watermark, f]` and `apply_delta`s, falling back to `write_full`
+on a full read (bootstrap / coverage-miss / changed overwrite source). The **transactional-PK gate** is
+enforced at creation (`Driver._assert_transactional_pk` rejects a published non-merge/no-pk table → the
+signpost error) and again at egress (the worker raises for a not-yet-checked source). The table is created
+lazily from the relation's schema (DuckDB type names; the extension maps them).
+
+Tests: `test_spout.py`, `test_egress_file.py` (file:// e2e + real Duck; s3/gs secret/target construction
+unit), `test_egress_postgres.py` (the full apply/upsert/delete/reload/watermark logic against a
+**DuckDB-attached** destination — the same SQL path; the PK gate; the worker delta-vs-reload routing). **Real-
+backend write e2es are the CI follow-up** (MinIO/moto for s3; a containerised Postgres — both gated/skipped
+locally). **Not yet built:** the incremental object-store path (per-run parts / Iceberg-in-bucket) and the
+demand-aware (`--every`) schedule (reserved; the `schedule` column defaults `on-run`). A Spout name defaults
+to the table (or scheme for an all-tables Spout), `-2`/`-3` on collision; `rm`/`resync` take the name.
 
 A **Spout** is a Pond's egress binding — "pour this table out to there." It is **operational config**
 (created via CLI/API, persisted, survives redeploys), exactly like windows — *not* declared in

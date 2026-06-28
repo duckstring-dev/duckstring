@@ -163,7 +163,7 @@ All under `/api/ponds/{name}/…`, all returning `{"ok": true}`; `404` for unkno
 
 ## Spouts (egress)
 
-All full-gated. A Spout publishes a Pond's output to an external destination; it is operational config (persisted, survives redeploys). Credentials live in the destination URI as `${env:NAME}` references, resolved only at egress time (for object stores, in the query: `?key_id=${env:..}&secret=${env:..}&region=..`). After each Pond Run the egress worker delivers snapshot Parquet to the destination. *(`file://`/`s3://`/`gs://` work today; the Postgres sink is landing — an unbuilt driver parks the Spout.)*
+All full-gated. A Spout publishes a Pond's output to an external destination; it is operational config (persisted, survives redeploys). Credentials live in the destination URI as `${env:NAME}` references, resolved only at egress time (for object stores, in the query: `?key_id=${env:..}&secret=${env:..}&region=..`). After each Pond Run the egress worker delivers to the destination — snapshot Parquet for object stores; `postgres://` syncs a merge Trickle's changelog **incrementally** (upserts + deletes in one transaction, exactly-once). A transactional destination requires a primary key (a merge Trickle), so a plain table to `postgres://` is `422` at creation.
 
 | Endpoint | Description |
 |---|---|
