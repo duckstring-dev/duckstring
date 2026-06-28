@@ -222,7 +222,11 @@ streams the whole root) or need special-case exclusion. Every platform that matt
 Posit Connect, the cloud hosts) already injects secrets as env vars; that's the 12-factor path and it's
 better than anything we'd ship.
 
-So, v1:
+So, v1 (**resolver built** — `egress/credentials.py`: `resolve()` interpolates `${env:NAME}` from the
+process environment, raises `CredentialError` naming an unset var, leaves unrecognised `${...}` untouched;
+`references()` lists a string's refs for pre-flight without resolving; `${secret:NAME}` is parsed-and-
+reserved, raising "not yet supported". The Spout machinery will store the reference form and call
+`resolve()` only at egress time):
 
 - A Spout destination references a credential as **`${env:NAME}`** (in the URI or a credential field),
   resolved from the process environment **at egress time only** — never logged, never returned by the API.
