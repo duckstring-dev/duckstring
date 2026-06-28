@@ -1678,6 +1678,11 @@ class Driver:
                     "kind": self.meta[key]["kind"],
                     "is_draw": self.meta[key].get("is_draw", False),
                     "is_spout": self.meta[key].get("is_spout", False),
+                    # A Spout's egress config + armed state, for the node's control panel.
+                    "spout": (
+                        {**self.meta[key]["spout"], "armed": ps.standing_wake}
+                        if self.meta[key].get("is_spout") and self.meta[key].get("spout") else None
+                    ),
                     "version": self.meta[key]["version"],
                     "has_tables": has_tables,
                     "status": st,

@@ -42,6 +42,10 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
 
   const borderColor = stateColor(view);
   const isSelected = selectedPondId === pondId;
+  // A Spout's pond name is "{source}#{spout}" — show just the spout part on the node.
+  const displayName = pond.isSpout ? pond.name.split('#').slice(1).join('#') || pond.name : pond.name;
+  // Draws and Spouts both cross the Catchment boundary → dashed (ingress vs egress).
+  const boundary = pond.isDraw || pond.isSpout;
   // In repair mode, clicking a Pond toggles it in/out of the repair scope (a bright ring marks it).
   const ringColor = repairMode && inRepair ? '#a3e635' : borderColor;
 
@@ -55,8 +59,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
       style={{
         width: '100%',
         height: '100%',
-        // A Pond Draw (fed by a duct) is drawn with a dashed border to set it apart from a local Pond.
-        border: `2px ${pond.isDraw ? 'dashed' : 'solid'} ${borderColor}`,
+        // Draws (ingress) and Spouts (egress) cross the Catchment boundary → dashed, vs a solid Pond.
+        border: `2px ${boundary ? 'dashed' : 'solid'} ${borderColor}`,
         boxShadow: repairMode && inRepair
           ? `0 0 0 3px ${ringColor}`
           : refreshPending
@@ -107,8 +111,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           flexDirection: 'column',
           justifyContent: 'center',
           gap: 5,
-          // No divider when there's no ripple area beneath to separate — a Draw, or a collapsed Pond.
-          borderBottom: pond.isDraw || collapsed ? 'none' : `1px solid ${borderColor}30`,
+          // No divider when there's no ripple area beneath to separate — a Draw/Spout, or a collapsed Pond.
+          borderBottom: boundary || collapsed ? 'none' : `1px solid ${borderColor}30`,
         }}
       >
         <span style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
@@ -125,13 +129,13 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
               {collapsed ? '▸' : '▾'}
             </span>
           )}
-          {pond.isDraw && (
+          {(pond.isDraw || pond.isSpout) && (
             <span style={{ fontSize: 10, fontWeight: 700, color: borderColor, letterSpacing: '0.06em', flexShrink: 0 }}>
-              [DRAW]
+              {pond.isDraw ? '[DRAW]' : '[SPOUT]'}
             </span>
           )}
           <span style={{ fontSize: 13, fontWeight: 700, color: '#e4e4e7', letterSpacing: '0.04em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {pond.name}
+            {displayName}
           </span>
           {info && <span style={{ fontSize: 10, color: '#52525b', whiteSpace: 'nowrap' }}>v{info.version}</span>}
         </span>
