@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useLiveStore, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
+import { useLiveStore, atLeast, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
 import type { FreqUnit, Pond, PondInfo, PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
@@ -76,7 +76,7 @@ function StatusCard({ color, title, children }: { color: string; title: string; 
 
 // The reason a Pond is failed/killed/blocked (missing Sources / a failed upstream), with details.
 // Null when the Pond is healthy.
-function StatusBox({ info, ponds }: { info: PondInfo; ponds: Record<string, Pond> }) {
+function StatusBox({ info, ponds, canControl }: { info: PondInfo; ponds: Record<string, Pond>; canControl: boolean }) {
   const bullets = (items: string[], render: (s: string) => string) => (
     <ul style={{ margin: 0, paddingLeft: 18, color: '#fafafa', listStyleType: 'disc', listStylePosition: 'outside' }}>
       {items.map((s) => <li key={s} style={{ marginTop: 2 }}>{render(s)}</li>)}
@@ -91,7 +91,11 @@ function StatusBox({ info, ponds }: { info: PondInfo; ponds: Record<string, Pond
     );
   }
   if (info.isKilled) {
-    return <StatusCard color={THEME_DANGER} title="Killed">Stopped by an operator. Wake, Force, or clear to resume.</StatusCard>;
+    return (
+      <StatusCard color={THEME_DANGER} title="Killed">
+        Stopped by an operator.{canControl ? ' Wake, Force, or clear to resume.' : ''}
+      </StatusCard>
+    );
   }
   if (info.isBlocked) {
     if (info.missingSources.length > 0) {
@@ -181,6 +185,12 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const enterRepair = useLiveStore((s) => s.enterRepair);
   const repairMode = useLiveStore((s) => s.repairMode);
 
+  // Access level gates the action surface (the backend enforces it too — this just avoids dead buttons).
+  // read: status/history/data only · demand: + the Triggers menu · full: + Control/Windows/Failures.
+  const accessLevel = useLiveStore((s) => s.accessLevel);
+  const canDemand = atLeast(accessLevel, 'demand');
+  const canControl = atLeast(accessLevel, 'full');
+
   const [tideBound, setTideBound] = useState('2');
   const [tideUnit, setTideUnit] = useState<FreqUnit>('SECOND');
   const [showTideInput, setShowTideInput] = useState(false);
@@ -226,8 +236,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
     <>
       {!selectedPond && !selectedRipple && !selectedTriggerId && (
         <div style={{ fontSize: 12, color: '#71717a', lineHeight: 1.6 }}>
-          Select a Pond or Ripple to inspect its freshness and run history, or to send a Tap, Pulse,
-          Wave, or Tide. Ponds are established by deploying code — not from here.
+          Select a Pond or Ripple to inspect its freshness and run history
+          {canDemand ? ', or to send a Tap, Pulse, Wave, or Tide' : ''}. Ponds are established by
+          deploying code — not from here.
         </div>
       )}
 
@@ -242,7 +253,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               Tide — max staleness ≤ {formatDuration(triggers[selectedTriggerId].boundMs ?? 1000)}.
             </div>
           )}
-          <Btn onClick={() => removeTrigger(selectedTriggerId)} color={THEME_DANGER}>Remove Trigger</Btn>
+          {canDemand && (
+            <Btn onClick={() => removeTrigger(selectedTriggerId)} color={THEME_DANGER}>Remove Trigger</Btn>
+          )}
         </Section>
       )}
 
@@ -278,15 +291,18 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
           {isInlet && (
             <Section>
               <Label>Windows (batch source)</Label>
-              <WindowEditor pond={selectedPond} />
+              <WindowEditor pond={selectedPond} readOnly={!canControl} />
             </Section>
           )}
 
-          {/* Triggers — or, while halted, the reason (triggers have no effect). */}
+          {/* Triggers — or, while halted, the reason (triggers have no effect). The failure reason is
+              read-level (shown to all); the trigger buttons are demand+. A read user on a healthy Pond
+              sees no Triggers section at all. */}
+          {(halted || canDemand) && (
           <Section>
             <Label>Triggers</Label>
             {halted ? (
-              <StatusBox info={selectedInfo!} ponds={ponds} />
+              <StatusBox info={selectedInfo!} ponds={ponds} canControl={canControl} />
             ) : (
               <>
                 <div style={quadRow}>
@@ -327,8 +343,10 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               </>
             )}
           </Section>
+          )}
 
-          {/* Control: Force/Wake (go) and Sleep/Kill (stop) lifecycle on the Duck */}
+          {/* Control: Force/Wake (go) and Sleep/Kill (stop) lifecycle on the Duck. Full only. */}
+          {canControl && (
           <Section>
             <Label>Control</Label>
             <div style={quadRow}>
@@ -348,8 +366,11 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               </Btn>
             </div>
           </Section>
+          )}
 
-          {/* Failures: retry budgets + clearing a failed Pond */}
+          {/* Failures: retry budgets + clearing a failed Pond. Full only — the failure *reason* is shown
+              above (Triggers StatusBox) and in Run Detail for every level; only remediation is gated. */}
+          {canControl && (
           <Section>
             <Label>Failures</Label>
             {([
@@ -378,6 +399,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               <Btn onClick={() => enterRepair()} color={THEME_DANGER} disabled={repairMode}>Repair…</Btn>
             </div>
           </Section>
+          )}
 
           <Section>
             <TraceChart {...pondTrace(selectedPondRuns)} />

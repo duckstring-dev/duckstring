@@ -25,6 +25,7 @@ import {
   removeWindow,
   setApiKey,
   UnauthorizedError,
+  type AccessLevel,
   type StatusPayload,
   type RawPond,
   type RawRipple,
@@ -97,8 +98,16 @@ function mapWindow(w: RawWindow): WindowRow {
   };
 }
 
+const LEVEL_RANK: Record<AccessLevel, number> = { read: 1, demand: 2, full: 3 };
+
+/** Whether `level` meets `required` on the read ⊂ demand ⊂ full ladder. */
+export function atLeast(level: AccessLevel, required: AccessLevel): boolean {
+  return LEVEL_RANK[level] >= LEVEL_RANK[required];
+}
+
 interface StatusSlice {
   catchment: { id: string | null; name: string | null } | null;
+  accessLevel: AccessLevel;
   ponds: Record<PondId, Pond>;
   ripples: Record<RippleId, Ripple>;
   pondViews: Record<PondId, NodeView>;
@@ -162,7 +171,13 @@ function transformStatus(payload: StatusPayload): StatusSlice {
     ponds[snk]?.sources.push(src);
   }
 
-  return { catchment: payload.catchment ?? null, ponds, ripples, pondViews, rippleViews, pondInfo, triggers };
+  return {
+    catchment: payload.catchment ?? null,
+    // Default to 'full' when absent — keeps an open/unauthed Catchment (and any transitional backend)
+    // showing every control, matching pre-ladder behaviour.
+    accessLevel: payload.access_level ?? 'full',
+    ponds, ripples, pondViews, rippleViews, pondInfo, triggers,
+  };
 }
 
 // ─── Store ───────────────────────────────────────────────────────────────────
@@ -268,6 +283,7 @@ export function runKey(r: PondRun): string {
 
 export const useLiveStore = create<LiveState>((set, get) => ({
   catchment: null,
+  accessLevel: 'full', // until the first /api/status; open Catchments stay 'full'
   ponds: {},
   ripples: {},
   pondViews: {},

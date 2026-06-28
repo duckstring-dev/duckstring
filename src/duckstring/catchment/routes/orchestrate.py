@@ -14,7 +14,7 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
@@ -51,11 +51,15 @@ def _resolve(request: Request, name: str, major: int | None, version: str | None
 
 
 @router.get("/status", dependencies=[auth.read])
-async def status(request: Request, since: Optional[int] = None):
+async def status(
+    request: Request, since: Optional[int] = None,
+    principal: auth.Principal = Depends(auth.get_principal),
+):
     """Live state. Without ``since``, returns immediately (the CLI / first load). With ``since``, it
     **long-polls**: holds until the engine state moves past that version (or a heartbeat timeout), so
     the UI updates the instant anything changes instead of on a fixed timer. The payload's ``version``
-    is the token to pass back as ``since``."""
+    is the token to pass back as ``since``. ``access_level`` is the caller's level — the UI gates its
+    controls on it (so a read/demand key sees no dead buttons)."""
     driver = _driver(request)
     if since is not None:
         for _ in range(int(_STATUS_WAIT_TIMEOUT / _STATUS_WAIT_TICK)):
@@ -64,7 +68,19 @@ async def status(request: Request, since: Optional[int] = None):
             await asyncio.sleep(_STATUS_WAIT_TICK)
     # status() holds the driver lock and builds the whole payload — off the event loop so concurrent
     # requests (the draw long-polls, cross-Catchment view recursion) aren't blocked behind it.
-    return await run_in_threadpool(driver.status)
+    payload = await run_in_threadpool(driver.status)
+    payload["access_level"] = auth.LEVEL_TO_NAME[principal.level]
+    return payload
+
+
+def _redact_tracebacks(runs: list[dict]) -> None:
+    """Strip the full traceback from each run (and its nested Ripple Runs), in place. Tracebacks can
+    surface filesystem paths / connection strings, so they are full-access only; the error *message*
+    is kept for every level."""
+    for run in runs:
+        run["traceback"] = None
+        for ripple in run.get("ripples") or []:
+            ripple["traceback"] = None
 
 
 @router.get("/runs", dependencies=[auth.read])
@@ -76,12 +92,17 @@ def runs(
     lineage: bool = True,
     ripples: bool = False,
     limit: int = 100,
+    principal: auth.Principal = Depends(auth.get_principal),
 ):
     """Recent Pond Run history (newest first). ``pond`` filters to that Pond and, when ``lineage``,
-    its upstream sources; ``ripples`` nests each run's Ripple Runs. ``limit`` is clamped to [1, 1000]."""
+    its upstream sources; ``ripples`` nests each run's Ripple Runs. ``limit`` is clamped to [1, 1000].
+    Tracebacks are redacted below full access (the error message is always kept)."""
     key = _resolve(request, pond, major, version) if pond is not None else None
     limit = max(1, min(limit, 1000))
-    return {"runs": _driver(request).run_history(key, lineage, ripples, limit)}
+    history = _driver(request).run_history(key, lineage, ripples, limit)
+    if principal.level != auth.Level.FULL:
+        _redact_tracebacks(history)
+    return {"runs": history}
 
 
 @router.post("/ponds/{name}/tap", dependencies=[auth.demand])

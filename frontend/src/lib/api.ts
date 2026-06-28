@@ -94,9 +94,13 @@ export interface RawPond {
   ripple_edges: [string, string][]; // [sourceName, sinkName] within the Pond
 }
 
+// The caller's access level — a total order read ⊂ demand ⊂ full. The UI gates its controls on it.
+export type AccessLevel = 'read' | 'demand' | 'full';
+
 export interface StatusPayload {
   catchment: { id: string | null; name: string | null } | null; // this Catchment's stable identity
   version: number; // change token for the /api/status long-poll (pass back as ?since=)
+  access_level: AccessLevel; // the caller's level (always 'full' when the Catchment is open/unauthed)
   ponds: RawPond[];
   edges: [string, string][]; // [sourceId, sinkId] — pond keys ("name@major")
 }

@@ -61,7 +61,9 @@ const selectInput: React.CSSProperties = { ...numInput, width: 'auto' };
 // which zustand's useSyncExternalStore reads as a changed snapshot → infinite loop.
 const NO_WINDOWS: WindowRow[] = [];
 
-export function WindowEditor({ pond }: { pond: Pond }) {
+// `readOnly` (below full access) shows the window list but no add/remove controls — viewing an Inlet's
+// batch schedule is `read`-gated server-side; editing it is full only.
+export function WindowEditor({ pond, readOnly = false }: { pond: Pond; readOnly?: boolean }) {
   const windows = useLiveStore((s) => s.windowsByPond[pond.id]) ?? NO_WINDOWS;
   const addWindow = useLiveStore((s) => s.addWindow);
   const removeWindow = useLiveStore((s) => s.removeWindow);
@@ -124,15 +126,22 @@ export function WindowEditor({ pond }: { pond: Pond }) {
       {windows.map((w) => (
         <div key={w.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
           <span style={{ fontSize: 12, color: '#a1a1aa' }}>{w.name}</span>
-          <button
-            onClick={() => removeWindow(pond.id, w.name)}
-            style={{ background: 'none', border: 'none', color: '#52525b', cursor: 'pointer', fontSize: 14 }}
-          >
-            ✕
-          </button>
+          {!readOnly && (
+            <button
+              onClick={() => removeWindow(pond.id, w.name)}
+              style={{ background: 'none', border: 'none', color: '#52525b', cursor: 'pointer', fontSize: 14 }}
+            >
+              ✕
+            </button>
+          )}
         </div>
       ))}
 
+      {readOnly && windows.length === 0 && (
+        <div style={{ fontSize: 12, color: '#52525b' }}>No windows — this source is live.</div>
+      )}
+
+      {!readOnly && (<>
       {/* Required: every + name */}
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
         <span style={{ fontSize: 11, color: '#71717a', width: 40 }}>Every</span>
@@ -227,6 +236,7 @@ export function WindowEditor({ pond }: { pond: Pond }) {
           + Add Window
         </button>
       </div>
+      </>)}
     </>
   );
 }

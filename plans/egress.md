@@ -203,14 +203,18 @@ Design:
 
 **Status: built** (`catchment/auth.py`, migration `007_catchment_key.sql`; the guard is per-route deps +
 `audit_routes` fail-closed at `create_app`; the Duck token is *persisted* in `catchment_meta`, not
-ephemeral — a Duck must survive a Catchment restart). **Still TODO — UI graceful downgrade:**
-- The web UI currently carries one key and assumes full access — a `read`/`demand` key gets bare `403`s on
-  control actions (and a `403` shouldn't be swallowed like the `401`-reprompt is). The UI needs to **degrade
-  gracefully**: hide/disable the actions a key can't perform rather than letting them fail.
-- That needs a **response mechanism to surface the caller's level** — a lightweight signal the UI reads
-  once (e.g. a `level` field on `/api/status`, or a dedicated `GET /api/whoami` → `{level}`) and gates its
-  controls on. Pick one when building the UI pass; `/api/status` is the cheapest since the UI already polls
-  it (it's `read`-gated, so every authenticated UI key can read its own level there).
+ephemeral — a Duck must survive a Catchment restart). **UI graceful downgrade: built** —
+- `/api/status` carries the caller's **`access_level`** (read off the request principal; `full` in open
+  mode), threaded through the store (`accessLevel`, defaults `full` when absent) and the `atLeast()`
+  ladder helper. The Sidebar gates on it: read = status/history/data only; demand = + the Triggers menu
+  (tap/wave/pulse/tide + remove-trigger); full = + Control / window editing / Failures (budgets, clear,
+  repair). The failure *reason* (StatusBox + Run Detail) stays visible to every level — only remediation
+  is gated; window *viewing* is read-only below full, not hidden.
+- **Tracebacks are full-only**, redacted server-side in `/api/runs` (`_redact_tracebacks`) — they can leak
+  paths/connection strings, so read+demand get the error *message* but a null `traceback`. (Backend
+  redaction, not just UI hiding — a read key hitting `/api/runs` directly is covered.)
+- Still optional (not built): a small visible badge telling the user *which* level they hold (so missing
+  controls read as "your key can't do this", not "broken UI"). Cheap follow-up if wanted.
 
 ## Secrets — env-var-first, no bespoke vault
 

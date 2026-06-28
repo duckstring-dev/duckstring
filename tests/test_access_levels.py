@@ -71,6 +71,40 @@ def test_legacy_single_key_is_full(tmp_path):
         assert client.post("/api/catchment/keys/rotate", headers=h, json={}).status_code == 200
 
 
+# ─── The level signal + traceback redaction ──────────────────────────────────
+
+
+def test_status_reports_callers_access_level(laddered):
+    client, keys = laddered
+    for level in ("read", "demand", "full"):
+        payload = client.get("/api/status", headers=_bearer(keys[level])).json()
+        assert payload["access_level"] == level
+
+
+def test_status_access_level_is_full_in_open_mode(tmp_path):
+    with TestClient(create_app(tmp_path)) as client:
+        assert client.get("/api/status").json()["access_level"] == "full"
+
+
+def test_runs_redacts_traceback_below_full(laddered, monkeypatch):
+    client, keys = laddered
+
+    # Stub the run feed with a traceback-bearing run + nested ripple.
+    run = {"pond": "x", "id": "x@1", "error": "boom", "traceback": "Traceback…secret/path",
+           "ripples": [{"ripple": "r", "error": "boom", "traceback": "Traceback…secret/path"}]}
+    monkeypatch.setattr(client.app.state.driver, "run_history", lambda *a, **k: [dict(run, ripples=[dict(run["ripples"][0])])])
+
+    for level in ("read", "demand"):
+        got = client.get("/api/runs", headers=_bearer(keys[level])).json()["runs"][0]
+        assert got["error"] == "boom"            # the message survives every level
+        assert got["traceback"] is None          # the traceback is redacted
+        assert got["ripples"][0]["traceback"] is None
+
+    full = client.get("/api/runs", headers=_bearer(keys["full"])).json()["runs"][0]
+    assert full["traceback"] == "Traceback…secret/path"
+    assert full["ripples"][0]["traceback"] == "Traceback…secret/path"
+
+
 # ─── Rotation ────────────────────────────────────────────────────────────────
 
 
