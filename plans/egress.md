@@ -101,9 +101,10 @@ Tests: `test_spout.py`, `test_egress_file.py` (file:// e2e + real Duck; s3/gs se
 unit), `test_egress_postgres.py` (the full apply/upsert/delete/reload/watermark logic against a
 **DuckDB-attached** destination — the same SQL path; the PK gate; the worker delta-vs-reload routing). **Real-
 backend write e2es are the CI follow-up** (MinIO/moto for s3; a containerised Postgres — both gated/skipped
-locally). **Not yet built:** the incremental object-store path (per-run parts / Iceberg-in-bucket) and the
-demand-aware (`--every`) schedule (reserved; the `schedule` column defaults `on-run`). A Spout name defaults
-to the table (or scheme for an all-tables Spout), `-2`/`-3` on collision; `rm`/`resync` take the name.
+locally). **Not yet built:** the incremental object-store path (per-run parts / Iceberg-in-bucket). The
+demand-aware `--every` schedule is **dropped** (superseded — see the Lifecycle note: keep the source fresh
+with a Tide/Wave, throttle delivery with a window). A Spout name defaults to the table (or scheme for an
+all-tables Spout), `-2`/`-3` on collision; `rm`/`resync` take the name.
 
 A **Spout** is a Pond's egress binding — "pour this table out to there." It is **operational config**
 (created via CLI/API, persisted, survives redeploys), exactly like windows — *not* declared in
@@ -141,10 +142,17 @@ disarm the standing Wake (Kill also parks via `kill_pond`), **Wake**/**Force** r
 wake|force|sleep|kill|clear|resync`. **An egress failure fails only the Spout's run** (a real failed
 `pond_run` with traceback, in `/api/runs`) and never the terminal source. A Spout rides `/api/status`
 `ponds[]` with `is_spout` (its source→spout edge in `edges`) — dashed in the UI like a Draw. The Postgres
-**data + CDC cursor ride the true `sourceF`** (the in-destination watermark), exactly-once. **Windows on a
-Spout** were dropped in the flip — the windowed-CDC throttle (fire on source-advance but stamp the window
-end) doesn't fit the engine's single-freshness `pond_source_f`, so it is to be **re-derived natively** on
-the node model next.
+**data + CDC cursor ride the true `sourceF`** (the in-destination watermark, carried as the job's
+`source_f`), exactly-once. **Windows throttle a Spout's delivery** using the **same window mechanics as a
+windowed Inlet**: `pond_source_f` returns the active window's end for a windowed spout, so the standing
+Wake fires once per window (holding in a gap / until the source has published); the run is stamped with
+the window end (the throttle clock) while the worker still ships the source's data at the source's real
+freshness. Because a Spout is a real pond, **windows reuse the existing `pond_window` CRUD verbatim** —
+`trigger window {source}#{spout}` / the UI `WindowEditor` on the spout's key, zero new surface
+(`engine`: `pond_source_f` + `next_wake`; `next_wake` now also wakes at a windowed spout's boundaries).
+The old demand-aware **`--every`** schedule is **dropped** — a Tide-shaped staleness bound would have the
+spout *solicit* its source, which contradicts the passive-Wake model; keep the source fresh with a
+Tide/Wave on the *source*, throttle delivery with a window on the *spout*.
 
 ## The egress-driver seam
 

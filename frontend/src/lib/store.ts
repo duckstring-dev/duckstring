@@ -422,7 +422,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   selectPond(id) {
     set({ selectedPondId: id, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
-    if (id && get().ponds[id]?.sources.length === 0) get().refreshWindows(id);
+    // Windows live on Inlets (batch availability) and on Spouts (delivery throttle).
+    if (id && (get().ponds[id]?.sources.length === 0 || get().ponds[id]?.isSpout)) get().refreshWindows(id);
     get().refresh();
   },
   selectRipple(id) {

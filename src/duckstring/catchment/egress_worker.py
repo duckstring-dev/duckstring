@@ -42,7 +42,9 @@ def _egress_spout(root: Path, job: dict) -> None:
     caps = driver.capabilities()
     data_dir = pond_data_dir(Path(root), job["pond_name"], job["major"])
     dp = get_data_plane()
-    f = job["f"]
+    # The data + the CDC cursor ride the **source's** real freshness; the Spout's run freshness (job["f"])
+    # is only the engine/throttle clock (the window end, when windowed) — used for completion, not the data.
+    f = job.get("source_f") or job["f"]
 
     con = duckdb.connect()  # in-memory: reads the exported snapshot, never the live registry
     try:

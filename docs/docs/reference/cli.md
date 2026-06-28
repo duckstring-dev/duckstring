@@ -111,7 +111,7 @@ Publish a Pond's output to external systems. A Spout is operational config (pers
 | `spout force {pond} {name}` | Re-arm and re-deliver the current freshness now. |
 | `spout kill \| clear {pond} {name}` | Park the Spout (terminal) / clear a failed-or-killed Spout. |
 
-A Spout is a **real Pond** hanging off its source with a standing **Wake** (the egress dual of a [Pond Draw](../guides/connecting-catchments.md)) — it delivers whenever the source's freshness advances, never pulls on the source, and never blocks anything (its runs and failures are its own, with full run history + tracebacks in [run history](#duckstring-status)). The **Control** verbs above apply to it; the **Demand** verbs (tap/wave/pulse/tide) do not.
+A Spout is a **real Pond** hanging off its source with a standing **Wake** (the egress dual of a [Pond Draw](../guides/connecting-catchments.md)) — it delivers whenever the source's freshness advances, never pulls on the source, and never blocks anything (its runs and failures are its own, with full run history + tracebacks in [run history](#duckstring-status)). The **Control** verbs above apply to it; the **Demand** verbs (tap/wave/pulse/tide) do not. To **throttle** delivery to a cadence, put a [window](#duckstring-trigger--demand-triggers) on the Spout — it's a Pond, so `trigger window {source}#{spout} add -e 1h …` (or the UI) works directly: it delivers at most once per window.
 
 ## `duckstring control` — execution & health
 

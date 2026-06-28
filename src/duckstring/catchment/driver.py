@@ -812,8 +812,12 @@ class Driver:
                 if src_key is None or src_key not in self.meta:
                     continue
                 src, cfg = self.meta[src_key], sm.get("spout", {})
+                # `f` is the Spout's run freshness (= the window end when windowed — the throttle clock);
+                # `source_f` is the source's actual published freshness, which the data + CDC cursor ride.
+                src_ps = self.state.pond_states.get(src_key)
+                source_f = _iso(src_ps.end_f) if src_ps and src_ps.end_f > NEVER else _iso(f)
                 jobs.append({
-                    "spout_key": skey, "f": _iso(f),
+                    "spout_key": skey, "f": _iso(f), "source_f": source_f,
                     "pond_name": src["name"], "major": src["major"],
                     "table": cfg.get("table"), "destination": cfg.get("destination"), "mode": cfg.get("mode"),
                 })

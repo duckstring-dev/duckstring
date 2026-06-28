@@ -63,7 +63,7 @@ const NO_WINDOWS: WindowRow[] = [];
 
 // `readOnly` (below full access) shows the window list but no add/remove controls — viewing an Inlet's
 // batch schedule is `read`-gated server-side; editing it is full only.
-export function WindowEditor({ pond, readOnly = false }: { pond: Pond; readOnly?: boolean }) {
+export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; readOnly?: boolean; caption?: string }) {
   const windows = useLiveStore((s) => s.windowsByPond[pond.id]) ?? NO_WINDOWS;
   const addWindow = useLiveStore((s) => s.addWindow);
   const removeWindow = useLiveStore((s) => s.removeWindow);
@@ -120,7 +120,7 @@ export function WindowEditor({ pond, readOnly = false }: { pond: Pond; readOnly?
   return (
     <>
       <div style={{ fontSize: 10, color: '#52525b', marginBottom: 8, lineHeight: 1.5 }}>
-        When this batch source is available. None ⇒ live (always fresh).
+        {caption ?? 'When this batch source is available. None ⇒ live (always fresh).'}
       </div>
 
       {windows.map((w) => (

@@ -150,6 +150,10 @@ function SpoutPanel({ pond, canControl }: { pond: Pond; canControl: boolean }) {
           </div>
         </Section>
       )}
+      <Section>
+        <Label>Windows · throttle</Label>
+        <WindowEditor pond={pond} readOnly={!canControl} caption="Throttle delivery to a window cadence. None ⇒ deliver on every source advance." />
+      </Section>
     </>
   );
 }

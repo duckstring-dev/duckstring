@@ -266,6 +266,33 @@ def test_status_surfaces_spout_as_node(tmp_path):
     assert node["status"] == "idle"  # delivered, caught up
 
 
+def test_windowed_spout_throttles_on_window_clock(tmp_path, monkeypatch):
+    import duckstring.catchment.driver as drv_mod
+    clock = [datetime(2026, 6, 10, 12, 0, tzinfo=UTC)]
+    monkeypatch.setattr(drv_mod, "_now", lambda: clock[0])
+
+    out = tmp_path / "egress"
+    src_f = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+    d, _ = _with_spout(tmp_path, f"file://{out}", end_f=src_f)
+    # Windows reuse the existing pond-window machinery — a Spout is a real pond, keyed by its own id.
+    d.add_window("sales#file@1", "daily", "2026-06-01T00:00:00+00:00", 86400, "DAY", 1)
+    d.state.pond_states["sales@1"].end_f = src_f  # re-assert after add_window's reload
+
+    _deliver(d, tmp_path)
+    assert (out / "revenue.parquet").exists()  # the source's data was delivered (rides source freshness)
+    # The run completed at the window end (the throttle clock), not the source's freshness.
+    assert d.list_spouts("sales@1")[0]["watermark"] == "2026-06-11T00:00:00+00:00"
+
+    # Same window, source advances → throttled (the window end, not the source, gates the next fire).
+    d.state.pond_states["sales@1"].end_f = datetime(2026, 6, 10, 23, 0, tzinfo=UTC)
+    assert not _would_dispatch(d, "sales#file@1")
+
+    # Next window → fires again.
+    clock[0] = datetime(2026, 6, 11, 1, 0, tzinfo=UTC)
+    d.state.pond_states["sales@1"].end_f = clock[0]
+    assert _would_dispatch(d, "sales#file@1")
+
+
 @pytest.mark.timeout(60)
 def test_egress_e2e_file_snapshot(tmp_path_factory, monkeypatch):
     """A real Catchment + Duck: deploy a Pond, add a file:// Spout, run it — the egress worker delivers
