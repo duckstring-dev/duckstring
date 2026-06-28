@@ -122,10 +122,24 @@ A Spout is `(pond, major, table | *, destination, mode, schedule)`:
   Tide (`30m` — egress at least this fresh). v1 ships `on-run` + manual resync; the Tide form is the
   natural extension once egress is demand-aware.
 
-Lifecycle: after a Pond Run publishes, the Driver enqueues that Pond's Spouts; an async egress worker
-drains them (see below). A Spout has its own fault state (`is_failed`, `failures`, retry budget) mirroring
-a Pond's — **an egress failure never fails the Pond Run** (the data is published and correct locally;
-egress is downstream of the boundary), it parks the Spout and raises an [alert](#alerting-adjacent-track).
+**Lifecycle — a Spout is a passive standing-Wake node (the egress dual of a Pond Draw).** Conceptually a
+Spout is a *Pond hanging off its source Pond with a standing Wake on it*: it delivers whenever its source's
+freshness advances past what it has delivered (`sourceF > deliveredF`, and not already mid-delivery), and —
+because it's a **Wake, not a Wave** — it **never solicits the source** (adds no upstream demand) and, being
+**terminal**, **never blocks anything** (a downstream Pond reads the source's *published* freshness, which
+advanced at publish; a sibling Spout's failure is irrelevant). It has its own freshness/run/fault log. This
+is the mirror of a **Draw** (an ingress node the *poller* runs); the **egress worker** is "the Spout's
+Duck." *Status: built — implemented Driver-side (`pond_spout` + `Driver.egress_pending`/`mark_egress_running`
++ the worker), deliberately **not** woven into the validated core propagation engine, since the node is
+isolated by construction (non-propagating up, terminal down).* The **Control set applies, the Demand set
+does not**: **Sleep**/**Kill** disarm the standing Wake (`standing_wake=0`; Kill also parks), **Wake**/**Force**
+re-arm it (Force also clears the watermark to re-deliver now), **Clear** resets a fault — `Driver.spout_*`,
+`POST /api/ponds/{name}/spouts/{spout}/{wake|force|sleep|kill|clear|resync}` (full-gated), `duckstring spout
+wake|force|sleep|kill|clear|resync`. **An egress failure never fails the Pond Run** — it parks the Spout
+(its own `is_failed`/`failures`/retry budget) and raises an [alert](#alerting-adjacent-track). Spouts are
+surfaced in `/api/status` as their own nodes (`spouts[]` + a source→spout edge; `status` ∈ delivering /
+queued / delivered / asleep / failed / killed) for the dashed-node UI. **Windows on a Spout** (throttle the
+Wake to a frequency) are designed but not yet built.
 
 ## The egress-driver seam
 

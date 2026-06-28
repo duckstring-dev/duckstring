@@ -107,6 +107,11 @@ Publish a Pond's output to external systems. A Spout is operational config (pers
 | `spout ls {pond}` | List the Pond's Spouts with their delivery watermark and state (ok / retrying / failed). |
 | `spout rm {pond} {name}` | Remove a Spout. |
 | `spout resync {pond} {name}` | Force a full re-egress (clears the watermark + any failure). |
+| `spout sleep \| wake {pond} {name}` | Disarm / re-arm the Spout's standing Wake (it delivers on each source advance). |
+| `spout force {pond} {name}` | Re-arm and re-deliver the current freshness now. |
+| `spout kill \| clear {pond} {name}` | Park the Spout (terminal) / clear a failed-or-killed Spout. |
+
+A Spout is a passive **standing-Wake** node hanging off its Pond — it delivers whenever the Pond's freshness advances, never pulls on the Pond, and never blocks anything (its failures are its own). The **Control** verbs above apply to it; the **Demand** verbs (tap/wave/pulse/tide) do not.
 
 ## `duckstring control` — execution & health
 

@@ -89,23 +89,38 @@ def ls(
     Console().print(table)
 
 
-@app.command("resync")
-def resync(
-    pond: str = typer.Argument(..., help="The Pond the Spout is on."),
-    name: str = typer.Argument(..., help="The Spout's name (see `spout ls`)."),
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
-    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
-) -> None:
-    """Force a full re-egress (clears the Spout's watermark + any failure)."""
+def _control(action: str, pond: str, name: str, catchment, major, version, done: str) -> None:
     from . import _http
 
     url, cfg = _resolve(catchment)
     _http.post(
-        f"{url}/api/ponds/{pond}/spouts/{name}/resync", auth=cfg,
+        f"{url}/api/ponds/{pond}/spouts/{name}/{action}", auth=cfg,
         params=_http.pond_params(major, version), json={},
     )
-    typer.echo(f"Spout '{name}' on '{pond}' will re-egress.")
+    typer.echo(f"Spout '{name}' on '{pond}' {done}.")
+
+
+def _control_command(action: str, done: str, help_text: str):
+    def cmd(
+        pond: str = typer.Argument(..., help="The Pond the Spout is on."),
+        name: str = typer.Argument(..., help="The Spout's name (see `spout ls`)."),
+        catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+        major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
+        version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
+    ) -> None:
+        _control(action, pond, name, catchment, major, version, done)
+
+    cmd.__doc__ = help_text
+    return cmd
+
+
+# A Spout's Control set (its standing Wake). Demand verbs don't apply.
+app.command("resync")(_control_command("resync", "will re-egress", "Force a full re-egress (clears watermark + failure)."))
+app.command("wake")(_control_command("wake", "armed", "Re-arm the standing Wake (deliver on the next source advance)."))
+app.command("force")(_control_command("force", "will re-egress now", "Re-arm and re-deliver the current freshness now."))
+app.command("sleep")(_control_command("sleep", "asleep", "Disarm the standing Wake — no new deliveries."))
+app.command("kill")(_control_command("kill", "killed", "Disarm and park the Spout until wake/force/clear."))
+app.command("clear")(_control_command("clear", "cleared", "Clear a failed/killed Spout."))
 
 
 @app.command("rm")

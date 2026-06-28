@@ -170,7 +170,9 @@ All full-gated. A Spout publishes a Pond's output to an external destination; it
 | `GET /api/ponds/{name}/spouts` | `{"spouts": [{"name", "table", "destination", "mode", "schedule", "watermark", "is_failed", "failures", "error"}]}` |
 | `POST /api/ponds/{name}/spouts` | Bind a Spout: `{"destination", "name"?, "table"?, "mode"?}`. `destination` scheme ∈ `file/s3/gs/postgres`; `mode` ∈ `auto/full/append` (default `auto`); `table` null = all. Returns `{"name"}`. `422` on a bad destination/mode or duplicate name. |
 | `POST /api/ponds/{name}/spouts/{spout}/remove` | Remove a Spout (`404` if absent). |
-| `POST /api/ponds/{name}/spouts/{spout}/resync` | Force a full re-egress: clear the watermark + failure (`404` if absent). |
+| `POST /api/ponds/{name}/spouts/{spout}/{action}` | Control a Spout's standing Wake. `action` ∈ `wake`/`force` (re-arm; force re-delivers now), `sleep`/`kill` (disarm; kill parks), `clear` (reset a fault), `resync` (full re-egress). |
+
+Spouts also appear in `GET /api/status` as their own nodes: `"spouts": [{"id", "source", "name", "destination", "table", "mode", "status", "source_f", "delivered_f", "standing_wake", "is_failed", "is_killed", "failures", "error"}]` — `status` ∈ `delivering`/`queued`/`delivered`/`asleep`/`failed`/`killed`, with an edge from each Spout's `source` Pond.
 
 ## Data
 

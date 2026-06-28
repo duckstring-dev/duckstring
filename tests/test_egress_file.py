@@ -215,6 +215,80 @@ def test_worker_retry_budget(tmp_path):
     assert s["failures"] == 3 and s["is_failed"] is True
 
 
+# ─── The standing Wake: Control verbs (sleep/wake/kill/force/clear) + running guard ──
+
+
+def _spout(d, name="file"):
+    return next(x for x in d.list_spouts("sales@1") if x["name"] == name)
+
+
+def test_spout_sleep_disarms_wake_rearms(tmp_path):
+    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
+    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
+    assert len(d.egress_pending()) == 1  # armed by default
+
+    assert d.spout_sleep("sales@1", "file") is True
+    assert _spout(d)["standing_wake"] is False
+    assert d.egress_pending() == []  # disarmed → never fires
+
+    assert d.spout_wake("sales@1", "file") is True
+    assert _spout(d)["standing_wake"] is True
+    assert len(d.egress_pending()) == 1  # re-armed
+
+
+def test_spout_kill_parks_until_clear(tmp_path):
+    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
+    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
+    d.spout_kill("sales@1", "file")
+    assert _spout(d)["is_killed"] is True and _spout(d)["standing_wake"] is False
+    assert d.egress_pending() == []
+    d.spout_clear("sales@1", "file")
+    assert _spout(d)["is_killed"] is False
+    # clear leaves it disarmed (kill turned the wake off); wake re-arms.
+    assert d.egress_pending() == []
+    d.spout_wake("sales@1", "file")
+    assert len(d.egress_pending()) == 1
+
+
+def test_spout_force_redelivers_after_caught_up(tmp_path):
+    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
+    out = tmp_path / "o"
+    d.add_spout("sales@1", None, None, f"file://{out}", "full")
+    asyncio.run(_drain(d, tmp_path))
+    assert d.egress_pending() == []  # delivered, caught up
+
+    d.spout_force("sales@1", "file")  # re-deliver the current freshness
+    assert len(d.egress_pending()) == 1
+
+
+def test_running_guard_excludes_in_flight_spout(tmp_path):
+    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
+    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
+    pond_id = d.meta["sales@1"]["pond_id"]
+    d.mark_egress_running(pond_id, "file", True)
+    assert d.egress_pending() == []  # mid-delivery → not re-dispatched
+    assert _spout(d)["running"] is True
+    d.mark_egress_running(pond_id, "file", False)
+    assert len(d.egress_pending()) == 1
+
+
+def test_status_surfaces_spout_nodes(tmp_path):
+    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
+    dest = f"file://{tmp_path / 'o'}"
+    d.add_spout("sales@1", "revenue", "revenue", dest, "auto")
+    spouts = d.status()["spouts"]
+    assert len(spouts) == 1
+    s = spouts[0]
+    assert s["id"] == "sales@1#revenue" and s["source"] == "sales@1"
+    assert s["destination"] == dest and s["table"] == "revenue"
+    assert s["status"] == "queued"  # source advanced past delivered → wants to deliver
+
+    asyncio.run(_drain(d, tmp_path))
+    assert d.status()["spouts"][0]["status"] == "delivered"  # caught up
+    d.spout_sleep("sales@1", "revenue")
+    assert d.status()["spouts"][0]["status"] == "asleep"
+
+
 @pytest.mark.timeout(60)
 def test_egress_e2e_file_snapshot(tmp_path_factory, monkeypatch):
     """A real Catchment + Duck: deploy a Pond, add a file:// Spout, run it — the egress worker delivers

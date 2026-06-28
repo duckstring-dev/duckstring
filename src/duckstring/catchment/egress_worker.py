@@ -70,12 +70,15 @@ def _egress_spout(root: Path, job: dict) -> None:
 
 async def _drain(driver, root: Path) -> None:
     for job in driver.egress_pending():
+        driver.mark_egress_running(job["pond_id"], job["spout"], True)  # "delivering" + no re-dispatch
         try:
             await asyncio.wait_for(run_in_threadpool(_egress_spout, root, job), timeout=_PER_SPOUT_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — any delivery error parks the Spout, never the Pond
             driver.record_egress_failure(job["pond_id"], job["spout"], f"{type(exc).__name__}: {exc}")
         else:
             driver.record_egress_success(job["pond_id"], job["spout"], job["f"])
+        finally:
+            driver.mark_egress_running(job["pond_id"], job["spout"], False)
 
 
 async def run_egress_worker(driver, root, wake: asyncio.Event) -> None:

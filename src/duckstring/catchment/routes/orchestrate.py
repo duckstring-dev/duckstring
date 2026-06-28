@@ -366,13 +366,24 @@ def remove_spout(
     return {"ok": True}
 
 
-@router.post("/ponds/{name}/spouts/{spout_name}/resync", dependencies=[auth.full])
-def resync_spout(
-    name: str, spout_name: str, request: Request,
+# A Spout's Control set (its standing Wake) + resync. Demand verbs (tap/wave/pulse/tide) don't apply.
+_SPOUT_ACTIONS = {
+    "wake": "spout_wake", "force": "spout_force", "sleep": "spout_sleep",
+    "kill": "spout_kill", "clear": "spout_clear", "resync": "resync_spout",
+}
+
+
+@router.post("/ponds/{name}/spouts/{spout_name}/{action}", dependencies=[auth.full])
+def control_spout(
+    name: str, spout_name: str, action: str, request: Request,
     major: int | None = None, version: str | None = None,
 ):
-    """Force a full re-egress: clear the Spout's watermark + failure so it re-delivers next pass."""
+    """Control a Spout: wake/force re-arm its standing Wake, sleep/kill disarm it, clear resets a fault,
+    resync forces a full re-egress."""
+    method = _SPOUT_ACTIONS.get(action)
+    if method is None:
+        raise HTTPException(status_code=404, detail=f"unknown spout action '{action}'")
     key = _resolve(request, name, major, version)
-    if not _driver(request).resync_spout(key, spout_name):
+    if not getattr(_driver(request), method)(key, spout_name):
         raise HTTPException(status_code=404, detail=f"No spout '{spout_name}' on '{name}'")
     return {"ok": True}
