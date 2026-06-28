@@ -130,6 +130,10 @@ class Pond:
     # its freshness is the upstream freshness mirrored by the poller (PondState.remote_f), and its
     # single ripple performs the data transfer. See plans/cross-catchment-ducts.md.
     is_draw: bool = False
+    # A Spout (egress): a terminal node hanging off its Source with a standing Wake — it delivers the
+    # Source's output to an external system, is run by the egress worker (not a Duck), and never
+    # propagates (a Wake up, terminal down). The egress dual of a Draw. See plans/egress.md.
+    is_spout: bool = False
     # At least one declared Source (required OR optional) is absent from the Catchment — not deployed
     # and not drawn over a duct. The Pond cannot run with a missing dependency, so it is hard-blocked
     # until every Source is present (e.g. the Source is deployed, or a duct draws it in).
@@ -192,6 +196,9 @@ class PondState:
     # Control (Wake/Force/Kill — see docs).
     is_killed: bool = False  # operator Kill: terminal, supersedes retries, until Wake/Force/Clear
     pull_local: bool = False  # the pending pull is a Wake — run on fresh input but do NOT solicit Sources
+    standing_wake: bool = False  # a Spout: a *standing* non-propagating pull — re-arm a Wake whenever idle,
+                                 # so it runs on every Source advance without ever soliciting the Source.
+                                 # Sleep/Kill disarm it; Wake/Force re-arm it.
     force_pending: bool = False  # next Run is a Force (recompute) — re-run Ripples even if unchanged
     refresh_pending: bool = False  # next Run is a Refresh — the Duck wipes state first for a cold rebuild
     repairing: bool = False  # in an active repair plan: blocked from normal demand until its turn (D3)

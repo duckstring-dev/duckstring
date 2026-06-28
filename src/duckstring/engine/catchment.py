@@ -599,6 +599,21 @@ def tick(now: datetime, state: EngineState) -> EngineState:
     """Clock-driven processes only: Tide target emission and Wave-on-idle re-Tap. Window availability
     is read live in :func:`can_start_pond`. The caller runs :func:`sentinel` afterwards."""
     s = state.clone()
+    # Standing Wake (Spouts): whenever idle and armed, re-arm a **non-propagating** pull (a Wake, not a
+    # Wave — `pull_local` stops `start_pond_run` soliciting the Source). It then runs whenever the Source
+    # is fresher (`can_start_pond`), at most once per window (the freshness is the window end), and never
+    # adds upstream demand. Failed/killed Spouts stay parked until cleared.
+    for pid in s.pond_states:
+        ps = s.pond_states[pid]
+        if not ps.standing_wake or ps.is_failed or ps.is_killed or ps.is_blocked:
+            continue
+        idle = ps.start_f == ps.end_f and not ps.has_pull and not ps.targets and not any_ripple_busy(s, pid)
+        if idle:
+            ps.has_pull = True
+            ps.pull_local = True
+            for rid in ripples_of(s, pid):
+                s.ripple_states[rid].has_pull = True
+
     for pid, trig in s.triggers.items():
         ps = s.pond_states[pid]
         if trig.kind == "wave":
