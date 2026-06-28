@@ -1,18 +1,20 @@
-"""The egress worker — delivers published Pond output to a Spout's external destination.
+"""The egress worker — delivers a Spout's source output to its external destination.
 
-One async task in the Catchment process (outbound I/O, like the duct poller). It is a **reconciliation
-loop**: each pass it asks the Driver for Spouts whose Pond has published past their watermark
-(:meth:`Driver.egress_pending`) and delivers each via its scheme's egress driver, then advances the
-watermark. Reconciliation (not a fire-and-forget queue) makes it restart-safe — the watermark is the
-durable cursor. A run completion wakes it for promptness; a periodic tick is the self-healing fallback.
+A Spout is a real engine node (the egress dual of a Pond Draw): the engine decides when it runs (a
+standing Wake) and dispatches the run here instead of to a Duck — this worker is "the Spout's Duck". One
+async task in the Catchment process (outbound I/O, like the duct poller): each pass it drains the runs the
+engine dispatched (:meth:`Driver.take_spout_jobs`), delivers each via its scheme's driver, and reports
+completion (:meth:`Driver.complete_spout_run` / :meth:`Driver.fail_spout_run`). Because completion flows
+through the normal pond_run path, a Spout gets the same run history + traceback + /api/runs as any Pond.
 
-An egress failure parks the Spout (its own fault/retry state) and never touches the Pond Run — the data
-is published and correct locally; egress is downstream of that boundary.
+A delivery failure fails *only the Spout's* run (with the traceback) and never the source — a Spout is
+terminal, so it blocks nothing.
 """
 
 from __future__ import annotations
 
 import asyncio
+import traceback
 from pathlib import Path
 
 from fastapi.concurrency import run_in_threadpool
@@ -69,22 +71,18 @@ def _egress_spout(root: Path, job: dict) -> None:
 
 
 async def _drain(driver, root: Path) -> None:
-    for job in driver.egress_pending():
-        driver.mark_egress_running(job["pond_id"], job["spout"], True)  # "delivering" + no re-dispatch
+    for job in driver.take_spout_jobs():
         try:
             await asyncio.wait_for(run_in_threadpool(_egress_spout, root, job), timeout=_PER_SPOUT_TIMEOUT)
-        except Exception as exc:  # noqa: BLE001 — any delivery error parks the Spout, never the Pond
-            driver.record_egress_failure(job["pond_id"], job["spout"], f"{type(exc).__name__}: {exc}")
+        except Exception as exc:  # noqa: BLE001 — any delivery error fails the Spout's run, never the source
+            driver.fail_spout_run(job["spout_key"], job["f"], f"{type(exc).__name__}: {exc}", traceback.format_exc())
         else:
-            # gate_f is the throttle watermark (window end, when windowed); the data rode job["f"].
-            driver.record_egress_success(job["pond_id"], job["spout"], job["gate_f"])
-        finally:
-            driver.mark_egress_running(job["pond_id"], job["spout"], False)
+            driver.complete_spout_run(job["spout_key"], job["f"])
 
 
 async def run_egress_worker(driver, root, wake: asyncio.Event) -> None:
-    """Drain pending Spouts on each wake (a Pond published / a resync) or on the reconcile tick.
-    Cancelled on shutdown."""
+    """Drain the Spout runs the engine dispatched, on each wake (a Pond published / a control verb) or
+    on the reconcile tick. Cancelled on shutdown."""
     root = Path(root)
     while True:
         try:

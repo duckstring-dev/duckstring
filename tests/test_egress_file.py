@@ -144,16 +144,37 @@ def _driver_with_published(tmp_path, end_f):
     return d
 
 
-def test_worker_delivers_snapshot_and_advances_watermark(tmp_path):
-    f1 = datetime(2026, 6, 1, tzinfo=UTC)
-    d = _driver_with_published(tmp_path, f1)
+def _deliver(d, root):
+    """Dispatch the Spout's run (the engine arms the standing Wake on the Source advance) and let the
+    worker deliver + report completion — the real-node path."""
+    d.scheduler_tick()
+    asyncio.run(_drain(d, root))
+
+
+def _would_dispatch(d, spout_key="sales#file@1"):
+    """Whether the engine would dispatch this Spout now — non-mutating (arms a clone, checks the gate)."""
+    from duckstring.catchment.driver import _now
+    from duckstring.engine.catchment import can_start_pond, tick
+    now = _now()
+    return can_start_pond(tick(now, d.state.clone()), spout_key, now)
+
+
+def _with_spout(tmp_path, dest, *, table=None, name=None, mode="full", end_f=None):
+    end_f = end_f or datetime(2026, 6, 1, tzinfo=UTC)
+    d = _driver_with_published(tmp_path, end_f)             # publishes the source parquet
+    spout = d.add_spout("sales@1", name, table, dest, mode)  # add_spout reloads…
+    d.state.pond_states["sales@1"].end_f = end_f             # …so re-assert the Source freshness
+    return d, spout
+
+
+def _sp(d, name):
+    return next(x for x in d.list_spouts("sales@1") if x["name"] == name)
+
+
+def test_worker_delivers_snapshot_and_records_history(tmp_path):
     out = tmp_path / "egress"
-    d.add_spout("sales@1", None, None, f"file://{out}", "full")
-
-    jobs = d.egress_pending()
-    assert len(jobs) == 1 and jobs[0]["spout"] == "file" and jobs[0]["table"] is None and jobs[0]["f"] == f1
-
-    asyncio.run(_drain(d, tmp_path))
+    d, _ = _with_spout(tmp_path, f"file://{out}")
+    _deliver(d, tmp_path)
 
     assert (out / "revenue.parquet").exists()
     rows = duckdb.connect().execute(
@@ -161,198 +182,88 @@ def test_worker_delivers_snapshot_and_advances_watermark(tmp_path):
     ).fetchall()
     assert rows == [(1, 10), (2, 20)]
 
-    # Watermark advanced → nothing pending until the Pond publishes further.
-    assert d.egress_pending() == []
-    assert d.list_spouts("sales@1")[0]["watermark"] == f1.isoformat()
+    sp = _sp(d, "file")
+    assert sp["watermark"] == datetime(2026, 6, 1, tzinfo=UTC).isoformat() and not sp["running"]
+    runs = d.run_history("sales#file@1", lineage=False, ripples=False, limit=10)
+    assert len(runs) == 1 and runs[0]["status"] == "success"
+    assert not _would_dispatch(d)
 
 
-def test_worker_redelivers_when_pond_advances(tmp_path):
-    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
+def test_worker_redelivers_when_source_advances(tmp_path):
     out = tmp_path / "egress"
-    d.add_spout("sales@1", None, None, f"file://{out}", "full")
-    asyncio.run(_drain(d, tmp_path))
-    assert d.egress_pending() == []
+    d, _ = _with_spout(tmp_path, f"file://{out}")
+    _deliver(d, tmp_path)
+    assert not _would_dispatch(d)
 
-    # The Pond runs again with new data at a later freshness.
     _publish_table(tmp_path, "sales", 1, "revenue", "SELECT * FROM (VALUES (1, 99)) t(id, amt)")
     d.state.pond_states["sales@1"].end_f = datetime(2026, 6, 2, tzinfo=UTC)
-    assert len(d.egress_pending()) == 1
-    asyncio.run(_drain(d, tmp_path))
+    _deliver(d, tmp_path)
     rows = duckdb.connect().execute(f"SELECT amt FROM read_parquet('{out / 'revenue.parquet'}')").fetchall()
     assert rows == [(99,)]
 
 
-def test_worker_failure_parks_spout_then_resync_rearms(tmp_path):
-    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
-    # An unwritable destination → delivery fails fast (mkdir under a file, no network); budget 0 → parks.
-    d.add_spout("sales@1", "lake", None, "file:///dev/null/nope", "full")
-    asyncio.run(_drain(d, tmp_path))
+def test_worker_failure_records_failed_run_with_traceback(tmp_path):
+    d, _ = _with_spout(tmp_path, "file:///dev/null/nope", name="lake")
+    _deliver(d, tmp_path)
 
-    s = next(x for x in d.list_spouts("sales@1") if x["name"] == "lake")
-    assert s["is_failed"] is True and s["failures"] == 1 and s["error"]
-    assert d.egress_pending() == []  # parked → not retried
+    sp = _sp(d, "lake")
+    assert sp["is_failed"] is True and sp["error"]
+    # PARITY: a Spout failure is a real failed pond_run with a traceback, in run history.
+    runs = d.run_history("sales#lake@1", lineage=False, ripples=True, limit=10)
+    assert runs[0]["status"] == "failed" and runs[0]["traceback"]
 
-    assert d.resync_spout("sales@1", "lake") is True
-    s = next(x for x in d.list_spouts("sales@1") if x["name"] == "lake")
-    assert s["is_failed"] is False and s["failures"] == 0
-    assert len(d.egress_pending()) == 1  # re-armed
-
-
-def test_worker_retry_budget(tmp_path):
-    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
-    d.add_spout("sales@1", "lake", None, "file:///dev/null/nope", "full")
-    d.db.execute("UPDATE pond_spout SET retries = 2 WHERE name = 'lake'")
-    d.db.commit()
-
-    for expected in (1, 2):  # within budget → stays unparked, still pending
-        asyncio.run(_drain(d, tmp_path))
-        s = next(x for x in d.list_spouts("sales@1") if x["name"] == "lake")
-        assert s["failures"] == expected and s["is_failed"] is False
-        assert len(d.egress_pending()) == 1
-
-    asyncio.run(_drain(d, tmp_path))  # exhausts the budget (3rd failure > 2)
-    s = next(x for x in d.list_spouts("sales@1") if x["name"] == "lake")
-    assert s["failures"] == 3 and s["is_failed"] is True
+    assert d.spout_clear("sales@1", "lake") is True
+    assert _sp(d, "lake")["is_failed"] is False
+    assert _would_dispatch(d, "sales#lake@1")
 
 
-# ─── The standing Wake: Control verbs (sleep/wake/kill/force/clear) + running guard ──
-
-
-def _spout(d, name="file"):
-    return next(x for x in d.list_spouts("sales@1") if x["name"] == name)
+# ─── The standing Wake: Control verbs (sleep/wake/kill/force/clear) ────────────
 
 
 def test_spout_sleep_disarms_wake_rearms(tmp_path):
-    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
-    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
-    assert len(d.egress_pending()) == 1  # armed by default
+    d, _ = _with_spout(tmp_path, f"file://{tmp_path / 'o'}")
+    assert _would_dispatch(d)  # armed by default
 
     assert d.spout_sleep("sales@1", "file") is True
-    assert _spout(d)["standing_wake"] is False
-    assert d.egress_pending() == []  # disarmed → never fires
+    assert _sp(d, "file")["standing_wake"] is False
+    assert not _would_dispatch(d)    # disarmed → never dispatches
 
     assert d.spout_wake("sales@1", "file") is True
-    assert _spout(d)["standing_wake"] is True
-    assert len(d.egress_pending()) == 1  # re-armed
+    assert _sp(d, "file")["standing_wake"] is True
+    assert _would_dispatch(d)        # re-armed
 
 
-def test_spout_kill_parks_until_clear(tmp_path):
-    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
-    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
+def test_spout_kill_parks_until_wake(tmp_path):
+    d, _ = _with_spout(tmp_path, f"file://{tmp_path / 'o'}")
     d.spout_kill("sales@1", "file")
-    assert _spout(d)["is_killed"] is True and _spout(d)["standing_wake"] is False
-    assert d.egress_pending() == []
+    assert _sp(d, "file")["is_killed"] is True and _sp(d, "file")["standing_wake"] is False
+    assert not _would_dispatch(d)
     d.spout_clear("sales@1", "file")
-    assert _spout(d)["is_killed"] is False
-    # clear leaves it disarmed (kill turned the wake off); wake re-arms.
-    assert d.egress_pending() == []
+    assert _sp(d, "file")["is_killed"] is False
+    assert not _would_dispatch(d)    # clear leaves it disarmed (kill turned the Wake off)
     d.spout_wake("sales@1", "file")
-    assert len(d.egress_pending()) == 1
+    assert _would_dispatch(d)
 
 
 def test_spout_force_redelivers_after_caught_up(tmp_path):
-    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
-    out = tmp_path / "o"
-    d.add_spout("sales@1", None, None, f"file://{out}", "full")
-    asyncio.run(_drain(d, tmp_path))
-    assert d.egress_pending() == []  # delivered, caught up
+    d, _ = _with_spout(tmp_path, f"file://{tmp_path / 'o'}")
+    _deliver(d, tmp_path)
+    assert not _would_dispatch(d)    # delivered, caught up
 
-    d.spout_force("sales@1", "file")  # re-deliver the current freshness
-    assert len(d.egress_pending()) == 1
+    d.spout_force("sales@1", "file")  # re-deliver the current state
+    assert _would_dispatch(d)
 
 
-def test_running_guard_excludes_in_flight_spout(tmp_path):
-    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
-    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
-    pond_id = d.meta["sales@1"]["pond_id"]
-    d.mark_egress_running(pond_id, "file", True)
-    assert d.egress_pending() == []  # mid-delivery → not re-dispatched
-    assert _spout(d)["running"] is True
-    d.mark_egress_running(pond_id, "file", False)
-    assert len(d.egress_pending()) == 1
-
-
-def test_status_surfaces_spout_nodes(tmp_path):
-    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
+def test_status_surfaces_spout_as_node(tmp_path):
     dest = f"file://{tmp_path / 'o'}"
-    d.add_spout("sales@1", "revenue", "revenue", dest, "auto")
-    spouts = d.status()["spouts"]
-    assert len(spouts) == 1
-    s = spouts[0]
-    assert s["id"] == "sales@1#revenue" and s["source"] == "sales@1"
-    assert s["destination"] == dest and s["table"] == "revenue"
-    assert s["status"] == "queued"  # source advanced past delivered → wants to deliver
+    d, _ = _with_spout(tmp_path, dest, table="revenue", name="revenue")
+    spouts = [p for p in d.status()["ponds"] if p.get("is_spout")]
+    assert len(spouts) == 1 and spouts[0]["id"] == "sales#revenue@1"
+    assert ["sales@1", "sales#revenue@1"] in d.status()["edges"]
 
-    asyncio.run(_drain(d, tmp_path))
-    assert d.status()["spouts"][0]["status"] == "delivered"  # caught up
-    d.spout_sleep("sales@1", "revenue")
-    assert d.status()["spouts"][0]["status"] == "asleep"
-
-
-# ─── Windows on a Spout: throttle the standing Wake to a window cadence ────────
-
-
-def test_spout_window_throttles_to_window_end(tmp_path, monkeypatch):
-    import duckstring.catchment.driver as drv_mod
-
-    clock = [datetime(2026, 6, 10, 12, 0, tzinfo=UTC)]  # inside the daily window [06-10, 06-11)
-    monkeypatch.setattr(drv_mod, "_now", lambda: clock[0])
-
-    d = _driver_with_published(tmp_path, clock[0])  # source fresh "now"
-    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
-    # Back-to-back daily windows → always inside one; the active window ends at the next midnight.
-    d.add_spout_window("sales@1", "file", "daily", "2026-06-01T00:00:00+00:00", 86400, "DAY", 1)
-    pid = d.meta["sales@1"]["pond_id"]
-
-    jobs = d.egress_pending()
-    assert len(jobs) == 1
-    gate, src = jobs[0]["gate_f"], jobs[0]["f"]
-    assert gate == datetime(2026, 6, 11, 0, 0, tzinfo=UTC)  # delivered freshness clamps to the window end
-    assert gate > src                                       # …which is in the future vs the source freshness
-
-    d.record_egress_success(pid, "file", gate)
-    # Throttled: the source keeps advancing within the window, but the Spout won't re-deliver.
-    d.state.pond_states["sales@1"].end_f = datetime(2026, 6, 10, 23, 0, tzinfo=UTC)
-    assert d.egress_pending() == []
-
-    # Time + source cross the window boundary → it fires again, into the next window.
-    clock[0] = datetime(2026, 6, 11, 1, 0, tzinfo=UTC)
-    d.state.pond_states["sales@1"].end_f = clock[0]
-    jobs = d.egress_pending()
-    assert len(jobs) == 1
-    assert jobs[0]["gate_f"] == datetime(2026, 6, 12, 0, 0, tzinfo=UTC)  # the next window's end
-
-
-def test_spout_window_gap_holds_delivery(tmp_path, monkeypatch):
-    import duckstring.catchment.driver as drv_mod
-
-    clock = [datetime(2026, 6, 10, 12, 0, tzinfo=UTC)]
-    monkeypatch.setattr(drv_mod, "_now", lambda: clock[0])
-
-    d = _driver_with_published(tmp_path, clock[0])
-    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
-    # A window that only opens in 2030 → no active window now → in a gap.
-    d.add_spout_window("sales@1", "file", "future", "2030-01-01T00:00:00+00:00", 3600, "DAY", 1)
-    assert d.egress_pending() == []  # windowed + in a gap → delivery held
-
-    # Remove the window → unthrottled again.
-    assert d.remove_spout_window("sales@1", "file", "future") is True
-    assert len(d.egress_pending()) == 1
-
-
-def test_spout_window_crud(tmp_path):
-    d = _driver_with_published(tmp_path, datetime(2026, 6, 1, tzinfo=UTC))
-    d.add_spout("sales@1", None, None, f"file://{tmp_path / 'o'}", "full")
-    d.add_spout_window("sales@1", "file", "nightly", "2026-06-01T02:00:00+00:00", 3600, "DAY", 1)
-    ws = d.list_spout_windows("sales@1", "file")
-    assert len(ws) == 1 and ws[0]["name"] == "nightly" and ws[0]["freq_unit"] == "DAY"
-    assert d.status()["spouts"][0]["windowed"] is True
-    with pytest.raises(ValueError, match="already exists"):
-        d.add_spout_window("sales@1", "file", "nightly", "2026-06-01T05:00:00+00:00", 600, "DAY", 1)
-    with pytest.raises(ValueError, match="No spout"):
-        d.add_spout_window("sales@1", "ghost", "w", "2026-06-01T00:00:00+00:00", 600, "DAY", 1)
-    assert d.remove_spout_window("sales@1", "file", "nightly") is True
-    assert d.list_spout_windows("sales@1", "file") == []
+    _deliver(d, tmp_path)
+    node = next(p for p in d.status()["ponds"] if p.get("is_spout"))
+    assert node["status"] == "idle"  # delivered, caught up
 
 
 @pytest.mark.timeout(60)

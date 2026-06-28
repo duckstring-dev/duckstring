@@ -148,9 +148,9 @@ class Driver:
         # Wakes the egress worker (a Pond Run published → its Spouts may have work). Same cross-thread
         # shape as _notify_cb; None when no worker is attached (NoopLauncher tests).
         self._egress_cb = None
-        # Spouts currently mid-delivery (pond_id, name) — so a long sync isn't re-dispatched and the UI can
-        # show "delivering". In-memory: a crash just re-evaluates on restart (idempotent via the watermark).
-        self._egress_running: set[tuple[int, str]] = set()
+        # Spout runs the engine dispatched (instead of to a Duck), awaiting the egress worker — mirrors
+        # _pending_transfers for Draws. (spout_key, f). In-memory: a crash re-dispatches on restart.
+        self._pending_egress: list[tuple[str, datetime]] = []
         # Monotonic counter bumped on every state change — the UI long-polls /api/status against it, so
         # the display updates the instant the engine state moves rather than on a fixed timer.
         self.state_version = 0
@@ -189,20 +189,20 @@ class Driver:
             name_by_pnid = {r[0]: r[1] for r in db.execute("SELECT id, name FROM pond_name")}
             rows = db.execute("""
                 SELECT pn.name, p.major, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind,
-                       p.is_draw
+                       p.is_draw, p.is_spout
                 FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id
                 JOIN pond_version pv ON pv.id = p.pond_version_id
             """).fetchall()
             deployed = {pond_key(name, major) for name, major, *_ in rows}
             pondid_to_key = {pid: pond_key(nm, mj) for nm, mj, pid, *_ in rows}
-            for name, major, pond_id, pv_id, version, source_path, kind, is_draw in rows:
+            for name, major, pond_id, pv_id, version, source_path, kind, is_draw, is_spout in rows:
                 self.meta[pond_key(name, major)] = {
                     "name": name, "major": major, "version_id": pv_id, "version": version,
                     "source_path": source_path, "pond_id": pond_id, "kind": kind,
-                    "is_draw": bool(is_draw), "ripple_ids": {},
+                    "is_draw": bool(is_draw), "is_spout": bool(is_spout), "ripple_ids": {},
                 }
 
-            for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw in rows:
+            for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw, is_spout in rows:
                 key = pond_key(name, major)
                 sources, optional, missing = [], set(), []
                 for snid, smajor, required in db.execute(
@@ -231,9 +231,19 @@ class Driver:
                 ponds[key] = Pond(
                     id=key, name=key, sources=sources, optional_sources=optional, windows=windows,
                     retry_immediately=imm, retry_on_change=onc, is_draw=bool(is_draw),
-                    has_missing_source=has_missing_source,
+                    is_spout=bool(is_spout), has_missing_source=has_missing_source,
                 )
                 pond_states[key] = self._load_pond_state(pond_id)
+                if is_spout:
+                    # The egress config + the standing-Wake armed state (Sleep persists as armed=0).
+                    cfg = db.execute(
+                        "SELECT table_name, destination, mode, armed FROM pond_spout WHERE pond_id = ?",
+                        (pond_id,),
+                    ).fetchone()
+                    if cfg:
+                        self.meta[key]["spout"] = {"table": cfg[0], "destination": cfg[1], "mode": cfg[2]}
+                        self.meta[key]["source_key"] = sources[0] if sources else None
+                        pond_states[key].standing_wake = bool(cfg[3])
 
                 rip_rows = db.execute(
                     "SELECT id, name FROM ripple WHERE pond_version_id = ?", (pv_id,)
@@ -630,13 +640,15 @@ class Driver:
 
     # ─── Spouts (egress bindings) ──────────────────────────────────────────────
 
-    def _default_spout_name(self, pond_id: int, scheme: str, table: str | None) -> str:
-        """A friendly, unique-per-Pond name when the operator gives none: the table (or the scheme for an
-        all-tables Spout), suffixed ``-2``, ``-3`` on collision."""
+    def _default_spout_name(self, source_name: str, scheme: str, table: str | None) -> str:
+        """A friendly, unique-per-source name when the operator gives none: the table (or the scheme for
+        an all-tables Spout), suffixed ``-2``, ``-3`` on collision."""
         base = table or scheme
-        existing = {r[0] for r in self.db.execute(
-            "SELECT name FROM pond_spout WHERE pond_id = ?", (pond_id,)
-        )}
+        existing = {
+            n.split("#", 1)[1]
+            for (n,) in self.db.execute("SELECT name FROM pond_name WHERE name LIKE ?", (f"{source_name}#%",))
+            if "#" in n
+        }
         if base not in existing:
             return base
         i = 2
@@ -646,34 +658,37 @@ class Driver:
 
     def add_spout(self, pond: str, name: str | None, table: str | None,
                   destination: str, mode: str = "auto") -> str:
-        """Bind a Spout to a Pond: egress ``table`` (or all tables) to ``destination`` in ``mode``.
-        Validates the destination scheme + credential-reference syntax and the mode; the credentials
-        themselves are resolved only at egress time. Returns the Spout's (possibly generated) name.
-        Raises ValueError on a bad destination/mode or a duplicate name."""
+        """Bind a Spout to a Pond (its source): a real engine node (the egress dual of a Draw) that
+        delivers ``table`` (or all tables) to ``destination`` in ``mode`` via the egress worker. Returns
+        the Spout's (possibly generated) name. Raises ValueError on a bad destination/mode/duplicate."""
         from ..egress.destination import parse_destination, validate_mode
+        from ..keys import split_pond_key
 
         dest = parse_destination(destination)
         validate_mode(mode)
         with self.lock:
             m = self.meta[pond]
-            pond_id = m["pond_id"]
             if dest.transactional:
                 # A transactional destination does identity-based upsert/delete → it needs a primary key,
-                # which only a merge Trickle declares. Reject what we can see now (the Pond has published a
-                # plain/overwrite table); a not-yet-published source is caught at egress instead.
+                # which only a merge Trickle declares. Reject what we can see now; a not-yet-published
+                # source is caught at egress instead.
                 self._assert_transactional_pk(m["name"], m["major"], table)
-            final = name or self._default_spout_name(pond_id, dest.scheme, table)
-            if self.db.execute(
-                "SELECT 1 FROM pond_spout WHERE pond_id = ? AND name = ?", (pond_id, final)
-            ).fetchone():
+            src_name, major = split_pond_key(pond)
+            final = name or self._default_spout_name(src_name, dest.scheme, table)
+            if self.meta.get(pond_key(f"{src_name}#{final}", major), {}).get("is_spout"):
                 raise ValueError(f"A spout named '{final}' already exists on '{pond}'")
-            self.db.execute(
-                "INSERT INTO pond_spout (pond_id, name, table_name, destination, mode, schedule) "
-                "VALUES (?, ?, ?, ?, ?, 'on-run')",
-                (pond_id, final, table, destination, mode),
-            )
+            self._create_spout(src_name, major, final, destination, table, mode)
             self.db.commit()
-            return final
+            self.reload()
+        self._signal_egress()
+        return final
+
+    def _resolve_spout(self, pond: str, name: str) -> str | None:
+        from ..keys import split_pond_key
+
+        src_name, major = split_pond_key(pond)
+        skey = pond_key(f"{src_name}#{name}", major)
+        return skey if self.meta.get(skey, {}).get("is_spout") else None
 
     def _assert_transactional_pk(self, name: str, major: int, table: str | None) -> None:
         """Reject a Spout to a transactional destination whose source table is already published without a
@@ -696,196 +711,146 @@ class Driver:
 
     def list_spouts(self, pond: str) -> list[dict]:
         with self.lock:
-            pond_id = self.meta[pond]["pond_id"]
-            rows = self.db.execute(
-                "SELECT name, table_name, destination, mode, schedule, watermark, is_failed, failures, "
-                "error, standing_wake, is_killed FROM pond_spout WHERE pond_id = ? ORDER BY name", (pond_id,)
-            ).fetchall()
-            return [
-                {"name": n, "table": t, "destination": d, "mode": m, "schedule": s,
-                 "watermark": wm, "is_failed": bool(failed), "failures": failures, "error": err,
-                 "standing_wake": bool(wake), "is_killed": bool(killed),
-                 "running": (pond_id, n) in self._egress_running}
-                for (n, t, d, m, s, wm, failed, failures, err, wake, killed) in rows
-            ]
+            out = []
+            for skey, sm in self.meta.items():
+                if not sm.get("is_spout") or sm.get("source_key") != pond:
+                    continue
+                ps = self.state.pond_states[skey]
+                cfg = sm.get("spout", {})
+                err = None
+                if ps.is_failed:
+                    row = self.db.execute(
+                        "SELECT error FROM pond_run WHERE pond_version_id = ? AND status = 'failed' "
+                        "ORDER BY f DESC LIMIT 1", (sm["version_id"],),
+                    ).fetchone()
+                    err = row[0] if row else None
+                out.append({
+                    "name": sm["name"].split("#", 1)[1], "table": cfg.get("table"),
+                    "destination": cfg.get("destination"), "mode": cfg.get("mode"),
+                    "watermark": _iso(ps.end_f) if ps.end_f != NEVER else None,
+                    "is_failed": ps.is_failed, "is_killed": ps.is_killed, "failures": ps.failures,
+                    "error": err, "standing_wake": ps.standing_wake, "running": ps.start_f != ps.end_f,
+                })
+            out.sort(key=lambda s: s["name"])
+            return out
 
     def remove_spout(self, pond: str, name: str) -> bool:
         with self.lock:
-            pond_id = self.meta[pond]["pond_id"]
-            cur = self.db.execute(
-                "DELETE FROM pond_spout WHERE pond_id = ? AND name = ?", (pond_id, name)
-            )
+            skey = self._resolve_spout(pond, name)
+            if skey is None:
+                return False
+            self._destroy_spout(skey)
             self.db.commit()
-            return cur.rowcount > 0
+            self.reload()
+        return True
 
-    def _spout_control(self, pond: str, name: str, sql: str) -> bool:
+    # The Control set on a Spout's standing Wake. Demand verbs (tap/wave/pulse/tide) do NOT apply — a
+    # Spout never solicits and never takes demand. The Spout is a real node, so these mutate its engine
+    # state (and persist the armed flag); failure/history flow through the normal pond_run path.
+    def _spout_ctl(self, pond: str, name: str, fn) -> bool:
         with self.lock:
-            pond_id = self.meta[pond]["pond_id"]
-            cur = self.db.execute(sql + " WHERE pond_id = ? AND name = ?", (pond_id, name))
+            skey = self._resolve_spout(pond, name)
+            if skey is None:
+                return False
+            fn(skey, self.meta[skey]["pond_id"])
             self.db.commit()
-        if cur.rowcount > 0:
-            self._signal_egress()
-        return cur.rowcount > 0
+            self._process(_now())
+        self._signal_egress()
+        return True
 
-    # The Control set on a Spout (its standing Wake): Sleep/Kill disarm, Wake/Force re-arm. Demand verbs
-    # (tap/wave/pulse/tide) do NOT apply — a Spout never solicits and never takes demand.
+    def _arm(self, skey: str, pid: int, armed: bool) -> None:
+        self.db.execute("UPDATE pond_spout SET armed = ? WHERE pond_id = ?", (1 if armed else 0, pid))
+        self.state.pond_states[skey].standing_wake = armed
+
     def spout_wake(self, pond: str, name: str) -> bool:
-        """Re-arm the standing Wake (and clear any failure/kill): deliver on the next source advance."""
-        return self._spout_control(pond, name, "UPDATE pond_spout SET standing_wake = 1, is_failed = 0, "
-                                               "is_killed = 0, failures = 0, error = NULL")
+        """Re-arm the standing Wake + clear any failure/kill — deliver on the next source advance."""
+        def fn(skey, pid):
+            self.state = clear_pond(self.state, skey, _now())  # roll the phantom + clear failed/killed
+            self._arm(skey, pid, True)
+        return self._spout_ctl(pond, name, fn)
 
     def spout_force(self, pond: str, name: str) -> bool:
-        """Re-arm + re-deliver now: clear the watermark so the current freshness is re-egressed."""
-        return self._spout_control(pond, name, "UPDATE pond_spout SET standing_wake = 1, is_failed = 0, "
-                                               "is_killed = 0, failures = 0, error = NULL, watermark = NULL")
+        """Re-arm + re-deliver the current state now (reset the delivered freshness)."""
+        def fn(skey, pid):
+            self.state = clear_pond(self.state, skey, _now())
+            self._arm(skey, pid, True)
+            ps = self.state.pond_states[skey]
+            ps.start_f = ps.end_f = NEVER  # re-fire from scratch (idempotent for the destination)
+        return self._spout_ctl(pond, name, fn)
 
     def spout_sleep(self, pond: str, name: str) -> bool:
         """Disarm the standing Wake — no new deliveries (an in-flight one finishes)."""
-        return self._spout_control(pond, name, "UPDATE pond_spout SET standing_wake = 0")
+        return self._spout_ctl(pond, name, lambda skey, pid: self._arm(skey, pid, False))
 
     def spout_kill(self, pond: str, name: str) -> bool:
-        """Disarm + park (killed): no deliveries until Wake/Force/Clear."""
-        return self._spout_control(pond, name, "UPDATE pond_spout SET standing_wake = 0, is_killed = 1")
+        """Disarm + park (killed) until Wake/Force/Clear."""
+        def fn(skey, pid):
+            self.state = kill_pond(self.state, skey, _now())
+            self._arm(skey, pid, False)
+        return self._spout_ctl(pond, name, fn)
 
     def spout_clear(self, pond: str, name: str) -> bool:
-        """Clear a failed/killed Spout without changing whether it is armed."""
-        return self._spout_control(pond, name, "UPDATE pond_spout SET is_failed = 0, is_killed = 0, "
-                                               "failures = 0, error = NULL")
+        """Clear a failed/killed Spout (leaves its armed state unchanged)."""
+        return self._spout_ctl(pond, name, lambda skey, pid: setattr(
+            self, "state", clear_pond(self.state, skey, _now())))
 
     def resync_spout(self, pond: str, name: str) -> bool:
-        """Force a full re-egress: clear the watermark + any failure so the current state re-delivers."""
-        return self._spout_control(pond, name, "UPDATE pond_spout SET watermark = NULL, is_failed = 0, "
-                                               "failures = 0, error = NULL")
+        """Force a full re-egress of the current state."""
+        return self.spout_force(pond, name)
 
-    # ─── Spout windows (throttle the standing Wake) ─────────────────────────────
+    # ─── Egress worker support (node dispatch) ──────────────────────────────────
 
-    def add_spout_window(self, pond: str, spout: str, name: str, start_anchor: str, duration_seconds: int,
-                         freq_unit: str, freq_interval: int, valid_days: str | None = None,
-                         until_time: str | None = None) -> None:
-        with self.lock:
-            pond_id = self.meta[pond]["pond_id"]
-            if not self.db.execute(
-                "SELECT 1 FROM pond_spout WHERE pond_id = ? AND name = ?", (pond_id, spout)
-            ).fetchone():
-                raise ValueError(f"No spout '{spout}' on '{pond}'")
-            if self.db.execute(
-                "SELECT 1 FROM spout_window WHERE pond_id = ? AND spout_name = ? AND name = ?",
-                (pond_id, spout, name),
-            ).fetchone():
-                raise ValueError(f"A window named '{name}' already exists on spout '{spout}'")
-            self.db.execute(
-                "INSERT INTO spout_window (pond_id, spout_name, name, start_anchor, duration_seconds, "
-                "freq_unit, freq_interval, valid_days, until_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (pond_id, spout, name, start_anchor, duration_seconds, freq_unit, freq_interval,
-                 valid_days, until_time),
-            )
-            self.db.commit()
-        self._signal_egress()
-
-    def list_spout_windows(self, pond: str, spout: str) -> list[dict]:
-        with self.lock:
-            pond_id = self.meta[pond]["pond_id"]
-            rows = self.db.execute(
-                "SELECT name, start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, "
-                "until_time FROM spout_window WHERE pond_id = ? AND spout_name = ? ORDER BY name",
-                (pond_id, spout),
-            ).fetchall()
-            return [
-                {"name": n, "start_anchor": sa, "duration_seconds": d, "freq_unit": u,
-                 "freq_interval": i, "valid_days": vd, "until_time": ut}
-                for (n, sa, d, u, i, vd, ut) in rows
-            ]
-
-    def remove_spout_window(self, pond: str, spout: str, name: str) -> bool:
-        with self.lock:
-            pond_id = self.meta[pond]["pond_id"]
-            cur = self.db.execute(
-                "DELETE FROM spout_window WHERE pond_id = ? AND spout_name = ? AND name = ?",
-                (pond_id, spout, name),
-            )
-            self.db.commit()
-        return cur.rowcount > 0
-
-    # ─── Egress worker support ──────────────────────────────────────────────────
-
-    def _spout_window_end(self, pond_id: int, spout: str, now: datetime):
-        """For a windowed Spout: ('active', window_end) when ``now`` is inside a window, ('gap', None)
-        when it has windows but none is active. ('open', None) when it has no windows (unthrottled)."""
-        rows = self.db.execute(
-            "SELECT start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time "
-            "FROM spout_window WHERE pond_id = ? AND spout_name = ?", (pond_id, spout)
-        ).fetchall()
-        if not rows:
-            return "open", None
-        ends = [e for e in (self._row_to_window(r).active_end(now) for r in rows) if e is not None]
-        return ("active", max(ends)) if ends else ("gap", None)
-
-    def egress_pending(self) -> list[dict]:
-        """Every armed Spout whose source Pond has advanced past what it has delivered and that isn't
-        parked or already mid-delivery — the standing-Wake firing condition (run when ``sourceF > deliveredF``,
-        non-propagating). A **windowed** Spout fires only inside an active window and records the window's
-        end as delivered (`gate_f`), so it delivers at most once per window. Each job carries what the
-        worker needs to read + write, plus `gate_f` (the watermark to set; the data still rides `f`)."""
-        now = _now()
+    def take_spout_jobs(self) -> list[dict]:
+        """Drain the Spout runs the engine dispatched (instead of sending them to a Duck). Each job
+        carries the **source** Pond to read + the destination to write; the worker delivers out-of-lock
+        and reports completion via complete_spout_run / fail_spout_run."""
         with self.lock:
             jobs = []
-            for key, m in self.meta.items():
-                ps = self.state.pond_states.get(key)
-                if ps is None or ps.end_f <= NEVER:
+            for skey, f in self._pending_egress:
+                sm = self.meta.get(skey)
+                src_key = sm.get("source_key") if sm else None
+                if src_key is None or src_key not in self.meta:
                     continue
-                source_f = ps.end_f  # the source Pond's published freshness
-                for name, table, dest, mode, wm in self.db.execute(
-                    "SELECT name, table_name, destination, mode, watermark FROM pond_spout "
-                    "WHERE pond_id = ? AND standing_wake = 1 AND is_failed = 0 AND is_killed = 0",
-                    (m["pond_id"],),
-                ).fetchall():
-                    if (m["pond_id"], name) in self._egress_running:  # not already delivering
-                        continue
-                    if source_f <= (datetime.fromisoformat(wm) if wm else NEVER):  # already delivered
-                        continue
-                    wstate, wend = self._spout_window_end(m["pond_id"], name, now)
-                    if wstate == "gap":  # windowed but between windows — hold delivery
-                        continue
-                    # gate_f throttles the next fire (window end, in the future vs source_f → no re-fire
-                    # until the source passes it); the data + CDC cursor still use source_f.
-                    gate_f = wend if wstate == "active" else source_f
-                    jobs.append({
-                        "pond_id": m["pond_id"], "pond_name": m["name"], "major": m["major"],
-                        "spout": name, "table": table, "destination": dest, "mode": mode,
-                        "f": source_f, "gate_f": gate_f,
-                    })
+                src, cfg = self.meta[src_key], sm.get("spout", {})
+                jobs.append({
+                    "spout_key": skey, "f": _iso(f),
+                    "pond_name": src["name"], "major": src["major"],
+                    "table": cfg.get("table"), "destination": cfg.get("destination"), "mode": cfg.get("mode"),
+                })
+            self._pending_egress = []
             return jobs
 
-    def mark_egress_running(self, pond_id: int, spout: str, running: bool) -> None:
+    def complete_spout_run(self, spout_key: str, f: str) -> None:
+        """The egress worker delivered freshness ``f``: complete the Spout's run (advances its freshness;
+        records a success pond_run/ripple_run — the same history a Pond gets)."""
         with self.lock:
-            if running:
-                self._egress_running.add((pond_id, spout))
-            else:
-                self._egress_running.discard((pond_id, spout))
+            now = _now()
+            eid = f"{spout_key}.egress"
+            rs = self.state.ripple_states.get(eid)
+            started = _iso(rs.started_at) if rs and rs.started_at else _iso(now)
+            if rs is not None:
+                rs.start_f = datetime.fromisoformat(f)
+                self.state = complete_ripple(self.state, eid, now)
+                self._record_ripple_run(spout_key, "egress", f, "success",
+                                        started_at=started, finished_at=_iso(now))
+            self._finish_pond_run(spout_key, f, now)
+            self._process(now, notify=False)
 
-    def record_egress_success(self, pond_id: int, spout: str, f: datetime) -> None:
+    def fail_spout_run(self, spout_key: str, f: str, error: str, tb: str | None = None) -> None:
+        """The egress worker could not deliver: fail the Spout's run (a failed pond_run with the
+        traceback — surfaced in /api/runs like any Pond — never touching the source)."""
         with self.lock:
-            self.db.execute(
-                "UPDATE pond_spout SET watermark = ?, failures = 0, is_failed = 0, error = NULL "
-                "WHERE pond_id = ? AND name = ?", (_iso(f), pond_id, spout)
-            )
-            self.db.commit()
-
-    def record_egress_failure(self, pond_id: int, spout: str, error: str) -> None:
-        """Count a failed delivery; park the Spout (is_failed) once it exhausts its retry budget. Never
-        touches the Pond — egress is downstream of the published boundary."""
-        with self.lock:
-            row = self.db.execute(
-                "SELECT failures, retries FROM pond_spout WHERE pond_id = ? AND name = ?", (pond_id, spout)
-            ).fetchone()
-            if row is None:
-                return
-            failures = row[0] + 1
-            self.db.execute(
-                "UPDATE pond_spout SET failures = ?, is_failed = ?, error = ? WHERE pond_id = ? AND name = ?",
-                (failures, 1 if failures > row[1] else 0, (error or "")[:500], pond_id, spout),
-            )
-            self.db.commit()
+            now = _now()
+            eid = f"{spout_key}.egress"
+            rs = self.state.ripple_states.get(eid)
+            started = _iso(rs.started_at) if rs and rs.started_at else _iso(now)
+            if rs is not None:
+                rs.start_f = datetime.fromisoformat(f)
+                self.state = fail_ripple(self.state, eid, now)
+                self._record_ripple_run(spout_key, "egress", f, "failed",
+                                        started_at=started, finished_at=_iso(now), error=error)
+            self._fail_pond_run(spout_key, f, now, error, tb)
+            self._process(now, notify=False)
 
     # ─── Duck events ──────────────────────────────────────────────────────────
 
@@ -1259,6 +1224,67 @@ class Driver:
         db.execute("DELETE FROM ripple WHERE pond_version_id = ?", (pv_id,))
         db.execute("DELETE FROM pond_version WHERE id = ?", (pv_id,))
 
+    def _create_spout(self, source_name: str, source_major: int, spout: str,
+                      destination: str, table: str | None, mode: str) -> str:
+        """Materialise a Spout's identity rows (caller holds the lock and reloads). The egress dual of a
+        Draw: kind='outlet', is_spout=1, a synthetic pond_version + one 'egress' ripple, wired to its
+        source via pond_to_pond. Returns the Spout's pond key. Mirrors :meth:`_create_draw`."""
+        db = self.db
+        sname = f"{source_name}#{spout}"
+        db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, 'outlet')", (sname,))
+        (pn_id,) = db.execute("SELECT id FROM pond_name WHERE name = ?", (sname,)).fetchone()
+        (src_pn_id,) = db.execute("SELECT id FROM pond_name WHERE name = ?", (source_name,)).fetchone()
+
+        version = f"{source_major}.0.0"
+        db.execute(
+            "INSERT OR IGNORE INTO pond_version (pond_name_id, version, major, source_path) VALUES (?, ?, ?, ?)",
+            (pn_id, version, source_major, f"spout://{sname}@{source_major}"),
+        )
+        (pv_id,) = db.execute(
+            "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
+        ).fetchone()
+        db.execute("INSERT OR IGNORE INTO ripple (pond_version_id, name) VALUES (?, 'egress')", (pv_id,))
+        db.execute(
+            "INSERT INTO pond (pond_name_id, major, pond_version_id, is_spout) VALUES (?, ?, ?, 1) "
+            "ON CONFLICT(pond_name_id, major) DO UPDATE SET pond_version_id = excluded.pond_version_id, "
+            "is_spout = 1",
+            (pn_id, source_major, pv_id),
+        )
+        (spout_pid,) = db.execute(
+            "SELECT id FROM pond WHERE pond_name_id = ? AND major = ?", (pn_id, source_major)
+        ).fetchone()
+        db.execute(
+            "INSERT OR IGNORE INTO pond_to_pond (pond_id, source_pond_name_id, source_major, required) "
+            "VALUES (?, ?, ?, 1)", (spout_pid, src_pn_id, source_major),
+        )
+        db.execute(
+            "INSERT INTO pond_spout (pond_id, table_name, destination, mode, armed) VALUES (?, ?, ?, ?, 1) "
+            "ON CONFLICT(pond_id) DO UPDATE SET table_name = excluded.table_name, "
+            "destination = excluded.destination, mode = excluded.mode",
+            (spout_pid, table, destination, mode),
+        )
+        return pond_key(sname, source_major)
+
+    def _destroy_spout(self, spout_key: str) -> bool:
+        """Remove a Spout's identity + state + history rows (caller holds the lock and reloads)."""
+        db = self.db
+        meta = self.meta.get(spout_key)
+        if meta is None or not meta.get("is_spout"):
+            return False
+        pond_id, pv_id = meta["pond_id"], meta["version_id"]
+        (pn_id,) = db.execute("SELECT pond_name_id FROM pond WHERE id = ?", (pond_id,)).fetchone()
+        db.execute("DELETE FROM ripple_run WHERE pond_version_id = ?", (pv_id,))
+        db.execute("DELETE FROM pond_run WHERE pond_version_id = ?", (pv_id,))
+        for tbl in ("pond_state", "pond_target", "pond_open", "pond_trigger", "pond_retry",
+                    "pond_window", "pond_spout", "pond_to_pond"):
+            db.execute(f"DELETE FROM {tbl} WHERE pond_id = ?", (pond_id,))
+        db.execute("DELETE FROM pond WHERE id = ?", (pond_id,))
+        db.execute("DELETE FROM ripple WHERE pond_version_id = ?", (pv_id,))
+        db.execute("DELETE FROM pond_version WHERE id = ?", (pv_id,))
+        db.execute("DELETE FROM pond_name WHERE id = ? AND NOT EXISTS "
+                   "(SELECT 1 FROM pond_version WHERE pond_name_id = ?)", (pn_id, pn_id))
+        return True
+
     # ─── Scheduling ───────────────────────────────────────────────────────────
 
     def next_wake(self) -> datetime | None:
@@ -1278,7 +1304,8 @@ class Driver:
         if not self.launcher.manages_processes:
             return
         for pond in list(self.state.ponds):
-            if self.state.ponds[pond].is_draw:  # no Duck process — the poller drives transfers
+            p = self.state.ponds[pond]
+            if p.is_draw or p.is_spout:  # no Duck process — the poller/egress worker drives these
                 continue
             ps = self.state.pond_states[pond]
             if ps.is_blocked or ps.is_killed:  # killed Ponds are intentionally down — don't re-fail
@@ -1328,6 +1355,19 @@ class Driver:
             self.db.commit()
             if (pond, f) not in self._pending_transfers:
                 self._pending_transfers.append((pond, f))
+            return
+        # A Spout is the egress dual: not run by a Duck either — record the Run and hand the delivery to
+        # the egress worker (it reads the source + writes out-of-lock, then reports via complete/fail).
+        if meta.get("is_spout"):
+            self.db.execute(
+                "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status) "
+                "VALUES (?, ?, ?, 'running')",
+                (meta["version_id"], _iso(f), _iso(now)),
+            )
+            self.db.commit()
+            if (pond, f) not in self._pending_egress:
+                self._pending_egress.append((pond, f))
+            self._signal_egress()
             return
         self.launcher.ensure(pond, meta["version"], meta["source_path"])
         self.last_seen[pond] = now  # grace clock: a freshly (re)spawned Duck isn't immediately stale
@@ -1637,6 +1677,7 @@ class Driver:
                     "major": self.meta[key]["major"],
                     "kind": self.meta[key]["kind"],
                     "is_draw": self.meta[key].get("is_draw", False),
+                    "is_spout": self.meta[key].get("is_spout", False),
                     "version": self.meta[key]["version"],
                     "has_tables": has_tables,
                     "status": st,
@@ -1663,51 +1704,16 @@ class Driver:
                     "ripples": ripples,
                     "ripple_edges": ripple_edges,
                 })
-            # Edge endpoints are pond keys ("name@major") — match entries on their "id".
+            # Edge endpoints are pond keys ("name@major") — match entries on their "id". A Spout is a
+            # real node now, so it and its source→spout edge fall out of `ponds`/`edges` (dashed in the UI
+            # like a Draw, distinguished by `is_spout`).
             edges = [[s, key] for key, pond in self.state.ponds.items() for s in pond.sources]
-
-            # Spouts — passive standing-Wake nodes hanging off their Pond (rendered dashed, like Draws).
-            # Each carries its own delivery freshness/state; an edge runs from its source Pond to it.
-            spouts = []
-            by_id = {m["pond_id"]: key for key, m in self.meta.items()}
-            windowed = {(p, s) for p, s in self.db.execute(
-                "SELECT DISTINCT pond_id, spout_name FROM spout_window"
-            ).fetchall()}
-            for pond_id, name, table, dest, mode, wm, failed, failures, err, wake, killed in self.db.execute(
-                "SELECT pond_id, name, table_name, destination, mode, watermark, is_failed, failures, "
-                "error, standing_wake, is_killed FROM pond_spout ORDER BY pond_id, name"
-            ).fetchall():
-                src_key = by_id.get(pond_id)
-                if src_key is None:
-                    continue
-                source_f = self.state.pond_states[src_key].end_f
-                delivered = datetime.fromisoformat(wm) if wm else NEVER
-                running = (pond_id, name) in self._egress_running
-                if running:
-                    sstat = "delivering"
-                elif failed:
-                    sstat = "failed"
-                elif killed:
-                    sstat = "killed"
-                elif not wake:
-                    sstat = "asleep"
-                elif delivered < source_f:
-                    sstat = "queued"
-                else:
-                    sstat = "delivered"
-                spouts.append({
-                    "id": f"{src_key}#{name}", "source": src_key, "name": name, "destination": dest,
-                    "table": table, "mode": mode, "status": sstat, "source_f": ts(source_f),
-                    "delivered_f": ts(delivered), "standing_wake": bool(wake), "is_failed": bool(failed),
-                    "is_killed": bool(killed), "failures": failures, "error": err,
-                    "windowed": (pond_id, name) in windowed,
-                })
 
             rows = dict(self.db.execute("SELECT key, value FROM catchment_meta").fetchall())
             return {
                 "catchment": {"id": rows.get("id"), "name": rows.get("name")},
                 "version": self.state_version,  # the /api/status long-poll's change token
-                "ponds": ponds, "edges": edges, "spouts": spouts,
+                "ponds": ponds, "edges": edges,
             }
 
     def view_fragment(self, scope: list[str] | None) -> dict:

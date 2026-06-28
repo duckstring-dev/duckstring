@@ -77,9 +77,11 @@ def test_driver_spout_add_list_remove(tmp_path):
     spouts = d.list_spouts("sales@1")
     assert len(spouts) == 1
     s = spouts[0]
-    assert (s["name"], s["table"], s["destination"], s["mode"], s["schedule"]) == \
-        ("revenue", "revenue", "s3://bucket/sales", "auto", "on-run")
-    assert s["watermark"] is None and s["is_failed"] is False and s["failures"] == 0
+    assert (s["name"], s["table"], s["destination"], s["mode"]) == \
+        ("revenue", "revenue", "s3://bucket/sales", "auto")
+    assert s["watermark"] is None and s["is_failed"] is False and s["standing_wake"] is True
+    # The Spout is a real node now: identity rows exist for it.
+    assert "sales#revenue@1" in d.meta and d.meta["sales#revenue@1"]["is_spout"]
     assert d.remove_spout("sales@1", "revenue") is True
     assert d.list_spouts("sales@1") == []
     assert d.remove_spout("sales@1", "revenue") is False  # already gone

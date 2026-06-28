@@ -366,42 +366,6 @@ def remove_spout(
     return {"ok": True}
 
 
-# Windows on a Spout (throttle its standing Wake). Registered before the generic /{action} route below
-# so `windows` is matched as a literal, not an action.
-@router.post("/ponds/{name}/spouts/{spout_name}/windows", dependencies=[auth.full])
-def add_spout_window(
-    name: str, spout_name: str, body: _WindowBody, request: Request,
-    major: int | None = None, version: str | None = None,
-):
-    key = _resolve(request, name, major, version)
-    try:
-        _driver(request).add_spout_window(
-            key, spout_name, body.name, body.start_anchor, body.duration_seconds,
-            body.freq_unit, body.freq_interval, body.valid_days, body.until_time,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"ok": True}
-
-
-@router.get("/ponds/{name}/spouts/{spout_name}/windows", dependencies=[auth.read])
-def list_spout_windows(name: str, spout_name: str, request: Request,
-                       major: int | None = None, version: str | None = None):
-    key = _resolve(request, name, major, version)
-    return {"windows": _driver(request).list_spout_windows(key, spout_name)}
-
-
-@router.post("/ponds/{name}/spouts/{spout_name}/windows/{window_name}/remove", dependencies=[auth.full])
-def remove_spout_window(
-    name: str, spout_name: str, window_name: str, request: Request,
-    major: int | None = None, version: str | None = None,
-):
-    key = _resolve(request, name, major, version)
-    if not _driver(request).remove_spout_window(key, spout_name, window_name):
-        raise HTTPException(status_code=404, detail=f"No window '{window_name}' on spout '{spout_name}'")
-    return {"ok": True}
-
-
 # A Spout's Control set (its standing Wake) + resync. Demand verbs (tap/wave/pulse/tide) don't apply.
 _SPOUT_ACTIONS = {
     "wake": "spout_wake", "force": "spout_force", "sleep": "spout_sleep",
