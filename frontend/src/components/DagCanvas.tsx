@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -75,9 +75,10 @@ const edgeTypes: EdgeTypes = {
 
 // ─── Status / legend panel ───────────────────────────────────────────────────
 
-// The caller's API access level as three capability chips — Manage / Demand / Read — each green when
-// the key grants it, grey when not. Read is the floor (always on); Demand adds tap/wave/pulse/tide;
-// Manage adds deploy/control/secrets. Reads as "what your key can do", not a broken UI.
+// The caller's API access level as three capabilities — Manage | Demand | Read — each prefixed with a
+// green ✓ when the key grants it, a grey – when not. The labels stay white (the ✓/– carries the state);
+// reads as "what your key can do", not a broken UI. Read is the floor (always on); Demand adds
+// tap/wave/pulse/tide; Manage adds deploy/control/secrets.
 const ACCESS_CHIPS: { label: string; active: (l: AccessLevel) => boolean; hint: string }[] = [
   { label: 'Manage', active: (l) => l === 'full', hint: 'Deploy, control, and manage secrets.' },
   { label: 'Demand', active: (l) => l === 'full' || l === 'demand', hint: 'Create demand: tap, wave, pulse, tide.' },
@@ -87,26 +88,17 @@ const ACCESS_CHIPS: { label: string; active: (l: AccessLevel) => boolean; hint: 
 function AccessBadge() {
   const level = useLiveStore((s) => s.accessLevel);
   return (
-    <div style={{ display: 'flex', gap: 4 }}>
-      {ACCESS_CHIPS.map(({ label, active, hint }) => {
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, letterSpacing: '0.02em' }}>
+      {ACCESS_CHIPS.map(({ label, active, hint }, i) => {
         const on = active(level);
         return (
-          <span
-            key={label}
-            title={hint}
-            style={{
-              fontSize: 9,
-              fontWeight: 600,
-              letterSpacing: '0.04em',
-              padding: '2px 6px',
-              borderRadius: 4,
-              color: on ? THEME_SUCCESS : '#52525b',
-              border: `1px solid ${on ? THEME_SUCCESS : '#3f3f46'}`,
-              background: on ? 'rgba(34,197,94,0.08)' : 'transparent',
-            }}
-          >
-            {label}
-          </span>
+          <Fragment key={label}>
+            {i > 0 && <span style={{ color: '#3f3f46' }}>|</span>}
+            <span title={hint} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: '#e4e4e7' }}>
+              <span style={{ color: on ? THEME_SUCCESS : '#52525b' }}>{on ? '✓' : '–'}</span>
+              {label}
+            </span>
+          </Fragment>
         );
       })}
     </div>
@@ -212,9 +204,7 @@ function StatusPanel() {
           {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
         </span>
       </div>
-      <div style={{ paddingLeft: 15 }}>
-        <AccessBadge />
-      </div>
+      <AccessBadge />
     </div>
   );
 }
