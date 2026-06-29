@@ -95,7 +95,7 @@ See [Windows](../guides/windows.md). The Pond name comes directly after `window`
 
 ## `duckstring spout` — egress bindings
 
-Publish a Pond's output to external systems. A Spout is operational config (persisted, survives redeploys), not declared in `pond.toml`. Credentials go in the destination URI as `${env:NAME}` references, resolved only at egress time. After each successful Pond Run, the egress worker delivers the Pond's published tables to the destination as snapshot Parquet (`{prefix}/{table}.parquet`).
+Publish a Pond's output to external systems. A Spout is operational config (persisted, survives redeploys), not declared in `pond.toml`. Credentials go in the destination URI as `${env:NAME}` (process environment) or `${secret:NAME}` ([secret store](#duckstring-secret--credential-store)) references, resolved only at egress time — never stored in the binding or logged. After each successful Pond Run, the egress worker delivers the Pond's published tables to the destination as snapshot Parquet (`{prefix}/{table}.parquet`).
 
 `file://`, `s3://`, `gs://`, and `postgres://` work today. Object-store credentials go in the URI query: `s3://bucket/prefix?key_id=${env:AWS_KEY}&secret=${env:AWS_SECRET}&region=us-east-1` (also `endpoint`, `url_style`, `use_ssl`, `session_token`); `s3://` with no key falls back to the AWS credential chain (env / instance profile); `gs://` needs HMAC `key_id`+`secret`.
 
@@ -112,6 +112,18 @@ Publish a Pond's output to external systems. A Spout is operational config (pers
 | `spout kill \| clear {pond} {name}` | Park the Spout (terminal) / clear a failed-or-killed Spout. |
 
 A Spout is a **real Pond** hanging off its source with a standing **Wake** (the egress dual of a [Pond Draw](../guides/connecting-catchments.md)) — it delivers whenever the source's freshness advances, never pulls on the source, and never blocks anything (its runs and failures are its own, with full run history + tracebacks in [run history](#duckstring-status)). The **Control** verbs above apply to it; the **Demand** verbs (tap/wave/pulse/tide) do not. To **throttle** delivery to a cadence, put a [window](#duckstring-trigger--demand-triggers) on the Spout — it's a Pond, so `trigger window {source}#{spout} add -e 1h …` (or the UI) works directly: it delivers at most once per window.
+
+## `duckstring secret` — credential store
+
+A **write-only**, catchment-wide store for the credentials a Spout references as `${secret:NAME}`. An alternative to `${env:NAME}` when you'd rather not manage the Catchment's process environment. Secrets are stored at the catchment root (private file, `0600`), **never returned** by the API or CLI (you can list names, not values), and **excluded** from a [`catchment download`](#duckstring-catchment) bundle. Managing secrets requires **full access**.
+
+| Command | Description |
+|---|---|
+| `secret set {name}` | Store (or overwrite) a secret. The value is **prompted and hidden** — it never appears in your shell history or process arguments. Name must match `[A-Za-z_][A-Za-z0-9_]*`. |
+| `secret ls` | List secret names (and when each was set) — never the values. |
+| `secret rm {name}` | Remove a secret. |
+
+The value **is** sent to the Catchment over the wire when you set it (an HTTPS POST body) — use TLS, or set it via the server's environment with `${env:NAME}` instead. Encryption-at-rest is not applied: the store is a private plaintext file, secured by filesystem permissions. The same names appear as a picker in the web UI's Spout add form (under the 🔑 menu beside the catchment name).
 
 ## `duckstring control` — execution & health
 

@@ -307,6 +307,32 @@ export async function addSpout(
   return res.json();
 }
 
+// ─── Secrets (the catchment-wide write-only store) ───────────────────────────
+
+export interface SecretName {
+  name: string;
+  set_at: string | null;
+}
+
+export function fetchSecrets(): Promise<SecretName[]> {
+  return getJSON<{ secrets: SecretName[] }>('/secrets').then((d) => d.secrets);
+}
+
+// Set/overwrite a secret. The value travels in the request (use an HTTPS Catchment); never read back.
+// Surfaces the server's 422 detail (bad name) on error.
+export function setSecret(name: string, value: string): Promise<void> {
+  return postJSON('/secrets', { name, value });
+}
+
+export async function removeSecret(name: string): Promise<void> {
+  const res = await fetch(`${apiBase()}/secrets/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error(`remove secret failed (${res.status})`);
+}
+
 // ─── Data viewer (windowed read of a Pond's exported tables) ─────────────────
 
 export interface PageResult {

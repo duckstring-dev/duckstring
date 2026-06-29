@@ -163,7 +163,7 @@ All under `/api/ponds/{name}/…`, all returning `{"ok": true}`; `404` for unkno
 
 ## Spouts (egress)
 
-All full-gated. A Spout publishes a Pond's output to an external destination; it is operational config (persisted, survives redeploys). Credentials live in the destination URI as `${env:NAME}` references, resolved only at egress time (for object stores, in the query: `?key_id=${env:..}&secret=${env:..}&region=..`). After each Pond Run the egress worker delivers to the destination — snapshot Parquet for object stores; `postgres://` syncs a merge Trickle's changelog **incrementally** (upserts + deletes in one transaction, exactly-once). A transactional destination requires a primary key (a merge Trickle), so a plain table to `postgres://` is `422` at creation.
+All full-gated. A Spout publishes a Pond's output to an external destination; it is operational config (persisted, survives redeploys). Credentials live in the destination URI as `${env:NAME}` (process environment) or `${secret:NAME}` ([secret store](#secrets)) references, resolved only at egress time (for object stores, in the query: `?key_id=${env:..}&secret=${env:..}&region=..`). After each Pond Run the egress worker delivers to the destination — snapshot Parquet for object stores; `postgres://` syncs a merge Trickle's changelog **incrementally** (upserts + deletes in one transaction, exactly-once). A transactional destination requires a primary key (a merge Trickle), so a plain table to `postgres://` is `422` at creation.
 
 | Endpoint | Description |
 |---|---|
@@ -173,6 +173,18 @@ All full-gated. A Spout publishes a Pond's output to an external destination; it
 | `POST /api/ponds/{name}/spouts/{spout}/{action}` | Control a Spout's standing Wake. `action` ∈ `wake`/`force` (re-arm; force re-delivers now), `sleep`/`kill` (disarm; kill parks), `clear` (reset a fault), `resync` (full re-egress). |
 
 A Spout is a **real node**, so it appears in `GET /api/status` `ponds[]` with `"is_spout": true` (its key is `{source}#{spout}@{major}`), and its source→spout edge rides the normal `edges` list. Its run history (including failed runs with tracebacks) is in `GET /api/runs` like any Pond.
+
+## Secrets
+
+All full-gated. A **write-only** catchment-wide store for the credentials a Spout references as `${secret:NAME}`. Values are **never returned** — you read names, not secrets — and the store is excluded from `GET /api/catchment/archive`.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/secrets` | `{"secrets": [{"name", "set_at"}]}` — names and set-times only, never values. |
+| `POST /api/secrets` | Store (or overwrite) a secret: `{"name", "value"}`. `name` must match `[A-Za-z_][A-Za-z0-9_]*` (`422` otherwise). The value is accepted but never echoed back. |
+| `DELETE /api/secrets/{name}` | Remove a secret (`404` if absent). |
+
+The value is transmitted in the `POST` body — front the Catchment with TLS, or prefer `${env:NAME}` (set in the server's environment, never over the wire). Stored as a private (`0600`) plaintext file; no encryption-at-rest.
 
 ## Data
 

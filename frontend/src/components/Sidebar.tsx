@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { fetchSecrets } from '@/lib/api';
 import { useLiveStore, atLeast, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
 import type { FreqUnit, Pond, PondInfo, PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
@@ -159,7 +160,7 @@ function SpoutPanel({ pond, canControl }: { pond: Pond; canControl: boolean }) {
 }
 
 // The egress Spouts on a source Pond — list (click to inspect) + an add form whose credentials are
-// environment-variable *names* (assembled as ${env:NAME}); a value never crosses the wire.
+// *names* (assembled as ${env:NAME} or ${secret:NAME}), never values; a value never crosses the wire.
 function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: boolean }) {
   const ponds = useLiveStore((s) => s.ponds);
   const pondInfo = useLiveStore((s) => s.pondInfo);
@@ -173,19 +174,30 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
   const [table, setTable] = useState('');
   const [keyVar, setKeyVar] = useState('');
   const [secretVar, setSecretVar] = useState('');
+  // Where the credential names resolve from: the Catchment's process env (${env:NAME}), or the
+  // catchment-wide write-only secret store (${secret:NAME}, set under the brand box).
+  const [credKind, setCredKind] = useState<'env' | 'secret'>('env');
+  const [storedNames, setStoredNames] = useState<string[]>([]);
   const [mode, setMode] = useState('auto');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Offer the stored secret names as a datalist once the form opens (full access only — the names
+  // route is full-gated; a 403 just leaves the list empty).
+  useEffect(() => {
+    if (open && canControl) fetchSecrets().then((s) => setStoredNames(s.map((n) => n.name))).catch(() => setStoredNames([]));
+  }, [open, canControl]);
 
   if (!canControl && spouts.length === 0) return null;
   const fld: React.CSSProperties = { ...numInput, width: '100%', boxSizing: 'border-box' };
 
   const buildDestination = () => {
+    const ref = (name: string) => `\${${credKind}:${name.trim()}}`;
     if (scheme === 'file') return `file://${path}`;
     if (scheme === 'postgres') return `postgres://${path}`;
     const q: string[] = [];
-    if (keyVar.trim()) q.push(`key_id=\${env:${keyVar.trim()}}`);
-    if (secretVar.trim()) q.push(`secret=\${env:${secretVar.trim()}}`);
+    if (keyVar.trim()) q.push(`key_id=${ref(keyVar)}`);
+    if (secretVar.trim()) q.push(`secret=${ref(secretVar)}`);
     return `${scheme}://${path}${q.length ? '?' + q.join('&') : ''}`;
   };
 
@@ -243,8 +255,29 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
           </div>
           {(scheme === 's3' || scheme === 'gs') && (
             <>
-              <input value={keyVar} onChange={(e) => setKeyVar(e.target.value)} placeholder="key id — env var name (e.g. AWS_KEY)" style={fld} />
-              <input value={secretVar} onChange={(e) => setSecretVar(e.target.value)} placeholder="secret — env var name (e.g. AWS_SECRET)" style={fld} />
+              <select value={credKind} onChange={(e) => setCredKind(e.target.value as 'env' | 'secret')} style={selectInput}>
+                <option value="env">env var</option>
+                <option value="secret">stored secret</option>
+              </select>
+              <input
+                value={keyVar}
+                onChange={(e) => setKeyVar(e.target.value)}
+                list={credKind === 'secret' ? 'spout-secret-names' : undefined}
+                placeholder={`key id — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_KEY)`}
+                style={fld}
+              />
+              <input
+                value={secretVar}
+                onChange={(e) => setSecretVar(e.target.value)}
+                list={credKind === 'secret' ? 'spout-secret-names' : undefined}
+                placeholder={`secret — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_SECRET)`}
+                style={fld}
+              />
+              {credKind === 'secret' && (
+                <datalist id="spout-secret-names">
+                  {storedNames.map((n) => <option key={n} value={n} />)}
+                </datalist>
+              )}
             </>
           )}
           <div style={{ display: 'flex', gap: 6 }}>
@@ -256,7 +289,9 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
             </select>
           </div>
           <div style={{ fontSize: 10, color: '#52525b', lineHeight: 1.5 }}>
-            Credentials are <b>env var names</b>, not values — read from the Catchment&apos;s environment at delivery time.
+            Credentials are <b>names</b>, not values — {credKind === 'secret'
+              ? 'resolved from the Catchment’s secret store'
+              : 'read from the Catchment’s environment'} at delivery time.
           </div>
           {err && <div style={{ fontSize: 11, color: THEME_DANGER, wordBreak: 'break-word' }}>{err}</div>}
           <div style={{ display: 'flex', gap: 6 }}>

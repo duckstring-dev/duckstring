@@ -14,7 +14,8 @@ it is crippleware that poisons adoption. Specifically OSS:
 - the **Spout** construct + the pluggable egress-driver seam (no product noun);
 - two reference drivers: **object store** (S3/GCS/local, the baseline) and **Postgres** (the flagship
   *incremental* destination);
-- **credential resolution** the drivers need — env-var-first (`${env:NAME}`), no bespoke vault (see Secrets).
+- **credential resolution** the drivers need — env-var-first (`${env:NAME}`) plus a write-only secret
+  store (`${secret:NAME}`), no encrypted vault (see Secrets).
 
 Reserved for **duckstring-cloud** (it's *maintenance, credentials, and support*, not the mechanism): the
 curated **managed connector catalog** (Snowflake / BigQuery / Redshift / SaaS destinations with managed,
@@ -287,10 +288,10 @@ Posit Connect, the cloud hosts) already injects secrets as env vars; that's the 
 better than anything we'd ship.
 
 So, v1 (**resolver built** — `egress/credentials.py`: `resolve()` interpolates `${env:NAME}` from the
-process environment, raises `CredentialError` naming an unset var, leaves unrecognised `${...}` untouched;
-`references()` lists a string's refs for pre-flight without resolving; `${secret:NAME}` is parsed-and-
-reserved, raising "not yet supported". The Spout machinery will store the reference form and call
-`resolve()` only at egress time):
+process environment and `${secret:NAME}` from the secret store (a module-level provider, below), raises
+`CredentialError` naming an unset reference, leaves unrecognised `${...}` untouched;
+`references()` lists a string's refs for pre-flight without resolving. The Spout machinery stores the
+reference form and calls `resolve()` only at egress time):
 
 - A Spout destination references a credential as **`${env:NAME}`** (in the URI or a credential field),
   resolved from the process environment **at egress time only** — never logged, never returned by the API.
@@ -300,15 +301,19 @@ reserved, raising "not yet supported". The Spout machinery will store the refere
 - **Tradeoff (accepted):** a Spout to a *new* destination needs its credential present in the environment,
   so introducing one is a deploy/restart-time act, not fully runtime-dynamic. Cheap on every real target.
 
-**Reserved escape hatch (`${secret:NAME}`, fast-follow — build only if "never SSH in" is a hard
-requirement):** a *write-only* credential store closing the runtime/no-SSH gap without becoming the vault
-we rejected. `duckstring secret set NAME` (prompts / `--value`) persists to a **plaintext `chmod 0600`**
-file under the root (same posture as `config.toml`'s auth headers — **no encryption**, dropping the
-`DUCKSTRING_SECRET_KEY` circularity), **excluded from the archive walk** (so it never leaks into a bundle).
-`secret ls` shows **names only**; there is **no read-back endpoint** (write-only ⇒ not an exfil surface);
-`secret rm`. Resolved as `${secret:NAME}` at egress, never logged. The `${secret:}` syntax is parsed-and-
-reserved from v1 so adding the store later breaks nothing. Cloud extends this to a managed vault with
-rotation + per-team scoping.
+**Write-only secret store (`${secret:NAME}`, BUILT):** the escape hatch closing the runtime/no-SSH gap
+without becoming the vault we rejected. `catchment/secrets.py` `SecretStore(root)` persists a **plaintext
+`chmod 0600`** `secrets.json` under the root (same posture as `config.toml`'s auth headers — **no
+encryption**, dropping the `DUCKSTRING_SECRET_KEY` circularity; the author's explicit call), **excluded
+from the archive walk** (`routes/catchment.py` `_SKIP_NAMES`, so it never leaks into a bundle). `create_app`
+wires `credentials.set_secret_provider(store.get)` (the module-level provider `resolve()` reads). API
+(`/api/secrets`, **full-gated**): `GET` lists **names + set-times only**, `POST {name,value}` sets,
+`DELETE /{name}` removes — there is **no read-back endpoint** (write-only ⇒ not an exfil surface). CLI
+`duckstring secret set|ls|rm` (value **prompted, hidden, never in argv**). UI `SecretsMenu` (🔑 under the
+brand box, full only) + a stored-secret datalist in the Spout add form. Resolved as `${secret:NAME}` at
+egress, never logged. **`set` does transmit the value** in the POST body (accepted tradeoff — front with
+TLS, or use `${env:}`). Cloud extends this to a managed vault with rotation + per-team scoping. Tests:
+`test_secrets.py`.
 
 ## Alerting (adjacent track — *not* egress, sequenced alongside)
 
@@ -324,9 +329,11 @@ These are the cheapest large credibility win; build them in the same milestone b
 
 ## CLI / API surface
 
-- `duckstring spout add {pond} --to <uri> [--table T | --all] [--mode auto|full|append] [--every 30m] [--secret NAME]`
-- `duckstring spout ls|rm {pond}`; `duckstring spout resync {pond} [--table T]` (force a full re-egress)
-- `duckstring secret set|ls|rm` (the reserved write-only store — fast-follow; `ls` = names only, no get)
+- `duckstring spout add {pond} --to <uri> [--table T | --all] [--mode auto|full|append] [--name N]`
+  (credentials are `${env:NAME}`/`${secret:NAME}` references *in* the URI; throttle with a window, not `--every`)
+- `duckstring spout ls|rm {pond}`; `duckstring spout resync {pond} {name}` (force a full re-egress);
+  `spout wake|force|sleep|kill|clear {pond} {name}` (the Control set on the standing Wake)
+- `duckstring secret set|ls|rm` (the write-only store — BUILT; `ls` = names only, no get; value prompted)
 - `duckstring catchment rotate-keys [--level read|demand|full|all]` (regenerate + print once)
 - `/api/ponds/{name}/spouts` (CRUD) + Spout state in `/api/status` (delivery lag, `is_failed`)
 - Web UI: a Spout shows on its Pond as an outbound edge with a freshness-lag badge (read-mostly, like the
@@ -352,8 +359,9 @@ These are the cheapest large credibility win; build them in the same milestone b
   the scale path). Confirm the failure/retry budget mirrors `pond_retry`.
 - Watermark home confirmed per destination (in-destination for transactional, `duck.db` for object store).
 - Demand-aware egress (a Tide-shaped staleness bound) — reserve the schedule slot, build `on-run` first.
-- Whether the write-only `${secret:}` store ships in v1 or stays reserved — decided: **reserved**
-  (env-var-first; the restart-to-add-credential tradeoff is accepted). Build only if "never SSH in" hardens.
+- Whether the write-only `${secret:}` store ships in v1 or stays reserved — decided **reserved**, then
+  **built** (the runtime-dynamic credential need won out): plaintext `0600`, write-only, full-gated,
+  archive-excluded, no encryption-at-rest (the author's call). See Secrets.
 
 ## Testing
 

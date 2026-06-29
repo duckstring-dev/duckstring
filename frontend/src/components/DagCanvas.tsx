@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -25,6 +25,7 @@ import { RippleNode } from './RippleNode';
 import { TriggerNode } from './TriggerNode';
 import { CatchmentGroupNode } from './CatchmentGroupNode';
 import { RemotePondNode } from './RemotePondNode';
+import { SecretsMenu } from './SecretsMenu';
 
 // ─── Custom edges (read-only; colour reflects the sink's demand) ─────────────
 
@@ -103,6 +104,8 @@ function StatusPanel() {
   // This Catchment's display name, or a short slice of its stable id, or a plain label.
   const label = catchment?.name || (catchment?.id ? catchment.id.slice(0, 8) : 'Catchment');
   const isMobile = useIsMobile();
+  const accessLevel = useLiveStore((s) => s.accessLevel);
+  const [secretsOpen, setSecretsOpen] = useState(false);
 
   // Mobile: one compact row — the full card would shade a third of a phone canvas.
   if (isMobile) {
@@ -148,53 +151,73 @@ function StatusPanel() {
   }
 
   return (
-    <div
-      style={{
-        background: '#15151a',
-        border: '1px solid #27272a',
-        borderRadius: 8,
-        padding: '9px 12px',
-        fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-        fontSize: 11,
-        color: '#a1a1aa',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 7,
-        minWidth: 168,
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-        <span
-          aria-label="Duckstring"
-          style={{
-            width: 39,
-            height: 39,
-            flexShrink: 0,
-            backgroundImage: 'url(/logo-mark.svg)',
-            backgroundSize: 'contain',
-            backgroundRepeat: 'no-repeat',
-            backgroundPosition: 'center',
-          }}
-        />
-        <span style={{ fontSize: 17, fontWeight: 700, lineHeight: 1, color: '#f4f4f5', letterSpacing: '0.01em' }}>
-          Duckstring
-        </span>
+    <div style={{ display: 'flex', flexDirection: 'column' }}>
+      <div
+        style={{
+          background: '#15151a',
+          border: '1px solid #27272a',
+          borderRadius: 8,
+          padding: '9px 12px',
+          fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+          fontSize: 11,
+          color: '#a1a1aa',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 7,
+          minWidth: 168,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+          <span
+            aria-label="Duckstring"
+            style={{
+              width: 39,
+              height: 39,
+              flexShrink: 0,
+              backgroundImage: 'url(/logo-mark.svg)',
+              backgroundSize: 'contain',
+              backgroundRepeat: 'no-repeat',
+              backgroundPosition: 'center',
+            }}
+          />
+          <span style={{ fontSize: 17, fontWeight: 700, lineHeight: 1, color: '#f4f4f5', letterSpacing: '0.01em' }}>
+            Duckstring
+          </span>
+          {/* The catchment-wide secret store lives under the brand box, full access only. */}
+          {accessLevel === 'full' && (
+            <span
+              role="button"
+              title="Secrets"
+              onClick={() => setSecretsOpen((o) => !o)}
+              style={{
+                marginLeft: 'auto',
+                cursor: 'pointer',
+                fontSize: 14,
+                lineHeight: 1,
+                color: secretsOpen ? '#e4e4e7' : '#52525b',
+              }}
+            >
+              🔑
+            </span>
+          )}
+        </div>
+        <div style={{ height: 1, background: '#27272a' }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span
+            title={connected ? 'connected' : error ? 'unreachable' : 'connecting'}
+            style={{ width: 8, height: 8, flexShrink: 0, borderRadius: '50%', background: connected ? THEME_SUCCESS : THEME_DANGER }}
+          />
+          <span style={{ color: '#71717a' }}>
+            <span title={catchment?.id ?? undefined} style={{ color: '#a1a1aa' }}>{label}</span>
+            <span style={{ color: '#3f3f46' }}> · </span>
+            {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
+          </span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', paddingLeft: 15 }}>
+          <AccessBadge />
+        </div>
       </div>
-      <div style={{ height: 1, background: '#27272a' }} />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-        <span
-          title={connected ? 'connected' : error ? 'unreachable' : 'connecting'}
-          style={{ width: 8, height: 8, flexShrink: 0, borderRadius: '50%', background: connected ? THEME_SUCCESS : THEME_DANGER }}
-        />
-        <span style={{ color: '#71717a' }}>
-          <span title={catchment?.id ?? undefined} style={{ color: '#a1a1aa' }}>{label}</span>
-          <span style={{ color: '#3f3f46' }}> · </span>
-          {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
-        </span>
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', paddingLeft: 15 }}>
-        <AccessBadge />
-      </div>
+      {accessLevel === 'full' && secretsOpen && <SecretsMenu onClose={() => setSecretsOpen(false)} />}
     </div>
   );
 }
