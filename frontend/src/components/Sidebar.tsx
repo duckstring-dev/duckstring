@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
-import { useLiveStore, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
+import { useEffect, useState } from 'react';
+import { fetchSecrets, testSpout } from '@/lib/api';
+import { useLiveStore, atLeast, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
 import type { FreqUnit, Pond, PondInfo, PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
@@ -76,7 +77,7 @@ function StatusCard({ color, title, children }: { color: string; title: string; 
 
 // The reason a Pond is failed/killed/blocked (missing Sources / a failed upstream), with details.
 // Null when the Pond is healthy.
-function StatusBox({ info, ponds }: { info: PondInfo; ponds: Record<string, Pond> }) {
+function StatusBox({ info, ponds, canControl }: { info: PondInfo; ponds: Record<string, Pond>; canControl: boolean }) {
   const bullets = (items: string[], render: (s: string) => string) => (
     <ul style={{ margin: 0, paddingLeft: 18, color: '#fafafa', listStyleType: 'disc', listStylePosition: 'outside' }}>
       {items.map((s) => <li key={s} style={{ marginTop: 2 }}>{render(s)}</li>)}
@@ -91,7 +92,11 @@ function StatusBox({ info, ponds }: { info: PondInfo; ponds: Record<string, Pond
     );
   }
   if (info.isKilled) {
-    return <StatusCard color={THEME_DANGER} title="Killed">Stopped by an operator. Wake, Force, or clear to resume.</StatusCard>;
+    return (
+      <StatusCard color={THEME_DANGER} title="Killed">
+        Stopped by an operator.{canControl ? ' Wake, Force, or clear to resume.' : ''}
+      </StatusCard>
+    );
   }
   if (info.isBlocked) {
     if (info.missingSources.length > 0) {
@@ -103,6 +108,231 @@ function StatusBox({ info, ponds }: { info: PondInfo; ponds: Record<string, Pond
     return <StatusCard color={THEME_BLOCKED} title="Blocked" />;
   }
   return null;
+}
+
+// A Spout node (egress) — its destination + state, and the Control set on its standing Wake.
+function SpoutPanel({ pond, canControl }: { pond: Pond; canControl: boolean }) {
+  const info = useLiveStore((s) => s.pondInfo[pond.id]);
+  const view = useLiveStore((s) => s.pondViews[pond.id]);
+  const now = useLiveStore((s) => s.now);
+  const spoutControl = useLiveStore((s) => s.spoutControl);
+  const removeSpout = useLiveStore((s) => s.removeSpout);
+  const cfg = info?.spout;
+  if (!cfg) return null;
+  const state = info?.isKilled ? 'killed' : info?.isFailed ? 'failed' : cfg.armed ? 'armed' : 'asleep';
+  return (
+    <>
+      <Section>
+        <Label>Spout · egress</Label>
+        <div style={{ fontSize: 11, color: '#a1a1aa', wordBreak: 'break-all', marginBottom: 6 }}>→ {cfg.destination}</div>
+        <div style={{ fontSize: 11, color: '#71717a', lineHeight: 1.7 }}>
+          <div>table <span style={{ color: '#a1a1aa' }}>{cfg.table ?? 'all'}</span> · mode <span style={{ color: '#a1a1aa' }}>{cfg.mode}</span></div>
+          <div>delivered <span style={{ color: '#a1a1aa' }}>{formatAge(view?.endF ?? 0, now)}</span> old · {state}</div>
+        </div>
+        {info?.isFailed && info.error && (
+          <div style={{ marginTop: 8, border: `1px solid ${THEME_DANGER}`, background: `${THEME_DANGER}14`, borderRadius: 6, padding: '8px 10px', fontSize: 12, color: '#d4d4d8', wordBreak: 'break-word' }}>
+            {info.error}
+          </div>
+        )}
+      </Section>
+      {canControl && (
+        <Section>
+          <Label>Control</Label>
+          <div style={quadRow}>
+            <Btn block onClick={() => spoutControl(pond.id, 'force')} color={THEME_SUCCESS}>Force</Btn>
+            <Btn block onClick={() => spoutControl(pond.id, cfg.armed ? 'sleep' : 'wake')} color={cfg.armed ? THEME_BLOCKED : THEME_WAKE}>
+              {cfg.armed ? 'Sleep' : 'Wake'}
+            </Btn>
+            <Btn block onClick={() => spoutControl(pond.id, 'kill')} color={THEME_DANGER}>Kill</Btn>
+            <Btn block onClick={() => spoutControl(pond.id, 'clear')} color={THEME_PULL}>Clear</Btn>
+          </div>
+          <div style={{ marginTop: 6 }}>
+            <Btn onClick={() => removeSpout(pond.id)} color={THEME_DANGER}>Remove Spout</Btn>
+          </div>
+        </Section>
+      )}
+      <Section>
+        <Label>Windows · throttle</Label>
+        <WindowEditor pond={pond} readOnly={!canControl} caption="Throttle delivery to a window cadence. None ⇒ deliver on every source advance." />
+      </Section>
+    </>
+  );
+}
+
+// The egress Spouts on a source Pond — list (click to inspect) + an add form whose credentials are
+// *names* (assembled as ${env:NAME} or ${secret:NAME}), never values; a value never crosses the wire.
+function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: boolean }) {
+  const ponds = useLiveStore((s) => s.ponds);
+  const pondInfo = useLiveStore((s) => s.pondInfo);
+  const addSpout = useLiveStore((s) => s.addSpout);
+  const selectPond = useLiveStore((s) => s.selectPond);
+  const spouts = Object.values(ponds).filter((p) => p.isSpout && p.sources.includes(sourceId));
+
+  const [open, setOpen] = useState(false);
+  const [scheme, setScheme] = useState('s3');
+  const [path, setPath] = useState('');
+  const [table, setTable] = useState('');
+  const [keyVar, setKeyVar] = useState('');
+  const [secretVar, setSecretVar] = useState('');
+  // Where the credential names resolve from: the Catchment's process env (${env:NAME}), or the
+  // catchment-wide write-only secret store (${secret:NAME}, set under the brand box).
+  const [credKind, setCredKind] = useState<'env' | 'secret'>('env');
+  const [storedNames, setStoredNames] = useState<string[]>([]);
+  const [mode, setMode] = useState('auto');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  // The connection-test outcome (the "Test" button), tagged with the destination it ran against so it
+  // only shows while that destination is still in the form (no effect needed to clear it on edits).
+  const [testResult, setTestResult] = useState<{ destination: string; ok: boolean; error?: string } | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  // Offer the stored secret names as a datalist once the form opens (full access only — the names
+  // route is full-gated; a 403 just leaves the list empty).
+  useEffect(() => {
+    if (open && canControl) fetchSecrets().then((s) => setStoredNames(s.map((n) => n.name))).catch(() => setStoredNames([]));
+  }, [open, canControl]);
+
+  if (!canControl && spouts.length === 0) return null;
+  const fld: React.CSSProperties = { ...numInput, width: '100%', boxSizing: 'border-box' };
+
+  const buildDestination = () => {
+    const ref = (name: string) => `\${${credKind}:${name.trim()}}`;
+    if (scheme === 'file') return `file://${path}`;
+    if (scheme === 'postgres') return `postgres://${path}`;
+    const q: string[] = [];
+    if (keyVar.trim()) q.push(`key_id=${ref(keyVar)}`);
+    if (secretVar.trim()) q.push(`secret=${ref(secretVar)}`);
+    return `${scheme}://${path}${q.length ? '?' + q.join('&') : ''}`;
+  };
+
+  const test = async () => {
+    setErr(null);
+    setTestResult(null);
+    setTesting(true);
+    const destination = buildDestination();
+    try {
+      setTestResult({ destination, ...(await testSpout(sourceId, destination)) });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'test failed');
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const submit = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      await addSpout(sourceId, { destination: buildDestination(), table: table.trim() || null, mode });
+      setOpen(false);
+      setPath('');
+      setTable('');
+      setKeyVar('');
+      setSecretVar('');
+      setTestResult(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'failed to add');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section>
+      <Label>Spouts · egress</Label>
+      {spouts.length === 0 && !open && <div style={{ fontSize: 12, color: '#52525b', marginBottom: 6 }}>None.</div>}
+      {spouts.map((sp) => (
+        <div
+          key={sp.id}
+          role="button"
+          onClick={() => selectPond(sp.id)}
+          style={{ fontSize: 12, marginBottom: 4, cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: 8 }}
+        >
+          <span style={{ color: pondInfo[sp.id]?.isFailed ? THEME_DANGER : '#a1a1aa', flexShrink: 0 }}>
+            {sp.name.split('#').slice(1).join('#')}
+          </span>
+          <span style={{ color: '#52525b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {pondInfo[sp.id]?.spout?.destination ?? ''} ›
+          </span>
+        </div>
+      ))}
+      {canControl && (open ? (
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <select value={scheme} onChange={(e) => setScheme(e.target.value)} style={selectInput}>
+              <option value="s3">s3://</option>
+              <option value="gs">gs://</option>
+              <option value="file">file://</option>
+              <option value="postgres">postgres://</option>
+            </select>
+            <input
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              placeholder={scheme === 'file' ? '/abs/path' : scheme === 'postgres' ? 'user:${env:PW}@host/db' : 'bucket/prefix'}
+              style={{ ...fld, flex: 1 }}
+            />
+          </div>
+          {(scheme === 's3' || scheme === 'gs') && (
+            <>
+              <select value={credKind} onChange={(e) => setCredKind(e.target.value as 'env' | 'secret')} style={selectInput}>
+                <option value="env">env var</option>
+                <option value="secret">stored secret</option>
+              </select>
+              <input
+                value={keyVar}
+                onChange={(e) => setKeyVar(e.target.value)}
+                list={credKind === 'secret' ? 'spout-secret-names' : undefined}
+                placeholder={`key id — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_KEY)`}
+                style={fld}
+              />
+              <input
+                value={secretVar}
+                onChange={(e) => setSecretVar(e.target.value)}
+                list={credKind === 'secret' ? 'spout-secret-names' : undefined}
+                placeholder={`secret — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_SECRET)`}
+                style={fld}
+              />
+              {credKind === 'secret' && (
+                <datalist id="spout-secret-names">
+                  {storedNames.map((n) => <option key={n} value={n} />)}
+                </datalist>
+              )}
+            </>
+          )}
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input value={table} onChange={(e) => setTable(e.target.value)} placeholder="table (blank = all)" style={{ ...fld, flex: 1 }} />
+            <select value={mode} onChange={(e) => setMode(e.target.value)} style={selectInput}>
+              <option value="auto">auto</option>
+              <option value="full">full</option>
+              <option value="append">append</option>
+            </select>
+          </div>
+          <div style={{ fontSize: 10, color: '#52525b', lineHeight: 1.5 }}>
+            Credentials are <b>names</b>, not values — {credKind === 'secret'
+              ? 'resolved from the Catchment’s secret store'
+              : 'read from the Catchment’s environment'} at delivery time.
+          </div>
+          {err && <div style={{ fontSize: 11, color: THEME_DANGER, wordBreak: 'break-word' }}>{err}</div>}
+          {testResult && testResult.destination === buildDestination() && (
+            <div style={{ fontSize: 11, color: testResult.ok ? THEME_SUCCESS : THEME_DANGER, wordBreak: 'break-word' }}>
+              {testResult.ok ? '✓ connection ok' : `✕ ${testResult.error ?? 'connection failed'}`}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 6 }}>
+            <Btn small onClick={test} color={THEME_PULL} disabled={testing || busy || !path.trim()}>
+              {testing ? 'Testing…' : 'Test'}
+            </Btn>
+            <Btn small onClick={submit} color={THEME_SUCCESS} disabled={busy || testing || !path.trim()}>Add</Btn>
+            <Btn small onClick={() => { setOpen(false); setErr(null); setTestResult(null); }} color={THEME_BLOCKED}>Cancel</Btn>
+          </div>
+        </div>
+      ) : (
+        <div style={{ marginTop: 6 }}>
+          <Btn small onClick={() => setOpen(true)} color={THEME_PULL}>+ Add Spout</Btn>
+        </div>
+      ))}
+    </Section>
+  );
 }
 
 const numInput: React.CSSProperties = {
@@ -181,6 +411,12 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const enterRepair = useLiveStore((s) => s.enterRepair);
   const repairMode = useLiveStore((s) => s.repairMode);
 
+  // Access level gates the action surface (the backend enforces it too — this just avoids dead buttons).
+  // read: status/history/data only · demand: + the Triggers menu · full: + Control/Windows/Failures.
+  const accessLevel = useLiveStore((s) => s.accessLevel);
+  const canDemand = atLeast(accessLevel, 'demand');
+  const canControl = atLeast(accessLevel, 'full');
+
   const [tideBound, setTideBound] = useState('2');
   const [tideUnit, setTideUnit] = useState<FreqUnit>('SECOND');
   const [showTideInput, setShowTideInput] = useState(false);
@@ -226,8 +462,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
     <>
       {!selectedPond && !selectedRipple && !selectedTriggerId && (
         <div style={{ fontSize: 12, color: '#71717a', lineHeight: 1.6 }}>
-          Select a Pond or Ripple to inspect its freshness and run history, or to send a Tap, Pulse,
-          Wave, or Tide. Ponds are established by deploying code — not from here.
+          Select a Pond or Ripple to inspect its freshness and run history
+          {canDemand ? ', or to send a Tap, Pulse, Wave, or Tide' : ''}. Ponds are established by
+          deploying code — not from here.
         </div>
       )}
 
@@ -242,7 +479,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               Tide — max staleness ≤ {formatDuration(triggers[selectedTriggerId].boundMs ?? 1000)}.
             </div>
           )}
-          <Btn onClick={() => removeTrigger(selectedTriggerId)} color={THEME_DANGER}>Remove Trigger</Btn>
+          {canDemand && (
+            <Btn onClick={() => removeTrigger(selectedTriggerId)} color={THEME_DANGER}>Remove Trigger</Btn>
+          )}
         </Section>
       )}
 
@@ -250,12 +489,20 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
       {selectedPond && !selectedRippleId && (
         <>
           <Section>
-            <Label>Pond: {selectedPond.name}</Label>
+            <Label>
+              {selectedPond.isSpout ? 'Spout' : 'Pond'}: {selectedPond.isSpout
+                ? selectedPond.name.split('#').slice(1).join('#') || selectedPond.name
+                : selectedPond.name}
+            </Label>
             <div style={{ fontSize: 11, color: '#71717a', marginBottom: 8, lineHeight: 1.7 }}>
               <div>
-                {pondInfo[selectedPond.id]?.kind ?? 'pond'}
-                <span style={{ color: '#52525b' }}> · </span>
-                v<span style={{ color: '#a1a1aa' }}>{pondInfo[selectedPond.id]?.version ?? '—'}</span>
+                {selectedPond.isSpout ? 'egress' : (pondInfo[selectedPond.id]?.kind ?? 'pond')}
+                {!selectedPond.isSpout && (
+                  <>
+                    <span style={{ color: '#52525b' }}> · </span>
+                    v<span style={{ color: '#a1a1aa' }}>{pondInfo[selectedPond.id]?.version ?? '—'}</span>
+                  </>
+                )}
               </div>
               <div>
                 Runs: <span style={{ color: '#a1a1aa' }}>{pondViews[selectedPond.id]?.runsCompleted ?? 0}</span>
@@ -274,19 +521,29 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             )}
           </Section>
 
+          {/* A Spout is a real node but its surface is its own (egress destination + the standing-Wake
+              control), so it replaces the Pond's Triggers/Control/Windows sections. */}
+          {selectedPond.isSpout ? (
+            <SpoutPanel pond={selectedPond} canControl={canControl} />
+          ) : (
+          <>
+
           {/* Windows (Inlet ponds only) */}
           {isInlet && (
             <Section>
               <Label>Windows (batch source)</Label>
-              <WindowEditor pond={selectedPond} />
+              <WindowEditor pond={selectedPond} readOnly={!canControl} />
             </Section>
           )}
 
-          {/* Triggers — or, while halted, the reason (triggers have no effect). */}
+          {/* Triggers — or, while halted, the reason (triggers have no effect). The failure reason is
+              read-level (shown to all); the trigger buttons are demand+. A read user on a healthy Pond
+              sees no Triggers section at all. */}
+          {(halted || canDemand) && (
           <Section>
             <Label>Triggers</Label>
             {halted ? (
-              <StatusBox info={selectedInfo!} ponds={ponds} />
+              <StatusBox info={selectedInfo!} ponds={ponds} canControl={canControl} />
             ) : (
               <>
                 <div style={quadRow}>
@@ -327,8 +584,10 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               </>
             )}
           </Section>
+          )}
 
-          {/* Control: Force/Wake (go) and Sleep/Kill (stop) lifecycle on the Duck */}
+          {/* Control: Force/Wake (go) and Sleep/Kill (stop) lifecycle on the Duck. Full only. */}
+          {canControl && (
           <Section>
             <Label>Control</Label>
             <div style={quadRow}>
@@ -348,8 +607,11 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               </Btn>
             </div>
           </Section>
+          )}
 
-          {/* Failures: retry budgets + clearing a failed Pond */}
+          {/* Failures: retry budgets + clearing a failed Pond. Full only — the failure *reason* is shown
+              above (Triggers StatusBox) and in Run Detail for every level; only remediation is gated. */}
+          {canControl && (
           <Section>
             <Label>Failures</Label>
             {([
@@ -378,10 +640,17 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               <Btn onClick={() => enterRepair()} color={THEME_DANGER} disabled={repairMode}>Repair…</Btn>
             </div>
           </Section>
+          )}
+
+          {/* Egress Spouts on this Pond — a Draw can't be a source (it has no local output). */}
+          {!selectedPond.isDraw && <SpoutEditor sourceId={selectedPond.id} canControl={canControl} />}
 
           <Section>
             <TraceChart {...pondTrace(selectedPondRuns)} />
           </Section>
+
+          </>
+          )}
         </>
       )}
 

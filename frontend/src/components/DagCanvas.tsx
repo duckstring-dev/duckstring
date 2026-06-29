@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -17,6 +17,7 @@ import {
 import '@xyflow/react/dist/style.css';
 
 import { useLiveStore, consumeEdgeColor, formatAge, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER } from '@/lib/store';
+import type { AccessLevel } from '@/lib/api';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { PondNode } from './PondNode';
@@ -24,6 +25,7 @@ import { RippleNode } from './RippleNode';
 import { TriggerNode } from './TriggerNode';
 import { CatchmentGroupNode } from './CatchmentGroupNode';
 import { RemotePondNode } from './RemotePondNode';
+import { SecretsMenu } from './SecretsMenu';
 
 // ─── Custom edges (read-only; colour reflects the sink's demand) ─────────────
 
@@ -73,6 +75,36 @@ const edgeTypes: EdgeTypes = {
 
 // ─── Status / legend panel ───────────────────────────────────────────────────
 
+// The caller's API access level as three capabilities — Manage | Demand | Read — each prefixed with a
+// green ✓ when the key grants it, a grey – when not. The labels stay white (the ✓/– carries the state);
+// reads as "what your key can do", not a broken UI. Read is the floor (always on); Demand adds
+// tap/wave/pulse/tide; Manage adds deploy/control/secrets.
+const ACCESS_CHIPS: { label: string; active: (l: AccessLevel) => boolean; hint: string }[] = [
+  { label: 'Manage', active: (l) => l === 'full', hint: 'Deploy, control, and manage secrets.' },
+  { label: 'Demand', active: (l) => l === 'full' || l === 'demand', hint: 'Create demand: tap, wave, pulse, tide.' },
+  { label: 'Read', active: () => true, hint: 'Read status and query data.' },
+];
+
+function AccessBadge() {
+  const level = useLiveStore((s) => s.accessLevel);
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, letterSpacing: '0.02em' }}>
+      {ACCESS_CHIPS.map(({ label, active, hint }, i) => {
+        const on = active(level);
+        return (
+          <Fragment key={label}>
+            {i > 0 && <span style={{ color: '#3f3f46' }}>|</span>}
+            <span title={hint} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: on ? '#e4e4e7' : '#3f3f46' }}>
+              <span style={{ color: on ? THEME_SUCCESS : '#3f3f46' }}>{on ? '✓' : '–'}</span>
+              {label}
+            </span>
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
 // Top-left panel: the Duckstring brand mark (and natural home for catchment navigation later),
 // over the live connection status.
 function StatusPanel() {
@@ -121,6 +153,8 @@ function StatusPanel() {
         <span style={{ color: '#71717a' }}>
           {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
         </span>
+        <span style={{ color: '#3f3f46' }}>·</span>
+        <AccessBadge />
       </div>
     );
   }
@@ -170,45 +204,66 @@ function StatusPanel() {
           {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
         </span>
       </div>
+      <AccessBadge />
     </div>
   );
 }
 
-// Top-right control: collapse every Pond's Ripples to a header-only box, or expand them back. The
-// label flips to "Expand all" once every collapsible Pond (one that owns Ripples) is collapsed.
-function CollapsePanel() {
+// The shared look of a top-right panel button (collapse-all, Secrets) — same shape, colour, width.
+const panelButton: React.CSSProperties = {
+  background: '#15151a',
+  border: '1px solid #27272a',
+  borderRadius: 8,
+  padding: '7px 12px',
+  fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+  fontSize: 12,
+  color: '#a1a1aa',
+  cursor: 'pointer',
+  display: 'flex',
+  alignItems: 'center',
+  gap: 7,
+};
+
+// Top-right controls, stacked: collapse every Pond's Ripples to a header-only box (label flips to
+// "Expand all" once every collapsible Pond is collapsed), and — full access only — the catchment-wide
+// secret store (SecretsMenu). The two buttons share a width; the menu drops below them.
+function ControlsPanel() {
   const collapsedPonds = useLiveStore((s) => s.collapsedPonds);
   const setAllCollapsed = useLiveStore((s) => s.setAllCollapsed);
+  const accessLevel = useLiveStore((s) => s.accessLevel);
   // A Pond is collapsible only if it owns Ripples (a Draw has none to hide). Select a stable joined
   // key — not a fresh array — so the panel doesn't re-render on every poll.
   const collapsibleKey = useLiveStore((s) =>
     [...new Set(Object.values(s.ripples).map((r) => r.pondId))].sort().join(',')
   );
+  const [secretsOpen, setSecretsOpen] = useState(false);
 
-  if (!collapsibleKey) return null;
-  const collapsibleIds = collapsibleKey.split(',');
-  const allCollapsed = collapsibleIds.every((id) => collapsedPonds[id]);
+  const collapsibleIds = collapsibleKey ? collapsibleKey.split(',') : [];
+  const allCollapsed = collapsibleIds.length > 0 && collapsibleIds.every((id) => collapsedPonds[id]);
+  const isFull = accessLevel === 'full';
+  if (collapsibleIds.length === 0 && !isFull) return null;
 
   return (
-    <button
-      onClick={() => setAllCollapsed(!allCollapsed)}
-      style={{
-        background: '#15151a',
-        border: '1px solid #27272a',
-        borderRadius: 8,
-        padding: '7px 12px',
-        fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-        fontSize: 12,
-        color: '#a1a1aa',
-        cursor: 'pointer',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 7,
-      }}
-    >
-      <span style={{ fontSize: 11, color: '#71717a' }}>{allCollapsed ? '▸' : '▾'}</span>
-      {allCollapsed ? 'Expand all' : 'Collapse all'}
-    </button>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 7, alignItems: 'flex-end' }}>
+      {/* A stretch column so the two buttons share the widest one's width. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 7, alignItems: 'stretch' }}>
+        {collapsibleIds.length > 0 && (
+          <button onClick={() => setAllCollapsed(!allCollapsed)} style={panelButton}>
+            <span style={{ fontSize: 11, color: '#71717a' }}>{allCollapsed ? '▸' : '▾'}</span>
+            {allCollapsed ? 'Expand all' : 'Collapse all'}
+          </button>
+        )}
+        {isFull && (
+          <button
+            onClick={() => setSecretsOpen((o) => !o)}
+            style={{ ...panelButton, justifyContent: 'center', color: secretsOpen ? '#e4e4e7' : '#a1a1aa' }}
+          >
+            Secrets
+          </button>
+        )}
+      </div>
+      {isFull && secretsOpen && <SecretsMenu onClose={() => setSecretsOpen(false)} />}
+    </div>
   );
 }
 
@@ -357,7 +412,7 @@ export function DagCanvas() {
           <StatusPanel />
         </Panel>
         <Panel position="top-right">
-          <CollapsePanel />
+          <ControlsPanel />
         </Panel>
         <Controls style={{ background: '#1a1a1f', border: '1px solid #3f3f46', borderRadius: 6 }} />
       </ReactFlow>

@@ -13,17 +13,18 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from ...keys import pond_key
+from .. import auth
 
 router = APIRouter()
 
 
-@router.get("/duck/{name}/{major}/jobs")
+@router.get("/duck/{name}/{major}/jobs", dependencies=[auth.duck])
 def jobs(name: str, major: int, request: Request):
     driver = request.app.state.driver
     return {"jobs": driver.take_jobs(pond_key(name, major))}
 
 
-@router.post("/duck/{name}/{major}/events")
+@router.post("/duck/{name}/{major}/events", dependencies=[auth.duck])
 async def events(name: str, major: int, request: Request):
     driver = request.app.state.driver
     payload = await request.json()

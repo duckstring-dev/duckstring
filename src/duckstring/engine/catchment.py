@@ -135,6 +135,19 @@ def pond_source_f(s: EngineState, pid: PondId, now: datetime) -> tuple[datetime 
         # polled, or upstream never run) → cannot transfer.
         rf = s.pond_states[pid].remote_f
         return (rf if rf != NEVER else None), ZERO
+    # A Spout with windows delivers on the window clock — the *same* window mechanics as a windowed Inlet:
+    # its freshness is the active window's end, so the standing Wake fires once per window (and holds
+    # between windows, or until its source has published something to deliver). The worker still ships the
+    # source's actual data at the source's real freshness; this is only the throttle clock.
+    if pond.is_spout and pond.windows:
+        if not any(s.pond_states[sp].end_f > NEVER for sp in pond.sources):
+            return None, ZERO  # nothing published to deliver yet
+        best: tuple[datetime, timedelta] | None = None
+        for w in pond.windows:
+            end = w.active_end(now)
+            if end is not None and (best is None or end < best[0]):
+                best = (end, w.duration)
+        return best if best is not None else (None, ZERO)  # None = between windows: hold delivery
     if not pond.sources:
         if pond.windows:
             best: tuple[datetime, timedelta] | None = None
@@ -599,6 +612,21 @@ def tick(now: datetime, state: EngineState) -> EngineState:
     """Clock-driven processes only: Tide target emission and Wave-on-idle re-Tap. Window availability
     is read live in :func:`can_start_pond`. The caller runs :func:`sentinel` afterwards."""
     s = state.clone()
+    # Standing Wake (Spouts): whenever idle and armed, re-arm a **non-propagating** pull (a Wake, not a
+    # Wave — `pull_local` stops `start_pond_run` soliciting the Source). It then runs whenever the Source
+    # is fresher (`can_start_pond`), at most once per window (the freshness is the window end), and never
+    # adds upstream demand. Failed/killed Spouts stay parked until cleared.
+    for pid in s.pond_states:
+        ps = s.pond_states[pid]
+        if not ps.standing_wake or ps.is_failed or ps.is_killed or ps.is_blocked:
+            continue
+        idle = ps.start_f == ps.end_f and not ps.has_pull and not ps.targets and not any_ripple_busy(s, pid)
+        if idle:
+            ps.has_pull = True
+            ps.pull_local = True
+            for rid in ripples_of(s, pid):
+                s.ripple_states[rid].has_pull = True
+
     for pid, trig in s.triggers.items():
         ps = s.pond_states[pid]
         if trig.kind == "wave":
@@ -618,7 +646,8 @@ def next_wake(now: datetime, state: EngineState) -> datetime | None:
     windowed Inlet, or the next Tide deadline. ``None`` if nothing is time-driven."""
     candidates: list[datetime] = []
     for pond in state.ponds.values():
-        if pond.sources or not pond.windows:
+        # Windowed Inlets (no sources) and windowed Spouts both advance on window boundaries.
+        if (pond.sources and not pond.is_spout) or not pond.windows:
             continue
         for w in pond.windows:
             b = w.next_boundary(now)

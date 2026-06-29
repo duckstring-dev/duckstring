@@ -23,9 +23,10 @@ Most commands that talk to a Catchment share these:
 
 | Command | Description |
 |---|---|
-| `catchment init -n {name} [--host H] [-p PORT] [--root DIR] [--key KEY \| --generate-key] [--header 'N: v']… [-y]` | Create and register a local Catchment, then start its server. Defaults: host `127.0.0.1`, port `7474`, root `~/.duckstring/{name}`, no API key (open). `--generate-key` creates a key, prints it once, and stores it (mutually exclusive with `--key`). Offers to set as default (`-y` accepts). |
+| `catchment init -n {name} [--host H] [-p PORT] [--root DIR] [--key KEY \| --generate-key] [--header 'N: v']… [-y]` | Create and register a local Catchment, then start its server. Defaults: host `127.0.0.1`, port `7474`, root `~/.duckstring/{name}`, no API key (open). `--generate-key` mints the read/demand/full key ladder, prints all three once, and stores the full key (mutually exclusive with `--key`, which sets a single full-access key). Offers to set as default (`-y` accepts). |
 | `catchment start {name}` | Start the server for a registered local Catchment. |
-| `catchment connect -n {name} --path {url} [--key KEY] [--header 'N: v']… [-y]` | Register a remote Catchment by URL; `--key` stores its API key (sent as a Bearer header), `--header` stores arbitrary headers for platform auth (e.g. `'Authorization: Key …'` for Posit Connect) — both attached to every request. |
+| `catchment rotate-keys [-c NAME] [--level read\|demand\|full]… [-y]` | Reroll a Catchment's access keys (default all three; `--level` repeatable for a subset), printing the new keys once. The old key for each rerolled level stops working; the internal Duck token is untouched. If the full key is rerolled, the stored registration is updated. Requires a full-access key. |
+| `catchment connect -n {name} --path {url} [--key KEY] [--header 'N: v']… [-y]` | Register a remote Catchment by URL; `--key` stores its API key (sent as a Bearer header — use a `demand` key for a downstream that only solicits and draws), `--header` stores arbitrary headers for platform auth (e.g. `'Authorization: Key …'` for Posit Connect) — both attached to every request. |
 | `catchment list` | List registered Catchments; `●` marks the default. |
 | `catchment download [-c NAME] [--path DIR] [-y]` | Download the Catchment's entire root (database, artifacts, data, ledgers) into a local directory — default `./.duckstring`, so it drops straight into a platform deploy bundle. Shows the state size and asks before transferring (`-y` skips); streams with a progress bar. |
 | `catchment set-default {name}` | Set the default Catchment. |
@@ -91,6 +92,38 @@ See [Windows](../guides/windows.md). The Pond name comes directly after `window`
 | `trigger window {pond} add -n {name} -e {every} [-s START] [-d DUR] [-o DAYS] [-u UNTIL]` | Add a recurring window. `--every` is a single-unit interval (`10s`, `12h`, `1d`, `1w`); `--start` is ISO 8601 or `HH:MM` UTC (default `00:00` today); `--duration` accepts compound durations and defaults to `--every` (back-to-back); `--on` restricts weekdays (`MON,WED,FRI`); `--until` expires the rule. |
 | `trigger window {pond} list` | List the Pond's windows. |
 | `trigger window {pond} remove {name}` | Remove a window rule. |
+
+## `duckstring spout` — egress bindings
+
+Publish a Pond's output to external systems. A Spout is operational config (persisted, survives redeploys), not declared in `pond.toml`. Credentials go in the destination URI as `${env:NAME}` (process environment) or `${secret:NAME}` ([secret store](#duckstring-secret--credential-store)) references, resolved only at egress time — never stored in the binding or logged. After each successful Pond Run, the egress worker delivers the Pond's published tables to the destination as snapshot Parquet (`{prefix}/{table}.parquet`).
+
+`file://`, `s3://`, `gs://`, and `postgres://` work today. Object-store credentials go in the URI query: `s3://bucket/prefix?key_id=${env:AWS_KEY}&secret=${env:AWS_SECRET}&region=us-east-1` (also `endpoint`, `url_style`, `use_ssl`, `session_token`); `s3://` with no key falls back to the AWS credential chain (env / instance profile); `gs://` needs HMAC `key_id`+`secret`.
+
+`postgres://user:${env:PGPASS}@host/db?schema=public` syncs **incrementally**: a [merge Trickle](../guides/trickle.md)'s changelog applies as upserts + deletes inside one transaction, exactly-once. A transactional destination **requires a primary key**, so the source table must be a merge Trickle — a plain/overwrite table is refused at creation with a signpost error.
+
+| Command | Description |
+|---|---|
+| `spout add {pond} --to {uri} [--table T \| --all] [--mode auto\|full\|append] [--name N]` | Bind a Spout. `--to` is a `file://`/`s3://`/`gs://`/`postgres://` URI (credentials as `${env:NAME}`); `--table` egresses one table, default all; `--mode` defaults `auto`; `--name` defaults to the table (or scheme), `-2`/`-3` on collision. |
+| `spout ls {pond}` | List the Pond's Spouts with their delivery watermark and state (ok / retrying / failed). |
+| `spout rm {pond} {name}` | Remove a Spout. |
+| `spout resync {pond} {name}` | Force a full re-egress (clears the watermark + any failure). |
+| `spout sleep \| wake {pond} {name}` | Disarm / re-arm the Spout's standing Wake (it delivers on each source advance). |
+| `spout force {pond} {name}` | Re-arm and re-deliver the current freshness now. |
+| `spout kill \| clear {pond} {name}` | Park the Spout (terminal) / clear a failed-or-killed Spout. |
+
+A Spout is a **real Pond** hanging off its source with a standing **Wake** (the egress dual of a [Pond Draw](../guides/connecting-catchments.md)) — it delivers whenever the source's freshness advances, never pulls on the source, and never blocks anything (its runs and failures are its own, with full run history + tracebacks in [run history](#duckstring-status)). The **Control** verbs above apply to it; the **Demand** verbs (tap/wave/pulse/tide) do not. To **throttle** delivery to a cadence, put a [window](#duckstring-trigger--demand-triggers) on the Spout — it's a Pond, so `trigger window {source}#{spout} add -e 1h …` (or the UI) works directly: it delivers at most once per window.
+
+## `duckstring secret` — credential store
+
+A **write-only**, catchment-wide store for the credentials a Spout references as `${secret:NAME}`. An alternative to `${env:NAME}` when you'd rather not manage the Catchment's process environment. Secrets are stored at the catchment root (private file, `0600`), **never returned** by the API or CLI (you can list names, not values), and **excluded** from a [`catchment download`](#duckstring-catchment) bundle. Managing secrets requires **full access**.
+
+| Command | Description |
+|---|---|
+| `secret set {name}` | Store (or overwrite) a secret. The value is **prompted and hidden** — it never appears in your shell history or process arguments. Name must match `[A-Za-z_][A-Za-z0-9_]*`. |
+| `secret ls` | List secret names (and when each was set) — never the values. |
+| `secret rm {name}` | Remove a secret. |
+
+The value **is** sent to the Catchment over the wire when you set it (an HTTPS POST body) — use TLS, or set it via the server's environment with `${env:NAME}` instead. Encryption-at-rest is not applied: the store is a private plaintext file, secured by filesystem permissions. The same names appear as a picker in the web UI's Spout add form (under the 🔑 menu beside the catchment name).
 
 ## `duckstring control` — execution & health
 

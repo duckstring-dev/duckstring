@@ -63,6 +63,102 @@ def build(ponds: list[Pond], ripples: list[Ripple], triggers: list[Trigger] | No
     )
 
 
+def test_standing_wake_delivers_on_source_advance_without_soliciting():
+    """A Spout node (standing Wake): runs whenever its Source is fresher, never solicits the Source
+    (a Wake, not a Wave), and does not re-run until the Source advances again."""
+    src = Pond("src", "src")
+    spt = Pond("spt", "spt", sources=["src"], is_spout=True)  # terminal, no Ripples — run by the worker
+    s = build([src, spt], [Ripple("r", "src", "r")])
+    s.pond_states["spt"].standing_wake = True
+
+    s.pond_states["src"].start_f = s.pond_states["src"].end_f = T0  # the Source publishes a freshness
+    s = tick(T0, s)
+    s, _ = sentinel(T0, s)
+    assert s.pond_states["spt"].start_f == T0                       # delivered at the Source's freshness
+    assert s.pond_states["src"].has_received_pull is False          # a Wake never solicits the Source
+    assert "spt" in [b.pond_id for b in s.pending_begin_runs]
+
+    # Complete the delivery; the Source isn't fresher → it does not re-run.
+    s.pond_states["spt"].end_f = s.pond_states["spt"].start_f
+    s.pending_begin_runs.clear()
+    s = tick(T0 + STEP, s)
+    s, _ = sentinel(T0 + STEP, s)
+    assert s.pending_begin_runs == []
+
+    # The Source advances → it delivers again.
+    s.pond_states["src"].start_f = s.pond_states["src"].end_f = T0 + secs(10)
+    s = tick(T0 + secs(10), s)
+    s, _ = sentinel(T0 + secs(10), s)
+    assert s.pond_states["spt"].start_f == T0 + secs(10)
+    assert "spt" in [b.pond_id for b in s.pending_begin_runs]
+
+
+def test_windowed_spout_fires_once_per_window():
+    """A windowed Spout uses the same window mechanics as an Inlet: it fires once per window, stamped
+    with the window end (the throttle clock), not the source freshness."""
+    win = Window(start_anchor=T0, duration=timedelta(days=1), freq_unit="DAY", freq_interval=1)  # back-to-back daily
+    spt = Pond("spt", "spt", sources=["src"], is_spout=True, windows=[win])
+    s = build([Pond("src", "src"), spt], [])
+    s.pond_states["spt"].standing_wake = True
+    s.pond_states["src"].start_f = s.pond_states["src"].end_f = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+
+    at = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+    s = tick(at, s)
+    s, _ = sentinel(at, s)
+    assert s.pond_states["spt"].start_f == datetime(2026, 6, 11, 0, 0, tzinfo=UTC)  # the window end, not 12:00
+    assert "spt" in [b.pond_id for b in s.pending_begin_runs]
+
+    # Later in the same window → no re-fire (window end unchanged).
+    s.pond_states["spt"].end_f = s.pond_states["spt"].start_f
+    s.pending_begin_runs.clear()
+    later = datetime(2026, 6, 10, 18, 0, tzinfo=UTC)
+    s = tick(later, s)
+    s, _ = sentinel(later, s)
+    assert s.pending_begin_runs == []
+
+    # Next window → fires again, stamped with the next window's end.
+    nxt = datetime(2026, 6, 11, 1, 0, tzinfo=UTC)
+    s.pond_states["src"].end_f = nxt
+    s = tick(nxt, s)
+    s, _ = sentinel(nxt, s)
+    assert s.pond_states["spt"].start_f == datetime(2026, 6, 12, 0, 0, tzinfo=UTC)
+
+
+def test_windowed_spout_holds_in_gap_and_before_source():
+    future = Window(start_anchor=datetime(2030, 1, 1, tzinfo=UTC), duration=timedelta(hours=1),
+                    freq_unit="DAY", freq_interval=1)  # opens only in 2030 → a gap now
+    spt = Pond("spt", "spt", sources=["src"], is_spout=True, windows=[future])
+    s = build([Pond("src", "src"), spt], [])
+    s.pond_states["spt"].standing_wake = True
+    s.pond_states["src"].end_f = datetime(2026, 6, 10, tzinfo=UTC)
+    at = datetime(2026, 6, 10, 12, tzinfo=UTC)
+    s = tick(at, s)
+    s, _ = sentinel(at, s)
+    assert s.pending_begin_runs == []  # in a window gap → delivery holds
+
+    # An active window but the source has never published → still nothing to deliver.
+    live = Window(start_anchor=T0, duration=timedelta(days=1), freq_unit="DAY", freq_interval=1)
+    spt2 = Pond("spt2", "spt2", sources=["src2"], is_spout=True, windows=[live])
+    s2 = build([Pond("src2", "src2"), spt2], [])
+    s2.pond_states["spt2"].standing_wake = True  # src2.end_f stays NEVER
+    s2 = tick(at, s2)
+    s2, _ = sentinel(at, s2)
+    assert s2.pending_begin_runs == []
+
+
+def test_standing_wake_parked_when_failed_or_killed():
+    spt = Pond("spt", "spt", sources=["src"], is_spout=True)
+    s = build([Pond("src", "src"), spt], [])
+    s.pond_states["spt"].standing_wake = True
+    s.pond_states["src"].start_f = s.pond_states["src"].end_f = T0
+    for flag in ("is_failed", "is_killed"):
+        st = s.clone()
+        setattr(st.pond_states["spt"], flag, True)
+        st = tick(T0, st)
+        st, _ = sentinel(T0, st)
+        assert st.pending_begin_runs == []  # parked → no delivery
+
+
 def chain_topology() -> tuple[EngineState, dict[str, timedelta]]:
     """p1 (inlet: r1, r2 -> r3) -> p2 (single ripple s1). All Ripples 1 s."""
     ponds = [Pond("p1", "p1"), Pond("p2", "p2", sources=["p1"])]

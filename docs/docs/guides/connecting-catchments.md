@@ -14,7 +14,7 @@ The mechanism is a **duct**: a one-directional conduit that draws a Pond from an
 Both Catchments must be registered with the CLI (the consumer needs to reach the upstream — see [Running a Catchment](running-a-catchment.md)):
 
 ```bash
-duckstring catchment connect --name products-cat --path https://products.host:7474 --key …
+duckstring catchment connect --name products-cat --path https://products.host:7474 --key $DEMAND_KEY
 duckstring catchment connect --name main --path http://127.0.0.1:7474
 ```
 
@@ -27,7 +27,7 @@ duckstring catchment duct add products-cat products -c main   # draw the `produc
 
 `duct create` records the upstream's address, credentials, and [stable identity](#identity-and-the-lineage-view) on the consuming Catchment. `duct add` materialises the Pond Draw — from that moment a local Pond whose `pond.toml` names `products` as a Source wires straight to it, no code change. Use `duct sync` instead of `add` to draw *every* Pond the upstream currently exposes (`duct create --sync` does both at once), and `duct ls` to see your ducts and what they draw.
 
-That's all the consumer side needs. The upstream requires nothing special for a duct — it serves its already-published data and accepts the demand the duct forwards, gated by its [API key](running-a-catchment.md#authentication).
+That's all the consumer side needs. The upstream requires nothing special for a duct — it serves its already-published data and accepts the demand the duct forwards, gated by its [API key](running-a-catchment.md#authentication). A duct only solicits demand and draws data, so a **demand** key is all you need to hand the downstream — not a full one.
 
 ## How a Draw behaves
 
@@ -59,6 +59,6 @@ duckstring catchment close reports
 
 ## What to know
 
-- **A duct is a full-trust link.** It holds the upstream's credentials, which under the built-in API key grant full access. So today's ducts are for Catchments within one trust domain — your own machines, or a team you'd hand a key. Scoped per-link credentials are a future step; until then, don't duct in a Catchment you wouldn't share a key with.
+- **Scope the duct's key to what it needs.** A duct holds the upstream's credentials and uses them to solicit demand and draw data — so hand it a **demand** key, not a full one, and the link can't deploy, kill, or reconfigure the upstream. A single legacy `--key` (or `DUCKSTRING_API_KEY`) grants full access, so prefer the laddered keys for cross-Catchment links. Per-Pond credential scoping is still a future step; until then, don't duct in a Catchment you wouldn't grant demand-level access.
 - **Transfers are incremental where there's a delta to send.** A plain (overwrite) Pond ships its exported Parquet whole each refresh — overwrite output has no delta. A [Trickle](trickle.md) Source instead ships only the history/changelog parts newer than what the consumer has already landed, dropped straight into its own parts directory (immutable and idempotent by name, so a repeated or interrupted draw is harmless); a merge main's cold base re-transfers only when the upstream recompacts it, not on every draw. The mode and key metadata travel with the data, so the consumer resolves the Source with no shared configuration — and a first draw, or one that has fallen past the upstream's retention, transfers the current state whole before resuming incrementally.
 - **Names share a namespace.** A drawn Pond can't share a `name@major` with a local Pond — remove or rename one. Cross-Catchment dependency cycles aren't detected centrally (no Catchment sees the whole mesh); the freshness model doesn't deadlock on them, but they're yours to avoid.

@@ -17,6 +17,7 @@ export interface Pond {
   name: string;
   kind: string; // inlet | pond | outlet
   isDraw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment
+  isSpout: boolean; // a Spout — egresses its source's output to an external system (terminal)
   sources: PondId[];
 }
 
@@ -65,6 +66,8 @@ export interface PondInfo {
   error: string | null; // failure message of the freshest failed Run, when failed
   immediateRetries: number; // live budget: Ripple retries within a Run
   sourceRetries: number; // live budget: Runs retried on a Source change
+  // Spout nodes only: its egress config + standing-Wake armed state.
+  spout?: { destination: string; table: string | null; mode: string; armed: boolean } | null;
 }
 
 // ─── Run history ─────────────────────────────────────────────────────────────

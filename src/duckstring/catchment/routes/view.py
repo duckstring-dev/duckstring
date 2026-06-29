@@ -14,6 +14,8 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 
+from .. import auth
+
 router = APIRouter()
 
 
@@ -86,7 +88,7 @@ async def assemble_view(driver, scope: Optional[list[str]], visited: set[str], c
     return result
 
 
-@router.get("/view")
+@router.get("/view", dependencies=[auth.read])
 async def view(request: Request, scope: Optional[str] = None, visited: Optional[str] = None):
     driver = getattr(request.app.state, "driver", None)
     if driver is None:

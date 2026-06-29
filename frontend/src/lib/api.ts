@@ -67,6 +67,8 @@ export interface RawPond {
   major: number;
   kind: string;
   is_draw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment, not run by a Duck
+  is_spout: boolean; // a Spout — egresses its source's output to an external system (run by the egress worker)
+  spout: { destination: string; table: string | null; mode: string; armed: boolean } | null;
   version: string;
   has_tables: boolean; // this major line has published at least one table — the data viewer is offered
   status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
@@ -94,9 +96,13 @@ export interface RawPond {
   ripple_edges: [string, string][]; // [sourceName, sinkName] within the Pond
 }
 
+// The caller's access level — a total order read ⊂ demand ⊂ full. The UI gates its controls on it.
+export type AccessLevel = 'read' | 'demand' | 'full';
+
 export interface StatusPayload {
   catchment: { id: string | null; name: string | null } | null; // this Catchment's stable identity
   version: number; // change token for the /api/status long-poll (pass back as ?since=)
+  access_level: AccessLevel; // the caller's level (always 'full' when the Catchment is open/unauthed)
   ponds: RawPond[];
   edges: [string, string][]; // [sourceId, sinkId] — pond keys ("name@major")
 }
@@ -245,6 +251,99 @@ export function setBudget(pond: string, immediateRetries: number, sourceRetries:
     immediate_retries: immediateRetries,
     source_retries: sourceRetries,
   });
+}
+
+// ─── Spouts (egress) ─────────────────────────────────────────────────────────
+
+export interface RawSpout {
+  name: string;
+  table: string | null;
+  destination: string;
+  mode: string;
+  is_failed: boolean;
+  is_killed: boolean;
+  standing_wake: boolean;
+  error: string | null;
+}
+
+// A Spout's node id is "{source}#{spout}@{major}" — split into the source pond id + the spout name.
+export function spoutParts(spoutId: string): { source: string; name: string } {
+  const at = spoutId.lastIndexOf('@');
+  const major = at === -1 ? '' : spoutId.slice(at + 1);
+  const body = at === -1 ? spoutId : spoutId.slice(0, at);
+  const hash = body.indexOf('#');
+  const sourceName = hash === -1 ? body : body.slice(0, hash);
+  const name = hash === -1 ? '' : body.slice(hash + 1);
+  return { source: major ? `${sourceName}@${major}` : sourceName, name };
+}
+
+export function fetchSpouts(sourceId: string): Promise<RawSpout[]> {
+  return getJSON<{ spouts: RawSpout[] }>(pondPath(sourceId, 'spouts')).then((d) => d.spouts);
+}
+
+// Control a Spout's standing Wake (wake | force | sleep | kill | clear | resync). `spoutId` is the node id.
+export function controlSpout(spoutId: string, action: string): Promise<void> {
+  const { source, name } = spoutParts(spoutId);
+  return postJSON(pondPath(source, `spouts/${encodeURIComponent(name)}/${action}`));
+}
+
+export function removeSpout(spoutId: string): Promise<void> {
+  const { source, name } = spoutParts(spoutId);
+  return postJSON(pondPath(source, `spouts/${encodeURIComponent(name)}/remove`));
+}
+
+// Probe a destination's connection/credentials before binding a Spout (the add form's "Test" button).
+// Writes no data. Returns {ok} or {ok: false, error} — a connection problem is data, not an exception.
+export async function testSpout(sourceId: string, destination: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`${apiBase()}${pondPath(sourceId, 'spouts/test')}`, {
+    method: 'POST',
+    headers: authHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify({ destination }),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `test failed (${res.status})`);
+  return res.json();
+}
+
+// Add a Spout on a source Pond. Surfaces the server's 422 detail (bad destination / PK gate) on error.
+export async function addSpout(
+  sourceId: string,
+  body: { destination: string; name?: string | null; table?: string | null; mode?: string },
+): Promise<{ name: string }> {
+  const res = await fetch(`${apiBase()}${pondPath(sourceId, 'spouts')}`, {
+    method: 'POST',
+    headers: authHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `add spout failed (${res.status})`);
+  return res.json();
+}
+
+// ─── Secrets (the catchment-wide write-only store) ───────────────────────────
+
+export interface SecretName {
+  name: string;
+  set_at: string | null;
+}
+
+export function fetchSecrets(): Promise<SecretName[]> {
+  return getJSON<{ secrets: SecretName[] }>('/secrets').then((d) => d.secrets);
+}
+
+// Set/overwrite a secret. The value travels in the request (use an HTTPS Catchment); never read back.
+// Surfaces the server's 422 detail (bad name) on error.
+export function setSecret(name: string, value: string): Promise<void> {
+  return postJSON('/secrets', { name, value });
+}
+
+export async function removeSecret(name: string): Promise<void> {
+  const res = await fetch(`${apiBase()}/secrets/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error(`remove secret failed (${res.status})`);
 }
 
 // ─── Data viewer (windowed read of a Pond's exported tables) ─────────────────

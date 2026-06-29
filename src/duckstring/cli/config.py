@@ -76,6 +76,17 @@ def register_catchment(
     save_config(config)
 
 
+def update_catchment_key(name: str, key: str) -> None:
+    """Replace the stored API key for a registered catchment (e.g. after rotating the full key, so the
+    operator's own CLI keeps working)."""
+    config = load_config()
+    cfg = config.get("catchments", {}).get(name)
+    if cfg is None:
+        return
+    cfg["key"] = key
+    save_config(config)
+
+
 def unregister_catchment(name: str) -> None:
     config = load_config()
     config.get("catchments", {}).pop(name, None)

@@ -19,6 +19,75 @@ def _offer_default(name: str, yes: bool) -> None:
         typer.echo(f"Default catchment set to '{name}'.")
 
 
+def _has_key_ladder(root: Path) -> bool:
+    """Whether tiered read/demand/full keys are stored in this Catchment's database."""
+    from duckstring.catchment.db import connect
+
+    db = root / "duck.db"
+    if not db.exists():
+        return False
+    con = connect(db)
+    try:
+        row = con.execute(
+            "SELECT 1 FROM catchment_key LIMIT 1"
+        ).fetchone()
+    except Exception:  # table not migrated yet
+        row = None
+    finally:
+        con.close()
+    return row is not None
+
+
+def _generate_ladder(root: Path) -> dict[str, str]:
+    """Mint the three-tier key ladder into a Catchment's database, returning the plaintext once."""
+    from duckstring.catchment import auth
+    from duckstring.catchment.db import connect, migrate
+
+    root.mkdir(parents=True, exist_ok=True)
+    con = connect(root / "duck.db")
+    try:
+        migrate(con)
+        return auth.generate(con)
+    finally:
+        con.close()
+
+
+_LEVEL_BLURB = {
+    "full": "deploy, control, ducts, rotate",
+    "demand": "read + create demand + downstream duct",
+    "read": "read & query only",
+}
+
+
+def _print_keys_panel(name: str, keys: dict[str, str], url: str | None = None) -> None:
+    from rich.console import Console
+    from rich.panel import Panel
+
+    rows = "\n".join(
+        f"  [bold]{lvl:<6}[/bold] [cyan]{keys[lvl]}[/cyan]   [dim]{_LEVEL_BLURB[lvl]}[/dim]"
+        for lvl in ("full", "demand", "read")
+        if lvl in keys
+    )
+    connect_hint = (
+        f"\n\n  Give the [bold]demand[/bold] key to a downstream operator:\n"
+        f"  [dim]duckstring catchment connect --name {name} --path {url} --key {keys['demand']}[/dim]"
+        if url and "demand" in keys else ""
+    )
+    stored = (
+        f"\n\n  The [bold]full[/bold] key is stored against '{name}' in [dim]~/.duckstring/config.toml[/dim]; "
+        "the others are not — copy them now."
+        if "full" in keys else ""
+    )
+    Console().print(
+        Panel(
+            "[bold white]Access keys[/bold white]  [dim](shown once — store them now)[/dim]\n\n"
+            f"{rows}{connect_hint}{stored}",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+
+
 def _launch(name: str, url: str, root: Path, key: str | None = None) -> None:
     from urllib.parse import urlparse
 
@@ -30,13 +99,14 @@ def _launch(name: str, url: str, root: Path, key: str | None = None) -> None:
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 7474
 
+    auth_line = "API key required" if (key or _has_key_ladder(root)) else "open (no API key)"
     console = Console()
     console.print(
         Panel(
             f"[bold white]duckstring catchment[/bold white] [bold cyan]{name}[/bold cyan]\n\n"
             f"  [dim]url:  {url}[/dim]\n"
             f"  [dim]root: {root}[/dim]\n"
-            f"  [dim]auth: {'API key required' if key else 'open (no API key)'}[/dim]\n\n"
+            f"  [dim]auth: {auth_line}[/dim]\n\n"
             f"  Press [bold]Ctrl-C[/bold] to stop.",
             border_style="bright_black",
             padding=(1, 2),
@@ -94,12 +164,13 @@ def init(
     port: int = typer.Option(7474, "--port", "-p", help="Port to listen on."),
     root: Optional[Path] = typer.Option(None, "--root", help="Root directory for Catchment data."),
     key: Optional[str] = typer.Option(
-        None, "--key", help="API key the server requires on every request (and the CLI then sends)."
+        None, "--key", help="A single full-access API key the server requires (and the CLI then sends)."
     ),
     generate_key: bool = typer.Option(
         False, "--generate-key",
-        help="Generate a fresh API key, print it once, and start the server with it (stored in the "
-             "registration so `catchment start` reuses it). Mutually exclusive with --key.",
+        help="Generate the three-tier key ladder (read/demand/full), print them once, and start the "
+             "server. The full key is stored in the registration so `catchment start` reuses it. "
+             "Mutually exclusive with --key.",
     ),
     header: Optional[list[str]] = typer.Option(None, "--header", help=_HEADER_HELP),
     yes: bool = typer.Option(False, "--yes", "-y", help="Automatically set as default catchment."),
@@ -107,33 +178,19 @@ def init(
     """Create and register a new local Catchment, then start the server."""
     from .config import CONFIG_DIR, list_catchments
 
-    if generate_key:
-        if key:
-            typer.echo("Error: --generate-key and --key are mutually exclusive — the generated key IS the key.",
-                       err=True)
-            raise typer.Exit(1)
-        import secrets
-
-        from rich.console import Console
-        from rich.panel import Panel
-
-        key = secrets.token_urlsafe(24)
-        Console().print(
-            Panel(
-                f"[bold white]Generated API key[/bold white]\n\n"
-                f"  [bold cyan]{key}[/bold cyan]\n\n"
-                f"  Clients connect with:\n"
-                f"  [dim]duckstring catchment connect --name {name} --path <url> --key {key}[/dim]\n\n"
-                f"  Stored in [dim]~/.duckstring/config.toml[/dim] against '{name}' — "
-                f"[dim]catchment start {name}[/dim] reuses it.",
-                border_style="cyan",
-                padding=(1, 2),
-            )
-        )
+    if generate_key and key:
+        typer.echo("Error: --generate-key and --key are mutually exclusive — the generated full key IS the key.",
+                   err=True)
+        raise typer.Exit(1)
 
     headers = _parse_headers(header)
     root_dir = Path(root) if root else CONFIG_DIR / name
     url = f"http://{host}:{port}"
+
+    if generate_key:
+        keys = _generate_ladder(root_dir)
+        key = keys["full"]  # the operator's own CLI gets full access; the others are handed out
+        _print_keys_panel(name, keys, url)
 
     existing = dict(list_catchments()).get(name)
     if existing:
@@ -179,6 +236,34 @@ def start(
     url = cfg["url"]
     root_dir = Path(cfg["root"]) if cfg.get("root") else Path.home() / ".duckstring" / name
     _launch(name, url, root_dir, cfg.get("key"))
+
+
+@app.command(name="rotate-keys")
+def rotate_keys(
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to rotate (uses default if omitted)."),
+    level: Optional[list[str]] = typer.Option(
+        None, "--level", help="Level(s) to reroll: read/demand/full (repeatable). Default: all three."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
+) -> None:
+    """Reroll a Catchment's access keys, printing the new ones once. Rerolling invalidates the old key
+    for each rotated level; the internal Duck token is untouched (running Ducks keep working). Requires
+    a full-access key on the registration."""
+    from . import _http
+    from .config import resolve_catchment, update_catchment_key
+
+    cname, cfg = resolve_catchment(catchment)
+    levels = list(level) if level else None
+    target = ", ".join(levels) if levels else "all (read, demand, full)"
+    if not yes:
+        typer.confirm(f"Reroll the {target} key(s) for '{cname}'? Old keys stop working.", default=False, abort=True)
+
+    resp = _http.post(f"{cfg['url']}/api/catchment/keys/rotate", auth=cfg, json={"levels": levels}).json()
+    keys = resp["keys"]
+    # Keep the operator's own CLI working: if the full key was rerolled, update the stored registration.
+    if "full" in keys:
+        update_catchment_key(cname, keys["full"])
+    _print_keys_panel(cname, keys)
 
 
 @app.command()

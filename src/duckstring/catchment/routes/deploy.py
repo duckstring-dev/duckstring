@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ...keys import version_key as _version_key
+from .. import auth
 
 router = APIRouter()
 
@@ -213,7 +214,7 @@ class _GitBody(BaseModel):
     repo_url: str
 
 
-@router.post("/deploy")
+@router.post("/deploy", dependencies=[auth.full])
 async def deploy(request: Request):
     db = request.app.state.db
     root: Path = request.app.state.root

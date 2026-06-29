@@ -82,7 +82,26 @@ To expose a bare Catchment (a VM, a LAN box) without a platform in front, give i
 duckstring catchment init --name prod --host 0.0.0.0 --generate-key
 ```
 
-`--generate-key` creates a fresh key, prints it once, and stores it against the registration so `catchment start prod` reuses it; pass `--key` instead to supply your own (the two are mutually exclusive), or set `DUCKSTRING_API_KEY` in the server's environment. With a key set, every `/api` request except the health check must carry `Authorization: Bearer {key}` and is rejected `401` otherwise. Clients register the key once with `catchment connect --key`; the server's own Ducks inherit it automatically; the web UI prompts for it on first visit and keeps it in the browser.
+`--generate-key` mints a **three-tier key ladder**, prints all three once, and stores the **full** key against the registration so `catchment start prod` reuses it. The levels are a total order — each grants everything below it:
+
+| Level | Can do | Hand it to |
+|---|---|---|
+| **read** | read & query data | a dashboard, a read-only consumer |
+| **demand** | read + create demand (tap/wave/pulse/tide) + connect a downstream duct | a downstream Catchment's operator |
+| **full** | everything: deploy, the control verbs, windows, ducts, key rotation | yourself / trusted operators |
+
+With a key set, every `/api` request except the health check must carry `Authorization: Bearer {key}` and is rejected `401` if missing/invalid, or `403` if the key's level is too low for the route. Clients register a key once with `catchment connect --key`; the server's own Ducks authenticate on a **separate internal token** (so rotating a user key never disrupts a running Duck); the web UI prompts for a key on first visit and keeps it in the browser.
+
+Only the keys' **hashes** are stored, so the plaintext is unrecoverable — keep the copy you were shown. Pass `--key` instead of `--generate-key` to supply a single full-access key of your own (the two are mutually exclusive), or set `DUCKSTRING_API_KEY` in the server's environment for the same single-key, full-access mode.
+
+**Rotating keys.** Reroll without recreating the Catchment:
+
+```bash
+duckstring catchment rotate-keys                 # all three (asks first)
+duckstring catchment rotate-keys --level demand  # just one level
+```
+
+The old key for each rerolled level stops working immediately; the new keys are printed once. If the full key is rerolled, the CLI updates your stored registration so your own commands keep working — re-distribute the read/demand keys to whoever holds them.
 
 Transport security is yours to provide — put a keyed Catchment behind TLS (a reverse proxy) before sending the key over a network. Either way, keys and headers live in `~/.duckstring/config.toml`, which the CLI keeps private (`0600`).
 

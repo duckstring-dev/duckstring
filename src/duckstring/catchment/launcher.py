@@ -54,7 +54,8 @@ class SubprocessLauncher:
                 "--major", str(major),
                 "--version", version,
                 "--catchment", self.base_url,
-                "--token", self.token,
+                # `--token=` (joined) so a urlsafe token starting with '-' isn't read as a flag.
+                f"--token={self.token}",
                 "--root", str(self.root),
                 "--source-path", source_path,
             ]

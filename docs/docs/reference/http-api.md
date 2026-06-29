@@ -7,7 +7,7 @@ description: The Catchment's REST surface.
 
 Everything the CLI and [web UI](../guides/web-ui.md) do goes through this API, served by the Catchment under `/api`. All timestamps are UTC ISO-8601 strings; all bodies are JSON unless noted.
 
-When the Catchment is started with an API key (`duckstring catchment init --key …` / `--generate-key`, or the `DUCKSTRING_API_KEY` environment variable), every `/api` request except `/api/health` must carry it — `Authorization: Bearer {key}` — and is `401` otherwise. The CLI sends the credentials registered against the Catchment (`catchment connect --key …`, or arbitrary `--header` pairs for a platform gate in front) automatically; the web UI prompts for the key on a `401`. See [Authentication](../guides/running-a-catchment.md#authentication).
+When the Catchment is started with API keys (`duckstring catchment init --key …` / `--generate-key`, or the `DUCKSTRING_API_KEY` environment variable), every `/api` request except `/api/health` must carry one — `Authorization: Bearer {key}` — and is `401` when missing/invalid. Keys come in a total-ordered ladder (**read ⊂ demand ⊂ full**); each route declares a minimum level, and a valid key whose level is too low gets `403`. Read routes (status, runs, data, draw) need `read`; demand routes (tap/wave/pulse/tide, the duct connection) need `demand`; deploy, the control verbs, windows, ducts and key rotation need `full`. A single `--key`/`DUCKSTRING_API_KEY` means `full`. The CLI sends the credentials registered against the Catchment (`catchment connect --key …`, or arbitrary `--header` pairs for a platform gate in front) automatically; the web UI prompts for a key on a `401`. The worker (`/api/duck/*`) channel uses a separate internal token, not a user key. See [Authentication](../guides/running-a-catchment.md#authentication).
 
 ## Health
 
@@ -36,6 +36,12 @@ GET /api/catchment/identity
 ```
 
 `{"id", "name"}` — this Catchment's stable UUID (minted once on first start) and optional display name. How a downstream resolves cross-Catchment identity over a [duct](../guides/connecting-catchments.md).
+
+```
+POST /api/catchment/keys/rotate     {"levels": ["read", "demand", "full"]?}    (full)
+```
+
+Reroll the access keys for the given levels (omit `levels` for all three), returning `{"keys": {level: plaintext}}` **once** — only hashes are stored. The internal Duck token is untouched. Backs `duckstring catchment rotate-keys`.
 
 ## Deploy
 
@@ -154,6 +160,32 @@ All under `/api/ponds/{name}/…`, all returning `{"ok": true}`; `404` for unkno
 | `GET /api/ponds/{name}/windows` | `{"windows": [...]}` |
 | `POST /api/ponds/{name}/windows` | Add a rule: `{"name", "start_anchor", "duration_seconds", "freq_unit", "freq_interval", "valid_days", "until_time"}`. `freq_unit` ∈ `SECOND \| MINUTE \| HOUR \| DAY \| WEEK`; `valid_days` like `"MON,WED,FRI"` or `null`; `422` on overlap. |
 | `POST /api/ponds/{name}/windows/{window}/remove` | Remove a rule (`404` if absent). |
+
+## Spouts (egress)
+
+All full-gated. A Spout publishes a Pond's output to an external destination; it is operational config (persisted, survives redeploys). Credentials live in the destination URI as `${env:NAME}` (process environment) or `${secret:NAME}` ([secret store](#secrets)) references, resolved only at egress time (for object stores, in the query: `?key_id=${env:..}&secret=${env:..}&region=..`). After each Pond Run the egress worker delivers to the destination — snapshot Parquet for object stores; `postgres://` syncs a merge Trickle's changelog **incrementally** (upserts + deletes in one transaction, exactly-once). A transactional destination requires a primary key (a merge Trickle), so a plain table to `postgres://` is `422` at creation.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/ponds/{name}/spouts` | `{"spouts": [{"name", "table", "destination", "mode", "schedule", "watermark", "is_failed", "failures", "error"}]}` |
+| `POST /api/ponds/{name}/spouts` | Bind a Spout: `{"destination", "name"?, "table"?, "mode"?}`. `destination` scheme ∈ `file/s3/gs/postgres`; `mode` ∈ `auto/full/append` (default `auto`); `table` null = all. Returns `{"name"}`. `422` on a bad destination/mode or duplicate name. |
+| `POST /api/ponds/{name}/spouts/test` | Probe a destination's connection/credentials before binding (the UI's *Test* button). Body `{"destination"}`; **writes no data** (a write+delete probe for `file://`, an `ATTACH`+`SELECT 1` for `postgres://`, a prefix-list for `s3`/`gs`). Returns `{"ok": true}` or `{"ok": false, "error"}` — a connection problem is a `200` result, not a `5xx`; the error is sanitised (never echoes a credential). `name` is unused (the probe is destination-only). |
+| `POST /api/ponds/{name}/spouts/{spout}/remove` | Remove a Spout (`404` if absent). |
+| `POST /api/ponds/{name}/spouts/{spout}/{action}` | Control a Spout's standing Wake. `action` ∈ `wake`/`force` (re-arm; force re-delivers now), `sleep`/`kill` (disarm; kill parks), `clear` (reset a fault), `resync` (full re-egress). |
+
+A Spout is a **real node**, so it appears in `GET /api/status` `ponds[]` with `"is_spout": true` (its key is `{source}#{spout}@{major}`), and its source→spout edge rides the normal `edges` list. Its run history (including failed runs with tracebacks) is in `GET /api/runs` like any Pond.
+
+## Secrets
+
+All full-gated. A **write-only** catchment-wide store for the credentials a Spout references as `${secret:NAME}`. Values are **never returned** — you read names, not secrets — and the store is excluded from `GET /api/catchment/archive`.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/secrets` | `{"secrets": [{"name", "set_at"}]}` — names and set-times only, never values. |
+| `POST /api/secrets` | Store (or overwrite) a secret: `{"name", "value"}`. `name` must match `[A-Za-z_][A-Za-z0-9_]*` (`422` otherwise). The value is accepted but never echoed back. |
+| `DELETE /api/secrets/{name}` | Remove a secret (`404` if absent). |
+
+The value is transmitted in the `POST` body — front the Catchment with TLS, or prefer `${env:NAME}` (set in the server's environment, never over the wire). Stored as a private (`0600`) plaintext file; no encryption-at-rest.
 
 ## Data
 

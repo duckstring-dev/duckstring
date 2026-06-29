@@ -23,8 +23,12 @@ import {
   setBudget,
   addWindow,
   removeWindow,
+  controlSpout,
+  addSpout as apiAddSpout,
+  removeSpout as apiRemoveSpout,
   setApiKey,
   UnauthorizedError,
+  type AccessLevel,
   type StatusPayload,
   type RawPond,
   type RawRipple,
@@ -97,8 +101,16 @@ function mapWindow(w: RawWindow): WindowRow {
   };
 }
 
+const LEVEL_RANK: Record<AccessLevel, number> = { read: 1, demand: 2, full: 3 };
+
+/** Whether `level` meets `required` on the read ⊂ demand ⊂ full ladder. */
+export function atLeast(level: AccessLevel, required: AccessLevel): boolean {
+  return LEVEL_RANK[level] >= LEVEL_RANK[required];
+}
+
 interface StatusSlice {
   catchment: { id: string | null; name: string | null } | null;
+  accessLevel: AccessLevel;
   ponds: Record<PondId, Pond>;
   ripples: Record<RippleId, Ripple>;
   pondViews: Record<PondId, NodeView>;
@@ -121,7 +133,10 @@ function transformStatus(payload: StatusPayload): StatusSlice {
 
   for (const p of payload.ponds) {
     if (p.is_draw && !consumed.has(p.id)) continue;
-    ponds[p.id] = { id: p.id, name: p.name, kind: p.kind, isDraw: p.is_draw ?? false, sources: [] };
+    ponds[p.id] = {
+      id: p.id, name: p.name, kind: p.kind,
+      isDraw: p.is_draw ?? false, isSpout: p.is_spout ?? false, sources: [],
+    };
     pondInfo[p.id] = {
       version: p.version,
       major: p.major,
@@ -139,13 +154,14 @@ function transformStatus(payload: StatusPayload): StatusSlice {
       error: p.error,
       immediateRetries: p.immediate_retries,
       sourceRetries: p.source_retries,
+      spout: p.spout ?? null,
     };
     pondViews[p.id] = nodeView(p, p.d_ms);
     if (p.trigger) triggers[p.id] = { kind: p.trigger.kind, boundMs: p.trigger.bound_ms };
 
-    // A Pond Draw's single "draw" ripple is an internal transfer mechanism — not worth rendering. Skip
-    // its ripples entirely; the Draw shows as a bare node (its running/idle state is pond-level).
-    if (!p.is_draw) {
+    // A Draw's "draw" ripple and a Spout's "egress" ripple are internal mechanisms — not worth rendering.
+    // Skip them; the node shows bare (its running/idle/failed state is pond-level).
+    if (!p.is_draw && !p.is_spout) {
       for (const r of p.ripples) {
         const eid = `${p.id}.${r.name}`;
         ripples[eid] = { id: eid, pondId: p.id, name: r.name, parents: [] };
@@ -162,7 +178,13 @@ function transformStatus(payload: StatusPayload): StatusSlice {
     ponds[snk]?.sources.push(src);
   }
 
-  return { catchment: payload.catchment ?? null, ponds, ripples, pondViews, rippleViews, pondInfo, triggers };
+  return {
+    catchment: payload.catchment ?? null,
+    // Default to 'full' when absent — keeps an open/unauthed Catchment (and any transitional backend)
+    // showing every control, matching pre-ladder behaviour.
+    accessLevel: payload.access_level ?? 'full',
+    ponds, ripples, pondViews, rippleViews, pondInfo, triggers,
+  };
 }
 
 // ─── Store ───────────────────────────────────────────────────────────────────
@@ -245,6 +267,13 @@ export interface LiveState extends StatusSlice {
 
   addWindow(pond: PondId, body: AddWindowBody): Promise<void>;
   removeWindow(pond: PondId, name: string): Promise<void>;
+
+  spoutControl(spoutId: PondId, action: string): Promise<void>;
+  removeSpout(spoutId: PondId): Promise<void>;
+  addSpout(
+    sourceId: PondId,
+    body: { destination: string; name?: string | null; table?: string | null; mode?: string },
+  ): Promise<{ name: string }>;
 }
 
 // Run-history feed window: starts at one page, grows by a page per scroll-to-bottom, hard-capped
@@ -268,6 +297,7 @@ export function runKey(r: PondRun): string {
 
 export const useLiveStore = create<LiveState>((set, get) => ({
   catchment: null,
+  accessLevel: 'full', // until the first /api/status; open Catchments stay 'full'
   ponds: {},
   ripples: {},
   pondViews: {},
@@ -392,7 +422,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   selectPond(id) {
     set({ selectedPondId: id, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
-    if (id && get().ponds[id]?.sources.length === 0) get().refreshWindows(id);
+    // Windows live on Inlets (batch availability) and on Spouts (delivery throttle).
+    if (id && (get().ponds[id]?.sources.length === 0 || get().ponds[id]?.isSpout)) get().refreshWindows(id);
     get().refresh();
   },
   selectRipple(id) {
@@ -474,6 +505,18 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   clearFailure: (pond) => act(get, set, () => clearFailure(pond)),
   setBudget: (pond, immediateRetries, sourceRetries) =>
     act(get, set, () => setBudget(pond, immediateRetries, sourceRetries)),
+
+  // Spout control (the standing Wake) — wake/force/sleep/kill/clear/resync on a Spout node id.
+  spoutControl: (spoutId, action) => act(get, set, () => controlSpout(spoutId, action)),
+  removeSpout: (spoutId) => act(get, set, () => apiRemoveSpout(spoutId)),
+  // Add returns the created name (or throws the server detail) so the form can show inline errors;
+  // re-polls on success.
+  addSpout: async (sourceId, body) => {
+    const res = await apiAddSpout(sourceId, body);
+    set({ error: null });
+    await get().refresh();
+    return res;
+  },
 
   addWindow: (pond, body) =>
     act(get, set, async () => {
