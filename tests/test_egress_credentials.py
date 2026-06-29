@@ -33,10 +33,11 @@ def test_unrelated_brace_syntax_passes_through():
     assert cred.resolve("${HOME}/$FOO/path", env={}) == "${HOME}/$FOO/path"
 
 
-def test_secret_scheme_is_reserved_not_yet_supported():
-    with pytest.raises(CredentialError) as exc:
-        cred.resolve("${secret:PGPASS}", env={})
-    assert "not yet supported" in str(exc.value)
+def test_secret_scheme_resolves_via_provider():
+    # ${secret:NAME} resolves from the Catchment secret store (see test_secrets.py for the full path).
+    assert cred.resolve("${secret:PGPASS}", secret={"PGPASS": "shh"}.get) == "shh"
+    with pytest.raises(CredentialError, match="not set"):
+        cred.resolve("${secret:PGPASS}", secret={}.get)
 
 
 def test_empty_reference_raises():

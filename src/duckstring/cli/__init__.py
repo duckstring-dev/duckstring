@@ -6,6 +6,7 @@ from . import catchment as catchment_cmd
 from . import duct as duct_cmd
 from . import pond as pond_cmd
 from . import puddle as puddle_cmd
+from . import secret as secret_cmd
 from . import spout as spout_cmd
 from .control import clear, failure_budget, force, kill, refresh, repair, sleep, wake
 from .data import get, query
@@ -68,6 +69,7 @@ app.add_typer(puddle_cmd.app, name="puddle")
 app.add_typer(trigger_app, name="trigger")
 app.add_typer(control_app, name="control")
 app.add_typer(spout_cmd.app, name="spout")
+app.add_typer(secret_cmd.app, name="secret")
 
 pond_cmd.app.command("deploy")(deploy)
 app.command("status")(status)

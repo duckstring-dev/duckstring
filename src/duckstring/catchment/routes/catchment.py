@@ -26,6 +26,7 @@ from .. import auth
 router = APIRouter()
 
 _SKIP_SUFFIXES = (".db-wal", ".db-shm")  # subsumed by the SQLite snapshot
+_SKIP_NAMES = {"secrets.json", "secrets.json.tmp"}  # the write-only secret store never travels in a bundle
 
 
 def _db(request: Request) -> sqlite3.Connection:
@@ -66,7 +67,7 @@ def _root_files(root: Path) -> list[tuple[Path, str]]:
     """Every regular file in the root as (path, root-relative arcname), WAL sidecars skipped."""
     files = []
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.name.endswith(_SKIP_SUFFIXES):
+        if not path.is_file() or path.name.endswith(_SKIP_SUFFIXES) or path.name in _SKIP_NAMES:
             continue
         files.append((path, path.relative_to(root).as_posix()))
     return files

@@ -94,6 +94,12 @@ def create_app(
     app.state.api_key = api_key or os.environ.get("DUCKSTRING_API_KEY") or None
     # The internal token Ducks present on the duck channel (persisted, decoupled from the user keys).
     app.state.duck_token = auth.ensure_duck_token(con)
+    # The write-only secret store (at the root, archive-excluded). Injected into the egress credential
+    # resolver so a ${secret:NAME} reference resolves at egress time.
+    from ..egress import credentials
+    from .secrets import SecretStore
+    app.state.secret_store = SecretStore(root)
+    credentials.set_secret_provider(app.state.secret_store.get)
     # The address Ducks dial back to: explicit argument (the CLI passes its bind address), or the
     # environment, or None — unknown, because the host platform picks the bind address (e.g. Posit
     # Connect). When None it is learned from the first request's ASGI scope below.

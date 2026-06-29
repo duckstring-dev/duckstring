@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 # ${env:NAME} / ${secret:NAME} — the name is any run of non-`}` chars (trimmed); other schemes don't match.
@@ -30,7 +30,18 @@ _REF = re.compile(r"\$\{(env|secret):([^}]*)\}")
 
 
 class CredentialError(Exception):
-    """A credential reference could not be resolved (missing env var, or a reserved scheme)."""
+    """A credential reference could not be resolved (a missing env var or unset secret)."""
+
+
+# The Catchment injects its write-only secret store here (process-wide) so ``${secret:NAME}`` resolves
+# deep inside the egress drivers without threading it through every call. A ``name -> value | None``
+# lookup; ``None`` when no store is attached (e.g. tests, or a Catchment that never set one).
+_secret_provider: "Callable[[str], str | None] | None" = None
+
+
+def set_secret_provider(fn: "Callable[[str], str | None] | None") -> None:
+    global _secret_provider
+    _secret_provider = fn
 
 
 @dataclass(frozen=True)
@@ -51,21 +62,29 @@ def references(text: str) -> list[Reference]:
     return out
 
 
-def resolve(text: str, *, env: Mapping[str, str] | None = None) -> str:
-    """Substitute every ``${env:NAME}`` in ``text`` with the environment value, returning the resolved
-    string. Raises :class:`CredentialError` if a referenced var is unset (naming the var, never a value)
-    or if a reserved ``${secret:...}`` reference is used. **Do not log or persist the result.**"""
+def resolve(
+    text: str, *, env: Mapping[str, str] | None = None,
+    secret: "Callable[[str], str | None] | None" = None,
+) -> str:
+    """Substitute every ``${env:NAME}`` (from the environment) and ``${secret:NAME}`` (from the Catchment
+    secret store) in ``text`` with its value. Raises :class:`CredentialError` naming an unset var/secret
+    (never a value). ``secret`` overrides the injected provider (for tests). **Do not log or persist the
+    result.**"""
     environ = os.environ if env is None else env
+    secret_lookup = secret if secret is not None else _secret_provider
 
     def _sub(match: re.Match[str]) -> str:
         scheme, name = match.group(1), match.group(2).strip()
         if not name:
             raise CredentialError(f"empty credential reference: ${{{scheme}:}}")
         if scheme == "secret":
-            raise CredentialError(
-                f"secret references (${{secret:{name}}}) are not yet supported — use ${{env:{name}}} "
-                "and inject the value via the environment"
-            )
+            val = secret_lookup(name) if secret_lookup is not None else None
+            if val is None:
+                raise CredentialError(
+                    f"secret {name!r} is not set (referenced as ${{secret:{name}}} — set it with "
+                    "`duckstring secret set` or the UI, or use ${{env:…}})"
+                )
+            return val
         try:
             return environ[name]
         except KeyError:
