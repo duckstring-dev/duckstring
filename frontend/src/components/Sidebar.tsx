@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { fetchSecrets } from '@/lib/api';
+import { fetchSecrets, testSpout } from '@/lib/api';
 import { useLiveStore, atLeast, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
 import type { FreqUnit, Pond, PondInfo, PondRun } from '@/lib/types';
 import { TraceChart } from './TraceChart';
@@ -181,6 +181,10 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
   const [mode, setMode] = useState('auto');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // The connection-test outcome (the "Test" button), tagged with the destination it ran against so it
+  // only shows while that destination is still in the form (no effect needed to clear it on edits).
+  const [testResult, setTestResult] = useState<{ destination: string; ok: boolean; error?: string } | null>(null);
+  const [testing, setTesting] = useState(false);
 
   // Offer the stored secret names as a datalist once the form opens (full access only — the names
   // route is full-gated; a 403 just leaves the list empty).
@@ -201,6 +205,20 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
     return `${scheme}://${path}${q.length ? '?' + q.join('&') : ''}`;
   };
 
+  const test = async () => {
+    setErr(null);
+    setTestResult(null);
+    setTesting(true);
+    const destination = buildDestination();
+    try {
+      setTestResult({ destination, ...(await testSpout(sourceId, destination)) });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'test failed');
+    } finally {
+      setTesting(false);
+    }
+  };
+
   const submit = async () => {
     setErr(null);
     setBusy(true);
@@ -211,6 +229,7 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
       setTable('');
       setKeyVar('');
       setSecretVar('');
+      setTestResult(null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'failed to add');
     } finally {
@@ -294,9 +313,17 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
               : 'read from the Catchment’s environment'} at delivery time.
           </div>
           {err && <div style={{ fontSize: 11, color: THEME_DANGER, wordBreak: 'break-word' }}>{err}</div>}
+          {testResult && testResult.destination === buildDestination() && (
+            <div style={{ fontSize: 11, color: testResult.ok ? THEME_SUCCESS : THEME_DANGER, wordBreak: 'break-word' }}>
+              {testResult.ok ? '✓ connection ok' : `✕ ${testResult.error ?? 'connection failed'}`}
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 6 }}>
-            <Btn small onClick={submit} color={THEME_SUCCESS} disabled={busy || !path.trim()}>Add</Btn>
-            <Btn small onClick={() => { setOpen(false); setErr(null); }} color={THEME_BLOCKED}>Cancel</Btn>
+            <Btn small onClick={test} color={THEME_PULL} disabled={testing || busy || !path.trim()}>
+              {testing ? 'Testing…' : 'Test'}
+            </Btn>
+            <Btn small onClick={submit} color={THEME_SUCCESS} disabled={busy || testing || !path.trim()}>Add</Btn>
+            <Btn small onClick={() => { setOpen(false); setErr(null); setTestResult(null); }} color={THEME_BLOCKED}>Cancel</Btn>
           </div>
         </div>
       ) : (

@@ -55,6 +55,13 @@ class EgressDriver(Protocol):
         """Apply an incremental change-set (upserts + deletes). Only when ``supports_delta``."""
         ...
 
+    def test_connection(self, con: "duckdb.DuckDBPyConnection") -> None:
+        """Probe the destination's connectivity + credentials **without writing real data** — for the
+        "Test" button on the Spout add form. Returns on success; raises on failure with a **sanitised**
+        message (never echoing a resolved credential). ``con`` is a scratch in-memory connection a driver
+        may use to load an extension / register credentials."""
+        ...
+
 
 _REGISTRY: dict[str, Callable[[Destination], EgressDriver]] = {}
 

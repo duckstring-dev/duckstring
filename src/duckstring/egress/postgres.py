@@ -89,6 +89,13 @@ class PostgresEgressDriver:
     def ensure(self, *, table: str, schema: dict | None, pk: list[str] | None) -> None:
         pass  # the table is created lazily from the relation's schema on first write (see _ensure_table)
 
+    def test_connection(self, con) -> None:
+        """Probe connectivity + credentials: ``ATTACH`` eagerly connects (a bad host/credential fails
+        here, sanitised so the password never echoes), then a trivial query confirms the link. No schema
+        or table is created — this is lighter than ``ensure``."""
+        self._attach(con)
+        con.execute("SELECT 1").fetchall()
+
     def watermark(self, con, table: str) -> datetime | None:
         """The freshness the destination has fully applied for ``table`` — the worker's ``previous_f``."""
         prefix = self._ensure_attached(con)

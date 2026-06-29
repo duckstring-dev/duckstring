@@ -292,6 +292,19 @@ export function removeSpout(spoutId: string): Promise<void> {
   return postJSON(pondPath(source, `spouts/${encodeURIComponent(name)}/remove`));
 }
 
+// Probe a destination's connection/credentials before binding a Spout (the add form's "Test" button).
+// Writes no data. Returns {ok} or {ok: false, error} — a connection problem is data, not an exception.
+export async function testSpout(sourceId: string, destination: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`${apiBase()}${pondPath(sourceId, 'spouts/test')}`, {
+    method: 'POST',
+    headers: authHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify({ destination }),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `test failed (${res.status})`);
+  return res.json();
+}
+
 // Add a Spout on a source Pond. Surfaces the server's 422 detail (bad destination / PK gate) on error.
 export async function addSpout(
   sourceId: string,

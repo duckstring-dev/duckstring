@@ -169,6 +169,7 @@ All full-gated. A Spout publishes a Pond's output to an external destination; it
 |---|---|
 | `GET /api/ponds/{name}/spouts` | `{"spouts": [{"name", "table", "destination", "mode", "schedule", "watermark", "is_failed", "failures", "error"}]}` |
 | `POST /api/ponds/{name}/spouts` | Bind a Spout: `{"destination", "name"?, "table"?, "mode"?}`. `destination` scheme ∈ `file/s3/gs/postgres`; `mode` ∈ `auto/full/append` (default `auto`); `table` null = all. Returns `{"name"}`. `422` on a bad destination/mode or duplicate name. |
+| `POST /api/ponds/{name}/spouts/test` | Probe a destination's connection/credentials before binding (the UI's *Test* button). Body `{"destination"}`; **writes no data** (a write+delete probe for `file://`, an `ATTACH`+`SELECT 1` for `postgres://`, a prefix-list for `s3`/`gs`). Returns `{"ok": true}` or `{"ok": false, "error"}` — a connection problem is a `200` result, not a `5xx`; the error is sanitised (never echoes a credential). `name` is unused (the probe is destination-only). |
 | `POST /api/ponds/{name}/spouts/{spout}/remove` | Remove a Spout (`404` if absent). |
 | `POST /api/ponds/{name}/spouts/{spout}/{action}` | Control a Spout's standing Wake. `action` ∈ `wake`/`force` (re-arm; force re-delivers now), `sleep`/`kill` (disarm; kill parks), `clear` (reset a fault), `resync` (full re-egress). |
 

@@ -75,22 +75,41 @@ const edgeTypes: EdgeTypes = {
 
 // ─── Status / legend panel ───────────────────────────────────────────────────
 
-// The caller's API access level, shown under the catchment name so a read/demand key reads as
-// "your key can't do this" rather than a broken UI. Matched to the route gating in the Sidebar.
-const LEVEL_META: Record<AccessLevel, { label: string; color: string; hint: string }> = {
-  full: { label: 'full access', color: THEME_SUCCESS, hint: 'Deploy, control, demand, and read.' },
-  demand: { label: 'demand access', color: THEME_PULL, hint: 'Create demand (tap/wave/pulse/tide) and read.' },
-  read: { label: 'read-only', color: '#71717a', hint: 'Read & query data only.' },
-};
+// The caller's API access level as three capability chips — Manage / Demand / Read — each green when
+// the key grants it, grey when not. Read is the floor (always on); Demand adds tap/wave/pulse/tide;
+// Manage adds deploy/control/secrets. Reads as "what your key can do", not a broken UI.
+const ACCESS_CHIPS: { label: string; active: (l: AccessLevel) => boolean; hint: string }[] = [
+  { label: 'Manage', active: (l) => l === 'full', hint: 'Deploy, control, and manage secrets.' },
+  { label: 'Demand', active: (l) => l === 'full' || l === 'demand', hint: 'Create demand: tap, wave, pulse, tide.' },
+  { label: 'Read', active: () => true, hint: 'Read status and query data.' },
+];
 
 function AccessBadge() {
   const level = useLiveStore((s) => s.accessLevel);
-  const { label, color, hint } = LEVEL_META[level];
   return (
-    <span title={hint} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color, letterSpacing: '0.04em' }}>
-      <span style={{ width: 6, height: 6, flexShrink: 0, borderRadius: '50%', background: color }} />
-      {label}
-    </span>
+    <div style={{ display: 'flex', gap: 4 }}>
+      {ACCESS_CHIPS.map(({ label, active, hint }) => {
+        const on = active(level);
+        return (
+          <span
+            key={label}
+            title={hint}
+            style={{
+              fontSize: 9,
+              fontWeight: 600,
+              letterSpacing: '0.04em',
+              padding: '2px 6px',
+              borderRadius: 4,
+              color: on ? THEME_SUCCESS : '#52525b',
+              border: `1px solid ${on ? THEME_SUCCESS : '#3f3f46'}`,
+              background: on ? 'rgba(34,197,94,0.08)' : 'transparent',
+            }}
+          >
+            {label}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
@@ -104,8 +123,6 @@ function StatusPanel() {
   // This Catchment's display name, or a short slice of its stable id, or a plain label.
   const label = catchment?.name || (catchment?.id ? catchment.id.slice(0, 8) : 'Catchment');
   const isMobile = useIsMobile();
-  const accessLevel = useLiveStore((s) => s.accessLevel);
-  const [secretsOpen, setSecretsOpen] = useState(false);
 
   // Mobile: one compact row — the full card would shade a third of a phone canvas.
   if (isMobile) {
@@ -151,112 +168,112 @@ function StatusPanel() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column' }}>
-      <div
-        style={{
-          background: '#15151a',
-          border: '1px solid #27272a',
-          borderRadius: 8,
-          padding: '9px 12px',
-          fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-          fontSize: 11,
-          color: '#a1a1aa',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 7,
-          minWidth: 168,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-          <span
-            aria-label="Duckstring"
-            style={{
-              width: 39,
-              height: 39,
-              flexShrink: 0,
-              backgroundImage: 'url(/logo-mark.svg)',
-              backgroundSize: 'contain',
-              backgroundRepeat: 'no-repeat',
-              backgroundPosition: 'center',
-            }}
-          />
-          <span style={{ fontSize: 17, fontWeight: 700, lineHeight: 1, color: '#f4f4f5', letterSpacing: '0.01em' }}>
-            Duckstring
-          </span>
-          {/* The catchment-wide secret store lives under the brand box, full access only. */}
-          {accessLevel === 'full' && (
-            <span
-              role="button"
-              title="Secrets"
-              onClick={() => setSecretsOpen((o) => !o)}
-              style={{
-                marginLeft: 'auto',
-                cursor: 'pointer',
-                fontSize: 14,
-                lineHeight: 1,
-                color: secretsOpen ? '#e4e4e7' : '#52525b',
-              }}
-            >
-              🔑
-            </span>
-          )}
-        </div>
-        <div style={{ height: 1, background: '#27272a' }} />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <span
-            title={connected ? 'connected' : error ? 'unreachable' : 'connecting'}
-            style={{ width: 8, height: 8, flexShrink: 0, borderRadius: '50%', background: connected ? THEME_SUCCESS : THEME_DANGER }}
-          />
-          <span style={{ color: '#71717a' }}>
-            <span title={catchment?.id ?? undefined} style={{ color: '#a1a1aa' }}>{label}</span>
-            <span style={{ color: '#3f3f46' }}> · </span>
-            {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
-          </span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', paddingLeft: 15 }}>
-          <AccessBadge />
-        </div>
+    <div
+      style={{
+        background: '#15151a',
+        border: '1px solid #27272a',
+        borderRadius: 8,
+        padding: '9px 12px',
+        fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+        fontSize: 11,
+        color: '#a1a1aa',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 7,
+        minWidth: 168,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+        <span
+          aria-label="Duckstring"
+          style={{
+            width: 39,
+            height: 39,
+            flexShrink: 0,
+            backgroundImage: 'url(/logo-mark.svg)',
+            backgroundSize: 'contain',
+            backgroundRepeat: 'no-repeat',
+            backgroundPosition: 'center',
+          }}
+        />
+        <span style={{ fontSize: 17, fontWeight: 700, lineHeight: 1, color: '#f4f4f5', letterSpacing: '0.01em' }}>
+          Duckstring
+        </span>
       </div>
-      {accessLevel === 'full' && secretsOpen && <SecretsMenu onClose={() => setSecretsOpen(false)} />}
+      <div style={{ height: 1, background: '#27272a' }} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        <span
+          title={connected ? 'connected' : error ? 'unreachable' : 'connecting'}
+          style={{ width: 8, height: 8, flexShrink: 0, borderRadius: '50%', background: connected ? THEME_SUCCESS : THEME_DANGER }}
+        />
+        <span style={{ color: '#71717a' }}>
+          <span title={catchment?.id ?? undefined} style={{ color: '#a1a1aa' }}>{label}</span>
+          <span style={{ color: '#3f3f46' }}> · </span>
+          {connected ? `${count} pond${count === 1 ? '' : 's'}` : error ? 'unreachable' : 'connecting…'}
+        </span>
+      </div>
+      <div style={{ paddingLeft: 15 }}>
+        <AccessBadge />
+      </div>
     </div>
   );
 }
 
-// Top-right control: collapse every Pond's Ripples to a header-only box, or expand them back. The
-// label flips to "Expand all" once every collapsible Pond (one that owns Ripples) is collapsed.
-function CollapsePanel() {
+// The shared look of a top-right panel button (collapse-all, Secrets) — same shape, colour, width.
+const panelButton: React.CSSProperties = {
+  background: '#15151a',
+  border: '1px solid #27272a',
+  borderRadius: 8,
+  padding: '7px 12px',
+  fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+  fontSize: 12,
+  color: '#a1a1aa',
+  cursor: 'pointer',
+  display: 'flex',
+  alignItems: 'center',
+  gap: 7,
+};
+
+// Top-right controls, stacked: collapse every Pond's Ripples to a header-only box (label flips to
+// "Expand all" once every collapsible Pond is collapsed), and — full access only — the catchment-wide
+// secret store (SecretsMenu). The two buttons share a width; the menu drops below them.
+function ControlsPanel() {
   const collapsedPonds = useLiveStore((s) => s.collapsedPonds);
   const setAllCollapsed = useLiveStore((s) => s.setAllCollapsed);
+  const accessLevel = useLiveStore((s) => s.accessLevel);
   // A Pond is collapsible only if it owns Ripples (a Draw has none to hide). Select a stable joined
   // key — not a fresh array — so the panel doesn't re-render on every poll.
   const collapsibleKey = useLiveStore((s) =>
     [...new Set(Object.values(s.ripples).map((r) => r.pondId))].sort().join(',')
   );
+  const [secretsOpen, setSecretsOpen] = useState(false);
 
-  if (!collapsibleKey) return null;
-  const collapsibleIds = collapsibleKey.split(',');
-  const allCollapsed = collapsibleIds.every((id) => collapsedPonds[id]);
+  const collapsibleIds = collapsibleKey ? collapsibleKey.split(',') : [];
+  const allCollapsed = collapsibleIds.length > 0 && collapsibleIds.every((id) => collapsedPonds[id]);
+  const isFull = accessLevel === 'full';
+  if (collapsibleIds.length === 0 && !isFull) return null;
 
   return (
-    <button
-      onClick={() => setAllCollapsed(!allCollapsed)}
-      style={{
-        background: '#15151a',
-        border: '1px solid #27272a',
-        borderRadius: 8,
-        padding: '7px 12px',
-        fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-        fontSize: 12,
-        color: '#a1a1aa',
-        cursor: 'pointer',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 7,
-      }}
-    >
-      <span style={{ fontSize: 11, color: '#71717a' }}>{allCollapsed ? '▸' : '▾'}</span>
-      {allCollapsed ? 'Expand all' : 'Collapse all'}
-    </button>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 7, alignItems: 'flex-end' }}>
+      {/* A stretch column so the two buttons share the widest one's width. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 7, alignItems: 'stretch' }}>
+        {collapsibleIds.length > 0 && (
+          <button onClick={() => setAllCollapsed(!allCollapsed)} style={panelButton}>
+            <span style={{ fontSize: 11, color: '#71717a' }}>{allCollapsed ? '▸' : '▾'}</span>
+            {allCollapsed ? 'Expand all' : 'Collapse all'}
+          </button>
+        )}
+        {isFull && (
+          <button
+            onClick={() => setSecretsOpen((o) => !o)}
+            style={{ ...panelButton, justifyContent: 'center', color: secretsOpen ? '#e4e4e7' : '#a1a1aa' }}
+          >
+            Secrets
+          </button>
+        )}
+      </div>
+      {isFull && secretsOpen && <SecretsMenu onClose={() => setSecretsOpen(false)} />}
+    </div>
   );
 }
 
@@ -405,7 +422,7 @@ export function DagCanvas() {
           <StatusPanel />
         </Panel>
         <Panel position="top-right">
-          <CollapsePanel />
+          <ControlsPanel />
         </Panel>
         <Controls style={{ background: '#1a1a1f', border: '1px solid #3f3f46', borderRadius: 6 }} />
       </ReactFlow>

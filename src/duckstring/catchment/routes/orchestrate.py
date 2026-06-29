@@ -350,6 +350,42 @@ def add_spout(
     return {"ok": True, "name": final}
 
 
+class _SpoutTestBody(BaseModel):
+    destination: str
+
+
+def _probe_destination(destination: str) -> dict:
+    """Resolve the driver for a destination and probe its connection — no data is written. Credentials
+    (``${env:}``/``${secret:}``) resolve at probe time exactly as they would at egress. Returns
+    ``{ok, error?}`` (a connection problem is data, not a 5xx). Runs in a threadpool (blocking I/O)."""
+    import duckdb
+
+    from ...egress.base import get_egress
+    from ...egress.destination import DestinationError
+
+    try:
+        driver = get_egress(destination)  # validates scheme + credential syntax, picks the driver
+    except (DestinationError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+    con = duckdb.connect()
+    try:
+        con.execute("SET TimeZone='UTC'")
+        driver.test_connection(con)
+    except Exception as exc:  # sanitised by the driver — safe to surface (never a credential)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        con.close()
+    return {"ok": True}
+
+
+@router.post("/ponds/{name}/spouts/test", dependencies=[auth.full])
+async def test_spout(name: str, body: _SpoutTestBody):
+    """Probe a Spout destination's connection/credentials before binding it (the add form's *Test*
+    button). Writes no data; returns ``{ok}`` or ``{ok: false, error}``. The Pond ``name`` is unused —
+    the probe is destination-only — but the route lives under the spout surface, full-gated."""
+    return await run_in_threadpool(_probe_destination, body.destination)
+
+
 @router.get("/ponds/{name}/spouts", dependencies=[auth.full])
 def list_spouts(name: str, request: Request, major: int | None = None, version: str | None = None):
     return {"spouts": _driver(request).list_spouts(_resolve(request, name, major, version))}

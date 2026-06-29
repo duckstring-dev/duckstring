@@ -71,6 +71,32 @@ class ObjectStoreEgressDriver:
     def apply_delta(self, delta, *, table: str, pk: list[str] | None, f: datetime) -> None:
         raise NotImplementedError("object-store egress is snapshot-only in v1 (no apply_delta)")
 
+    def test_connection(self, con) -> None:
+        """Probe without writing data: ``file://`` does a write+delete probe in the target directory
+        (so it exactly tests the write permission egress needs); ``s3://``/``gs://`` configure httpfs +
+        the secret and list the prefix (credentials resolve, the bucket is reachable + authorised)."""
+        if self.dest.scheme == "file":
+            base = self._file_base()
+            base.mkdir(parents=True, exist_ok=True)
+            probe = base / f".duckstring_egress_test.{os.getpid()}.tmp"
+            try:
+                probe.write_bytes(b"ok")
+            finally:
+                probe.unlink(missing_ok=True)
+            return
+        self._prepare_remote(con)  # loads httpfs + the secret (sanitised error on a bad credential)
+        u = urlparse(credentials.resolve(self.dest.raw))
+        if not u.netloc:
+            raise ValueError(f"{self.dest.scheme}:// destination needs a bucket: {self.dest.scheme}://bucket/prefix")
+        prefix = u.path.strip("/")
+        pattern = f"{self.dest.scheme}://{u.netloc}/{prefix}/*" if prefix else f"{self.dest.scheme}://{u.netloc}/*"
+        try:
+            # glob lists the prefix (0 rows for an empty/new prefix is fine) — surfaces auth/host errors.
+            # The pattern carries no credentials (those live in the secret), so the error is safe to show.
+            con.execute(f"SELECT 1 FROM glob({_q(pattern)}) LIMIT 1").fetchall()
+        except Exception as exc:
+            raise RuntimeError(f"could not reach the {self.dest.scheme} destination ({exc})") from None
+
     # ─── file:// ─────────────────────────────────────────────────────────────
 
     def _file_base(self) -> Path:

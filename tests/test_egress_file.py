@@ -66,6 +66,31 @@ def test_file_driver_rejects_remote_file_host():
         drv.write_full(con, con.sql("SELECT 1 AS id"), table="t", pk=None, f=datetime(2026, 1, 1, tzinfo=UTC))
 
 
+# ─── test_connection (the add form's "Test" button) ───────────────────────────
+
+
+def test_file_driver_test_connection_probes_writable_and_leaves_nothing(tmp_path):
+    drv = get_egress(f"file://{tmp_path / 'out'}")
+    drv.test_connection(duckdb.connect())  # creates the dir, write+deletes a probe
+    assert (tmp_path / "out").is_dir()
+    assert list((tmp_path / "out").iterdir()) == []  # the probe is cleaned up — no real data written
+
+
+def test_file_driver_test_connection_fails_on_unwritable_path(tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("i am a file, not a directory")
+    drv = get_egress(f"file://{blocker / 'out'}")  # parent is a file → mkdir raises
+    with pytest.raises(OSError):
+        drv.test_connection(duckdb.connect())
+
+
+def test_postgres_driver_test_connection_fails_sanitised_without_echoing_password():
+    drv = get_egress("postgres://user:hunter2@127.0.0.1:1/db")  # nothing listening on :1
+    with pytest.raises(RuntimeError) as exc:
+        drv.test_connection(duckdb.connect())
+    assert "hunter2" not in str(exc.value)  # the password never leaks into the error
+
+
 # ─── s3:// / gs:// target + secret construction (no network) ──────────────────
 
 

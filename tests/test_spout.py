@@ -170,3 +170,22 @@ def test_http_spout_bad_destination_is_422(live_catchment):
     r = httpx.post(f"{live_catchment}/api/ponds/sales/spouts", json={"destination": "ftp://x/y"}, timeout=10.0)
     assert r.status_code == 422
     assert "unsupported destination scheme" in r.json()["detail"]
+
+
+def test_http_spout_test_connection(live_catchment, tmp_path):
+    _deploy_outlet(live_catchment)
+    base = f"{live_catchment}/api/ponds/sales/spouts/test"
+
+    # A writable file:// destination probes ok (and writes no real data).
+    ok = httpx.post(base, json={"destination": f"file://{tmp_path / 'lake'}"}, timeout=10.0)
+    assert ok.status_code == 200 and ok.json() == {"ok": True}
+
+    # An unknown scheme comes back as a connection result (ok: false), not a 5xx.
+    bad = httpx.post(base, json={"destination": "ftp://x/y"}, timeout=10.0)
+    assert bad.status_code == 200 and bad.json()["ok"] is False
+    assert "unsupported destination scheme" in bad.json()["error"]
+
+    # An unreachable Postgres fails sanitised — the password is never echoed back.
+    pg = httpx.post(base, json={"destination": "postgres://u:hunter2@127.0.0.1:1/db"}, timeout=15.0)
+    assert pg.status_code == 200 and pg.json()["ok"] is False
+    assert "hunter2" not in pg.text
