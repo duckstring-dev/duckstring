@@ -94,8 +94,8 @@ function AccessBadge() {
         return (
           <Fragment key={label}>
             {i > 0 && <span style={{ color: '#3f3f46' }}>|</span>}
-            <span title={hint} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: '#e4e4e7' }}>
-              <span style={{ color: on ? THEME_SUCCESS : '#52525b' }}>{on ? '✓' : '–'}</span>
+            <span title={hint} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: on ? '#e4e4e7' : '#3f3f46' }}>
+              <span style={{ color: on ? THEME_SUCCESS : '#3f3f46' }}>{on ? '✓' : '–'}</span>
               {label}
             </span>
           </Fragment>
