@@ -1,14 +1,15 @@
 # No-change skip: content freshness (`changedF`) and the Pond pass
 
-Status: **built (D1–D4); Trickle empty-delta auto-report deferred.** The engine pass + `changed_f`
-(D1, `engine/`), persistence/restore + pass recording (D2, migration `013`, `driver.py`), the Duck
-`changed` report + `pond.skip()`/`pond.sources_changed()` (D3, `duck/`, `core.py`), and the
-`@ripple(always_run=True)` plumbing (D4, `deploy.py`, reload OR) are implemented and tested
-(`tests/test_engine.py`, `tests/test_restart.py`, `tests/test_no_change.py`). **Still to build:** the
-Trickle empty-delta auto-report (so a Trickle ripple with an empty composed delta reports
-`changed=False` without an explicit `pond.skip()`) — see "Deferred / open". Until then, the quiet
-interior is reached by calling `pond.skip()` at the **inlets** (the source of change-truth); every
-downstream Pond then engine-passes for free.
+Status: **built (D1–D5).** The engine pass + `changed_f` (D1, `engine/`), persistence/restore + pass
+recording (D2, migration `013`, `driver.py`), the Duck `changed` report + `pond.skip()`/
+`pond.sources_changed()` (D3, `duck/`, `core.py`), the `@ripple(always_run=True)` plumbing (D4,
+`deploy.py`, reload OR), and the docs (D5, theory.md/python-api.md/concepts) are implemented and
+tested (`tests/test_engine.py`, `tests/test_restart.py`, `tests/test_no_change.py`,
+`tests/test_trickle.py`). The Trickle no-change signal is **user-controlled, not automatic** (the
+settled call, like overwrite): the writes (`merge_table`/`append_table`/`apply_zset`) **return a
+`bool`** and the builder terminal exposes **`.was_changed()`**, so a Ripple decides whether to
+`pond.skip()`. Most worthwhile at the **inlets** (the source of change-truth); every downstream Pond
+then engine-passes for free.
 
 Original design follows. This plan adds a second freshness stamp, `changedF`, so a Pond
 can signal "I ran but my output did not change," letting downstream skip work — at the engine
@@ -259,18 +260,25 @@ upstream forwarding) changes.
 
 ---
 
+## Trickle no-change signal (built — user-controlled)
+
+Rather than an automatic empty-delta report (which would need an unsound cross-ripple aggregation —
+a Pond's "changed" is the OR over *all* output paths, and `write_table` overwrites can't be
+auto-detected), the signal is **surfaced to the user**, matching the overwrite story:
+
+- `pond.merge_table` / `pond.append_table` / `pond.apply_zset` **return `bool`** — whether the write
+  changed anything (an empty diff, an empty append, or a pure same-`f` replay is `False`). The bit is
+  the one each already computes internally (`trickle/io.py`).
+- The builder's `.merge()` / `.append()` return handle exposes **`.was_changed()`** (the composed ΔO
+  was non-empty; an `"empty"` compute is `False`).
+
+The user ORs these and calls `pond.skip()`. Sound by construction (each call reports its own result —
+no shared per-run state, no concurrency race). The one caveat: `pond.skip()` is run-level, so a
+multi-output Pond must account for all its writes before skipping. Tests in `tests/test_trickle.py`
+(`test_write_return_values_signal_change`, `test_builder_was_changed_tracks_output`).
+
 ## Deferred / open
 
-- **Trickle empty-delta auto-report** (the remaining headline piece). A Trickle ripple whose composed
-  delta is empty should report `changed=False` automatically, so a pure-Trickle pipeline goes quiet
-  with zero API. The sound rule: a Pond auto-passes iff every output write this run went through a
-  Trickle method *and* every such write was empty *and* no `write_table` (overwrite) happened — `True`
-  otherwise (conservative; an overwrite can't be auto-detected, and a ripple that only does a side
-  effect must not be assumed no-change). Implementation: have the Trickle writes (`merge_table` /
-  `append_table` / `apply_zset` / the builder's `.merge()`/`.append()`) report per-write emptiness back
-  through the Pond handle (a write-report callback alongside `skip_sink`), accumulate per-`f` in
-  `DuckCore`, and fold into the `changed` decision next to the explicit skip. Reaches the same end as
-  the explicit inlet-skip available today, minus the call.
 - **UI surfacing** of pass vs idle vs running, and a "last changed" age distinct from "last run."
 - **Spouts.** A Spout already only delivers when `sourceF > deliveredF`; with `changedF` it could also
   skip delivery when the Source merely republished unchanged. Natural extension once the core lands —

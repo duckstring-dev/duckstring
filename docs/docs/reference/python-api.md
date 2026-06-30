@@ -163,7 +163,7 @@ A [Trickle](../concepts/trickle.md) is a history-preserving table, not a separat
 
 ### `pond.append_table(name, relation, *, pk=None, fail_on_conflict=True, retain_t=None, retain_n=None)`
 
-Append `relation` to the insert-only history table `name`; each row is stamped with `pond.f`. No diff, no deletes. Idempotent on replay at the same freshness. The history table is both the full read and the delta source.
+Append `relation` to the insert-only history table `name`; each row is stamped with `pond.f`. No diff, no deletes. Idempotent on replay at the same freshness. The history table is both the full read and the delta source. **Returns `bool`** — whether rows were actually appended (an empty relation, or a pure same-`f` replay, is no change), so a Ripple can [`pond.skip()`](#pondsources_changed--bool-and-pondskip) a no-change run.
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -173,7 +173,7 @@ Append `relation` to the insert-only history table `name`; each row is stamped w
 
 ### `pond.merge_table(name, relation, *, pk, retain_t=None, retain_n=None)`
 
-Merge the **complete current state** `relation` into the clean current-state **main** table `name`, recording the change as a Z-set in its `__changelog` companion. Duckstring diffs `relation` against the previous main as a full-row Z-set difference to derive inserts/updates/deletes — so it is always safe to hand it the whole state, and there is no way to under-merge.
+Merge the **complete current state** `relation` into the clean current-state **main** table `name`, recording the change as a Z-set in its `__changelog` companion. Duckstring diffs `relation` against the previous main as a full-row Z-set difference to derive inserts/updates/deletes — so it is always safe to hand it the whole state, and there is no way to under-merge. **Returns `bool`** — whether the state actually changed (the diff was non-empty); gate [`pond.skip()`](#pondsources_changed--bool-and-pondskip) on it for a no-change pass. (`pond.apply_zset` returns the same signal.)
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -210,6 +210,12 @@ A fluent builder that composes an incremental join from its sources' Z-set delta
 - Bootstrap / coverage-miss / changed-Ripple / over-`p` → comprehensive recompute diffed against the last-written main. The op set is closed — a join operand carrying its own `.filter()`/`.mutate()`/`.select()`/`.aggregate()`/`.sql()`, a missing merge key, an ambiguous join key, or a `*` output with an unresolvable name collision raises at build time.
 - **`.append(name, *, pk=None, fail_on_conflict=True, log_drops=True, retain_t=None, retain_n=None)`** is the alternative terminal: write the result to an **append** (insert-only history) Trickle instead of a merge main+changelog — for a *monotonic* transform (output rows only added, never updated/retracted), e.g. enriching an append-only fact stream with stable/SCD dims. A retraction in ΔO, or a `+1` row whose `pk` is in history with a *different* image, is a conflict (identical-image is a benign idempotent skip); `fail_on_conflict=True` raises, `False` drops it (history wins) and — with `log_drops` — records the dropped rows in a `{name}__droplog` companion (published alongside the table like `__changelog`). `pk=None` + `fail_on_conflict=False` skips the checks (fast; sound only when duplicates/past-changes are impossible). **Spine-PK fast path:** when the output PK is a verbatim `s0.<col>` pass-through of the spine's key *and* `fail_on_conflict=False, log_drops=False`, dim deltas can't affect the result (changed facts are dropped-and-forgotten either way), so the builder skips them — computing only `new spine rows ⋈ current dims`. Auto-detected and conservative (falls back to the full, always-correct path otherwise).
 - **`.merge(...)` / `.append(...)` return a builder rooted at the table just written**, so joins chain through materialised intermediates in one Ripple — `a.join(b).merge("ab", pk=…).join(c).merge("abc", pk=…)`. Each terminal stores its output's trace, so a later run that changes only `c` reuses the stored `ab` instead of recomputing `a⋈b`. The returned handle is the next **spine** (its in-run delta is threaded forward); a composed builder still can't be a *dimension*.
+- **`.was_changed()`** on that returned handle reports whether the `.merge()`/`.append()` actually changed the output (the composed ΔO was non-empty). Gate [`pond.skip()`](#pondsources_changed--bool-and-pondskip) on it to pass a no-change run downstream:
+  ```python
+  out = pond.trickle("orders.order").join(...).merge("priced", pk="order_id")
+  if not out.was_changed():
+      pond.skip()
+  ```
 
 See the [guide](../guides/trickle.md#the-builder-pondtrickle).
 

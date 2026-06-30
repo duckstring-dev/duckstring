@@ -2565,3 +2565,42 @@ def test_incremental_draw_window_roundtrip(tmp_path):
 
 def test_landed_after_bootstrap_is_none(tmp_path):
     assert T.landed_after(tmp_path) is None
+
+
+# ─── No-change signal: write return values + builder.was_changed() (no-change-skip.md) ─────
+
+
+def test_write_return_values_signal_change(reg):
+    # append_table: new rows → True; empty relation → False; same-f replay → False.
+    assert T.append_table(reg, "ev", reg.sql("SELECT 1 AS id"), ts(1), ("id",)) is True
+    empty = reg.sql("SELECT CAST(NULL AS INTEGER) AS id WHERE 1=0")
+    assert T.append_table(reg, "ev", empty, ts(2), ("id",)) is False
+    assert T.append_table(reg, "ev", reg.sql("SELECT 1 AS id"), ts(1), ("id",)) is False  # replay
+
+    # merge_table: a real change → True; re-merging the identical state → False.
+    assert T.merge_table(reg, "dim", _state(reg, [(1, "a"), (2, "b")]), ts(1), ("id",)) is True
+    assert T.merge_table(reg, "dim", _state(reg, [(1, "a"), (2, "b")]), ts(2), ("id",)) is False
+    assert T.merge_table(reg, "dim", _state(reg, [(1, "A"), (2, "b")]), ts(3), ("id",)) is True
+
+
+def test_builder_was_changed_tracks_output(tmp_path):
+    _cons, ol, pr = _star_sources(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "f" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("f", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
+        out = (pond.trickle("sales.order_line", p=1.0)
+                   .join(pond.trickle("catalog.product", p=1.0), on="product_id")
+                   .select("s0.order_id, s0.qty * s1.price AS total")
+                   .merge("f", pk="order_id"))
+        publish(snk, snk_dir, f=f)
+        return out.was_changed()
+
+    ol([(10, "p1", 2)], ts(1))
+    pr([("p1", 5)], ts(1))
+    assert run(ts(1), NEVER) is True            # bootstrap writes output
+    assert run(ts(2), ts(1)) is False           # nothing upstream changed → empty ΔO, no change
+    pr([("p1", 9)], ts(3))                       # reprice → output total changes
+    assert run(ts(3), ts(2)) is True
+    snk.close()
