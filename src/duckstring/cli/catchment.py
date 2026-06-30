@@ -88,7 +88,10 @@ def _print_keys_panel(name: str, keys: dict[str, str], url: str | None = None) -
     )
 
 
-def _launch(name: str, url: str, root: Path, key: str | None = None) -> None:
+def _launch(
+    name: str, url: str, root: Path, key: str | None = None, *, data_root: str | None = None,
+    state_backup: str | None = None, checkpoint_every: str | None = None,
+) -> None:
     from urllib.parse import urlparse
 
     import uvicorn
@@ -100,12 +103,17 @@ def _launch(name: str, url: str, root: Path, key: str | None = None) -> None:
     port = parsed.port or 7474
 
     auth_line = "API key required" if (key or _has_key_ladder(root)) else "open (no API key)"
+    extra = ""
+    if data_root:
+        extra += f"\n  [dim]data: {data_root}[/dim]"
+    if state_backup:
+        extra += f"\n  [dim]state backup: {state_backup} (every {checkpoint_every or '60s'})[/dim]"
     console = Console()
     console.print(
         Panel(
             f"[bold white]duckstring catchment[/bold white] [bold cyan]{name}[/bold cyan]\n\n"
             f"  [dim]url:  {url}[/dim]\n"
-            f"  [dim]root: {root}[/dim]\n"
+            f"  [dim]root: {root}[/dim]{extra}\n"
             f"  [dim]auth: {auth_line}[/dim]\n\n"
             f"  Press [bold]Ctrl-C[/bold] to stop.",
             border_style="bright_black",
@@ -117,23 +125,58 @@ def _launch(name: str, url: str, root: Path, key: str | None = None) -> None:
     # Ducks dial back to the actual bind address (a wildcard bind is dialled via loopback).
     dial_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     uvicorn.run(
-        create_app(root, api_key=key, base_url=f"http://{dial_host}:{port}", name=name),
+        create_app(
+            root, api_key=key, base_url=f"http://{dial_host}:{port}", name=name,
+            data_root=data_root, state_backup=state_backup, checkpoint_every=checkpoint_every,
+        ),
         host=host, port=port, reload=False, log_level="warning",
     )
 
 
 def _register_or_abort(
     name: str, url: str, kind: str, root: str | None = None, key: str | None = None,
-    headers: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None, data_root: str | None = None,
+    state_backup: str | None = None, checkpoint_every: str | None = None,
 ) -> None:
     """Call register_catchment, printing a friendly error on conflict."""
     from .config import CatchmentConflict, register_catchment
 
     try:
-        register_catchment(name, url=url, kind=kind, root=root, key=key, headers=headers)
+        register_catchment(
+            name, url=url, kind=kind, root=root, key=key, headers=headers,
+            data_root=data_root, state_backup=state_backup, checkpoint_every=checkpoint_every,
+        )
     except CatchmentConflict as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
+
+
+def _validate_data_uri(value: str, *, flag: str) -> None:
+    """Validate a ``--data-root`` / ``--state-backup`` URI at establish time: its ``${env:NAME}`` /
+    ``${secret:NAME}`` credential references must parse (resolved only at runtime). The scheme is left
+    open (local path or any object-store URI); an unknown scheme surfaces at first use, not here."""
+    from duckstring.egress import credentials
+
+    try:
+        credentials.references(value)
+    except credentials.CredentialError as exc:
+        typer.echo(f"Error: invalid {flag} {value!r} — {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+
+def _warn_if_object_state_root(root: Path) -> None:
+    """Loudly warn if the **state** root is an object-store/Volume URI — the SQLite-on-FUSE corruption
+    footgun. Hot state (duck.db, ledgers, registries) must be a local POSIX path; only the *data* root
+    and the backup URI may be object-store-class."""
+    from duckstring.storage import is_object_uri
+
+    if is_object_uri(str(root)):
+        typer.secho(
+            f"Warning: --root {root} looks like an object store. The state root holds SQLite/DuckDB "
+            "files that need POSIX semantics — put it on a LOCAL disk (e.g. /local_disk0) and use "
+            "--data-root for the bucket/Volume.",
+            fg="yellow", err=True,
+        )
 
 
 def _parse_headers(values: Optional[list[str]]) -> Optional[dict[str, str]]:
@@ -162,7 +205,22 @@ def init(
     name: str = typer.Option(..., "--name", "-n", prompt="Catchment name", help="Name to register this Catchment under."),
     host: str = typer.Option("127.0.0.1", "--host", help="Host to bind to."),
     port: int = typer.Option(7474, "--port", "-p", help="Port to listen on."),
-    root: Optional[Path] = typer.Option(None, "--root", help="Root directory for Catchment data."),
+    root: Optional[Path] = typer.Option(
+        None, "--root", help="Local hot-state directory (duck.db, ledgers, registries). Must be a local "
+                             "POSIX path — never an object store."
+    ),
+    data_root: Optional[str] = typer.Option(
+        None, "--data-root", help="Where the data plane publishes tables: a local path or an object-store "
+                                  "/ Volume URI (s3://…, gs://…, abfss://…, /Volumes/…). Credentials as "
+                                  "${env:NAME} refs in the URI query. Default: under the state root."
+    ),
+    state_backup: Optional[str] = typer.Option(
+        None, "--state-backup", help="Where Tier-1/2 hot-state checkpoints sync (object store / Volume / "
+                                     "path) so an ephemeral / scale-to-zero node survives. Default: no sync."
+    ),
+    checkpoint_every: Optional[str] = typer.Option(
+        None, "--checkpoint-every", help="Tier-1 (duck.db) backup cadence, e.g. 30s. Default 60s."
+    ),
     key: Optional[str] = typer.Option(
         None, "--key", help="A single full-access API key the server requires (and the CLI then sends)."
     ),
@@ -187,6 +245,13 @@ def init(
     root_dir = Path(root) if root else CONFIG_DIR / name
     url = f"http://{host}:{port}"
 
+    if root:
+        _warn_if_object_state_root(root)
+    if data_root:
+        _validate_data_uri(data_root, flag="--data-root")
+    if state_backup:
+        _validate_data_uri(state_backup, flag="--state-backup")
+
     if generate_key:
         keys = _generate_ladder(root_dir)
         key = keys["full"]  # the operator's own CLI gets full access; the others are handed out
@@ -197,22 +262,28 @@ def init(
         existing_root = existing.get("root", str(CONFIG_DIR / name))
         key = key or existing.get("key")
         headers = headers or existing.get("headers")
+        # Inherit storage config from the registration when not re-specified on this invocation.
+        data_root = data_root or existing.get("data_root")
+        state_backup = state_backup or existing.get("state_backup")
+        checkpoint_every = checkpoint_every or existing.get("checkpoint_every")
+    store_kw = dict(data_root=data_root, state_backup=state_backup, checkpoint_every=checkpoint_every)
+
+    if existing:
         if existing_root == str(root_dir):
             typer.echo(f"Catchment '{name}' already registered at {root_dir}.")
-            if key != existing.get("key") or headers != existing.get("headers"):
-                _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers)
+            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers, **store_kw)
         else:
             typer.echo(f"Catchment '{name}' is already registered with data at: {existing_root}")
             if not typer.confirm(f"Update root to {root_dir}?", default=False):
                 raise typer.Exit(0)
             root_dir.mkdir(parents=True, exist_ok=True)
-            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers)
+            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers, **store_kw)
     else:
         root_dir.mkdir(parents=True, exist_ok=True)
-        _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers)
+        _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers, **store_kw)
         _offer_default(name, yes)
 
-    _launch(name, url, root_dir, key)
+    _launch(name, url, root_dir, key, **store_kw)
 
 
 @app.command()
@@ -235,7 +306,11 @@ def start(
 
     url = cfg["url"]
     root_dir = Path(cfg["root"]) if cfg.get("root") else Path.home() / ".duckstring" / name
-    _launch(name, url, root_dir, cfg.get("key"))
+    _launch(
+        name, url, root_dir, cfg.get("key"),
+        data_root=cfg.get("data_root"), state_backup=cfg.get("state_backup"),
+        checkpoint_every=cfg.get("checkpoint_every"),
+    )
 
 
 @app.command(name="rotate-keys")
@@ -374,8 +449,9 @@ def download(
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the size confirmation."),
 ) -> None:
-    """Download a Catchment's entire state (its root: database, artifacts, data, ledgers) into a
-    local directory — e.g. to carry state across a platform redeploy, or as a backup."""
+    """Download a Catchment's **state root** (database, deployed artifacts, ledgers, registries) into a
+    local directory — e.g. to carry state across a platform redeploy, or as a backup. With an external
+    data root (``--data-root``) the data plane is already durable on its own and is **not** included."""
     import tarfile
     import tempfile
 
@@ -436,6 +512,33 @@ def download(
             tmp_path.unlink(missing_ok=True)
 
     console.print(f"[green]Downloaded[/green] catchment [bold]{cname}[/bold] → {path}")
+
+
+@app.command()
+def restore(
+    from_uri: str = typer.Option(..., "--from", help="State-backup URI to restore from (object store / "
+                                                     "Volume / path) — a DUCKSTRING_STATE_BACKUP_URI target."),
+    path: Path = typer.Option(
+        Path(".duckstring"), "--path", help="Local state root to restore into (default ./.duckstring)."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the overwrite confirmation."),
+) -> None:
+    """Restore hot state (duck.db + ledgers/registries) from a state backup into a local directory — the
+    explicit inverse of the boot-time auto-restore, for seeding a fresh node by hand."""
+    from duckstring.catchment.state_sync import restore_state
+
+    _validate_data_uri(from_uri, flag="--from")
+    if path.exists() and any(path.iterdir()) and not yes:
+        typer.confirm(f"{path} is not empty — overwrite where names collide?", default=False, abort=True)
+    try:
+        ok = restore_state(path, from_uri)
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"Error: restore failed — {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if ok:
+        typer.secho(f"Restored state from {from_uri} → {path}", fg="green")
+    else:
+        typer.echo(f"No state found at {from_uri} (nothing to restore).")
 
 
 @app.command(name="set-default")

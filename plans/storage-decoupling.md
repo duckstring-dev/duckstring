@@ -1,8 +1,43 @@
 # Storage decoupling — object-store data, ephemeral hot state, scale-to-zero
 
-**Status:** plan. Motivated by hosting a Catchment on a cloud node whose local disk is ephemeral
-(Databricks Apps, a scale-to-zero container) and whose durable storage is an object store (S3/GCS/ABFS)
-or a Databricks Volume.
+**Status:** Phase 1 + Phase 2 (Tier-1) **implemented**. Motivated by hosting a Catchment on a cloud node
+whose local disk is ephemeral (Databricks Apps, a scale-to-zero container) and whose durable storage is an
+object store (S3/GCS/ABFS) or a Databricks Volume.
+
+**What shipped:**
+- `src/duckstring/storage.py` — the `Storage` seam (`LocalStorage` + `ObjectStorage`/fsspec), `${env:}`
+  credentials, DuckDB `httpfs` setup. `pond_data_dir(state_root, name, major, data_root)` returns a
+  `Storage`; the **parquet** data plane + the trickle fs helpers + draw/poller/egress/data routes all run
+  through it.
+- **Iceberg over object storage** — `FileCatalog`'s `catalog.json` pointer is routed through the `Storage`
+  seam (a single-object atomic PUT, no `os.replace`); `_catalog` uses `warehouse_location()` (the object
+  URI) and threads the resolved `${env:}` creds into pyiceberg FileIO `properties` (`s3.*`/`gcs.*`/`adls.*`);
+  the orphan-file GC sweeps via the seam (`data_dir.child("pond", table, sub).names()`). So **both** data
+  planes work on an object-store data root; Iceberg stays the default everywhere.
+- **Data-root writer lease** (`src/duckstring/catchment/data_lease.py`) — a `_duckstring_owner.json` object
+  at an external data root, keyed to the Catchment `id`, acquired at boot / renewed / released on shutdown.
+  Refuses to start a *different* live Catchment on the same lake (the case single-writer-per-line can't
+  cover) so two writers can't race the Iceberg pointer; a same-id restart reclaims instantly, an expired
+  lease is taken over (TTL 120 s), `DUCKSTRING_FORCE_TAKEOVER=1` steals it. A portable plain-PUT lease with
+  read-back race detection — a *detector/narrower*, not a CAS mutex (engaged only for an external data root).
+- The **state/data root split**: env vars `DUCKSTRING_STATE_ROOT` (alias `DUCKSTRING_ROOT`),
+  `DUCKSTRING_DATA_ROOT`, `DUCKSTRING_STATE_BACKUP_URI`, `DUCKSTRING_CHECKPOINT_INTERVAL`; `catchment init`
+  `--data-root`/`--state-backup`/`--checkpoint-every` (+ validation, persisted in the registration so
+  `start` reuses them); `catchment restore`; `download` scoped to the state root.
+- **Tier-1 state sync** (`src/duckstring/catchment/state_sync.py`): a checkpoint worker pushing a `duck.db`
+  snapshot on an interval, a graceful-shutdown flush that also bundles the (now-quiescent) registries +
+  ledgers (`state.tar`), and boot-time auto-restore in `create_app`.
+- Tests: `tests/test_storage.py`, `tests/test_state_sync.py`; the existing suite is green (the data plane
+  runs through `LocalStorage`, proving the port is behaviour-neutral on the local path).
+
+**Deferred / CI follow-up** (same posture as the egress real-backend tests): real `s3://`/MinIO/moto e2e
+of the DuckDB-over-`httpfs` + pyiceberg-FileIO read/write path (the fsspec metadata ops are unit-tested
+against `memory://`; the full parquet **and** Iceberg pipelines against a separate **local** data root,
+i.e. the Volume-FUSE case); the catalog-pointer **conditional PUT** (the writer lease now guards the
+two-Catchment case at boot; a per-commit CAS would make it an airtight mutex rather than a detector —
+deferred, needs backend-specific conditional-write); **Tier-2 as a live cache**
+(publishing the accumulator companions to the data plane / quiescent registry sync mid-run); a **local
+read-cache dir** for cold object reads.
 
 ## Problem
 

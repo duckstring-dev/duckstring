@@ -225,7 +225,7 @@ def test_chunked_base_splits_by_size_and_replaces_on_checkpoint(reg, tmp_path, m
         T.merge_table(reg, "dim", state("i % 2 = 0", "v2"), ts(h), ("id",), compact_threshold=chunk)
         publish(reg, snk_dir, f=ts(h))
     chunksN = T.base_chunks(snk_dir, "dim")
-    assert {c.name for c in chunks1}.isdisjoint({c.name for c in chunksN}), "cold compaction replaced chunks"
+    assert set(chunks1).isdisjoint(set(chunksN)), "cold compaction replaced chunks"
     # No deleted (odd) PK is resurrected from a stale chunk across all the folding/compaction.
     assert rows(reg, snk_dir, "dim", "count(*)") == [(100000,)]
     assert rows(reg, snk_dir, "dim", "count(*) FILTER (WHERE id % 2 = 1)") == [(0,)]
@@ -2549,10 +2549,10 @@ def test_incremental_draw_window_roundtrip(tmp_path):
     # Incremental draw: the merge main is log-structured (no base file until a checkpoint), so only the new
     # changelog parts move — here just the ts(3) part.
     after = datetime.fromisoformat(T.landed_after(cons))
-    shipped = [p for p in T.table_parts(prod, "dim__changelog") if T.part_f(p.name) > after]
-    assert [T.part_f(p.name) for p in shipped] == [ts(3)]
-    for p in shipped:
-        shutil.copy(p, cons / "dim__changelog" / p.name)
+    shipped = [n for n in T.table_parts(prod, "dim__changelog") if T.part_f(n) > after]
+    assert [T.part_f(n) for n in shipped] == [ts(3)]
+    for n in shipped:
+        shutil.copy(prod / "dim__changelog" / n, cons / "dim__changelog" / n)
 
     rcon = duckdb.connect()
     rcon.execute("SET TimeZone='UTC'")

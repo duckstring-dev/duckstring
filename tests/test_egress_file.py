@@ -153,7 +153,7 @@ def test_sql_quote_escapes_embedded_quote():
 
 def _publish_table(root, name, major, table, sql):
     """Write a Pond's exported parquet directly (the snapshot the worker reads)."""
-    data_dir = pond_data_dir(root, name, major)
+    data_dir = pond_data_dir(root, name, major).root
     data_dir.mkdir(parents=True, exist_ok=True)
     duckdb.connect().execute(f"COPY ({sql}) TO '{data_dir / f'{table}.parquet'}' (FORMAT PARQUET)")
 

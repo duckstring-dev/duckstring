@@ -91,6 +91,48 @@ META_TABLE = "_duckstring_trickle"
 SIDECAR = "_trickle.json"
 
 
+class _PathStore:
+    """A minimal, **stdlib-only** local-filesystem adapter exposing the small directory interface the
+    data-plane sidecar/part helpers below need (``parquet_names`` / ``subdir_names`` / ``read_text`` /
+    ``write_text`` / ``mkdir``). The host normally injects a richer ``Storage`` (object-store-capable);
+    this shim is what makes a bare ``Path`` (a standalone/test caller) work too — keeping this subpackage
+    dependency-free (it imports nothing from the rest of duckstring; a real ``Storage`` passes through
+    :func:`_store` untouched)."""
+
+    def __init__(self, root) -> None:
+        self.root = Path(root)
+
+    def _abs(self, *parts: str) -> Path:
+        return self.root.joinpath(*parts) if parts else self.root
+
+    def parquet_names(self, *parts: str) -> list[str]:
+        d = self._abs(*parts)
+        return sorted(p.name for p in d.glob("*.parquet")) if d.is_dir() else []
+
+    def subdir_names(self) -> list[str]:
+        return sorted(p.name for p in self.root.iterdir() if p.is_dir()) if self.root.is_dir() else []
+
+    def read_text(self, *parts: str) -> str | None:
+        f = self._abs(*parts)
+        return f.read_text(encoding="utf-8") if f.exists() else None
+
+    def write_text(self, text: str, *parts: str) -> None:
+        f = self._abs(*parts)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_name(f.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(f)
+
+    def mkdir(self, *parts: str) -> None:
+        self._abs(*parts).mkdir(parents=True, exist_ok=True)
+
+
+def _store(data_dir):
+    """Coerce a ``data_dir`` (a ``Storage`` from the host, or a bare ``Path``/str) to the directory
+    interface the helpers below use. A ``Storage`` (object-store-capable) passes through unchanged."""
+    return data_dir if hasattr(data_dir, "parquet_names") else _PathStore(data_dir)
+
+
 class DeltaError(ValueError):
     """A delta read or Trickle write was used incompatibly."""
 
@@ -112,11 +154,12 @@ def warm_name(table: str) -> str:
     return f"{table}{WARM_SUFFIX}"
 
 
-def base_chunks(data_dir: Path, table: str) -> list[Path]:
-    """The published base chunk files of a merge main ``table`` (its ``{table}__base/`` directory), sorted;
-    ``[]`` when the base has not been chunk-published (no checkpoint yet, or a legacy single-file base)."""
-    d = Path(data_dir) / base_dir_name(table)
-    return sorted(d.glob("*.parquet")) if d.is_dir() else []
+def base_chunks(data_dir, table: str) -> list[str]:
+    """The published base chunk **names** of a merge main ``table`` (in its ``{table}__base/`` directory),
+    sorted; ``[]`` when the base has not been chunk-published (no checkpoint yet, or a legacy single-file
+    base). ``data_dir`` is a :class:`~duckstring.storage.Storage` (duck-typed here to keep this subpackage
+    dependency-free)."""
+    return _store(data_dir).parquet_names(base_dir_name(table))
 
 
 def normalize_pk(pk) -> tuple[str, ...]:
@@ -287,24 +330,22 @@ def _set_compact_threshold(con, table: str, n) -> None:
     )
 
 
-def write_sidecar(data_dir: Path, payload: dict[str, dict]) -> None:
+def write_sidecar(data_dir, payload: dict[str, dict]) -> None:
     """Publish ``{table: {mode, pk, floor, f}}`` next to the data so a cross-Pond reader can resolve a
     Trickle source's coverage and detect whether an overwrite source advanced (its ``f`` vs the
-    consumer's ``previous_f``)."""
-    data_dir = Path(data_dir)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    tmp = data_dir / (SIDECAR + ".tmp")
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
-    tmp.replace(data_dir / SIDECAR)
+    consumer's ``previous_f``). ``data_dir`` is a :class:`~duckstring.storage.Storage`."""
+    store = _store(data_dir)
+    store.mkdir()
+    store.write_text(json.dumps(payload), SIDECAR)
 
 
-def load_sidecar(data_dir: Path) -> dict[str, dict]:
-    path = Path(data_dir) / SIDECAR
-    if not path.exists():
+def load_sidecar(data_dir) -> dict[str, dict]:
+    text = _store(data_dir).read_text(SIDECAR)
+    if text is None:
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
+        return json.loads(text)
+    except ValueError:
         return {}
 
 
@@ -351,31 +392,28 @@ def part_f(name: str):
     return datetime.fromisoformat(stem.replace("_", ":"))
 
 
-def table_parts(data_dir: Path, table: str) -> list[Path]:
-    """The per-run part files of an append-only ``table`` (a directory), sorted oldest-first; ``[]`` if it
-    is not a parts directory (e.g. a wholesale single-file table, or absent)."""
-    d = Path(data_dir) / table
-    return sorted(d.glob("*.parquet")) if d.is_dir() else []
+def table_parts(data_dir, table: str) -> list[str]:
+    """The per-run part **names** of an append-only ``table`` (its directory), sorted oldest-first (the
+    part names are canonical-UTC ISO, so a lexical sort is freshness order); ``[]`` if it is not a parts
+    directory (e.g. a wholesale single-file table, or absent)."""
+    return _store(data_dir).parquet_names(table)
 
 
-def part_tables(data_dir: Path) -> list[str]:
+def part_tables(data_dir) -> list[str]:
     """The names of the append-only (parts-directory) tables published under ``data_dir``. A merge main's
     ``{table}__base/`` directory is **excluded** — it is a wholesale base (rewritten at a checkpoint), not
     a per-run-parts table, so the incremental-draw / ``landed_after`` machinery must not treat it as one."""
-    data_dir = Path(data_dir)
-    if not data_dir.is_dir():
-        return []
-    return sorted(p.name for p in data_dir.iterdir()
-                  if p.is_dir() and not p.name.endswith(BASE_SUFFIX) and any(p.glob("*.parquet")))
+    store = _store(data_dir)
+    return sorted(name for name in store.subdir_names()
+                  if not name.endswith(BASE_SUFFIX) and store.parquet_names(name))
 
 
-def landed_after(data_dir: Path) -> str | None:
+def landed_after(data_dir) -> str | None:
     """The freshness a consumer has fully landed = ``min`` over its append-only tables of each table's
     high-water ``max(floor, max part f)`` (read from the part filenames, no Parquet open). ``None`` means
     *transfer wholesale* (no append-only tables landed yet — a bootstrap)."""
     from datetime import datetime
 
-    data_dir = Path(data_dir)
     sidecar = load_sidecar(data_dir)
     tables = part_tables(data_dir)
     if not tables:
@@ -390,7 +428,7 @@ def landed_after(data_dir: Path) -> str | None:
         floor = sidecar.get(base, {}).get("floor")
         high = datetime.fromisoformat(floor) if floor else None
         for pq in table_parts(data_dir, table):
-            pf = part_f(pq.name)
+            pf = part_f(pq)
             if high is None or pf > high:
                 high = pf
         if high is None:

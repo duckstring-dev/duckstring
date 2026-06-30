@@ -51,7 +51,8 @@ class CatchmentConflict(Exception):
 
 def register_catchment(
     name: str, url: str, kind: str = "local", root: str | None = None, key: str | None = None,
-    headers: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None, data_root: str | None = None,
+    state_backup: str | None = None, checkpoint_every: str | None = None,
 ) -> None:
     config = load_config()
     catchments = config.setdefault("catchments", {})
@@ -66,12 +67,18 @@ def register_catchment(
         if root and cfg.get("root") == root:
             raise CatchmentConflict(root, existing_name)
 
+    # ``data_root`` / ``state_backup`` are environment-specific operational config (like windows/spouts):
+    # where the data plane lands and where hot state is backed up — never in pond.toml, stored here as
+    # written (``${env:NAME}`` credential refs are kept verbatim and resolved only at runtime).
     catchments[name] = {
         "url": url,
         "type": kind,
         **({"root": root} if root else {}),
         **({"key": key} if key else {}),
         **({"headers": headers} if headers else {}),
+        **({"data_root": data_root} if data_root else {}),
+        **({"state_backup": state_backup} if state_backup else {}),
+        **({"checkpoint_every": checkpoint_every} if checkpoint_every else {}),
     }
     save_config(config)
 

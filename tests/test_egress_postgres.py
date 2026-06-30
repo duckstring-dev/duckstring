@@ -185,7 +185,7 @@ def _published_driver(tmp_path, sidecar):
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0",
               {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": "outlet"},
               [{"func": "f", "name": "agg", "parents": []}])
-    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    data_dir = pond_data_dir(tmp_path, "sales", 1).root
     data_dir.mkdir(parents=True, exist_ok=True)
     write_sidecar(data_dir, sidecar)
     return Driver(db, tmp_path, "http://x", NoopLauncher())
@@ -221,7 +221,7 @@ def test_worker_routes_delta_vs_full(tmp_path, monkeypatch):
     from duckstring.egress.base import Capabilities
     from duckstring.trickle_io import write_sidecar
 
-    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    data_dir = pond_data_dir(tmp_path, "sales", 1).root
     data_dir.mkdir(parents=True, exist_ok=True)
     duckdb.connect().execute(f"COPY (SELECT 1 AS id, 2 AS amt) TO '{data_dir / 'fact.parquet'}' (FORMAT PARQUET)")
     write_sidecar(data_dir, {"fact": {"mode": "merge", "pk": ["id"], "floor": None, "f_base": None, "f": F1.isoformat()}})

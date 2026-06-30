@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .dataplane import DataPlane, ParquetDataPlane
+from .dataplane import DataPlane, ParquetDataPlane, _as_storage
 
 _NAMESPACE = "pond"  # the single namespace within each per-line catalog
 F_PROP = "duckstring.f"  # snapshot summary property carrying the Pond Run's freshness
@@ -68,27 +68,32 @@ class IcebergDataPlane(DataPlane):
 
     # ─── catalog ──────────────────────────────────────────────────────────────
 
-    def _catalog(self, data_dir: Path):
+    def _catalog(self, data_dir):
         from .iceberg_catalog import FileCatalog
 
-        data_dir = Path(data_dir)
-        data_dir.mkdir(parents=True, exist_ok=True)
+        storage = _as_storage(data_dir)
+        storage.mkdir()
+        # The catalog's pointer object (catalog.json) and its warehouse both live in the data location —
+        # local path or object store. The Storage routes the pointer PUT/GET; iceberg_properties carries
+        # pyiceberg's own FileIO credentials for an object store (empty for local).
         cat = FileCatalog(
             "duckstring",
-            catalog_path=data_dir / "catalog.json",
-            warehouse=data_dir.as_uri(),
+            warehouse=storage.warehouse_location(),
+            pointer_storage=storage,
+            **storage.iceberg_properties(),
         )
         cat.create_namespace_if_not_exists(_NAMESPACE)
         return cat
 
-    def _load(self, data_dir: Path, table: str):
-        """The Iceberg table, or ``None`` if this line has no such table yet (pre-Iceberg Source, or a
-        table never written)."""
+    def _load(self, data_dir, table: str):
+        """The Iceberg table, or ``None`` if this line has no such table yet (pre-Iceberg Source, a table
+        never written → served from the flat parts layer)."""
         from pyiceberg.exceptions import NoSuchTableError
 
-        if not (Path(data_dir) / "catalog.json").exists():
+        storage = _as_storage(data_dir)
+        if not storage.exists("catalog.json"):
             return None
-        cat = self._catalog(data_dir)
+        cat = self._catalog(storage)
         try:
             return cat.load_table(f"{_NAMESPACE}.{table}")
         except NoSuchTableError:
@@ -101,11 +106,12 @@ class IcebergDataPlane(DataPlane):
         from .dataplane import _check_mode, publish_plan
 
         _check_mode(mode)
-        data_dir = Path(data_dir)
+        data_dir = _as_storage(data_dir)
         # Validates the publish set (Trickle tables exempt from the reserved-column check), writes the
         # Trickle mode/PK sidecar, and returns the tables to commit — all before any write.
         tables = publish_plan(con, data_dir, f)
-        # Flat-Parquet sidecar first (also the consistent fallback if the Iceberg commit fails).
+        # Flat-Parquet sidecar first (also the consistent fallback if the Iceberg commit fails). This also
+        # runs ``data_dir.duckdb_setup(con)`` so the export connection can COPY to an object store.
         self._parquet.export(con, data_dir, mode=mode, f=f)
         # Stamp _duckstring_f (a TIMESTAMPTZ) as UTC for Arrow: pyiceberg accepts only UTC-tz timestamps,
         # and a registry written under a local session tz would otherwise fetch as e.g. tz=Australia/…
@@ -121,7 +127,7 @@ class IcebergDataPlane(DataPlane):
             if self._is_incremental(table, meta) or meta.get(table, {}).get("mode") == "merge":
                 continue
             arrow = con.execute(f'SELECT * FROM "{table}"').fetch_arrow_table()
-            self._commit(cat, table, arrow, f)
+            self._commit(cat, table, arrow, f, data_dir)
 
     @staticmethod
     def _is_incremental(table: str, meta: dict) -> bool:
@@ -137,7 +143,7 @@ class IcebergDataPlane(DataPlane):
                 return True
         return False
 
-    def _commit(self, cat, table: str, arrow, f) -> None:
+    def _commit(self, cat, table: str, arrow, f, data_dir) -> None:
         import warnings
 
         from pyiceberg.exceptions import NoSuchTableError
@@ -171,7 +177,7 @@ class IcebergDataPlane(DataPlane):
             _overwrite(_create())
         # Overwrite leaves the prior run's full data file referenced only by the now-superseded snapshot —
         # reclaim it (and the stale manifests) once that snapshot ages out.
-        self._prune(cat, table)
+        self._prune(cat, table, data_dir)
 
     @staticmethod
     def _create_table(cat, ident: str, schema):
@@ -181,7 +187,7 @@ class IcebergDataPlane(DataPlane):
 
     # ─── prune (bound on-disk growth) ─────────────────────────────────────────────
 
-    def _prune(self, cat, table: str) -> None:
+    def _prune(self, cat, table: str, data_dir) -> None:
         """Keep only the most-recent ``_keep_snapshots()`` snapshots and physically remove any data /
         manifest files no surviving snapshot references. Space-only — correctness rides the current
         snapshot (always retained) and the consumer's window read — so any failure here is swallowed: a
@@ -197,48 +203,40 @@ class IcebergDataPlane(DataPlane):
                 expire = [s.snapshot_id for s in snaps[:-keep]]
                 tbl.maintenance.expire_snapshots().by_ids(expire).commit()
                 tbl = cat.load_table(ident)
-            self._gc_orphan_files(tbl)
+            self._gc_orphan_files(tbl, data_dir, table)
         except Exception:  # pragma: no cover - housekeeping must never break a run
             import logging
 
             logging.getLogger(__name__).debug("iceberg prune skipped for %s", table, exc_info=True)
 
     @staticmethod
-    def _gc_orphan_files(tbl) -> None:
+    def _gc_orphan_files(tbl, data_dir, table: str) -> None:
         """Delete files under the table's ``data/`` and ``metadata/`` dirs that no surviving snapshot (or
         the retained metadata log / current metadata pointer) references — the orphans left behind when a
-        snapshot is expired (pyiceberg 0.11 expires metadata only, never the files)."""
-        import os
-        from urllib.parse import unquote, urlparse
-
-        def _norm(p) -> str:
-            u = urlparse(str(p))
-            return os.path.abspath(unquote(u.path) if u.scheme in ("file", "") else str(p))
+        snapshot is expired (pyiceberg 0.11 expires metadata only, never the files). Works on local **and**
+        object storage: the table lives at ``{warehouse}/pond/{table}/`` so we sweep through the
+        :class:`~duckstring.storage.Storage` (``data_dir.child("pond", table, sub)``), comparing file
+        **basenames** (uuid-named, collision-free across data/metadata) against the live set."""
+        def _base(p) -> str:
+            return str(p).rstrip("/").rsplit("/", 1)[-1]
 
         io = tbl.io
-        live: set[str] = {_norm(tbl.metadata_location)}
+        live: set[str] = {_base(tbl.metadata_location)}
         for entry in tbl.metadata.metadata_log:
-            live.add(_norm(entry.metadata_file))
+            live.add(_base(entry.metadata_file))
         for snap in tbl.snapshots():
             if snap.manifest_list:
-                live.add(_norm(snap.manifest_list))
+                live.add(_base(snap.manifest_list))
             for mf in snap.manifests(io):
-                live.add(_norm(mf.manifest_path))
+                live.add(_base(mf.manifest_path))
                 for e in mf.fetch_manifest_entry(io, discard_deleted=False):
-                    live.add(_norm(e.data_file.file_path))
+                    live.add(_base(e.data_file.file_path))
 
-        table_dir = os.path.dirname(os.path.dirname(_norm(tbl.metadata_location)))  # .../{namespace}/{table}
         for sub in ("data", "metadata"):
-            dpath = os.path.join(table_dir, sub)
-            if not os.path.isdir(dpath):
-                continue
-            for fn in os.listdir(dpath):
-                fp = os.path.abspath(os.path.join(dpath, fn))
-                if os.path.isfile(fp) and fp not in live:
-                    try:
-                        os.remove(fp)
-                    except OSError:
-                        pass
+            store = data_dir.child(_NAMESPACE, table, sub)
+            for name in store.names():
+                if name not in live:
+                    store.remove(name)
 
     # ─── read ──────────────────────────────────────────────────────────────────
 
