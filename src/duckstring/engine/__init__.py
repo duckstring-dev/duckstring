@@ -20,6 +20,7 @@ from .catchment import (
     complete_ripple,
     derive_blocked,
     drain_begin_runs,
+    drain_passes,
     fail_pond,
     fail_ripple,
     force_pond,
@@ -94,6 +95,7 @@ __all__ = [
     "tick",
     "next_wake",
     "drain_begin_runs",
+    "drain_passes",
     "worker",
     "pond",
 ]

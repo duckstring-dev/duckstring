@@ -22,7 +22,7 @@ def retry_on_lock(fn, attempts: int = 12, base: float = 0.05):
             time.sleep(min(base * (2**i), 0.5))
 
 
-def ripple(func=None, *, parents=None, name=None):
+def ripple(func=None, *, parents=None, name=None, always_run=False):
     """Decorator that registers a function as a Ripple — a named unit of code in a Pond. A Ripple has no
     tabular expectations: it may write zero, one, or many tables (in call order — sequential within the
     Ripple; split across Ripples for parallelism), or none at all. ``parents`` are the *within-Pond*
@@ -42,12 +42,14 @@ def ripple(func=None, *, parents=None, name=None):
     """
     if func is not None:
         # Called as @ripple without arguments
-        _RIPPLES.append({"func": func, "name": name or func.__name__, "parents": parents or []})
+        _RIPPLES.append({"func": func, "name": name or func.__name__, "parents": parents or [],
+                         "always_run": always_run})
         return func
 
     # Called as @ripple(...) with arguments
     def decorator(f):
-        _RIPPLES.append({"func": f, "name": name or f.__name__, "parents": parents or []})
+        _RIPPLES.append({"func": f, "name": name or f.__name__, "parents": parents or [],
+                         "always_run": always_run})
         return f
 
     return decorator
@@ -314,9 +316,15 @@ class Pond:
     def __init__(
         self, name: str, version: str, con, root,
         source_majors: dict[str, int] | None = None, f=None, previous_f=None, data_root: str | None = None,
+        sources_changed: bool = True, skip_sink=None,
     ) -> None:
         from .engine.core import NEVER
 
+        # No-change skip (plans/no-change-skip.md): ``sources_changed`` is the engine's verdict for this
+        # Run; ``skip_sink`` is the Duck's callback to mark the Run a pass when ``skip()`` is called.
+        # Both default to the always-changed / no-op behaviour for local (puddle) runs.
+        self._sources_changed = sources_changed
+        self._skip_sink = skip_sink
         self.name = name
         self.version = version
         self.con = con
@@ -335,6 +343,27 @@ class Pond:
         # ``(previous_f, f]`` a ripple can read from a Source for hand-rolled incremental logic.
         # ``NEVER`` on the first run (so that bracket reads everything). Trickle will automate this.
         self.previous_f = NEVER if previous_f is None else previous_f
+
+    def sources_changed(self) -> bool:
+        """Did any Source change its output since this Pond last ran? The engine's content-skip verdict
+        (``max(Source.changedF) > prior_f``), exposed so a side-effecting (``always_run``) Ripple can do
+        its effect every run but skip the data work when nothing upstream changed::
+
+            ...side effects that run every time...
+            if not pond.sources_changed():
+                pond.skip()
+                return
+            ...otherwise compute normally...
+
+        Always ``True`` in a local (puddle) run, which has no engine. See plans/no-change-skip.md."""
+        return self._sources_changed
+
+    def skip(self) -> None:
+        """Mark this Pond Run as producing **no change** — a pass. The Duck reports ``changed=False``,
+        so the Catchment holds this Pond's ``changed_f`` and downstream skips its work. A no-op in a
+        local (puddle) run. See plans/no-change-skip.md."""
+        if self._skip_sink is not None:
+            self._skip_sink()
 
     def write_table(self, name: str, relation) -> None:
         tmp = f"__tmp_{name}"
@@ -448,7 +477,7 @@ class Pond:
 
     def append_table(
         self, name: str, relation, *, pk=None, fail_on_conflict=True, retain_t=None, retain_n=None
-    ) -> None:
+    ) -> bool:
         """Append ``relation`` to the history table ``name`` (insert-only; each row stamped with the
         run's freshness ``pond.f``). The fast path for event/fact logs whose identity is unique by
         construction — no diff, no deletes; idempotent on replay at the same ``f``. ``pk`` is optional
@@ -459,37 +488,40 @@ class Pond:
         ``timedelta``) / ``retain_n`` (a count) opt into bounding the kept history."""
         from . import trickle_io as trickle
 
-        trickle.append_table(
+        return trickle.append_table(
             self.con, name, relation, self.f, self._resolve_pk(pk),
             fail_on_conflict=fail_on_conflict, retain_t=retain_t, retain_n=retain_n,
         )
 
     def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None,
-                    compact_threshold=None) -> None:
+                    compact_threshold=None) -> bool:
         """Merge the **complete current state** ``relation`` into the clean main table ``name`` + its Z-set
         changelog, stamped ``pond.f``. ``pk`` (the output identity) is **required** — it is the merge key.
         Duckstring diffs ``relation`` against the prior main as a full-row Z-set difference to derive
         inserts/updates/deletes automatically — so it is always safe to hand it the whole state. ``retain_t``
         / ``retain_n`` opt into bounding the kept changelog (the main, being the clean current state, is
         never trimmed). ``compact_threshold`` (bytes) overrides the catchment-level checkpoint size for this
-        main — the changelog must outgrow ``max(base, this)`` before the base is re-folded."""
+        main — the changelog must outgrow ``max(base, this)`` before the base is re-folded.
+
+        Returns whether the state actually changed (the diff was non-empty) — gate ``pond.skip()`` on it to
+        pass a no-change run (see :meth:`skip`, plans/no-change-skip.md)."""
         from . import trickle_io as trickle
 
-        trickle.merge_table(
+        return trickle.merge_table(
             self.con, name, relation, self.f, self._resolve_pk(pk),
             retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
         )
 
     def apply_zset(self, name: str, zset, *, pk, retain_t=None, retain_n=None,
-                   compact_threshold=None) -> None:
+                   compact_threshold=None) -> bool:
         """Apply a **Z-set** change (a relation of user columns + ``_duckstring_d``) to the output Trickle
         ``name`` — the low-level primitive the builder uses for the incremental path. ``pk`` (the output
         identity) is **required**. Prefer :meth:`trickle` / :meth:`merge_table`; reach for this only for
         hand-rolled incremental compute. ``compact_threshold`` overrides the checkpoint size (see
-        :meth:`merge_table`)."""
+        :meth:`merge_table`). Returns whether the change was non-empty (the ``pond.skip()`` signal)."""
         from . import trickle_io as trickle
 
-        trickle.apply_zset(
+        return trickle.apply_zset(
             self.con, name, zset, self.f, self._resolve_pk(pk),
             retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
         )

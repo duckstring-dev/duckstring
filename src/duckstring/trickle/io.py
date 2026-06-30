@@ -442,14 +442,17 @@ def landed_after(data_dir) -> str | None:
 
 def append_table(
     con, name: str, relation, f, pk: tuple[str, ...], *, fail_on_conflict=True, retain_t=None, retain_n=None
-) -> None:
+) -> bool:
     """Append ``relation``'s rows to the history table ``name``, each stamped ``_duckstring_f = f``.
     Insert-only: no diff, no deletes (its Z-set is all ``+1``). Idempotent at a given ``f`` (rows already
     stamped ``f`` are dropped before re-appending). ``pk`` is recorded as the declared key; when it is set,
     ``fail_on_conflict=True`` (the default) asserts it is unique across the appended rows and the existing
     history, raising :class:`DeltaError` before any write (the live table is untouched on a violation). Pass
     ``fail_on_conflict=False`` for the trust-the-writer fast path (no check). With ``pk`` unset the check is a
-    no-op regardless."""
+    no-op regardless.
+
+    Returns whether rows were actually appended (an empty relation, or a pure same-``f`` replay, is no
+    change) — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     src = "_duckstring_ds_append_src"
@@ -457,6 +460,12 @@ def append_table(
     cols = relation.columns
     sel_cols = ", ".join(_q(c) for c in cols)
     first = not _table_exists(con, name)  # the floor anchors at the first append's freshness
+    # A pure replay (rows already stamped this f) re-writes identical rows → no net change. Detect it
+    # before the idempotent DELETE below so the returned "changed" flag reflects new content, not a re-run.
+    replay = (not first) and con.execute(
+        f'SELECT 1 FROM {_q(name)} WHERE {_q(F_COL)} = {_ts(f)} LIMIT 1'
+    ).fetchone() is not None
+    n_src = con.execute(f'SELECT count(*) FROM {_q(src)}').fetchone()[0]
     if fail_on_conflict and pk:
         missing = [c for c in pk if c not in cols]
         if missing:
@@ -488,12 +497,13 @@ def append_table(
     _record_meta(con, name, "append", pk)
     cutoff = _apply_retention(con, name, f, retain_t, retain_n)
     _advance_floor(con, name, bootstrap_f=(f if first else None), cutoff=cutoff)
+    return n_src > 0 and not replay
 
 
 def append_zset(
     con, name: str, zset, f, pk: tuple[str, ...], *, fail_on_conflict=True, log_drops=True,
     retain_t=None, retain_n=None,
-) -> None:
+) -> bool:
     """Append the **present** rows of a Z-set ΔO (the builder's incremental output, or a full recompute
     tagged ``+1``) to the insert-only history ``name`` — the ``.append()`` terminal of the builder. An
     insert-only table can't reflect a *change to the past*, so two things are conflicts:
@@ -511,7 +521,10 @@ def append_zset(
     ``log_drops`` the dropped rows land in a ``{name}__droplog`` companion (user columns + ``_duckstring_d``
     sign + ``_duckstring_f``), published alongside the table like ``__changelog``. ``pk`` unset skips the pk
     checks entirely (only retractions are conflicts) — fast, sound only when duplicates and past-changes are
-    impossible by construction."""
+    impossible by construction.
+
+    Returns whether any genuinely new rows were appended (benign idempotent skips and dropped conflicts
+    don't count) — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     src = unique_name("appz")
@@ -584,6 +597,7 @@ def append_zset(
         )
     new_view = unique_name("appn")
     new_rows.create_view(new_view, replace=True)
+    n_new = con.execute(f'SELECT count(*) FROM {_q(new_view)}').fetchone()[0]
     con.execute(f'INSERT INTO {_q(name)} ({sel}, {_q(F_COL)}) SELECT {sel}, {_ts(f)} FROM {_q(new_view)}')
 
     if log_drops and not fail_on_conflict and (retractions or hist_conflict):
@@ -592,6 +606,7 @@ def append_zset(
     _record_meta(con, name, "append", pk)
     cutoff = _apply_retention(con, name, f, retain_t, retain_n)
     _advance_floor(con, name, bootstrap_f=(f if first else None), cutoff=cutoff)
+    return n_new > 0
 
 
 def _log_drops(con, name, consol, user, pk, f, first_output) -> None:
@@ -738,7 +753,7 @@ def count_current(con, name: str) -> int:
 
 
 def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
-               compact_threshold=None) -> None:
+               compact_threshold=None) -> bool:
     """Append a Z-set ``zset`` (user columns + ``_duckstring_d``) to the merge main's append-only
     ``__changelog``. The main is **log-structured**: the changelog is the source of truth and the clean
     current state is reconstructed on read (:func:`reconstruct_current`) from a base table (written only by
@@ -747,7 +762,10 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
 
     Idempotent replay at the same ``f``: a non-empty change rewrites just this ``f``'s changelog window; an
     empty consolidated change leaves it untouched (so a comprehensive replay, whose diff against the
-    already-advanced state is empty, preserves the first attempt's rows)."""
+    already-advanced state is empty, preserves the first attempt's rows).
+
+    Returns whether the change was non-empty (something was actually inserted/updated/deleted) — the
+    signal a Ripple can use to ``pond.skip()`` a no-change run (see plans/no-change-skip.md)."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if not pk:
@@ -790,13 +808,15 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     _set_compact_threshold(con, name, compact_threshold)
     cutoff = _apply_retention(con, clog, f, retain_t, retain_n)
     _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None), cutoff=cutoff)
+    return nonempty
 
 
 def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
-                compact_threshold=None) -> None:
+                compact_threshold=None) -> bool:
     """Comprehensive merge: ``relation`` is the **complete current state**. Diff it against the
     reconstructed prior state (base ⊎ changelog) as a full-row Z-set (``new(+1) ⊎ prior(-1)``, consolidated)
-    and append the diff to the changelog."""
+    and append the diff to the changelog. Returns whether the diff was non-empty (the state actually
+    changed) — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
     if not pk:
         raise DeltaError(f"merge_table('{name}', ...) needs a primary key — pass pk=...")
     cols = list(relation.columns)
@@ -819,8 +839,8 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
         )
     else:
         zset = con.sql(f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)}')
-    apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n,
-               compact_threshold=compact_threshold)
+    return apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n,
+                      compact_threshold=compact_threshold)
 
 
 def fold_warm(con, name: str, target_f) -> None:

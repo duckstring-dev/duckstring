@@ -37,9 +37,13 @@ class Event:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     schema: dict | None = None  # published output schema (run_completed) — captured as the version contract
+    changed: bool = True  # did this Pond Run change its output? False = a pass (pond.skip() / empty delta).
+                          # Set on the Run-completing ripple event + run_completed; holds changed_f at the
+                          # Catchment so downstream skips. See plans/no-change-skip.md.
 
     def payload(self) -> dict:
-        d = {"kind": self.kind, "f": self.f.isoformat(), "status": self.status, "retry": self.retry}
+        d = {"kind": self.kind, "f": self.f.isoformat(), "status": self.status, "retry": self.retry,
+             "changed": self.changed}
         if self.ripple is not None:
             d["ripple"] = self.ripple
         if self.error is not None:
@@ -65,10 +69,24 @@ class DuckCore:
         self.last_begin_f: datetime = NEVER  # freshness of the most recently started Pond Run
         self._previous_f: dict[datetime, datetime] = {}  # Pond Run freshness → the prior run's freshness
         self.contract: dict | None = None  # the major line's additive schema contract (gated at publish)
+        # No-change tracking (plans/no-change-skip.md), keyed by Pond Run freshness so concurrent Runs
+        # don't cross-contaminate. ``_skipped`` holds Runs a Ripple marked no-change via ``pond.skip()``;
+        # ``_sources_changed`` is the engine's verdict (exposed to Ripples as ``pond.sources_changed()``).
+        self._skipped: set[datetime] = set()
+        self._sources_changed: dict[datetime, bool] = {}
+
+    def mark_skipped(self, f: datetime) -> None:
+        """A Ripple called ``pond.skip()`` for the Run at ``f`` — report it as a pass (changed=False)."""
+        self._skipped.add(f)
+
+    def sources_changed_for(self, f: datetime) -> bool:
+        """The engine's "did any Source change" verdict for the Run at ``f`` (default True if unknown,
+        e.g. a Run recovered from the ledger with no live begin_run)."""
+        return self._sources_changed.get(f, True)
 
     def begin_run(
         self, f: datetime, now: datetime, retry_immediately: int = 0, force: bool = False,
-        previous_f: datetime = NEVER, contract: dict | None = None,
+        previous_f: datetime = NEVER, contract: dict | None = None, sources_changed: bool = True,
     ) -> list[str]:
         """Start a Pond Run at freshness ``f`` (idempotent — completed Ripples are not re-stamped, unless
         ``force``, which recomputes every Ripple). ``retry_immediately`` is the Run's Ripple-retry budget
@@ -80,6 +98,7 @@ class DuckCore:
         self.state = worker.begin_run(self.state, f, retry_immediately, force=force)
         self.last_begin_f = max(self.last_begin_f, f)
         self._previous_f[f] = previous_f
+        self._sources_changed[f] = sources_changed
         ledger.record_pond_run_start(self.con, f, now)
         return self._advance(now)
 
@@ -104,11 +123,17 @@ class DuckCore:
         end_f = self.state.states[name].start_f
         ledger.record_ripple_complete(self.con, name, end_f)
         self.state, rc = worker.complete_ripple(self.state, name, now)
-        self.events.append(
-            Event(kind="ripple", ripple=name, f=end_f, retry=self.attempts.pop(name, 0),
-                  started_at=started_at, finished_at=finished_at)
-        )
+        ripple_event = Event(kind="ripple", ripple=name, f=end_f, retry=self.attempts.pop(name, 0),
+                             started_at=started_at, finished_at=finished_at)
+        self.events.append(ripple_event)
         if rc is not None:
+            # The Run completed at this Ripple — decide whether its output changed and stamp it on this
+            # (Run-completing) ripple event so the Catchment holds changed_f *before* it triggers
+            # downstream, plus on run_completed for the pond_run flag (see plans/no-change-skip.md).
+            changed = rc.f not in self._skipped
+            self._skipped.discard(rc.f)
+            self._sources_changed.pop(rc.f, None)
+            ripple_event.changed = changed
             schema = None
             if export is not None:
                 try:
@@ -122,7 +147,7 @@ class DuckCore:
                     return self._advance(now)
             ledger.record_pond_run_finish(self.con, rc.f, now)
             self._previous_f.pop(rc.f, None)  # the Run is done; drop its carried previous_f
-            self.events.append(Event(kind="run_completed", f=rc.f, schema=schema))
+            self.events.append(Event(kind="run_completed", f=rc.f, schema=schema, changed=changed))
         return self._advance(now)
 
     def ripple_failed(

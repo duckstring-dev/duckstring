@@ -223,6 +223,9 @@ class TrickleBuilder:
         self.spine_ref = spine_ref
         self.p = p
         self._root = _Source(spine_ref, p, threaded_delta=_spine_delta)
+        # Whether the .merge()/.append() that produced THIS (chained) handle actually changed its output —
+        # the pond.skip() signal, read via .was_changed(). True for a fresh source builder (unwritten).
+        self._was_changed = True
         # The output pipeline: an ordered list of ("filter", pred) / ("mutate", {name: expr}) / ("select",
         # projection) stages, applied (in call order) to the composed DAG result. Each is a row-local,
         # deterministic map, so the whole pipeline distributes over the Z-set delta — incrementally free.
@@ -483,15 +486,16 @@ class TrickleBuilder:
         if not out_pk:
             raise BuildError(f"pond.trickle('{self.spine_ref}')...merge('{name}'): pass the output key, merge(pk=...)")
         if self._materialised is not None:  # comprehensive mode (post-.sql) → diff the relation vs prior main
-            ctx.merge_table(name, self._materialised, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
-            return self._chain(name, out_pk)
+            changed = ctx.merge_table(name, self._materialised, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
+            return self._chain(name, out_pk, changed=changed)
         kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter)
         if kind == "comprehensive":
-            ctx.merge_table(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
+            changed = ctx.merge_table(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
         elif kind == "incremental":
-            ctx.apply_zset(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
-        # "empty": nothing changed (and no full read) → output unchanged, no write.
-        return self._chain(name, out_pk)
+            changed = ctx.apply_zset(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
+        else:
+            changed = False  # "empty": nothing changed (and no full read) → output unchanged, no write.
+        return self._chain(name, out_pk, changed=changed)
 
     def append(
         self, name: str, *, pk=None, fail_on_conflict=True, log_drops=True, ivm: bool = True,
@@ -516,30 +520,31 @@ class TrickleBuilder:
         from . import io as trickle
 
         if self._materialised is not None:  # comprehensive mode (post-.sql) → +1 the relation, append-filter
-            trickle.append_zset(
+            changed = trickle.append_zset(
                 ctx.con, name, trickle._as_zset(self._materialised, 1), ctx.f, out_pk,
                 fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
             )
-            return self._chain(name, out_pk)
+            return self._chain(name, out_pk, changed=changed)
 
         spine_delta = self._spine_delta_value()
         if (ivm and isinstance(self._root, _Join) and not fail_on_conflict and not log_drops
                 and self._spine_pk_passthrough(out_pk, spine_delta.pk)):
             candidate = self._full_join(spine_rel=self._new_spine_rows(spine_delta, name, out_pk))
-            trickle.append_zset(
+            changed = trickle.append_zset(
                 ctx.con, name, trickle._as_zset(candidate, 1), ctx.f, out_pk,
                 fail_on_conflict=False, log_drops=False, retain_t=retain_t, retain_n=retain_n,
             )
-            return self._chain(name, out_pk)
+            return self._chain(name, out_pk, changed=changed)
 
         kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter)
+        changed = False
         if kind != "empty":
             zset = trickle._as_zset(rel, 1) if kind == "comprehensive" else rel
-            trickle.append_zset(
+            changed = trickle.append_zset(
                 ctx.con, name, zset, ctx.f, out_pk,
                 fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
             )
-        return self._chain(name, out_pk)
+        return self._chain(name, out_pk, changed=changed)
 
     def _acc_required(self, out_pk):
         """The columns the scan needs present in the composed rows: ``by`` + ``along`` + each metric's input
@@ -1047,11 +1052,24 @@ class TrickleBuilder:
                 f"or leave the column in the bare * output"
             )
 
-    def _chain(self, name: str, out_pk) -> "TrickleBuilder":
+    def _chain(self, name: str, out_pk, changed: bool = True) -> "TrickleBuilder":
         """Thread the just-materialised output forward as a chainable in-run operand — its delta read back
-        from the registry (same coverage rule as the published read_delta)."""
+        from the registry (same coverage rule as the published read_delta). ``changed`` records whether the
+        write actually changed the output, surfaced on the returned handle via :meth:`was_changed`."""
         threaded = read_registry_delta(self.ctx.con, name, self.ctx.previous_f, self.ctx.f, out_pk)
-        return TrickleBuilder(self.ctx, name, _spine_delta=threaded)
+        nxt = TrickleBuilder(self.ctx, name, _spine_delta=threaded)
+        nxt._was_changed = changed
+        return nxt
+
+    def was_changed(self) -> bool:
+        """Did the :meth:`merge` / :meth:`append` that produced this handle change its output? Gate
+        ``pond.skip()`` on it to pass a no-change run (see plans/no-change-skip.md)::
+
+            out = pond.trickle("orders.order").join(...).merge("priced", pk="order_id")
+            if not out.was_changed():
+                pond.skip()
+        """
+        return self._was_changed
 
     def _over_threshold(self, ref: str, delta, p: float) -> bool:
         """Whether ``delta`` touches more than fraction ``p`` of ``ref``'s current rows (``p >= 1`` never

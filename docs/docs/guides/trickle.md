@@ -257,6 +257,33 @@ When the output is keyed by the **spine's own PK** — projected straight throug
 
 This is automatic and conservative — it engages only when the PK is a verbatim `s0.<col>` pass-through of the spine's declared key, and falls back to the full path for anything computed or renamed-off-a-dimension (the full path is always correct, so a missed detection only costs speed, never correctness). It's the in-builder equivalent of "this fact stream is enrich-once, append-only" — exactly the case where recomputing against changing dimensions would be wasted work.
 
+## Skipping a no-change run
+
+A Trickle run often produces an empty delta — the Sources advanced their freshness but nothing actually changed. Downstream still does minimal work (it reads an empty delta), but you can spare it entirely: every Trickle write reports whether it changed anything, and you can pass the run with [`pond.skip()`](../reference/python-api.md#pondsources_changed--bool-and-pondskip) so the Pond holds its content freshness and downstream Ponds skip too.
+
+The direct writes return a `bool`:
+
+```python
+@ripple
+def catalog(pond):
+    if not pond.merge_table("catalog", current_state, pk="id"):   # False ⇒ nothing changed
+        pond.skip()
+```
+
+The builder's terminal returns a handle with `.was_changed()`:
+
+```python
+@ripple
+def priced(pond):
+    out = (pond.trickle("orders.order")
+               .join(pond.trickle("catalog.product"), on="product_id")
+               .merge("priced", pk="order_id"))
+    if not out.was_changed():
+        pond.skip()
+```
+
+It's optional — leaving it off is fine; an empty-delta run is cheap and downstream mostly idles anyway. It's most worthwhile at the **inlets** (where data enters): an inlet that skips when it finds nothing new lets the entire pipeline below it stay quiet. `pond.skip()` is run-level, so for a Pond writing several tables across several Ripples, only skip once you've accounted for *all* of them (e.g. `if not (a or b): pond.skip()`).
+
 ## Following a Ripple
 
 A Trickle can read an ordinary (overwrite) Ripple as a source — the builder accepts it directly. While that Ripple is unchanged it's a free, stable join operand; the run a change lands, the consumer recomputes that output comprehensively (an overwrite source has no prior state to retract against, so the incremental win doesn't apply across that edge). Promote the Ripple to a Trickle upstream when you want its changes to flow incrementally — consumers don't change.

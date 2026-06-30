@@ -126,6 +126,10 @@ class Pond:
     # update. See docs/guide/theory.md "Fault Tolerance".
     retry_immediately: int = 0
     retry_on_change: int = 0
+    # A side-effecting Pond that must run every time (e.g. a monitoring ping): it is never engine-passed
+    # when its Sources are unchanged, so the Duck always runs (the Ripple gates its data work via
+    # ``pond.sources_changed()`` / ``pond.skip()``). ORed up from its Ripples' ``always_run`` flags.
+    always_run: bool = False
     # A Pond Draw (cross-Catchment): fed by a duct, not executed by a Duck. It has no local sources;
     # its freshness is the upstream freshness mirrored by the poller (PondState.remote_f), and its
     # single ripple performs the data transfer. See plans/cross-catchment-ducts.md.
@@ -169,6 +173,8 @@ class BeginRun:
     f: datetime
     force: bool = False
     refresh: bool = False  # a Refresh: the Duck wipes the registry first → a cold full rebuild
+    sources_changed: bool = True  # the engine's no-change verdict, exposed to Ripples as
+                                  # pond.sources_changed() (an always_run Pond runs even when False)
 
 
 # ─── Run state (mutable) ──────────────────────────────────────────────────────
@@ -178,6 +184,9 @@ class BeginRun:
 class PondState:
     start_f: datetime = NEVER  # freshness of the most recently started Pond Run
     end_f: datetime = NEVER  # freshness of the most recently completed Pond Run
+    changed_f: datetime = NEVER  # freshness at which this Pond's OUTPUT last actually changed
+                                 # (<= end_f). A pass advances end_f but holds this. See
+                                 # plans/no-change-skip.md.
     d: timedelta = ZERO  # window delay carried by the current freshness
     remote_f: datetime = NEVER  # Pond Draws only: the upstream freshness mirrored by the poller
                                 # (transient — repopulated on each poll, not persisted)
