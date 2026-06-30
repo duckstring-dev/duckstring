@@ -1010,6 +1010,7 @@ Pond:
     state:
         startF          # freshness of the most recently started Pond Run
         endF            # freshness of the most recently completed Pond Run
+        changedF        # freshness at which this Pond's OUTPUT last actually changed (<= endF)
         sourceF         # freshness available from this Pond's Sources (derived, below)
         D               # window delay (see Staleness); 0 unless fed by a window
         hasReceivedPull # a Sink (or trigger) has asked for resupply
@@ -1056,6 +1057,7 @@ Pond:
         or (hasPull and sourceF > startF)                # pull with fresher input
 
     on starting a Pond Run:
+        priorF  = startF                            # the freshness this Run builds on (captured first)
         if hasPull and not Inlet (no Sources): 
             for each Source: 
                 Source.hasReceivedPull = true       # propagate pull
@@ -1064,6 +1066,16 @@ Pond:
         remove every T <= startF from targets       # this Run takes the freshest input, satisfying them all
         D = max(Parent.D over Parents where Parent.endF == startF)   # carry worst-case delay
         for each Ripple: send push target startF to Ripple   # every Ripple must reach startF; initiates the run
+
+        # No-change pass (see "No-Change Passes" below). A Pond with Sources whose content is all
+        # unchanged since priorF is completed in-place with no execution — freshness advances, changedF
+        # is held — unless it must run regardless (an Inlet, a Force/Refresh, an always-run side effect).
+        if (no Sources) or alwaysRun or forcing
+           or (max(Source.changedF over all Sources) > priorF):
+            execute the Run                         # the Ripples run; on completion changedF = startF if
+                                                     # the output actually changed (else changedF is held)
+        else:
+            pass: complete the Run immediately, advancing endF = startF but holding changedF
 
 Ripple:
     state:
@@ -1109,6 +1121,18 @@ Under *pull*, a Pond will continuously initiate new Pond Runs any time its `sour
 Under *push*, a Pond Run will start any time there is change in its Source if that change satisfies a target, until all targets are satisfied. Consequently, there can be many concurrent push runs in the pipeline simultaneously.
 
 Every Ripple in a Pond Run will *eventually* reach the `Pond.startF` freshness, as this is added to the Ripple's target set at run start. The Pond Runs may therefore be identified (and logged) by their `Pond.startF` freshness.
+
+### No-Change Passes
+
+The *Change Gating* discussed in the Motivation throttles a node to its upstream bottleneck — but only by *freshness*: in the model so far, every run advances `startF`/`endF`, so a Sink re-runs whenever a Source completes, **even if that Source produced byte-identical output**. This is the build-system notion of *early cutoff*: a target rebuilt to identical output should spare its consumers, because they depend on the *output*, not the rebuild.
+
+To capture this, each Pond carries a second freshness stamp, `changedF` — the freshness at which its **output** last actually changed (always `≤ endF`). The two are kept strictly separate, because they are different signals and conflating them breaks the demand heartbeat: `startF`/`endF` must advance on *every* run, including a no-change one, or a standing Wave would stop re-arming its Inlets and the pipeline would stall. So a run that produces no change still advances freshness — it just **holds `changedF`**.
+
+A Pond's run becomes a **pass** — completed in place, with no execution — exactly when it has Sources and none of them changed content since the Pond last ran: `max(Source.changedF) ≤ priorF`, where `priorF` is the Pond's freshness *before* this run (the strict comparison is against the prior run freshness, not the new `startF`, so a change from a fresher non-binding Source in a diamond is never missed). A pass holds `changedF`, so each downstream Pond in turn sees no change and passes as well — the "no change" propagates through the graph for free, advancing freshness without compute.
+
+Some Ponds must always run regardless: an **Inlet** (it alone can tell whether the outside world changed — it reports `changedF` from its own content, e.g. an empty incremental delta), a **Force**/**Refresh** (a deliberate recompute), and a Pond carrying an **always-run** side effect (which fires every run, then decides whether to skip the data work from `sources_changed()`). Everything else passes when its Sources are unchanged.
+
+The practical consequence is the desired one: under a standing Wave with nothing changing, only the Inlets keep executing (polling the outside world — throttled in turn by any **window** on them), while the entire interior of the graph goes quiet, each Pond passing its freshness along without running.
 
 ### Triggers
 

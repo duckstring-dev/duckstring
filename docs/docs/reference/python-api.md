@@ -30,6 +30,7 @@ def join_lines_impl(pond): ...
 |---|---|---|
 | `parents` | `[]` | Ripples (the decorated function objects) that must complete, within the same Pond Run, before this one starts. Ripples with no parent relationship run in parallel. All parent edges are required. |
 | `name` | the function's name | The Ripple's registered name — used in topology, run history, and `duckstring get`/`query`. |
+| `always_run` | `False` | Run this Pond **every time** it is triggered, even when its Sources are unchanged (so a side effect — a notification, a heartbeat — always fires). By default a Pond whose Sources didn't change is *passed* (completed with no execution); `always_run` opts out of that. ORed up to the Pond: any always-run Ripple makes the whole Pond always run. Pair with `pond.sources_changed()` / `pond.skip()` to still skip the *data* work. |
 
 The decorated function must accept exactly one argument: the `Pond` handle. It returns nothing — output happens through `pond.write_table`. The decorator returns the function unchanged, so parents can reference it directly.
 
@@ -105,6 +106,27 @@ import pandas as pd
 df = pd.DataFrame(fetch_from_api())                    # arbitrary Python
 pond.write_table("snapshot", pond.con.from_df(df))
 ```
+
+### `pond.sources_changed()` → `bool` and `pond.skip()`
+
+By default Duckstring skips a Pond Run whose Sources are all unchanged since it last ran — it *passes*, advancing freshness with no execution, so downstream skips too (see [Freshness](../concepts/freshness.md#no-change-and-passes)). Most Ponds need nothing here; the skip is automatic and the Ripple never runs.
+
+These two methods are for a Pond that **must** run every time — declared with [`@ripple(always_run=True)`](#ripple) because it carries a side effect — but should still skip the *data* work when nothing upstream changed:
+
+- **`pond.sources_changed()`** returns whether any Source changed its output since this Pond last ran (the engine's verdict). Always `True` in a [local Puddle run](../guides/local-testing.md).
+- **`pond.skip()`** marks the current run as producing **no change** — a pass. The Pond's content freshness is held, so downstream Ponds skip. A no-op in a local Puddle run.
+
+```python
+@ripple(always_run=True)
+def publish(pond):
+    notify_dashboard("run started")          # the side effect — every run
+    if not pond.sources_changed():
+        pond.skip()                          # nothing upstream changed → don't redo the data work
+        return
+    pond.write_table("report", build_report(pond))
+```
+
+An Inlet that ingests from outside can likewise call `pond.skip()` when it finds no new data — every downstream Pond then passes for free.
 
 ## `@puddle` and the `Puddle` handle
 

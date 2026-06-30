@@ -1,6 +1,16 @@
 # No-change skip: content freshness (`changedF`) and the Pond pass
 
-Status: **design.** Not built. This plan adds a second freshness stamp, `changedF`, so a Pond
+Status: **built (D1–D4); Trickle empty-delta auto-report deferred.** The engine pass + `changed_f`
+(D1, `engine/`), persistence/restore + pass recording (D2, migration `013`, `driver.py`), the Duck
+`changed` report + `pond.skip()`/`pond.sources_changed()` (D3, `duck/`, `core.py`), and the
+`@ripple(always_run=True)` plumbing (D4, `deploy.py`, reload OR) are implemented and tested
+(`tests/test_engine.py`, `tests/test_restart.py`, `tests/test_no_change.py`). **Still to build:** the
+Trickle empty-delta auto-report (so a Trickle ripple with an empty composed delta reports
+`changed=False` without an explicit `pond.skip()`) — see "Deferred / open". Until then, the quiet
+interior is reached by calling `pond.skip()` at the **inlets** (the source of change-truth); every
+downstream Pond then engine-passes for free.
+
+Original design follows. This plan adds a second freshness stamp, `changedF`, so a Pond
 can signal "I ran but my output did not change," letting downstream skip work — at the engine
 level (no Duck spawned) where the no-change can be *proven* from metadata, and at the Duck level
 where only the run itself can tell. It is the content-aware *early cutoff* that theory.md's
@@ -251,6 +261,16 @@ upstream forwarding) changes.
 
 ## Deferred / open
 
+- **Trickle empty-delta auto-report** (the remaining headline piece). A Trickle ripple whose composed
+  delta is empty should report `changed=False` automatically, so a pure-Trickle pipeline goes quiet
+  with zero API. The sound rule: a Pond auto-passes iff every output write this run went through a
+  Trickle method *and* every such write was empty *and* no `write_table` (overwrite) happened — `True`
+  otherwise (conservative; an overwrite can't be auto-detected, and a ripple that only does a side
+  effect must not be assumed no-change). Implementation: have the Trickle writes (`merge_table` /
+  `append_table` / `apply_zset` / the builder's `.merge()`/`.append()`) report per-write emptiness back
+  through the Pond handle (a write-report callback alongside `skip_sink`), accumulate per-`f` in
+  `DuckCore`, and fold into the `changed` decision next to the explicit skip. Reaches the same end as
+  the explicit inlet-skip available today, minus the call.
 - **UI surfacing** of pass vs idle vs running, and a "last changed" age distinct from "last run."
 - **Spouts.** A Spout already only delivers when `sourceF > deliveredF`; with `changedF` it could also
   skip delivery when the Source merely republished unchanged. Natural extension once the core lands —

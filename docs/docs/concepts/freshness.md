@@ -41,6 +41,12 @@ A useful asymmetry: a Tide is a *staleness bound* ("never more than 30 minutes o
 
 Separately from triggers, the [control verbs](../guides/control.md) (Wake, Force, Sleep, Kill) operate on a single Pond without propagating demand.
 
+## No change and passes
+
+Freshness throttles a node to its upstream bottleneck, but a Source completing a run doesn't always mean its output *changed* — it may have recomputed to identical data. Re-running consumers in that case is wasted work. So a Pond tracks, separately from its freshness, **when its output last actually changed**. When a Pond is triggered but none of its Sources changed since it last ran, it **passes**: it completes instantly with no execution, advancing its freshness (so the demand heartbeat keeps flowing) while holding its content unchanged. Each downstream Pond then sees no change and passes in turn — "no change" propagates through the graph for free.
+
+The effect is most visible under a standing Wave with nothing changing: only the **Inlets** keep executing — they alone can tell whether the outside world changed (and a [Window](../guides/windows.md) throttles even that to the batch cadence) — while the entire interior of the graph goes quiet, each Pond passing its freshness along without running. An Inlet, or any Pond doing a side effect, can also declare a no-change run explicitly with [`pond.skip()`](../reference/python-api.md#pondsources_changed--bool-and-pondskip).
+
 ## No concurrency cap
 
 The Catchment never limits concurrent Pond Runs. If the pipeline takes 7 seconds end-to-end and the bottleneck cadence is 3 seconds, two to three runs are in flight at any moment, pipelined like instructions in a CPU. Flow control doesn't come from a cap — it comes from completions: a node only re-runs when its consumers have taken delivery and demanded more. Throughput is set by the bottleneck, latency by the critical path, and neither requires configuration.
