@@ -232,10 +232,15 @@ class Driver:
                     "SELECT immediate_retries, source_retries FROM pond_retry WHERE pond_id = ?", (pond_id,)
                 ).fetchone()
                 imm, onc = retry if retry else (0, 0)
+                # always_run is a Pond property ORed up from its Ripples: any always_run Ripple means
+                # the Pond runs every time (never engine-passed). See plans/no-change-skip.md.
+                always_run = bool(db.execute(
+                    "SELECT MAX(always_run) FROM ripple WHERE pond_version_id = ?", (pv_id,)
+                ).fetchone()[0])
                 ponds[key] = Pond(
                     id=key, name=key, sources=sources, optional_sources=optional, windows=windows,
                     retry_immediately=imm, retry_on_change=onc, is_draw=bool(is_draw),
-                    is_spout=bool(is_spout), has_missing_source=has_missing_source,
+                    is_spout=bool(is_spout), has_missing_source=has_missing_source, always_run=always_run,
                 )
                 pond_states[key] = self._load_pond_state(pond_id)
                 if is_spout:

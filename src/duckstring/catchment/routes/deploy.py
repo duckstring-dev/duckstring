@@ -171,8 +171,8 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
         name_to_id: dict[str, int] = {}
         for r in ripples:
             db.execute(
-                "INSERT OR IGNORE INTO ripple (pond_version_id, name) VALUES (?, ?)",
-                (pv_id, r["name"]),
+                "INSERT OR IGNORE INTO ripple (pond_version_id, name, always_run) VALUES (?, ?, ?)",
+                (pv_id, r["name"], int(r.get("always_run", False))),
             )
             (rid,) = db.execute(
                 "SELECT id FROM ripple WHERE pond_version_id = ? AND name = ?", (pv_id, r["name"])

@@ -8,3 +8,7 @@ UPDATE pond_state SET changed_f = end_f;
 -- Per-run "did the output change" flag. A pass (engine-synthesised no-change run, or a Duck reporting
 -- an empty delta / pond.skip()) records changed = 0; a real run that produced new output records 1.
 ALTER TABLE pond_run ADD COLUMN changed INTEGER NOT NULL DEFAULT 1;
+
+-- A Ripple declared @ripple(always_run=True): the Pond runs every time even when its Sources are
+-- unchanged (a side effect must fire); ORed up to the Pond. See plans/no-change-skip.md.
+ALTER TABLE ripple ADD COLUMN always_run INTEGER NOT NULL DEFAULT 0;

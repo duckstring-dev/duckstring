@@ -22,7 +22,7 @@ def retry_on_lock(fn, attempts: int = 12, base: float = 0.05):
             time.sleep(min(base * (2**i), 0.5))
 
 
-def ripple(func=None, *, parents=None, name=None):
+def ripple(func=None, *, parents=None, name=None, always_run=False):
     """Decorator that registers a function as a Ripple — a named unit of code in a Pond. A Ripple has no
     tabular expectations: it may write zero, one, or many tables (in call order — sequential within the
     Ripple; split across Ripples for parallelism), or none at all. ``parents`` are the *within-Pond*
@@ -42,12 +42,14 @@ def ripple(func=None, *, parents=None, name=None):
     """
     if func is not None:
         # Called as @ripple without arguments
-        _RIPPLES.append({"func": func, "name": name or func.__name__, "parents": parents or []})
+        _RIPPLES.append({"func": func, "name": name or func.__name__, "parents": parents or [],
+                         "always_run": always_run})
         return func
 
     # Called as @ripple(...) with arguments
     def decorator(f):
-        _RIPPLES.append({"func": f, "name": name or f.__name__, "parents": parents or []})
+        _RIPPLES.append({"func": f, "name": name or f.__name__, "parents": parents or [],
+                         "always_run": always_run})
         return f
 
     return decorator

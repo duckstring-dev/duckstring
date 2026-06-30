@@ -21,12 +21,14 @@ def _cfg(sources=None):
     return {"sources": sources or {}, "immediate_retries": 0, "source_retries": 0, "windows": []}
 
 
-def _chain(tmp_path):
+def _chain(tmp_path, snk_always_run=False):
     """src (inlet) -> snk (one ripple each)."""
     db = connect(tmp_path / "duck.db")
     migrate(db)
+    snk_r = [{"func": "f", "name": "r", "parents": [], "always_run": snk_always_run}]
     _register(db, "src", "1.0.0", "inlet", "ponds/src/1.0.0", {**_cfg(), "kind": "inlet"}, _R)
-    _register(db, "snk", "1.0.0", "pond", "ponds/snk/1.0.0", {**_cfg(sources={"src": "1.0.0"}), "kind": "pond"}, _R)
+    _register(db, "snk", "1.0.0", "pond", "ponds/snk/1.0.0",
+              {**_cfg(sources={"src": "1.0.0"}), "kind": "pond"}, snk_r)
     return Driver(db, tmp_path, "http://x", NoopLauncher())
 
 
@@ -82,3 +84,20 @@ def test_changed_source_dispatches_sink(tmp_path):
     _run_pond(d, "src@1", changed=True)  # source changed this time
     # The sink is dispatched (a real run), not passed.
     assert any(j.get("kind") == "begin_run" for j in d.jobs.get("snk@1", []))
+
+
+def test_always_run_sink_dispatches_with_sources_changed_false(tmp_path):
+    d = _chain(tmp_path, snk_always_run=True)
+    assert d.state.ponds["snk@1"].always_run  # ORed up from the ripple
+    d.tap("snk@1")
+    _run_pond(d, "src@1", changed=True)
+    _run_pond(d, "snk@1", changed=True)
+
+    # Source republishes unchanged: an always_run sink still runs, and the job tells it sources_changed=False
+    # so the ripple can skip its data work (pond.sources_changed() -> pond.skip()).
+    d.tap("snk@1")
+    d.jobs["snk@1"] = []
+    _run_pond(d, "src@1", changed=False)
+    jobs = [j for j in d.jobs.get("snk@1", []) if j.get("kind") == "begin_run"]
+    assert jobs, "always_run sink must be dispatched even when sources are unchanged"
+    assert jobs[-1]["sources_changed"] is False
