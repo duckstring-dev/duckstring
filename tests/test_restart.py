@@ -43,6 +43,17 @@ def _complete_run(driver):
     return f
 
 
+def test_restart_restores_changed_f(tmp_path):
+    d = _driver(tmp_path)
+    d.pulse("p@1")
+    _complete_run(d)
+    st = _pond(d)
+    assert st["changed_f"] == st["end_f"]  # a real run advanced content freshness to its freshness
+
+    d2 = Driver(d.db, tmp_path, "http://x", NoopLauncher())
+    assert _pond(d2)["changed_f"] == st["changed_f"], "content freshness lost on restart"
+
+
 def test_restart_restores_gen_and_freshness(tmp_path):
     d = _driver(tmp_path)
     d.pulse("p@1")

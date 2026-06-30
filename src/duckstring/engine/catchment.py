@@ -82,6 +82,9 @@ class EngineState:
     # Pond Run commands accumulated by start_pond_run; the Catchment drains these to dispatch to
     # Ducks. Ignored by in-process simulations/tests.
     pending_begin_runs: list[BeginRun] = field(default_factory=list)
+    # Engine-synthesised passes (no-change Runs completed in-engine, no Duck): (pond_id, f) per pass.
+    # The Catchment drains these to record a no-change pond_run row for history + reload counts.
+    pending_passes: list[tuple[PondId, datetime]] = field(default_factory=list)
 
     def clone(self) -> EngineState:
         return EngineState(
@@ -91,6 +94,7 @@ class EngineState:
             ripple_states={k: v.copy() for k, v in self.ripple_states.items()},
             triggers=self.triggers,
             pending_begin_runs=list(self.pending_begin_runs),
+            pending_passes=list(self.pending_passes),
         )
 
 
@@ -98,6 +102,14 @@ def drain_begin_runs(state: EngineState) -> list[BeginRun]:
     """Return and clear the accumulated Pond Run commands (the Catchment dispatches these to Ducks)."""
     out = state.pending_begin_runs
     state.pending_begin_runs = []
+    return out
+
+
+def drain_passes(state: EngineState) -> list[tuple[PondId, datetime]]:
+    """Return and clear the accumulated engine-synthesised passes (the Catchment records each as a
+    no-change pond_run)."""
+    out = state.pending_passes
+    state.pending_passes = []
     return out
 
 
@@ -329,6 +341,7 @@ def _pass_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
         rs.started_at = None
         rs.targets = [t for t in rs.targets if t > target_f]
     _complete_pond_run(s, pid, target_f, now, changed=False)
+    s.pending_passes.append((pid, target_f))
 
 
 def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
