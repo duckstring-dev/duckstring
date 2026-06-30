@@ -314,9 +314,15 @@ class Pond:
     def __init__(
         self, name: str, version: str, con, root,
         source_majors: dict[str, int] | None = None, f=None, previous_f=None, data_root: str | None = None,
+        sources_changed: bool = True, skip_sink=None,
     ) -> None:
         from .engine.core import NEVER
 
+        # No-change skip (plans/no-change-skip.md): ``sources_changed`` is the engine's verdict for this
+        # Run; ``skip_sink`` is the Duck's callback to mark the Run a pass when ``skip()`` is called.
+        # Both default to the always-changed / no-op behaviour for local (puddle) runs.
+        self._sources_changed = sources_changed
+        self._skip_sink = skip_sink
         self.name = name
         self.version = version
         self.con = con
@@ -335,6 +341,27 @@ class Pond:
         # ``(previous_f, f]`` a ripple can read from a Source for hand-rolled incremental logic.
         # ``NEVER`` on the first run (so that bracket reads everything). Trickle will automate this.
         self.previous_f = NEVER if previous_f is None else previous_f
+
+    def sources_changed(self) -> bool:
+        """Did any Source change its output since this Pond last ran? The engine's content-skip verdict
+        (``max(Source.changedF) > prior_f``), exposed so a side-effecting (``always_run``) Ripple can do
+        its effect every run but skip the data work when nothing upstream changed::
+
+            ...side effects that run every time...
+            if not pond.sources_changed():
+                pond.skip()
+                return
+            ...otherwise compute normally...
+
+        Always ``True`` in a local (puddle) run, which has no engine. See plans/no-change-skip.md."""
+        return self._sources_changed
+
+    def skip(self) -> None:
+        """Mark this Pond Run as producing **no change** — a pass. The Duck reports ``changed=False``,
+        so the Catchment holds this Pond's ``changed_f`` and downstream skips its work. A no-op in a
+        local (puddle) run. See plans/no-change-skip.md."""
+        if self._skip_sink is not None:
+            self._skip_sink()
 
     def write_table(self, name: str, relation) -> None:
         tmp = f"__tmp_{name}"

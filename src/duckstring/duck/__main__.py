@@ -58,6 +58,8 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                 core.previous_f_for(start_f),  # the prior run's freshness, exposed as pond.previous_f
                 on_done=lambda n, started, finished: q.put(("done", (n, started, finished))),
                 on_error=lambda n, exc, started, finished: q.put(("error", (n, exc, started, finished))),
+                sources_changed=core.sources_changed_for(start_f),  # backs pond.sources_changed()
+                skip_sink=(lambda f=start_f: core.mark_skipped(f)),  # backs pond.skip() for this Run
             )
 
     poller = threading.Thread(target=_poll_loop, daemon=True)
@@ -85,6 +87,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                             force=data.get("force", False),
                             previous_f=datetime.fromisoformat(prev) if prev else NEVER,
                             contract=data.get("contract"),
+                            sources_changed=data.get("sources_changed", True),
                         ))
                 elif kind == "done":
                     inflight -= 1

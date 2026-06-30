@@ -880,7 +880,9 @@ class Driver:
                     if f:
                         self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
                     if status == "success":
-                        self.state = complete_ripple(self.state, eid, now)
+                        # changed=False on the Run-completing ripple event holds this Pond's changed_f
+                        # (a pass: pond.skip() / empty delta) so downstream skips. See no-change-skip.md.
+                        self.state = complete_ripple(self.state, eid, now, changed=payload.get("changed", True))
                     # A "failed" ripple event is a within-budget immediate retry: record the attempt for
                     # history; the engine keeps modelling the Ripple as in-flight (the Duck relaunched it).
                     self._record_ripple_run(
@@ -910,7 +912,7 @@ class Driver:
                     )
                     self._process(now)
             elif kind == "run_completed":
-                self._finish_pond_run(pond, f, now)
+                self._finish_pond_run(pond, f, now, changed=payload.get("changed", True))
                 # Freeze the published output schema as the version's contract (the substrate the
                 # additive gate and min_version enforcement build on).
                 if payload.get("schema"):
@@ -1341,7 +1343,8 @@ class Driver:
     def _process(self, now: datetime, notify: bool = True) -> None:
         self.state, _started = sentinel(now, self.state)
         for cmd in drain_begin_runs(self.state):
-            self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force, refresh=cmd.refresh)
+            self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force, refresh=cmd.refresh,
+                                     sources_changed=cmd.sources_changed)
         for pid, f in drain_passes(self.state):
             self._record_pass(pid, f, now)
         self._persist_state()
@@ -1353,7 +1356,8 @@ class Driver:
             self._notify_cb()
 
     def _dispatch_begin_run(
-        self, pond: str, f: datetime, now: datetime, force: bool = False, refresh: bool = False
+        self, pond: str, f: datetime, now: datetime, force: bool = False, refresh: bool = False,
+        sources_changed: bool = True,
     ) -> None:
         meta = self.meta[pond]
         # A Pond Draw is not run by a Duck: record the Run as running and hand the parquet transfer to
@@ -1388,6 +1392,7 @@ class Driver:
         self.jobs[pond] = [j for j in self.jobs.get(pond, []) if j.get("kind") != "shutdown"]
         self.jobs[pond].append({
             "kind": "begin_run", "f": _iso(f), "force": force, "refresh": refresh,
+            "sources_changed": sources_changed,  # backs pond.sources_changed() (for always_run gating)
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
             # The prior completed run's freshness (the pond's end_f *before* this run advances it),
             # carried to the Ripples as pond.previous_f. A Refresh reads its Sources in full, so NEVER.

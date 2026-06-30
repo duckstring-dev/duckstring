@@ -173,6 +173,8 @@ class BeginRun:
     f: datetime
     force: bool = False
     refresh: bool = False  # a Refresh: the Duck wipes the registry first → a cold full rebuild
+    sources_changed: bool = True  # the engine's no-change verdict, exposed to Ripples as
+                                  # pond.sources_changed() (an always_run Pond runs even when False)
 
 
 # ─── Run state (mutable) ──────────────────────────────────────────────────────

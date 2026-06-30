@@ -53,7 +53,7 @@ def _load_ripple(source_path: str, root: str, ripple_name: str):
 def _run_ripple(
     func, pond_name: str, version: str, con, root_str: str,
     source_majors: dict[str, int], f: datetime | None, previous_f: datetime | None,
-    data_root: str | None = None,
+    data_root: str | None = None, sources_changed: bool = True, skip_sink=None,
 ) -> None:
     from ..core import Pond
 
@@ -64,6 +64,7 @@ def _run_ripple(
         func(Pond(
             name=pond_name, version=version, con=con, root=Path(root_str),
             source_majors=source_majors, f=f, previous_f=previous_f, data_root=data_root,
+            sources_changed=sources_changed, skip_sink=skip_sink,
         ))
     finally:
         con.close()
@@ -122,11 +123,13 @@ class RippleExecutor:
         with self._cursor_lock:
             return self._registry.cursor()
 
-    def submit(self, ripple_name: str, f: datetime | None, previous_f: datetime | None, on_done, on_error):
+    def submit(self, ripple_name: str, f: datetime | None, previous_f: datetime | None, on_done, on_error,
+               sources_changed: bool = True, skip_sink=None):
         """Load and run ``ripple_name`` at freshness ``f`` (exposed to the ripple as ``pond.f``, with
         the prior run's freshness as ``pond.previous_f``); call ``on_done(name, started_at,
         finished_at)`` on success and ``on_error(name, exc, started_at, finished_at)`` on failure
-        (timings wall-clock UTC, for the run-history duration; both fire on a pool thread)."""
+        (timings wall-clock UTC, for the run-history duration; both fire on a pool thread).
+        ``sources_changed``/``skip_sink`` back ``pond.sources_changed()`` / ``pond.skip()``."""
         timing: dict[str, datetime] = {}
 
         def _task():
@@ -135,6 +138,7 @@ class RippleExecutor:
             _run_ripple(
                 func, self.pond_name, self.version, self._cursor(), str(self.root),
                 self.source_majors, f, previous_f, self.data_root,
+                sources_changed=sources_changed, skip_sink=skip_sink,
             )
 
         fut = self._pool.submit(_task)

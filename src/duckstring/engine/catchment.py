@@ -400,8 +400,12 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
         not pond.sources or pond.always_run or pond.is_draw or pond.is_spout
         or ps.force_pending or ps.refresh_pending or ps.repairing
     )
-    if must_run or _pond_sources_changed(s, pid, prior_f):
-        s.pending_begin_runs.append(BeginRun(pid, ps.start_f, force=ps.force_pending, refresh=ps.refresh_pending))
+    sources_changed = _pond_sources_changed(s, pid, prior_f)
+    if must_run or sources_changed:
+        s.pending_begin_runs.append(BeginRun(
+            pid, ps.start_f, force=ps.force_pending, refresh=ps.refresh_pending,
+            sources_changed=sources_changed,
+        ))
     else:
         _pass_pond_run(s, pid, now)
     ps.force_pending = False
