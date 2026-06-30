@@ -295,9 +295,46 @@ def can_start_pond(s: EngineState, pid: PondId, now: datetime) -> bool:
     return False
 
 
+def _pond_sources_changed(s: EngineState, pid: PondId, prior_f: datetime) -> bool:
+    """Did any Source change its output since this Pond last ran (at ``prior_f``)? The content-aware
+    skip test (plans/no-change-skip.md): ``max(Source.changedF) > prior_f`` over **all** Sources read
+    (required ∪ optional — optional never triggers a run, but a triggered run still folds in whatever
+    optional changed). Compared with strict ``>`` against the Pond's *prior* run freshness — a Source
+    that changed exactly at ``prior_f`` was already incorporated. Sound (never misses a change); the
+    only imprecision is a redundant run from a fresher non-binding Source, which is accepted.
+
+    A Source with ``changed_f == NEVER`` but a real ``end_f`` (an under-initialised / pre-backfill
+    state — production always stamps ``changed_f`` on the first completion) falls back to ``end_f``, so
+    we assume changed rather than spuriously pass."""
+    cfs = []
+    for sp in s.ponds[pid].sources:
+        sps = s.pond_states.get(sp)
+        if sps is None:
+            continue
+        cfs.append(sps.changed_f if sps.changed_f > NEVER else sps.end_f)
+    return bool(cfs) and max(cfs) > prior_f
+
+
+def _pass_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
+    """Synthesise a **pass**: complete this Pond Run with no Duck (no BeginRun). Advance every Ripple
+    and the Pond to ``start_f`` so the heartbeat (freshness, re-arm, Wave re-tap) climbs as on a real
+    Run, but hold ``changed_f`` — downstream then sees no content change and passes in turn."""
+    ps = s.pond_states[pid]
+    target_f = ps.start_f
+    for rid in ripples_of(s, pid):
+        rs = s.ripple_states[rid]
+        rs.start_f = target_f
+        rs.end_f = target_f
+        rs.is_running = False
+        rs.started_at = None
+        rs.targets = [t for t in rs.targets if t > target_f]
+    _complete_pond_run(s, pid, target_f, now, changed=False)
+
+
 def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     ps = s.pond_states[pid]
     pond = s.ponds[pid]
+    prior_f = ps.start_f  # the freshness this Run builds on (captured before the reset below)
     f, window_d = pond_source_f(s, pid, now)
     assert f is not None
     started_as_pull = ps.has_pull
@@ -340,10 +377,20 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
 
     ps.runs_started += 1
     ps.gen_start_times[ps.runs_started] = now
-    # Record the command for the Catchment to dispatch to this Pond's Duck (force = a recompute; refresh
-    # = a cold wipe-and-rebuild). Both are consumed here; a refresh wipes the registry at the Duck, so a
-    # retry of a failed refresh still cold-bootstraps from the emptied registry.
-    s.pending_begin_runs.append(BeginRun(pid, ps.start_f, force=ps.force_pending, refresh=ps.refresh_pending))
+
+    # Pass vs dispatch (plans/no-change-skip.md). A Pond with Sources whose content is all unchanged
+    # since ``prior_f`` is completed in-engine as a **pass** (no Duck) — unless it must run regardless:
+    # an Inlet (determines change by content, the engine can't), a Force/Refresh/repair (recompute by
+    # intent), an ``always_run`` side-effecting Pond, or a Draw/Spout (run off-Duck by the poller/egress
+    # worker). Otherwise dispatch a BeginRun for the Duck (force = recompute; refresh = cold rebuild).
+    must_run = (
+        not pond.sources or pond.always_run or pond.is_draw or pond.is_spout
+        or ps.force_pending or ps.refresh_pending or ps.repairing
+    )
+    if must_run or _pond_sources_changed(s, pid, prior_f):
+        s.pending_begin_runs.append(BeginRun(pid, ps.start_f, force=ps.force_pending, refresh=ps.refresh_pending))
+    else:
+        _pass_pond_run(s, pid, now)
     ps.force_pending = False
     ps.refresh_pending = False
 
@@ -374,9 +421,36 @@ def start_ripple(s: EngineState, rid: RippleId, now: datetime) -> None:
     rs.targets = [t for t in rs.targets if t > source_f]
 
 
-def complete_ripple(state: EngineState, rid: RippleId, now: datetime) -> EngineState:
+def _complete_pond_run(s: EngineState, pid: PondId, new_end: datetime, now: datetime, changed: bool) -> None:
+    """Advance a Pond Run to completion at ``new_end`` (the caller has established ``new_end > end_f``).
+    Shared by ``complete_ripple`` (last leaf done) and ``_pass_pond_run`` (an engine-synthesised pass).
+    ``changed`` advances ``changed_f`` only when the Run actually produced new output — a pass holds it."""
+    ps = s.pond_states[pid]
+    ps.end_f = new_end
+    if changed:
+        ps.changed_f = new_end
+    # A completed Run satisfies every target up to its freshness — drop them so a target that was added
+    # *during* the Run (valid then, ``t > end_f``) can't linger past completion and trigger a spurious
+    # re-run at the same F. (start_pond_run clears only what existed at start.)
+    ps.targets = [t for t in ps.targets if t > ps.end_f]
+    ps.runs_completed += 1
+    ps.completion_times.append(now)
+    ps.gen_start_times.pop(ps.runs_completed, None)
+    if ps.is_failed and ps.end_f > ps.failed_f:  # a Run fresher than the failure has succeeded
+        ps.is_failed = False
+        ps.failed_f = NEVER
+        ps.failures = 0
+        derive_blocked(s, pid)
+    trig = s.triggers.get(pid)
+    if trig is not None and trig.kind == "wave":
+        pond_receive_pull(s, pid, now, now)  # Wave re-tap: a new demand epoch at completion
+
+
+def complete_ripple(state: EngineState, rid: RippleId, now: datetime, changed: bool = True) -> EngineState:
     """Event: a Ripple's run finished (in the runtime, reported by the Duck). Adopts its parents'
-    freshness, advances the Pond if it was the last leaf, and re-Taps a Wave on completion."""
+    freshness, advances the Pond if it was the last leaf, and re-Taps a Wave on completion. ``changed``
+    (carried by the Duck on the Run-completing Ripple event) decides whether the Pond's ``changed_f``
+    advances — ``False`` for a Trickle with an empty delta or an explicit ``pond.skip()``."""
     s = state.clone()
     rs = s.ripple_states[rid]
     rs.end_f = rs.start_f
@@ -389,22 +463,7 @@ def complete_ripple(state: EngineState, rid: RippleId, now: datetime) -> EngineS
     ps = s.pond_states[pid]
     new_end = min(s.ripple_states[leaf].end_f for leaf in leaves_of(s, pid))
     if new_end > ps.end_f:
-        ps.end_f = new_end
-        # A completed Run satisfies every target up to its freshness — drop them so a target that was
-        # added *during* the Run (valid then, ``t > end_f``) can't linger past completion and trigger a
-        # spurious re-run at the same F. (start_pond_run clears only what existed at start.)
-        ps.targets = [t for t in ps.targets if t > ps.end_f]
-        ps.runs_completed += 1
-        ps.completion_times.append(now)
-        ps.gen_start_times.pop(ps.runs_completed, None)
-        if ps.is_failed and ps.end_f > ps.failed_f:  # a Run fresher than the failure has succeeded
-            ps.is_failed = False
-            ps.failed_f = NEVER
-            ps.failures = 0
-            derive_blocked(s, pid)
-        trig = s.triggers.get(pid)
-        if trig is not None and trig.kind == "wave":
-            pond_receive_pull(s, pid, now, now)  # Wave re-tap: a new demand epoch at completion
+        _complete_pond_run(s, pid, new_end, now, changed)
     return s
 
 

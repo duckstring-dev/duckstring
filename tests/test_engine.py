@@ -226,10 +226,16 @@ class Driver:
         self.now = now
         self.inflight: dict[str, datetime] = {}  # rid -> scheduled completion time
         self.fail_counts: dict[str, int] = {}  # rid -> remaining runs to fail instead of complete
+        self.unchanged: set[str] = set()  # rids whose completions report no output change (changed=False)
 
     def fail_next(self, rid: str, n: int = 1) -> None:
         """Make the next ``n`` runs of ``rid`` error (the Duck gave up) rather than complete."""
         self.fail_counts[rid] = self.fail_counts.get(rid, 0) + n
+
+    def mark_unchanged(self, rid: str) -> None:
+        """Make ``rid``'s completions report no output change (a Trickle empty delta / pond.skip), so
+        the Pond holds its ``changed_f`` — simulating a Duck reporting ``changed=False``."""
+        self.unchanged.add(rid)
 
     def _react(self) -> None:
         self.state, started = sentinel(self.now, self.state)
@@ -258,7 +264,7 @@ class Driver:
                 self.fail_counts[rid] -= 1
                 self.state = fail_ripple(self.state, rid, self.now)
             else:
-                self.state = complete_ripple(self.state, rid, self.now)
+                self.state = complete_ripple(self.state, rid, self.now, changed=rid not in self.unchanged)
         self.state = tick(self.now, self.state)
         self._react()
         self.now += STEP
@@ -749,3 +755,117 @@ def test_kill_parks_terminal_and_blocks_downstream():
     # Clear lifts it and unblocks downstream.
     cleared = clear_pond(out, "p1", T0 + secs(8))
     assert not cleared.pond_states["p1"].is_killed and not cleared.pond_states["p2"].is_blocked
+
+
+# ─── No-change skip: content freshness (changed_f) and the Pond pass ───────────
+# plans/no-change-skip.md. A Pond with Sources whose content is unchanged since it last ran is
+# completed in-engine as a *pass* (no BeginRun): freshness/heartbeat advance, changed_f is held.
+
+
+def _settle_chain_at(s: EngineState, f: datetime) -> None:
+    """Put the p1 -> p2 chain in a clean idle state, both Ponds run and changed at freshness ``f``."""
+    for pid in ("p1", "p2"):
+        ps = s.pond_states[pid]
+        ps.start_f = ps.end_f = ps.changed_f = f
+    for rid in ("r1", "r2", "r3", "s1"):
+        s.ripple_states[rid].start_f = s.ripple_states[rid].end_f = f
+
+
+@pytest.mark.timeout(1)
+def test_unchanged_source_makes_sink_pass_without_dispatch():
+    s, _ = chain_topology()
+    f1 = T0 + secs(5)
+    _settle_chain_at(s, f1)
+    # p1 republishes at f2 with NO content change (changed_f stays f1); its ripples advance.
+    f2 = T0 + secs(10)
+    s.pond_states["p1"].start_f = s.pond_states["p1"].end_f = f2
+    for rid in ("r1", "r2", "r3"):
+        s.ripple_states[rid].start_f = s.ripple_states[rid].end_f = f2
+    # Demand p2 (a pull wanting fresher input).
+    s.pond_states["p2"].has_pull = True
+    s.ripple_states["s1"].has_pull = True
+
+    out, started = sentinel(f2, s)
+    p2 = out.pond_states["p2"]
+    assert "s1" not in started  # no Ripple ran — the Pond passed
+    assert not out.pending_begin_runs  # and no Duck was dispatched
+    assert p2.end_f == f2  # freshness (the heartbeat) advanced
+    assert p2.changed_f == f1  # but the content mark is held
+    assert p2.runs_completed == s.pond_states["p2"].runs_completed + 1  # the pass is a completed Run
+
+
+@pytest.mark.timeout(1)
+def test_changed_source_makes_sink_do_real_work():
+    s, _ = chain_topology()
+    f1 = T0 + secs(5)
+    _settle_chain_at(s, f1)
+    f2 = T0 + secs(10)
+    s.pond_states["p1"].start_f = s.pond_states["p1"].end_f = s.pond_states["p1"].changed_f = f2
+    for rid in ("r1", "r2", "r3"):
+        s.ripple_states[rid].start_f = s.ripple_states[rid].end_f = f2
+    s.pond_states["p2"].has_pull = True
+    s.ripple_states["s1"].has_pull = True
+
+    out, started = sentinel(f2, s)
+    assert "s1" in started  # p1 changed → p2 does real work
+    assert any(br.pond_id == "p2" for br in out.pending_begin_runs)  # dispatched to a Duck
+
+
+@pytest.mark.timeout(1)
+def test_skip_compares_prior_freshness_not_new_startf():
+    """The operand correctness case (plans/no-change-skip.md). X reads A and B. A: endF 8 / changedF 6;
+    B: endF 10 / changedF 7; X last ran at priorF 5. B changed at 7 — newer than X's prior freshness —
+    so X must do real work, even though 7 < X's new startF (min(8,10)=8). The wrong ``>= startF`` rule
+    would pass here and miss B's change."""
+    s, _ = diamond_topology()
+    s.pond_states["A"].start_f = s.pond_states["A"].end_f = T0 + secs(8)
+    s.pond_states["A"].changed_f = T0 + secs(6)
+    s.pond_states["B"].start_f = s.pond_states["B"].end_f = T0 + secs(10)
+    s.pond_states["B"].changed_f = T0 + secs(7)
+    s.pond_states["X"].start_f = s.pond_states["X"].end_f = s.pond_states["X"].changed_f = T0 + secs(5)
+    s.pond_states["X"].has_pull = True
+    s.ripple_states["x"].has_pull = True
+
+    out, started = sentinel(T0 + secs(12), s)
+    assert out.pond_states["X"].start_f == T0 + secs(8)  # ran at min(8, 10)
+    assert "x" in started  # real work — B's change at 7 (> priorF 5) is incorporated
+    assert any(br.pond_id == "X" for br in out.pending_begin_runs)
+
+
+@pytest.mark.timeout(1)
+def test_always_run_pond_dispatches_despite_unchanged_sources():
+    s, _ = chain_topology()
+    s.ponds["p2"].always_run = True  # a side-effecting Pond must run every time
+    f1 = T0 + secs(5)
+    _settle_chain_at(s, f1)
+    f2 = T0 + secs(10)
+    s.pond_states["p1"].start_f = s.pond_states["p1"].end_f = f2  # republish, changed_f held at f1
+    for rid in ("r1", "r2", "r3"):
+        s.ripple_states[rid].start_f = s.ripple_states[rid].end_f = f2
+    s.pond_states["p2"].has_pull = True
+    s.ripple_states["s1"].has_pull = True
+
+    out, started = sentinel(f2, s)
+    assert "s1" in started  # always_run bypasses the pass
+    assert any(br.pond_id == "p2" for br in out.pending_begin_runs)
+
+
+@pytest.mark.timeout(5)
+def test_wave_steady_state_only_inlet_runs_when_nothing_changes():
+    """Under a Wave, an Inlet that stops changing leaves the whole interior quiet: the Inlet keeps
+    polling (real runs), every Sink passes (freshness climbs, no Ripple work)."""
+    s, dur = chain_topology()
+    s.triggers["p2"] = Trigger("p2", "wave")
+    d = Driver(s, dur)
+    d.run(10)  # reach steady state
+    d.mark_unchanged("r3")  # p1's leaf — p1's output stops changing from here
+    d.run(2)  # let one more p1 run land as unchanged
+    s1_runs = d.state.ripple_states["s1"].runs_started
+    p2_completed = d.state.pond_states["p2"].runs_completed
+    p2_changed_f = d.state.pond_states["p2"].changed_f
+    d.run(10)
+    p1, p2 = d.state.pond_states["p1"], d.state.pond_states["p2"]
+    assert p1.end_f > p2_changed_f  # the Inlet kept polling (freshness advanced)
+    assert p2.runs_completed > p2_completed  # p2 kept completing — as passes
+    assert d.state.ripple_states["s1"].runs_started == s1_runs  # but its Ripple never ran again
+    assert p2.changed_f == p2_changed_f  # content mark frozen
