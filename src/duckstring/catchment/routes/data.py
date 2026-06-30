@@ -45,10 +45,11 @@ def _resolve_major(request: Request, pond_name: str, major: Optional[int], versi
     raise HTTPException(status_code=404, detail=f"Pond '{pond_name}' not found")
 
 
-def _data_dir(request: Request, pond_name: str, major: int) -> Path:
+def _data_dir(request: Request, pond_name: str, major: int):
     from ..registry import pond_data_dir
 
-    return pond_data_dir(Path(request.app.state.root), pond_name, major)
+    data_root = getattr(request.app.state, "data_root", None)
+    return pond_data_dir(Path(request.app.state.root), pond_name, major, data_root)
 
 
 def _open_pond(request: Request, pond_name: str, major: int):
@@ -64,6 +65,7 @@ def _open_pond(request: Request, pond_name: str, major: int):
     con = duckdb.connect()  # in-memory: no file, no lock, no contention
     con.execute("SET TimeZone='UTC'")  # Trickle freshness is UTC; read/compare/render consistently
     dp.prepare(con)  # ready the connection to read the published format (e.g. load the iceberg ext)
+    data_dir.duckdb_setup(con)  # object store → httpfs + credentials (no-op for local)
     con.execute(f'CREATE SCHEMA IF NOT EXISTS "{pond_name}"')
     for table in dp.list_tables(data_dir):
         select = dp.read_select(data_dir, table)
@@ -109,16 +111,14 @@ def get_ripple(
     from ...dataplane import get_data_plane
 
     m = _resolve_major(request, outlet, major, version)
-    pq = get_data_plane().table_path(_data_dir(request, outlet, m), ripple_name)
-    if pq is None or not pq.exists():
+    data_dir = _data_dir(request, outlet, m)
+    entries = get_data_plane().files_for(data_dir, ripple_name)
+    if not entries:
         raise HTTPException(status_code=404, detail=f"No data for {outlet}.{ripple_name} (major {m})")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        if pq.is_dir():
-            for part in sorted(pq.glob("*.parquet")):
-                zf.write(part, f"{ripple_name}/{part.name}")
-        else:
-            zf.write(pq, f"{ripple_name}.parquet")
+        for storage_parts, arcname in entries:
+            zf.writestr(arcname, data_dir.read_bytes(*storage_parts))
     return Response(content=buf.getvalue(), media_type="application/zip")
 
 

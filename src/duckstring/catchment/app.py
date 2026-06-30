@@ -41,8 +41,10 @@ async def _lifespan(app: FastAPI):
         # keys, so rotating those never disrupts running Ducks).
         # base_url None = unknown (the platform picked the bind address): the launcher defers spawns
         # until the dial-back middleware learns the address from the first request.
-        launcher = SubprocessLauncher(app.state.root, base_url, token=app.state.duck_token)
-    driver = Driver(app.state.db, app.state.root, base_url, launcher)
+        launcher = SubprocessLauncher(
+            app.state.root, base_url, token=app.state.duck_token, data_root=app.state.data_root
+        )
+    driver = Driver(app.state.db, app.state.root, base_url, launcher, data_root=app.state.data_root)
     app.state.driver = driver
     app.state.launcher = launcher
 
@@ -62,31 +64,90 @@ async def _lifespan(app: FastAPI):
     egress_wake = asyncio.Event()
     driver.set_egress_notify(lambda: loop.call_soon_threadsafe(egress_wake.set))
 
+    from .state_sync import checkpoint_full, run_checkpoint_worker
+
     scheduler = asyncio.create_task(_scheduler(driver))
     poller = asyncio.create_task(run_poller(driver, app.state.root, wake))
     egress = asyncio.create_task(run_egress_worker(driver, app.state.root, egress_wake))
+    # Tier-1 state backup: push a duck.db snapshot to DUCKSTRING_STATE_BACKUP_URI on an interval (no-op
+    # when unset). The Tier-2 warm bundle is flushed once below, after the Ducks are stopped (quiescent).
+    checkpointer = asyncio.create_task(
+        run_checkpoint_worker(app.state.root, app.state.state_backup, app.state.checkpoint_every)
+    )
+    # Renew the data-root writer lease so a live Catchment's ownership never lapses (external data root only).
+    tasks = [scheduler, poller, egress, checkpointer]
+    if app.state.data_lease is not None:
+        from .data_lease import run_lease_renewer
+
+        lease_store, owner_id = app.state.data_lease
+        tasks.append(asyncio.create_task(run_lease_renewer(lease_store, owner_id)))
     try:
         yield
     finally:
-        for task in (scheduler, poller, egress):
+        for task in tasks:
             task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
         launcher.shutdown_all()
+        if app.state.data_lease is not None:
+            from .data_lease import release_lease
+
+            lease_store, owner_id = app.state.data_lease
+            try:
+                release_lease(lease_store, owner_id)
+            except Exception:  # pragma: no cover - releasing the lease must not break shutdown
+                pass
+        # Ducks are now stopped → the registries/ledgers are quiescent: flush the warm Tier-1+2 bundle so a
+        # scaled-to-zero restart comes back warm (and engine state survives even a hard next crash).
+        if app.state.state_backup:
+            from fastapi.concurrency import run_in_threadpool
+
+            await run_in_threadpool(checkpoint_full, app.state.root, app.state.state_backup)
 
 
 def create_app(
-    root: Path, api_key: str | None = None, base_url: str | None = None, name: str | None = None
+    root: Path, api_key: str | None = None, base_url: str | None = None, name: str | None = None,
+    *, data_root: str | None = None, state_backup: str | None = None, checkpoint_every: str | None = None,
 ) -> FastAPI:
+    # Data plane location (object store / Volume / path) and the Tier-1 state-backup target. Explicit
+    # arguments (the CLI passes the registration's values) win, else the platform-hosting env vars.
+    data_root = data_root or os.environ.get("DUCKSTRING_DATA_ROOT") or None
+    state_backup = state_backup or os.environ.get("DUCKSTRING_STATE_BACKUP_URI") or None
+    checkpoint_every = checkpoint_every or os.environ.get("DUCKSTRING_CHECKPOINT_INTERVAL") or "60s"
+
+    # Restore Tier-1 state (duck.db, ledgers) from the backup before opening the DB, if the state root is
+    # empty (a fresh/scaled-to-zero node) and a backup exists.
+    from .state_sync import restore_state_if_empty
+
+    restore_state_if_empty(root, state_backup)
+
     root.mkdir(parents=True, exist_ok=True)
     con = connect(root / "duck.db")
     migrate(con)
     ensure_identity(con, name or os.environ.get("DUCKSTRING_CATCHMENT_NAME"))
 
+    # Writer lease on an external data root — refuse to start if a *different* live Catchment owns it (two
+    # Catchments racing one lake's Iceberg catalog would dangle its pointer). A same-id restart reclaims
+    # instantly; only engaged for an external DUCKSTRING_DATA_ROOT, so the local default is untouched.
+    data_lease = None
+    if data_root:
+        from ..storage import get_storage
+        from .data_lease import acquire_lease
+
+        cid = con.execute("SELECT value FROM catchment_meta WHERE key = 'id'").fetchone()
+        owner_id = cid[0] if cid else "unknown"
+        lease_store = get_storage(data_root)
+        acquire_lease(lease_store, owner_id)  # raises LeaseConflict → the server does not start
+        data_lease = (lease_store, owner_id)
+
     app = FastAPI(title="Duckstring Catchment", lifespan=_lifespan)
     app.state.root = root
+    app.state.data_lease = data_lease
+    app.state.data_root = data_root
+    app.state.state_backup = state_backup
+    app.state.checkpoint_every = checkpoint_every
     app.state.db = con
     # Built-in single API key (legacy / bare self-hosting): explicit argument or the environment. It
     # means full access. The tiered read/demand/full keys live in `catchment_key` (see auth.py); either

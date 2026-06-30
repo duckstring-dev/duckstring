@@ -43,7 +43,8 @@ async def _fetch_status(client: httpx.AsyncClient, url: str, auth: dict) -> dict
         return None
 
 
-async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, name: str, major: int) -> None:
+async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, name: str, major: int,
+                         data_root: str | None = None) -> None:
     """Fetch an upstream Pond line's exported Parquet (+ the Trickle sidecar) and land it. **Incremental
     for Trickle sources**: the consumer sends the freshness it has already landed (``after``); the producer
     ships only the append-only parts newer than that (append history / ``__changelog`` / ``__droplog``),
@@ -59,7 +60,7 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
         warm_name,
     )
 
-    data_dir = pond_data_dir(root, name, major)
+    data_dir = pond_data_dir(root, name, major, data_root)
     after = landed_after(data_dir)  # what we already hold; None → wholesale (bootstrap)
     # The cold base is wholesale but rewritten rarely — tell the producer the oldest cold-base freshness we
     # already hold so it re-ships a base only when its fold watermark has advanced past it.
@@ -69,7 +70,7 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
     params = {k: v for k, v in (("after", after), ("base_after", base_after)) if v}
     resp = await client.get(f"{url}/api/draw/{name}/{major}", params=params, headers=auth)
     resp.raise_for_status()
-    data_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir()
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         # Each entry is written to its path atomically: a top-level "{table}.parquet" replaces a wholesale
         # table; a nested "{table}/{f}.parquet" adds an append-only part (incremental — no merge needed,
@@ -80,18 +81,15 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
         for info in zf.infolist():
             if not (info.filename.endswith(".parquet") or info.filename == SIDECAR):
                 continue
-            dest = data_dir / info.filename
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dest.with_suffix(dest.suffix + ".tmp")
-            tmp.write_bytes(zf.read(info))
-            tmp.replace(dest)
-            head = info.filename.split("/", 1)[0]
-            if "/" in info.filename and head.endswith(BASE_SUFFIX):
-                landed_base.setdefault(head, set()).add(dest.name)
+            parts = info.filename.split("/")
+            data_dir.write_bytes(zf.read(info), *parts)  # atomic per-object write (rename local / PUT object)
+            if len(parts) > 1 and parts[0].endswith(BASE_SUFFIX):
+                landed_base.setdefault(parts[0], set()).add(parts[-1])
         for base_name, kept in landed_base.items():  # prune the previous compaction's chunks (overlap-safe)
-            for old in (data_dir / base_name).glob("*.parquet"):
-                if old.name not in kept:
-                    old.unlink()
+            base = data_dir.child(base_name)
+            for old in base.parquet_names():
+                if old not in kept:
+                    base.remove(old)
     # Reclaim warm bands / hot changelog parts now subsumed by the (possibly advanced) cold base: anything
     # at-or-below a merge main's published f_base is folded into the base, so reconstruct ignores it
     # (it filters `> f_base`). Storage-only — correctness already holds via that filter.
@@ -100,9 +98,10 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
             continue
         f_base = datetime.fromisoformat(m["f_base"])
         for companion in (warm_name(main), changelog_name(main)):
-            for part in (data_dir / companion).glob("*.parquet"):
-                if part_f(part.name) <= f_base:
-                    part.unlink()
+            comp = data_dir.child(companion)
+            for part in comp.parquet_names():
+                if part_f(part) <= f_base:
+                    comp.remove(part)
 
 
 async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | None = None) -> None:
@@ -143,7 +142,8 @@ async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | N
             driver.fail_draw_transfer(t["key"], t["f"], "no duct for this Draw")
             continue
         try:
-            await _land_transfer(client, duct["remote_url"], duct["auth"], root, t["name"], t["major"])
+            await _land_transfer(client, duct["remote_url"], duct["auth"], root, t["name"], t["major"],
+                                 getattr(driver, "data_root", None))
             driver.complete_draw_transfer(t["key"], t["f"])
         except Exception as exc:  # noqa: BLE001 — any failure fails the transfer (blocks downstream)
             driver.fail_draw_transfer(t["key"], t["f"], f"transfer failed: {exc}")

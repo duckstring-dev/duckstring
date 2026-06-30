@@ -42,25 +42,48 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 
-class FileCatalog(MetastoreCatalog):
-    """An Iceberg ``MetastoreCatalog`` whose pointer registry is a JSON file. Construct with a
-    ``catalog_path`` (the JSON file) and a ``warehouse`` URI (where tables live)."""
+_CATALOG_FILE = "catalog.json"  # the pointer file name within the catalog location
 
-    def __init__(self, name: str, *, catalog_path: str | os.PathLike, warehouse: str, **properties: str) -> None:
+
+class FileCatalog(MetastoreCatalog):
+    """An Iceberg ``MetastoreCatalog`` whose pointer registry is a single JSON object. Construct with a
+    ``warehouse`` URI (where tables live) and **either** a ``catalog_path`` (a local JSON file) **or** a
+    ``pointer_storage`` (a :class:`~duckstring.storage.Storage` the ``catalog.json`` object lives in —
+    object-store-capable). Routing the pointer through a ``Storage`` is what lets the whole catalog live in
+    a bucket / Volume: a save is a single-object atomic PUT there (tmp+rename locally). Single-writer-per-
+    line means no optimistic-concurrency check is needed."""
+
+    def __init__(
+        self, name: str, *, warehouse: str, catalog_path: str | os.PathLike | None = None,
+        pointer_storage=None, **properties: str,
+    ) -> None:
         super().__init__(name, warehouse=warehouse, **properties)
-        self._path = Path(catalog_path)
+        self._storage = pointer_storage  # a Storage (object-store-capable) — wins over catalog_path
+        self._path = Path(catalog_path) if catalog_path is not None else None
         self._state: dict = {"namespaces": {}, "tables": {}}
-        if self._path.exists():
-            self._state = json.loads(self._path.read_text(encoding="utf-8"))
+        raw = self._read_pointer()
+        if raw is not None:
+            self._state = json.loads(raw)
             self._state.setdefault("namespaces", {})
             self._state.setdefault("tables", {})
 
     # ─── JSON pointer store ─────────────────────────────────────────────────────
 
+    def _read_pointer(self) -> str | None:
+        if self._storage is not None:
+            return self._storage.read_text(_CATALOG_FILE)
+        if self._path is not None and self._path.exists():
+            return self._path.read_text(encoding="utf-8")
+        return None
+
     def _save(self) -> None:
+        data = json.dumps(self._state)
+        if self._storage is not None:
+            self._storage.write_text(data, _CATALOG_FILE)  # atomic single-object PUT (object) / rename (local)
+            return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(json.dumps(self._state), encoding="utf-8")
+        tmp.write_text(data, encoding="utf-8")
         os.replace(tmp, self._path)  # atomic for concurrent cross-Pond readers
 
     def _pointer(self, namespace: str, table: str) -> str | None:

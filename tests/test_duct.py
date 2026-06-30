@@ -342,7 +342,7 @@ def test_draw_route_streams_all_parquet(tmp_path):
     migrate(db)
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
-    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    data_dir = pond_data_dir(tmp_path, "sales", 1).root
     data_dir.mkdir(parents=True)
     (data_dir / "orders.parquet").write_bytes(b"ORDERS")
     (data_dir / "items.parquet").write_bytes(b"ITEMS")
@@ -362,7 +362,7 @@ def test_draw_route_includes_trickle_sidecar(tmp_path):
     migrate(db)
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
-    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    data_dir = pond_data_dir(tmp_path, "sales", 1).root
     data_dir.mkdir(parents=True)
     (data_dir / "order_line.parquet").write_bytes(b"DATA")
     (data_dir / "order_line__changelog.parquet").write_bytes(b"CDC")
@@ -386,7 +386,7 @@ def test_draw_route_windows_trickle_changelog_with_after(tmp_path):
     migrate(db)
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
-    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    data_dir = pond_data_dir(tmp_path, "sales", 1).root
     clog_dir = data_dir / "sale__changelog"
     clog_dir.mkdir(parents=True)
     con = duckdb.connect()
@@ -423,7 +423,7 @@ def test_draw_route_ships_chunked_base_wholesale(tmp_path):
     migrate(db)
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
-    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    data_dir = pond_data_dir(tmp_path, "sales", 1).root
     base_dir = data_dir / "sale__base"
     base_dir.mkdir(parents=True)
     (base_dir / "2026-06-16T03_00_00+00_00__0.parquet").write_bytes(b"CHUNK0")
@@ -447,7 +447,7 @@ def test_draw_route_skips_unchanged_cold_base(tmp_path):
     migrate(db)
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
-    data_dir = pond_data_dir(tmp_path, "sales", 1)
+    data_dir = pond_data_dir(tmp_path, "sales", 1).root
     base_dir = data_dir / "sale__base"
     base_dir.mkdir(parents=True)
     (base_dir / "2026-06-16T03_00_00+00_00__0.parquet").write_bytes(b"CHUNK0")
@@ -650,9 +650,9 @@ def test_poller_mirrors_fetches_and_lands_parquet(tmp_path):
     # Freshness mirrored, transfer landed (data + the Trickle sidecar), draw advanced.
     from duckstring.trickle_io import SIDECAR
 
-    landed = pond_data_dir(tmp_path, "sales", 1) / "orders.parquet"
+    landed = pond_data_dir(tmp_path, "sales", 1).root / "orders.parquet"
     assert landed.read_bytes() == b"PARQUET-BYTES"
-    assert (pond_data_dir(tmp_path, "sales", 1) / SIDECAR).exists()  # sidecar landed → read_delta can resolve
+    assert (pond_data_dir(tmp_path, "sales", 1).root / SIDECAR).exists()  # sidecar landed → read_delta can resolve
     assert d.state.pond_states["sales@1"].end_f == f
 
 

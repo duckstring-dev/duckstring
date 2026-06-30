@@ -23,7 +23,7 @@ _RECONCILE_INTERVAL = 5.0  # self-healing tick (also catches anything a missed w
 _PER_SPOUT_TIMEOUT = 60.0  # ceiling on one Spout's delivery, so a slow destination can't starve others
 
 
-def _egress_spout(root: Path, job: dict) -> None:
+def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
     """Deliver one Spout (blocking — runs in the thread pool). Reads the Pond's published tables via the
     data plane and writes each to the destination. Raises on any failure (the caller records it).
 
@@ -40,7 +40,7 @@ def _egress_spout(root: Path, job: dict) -> None:
 
     driver = get_egress(job["destination"])  # resolves the scheme's driver (+ validates the URI)
     caps = driver.capabilities()
-    data_dir = pond_data_dir(Path(root), job["pond_name"], job["major"])
+    data_dir = pond_data_dir(Path(root), job["pond_name"], job["major"], data_root)
     dp = get_data_plane()
     # The data + the CDC cursor ride the **source's** real freshness; the Spout's run freshness (job["f"])
     # is only the engine/throttle clock (the window end, when windowed) — used for completion, not the data.
@@ -50,6 +50,7 @@ def _egress_spout(root: Path, job: dict) -> None:
     try:
         con.execute("SET TimeZone='UTC'")
         dp.prepare(con)
+        data_dir.duckdb_setup(con)  # object store → httpfs + credentials (no-op local)
         sidecar = load_sidecar(data_dir)
         tables = [job["table"]] if job["table"] else dp.list_tables(data_dir)
         for table in tables:
@@ -75,7 +76,10 @@ def _egress_spout(root: Path, job: dict) -> None:
 async def _drain(driver, root: Path) -> None:
     for job in driver.take_spout_jobs():
         try:
-            await asyncio.wait_for(run_in_threadpool(_egress_spout, root, job), timeout=_PER_SPOUT_TIMEOUT)
+            await asyncio.wait_for(
+                run_in_threadpool(_egress_spout, root, job, getattr(driver, "data_root", None)),
+                timeout=_PER_SPOUT_TIMEOUT,
+            )
         except Exception as exc:  # noqa: BLE001 — any delivery error fails the Spout's run, never the source
             driver.fail_spout_run(job["spout_key"], job["f"], f"{type(exc).__name__}: {exc}", traceback.format_exc())
         else:

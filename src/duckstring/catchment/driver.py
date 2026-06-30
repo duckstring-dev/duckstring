@@ -123,9 +123,12 @@ def _topo_order(scope: set[str], parents: dict[str, set[str]]) -> list[str]:
 
 
 class Driver:
-    def __init__(self, db, root, base_url: str | None, launcher):
+    def __init__(self, db, root, base_url: str | None, launcher, data_root: str | None = None):
         self.db = db
         self.root = root
+        # The data-plane root (object store / Volume / path); None = under the state root. Threaded into
+        # every ``pond_data_dir`` lookup the Catchment makes for sidecar reads / table listing / egress.
+        self.data_root = data_root
         self.base_url = base_url
         self.launcher = launcher
         self.lock = threading.RLock()
@@ -699,7 +702,7 @@ class Driver:
         from ..trickle_io import load_sidecar
         from .registry import pond_data_dir
 
-        sidecar = load_sidecar(pond_data_dir(Path(self.root), name, major))
+        sidecar = load_sidecar(pond_data_dir(Path(self.root), name, major, self.data_root))
         targets = [table] if table else list(sidecar)
         for t in targets:
             meta = sidecar.get(t)
@@ -1592,7 +1595,7 @@ class Driver:
         if meta.get("is_draw"):
             return set()
         try:
-            data_dir = pond_data_dir(Path(self.root), meta["name"], meta["major"])
+            data_dir = pond_data_dir(Path(self.root), meta["name"], meta["major"], self.data_root)
             return set(get_data_plane().list_tables(data_dir))
         except Exception:
             return set()

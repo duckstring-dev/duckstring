@@ -161,15 +161,18 @@ def main() -> None:
     ap.add_argument("--token", default="")
     ap.add_argument("--root", required=True)
     ap.add_argument("--source-path", required=True, help="pond source dir relative to root")
+    ap.add_argument("--data-root", default="", help="data-plane root URI (object store / Volume / path); "
+                                                    "empty = under the state root")
     args = ap.parse_args()
 
     root = Path(args.root)
+    data_root = args.data_root or None
     parents = load_topology(root / args.source_path)
     major_dir = pond_major_dir(root, args.pond, args.major)
     major_dir.mkdir(parents=True, exist_ok=True)
     con = ledger.connect(major_dir / "pond.db")
     core = DuckCore(f"{args.pond}@{args.major}", con, parents)  # name@major label for log lines
-    executor = RippleExecutor(args.pond, args.major, args.version, args.source_path, root)
+    executor = RippleExecutor(args.pond, args.major, args.version, args.source_path, root, data_root=data_root)
     client = CatchmentClient(args.catchment, args.pond, args.major, args.token)
     serve(core, executor, client)
 

@@ -53,6 +53,7 @@ def _load_ripple(source_path: str, root: str, ripple_name: str):
 def _run_ripple(
     func, pond_name: str, version: str, con, root_str: str,
     source_majors: dict[str, int], f: datetime | None, previous_f: datetime | None,
+    data_root: str | None = None,
 ) -> None:
     from ..core import Pond
 
@@ -62,17 +63,15 @@ def _run_ripple(
     try:
         func(Pond(
             name=pond_name, version=version, con=con, root=Path(root_str),
-            source_majors=source_majors, f=f, previous_f=previous_f,
+            source_majors=source_majors, f=f, previous_f=previous_f, data_root=data_root,
         ))
     finally:
         con.close()
 
 
-def _export_data(con, registry_path: Path, f: datetime | None, contract=None) -> dict | None:
+def _export_data(con, data_dir, f: datetime | None, contract=None) -> dict | None:
     from ..dataplane import get_data_plane
     from ..schema_contract import ContractViolation, contract_violations, extract_schema
-
-    data_dir = registry_path.parent / "data"
 
     # ``con`` is a cursor off the shared instance: the export reads a consistent MVCC snapshot and shares
     # the ripples' configuration, so it neither clashes with their open connections nor conflicts on the
@@ -92,7 +91,8 @@ def _export_data(con, registry_path: Path, f: datetime | None, contract=None) ->
 
 
 class RippleExecutor:
-    def __init__(self, pond_name: str, major: int, version: str, source_path: str, root: Path, max_workers: int = 8):
+    def __init__(self, pond_name: str, major: int, version: str, source_path: str, root: Path,
+                 max_workers: int = 8, data_root: str | None = None):
         import duckdb
 
         from ..core import read_pond_toml
@@ -103,6 +103,7 @@ class RippleExecutor:
         self.version = version
         self.source_path = source_path
         self.root = root
+        self.data_root = data_root
         self.registry_path = pond_registry_path(root, pond_name, major)
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
         # ONE registry instance for the Duck's life: ripples (and the export) each run on a `.cursor()`
@@ -133,7 +134,7 @@ class RippleExecutor:
             func = _load_ripple(self.source_path, str(self.root), ripple_name)
             _run_ripple(
                 func, self.pond_name, self.version, self._cursor(), str(self.root),
-                self.source_majors, f, previous_f,
+                self.source_majors, f, previous_f, self.data_root,
             )
 
         fut = self._pool.submit(_task)
@@ -155,7 +156,10 @@ class RippleExecutor:
         run's freshness ``f`` (recorded by snapshotting backends). ``contract`` is the major line's
         additive contract — a violation raises :class:`ContractViolation` *before* publishing (last-good
         is left intact). Returns the published output schema (for the Catchment to capture)."""
-        return _export_data(self._cursor(), self.registry_path, f, contract)
+        from ..catchment.registry import pond_data_dir
+
+        data_dir = pond_data_dir(self.root, self.pond_name, self.major, self.data_root)
+        return _export_data(self._cursor(), data_dir, f, contract)
 
     def wipe(self) -> None:
         """Drop every table in the Pond's registry — a Refresh's cold reset. The next run then reads its

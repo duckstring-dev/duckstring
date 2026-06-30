@@ -313,7 +313,7 @@ class Puddle:
 class Pond:
     def __init__(
         self, name: str, version: str, con, root,
-        source_majors: dict[str, int] | None = None, f=None, previous_f=None,
+        source_majors: dict[str, int] | None = None, f=None, previous_f=None, data_root: str | None = None,
     ) -> None:
         from .engine.core import NEVER
 
@@ -321,6 +321,9 @@ class Pond:
         self.version = version
         self.con = con
         self.root = root
+        # Where the data plane publishes/reads tables — a local path under the state root by default, or an
+        # object-store / Volume URI (``DUCKSTRING_DATA_ROOT``). Foreign-Source reads resolve through it.
+        self.data_root = data_root
         # Which major line of each Source this Pond consumes (from its pond.toml [sources] pins).
         # None/missing falls back to the flat puddles layout (local runs have no majors).
         self.source_majors = source_majors or {}
@@ -351,13 +354,19 @@ class Pond:
         retry_on_lock(_write)  # a concurrent write conflict queues + retries rather than failing
 
     def _source_data_dir(self, source_pond: str):
-        """The published ``data_dir`` for a foreign Source, honouring this Pond's major pin (or the flat
-        puddles layout in local runs, which have no majors)."""
+        """The published data location for a foreign Source as a :class:`~duckstring.storage.Storage`,
+        honouring this Pond's major pin and the configured data root (or the flat puddles layout in local
+        runs, which have no majors)."""
         from pathlib import Path as _Path
 
-        base = _Path(self.root) / "ponds" / source_pond
+        from .storage import LocalStorage
+
         major = self.source_majors.get(source_pond)
-        return base / f"m{major}" / "data" if major is not None else base / "data"
+        if major is None:  # flat puddles layout (local runs have no majors) — always under the local root
+            return LocalStorage(_Path(self.root) / "ponds" / source_pond / "data")
+        from .catchment.registry import pond_data_dir
+
+        return pond_data_dir(_Path(self.root), source_pond, major, self.data_root)
 
     def read_table(self, ref: str):
         """A relation over a table — own (``"name"``) or a Source's (``"source.table"``). A Source
@@ -376,6 +385,7 @@ class Pond:
                 data_dir = self._source_data_dir(source_pond)
                 dp = get_data_plane()
                 dp.prepare(self.con)  # ready the connection to read the Source's published format
+                data_dir.duckdb_setup(self.con)  # object store → httpfs + credentials (no-op for local)
                 try:
                     # As-of pin: read the Source snapshot at this run's freshness, NOT latest. A Pond Run
                     # spans wall-clock time over several Ripples; an upstream Source can republish mid-run.
@@ -420,6 +430,7 @@ class Pond:
                 data_dir = self._source_data_dir(source_pond)
                 dp = get_data_plane()
                 dp.prepare(self.con)
+                data_dir.duckdb_setup(self.con)
                 meta = trickle.load_sidecar(data_dir).get(table, {})
                 (n,) = self.con.execute(
                     dp.consolidated_count_select(data_dir, table, meta, as_of=self.f)
@@ -498,6 +509,7 @@ class Pond:
         data_dir = self._source_data_dir(source_pond)
         dp = get_data_plane()
         dp.prepare(self.con)
+        data_dir.duckdb_setup(self.con)
         return trickle.read_delta(self.con, data_dir, table, self.previous_f, self.f, dp=dp)
 
     def trickle(self, spine_ref: str, *, p: float = 0.3):

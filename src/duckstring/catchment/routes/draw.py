@@ -71,7 +71,7 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
     base is not re-sent. Omit ``after``/``base_after`` (bootstrap) → the whole set."""
     from datetime import datetime
 
-    from ...trickle_io import BASE_SUFFIX, SIDECAR, base_chunks, load_sidecar, part_f, part_tables, table_parts
+    from ...trickle_io import BASE_SUFFIX, SIDECAR, base_chunks, base_dir_name, load_sidecar, part_f, part_tables, table_parts
 
     m = _resolve_major(request, name, major, None)
     data_dir = _data_dir(request, name, m)
@@ -79,33 +79,36 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
     after_dt = datetime.fromisoformat(after) if after else None
     base_after_dt = datetime.fromisoformat(base_after) if base_after else None
 
-    files = sorted(p for p in data_dir.glob("*.parquet") if wanted is None or p.stem in wanted)
+    files = sorted(n for n in data_dir.parquet_names()
+                   if wanted is None or n[: -len(".parquet")] in wanted)  # wholesale single-file tables
     dirs = [t for t in part_tables(data_dir) if wanted is None or t in wanted]
     base_dirs = sorted(
-        d.name[: -len(BASE_SUFFIX)] for d in data_dir.glob(f"*{BASE_SUFFIX}")
-        if d.is_dir() and (wanted is None or d.name[: -len(BASE_SUFFIX)] in wanted)
-    ) if data_dir.exists() else []
+        d[: -len(BASE_SUFFIX)] for d in data_dir.subdir_names()
+        if d.endswith(BASE_SUFFIX) and (wanted is None or d[: -len(BASE_SUFFIX)] in wanted)
+    )
     if not files and not dirs and not base_dirs and not data_dir.exists():
         raise HTTPException(status_code=404, detail=f"No exported data for '{name}' (major {m})")
     sidecar_meta = load_sidecar(data_dir)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for pq in files:  # wholesale single-file tables (legacy merge base / plain output)
-            zf.write(pq, pq.name)
+        for n in files:  # wholesale single-file tables (legacy merge base / plain output)
+            zf.writestr(n, data_dir.read_bytes(n))
         for main in base_dirs:  # cold base chunks — wholesale, but only if f_base advanced past the consumer's
             fb = sidecar_meta.get(main, {}).get("f_base")
             if base_after_dt is not None and fb is not None and datetime.fromisoformat(fb) <= base_after_dt:
                 continue  # the consumer already holds this cold base — don't re-ship it
+            base = data_dir.child(base_dir_name(main))
             for chunk in base_chunks(data_dir, main):
-                zf.write(chunk, f"{main}{BASE_SUFFIX}/{chunk.name}")
+                zf.writestr(f"{main}{BASE_SUFFIX}/{chunk}", base.read_bytes(chunk))
         for table in dirs:  # append-only parts → ship only the parts newer than `after`
+            part_store = data_dir.child(table)
             for part in table_parts(data_dir, table):
-                if after_dt is None or part_f(part.name) > after_dt:
-                    zf.write(part, f"{table}/{part.name}")
+                if after_dt is None or part_f(part) > after_dt:
+                    zf.writestr(f"{table}/{part}", part_store.read_bytes(part))
         # The Trickle mode/PK sidecar travels with the data so the consuming Catchment's read_delta can
         # resolve a Trickle source (mode/PK aren't in the downstream's duck.db). Harmless for plain Ponds.
-        sidecar = data_dir / SIDECAR
-        if sidecar.exists():
-            zf.write(sidecar, sidecar.name)
+        sidecar = data_dir.read_text(SIDECAR)
+        if sidecar is not None:
+            zf.writestr(SIDECAR, sidecar)
     return Response(content=buf.getvalue(), media_type="application/zip")

@@ -17,12 +17,14 @@ from ..keys import split_pond_key
 class SubprocessLauncher:
     manages_processes = True  # owns real Duck processes, so liveness can be checked via proc.poll()
 
-    def __init__(self, root: Path, base_url: str | None, token: str = ""):
+    def __init__(self, root: Path, base_url: str | None, token: str = "", data_root: str | None = None):
         self.root = root
         # The address Ducks dial back to. None = not yet known (a platform like Posit Connect picks
         # the bind address; it's learned from the first request) — spawns are deferred until then.
         self.base_url = base_url
         self.token = token
+        # The data-plane root passed through to each Duck (object store / Volume / path); None = local default.
+        self.data_root = data_root
         self._procs: dict[str, subprocess.Popen] = {}  # pond key (name@major) → process
         self._pending: dict[str, tuple[str, str]] = {}  # spawns deferred until base_url is known
 
@@ -58,6 +60,7 @@ class SubprocessLauncher:
                 f"--token={self.token}",
                 "--root", str(self.root),
                 "--source-path", source_path,
+                f"--data-root={self.data_root or ''}",
             ]
         )
 
