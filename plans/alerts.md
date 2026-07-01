@@ -1,6 +1,9 @@
 # Alerts: failure & freshness notifications to the channels a team already runs
 
-Status: **building** (this branch). The last observability gap before Duckstring is credible for serious
+Status: **built** (webhook + email channels, event-driven failure/contract/spout/recovery alerts with
+root-cause dedup, tick-driven freshness-SLA breaches, the outbox worker, CLI + full-gated API — tests in
+`tests/test_alerts.py`). Deferred: re-notify cadence, a `/metrics` endpoint, a UI management surface. The
+last observability gap before Duckstring is credible for serious
 data engineering: when a pipeline breaks — or, more insidiously, goes *stale without breaking* — the
 right people learn about it, on the channel they already watch (email, Slack, PagerDuty), without polling
 the UI. Alerting is **observability, not data movement**: it shares no code with egress, but it reuses

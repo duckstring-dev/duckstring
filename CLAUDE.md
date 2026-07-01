@@ -59,11 +59,12 @@ src/duckstring/
     auth.py                #   access-level key ladder + route guards + the Duck token (see Auth)
     driver.py              #   Driver: engine brain + Duck coordinator + persistence + trigger/window/spout CRUD + restart restore
     egress_worker.py       #   the egress worker: reconciliation loop delivering published output to Spouts (see Egress)
+    alert_worker.py        #   the alert worker: drains the alert_delivery outbox → notifier.send (see Alerts)
     launcher.py            #   SubprocessLauncher (spawns Ducks) / NoopLauncher (tests)
     db.py                  #   SQLite connect + migration runner
     secrets.py             #   SecretStore — the write-only catchment secret store (secrets.json, 0600, names-only read; see Secrets)
     schema/001_init.sql    #   Database schema (see below)
-    routes/                #   deploy, orchestrate (triggers/control/status/runs/windows/spouts), secrets, duck (jobs/events), data (parquet), catchment (health)
+    routes/                #   deploy, orchestrate (triggers/control/status/runs/windows/spouts), secrets, alerts, duck (jobs/events), data (parquet), catchment (health)
     registry.py, dag.py    #   pond DuckDB registry paths; inter-pond cycle check
   local/                   # Local pre-deploy testing (no engine/FastAPI/Ducks). See Puddles.
     project.py             #   load_project: pond.toml + entrypoints + puddles/ dirs
@@ -76,7 +77,13 @@ src/duckstring/
     puddle.py              #   puddle ls/show/query (inspect ./puddles via in-memory DuckDB views)
     spout.py               #   spout add/ls/rm {pond} — egress bindings (see Egress)
     secret.py              #   secret set/ls/rm — the write-only secret store (value prompted, never in argv)
+    alert.py               #   alert add/ls/rm/test/log — notification channels (see Alerts)
     status.py, data.py, catchment.py, config.py, window.py, _http.py
+  alerts/                  # Alerts: failure & freshness notifications, the observability sibling of a Spout (see Alerts + plans/alerts.md)
+    event.py               #   AlertEvent (rendered, sanitised — never a traceback) + KNOWN_EVENTS/normalise_events
+    base.py                #   the notifier SEAM: Notifier Protocol + get_notifier(uri) scheme registry + destination validation
+    webhook.py             #   WebhookNotifier (http/https) — Slack-incoming-webhook-compatible JSON POST
+    email.py               #   EmailNotifier (mailto:) — stdlib smtplib; SMTP config from the URI query or DUCKSTRING_SMTP_*
   egress/                  # Egress: publishing a Pond's output to external systems (see Egress + plans/egress.md)
     credentials.py         #   ${env:NAME} + ${secret:NAME} credential resolution (env-var-first; ${secret:} → the catchment secret store)
     destination.py         #   Spout destination URI parse/validate (known schemes + mode + credential syntax)
@@ -138,6 +145,16 @@ The OSS "last mile": getting a Pond's output **out** to the systems a team alrea
 ## Secrets (`catchment/secrets.py`, `routes/secrets.py`, `cli/secret.py`)
 
 A **write-only** catchment-wide secret store for egress credentials referenced as `${secret:NAME}`. `SecretStore(root)` persists a plaintext `secrets.json` at the catchment root (`chmod 0600`, atomic tmp+replace; name regex `[A-Za-z_][A-Za-z0-9_]*`); `set`/`names`/`get`/`remove`. **`names()` returns `[{name, set_at}]` — never values**; `get()` is for internal resolution only (there is **no read-back endpoint**). `create_app` instantiates the store on `app.state.secret_store` and wires `credentials.set_secret_provider(store.get)` (a module-level provider so `${secret:}` resolves deep in a driver). **API** (`/api/secrets`, all `dependencies=[auth.full]`): `GET` (names only), `POST {name,value}` (422 on bad name), `DELETE /{name}`. **CLI**: `duckstring secret set NAME` (value **prompted, hidden — never in argv**), `secret ls`, `secret rm NAME`. **UI**: `SecretsMenu` (the **Secrets** button under Collapse-all, top-right `ControlsPanel`, **full access only**) lists names + a write-only set form; the Spout add form offers a stored-secret datalist of those names. **Encryption-at-rest is deliberately skipped** (plaintext 0600; the design decision is the author's — folks who care use HTTPS + don't transmit). **`set` DOES transmit the value over the wire** (POST body) — by design; use HTTPS. The store is **excluded from the `catchment archive`/download bundle** (`routes/catchment.py` `_SKIP_NAMES`) so secrets never travel in a state bundle. Tests: `tests/test_secrets.py`.
+
+## Alerts (`alerts/`, `catchment/alert_worker.py`, `routes/alerts.py`, `cli/alert.py`; see `plans/alerts.md`)
+
+Failure & freshness **notifications** — the **observability sibling of a Spout** (same shape: operational config not in `pond.toml`, a scheme-selected driver seam, `${env:}`/`${secret:}` creds reused from egress, an async worker that **never cascades a failure into the engine**). A channel is **NOT an engine node** (a notification has no freshness/run semantics) — it is lightweight config + an outbox + a worker; alerting **observes** state transitions the engine already computes and adds no orchestration state. **Built:** webhook + email notifiers, event- and tick-driven emission with root-cause dedup, the outbox worker, CLI + full-gated API. Migration `014_alert.sql` (`alert_channel` + `alert_delivery`).
+
+- **The notifier seam** (`alerts/base.py`): `Notifier` Protocol (`send`/`test`) + `get_notifier(uri)` scheme registry (mirrors `get_egress`); `parse_notifier_destination` validates scheme + `${…}` syntax without resolving. **`WebhookNotifier`** (`http`/`https`) POSTs a body that is both a plain structured event **and** Slack-incoming-webhook-compatible (a top-level `text` summary + the structured fields) — covers Slack, generic receivers, PagerDuty-via-proxy. **`EmailNotifier`** (`mailto:`) uses stdlib `smtplib`; SMTP host/port/user/pass/from from the URI query or `DUCKSTRING_SMTP_*`. An `AlertEvent` (`alerts/event.py`) is the rendered, **sanitised** payload — the error *message*, **never a traceback** (a channel is a third-party surface; same concern as `_redact_tracebacks`).
+- **Two firing mechanisms.** *Event-driven* (from `Driver` state transitions): `failure` (a Pond Run gives up / dead-or-silent Duck / Duck-level error), `contract` (the Duck refused to publish — additive-contract break), `spout` (a Spout delivery failed — scoped to its source Pond's name), `recovery` (a failed Pond/Spout clears). *Tick-driven* (in `scheduler_tick` beside `_check_liveness`): `freshness` (a scoped Pond's staleness exceeds the channel's `--stale` bound), + its `recovery`.
+- **Root-cause dedup (anti-storm):** failure alerts fire **only for roots** — a blocked-downstream Pond is `is_blocked`, never `is_failed`, and the fail path is only called on the root, so blocked Ponds get no alert; the failure payload carries the currently-blocked names as **blast radius**. Within a root, the outbox `UNIQUE(channel_id, dedup_key)` (`"{kind}:{pond}:{f}"`) is the **fire-once-per-episode** fence (retries at the same failed `f` = one alert; a new failed `f` = a new alert). Recovery is emitted centrally in `_process` (diffing `_alerted_failures`) so **every** clear path (fresher run, wake/force/clear, redeploy) is covered once; a **kill** is intentional, not a recovery. A `recovery` also reaches channels subscribed only to the originating kind (via `match_kinds`), so subscribing to `failure` gets you its recovery without also subscribing to `recovery`.
+- **Delivery** (`alert_worker.py`, the egress-worker shape): woken by `Driver._signal_alert` or a 5 s tick, it drains `take_alert_deliveries` → `Notifier.send` in a threadpool (per-send timeout), marking each `sent` or bumping `attempts`/parking `failed` at `MAX_ATTEMPTS` (a dead channel stops retrying but stays auditable). `Driver._emit_alert` is the enqueue seam (matches enabled channels by scope + event filter, `INSERT OR IGNORE`s the dedup-fenced rows) and is **wrapped so a bug in alerting can never break a Pond Run**.
+- **Config + surface.** A channel is `(name, destination, scope_name|NULL, events CSV|'all', stale_ms?)` — scoped by pond **name** (survives version/major changes), catchment-wide when NULL; operational config, persisted, survives redeploys. **CLI**: `duckstring alert add --to <uri> [--pond N] [--on failure,…|all] [--stale 1h]`, `alert ls|rm|test|log`. **API** (`/api/alerts`, all `dependencies=[auth.full]` — a destination is an outbound egress surface): `GET`/`POST`, `DELETE /{name}`, `POST /{name}/test` (a connection problem is a 200 `{ok:false,error}`, not a 5xx), `GET /alerts/deliveries` (the audit log). **Deferred:** re-notify cadence (needs an ack surface — that's PagerDuty's job), a `/metrics` Prometheus endpoint, a UI management surface. Tests: `tests/test_alerts.py`.
 
 ## Data plane (`dataplane.py`, `iceberg_plane.py`)
 

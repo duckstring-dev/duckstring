@@ -51,6 +51,7 @@ async def _lifespan(app: FastAPI):
     # Restore: resume any Pond Runs that were in flight when the Catchment last stopped.
     driver.resume_incomplete()
 
+    from .alert_worker import run_alert_worker
     from .egress_worker import run_egress_worker
     from .poller import run_poller
 
@@ -64,18 +65,23 @@ async def _lifespan(app: FastAPI):
     egress_wake = asyncio.Event()
     driver.set_egress_notify(lambda: loop.call_soon_threadsafe(egress_wake.set))
 
+    # The alert worker wakes when a failure/freshness event enqueues a notification delivery.
+    alert_wake = asyncio.Event()
+    driver.set_alert_notify(lambda: loop.call_soon_threadsafe(alert_wake.set))
+
     from .state_sync import checkpoint_full, run_checkpoint_worker
 
     scheduler = asyncio.create_task(_scheduler(driver))
     poller = asyncio.create_task(run_poller(driver, app.state.root, wake))
     egress = asyncio.create_task(run_egress_worker(driver, app.state.root, egress_wake))
+    alerts = asyncio.create_task(run_alert_worker(driver, alert_wake))
     # Tier-1 state backup: push a duck.db snapshot to DUCKSTRING_STATE_BACKUP_URI on an interval (no-op
     # when unset). The Tier-2 warm bundle is flushed once below, after the Ducks are stopped (quiescent).
     checkpointer = asyncio.create_task(
         run_checkpoint_worker(app.state.root, app.state.state_backup, app.state.checkpoint_every)
     )
     # Renew the data-root writer lease so a live Catchment's ownership never lapses (external data root only).
-    tasks = [scheduler, poller, egress, checkpointer]
+    tasks = [scheduler, poller, egress, alerts, checkpointer]
     if app.state.data_lease is not None:
         from .data_lease import run_lease_renewer
 
