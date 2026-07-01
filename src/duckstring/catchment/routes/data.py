@@ -318,6 +318,29 @@ def get_pond_object(
     )
 
 
+@router.delete("/ponds/{name}/objects/{obj}", dependencies=[auth.full])
+def delete_pond_object(
+    name: str, obj: str, request: Request, major: Optional[int] = None, version: Optional[str] = None,
+):
+    """Delete one non-tabular Object from a Pond — its payload + sidecar entry (no registry, no run).
+    Gated on the Pond being idle so it can't race a run's commit_objects re-adding the entry (409)."""
+    from ...objects import delete_object
+
+    m = _resolve_major(request, name, major, version)
+    driver = getattr(request.app.state, "driver", None)
+    if driver is not None:
+        try:
+            key = driver.resolve(name, major, version)
+            if driver.is_pond_running(key):
+                raise HTTPException(status_code=409, detail="the Pond is running — delete an Object when it is idle")
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # not a live engine Pond (exported data outlives a deployment) — allow the delete
+    delete_object(_data_dir(request, name, m), obj)
+    return {"ok": True}
+
+
 @router.get("/ponds/{name}/freshness", dependencies=[auth.read])
 def pond_freshness(
     name: str, request: Request, table: str,

@@ -237,3 +237,10 @@ def test_list_and_download_endpoints(tmp_path):
 
     r = client.get("/api/ponds/trainer/objects/missing", params={"major": 1})
     assert r.status_code == 404
+
+    # Delete one Object via the API (Pond is idle) → gone from the listing, others kept.
+    r = client.delete("/api/ponds/trainer/objects/model", params={"major": 1})
+    assert r.status_code == 200, r.text
+    names = {o["name"] for o in client.get("/api/ponds/trainer/objects", params={"major": 1}).json()["objects"]}
+    assert names == {"bundle"}
+    assert client.get("/api/ponds/trainer/objects/model", params={"major": 1}).status_code == 404

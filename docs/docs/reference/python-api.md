@@ -133,7 +133,7 @@ def score(pond):
     tokenizer = AutoTokenizer.from_pretrained(pond.object_path("trainer.hf"))  # a directory, by path
 ```
 
-Objects are overwrite-only and ripple-only (no history/versioning yet). They appear under the **Objects** tab of the [Data Viewer](../guides/web-ui.md) and download via `duckstring get-object <pond> <name>`.
+Objects are overwrite-only and ripple-only (no history/versioning yet). They appear under the **Objects** tab of the [Data Viewer](../guides/web-ui.md), download via `duckstring get-object <pond> <name>`, and can be removed with `duckstring delete-object <pond> <name>` (or the tab's Delete button) — a deleted Object returns only if a Ripple writes it again.
 
 ### `pond.sources_changed()` → `bool` and `pond.skip()`
 

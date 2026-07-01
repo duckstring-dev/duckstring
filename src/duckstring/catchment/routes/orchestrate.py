@@ -172,6 +172,16 @@ def refresh(
     return {"ok": True}
 
 
+@router.delete("/ponds/{name}/tables/{table}", dependencies=[auth.full])
+def delete_table(
+    name: str, table: str, request: Request, major: int | None = None, version: str | None = None,
+):
+    """Delete one table from a Pond — its published data **and** its registry collection — then force a
+    run so it rebuilds (or stays gone if the code no longer produces it). See plans/deletes.md."""
+    _driver(request).delete_table(_resolve(request, name, major, version), table)
+    return {"ok": True}
+
+
 class _RepairPond(BaseModel):
     name: str
     major: Optional[int] = None

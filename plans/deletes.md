@@ -1,6 +1,14 @@
 # Deleting a table or Object from a Pond
 
-Status: **designed, unbuilt.** The ability to remove **one** published output — a table or an
+Status: **implemented.** The engine trigger (`builder._compute`: absent output ⇒ comprehensive) +
+`trickle_io.drop_table`/`drop_meta` + `dataplane.unpublish_table` + `executor.wipe_table` +
+`objects.delete_object` + the `pond_pending_drop` flag (migration 015) carried on `BeginRun` +
+`Driver.delete_table` (force-rebuild) + the `DELETE` routes + `delete-table`/`delete-object` CLI + the
+Data Viewer Delete actions are all wired. Tests: `test_builder_rebuilds_whole_when_output_dropped`
+(the correctness core), `test_unpublish_table`/`test_drop_table`, `test_delete_object*`, and the real-Duck
+`test_delete_table_drops_and_rebuilds`.
+
+The ability to remove **one** published output — a table or an
 [Object](objects.md) — from a Pond *without* refreshing the whole Pond. The escape from "something looks
 off, so I `rm -rf` the Pond and start over" (see the reset/undeploy discussion), scoped to a single
 artifact.

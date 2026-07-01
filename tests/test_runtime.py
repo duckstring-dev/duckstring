@@ -184,6 +184,45 @@ def test_trickle_chain_runs_end_to_end(runtime):
         assert n > 0, f"{name}: empty reconstructed main"
 
 
+def test_delete_table_drops_and_rebuilds(runtime):
+    """`delete-table` drops a Trickle's registry collection + published data, then forces a run that
+    rebuilds it via the builder's absent⇒comprehensive path (plans/deletes.md). On a real Duck: the
+    priced_line main + changelog disappear, then come back with the same current state."""
+    import duckdb
+
+    from duckstring.dataplane import ParquetDataPlane
+
+    url, root = runtime
+    _deploy(url, _TRICKLE_PONDS)
+    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
+
+    data_dir = root / "ponds" / "priced" / "m1" / "data"
+    clog = data_dir / "priced_line__changelog"
+
+    def state_count() -> int:
+        con = duckdb.connect()
+        try:
+            sql = ParquetDataPlane().read_select(data_dir, "priced_line")
+            return con.sql(f"SELECT count(*) FROM ({sql})").fetchone()[0]
+        except Exception:
+            return -1  # not published (deleted / not yet rebuilt)
+        finally:
+            con.close()
+
+    n_before = state_count()
+    assert n_before > 0, "priced_line never populated"
+
+    # Delete the table — its data + registry state — and force a rebuild.
+    r = httpx.request("DELETE", f"{url}/api/ponds/priced/tables/priced_line", timeout=5.0)
+    assert r.status_code == 200, r.text
+
+    # The forced run rebuilds priced_line comprehensively → the changelog reappears and the current state
+    # matches (the whole join, not just a delta).
+    assert _wait(lambda: clog.exists() and state_count() == n_before, timeout=45.0), \
+        f"priced_line did not rebuild (count now {state_count()}, was {n_before})"
+
+
 def test_refresh_flag_rebuilds_and_bumps_floor(runtime):
     """`control refresh` is lazy: it flags the Pond (refresh_pending) but runs nothing. The next run is a
     cold wipe-and-rebuild that raises the published changelog floor, so downstream coverage-misses."""

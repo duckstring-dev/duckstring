@@ -187,3 +187,10 @@ duckstring get-object {pond} {name} [-o PATH]  # download one (a file, or a dire
 ```
 
 List / download a Pond's [Objects](python-api.md#objects--non-tabular-outputs) — models, blobs, and other non-tabular outputs. A single-file Object writes to `./{name}` (or `--out`); a directory Object unzips into it.
+
+```bash
+duckstring delete-table {pond} {table} [-y]    # delete a table (data + state), then force a rebuild
+duckstring delete-object {pond} {name} [-y]     # delete an Object (returns only if a Ripple rewrites it)
+```
+
+Delete one published output from a Pond (full access). A table delete drops its data **and** registry state and forces a run: if the code still produces it, the run rebuilds it; otherwise it stays gone (an append Trickle warns first — its history is dropped). An Object delete removes it directly and needs the Pond idle.

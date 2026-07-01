@@ -121,6 +121,56 @@ def get_object(
         console.print(f"[green]Written to[/green] {dest}")
 
 
+def delete_table(
+    outlet: str = typer.Argument(..., help="Pond name."),
+    table: str = typer.Argument(..., help="Table name to delete."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version (default: latest)."),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Delete a table from a Pond (its data + registry state), then force a rebuild. If the code still
+    produces it, the next run rebuilds it; otherwise it stays gone."""
+    from . import _http
+    from .config import resolve_catchment
+
+    _, cfg = resolve_catchment(catchment)
+    params = _http.pond_params(major, version)
+    # Warn if it's an append Trickle — deleting drops its history (rebuilds only if produced comprehensively).
+    try:
+        tables = _http.get(f"{cfg['url']}/api/ponds/{outlet}/tables", auth=cfg, params=params).json().get("tables", [])
+        info = next((t for t in tables if t["name"] == table), None)
+    except Exception:
+        info = None
+    if info and info.get("trickle") == "append":
+        typer.echo(f"Warning: '{table}' is an append Trickle — deleting drops its accumulated history.")
+    if not yes:
+        typer.confirm(f"Delete table '{outlet}.{table}' (data + state) and rebuild?", abort=True)
+    _http.delete(f"{cfg['url']}/api/ponds/{outlet}/tables/{table}", auth=cfg, params=params)
+    typer.echo(f"Deleted '{outlet}.{table}'. It rebuilds on the forced run if still produced.")
+
+
+def delete_object(
+    outlet: str = typer.Argument(..., help="Pond name."),
+    name: str = typer.Argument(..., help="Object name to delete."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version (default: latest)."),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Delete a non-tabular Object from a Pond. It returns only if a Ripple writes it again."""
+    from . import _http
+    from .config import resolve_catchment
+
+    _, cfg = resolve_catchment(catchment)
+    if not yes:
+        typer.confirm(f"Delete object '{outlet}.{name}'?", abort=True)
+    _http.delete(
+        f"{cfg['url']}/api/ponds/{outlet}/objects/{name}", auth=cfg, params=_http.pond_params(major, version),
+    )
+    typer.echo(f"Deleted object '{outlet}.{name}'.")
+
+
 def query(
     outlet: str = typer.Argument(..., help="Pond name."),
     ripple: Optional[str] = typer.Argument(None, help="Ripple name (default query: SELECT * LIMIT 10)."),

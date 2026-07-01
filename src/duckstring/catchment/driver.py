@@ -455,23 +455,12 @@ class Driver:
             self.state = force_pond(self.state, pond, _now())  # make the drop+rebuild happen promptly
             self._process(_now())
 
-    def delete_object(self, pond: str, name: str) -> None:
-        """Delete one published Object from a Pond — its ``objects/{name}/`` payload + sidecar entry. No
-        registry, no run. Gated on the Pond being idle so it can't race a run's commit_objects re-adding
-        the entry. See plans/deletes.md."""
-        from pathlib import Path
-
-        from ..objects import delete_object as _delete
-        from .registry import pond_data_dir
-
+    def is_pond_running(self, pond: str) -> bool:
+        """Whether a Pond has a Run in flight (start_f advanced past end_f) — the idle gate for an Object
+        delete (which must not race a run's commit_objects). Best-effort: unknown Pond ⇒ not running."""
         with self.lock:
             ps = self.state.pond_states.get(pond)
-            if ps is not None and ps.start_f > ps.end_f:
-                raise ValueError("the Pond is running — delete an Object when it is idle")
-            meta = self.meta[pond]
-            data_dir = pond_data_dir(Path(self.root), meta["name"], meta["major"], self.data_root)
-            _delete(data_dir, name)
-            self.state_version += 1
+            return ps is not None and ps.start_f > ps.end_f
 
     def repair(self, ponds: list[tuple[str, int | None]], downstream: bool = False) -> dict:
         """Repair — force-rebuild a **connected** set of Ponds now, in topological order (steps out of

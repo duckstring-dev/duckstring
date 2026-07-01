@@ -1,9 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useLiveStore, THEME_BLOCKED, THEME_BRAND } from '@/lib/store';
+import { useLiveStore, atLeast, THEME_BLOCKED, THEME_BRAND } from '@/lib/store';
 import {
   fetchTables, fetchFreshness, fetchHistory, fetchCount, fetchPage, fetchObjects, downloadObject,
+  deleteTable, deleteObject,
   type DataQuery, type TableInfo, type TrickleMode, type PageResult, type ObjectInfo, UnauthorizedError,
 } from '@/lib/api';
 import type { PondId } from '@/lib/types';
@@ -39,6 +40,7 @@ function DataViewer({ pondId }: { pondId: PondId }) {
   const close = useLiveStore((s) => s.closeDataViewer);
   const pondName = useLiveStore((s) => s.ponds[pondId]?.name ?? pondId);
   const hasObjects = useLiveStore((s) => s.pondInfo[pondId]?.hasObjects ?? false);
+  const canManage = useLiveStore((s) => atLeast(s.accessLevel, 'full'));
 
   // Tabular data vs non-tabular Objects (models/blobs). Objects are a separate published surface.
   const [view, setView] = useState<'tables' | 'objects'>('tables');
@@ -135,6 +137,24 @@ function DataViewer({ pondId }: { pondId: PondId }) {
     setSort({ col: null, desc: false }); // columns differ between tables
     void loadFreshness(t, ti);
   };
+  const deleteCurrentTable = async () => {
+    if (!table) return;
+    const warn = trickle === 'append' ? '\n\nThis is an append Trickle — its accumulated history is dropped.' : '';
+    if (!window.confirm(`Delete table "${table}" (data + state) and rebuild?${warn}`)) return;
+    try {
+      await deleteTable(pondId, table);
+      const ts = await fetchTables(pondId); // it may reappear once the forced run rebuilds it
+      setTables(ts);
+      setTable(ts[0]?.name ?? null);
+      if (ts[0]) {
+        setSqlText(browseSql(pondName, ts[0].name));
+        void loadFreshness(ts[0].name, ts[0]);
+      }
+    } catch (e) {
+      on401(e);
+      setTablesError(e instanceof Error ? e.message : String(e));
+    }
+  };
   const runQuery = () => {
     if (!sqlText.trim()) return;
     setActiveSql(sqlText);
@@ -217,6 +237,19 @@ function DataViewer({ pondId }: { pondId: PondId }) {
               </select>
               <span style={{ position: 'absolute', right: 9, pointerEvents: 'none', color: '#71717a', fontSize: 9 }}>▼</span>
             </span>
+          )}
+          {view === 'tables' && mode === 'browse' && table && canManage && (
+            <button
+              onClick={deleteCurrentTable}
+              title={`Delete "${table}" (drops its data + state, then rebuilds)`}
+              style={{
+                background: 'transparent', border: `1px solid ${THEME_BLOCKED}66`, borderRadius: 5,
+                color: THEME_BLOCKED, fontSize: 11.5, fontWeight: 700, padding: '4px 9px', cursor: 'pointer',
+                fontFamily: 'inherit',
+              }}
+            >
+              Delete
+            </button>
           )}
           {view === 'tables' && mode === 'query' && (
             <span style={{ fontSize: 10, fontWeight: 700, color: '#ee9333', letterSpacing: '0.06em' }}>QUERY</span>
@@ -304,7 +337,7 @@ function DataViewer({ pondId }: { pondId: PondId }) {
         {/* Body: the tabular grid, or the Objects list */}
         <div style={{ flex: 1, minHeight: 0 }}>
           {view === 'objects' ? (
-            <ObjectsPanel pondId={pondId} />
+            <ObjectsPanel pondId={pondId} canManage={canManage} />
           ) : tablesError ? (
             <div style={{ padding: 16, color: '#ef4444', fontSize: 12.5 }}>{tablesError}</div>
           ) : tables == null ? (
@@ -341,27 +374,43 @@ function fmtBytes(n: number | null): string {
   return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
 }
 
-function ObjectsPanel({ pondId }: { pondId: PondId }) {
+function ObjectsPanel({ pondId, canManage }: { pondId: PondId; canManage: boolean }) {
   const [objects, setObjects] = useState<ObjectInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
-  useEffect(() => {
-    const t = setTimeout(async () => {
-      try {
-        setObjects(await fetchObjects(pondId));
-      } catch (e) {
-        on401(e);
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    }, 0);
-    return () => clearTimeout(t);
+  const load = useCallback(async () => {
+    try {
+      setObjects(await fetchObjects(pondId));
+    } catch (e) {
+      on401(e);
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }, [pondId]);
+
+  useEffect(() => {
+    const t = setTimeout(() => void load(), 0);
+    return () => clearTimeout(t);
+  }, [load]);
 
   const download = async (o: ObjectInfo) => {
     setBusy(o.name);
     try {
       await downloadObject(pondId, o);
+    } catch (e) {
+      on401(e);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remove = async (o: ObjectInfo) => {
+    if (!window.confirm(`Delete object "${o.name}"? It returns only if a Ripple writes it again.`)) return;
+    setBusy(o.name);
+    try {
+      await deleteObject(pondId, o.name);
+      await load();
     } catch (e) {
       on401(e);
       setError(e instanceof Error ? e.message : String(e));
@@ -394,18 +443,34 @@ function ObjectsPanel({ pondId }: { pondId: PondId }) {
               <td style={td({ textAlign: 'right', color: '#a1a1aa' })}>{fmtBytes(o.size)}</td>
               <td style={td({ color: '#a1a1aa' })}>{o.f ? fmtTs(o.f) : <span style={{ color: '#3f3f46' }}>·</span>}</td>
               <td style={td({ textAlign: 'right' })}>
-                <button
-                  onClick={() => download(o)}
-                  disabled={busy === o.name}
-                  title={o.is_dir ? 'Download as a zip' : 'Download'}
-                  style={{
-                    background: 'transparent', border: '1px solid #3f3f46', borderRadius: 5, padding: '2px 10px',
-                    color: busy === o.name ? '#52525b' : '#06c4e6', fontSize: 11.5, fontWeight: 700,
-                    cursor: busy === o.name ? 'default' : 'pointer', fontFamily: 'inherit',
-                  }}
-                >
-                  {busy === o.name ? '…' : o.is_dir ? 'Download .zip' : 'Download'}
-                </button>
+                <span style={{ display: 'inline-flex', gap: 6, justifyContent: 'flex-end' }}>
+                  <button
+                    onClick={() => download(o)}
+                    disabled={busy === o.name}
+                    title={o.is_dir ? 'Download as a zip' : 'Download'}
+                    style={{
+                      background: 'transparent', border: '1px solid #3f3f46', borderRadius: 5, padding: '2px 10px',
+                      color: busy === o.name ? '#52525b' : '#06c4e6', fontSize: 11.5, fontWeight: 700,
+                      cursor: busy === o.name ? 'default' : 'pointer', fontFamily: 'inherit',
+                    }}
+                  >
+                    {busy === o.name ? '…' : o.is_dir ? 'Download .zip' : 'Download'}
+                  </button>
+                  {canManage && (
+                    <button
+                      onClick={() => remove(o)}
+                      disabled={busy === o.name}
+                      title="Delete this Object"
+                      style={{
+                        background: 'transparent', border: `1px solid ${THEME_BLOCKED}66`, borderRadius: 5,
+                        padding: '2px 10px', color: THEME_BLOCKED, fontSize: 11.5, fontWeight: 700,
+                        cursor: busy === o.name ? 'default' : 'pointer', fontFamily: 'inherit',
+                      }}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </span>
               </td>
             </tr>
           ))}

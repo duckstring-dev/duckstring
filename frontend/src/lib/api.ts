@@ -510,6 +510,30 @@ export async function downloadObject(pond: string, obj: ObjectInfo): Promise<voi
   URL.revokeObjectURL(href);
 }
 
+// Delete a table (its data + registry state); the Catchment forces a rebuild run. Full access only.
+export async function deleteTable(pond: string, table: string): Promise<void> {
+  const { name, major } = splitPond(pond);
+  const qs = major === undefined ? '' : `?major=${major}`;
+  const res = await fetch(
+    `${apiBase()}/ponds/${encodeURIComponent(name)}/tables/${encodeURIComponent(table)}${qs}`,
+    { method: 'DELETE', headers: authHeaders() },
+  );
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `delete failed: ${res.status}`);
+}
+
+// Delete a published Object. Requires the Pond to be idle (409 otherwise). Full access only.
+export async function deleteObject(pond: string, name: string): Promise<void> {
+  const { name: pn, major } = splitPond(pond);
+  const qs = major === undefined ? '' : `?major=${major}`;
+  const res = await fetch(
+    `${apiBase()}/ponds/${encodeURIComponent(pn)}/objects/${encodeURIComponent(name)}${qs}`,
+    { method: 'DELETE', headers: authHeaders() },
+  );
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `delete failed: ${res.status}`);
+}
+
 // The distinct run freshnesses (newest-first) of a Trickle table — the window selector's options.
 export async function fetchFreshness(pond: string, table: string): Promise<{ freshness: string[]; floor: string | null }> {
   const { name, major } = splitPond(pond);
