@@ -176,9 +176,13 @@ def refresh(
 def delete_table(
     name: str, table: str, request: Request, major: int | None = None, version: str | None = None,
 ):
-    """Delete one table from a Pond — its published data **and** its registry collection — then force a
-    run so it rebuilds (or stays gone if the code no longer produces it). See plans/deletes.md."""
-    _driver(request).delete_table(_resolve(request, name, major, version), table)
+    """Delete one table from a Pond — its published data **and** its registry collection — now. No run:
+    it reappears only if the Pond's code recreates it on a future run. Requires the Pond idle (409).
+    See plans/deletes.md."""
+    try:
+        _driver(request).delete_table(_resolve(request, name, major, version), table)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"ok": True}
 
 

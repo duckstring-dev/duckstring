@@ -203,24 +203,6 @@ class RippleExecutor:
 
         shutil.rmtree(self.staging_dir, ignore_errors=True)  # discard any uncommitted staged Objects
 
-    def wipe_table(self, name: str) -> None:
-        """Delete one table's whole collection — its registry tables **and** its published data (see
-        plans/deletes.md). A scoped sibling of :meth:`wipe`. The next run rebuilds it iff the code still
-        produces it (the builder's absent⇒comprehensive trigger); otherwise it stays gone."""
-        from ..core import retry_on_lock
-        from ..dataplane import unpublish_table
-        from ..trickle_io import drop_table
-
-        def _drop() -> None:
-            cur = self._cursor()
-            try:
-                drop_table(cur, name)
-            finally:
-                cur.close()
-
-        retry_on_lock(_drop)
-        unpublish_table(self.own_data_dir, name)
-
     def shutdown(self) -> None:
         self._pool.shutdown(wait=True)
         self._registry.close()

@@ -442,18 +442,33 @@ class Driver:
             self.state_version += 1
 
     def delete_table(self, pond: str, table: str) -> None:
-        """Delete one table — its published data **and** its registry collection — from a Pond, then force
-        a run so it rebuilds (the builder's absent⇒comprehensive trigger) or stays gone if the code no
-        longer produces it. The drop is persisted (survives a restart) and applied Duck-side at the next
-        run start. See plans/deletes.md."""
+        """Delete one table — its published data **and** its registry collection — from a Pond, **now**.
+        No run and no freshness change: the table is simply gone, and reappears only if the Pond's code
+        recreates it on a genuine future run (where the builder's absent⇒comprehensive trigger rebuilds it
+        whole). Requires the Pond to be idle. See plans/deletes.md."""
+        from pathlib import Path
+
+        from ..dataplane import unpublish_table
+        from ..trickle_io import drop_table
+        from .registry import pond_connect, pond_data_dir
+
         with self.lock:
-            self.db.execute(
-                "INSERT OR IGNORE INTO pond_pending_drop (pond_id, table_name) VALUES (?, ?)",
-                (self.meta[pond]["pond_id"], table),
-            )
-            self.db.commit()
-            self.state = force_pond(self.state, pond, _now())  # make the drop+rebuild happen promptly
-            self._process(_now())
+            ps = self.state.pond_states.get(pond)
+            if ps is not None and ps.start_f > ps.end_f:
+                raise ValueError("the Pond is running — delete a table when it is idle")
+            meta = self.meta[pond]
+            name, major = meta["name"], meta["major"]
+            # An idle Duck still holds registry.duckdb open, so free it before dropping (it respawns on the
+            # next run). Then drop the table's registry collection + its published data — no run, no rebuild.
+            self.launcher.terminate(pond, wait=True)
+            self._idle_since.pop(pond, None)
+            con = pond_connect(Path(self.root), name, major)
+            try:
+                drop_table(con, table)
+            finally:
+                con.close()
+            unpublish_table(pond_data_dir(Path(self.root), name, major, self.data_root), table)
+            self.state_version += 1
 
     def is_pond_running(self, pond: str) -> bool:
         """Whether a Pond has a Run in flight (start_f advanced past end_f) — the idle gate for an Object
@@ -1656,15 +1671,8 @@ class Driver:
         self._idle_since.pop(pond, None)  # it's running again — reset its reap grace clock
         # Cancel any not-yet-collected shutdown: this Pond is running again, so the Duck must not exit.
         self.jobs[pond] = [j for j in self.jobs.get(pond, []) if j.get("kind") != "shutdown"]
-        # Pending per-table deletes (plans/deletes.md): the Duck drops each table's whole registry
-        # collection + published data at run start, then the run rebuilds it (or leaves it gone). Consumed
-        # once — cleared as they're handed off.
-        drops = [r[0] for r in self.db.execute(
-            "SELECT table_name FROM pond_pending_drop WHERE pond_id = ?", (meta["pond_id"],)).fetchall()]
-        if drops:
-            self.db.execute("DELETE FROM pond_pending_drop WHERE pond_id = ?", (meta["pond_id"],))
         self.jobs[pond].append({
-            "kind": "begin_run", "f": _iso(f), "force": force, "refresh": refresh, "drop_tables": drops,
+            "kind": "begin_run", "f": _iso(f), "force": force, "refresh": refresh,
             "sources_changed": sources_changed,  # backs pond.sources_changed() (for always_run gating)
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
             # The prior completed run's freshness (the pond's end_f *before* this run advances it),

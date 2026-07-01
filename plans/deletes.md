@@ -1,17 +1,23 @@
 # Deleting a table or Object from a Pond
 
 Status: **implemented.** The engine trigger (`builder._compute`: absent output ⇒ comprehensive) +
-`trickle_io.drop_table`/`drop_meta` + `dataplane.unpublish_table` + `executor.wipe_table` +
-`objects.delete_object` + the `pond_pending_drop` flag (migration 015) carried on `BeginRun` +
-`Driver.delete_table` (force-rebuild) + the `DELETE` routes + `delete-table`/`delete-object` CLI + the
-Data Viewer Delete actions are all wired. Tests: `test_builder_rebuilds_whole_when_output_dropped`
+`trickle_io.drop_table`/`drop_meta` + `dataplane.unpublish_table` + `objects.delete_object` +
+`Driver.delete_table` (a direct, no-run drop) + the `DELETE` routes + `delete-table`/`delete-object` CLI +
+the Data Viewer Delete actions are all wired. Tests: `test_builder_rebuilds_whole_when_output_dropped`
 (the correctness core), `test_unpublish_table`/`test_drop_table`, `test_delete_object*`, and the real-Duck
-`test_delete_table_drops_and_rebuilds`.
+`test_delete_table_removes_now_and_rebuilds_on_next_run`.
 
 The ability to remove **one** published output — a table or an
 [Object](objects.md) — from a Pond *without* refreshing the whole Pond. The escape from "something looks
 off, so I `rm -rf` the Pond and start over" (see the reset/undeploy discussion), scoped to a single
 artifact.
+
+**A delete removes; it does not rebuild.** An earlier draft *forced a run* after the drop so the table
+"came back if still produced" — but a run re-executes the producing Ripple, which instantly recreates the
+table (identically, for a deterministic inlet), so "delete" behaved as "reset" and looked like a no-op.
+The correct behaviour: a delete removes the artifact **now**, with **no run and no freshness change**; it
+reappears only when the Pond next runs *genuinely* (new demand), rebuilt whole by the absence trigger. On
+an idle Pond a deleted table stays gone — which is what the operator meant.
 
 ## The model — one artifact, both copies
 
@@ -96,35 +102,37 @@ doesn't exist (the builder never does this once the trigger lands, so it's a pur
 
 ## The delete mechanism
 
-**Registry side is Duck-owned**, so a table delete is Duck-mediated at a run boundary (the proven
-`refresh` shape), and **not** `previous_f=NEVER`:
+A table delete is a **direct, synchronous, no-run drop** (`Driver.delete_table`), idle-gated:
 
-1. **`executor.wipe_table(name)`** (sibling of [`executor.wipe`](../src/duckstring/duck/executor.py)) —
-   drop the whole registry collection for `name`: the base/main table, `{name}__changelog`, `{name}__band`,
+1. **Idle gate** — reject (409) if a Run is in flight (`start_f > end_f`). A delete is a quiescent
+   operation; it must not race a run writing that table.
+2. **Free the registry.** The registry (`registry.duckdb`) is a single-writer DuckDB file an idle Duck
+   still holds open, so `launcher.terminate(pond, wait=True)` stops it (waiting for the handle to release).
+   The Duck respawns on the next genuine run — nothing is in flight, so there's nothing to reconcile.
+3. **Drop the registry collection** — the Catchment opens the registry directly and calls
+   `trickle_io.drop_table(con, name)`: the base/main table, `{name}__changelog`, `{name}__band`,
    `{name}__droplog`, `_duckstring_agg_{name}`, `_duckstring_acc_{name}`, **and** the `_duckstring_trickle`
-   meta row + floor (a new `trickle_io.drop_meta(con, name)`). For an overwrite table it's just the one
-   table + meta. Uses the `trickle_io` naming helpers so it stays in sync with the collection shape.
-2. **`dataplane.unpublish_table(data_dir, name)`** — remove the published collection: `{name}.parquet`,
-   `{name}/`, `{name}__changelog/`, `{name}__band/`, `{name}__base/`, `{name}__droplog/`, and the `name`
-   entry from the sidecar. Storage-seam ops (`remove`/`rmtree`), so local + object store.
-3. **Flag + rebuild.** A persisted pending-drop (a small `pond_pending_drop(pond_id, table_name)` table,
-   like `pond_window`) survives a Catchment restart; it rides the `BeginRun` job the way `refresh` does.
-   The delete issues a **force** so a run happens promptly: at run start the executor drops the registry
-   collection (1) + unpublishes (2), then the run proceeds. The builder hits the absence trigger →
-   comprehensive → rebuilds `name` from current Source state → `export` republishes it. Other tables
-   re-run under the force but, their logs intact, produce empty deltas (no-ops). **Cost ≈ one
-   `_full_join` of the deleted table**, not a Pond refresh.
-   - If the code **no longer produces** `name`, the run simply doesn't rebuild it → permanently gone. Same
-     verb, both outcomes: *"re-derive the Pond's outputs; `name` returns iff it's still an output."*
-4. **Downstream** self-heals like refresh: the rebuild raises `name`'s floor (bootstrap), so a downstream
-   consumer coverage-misses and full-reads on its next run. Force doesn't advance this Pond's freshness
-   (the data didn't get *fresher*, just rebuilt), so propagation is lazy/honest — identical to refresh.
-   Use `repair` if you want a connected, topologically-sequenced rebuild instead.
+   meta row + floor (`drop_meta`). For an overwrite table it's just the one table + meta.
+4. **Unpublish** — `dataplane.unpublish_table(data_dir, name)` removes the published collection
+   (`{name}.parquet`, `{name}/`, `{name}__changelog/`, `{name}__band/`, `{name}__base/`, `{name}__droplog/`)
+   + the `name` sidecar entry. Storage-seam ops, so local + object store.
 
-**Objects skip all of this** — no registry, so the Catchment removes `objects/{name}/` + the sidecar
-`objects` entry directly (a `objects.delete_object(data_dir, name)` helper). Gate on the Pond being
-**idle** so it can't race a run's `commit_objects` re-adding the entry (a mid-run delete would otherwise be
-undone by the commit). No run needed; rebuild only if you re-run a Ripple that writes it.
+That's it — **no run, no freshness change, no `pond_run`.** The artifact is simply gone.
+
+**Rebuild is lazy and genuine.** The table reappears only when the Pond next runs for a real reason (new
+demand). At that run the builder hits the absence trigger → comprehensive → rebuilds `name` from the
+Sources' *current* state → `export` republishes it, floor raised (bootstrap) so a downstream
+coverage-misses and reloads. On an idle Pond with no standing trigger the table **stays gone** — the
+operator's intent. (An actively-triggered Pond re-produces its output on the next tick; that's inherent —
+you can't keep an output deleted while the Pond keeps running. Deleting a table you don't want is a code
+change, not an operation.)
+
+**No durability flag / no Duck round-trip.** The drop completes inside the API call under the driver lock,
+so there's nothing to persist across a restart (an earlier draft used a `pond_pending_drop` table + a
+`BeginRun`-carried `drop_tables` + a forced run; all removed).
+
+**Objects** are the same shape, minus the registry: `Driver`-free, the route removes `objects/{name}/` +
+the sidecar entry directly (`objects.delete_object`), idle-gated so it can't race a run's `commit_objects`.
 
 ## Surfaces
 

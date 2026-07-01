@@ -152,7 +152,7 @@ function DataViewer({ pondId }: { pondId: PondId }) {
       ? ' It is an append Trickle, so its accumulated history is dropped.' : '';
     setConfirm({
       title: `Delete “${name}”?`,
-      body: `Its data and registry state are removed, then the Pond rebuilds it — or it stays gone if the code no longer produces it.${warn}`,
+      body: `This cannot be undone.${warn}`,
       confirmLabel: 'Delete table',
       action: async () => {
         try {

@@ -129,8 +129,8 @@ def delete_table(
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Delete a table from a Pond (its data + registry state), then force a rebuild. If the code still
-    produces it, the next run rebuilds it; otherwise it stays gone."""
+    """Delete a table from a Pond (its data + registry state) now. It stays gone until the Pond next runs,
+    which recreates it only if the code still produces it. Requires the Pond to be idle."""
     from . import _http
     from .config import resolve_catchment
 
@@ -145,9 +145,9 @@ def delete_table(
     if info and info.get("trickle") == "append":
         typer.echo(f"Warning: '{table}' is an append Trickle — deleting drops its accumulated history.")
     if not yes:
-        typer.confirm(f"Delete table '{outlet}.{table}' (data + state) and rebuild?", abort=True)
+        typer.confirm(f"Delete table '{outlet}.{table}' (data + state)?", abort=True)
     _http.delete(f"{cfg['url']}/api/ponds/{outlet}/tables/{table}", auth=cfg, params=params)
-    typer.echo(f"Deleted '{outlet}.{table}'. It rebuilds on the forced run if still produced.")
+    typer.echo(f"Deleted '{outlet}.{table}'. It returns only if the Pond recreates it on a future run.")
 
 
 def delete_object(

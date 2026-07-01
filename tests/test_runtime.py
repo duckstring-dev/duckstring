@@ -184,10 +184,10 @@ def test_trickle_chain_runs_end_to_end(runtime):
         assert n > 0, f"{name}: empty reconstructed main"
 
 
-def test_delete_table_drops_and_rebuilds(runtime):
-    """`delete-table` drops a Trickle's registry collection + published data, then forces a run that
-    rebuilds it via the builder's absent⇒comprehensive path (plans/deletes.md). On a real Duck: the
-    priced_line main + changelog disappear, then come back with the same current state."""
+def test_delete_table_removes_now_and_rebuilds_on_next_run(runtime):
+    """`delete-table` removes a table (data + registry state) **immediately** — no run, no freshness
+    change — and it reappears only when the Pond next genuinely runs, rebuilt whole by the builder's
+    absent⇒comprehensive trigger (plans/deletes.md)."""
     import duckdb
 
     from duckstring.dataplane import ParquetDataPlane
@@ -196,31 +196,42 @@ def test_delete_table_drops_and_rebuilds(runtime):
     _deploy(url, _TRICKLE_PONDS)
     httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
+    time.sleep(1.0)  # let the chain settle to idle
 
     data_dir = root / "ponds" / "priced" / "m1" / "data"
-    clog = data_dir / "priced_line__changelog"
 
-    def state_count() -> int:
+    def state_count():
         con = duckdb.connect()
         try:
             sql = ParquetDataPlane().read_select(data_dir, "priced_line")
             return con.sql(f"SELECT count(*) FROM ({sql})").fetchone()[0]
         except Exception:
-            return -1  # not published (deleted / not yet rebuilt)
+            return None  # not published (removed)
         finally:
             con.close()
 
+    def run_count():
+        return len(httpx.get(f"{url}/api/runs", params={"pond": "priced", "limit": 1000}, timeout=5.0).json()["runs"])
+
     n_before = state_count()
-    assert n_before > 0, "priced_line never populated"
+    assert n_before and n_before > 0
+    end_f_before = (_pond_status(url, "priced") or {}).get("end_f")
+    runs_before = run_count()
 
-    # Delete the table — its data + registry state — and force a rebuild.
-    r = httpx.request("DELETE", f"{url}/api/ponds/priced/tables/priced_line", timeout=5.0)
+    # Delete → gone at once. No run, no freshness bump.
+    r = httpx.request("DELETE", f"{url}/api/ponds/priced/tables/priced_line", timeout=10.0)
     assert r.status_code == 200, r.text
+    assert state_count() is None, "priced_line was not removed"
+    time.sleep(2.0)  # give any (erroneous) run a chance to appear
+    assert state_count() is None, "priced_line came back with no genuine run (a rebuild was forced)"
+    assert (_pond_status(url, "priced") or {}).get("end_f") == end_f_before, "freshness advanced on a delete"
+    assert run_count() == runs_before, "a Pond Run was logged for a delete"
 
-    # The forced run rebuilds priced_line comprehensively → the changelog reappears and the current state
-    # matches (the whole join, not just a delta).
-    assert _wait(lambda: clog.exists() and state_count() == n_before, timeout=45.0), \
-        f"priced_line did not rebuild (count now {state_count()}, was {n_before})"
+    # A genuine new run (fresh pulse) rebuilds it whole via the absence trigger. The source has grown a
+    # batch since, so it comes back at the *current* full state (≥ the old count), not just a delta.
+    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    assert _wait(lambda: (state_count() or 0) >= n_before, timeout=45.0), \
+        f"priced_line did not rebuild on the next run (count now {state_count()}, was {n_before})"
 
 
 def test_refresh_flag_rebuilds_and_bumps_floor(runtime):
