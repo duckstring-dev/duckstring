@@ -10,7 +10,7 @@ from . import puddle as puddle_cmd
 from . import secret as secret_cmd
 from . import spout as spout_cmd
 from .control import clear, failure_budget, force, kill, refresh, repair, sleep, wake
-from .data import get, query
+from .data import get, get_object, objects, query
 from .deploy import deploy
 from .status import status
 from .trigger import pulse, remove, tap, tide, wave
@@ -77,6 +77,8 @@ pond_cmd.app.command("deploy")(deploy)
 app.command("status")(status)
 app.command("get")(get)
 app.command("query")(query)
+app.command("objects")(objects)
+app.command("get-object")(get_object)
 
 
 def main() -> None:

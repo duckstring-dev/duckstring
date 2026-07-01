@@ -53,6 +53,7 @@ export interface PondInfo {
   major: number;
   kind: string;
   hasTables: boolean; // this major line has published tables — the data viewer is offered
+  hasObjects: boolean; // this major line has published non-tabular Objects — the viewer's Objects tab is offered
   // Fault tolerance + control (Ponds only).
   isFailed: boolean;
   isBlocked: boolean;

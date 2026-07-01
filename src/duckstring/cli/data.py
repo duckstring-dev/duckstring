@@ -45,6 +45,82 @@ def get(
     console.print(f"[green]Written to[/green] {out_dir}")
 
 
+def objects(
+    outlet: str = typer.Argument(..., help="Pond name."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to read from (default: latest)."),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line to read."),
+) -> None:
+    """List a Pond's published non-tabular Objects (models, blobs)."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from . import _http
+    from .config import resolve_catchment
+
+    _, cfg = resolve_catchment(catchment)
+    resp = _http.get(
+        f"{cfg['url']}/api/ponds/{outlet}/objects", auth=cfg, params=_http.pond_params(major, version),
+    )
+    items = resp.json().get("objects", [])
+    console = Console()
+    if not items:
+        console.print("[dim]No objects.[/dim]")
+        return
+
+    def _size(n) -> str:
+        if n is None:
+            return ""
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if n < 1024 or unit == "TB":
+                return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+            n /= 1024
+        return f"{n} B"
+
+    table = Table(show_header=True, header_style="bold dim")
+    for col in ("name", "kind", "size", "freshness"):
+        table.add_column(col)
+    for o in items:
+        kind = "directory" if o.get("is_dir") else f"file{(' · ' + o['ext']) if o.get('ext') else ''}"
+        table.add_row(o["name"], kind, _size(o.get("size")), (o.get("f") or "")[:19].replace("T", " "))
+    console.print(table)
+
+
+def get_object(
+    outlet: str = typer.Argument(..., help="Pond name."),
+    name: str = typer.Argument(..., help="Object name."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to read from (default: latest)."),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line to read."),
+    out: Optional[Path] = typer.Option(None, "--out", "-o", help="Output path (default ./{name}; a dir Object unzips here)."),
+) -> None:
+    """Download a Pond's published Object (a single file, or a directory Object unzipped into a folder)."""
+    from rich.console import Console
+
+    from . import _http
+    from .config import resolve_catchment
+
+    _, cfg = resolve_catchment(catchment)
+    console = Console()
+    console.print(f"Fetching [bold]{outlet}.{name}[/bold]...")
+    resp = _http.get(
+        f"{cfg['url']}/api/ponds/{outlet}/objects/{name}", auth=cfg, params=_http.pond_params(major, version),
+    )
+    # A directory Object comes back as a zip; a single file as raw bytes. Detect the zip by content.
+    is_zip = resp.headers.get("content-type", "").startswith("application/zip")
+    if is_zip:
+        dest = Path(out) if out else Path(name)
+        dest.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            zf.extractall(dest)
+        console.print(f"[green]Written to[/green] {dest}/")
+    else:
+        dest = Path(out) if out else Path(name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(resp.content)
+        console.print(f"[green]Written to[/green] {dest}")
+
+
 def query(
     outlet: str = typer.Argument(..., help="Pond name."),
     ripple: Optional[str] = typer.Argument(None, help="Ripple name (default query: SELECT * LIMIT 10)."),

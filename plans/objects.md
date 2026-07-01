@@ -1,6 +1,13 @@
 # Objects: non-tabular Pond outputs
 
-Status: **designed, unbuilt.** The gap: a deployed Pond can only publish *tables* (`write_table` → the
+Status: **implemented (v1).** `src/duckstring/objects.py` is the module; `Pond.write_object` /
+`read_object` / `object_path` (+ Puddle parity) are the surface; `RippleExecutor.export` / the local
+runner commit staged Objects after the table export; the sidecar gains an `objects` section; the read API
+(`/api/ponds/{name}/objects[/{obj}]`) + `has_objects` on `/api/status` + the Data Viewer **Objects** tab
++ `duckstring objects` / `get-object` + cross-Catchment duct/draw transfer are all wired. Tests:
+`tests/test_objects.py`. Overwrite-only / ripple-only (Trickle Objects remain a future extension).
+
+The original gap: a deployed Pond could only publish *tables* (`write_table` → the
 DuckDB registry → the data plane). A Ripple that produces a non-tabular artifact — an ML model, a
 serialised vectoriser, a rendered report, a blob — has **nowhere blessed to put it**. Only the *puddle*
 handle has a general escape (`Puddle.path`, `core.py`); the deployed `Pond` handle has none.

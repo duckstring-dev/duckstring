@@ -271,6 +271,11 @@ def publish_plan(con, data_dir: Path, f=None) -> list[str]:
         if m["mode"] == "merge":
             entry["f_base"] = m.get("f_base")  # fold watermark — the read reconstructs base ⊎ changelog>f_base
         payload[base] = entry
+    # Objects persist until overwritten (not per-run declared), so carry their sidecar section forward —
+    # this run's staged Object commits fold their fresh entries in afterwards (see objects.commit_objects).
+    existing_objects = trickle.load_sidecar(data_dir).get("objects")
+    if existing_objects:
+        payload["objects"] = existing_objects
     trickle.write_sidecar(data_dir, payload)
     return tables
 

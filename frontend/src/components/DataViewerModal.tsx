@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLiveStore, THEME_BLOCKED, THEME_BRAND } from '@/lib/store';
 import {
-  fetchTables, fetchFreshness, fetchHistory, fetchCount, fetchPage,
-  type DataQuery, type TableInfo, type TrickleMode, type PageResult, UnauthorizedError,
+  fetchTables, fetchFreshness, fetchHistory, fetchCount, fetchPage, fetchObjects, downloadObject,
+  type DataQuery, type TableInfo, type TrickleMode, type PageResult, type ObjectInfo, UnauthorizedError,
 } from '@/lib/api';
 import type { PondId } from '@/lib/types';
 
@@ -38,7 +38,10 @@ export function DataViewerModal() {
 function DataViewer({ pondId }: { pondId: PondId }) {
   const close = useLiveStore((s) => s.closeDataViewer);
   const pondName = useLiveStore((s) => s.ponds[pondId]?.name ?? pondId);
+  const hasObjects = useLiveStore((s) => s.pondInfo[pondId]?.hasObjects ?? false);
 
+  // Tabular data vs non-tabular Objects (models/blobs). Objects are a separate published surface.
+  const [view, setView] = useState<'tables' | 'objects'>('tables');
   const [tables, setTables] = useState<TableInfo[] | null>(null);
   const [table, setTable] = useState<string | null>(null);
   const [mode, setMode] = useState<'browse' | 'query'>('browse');
@@ -92,6 +95,8 @@ function DataViewer({ pondId }: { pondId: PondId }) {
           setTable(ts[0].name);
           setSqlText(browseSql(pondName, ts[0].name));
           void loadFreshness(ts[0].name, ts[0]);
+        } else if (hasObjects) {
+          setView('objects'); // no tables — open straight to the Objects tab
         }
       } catch (e) {
         on401(e);
@@ -177,7 +182,24 @@ function DataViewer({ pondId }: { pondId: PondId }) {
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderBottom: '1px solid #27272a', flexShrink: 0 }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: '#e4e4e7' }}>{pondName}</span>
-          {tables && tables.length > 0 && (
+          {hasObjects && tables && tables.length > 0 && (
+            <span style={{ display: 'inline-flex', border: '1px solid #3f3f46', borderRadius: 6, overflow: 'hidden' }}>
+              {(['tables', 'objects'] as const).map((v) => (
+                <button
+                  key={v}
+                  onClick={() => setView(v)}
+                  style={{
+                    background: view === v ? '#27272a' : 'transparent', border: 'none', padding: '5px 11px',
+                    color: view === v ? '#e4e4e7' : '#71717a', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  {v === 'tables' ? 'Tables' : 'Objects'}
+                </button>
+              ))}
+            </span>
+          )}
+          {view === 'tables' && tables && tables.length > 0 && (
             <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
               <select
                 value={mode === 'browse' ? table ?? '' : ''}
@@ -196,12 +218,14 @@ function DataViewer({ pondId }: { pondId: PondId }) {
               <span style={{ position: 'absolute', right: 9, pointerEvents: 'none', color: '#71717a', fontSize: 9 }}>▼</span>
             </span>
           )}
-          {mode === 'query' && (
+          {view === 'tables' && mode === 'query' && (
             <span style={{ fontSize: 10, fontWeight: 700, color: '#ee9333', letterSpacing: '0.06em' }}>QUERY</span>
           )}
-          <span style={{ fontSize: 11, color: '#71717a' }}>
-            {total == null ? '' : `${total.toLocaleString()} row${total === 1 ? '' : 's'}`}
-          </span>
+          {view === 'tables' && (
+            <span style={{ fontSize: 11, color: '#71717a' }}>
+              {total == null ? '' : `${total.toLocaleString()} row${total === 1 ? '' : 's'}`}
+            </span>
+          )}
           <button
             onClick={close}
             title="Close (Esc)"
@@ -215,7 +239,7 @@ function DataViewer({ pondId }: { pondId: PondId }) {
         </div>
 
         {/* Freshness window — only for a Trickle table being browsed */}
-        {mode === 'browse' && trickle && (
+        {view === 'tables' && mode === 'browse' && trickle && (
           <FreshnessWindow
             freshness={freshness}
             floor={floor}
@@ -227,6 +251,7 @@ function DataViewer({ pondId }: { pondId: PondId }) {
         )}
 
         {/* SQL box */}
+        {view === 'tables' && (
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '10px 14px', borderBottom: '1px solid #27272a', flexShrink: 0 }}>
           <textarea
             ref={taRef}
@@ -274,15 +299,20 @@ function DataViewer({ pondId }: { pondId: PondId }) {
             )}
           </div>
         </div>
+        )}
 
-        {/* Grid */}
+        {/* Body: the tabular grid, or the Objects list */}
         <div style={{ flex: 1, minHeight: 0 }}>
-          {tablesError ? (
+          {view === 'objects' ? (
+            <ObjectsPanel pondId={pondId} />
+          ) : tablesError ? (
             <div style={{ padding: 16, color: '#ef4444', fontSize: 12.5 }}>{tablesError}</div>
           ) : tables == null ? (
             <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>Loading…</div>
           ) : query == null ? (
-            <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>This Pond has no exported tables.</div>
+            <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>
+              This Pond has no exported tables.{hasObjects ? ' See the Objects tab.' : ''}
+            </div>
           ) : (
             <VirtualGrid key={queryKey} query={query} onTotal={setTotal} onRowClick={setHistoryPk} sort={sort} onSort={cycleSort} />
           )}
@@ -292,6 +322,95 @@ function DataViewer({ pondId }: { pondId: PondId }) {
           <HistoryOverlay pond={pondId} pondName={pondName} table={table} pk={historyPk} onClose={() => setHistoryPk(null)} />
         )}
       </div>
+    </div>
+  );
+}
+
+// ─── Objects list ────────────────────────────────────────────────────────────
+
+function fmtBytes(n: number | null): string {
+  if (n == null) return '';
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+function ObjectsPanel({ pondId }: { pondId: PondId }) {
+  const [objects, setObjects] = useState<ObjectInfo[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      try {
+        setObjects(await fetchObjects(pondId));
+      } catch (e) {
+        on401(e);
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    }, 0);
+    return () => clearTimeout(t);
+  }, [pondId]);
+
+  const download = async (o: ObjectInfo) => {
+    setBusy(o.name);
+    try {
+      await downloadObject(pondId, o);
+    } catch (e) {
+      on401(e);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (error) return <div style={{ padding: 16, color: '#ef4444', fontSize: 12.5 }}>{error}</div>;
+  if (objects == null) return <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>Loading…</div>;
+  if (objects.length === 0) return <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>No objects.</div>;
+
+  return (
+    <div style={{ height: '100%', overflow: 'auto' }}>
+      <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12, color: '#d4d4d8' }}>
+        <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
+          <tr>
+            <th style={th({})}>name</th>
+            <th style={th({})}>kind</th>
+            <th style={th({ textAlign: 'right' })}>size</th>
+            <th style={th({})}>freshness</th>
+            <th style={th({ textAlign: 'right' })}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {objects.map((o, i) => (
+            <tr key={o.name} style={{ height: ROW_H, background: i % 2 ? '#121217' : 'transparent' }}>
+              <td style={td({ color: '#e4e4e7', fontWeight: 600 })} title={o.name}>{o.name}</td>
+              <td style={td({ color: '#a1a1aa' })}>{o.is_dir ? 'directory' : `file${o.ext ? ` · ${o.ext}` : ''}`}</td>
+              <td style={td({ textAlign: 'right', color: '#a1a1aa' })}>{fmtBytes(o.size)}</td>
+              <td style={td({ color: '#a1a1aa' })}>{o.f ? fmtTs(o.f) : <span style={{ color: '#3f3f46' }}>·</span>}</td>
+              <td style={td({ textAlign: 'right' })}>
+                <button
+                  onClick={() => download(o)}
+                  disabled={busy === o.name}
+                  title={o.is_dir ? 'Download as a zip' : 'Download'}
+                  style={{
+                    background: 'transparent', border: '1px solid #3f3f46', borderRadius: 5, padding: '2px 10px',
+                    color: busy === o.name ? '#52525b' : '#06c4e6', fontSize: 11.5, fontWeight: 700,
+                    cursor: busy === o.name ? 'default' : 'pointer', fontFamily: 'inherit',
+                  }}
+                >
+                  {busy === o.name ? '…' : o.is_dir ? 'Download .zip' : 'Download'}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

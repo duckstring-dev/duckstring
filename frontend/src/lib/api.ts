@@ -71,6 +71,7 @@ export interface RawPond {
   spout: { destination: string; table: string | null; mode: string; armed: boolean } | null;
   version: string;
   has_tables: boolean; // this major line has published at least one table — the data viewer is offered
+  has_objects: boolean; // this major line has published at least one non-tabular Object — the Objects tab is offered
   status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
   gen: number;
   runs_completed: number;
@@ -471,6 +472,42 @@ export async function fetchTables(pond: string): Promise<TableInfo[]> {
   const { name, major } = splitPond(pond);
   const qs = major === undefined ? '' : `?major=${major}`;
   return getJSON<{ tables: TableInfo[] }>(`/ponds/${encodeURIComponent(name)}/tables${qs}`).then((d) => d.tables);
+}
+
+// A published non-tabular Object (an ML model, a serialised blob) — see plans/objects.md.
+export interface ObjectInfo {
+  name: string;
+  size: number | null; // total byte size (payload sum for a directory Object)
+  f: string | null; // the run freshness that produced it (ISO)
+  is_dir: boolean; // a directory Object (published/downloaded as a unit) vs a single file
+  ext: string; // the single-file Object's extension (e.g. ".pkl"); "" for a dir Object or an extension-less blob
+}
+
+// The non-tabular Objects this Pond's major line has published — the viewer's Objects list.
+export async function fetchObjects(pond: string): Promise<ObjectInfo[]> {
+  const { name, major } = splitPond(pond);
+  const qs = major === undefined ? '' : `?major=${major}`;
+  return getJSON<{ objects: ObjectInfo[] }>(`/ponds/${encodeURIComponent(name)}/objects${qs}`).then((d) => d.objects);
+}
+
+// Download one Object (a single file, or a directory Object as a zip). Fetched with auth then handed to the
+// browser as a blob (a plain link wouldn't carry the auth header the Catchment may require).
+export async function downloadObject(pond: string, obj: ObjectInfo): Promise<void> {
+  const { name, major } = splitPond(pond);
+  const qs = major === undefined ? '' : `?major=${major}`;
+  const url = `${apiBase()}/ponds/${encodeURIComponent(name)}/objects/${encodeURIComponent(obj.name)}${qs}`;
+  const res = await fetch(url, { headers: authHeaders() });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error(`download failed: ${res.status}`);
+  const blob = await res.blob();
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = obj.is_dir ? `${obj.name}.zip` : `${obj.name}${obj.ext}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(href);
 }
 
 // The distinct run freshnesses (newest-first) of a Trickle table — the window selector's options.

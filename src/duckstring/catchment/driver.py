@@ -1876,6 +1876,22 @@ class Driver:
         except Exception:
             return set()
 
+    def _has_objects(self, key: str) -> bool:
+        """Whether this major line has published any non-tabular Object — gates the viewer's Objects tab."""
+        from pathlib import Path
+
+        from ..objects import list_objects
+        from .registry import pond_data_dir
+
+        meta = self.meta.get(key, {})
+        if meta.get("is_draw"):
+            return False
+        try:
+            data_dir = pond_data_dir(Path(self.root), meta["name"], meta["major"], self.data_root)
+            return bool(list_objects(data_dir))
+        except Exception:
+            return False
+
     def status(self) -> dict:
         with self.lock:
             from ..engine import NEVER, min_target
@@ -1893,6 +1909,7 @@ class Driver:
                 ps = self.state.pond_states[key]
                 # Whether this major line has published any tables — gates the Pond's data viewer.
                 has_tables = bool(self._exported_tables(key))
+                has_objects = self._has_objects(key)
                 # Ripples belonging to this Pond, with their live per-Ripple state and intra-Pond edges.
                 ripples = []
                 ripple_edges = []
@@ -1968,6 +1985,7 @@ class Driver:
                     ),
                     "version": self.meta[key]["version"],
                     "has_tables": has_tables,
+                    "has_objects": has_objects,
                     "status": st,
                     "gen": ps.runs_started,
                     "runs_completed": ps.runs_completed,

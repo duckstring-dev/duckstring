@@ -142,6 +142,7 @@ function transformStatus(payload: StatusPayload): StatusSlice {
       major: p.major,
       kind: p.kind,
       hasTables: p.has_tables ?? false,
+      hasObjects: p.has_objects ?? false,
       isFailed: p.is_failed,
       isBlocked: p.is_blocked,
       isKilled: p.is_killed,

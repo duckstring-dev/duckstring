@@ -180,3 +180,10 @@ duckstring query {pond} [ripple] [--sql SQL | --sql @file.sql]
 ```
 
 Run SQL against the Pond's exported tables. With just a `ripple` argument: `SELECT * FROM {pond}.{ripple} LIMIT 10`. Without a format flag, results print to the terminal; with one, they're written to `./ponds/{pond}/[{ripple}/]{filename}` or `--path`.
+
+```bash
+duckstring objects {pond}                     # list a Pond's non-tabular Objects
+duckstring get-object {pond} {name} [-o PATH]  # download one (a file, or a directory Object unzipped)
+```
+
+List / download a Pond's [Objects](python-api.md#objects--non-tabular-outputs) — models, blobs, and other non-tabular outputs. A single-file Object writes to `./{name}` (or `--out`); a directory Object unzips into it.

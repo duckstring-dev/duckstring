@@ -306,6 +306,26 @@ class Puddle:
             return self.con.read_csv(str(src))
         return self.con.read_parquet(str(src))
 
+    def write_object(self, name: str, src) -> None:
+        """Seed a non-tabular **Object** for the Source under test (the puddle counterpart of
+        :meth:`Pond.write_object`) — ``src`` is a path (file or dir), ``bytes``, or a binary file-like.
+        Published under ``{path}/objects/{name}/`` so a Pond reading ``"{source}.{name}"`` resolves it."""
+        from .objects import write_object_now
+
+        write_object_now(self.path, name, src)
+
+    def read_object(self, name: str) -> bytes:
+        """A single-file Object seeded for this Source — its bytes."""
+        from .objects import read_object as _read
+
+        return _read(self.path, name)
+
+    def object_path(self, name: str) -> Path:
+        """A local path to an Object seeded for this Source (file or directory)."""
+        from .objects import object_path as _path
+
+        return _path(self.path, name, self.path / ".object_cache")
+
     def catchment(self, name: str | None = None) -> Catchment:
         """A :class:`Catchment` client bound to this puddle's Source and scratch connection."""
         url, headers = resolve_catchment_auth(name or self.default_catchment)
@@ -316,7 +336,7 @@ class Pond:
     def __init__(
         self, name: str, version: str, con, root,
         source_majors: dict[str, int] | None = None, f=None, previous_f=None, data_root: str | None = None,
-        sources_changed: bool = True, skip_sink=None,
+        sources_changed: bool = True, skip_sink=None, staging_dir=None, own_data_dir=None,
     ) -> None:
         from .engine.core import NEVER
 
@@ -325,6 +345,12 @@ class Pond:
         # Both default to the always-changed / no-op behaviour for local (puddle) runs.
         self._sources_changed = sources_changed
         self._skip_sink = skip_sink
+        # Non-tabular Objects (see objects.py / plans/objects.md). ``staging_dir`` is the local dir a
+        # ``write_object`` stages into (committed at export by the runtime); ``own_data_dir`` is where this
+        # Pond's own Objects are published (for own reads). Both set by the runtime; None outside a run.
+        self._staging_dir = staging_dir
+        self._own_data_dir = own_data_dir
+        self._object_scratch = None
         self.name = name
         self.version = version
         self.con = con
@@ -381,6 +407,72 @@ class Pond:
                 raise
 
         retry_on_lock(_write)  # a concurrent write conflict queues + retries rather than failing
+
+    def write_object(self, name: str, src) -> None:
+        """Publish a **non-tabular** artifact (an ML model, a serialised blob, a rendered file) under
+        ``name`` — the Object counterpart of :meth:`write_table`. ``src`` is a filesystem path (a file **or**
+        a directory, published as one unit), raw ``bytes``, or a binary file-like. Ripple-only, overwrite;
+        the write is *staged* now and committed atomically when the run publishes (a later Ripple failure
+        leaves the last-good Object intact). Read it back with :meth:`read_object` / :meth:`object_path`."""
+        from .objects import stage_object
+
+        if self._staging_dir is None:
+            raise RuntimeError("write_object is only available inside a Pond Run (no staging context)")
+        stage_object(Path(self._staging_dir), name, src)
+
+    def read_object(self, ref: str) -> bytes:
+        """A single-file Object's **bytes** — own (``"name"``) or a Source's (``"source.name"``). Raises for
+        a *directory* Object (use :meth:`object_path`). Overwrite-only, so this reads the latest publish."""
+        from .objects import read_object as _read
+        from .objects import read_staged
+
+        source, name = self._split_object_ref(ref)
+        if source is None:
+            if self._staging_dir is not None:
+                staged = read_staged(Path(self._staging_dir), name)
+                if staged is not None:
+                    return staged
+            return _read(self._own_store(), name)
+        return _read(self._source_data_dir(source), name)
+
+    def object_path(self, ref: str) -> Path:
+        """A local filesystem **path** to an Object — own (``"name"``) or a Source's (``"source.name"``) —
+        valid for a single file *and* a directory Object. A remote (object-store) Object is materialised to
+        a run-scoped scratch dir once; a local one is handed back in place (read-only by contract)."""
+        from .objects import object_path as _path
+        from .objects import staged_object_path
+
+        source, name = self._split_object_ref(ref)
+        if source is None:
+            if self._staging_dir is not None:
+                sp = staged_object_path(Path(self._staging_dir), name)
+                if sp is not None:
+                    return sp
+            return _path(self._own_store(), name, self._scratch())
+        return _path(self._source_data_dir(source), name, self._scratch())
+
+    def _split_object_ref(self, ref: str):
+        """``"source.name"`` → ``(source, name)``; an own ``"name"`` (or ``"self.name"``) → ``(None, name)``."""
+        if "." in ref:
+            source_pond, name = ref.split(".", 1)
+            if source_pond != self.name:
+                return source_pond, name
+            return None, name
+        return None, ref
+
+    def _own_store(self):
+        from .storage import LocalStorage, Storage
+
+        if self._own_data_dir is None:
+            raise RuntimeError("read_object/object_path need a run context (no own data dir)")
+        return self._own_data_dir if isinstance(self._own_data_dir, Storage) else LocalStorage(Path(self._own_data_dir))
+
+    def _scratch(self) -> Path:
+        import tempfile
+
+        if self._object_scratch is None:
+            self._object_scratch = Path(tempfile.mkdtemp(prefix="duckstring-obj-"))
+        return self._object_scratch
 
     def _source_data_dir(self, source_pond: str):
         """The published data location for a foreign Source as a :class:`~duckstring.storage.Storage`,
