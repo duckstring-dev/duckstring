@@ -25,6 +25,10 @@ const COL_LABELS: Record<string, string> = { [FRESH]: 'freshness', [UPDATES]: 'u
 // History event → label colour (reusing the theme): create = white, update = brand cyan, delete = blocked red.
 const EVENT_COLOR: Record<string, string> = { create: '#f4f4f5', update: THEME_BRAND, delete: THEME_BLOCKED };
 
+// A destructive-confirmation request handed to the shared themed ConfirmDialog. `action` is the work to
+// run on confirm (the dialog awaits it, then closes).
+type ConfirmOpts = { title: string; body: string; confirmLabel: string; action: () => Promise<void> | void };
+
 const browseSql = (pond: string, table: string) => `SELECT * FROM "${pond}"."${table}" LIMIT 1000`;
 const on401 = (e: unknown) => e instanceof UnauthorizedError && useLiveStore.setState({ needsKey: true });
 // A freshness ISO → compact, stable 'YYYY-MM-DD HH:MM:SS' (backend serialises in UTC).
@@ -59,6 +63,8 @@ function DataViewer({ pondId }: { pondId: PondId }) {
   const [fHi, setFHi] = useState<string | null>(null);
   // The record whose changelog history is open (merge only).
   const [historyPk, setHistoryPk] = useState<Record<string, unknown> | null>(null);
+  // A pending destructive confirmation (themed in-app dialog), shared by the table + object deletes.
+  const [confirm, setConfirm] = useState<ConfirmOpts | null>(null);
   // Opt-in column sort (null = the efficient base order). Clicking a header cycles asc → desc → off.
   const [sort, setSort] = useState<{ col: string | null; desc: boolean }>({ col: null, desc: false });
   const cycleSort = (col: string) =>
@@ -111,10 +117,12 @@ function DataViewer({ pondId }: { pondId: PondId }) {
   }, []);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && (historyPk ? setHistoryPk(null) : close());
+    // When a confirm dialog is open it owns Escape (it closes itself); don't also close the modal.
+    const onKey = (e: KeyboardEvent) =>
+      e.key === 'Escape' && !confirm && (historyPk ? setHistoryPk(null) : close());
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [close, historyPk]);
+  }, [close, historyPk, confirm]);
 
   const expand = () => {
     setExpanded(true);
@@ -137,23 +145,31 @@ function DataViewer({ pondId }: { pondId: PondId }) {
     setSort({ col: null, desc: false }); // columns differ between tables
     void loadFreshness(t, ti);
   };
-  const deleteCurrentTable = async () => {
+  const deleteCurrentTable = () => {
     if (!table) return;
-    const warn = trickle === 'append' ? '\n\nThis is an append Trickle — its accumulated history is dropped.' : '';
-    if (!window.confirm(`Delete table "${table}" (data + state) and rebuild?${warn}`)) return;
-    try {
-      await deleteTable(pondId, table);
-      const ts = await fetchTables(pondId); // it may reappear once the forced run rebuilds it
-      setTables(ts);
-      setTable(ts[0]?.name ?? null);
-      if (ts[0]) {
-        setSqlText(browseSql(pondName, ts[0].name));
-        void loadFreshness(ts[0].name, ts[0]);
-      }
-    } catch (e) {
-      on401(e);
-      setTablesError(e instanceof Error ? e.message : String(e));
-    }
+    const name = table;
+    const warn = trickle === 'append'
+      ? ' It is an append Trickle, so its accumulated history is dropped.' : '';
+    setConfirm({
+      title: `Delete “${name}”?`,
+      body: `Its data and registry state are removed, then the Pond rebuilds it — or it stays gone if the code no longer produces it.${warn}`,
+      confirmLabel: 'Delete table',
+      action: async () => {
+        try {
+          await deleteTable(pondId, name);
+          const ts = await fetchTables(pondId); // it may reappear once the forced run rebuilds it
+          setTables(ts);
+          setTable(ts[0]?.name ?? null);
+          if (ts[0]) {
+            setSqlText(browseSql(pondName, ts[0].name));
+            void loadFreshness(ts[0].name, ts[0]);
+          }
+        } catch (e) {
+          on401(e);
+          setTablesError(e instanceof Error ? e.message : String(e));
+        }
+      },
+    });
   };
   const runQuery = () => {
     if (!sqlText.trim()) return;
@@ -337,7 +353,7 @@ function DataViewer({ pondId }: { pondId: PondId }) {
         {/* Body: the tabular grid, or the Objects list */}
         <div style={{ flex: 1, minHeight: 0 }}>
           {view === 'objects' ? (
-            <ObjectsPanel pondId={pondId} canManage={canManage} />
+            <ObjectsPanel pondId={pondId} canManage={canManage} requestConfirm={setConfirm} />
           ) : tablesError ? (
             <div style={{ padding: 16, color: '#ef4444', fontSize: 12.5 }}>{tablesError}</div>
           ) : tables == null ? (
@@ -354,6 +370,8 @@ function DataViewer({ pondId }: { pondId: PondId }) {
         {historyPk && table && (
           <HistoryOverlay pond={pondId} pondName={pondName} table={table} pk={historyPk} onClose={() => setHistoryPk(null)} />
         )}
+
+        {confirm && <ConfirmDialog opts={confirm} onClose={() => setConfirm(null)} />}
       </div>
     </div>
   );
@@ -374,7 +392,9 @@ function fmtBytes(n: number | null): string {
   return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
 }
 
-function ObjectsPanel({ pondId, canManage }: { pondId: PondId; canManage: boolean }) {
+function ObjectsPanel({ pondId, canManage, requestConfirm }: {
+  pondId: PondId; canManage: boolean; requestConfirm: (o: ConfirmOpts) => void;
+}) {
   const [objects, setObjects] = useState<ObjectInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -405,18 +425,24 @@ function ObjectsPanel({ pondId, canManage }: { pondId: PondId; canManage: boolea
     }
   };
 
-  const remove = async (o: ObjectInfo) => {
-    if (!window.confirm(`Delete object "${o.name}"? It returns only if a Ripple writes it again.`)) return;
-    setBusy(o.name);
-    try {
-      await deleteObject(pondId, o.name);
-      await load();
-    } catch (e) {
-      on401(e);
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
+  const remove = (o: ObjectInfo) => {
+    requestConfirm({
+      title: `Delete “${o.name}”?`,
+      body: 'This Object is removed. It returns only if a Ripple writes it again.',
+      confirmLabel: 'Delete object',
+      action: async () => {
+        setBusy(o.name);
+        try {
+          await deleteObject(pondId, o.name);
+          await load();
+        } catch (e) {
+          on401(e);
+          setError(e instanceof Error ? e.message : String(e));
+        } finally {
+          setBusy(null);
+        }
+      },
+    });
   };
 
   if (error) return <div style={{ padding: 16, color: '#ef4444', fontSize: 12.5 }}>{error}</div>;
@@ -817,6 +843,76 @@ function HistoryOverlay({
               </tbody>
             </table>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Themed confirmation dialog (replaces window.confirm) ────────────────────
+
+function ConfirmDialog({ opts, onClose }: { opts: ConfirmOpts; onClose: () => void }) {
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !busy) onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [busy, onClose]);
+
+  const go = async () => {
+    setBusy(true);
+    try {
+      await opts.action();
+    } finally {
+      onClose();
+    }
+  };
+
+  return (
+    <div
+      onClick={() => !busy && onClose()}
+      style={{
+        position: 'absolute', inset: 0, zIndex: 20, display: 'flex', alignItems: 'center',
+        justifyContent: 'center', background: 'rgba(9, 9, 11, 0.66)', padding: 16,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        role="alertdialog"
+        aria-label={opts.title}
+        style={{
+          background: '#101014', border: '1px solid #3f3f46', borderRadius: 10,
+          width: 'min(420px, 92vw)', padding: '18px 18px 16px', boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
+        }}
+      >
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: '#e4e4e7', marginBottom: 8 }}>{opts.title}</div>
+        <div style={{ fontSize: 12.5, color: '#a1a1aa', lineHeight: 1.55, marginBottom: 16 }}>{opts.body}</div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button
+            onClick={onClose}
+            disabled={busy}
+            style={{
+              background: 'transparent', border: '1px solid #3f3f46', borderRadius: 6, padding: '8px 15px',
+              color: '#a1a1aa', fontSize: 12.5, fontWeight: 700, cursor: busy ? 'default' : 'pointer',
+              fontFamily: 'inherit',
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={go}
+            disabled={busy}
+            style={{
+              background: THEME_BLOCKED, border: 'none', borderRadius: 6, padding: '8px 16px',
+              color: busy ? '#fca5a5' : '#f4f4f5', fontSize: 12.5, fontWeight: 700,
+              cursor: busy ? 'default' : 'pointer', fontFamily: 'inherit',
+            }}
+          >
+            {busy ? '…' : opts.confirmLabel}
+          </button>
         </div>
       </div>
     </div>
