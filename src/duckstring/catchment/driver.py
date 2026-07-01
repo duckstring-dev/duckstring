@@ -449,13 +449,16 @@ class Driver:
         from pathlib import Path
 
         from ..dataplane import unpublish_table
-        from ..trickle_io import drop_table
+        from ..trickle_io import base_table_name, drop_table
         from .registry import pond_connect, pond_data_dir
 
         with self.lock:
             ps = self.state.pond_states.get(pond)
             if ps is not None and ps.start_f > ps.end_f:
                 raise ValueError("the Pond is running — delete a table when it is idle")
+            # A Trickle companion (changelog/band/droplog/base) resolves to its base — the collection is one
+            # deletable unit; deleting a changelog alone would corrupt the reconstructable main.
+            table = base_table_name(table)
             meta = self.meta[pond]
             name, major = meta["name"], meta["major"]
             # An idle Duck still holds registry.duckdb open, so free it before dropping (it respawns on the

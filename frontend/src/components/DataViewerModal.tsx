@@ -29,6 +29,15 @@ const EVENT_COLOR: Record<string, string> = { create: '#f4f4f5', update: THEME_B
 // run on confirm (the dialog awaits it, then closes).
 type ConfirmOpts = { title: string; body: string; confirmLabel: string; action: () => Promise<void> | void };
 
+// A Trickle companion (X__changelog / X__band / X__droplog / X__base) belongs to base table X — a delete
+// takes the whole collection, so a companion resolves to its base (mirrors trickle_io.base_table_name).
+function baseTableName(name: string): string {
+  for (const s of ['__changelog', '__band', '__droplog', '__base']) {
+    if (name.endsWith(s) && name.length > s.length) return name.slice(0, -s.length);
+  }
+  return name;
+}
+
 const browseSql = (pond: string, table: string) => `SELECT * FROM "${pond}"."${table}" LIMIT 1000`;
 const on401 = (e: unknown) => e instanceof UnauthorizedError && useLiveStore.setState({ needsKey: true });
 // A freshness ISO → compact, stable 'YYYY-MM-DD HH:MM:SS' (backend serialises in UTC).
@@ -147,17 +156,22 @@ function DataViewer({ pondId }: { pondId: PondId }) {
   };
   const deleteCurrentTable = () => {
     if (!table) return;
-    const name = table;
-    const warn = trickle === 'append'
-      ? ' It is an append Trickle, so its accumulated history is dropped.' : '';
+    const target = table;
+    // A Trickle companion (changelog/band/droplog/base) is one deletable unit with its base table.
+    const base = baseTableName(target);
+    const baseMode = tables?.find((t) => t.name === base)?.trickle ?? null;
+    const notes: string[] = [];
+    if (base !== target) notes.push(`“${target}” is part of table “${base}”, so the whole table is deleted.`);
+    if (baseMode === 'merge') notes.push('Its changelog is removed too.');
+    else if (baseMode === 'append') notes.push('It is an append Trickle — its droplog and accumulated history are dropped.');
     setConfirm({
-      title: `Delete “${name}”?`,
-      body: `This cannot be undone.${warn}`,
+      title: `Delete “${base}”?`,
+      body: `This cannot be undone.${notes.length ? ' ' + notes.join(' ') : ''}`,
       confirmLabel: 'Delete table',
       action: async () => {
         try {
-          await deleteTable(pondId, name);
-          const ts = await fetchTables(pondId); // it may reappear once the forced run rebuilds it
+          await deleteTable(pondId, target); // the Catchment resolves a companion to its base
+          const ts = await fetchTables(pondId);
           setTables(ts);
           setTable(ts[0]?.name ?? null);
           if (ts[0]) {

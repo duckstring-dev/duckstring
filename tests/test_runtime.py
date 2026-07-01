@@ -232,6 +232,15 @@ def test_delete_table_removes_now_and_rebuilds_on_next_run(runtime):
     httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
     assert _wait(lambda: (state_count() or 0) >= n_before, timeout=45.0), \
         f"priced_line did not rebuild on the next run (count now {state_count()}, was {n_before})"
+    time.sleep(1.0)
+
+    # Deleting the *changelog* companion resolves to the base table — the whole merge collection goes,
+    # never a changelog stranded from its main.
+    assert (root / "ponds" / "priced" / "m1" / "data" / "priced_line__changelog").exists()
+    r = httpx.request("DELETE", f"{url}/api/ponds/priced/tables/priced_line__changelog", timeout=10.0)
+    assert r.status_code == 200, r.text
+    assert state_count() is None, "deleting the changelog left the main"
+    assert not (root / "ponds" / "priced" / "m1" / "data" / "priced_line__changelog").exists()
 
 
 def test_refresh_flag_rebuilds_and_bumps_floor(runtime):

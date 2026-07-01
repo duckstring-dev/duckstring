@@ -131,6 +131,14 @@ change, not an operation.)
 so there's nothing to persist across a restart (an earlier draft used a `pond_pending_drop` table + a
 `BeginRun`-carried `drop_tables` + a forced run; all removed).
 
+**Companions resolve to the base.** `list_tables` surfaces a Trickle's companions (`X__changelog`,
+`X__band`, `X__droplog`) as raw-navigable tables, so a delete could target one. Deleting a companion in
+isolation is *never* safe — a merge main is reconstructed from base ⊎ changelog, so a stranded changelog
+corrupts it. `Driver.delete_table` therefore normalises any companion target to its base
+(`trickle_io.base_table_name`) and takes the **whole collection**. The CLI/UI mirror the resolver only for
+messaging: deleting a merge notes "its changelog is removed too"; an append notes "its droplog + history";
+a companion target notes it deletes the whole table.
+
 **Objects** are the same shape, minus the registry: `Driver`-free, the route removes `objects/{name}/` +
 the sidecar entry directly (`objects.delete_object`), idle-gated so it can't race a run's `commit_objects`.
 

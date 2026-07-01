@@ -131,23 +131,30 @@ def delete_table(
 ) -> None:
     """Delete a table from a Pond (its data + registry state) now. It stays gone until the Pond next runs,
     which recreates it only if the code still produces it. Requires the Pond to be idle."""
+    from duckstring.trickle_io import base_table_name
+
     from . import _http
     from .config import resolve_catchment
 
     _, cfg = resolve_catchment(catchment)
     params = _http.pond_params(major, version)
-    # Warn if it's an append Trickle — deleting drops its history (rebuilds only if produced comprehensively).
+    # A companion (changelog/band/droplog/base) resolves to its base table — the whole collection is deleted.
+    base = base_table_name(table)
     try:
         tables = _http.get(f"{cfg['url']}/api/ponds/{outlet}/tables", auth=cfg, params=params).json().get("tables", [])
-        info = next((t for t in tables if t["name"] == table), None)
+        mode = next((t.get("trickle") for t in tables if t["name"] == base), None)
     except Exception:
-        info = None
-    if info and info.get("trickle") == "append":
-        typer.echo(f"Warning: '{table}' is an append Trickle — deleting drops its accumulated history.")
+        mode = None
+    if base != table:
+        typer.echo(f"Note: '{table}' is part of table '{base}' — deleting it removes the whole table.")
+    if mode == "merge":
+        typer.echo(f"Note: deleting '{base}' removes its changelog too.")
+    elif mode == "append":
+        typer.echo(f"Warning: '{base}' is an append Trickle — deleting removes its droplog and drops its accumulated history.")
     if not yes:
-        typer.confirm(f"Delete table '{outlet}.{table}' (data + state)?", abort=True)
+        typer.confirm(f"Delete table '{outlet}.{base}' (data + state)?", abort=True)
     _http.delete(f"{cfg['url']}/api/ponds/{outlet}/tables/{table}", auth=cfg, params=params)
-    typer.echo(f"Deleted '{outlet}.{table}'. It returns only if the Pond recreates it on a future run.")
+    typer.echo(f"Deleted '{outlet}.{base}'. It returns only if the Pond recreates it on a future run.")
 
 
 def delete_object(

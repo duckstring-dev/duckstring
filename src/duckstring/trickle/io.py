@@ -255,6 +255,21 @@ def drop_meta(con, table: str) -> None:
         con.execute(f'DELETE FROM {_q(META_TABLE)} WHERE table_name = ?', [table])
 
 
+# The published companion suffixes of a Trickle base table — a delete of any of these resolves to (and
+# takes) the whole base collection: deleting a changelog/band alone would corrupt the reconstructable main.
+_COMPANION_SUFFIXES = ("__changelog", "__band", DROPLOG_SUFFIX, BASE_SUFFIX)
+
+
+def base_table_name(name: str) -> str:
+    """Map a Trickle **companion** (``X__changelog`` / ``X__band`` / ``X__droplog`` / ``X__base``) to its
+    base table ``X``; any other name is returned unchanged. A delete acts on the whole collection, so a
+    companion target resolves to its base (see ``plans/deletes.md``)."""
+    for suf in _COMPANION_SUFFIXES:
+        if name.endswith(suf) and len(name) > len(suf):
+            return name[: -len(suf)]
+    return name
+
+
 def drop_table(con, name: str) -> None:
     """Drop a table's **entire registry collection** — the deletable unit (see ``plans/deletes.md``). For a
     Trickle that is the base/main + ``__changelog`` + warm ``__band`` + ``__droplog`` + the aggregate/scan

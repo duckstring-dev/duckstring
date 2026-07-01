@@ -572,6 +572,15 @@ def test_unpublish_table_removes_published_collection(tmp_path):
     unpublish_table(data_dir, "dim")  # idempotent
 
 
+def test_base_table_name_resolves_companions():
+    assert T.base_table_name("priced_line") == "priced_line"
+    assert T.base_table_name("priced_line__changelog") == "priced_line"
+    assert T.base_table_name("priced_line__band") == "priced_line"
+    assert T.base_table_name("order_line__droplog") == "order_line"
+    assert T.base_table_name("priced_line__base") == "priced_line"
+    assert T.base_table_name("__changelog") == "__changelog"  # no base → unchanged
+
+
 def test_drop_table_clears_registry_collection(tmp_path):
     con, _ = _producer(tmp_path, "src")
     T.merge_table(con, "dim", con.sql("SELECT * FROM (VALUES ('A',1)) v(k,x)"), ts(1), ("k",))
