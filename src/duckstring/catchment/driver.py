@@ -2005,6 +2005,37 @@ class Driver:
                 "ponds": ponds, "edges": edges,
             }
 
+    def metrics_snapshot(self) -> dict:
+        """Raw numbers for the Prometheus ``/metrics`` endpoint (rendered by ``routes/metrics.py``). Per
+        engine node: freshness/delivery lag, state flags, and the runs-completed counter — plus cumulative
+        failed Pond Runs and alert-delivery counts from the DB (survive restarts, so they read as counters)."""
+        with self.lock:
+            now = _now()
+            nodes = []
+            for key in self.state.ponds:
+                m = self.meta[key]
+                ps = self.state.pond_states[key]
+                lag = (now - ps.end_f).total_seconds() if ps.end_f != NEVER else None
+                nodes.append({
+                    "name": m["name"], "major": m["major"], "kind": m["kind"],
+                    "is_spout": bool(m.get("is_spout")), "is_draw": bool(m.get("is_draw")),
+                    "lag_seconds": lag, "runs_completed": ps.runs_completed,
+                    "is_failed": ps.is_failed, "is_blocked": ps.is_blocked, "is_killed": ps.is_killed,
+                })
+            # Cumulative failed Pond Runs per (name, major) — a monotonic counter across restarts.
+            failures = {
+                (r[0], r[1]): r[2] for r in self.db.execute(
+                    "SELECT pn.name, pv.major, COUNT(*) FROM pond_run pr "
+                    "JOIN pond_version pv ON pv.id = pr.pond_version_id "
+                    "JOIN pond_name pn ON pn.id = pv.pond_name_id "
+                    "WHERE pr.status = 'failed' GROUP BY pn.name, pv.major"
+                ).fetchall()
+            }
+            deliveries = dict(self.db.execute(
+                "SELECT status, COUNT(*) FROM alert_delivery GROUP BY status"
+            ).fetchall())
+            return {"nodes": nodes, "failures": failures, "alert_deliveries": deliveries}
+
     def view_fragment(self, scope: list[str] | None) -> dict:
         """This Catchment's slice of the recursive lineage view (see plans/cross-catchment-visibility.md):
         the in-scope Ponds (``scope`` keys + their ancestors here; all local Ponds when ``scope`` is

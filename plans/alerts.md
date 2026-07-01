@@ -3,7 +3,8 @@
 Status: **built** (webhook + email channels, event-driven failure/contract/spout/recovery alerts with
 root-cause dedup, tick-driven freshness-SLA breaches, the outbox worker, CLI + full-gated API, **and full
 UI management** — the catchment-wide **Alerts** menu beside Secrets + a per-Pond **Alerts** section in the
-Sidebar — tests in `tests/test_alerts.py`). Deferred: re-notify cadence, a `/metrics` endpoint. The
+Sidebar — **and a Prometheus `/metrics` endpoint** — tests in `tests/test_alerts.py` + `tests/test_metrics.py`).
+Deferred: re-notify cadence. The
 last observability gap before Duckstring is credible for serious
 data engineering: when a pipeline breaks — or, more insidiously, goes *stale without breaking* — the
 right people learn about it, on the channel they already watch (email, Slack, PagerDuty), without polling
@@ -155,9 +156,22 @@ wrapped so a bug in alerting can never break a Pond Run.
   `egress_worker`; `is_failed`/`is_blocked`/`derive_blocked` for root-cause dedup; the `scheduler_tick`
   liveness-sweep shape for the freshness tick.
 - **Non-goals** (v1): re-notify cadence / ack / silence (→ PagerDuty), escalation policies, on-call
-  schedules, per-severity routing beyond the event-kind filter, a `/metrics` Prometheus endpoint (a
-  separate, easy follow-up — self-hosters plug their own Grafana/Alertmanager into gauges; hosted
-  dashboards = cloud).
+  schedules, per-severity routing beyond the event-kind filter.
+
+## Metrics (built)
+
+A Prometheus scrape endpoint at **`GET /metrics`** (`catchment/routes/metrics.py`) so self-hosters plug
+their own Grafana/Alertmanager into the same signals the channels alert on (hosted dashboards = cloud).
+Deliberately at the **root** (not `/api/metrics`) and **unauthenticated** — the exporter convention; a
+scraper sends no key. It is therefore outside the `/api` access-level audit (which only classifies `/api`
+routes), mounted before the static `/` catch-all. Pond names appear as labels, so an operator who
+considers those sensitive should network-restrict the endpoint. **No new dependency** — the text-exposition
+format is hand-rendered (`render_metrics`), fed by `Driver.metrics_snapshot()` (engine state + two DB
+rollups). Families (`duckstring_*`): `up`; `pond_freshness_lag_seconds` (the headline — `now − end_f`);
+`pond_failed`/`blocked`/`killed` (0/1); `pond_runs_completed_total` + `pond_failures_total` (counters,
+rebuilt from `pond_run` → monotonic across restarts); `spout_delivery_lag_seconds` + `spout_failed`;
+`alert_deliveries_total{status}`. Tests: `tests/test_metrics.py` (render shapes, label escaping, and that
+the endpoint is open + doesn't trip the boot-time audit).
 
 ## UI (built)
 

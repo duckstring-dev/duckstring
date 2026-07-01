@@ -188,6 +188,11 @@ def create_app(
     app.include_router(router, prefix="/api")
     auth.audit_routes(app)  # fail-closed: every /api route must declare an access level
 
+    # Prometheus scrape endpoint at the ROOT (unauthenticated, the exporter convention) — mounted before
+    # the static "/" catch-all so it resolves, and outside "/api" so the access-level audit doesn't cover it.
+    from .routes.metrics import router as metrics_router
+    app.include_router(metrics_router)
+
     if _STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="frontend")
 
