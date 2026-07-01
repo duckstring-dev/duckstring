@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { fetchSecrets, testSpout } from '@/lib/api';
+import { fetchAlerts, fetchSecrets, testSpout, type RawAlertChannel } from '@/lib/api';
 import { useLiveStore, atLeast, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
 import type { FreqUnit, Pond, PondInfo, PondRun } from '@/lib/types';
+import { AlertChannelForm, ChannelRow } from './AlertsMenu';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
 
@@ -335,6 +336,40 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
   );
 }
 
+// The notification channels scoped to this Pond (full access only) — list (with per-channel Test +
+// remove) + an add form pinned to this Pond's name. Catchment-wide channels are managed under the
+// "Alerts" button by Collapse-all; this section is the per-Pond view of the same alert_channel store.
+function AlertEditor({ pond, canControl }: { pond: Pond; canControl: boolean }) {
+  const [channels, setChannels] = useState<RawAlertChannel[]>([]);
+  const [open, setOpen] = useState(false);
+
+  const load = () =>
+    fetchAlerts().then((cs) => setChannels(cs.filter((c) => c.scope === pond.name))).catch(() => setChannels([]));
+  // Load once on mount — the parent keys this component by pond id, so a pond switch remounts it fresh.
+  useEffect(() => { if (canControl) void load(); }, [canControl]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!canControl) return null;
+  return (
+    <Section>
+      <Label>Alerts</Label>
+      {channels.length === 0 && !open && <div style={{ fontSize: 12, color: '#52525b', marginBottom: 6 }}>None.</div>}
+      {channels.map((c) => <ChannelRow key={c.name} channel={c} onChanged={load} />)}
+      {open ? (
+        <div style={{ marginTop: 8 }}>
+          <AlertChannelForm fixedScope={pond.name} onAdded={() => { setOpen(false); void load(); }} />
+          <div style={{ marginTop: 6 }}>
+            <Btn small onClick={() => setOpen(false)} color={THEME_BLOCKED}>Cancel</Btn>
+          </div>
+        </div>
+      ) : (
+        <div style={{ marginTop: 6 }}>
+          <Btn small onClick={() => setOpen(true)} color={THEME_PULL}>+ Add Alert</Btn>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 const numInput: React.CSSProperties = {
   width: 64,
   background: '#1a1a1f',
@@ -644,6 +679,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
 
           {/* Egress Spouts on this Pond — a Draw can't be a source (it has no local output). */}
           {!selectedPond.isDraw && <SpoutEditor sourceId={selectedPond.id} canControl={canControl} />}
+
+          {/* Failure & freshness alert channels scoped to this Pond. Keyed by id so a pond switch remounts. */}
+          <AlertEditor key={selectedPond.id} pond={selectedPond} canControl={canControl} />
 
           <Section>
             <TraceChart {...pondTrace(selectedPondRuns)} />

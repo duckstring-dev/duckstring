@@ -187,6 +187,26 @@ All full-gated. A **write-only** catchment-wide store for the credentials a Spou
 
 The value is transmitted in the `POST` body — front the Catchment with TLS, or prefer `${env:NAME}` (set in the server's environment, never over the wire). Stored as a private (`0600`) plaintext file; no encryption-at-rest.
 
+## Alerts
+
+All full-gated. A notification **channel** delivers failures and staleness to an external destination (a webhook / Slack, or email); it is operational config (persisted, survives redeploys). It fires on subscribed event kinds — `failure`, `contract`, `spout`, `recovery`, `freshness` — with root-cause dedup (a blocked-downstream Pond raises no alert; the failing root's payload carries the blocked names). Credentials in the destination URI are `${env:NAME}`/`${secret:NAME}`, resolved only at send time. A delivery failure never affects a Pond — it is retried, then parked `failed` in the log.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/alerts` | `{"channels": [{"name", "destination", "scope", "events", "stale_ms", "enabled", "created_at"}]}`. `scope` is a Pond name or `null` (catchment-wide). |
+| `POST /api/alerts` | Create a channel: `{"name", "destination", "scope"?, "events"?, "stale_ms"?}`. `destination` scheme ∈ `https/http/mailto`; `events` is a CSV of kinds or `all`; `stale_ms` sets a freshness SLA. `422` on a bad destination/event or duplicate name. |
+| `DELETE /api/alerts/{name}` | Remove a channel (`404` if absent). |
+| `POST /api/alerts/{name}/test` | Send a test notification (validates connectivity/credentials). Returns `{"ok": true}` or `{"ok": false, "error"}` — a connection problem is a `200` result, sanitised (never a credential). |
+| `GET /api/alerts/deliveries?limit=N` | Recent deliveries (`{"deliveries": [{"channel", "kind", "pond", "severity", "status", "attempts", "error", ...}]}`) — the audit log. |
+
+## Metrics
+
+```
+GET /metrics
+```
+
+A Prometheus text-exposition endpoint at the **root** (not under `/api`) and **unauthenticated** — the exporter convention; a scraper sends no key. Pond names appear as labels, so network-restrict it if those are sensitive. Families (`duckstring_*`): `up`; `pond_freshness_lag_seconds` (the headline — seconds since a Pond last became fresh); `pond_failed`/`blocked`/`killed`; `pond_runs_completed_total`; `pond_failures_total`; `spout_delivery_lag_seconds`; `spout_failed`; `alert_deliveries_total{status}`.
+
 ## Data
 
 See [Querying Data](../guides/querying-data.md). Reads always hit the exported Parquet snapshots, never live state.

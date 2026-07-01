@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import typer
 
+from . import alert as alert_cmd
 from . import catchment as catchment_cmd
 from . import duct as duct_cmd
 from . import pond as pond_cmd
@@ -70,6 +71,7 @@ app.add_typer(trigger_app, name="trigger")
 app.add_typer(control_app, name="control")
 app.add_typer(spout_cmd.app, name="spout")
 app.add_typer(secret_cmd.app, name="secret")
+app.add_typer(alert_cmd.app, name="alert")
 
 pond_cmd.app.command("deploy")(deploy)
 app.command("status")(status)

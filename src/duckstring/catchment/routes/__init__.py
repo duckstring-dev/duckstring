@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from .alerts import router as alerts_router
 from .catchment import router as catchment_router
 from .data import router as data_router
 from .deploy import router as deploy_router
@@ -20,5 +21,6 @@ router.include_router(draw_router)
 router.include_router(duct_router)
 router.include_router(view_router)
 router.include_router(secrets_router)
+router.include_router(alerts_router)
 
 __all__ = ["router"]
