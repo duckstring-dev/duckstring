@@ -197,6 +197,24 @@ def read_object(data_dir, name: str) -> bytes:
     return _as_storage(data_dir).read_bytes(*_payload_parts(name, entry))
 
 
+def delete_object(data_dir, name: str) -> None:
+    """Remove a published Object — its ``objects/{name}/`` payload + its sidecar entry (see
+    ``plans/deletes.md``). No registry involved. Idempotent."""
+    from .trickle.io import load_sidecar, write_sidecar
+
+    store = _as_storage(data_dir)
+    store.rmtree(OBJECTS_DIR, name)
+    sidecar = load_sidecar(store)
+    section = sidecar.get(OBJECTS_KEY)
+    if section and name in section:
+        del section[name]
+        if section:
+            sidecar[OBJECTS_KEY] = section
+        else:
+            sidecar.pop(OBJECTS_KEY, None)
+        write_sidecar(store, sidecar)
+
+
 def object_path(data_dir, name: str, scratch: Path) -> Path:
     """A local path to an Object's payload — the real path for a local backend, a download into ``scratch``
     for an object store. A single-file Object resolves to its file, a directory Object to its directory."""

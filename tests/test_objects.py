@@ -136,6 +136,29 @@ def test_staged_write_is_not_visible_until_commit(tmp_path):
     assert objects.read_object(data_dir, "model") == b"BAD"
 
 
+# ── delete ─────────────────────────────────────────────────────────────────────
+
+
+def test_delete_object_removes_payload_and_sidecar_entry(tmp_path):
+    from datetime import datetime, timezone
+
+    from duckstring import objects
+    from duckstring.storage import LocalStorage
+
+    now = lambda: datetime.now(timezone.utc)  # noqa: E731
+    data_dir = LocalStorage(tmp_path / "data")
+    objects.write_object_now(data_dir, "model", b"m", now())
+    objects.write_object_now(data_dir, "keep", b"k", now())
+
+    objects.delete_object(data_dir, "model")
+    assert set(objects.list_objects(data_dir)) == {"keep"}
+    assert not (tmp_path / "data" / "objects" / "model").exists()
+    with pytest.raises(FileNotFoundError):
+        objects.read_object(data_dir, "model")
+    assert objects.read_object(data_dir, "keep") == b"k"  # untouched
+    objects.delete_object(data_dir, "model")  # idempotent
+
+
 # ── cross-Pond read (major/flat-layout resolution) ─────────────────────────────
 
 

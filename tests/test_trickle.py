@@ -553,6 +553,37 @@ def test_builder_rebuilds_whole_when_output_dropped(tmp_path):
     snk.close()
 
 
+def test_unpublish_table_removes_published_collection(tmp_path):
+    """unpublish_table drops every published form + the sidecar entry (the data half of a delete)."""
+    from duckstring.dataplane import unpublish_table
+    from duckstring.trickle_io import load_sidecar
+
+    con, data_dir = _producer(tmp_path, "src")
+    T.merge_table(con, "dim", con.sql("SELECT * FROM (VALUES ('A',1),('B',2)) v(k,x)"), ts(1), ("k",))
+    T.append_table(con, "log", con.sql("SELECT 1 AS id"), ts(1), ("id",))
+    publish(con, data_dir, f=ts(1))
+    # A merge main surfaces its main + its raw-navigable __changelog; the append is a parts table.
+    assert set(ParquetDataPlane().list_tables(data_dir)) == {"dim", "dim__changelog", "log"}
+
+    unpublish_table(data_dir, "dim")  # takes the main + every companion with it
+    assert ParquetDataPlane().list_tables(data_dir) == ["log"]
+    assert "dim" not in load_sidecar(data_dir)
+    assert not (data_dir / "dim__changelog").exists()
+    unpublish_table(data_dir, "dim")  # idempotent
+
+
+def test_drop_table_clears_registry_collection(tmp_path):
+    con, _ = _producer(tmp_path, "src")
+    T.merge_table(con, "dim", con.sql("SELECT * FROM (VALUES ('A',1)) v(k,x)"), ts(1), ("k",))
+    assert "dim" in T.read_meta(con)
+    assert con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'dim__changelog'").fetchone()[0] == 1
+
+    T.drop_table(con, "dim")
+    assert "dim" not in T.read_meta(con)
+    assert con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE 'dim%'").fetchone()[0] == 0
+    T.drop_table(con, "dim")  # idempotent
+
+
 def test_builder_count(tmp_path):
     """``.count()``: a bare stored Trickle counts via metadata + changelog net weight (no scan); a composed
     query is evaluated in full and counted. Both track inserts and deletes, and the merge-main count matches
