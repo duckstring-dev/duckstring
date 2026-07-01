@@ -31,6 +31,9 @@ The selected Pond's operating panel:
 - **Control row** — Force / Wake / Sleep / Kill, exactly as in [Control](control.md).
 - **Failures** — the Pond's [retry budgets](fault-tolerance.md), editable live, and a **Clear Failure** action when the Pond is failed.
 - **Windows** — the Pond's [availability windows](windows.md), with an editor for adding and removing rules.
+- **Alerts** — the [notification channels](running-a-catchment.md#alerts) scoped to this Pond, with a form to add one (destination, event kinds, freshness SLA) and a per-channel test.
+
+Two catchment-wide menus sit top-right, beside **Collapse all** (full access only): **🔑 Secrets** (the write-only [credential store](running-a-catchment.md#authentication)) and **Alerts** (every notification channel — add/test/remove, plus a delivery log).
 
 ## Run history and Run Detail
 

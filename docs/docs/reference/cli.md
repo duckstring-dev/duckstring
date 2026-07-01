@@ -125,6 +125,22 @@ A **write-only**, catchment-wide store for the credentials a Spout references as
 
 The value **is** sent to the Catchment over the wire when you set it (an HTTPS POST body) — use TLS, or set it via the server's environment with `${env:NAME}` instead. Encryption-at-rest is not applied: the store is a private plaintext file, secured by filesystem permissions. The same names appear as a picker in the web UI's Spout add form (under the 🔑 menu beside the catchment name).
 
+## `duckstring alert` — notification channels
+
+Deliver failures and staleness to the channels a team already watches. A **channel** is operational config (persisted, survives redeploys), not declared in `pond.toml`. It fires on the events you subscribe it to — `failure` (a Pond Run gave up), `contract` (a breaking schema change), `spout` (an egress delivery failed), `recovery` (a failed Pond/Spout cleared), and `freshness` (a Pond stayed stale past an SLA) — and **root-cause dedup** means one failed Source that blocks twenty downstream Ponds pages you once (about the root, with the blocked names as blast radius), not twenty times. Credentials in the destination URI are `${env:NAME}`/`${secret:NAME}` references, resolved only at send time. Managing channels requires **full access**.
+
+Two destinations work today: a **webhook** (`https://…`/`http://…`, a Slack-incoming-webhook-compatible JSON POST — also any generic receiver) and **email** (`mailto:you@example.com?smtp=host:587&from=alerts@example.com`; SMTP settings from the URI query or the `DUCKSTRING_SMTP_*` environment).
+
+| Command | Description |
+|---|---|
+| `alert add --to {uri} [--pond N] [--on failure,…\|all] [--stale 1h] [--name N]` | Add a channel. `--to` is an `https://`/`http://`/`mailto:` URI; `--pond` scopes it to one Pond (default: catchment-wide); `--on` is the event kinds (default `all`); `--stale` sets a freshness SLA (e.g. `1h`, `30m`) — required for `freshness` to fire; `--name` defaults to the scheme/scope. |
+| `alert ls` | List channels with their scope, events, SLA, and destination. |
+| `alert rm {name}` | Remove a channel. |
+| `alert test {name}` | Send a test notification through the channel (validates connectivity + credentials). |
+| `alert log [--limit N]` | Recent deliveries (channel, kind, pond, status, error) — the audit trail. |
+
+**Freshness is the headline.** A pipeline can be green with zero failures and still be *wrong* because nothing has refreshed it — a `--stale` channel is how you find out. A delivery failure never affects a Pond: it is retried and, if a channel stays broken, parked as `failed` in `alert log`, never cascaded. Channels are also managed from the web UI — a catchment-wide **Alerts** menu (beside 🔑 Secrets) and a per-Pond **Alerts** section in the sidebar. See also the Prometheus [`/metrics`](../guides/running-a-catchment.md#monitoring) endpoint.
+
 ## `duckstring control` — execution & health
 
 See [Control](../guides/control.md) and [Fault Tolerance](../guides/fault-tolerance.md).

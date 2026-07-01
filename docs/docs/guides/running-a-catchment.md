@@ -154,7 +154,7 @@ A cloud node has two very different kinds of storage, and Duckstring splits alon
 - **Hot state** — `duck.db`, the `pond.db` ledgers, the `registry.duckdb` registries — needs POSIX semantics (byte-range writes, `fsync`, locking), so it lives on a **local disk** (`DUCKSTRING_STATE_ROOT`). **Never** put it on S3 or a Volume FUSE mount — SQLite-on-FUSE corrupts. If that local disk is **ephemeral** (a scale-to-zero container, Databricks Apps), set `DUCKSTRING_STATE_BACKUP_URI`: the Catchment syncs `duck.db` snapshots out and **restores automatically** on a fresh boot. Durability comes from syncing snapshots, never from relocating the live files.
 - **Data blobs** — the published Parquet / Iceberg — are write-once / atomic-overwrite, so they belong in the **bucket or Volume** (`DUCKSTRING_DATA_ROOT`). Both data planes work there; Iceberg keeps its per-line catalog (`catalog.json`) and table metadata in the bucket alongside the data, read back over DuckDB's `httpfs`.
 
-Object-store credentials are `${env:NAME}` references in the data-root URI query, resolved only at runtime (never stored); with no key the ambient credential chain (instance profile / managed identity) is used. **Run one Catchment per data root** — an external data root is held by a writer lease, so a second Catchment on the same lake refuses to start (give each a distinct prefix to share a bucket; `DUCKSTRING_FORCE_TAKEOVER=1` overrides). All of this is **operational config** set at the Catchment, never in `pond.toml` (where your output lands is the Catchment's concern, like [windows](triggering.md) and [Spouts](egress.md)); `duckstring pond deploy` is unchanged.
+Object-store credentials are `${env:NAME}` references in the data-root URI query, resolved only at runtime (never stored); with no key the ambient credential chain (instance profile / managed identity) is used. **Run one Catchment per data root** — an external data root is held by a writer lease, so a second Catchment on the same lake refuses to start (give each a distinct prefix to share a bucket; `DUCKSTRING_FORCE_TAKEOVER=1` overrides). All of this is **operational config** set at the Catchment, never in `pond.toml` (where your output lands is the Catchment's concern, like [windows](windows.md) and [Spouts](../reference/cli.md#duckstring-spout--egress-bindings)); `duckstring pond deploy` is unchanged.
 
 The three recipes below are the common shapes.
 
@@ -303,6 +303,31 @@ duckstring status --once     # single snapshot, no live updates
 ```
 
 The live view polls the Catchment and shows each Pond's state (idle / queued / running / failed / killed / blocked), freshness, and standing trigger, staying open until `Ctrl+C`. The [web UI](web-ui.md) at the Catchment's URL shows the same state graphically.
+
+### Alerts
+
+To be told about a problem instead of watching for it, add a notification **channel** — a binding to a webhook (Slack or generic) or email that fires on failures and, importantly, on **staleness**:
+
+```bash
+duckstring alert add --to 'https://hooks.slack.com/services/${secret:SLACK_HOOK}'
+duckstring alert add --to 'mailto:oncall@example.com?smtp=smtp.example.com:587' --pond sales --stale 1h
+duckstring alert ls
+duckstring alert test <name>     # send a test notification
+```
+
+A channel is catchment-wide by default, or scoped to one Pond with `--pond`. The `--stale` bound is the one most pipelines are missing: a pipeline can be **green with zero failures and still wrong** because nothing refreshed it — a freshness alert catches that. Failures dedup by root cause (one failed Source that blocks downstream Ponds alerts once, not once per blocked Pond), and a broken channel never affects a Pond — deliveries are retried and audited in `duckstring alert log`. Full details in the [CLI reference](../reference/cli.md#duckstring-alert--notification-channels); channels are also managed from the [web UI](web-ui.md).
+
+### Metrics
+
+The Catchment exposes a Prometheus scrape endpoint at **`/metrics`** (at the root, unauthenticated — the exporter convention; network-restrict it if your Pond names are sensitive). Point Prometheus at it to graph and alert in your own Grafana/Alertmanager:
+
+```
+duckstring_pond_freshness_lag_seconds{pond="sales",major="1"}   # seconds since last fresh (the headline)
+duckstring_pond_failed{pond="sales",major="1"}                  # 0/1
+duckstring_pond_failures_total{pond="sales",major="1"}          # cumulative failed runs
+duckstring_spout_delivery_lag_seconds{spout="sales#warehouse"}  # egress lag
+duckstring_alert_deliveries_total{status="failed"}              # notification health
+```
 
 ## Restart behaviour
 
