@@ -346,6 +346,71 @@ export async function removeSecret(name: string): Promise<void> {
   if (!res.ok) throw new Error(`remove secret failed (${res.status})`);
 }
 
+// ─── Alerts (failure & freshness notification channels — full-gated) ─────────
+
+export interface RawAlertChannel {
+  name: string;
+  destination: string;
+  scope: string | null; // a pond name, or null for catchment-wide
+  events: string; // CSV of kinds, or 'all'
+  stale_ms: number | null;
+  enabled: boolean;
+  created_at: string | null;
+}
+
+export interface RawAlertDelivery {
+  channel: string;
+  kind: string;
+  pond: string | null;
+  severity: string;
+  status: string; // pending | sent | failed
+  attempts: number;
+  error: string | null;
+  created_at: string | null;
+  sent_at: string | null;
+}
+
+export function fetchAlerts(): Promise<RawAlertChannel[]> {
+  return getJSON<{ channels: RawAlertChannel[] }>('/alerts').then((d) => d.channels);
+}
+
+// Create a channel. Surfaces the server's 422 detail (bad destination / event kind) on error.
+export function addAlert(body: {
+  name: string;
+  destination: string;
+  scope?: string | null;
+  events?: string;
+  stale_ms?: number | null;
+}): Promise<void> {
+  return postJSON('/alerts', body);
+}
+
+export async function removeAlert(name: string): Promise<void> {
+  const res = await fetch(`${apiBase()}/alerts/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error(`remove alert failed (${res.status})`);
+}
+
+// Send a test notification (validates connectivity/credentials). A connection problem is 200
+// {ok: false, error} (a sanitised message), not an exception — mirrors testSpout.
+export async function testAlert(name: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`${apiBase()}/alerts/${encodeURIComponent(name)}/test`, {
+    method: 'POST',
+    headers: authHeaders({ 'content-type': 'application/json' }),
+    body: '{}',
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `test failed (${res.status})`);
+  return res.json();
+}
+
+export function fetchDeliveries(limit = 50): Promise<RawAlertDelivery[]> {
+  return getJSON<{ deliveries: RawAlertDelivery[] }>(`/alerts/deliveries?limit=${limit}`).then((d) => d.deliveries);
+}
+
 // ─── Data viewer (windowed read of a Pond's exported tables) ─────────────────
 
 export interface PageResult {

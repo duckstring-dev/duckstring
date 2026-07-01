@@ -25,6 +25,7 @@ import { RippleNode } from './RippleNode';
 import { TriggerNode } from './TriggerNode';
 import { CatchmentGroupNode } from './CatchmentGroupNode';
 import { RemotePondNode } from './RemotePondNode';
+import { AlertsMenu } from './AlertsMenu';
 import { SecretsMenu } from './SecretsMenu';
 
 // ─── Custom edges (read-only; colour reflects the sink's demand) ─────────────
@@ -237,6 +238,7 @@ function ControlsPanel() {
     [...new Set(Object.values(s.ripples).map((r) => r.pondId))].sort().join(',')
   );
   const [secretsOpen, setSecretsOpen] = useState(false);
+  const [alertsOpen, setAlertsOpen] = useState(false);
 
   const collapsibleIds = collapsibleKey ? collapsibleKey.split(',') : [];
   const allCollapsed = collapsibleIds.length > 0 && collapsibleIds.every((id) => collapsedPonds[id]);
@@ -255,14 +257,23 @@ function ControlsPanel() {
         )}
         {isFull && (
           <button
-            onClick={() => setSecretsOpen((o) => !o)}
+            onClick={() => { setSecretsOpen((o) => !o); setAlertsOpen(false); }}
             style={{ ...panelButton, justifyContent: 'center', color: secretsOpen ? '#e4e4e7' : '#a1a1aa' }}
           >
             Secrets
           </button>
         )}
+        {isFull && (
+          <button
+            onClick={() => { setAlertsOpen((o) => !o); setSecretsOpen(false); }}
+            style={{ ...panelButton, justifyContent: 'center', color: alertsOpen ? '#e4e4e7' : '#a1a1aa' }}
+          >
+            Alerts
+          </button>
+        )}
       </div>
       {isFull && secretsOpen && <SecretsMenu onClose={() => setSecretsOpen(false)} />}
+      {isFull && alertsOpen && <AlertsMenu onClose={() => setAlertsOpen(false)} />}
     </div>
   );
 }

@@ -1,8 +1,9 @@
 # Alerts: failure & freshness notifications to the channels a team already runs
 
 Status: **built** (webhook + email channels, event-driven failure/contract/spout/recovery alerts with
-root-cause dedup, tick-driven freshness-SLA breaches, the outbox worker, CLI + full-gated API — tests in
-`tests/test_alerts.py`). Deferred: re-notify cadence, a `/metrics` endpoint, a UI management surface. The
+root-cause dedup, tick-driven freshness-SLA breaches, the outbox worker, CLI + full-gated API, **and full
+UI management** — the catchment-wide **Alerts** menu beside Secrets + a per-Pond **Alerts** section in the
+Sidebar — tests in `tests/test_alerts.py`). Deferred: re-notify cadence, a `/metrics` endpoint. The
 last observability gap before Duckstring is credible for serious
 data engineering: when a pipeline breaks — or, more insidiously, goes *stale without breaking* — the
 right people learn about it, on the channel they already watch (email, Slack, PagerDuty), without polling
@@ -156,7 +157,24 @@ wrapped so a bug in alerting can never break a Pond Run.
 - **Non-goals** (v1): re-notify cadence / ack / silence (→ PagerDuty), escalation policies, on-call
   schedules, per-severity routing beyond the event-kind filter, a `/metrics` Prometheus endpoint (a
   separate, easy follow-up — self-hosters plug their own Grafana/Alertmanager into gauges; hosted
-  dashboards = cloud), UI management surface (the UI is read-mostly; alerts are CLI/API config for now).
+  dashboards = cloud).
+
+## UI (built)
+
+Channels are managed from two places (both **full access only** — the routes are `auth.full`), reusing one
+`AlertChannelForm` + `ChannelRow` (`frontend/src/components/AlertsMenu.tsx`):
+
+- **Catchment-wide** — an **Alerts** button beside **Secrets** in the top-right `ControlsPanel`
+  (`DagCanvas`) opens `AlertsMenu`: every channel (scope/events/SLA + destination, a per-channel **test**
+  and remove), an add form (destination, optional name/scope, event-kind chips, freshness-SLA input), and a
+  **Delivery log** tab (`GET /api/alerts/deliveries`) — the audit trail with per-row status/error.
+- **Per-Pond** — an **Alerts** `Section` in the Sidebar's pond panel (`AlertEditor`, after Spouts) lists the
+  channels scoped to that Pond and adds one pinned to its name (`fixedScope`). Keyed by pond id so a
+  selection switch remounts it fresh.
+
+Consistent with the read-mostly UI, alert config is the exception it shares with Spouts/Secrets/Windows:
+operational, mutable, full-gated. `frontend/src/lib/api.ts`: `fetchAlerts`/`addAlert`/`removeAlert`/
+`testAlert`/`fetchDeliveries`. A `test` result is data (`{ok}`/`{ok,error}`), rendered inline, never a throw.
 - **Risks**: a flaky channel retrying forever (bounded by `MAX_ATTEMPTS` → parked `failed`); a slow
   destination starving the worker (bounded by a per-send timeout, like egress); freshness false-positives on
   never-run or windowed Ponds (v1 skips never-run Ponds; windows refine `D` — start with `now - end_f`).
