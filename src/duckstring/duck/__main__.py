@@ -81,6 +81,8 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                         prev = data.get("previous_f")
                         if data.get("refresh"):
                             executor.wipe()  # cold reset: the run rebuilds from scratch
+                        for _t in data.get("drop_tables", []):
+                            executor.wipe_table(_t)  # per-table delete: drop it; the run rebuilds or omits it
                         _launch(core.begin_run(
                             datetime.fromisoformat(data["f"]), _now(),
                             retry_immediately=data.get("immediate_retries", 0),

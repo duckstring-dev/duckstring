@@ -441,6 +441,38 @@ class Driver:
             self._persist_state()
             self.state_version += 1
 
+    def delete_table(self, pond: str, table: str) -> None:
+        """Delete one table — its published data **and** its registry collection — from a Pond, then force
+        a run so it rebuilds (the builder's absent⇒comprehensive trigger) or stays gone if the code no
+        longer produces it. The drop is persisted (survives a restart) and applied Duck-side at the next
+        run start. See plans/deletes.md."""
+        with self.lock:
+            self.db.execute(
+                "INSERT OR IGNORE INTO pond_pending_drop (pond_id, table_name) VALUES (?, ?)",
+                (self.meta[pond]["pond_id"], table),
+            )
+            self.db.commit()
+            self.state = force_pond(self.state, pond, _now())  # make the drop+rebuild happen promptly
+            self._process(_now())
+
+    def delete_object(self, pond: str, name: str) -> None:
+        """Delete one published Object from a Pond — its ``objects/{name}/`` payload + sidecar entry. No
+        registry, no run. Gated on the Pond being idle so it can't race a run's commit_objects re-adding
+        the entry. See plans/deletes.md."""
+        from pathlib import Path
+
+        from ..objects import delete_object as _delete
+        from .registry import pond_data_dir
+
+        with self.lock:
+            ps = self.state.pond_states.get(pond)
+            if ps is not None and ps.start_f > ps.end_f:
+                raise ValueError("the Pond is running — delete an Object when it is idle")
+            meta = self.meta[pond]
+            data_dir = pond_data_dir(Path(self.root), meta["name"], meta["major"], self.data_root)
+            _delete(data_dir, name)
+            self.state_version += 1
+
     def repair(self, ponds: list[tuple[str, int | None]], downstream: bool = False) -> dict:
         """Repair — force-rebuild a **connected** set of Ponds now, in topological order (steps out of
         the demand model; see ``plans/refresh.md``). Each node is wiped and rebuilt (refresh + force) once
@@ -1635,8 +1667,15 @@ class Driver:
         self._idle_since.pop(pond, None)  # it's running again — reset its reap grace clock
         # Cancel any not-yet-collected shutdown: this Pond is running again, so the Duck must not exit.
         self.jobs[pond] = [j for j in self.jobs.get(pond, []) if j.get("kind") != "shutdown"]
+        # Pending per-table deletes (plans/deletes.md): the Duck drops each table's whole registry
+        # collection + published data at run start, then the run rebuilds it (or leaves it gone). Consumed
+        # once — cleared as they're handed off.
+        drops = [r[0] for r in self.db.execute(
+            "SELECT table_name FROM pond_pending_drop WHERE pond_id = ?", (meta["pond_id"],)).fetchall()]
+        if drops:
+            self.db.execute("DELETE FROM pond_pending_drop WHERE pond_id = ?", (meta["pond_id"],))
         self.jobs[pond].append({
-            "kind": "begin_run", "f": _iso(f), "force": force, "refresh": refresh,
+            "kind": "begin_run", "f": _iso(f), "force": force, "refresh": refresh, "drop_tables": drops,
             "sources_changed": sources_changed,  # backs pond.sources_changed() (for always_run gating)
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
             # The prior completed run's freshness (the pond's end_f *before* this run advances it),
