@@ -100,6 +100,9 @@ function StatusBox({ info, ponds, canControl }: { info: PondInfo; ponds: Record<
     );
   }
   if (info.isBlocked) {
+    if (info.blockedReason) {
+      return <StatusCard color={THEME_BLOCKED} title="Blocked · Waiting for a Source asset">{info.blockedReason}</StatusCard>;
+    }
     if (info.missingSources.length > 0) {
       return <StatusCard color={THEME_BLOCKED} title="Blocked · Missing Sources">{bullets(info.missingSources, (s) => s)}</StatusCard>;
     }

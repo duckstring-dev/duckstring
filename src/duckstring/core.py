@@ -332,6 +332,23 @@ class Puddle:
         return Catchment(url, con=self.con, default_pond=self.source, default_table=self.table, headers=headers)
 
 
+class MissingSourceAsset(FileNotFoundError):
+    """A Ripple read a Source table/Object that is not published — the Source has not produced it (yet), or
+    it was deleted. Distinct from a code error: the consumer isn't broken, it is *waiting* for the Source to
+    (re)publish. The Duck reports this as a ``missing_source`` event and the Catchment parks the Pond
+    **blocked-with-a-reason** — no failure, no retry-budget burn, no alert. See plans/reset.md.
+
+    Subclasses ``FileNotFoundError`` so existing ``except FileNotFoundError`` sites still catch it."""
+
+    def __init__(self, source: str, table: str) -> None:
+        self.source = source
+        self.table = table
+        super().__init__(
+            f"'{source}.{table}' is not published — waiting for '{source}' to (re)publish it "
+            f"(has it completed a run that produces '{table}'?)"
+        )
+
+
 class Pond:
     def __init__(
         self, name: str, version: str, con, root,
@@ -515,10 +532,7 @@ class Pond:
                     # snapshots); the Parquet plane has no history and reads latest regardless.
                     select = dp.read_select(data_dir, table, as_of=self.f)
                 except FileNotFoundError as exc:
-                    raise FileNotFoundError(
-                        f"No exported data found for '{source_pond}.{table}' — "
-                        f"has {source_pond} completed a successful run?"
-                    ) from exc
+                    raise MissingSourceAsset(source_pond, table) from exc
                 rel = _strip_system(self.con.sql(select))
                 try:
                     rel.create_view(table, replace=True)
@@ -634,7 +648,10 @@ class Pond:
         dp = get_data_plane()
         dp.prepare(self.con)
         data_dir.duckdb_setup(self.con)
-        return trickle.read_delta(self.con, data_dir, table, self.previous_f, self.f, dp=dp)
+        try:
+            return trickle.read_delta(self.con, data_dir, table, self.previous_f, self.f, dp=dp)
+        except FileNotFoundError as exc:
+            raise MissingSourceAsset(source_pond, table) from exc
 
     def trickle(self, spine_ref: str, *, p: float = 0.3):
         """Start a :class:`~duckstring.trickle_builder.TrickleBuilder` rooted at the **spine** source

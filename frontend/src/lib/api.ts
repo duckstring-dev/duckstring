@@ -83,6 +83,7 @@ export interface RawPond {
   trigger: { kind: 'wave' | 'tide'; bound_ms: number | null } | null;
   is_failed: boolean;
   is_blocked: boolean;
+  blocked_reason: string | null; // e.g. waiting for a Source asset a Ripple couldn't read (Mechanism 2)
   is_killed: boolean;
   refresh_pending: boolean; // next run is a cold wipe-and-rebuild (control refresh)
   repairing: boolean; // in an active repair plan — blocked from normal demand

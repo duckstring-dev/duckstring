@@ -22,6 +22,8 @@ from duckstring.engine import (
     RippleState,
     Trigger,
     Window,
+    block_on_missing_asset,
+    clear_missing_asset,
     clear_pond,
     complete_ripple,
     derive_blocked,
@@ -527,6 +529,36 @@ def test_restore_demand_parks_under_blocked_source_and_heals_on_unblock():
     s.pond_states["src"].is_blocked = False
     s = tick(T0 + 2 * STEP, s)
     assert s.pond_states["src"].has_pull is True        # healed on the next tick
+
+
+@pytest.mark.timeout(5)
+def test_missing_source_asset_blocks_with_reason_not_failed():
+    """A read of an unpublished Source asset (plans/reset.md Mechanism 2) parks the Pond blocked-with-a-
+    reason — not failed: no budget burn, no ``failed_f`` — abandons the incomplete Run, and propagates
+    ``blocked`` downstream. ``clear_missing_asset`` (a later clean read) releases it and the downstream."""
+    src = Pond("src", "src")
+    mid = Pond("mid", "mid", sources=["src"])
+    dwn = Pond("dwn", "dwn", sources=["mid"])
+    s = build([src, mid, dwn], [Ripple("r", "mid", "r"), Ripple("r2", "dwn", "r2")])
+    # `mid` started a Run (reached start_f=T0) then read src.x and missed.
+    s.pond_states["mid"].start_f = T0
+    s.pond_states["mid"].end_f = NEVER
+    s.ripple_states["r"].start_f = T0
+    s.ripple_states["r"].is_running = True
+
+    s = block_on_missing_asset(s, "mid", "src.x", T0 + STEP)
+    m = s.pond_states["mid"]
+    assert m.missing_asset == "src.x"
+    assert m.is_blocked is True and m.is_failed is False   # blocked, not failed
+    assert m.failures == 0 and m.failed_f == NEVER          # no budget burn
+    assert m.start_f == m.end_f                             # incomplete Run abandoned (liveness won't fail it)
+    assert not s.ripple_states["r"].is_running
+    assert s.pond_states["dwn"].is_blocked is True          # propagated downstream
+
+    s = clear_missing_asset(s, "mid")                       # a later clean read
+    assert s.pond_states["mid"].missing_asset is None
+    assert s.pond_states["mid"].is_blocked is False
+    assert s.pond_states["dwn"].is_blocked is False         # downstream released too
 
 
 @pytest.mark.timeout(5)

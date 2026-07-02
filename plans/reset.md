@@ -66,9 +66,19 @@ Instead:
   `{source}.{table}`" — burning **no** budget and firing **no** failure alert; **(b)** converts D's demand
   into a **solicitation**: re-arms a real pull on S at D's epoch (so S republishes); **(c)** auto-recovers
   via the existing on-change path when S publishes fresher and D reads clean.
-- **Loop guard / escalation:** if S has since published at a *fresher* `f` and the asset is *still*
-  missing, escalate to a genuine `failed` — S's code no longer produces the table, a topology break the
-  operator must fix, not something to retry forever.
+- **Loop guard / escalation** *(deferred)*: if S has since published at a *fresher* `f` and the asset is
+  *still* missing, escalate to a genuine `failed` — S's code no longer produces the table, a topology break
+  the operator must fix, not something to retry forever.
+
+**Built (core):** `MissingSourceAsset` (`core.py`) from both foreign reads; the Duck's `ripple_missing_source`
+→ a distinct `missing_source` event (no immediate-retry spend); `engine.block_on_missing_asset` /
+`clear_missing_asset` + `PondState.missing_asset` folded into `derive_blocked`; the Catchment parks
+blocked-with-a-reason (no `fail_ripple`, no budget, no alert) and clears on the next clean `run_completed`;
+`blocked_reason` on `/api/status` + the Sidebar. Recovery is automatic when S republishes **fresher** (the
+common live-pipeline case — the parked Pond holds a non-propagating pull and re-runs on S's advance).
+**Deferred:** auto-*solicit* (forcing an idle S to rebuild a genuinely-deleted asset — today the operator
+re-triggers S) and the stale-`f` escalation. `missing_asset` is transient (not persisted — re-derived on
+the next read attempt after a restart).
 
 **Q5 answered:** the Pond that had things deleted/reset is **healthy** — never failed, never blocked; its
 next genuine run rebuilds whatever its code still produces. Only a consumer that actually *hits* the gap

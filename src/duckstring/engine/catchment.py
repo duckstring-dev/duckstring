@@ -268,7 +268,8 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
     downstream; a Pond still reads its blocked state solely from itself and its Sources."""
     ps = s.pond_states[pid]
     pond = s.ponds[pid]
-    blocked = ps.is_failed or ps.is_killed or ps.remote_down or pond.has_missing_source or any(
+    blocked = ps.is_failed or ps.is_killed or ps.remote_down or ps.missing_asset is not None \
+        or pond.has_missing_source or any(
         s.pond_states[sp].is_failed or s.pond_states[sp].is_blocked or s.pond_states[sp].is_killed
         or s.pond_states[sp].repairing  # a Source mid-repair: don't run downstream on its stale output
         for sp in pond.sources
@@ -281,6 +282,38 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
 
 
 # ─── Lifecycle ────────────────────────────────────────────────────────────────
+
+
+def block_on_missing_asset(state: EngineState, pid: PondId, reason: str, now: datetime) -> EngineState:
+    """A Ripple read a Source asset that isn't published (:class:`~duckstring.core.MissingSourceAsset`).
+    Park the Pond **blocked-with-a-reason** — *not* failed: no retry-budget burn, no failure alert. Abandon
+    the incomplete Run (roll the phantom ``start_f → end_f`` so liveness won't fail it), record the reason,
+    and re-arm a **non-propagating** local pull so the Pond re-attempts when its Source next publishes
+    something fresher (it does not solicit the Source — auto-solicit is deferred). Propagates ``blocked``
+    downstream. Recovers via :func:`clear_missing_asset` on the next successful Run. See plans/reset.md."""
+    s = state.clone()
+    ps = s.pond_states[pid]
+    ps.start_f = ps.end_f  # abandon the incomplete run (the read failed; nothing published)
+    for rid in ripples_of(s, pid):
+        rs = s.ripple_states[rid]
+        rs.is_running = False
+        rs.started_at = None
+        rs.start_f = rs.end_f
+        rs.targets = [t for t in rs.targets if t > rs.end_f]
+    ps.missing_asset = reason
+    ps.has_pull = True       # retry when the Source is fresher …
+    ps.pull_local = True     # … without soliciting it (deferred auto-solicit)
+    derive_blocked(s, pid)
+    return s
+
+
+def clear_missing_asset(state: EngineState, pid: PondId) -> EngineState:
+    """Clear a Pond's missing-asset wait (its Source republished and it read clean) and re-derive blocked."""
+    s = state.clone()
+    if s.pond_states[pid].missing_asset is not None:
+        s.pond_states[pid].missing_asset = None
+        derive_blocked(s, pid)
+    return s
 
 
 def can_start_pond(s: EngineState, pid: PondId, now: datetime) -> bool:

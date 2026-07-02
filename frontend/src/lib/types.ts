@@ -57,6 +57,7 @@ export interface PondInfo {
   // Fault tolerance + control (Ponds only).
   isFailed: boolean;
   isBlocked: boolean;
+  blockedReason: string | null;
   isKilled: boolean;
   refreshPending: boolean; // next run is a cold wipe-and-rebuild (control refresh)
   repairing: boolean; // in an active repair plan

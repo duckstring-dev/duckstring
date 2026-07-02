@@ -30,6 +30,8 @@ from ..engine import (
     RippleState,
     Trigger,
     Window,
+    block_on_missing_asset,
+    clear_missing_asset,
     clear_pond,
     complete_ripple,
     derive_blocked,
@@ -1193,7 +1195,28 @@ class Driver:
                     self._alert_failure(pond, "failure", scope_pond=name, f=f,
                                         title=f"Pond '{name}' failed",
                                         message=f"Ripple '{rname}' failed: {err or 'unknown error'}")
+            elif kind == "missing_source":
+                # A Ripple read a Source asset that isn't published (deleted, or not produced yet). Park the
+                # Pond blocked-with-a-reason — NOT failed: no retry-budget burn, no failure alert. It
+                # recovers when the Source republishes something fresher. See plans/reset.md.
+                rname = payload["ripple"]
+                eid = f"{pond}.{rname}"
+                if eid in self.state.ripple_states:
+                    if f:
+                        self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
+                    reason = f"{payload.get('source')}.{payload.get('table')}"
+                    self.state = block_on_missing_asset(self.state, pond, reason, now)
+                    msg = f"waiting for '{reason}' to be published"
+                    self._fail_pond_run(pond, f, now, msg, None)  # history: the Run couldn't complete
+                    self._record_ripple_run(
+                        pond, rname, f, "failed",
+                        started_at=payload.get("started_at"),
+                        finished_at=payload.get("finished_at") or _iso(now),
+                        retry=payload.get("retry", 0), error=msg,
+                    )
+                    self._process(now)
             elif kind == "run_completed":
+                self.state = clear_missing_asset(self.state, pond)  # a clean read → the wait (if any) is over
                 self._finish_pond_run(pond, f, now, changed=payload.get("changed", True))
                 # Freeze the published output schema as the version's contract (the substrate the
                 # additive gate and min_version enforcement build on).
@@ -2037,6 +2060,7 @@ class Driver:
                     "trigger": trigger,
                     "is_failed": ps.is_failed,
                     "is_blocked": ps.is_blocked,
+                    "blocked_reason": (f"waiting for '{ps.missing_asset}'" if ps.missing_asset else None),
                     "is_killed": ps.is_killed,
                     "refresh_pending": ps.refresh_pending,
                     "repairing": ps.repairing,

@@ -145,6 +145,7 @@ function transformStatus(payload: StatusPayload): StatusSlice {
       hasObjects: p.has_objects ?? false,
       isFailed: p.is_failed,
       isBlocked: p.is_blocked,
+      blockedReason: p.blocked_reason ?? null,
       isKilled: p.is_killed,
       refreshPending: p.refresh_pending ?? false,
       repairing: p.repairing ?? false,

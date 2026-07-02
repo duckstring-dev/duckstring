@@ -243,6 +243,36 @@ def test_delete_table_removes_now_and_rebuilds_on_next_run(runtime):
     assert not (root / "ponds" / "priced" / "m1" / "data" / "priced_line__changelog").exists()
 
 
+def test_missing_source_asset_blocks_downstream_with_reason(runtime):
+    """A downstream that reads a deleted Source table parks **blocked-with-a-reason** — not failed, no
+    retry-budget burn (plans/reset.md Mechanism 2) — and recovers when the Source republishes."""
+    url, root = runtime
+    _deploy(url, _TRICKLE_PONDS)
+    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
+    time.sleep(1.0)
+
+    # Delete catalog.product — priced reads it. Then force priced to hit the (now missing) read.
+    r = httpx.request("DELETE", f"{url}/api/ponds/catalog/tables/product", timeout=10.0)
+    assert r.status_code == 200, r.text
+    httpx.post(f"{url}/api/ponds/priced/force", timeout=5.0)
+
+    def priced():
+        return _pond_status(url, "priced") or {}
+
+    assert _wait(lambda: priced().get("is_blocked") and priced().get("blocked_reason"), timeout=30.0), \
+        f"priced never blocked (status={priced()})"
+    st = priced()
+    assert "catalog.product" in st["blocked_reason"]
+    assert st["is_failed"] is False, "a missing Source asset must not fail the Pond"
+    assert st["failures"] == 0, "a missing Source asset must not burn the retry budget"
+
+    # Recover: rebuild catalog.product at a fresh freshness → priced re-reads clean → unblocks.
+    httpx.post(f"{url}/api/ponds/catalog/pulse", timeout=5.0)
+    assert _wait(lambda: not priced().get("is_blocked") and not priced().get("blocked_reason"), timeout=30.0), \
+        f"priced never recovered (status={priced()})"
+
+
 def test_refresh_flag_rebuilds_and_bumps_floor(runtime):
     """`control refresh` is lazy: it flags the Pond (refresh_pending) but runs nothing. The next run is a
     cold wipe-and-rebuild that raises the published changelog floor, so downstream coverage-misses."""
