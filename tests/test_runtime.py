@@ -301,6 +301,33 @@ def test_reset_pond_scrubs_and_rebuilds(runtime):
         "catalog did not rebuild after reset + pulse"
 
 
+def test_reset_catchment_scrubs_all_keeps_artifacts(runtime):
+    """`catchment reset` scrubs every line's registry/data/ledger and rewinds all freshness — keeping the
+    deployed artifacts + config — and the whole chain rebuilds from the Inlets down (plans/reset.md)."""
+    url, root = runtime
+    _deploy(url, _TRICKLE_PONDS)
+    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
+    time.sleep(1.0)
+    assert all((root / "ponds" / p / "m1" / "registry.duckdb").exists() for p in _TRICKLE_PONDS)
+
+    r = httpx.post(f"{url}/api/catchment/reset", timeout=30.0)
+    assert r.status_code == 200, r.text
+    assert r.json()["ponds"] == len(_TRICKLE_PONDS)
+    for p in _TRICKLE_PONDS:
+        assert not (root / "ponds" / p / "m1").exists(), f"{p} runtime not scrubbed"
+        # The deployed artifact ({name}/{version}/) survives.
+        assert any(d.is_dir() and d.name[0].isdigit() for d in (root / "ponds" / p).iterdir()), \
+            f"{p} artifact was removed"
+        assert (_pond_status(url, p) or {}).get("has_tables") is False
+
+    # The whole chain rebuilds from scratch on the next demand.
+    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None
+                 and (_pond_status(url, "priced") or {}).get("has_tables") is True, timeout=45.0), \
+        "chain did not rebuild after catchment reset"
+
+
 def test_reset_pond_rejects_while_running(runtime):
     """A reset requires the Pond idle (409 while a Run is in flight)."""
     url, _ = runtime

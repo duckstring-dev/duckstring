@@ -243,6 +243,18 @@ export async function repairPonds(
   return res.json();
 }
 
+// Reset the whole Catchment to a fresh-deploy state (scrub data + state; keep deploys/config/secrets).
+export async function resetCatchment(clearHistory = false): Promise<{ ponds: number }> {
+  const res = await fetch(`${apiBase()}/catchment/reset`, {
+    method: 'POST',
+    headers: authHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify({ clear_history: clearHistory }),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `reset failed (${res.status})`);
+  return res.json();
+}
+
 // Failure management.
 export function clearFailure(pond: string): Promise<void> {
   return postJSON(pondPath(pond, 'clear'));

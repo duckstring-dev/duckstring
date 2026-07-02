@@ -529,6 +529,58 @@ class Driver:
             self.state_version += 1
             self._process(_now())
 
+    def reset_catchment(self, clear_history: bool = False) -> dict:
+        """Reset the **whole Catchment** to a fresh-deploy state — the sanctioned replacement for
+        ``rm -rf .duckstring``. Stop-the-world: terminate every Duck, scrub every line's registry, ledger,
+        and published data, rewind every Pond's freshness/fault to ``NEVER`` — keeping the deployed
+        artifacts, operational config, secrets, and keys. Rebuilds lazily (standing triggers + demand from
+        the Inlets down). See plans/reset.md. Returns ``{"ponds": n}``."""
+        import shutil
+        from pathlib import Path
+
+        from .registry import pond_data_dir
+
+        with self.lock:
+            # 1. Quiesce: stop every Duck (wait, so registry.duckdb handles are free) and drop pending work.
+            for key in list(self.state.ponds):
+                self.launcher.terminate(key, wait=True)
+            self.jobs.clear()
+            self._pending_transfers.clear()
+            self._pending_egress.clear()
+            self._idle_since.clear()
+            lines = [(m["name"], m["major"]) for m in self.meta.values()
+                     if not m.get("is_draw") and not m.get("is_spout")]
+            # 2. Scrub each line's runtime: registry.duckdb + pond.db + local data/ (keep the {version}/ artifacts).
+            ponds_root = Path(self.root) / "ponds"
+            if ponds_root.exists():
+                for name_dir in ponds_root.iterdir():
+                    if name_dir.is_dir():
+                        for m in name_dir.glob("m*"):
+                            if m.is_dir() and m.name[1:].isdigit():
+                                shutil.rmtree(m, ignore_errors=True)
+            if self.data_root is not None:  # published data outside the state root
+                for name, major in lines:
+                    try:
+                        pond_data_dir(Path(self.root), name, major, self.data_root).rmtree()
+                    except Exception:
+                        pass
+            # 3. Rewind all runtime rows in duck.db (keep demand + topology + operational config + secrets).
+            self.db.execute(
+                "UPDATE pond_state SET start_f=?, end_f=?, changed_f=?, d_ms=0, is_failed=0, is_blocked=0, "
+                "failed_f=?, failures=0, is_killed=0, refresh_pending=0",
+                (_iso(NEVER), _iso(NEVER), _iso(NEVER), _iso(NEVER)),
+            )
+            self.db.execute("DELETE FROM alert_delivery")  # the notification outbox is runtime, not config
+            if clear_history:
+                self.db.execute("DELETE FROM ripple_run")
+                self.db.execute("DELETE FROM pond_run")
+            self.db.commit()
+            # 4. Rebuild the engine from the scrubbed DB — a fresh-deploy engine (spouts/triggers re-armed).
+            self.reload()
+            self.state_version += 1
+            self._process(_now())
+            return {"ponds": len(lines)}
+
     def is_pond_running(self, pond: str) -> bool:
         """Whether a Pond has a Run in flight (start_f advanced past end_f) — the idle gate for an Object
         delete (which must not race a run's commit_objects). Best-effort: unknown Pond ⇒ not running."""

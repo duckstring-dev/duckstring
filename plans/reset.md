@@ -1,7 +1,11 @@
 # Reset — a clean slate for a Pond or the whole Catchment
 
-Status: **designed; two demand-model prerequisites first.** The sanctioned replacement for "something feels
-weird with the `.duckstring` files, so I `rm -rf` it and start over." Two scopes:
+Status: **implemented.** Mechanism 1 (`engine.restore_demand`) + Mechanism 2 (`MissingSourceAsset` →
+blocked-with-a-reason) + `Driver.reset_pond` / `reset_catchment` + the routes / CLI (`control reset`,
+`catchment reset`) / UI (Sidebar Reset, catchment "Reset all") are all wired and tested. Deferred (noted
+below): Mechanism 2's auto-*solicit* of an idle Source + its stale-`f` escalation. The sanctioned
+replacement for "something feels weird with the `.duckstring` files, so I `rm -rf` it and start over." Two
+scopes:
 
 - **`reset {pond}`** — scrub one Pond's runtime state, keeping its deployed code and operational config.
 - **`catchment reset`** — do that for every Pond at once: the whole runtime back to a fresh-deploy state,

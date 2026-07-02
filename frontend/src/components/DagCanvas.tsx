@@ -17,7 +17,7 @@ import {
 import '@xyflow/react/dist/style.css';
 
 import { useLiveStore, consumeEdgeColor, formatAge, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER } from '@/lib/store';
-import type { AccessLevel } from '@/lib/api';
+import { resetCatchment, type AccessLevel } from '@/lib/api';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { PondNode } from './PondNode';
@@ -239,6 +239,7 @@ function ControlsPanel() {
   );
   const [secretsOpen, setSecretsOpen] = useState(false);
   const [alertsOpen, setAlertsOpen] = useState(false);
+  const [resetArmed, setResetArmed] = useState(false);
 
   const collapsibleIds = collapsibleKey ? collapsibleKey.split(',') : [];
   const allCollapsed = collapsibleIds.length > 0 && collapsibleIds.every((id) => collapsedPonds[id]);
@@ -269,6 +270,25 @@ function ControlsPanel() {
             style={{ ...panelButton, justifyContent: 'center', color: alertsOpen ? '#e4e4e7' : '#a1a1aa' }}
           >
             Alerts
+          </button>
+        )}
+        {isFull && (
+          <button
+            title="Scrub every Pond's data + state to a fresh-deploy state (keeps deploys, config, secrets)"
+            onClick={() => {
+              if (resetArmed) {
+                setResetArmed(false);
+                void resetCatchment().catch(() => {});
+              } else {
+                setResetArmed(true);
+                setTimeout(() => setResetArmed(false), 4000);
+              }
+            }}
+            style={{ ...panelButton, justifyContent: 'center', color: resetArmed ? '#f4f4f5' : '#a1a1aa',
+                     borderColor: resetArmed ? THEME_DANGER : undefined,
+                     background: resetArmed ? `${THEME_DANGER}22` : undefined }}
+          >
+            {resetArmed ? 'Confirm — reset all' : 'Reset all'}
           </button>
         )}
       </div>

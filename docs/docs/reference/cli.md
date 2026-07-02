@@ -29,6 +29,7 @@ Most commands that talk to a Catchment share these:
 | `catchment connect -n {name} --path {url} [--key KEY] [--header 'N: v']… [-y]` | Register a remote Catchment by URL; `--key` stores its API key (sent as a Bearer header — use a `demand` key for a downstream that only solicits and draws), `--header` stores arbitrary headers for platform auth (e.g. `'Authorization: Key …'` for Posit Connect) — both attached to every request. |
 | `catchment list` | List registered Catchments; `●` marks the default. |
 | `catchment download [-c NAME] [--path DIR] [-y]` | Download the Catchment's entire root (database, artifacts, data, ledgers) into a local directory — default `./.duckstring`, so it drops straight into a platform deploy bundle. Shows the state size and asks before transferring (`-y` skips); streams with a progress bar. |
+| `catchment reset [-c NAME] [--clear-history] [-y]` | Reset the **whole Catchment** to a fresh-deploy state — scrub every Pond's registry, published data, and ledger and rewind all freshness — **keeping** the deployed code, operational config, secrets, and keys. The sanctioned replacement for deleting `.duckstring`; stop-the-world (every worker restarts). Ponds rebuild lazily from the Inlets down. |
 | `catchment set-default {name}` | Set the default Catchment. |
 | `catchment disconnect {name} [--purge]` | Unregister; for local Catchments, offers to delete the data directory (`--purge` deletes without asking). |
 | `catchment open {pond} [-m M] [--tap-on-get]` | Mark a Pond open to demand from any source; `--tap-on-get` makes a [query](../guides/querying-data.md) read fire a Tap (snapshot served first). |
@@ -151,6 +152,7 @@ See [Control](../guides/control.md) and [Fault Tolerance](../guides/fault-tolera
 | `control force {pond}` | Recompute now at current freshness; doesn't propagate downstream. Clears failed/killed. |
 | `control refresh {pond} [--clear]` | Flag the Pond so its *next* run is a cold wipe-and-rebuild (full recompute, clears the changelog so downstream reloads). Lazy — nothing runs now. `--clear` un-flags. See [Trickle](../guides/trickle.md). |
 | `control repair {ponds}... [--downstream]` | Force-rebuild a **connected** set of Ponds now, in dependency order (each reads its freshly-rebuilt parents). For an immediate fix when no new upstream run is coming. `--downstream` extends the set to all descendants; a disconnected set (a skipped Pond in a sequence) is rejected. |
+| `control reset {pond} [--clear-history] [-y]` | Reset a Pond to a fresh-deploy state — scrub its registry, published data, and ledger and rewind its freshness — **keeping** its code, operational config, and demand. Lazy: nothing runs now; it rebuilds from scratch when next demanded. Requires the Pond idle. |
 | `control sleep {pond} [--upstream]` | Clear all demand (started runs complete). `--upstream` also sleeps every ancestor. |
 | `control kill {pond}` | Terminate the Pond's worker and cancel its run; parks the Pond `killed` until wake/force/clear. |
 | `control clear {pond}` | Reset a failed/killed Pond to idle and unblock downstream, without running. |
