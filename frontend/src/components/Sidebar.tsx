@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { fetchAlerts, fetchSecrets, testSpout, fetchTables, fetchObjects, type RawAlertChannel } from '@/lib/api';
 import { ConfirmDialog, type ConfirmOpts } from './ConfirmDialog';
-import { useLiveStore, atLeast, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
+import { useLiveStore, atLeast, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE, THEME_BRAND } from '@/lib/store';
 import type { FreqUnit, Pond, PondId, PondInfo, PondRun } from '@/lib/types';
 import { AlertChannelForm, ChannelRow } from './AlertsMenu';
 import { TraceChart } from './TraceChart';
@@ -342,7 +342,7 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
         </div>
       ) : (
         <div style={{ marginTop: 6 }}>
-          <Btn small onClick={() => setOpen(true)} color={THEME_PULL}>+ Add Spout</Btn>
+          <Btn block onClick={() => setOpen(true)} color={THEME_BRAND}>+ Add Spout</Btn>
         </div>
       ))}
     </Section>
@@ -376,7 +376,7 @@ function AlertEditor({ pond, canControl }: { pond: Pond; canControl: boolean }) 
         </div>
       ) : (
         <div style={{ marginTop: 6 }}>
-          <Btn small onClick={() => setOpen(true)} color={THEME_PULL}>+ Add Alert</Btn>
+          <Btn block onClick={() => setOpen(true)} color={THEME_BRAND}>+ Add Alert</Btn>
         </div>
       )}
     </Section>
@@ -695,7 +695,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
                 <input type="number" min="0" step="1" value={value} onChange={(e) => setValue(e.target.value)} style={{ ...numInput, width: 48 }} />
                 <Btn
                   small
-                  color={THEME_PUSH}
+                  color={THEME_WAKE}
                   onClick={() => setBudget(selectedPond.id, Math.max(0, parseInt(immRetries) || 0), Math.max(0, parseInt(srcRetries) || 0))}
                 >
                   Set
@@ -709,7 +709,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             )}
             {/* Repair: enter canvas-selection mode to force-rebuild a connected set of Ponds now. */}
             <div style={{ marginTop: 8 }}>
-              <Btn onClick={() => enterRepair()} color={THEME_DANGER} disabled={repairMode}>Repair…</Btn>
+              <Btn block onClick={() => enterRepair()} color={THEME_BLOCKED} disabled={repairMode}>
+                Repair — rebuild a connected set…
+              </Btn>
             </div>
           </Section>
           )}
