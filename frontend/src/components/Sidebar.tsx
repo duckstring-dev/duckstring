@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { fetchAlerts, fetchSecrets, testSpout, type RawAlertChannel } from '@/lib/api';
+import { fetchAlerts, fetchSecrets, testSpout, fetchTables, fetchObjects, type RawAlertChannel } from '@/lib/api';
+import { ConfirmDialog, type ConfirmOpts } from './ConfirmDialog';
 import { useLiveStore, atLeast, formatAge, formatDuration, parseTs, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
-import type { FreqUnit, Pond, PondInfo, PondRun } from '@/lib/types';
+import type { FreqUnit, Pond, PondId, PondInfo, PondRun } from '@/lib/types';
 import { AlertChannelForm, ChannelRow } from './AlertsMenu';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
@@ -48,6 +49,15 @@ function Btn({
 
 // A 4-column row of equal-width buttons — so the Trigger and Control rows line up.
 const quadRow: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 };
+
+// A Trickle companion (X__changelog / X__band / X__droplog / X__base) belongs to base table X — collapse
+// them so a Reset lists the user-facing tables, not their internals (mirrors trickle_io.base_table_name).
+function baseTableName(name: string): string {
+  for (const s of ['__changelog', '__band', '__droplog', '__base']) {
+    if (name.endsWith(s) && name.length > s.length) return name.slice(0, -s.length);
+  }
+  return name;
+}
 
 function Label({ children }: { children: React.ReactNode }) {
   return (
@@ -449,7 +459,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const resetPond = useLiveStore((s) => s.resetPond);
   const enterRepair = useLiveStore((s) => s.enterRepair);
   const repairMode = useLiveStore((s) => s.repairMode);
-  const [resetArmed, setResetArmed] = useState<string | null>(null);  // two-click confirm for the destructive Reset
+  const [confirm, setConfirm] = useState<ConfirmOpts | null>(null);  // themed confirm dialog (Reset)
 
   // Access level gates the action surface (the backend enforces it too — this just avoids dead buttons).
   // read: status/history/data only · demand: + the Triggers menu · full: + Control/Windows/Failures.
@@ -497,6 +507,25 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
     : selectedRipple
       ? `${ponds[selectedRipple.pondId]?.name ?? ''} / ${selectedRipple.name}`
       : selectedPond?.name ?? null;
+
+  // Open the Reset confirm: fetch the Pond's tables + Objects so the dialog can list exactly what clears.
+  const openResetConfirm = async (id: PondId, name: string) => {
+    const [tables, objects] = await Promise.all([
+      fetchTables(id).catch(() => []),
+      fetchObjects(id).catch(() => []),
+    ]);
+    const bases = [...new Set(tables.map((t) => baseTableName(t.name)))];
+    const list = (xs: string[]) => (xs.length ? xs.join(', ') : '(none)');
+    setConfirm({
+      title: `Reset "${name}"?`,
+      body:
+        'This scrubs its registry, published data, and ledger and rewinds its freshness — keeping its code, ' +
+        'operational config, and demand. It rebuilds from scratch when next demanded.\n\n' +
+        `Tables cleared: ${list(bases)}\nObjects cleared: ${list(objects.map((o) => o.name))}`,
+      confirmLabel: 'Reset',
+      action: async () => { await resetPond(id); },
+    });
+  };
 
   const content = (
     <>
@@ -636,33 +665,17 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               <Btn block onClick={() => sleep(selectedPond.id)} color={THEME_BLOCKED}>Sleep</Btn>
               <Btn block onClick={() => kill(selectedPond.id)} color={THEME_DANGER}>Kill</Btn>
             </div>
-            {/* Refresh: flag the next run to rebuild from scratch (lazy). Toggles when pending. */}
-            <div style={{ marginTop: 6 }}>
+            {/* Refresh (flag a cold rebuild on the next run, lazy) + Reset (scrub data + state now). */}
+            <div style={{ marginTop: 6, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
               <Btn
                 block
                 color={THEME_PULL}
                 onClick={() => refreshPond(selectedPond.id, !!selectedInfo?.refreshPending)}
               >
-                {selectedInfo?.refreshPending ? 'Cancel Refresh' : 'Refresh on next run'}
+                {selectedInfo?.refreshPending ? 'Cancel' : 'Refresh'}
               </Btn>
-            </div>
-            {/* Reset: scrub the Pond's data + state (keeps code, config, demand); rebuilds when demanded.
-                Two-click confirm — it is destructive. */}
-            <div style={{ marginTop: 6 }}>
-              <Btn
-                block
-                color={THEME_DANGER}
-                onClick={() => {
-                  if (resetArmed === selectedPond.id) {
-                    setResetArmed(null);
-                    void resetPond(selectedPond.id);
-                  } else {
-                    setResetArmed(selectedPond.id);
-                    setTimeout(() => setResetArmed((a) => (a === selectedPond.id ? null : a)), 4000);
-                  }
-                }}
-              >
-                {resetArmed === selectedPond.id ? 'Confirm reset — scrubs data' : 'Reset (scrub data + state)'}
+              <Btn block color={THEME_DANGER} onClick={() => openResetConfirm(selectedPond.id, selectedPond.name)}>
+                Reset
               </Btn>
             </div>
           </Section>
@@ -745,6 +758,8 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
           </Section>
         </>
       )}
+
+      {confirm && <ConfirmDialog opts={confirm} onClose={() => setConfirm(null)} />}
     </>
   );
 

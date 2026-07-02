@@ -288,7 +288,7 @@ function ControlsPanel() {
               requireTyped: catchmentName || 'reset all',
               action: async () => { await resetCatchment().catch(() => {}); },
             })}
-            style={{ ...panelButton, justifyContent: 'center', color: '#a1a1aa' }}
+            style={{ ...panelButton, justifyContent: 'center', color: THEME_DANGER, borderColor: `${THEME_DANGER}66` }}
           >
             Reset all
           </button>
