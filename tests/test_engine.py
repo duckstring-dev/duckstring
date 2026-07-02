@@ -492,6 +492,59 @@ def test_tide_below_bottleneck_throttles():
 
 
 @pytest.mark.timeout(5)
+def test_restore_demand_re_solicits_a_stranded_source():
+    """The demand-restoration invariant (plans/reset.md): a downstream still holding a standing pull whose
+    Source no longer mirrors it (e.g. the Source was reset to NEVER, or a cascade was lost) gets its Source
+    re-solicited on the next tick. Without it the Source sits idle forever and the downstream never runs."""
+    src = Pond("src", "src")
+    dwn = Pond("dwn", "dwn", sources=["src"])
+    s = build([src, dwn], [Ripple("r", "dwn", "r")])
+    s.pond_states["dwn"].start_f = s.pond_states["dwn"].end_f = T0
+    s.pond_states["dwn"].has_pull = True             # preserved demand (the intent to keep running)
+    s.pond_states["src"].start_f = s.pond_states["src"].end_f = NEVER  # reset: cleared to a fresh slate
+    assert s.pond_states["src"].has_pull is False
+
+    s = tick(T0 + STEP, s)
+    assert s.pond_states["src"].has_pull is True      # re-solicited (cold-start cascade)
+
+
+@pytest.mark.timeout(5)
+def test_restore_demand_parks_under_blocked_source_and_heals_on_unblock():
+    """Re-solicitation refuses a blocked Source (as all demand does), so a path parks under a blocked
+    Source and heals on the first tick after it unblocks — the fix for the standing gap where a blocked
+    Pond drops incoming demand instead of parking it."""
+    src = Pond("src", "src")
+    dwn = Pond("dwn", "dwn", sources=["src"])
+    s = build([src, dwn], [Ripple("r", "dwn", "r")])
+    s.pond_states["dwn"].start_f = s.pond_states["dwn"].end_f = T0
+    s.pond_states["dwn"].has_pull = True
+    s.pond_states["src"].start_f = s.pond_states["src"].end_f = NEVER
+    s.pond_states["src"].is_blocked = True
+
+    s = tick(T0 + STEP, s)
+    assert s.pond_states["src"].has_pull is False      # blocked → parks, not re-solicited
+
+    s.pond_states["src"].is_blocked = False
+    s = tick(T0 + 2 * STEP, s)
+    assert s.pond_states["src"].has_pull is True        # healed on the next tick
+
+
+@pytest.mark.timeout(5)
+def test_restore_demand_quiescent_graph_no_spurious_demand():
+    """A fully-idle graph with no outstanding demand stays quiescent — the invariant only re-derives held
+    demand, it never invents it."""
+    src = Pond("src", "src")
+    dwn = Pond("dwn", "dwn", sources=["src"])
+    s = build([src, dwn], [Ripple("r", "dwn", "r")])
+    for pid in ("src", "dwn"):
+        s.pond_states[pid].start_f = s.pond_states[pid].end_f = T0
+    s = tick(T0 + STEP, s)
+    s, _ = sentinel(T0 + STEP, s)
+    assert not any(ps.has_pull for ps in s.pond_states.values())
+    assert s.pending_begin_runs == []
+
+
+@pytest.mark.timeout(5)
 def test_push_precision_diamond():
     # Standing Wave on B churns it; one Pulse on X must run X exactly once despite the forked path.
     s, dur = diamond_topology([Trigger("B", "wave")])

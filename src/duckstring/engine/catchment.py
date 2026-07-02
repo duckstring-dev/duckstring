@@ -684,9 +684,33 @@ def sentinel(now: datetime, state: EngineState) -> tuple[EngineState, list[Rippl
     return s, started
 
 
+def restore_demand(s: EngineState, now: datetime) -> None:
+    """Re-derive **pull** demand from the sinks — a corrective invariant that makes the one-shot pull
+    propagation *eventually consistent*. A Pond still holding a propagating pull it can't yet satisfy
+    implies its behind Sources (the cold-start test ``S.start_f <= D.start_f``) should hold pulls too; if a
+    reset / a crash between propagate-and-persist / a blocked-Source refusal dropped that upstream, this
+    re-solicits it. ``pond_receive_pull`` is idempotent (the ``has_pull`` guard) and **refuses blocked
+    Ponds**, so a path automatically parks under a blocked Source and heals on the first tick after it
+    unblocks. Excludes killed Ponds (parked terminal) and ``pull_local`` Wakes (non-propagating).
+
+    *Push* is deliberately not restored here: a standing Tide re-emits its targets every bound (its own
+    restoration), and the narrow "a one-shot Pulse hit a blocked Source" strand is healed by Mechanism 2's
+    solicitation (a pull), not by blanket per-tick target re-propagation — which churns the Tide throttle
+    (targets encode the cadence). See plans/reset.md."""
+    for pid in list(s.pond_states):
+        ps = s.pond_states[pid]
+        if ps.is_killed or ps.pull_local or ps.is_blocked or not ps.has_pull:
+            continue
+        for sp in s.ponds[pid].sources:
+            if s.pond_states[sp].start_f <= ps.start_f:
+                s.pond_states[sp].has_received_pull = True
+                pond_receive_pull(s, sp, now, ps.pull_m)
+
+
 def tick(now: datetime, state: EngineState) -> EngineState:
-    """Clock-driven processes only: Tide target emission and Wave-on-idle re-Tap. Window availability
-    is read live in :func:`can_start_pond`. The caller runs :func:`sentinel` afterwards."""
+    """Clock-driven processes only: Tide target emission and Wave-on-idle re-Tap, plus the demand-restoration
+    invariant (:func:`restore_demand`). Window availability is read live in :func:`can_start_pond`. The
+    caller runs :func:`sentinel` afterwards."""
     s = state.clone()
     # Standing Wake (Spouts): whenever idle and armed, re-arm a **non-propagating** pull (a Wake, not a
     # Wave — `pull_local` stops `start_pond_run` soliciting the Source). It then runs whenever the Source
@@ -714,6 +738,7 @@ def tick(now: datetime, state: EngineState) -> EngineState:
             ref = max_target(ps.targets) or ps.start_f
             if now + ps.d - ref >= bound:
                 pond_add_target(s, pid, now)
+    restore_demand(s, now)  # re-derive any demand lost upstream (reset / crash / blocked-refusal)
     return s
 
 
