@@ -27,6 +27,7 @@ import { CatchmentGroupNode } from './CatchmentGroupNode';
 import { RemotePondNode } from './RemotePondNode';
 import { AlertsMenu } from './AlertsMenu';
 import { SecretsMenu } from './SecretsMenu';
+import { ConfirmDialog, type ConfirmOpts } from './ConfirmDialog';
 
 // ─── Custom edges (read-only; colour reflects the sink's demand) ─────────────
 
@@ -239,7 +240,8 @@ function ControlsPanel() {
   );
   const [secretsOpen, setSecretsOpen] = useState(false);
   const [alertsOpen, setAlertsOpen] = useState(false);
-  const [resetArmed, setResetArmed] = useState(false);
+  const [resetConfirm, setResetConfirm] = useState<ConfirmOpts | null>(null);
+  const catchmentName = useLiveStore((s) => s.catchment?.name ?? null);
 
   const collapsibleIds = collapsibleKey ? collapsibleKey.split(',') : [];
   const allCollapsed = collapsibleIds.length > 0 && collapsibleIds.every((id) => collapsedPonds[id]);
@@ -275,23 +277,24 @@ function ControlsPanel() {
         {isFull && (
           <button
             title="Scrub every Pond's data + state to a fresh-deploy state (keeps deploys, config, secrets)"
-            onClick={() => {
-              if (resetArmed) {
-                setResetArmed(false);
-                void resetCatchment().catch(() => {});
-              } else {
-                setResetArmed(true);
-                setTimeout(() => setResetArmed(false), 4000);
-              }
-            }}
-            style={{ ...panelButton, justifyContent: 'center', color: resetArmed ? '#f4f4f5' : '#a1a1aa',
-                     borderColor: resetArmed ? THEME_DANGER : undefined,
-                     background: resetArmed ? `${THEME_DANGER}22` : undefined }}
+            onClick={() => setResetConfirm({
+              title: 'Reset the entire Catchment?',
+              body:
+                'This scrubs EVERY Pond — its registry, published data, and ledger — and rewinds all ' +
+                'freshness to a fresh-deploy state. Every worker restarts; Ponds rebuild from scratch when ' +
+                'next demanded.\n\nKept: your deployed code, operational config (triggers, windows, spouts, ' +
+                'alerts), secrets, and keys. This cannot be undone.',
+              confirmLabel: 'Reset everything',
+              requireTyped: catchmentName || 'reset all',
+              action: async () => { await resetCatchment().catch(() => {}); },
+            })}
+            style={{ ...panelButton, justifyContent: 'center', color: '#a1a1aa' }}
           >
-            {resetArmed ? 'Confirm — reset all' : 'Reset all'}
+            Reset all
           </button>
         )}
       </div>
+      {isFull && resetConfirm && <ConfirmDialog opts={resetConfirm} onClose={() => setResetConfirm(null)} />}
       {isFull && secretsOpen && <SecretsMenu onClose={() => setSecretsOpen(false)} />}
       {isFull && alertsOpen && <AlertsMenu onClose={() => setAlertsOpen(false)} />}
     </div>

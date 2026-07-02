@@ -8,6 +8,7 @@ import {
   type DataQuery, type TableInfo, type TrickleMode, type PageResult, type ObjectInfo, UnauthorizedError,
 } from '@/lib/api';
 import type { PondId } from '@/lib/types';
+import { ConfirmDialog, type ConfirmOpts } from './ConfirmDialog';
 
 const ROW_H = 26;
 const NUM_W = 60;
@@ -24,10 +25,6 @@ const DELTA = '_duckstring_d'; // Z-set weight: +1 insert / -1 retraction — sh
 const COL_LABELS: Record<string, string> = { [FRESH]: 'freshness', [UPDATES]: 'updates', [EVENT]: 'event', [DELTA]: 'Δ' };
 // History event → label colour (reusing the theme): create = white, update = brand cyan, delete = blocked red.
 const EVENT_COLOR: Record<string, string> = { create: '#f4f4f5', update: THEME_BRAND, delete: THEME_BLOCKED };
-
-// A destructive-confirmation request handed to the shared themed ConfirmDialog. `action` is the work to
-// run on confirm (the dialog awaits it, then closes).
-type ConfirmOpts = { title: string; body: string; confirmLabel: string; action: () => Promise<void> | void };
 
 // A Trickle companion (X__changelog / X__band / X__droplog / X__base) belongs to base table X — a delete
 // takes the whole collection, so a companion resolves to its base (mirrors trickle_io.base_table_name).
@@ -863,75 +860,6 @@ function HistoryOverlay({
   );
 }
 
-// ─── Themed confirmation dialog (replaces window.confirm) ────────────────────
-
-function ConfirmDialog({ opts, onClose }: { opts: ConfirmOpts; onClose: () => void }) {
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [busy, onClose]);
-
-  const go = async () => {
-    setBusy(true);
-    try {
-      await opts.action();
-    } finally {
-      onClose();
-    }
-  };
-
-  return (
-    <div
-      onClick={() => !busy && onClose()}
-      style={{
-        position: 'absolute', inset: 0, zIndex: 20, display: 'flex', alignItems: 'center',
-        justifyContent: 'center', background: 'rgba(9, 9, 11, 0.66)', padding: 16,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        role="alertdialog"
-        aria-label={opts.title}
-        style={{
-          background: '#101014', border: '1px solid #3f3f46', borderRadius: 10,
-          width: 'min(420px, 92vw)', padding: '18px 18px 16px', boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
-        }}
-      >
-        <div style={{ fontSize: 13.5, fontWeight: 700, color: '#e4e4e7', marginBottom: 8 }}>{opts.title}</div>
-        <div style={{ fontSize: 12.5, color: '#a1a1aa', lineHeight: 1.55, marginBottom: 16 }}>{opts.body}</div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <button
-            onClick={onClose}
-            disabled={busy}
-            style={{
-              background: 'transparent', border: '1px solid #3f3f46', borderRadius: 6, padding: '8px 15px',
-              color: '#a1a1aa', fontSize: 12.5, fontWeight: 700, cursor: busy ? 'default' : 'pointer',
-              fontFamily: 'inherit',
-            }}
-          >
-            Cancel
-          </button>
-          <button
-            onClick={go}
-            disabled={busy}
-            style={{
-              background: THEME_BLOCKED, border: 'none', borderRadius: 6, padding: '8px 16px',
-              color: busy ? '#fca5a5' : '#f4f4f5', fontSize: 12.5, fontWeight: 700,
-              cursor: busy ? 'default' : 'pointer', fontFamily: 'inherit',
-            }}
-          >
-            {busy ? '…' : opts.confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function th(extra: React.CSSProperties): React.CSSProperties {
   return {
