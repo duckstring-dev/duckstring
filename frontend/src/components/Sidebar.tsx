@@ -709,7 +709,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             )}
             {/* Repair: enter canvas-selection mode to force-rebuild a connected set of Ponds now. */}
             <div style={{ marginTop: 8 }}>
-              <Btn block onClick={() => enterRepair()} color={THEME_BLOCKED} disabled={repairMode}>
+              <Btn block onClick={() => enterRepair()} color={THEME_SUCCESS} disabled={repairMode}>
                 Repair — rebuild a connected set…
               </Btn>
             </div>
