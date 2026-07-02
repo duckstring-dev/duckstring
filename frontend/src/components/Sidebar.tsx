@@ -669,7 +669,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             <div style={{ marginTop: 6, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
               <Btn
                 block
-                color={THEME_PULL}
+                color={THEME_SUCCESS}
                 onClick={() => refreshPond(selectedPond.id, !!selectedInfo?.refreshPending)}
               >
                 {selectedInfo?.refreshPending ? 'Cancel' : 'Refresh'}
