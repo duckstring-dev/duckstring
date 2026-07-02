@@ -475,6 +475,60 @@ class Driver:
             unpublish_table(pond_data_dir(Path(self.root), name, major, self.data_root), table)
             self.state_version += 1
 
+    def reset_pond(self, pond: str, clear_history: bool = False) -> None:
+        """Reset one Pond to a fresh-deploy state — scrub its registry, published data, and ledger, and
+        rewind its freshness/fault to ``NEVER`` — while **keeping** its deployed artifact, operational
+        config, and **demand**. Lazy: it forces nothing; preserved demand + standing triggers re-drive the
+        rebuild when next eligible (the data dir is empty, so no downstream reads a gap — nobody reads a
+        ``NEVER`` Source). Requires the Pond idle. See plans/reset.md."""
+        import shutil
+        from pathlib import Path
+
+        from .registry import pond_data_dir, pond_major_dir
+
+        with self.lock:
+            ps = self.state.pond_states.get(pond)
+            if ps is not None and ps.start_f > ps.end_f:
+                raise ValueError("the Pond is running — reset it when idle")
+            meta = self.meta[pond]
+            name, major = meta["name"], meta["major"]
+            # 1. Free + scrub the on-disk runtime: registry.duckdb, pond.db ledger, and the published data.
+            self.launcher.terminate(pond, wait=True)
+            self._idle_since.pop(pond, None)
+            shutil.rmtree(pond_major_dir(Path(self.root), name, major), ignore_errors=True)
+            if self.data_root is not None:  # published data lives outside the state root (bucket/Volume)
+                pond_data_dir(Path(self.root), name, major, self.data_root).rmtree()
+            # 2. Rewind freshness/fault in duck.db (keep demand + operational config).
+            self.db.execute(
+                "UPDATE pond_state SET start_f=?, end_f=?, changed_f=?, d_ms=0, is_failed=0, is_blocked=0, "
+                "failed_f=?, failures=0, is_killed=0, refresh_pending=0 WHERE pond_id=?",
+                (_iso(NEVER), _iso(NEVER), _iso(NEVER), _iso(NEVER), meta["pond_id"]),
+            )
+            if clear_history:
+                self.db.execute("DELETE FROM ripple_run WHERE pond_version_id=?", (meta["version_id"],))
+                self.db.execute("DELETE FROM pond_run WHERE pond_version_id=?", (meta["version_id"],))
+            self.db.commit()
+            # 3. Rewind the in-memory engine state (keep demand: has_pull/pull_m/targets/standing_wake).
+            if ps is not None:
+                ps.start_f = ps.end_f = ps.changed_f = NEVER
+                ps.d = timedelta()
+                ps.is_failed = ps.is_blocked = ps.is_killed = False
+                ps.failed_f = NEVER
+                ps.failures = 0
+                ps.missing_asset = None
+                ps.refresh_pending = ps.repairing = False
+                ps.runs_started = ps.runs_completed = 0
+                for rid, rip in self.state.ripples.items():
+                    if rip.pond_id == pond:
+                        rs = self.state.ripple_states[rid]
+                        rs.start_f = rs.end_f = NEVER
+                        rs.is_running = False
+                        rs.started_at = None
+                        rs.runs_completed = 0
+                derive_blocked(self.state, pond)  # re-derive this Pond + propagate to its Sinks
+            self.state_version += 1
+            self._process(_now())
+
     def is_pond_running(self, pond: str) -> bool:
         """Whether a Pond has a Run in flight (start_f advanced past end_f) — the idle gate for an Object
         delete (which must not race a run's commit_objects). Best-effort: unknown Pond ⇒ not running."""

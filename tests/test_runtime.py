@@ -273,6 +273,51 @@ def test_missing_source_asset_blocks_downstream_with_reason(runtime):
         f"priced never recovered (status={priced()})"
 
 
+def test_reset_pond_scrubs_and_rebuilds(runtime):
+    """`reset {pond}` scrubs a Pond's registry, published data, and ledger and rewinds its freshness —
+    keeping code + config + demand — and it rebuilds from scratch when next demanded (plans/reset.md).
+    Lazy: nothing runs until re-triggered; the Pond survives (identity/config intact)."""
+    url, root = runtime
+    _deploy(url, _TRICKLE_PONDS)
+    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
+    time.sleep(1.0)
+
+    line = root / "ponds" / "catalog" / "m1"
+    assert (line / "registry.duckdb").exists() and (line / "data").exists()
+    assert (_pond_status(url, "catalog") or {}).get("has_tables") is True
+
+    r = httpx.post(f"{url}/api/ponds/catalog/reset", timeout=15.0)
+    assert r.status_code == 200, r.text
+    assert not (line / "registry.duckdb").exists(), "registry not scrubbed"
+    assert not (line / "data").exists(), "published data not scrubbed"
+    st = _pond_status(url, "catalog") or {}
+    assert st.get("has_tables") is False and st.get("end_f") is None, f"freshness not rewound ({st})"
+    assert st.get("version"), "the Pond (identity/config) must survive a reset"
+
+    # Lazy: it rebuilds from scratch on the next genuine demand.
+    httpx.post(f"{url}/api/ponds/catalog/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "catalog") or {}).get("has_tables") is True, timeout=30.0), \
+        "catalog did not rebuild after reset + pulse"
+
+
+def test_reset_pond_rejects_while_running(runtime):
+    """A reset requires the Pond idle (409 while a Run is in flight)."""
+    url, _ = runtime
+    _deploy(url, _TRICKLE_PONDS)
+    httpx.post(f"{url}/api/ponds/orders/wave", timeout=5.0)  # a standing pull keeps it busy
+    # Catch it mid-run; if we miss the window the wave will re-run it, so retry a few times.
+    saw_409 = False
+    for _ in range(40):
+        r = httpx.post(f"{url}/api/ponds/orders/reset", timeout=5.0)
+        if r.status_code == 409:
+            saw_409 = True
+            break
+        time.sleep(0.05)
+    httpx.post(f"{url}/api/ponds/orders/remove", timeout=5.0)  # drop the wave
+    assert saw_409, "reset was allowed mid-run (should 409)"
+
+
 def test_refresh_flag_rebuilds_and_bumps_floor(runtime):
     """`control refresh` is lazy: it flags the Pond (refresh_pending) but runs nothing. The next run is a
     cold wipe-and-rebuild that raises the published changelog floor, so downstream coverage-misses."""

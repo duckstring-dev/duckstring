@@ -253,6 +253,7 @@ export interface LiveState extends StatusSlice {
   force(pond: PondId): Promise<void>;
   kill(pond: PondId): Promise<void>;
   refreshPond(pond: PondId, clear?: boolean): Promise<void>;
+  resetPond(pond: PondId): Promise<void>;
 
   // Repair (D3): a canvas selection mode that force-rebuilds a connected set of Ponds now.
   repairMode: boolean;
@@ -469,6 +470,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   force: (pond) => act(get, set, () => postTrigger(pond, 'force')),
   kill: (pond) => act(get, set, () => postTrigger(pond, 'kill')),
   refreshPond: (pond, clear = false) => act(get, set, () => refreshPond(pond, clear)),
+  resetPond: (pond) => act(get, set, () => postTrigger(pond, 'reset')),
 
   repairMode: false,
   repairScope: [],

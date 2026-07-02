@@ -9,7 +9,7 @@ from . import pond as pond_cmd
 from . import puddle as puddle_cmd
 from . import secret as secret_cmd
 from . import spout as spout_cmd
-from .control import clear, failure_budget, force, kill, refresh, repair, sleep, wake
+from .control import clear, failure_budget, force, kill, refresh, repair, reset, sleep, wake
 from .data import delete_object, delete_table, get, get_object, objects, query
 from .deploy import deploy
 from .status import status
@@ -54,6 +54,7 @@ control_app = typer.Typer(
 control_app.command("force")(force)
 control_app.command("refresh")(refresh)
 control_app.command("repair")(repair)
+control_app.command("reset")(reset)
 control_app.command("wake")(wake)
 control_app.command("sleep")(sleep)
 control_app.command("kill")(kill)

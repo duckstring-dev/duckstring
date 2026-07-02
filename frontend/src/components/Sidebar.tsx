@@ -446,8 +446,10 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const clearFailure = useLiveStore((s) => s.clearFailure);
   const setBudget = useLiveStore((s) => s.setBudget);
   const refreshPond = useLiveStore((s) => s.refreshPond);
+  const resetPond = useLiveStore((s) => s.resetPond);
   const enterRepair = useLiveStore((s) => s.enterRepair);
   const repairMode = useLiveStore((s) => s.repairMode);
+  const [resetArmed, setResetArmed] = useState<string | null>(null);  // two-click confirm for the destructive Reset
 
   // Access level gates the action surface (the backend enforces it too — this just avoids dead buttons).
   // read: status/history/data only · demand: + the Triggers menu · full: + Control/Windows/Failures.
@@ -642,6 +644,25 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
                 onClick={() => refreshPond(selectedPond.id, !!selectedInfo?.refreshPending)}
               >
                 {selectedInfo?.refreshPending ? 'Cancel Refresh' : 'Refresh on next run'}
+              </Btn>
+            </div>
+            {/* Reset: scrub the Pond's data + state (keeps code, config, demand); rebuilds when demanded.
+                Two-click confirm — it is destructive. */}
+            <div style={{ marginTop: 6 }}>
+              <Btn
+                block
+                color={THEME_DANGER}
+                onClick={() => {
+                  if (resetArmed === selectedPond.id) {
+                    setResetArmed(null);
+                    void resetPond(selectedPond.id);
+                  } else {
+                    setResetArmed(selectedPond.id);
+                    setTimeout(() => setResetArmed((a) => (a === selectedPond.id ? null : a)), 4000);
+                  }
+                }}
+              >
+                {resetArmed === selectedPond.id ? 'Confirm reset — scrubs data' : 'Reset (scrub data + state)'}
               </Btn>
             </div>
           </Section>

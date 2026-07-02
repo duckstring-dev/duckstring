@@ -172,6 +172,21 @@ def refresh(
     return {"ok": True}
 
 
+@router.post("/ponds/{name}/reset", dependencies=[auth.full])
+def reset(
+    name: str, request: Request, clear_history: bool = False,
+    major: int | None = None, version: str | None = None,
+):
+    """Reset a Pond to a fresh-deploy state — scrub its registry, data, and ledger and rewind its
+    freshness, keeping its code, operational config, and demand. Lazy (no forced run); requires the Pond
+    idle (409). See plans/reset.md."""
+    try:
+        _driver(request).reset_pond(_resolve(request, name, major, version), clear_history=clear_history)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True}
+
+
 @router.delete("/ponds/{name}/tables/{table}", dependencies=[auth.full])
 def delete_table(
     name: str, table: str, request: Request, major: int | None = None, version: str | None = None,
