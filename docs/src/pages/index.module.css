@@ -88,7 +88,10 @@
   letter-spacing: 0.28em;
   text-transform: uppercase;
   color: #06c4e6;
-  margin: 0 0 10px;
+  /* letter-spacing adds its gap AFTER every character, the last one included, so the text box is
+     0.28em wider on the right than the glyphs are. Centring the box therefore sits the word half
+     that (0.14em) left of true centre. Pull the trailing gap back out so the glyphs centre. */
+  margin: 0 -0.28em 10px 0;
 }
 
 .tagline {
@@ -107,7 +110,23 @@
   margin: 0 0 28px;
 }
 
-/* pip install is the primary conversion — give it a prominent terminal-style block above the CTAs. */
+/* pip install is the primary conversion — the terminal block and the Quickstart CTA sit on one row,
+   equal height, so the install and the next step read as a single move. Wraps to two lines on narrow. */
+.installRow {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-bottom: 22px;
+}
+
+.installRow .ctaPrimary,
+.installRow .ctaGhost {
+  display: inline-flex;
+  align-items: center;
+}
+
 .install {
   display: inline-flex;
   align-items: center;
@@ -116,7 +135,6 @@
   border: 1px solid rgba(6, 196, 230, 0.4);
   border-radius: 9px;
   padding: 12px 20px;
-  margin-bottom: 22px;
   box-shadow: 0 0 0 4px rgba(6, 196, 230, 0.06);
 }
 
@@ -259,7 +277,7 @@
   width: 100%;
   display: flex;
   justify-content: center;
-  padding: 64px 0;
+  padding: 32px 0 16px;
   border-top: 1px solid #1c1c22;
   scroll-margin-top: var(--ifm-navbar-height);
 }
@@ -272,15 +290,6 @@
 .sectionInner {
   width: 100%;
   max-width: 860px;
-}
-
-.kicker {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: #06c4e6;
-  margin: 0 0 10px;
 }
 
 .sectionTitle {
