@@ -32,3 +32,45 @@
   --ifm-color-primary-lightest: #45d8f2;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
 }
+
+/* No navbar on desktop. With the landing page serving as the docs index, the bar held nothing but
+   the brand, and the sidebar's own Home item is the route back to it.
+   Kept below 997px (Docusaurus's mobile breakpoint) because the mobile docs sidebar is opened from
+   the navbar's hamburger — hiding it there would strand phone readers with no navigation at all.
+   --ifm-navbar-height goes to 0 with it, or the sidebar and anchor offsets keep reserving its space. */
+@media (min-width: 997px) {
+  :root {
+    --ifm-navbar-height: 0px;
+  }
+
+  .navbar {
+    display: none;
+  }
+}
+
+/* The landing page starts at the very top of the window now, so the doc chrome above it reads as
+   dead space: the container's standard top padding, plus a breadcrumb trail whose only entry is
+   "Home" — on the home page. Scoped to that one doc (html carries .docs-doc-id-index), so every
+   other page keeps its normal spacing and breadcrumbs. */
+.docs-doc-id-index .padding-top--md {
+  padding-top: 0;
+}
+
+.docs-doc-id-index .theme-doc-breadcrumbs {
+  display: none;
+}
+
+/* Mobile keeps the navbar (it holds the hamburger that opens the docs sidebar), but 60px of it above
+   the hero is most of the gap there. Trim it, and drop the hero's own top padding on small screens. */
+@media (max-width: 996px) {
+  :root {
+    --ifm-navbar-height: 40px;
+  }
+
+  /* Just the hamburger. The brand repeated the mark and wordmark that the hero shows directly below
+     it, much larger — which is what made the bar read as a gap rather than as chrome. Home is still
+     reachable: it is the first item in the sidebar the hamburger opens. */
+  .navbar__brand {
+    display: none;
+  }
+}

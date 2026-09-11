@@ -1,9 +1,8 @@
 import type {ReactNode} from 'react';
 import Link from '@docusaurus/Link';
 import useBaseUrl from '@docusaurus/useBaseUrl';
-import Layout from '@theme/Layout';
 
-import styles from './index.module.css';
+import styles from './styles.module.css';
 
 // ─────────────────────────────────────────────────────────────────────────────
 interface DemoSlotProps {
@@ -96,11 +95,11 @@ function Hero(): ReactNode {
 // Intro
 function WhatIsThis(): ReactNode {
   return (
-    <Section title="The Data Engineering platform built on DuckDB.">
+    <Section title="DuckDB Data Engineering.">
       <p className={styles.prose}>
         The world has been upsold on distributed computing. 
         Data volumes into the terabytes can easily be handled on single machines, where DuckDB has no competition.
-        Duckstring is an open source data engineering platform that gives DuckDB the space to do its magic - <b>fast, simple scalable</b>.
+        Duckstring is an open source data engineering platform that gives DuckDB the space to do its magic - <b>fast, simple, scalable</b>.
       </p>
       <p>
         Duckstring runs the same on your local machine, a single Cloud box, or coordinating across many compute instances
@@ -316,21 +315,18 @@ function Hosting(): ReactNode {
   );
 }
 
-export default function Home(): ReactNode {
+export default function Landing(): ReactNode {
   return (
-    <Layout
-      description="The Data Engineering platform built on DuckDB. Fast, simple, scalable.">
-      <main className={styles.canvas}>
-        <Hero />
-        <WhatIsThis />
-        <ModularTransformations />
-        <PullOrchestration />
-        <ModernIncrementality />
-        <Catalog />
-        <GetStarted />
-        <Routes />
-        <Hosting />
-      </main>
-    </Layout>
+    <div className={styles.canvas}>
+      <Hero />
+      <WhatIsThis />
+      <ModularTransformations />
+      <PullOrchestration />
+      <ModernIncrementality />
+      <Catalog />
+      <GetStarted />
+      <Routes />
+      <Hosting />
+    </div>
   );
 }

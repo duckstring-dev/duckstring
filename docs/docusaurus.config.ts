@@ -44,7 +44,6 @@ const config: Config = {
         docs: {
           routeBasePath: '/',
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/duckstring-dev/duckstring/tree/main/docs/',
           remarkPlugins: [remarkMath],
           rehypePlugins: [rehypeKatex],
         },
@@ -57,8 +56,12 @@ const config: Config = {
   ],
 
   themeConfig: {
+    // Dark only: the logo mark and the landing palette are built for a dark canvas, and there is no
+    // navbar on desktop to hold a toggle anyway. disableSwitch also drops it from the mobile navbar.
     colorMode: {
-      respectPrefersColorScheme: true,
+      defaultMode: 'dark',
+      disableSwitch: true,
+      respectPrefersColorScheme: false,
     },
     navbar: {
       title: 'Duckstring',
@@ -66,14 +69,9 @@ const config: Config = {
         alt: 'Duckstring',
         src: 'img/logo-mark.svg',
       },
-      items: [
-        {
-          type: 'docSidebar',
-          sidebarId: 'docs',
-          position: 'left',
-          label: 'Docs',
-        },
-      ],
+      // No items: the landing page IS the docs index, so every page already has the sidebar open —
+      // a "Docs" link would only point at the page you are on.
+      items: [],
     },
     footer: {
       style: 'dark',

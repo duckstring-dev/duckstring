@@ -1,17 +1,31 @@
-/* Landing page styles. The palette is the product UI's (frontend/src/lib/store.ts): canvas
-   #0f0f14, panel #15151a, hairline #27272a, brand cyan #06c4e6, pull amber #ee9333. The page is
-   intentionally dark in both colour modes — it's the brand canvas, not a doc. */
+/* Landing page styles. This renders as the docs' index (docs/index.mdx), so it sits inside the docs
+   content column and follows the reader's colour mode — the old fixed dark canvas would be unreadable
+   in light mode. Colours go through the tokens below; the brand cyan rides --ifm-color-primary, which
+   custom.css already defines per theme. */
 
 .canvas {
-  background-color: #0f0f14;
-  background-image: radial-gradient(#23232e 1px, transparent 1px);
-  background-size: 24px 24px;
-  color: #e4e4e7;
-  min-height: calc(100vh - var(--ifm-navbar-height));
+  --l-fg: #3f3f46;
+  --l-fg-strong: #18181b;
+  --l-muted: #52525b;
+  --l-border: var(--ifm-color-emphasis-300);
+  --l-panel: var(--ifm-color-emphasis-100);
+  --l-on-primary: #ffffff;
+}
+
+[data-theme='dark'] .canvas {
+  --l-fg: #d4d4d8;
+  --l-fg-strong: #f4f4f5;
+  --l-muted: #a1a1aa;
+  --l-border: #27272a;
+  --l-panel: #15151a;
+  --l-on-primary: #0f0f14;
+}
+
+.canvas {
+  color: var(--l-fg);
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 0 24px 72px;
 }
 
 /* ── Hero ─────────────────────────────────────────────────────────────────── */
@@ -21,22 +35,10 @@
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding-top: 32px;
+  padding-top: 8px;
   max-width: 720px;
 }
 
-/* The mark over expanding ripple rings — a pond, doing what ponds do. */
-.rippleStack {
-  position: relative;
-  width: 132px;
-  height: 132px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 18px;
-}
-
-/* The hero lockup: mark and wordmark inline, the same arrangement as the navbar. */
 /* The lockup: mark on the left, wordmark and tagline stacked on the right and sharing a left edge.
    Grouping them is what fixes the tagline reading as off-centre — centred on the page it lands on the
    WHOLE lockup's midpoint, which sits left of the wordmark's, so the two bits of text disagree. */
@@ -62,45 +64,6 @@
   z-index: 1;
 }
 
-.ripple {
-  position: absolute;
-  inset: 0;
-  border: 1px solid rgba(6, 196, 230, 0.45);
-  border-radius: 50%;
-  animation: ripple 4.5s linear infinite;
-  opacity: 0;
-}
-
-.ripple:nth-child(2) {
-  animation-delay: 1.5s;
-}
-
-.ripple:nth-child(3) {
-  animation-delay: 3s;
-}
-
-@keyframes ripple {
-  0% {
-    transform: scale(0.55);
-    opacity: 0;
-  }
-  12% {
-    opacity: 0.9;
-  }
-  100% {
-    transform: scale(1.55);
-    opacity: 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ripple {
-    animation: none;
-    opacity: 0.25;
-    transform: scale(1.15);
-  }
-}
-
 /* Matches the navbar brand: plain case, no tracking, foreground colour — just scaled up for the hero. */
 .wordmark {
   font-size: 78px;
@@ -109,7 +72,7 @@
      space between the wordmark and the tagline. The gap property cannot go negative, so the leading
      is what has to give. */
   line-height: 1;
-  color: #f4f4f5;
+  color: var(--l-fg-strong);
   margin: 0;
 }
 
@@ -120,8 +83,41 @@
   font-weight: 700;
   letter-spacing: -0.01em;
   line-height: 1.15;
-  color: #06c4e6;
+  color: var(--ifm-color-primary);
   margin: 0;
+}
+
+/* Mobile: the side-by-side lockup is ~655px wide, so it stacks — mark on top, wordmark and tagline
+   centred beneath it. Both text sizes become viewport-relative so "Duckstring" cannot outgrow the
+   screen; the clamp maxima are the desktop values, so nothing above the breakpoint changes. */
+@media (max-width: 768px) {
+  .hero {
+    padding-top: 0;
+  }
+
+  .brand {
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 20px;
+  }
+
+  .brandText {
+    align-items: center;
+    text-align: center;
+  }
+
+  .mark {
+    width: clamp(104px, 34vw, 150px);
+    height: auto;
+  }
+
+  .wordmark {
+    font-size: clamp(38px, 13vw, 60px);
+  }
+
+  .lead {
+    font-size: clamp(17px, 5.6vw, 26px);
+  }
 }
 
 /* pip install is the primary conversion — the terminal block and the Quickstart CTA sit on one row,
@@ -135,8 +131,7 @@
   margin-bottom: 42px;
 }
 
-.installRow .ctaPrimary,
-.installRow .ctaGhost {
+.installRow .ctaPrimary {
   display: inline-flex;
   align-items: center;
 }
@@ -145,7 +140,7 @@
   display: inline-flex;
   align-items: center;
   gap: 12px;
-  background: #0c0c10;
+  background: var(--l-panel);
   border: 1px solid rgba(6, 196, 230, 0.4);
   border-radius: 9px;
   padding: 12px 20px;
@@ -153,7 +148,7 @@
 }
 
 .installPrompt {
-  color: #06c4e6;
+  color: var(--ifm-color-primary);
   font-family: var(--ifm-font-family-monospace);
   font-weight: 700;
   font-size: 17px;
@@ -166,53 +161,24 @@
   font-size: 17px;
   font-weight: 600;
   letter-spacing: 0.01em;
-  color: #f4f4f5;
+  color: var(--l-fg-strong);
 }
 
-.ctaRow {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  justify-content: center;
-  margin-bottom: 16px;
-}
-
-.ctaPrimary,
-.ctaGhost {
+.ctaPrimary {
   border-radius: 7px;
   padding: 10px 22px;
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.03em;
-  transition: filter 0.15s ease, border-color 0.15s ease, color 0.15s ease;
-}
-
-.ctaPrimary {
-  background: #06c4e6;
-  color: #0f0f14;
+  transition: filter 0.15s ease, color 0.15s ease;
+  background: var(--ifm-color-primary);
+  color: var(--l-on-primary);
 }
 
 .ctaPrimary:hover {
   filter: brightness(1.12);
-  color: #0f0f14;
+  color: var(--l-on-primary);
   text-decoration: none;
-}
-
-.ctaGhost {
-  border: 1px solid #3f3f46;
-  color: #e4e4e7;
-}
-
-.ctaGhost:hover {
-  border-color: #06c4e6;
-  color: #06c4e6;
-  text-decoration: none;
-}
-
-.heroNote {
-  font-size: 13px;
-  color: #71717a;
-  margin: 0;
 }
 
 /* ── Route cards ──────────────────────────────────────────────────────────── */
@@ -234,8 +200,8 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: #15151a;
-  border: 1px solid #27272a;
+  background: var(--l-panel);
+  border: 1px solid var(--l-border);
   border-radius: 10px;
   padding: 18px 20px;
   color: inherit;
@@ -243,7 +209,7 @@
 }
 
 .routeCard:hover {
-  border-color: #06c4e6;
+  border-color: var(--ifm-color-primary);
   color: inherit;
   text-decoration: none;
 }
@@ -251,20 +217,20 @@
 .routeTitle {
   font-size: 15px;
   font-weight: 700;
-  color: #f4f4f5;
+  color: var(--l-fg-strong);
   display: flex;
   justify-content: space-between;
   align-items: baseline;
 }
 
 .routeArrow {
-  color: #06c4e6;
+  color: var(--ifm-color-primary);
 }
 
 .routeBody {
   font-size: 13px;
   line-height: 1.6;
-  color: #a1a1aa;
+  color: var(--l-muted);
 }
 
 /* ── Hosting contact ──────────────────────────────────────────────────────── */
@@ -272,7 +238,7 @@
 .hosting {
   margin-top: 56px;
   font-size: 14px;
-  color: #71717a;
+  color: var(--l-muted);
   text-align: center;
 }
 
@@ -281,7 +247,7 @@
 }
 
 .hosting a {
-  color: #06c4e6;
+  color: var(--ifm-color-primary);
 }
 
 /* ── Sections ─────────────────────────────────────────────────────────────── */
@@ -292,13 +258,8 @@
   display: flex;
   justify-content: center;
   padding: 32px 0 16px;
-  border-top: 1px solid #1c1c22;
+  border-top: 1px solid var(--l-border);
   scroll-margin-top: var(--ifm-navbar-height);
-}
-
-/* The alternating band — a faint tint so the demo sections read as their own beats. */
-.sectionAlt {
-  background: linear-gradient(180deg, #131319 0%, #15151a 100%);
 }
 
 .sectionInner {
@@ -311,7 +272,7 @@
   font-weight: 800;
   letter-spacing: -0.02em;
   line-height: 1.15;
-  color: #f4f4f5;
+  color: var(--l-fg-strong);
   margin: 0 0 22px;
 }
 
@@ -323,26 +284,26 @@
 }
 
 .prose {
-  color: #d4d4d8;
+  color: var(--l-fg);
 }
 
 .proseMuted {
-  color: #8b8b93;
+  color: var(--l-muted);
   font-size: 15px;
 }
 
 .prose strong {
-  color: #f4f4f5;
+  color: var(--l-fg-strong);
 }
 
 .prose code,
 .proseMuted code {
-  background: #0c0c10;
-  border: 1px solid #27272a;
+  background: var(--l-panel);
+  border: 1px solid var(--l-border);
   border-radius: 5px;
   padding: 1px 6px;
   font-size: 0.86em;
-  color: #e4e4e7;
+  color: var(--l-fg);
 }
 
 /* The three-payoff list under "what is this". */
@@ -360,7 +321,7 @@
   padding-left: 22px;
   font-size: 16px;
   line-height: 1.65;
-  color: #d4d4d8;
+  color: var(--l-fg);
 }
 
 .payoffs li::before {
@@ -371,11 +332,11 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #06c4e6;
+  background: var(--ifm-color-primary);
 }
 
 .payoffs strong {
-  color: #f4f4f5;
+  color: var(--l-fg-strong);
 }
 
 /* The bold lead of each payoff is an anchor link down to the section that demonstrates it. */
@@ -389,11 +350,11 @@
 }
 
 .payoffLink:hover strong {
-  color: #06c4e6;
+  color: var(--ifm-color-primary);
 }
 
 .payoffArrow {
-  color: #06c4e6;
+  color: var(--ifm-color-primary);
   font-size: 0.85em;
 }
 
@@ -407,11 +368,11 @@
   position: relative;
   width: 100%;
   /* Removed the hardcoded aspect-ratio: 16 / 9; here since the React component handles it inline */
-  border: 1px dashed #3f3f46;
+  border: 1px dashed var(--l-border);
   border-radius: 12px;
   background:
     radial-gradient(circle at 50% 42%, rgba(6, 196, 230, 0.08), transparent 60%),
-    #0c0c10;
+    var(--l-panel);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -430,67 +391,16 @@
   border: 0;
 }
 
-.demoBadge {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: #06c4e6;
-  background: rgba(6, 196, 230, 0.1);
-  border: 1px solid rgba(6, 196, 230, 0.35);
-  border-radius: 999px;
-  padding: 3px 10px;
-}
-
 .demoPlay {
   width: 56px;
   height: 56px;
   border-radius: 50%;
-  border: 1px solid #3f3f46;
+  border: 1px solid var(--l-border);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 20px;
-  color: #a1a1aa;
+  color: var(--l-muted);
   padding-left: 4px;
 }
 
-/* ── On-ramp use cases ────────────────────────────────────────────────────── */
-
-.useCases {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 14px;
-  margin-top: 6px;
-}
-
-@media (max-width: 760px) {
-  .useCases {
-    grid-template-columns: 1fr;
-  }
-}
-
-.useCase {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  background: #0f0f14;
-  border: 1px solid #27272a;
-  border-radius: 10px;
-  padding: 18px 20px;
-}
-
-.useCaseTitle {
-  font-size: 15px;
-  font-weight: 700;
-  color: #06c4e6;
-}
-
-.useCaseBody {
-  font-size: 13px;
-  line-height: 1.6;
-  color: #a1a1aa;
-}
