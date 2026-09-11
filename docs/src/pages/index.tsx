@@ -131,8 +131,8 @@ function WhatIsThis(): ReactNode {
             <strong>Modern Incrementality.</strong>
             <span className={styles.payoffArrow}> ↓</span>
           </a>{' '}
-          Changes are detected and propagated across Ponds using DBSP - a data format allowing tree-joins to skip computing 
-          parts of a transformation that could not have changed.
+          Changes are detected and propagated across Ponds using DBSP - a data format allowing even 
+          bushy joins to skip computing parts of a transformation that could not have changed.
         </li>
         <li>
           <a className={styles.payoffLink} href="#catalog">
@@ -140,7 +140,7 @@ function WhatIsThis(): ReactNode {
             <span className={styles.payoffArrow}> ↓</span>
           </a>{' '}
           The orchestrator and catalog live in Duckstring's Catchment - an environment
-          for coordinating Ponds and their interactions.
+          for coordinating Ponds, their interactions and their execution.
         </li>
       </ul>
       <p className={styles.proseMuted}>
@@ -257,6 +257,9 @@ function GetStarted(): ReactNode {
         There's nothing stopping you taking your existing transformations and calling them a Pond.
         Import straight SQL, a dbt model or Ibis transformations. You can even simply call an external
         service, using Duckstring as the scheduler alone.
+      </p>
+      <p className={styles.prose}>
+        Every action against a Catchment is CLI-first - ready for all your bots to take control.
       </p>
     </Section>
   );

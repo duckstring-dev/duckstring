@@ -73,16 +73,6 @@ const config: Config = {
           position: 'left',
           label: 'Docs',
         },
-        {
-          href: 'https://playground.duckstring.com',
-          label: 'Playground',
-          position: 'right',
-        },
-        {
-          href: 'https://github.com/duckstring-dev/duckstring',
-          label: 'GitHub',
-          position: 'right',
-        },
       ],
     },
     footer: {

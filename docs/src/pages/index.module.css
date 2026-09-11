@@ -44,7 +44,7 @@
   display: flex;
   align-items: center;
   gap: 27px;
-  margin-bottom: 28px;
+  margin-bottom: 8px;
 }
 
 .brandText {
@@ -52,7 +52,7 @@
   flex-direction: column;
   align-items: flex-start;
   text-align: left;
-  gap: 6px;
+  gap: 0;
 }
 
 .mark {
@@ -105,6 +105,10 @@
 .wordmark {
   font-size: 78px;
   font-weight: 700;
+  /* 1, not the inherited heading 1.25 — at 78px that leading is ~19px of empty line box, most of the
+     space between the wordmark and the tagline. The gap property cannot go negative, so the leading
+     is what has to give. */
+  line-height: 1;
   color: #f4f4f5;
   margin: 0;
 }
@@ -115,7 +119,7 @@
   font-size: clamp(22px, 3vw, 30px);
   font-weight: 700;
   letter-spacing: -0.01em;
-  line-height: 1.25;
+  line-height: 1.15;
   color: #06c4e6;
   margin: 0;
 }
@@ -128,7 +132,7 @@
   gap: 12px;
   flex-wrap: wrap;
   justify-content: center;
-  margin-bottom: 22px;
+  margin-bottom: 42px;
 }
 
 .installRow .ctaPrimary,
