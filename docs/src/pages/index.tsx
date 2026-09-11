@@ -71,13 +71,13 @@ function Section({
 function Hero(): ReactNode {
   return (
     <header className={styles.hero}>
-      <img src={useBaseUrl('/img/logo-mark.svg')} alt="" className={styles.mark} />
-      <p className={styles.wordmark}>Duckstring</p>
-      <h1 className={styles.tagline}>Get your ducks in a row.</h1>
-      <p className={styles.lead}>
-        The Data Engineering platform built on DuckDB.
-        Fast, simple, scalable.
-      </p>
+      <div className={styles.brand}>
+        <img src={useBaseUrl('/img/logo-mark.svg')} alt="" className={styles.mark} />
+        <div className={styles.brandText}>
+          <h1 className={styles.wordmark}>Duckstring</h1>
+          <p className={styles.lead}>Get your ducks in a row.</p>
+        </div>
+      </div>
       <div className={styles.installRow}>
         <div className={styles.install}>
           <span className={styles.installPrompt} aria-hidden>
@@ -96,11 +96,11 @@ function Hero(): ReactNode {
 // Intro
 function WhatIsThis(): ReactNode {
   return (
-    <Section title="Simplicity Scales.">
+    <Section title="The Data Engineering platform built on DuckDB.">
       <p className={styles.prose}>
         The world has been upsold on distributed computing. 
         Data volumes into the terabytes can easily be handled on single machines, where DuckDB has no competition.
-        Duckstring is an open source data engineering platform that gives DuckDB the space to do its magic.
+        Duckstring is an open source data engineering platform that gives DuckDB the space to do its magic - <b>fast, simple scalable</b>.
       </p>
       <p>
         Duckstring runs the same on your local machine, a single Cloud box, or coordinating across many compute instances
@@ -145,7 +145,7 @@ function WhatIsThis(): ReactNode {
       </ul>
       <p className={styles.proseMuted}>
         <a className={styles.payoffLink} href="#start">
-          <strong>Python Based</strong>
+          <strong>Python Based and CLI-first</strong>
           <span className={styles.payoffArrow}> ↓</span>
         </a>{' '}
         Ponds are generic python, with all the flexibility that provides.
@@ -231,7 +231,7 @@ function ModernIncrementality(): ReactNode {
 function Catalog(): ReactNode {
   // TODO: Include catalog recording
   return (
-    <Section id="upgrade" title="Think about what makes the data, not where it lives." alt>
+    <Section id="upgrade" title="Logic sets location." alt>
       <p className={styles.prose}>
         The execution environment is the Catchment, which also governs the catalog.
         Schemas are strictly defined as being within each major Pond version,

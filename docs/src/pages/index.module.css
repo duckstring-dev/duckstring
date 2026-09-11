@@ -36,9 +36,28 @@
   margin-bottom: 18px;
 }
 
+/* The hero lockup: mark and wordmark inline, the same arrangement as the navbar. */
+/* The lockup: mark on the left, wordmark and tagline stacked on the right and sharing a left edge.
+   Grouping them is what fixes the tagline reading as off-centre — centred on the page it lands on the
+   WHOLE lockup's midpoint, which sits left of the wordmark's, so the two bits of text disagree. */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 27px;
+  margin-bottom: 28px;
+}
+
+.brandText {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  gap: 6px;
+}
+
 .mark {
-  width: 180px;
-  height: 180px;
+  width: 198px;
+  height: 198px;
   position: relative;
   z-index: 1;
 }
@@ -82,32 +101,23 @@
   }
 }
 
+/* Matches the navbar brand: plain case, no tracking, foreground colour — just scaled up for the hero. */
 .wordmark {
-  font-size: 25px;
+  font-size: 78px;
   font-weight: 700;
-  letter-spacing: 0.28em;
-  text-transform: uppercase;
-  color: #06c4e6;
-  /* letter-spacing adds its gap AFTER every character, the last one included, so the text box is
-     0.28em wider on the right than the glyphs are. Centring the box therefore sits the word half
-     that (0.14em) left of true centre. Pull the trailing gap back out so the glyphs centre. */
-  margin: 0 -0.28em 10px 0;
-}
-
-.tagline {
-  font-size: clamp(40px, 7vw, 64px);
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  line-height: 1.05;
   color: #f4f4f5;
-  margin: 0 0 18px;
+  margin: 0;
 }
 
+/* The tagline under the lockup — display weight and brand cyan, not muted body copy. Line-height is
+   tight because it is one short line, not a paragraph. */
 .lead {
-  font-size: 17px;
-  line-height: 1.65;
-  color: #a1a1aa;
-  margin: 0 0 28px;
+  font-size: clamp(22px, 3vw, 30px);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: #06c4e6;
+  margin: 0;
 }
 
 /* pip install is the primary conversion — the terminal block and the Quickstart CTA sit on one row,
