@@ -149,9 +149,3 @@ duckstring query reports monthly_summary
 ```
 
 This prints to console the result of the query `SELECT * FROM reports.monthly_summary LIMIT 10`. Run arbitrary SQL with `--sql`, or export with `--csv`/`--json`/`--parquet`. See [Querying Data](../guides/querying-data.md).
-
-## Where next
-
-- Open `http://127.0.0.1:7474` and explore the [web UI](../guides/web-ui.md)
-- Try out some other [demos](../guides/demos.md)
-- Write [your own Pond](../guides/creating-a-pond.md)

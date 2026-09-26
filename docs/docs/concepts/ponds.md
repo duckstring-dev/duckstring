@@ -1,11 +1,11 @@
 ---
 title: Ponds
-description: The versioned package boundary — the unit of ownership, deployment, and dependency.
+description: Versioning and Packaging of Transformations.
 ---
 
 # Ponds
 
-A **Pond** is a versioned set of data transformations. It is the main organisational unit in Duckstring: one Pond has one owner, one version number, one deploy, and one declared set of dependencies. You can think of a Pond as a package with dependencies, much like software packages.
+A **Pond** is a versioned set of data transformations. You can think of a Pond as a package with dependencies, much like software packages. It is the main organisational unit in Duckstring. 
 
 ## Structure
 
@@ -35,7 +35,7 @@ products = "1.0.0"
 
 Nowhere is the pipeline of Ponds specified outside of this list of dependencies. Declaring sources allows the Pond to consume from
 the listed parent Ponds provided they match their major version. That allows upgrades to be made upstream until a major (breaking)
-change is made. See the [pond.toml reference](../reference/pond-toml.md) for every field.
+change is made.
 
 ## Types
 
@@ -51,16 +51,45 @@ a pipeline - mandating a Pond strictly as an Outlet avoids the inevitable spaghe
 
 ## Ripples
 
-Where a Pond is the primary *organisational* unit, a [Ripple](ripples.md) is the primary *operational* unit, where Ripples belong to Ponds. 
+Where a Pond is the primary *organisational* unit, a [Ripple](ripples.md) is the primary *operational* unit, where Ripples belong to Ponds. These are similarly organised into a pipeline *within* the Pond. The same Ripple may not run simultaneously, but multiple instances of the same Pond may run concurrently. The main difference is that individual Ripples are not versioned, and dependencies are managed at the Pond level. 
 
-The executable content of a Pond is its  — typically one per output table. When a Pond runs (a **Pond Run**), every Ripple in it runs, ordered by their declared intra-Pond dependencies. The Pond's boundary is what its Sinks see: a Sink never depends on an individual Ripple, only on the Pond and the tables it publishes.
+Of course, there's nothing stopping you from using only one Ripple in a Pond - but the purpose of the separation is to split the concepts of
+logical units (Ripples) from ownership, versioning and dependencies (Ponds).
 
-## Purpose
+## Deployment and Execution
 
+The *execution context* for Duckstring is the [Catchment](catchment.md). This manages execution, orchestration, data cataloging, querying
+and cloud compute configuration. Ponds are deployed to the Catchment by name. If a Pond of that name already exists, it's either:
 
+- Upgraded if the existing Pond is within the same major version
+- Added in parallel to the existing Pond if it is a new major version
 
-Because the Pond is a package, it inherits the package ecosystem's answers to coordination problems:
+The purpose of this is to allow seamless upgrades for non-breaking changes, and to retain the existing Pond for all its downstream dependencies
+for breaking changes. Following these rules, you can confidently upload changes and upgrade downstream Ponds when possible - no need for strong
+governance on simultaneous upgrades. 
 
-- **Ownership** — a team owns its Pond's repository and releases on its own schedule. Changing a transform never means editing shared orchestration code.
-- **Versioning** — Ponds use SemVer, and a new major version runs *concurrently* with the old until every Sink has migrated. Breaking changes stop being organisation-wide events. See [Versioning](versioning.md).
-- **Deployment** — deploys are atomic and per-Pond, like publishing a package. Deploy order doesn't matter; a Sink can even deploy before its Source exists. See [Deploying](../guides/deploying.md).
+Because orchestration is set against the *downstream* Ponds (**Outlets**), uploaded Ponds are not executed until something downstream depends
+on them. 
+
+## Data
+
+Data is considered to be co-located with a Pond - objects exist adjacent to the logic generating them. A Pond's name and major version 
+defines the *Schema* for its objects. A table `monthly_summary` in the `reports` Pond, under major version 2, may be queried by:
+
+```
+SELECT * FROM reports_v2.monthly_summary
+```
+
+If this also happens to be the maximum major version, for convenience the version can be omitted:
+
+```
+SELECT * FROM reports.monthly_summary
+```
+
+It is however safer to be explicit, so it's recommended to always include the major version.
+
+## Puddles
+
+Developing and testing against the entire live dataset is generally slow and wasteful. A Puddle defines queries against the Catchment
+for generating a sample snapshot of every Source object used in the Pond. Transformations can then be executed against this locally
+for testing.
