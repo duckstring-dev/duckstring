@@ -3,17 +3,17 @@ import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
 const sidebars: SidebarsConfig = {
   docs: [
     'index',
-    'intro',
-    {
-      type: 'category',
-      label: 'Getting Started',
-      collapsed: false,
-      items: [
-        'getting-started/playground',
-        'getting-started/installation',
-        'getting-started/quickstart',
-      ],
-    },
+    'quickstart',
+    // {
+    //   type: 'category',
+    //   label: 'Getting Started',
+    //   collapsed: false,
+    //   items: [
+    //     'getting-started/playground',
+    //     'getting-started/installation',
+    //     'getting-started/quickstart',
+    //   ],
+    // },
     {
       type: 'category',
       label: 'Concepts',

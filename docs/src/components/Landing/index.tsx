@@ -48,17 +48,15 @@ function Section({
   id,
   title,
   children,
-  alt,
 }: {
   id?: string;
-  title: string;
+  title?: string;
   children: ReactNode;
-  alt?: boolean;
 }): ReactNode {
   return (
-    <section id={id} className={alt ? styles.sectionAlt : styles.section}>
+    <section id={id} className={styles.section}>
       <div className={styles.sectionInner}>
-        <h2 className={styles.sectionTitle}>{title}</h2>
+        {title && <h2 className={styles.sectionTitle}>{title}</h2>}
         {children}
       </div>
     </section>
@@ -98,8 +96,8 @@ function WhatIsThis(): ReactNode {
     <Section title="DuckDB Data Engineering.">
       <p className={styles.prose}>
         The world has been upsold on distributed computing. 
-        Data volumes into the terabytes can easily be handled on single machines, where DuckDB has no competition.
-        Duckstring is an open source data engineering platform that gives DuckDB the space to do its magic - <b>fast, simple, scalable</b>.
+        Data volumes into the terabytes can easily be handled on single machines, where DuckDB is at its best.
+        Duckstring is an open source data engineering platform that gives DuckDB the space to do its magic.
       </p>
       <p>
         Duckstring runs the same on your local machine, a single Cloud box, or coordinating across many compute instances
@@ -147,7 +145,7 @@ function WhatIsThis(): ReactNode {
           <strong>Python Based and CLI-first</strong>
           <span className={styles.payoffArrow}> ↓</span>
         </a>{' '}
-        Ponds are generic python, with all the flexibility that provides.
+        Ponds are generic Python, with all the flexibility that provides.
       </p>
     </Section>
   );
@@ -156,12 +154,11 @@ function WhatIsThis(): ReactNode {
 // Modular Transformations
 function ModularTransformations(): ReactNode {
   return (
-    <Section id="upgrade" title="Treat transformations like software packages." alt>
+    <Section id="upgrade" title="Treat transformations like software packages.">
       <p className={styles.prose}>
         Ponds use strict SemVer conventions. A new major version runs <strong>concurrently</strong> with the old
         one, and doesn't start until something is consuming from it. 
-        The headache of choreographic complex changes is avoided using the same techniques that allowed open source to flourish.
-        Know your family, not the world.
+        The headache of choreographing complex changes is avoided using the same techniques that allowed open source to flourish.
       </p>
 
       <DemoSlot src="/img/upgrade" aspectRatio="28/10"/>
@@ -181,11 +178,10 @@ function PullOrchestration(): ReactNode {
   return (
     <Section
       id="demand"
-      title="Only run what's used."
-      alt>
+      title="Only run what's used.">
       <p className={styles.prose}>
-        Push Orchestration sets schedules relative to the <b>start</b> of a pipeline, and 
-        throttles work <em>downstream</em> of a slow step, and blindly runs pipelines that have no consumers.
+        Push Orchestration sets schedules relative to the <b>start</b> of a pipeline. It throttles
+        work <em>downstream</em> of a slow step, but blindly runs pipelines that have no consumers.
         Setting schedules instead at the <b>end</b> of a pipeline throttles both upstream and downstream of a slow step, and ensures
         that only paths with consumers are kept fresh.
       </p>
@@ -219,7 +215,7 @@ function ModernIncrementality(): ReactNode {
       <DemoSlot src="/img/trickle" aspectRatio="28/10"/>
 
       <p className={styles.proseMuted}>
-        Duckstring-managed change processing, so you see the performance without the pain. See{' '}
+        Change processing is Duckstring-managed, so you see the performance without the pain. See{' '}
         <Link to="/guides/trickle">Incremental processing</Link>.
       </p>
     </Section>
@@ -230,7 +226,7 @@ function ModernIncrementality(): ReactNode {
 function Catalog(): ReactNode {
   // TODO: Include catalog recording
   return (
-    <Section id="upgrade" title="Logic sets location." alt>
+    <Section id="catalog" title="Manage code and assets together.">
       <p className={styles.prose}>
         The execution environment is the Catchment, which also governs the catalog.
         Schemas are strictly defined as being within each major Pond version,
@@ -241,7 +237,7 @@ function Catalog(): ReactNode {
       {/* <DemoSlot src="/img/catalog" aspectRatio="28/10"/> */}
 
       <p className={styles.proseMuted}>
-        Keeping track of where data is need not be a separate task to defining how it's generated. See{' '}
+        Keeping track of where data lives need not be a separate task to defining how it's generated. See{' '}
         <Link to="/concepts/catalog">Catalog</Link>.
       </p>
     </Section>
@@ -251,7 +247,7 @@ function Catalog(): ReactNode {
 // Get started
 function GetStarted(): ReactNode {
   return (
-    <Section id="start" title="Everything is a Pond." alt>
+    <Section id="start" title="Everything is a Pond.">
       <p className={styles.prose}>
         There's nothing stopping you taking your existing transformations and calling them a Pond.
         Import straight SQL, a dbt model or Ibis transformations. You can even simply call an external
@@ -289,7 +285,7 @@ const ROUTES: {title: string; body: string; to?: string; href?: string}[] = [
 
 function Routes(): ReactNode {
   return (
-    <Section title="">
+    <Section>
       <div className={styles.routes}>
         {ROUTES.map((r) => (
           <Link key={r.title} className={styles.routeCard} to={r.to} href={r.href}>

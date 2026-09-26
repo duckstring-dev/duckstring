@@ -8,7 +8,7 @@ import rehypeKatex from 'rehype-katex';
 
 const config: Config = {
   title: 'Duckstring',
-  tagline: 'There is no DAG.',
+  tagline: 'Get your ducks in a row.',
   favicon: 'img/favicon.ico',
 
   future: {

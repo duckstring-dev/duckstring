@@ -5,23 +5,23 @@ description: The versioned package boundary — the unit of ownership, deploymen
 
 # Ponds
 
-A **Pond** is a versioned Python package containing data transforms. It is the unit of everything organisational in Duckstring: one Pond has one owner, one version number, one deploy, and one declared set of dependencies. Everything inside a Pond is private; everything a Pond publishes is a versioned contract.
+A **Pond** is a versioned set of data transformations. It is the main organisational unit in Duckstring: one Pond has one owner, one version number, one deploy, and one declared set of dependencies. You can think of a Pond as a package with dependencies, much like software packages.
 
-## A Pond is a package
+## Structure
 
 A Pond project looks like a small Python package:
 
 ```text
 sales/
 ├── src/
-│   ├── pond.py      # the Ripples — the transform code
+│   ├── pond.py      # Ripples containing the transform code
 │   └── puddles.py   # Source snapshots for local testing
 ├── pond.toml        # name, version, type, Sources
 ├── .gitignore
 └── README.md
 ```
 
-The manifest carries its identity and its dependencies:
+`pond.toml` specifies a Pond's identity and its dependencies.
 
 ```toml
 [pond]
@@ -33,25 +33,31 @@ transactions = "1.0.0"
 products = "1.0.0"
 ```
 
-That `[sources]` section is the entire pipeline definition, from this Pond's point of view. There is no global DAG file; the graph is the union of every Pond's declared Sources, exactly as a package index's dependency graph is the union of every package's requirements. See the [pond.toml reference](../reference/pond-toml.md) for every field.
+Nowhere is the pipeline of Ponds specified outside of this list of dependencies. Declaring sources allows the Pond to consume from
+the listed parent Ponds provided they match their major version. That allows upgrades to be made upstream until a major (breaking)
+change is made. See the [pond.toml reference](../reference/pond-toml.md) for every field.
 
-## Kinds and relationships
+## Types
 
-Relative to one another, Ponds are **Sources** (parents) and **Sinks** (children). By position in the graph, a Pond is one of three kinds, declared as `type` in `pond.toml`:
+Ponds can have **Sources** (parents) and **Sinks** (children). By position in the graph, a Pond is one of three kinds, declared as `type` in `pond.toml`:
 
-- **Inlet** — no Sources. Inlets ingest from external systems (an API, a warehouse export, a file drop) and are where [Windows](../guides/windows.md) apply, since their availability is governed by the outside world.
-- **Pond** — the default: transforms with both Sources and Sinks.
-- **Outlet** — no Sinks. Outlets produce the final data products that applications and analysts consume, and are the natural place to attach [triggers](../guides/triggers.md).
+- **Inlet** — no Sources. Inlets ingest from external systems (an API, a warehouse export, a file drop).
+- **Pond** — both Sources and Sinks.
+- **Outlet** — no Sinks. Outlets produce the final data products that applications and analysts consume.
 
-## What's inside: Ripples
+These are more guidelines than hard rules. However, if a Pond was built as an Outlet, typically it is worth remaking as a new Pond if a need
+arises for another Pond to draw from it. Building for consumers typically comes with quite different design considerations than building for
+a pipeline - mandating a Pond strictly as an Outlet avoids the inevitable spaghetti that comes with broadening scope beyond its initial purpose.
 
-The executable content of a Pond is its [Ripples](ripples.md) — typically one per output table. When a Pond runs (a **Pond Run**), every Ripple in it runs, ordered by their declared intra-Pond dependencies. The Pond's boundary is what its Sinks see: a Sink never depends on an individual Ripple, only on the Pond and the tables it publishes.
+## Ripples
 
-## What a Pond publishes
+Where a Pond is the primary *organisational* unit, a [Ripple](ripples.md) is the primary *operational* unit, where Ripples belong to Ponds. 
 
-Each successful run exports the Pond's tables as Parquet snapshots — the published, consistent output that Sinks and [queries](../guides/querying-data.md) read. A Sink reading `transactions.transaction` reads the last successfully exported snapshot, never a half-written intermediate state, and never contends with the Source's in-flight run.
+The executable content of a Pond is its  — typically one per output table. When a Pond runs (a **Pond Run**), every Ripple in it runs, ordered by their declared intra-Pond dependencies. The Pond's boundary is what its Sinks see: a Sink never depends on an individual Ripple, only on the Pond and the tables it publishes.
 
-## Why the package boundary matters
+## Purpose
+
+
 
 Because the Pond is a package, it inherits the package ecosystem's answers to coordination problems:
 
