@@ -139,16 +139,17 @@ _DEMO_PONDS = tuple(name for name, _ in _RIPPLE_DEMO)  # the default set (back-c
 
 @app.command()
 def demo(
-    ripple: bool = typer.Option(False, "--ripple", help="The overwrite-Ripple pipeline (the default set)."),
-    trickle: bool = typer.Option(False, "--trickle", help="The incremental-Trickle pipeline."),
-    tpcds: bool = typer.Option(False, "--tpcds", help="The TPC-DS real-data Trickle pipeline (generated)."),
-    gharchive: bool = typer.Option(False, "--gharchive", help="The GHArchive real-data Trickle pipeline (streamed)."),
-    dbt: bool = typer.Option(False, "--dbt", help="A dbt-mode Pond (a dbt project as a Pond) + its Source."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt (scripted use)."),
+    ripple: bool = typer.Option(False, "--ripple", help="transactions, products, sales, reports: plain Ripples (the default)."),
+    trickle: bool = typer.Option(False, "--trickle", help="orders, catalog, priced, revenue: incremental Trickles."),
+    tpcds: bool = typer.Option(False, "--tpcds", help="Six Ponds over locally generated TPC-DS data."),
+    gharchive: bool = typer.Option(False, "--gharchive", help="Six Ponds over the public GitHub event archive."),
+    dbt: bool = typer.Option(False, "--dbt", help="A dbt project deployed as a Pond, and its Source."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Create a demo pipeline as subdirectories: the overwrite-Ripple set (default / --ripple), the
-    incremental-Trickle set (--trickle), a real-data Trickle set (--tpcds / --gharchive), or a dbt-mode
-    Pond (--dbt; deploying/running it needs the dbt extra: pip install 'duckstring[dbt]')."""
+    """Create a set of demo Pond projects as subdirectories.
+
+    --dbt needs the dbt extra to deploy and run: pip install 'duckstring[dbt]'.
+    """
     import shutil
 
     from rich.console import Console
@@ -199,13 +200,13 @@ def hydrate(
         None, "--source", "-s", help="Hydrate only these Sources (repeatable)."
     ),
     catchment: Optional[str] = typer.Option(
-        None, "--catchment", "-c", help="Catchment for puddles that pull (uses default if omitted)."
+        None, "--catchment", "-c", help="Catchment used by Puddles that read from one, and by --from-catchment."
     ),
     from_catchment: bool = typer.Option(
-        False, "--from-catchment", help="Fill Sources that have no puddle definition from the Catchment."
+        False, "--from-catchment", help="Fill Sources with no Puddle definition from the Catchment."
     ),
 ) -> None:
-    """Materialise this Pond's puddles (Source snapshots) into puddles/ for a local run."""
+    """Build this Pond's Puddles into puddles/ for a local run."""
     from rich.console import Console
 
     from ..local import hydrate as hydrate_project
@@ -242,10 +243,11 @@ def hydrate(
 
 @app.command()
 def run(
-    ripple: Optional[str] = typer.Option(None, "--ripple", "-r", help="Run a single Ripple against the existing local state."),
-    fresh: bool = typer.Option(False, "--fresh", help="Ignore a self-puddle seed (start from nothing)."),
+    ripple: Optional[str] = typer.Option(None, "--ripple", "-r", help="Run only this Ripple, against the existing local "
+                                                                      "output."),
+    fresh: bool = typer.Option(False, "--fresh", help="Ignore the Pond's own Puddle and start from nothing."),
 ) -> None:
-    """Execute this Pond locally against its hydrated puddles (no Catchment, no Duck)."""
+    """Run this Pond once on this machine against its Puddles, with no Catchment. Output goes to puddles/out/."""
     from rich.console import Console
 
     from ..local import run_pond

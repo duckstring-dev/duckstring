@@ -16,7 +16,7 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="Manage a Pond's egress Spouts (publish its output to external systems).", no_args_is_help=True)
+app = typer.Typer(help="Deliver a Pond's tables to external systems.", no_args_is_help=True)
 
 
 def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
@@ -27,18 +27,18 @@ def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
 
 @app.command("add")
 def add(
-    pond: str = typer.Argument(..., help="The Pond whose output to egress."),
-    to: str = typer.Option(..., "--to", "-t", help="Destination URI (file://, s3://, gs://, postgres://); "
-                                                   "credentials as ${env:NAME}."),
-    table: Optional[str] = typer.Option(None, "--table", "-T", help="A single table to egress (default: all tables)."),
-    all_tables: bool = typer.Option(False, "--all", help="Egress all of the Pond's tables (the default; explicit)."),
-    mode: str = typer.Option("auto", "--mode", help="auto (incremental when possible) | full | append."),
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Spout handle (default: derived from table/scheme)."),
+    pond: str = typer.Argument(..., help="The Pond whose tables to deliver."),
+    to: str = typer.Option(..., "--to", "-t", help="Destination URI: file://, s3://, gs:// or "
+                                                   "postgres://. Credentials as ${env:NAME} or ${secret:NAME}."),
+    table: Optional[str] = typer.Option(None, "--table", "-T", help="Deliver only this table (default: all tables)."),
+    all_tables: bool = typer.Option(False, "--all", help="Deliver every table (the default)."),
+    mode: str = typer.Option("auto", "--mode", help="auto (only changes where supported), full, or append."),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Spout name. Defaults to the table name, or the scheme."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
 ) -> None:
-    """Bind a Spout to a Pond."""
+    """Add a Spout, delivering a Pond's tables to a destination whenever it publishes."""
     from . import _http
 
     if table and all_tables:
@@ -58,7 +58,7 @@ def ls(
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
 ) -> None:
-    """List a Pond's Spouts."""
+    """List a Pond's Spouts with their destinations, modes and states."""
     from rich.console import Console
     from rich.table import Table
 
@@ -115,12 +115,14 @@ def _control_command(action: str, done: str, help_text: str):
 
 
 # A Spout's Control set (its standing Wake). Demand verbs don't apply.
-app.command("resync")(_control_command("resync", "will re-egress", "Force a full re-egress (clears watermark + failure)."))
-app.command("wake")(_control_command("wake", "armed", "Re-arm the standing Wake (deliver on the next source advance)."))
-app.command("force")(_control_command("force", "will re-egress now", "Re-arm and re-deliver the current freshness now."))
-app.command("sleep")(_control_command("sleep", "asleep", "Disarm the standing Wake — no new deliveries."))
-app.command("kill")(_control_command("kill", "killed", "Disarm and park the Spout until wake/force/clear."))
-app.command("clear")(_control_command("clear", "cleared", "Clear a failed/killed Spout."))
+app.command("resync")(_control_command(
+    "resync", "will re-egress", "Forget what has been delivered and deliver everything again."))
+app.command("wake")(_control_command("wake", "armed", "Resume delivering, from the Pond's next publish."))
+app.command("force")(_control_command(
+    "force", "will re-egress now", "Resume delivering, and deliver the current output again now."))
+app.command("sleep")(_control_command("sleep", "asleep", "Stop delivering new output."))
+app.command("kill")(_control_command("kill", "killed", "Stop delivering and hold the Spout until woken, forced or cleared."))
+app.command("clear")(_control_command("clear", "cleared", "Reset a failed or killed Spout."))
 
 
 @app.command("rm")
@@ -131,7 +133,7 @@ def rm(
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
 ) -> None:
-    """Remove a Spout from a Pond."""
+    """Remove a Spout. Data already delivered stays in the destination."""
     from . import _http
 
     url, cfg = _resolve(catchment)

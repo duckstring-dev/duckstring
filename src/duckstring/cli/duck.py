@@ -13,8 +13,8 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="Per-Pond compute config: Duck target/size + Flock posture.", no_args_is_help=True)
-pool_app = typer.Typer(help="Duck Pools: Catchment-level named remote compute.", no_args_is_help=True)
+app = typer.Typer(help="Where each Pond runs, and the Duck pools it can use.", no_args_is_help=True)
+pool_app = typer.Typer(help="Named sizes of remote compute.", no_args_is_help=True)
 app.add_typer(pool_app, name="pool")
 
 _CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted).")
@@ -53,7 +53,7 @@ def show(
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
 ) -> None:
-    """Show a Pond's effective compute config (or every Pond's, plus the Catchment defaults)."""
+    """Show a Pond's effective compute settings, or every Pond's and the Catchment defaults."""
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -75,20 +75,22 @@ def show(
 
 @app.command("set")
 def set_(
-    pond: str = typer.Argument(..., help="Pond whose compute config to set."),
+    pond: str = typer.Argument(..., help="Pond whose compute settings to change."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
-    duck: Optional[str] = typer.Option(None, "--duck", help="Duck target: 'catchment' | a pool name | 'dedicated'."),
-    flock: Optional[str] = typer.Option(None, "--flock", help="Flock posture: off | upgrade | always."),
+    duck: Optional[str] = typer.Option(None, "--duck", help="Where the Pond runs: catchment, a pool name, or dedicated."),
+    flock: Optional[str] = typer.Option(None, "--flock", help="Flock mode: off, upgrade or always."),
     engine: Optional[str] = typer.Option(None, "--engine", help="Flock engine (e.g. athena)."),
-    oom: Optional[str] = typer.Option(None, "--oom", help="OOM policy: fail_up | fail."),
-    instance_type: Optional[str] = typer.Option(None, "--instance-type", help="Instance type for --duck dedicated."),
+    oom: Optional[str] = typer.Option(None, "--oom", help="On running out of memory: fail_up (retry on the Flock) or fail."),
+    instance_type: Optional[str] = typer.Option(None, "--instance-type", help="EC2 instance type for a dedicated Duck."),
     auto_stop: Optional[bool] = typer.Option(None, "--auto-stop/--no-auto-stop",
-                                             help="Stop a dedicated Pond Duck on run completion."),
-    clear: bool = typer.Option(False, "--clear", help="Drop the override (revert to pond.toml / defaults)."),
+                                             help="Stop a dedicated Duck after each run."),
+    clear: bool = typer.Option(False, "--clear", help="Remove the override, reverting to pond.toml and the defaults."),
 ) -> None:
-    """Set (or --clear) a Pond's compute override. Only the flags you pass change; the override
-    coalesces over the pond.toml-declared config and survives redeploys."""
+    """Set a Pond's compute override. Only the options given change.
+
+    Overrides take precedence over pond.toml and persist across redeploys.
+    """
     from . import _http
     from .config import resolve_catchment
     fields = {"duck_target": duck, "flock_mode": flock, "flock_engine": engine,
@@ -136,7 +138,7 @@ def _fmt_pool(p: dict) -> str:
 
 @pool_app.command("ls")
 def pool_ls(catchment: Optional[str] = _CATCHMENT) -> None:
-    """List the defined Duck Pools."""
+    """List the built-in and defined Duck pools."""
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -149,18 +151,25 @@ def pool_ls(catchment: Optional[str] = _CATCHMENT) -> None:
 def pool_add(
     name: str = typer.Argument(..., help="Pool name (referenced by pond.toml `duck = \"<name>\"`)."),
     catchment: Optional[str] = _CATCHMENT,
-    provider: Optional[str] = typer.Option(None, "--provider", help="fargate (default) | ec2."),
-    cpu: Optional[int] = typer.Option(None, "--cpu", help="Fargate task cpu units (256 = 0.25 vCPU)."),
+    provider: Optional[str] = typer.Option(None, "--provider", help="fargate (default) or ec2."),
+    cpu: Optional[int] = typer.Option(None, "--cpu", help="Fargate task CPU units (1024 = 1 vCPU)."),
     memory: Optional[int] = typer.Option(None, "--memory", help="Fargate task memory (MiB)."),
     instance_type: Optional[str] = typer.Option(None, "--instance-type", "-t", help="EC2 instance type."),
-    min_instances: Optional[int] = typer.Option(None, "--min", help="Floor / keep-warm baseline."),
-    max_instances: Optional[int] = typer.Option(None, "--max", help="Ceiling."),
-    keep_warm: Optional[int] = typer.Option(None, "--keep-warm", help="Spare capacity beyond current load."),
-    idle_timeout: Optional[int] = typer.Option(None, "--idle-timeout", help="Seconds before scale-down."),
+    min_instances: Optional[int] = typer.Option(None, "--min", help="Minimum size. Stored; automatic scaling isn't "
+                                                                    "implemented yet."),
+    max_instances: Optional[int] = typer.Option(None, "--max", help="Maximum size. Stored; automatic scaling isn't "
+                                                                    "implemented yet."),
+    keep_warm: Optional[int] = typer.Option(None, "--keep-warm", help="Spare capacity. Stored; automatic scaling isn't "
+                                                                      "implemented yet."),
+    idle_timeout: Optional[int] = typer.Option(None, "--idle-timeout", help="Idle seconds before scaling down. Stored; not "
+                                                                            "implemented yet."),
     region: Optional[str] = typer.Option(None, "--region", help="AWS region (defaults to the Catchment's)."),
 ) -> None:
-    """Create or update a named Duck Pool (provider defaults to Fargate). Inert until the remote
-    launcher is configured. The built-in S/M/L/XL presets need no add."""
+    """Create or update a Duck pool.
+
+    The Ponds assigned to a defined pool share one machine of its size. The built-in S, M, L and XL pools
+    need no definition and give each Pond its own task.
+    """
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -177,7 +186,7 @@ def pool_rm(
     name: str = typer.Argument(..., help="Pool to remove."),
     catchment: Optional[str] = _CATCHMENT,
 ) -> None:
-    """Remove a Duck Pool. Ponds pinned to it fall back to the Catchment Duck (never stranded)."""
+    """Remove a Duck pool. Ponds that used it run on the Catchment's machine instead."""
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)

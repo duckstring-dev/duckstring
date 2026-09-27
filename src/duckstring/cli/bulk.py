@@ -31,27 +31,31 @@ def _resolve_seed(token: str, live: dict[str, dict]) -> str:
 def do(
     ponds: Optional[list[str]] = typer.Argument(None, help="Ponds to target (name or name@major)."),
     all_: bool = typer.Option(False, "--all", help="Select every Pond in the Catchment."),
-    tree: bool = typer.Option(False, "--tree", help="Extend the selection to its whole connected component(s)."),
-    between: bool = typer.Option(False, "--between", help="Extend to Ponds on paths between the selected ones."),
-    downstream: bool = typer.Option(False, "--downstream", help="Extend the selection to all descendants."),
-    kill: bool = typer.Option(False, "--kill", help="Terminate the Duck, park killed."),
-    sleep: bool = typer.Option(False, "--sleep", help="Clear demand (started runs finish)."),
-    reset: bool = typer.Option(False, "--reset", help="Delete all tables/objects + rewind freshness."),
-    wipe: bool = typer.Option(False, "--wipe", help="Clear run history (no data scrub)."),
-    remove: bool = typer.Option(False, "--remove", help="Retire the line (data + config + attachments)."),
-    clear: bool = typer.Option(False, "--clear", help="Clear failure / unblock."),
-    repair: bool = typer.Option(False, "--repair", help="Force-rebuild the connected set now."),
-    refresh: bool = typer.Option(False, "--refresh", help="Flag the next run as a cold rebuild."),
-    confirm: Optional[str] = typer.Option(None, "--confirm", help="Catchment name, to authorise irreversible ops."),
+    tree: bool = typer.Option(False, "--tree", help="Add every Pond connected to the selection."),
+    between: bool = typer.Option(False, "--between", help="Add every Pond on a path between selected Ponds."),
+    downstream: bool = typer.Option(False, "--downstream", help="Add everything downstream of the selection."),
+    kill: bool = typer.Option(False, "--kill", help="Stop the Duck and hold the Pond killed."),
+    sleep: bool = typer.Option(False, "--sleep", help="Clear demand. Runs in progress finish."),
+    reset: bool = typer.Option(False, "--reset", help="Delete all tables and Objects and reset freshness."),
+    wipe: bool = typer.Option(False, "--wipe", help="Delete run history, leaving data alone."),
+    remove: bool = typer.Option(False, "--remove", help="Retire the major line, with its data, Spouts and alerts."),
+    clear: bool = typer.Option(False, "--clear", help="Clear a failure and unblock downstream."),
+    repair: bool = typer.Option(False, "--repair", help="Rebuild the selection now, in dependency order."),
+    refresh: bool = typer.Option(False, "--refresh", help="Rebuild from scratch on the next run."),
+    confirm: Optional[str] = typer.Option(None, "--confirm", help="The Catchment's name, to confirm --reset, --wipe or "
+                                                                  "--remove."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the interactive confirmation prompt."),
     catchment: Optional[str] = _CATCHMENT,
 ) -> None:
-    """Apply one or more operations to a set of Ponds, in precedence order — the CLI twin of the UI
-    Selector. Select Ponds by name, or expand the selection with --all / --tree / --between / --downstream.
-    Operations: --kill --sleep --reset --wipe --remove --clear --repair --refresh (applied in the order
-    kill > sleep > reset > wipe > remove > clear > repair > refresh). Repair can't combine with
-    remove/reset; remove implies (and subsumes) reset. Any of reset/wipe/remove need the catchment name
-    (--confirm, or you'll be prompted). See plans/selector_ui.md."""
+    """Apply operations to a set of Ponds.
+
+    Name Ponds as name or name@major, and widen the selection with --all, --tree, --between or
+    --downstream. Operations run in this order, whatever order they're given in: kill, sleep, reset, wipe,
+    remove, clear, repair, refresh. --repair can't be combined with --remove or --reset.
+
+    --reset, --wipe and --remove can't be undone and need the Catchment's name, from --confirm or a prompt.
+    --yes suppresses the prompt, so scripts must pass --confirm.
+    """
     from . import _http
     from .config import resolve_catchment
 

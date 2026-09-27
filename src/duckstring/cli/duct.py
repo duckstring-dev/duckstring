@@ -16,21 +16,22 @@ from typing import Optional
 import typer
 
 _CATCHMENT = typer.Option(None, "--catchment", "-c", help="Consuming Catchment (uses default if omitted).")
-_MAJOR = typer.Option(None, "--major", "-m", help="Major line to target (default: latest/1).")
-_VERSION = typer.Option(None, "--version", "-v", help="Specific semver whose major line to target.")
+_MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest).")
+_VERSION = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3.")
 
 
 # ─── Producer side: open / close ──────────────────────────────────────────────
 
 
 def open_pond(
-    pond: str = typer.Argument(..., help="Pond to open to demand from any source."),
+    pond: str = typer.Argument(..., help="Pond to open to demand from other Catchments."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
-    tap_on_get: bool = typer.Option(False, "--tap-on-get", help="A data read fires a Tap (snapshot served first)."),
+    tap_on_get: bool = typer.Option(False, "--tap-on-get", help="Also send a Tap on every read of the Pond's data, after "
+                                                                "serving it."),
 ) -> None:
-    """Open a Pond — it accepts demand from any source (e.g. a downstream Catchment over a duct)."""
+    """Open a Pond to demand from other Catchments."""
     from . import _http
     from .config import resolve_catchment
 
@@ -48,7 +49,7 @@ def close_pond(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Close a Pond — remove its open flag (and tap-on-get)."""
+    """Close a Pond to demand from other Catchments, and stop tapping it on reads."""
     from . import _http
     from .config import resolve_catchment
 
@@ -59,7 +60,7 @@ def close_pond(
 
 # ─── Consumer side: ducts ─────────────────────────────────────────────────────
 
-app = typer.Typer(help="Manage ducts (conduits from upstream Catchments).", no_args_is_help=True)
+app = typer.Typer(help="Consume Ponds from other Catchments.", no_args_is_help=True)
 
 
 def _resolve_pair(upstream: str, consumer: Optional[str]):
@@ -78,7 +79,7 @@ def create(
     catchment: Optional[str] = _CATCHMENT,
     sync: bool = typer.Option(False, "--sync", help="Also draw every Pond the upstream currently exposes."),
 ) -> None:
-    """Open a conduit from an upstream Catchment into the consuming Catchment."""
+    """Create a duct from an upstream Catchment into this one."""
     from . import _http
 
     consumer_name, consumer_cfg, up_url, up_headers = _resolve_pair(upstream, catchment)
@@ -100,7 +101,7 @@ def destroy(
     upstream: str = typer.Argument(..., help="Upstream the duct draws from."),
     catchment: Optional[str] = _CATCHMENT,
 ) -> None:
-    """Destroy a duct and all the Pond Draws it created."""
+    """Remove a duct and every Pond Draw it created."""
     from . import _http
     from .config import resolve_catchment
 
@@ -111,10 +112,10 @@ def destroy(
 
 @app.command("sync")
 def sync(
-    upstream: str = typer.Argument(..., help="Upstream to reflect into the duct."),
+    upstream: str = typer.Argument(..., help="Upstream the duct draws from."),
     catchment: Optional[str] = _CATCHMENT,
 ) -> None:
-    """Reflect the upstream's current Ponds into the duct — draw every Pond it exposes."""
+    """Draw every Pond the upstream Catchment exposes."""
     from .config import resolve_catchment
 
     consumer_name, cfg = resolve_catchment(catchment)
@@ -132,7 +133,7 @@ def _sync(consumer_cfg: dict, upstream: str, consumer_name: str) -> None:
 
 @app.command("ls")
 def ls(catchment: Optional[str] = _CATCHMENT) -> None:
-    """List ducts on the consuming Catchment and the Ponds each draws."""
+    """List ducts and the Ponds each one draws."""
     from rich.console import Console
     from rich.table import Table
 
@@ -160,9 +161,9 @@ def add(
     pond: str = typer.Argument(..., help="Upstream Pond to draw."),
     catchment: Optional[str] = _CATCHMENT,
     major: int = typer.Option(1, "--major", "-m", help="Major line of the upstream Pond."),
-    incremental: bool = typer.Option(False, "--incremental", help="(Reserved) delta fetch — not yet implemented."),
+    incremental: bool = typer.Option(False, "--incremental", help="Reserved; not implemented yet."),
 ) -> None:
-    """Draw one upstream Pond over the duct (materialises a Pond Draw)."""
+    """Draw one upstream Pond over the duct."""
     from . import _http
     from .config import resolve_catchment
 
@@ -181,7 +182,7 @@ def remove(
     catchment: Optional[str] = _CATCHMENT,
     major: int = typer.Option(1, "--major", "-m", help="Major line of the drawn Pond."),
 ) -> None:
-    """Stop drawing a Pond (removes its Pond Draw)."""
+    """Stop drawing a Pond and remove its Pond Draw."""
     from . import _http
     from .config import resolve_catchment
 

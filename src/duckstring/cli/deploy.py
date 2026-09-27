@@ -132,7 +132,11 @@ def deploy(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts."),
     all_ponds: bool = typer.Option(False, "--all", help="Deploy all Ponds found in subdirectories of the current directory."),
 ) -> None:
-    """Deploy the current Pond project to a Catchment."""
+    """Deploy the Pond project in the current directory to a Catchment.
+
+    Deploying a version replaces the running version of its major line. A new major version is deployed
+    alongside the existing ones.
+    """
     from rich.console import Console
 
     from .config import resolve_catchment
@@ -162,15 +166,16 @@ def remove(
     name: str = typer.Argument(..., help="Pond name to remove."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major line to remove (default: highest deployed)."),
-    wipe: bool = typer.Option(False, "--wipe", help="Also purge the deployment record, run history, and "
-                              "artifacts — as if never deployed (not reversible by a redeploy)."),
+    wipe: bool = typer.Option(False, "--wipe", help="Also delete the deployment record, run history and "
+                              "deployed code, as if never deployed."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Remove (retire) a deployed Pond major line — delete its data, live state, and on-disk runtime plus
-    its own Spouts and alert channels, keeping its deployment record and run history (a redeploy un-retires
-    it). Downstream Ponds that read it will block until fixed. Requires the line idle with no demand
-    (`control sleep` it first). Pass `--wipe` to also purge the deployment record + run history + artifacts,
-    leaving no trace of the line."""
+    """Retire a deployed major line: delete its data, live state, Spouts and alert channels.
+
+    The deployment record and run history are kept, and redeploying restores the line. Ponds downstream are
+    blocked until then. The line must be idle with no demand, so `control sleep` it first. --wipe also
+    deletes the record, history and deployed code.
+    """
     from . import _http
     from .config import resolve_catchment
 

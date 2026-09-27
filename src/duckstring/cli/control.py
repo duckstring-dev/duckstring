@@ -19,37 +19,41 @@ def wake(
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
 ) -> None:
-    """Wake a Pond — run once if its Sources already hold fresher data (no upstream solicit). Gentle."""
+    """Run the Pond once if its Sources already have newer data, without asking them to run."""
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
     _post_trigger(cfg, pond, major, version, silent, watch, "wake", {}, "Woken.", one_shot=True)
 
 
 def force(
-    pond: str = typer.Argument(..., help="Name of the Pond to force a recompute on."),
+    pond: str = typer.Argument(..., help="Name of the Pond to rerun."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
 ) -> None:
-    """Force a Pond to recompute now at its current freshness, even with no upstream change (e.g. after
-    a patch). Does not propagate downstream — freshness is unchanged."""
+    """Rerun the Pond now at its current freshness, even with no upstream change, e.g. after deploying a fix.
+
+    Freshness doesn't change, so Ponds downstream don't rerun because of it.
+    """
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
     _post_trigger(cfg, pond, major, version, silent, watch, "force", {}, "Forced.", one_shot=True)
 
 
 def refresh(
-    pond: str = typer.Argument(..., help="Name of the Pond to flag for a refresh."),
+    pond: str = typer.Argument(..., help="Name of the Pond to rebuild on its next run."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
-    clear: bool = typer.Option(False, "--clear", help="Un-set a pending refresh instead."),
+    clear: bool = typer.Option(False, "--clear", help="Remove a pending refresh instead."),
 ) -> None:
-    """Refresh a Pond — flag its *next* run to be a cold wipe-and-rebuild (full recompute, clears the
-    changelog so downstream reloads). Lazy: nothing runs now; it takes effect on the next run. For an
-    immediate rebuild across a set of Ponds, use `control repair`."""
+    """Rebuild the Pond from scratch on its next run.
+
+    Its working database is dropped and every Source is read in full, so Ponds downstream also read its
+    Trickles in full. Nothing runs now. For an immediate rebuild, use `control repair`.
+    """
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -68,9 +72,11 @@ def reset(
     clear_history: bool = typer.Option(False, "--clear-history", help="Also delete the Pond's run history."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Reset a Pond to a fresh-deploy state — scrub its registry, published data, and ledger and rewind its
-    freshness — keeping its deployed code, operational config, and demand. Lazy: nothing runs now; the Pond
-    rebuilds from scratch when next demanded. Requires the Pond to be idle."""
+    """Return the Pond to its freshly deployed state.
+
+    Deletes its published data, working database and run ledger, and resets its freshness. Keeps its code,
+    configuration and demand, so it rebuilds from scratch the next time it runs. The Pond must be idle.
+    """
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -84,14 +90,16 @@ def reset(
 
 
 def repair(
-    ponds: list[str] = typer.Argument(..., help="Ponds to rebuild (a connected set)."),
+    ponds: list[str] = typer.Argument(..., help="Ponds to rebuild. Must be connected."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     downstream: bool = typer.Option(False, "--downstream", help="Also rebuild everything downstream."),
 ) -> None:
-    """Repair — force-rebuild a connected set of Ponds now, in dependency order (each reads its freshly-
-    rebuilt parents). Use for an immediate fix when no new upstream run is coming; the set must be
-    connected (no skipped Pond in a sequence) — `--downstream` extends it to all descendants."""
+    """Rebuild a set of Ponds now, in dependency order, each reading its parents' rebuilt output.
+
+    The set must be connected: a Pond linking two selected Ponds must be selected too. --downstream adds
+    everything downstream.
+    """
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -104,11 +112,11 @@ def repair(
 def sleep(
     pond: str = typer.Argument(..., help="Name of the Pond to put to sleep."),
     catchment: Optional[str] = _CATCHMENT,
-    upstream: bool = typer.Option(False, "--upstream", help="Also sleep all upstream (source) Ponds."),
+    upstream: bool = typer.Option(False, "--upstream", help="Also sleep every Pond upstream."),
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Sleep a Pond — clear its demand (push + pull); started Pond Runs still complete. Gentle."""
+    """Clear the Pond's demand and remove its standing trigger. Runs in progress finish."""
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -125,8 +133,10 @@ def kill(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Kill a Pond — terminate its Duck and cancel its running Pond Run. Terminal: it stays killed
-    (no retries) until a Wake, Force, or `control clear`."""
+    """Stop the Pond's Duck immediately, abandoning its current run.
+
+    The Pond stays killed, with no runs or retries, until it's woken, forced or cleared.
+    """
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -138,12 +148,12 @@ def kill(
 
 
 def clear(
-    pond: str = typer.Argument(..., help="Name of the failed Pond to clear."),
+    pond: str = typer.Argument(..., help="Name of the failed or killed Pond to clear."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Clear a failed Pond — reset its failure and unblock everything downstream (no run)."""
+    """Reset a failed or killed Pond without running it, and unblock the Ponds downstream."""
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -155,17 +165,18 @@ def clear(
 
 
 def reset_contract(
-    pond: str = typer.Argument(..., help="Pond whose captured output schema to drop."),
+    pond: str = typer.Argument(..., help="Pond whose recorded output schema to forget."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
 ) -> None:
-    """Drop this major line's recorded output schema so the next run re-freezes it, and clear the failure.
+    """Forget the output schema recorded for this major line, and clear the failure.
 
-    The escape hatch for a line wedged by a NARROWING type change: the schema gate is forward-only, and a
-    failed run publishes nothing, so the line can otherwise never recover. Widenings no longer need this —
-    they are accepted as additive. Re-opens what a pinned Sink was promised, so it asks first."""
+    The next successful run records the schema again. Use it when a run failed for narrowing a column's
+    type and you accept the change within the same major version. Ponds downstream may rely on the old
+    schema, so it asks for confirmation.
+    """
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -189,13 +200,13 @@ def failure_budget(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
     immediate: Optional[int] = typer.Option(
-        None, "--immediate", "-i", help="Ripple-Run retries allowed within one Pond Run."
+        None, "--immediate", "-i", help="Retries of a failed Ripple within the same Pond Run."
     ),
     on_change: Optional[int] = typer.Option(
-        None, "--on-change", "-o", help="Pond Runs to retry after a Source updates."
+        None, "--on-change", "-o", help="Retries of a failed Pond Run when a Source next updates."
     ),
 ) -> None:
-    """Show or set a Pond's retry budgets. With no flags, prints the current values."""
+    """Show a Pond's retry budgets, or set them. They replace the values from pond.toml."""
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)

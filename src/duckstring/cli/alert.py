@@ -18,7 +18,7 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="Manage failure & freshness notification channels.", no_args_is_help=True)
+app = typer.Typer(help="Send notifications when Ponds fail, recover or go stale.", no_args_is_help=True)
 
 
 def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
@@ -29,20 +29,20 @@ def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
 
 @app.command("add")
 def add(
-    to: str = typer.Option(..., "--to", "-t", help="Destination URI (https://…, http://…, mailto:…); "
-                                                   "credentials as ${env:NAME}/${secret:NAME}."),
-    name: Optional[str] = typer.Option(None, "--name", "-n", help="Channel name (default: derived from the scheme)."),
-    pond: Optional[str] = typer.Option(None, "--pond", "-p", help="Scope to one Pond by name "
-                                                                  "(default: catchment-wide)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major of --pond to scope to "
-                                                                    "(default: its highest deployed major)."),
-    on: str = typer.Option("all", "--on", help="Event kinds, comma-separated: "
-                                              "failure,contract,spout,recovery,freshness (or 'all')."),
-    stale: Optional[str] = typer.Option(None, "--stale", help="Freshness-SLA bound, e.g. 1h, 30m — alert when a "
-                                                             "scoped Pond is stale longer than this."),
-    renotify: Optional[str] = typer.Option(None, "--renotify", help="Re-notify interval, e.g. 6h — repeat the alert "
-                                                                    "while a failure/staleness episode persists "
-                                                                    "(default: once per episode)."),
+    to: str = typer.Option(..., "--to", "-t", help="Where to send: an https:// or http:// webhook, or mailto:. "
+                                                   "Credentials as ${env:NAME} or ${secret:NAME}."),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Channel name. Defaults to one based on the scheme."),
+    pond: Optional[str] = typer.Option(None, "--pond", "-p", help="Only alert for this Pond. "
+                                                                  "Defaults to every Pond."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version of --pond. "
+                                                                    "Defaults to the highest deployed."),
+    on: str = typer.Option("all", "--on", help="Comma-separated events: "
+                                              "failure, contract, spout, recovery, freshness, or all."),
+    stale: Optional[str] = typer.Option(None, "--stale", help="Send a freshness alert when a Pond is "
+                                                             "staler than this, e.g. 1h or 30m."),
+    renotify: Optional[str] = typer.Option(None, "--renotify", help="While a failure or staleness lasts, send "
+                                                                    "it again at this interval, e.g. 6h. "
+                                                                    "Defaults to sending once."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
     """Add a notification channel."""
@@ -111,7 +111,7 @@ def test(
     name: str = typer.Argument(..., help="The channel to test (see `alert ls`)."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
-    """Send a test notification through the channel (validates connectivity + credentials)."""
+    """Send a test message through a channel and report whether it was delivered."""
     from . import _http
 
     url, cfg = _resolve(catchment)
@@ -128,7 +128,7 @@ def log(
     limit: int = typer.Option(50, "--limit", "-l", help="How many recent deliveries to show."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
-    """Show recent alert deliveries (the audit log)."""
+    """Show recent alert deliveries and their outcomes."""
     from rich.console import Console
     from rich.table import Table
 

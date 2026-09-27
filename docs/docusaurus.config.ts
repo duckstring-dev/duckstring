@@ -44,6 +44,15 @@ const config: Config = {
         docs: {
           routeBasePath: '/',
           sidebarPath: './sidebars.ts',
+          // The pre-rewrite docs stay in the repo for reference but are not built. The first four
+          // entries are Docusaurus's defaults, which setting `exclude` would otherwise drop.
+          exclude: [
+            '**/_*.{js,jsx,ts,tsx,md,mdx}',
+            '**/_*/**',
+            '**/*.test.{js,jsx,ts,tsx}',
+            '**/__tests__/**',
+            'old/**',
+          ],
           remarkPlugins: [remarkMath],
           rehypePlugins: [rehypeKatex],
         },
