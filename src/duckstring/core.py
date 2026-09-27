@@ -23,26 +23,27 @@ def retry_on_lock(fn, attempts: int = 12, base: float = 0.05):
 
 
 def ripple(func=None, *, parents=None, name=None, always_run=False):
-    """Decorator that registers a function as a Ripple — a named unit of code in a Pond. A Ripple has no
-    tabular expectations: it may write zero, one, or many tables (in call order — sequential within the
-    Ripple; split across Ripples for parallelism), or none at all. ``parents`` are the *within-Pond*
-    Ripples it runs after, given by function reference; cross-Pond dependencies are declared in
-    ``pond.toml [sources]``, not here.
+    """Register a function as a Ripple.
 
-    Incremental I/O is a capability, not a separate node type: any Ripple may read a Source's change-set
-    (:meth:`Pond.read_delta` / :meth:`Pond.trickle`) and publish history-preserving **Trickle** tables
-    (:meth:`Pond.append_table` / :meth:`Pond.merge_table`) — the mode is chosen per write.
+    Use bare (``@ripple``) or with arguments (``@ripple(parents=[...])``). The function takes one argument,
+    the :class:`Pond` handle, and its return value is ignored.
 
-    The **Flock** posture (over-envelope offload) is a **Pond-level** setting, declared in
-    ``pond.toml [flock]`` (``mode``/``engine``/``oom_policy``) and coalesced with an operator
-    override — not a per-Ripple concern. To isolate a known-heavy chunk, split it into its own Pond.
+    Args:
+        parents: Ripples in the same Pond that must finish before this one starts, as function
+            references. Dependencies on other Ponds are declared in ``pond.toml``.
+        name: The Ripple's name. Defaults to the function name.
+        always_run: Run even when no Source has changed since the last Pond Run. If any Ripple in a Pond
+            sets this, the whole Pond always runs.
 
-    Usage:
+    Example::
+
         @ripple
-        def load(pond): ...
+        def daily_sales(pond): ...
 
-        @ripple(parents=[load])
-        def clean(pond): ...
+        @ripple(parents=[daily_sales])
+        def join_lines(pond): ...
+
+    Reference: https://docs.duckstring.com/reference/python/decorators
     """
     if func is not None:
         # Called as @ripple without arguments
@@ -67,17 +68,25 @@ def collect_ripples() -> list[dict]:
 
 
 def puddle(target: str):
-    """Decorator that registers a function as a Puddle — a local snapshot of the Source data it
-    emulates, for testing a Pond before deployment (``duckstring pond hydrate`` / ``pond run``).
+    """Register a function that builds a Puddle: a local snapshot of Source data for testing.
 
-    Usage:
-        @puddle("transactions.transaction")     # one table of a Source
+    Args:
+        target: ``"source.table"`` for one table of a Source, or ``"source"`` for a whole Source whose
+            tables the function names itself.
+
+    The function takes one argument, the :class:`Puddle` handle. ``duckstring pond hydrate`` runs it.
+
+    Example::
+
+        @puddle("transactions.transaction")
         def transactions(p):
             p.write_table(p.con.sql("SELECT ..."))
 
-        @puddle("products")                     # a whole Source (name each table)
+        @puddle("products")
         def products(p):
             p.write_table("product", p.con.sql("SELECT ..."))
+
+    Reference: https://docs.duckstring.com/reference/python/decorators
     """
 
     def decorator(f):
@@ -171,11 +180,22 @@ def resolve_catchment_auth(name: str | None = None) -> tuple[str, dict[str, str]
 
 
 class Catchment:
-    """Client-side handle for a Catchment server's read surface (the ``/api/query`` route).
+    """A client for reading a Pond's published tables from a running Catchment.
 
-    ``query``/``get`` return DuckDB relations materialised on ``con`` (each Pond's exported Parquet
-    is queryable under ``"{pond}"."{table}"`` or bare). Inside a puddle definition, ``p.catchment()``
-    returns one of these pre-bound to the puddle's Source and scratch connection."""
+    Results are DuckDB relations loaded on ``con``. Queries target the Pond's highest deployed major.
+
+    Args:
+        url: The Catchment's address.
+        con: DuckDB connection for results. Defaults to a new in-memory connection.
+        default_pond: Pond used when a method is called without ``pond``.
+        default_table: Table used when :meth:`get` is called without ``table``.
+        api_key: Sent as ``Authorization: Bearer <key>`` unless ``headers`` sets ``Authorization``.
+        headers: Extra headers sent with every request.
+
+    Inside a ``@puddle`` function, ``p.catchment()`` returns one configured for the Puddle's Source.
+
+    Reference: https://docs.duckstring.com/reference/python/catchment
+    """
 
     def __init__(
         self, url: str, con=None, default_pond: str | None = None, default_table: str | None = None,
@@ -220,7 +240,11 @@ class Catchment:
         return resp
 
     def query(self, sql: str, pond: str | None = None):
-        """Run ``sql`` against a Pond's exported tables; returns a DuckDB relation on ``con``."""
+        """Run read-only SQL against one Pond's published tables and return the result as a relation.
+
+        Tables are referred to by bare name. ``pond`` defaults to ``default_pond``. Raises ``RuntimeError``
+        when the Catchment returns an error, and ``ValueError`` when no Pond is given.
+        """
         import tempfile
 
         resp = self._post_query({"pond": self._pond(pond), "sql": sql, "format": "parquet"})
@@ -230,22 +254,30 @@ class Catchment:
         return self.con.read_parquet(tmp)
 
     def get(self, table: str | None = None, pond: str | None = None):
-        """Fetch a whole table; returns a DuckDB relation on ``con``."""
+        """Fetch a whole table as a relation. ``table`` defaults to ``default_table``, ``pond`` to ``default_pond``."""
         target_table = table or self._default_table
         if not target_table:
             raise ValueError("no table given — pass table=... or define the puddle on a 'source.table' target")
         return self.query(f'SELECT * FROM "{target_table}"', pond=pond)
 
     def tables(self, pond: str | None = None) -> list[str]:
-        """The names of a Pond's exported tables."""
+        """The names of a Pond's published tables."""
         rows = self._post_query({"pond": self._pond(pond), "sql": "SHOW TABLES"}).json()
         return [row["name"] for row in rows]
 
 
 class Puddle:
-    """Handle passed to ``@puddle`` definitions. ``path`` is the puddle's destination directory —
-    the general escape hatch (write models, blobs, anything there directly); ``write_table`` /
-    ``write_path`` are conveniences layered on it."""
+    """The handle passed to every ``@puddle`` function.
+
+    Attributes:
+        con: A scratch in-memory DuckDB connection.
+        path: The directory the Puddle writes into, ``puddles/ponds/{source}/data/``. Anything written
+            here directly is visible to a local run.
+        source: The Source name from the decorator target.
+        table: The table name from the decorator target, or ``None`` for a whole-Source Puddle.
+
+    Reference: https://docs.duckstring.com/reference/python/puddle
+    """
 
     def __init__(self, target: str, root: Path, default_catchment: str | None = None):
         self.target = target
@@ -258,7 +290,7 @@ class Puddle:
 
     @property
     def path(self) -> Path:
-        """The destination directory (``puddles/ponds/{source}/data/``), created on access."""
+        """The directory the Puddle writes into, ``puddles/ponds/{source}/data/``. Created on access."""
         dest = self.root / "ponds" / self.source / "data"
         dest.mkdir(parents=True, exist_ok=True)
         return dest
@@ -273,8 +305,12 @@ class Puddle:
         return self._con
 
     def write_table(self, name_or_relation, relation=None) -> Path:
-        """Export a relation to ``{path}/{table}.parquet`` (atomic tmp+replace). The single-argument
-        form uses the table named on the decorator; name the table explicitly for whole-Source puddles."""
+        """Write a relation to ``{path}/{name}.parquet`` and return the file path.
+
+        Call as ``write_table(relation)`` to use the table named in the decorator target, or
+        ``write_table(name, relation)``. A whole-Source Puddle must name each table. A pandas DataFrame is
+        accepted and converted through ``con``.
+        """
         if relation is None:
             name, relation = self.table, name_or_relation
             if name is None:
@@ -292,8 +328,11 @@ class Puddle:
         return dest
 
     def write_path(self, src) -> None:
-        """Copy data file(s) into the puddle: a parquet/csv path or glob. A single-table puddle reads
-        everything matched as that table; a whole-Source puddle names each file's stem as a table."""
+        """Copy existing Parquet or CSV files into the Puddle from a path or glob.
+
+        For a single-table Puddle, everything matched becomes that table. For a whole-Source Puddle, each file
+        becomes a table named after the file. Raises ``FileNotFoundError`` when a glob matches nothing.
+        """
         src = Path(src).expanduser()
         if self.table is not None:
             self.write_table(self._read_path(src))
@@ -311,38 +350,41 @@ class Puddle:
         return self.con.read_parquet(str(src))
 
     def write_object(self, name: str, src) -> None:
-        """Seed a non-tabular **Object** for the Source under test (the puddle counterpart of
-        :meth:`Pond.write_object`) — ``src`` is a path (file or dir), ``bytes``, or a binary file-like.
-        Published under ``{path}/objects/{name}/`` so a Pond reading ``"{source}.{name}"`` resolves it."""
+        """Seed an Object for the Source, so a Ripple reading ``"{source}.{name}"`` finds it.
+
+        ``src`` is a file or directory path, ``bytes``, or a binary file-like.
+        """
         from .objects import write_object_now
 
         write_object_now(self.path, name, src)
 
     def read_object(self, name: str) -> bytes:
-        """A single-file Object seeded for this Source — its bytes."""
+        """The bytes of a seeded single-file Object."""
         from .objects import read_object as _read
 
         return _read(self.path, name)
 
     def object_path(self, name: str) -> Path:
-        """A local path to an Object seeded for this Source (file or directory)."""
+        """A local path to a seeded Object, file or directory."""
         from .objects import object_path as _path
 
         return _path(self.path, name, self.path / ".object_cache")
 
     def catchment(self, name: str | None = None) -> Catchment:
-        """A :class:`Catchment` client bound to this puddle's Source and scratch connection."""
+        """A :class:`Catchment` client whose default Pond is this Puddle's Source and default table is its target
+        table, sharing ``con``. ``name`` is a registered Catchment name or a URL, defaulting to the default
+        Catchment.
+        """
         url, headers = resolve_catchment_auth(name or self.default_catchment)
         return Catchment(url, con=self.con, default_pond=self.source, default_table=self.table, headers=headers)
 
 
 class MissingSourceAsset(FileNotFoundError):
-    """A Ripple read a Source table/Object that is not published — the Source has not produced it (yet), or
-    it was deleted. Distinct from a code error: the consumer isn't broken, it is *waiting* for the Source to
-    (re)publish. The Duck reports this as a ``missing_source`` event and the Catchment parks the Pond
-    **blocked-with-a-reason** — no failure, no retry-budget burn, no alert. See plans/reset.md.
+    """A Source table or Object that a Ripple read has not been published.
 
-    Subclasses ``FileNotFoundError`` so existing ``except FileNotFoundError`` sites still catch it."""
+    Duckstring treats this as waiting rather than failing: the Pond is held until the Source publishes
+    again, with no retry spent and no alert sent. A subclass of ``FileNotFoundError``.
+    """
 
     def __init__(self, source: str, table: str) -> None:
         self.source = source
@@ -354,6 +396,22 @@ class MissingSourceAsset(FileNotFoundError):
 
 
 class Pond:
+    """The handle passed to every Ripple.
+
+    Attributes:
+        con: DuckDB connection to the Pond's own database, shared by its Ripples. Tables written here
+            are published when the Pond Run succeeds.
+        name: The Pond's name.
+        version: The deployed version.
+        f: The freshness of this Pond Run (timezone-aware UTC). Stable across retries and crash recovery
+            of the same run. In a local run, the run's start time.
+        previous_f: The freshness of the previous successful run, or ``datetime.min`` (UTC) on the first.
+
+    Table references are ``"table"`` for this Pond's own tables and ``"source.table"`` for a Source's.
+
+    Reference: https://docs.duckstring.com/reference/python/pond
+    """
+
     def __init__(
         self, name: str, version: str, con, root,
         source_majors: dict[str, int] | None = None, source_f: dict[str, str] | None = None,
@@ -426,27 +484,37 @@ class Pond:
         return out
 
     def sources_changed(self) -> bool:
-        """Did any Source change its output since this Pond last ran? The engine's content-skip verdict
-        (``max(Source.changedF) > prior_f``), exposed so a side-effecting (``always_run``) Ripple can do
-        its effect every run but skip the data work when nothing upstream changed::
+        """Whether any Source's output changed since this Pond last ran.
 
-            ...side effects that run every time...
+        Mainly for a Ripple declared with ``always_run=True``, which runs regardless and can use this to skip
+        its data work::
+
+            send_heartbeat()
             if not pond.sources_changed():
                 pond.skip()
                 return
-            ...otherwise compute normally...
 
-        Always ``True`` in a local (puddle) run, which has no engine. See plans/no-change-skip.md."""
+        Always ``True`` in a local run.
+        """
         return self._sources_changed
 
     def skip(self) -> None:
-        """Mark this Pond Run as producing **no change** — a pass. The Duck reports ``changed=False``,
-        so the Catchment holds this Pond's ``changed_f`` and downstream skips its work. A no-op in a
-        local (puddle) run. See plans/no-change-skip.md."""
+        """Mark this Pond Run as producing no change.
+
+        Downstream Ponds then treat this Pond's output as unchanged and can skip their own runs. Freshness
+        still advances. Has no effect in a local run.
+        """
         if self._skip_sink is not None:
             self._skip_sink()
 
     def write_table(self, name: str, relation) -> None:
+        """Replace the table ``name`` in the Pond's database with ``relation``, in one transaction.
+
+        Every table in the database is published when the whole Pond Run succeeds; if any Ripple fails,
+        nothing from the run is published. A write that collides with another Ripple's is retried. Tables whose
+        names start with ``_duckstring_`` are never published, and columns with that prefix are rejected at
+        publish. Use :meth:`append_table` or :meth:`merge_table` to keep history for incremental consumers.
+        """
         self.record_lineage_write(name)
         tmp = f"__tmp_{name}"
 
@@ -465,11 +533,12 @@ class Pond:
         retry_on_lock(_write)  # a concurrent write conflict queues + retries rather than failing
 
     def write_object(self, name: str, src) -> None:
-        """Publish a **non-tabular** artifact (an ML model, a serialised blob, a rendered file) under
-        ``name`` — the Object counterpart of :meth:`write_table`. ``src`` is a filesystem path (a file **or**
-        a directory, published as one unit), raw ``bytes``, or a binary file-like. Ripple-only, overwrite;
-        the write is *staged* now and committed atomically when the run publishes (a later Ripple failure
-        leaves the last-good Object intact). Read it back with :meth:`read_object` / :meth:`object_path`."""
+        """Stage a non-tabular Object (a model, a file, a directory) to be published with the run's tables.
+
+        ``src`` is a file or directory path, ``bytes``, or a binary file-like. The Object is replaced as one
+        unit when the run publishes; a later Ripple failure leaves the previous Object in place. Raises
+        ``RuntimeError`` outside a Pond Run.
+        """
         from .objects import stage_object
 
         if self._staging_dir is None:
@@ -478,8 +547,11 @@ class Pond:
         stage_object(Path(self._staging_dir), name, src)
 
     def read_object(self, ref: str) -> bytes:
-        """A single-file Object's **bytes** — own (``"name"``) or a Source's (``"source.name"``). Raises for
-        a *directory* Object (use :meth:`object_path`). Overwrite-only, so this reads the latest publish."""
+        """The bytes of a single-file Object: ``"name"`` for this Pond's own, ``"source.name"`` for a Source's.
+
+        An own Object staged earlier in this run is returned in preference to the published one. Raises
+        ``ObjectError`` for a directory Object; use :meth:`object_path` instead.
+        """
         from .objects import read_object as _read
         from .objects import read_staged
 
@@ -494,9 +566,11 @@ class Pond:
         return _read(self._source_data_dir(source), name)
 
     def object_path(self, ref: str) -> Path:
-        """A local filesystem **path** to an Object — own (``"name"``) or a Source's (``"source.name"``) —
-        valid for a single file *and* a directory Object. A remote (object-store) Object is materialised to
-        a run-scoped scratch dir once; a local one is handed back in place (read-only by contract)."""
+        """A local path to an Object, file or directory: ``"name"`` or ``"source.name"``.
+
+        An Object in object storage is downloaded once per run to a scratch directory. Treat the path as
+        read-only.
+        """
         from .objects import object_path as _path
         from .objects import staged_object_path
 
@@ -552,13 +626,18 @@ class Pond:
                                 expected_f=self.source_f.get(source_pond))
 
     def read_table(self, ref: str):
-        """A relation over a table — own (``"name"``) or a Source's (``"source.table"``). A Source
-        table is also registered as a temp view under its own name, so SQL can reference it directly
-        (``FROM table``). Prefer that over naming the returned relation's Python variable in SQL:
-        that resolves by scanning Python frames, which is unreliable under the threaded executor.
+        """A relation over a table's current contents: ``"table"`` or ``"source.table"``.
 
-        For a Trickle source this is the **clean current state** (the merge *main* / the full append
-        history); its ``_duckstring_*`` system columns are projected out so the read is user-facing."""
+        A Source table is also registered as a view under its bare name, so SQL can refer to it directly
+        (``FROM product``), unless one of this Pond's own tables has that name. Source reads are pinned to this
+        run's freshness where the data plane keeps history, so every Ripple in a run sees the same snapshot.
+        For a Trickle, the result is the current state without the ``_duckstring_*`` system columns.
+
+        Refer to the registered view name in SQL rather than to a Python variable holding the relation, which
+        is unreliable under the Duck's threaded executor.
+
+        Raises :class:`MissingSourceAsset` when a Source table isn't published.
+        """
         if "." in ref:
             source_pond, table = ref.split(".", 1)
             if source_pond != self.name:
@@ -598,11 +677,9 @@ class Pond:
         return trickle.current_state(self.con, name)
 
     def count_table(self, ref: str) -> int:
-        """The current **active row count** of a table — own (``"name"``) or a Source's (``"source.table"``) —
-        via metadata + the changelog's net Z-set weight, **without scanning** it. This is the host fast path the
-        Trickle builder's ``.count()`` reaches for on a bare stored source: a Source's published count comes
-        from the data plane (base-file metadata + the post-``f_base`` changelog delta, pinned to this run's
-        as-of ``f``); an own registry table goes through :func:`duckstring.trickle_io.count_current`."""
+        """The current number of rows in a table (``"table"`` or ``"source.table"``), read from metadata without
+        scanning where possible.
+        """
         from . import trickle_io as trickle
 
         if "." in ref:
@@ -633,14 +710,22 @@ class Pond:
     def append_table(
         self, name: str, relation, *, pk=None, fail_on_conflict=True, retain_t=None, retain_n=None
     ) -> bool:
-        """Append ``relation`` to the history table ``name`` (insert-only; each row stamped with the
-        run's freshness ``pond.f``). The fast path for event/fact logs whose identity is unique by
-        construction — no diff, no deletes; idempotent on replay at the same ``f``. ``pk`` is optional
-        (recorded as the table's declared key, for downstream/the data viewer); when it is set,
-        ``fail_on_conflict=True`` (the default) asserts ``pk`` is unique across the appended rows and the
-        existing history (raising before any write). Pass ``fail_on_conflict=False`` for the trust-the-writer
-        fast path (no check); with ``pk`` unset the check is a no-op regardless. ``retain_t`` (a
-        ``timedelta``) / ``retain_n`` (a count) opt into bounding the kept history."""
+        """Append ``relation`` to the append Trickle ``name``, stamping each row with ``pond.f``.
+
+        Args:
+            name: Table name. Created on first use.
+            relation: The new rows.
+            pk: The table's primary key, recorded for consumers and checked when ``fail_on_conflict`` is set.
+            fail_on_conflict: With ``pk`` set, raise before writing if the key is repeated within
+                ``relation`` or already in the table's history. ``False`` skips the check.
+            retain_t: A ``timedelta``; drop history rows stamped earlier than ``f - retain_t``.
+            retain_n: Keep only the rows from the newest ``retain_n`` runs.
+
+        Returns ``True`` if rows were appended. Safe to repeat at the same ``f``. Raises ``DeltaError`` on a
+        key conflict or a missing key column.
+
+        Reference: https://docs.duckstring.com/reference/python/trickle_io
+        """
         from . import trickle_io as trickle
 
         self.record_lineage_write(name)
@@ -651,16 +736,26 @@ class Pond:
 
     def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None,
                     compact_threshold=None) -> bool:
-        """Merge the **complete current state** ``relation`` into the clean main table ``name`` + its Z-set
-        changelog, stamped ``pond.f``. ``pk`` (the output identity) is **required** — it is the merge key.
-        Duckstring diffs ``relation`` against the prior main as a full-row Z-set difference to derive
-        inserts/updates/deletes automatically — so it is always safe to hand it the whole state. ``retain_t``
-        / ``retain_n`` opt into bounding the kept changelog (the main, being the clean current state, is
-        never trimmed). ``compact_threshold`` (bytes) overrides the catchment-level checkpoint size for this
-        main — the changelog must outgrow ``max(base, this)`` before the base is re-folded.
+        """Merge the complete current state ``relation`` into the merge Trickle ``name``.
 
-        Returns whether the state actually changed (the diff was non-empty) — gate ``pond.skip()`` on it to
-        pass a no-change run (see :meth:`skip`, plans/no-change-skip.md)."""
+        Duckstring compares ``relation`` with the table's state before this run and records the inserts,
+        updates and deletes in its change log. Pass the whole table every time: missing rows are recorded as
+        deleted.
+
+        Args:
+            name: Table name.
+            relation: The table's complete current state.
+            pk: The primary key. Required, and must be unique in ``relation``.
+            retain_t: A ``timedelta``; drop change-log rows stamped earlier than ``f - retain_t``.
+            retain_n: Keep only the change-log rows from the newest ``retain_n`` runs.
+            compact_threshold: Bytes the change log must reach before it is folded into the table's base.
+                Defaults to ``DUCKSTRING_COMPACT_THRESHOLD`` (256 MiB).
+
+        Returns ``True`` if the state changed, the usual signal for :meth:`skip`. Raises ``DeltaError`` for a
+        missing or empty ``pk``.
+
+        Reference: https://docs.duckstring.com/reference/python/trickle_io
+        """
         from . import trickle_io as trickle
 
         self.record_lineage_write(name)
@@ -671,11 +766,16 @@ class Pond:
 
     def apply_zset(self, name: str, zset, *, pk, retain_t=None, retain_n=None,
                    compact_threshold=None) -> bool:
-        """Apply a **Z-set** change (a relation of user columns + ``_duckstring_d``) to the output Trickle
-        ``name`` — the low-level primitive the builder uses for the incremental path. ``pk`` (the output
-        identity) is **required**. Prefer :meth:`trickle` / :meth:`merge_table`; reach for this only for
-        hand-rolled incremental compute. ``compact_threshold`` overrides the checkpoint size (see
-        :meth:`merge_table`). Returns whether the change was non-empty (the ``pond.skip()`` signal)."""
+        """Append an already-computed change to the merge Trickle ``name`` without comparing it with the state.
+
+        ``zset`` holds the table's columns plus ``_duckstring_d`` (``+1`` added, ``-1`` removed; an update is a
+        ``-1`` of the old row and a ``+1`` of the new). It is consolidated before writing. ``pk`` is required;
+        ``retain_t``, ``retain_n`` and ``compact_threshold`` are as for :meth:`merge_table`. Returns ``True`` if
+        the consolidated change is non-empty.
+
+        This is the write the Trickle builder uses. Prefer :meth:`trickle` or :meth:`merge_table`: a wrong
+        weight corrupts the table for every consumer.
+        """
         from . import trickle_io as trickle
 
         self.record_lineage_write(name)
@@ -685,11 +785,21 @@ class Pond:
         )
 
     def read_delta(self, ref: str):
-        """A Source's change over this run's window ``(pond.previous_f, pond.f]`` as a **Z-set** — a
-        :class:`~duckstring.trickle_io.Delta` (``.zset`` + ``.is_full``; ``.upserts`` / ``.deletes`` are
-        derived conveniences). Resolves the source's declared mode (append → history window all ``+1``;
-        merge → changelog window consolidated; overwrite → full read if it advanced, else an empty delta)
-        and falls back to a full read on a coverage miss / bootstrap."""
+        """The changes to a Source table (``"source.table"``) over this run's window ``(previous_f, f]``.
+
+        Returns a ``Delta``: ``.zset`` (the Source's columns plus ``_duckstring_d``), ``.is_full``, and the
+        conveniences ``.upserts`` and ``.deletes``.
+
+        - Append Trickle: the rows appended in the window, all ``+1``.
+        - Merge Trickle: the change-log rows in the window, consolidated to the net change.
+        - Plain table: the whole table (``is_full``) if republished since ``previous_f``, else empty.
+        - First run, or ``previous_f`` older than the Source's retained history: the whole table (``is_full``).
+
+        A full read must be treated as a complete recompute, not an increment. Raises ``ValueError`` without a
+        Source prefix and :class:`MissingSourceAsset` for an unpublished table.
+
+        Reference: https://docs.duckstring.com/reference/python/trickle_io
+        """
         from . import trickle_io as trickle
         from .dataplane import get_data_plane
 
@@ -707,20 +817,24 @@ class Pond:
             raise MissingSourceAsset(source_pond, table) from exc
 
     def trickle(self, spine_ref: str, *, p: float = 0.3):
-        """Start a :class:`~duckstring.trickle_builder.TrickleBuilder` rooted at the **spine** source
-        ``spine_ref``. Chain ``.join(pond.trickle(dim), on=…)`` / ``.filter(...)`` / ``.select(...)``
-        then ``.merge(name, pk=…)`` (the merge key is the output identity). The builder composes each
-        changed source's Z-set delta through
-        the join (DBSP-style), so a join can be on **any** key and a deletion propagates by full-row
-        retraction — there is one ``.join()`` and no FK=PK constraint. Any table is a valid source
-        (Trickle or plain overwrite Ripple): an unchanged Ripple is a free stable operand, a changed one
-        forces a comprehensive recompute.
+        """Start a Trickle builder on a source table.
 
-        ``p`` is this source's **change-fraction threshold**: if its delta touches more than ``p`` of the
-        source's current rows, the incremental slice stops paying off, so ``.merge()`` recomputes
-        comprehensively for that run. Per source: ``p=0.3`` (default) caps a source that drives the output
-        row count; ``p=1.0`` disables the check (and skips the count). Applies to the spine
-        (``pond.trickle(spine, p=…)``) and each joined dimension (``.join(pond.trickle(dim, p=…), on=…)``)."""
+        Args:
+            spine_ref: ``"source.table"``. Any published table works. To build on one of this Pond's own
+                tables, write it with a terminal earlier in the same chain.
+            p: Change-fraction threshold. If this source's changes touch more than ``p`` of its rows, the
+                builder recomputes in full for that run. ``1.0`` disables the check.
+
+        Chain ``.join()``, ``.filter()``, ``.mutate()``, ``.select()``, ``.aggregate()``, ``.accumulate()`` or
+        ``.sql()``, then finish with ``.merge(name, pk=...)`` or ``.append(name)``::
+
+            (pond.trickle("orders.order_line")
+                 .join(pond.trickle("catalog.product"), on="product_id")
+                 .select("s0.order_id, s0.quantity, s1.unit_price")
+                 .merge("priced_line", pk="order_id"))
+
+        Reference: https://docs.duckstring.com/reference/python/trickle_builder
+        """
         from .trickle_builder import TrickleBuilder
 
         return TrickleBuilder(self, spine_ref, p=p)

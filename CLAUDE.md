@@ -6,7 +6,7 @@ Duckstring is an open source data engineering platform built on DuckDB. Transfor
 
 This file is an internal reference written for quick recall, so it is dense and uses the code's own vocabulary. Don't copy its phrasing into user-facing docs; follow "Writing docs" below instead.
 
-The code is the source of truth for behaviour. `theory.md` (the orchestration spec, currently under `docs/docs/old/` and destined for the Reference section) matches it, and `playground/src/lib/orchestration.ts` is a TypeScript simulation of the same state machine. The Python engine is a behaviour-for-behaviour port of that simulation.
+The code is the source of truth for behaviour. `docs/docs/reference/orchestration_theory.md` (the orchestration spec, including the Pond State Variables pseudocode) matches it, and `playground/src/lib/orchestration.ts` is a TypeScript simulation of the same state machine. The Python engine is a behaviour-for-behaviour port of that simulation.
 
 ## Positioning
 
@@ -39,7 +39,7 @@ The landing page (`docs/src/components/Landing/index.tsx`) is the source of trut
 - These are mostly soft rules. Don't contort a sentence to satisfy one; clarity for the reader wins.
 - Use the demo pipelines as running examples: `transactions`, `products` → `sales` → `reports`, and for incremental topics `orders`, `catalog` → `priced` → `revenue`.
 
-The docs are being rewritten (branch `documentation-rewrite`). The new structure is Home, Quickstart, Concepts, then Guides and Reference. The previous docs are in `docs/docs/old/`; avoid reading them unless absolutely necessary, since their language and structure are being replaced. Base new pages on the code and commit history. When the CLI or API surface changes, update the docs.
+The docs are being rewritten (branch `documentation-rewrite`). The structure is Home, Quickstart, Concepts, Guides (not yet written) and Reference. Reference covers Orchestration Theory, the Python API, `pond.toml`, the CLI (one page per command group), the HTTP API (auth, conventions and a route table; bodies are left to the Catchment's own `/openapi.json`), Formats and Environment Variables. The public Python docstrings (`core.py` decorators, `Pond`, `Puddle`, `Catchment`; the Trickle builder, `agg`, `acc`, `Delta`) are written to match `docs/docs/reference/python/`, so change both together. The previous docs are in `docs/docs/old/`; avoid reading them unless absolutely necessary, since their language and structure are being replaced. Base new pages on the code and commit history. When the CLI or API surface changes, update the docs.
 
 ## Current state (2026-09)
 

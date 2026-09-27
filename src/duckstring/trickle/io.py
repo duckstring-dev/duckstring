@@ -134,7 +134,9 @@ def _store(data_dir):
 
 
 class DeltaError(ValueError):
-    """A delta read or Trickle write was used incompatibly."""
+    """A Trickle write or delta read was used incorrectly: a missing or conflicting primary key, or a write
+    with no run freshness. A subclass of ``ValueError``.
+    """
 
 
 def changelog_name(table: str) -> str:
@@ -2216,15 +2218,17 @@ def _ensure_changelog(con, clog: str, schema_src: str) -> None:
 
 
 class Delta:
-    """A source's change over the window ``(previous_f, f]`` as a **Z-set** (:attr:`zset` — user columns +
-    ``_duckstring_d``).
+    """A Source table's changes over a run's window, returned by ``pond.read_delta``.
 
-    :attr:`is_full` is ``True`` when this is a *full read*, not a windowed delta — a bootstrap, a
-    coverage-miss (the consumer fell behind the source's retained history / its floor), or a **changed**
-    overwrite (plain Ripple) source. A full read is the whole current state at weight ``+1``; a consumer
-    must **absorb it comprehensively** (recompute its whole output and diff against its own main), never
-    treat it as an incremental slice. An *unchanged* overwrite source returns an **empty** Z-set
-    (``is_full`` False, no rows) — it contributes only as a stable history operand."""
+    Attributes:
+        zset: The changes: the Source's columns plus ``_duckstring_d`` (``+1`` added, ``-1`` removed).
+        is_full: ``True`` for a full read rather than a window of changes (a first run, a consumer
+            behind the Source's retained history, or a republished plain table). A full read must be
+            treated as a complete recompute, not an increment.
+        pk: The Source table's primary key, if it declared one.
+
+    Reference: https://docs.duckstring.com/reference/python/trickle_io
+    """
 
     def __init__(self, con, pk: tuple[str, ...], zset, *, is_full: bool = False) -> None:
         self.con = con
@@ -2233,22 +2237,22 @@ class Delta:
         self.is_full = is_full
 
     def is_empty(self) -> bool:
+        """Whether there are no changes."""
         return self.zset.aggregate("count(*) AS n").fetchone()[0] == 0
 
     def keys_count(self) -> int:
-        """Distinct rows that changed — the cost the change-fraction threshold measures against."""
+        """The number of changed rows."""
         return self.zset.aggregate("count(*) AS n").fetchone()[0]
 
     @property
     def upserts(self):
-        """The net present rows (weight ``> 0``), user columns only — a convenience for hand-rolled
-        consumers and the comprehensive case."""
+        """Rows present after the change (net weight above zero), without system columns."""
         consolidated = self._consolidated()
         return _strip_system(consolidated.filter(f"{_q(D_COL)} > 0"))
 
     @property
     def deletes(self):
-        """The PKs that were removed — keys appearing only with retractions (no surviving positive row)."""
+        """Primary key values removed and not re-added. Empty when the Source has no primary key."""
         if not self.pk:
             return self.zset.filter("1=0").project(", ".join(_q(c) for c in self.zset.columns if c != D_COL))
         consolidated = self._consolidated()

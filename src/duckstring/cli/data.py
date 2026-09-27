@@ -10,13 +10,13 @@ import typer
 
 def get(
     outlet: str = typer.Argument(..., help="Pond name."),
-    ripple: str = typer.Argument(..., help="Ripple name within the Pond."),
+    ripple: str = typer.Argument(..., metavar="TABLE", help="Table name within the Pond."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to read from (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line to read."),
-    path: Optional[Path] = typer.Option(None, "--path", help="Output directory (default: ./ponds/{outlet}/{ripple})."),
+    path: Optional[Path] = typer.Option(None, "--path", help="Output directory (default: ./ponds/{pond}/{table})."),
 ) -> None:
-    """Download a Ripple's output directory from a Catchment."""
+    """Download a table's published files from a Catchment."""
     from rich.console import Console
 
     from . import _http
@@ -180,7 +180,9 @@ def delete_object(
 
 def query(
     outlet: str = typer.Argument(..., help="Pond name."),
-    ripple: Optional[str] = typer.Argument(None, help="Ripple name (default query: SELECT * LIMIT 10)."),
+    ripple: Optional[str] = typer.Argument(
+        None, metavar="[TABLE]", help="Table name, for the default query (SELECT * ... LIMIT 10)."
+    ),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to query (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line to query."),

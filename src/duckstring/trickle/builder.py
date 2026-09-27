@@ -47,8 +47,9 @@ _W = "_duckstring_w"  # scratch weight column for prior-state reconstruction (di
 
 
 class BuildError(ValueError):
-    """The builder was misconfigured (a missing merge key / ``.select()``, an ambiguous join key, a
-    malformed join)."""
+    """The Trickle builder was used incorrectly: a missing ``pk``, an ambiguous join key, or a method used
+    where it isn't allowed. A subclass of ``ValueError``.
+    """
 
 
 # A verbatim source pass-through select item: ``<alias>.col`` / ``<alias>."col"`` / ``<alias>.col AS x``.
@@ -223,11 +224,15 @@ class _NodeState:
 
 
 class TrickleBuilder:
-    """One handle into the build DAG. ``pond.trickle(ref)`` starts a DAG rooted at a source; :meth:`join`
-    composes another (possibly itself composed) ``pond.trickle(...)`` operand as a binary join. The
-    ``.filter``/``.mutate``/``.select`` pipeline attaches to the composed result, applied in **call order**
-    (so a filter may reference an earlier mutate's column); the terminals are :meth:`merge` / :meth:`append`.
-    With no ``.select``, the output is the bare ``*`` (equi-join keys deduplicated)."""
+    """A Trickle builder, started with ``pond.trickle(ref)``.
+
+    Chain methods to compose joins, filters, computed columns, aggregations and accumulations, then call a
+    terminal (:meth:`merge` or :meth:`append`) to compute and write the result. ``.filter``, ``.mutate``
+    and ``.select`` apply in call order. Sources are named ``s0``, ``s1``, ... left to right unless given an
+    :meth:`alias`. Without a ``.select``, the output is every column, with join keys appearing once.
+
+    Reference: https://docs.duckstring.com/reference/python/trickle_builder
+    """
 
     def __init__(self, ctx, spine_ref: str, *, p: float = 0.3, _spine_delta=None) -> None:
         self.ctx = ctx
@@ -255,21 +260,27 @@ class TrickleBuilder:
     # ─── fluent surface ─────────────────────────────────────────────────────────
 
     def alias(self, name: str) -> "TrickleBuilder":
-        """Name this node. On a **source** the parent's ``.select``/``.filter`` reference it by name instead
-        of ``s0``/``s1``; on a builder you ``.sql()`` over, it's the name the query uses."""
+        """Name this source so expressions refer to it as ``name.col`` instead of ``s0.col``. Aliases must be
+        unique within a builder. :meth:`sql` needs one, as the table name its query selects from.
+        """
         self._alias = name
         if isinstance(self._root, _Source):
             self._root.alias = name
         return self
 
     def join(self, dimension: "TrickleBuilder", *, on, how: str = "inner") -> "TrickleBuilder":
-        """Equi-join another ``pond.trickle(...)`` operand on ``on`` (any column(s); a shared name, a list,
-        or a ``{left: right}`` dict; a name may be ``alias.col`` to disambiguate). ``how`` ∈ ``inner``
-        (default) / ``left`` / ``right`` / ``full`` / ``semi`` / ``anti`` — all maintained incrementally.
+        """Join another builder on an equality condition.
 
-        The operand may itself be a join DAG (``(a⋈b)`` composed), so bushy and snowflake shapes are
-        expressible. It must not already carry a ``.filter()``/``.select()``/``.aggregate()``/``.sql()`` —
-        attach those to the composed result, or split via a downstream Trickle."""
+        Args:
+            dimension: The right-hand side: ``pond.trickle(...)``, or itself a chain of joins.
+            on: A column name on both sides, a list of them, or a ``{left: right}`` mapping. A name can be
+                qualified as ``alias.col`` to pick a side.
+            how: ``"inner"`` (default), ``"left"``, ``"right"``, ``"full"``, ``"semi"`` or ``"anti"``. All are
+                maintained incrementally; ``semi`` and ``anti`` keep only left-side columns.
+
+        The right-hand side can't carry its own ``.filter()``, ``.mutate()``, ``.select()``, ``.aggregate()``
+        or ``.sql()``; apply those to the joined result.
+        """
         self._ensure_incremental("join")
         how = how.lower()
         if how not in _JOIN_SQL:
@@ -287,24 +298,21 @@ class TrickleBuilder:
         return self
 
     def filter(self, predicate: str) -> "TrickleBuilder":
-        """Restrict the output with a SQL boolean ``predicate``. Evaluated at its **position** in the
-        filter/mutate/select pipeline (call order): a filter placed after a ``.mutate(...)`` may reference the
-        mutated column; one before it sees only the source columns (``s0``/``s1``/… or ``.alias()`` names)."""
+        """Keep rows matching a SQL boolean ``predicate``, over the source columns (``s0.col`` or ``alias.col``)
+        and any column added by an earlier :meth:`mutate`.
+        """
         self._ensure_incremental("filter")
         self._ops.append(("filter", predicate))
         return self
 
     def mutate(self, **columns: str) -> "TrickleBuilder":
-        """Add computed columns to the output **without dropping the others** — the ``*``-preserving sibling of
-        :meth:`select`. Each ``name=expr`` is a SQL scalar expression over the columns available at this point:
-        the source columns (``s0``/``s1``/… or ``.alias()`` names) and any column an **earlier** ``.mutate()``
-        added. Columns in one call are computed in **parallel** (siblings see the input, not each other); chain
-        ``.mutate()`` calls to build on a fresh column. A name matching an existing column **replaces** it.
+        """Add computed columns, keeping the existing ones. Each keyword is a column name and a SQL expression.
 
-        A mutated column is a projection-layer value — it can be a ``pk`` (handy for a synthetic id) but it
-        **cannot be a join key** (join keys must be source columns). Expressions must be **deterministic** (no
-        ``random()`` / ``now()``): retractions cancel by full-row identity, so a non-deterministic value breaks
-        incremental maintenance."""
+        A name matching an existing column replaces it. Columns in one call can't refer to each other; chain
+        another call to build on a new column. A computed column can be the output ``pk`` but not a join key.
+        Expressions must be deterministic (no ``now()`` or ``random()``), since removals cancel against earlier
+        additions by matching whole rows.
+        """
         self._ensure_incremental("mutate")
         if not columns:
             raise BuildError("mutate() needs at least one name=expr column")
@@ -315,11 +323,9 @@ class TrickleBuilder:
         return self
 
     def select(self, projection: str) -> "TrickleBuilder":
-        """Choose the output column list (a SQL select list), **replacing** the column set at this point in the
-        pipeline. Required when a joined DAG's ``*`` would be ambiguous; it must include the output PK.
-        Reference columns by ``s{i}`` (left-to-right leaf order) / ``.alias()`` names, and any prior mutated
-        column by name. Computed items are allowed (``expr AS name``) — a deterministic computed column may be
-        the ``pk``."""
+        """Set the output columns with a SQL select list, replacing the current set. Items may be computed
+        (``expr AS name``). Must include the output ``pk``. Needed when column names clash across joined sources.
+        """
         self._ensure_incremental("select")
         self._ops.append(("select", projection))
         return self
@@ -356,20 +362,24 @@ class TrickleBuilder:
             )
 
     def along(self, col: str) -> "TrickleBuilder":
-        """Declare the **monotonic order axis** for an order-dependent :meth:`accumulate` scan — a column
-        non-decreasing with freshness (so each run's new rows sit at the tail). Distinct from a generic sort:
-        it's a precondition the scan relies on, not an ordering of a finished result."""
+        """Set the column that orders rows within each group for :meth:`accumulate` and ``agg.reduce``. For
+        ``.accumulate(...).append()``, it must never decrease from one run to the next.
+        """
         self._ensure_incremental("along")
         self._along = col
         return self
 
     def accumulate(self, by=None, **metrics) -> "TrickleBuilder":
-        """Enrich **each** row with order-dependent **running** values — a per-row scan in :meth:`along` order
-        partitioned by ``by`` — using :mod:`duckstring.acc` specs (sum / count / min / max / first / ema /
-        tema). It is **not a reduction** (output cardinality = input) and **not terminal**: it returns a
-        builder you finish with :meth:`append` (append-only — the input must stay monotonic in :meth:`along`)
-        or :meth:`merge` (**retraction-aware** — an edit anywhere re-folds the affected group's sequence, no
-        monotonic constraint). :meth:`along` is required either way."""
+        """Add a running value to every row, in :meth:`along` order within each ``by`` group.
+
+        Args:
+            by: Grouping column or columns. Omit for a single group.
+            **metrics: Output column name to an ``acc`` spec, e.g. ``running=acc.sum("qty")``.
+
+        Finish with :meth:`append` (rows only added, in increasing order; cost proportional to new rows) or
+        :meth:`merge` (any change, including removals and late rows; a changed group is recomputed).
+        Requires :meth:`along` first.
+        """
         self._ensure_incremental("accumulate")
         from .acc import AccMetric
 
@@ -386,16 +396,21 @@ class TrickleBuilder:
         return self
 
     def group_by(self, by) -> "TrickleBuilder":
-        """Ibis-shaped alias: ``.group_by(by).aggregate(**metrics)`` ≡ ``.aggregate(by=by, **metrics)``."""
+        """Set the grouping columns for a following :meth:`aggregate`: ``.group_by(by).aggregate(**metrics)``."""
         self._ensure_incremental("group_by")
         self._agg_by = normalize_pk(by)
         return self
 
     def aggregate(self, by=None, **metrics) -> "TrickleBuilder":
-        """Group the composed output by ``by`` and maintain the ``metrics`` incrementally — a grouped merge
-        Trickle keyed by ``by`` (the output ``pk`` defaults to it). Metrics are :mod:`duckstring.agg` specs
-        (count / sum / mean / min / max / var / stddev / weight_total / weighted_sum / weighted_average /
-        covariance / pearson_correlation / ols_slope / ols_intercept). Terminal-bound to :meth:`merge`."""
+        """Group the result by ``by`` and maintain one row per group.
+
+        Args:
+            by: Grouping column or columns. They become the output's primary key.
+            **metrics: Output column name to an ``agg`` spec, e.g. ``total=agg.sum("revenue")``.
+
+        Must be finished with :meth:`merge`, whose ``pk`` defaults to ``by``. ``agg.reduce`` needs
+        :meth:`along` first and can't share the call with other metrics.
+        """
         self._ensure_incremental("aggregate")
         from .agg import Metric
 
@@ -420,14 +435,14 @@ class TrickleBuilder:
         return self
 
     def sql(self, query) -> "TrickleBuilder":
-        """**The comprehensive escape hatch.** Collapse everything composed so far into one relation, expose
-        it under this node's :meth:`alias` (or a generated name), run ``query`` over it, and return a builder
-        in *comprehensive mode* — the home for anything outside the incremental op set (aggregation, window
-        functions, ``DISTINCT``, set ops, …).
+        """Run any SQL over the result so far, for operations the builder doesn't maintain incrementally (window
+        functions, ``DISTINCT``, medians, set operations).
 
-        It **breaks incremental compute** but **keeps incremental output**: the terminal :meth:`merge` still
-        diffs the result against the prior main, so only changed rows reach the changelog. ``query`` is a SQL
-        string, or — with Ibis installed — an Ibis expression compiled lazily via ``ibis.to_sql``."""
+        The result so far is computed in full and exposed under this builder's :meth:`alias`; ``query`` is a
+        SQL string selecting from it, or an Ibis expression (compiled lazily; needs ``ibis-framework``). The
+        returned builder is recomputed in full each run, but its terminal still writes only changed rows.
+        Afterwards only ``.alias()``, ``.sql()``, ``.schema()``, ``.count()`` and the terminals are available.
+        """
         ctx = self.ctx
         if self._agg is not None:
             raise BuildError(".sql() can't follow .aggregate() — aggregate is terminal-bound to .merge()")
@@ -449,29 +464,31 @@ class TrickleBuilder:
         return out
 
     def schema(self) -> dict[str, str]:
-        """``{column: DuckDB type}`` for this node's current output — introspection, no execution."""
+        """The current output's columns and DuckDB types, without writing anything."""
         rel = self._materialised if self._materialised is not None else self._full_join()
         return {c: str(t) for c, t in zip(rel.columns, rel.types, strict=True)}
 
     def to_ibis_schema(self) -> dict[str, str]:
-        """:meth:`schema` mapped to Ibis type-strings."""
+        """:meth:`schema` as Ibis type strings, for ``ibis.table(...)``. Raises for a type with no Ibis equivalent."""
         return {c: _duckdb_to_ibis(t) for c, t in self.schema().items()}
 
     # ─── terminals ──────────────────────────────────────────────────────────────
 
     def merge(self, name: str, *, pk=None, ivm: bool = True, key_filter: bool = True,
               retain_t=None, retain_n=None) -> "TrickleBuilder":
-        """Compose ΔO from the changed sources (or recompute comprehensively) and apply it to the output
-        **merge** Trickle ``name`` (clean main + Z-set changelog). ``pk`` (**required**, except after
-        :meth:`aggregate` where it defaults to the group key) is the output identity / merge key.
+        """Compute the result and write its changes to the merge Trickle ``name``.
 
-        ``ivm`` / ``key_filter`` are the two strategy escapes (both default ``True`` — the normal path); see
-        :meth:`_compute` for what they do. Use them only when you've measured that the default hurts a
-        specific build.
+        Args:
+            name: Output table.
+            pk: The output's primary key, which must be unique. Defaults to the ``by`` columns after
+                :meth:`aggregate`; otherwise required.
+            ivm: ``False`` ignores source changes and recomputes the whole output each run.
+            key_filter: ``False`` skips filtering each join to the changed keys. No effect with ``ivm=False``.
+            retain_t, retain_n: Change-log retention, as for ``pond.merge_table``.
 
-        Returns a chainable :class:`TrickleBuilder` rooted at ``name`` so joins can be chained through
-        intermediate materialisations **in one Ripple** — each ``.merge()`` persists the intermediate as a
-        cross-run trace (the explicit short-circuit to per-run recomputation)."""
+        Only change ``ivm`` or ``key_filter`` after measuring that the default is slower. Returns a builder
+        rooted at the written table, so the chain can continue; see :meth:`was_changed`.
+        """
         ctx = self.ctx
         if self._acc is not None:
             return self._merge_accumulate(name, pk=pk, retain_t=retain_t, retain_n=retain_n)
@@ -516,15 +533,23 @@ class TrickleBuilder:
         self, name: str, *, pk=None, fail_on_conflict=True, log_drops=True, ivm: bool = True,
         key_filter: bool = True, retain_t=None, retain_n=None
     ) -> "TrickleBuilder":
-        """Execute, writing the result to an **append** (insert-only history) Trickle ``name`` — for a
-        *monotonic* transform (output rows only added, never updated/retracted). See the module docs and
-        :func:`duckstring.trickle_io.append_zset` for the conflict semantics. ``ivm`` / ``key_filter`` are
-        the strategy escapes (see :meth:`_compute`); ``ivm=False`` also disables the spine-PK fast path.
+        """Compute the result and add its new rows to the append Trickle ``name``.
 
-        **Spine-PK fast path** — when the output is keyed by the spine's own PK (a verbatim ``s0.<pk>``
-        projection) *and* conflicts are both waived (``fail_on_conflict=False``) and unlogged
-        (``log_drops=False``), a dimension delta cannot affect the result, so the builder enriches only the
-        **new spine rows** with the **current** dimension states (an O(spine delta) lookup)."""
+        For transformations whose output rows are only ever added. A removed output row, or an added row whose
+        ``pk`` is already present with different values, is a conflict; an identical row is skipped.
+
+        Args:
+            name: Output table.
+            pk: The output's primary key, needed to detect changed rows.
+            fail_on_conflict: Raise ``DeltaError`` on a conflict, before writing. ``False`` drops conflicting
+                rows and keeps history as it was.
+            log_drops: With ``fail_on_conflict=False``, record dropped rows in a published ``{name}__droplog``.
+            ivm, key_filter, retain_t, retain_n: As for :meth:`merge`.
+
+        When ``pk`` is the first source's own key passed through as ``s0.col`` and both ``fail_on_conflict``
+        and ``log_drops`` are ``False``, only that source's new rows are joined, which is much cheaper when
+        other sources change a lot. Returns a builder rooted at the written table.
+        """
         ctx = self.ctx
         if self._acc is not None:
             return self._append_accumulate(name, pk=pk, fail_on_conflict=fail_on_conflict, log_drops=log_drops,
@@ -607,19 +632,10 @@ class TrickleBuilder:
         return self._chain(name, out_pk)
 
     def count(self) -> int:
-        """Terminal: the current **active row count** of what this builder represents — an ``int``, computed now.
-
-        - A **bare stored Trickle** — a source, or a just-written ``.merge()``/``.append()`` whose returned
-          handle is rooted at it — counts via metadata + the changelog's net Z-set weight, no base/history scan
-          (:func:`duckstring.trickle.io.count_current` for a registry table; an external source uses the host's
-          optional ``count_table`` if it offers one, else a plain ``count(*)``).
-        - A **composed query** (any ``.join()``/``.filter()``/``.select()``/``.sql()``) is evaluated to its full
-          current result and counted. **Each source is consolidated to its current state first, then the
-          joins/filters/projection run, then the rows are counted** — the comprehensive recompute. A count needs
-          the whole result and has no stored prior to increment, so neither IVM nor the key filter applies
-          (``ivm`` and ``key_filter`` are both effectively ``False``).
-        - After **``.aggregate()``** it shortcuts to the **number of groups** (``count(distinct by)`` over the
-          composed state) — the metric aggregations are never computed."""
+        """The number of rows this builder represents, computed now. A bare source or just-written table is
+        counted from metadata; a composed builder is computed in full and counted; after :meth:`aggregate`, the
+        number of groups is returned without computing the metrics.
+        """
         from . import io as trickle
 
         con = self.ctx.con
@@ -1122,10 +1138,10 @@ class TrickleBuilder:
         return nxt
 
     def was_changed(self) -> bool:
-        """Did the :meth:`merge` / :meth:`append` that produced this handle change its output? Gate
-        ``pond.skip()`` on it to pass a no-change run (see plans/no-change-skip.md)::
+        """On a builder returned by a terminal, whether that write changed the output table. Always ``True``
+        after :meth:`aggregate` or :meth:`accumulate`. Use it to call ``pond.skip()``::
 
-            out = pond.trickle("orders.order").join(...).merge("priced", pk="order_id")
+            out = pond.trickle("orders.order_line").join(...).merge("priced_line", pk="order_id")
             if not out.was_changed():
                 pond.skip()
         """
