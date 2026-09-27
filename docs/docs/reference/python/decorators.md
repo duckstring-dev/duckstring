@@ -69,7 +69,7 @@ Registers a function that builds a [Puddle](../../concepts/ponds.md#puddles): a 
 |---|---|---|
 | `target` | `str` | Either `"source.table"`, for one table of a Source, or `"source"`, for a whole Source whose tables the function names itself. |
 
-The decorated function takes one argument, the [Puddle handle](puddle.md).
+The decorated function takes one argument, the [Puddle handle](puddle.md). It can write its data through the handle, or return it: a returned relation is written as the target table, and a returned path is copied in with `write_path`. A Puddle may also target the Pond's own name, to provide its previous output for testing incremental runs.
 
 ```python
 from duckstring import puddle

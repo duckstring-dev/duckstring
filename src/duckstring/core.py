@@ -74,7 +74,9 @@ def puddle(target: str):
         target: ``"source.table"`` for one table of a Source, or ``"source"`` for a whole Source whose
             tables the function names itself.
 
-    The function takes one argument, the :class:`Puddle` handle. ``duckstring pond hydrate`` runs it.
+    The function takes one argument, the :class:`Puddle` handle, and ``duckstring pond hydrate`` runs it.
+    It can write through the handle or return the data: a relation is written as the target table, a path
+    is copied in with :meth:`Puddle.write_path`. Targeting the Pond's own name provides its previous output.
 
     Example::
 
