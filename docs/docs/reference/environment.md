@@ -46,7 +46,7 @@ Run only one Catchment process against a state directory, and only one Catchment
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_SERVE_PG_PORT` | none | Serve the catalog over the Postgres wire protocol on this port. |
-| `DUCKSTRING_SERVE_FLIGHT_PORT` | none | Serve the catalog over Arrow Flight SQL on this port. Needs `pyarrow` with Flight support. |
+| `DUCKSTRING_SERVE_FLIGHT_PORT` | none | Serve the catalog over Arrow Flight on this port, with the SQL as the ticket. Needs `pyarrow` with Flight support. |
 | `DUCKSTRING_SERVE_HOST` | `127.0.0.1` | Address both servers bind to. Put TLS and network restrictions in front of them when exposing them. |
 
 ## Flock

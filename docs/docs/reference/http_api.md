@@ -210,4 +210,4 @@ The `/api/draw/*` routes that ducts use to transfer data, and the `/api/duck/*` 
 
 ## Other interfaces
 
-The catalog can also be queried over the Postgres wire protocol and Arrow Flight SQL, each enabled by setting a port (`DUCKSTRING_SERVE_PG_PORT`, `DUCKSTRING_SERVE_FLIGHT_PORT`; see [Environment Variables](environment.md#serving)). Both use an API key as the password and apply the same access levels.
+The catalog can also be queried over the Postgres wire protocol and Arrow Flight, each enabled by setting a port (`DUCKSTRING_SERVE_PG_PORT`, `DUCKSTRING_SERVE_FLIGHT_PORT`; see [Environment Variables](environment.md#serving)). Both use an API key as the password and apply the same access levels.
