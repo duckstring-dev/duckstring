@@ -28,7 +28,7 @@ def open_pond(
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
-    tap_on_get: bool = typer.Option(False, "--tap-on-get", help="Also send a Tap on every read of the Pond's data, after "
+    tap_on_get: bool = typer.Option(False, "--tap-on-get", help="Also send a Tap on every query of the Pond, after "
                                                                 "serving it."),
 ) -> None:
     """Open a Pond to demand from other Catchments."""
