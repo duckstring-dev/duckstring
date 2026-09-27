@@ -80,7 +80,7 @@ defines the *Schema* for its objects. A table `monthly_summary` in the `reports`
 SELECT * FROM reports_v2.monthly_summary
 ```
 
-If this also happens to be the maximum major version, for convenience the version can be omitted:
+Each Pond also has a *served* major version, which can be queried without the suffix. This is the first major version deployed, until you promote another one (`duckstring serve promote`), so consumers can be moved to a new major version in a single step:
 
 ```
 SELECT * FROM reports.monthly_summary
