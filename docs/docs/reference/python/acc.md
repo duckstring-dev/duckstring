@@ -57,7 +57,7 @@ acc.scan(fn, init, dtype="DOUBLE")
 | `init` | any | | Each group's starting state. |
 | `dtype` | `str` | `"DOUBLE"` | The DuckDB type of the output column. `output` must be a scalar of a compatible type. |
 
-The state is stored as JSON between runs, so it must be JSON-serialisable. Tuples come back as lists.
+The state is stored as JSON between runs, so it must be JSON-serialisable. Tuples come back as lists, and DECIMAL columns arrive as `decimal.Decimal`, which must be converted (for example with `float()`) before being kept in the state.
 
 ```python
 def streak(state, row):

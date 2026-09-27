@@ -90,9 +90,12 @@ A custom reduction that depends on row order: it folds each group's rows in [`.a
 
 Requires `.along()` before `.aggregate()`, can't share an `.aggregate()` call with other metrics, and must be finished with `.merge()`. Any change to a group recomputes it from its current rows.
 
+The state is stored as JSON between runs, so it must be JSON-serialisable. DECIMAL columns arrive as `decimal.Decimal`, which isn't; convert them with `float()` first.
+
 ```python
 def last_price(state, row):
-    return row["unit_price"], row["unit_price"]
+    price = float(row["unit_price"])
+    return price, price
 
 (
     pond.trickle("catalog.price_history")

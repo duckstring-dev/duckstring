@@ -134,7 +134,8 @@ def reduce(fn, init, *, inverse=None, dtype: str = "DOUBLE") -> Metric:  # noqa:
         dtype: The DuckDB type of the output column.
 
     Needs ``.along()`` before ``.aggregate()``, can't share an ``.aggregate()`` with other metrics, and must
-    be finished with ``.merge()``. Any change to a group recomputes it.
+    be finished with ``.merge()``. Any change to a group recomputes it. The state is stored as JSON, so
+    convert DECIMAL values (``decimal.Decimal``) with ``float()`` before keeping them in it.
     """
     return Metric("reduce", fn=fn, init=init, dtype=dtype)
 

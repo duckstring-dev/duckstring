@@ -116,6 +116,7 @@ def scan(fn, init, dtype: str = "DOUBLE") -> AccMetric:
         init: Each group's starting state.
         dtype: The DuckDB type of the output column.
 
-    The state is stored as JSON between runs, so it must be JSON-serialisable; tuples come back as lists.
+    The state is stored as JSON between runs, so it must be JSON-serialisable; tuples come back as lists,
+    and DECIMAL values (``decimal.Decimal``) must be converted, e.g. with ``float()``.
     """
     return AccMetric("scan", None, None, fn=fn, init=init, dtype=dtype)
