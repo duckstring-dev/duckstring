@@ -128,7 +128,7 @@ function WhatIsThis(): ReactNode {
             <strong>Modern Incrementality.</strong>
             <span className={styles.payoffArrow}> ↓</span>
           </a>{' '}
-          Changes are detected and propagated across Ponds using DBSP - a data format allowing even 
+          Changes are detected and propagated across Ponds as Z-sets - a data format allowing even 
           bushy joins to skip computing parts of a transformation that could not have changed.
         </li>
         <li>

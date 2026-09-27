@@ -56,6 +56,7 @@ This is soft. Skip or shorten it where it doesn't fit:
 - Reference sections (a table of parameters, a list of CLI flags) don't need a motivation.
 - A section that follows naturally from the previous one may not need its own problem statement.
 - Don't invent a problem that nobody has, just to have one.
+- Where Duckstring does nothing unusual (Ripples are just transformations wrapped in Python with declared dependencies), say what the thing is and move on. A first Ripples draft was judged "pretty bad" for dressing a plain feature in a problem statement and mechanism detail.
 
 When a page previously ended with a "why this is better" section, consider moving that argument to the top as the page's motivating problem, rather than repeating it at both ends.
 
@@ -69,6 +70,7 @@ Keep different kinds of documentation on different pages. Mixing them was the ma
 | Guide | show how to do something well, with practical advice | plenty, in worked examples | task-led sections, short motivation, examples from the demo Ponds |
 | Reference | exhaustive, precise description of an API or CLI surface | signatures and small snippets | predictable, scannable, minimal motivation |
 
+- A concept page is an overview. Leave out retry behaviour, method signatures, configuration keys and edge cases; those belong in guides and reference. If a sentence only matters to someone implementing against the feature, cut it.
 - A concept page should make sense without reading any code. Where it helps, a small table of example rows is often clearer than a snippet.
 - A guide can link to the concept page instead of re-explaining the model.
 - Reference material should be complete and exact; it doesn't need narrative.

@@ -41,9 +41,9 @@ change is made.
 
 Ponds can have **Sources** (parents) and **Sinks** (children). By position in the graph, a Pond is one of three kinds, declared as `type` in `pond.toml`:
 
-- **Inlet** — no Sources. Inlets ingest from external systems (an API, a warehouse export, a file drop).
-- **Pond** — both Sources and Sinks.
-- **Outlet** — no Sinks. Outlets produce the final data products that applications and analysts consume.
+- **Inlet**: no Sources. Inlets ingest from external systems (an API, a warehouse export, a file drop).
+- **Pond**: both Sources and Sinks.
+- **Outlet**: no Sinks. Outlets produce the final data products that applications and analysts consume.
 
 These are more guidelines than hard rules. However, if a Pond was built as an Outlet, typically it is worth remaking as a new Pond if a need
 arises for another Pond to draw from it. Building for consumers typically comes with quite different design considerations than building for
@@ -58,7 +58,7 @@ logical units (Ripples) from ownership, versioning and dependencies (Ponds).
 
 ## Deployment and Execution
 
-The *execution context* for Duckstring is the [Catchment](catchment.md). This manages execution, orchestration, data cataloging, querying
+The *execution context* for Duckstring is the [Catchment](catchments.md). This manages execution, orchestration, data cataloging, querying
 and cloud compute configuration. Ponds are deployed to the Catchment by name. If a Pond of that name already exists, it's either:
 
 - Upgraded if the existing Pond is within the same major version
