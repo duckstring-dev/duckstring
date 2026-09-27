@@ -82,7 +82,7 @@ function Hero(): ReactNode {
           </span>
           <code className={styles.installCmd}>pip install duckstring</code>
         </div>
-        <Link className={styles.ctaPrimary} to="/getting-started/quickstart">
+        <Link className={styles.ctaPrimary} to="/quickstart">
           Quickstart →
         </Link>
       </div>
@@ -167,7 +167,7 @@ function ModularTransformations(): ReactNode {
         Upgrading a complex sequence of transformations can paralyze development. 
         Just deploy breaks as a separate major-version Pond, and let them sit 
         unused until consumers upgrade. See{' '}
-        <Link to="/concepts/versioning">Versioning</Link>.
+        <Link to="/concepts/ponds#versioning">Versioning</Link>.
       </p>
     </Section>
   );
@@ -191,7 +191,7 @@ function PullOrchestration(): ReactNode {
       <p className={styles.proseMuted}>
         No sophisticated prediction of run times is required. Duckstring uses the same scheduling system that keeps
         modern manufacturing processes humming. See{' '}
-        <Link to="/theory">Orchestration Theory</Link>.
+        <Link to="/concepts/orchestration">Orchestration</Link>.
       </p>
     </Section>
   );
@@ -216,7 +216,7 @@ function ModernIncrementality(): ReactNode {
 
       <p className={styles.proseMuted}>
         Change processing is Duckstring-managed, so you see the performance without the pain. See{' '}
-        <Link to="/guides/trickle">Incremental processing</Link>.
+        <Link to="/concepts/trickles">Trickles</Link>.
       </p>
     </Section>
   );
@@ -238,7 +238,7 @@ function Catalog(): ReactNode {
 
       <p className={styles.proseMuted}>
         Keeping track of where data lives need not be a separate task to defining how it's generated. See{' '}
-        <Link to="/concepts/catalog">Catalog</Link>.
+        <Link to="/concepts/catchments#data">Catalog</Link>.
       </p>
     </Section>
   );
@@ -264,7 +264,7 @@ const ROUTES: {title: string; body: string; to?: string; href?: string}[] = [
   {
     title: 'Quickstart',
     body: 'Get a pipeline running on your local machine in minutes.',
-    to: '/getting-started/quickstart',
+    to: '/quickstart',
   },
   {
     title: 'Orchestration Playground',
@@ -274,7 +274,7 @@ const ROUTES: {title: string; body: string; to?: string; href?: string}[] = [
   {
     title: 'Documentation',
     body: 'Full package documentation.',
-    to: '/intro',
+    to: '/concepts/ponds',
   },
   {
     title: 'GitHub',

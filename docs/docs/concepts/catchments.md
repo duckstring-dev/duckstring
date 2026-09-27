@@ -19,7 +19,14 @@ The Catchment decides when each Pond runs, based on the triggers set on it (see 
 
 ## Data
 
-The Catchment stores each Pond's published tables, either on local disk or in object storage such as S3. Because it knows every Pond, version and table, it also serves as the catalog: each major version of a Pond is a schema, such as `reports_v1`, containing that version's tables. It records lineage too, meaning which tables each run read and wrote.
+The Catchment stores each Pond's published tables, either on local disk or in object storage such as S3. Because it knows every Pond, version and table, it also serves as the catalog: each major version of a Pond is a schema, such as `reports_v1`, containing that version's tables. It also records lineage, at four levels:
+
+- which Ponds feed which, from the declared Sources
+- which tables each run actually read and wrote
+- which source columns each output column is derived from, where this can be determined exactly
+- for any published row, the run that produced it and the window of input it read
+
+Lineage can also be sent to other catalogs as OpenLineage events.
 
 ## Querying
 

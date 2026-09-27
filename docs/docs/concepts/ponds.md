@@ -56,20 +56,31 @@ Where a Pond is the primary *organisational* unit, a [Ripple](ripples.md) is the
 Of course, there's nothing stopping you from using only one Ripple in a Pond - but the purpose of the separation is to split the concepts of
 logical units (Ripples) from ownership, versioning and dependencies (Ponds).
 
-## Deployment and Execution
+## Versioning
 
-The *execution context* for Duckstring is the [Catchment](catchments.md). This manages execution, orchestration, data cataloging, querying
-and cloud compute configuration. Ponds are deployed to the Catchment by name. If a Pond of that name already exists, it's either:
+Ponds are deployed to a [Catchment](catchments.md) by name. If a Pond of that name already exists, it's either:
 
 - Upgraded if the existing Pond is within the same major version
 - Added in parallel to the existing Pond if it is a new major version
 
 The purpose of this is to allow seamless upgrades for non-breaking changes, and to retain the existing Pond for all its downstream dependencies
 for breaking changes. Following these rules, you can confidently upload changes and upgrade downstream Ponds when possible - no need for strong
-governance on simultaneous upgrades. 
+governance on simultaneous upgrades.
 
-Because orchestration is set against the *downstream* Ponds (**Outlets**), uploaded Ponds are not executed until something downstream depends
-on them. 
+Each entry under `[sources]` pins both a major version and a minimum version: `transactions = "1.2.0"` means major version 1, at least 1.2.0.
+A deployment that would break a pin is refused. A Sink can't be deployed against a Source older than its minimum, and a Source can't be rolled
+back below a version that a deployed Sink requires.
+
+Within a major version, a Pond's output may only grow. New tables, new columns and widening a column's type (such as `INTEGER` to `BIGINT`) are
+fine. Removing a table or column, or narrowing a type, is a breaking change and needs a new major version. As a Pond's output is only known once
+it runs, this is checked when a run publishes: a run whose output breaks the rule fails without publishing anything, and downstream Ponds keep
+reading the last good output.
+
+## Deployment and Execution
+
+The *execution context* for Duckstring is the [Catchment](catchments.md). This manages execution, orchestration, data cataloging, querying
+and cloud compute configuration. Because orchestration is set against the *downstream* Ponds (**Outlets**), uploaded Ponds are not executed
+until something downstream depends on them.
 
 ## Data
 

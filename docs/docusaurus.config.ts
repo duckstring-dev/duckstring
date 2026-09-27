@@ -79,9 +79,9 @@ const config: Config = {
         {
           title: 'Docs',
           items: [
-            {label: 'Introduction', to: '/intro'},
-            {label: 'Quickstart', to: '/getting-started/quickstart'},
-            {label: 'Theory', to: '/theory'},
+            {label: 'Concepts', to: '/concepts/ponds'},
+            {label: 'Quickstart', to: '/quickstart'},
+            {label: 'Orchestration', to: '/concepts/orchestration'},
           ],
         },
         {
