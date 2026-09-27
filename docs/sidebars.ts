@@ -17,13 +17,56 @@ const sidebars: SidebarsConfig = {
         'concepts/management_and_execution',
       ],
     },
-    // {
-    //   type: 'category',
-    //   label: 'Guides',
-    //   items: [
-    //     // TODO
-    //   ],
-    // },
+    {
+      type: 'category',
+      label: 'Guides',
+      items: [
+        {
+          type: 'category',
+          label: 'Building Ponds',
+          items: [
+            'guides/writing_ripples',
+            'guides/migrating_a_project',
+            'guides/testing_with_puddles',
+            'guides/dbt_projects',
+          ],
+        },
+        {
+          type: 'category',
+          label: 'Incremental Ponds',
+          items: [
+            'guides/append_and_merge',
+            'guides/joins_with_the_builder',
+            'guides/aggregation_and_accumulation',
+          ],
+        },
+        {
+          type: 'category',
+          label: 'Changing Ponds',
+          items: ['guides/upgrades'],
+        },
+        {
+          type: 'category',
+          label: 'Running Pipelines',
+          items: ['guides/scheduling', 'guides/monitoring_and_failures'],
+        },
+        {
+          type: 'category',
+          label: 'Getting Data Out',
+          items: ['guides/querying', 'guides/delivering_with_spouts'],
+        },
+        {
+          type: 'category',
+          label: 'Operating Catchments',
+          items: [
+            'guides/running_on_a_server',
+            'guides/hosting_on_a_platform',
+            'guides/cloud_compute_on_aws',
+            'guides/connecting_catchments',
+          ],
+        },
+      ],
+    },
     {
       type: 'category',
       label: 'Reference',

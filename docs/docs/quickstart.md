@@ -37,7 +37,7 @@ Leave it running and work from a second terminal. Later, restart it any time wit
 duckstring catchment start dev
 ```
 
-See [Hosting](concepts/management_and_execution.md#hosting) for running a Catchment on a server.
+See [Running on a Server](guides/running_on_a_server.md) for remote servers and multi-Catchment setups.
 
 ## 3. Create the Demo Ponds
 
@@ -133,7 +133,7 @@ duckstring trigger remove reports
 
 On the UI, you can also simply click on the target Pond and hit the "Pulse" or "Wave" buttons to trigger the runs.
 
-See [Triggers](concepts/orchestration.md#triggers) for detail on each of the four trigger types:
+See [Scheduling](guides/scheduling.md) for detail on each of the four trigger types:
 
 - Pulse: One request for a target freshness
 - Tide: A Pulse executed at a specified period (e.g. daily)
@@ -148,4 +148,4 @@ Tabular data is published as Parquet, as a named object, with the Pond's name as
 duckstring query reports monthly_summary
 ```
 
-This prints to console the result of the query `SELECT * FROM reports.monthly_summary LIMIT 10`. Run arbitrary SQL with `--sql`, or export with `--csv`/`--json`/`--parquet`. See [Querying](concepts/catchments.md#querying).
+This prints to console the result of the query `SELECT * FROM reports.monthly_summary LIMIT 10`. Run arbitrary SQL with `--sql`, or export with `--csv`/`--json`/`--parquet`. See [Querying](guides/querying.md).
