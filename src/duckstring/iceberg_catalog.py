@@ -225,3 +225,5 @@ class FileCatalog(MetastoreCatalog):
     drop_view = _unsupported
     rename_table = _unsupported
     register_table = _unsupported
+    load_view = _unsupported      # abstract from pyiceberg 0.12
+    register_view = _unsupported  # abstract from pyiceberg 0.12
