@@ -104,3 +104,8 @@ It is however safer to be explicit, so it's recommended to always include the ma
 Developing and testing against the entire live dataset is generally slow and wasteful. A Puddle defines queries against the Catchment
 for generating a sample snapshot of every Source object used in the Pond. Transformations can then be executed against this locally
 for testing.
+
+## See also
+
+- Guides: [Writing Ripples](../guides/writing_ripples.md), [Migrating a Project](../guides/migrating_a_project.md), [Testing with Puddles](../guides/testing_with_puddles.md), [Upgrades and Breaking Changes](../guides/upgrades.md)
+- Reference: [pond.toml](../reference/pond_toml.md), [duckstring pond](../reference/cli/pond.md), [Pond Handle](../reference/python/pond.md)

@@ -157,3 +157,8 @@ When a consumer reads a window covering several runs, the changes are consolidat
 ### Compaction
 
 A change log can't grow forever. As it gets large, Duckstring folds older changes into consolidated batches, and eventually into the main table itself, keeping recent changes available for consumers that are keeping up. A consumer that falls behind what's still retained reads the whole table instead, so compaction affects cost, never correctness.
+
+## See also
+
+- Guides: [Append and Merge Tables](../guides/append_and_merge.md), [Joins with the Builder](../guides/joins_with_the_builder.md), [Aggregation and Accumulation](../guides/aggregation_and_accumulation.md)
+- Reference: [Trickle I/O](../reference/python/trickle_io.md), [Trickle Builder](../reference/python/trickle_builder.md), [agg](../reference/python/agg.md), [acc](../reference/python/acc.md)

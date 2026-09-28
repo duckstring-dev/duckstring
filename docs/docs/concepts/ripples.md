@@ -50,3 +50,8 @@ By default a Ripple rewrites its tables in full on each run. A Ripple can instea
 ## dbt Models
 
 An existing dbt project can be deployed as a Pond by pointing `pond.toml` at it. Each dbt model becomes a Ripple, and the `ref()` dependencies between models set their order.
+
+## See also
+
+- Guides: [Writing Ripples](../guides/writing_ripples.md), [Testing with Puddles](../guides/testing_with_puddles.md), [dbt Projects](../guides/dbt_projects.md), [Append and Merge Tables](../guides/append_and_merge.md)
+- Reference: [Decorators](../reference/python/decorators.md), [Pond Handle](../reference/python/pond.md)

@@ -122,3 +122,8 @@ Windows are set on the Catchment with `duckstring trigger window`, not in `pond.
 | A dashboard kept as current as possible | a Wave on the dashboard's Outlet |
 | Data refreshed only when someone looks at it | a Tap each time it is queried |
 | An upstream source that updates nightly | a window on its Inlet, plus any trigger downstream |
+
+## See also
+
+- Guides: [Scheduling](../guides/scheduling.md), [Monitoring and Failures](../guides/monitoring_and_failures.md)
+- Reference: [Orchestration Theory](../reference/orchestration_theory.md), [duckstring trigger](../reference/cli/trigger.md), [duckstring control](../reference/cli/control.md)

@@ -52,3 +52,8 @@ Beyond triggers, a few commands act directly on a Pond's execution. They're avai
 | sleep | clear the Pond's demand and standing trigger, letting runs in progress finish |
 | kill | stop the Pond's Duck immediately and hold the Pond until it's woken, forced or cleared |
 | clear | reset a failed or killed Pond without running it |
+
+## See also
+
+- Guides: [Running on a Server](../guides/running_on_a_server.md), [Hosting on a Platform](../guides/hosting_on_a_platform.md), [Cloud Compute on AWS](../guides/cloud_compute_on_aws.md), [Monitoring and Failures](../guides/monitoring_and_failures.md)
+- Reference: [CLI Overview](../reference/cli/index.md), [duckstring control](../reference/cli/control.md), [duckstring duck](../reference/cli/duck.md), [Environment Variables](../reference/environment.md), [HTTP API](../reference/http_api.md)
