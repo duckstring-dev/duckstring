@@ -73,16 +73,15 @@ The computation isn't incremental, but its output is: anything downstream receiv
 
 ## Reading Trickles within the Pond
 
-A later Ripple in the same Pond must read a Trickle through `pond.read_table`, which returns its current state. Don't query the table's name directly in SQL: a merge Trickle's current state is assembled from its change log when read, so the table of that name may be missing or out of date. To use it in SQL, register the current state as a view under another name:
+Later Ripples in the same Pond can query a Trickle by name, like any other table:
 
 ```python
 @ripple(parents=[ingest])
 def expensive(pond):
-    pond.read_table("product").create_view("product_now", replace=True)
-    pond.write_table("expensive_product", pond.con.sql("SELECT * FROM product_now WHERE unit_price > 500"))
+    pond.write_table("expensive_product", pond.con.sql("SELECT * FROM product WHERE unit_price > 500"))
 ```
 
-Downstream Ponds don't have this problem: `pond.read_table("catalog.product")` always returns the current state.
+For a merge Trickle, `product` is a view that assembles the current state from the table's stored changes each time it's queried, so it always matches `pond.read_table("product")`. A Ripple that queries it many times can copy it into a temporary table first. The compacted part of the table, without recent changes, is available as `product__base` if you ever need it.
 
 ## Reading changes directly
 

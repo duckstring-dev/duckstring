@@ -157,7 +157,7 @@ def test_merge_main_checkpoint_folds_into_base(reg, tmp_path, monkeypatch):
     sc = run([(1, "a"), (2, "b")], ts(1))           # bootstrap → the first cold base
     assert T.base_chunks(snk_dir, "dim") and sc["f_base"] == ts(1).isoformat()
     assert rows(reg, snk_dir, "dim", "id, v") == [(1, "a"), (2, "b")]
-    assert "_duckstring_f" in reg.sql("SELECT * FROM dim LIMIT 0").columns
+    assert "_duckstring_f" in reg.sql("SELECT * FROM dim__base LIMIT 0").columns  # the cold base keeps f
 
     run([(1, "A"), (2, "b"), (3, "c")], ts(2))      # update 1, insert 3, keep 2
     assert rows(reg, snk_dir, "dim", "id, v") == [(1, "A"), (2, "b"), (3, "c")]
@@ -189,9 +189,9 @@ def test_base_hydrates_as_a_view_not_a_copy(reg, tmp_path, monkeypatch):
     fresh = duckdb.connect(str(tmp_path / "fresh.duckdb"))
     try:
         hydrate_registry(fresh, snk_dir)
-        # The base "dim" is a VIEW, not a materialised table.
-        assert fresh.execute("SELECT count(*) FROM duckdb_views() WHERE view_name = 'dim'").fetchone()[0] == 1
-        assert fresh.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'dim'").fetchone()[0] == 0
+        # The cold base "dim__base" is a VIEW over the chunks, not a materialised table.
+        assert fresh.execute("SELECT count(*) FROM duckdb_views() WHERE view_name = 'dim__base'").fetchone()[0] == 1
+        assert fresh.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'dim__base'").fetchone()[0] == 0
         # Reconstruction over the view is correct (current state after the update/insert/delete).
         rel = T.reconstruct_current(fresh, "dim")
         assert sorted(fresh.sql(f"SELECT id, v FROM ({rel.sql_query()})").fetchall()) == [(1, "A"), (3, "c")]

@@ -281,11 +281,12 @@ def publish_plan(con, data_dir: Path, f=None) -> list[str]:
     changelogs = {trickle.changelog_name(t) for t in meta}
     droplogs = {f"{t}{trickle.DROPLOG_SUFFIX}" for t in meta}
     warms = {trickle.warm_name(t) for t in meta}
+    colds = {trickle.cold_base_name(t) for t, m in meta.items() if m.get("mode") == "merge"}
     tables = registry_tables(con)
     f_iso = f.astimezone(timezone.utc).isoformat() if f is not None else None
     payload: dict[str, dict] = {}
     for table in tables:
-        if table in meta or table in changelogs or table in droplogs or table in warms:
+        if table in meta or table in changelogs or table in droplogs or table in warms or table in colds:
             continue  # Trickle base/companion — base added below; the __changelog/__band/__droplog
             #            companions are exported as files (reserved system columns) but take no sidecar entry.
         validate_publish(con, table)
@@ -344,12 +345,13 @@ class ParquetDataPlane(DataPlane):
         meta = trickle.read_meta(con)
         incremental = trickle.incremental_tables(meta) if f is not None else set()
         merge_mains = {t for t, m in meta.items() if m.get("mode") == "merge"}
+        colds = {trickle.cold_base_name(t) for t in merge_mains}
 
         def _export() -> None:
             for table in tables:
                 if table in incremental:
                     _export_parts(con, data_dir, table, f)
-                elif table in merge_mains:
+                elif table in merge_mains or table in colds:
                     continue  # the base is published only at a checkpoint (below), not per run
                 else:
                     with data_dir.copy_to(f"{table}.parquet") as uri:
@@ -621,8 +623,10 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
             # plans/s3-resident-state.md. The changelog/warm below stay materialised for now (later steps).
             if trickle.base_chunks(store, table) or store.exists(f"{table}.parquet"):
                 sql = plane._raw_read_select(store, table)
-                trickle._drop_relation(con, table)
-                con.execute(f'CREATE VIEW {trickle._q(table)} AS {sql}')
+                cold = trickle.cold_base_name(table)
+                trickle._drop_relation(con, table)  # a legacy base under the main's own name
+                trickle._drop_relation(con, cold)
+                con.execute(f'CREATE VIEW {trickle._q(cold)} AS {sql}')
                 loaded = True
         else:  # append parts dir, or the overwrite wholesale file
             if trickle.table_parts(store, table) or store.exists(f"{table}.parquet"):
@@ -648,6 +652,7 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
                 datetime.fromisoformat(entry["f_base"]) if entry.get("f_base") else None)
             if f_warm is not None:
                 trickle._set_f_warm(con, table, f_warm)
+            trickle.refresh_current_view(con, table)
         # Extension 1: the agg/acc accumulator snapshots (latest snapshot per companion).
         for kind, prefix in (("agg", trickle.AGG_STATE_PREFIX), ("acc", trickle.ACC_STATE_PREFIX)):
             snap_store = store.child("state", kind, table)
@@ -868,7 +873,7 @@ def _publish_tiered_main(con, data_dir: Path, main: str, f) -> None:
     bootstrap = cold_bytes == 0 and (warm_bytes + hot_bytes) >= threshold
     if warm_bytes >= max(cold_bytes, threshold) or bootstrap:  # cold compaction (k=1: warm ≥ cold)
         trickle.checkpoint(con, main, f)  # fold base+warm+hot≤f → clean base (a local table); clear warm
-        if trickle._table_exists(con, main):
+        if trickle._table_exists(con, trickle.cold_base_name(main)):
             _publish_base_chunks(con, data_dir, main, f, threshold)
             _review_base(con, data_dir, main)  # drop the local base; point the registry at the published S3 chunks
         if data_dir.is_dir(warm):
@@ -901,8 +906,10 @@ def _review_base(con, data_dir: Path, main: str) -> None:
     if not trickle.base_chunks(data_dir, main):  # nothing published (shouldn't happen post-publish) → leave as-is
         return
     sql = ParquetDataPlane()._raw_read_select(data_dir, main)  # the base chunks glob (flat layer)
-    trickle._drop_relation(con, main)
-    con.execute(f'CREATE VIEW {trickle._q(main)} AS {sql}')
+    cold = trickle.cold_base_name(main)
+    trickle._drop_relation(con, cold)
+    con.execute(f'CREATE VIEW {trickle._q(cold)} AS {sql}')
+    trickle.refresh_current_view(con, main)
 
 
 def _export_bands(con, data_dir: Path, main: str) -> None:
@@ -951,7 +958,7 @@ def _publish_base_chunks(con, data_dir: Path, main: str, f, chunk_bytes: int) ->
     written = []
     with data_dir.copy_dir_to(staging_name) as staging_uri:  # clears staging, yields the dir target
         con.execute(
-            f'COPY (SELECT * FROM "{main}" ORDER BY {fb}) '
+            f'COPY (SELECT * FROM "{trickle.cold_base_name(main)}" ORDER BY {fb}) '
             f"TO '{staging_uri}' (FORMAT PARQUET, FILE_SIZE_BYTES {size})"
         )
         for i, name in enumerate(staging_store.parquet_names()):  # commit each staged chunk under our token

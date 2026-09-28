@@ -661,10 +661,13 @@ class Pond:
                 except FileNotFoundError as exc:
                     raise MissingSourceAsset(source_pond, table) from exc
                 rel = _strip_system(self.con.sql(select))
-                try:
-                    rel.create_view(table, replace=True)
-                except Exception:
-                    pass  # name taken by one of this Pond's own tables — the relation still works
+                from .trickle_io import _is_current_view
+
+                if not _is_current_view(self.con, table):  # never replace this Pond's own merge Trickle view
+                    try:
+                        rel.create_view(table, replace=True)
+                    except Exception:
+                        pass  # name taken by one of this Pond's own tables — the relation still works
                 return rel
             self._record_read(None, table)
             return self._own_current(table)
@@ -755,6 +758,9 @@ class Pond:
 
         Returns ``True`` if the state changed, the usual signal for :meth:`skip`. Raises ``DeltaError`` for a
         missing or empty ``pk``.
+
+        Within the Pond, ``name`` is a view over the current state (no system columns), so later Ripples can
+        query it in SQL; the compacted base is ``{name}__base``.
 
         Reference: https://docs.duckstring.com/reference/python/trickle_io
         """

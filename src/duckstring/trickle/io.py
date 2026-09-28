@@ -148,6 +148,13 @@ def base_dir_name(table: str) -> str:
     return f"{table}{BASE_SUFFIX}"
 
 
+def cold_base_name(table: str) -> str:
+    """The registry relation holding a merge main's **cold base** (``{table}__base``, matching its published
+    ``{table}__base/`` directory). The main's own name is a view over its current state
+    (:func:`refresh_current_view`), so plain SQL in a later Ripple reads what ``read_table`` returns."""
+    return f"{table}{BASE_SUFFIX}"
+
+
 def warm_name(table: str) -> str:
     """The **warm tier** companion of a merge main ``table`` — consolidated freshness-range Z-set bands
     between the cold base and the hot ``__changelog``. A ``fold_warm`` moves an older slice of the changelog
@@ -201,6 +208,50 @@ def _drop_relation(con, name: str) -> None:
         con.execute(f"DROP VIEW {_q(name)}")
     else:
         con.execute(f"DROP TABLE IF EXISTS {_q(name)}")
+
+
+# The comment marking the view Duckstring maintains under a merge main's name. A view without it is something
+# else (a legacy base registered as a view, or a user/Source view) and is never replaced by the refresh.
+CURRENT_VIEW_COMMENT = "duckstring:merge-current-state"
+
+
+def _is_current_view(con, name: str) -> bool:
+    row = con.execute("SELECT comment FROM duckdb_views() WHERE view_name = ?", [name]).fetchone()
+    return row is not None and row[0] == CURRENT_VIEW_COMMENT
+
+
+def _migrate_base(con, name: str) -> None:
+    """Move a **legacy** cold base, stored under the merge main's own name (a table, or a view over the
+    published chunks), to :func:`cold_base_name`. A no-op once migrated, or when there is no base yet."""
+    cold = cold_base_name(name)
+    if _table_exists(con, cold) or _is_current_view(con, name):
+        return
+    if con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ?", [name]).fetchone():
+        con.execute(f"ALTER VIEW {_q(name)} RENAME TO {_q(cold)}")
+    elif con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ?", [name]).fetchone():
+        con.execute(f"ALTER TABLE {_q(name)} RENAME TO {_q(cold)}")
+
+
+def refresh_current_view(con, name: str) -> None:
+    """(Re)create the view under merge main ``name`` over its current state, with system columns stripped:
+    the same relation :func:`current_state` returns, so ``SELECT ... FROM name`` in plain SQL is correct.
+    Called after every change to the main's storage (a merge write, a warm fold, a checkpoint, a rebuild),
+    since the view's SQL depends on which tiers exist and on ``f_base``. A relation under ``name`` that
+    isn't Duckstring's view (e.g. a Source view registered by ``read_table``) is left alone."""
+    from .context import SYSTEM_PREFIX
+
+    if read_meta(con).get(name, {}).get("mode") != "merge":
+        return
+    sql = _reconstruct_sql_for(con, name)
+    if sql is None:
+        return
+    if _table_exists(con, name) and not _is_current_view(con, name):
+        return
+    con.execute(
+        f"CREATE OR REPLACE VIEW {_q(name)} AS "
+        f"SELECT COLUMNS(c -> NOT starts_with(c, '{SYSTEM_PREFIX}')) FROM ({sql})"
+    )
+    con.execute(f"COMMENT ON VIEW {_q(name)} IS '{CURRENT_VIEW_COMMENT}'")
 
 
 def _user_cols(columns) -> list[str]:
@@ -293,10 +344,10 @@ def drop_table(con, name: str) -> None:
     Trickle that is the base/main + ``__changelog`` + warm ``__band`` + ``__droplog`` + the aggregate/scan
     state companions + the meta row/floor; for a plain overwrite table just the one table. Idempotent."""
     for t in (
-        name, changelog_name(name), warm_name(name), f"{name}{DROPLOG_SUFFIX}",
+        name, cold_base_name(name), changelog_name(name), warm_name(name), f"{name}{DROPLOG_SUFFIX}",
         f"{AGG_STATE_PREFIX}{name}", f"{ACC_STATE_PREFIX}{name}",
     ):
-        con.execute(f'DROP TABLE IF EXISTS {_q(t)}')
+        _drop_relation(con, t)  # a merge main's name and cold base may be views
     drop_meta(con, name)
 
 
@@ -754,11 +805,13 @@ def _reconstruct_sql_for(con, name: str, *, upper=None, before=None) -> str | No
     """Build :func:`reconstruct_sql` for a merge main ``name`` from the registry — the cold base table
     ``name`` overlaid by the warm tier ⊎ hot ``__changelog`` (:func:`_clog_union_sql`). ``None`` if nothing
     has been written yet (no base, no warm, no changelog)."""
+    _migrate_base(con, name)
+    cold = cold_base_name(name)
+    base_sql = f'SELECT * FROM {_q(cold)}' if _table_exists(con, cold) else None
     clog_sql = _clog_union_sql(con, name)
     if clog_sql is None:
-        return f'SELECT * FROM {_q(name)}' if _table_exists(con, name) else None
+        return base_sql
     pk = tuple(read_meta(con).get(name, {}).get("pk", ()))
-    base_sql = f'SELECT * FROM {_q(name)}' if _table_exists(con, name) else None
     return reconstruct_sql(base_sql, clog_sql, _f_base(con, name), pk, upper=upper, before=before)
 
 
@@ -791,10 +844,10 @@ def count_current(con, name: str) -> int:
       fold — making this equal to ``count(*)`` over the reconstruct, but as metadata + a small delta scan.
     - **append** history (and plain output): a direct ``count(*)`` — insert-only, no retractions.
     - nothing written yet: ``0``."""
-    if not _table_exists(con, name) and not _table_exists(con, changelog_name(name)):
-        return 0
     if read_meta(con).get(name, {}).get("mode") == "merge":
-        base = con.execute(f'SELECT count(*) FROM {_q(name)}').fetchone()[0] if _table_exists(con, name) else 0
+        _migrate_base(con, name)
+        cold = cold_base_name(name)
+        base = con.execute(f'SELECT count(*) FROM {_q(cold)}').fetchone()[0] if _table_exists(con, cold) else 0
         clog_sql = _clog_union_sql(con, name)
         if clog_sql is None:
             return int(base)
@@ -802,6 +855,8 @@ def count_current(con, name: str) -> int:
         lo = f' WHERE {_q(F_COL)} > {_ts(f_base)}' if f_base is not None else ''
         (delta,) = con.execute(f'SELECT coalesce(sum({_q(D_COL)}), 0) FROM ({clog_sql}){lo}').fetchone()
         return int(base) + int(delta)
+    if not _table_exists(con, name):
+        return 0
     return int(con.execute(f'SELECT count(*) FROM {_q(name)}').fetchone()[0])
 
 
@@ -861,6 +916,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     _set_compact_threshold(con, name, compact_threshold)
     cutoff = _apply_retention(con, clog, f, retain_t, retain_n)
     _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None), cutoff=cutoff)
+    refresh_current_view(con, name)
     return nonempty
 
 
@@ -928,6 +984,7 @@ def fold_warm(con, name: str, target_f) -> None:
     con.execute(f'DELETE FROM {_q(clog)} WHERE {locond}{_q(F_COL)} <= {_ts(target_f)}')
     _set_f_warm(con, name, target_f)
     _advance_floor(con, name, cutoff=target_f)  # the delta floor rises to the warm watermark
+    refresh_current_view(con, name)  # the view must now read the warm tier too
 
 
 def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> None:
@@ -941,15 +998,17 @@ def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> Non
     if sql is None:
         return
     tmp = unique_name("ckpt")
+    cold = cold_base_name(name)
     con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(tmp)} AS {sql}')   # reads the OLD base + warm + changelog
-    _drop_relation(con, name)  # the base may be a VIEW over S3 chunks — CREATE OR REPLACE TABLE can't replace it
-    con.execute(f'CREATE TABLE {_q(name)} AS SELECT * FROM {_q(tmp)}')  # the new base, now a local table
+    _drop_relation(con, cold)  # the base may be a VIEW over S3 chunks — CREATE OR REPLACE TABLE can't replace it
+    con.execute(f'CREATE TABLE {_q(cold)} AS SELECT * FROM {_q(tmp)}')  # the new base, now a local table
     con.execute(f'DROP TABLE IF EXISTS {_q(tmp)}')
     con.execute(f'DROP TABLE IF EXISTS {_q(warm)}')  # the warm tier is now folded into the cold base
     _set_f_base(con, name, target_f)
     _set_f_warm(con, name, target_f)  # warm is empty; its watermark tracks the cold base
     cutoff = _apply_retention(con, clog, target_f, retain_t, retain_n)
     _advance_floor(con, name, cutoff=cutoff)
+    refresh_current_view(con, name)  # f_base moved: the view's window filter changes
 
 
 # ─── write: incremental aggregation (distributive / algebraic) ──────────────────

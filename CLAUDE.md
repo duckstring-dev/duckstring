@@ -391,6 +391,7 @@ Incremental behaviour is a capability of any `@ripple`, reached by writing histo
 ### Storage and system columns
 
 - Reserved columns: `_duckstring_f` is the freshness stamp on every history and changelog row, and on each merge base row (its last-write freshness, used for as-of reads and the data viewer); `read_table` strips it. `_duckstring_d` is the Z-set weight on a merge changelog.
+- In the registry, a merge main's own name is a **view over its current state** (system columns stripped, comment-marked `duckstring:merge-current-state`, rebuilt by `refresh_current_view` after every merge write, warm fold, checkpoint and rehydrate), so plain SQL in a later Ripple matches `read_table`; the cold base is the relation `{name}__base` (matching the published `{name}__base/` dir). A legacy registry with the base under the main's own name is migrated on first touch (`_migrate_base`). `read_table` never replaces the view with a same-named Source view. `tests/test_merge_view.py` covers it.
 - A merge main is the three-tier store described under Data plane: a clean cold base folded up to `f_base` (chunked, written only at cold compaction), warm Z-set bands (`__band/`, `fold_warm`), and the per-run `__changelog` (hot). The current state is reconstructed on read (latest-per-PK over cold, warm and hot filtered `> f_base`, with cold anti-joined by retraction keys; see `trickle/io.py:reconstruct_sql`/`_clog_union_sql`).
 - `_duckstring_f` is always read as a content predicate (`WHERE _duckstring_f > previous_f AND _duckstring_f <= f`), never as a snapshot cursor.
 

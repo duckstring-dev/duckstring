@@ -71,6 +71,8 @@ Merges the complete current state of a table into the merge Trickle `name`. Duck
 
 **Raises** `DeltaError` if `pk` is empty or a `pk` column is missing from `relation`.
 
+Within the Pond, `name` is a view over the table's current state, without system columns, so later Ripples can query it in SQL. The compacted base is stored as `{name}__base`. Don't write the same name with `write_table`.
+
 ```python
 @ripple
 def ingest(pond):
