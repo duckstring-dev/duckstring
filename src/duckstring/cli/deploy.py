@@ -7,12 +7,6 @@ from typing import Optional
 
 import typer
 
-_SKIP_DIRS = {
-    ".git", ".venv", "__pycache__", ".ruff_cache", ".pytest_cache",
-    "dist", ".next", "node_modules", ".mypy_cache",
-}
-_SKIP_EXTS = {".pyc", ".pyo"}
-
 
 def _read_pond_toml(cwd: Path) -> dict:
     from ..core import read_pond_toml
@@ -25,20 +19,47 @@ def _read_pond_toml(cwd: Path) -> dict:
 
 
 def _zip_pond(cwd: Path) -> bytes:
+    """The deploy archive: every file ``.pondignore`` (or its defaults) doesn't exclude."""
+    from ..pondignore import deployed_files
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fpath in sorted(cwd.rglob("*")):
-            if fpath.is_dir():
-                continue
-            rel = fpath.relative_to(cwd)
-            parts = rel.parts
-            # Skip hidden dirs, known noise dirs, and bad extensions
-            if any(p in _SKIP_DIRS or (p.startswith(".") and p not in {".gitignore"}) for p in parts[:-1]):
-                continue
-            if fpath.suffix in _SKIP_EXTS:
-                continue
-            zf.write(fpath, rel)
+        for rel in deployed_files(cwd):
+            zf.write(cwd / rel, rel)
     return buf.getvalue()
+
+
+def _size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n} B"
+
+
+def _summary(pond_dir: Path) -> tuple[int, int]:
+    """(file count, total bytes) of what a deploy of ``pond_dir`` uploads."""
+    from ..pondignore import deployed_files
+
+    files = deployed_files(pond_dir)
+    return len(files), sum((pond_dir / rel).stat().st_size for rel in files)
+
+
+def _dry_run(console, pond_dir: Path) -> None:
+    """List what a deploy would upload, without contacting a Catchment."""
+    from ..pondignore import IGNORE_FILE, deployed_files
+
+    info = _read_pond_toml(pond_dir)
+    name = info.get("pond", {}).get("name", pond_dir.name)
+    files = deployed_files(pond_dir)
+    total = 0
+    console.print(f"[bold]{name}[/bold] would upload:")
+    for rel in files:
+        size = (pond_dir / rel).stat().st_size
+        total += size
+        console.print(f"  {rel.as_posix():<60} {_size(size):>10}")
+    rules = IGNORE_FILE if (pond_dir / IGNORE_FILE).is_file() else "the default .pondignore rules"
+    console.print(f"[dim]{len(files)} files, {_size(total)} (excluding files matched by {rules})[/dim]")
 
 
 def _deploy_one(
@@ -112,6 +133,8 @@ def _deploy_one(
             json={"name": name, "version": version, "type": pond_type, "git_ref": git, "repo_url": repo_url},
         )
     else:
+        count, total = _summary(pond_dir)
+        console.print(f"[dim]Uploading {count} files ({_size(total)}).[/dim]")
         archive = _zip_pond(pond_dir)
         _http.post(
             f"{url}/api/deploy", auth=cfg,
@@ -131,19 +154,17 @@ def deploy(
     git: Optional[str] = typer.Option(None, "--git", help="Deploy from a git ref (branch, commit, or tag)."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts."),
     all_ponds: bool = typer.Option(False, "--all", help="Deploy all Ponds found in subdirectories of the current directory."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="List the files a deploy would upload, and upload nothing."),
 ) -> None:
     """Deploy the Pond project in the current directory to a Catchment.
 
     Deploying a version replaces the running version of its major line. A new major version is deployed
-    alongside the existing ones.
+    alongside the existing ones. Files matched by .pondignore (or its defaults: puddles/, .env, hidden
+    directories, caches) aren't uploaded; --dry-run lists what would be.
     """
     from rich.console import Console
 
-    from .config import resolve_catchment
-
     console = Console()
-    catchment_name, cfg = resolve_catchment(catchment)
-    url = cfg["url"]
 
     if all_ponds:
         cwd = Path.cwd()
@@ -154,12 +175,24 @@ def deploy(
         if not pond_dirs:
             typer.echo("No pond.toml files found in any subdirectory.", err=True)
             raise typer.Exit(1)
-        console.print(f"Found [bold]{len(pond_dirs)}[/bold] pond(s): {', '.join(d.name for d in pond_dirs)}")
-        for pond_dir in pond_dirs:
-            console.rule(pond_dir.name)
-            _deploy_one(console, pond_dir, url, cfg, catchment_name, git, yes)
     else:
-        _deploy_one(console, Path.cwd(), url, cfg, catchment_name, git, yes)
+        pond_dirs = [Path.cwd()]
+
+    if dry_run:
+        for pond_dir in pond_dirs:
+            _dry_run(console, pond_dir)
+        return
+
+    from .config import resolve_catchment
+
+    catchment_name, cfg = resolve_catchment(catchment)
+    url = cfg["url"]
+    if all_ponds:
+        console.print(f"Found [bold]{len(pond_dirs)}[/bold] pond(s): {', '.join(d.name for d in pond_dirs)}")
+    for pond_dir in pond_dirs:
+        if all_ponds:
+            console.rule(pond_dir.name)
+        _deploy_one(console, pond_dir, url, cfg, catchment_name, git, yes)
 
 
 def remove(

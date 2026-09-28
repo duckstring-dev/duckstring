@@ -18,6 +18,7 @@ sales/
 │   └── puddles.py   # Source snapshots for local testing
 ├── pond.toml        # name, version, type, Sources
 ├── .gitignore
+├── .pondignore      # files left out when deploying
 └── README.md
 ```
 

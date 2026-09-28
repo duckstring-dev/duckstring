@@ -38,12 +38,15 @@ Define one per Source table this Pond reads, then:
 
 
 def _write_pond_files(cwd: Path, toml_content: str, pond_py_content: str, readme_content: str) -> None:
+    from ..pondignore import DEFAULT_PATTERNS, IGNORE_FILE
+
     src = cwd / "src"
     src.mkdir(exist_ok=True)
     (src / "pond.py").write_text(pond_py_content, encoding="utf-8")
     (src / "puddles.py").write_text(_PUDDLES_PY, encoding="utf-8")
     (cwd / "pond.toml").write_text(toml_content, encoding="utf-8")
     (cwd / ".gitignore").write_text(_GITIGNORE, encoding="utf-8")
+    (cwd / IGNORE_FILE).write_text(DEFAULT_PATTERNS, encoding="utf-8")
     (cwd / "README.md").write_text(readme_content, encoding="utf-8")
 
 
@@ -93,6 +96,7 @@ def init(
     console.print("  [dim]src/pond.py[/dim]      — define your Ripples here")
     console.print("  [dim]src/puddles.py[/dim]   — define Source snapshots for local testing")
     console.print("  [dim]pond.toml[/dim]        — Pond name, version, and Sources")
+    console.print("  [dim].pondignore[/dim]      — files deploy leaves out (puddles/, .env, caches)")
 
 
 # The two demo pipelines: the overwrite-Ripple set (the default) and the incremental-Trickle set. Each

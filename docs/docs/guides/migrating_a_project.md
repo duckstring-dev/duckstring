@@ -32,7 +32,7 @@ duckstring pond init analytics
 mkdir -p src/sql && mv sql/*.sql src/sql/
 ```
 
-Everything in the project directory is uploaded when you deploy, apart from hidden directories and build caches, so files next to `src/pond.py` are available at run time. A small helper turns each file into a Ripple:
+Everything in the project directory is uploaded when you deploy, apart from what `.pondignore` excludes (by default local test data, `.env` files, hidden directories and caches), so files next to `src/pond.py` are available at run time. `duckstring pond deploy --dry-run` lists exactly what would be uploaded. A small helper turns each file into a Ripple:
 
 ```python
 from pathlib import Path

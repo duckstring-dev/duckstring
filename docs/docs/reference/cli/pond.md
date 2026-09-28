@@ -14,7 +14,7 @@ Commands for Pond projects. Except `demo` and `remove`, they act on the Pond pro
 duckstring pond init NAME
 ```
 
-Scaffolds a Pond project named `NAME` in the current directory: `pond.toml`, `src/pond.py`, `src/puddles.py`, `.gitignore` and `README.md`. Fails if the directory already has a `pond.toml`.
+Scaffolds a Pond project named `NAME` in the current directory: `pond.toml`, `src/pond.py`, `src/puddles.py`, `.gitignore`, `.pondignore` and `README.md`. Fails if the directory already has a `pond.toml`.
 
 ## `demo`
 
@@ -65,10 +65,10 @@ A full run starts from an empty `puddles/out/`. If `puddles/ponds/{this pond}/` 
 ## `deploy`
 
 ```bash
-duckstring pond deploy [-c NAME] [--all] [--git REF] [--yes]
+duckstring pond deploy [-c NAME] [--all] [--git REF] [--dry-run] [--yes]
 ```
 
-Packages the Pond project and deploys it to a Catchment. Before deploying, it reports whether the version is new, already deployed (and will be overwritten), or previously removed (and will be restored), and asks for confirmation.
+Packages the Pond project and deploys it to a Catchment. Before deploying, it reports whether the version is new, already deployed (and will be overwritten), or previously removed (and will be restored), and asks for confirmation. It then prints how many files it's uploading and their total size.
 
 Deploying a version selects it for its major line, replacing whichever version was running there. A new major version is deployed alongside the existing ones. The Catchment rejects a deployment that breaks a `[sources]` pin; see [`pond.toml`](../pond_toml.md#sources).
 
@@ -77,7 +77,27 @@ Deploying a version selects it for its major line, replacing whichever version w
 | `--catchment`, `-c` | Catchment to deploy to. |
 | `--all` | Deploy every Pond project found in subdirectories of the current directory. |
 | `--git` | Deploy a branch, commit or tag instead of the working directory. The Catchment clones the repository from the project's `origin` remote, so it needs access to it. |
+| `--dry-run` | List the files a deploy would upload, with their sizes, and upload nothing. Needs no Catchment. |
 | `--yes`, `-y` | Skip confirmations. |
+
+### `.pondignore`
+
+Files matching the patterns in `.pondignore`, at the Pond's root, aren't deployed. The syntax is the same as `.gitignore`, including `!` to re-include a file. Without a `.pondignore`, these defaults apply:
+
+```text
+puddles/          # local test data
+.env
+.env.*            # secrets and local environment
+.*/               # hidden directories: .git/, .venv/, tool caches
+__pycache__/
+*.py[co]
+*.egg-info/
+dist/
+build/
+node_modules/
+```
+
+A `.pondignore` replaces the defaults entirely, so keep the lines you still want. `pond init` writes one containing them. The same rules apply to a `--git` deploy, where the Catchment also removes the repository's `.git` directory from its copy.
 
 ## `remove`
 

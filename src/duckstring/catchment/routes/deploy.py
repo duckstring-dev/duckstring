@@ -412,6 +412,9 @@ async def deploy(request: Request):
         except subprocess.CalledProcessError as exc:
             shutil.rmtree(dest, ignore_errors=True)
             raise HTTPException(status_code=422, detail=f"git clone failed: {exc.stderr.decode()}") from exc
+        from ...pondignore import prune
+
+        prune(dest)  # keep what a local deploy would upload (.pondignore or its defaults), and drop .git
 
     cfg = _pond_config(dest / "pond.toml")
     if cfg["kind"]:

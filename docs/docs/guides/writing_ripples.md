@@ -16,7 +16,7 @@ mkdir sales && cd sales
 duckstring pond init sales
 ```
 
-This writes `pond.toml`, `src/pond.py` for the Ripples, `src/puddles.py` for [local test data](testing_with_puddles.md), a `.gitignore` and a `README.md`. Declare the Ponds you read from in `pond.toml`:
+This writes `pond.toml`, `src/pond.py` for the Ripples, `src/puddles.py` for [local test data](testing_with_puddles.md), a `.gitignore`, a `.pondignore` listing files that deploying leaves out, and a `README.md`. Declare the Ponds you read from in `pond.toml`:
 
 ```toml
 [pond]

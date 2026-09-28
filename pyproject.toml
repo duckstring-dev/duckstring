@@ -30,6 +30,8 @@ dependencies = [
   # (our _duckstring_f freshness column is TIMESTAMPTZ, read back in dataplane/trickle export).
   # It is otherwise only present transitively (pandas), so a clean install lacks it.
   "pytz",
+  # .pondignore matching with exact .gitignore semantics (negation, anchoring, **). Pure Python.
+  "pathspec>=0.10",
 ]
 
 [project.optional-dependencies]
