@@ -159,7 +159,9 @@ def forecast(pond):
     ...
 ```
 
-Avoid dots in Object names, since `read_object("a.b")` is read as Object `b` of the Source `a`. A downstream Pond reads it as `pond.read_object("forecasting.demand_model")`, or gets a local path to a directory Object with `pond.object_path(...)`. See [Pond Handle](../reference/python/pond.md#objects).
+A downstream Pond reads it as `pond.read_object("forecasting.demand_model")`, or gets a local path to a directory Object with `pond.object_path(...)`. See [Pond Handle](../reference/python/pond.md#objects).
+
+Object names may contain dots, such as `demand_model.pkl`, but references split at the first dot, so a dotted name must be read back in backticks: ``pond.read_object("`demand_model.pkl`")``, or ``"forecasting.`demand_model.pkl`"`` from downstream. Plain names are simpler.
 
 ## Ripples with side effects
 

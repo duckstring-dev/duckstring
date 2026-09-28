@@ -153,6 +153,44 @@ def import_pond_module(source_dir: Path, entry: str):
                 sys.modules.pop(key, None)
 
 
+def parse_ref(ref: str) -> tuple[str | None, str]:
+    """Split a table or Object reference into ``(source, name)``; ``source`` is ``None`` for a bare name.
+
+    ``"name"`` is the Pond's own; ``"source.name"`` is a Source's, split at the first dot. A part in
+    backticks is taken literally, so names containing dots can be referenced: ``"`model.pkl`"`` is the
+    Pond's own ``model.pkl``, and ``"forecasting.`model.pkl`"`` is the Source ``forecasting``'s. Raises
+    ``ValueError`` for an unclosed backtick or an empty part."""
+    def bad(why: str) -> ValueError:
+        return ValueError(f"invalid reference {ref!r}: {why}")
+
+    def quoted(text: str) -> tuple[str, str]:  # text starts with a backtick → (inside, remainder)
+        end = text.find("`", 1)
+        if end == -1:
+            raise bad("unclosed backtick")
+        return text[1:end], text[end + 1:]
+
+    if ref.startswith("`"):
+        first, rest = quoted(ref)
+    elif "." in ref:
+        first, rest = ref[:ref.index(".")], ref[ref.index("."):]
+    else:
+        first, rest = ref, ""
+    if not rest:
+        if not first:
+            raise bad("empty name")
+        return None, first
+    if not rest.startswith("."):
+        raise bad("expected '.' after the quoted Source")
+    second = rest[1:]
+    if second.startswith("`"):
+        second, tail = quoted(second)
+        if tail:
+            raise bad("unexpected text after the quoted name")
+    if not first or not second:
+        raise bad("empty Source or name")
+    return first, second
+
+
 def resolve_catchment_url(name: str | None = None) -> str:
     """A Catchment URL from a name in ``~/.duckstring/config.toml`` (default Catchment when ``None``),
     or the value itself when it already looks like a URL. Raises ``ValueError`` when unresolvable —
@@ -283,9 +321,11 @@ class Puddle:
 
     def __init__(self, target: str, root: Path, default_catchment: str | None = None):
         self.target = target
-        source, _, table = target.partition(".")
+        source, table = parse_ref(target)
+        if source is None:  # a whole-Source Puddle: the target names the Source
+            source, table = table, None
         self.source = source
-        self.table = table or None
+        self.table = table
         self.root = Path(root)
         self.default_catchment = default_catchment
         self._con = None
@@ -409,7 +449,9 @@ class Pond:
             of the same run. In a local run, the run's start time.
         previous_f: The freshness of the previous successful run, or ``datetime.min`` (UTC) on the first.
 
-    Table references are ``"table"`` for this Pond's own tables and ``"source.table"`` for a Source's.
+    Table and Object references are ``"name"`` for this Pond's own and ``"source.name"`` for a Source's,
+    split at the first dot; put a name containing dots in backticks (``"sales.`daily.v2`"``). See
+    :func:`parse_ref`.
 
     Reference: https://docs.duckstring.com/reference/python/pond
     """
@@ -419,9 +461,14 @@ class Pond:
         source_majors: dict[str, int] | None = None, source_f: dict[str, str] | None = None,
         f=None, previous_f=None, data_root: str | None = None,
         sources_changed: bool = True, skip_sink=None, staging_dir=None, own_data_dir=None,
-        flock: str | None = None,
+        flock: str | None = None, sources=None,
     ) -> None:
         from .engine.core import NEVER
+
+        # The declared Sources, when known (a deployed run's pins, or a local run's pond.toml), so a
+        # reference to anything else fails clearly instead of waiting on a Source that will never publish.
+        declared = sources if sources is not None else (source_majors or None)
+        self._declared_sources = set(declared) if declared is not None else None
 
         # No-change skip (plans/no-change-skip.md): ``sources_changed`` is the engine's verdict for this
         # Run; ``skip_sink`` is the Duck's callback to mark the Run a pass when ``skip()`` is called.
@@ -537,6 +584,9 @@ class Pond:
     def write_object(self, name: str, src) -> None:
         """Stage a non-tabular Object (a model, a file, a directory) to be published with the run's tables.
 
+        ``name`` is letters, digits and underscores, optionally with single dots between parts
+        (``model.pkl``); read a dotted name back with backticks, ``read_object("`model.pkl`")``.
+
         ``src`` is a file or directory path, ``bytes``, or a binary file-like. The Object is replaced as one
         unit when the run publishes; a later Ripple failure leaves the previous Object in place. Raises
         ``RuntimeError`` outside a Pond Run.
@@ -586,14 +636,20 @@ class Pond:
             return _path(self._own_store(), name, self._scratch())
         return _path(self._source_data_dir(source), name, self._scratch())
 
-    def _split_object_ref(self, ref: str):
-        """``"source.name"`` → ``(source, name)``; an own ``"name"`` (or ``"self.name"``) → ``(None, name)``."""
-        if "." in ref:
-            source_pond, name = ref.split(".", 1)
-            if source_pond != self.name:
-                return source_pond, name
+    def _resolve_ref(self, ref: str, what: str = "table") -> tuple[str | None, str]:
+        """:func:`parse_ref`, with this Pond's own name as the Source mapped to ``None`` (own), and a clear
+        error for a Source this Pond doesn't declare, suggesting backticks for a dotted own name."""
+        source, name = parse_ref(ref)
+        if source == self.name:
             return None, name
-        return None, ref
+        if source is not None and self._declared_sources is not None and source not in self._declared_sources:
+            declared = ", ".join(sorted(self._declared_sources)) or "none"
+            hint = f' To read this Pond\'s own {what} named "{ref}", quote it: "`{ref}`".' if "`" not in ref else ""
+            raise ValueError(f"'{source}' is not a Source of '{self.name}' (declared: {declared}).{hint}")
+        return source, name
+
+    def _split_object_ref(self, ref: str):
+        return self._resolve_ref(ref, "Object")
 
     def _own_store(self):
         from .storage import LocalStorage, Storage
@@ -640,39 +696,36 @@ class Pond:
 
         Raises :class:`MissingSourceAsset` when a Source table isn't published.
         """
-        if "." in ref:
-            source_pond, table = ref.split(".", 1)
-            if source_pond != self.name:
-                from .dataplane import get_data_plane
-                from .trickle_io import _strip_system
+        source_pond, table = self._resolve_ref(ref)
+        if source_pond is not None:
+            from .dataplane import get_data_plane
+            from .trickle_io import _strip_system
 
-                self._record_read(source_pond, table)
-                data_dir = self._source_data_dir(source_pond)
-                dp = get_data_plane()
-                dp.prepare(self.con)  # ready the connection to read the Source's published format
-                data_dir.duckdb_setup(self.con)  # object store → httpfs + credentials (no-op for local)
+            self._record_read(source_pond, table)
+            data_dir = self._source_data_dir(source_pond)
+            dp = get_data_plane()
+            dp.prepare(self.con)  # ready the connection to read the Source's published format
+            data_dir.duckdb_setup(self.con)  # object store → httpfs + credentials (no-op for local)
+            try:
+                # As-of pin: read the Source snapshot at this run's freshness, NOT latest. A Pond Run
+                # spans wall-clock time over several Ripples; an upstream Source can republish mid-run.
+                # Pinning to `self.f` gives every Ripple the same consistent as-of-F view of the Source
+                # (no intra-run read skew / too-fresh data). Honoured by the Iceberg plane (retained
+                # snapshots); the Parquet plane has no history and reads latest regardless.
+                select = dp.read_select(data_dir, table, as_of=self.f)
+            except FileNotFoundError as exc:
+                raise MissingSourceAsset(source_pond, table) from exc
+            rel = _strip_system(self.con.sql(select))
+            from .trickle_io import _is_current_view
+
+            if not _is_current_view(self.con, table):  # never replace this Pond's own merge Trickle view
                 try:
-                    # As-of pin: read the Source snapshot at this run's freshness, NOT latest. A Pond Run
-                    # spans wall-clock time over several Ripples; an upstream Source can republish mid-run.
-                    # Pinning to `self.f` gives every Ripple the same consistent as-of-F view of the Source
-                    # (no intra-run read skew / too-fresh data). Honoured by the Iceberg plane (retained
-                    # snapshots); the Parquet plane has no history and reads latest regardless.
-                    select = dp.read_select(data_dir, table, as_of=self.f)
-                except FileNotFoundError as exc:
-                    raise MissingSourceAsset(source_pond, table) from exc
-                rel = _strip_system(self.con.sql(select))
-                from .trickle_io import _is_current_view
-
-                if not _is_current_view(self.con, table):  # never replace this Pond's own merge Trickle view
-                    try:
-                        rel.create_view(table, replace=True)
-                    except Exception:
-                        pass  # name taken by one of this Pond's own tables — the relation still works
-                return rel
-            self._record_read(None, table)
-            return self._own_current(table)
-        self._record_read(None, ref)
-        return self._own_current(ref)
+                    rel.create_view(table, replace=True)
+                except Exception:
+                    pass  # name taken by one of this Pond's own tables — the relation still works
+            return rel
+        self._record_read(None, table)
+        return self._own_current(table)
 
     def _own_current(self, name: str):
         """Read one of this Pond's own registry tables as its current clean state — a merge Trickle is
@@ -687,23 +740,21 @@ class Pond:
         """
         from . import trickle_io as trickle
 
-        if "." in ref:
-            source_pond, table = ref.split(".", 1)
-            if source_pond != self.name:
-                from .dataplane import get_data_plane
+        source_pond, table = self._resolve_ref(ref)
+        if source_pond is not None:
+            from .dataplane import get_data_plane
 
-                self._record_read(source_pond, table)
-                data_dir = self._source_data_dir(source_pond)
-                dp = get_data_plane()
-                dp.prepare(self.con)
-                data_dir.duckdb_setup(self.con)
-                meta = trickle.load_sidecar(data_dir).get(table, {})
-                (n,) = self.con.execute(
-                    dp.consolidated_count_select(data_dir, table, meta, as_of=self.f)
-                ).fetchone()
-                return int(n)
-            ref = table
-        return trickle.count_current(self.con, ref)
+            self._record_read(source_pond, table)
+            data_dir = self._source_data_dir(source_pond)
+            dp = get_data_plane()
+            dp.prepare(self.con)
+            data_dir.duckdb_setup(self.con)
+            meta = trickle.load_sidecar(data_dir).get(table, {})
+            (n,) = self.con.execute(
+                dp.consolidated_count_select(data_dir, table, meta, as_of=self.f)
+            ).fetchone()
+            return int(n)
+        return trickle.count_current(self.con, table)
 
     # ─── Trickle: incremental I/O (see duckstring.trickle_io / plans/trickle.md) ───
 
@@ -811,9 +862,9 @@ class Pond:
         from . import trickle_io as trickle
         from .dataplane import get_data_plane
 
-        if "." not in ref:
+        source_pond, table = self._resolve_ref(ref)
+        if source_pond is None:
             raise ValueError(f"read_delta needs a 'source.table' reference, got '{ref}'")
-        source_pond, table = ref.split(".", 1)
         self._record_read(source_pond, table)
         data_dir = self._source_data_dir(source_pond)
         dp = get_data_plane()

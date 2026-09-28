@@ -5,7 +5,7 @@ import traceback as tb
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..core import Puddle, collect_puddles, import_pond_module
+from ..core import Puddle, collect_puddles, import_pond_module, parse_ref
 from .project import Project
 
 
@@ -17,6 +17,12 @@ class HydrateResult:
     duration_s: float = 0.0
     error: str | None = None
     traceback: str | None = None
+
+
+def _source_of(target: str) -> str:
+    """The Source a Puddle target names: ``"source"`` or ``"source.table"`` (see :func:`parse_ref`)."""
+    source, name = parse_ref(target)
+    return name if source is None else source
 
 
 def collect_definitions(project: Project) -> list[dict]:
@@ -34,7 +40,7 @@ def collect_definitions(project: Project) -> list[dict]:
 
     allowed = set(project.sources) | {project.name}
     for d in definitions:
-        source = d["target"].partition(".")[0]
+        source = _source_of(d["target"])
         if source not in allowed:
             declared = ", ".join(sorted(allowed))
             raise ValueError(
@@ -60,8 +66,8 @@ def hydrate(
     selected = definitions
     if only_sources:
         wanted = set(only_sources)
-        selected = [d for d in definitions if d["target"].partition(".")[0] in wanted]
-        unknown = wanted - {d["target"].partition(".")[0] for d in definitions}
+        selected = [d for d in definitions if _source_of(d["target"]) in wanted]
+        unknown = wanted - {_source_of(d["target"]) for d in definitions}
         for s in sorted(unknown):
             warnings.append(f"no puddle defined for source '{s}'")
 
@@ -84,7 +90,7 @@ def hydrate(
                 )
             )
 
-    covered = {d["target"].partition(".")[0] for d in definitions}
+    covered = {_source_of(d["target"]) for d in definitions}
     missing = [s for s in project.sources if s not in covered]
     if only_sources:
         missing = [s for s in missing if s in set(only_sources)]

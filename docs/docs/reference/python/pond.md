@@ -14,10 +14,12 @@ def daily_sales(pond):
     pond.write_table("daily_sales", pond.con.sql("SELECT ... FROM \"transaction\" ..."))
 ```
 
-Table references take two forms throughout:
+Table and Object references take two forms throughout:
 
 - `"table"`: one of this Pond's own tables.
 - `"source.table"`: a table published by the Source Pond `source`, which must be listed in `[sources]`.
+
+A reference is split at its first dot. For a name that itself contains a dot, put it in backticks: ``"`daily.v2`"`` is this Pond's own `daily.v2`, and ``"sales.`daily.v2`"`` is the Source's. Dotted names work but are best avoided. A reference to a Source the Pond doesn't declare raises `ValueError`, suggesting backticks if you meant a dotted name of your own.
 
 The Incremental methods (`append_table`, `merge_table`, `apply_zset`, `read_delta`, `trickle`) are documented on [Trickle I/O](trickle_io.md) and [Trickle Builder](trickle_builder.md).
 
@@ -100,7 +102,7 @@ Stages an Object to be published with the run's tables. A later Ripple failure l
 
 | Parameter | Type | Description |
 |---|---|---|
-| `name` | `str` | Object name. |
+| `name` | `str` | Object name: letters, digits and underscores, starting with a letter or underscore, optionally with single dots between parts (`model.pkl`). Read a dotted name back with backticks. |
 | `src` | path, `bytes` or binary file-like | A file path, a directory path (published as one Object), raw bytes, or an open binary file. |
 
 **Raises** `RuntimeError` outside a Pond Run.

@@ -32,7 +32,9 @@ OBJECTS_KEY = "objects"  # the sidecar section holding Object entries (see plans
 STAGING_DIR = ".object_staging"  # per-line local staging, swept on commit / wipe
 _MANIFEST = "manifest.json"
 _PAYLOAD = "payload"
-_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+# Letters, digits and underscores, with single dots between segments (``model.pkl``). No leading, trailing or
+# doubled dot, so a name can never be ``..`` or a hidden path. Read a dotted name back with backticks.
+_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)*$")
 
 
 class ObjectError(ValueError):
@@ -42,7 +44,8 @@ class ObjectError(ValueError):
 def validate_object_name(name: str) -> str:
     if not isinstance(name, str) or not _NAME_RE.match(name):
         raise ObjectError(
-            f"invalid object name {name!r}: use letters, digits and underscores (a letter/underscore first)"
+            f"invalid object name {name!r}: use letters, digits, underscores and single dots between them "
+            "(a letter/underscore first)"
         )
     if name.startswith("_duckstring_"):
         raise ObjectError(f"object name {name!r} uses the reserved '_duckstring_' prefix")
