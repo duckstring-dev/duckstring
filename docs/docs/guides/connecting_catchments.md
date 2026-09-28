@@ -72,7 +72,7 @@ transactions = "1.0.0"
 products = "1.0.0"
 ```
 
-A Draw's version is always recorded as `{major}.0.0`, because the consuming Catchment only tracks which major line it draws. Pin Draws at `{major}.0.0`: a higher minimum, such as `"1.2.0"`, is rejected at deploy.
+A Draw carries the version currently deployed upstream, kept up to date on every poll, so pins work as they do locally: `transactions = "1.2.0"` is accepted once the upstream runs 1.2.0 or later. The consuming Catchment can't stop the upstream from rolling back below a pin, so agree on minimum versions with the upstream's owners.
 
 Read the tables as usual, with `pond.read_table("transactions.transaction")`. Trickles keep working across the duct: only new changes are copied on each transfer, so downstream Ponds still read changes rather than whole tables.
 

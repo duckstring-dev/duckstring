@@ -142,7 +142,8 @@ async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | N
                 solicited.pop(key, None)  # forget what we sent so it re-forwards on recovery
                 continue
             up = by_key[(m["name"], m["major"])]
-            driver.observe_remote(key, _parse_f(up.get("end_f")), down=up.get("status") in _DOWN_STATES)
+            driver.observe_remote(key, _parse_f(up.get("end_f")), down=up.get("status") in _DOWN_STATES,
+                                  version=up.get("version"))
 
     # 2. Perform pending transfers (fetch + land), then report completion.
     url_by_origin = {d["origin"]: d for d in targets}

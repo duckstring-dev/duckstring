@@ -235,6 +235,19 @@ _OL_SCHEMA_URL = "https://openlineage.io/spec/2-0-2/OpenLineage.json#/definition
 _OL_SCHEMA_FACET = "https://openlineage.io/spec/facets/1-1-1/SchemaDatasetFacet.json"
 
 
+def _draw_version_ok(version: str | None, major: int) -> bool:
+    """Whether ``version`` is a usable ``MAJOR.MINOR.PATCH`` release of the given major line."""
+    if not version:
+        return False
+    try:
+        from ..keys import version_key
+
+        version_key(version)
+        return int(version.split(".")[0]) == major
+    except (ValueError, TypeError):
+        return False
+
+
 class Driver:
     def __init__(self, db, root, base_url: str | None, launcher, data_root: str | None = None):
         self.db = db
@@ -2446,20 +2459,40 @@ class Driver:
             return out
 
     def observe_remote(
-        self, pond: str, remote_f: datetime | None, *, down: bool = False,
+        self, pond: str, remote_f: datetime | None, *, down: bool = False, version: str | None = None,
     ) -> None:
-        """The poller reports an upstream Pond's freshness + reachability for a Draw. Mirror them and
-        run the cascade — a transfer starts if there is downstream demand and the upstream is fresher."""
+        """The poller reports an upstream Pond's freshness, reachability and deployed version for a Draw.
+        Mirror them and run the cascade — a transfer starts if there is downstream demand and the upstream
+        is fresher. The version keeps local ``[sources]`` pins on the Draw checked against the real release."""
         with self.lock:
             ps = self.state.pond_states.get(pond)
             if ps is None or not self.meta.get(pond, {}).get("is_draw"):
                 return
+            if version is not None and version != self.meta[pond]["version"]:
+                self._set_draw_version(pond, version)
             if remote_f is not None:
                 ps.remote_f = remote_f
             if ps.remote_down != down:
                 ps.remote_down = down
                 derive_blocked(self.state, pond)
             self._process(_now(), notify=False)  # poller-driven; transfers handled in this cycle
+
+    def _set_draw_version(self, pond: str, version: str) -> None:
+        """Record a Draw's upstream version on its (single) version row, in place, so its run history and
+        engine state are untouched. Caller holds the lock. A version from another major line, or one that
+        collides with a retired local version row of the same name, is ignored."""
+        meta = self.meta[pond]
+        if not _draw_version_ok(version, meta["major"]):
+            return
+        import sqlite3
+
+        try:
+            self.db.execute("UPDATE pond_version SET version = ? WHERE id = ?", (version, meta["version_id"]))
+            self.db.commit()
+        except sqlite3.IntegrityError:
+            self.db.rollback()
+            return
+        meta["version"] = version
 
     def pond_observation(self, pond: str) -> dict:
         """A Pond's freshness + down-state, for the producer's ``…/wait`` long-poll (a downstream
@@ -2579,12 +2612,16 @@ class Driver:
             self.reload()
             return True
 
-    def add_duct_pond(self, origin: str, pond_name: str, major: int, incremental: bool = False) -> None:
+    def add_duct_pond(self, origin: str, pond_name: str, major: int, incremental: bool = False,
+                      version: str | None = None) -> None:
+        """Draw ``pond_name@major`` over the duct from ``origin``. ``version`` is the upstream's deployed
+        version when the caller knows it, so ``[sources]`` pins are checked against it from the start; the
+        poller keeps it current either way (:meth:`observe_remote`)."""
         with self.lock:
             row = self.db.execute("SELECT id FROM duct WHERE origin_catchment = ?", (origin,)).fetchone()
             if row is None:
                 raise KeyError(f"No duct from '{origin}' — create it first")
-            self._create_draw(pond_name, major)  # raises ValueError on a local-Pond collision
+            self._create_draw(pond_name, major, version)  # raises ValueError on a local-Pond collision
             self.db.execute(
                 "INSERT OR REPLACE INTO duct_to_pond (duct_id, source_pond_name, major, incremental) "
                 "VALUES (?, ?, ?, ?)",
@@ -2649,7 +2686,7 @@ class Driver:
                 })
             return out
 
-    def _create_draw(self, name: str, major: int) -> None:
+    def _create_draw(self, name: str, major: int, version: str | None = None) -> None:
         """Materialise a Pond Draw's identity rows (caller holds the lock and reloads). Real but
         synthetic: kind='inlet', is_draw=1, a single immutable pond_version + one ``"draw"`` ripple."""
         db = self.db
@@ -2663,7 +2700,14 @@ class Driver:
         if existing is not None and not existing[0]:
             raise ValueError(f"A local Pond '{name}@{major}' already exists — cannot draw it over a duct")
 
-        version = f"{major}.0.0"
+        existing_pv = db.execute(
+            "SELECT pv.version FROM pond p JOIN pond_version pv ON pv.id = p.pond_version_id "
+            "WHERE p.pond_name_id = ? AND p.major = ?", (pn_id, major),
+        ).fetchone()
+        if existing_pv is not None:  # re-drawing an existing Draw: keep its version row (and history)
+            version = existing_pv[0]
+        elif not _draw_version_ok(version, major):
+            version = f"{major}.0.0"  # unknown until the poller observes the upstream
         db.execute(
             "INSERT OR IGNORE INTO pond_version (pond_name_id, version, major, source_path) "
             "VALUES (?, ?, ?, ?)",
