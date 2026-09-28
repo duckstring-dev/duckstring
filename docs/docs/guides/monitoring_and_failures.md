@@ -107,13 +107,12 @@ A killed Pond stays stopped until it's woken, forced or cleared.
 Alert channels notify a webhook or email address. Set up a Slack channel for failures across the Catchment:
 
 ```bash
-duckstring secret set SLACK_HOOK_PATH     # paste the part after /services/ at the prompt
-duckstring alert add --name ops --on failure,contract,spout \
-  --to 'https://hooks.slack.com/services/${secret:SLACK_HOOK_PATH}'
+duckstring secret set SLACK_WEBHOOK       # paste the webhook URL at the prompt
+duckstring alert add --name ops --to '${secret:SLACK_WEBHOOK}' --on failure,contract,spout
 duckstring alert test ops
 ```
 
-The destination must show its scheme, so keep the secret part of a URL, like the token path here, in the secret store. Webhook messages are JSON with a `text` field, which Slack displays directly.
+The whole webhook URL is kept in the secret store, since anyone with it can post to the channel. Its value is checked when the alert is tested or first sent. Webhook messages are JSON with a `text` field, which Slack displays directly.
 
 Alerts fire once per failure, however many retries happen, and only for the Pond that failed. Ponds blocked by it are listed in the message instead of alerting separately. A channel subscribed to `failure` also gets the recovery.
 

@@ -30,7 +30,7 @@ duckstring alert add --to URI [--name NAME] [--pond POND [--major N]] [--on EVEN
 
 | Option | Default | Description |
 |---|---|---|
-| `--to`, `-t` | required | `https://...` or `http://...` for a webhook, or `mailto:...` for email. Credentials are written as `${env:NAME}` or `${secret:NAME}`. See [Notification URIs](../formats.md#notification-uris). |
+| `--to`, `-t` | required | `https://...` or `http://...` for a webhook, or `mailto:...` for email. Credentials are written as `${env:NAME}` or `${secret:NAME}`, and a single reference can be the whole destination. See [Notification URIs](../formats.md#notification-uris). |
 | `--name`, `-n` | from the scheme | The channel's name. |
 | `--pond`, `-p` | every Pond | Only alert for this Pond. |
 | `--major`, `-m` | the highest deployed | The major line of `--pond`. |

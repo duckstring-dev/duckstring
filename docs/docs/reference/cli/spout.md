@@ -20,7 +20,7 @@ duckstring spout add POND --to URI [--table TABLE | --all] [--mode MODE] [--name
 
 | Option | Default | Description |
 |---|---|---|
-| `--to`, `-t` | required | The destination URI. Its scheme picks how data is written: `file://`, `s3://`, `gs://` or `postgres://`. Credentials are written as `${env:NAME}` or `${secret:NAME}` references and resolved only at delivery. See [Destination URIs](../formats.md#destination-uris). |
+| `--to`, `-t` | required | The destination URI. Its scheme picks how data is written: `file://`, `s3://`, `gs://` or `postgres://`. Credentials are written as `${env:NAME}` or `${secret:NAME}` references and resolved only at delivery, and a single reference can be the whole destination. See [Destination URIs](../formats.md#destination-uris). |
 | `--table`, `-T` | all tables | Deliver only this table. |
 | `--all` | | Deliver every table (the default, stated explicitly). |
 | `--mode` | `auto` | `auto`: send only changes where the destination supports it, otherwise the whole table. `full`: always write the whole table. `append`: for an object store, copy each run's new files, keeping the destination in Duckstring's file layout. |

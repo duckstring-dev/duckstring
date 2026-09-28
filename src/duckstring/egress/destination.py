@@ -29,7 +29,7 @@ class DestinationError(ValueError):
 
 @dataclass(frozen=True)
 class Destination:
-    scheme: str
+    scheme: str | None  # None: the whole destination is a reference, its scheme known only once resolved
     raw: str  # the original URI, with ${env:...} references intact (resolved only at egress time)
 
     @property
@@ -39,15 +39,33 @@ class Destination:
         return self.scheme in TRANSACTIONAL_SCHEMES
 
 
-def parse_destination(uri: str) -> Destination:
+def parse_destination(uri: str, *, resolve: bool = False) -> Destination:
     """Validate a Spout destination URI: a known scheme and well-formed ``${env:...}`` references.
-    Does **not** resolve credentials. Raises :class:`DestinationError` on anything malformed."""
+    Does **not** resolve credentials. Raises :class:`DestinationError` on anything malformed.
+
+    A destination that is **entirely** one reference (``${env:DATABASE_URL}``) has no visible scheme. It is
+    accepted with ``scheme=None``, and its scheme is checked when it's resolved: pass ``resolve=True`` (at
+    delivery or test time) to resolve it and validate the result. Errors name the reference, never its value."""
     if not uri or not uri.strip():
         raise DestinationError("destination must not be empty")
     try:
         credentials.references(uri)  # validates ${env:}/${secret:} syntax (raises on an empty reference)
     except credentials.CredentialError as exc:
         raise DestinationError(str(exc)) from exc
+    if credentials.whole_reference(uri):
+        if not resolve:
+            return Destination(scheme=None, raw=uri)
+        try:
+            target = credentials.resolve(uri)
+        except credentials.CredentialError as exc:
+            raise DestinationError(str(exc)) from exc
+        scheme = urlparse(target).scheme.lower()
+        if scheme not in KNOWN_SCHEMES:
+            raise DestinationError(
+                f"destination {uri.strip()} resolves to a value without a supported scheme — expected "
+                f"{', '.join(f'{s}://' for s in sorted(KNOWN_SCHEMES))}"
+            )
+        return Destination(scheme=scheme, raw=uri)
     scheme = urlparse(uri).scheme.lower()
     if not scheme:
         raise DestinationError(f"destination {uri!r} has no scheme — expected e.g. file://…, s3://…, postgres://…")

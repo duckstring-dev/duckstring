@@ -54,6 +54,8 @@ Destination URIs never contain credentials directly. They contain references, re
 | `${env:NAME}` | The environment variable `NAME` on the Catchment process. |
 | `${secret:NAME}` | The secret `NAME` from the Catchment's [secret store](cli/secret.md). |
 
+A reference can also be the whole destination, such as `${env:DATABASE_URL}` or `${secret:SLACK_WEBHOOK}`, when the entire URI is sensitive or is provided that way. Its scheme is then checked when it's resolved, at the first delivery or test, rather than when the Spout or channel is added.
+
 A missing variable or secret fails the delivery with an error naming the reference, never its value. Any other `${...}` text is left as it is.
 
 ## Data root URIs

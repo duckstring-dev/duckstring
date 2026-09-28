@@ -23,7 +23,15 @@ class EmailNotifier:
     SCHEMES = ("mailto",)
 
     def __init__(self, dest: Destination):
-        parsed = urlparse(dest.raw)
+        from ..egress import credentials
+
+        raw = dest.raw
+        if credentials.whole_reference(raw):  # the whole mailto: URI is held in a variable or secret
+            try:
+                raw = credentials.resolve(raw)
+            except credentials.CredentialError as exc:
+                raise NotifierError(str(exc)) from exc
+        parsed = urlparse(raw)
         self.recipients = [r.strip() for r in unquote(parsed.path).split(",") if r.strip()]
         if not self.recipients:
             raise NotifierError("mailto: destination has no recipient — use mailto:you@example.com")

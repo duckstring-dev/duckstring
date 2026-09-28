@@ -62,6 +62,12 @@ def references(text: str) -> list[Reference]:
     return out
 
 
+def whole_reference(text: str) -> bool:
+    """Whether ``text`` is exactly one ``${env:NAME}`` / ``${secret:NAME}`` reference, with nothing around
+    it: a destination held entirely in a variable or secret (e.g. ``${env:DATABASE_URL}``)."""
+    return _REF.fullmatch(text.strip()) is not None
+
+
 def resolve(
     text: str, *, env: Mapping[str, str] | None = None,
     secret: "Callable[[str], str | None] | None" = None,

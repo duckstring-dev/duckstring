@@ -27,19 +27,37 @@ class NotifierError(ValueError):
 
 @dataclass(frozen=True)
 class Destination:
-    scheme: str
+    scheme: str | None  # None: the whole destination is a reference, its scheme known only once resolved
     raw: str  # the original URI, with ${...} references intact (resolved only at send time)
 
 
-def parse_notifier_destination(uri: str) -> Destination:
+def parse_notifier_destination(uri: str, *, resolve: bool = False) -> Destination:
     """Validate a channel destination URI: a known scheme + well-formed ``${...}`` references. Does **not**
-    resolve credentials (so a channel can be created before its secrets are present). Raises NotifierError."""
+    resolve credentials (so a channel can be created before its secrets are present). Raises NotifierError.
+
+    A destination that is **entirely** one reference (``${secret:SLACK_WEBHOOK}``) is accepted with
+    ``scheme=None``; ``resolve=True`` (at send/test time) resolves it and checks the resulting scheme. Errors
+    name the reference, never its value."""
     if not uri or not uri.strip():
         raise NotifierError("destination must not be empty")
     try:
         credentials.references(uri)  # validates ${env:}/${secret:} syntax
     except credentials.CredentialError as exc:
         raise NotifierError(str(exc)) from exc
+    if credentials.whole_reference(uri):
+        if not resolve:
+            return Destination(scheme=None, raw=uri)
+        try:
+            target = credentials.resolve(uri)
+        except credentials.CredentialError as exc:
+            raise NotifierError(str(exc)) from exc
+        scheme = urlparse(target).scheme.lower()
+        if scheme not in KNOWN_SCHEMES:
+            raise NotifierError(
+                f"destination {uri.strip()} resolves to a value without a supported scheme — expected "
+                "https://…, http://… or mailto:…"
+            )
+        return Destination(scheme=scheme, raw=uri)
     scheme = urlparse(uri).scheme.lower()
     if not scheme:
         raise NotifierError(f"destination {uri!r} has no scheme — expected e.g. https://…, mailto:…")
@@ -72,7 +90,7 @@ def register(scheme: str, factory: Callable[[Destination], Notifier]) -> None:
 def get_notifier(destination: str) -> Notifier:
     """Resolve the notifier for a channel destination by its scheme. Raises :class:`NotifierError` for an
     unknown scheme, or a known scheme whose notifier is not built."""
-    dest = parse_notifier_destination(destination)
+    dest = parse_notifier_destination(destination, resolve=True)
     factory = _REGISTRY.get(dest.scheme)
     if factory is None:
         raise NotifierError(

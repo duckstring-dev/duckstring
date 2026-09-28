@@ -47,6 +47,14 @@ duckstring spout add priced --table priced_line \
   --to 'postgres://loader:${secret:APP_DB_PASSWORD}@db.internal:5432/app?schema=analytics'
 ```
 
+If the connection string is already in an environment variable on the Catchment, as many platforms provide it, use the variable as the whole destination:
+
+```bash
+duckstring spout add priced --table priced_line --to '${env:DATABASE_URL}'
+```
+
+A destination held entirely in a variable or secret is checked when it's first used, by the first delivery or the UI's **Test** button, rather than when the Spout is added.
+
 The table must be a merge Trickle with a primary key, written with `merge_table` or the builder's `.merge()`. Duckstring creates `analytics.priced_line` on first delivery, from the table's columns. Each later delivery deletes the changed and removed keys and inserts their new rows, in a single transaction.
 
 Delivery is exactly-once. The last delivered freshness is stored in a `_duckstring_egress` table in the same schema, updated in the same transaction as the data, so a delivery interrupted by a crash is rolled back and redone without duplicating anything.

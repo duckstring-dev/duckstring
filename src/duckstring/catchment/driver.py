@@ -1847,7 +1847,7 @@ class Driver:
                 # source is caught at egress instead.
                 self._assert_transactional_pk(m["name"], m["major"], table)
             src_name, major = split_pond_key(pond)
-            final = name or self._default_spout_name(src_name, dest.scheme, table)
+            final = name or self._default_spout_name(src_name, dest.scheme or "spout", table)
             if self.meta.get(pond_key(f"{src_name}#{final}", major), {}).get("is_spout"):
                 raise ValueError(f"A spout named '{final}' already exists on '{pond}'")
             self._create_spout(src_name, major, final, destination, table, mode)
