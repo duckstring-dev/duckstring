@@ -268,6 +268,7 @@ def main() -> None:
         # deployed source bundle over the duck channel and unpack it where the executor expects it.
         _unpack_artifact(client.fetch_artifact(), source_dir)
         log.info("[%s@%s] fetched source artifact -> %s", args.pond, args.major, source_dir)
+    _use_pond_env(root, source_dir, client)
     parents = load_topology(source_dir)
     major_dir = pond_major_dir(root, args.pond, args.major)
     major_dir.mkdir(parents=True, exist_ok=True)
@@ -285,6 +286,59 @@ def main() -> None:
         executor = RippleExecutor(args.pond, args.major, args.version, args.source_path, root,
                                   data_root=data_root, persist_root=persist_root)
     serve(core, executor, client)
+
+
+# While a Duck builds its Pond's environment it hasn't polled for jobs yet, so it reports in on this
+# interval: any event counts as contact, and the Catchment would otherwise judge a long build a silent Duck.
+_BUILD_HEARTBEAT_S = 15.0
+
+
+def _use_pond_env(root: Path, source_dir: Path, client: CatchmentClient) -> None:
+    """Switch to the Pond's own environment (plans/pond-environments.md), building it on this machine if
+    needed, by re-executing this Duck under that environment's Python. A no-op for a Pond on the default
+    environment, or when already running in the Pond's. A failed build is reported as a Pond failure
+    with uv's output, and the Duck exits."""
+    import os
+
+    from ..environments import REEXEC_ENV, EnvError, duck_python, pond_env
+
+    if os.environ.get(REEXEC_ENV):
+        return
+    try:
+        declared = pond_env(source_dir) is not None
+    except EnvError:
+        declared = True  # a missing lock: duck_python raises it below, and it's reported like a failed build
+    if not declared:
+        return
+    done = threading.Event()
+
+    def _heartbeat():
+        while not done.is_set():
+            client.post_event({"kind": "booting"})
+            done.wait(_BUILD_HEARTBEAT_S)
+
+    threading.Thread(target=_heartbeat, daemon=True).start()
+    try:
+        python = duck_python(root, source_dir)
+    except Exception as exc:
+        done.set()
+        detail = str(exc).strip()
+        last = detail.splitlines()[-1] if detail else type(exc).__name__
+        log.error("building the Pond's environment failed: %s", detail)
+        client.post_event({"kind": "pond_failed", "status": "failed",
+                           "error": f"Building the Pond's environment failed: {last}"[:500],
+                           "traceback": detail[-8000:]})
+        client.close()
+        sys.exit(1)
+    done.set()
+    if python is None:
+        return
+    log.info("switching to the Pond's environment: %s", python)
+    os.environ[REEXEC_ENV] = "1"
+    client.close()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(str(python), [str(python), "-m", "duckstring.duck", *sys.argv[1:]])
 
 
 def _unpack_artifact(tar_bytes: bytes, dest: Path) -> None:

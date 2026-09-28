@@ -88,7 +88,9 @@ dependencies = ["duckstring", "scikit-learn>=1.5"]
 
 The Catchment builds the environment with `uv sync --locked`, so a `uv.lock` that no longer matches `pyproject.toml` is also refused. Dev dependencies are left out. The Catchment then installs its own version of Duckstring into the environment, replacing any version in the lock, since the Duck and the Catchment must match. The environment uses the Catchment's Python version, unless the Pond has a `.python-version` file.
 
-Environments are stored under the Catchment's state directory in `envs/`, one per distinct lock, and shared by every Pond with the same one. Only Ducks on the Catchment's own machine use them for now; Ducks on a pool or in the cloud use the packages installed where they run.
+Lock against a released Duckstring. A lock made against a local checkout (`uv add --editable ../duckstring`) names a path that exists only on your machine, so a Catchment elsewhere refuses it.
+
+Environments are stored under the Catchment's state directory in `envs/`, one per distinct lock, and shared by every Pond with the same one. A Duck on a pool or in the cloud builds the environment on its own machine when it starts, from the lock the Catchment checked, with that machine's Python and Duckstring. A pool machine keeps it for later Ducks; a cloud Duck builds it again on each cold start.
 
 `requirements.txt` isn't read. It has no lock, so the deployed environment could differ from the one the Pond was tested in.
 

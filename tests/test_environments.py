@@ -218,3 +218,95 @@ def test_deploy_builds_the_ponds_environment(tmp_path, catchment_client):
     assert r.status_code == 422
     assert "uv lock" in r.json()["detail"]
     assert python_for(root, "ponds/envp/1.0.0") == python
+
+
+# ── which Duckstring goes into a Pond's environment ────────────────────────────
+
+
+class _FakeDist:
+    version = "9.9.9"
+
+    def __init__(self, direct):
+        self._direct = direct
+
+    def read_text(self, name):
+        return self._direct
+
+
+def _requirement(monkeypatch, direct):
+    import json
+    from importlib import metadata
+
+    monkeypatch.setattr(metadata, "distribution", lambda _name: _FakeDist(json.dumps(direct) if direct else None))
+    monkeypatch.setattr(envs, "_extras", lambda: ["aws"])
+    return envs.duckstring_requirement()
+
+
+def test_requirement_for_a_released_install(monkeypatch):
+    assert _requirement(monkeypatch, None) == ["duckstring[aws]==9.9.9"]
+
+
+def test_requirement_for_an_editable_checkout(monkeypatch, tmp_path):
+    direct = {"url": tmp_path.as_uri(), "dir_info": {"editable": True}}
+    assert _requirement(monkeypatch, direct) == ["-e", f"{tmp_path}[aws]"]
+
+
+def test_requirement_for_a_kept_wheel(monkeypatch, tmp_path):
+    wheel = tmp_path / "duckstring-9.9.9-py3-none-any.whl"
+    wheel.write_bytes(b"")
+    assert _requirement(monkeypatch, {"url": wheel.as_uri(), "archive_info": {}}) == \
+        [f"duckstring[aws] @ {wheel.as_uri()}"]
+
+
+def test_requirement_falls_back_when_the_wheel_is_gone(monkeypatch, tmp_path):
+    gone = (tmp_path / "deleted.whl").as_uri()
+    assert _requirement(monkeypatch, {"url": gone, "archive_info": {}}) == ["duckstring[aws]==9.9.9"]
+
+
+def test_requirement_for_a_vcs_install(monkeypatch):
+    direct = {"url": "https://github.com/x/duckstring", "vcs_info": {"vcs": "git", "commit_id": "abc123"}}
+    assert _requirement(monkeypatch, direct) == ["duckstring[aws] @ git+https://github.com/x/duckstring@abc123"]
+
+
+# ── a Duck switching to its Pond's environment ─────────────────────────────────
+
+
+def test_duck_python(tmp_path, monkeypatch):
+    monkeypatch.delenv(envs.REEXEC_ENV, raising=False)
+    assert envs.duck_python(tmp_path, tmp_path) is None  # default environment
+
+    env_python = envs._python_in(tmp_path / "envs" / "abc")
+    monkeypatch.setattr(envs, "ensure_env", lambda root, source, **kw: env_python)
+    assert envs.duck_python(tmp_path, tmp_path) == env_python  # switch to it
+
+    monkeypatch.setattr(envs.sys, "prefix", str(tmp_path / "envs" / "abc"))
+    assert envs.duck_python(tmp_path, tmp_path) is None  # already in it
+
+    monkeypatch.setenv(envs.REEXEC_ENV, "1")
+    monkeypatch.setattr(envs, "ensure_env", lambda root, source, **kw: pytest.fail("must not build"))
+    assert envs.duck_python(tmp_path, tmp_path) is None  # the re-executed Duck
+
+
+def test_a_duck_reports_a_failed_build_and_exits(tmp_path, monkeypatch):
+    from duckstring.duck.__main__ import _use_pond_env
+
+    monkeypatch.delenv(envs.REEXEC_ENV, raising=False)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'p'\n")  # no uv.lock
+
+    class Client:
+        events: list = []
+
+        def post_event(self, payload):
+            self.events.append(payload)
+            return True
+
+        def close(self):
+            pass
+
+    client = Client()
+    with pytest.raises(SystemExit) as exit_:
+        _use_pond_env(tmp_path, tmp_path, client)
+    assert exit_.value.code == 1
+    failed = [e for e in client.events if e["kind"] == "pond_failed"]
+    assert failed and failed[0]["error"].startswith("Building the Pond's environment failed")
+    assert "uv lock" in failed[0]["traceback"]

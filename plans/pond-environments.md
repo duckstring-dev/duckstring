@@ -1,7 +1,8 @@
 # Pond environments: each Pond runs in its own Python environment
 
-Status: **phase 1 built** (local Ducks + deploy-time discovery, 2026-09-29). Phases 2 and 3 are designed
-here, not built.
+Status: **built** (2026-09-29): phase 1 (local Ducks + deploy-time discovery), then phases 2 and 3
+(Pool and cloud Ducks) together, since one mechanism covers both. The object-store environment cache
+sketched for phase 3 is deferred (see Phases).
 
 ## Problem
 
@@ -97,10 +98,29 @@ timeout grows to cover a first build.
 
 ### Launchers
 
-- `SubprocessLauncher.ensure` spawns `python_for(root, source_path) -m duckstring.duck`.
-- Phase 1: a Pond with a declared environment whose Duck target is remote (a Pool, a preset or
-  dedicated) still runs in the image's environment, with a warning in the Duck's log. Phases 2 and 3
-  close this.
+- `SubprocessLauncher.ensure` spawns `python_for(root, source_path) -m duckstring.duck`, with
+  `DUCKSTRING_IN_POND_ENV=1` when that is a built Pond environment.
+- Every other Duck (a Pool agent's child, a Fargate task, an EC2 instance) starts with its machine's
+  own Python and **switches itself** (`duck/__main__._use_pond_env`, `environments.duck_python`): after
+  fetching its source artifact it builds the Pond's environment under its own root
+  (`ensure_env(..., check_lock=False)`) and `os.execv`s into that environment's Python with the same
+  arguments, setting `DUCKSTRING_IN_POND_ENV` so the new process doesn't repeat it. No launcher changes:
+  the Pool agent only strips the marker from its children's environment.
+- While building, the Duck posts a `booting` event every 15 s (any event counts as contact; the Driver
+  ignores the kind), so a long build isn't judged a silent Duck. A failed build is posted as
+  `pond_failed` ("Building the Pond's environment failed: …", uv's output as the traceback) and the Duck
+  exits, so the reason shows in the UI rather than as a dead Duck.
+- **The lock is checked once, at deploy** (`--locked` on the Catchment). A Duck elsewhere installs it
+  `--frozen`. Every build passes `--no-install-package duckstring` (the machine's own is installed next).
+  Both are needed for a lock made against a local Duckstring checkout: `--locked` re-reads the locked
+  Duckstring's source to check freshness, and that path exists only on the developer's machine. Such a
+  lock still can't deploy to a Catchment on another machine, which is correct.
+- **Which Duckstring** (`duckstring_requirement`): the machine's own install, from `direct_url.json`:
+  an editable checkout's path, the wheel file it was installed from if that file still exists, a VCS
+  URL at its commit, or an archive URL; otherwise (no direct URL, or the wheel is gone) the same released
+  version from the index. The `Dockerfile` now keeps its wheel at `/opt/duckstring/` so an image built
+  from an unreleased wheel can install that same build into Pond environments.
+- A machine with no `HOME` (EC2 userdata runs under cloud-init) gets `UV_CACHE_DIR={root}/uv-cache`.
 
 ### Local runs
 
@@ -114,13 +134,20 @@ If that environment lacks Duckstring, the message says to `uv add duckstring`.
    a real build of a tiny Pond (gated when uv or the network is unavailable), discovery success/failure
    (including the previously silent import error), lineage over the subprocess, the Duck spawned in the
    environment's Python, and local re-exec.
-2. **Pool agents.** The agent receives the environment hash with each Duck it starts, builds the
-   environment on its machine (same `environments.ensure_env`, fetching the Pond's source artifact as it
-   already does), and starts the Duck with that Python.
-3. **Cloud Ducks (Fargate, EC2).** Build at boot from the lock (uv's speed makes this viable for small
-   environments), with built environments optionally cached in object storage by hash
-   (`{data_root}/_envs/{hash}.tar`) so a cold start downloads instead of resolving. Boot failures must be
-   visible through the existing console/CloudWatch `diagnose` path.
+2. **Pool agents** and 3. **Cloud Ducks (Fargate, EC2)**: built together as the Duck switching itself
+   (see Launchers), rather than the agent building environments, since a Fargate or EC2 Duck has no
+   agent and the same code then serves all three. A Pool machine keeps built environments in its root
+   for later Ducks; a cloud Duck builds on every cold start.
+   Tests: `test_runtime.py::test_a_pool_duck_builds_its_ponds_environment` (a local Pool agent with its
+   own root: artifact fetch → build → switch → run), unit tests for `duck_python`, the requirement
+   fallbacks and the failed-build report. Verified by hand in the repository's Docker image as the
+   non-root user: the requirement resolves to the kept wheel, a cold build (empty uv cache, Duckstring's
+   own dependencies plus a small local package) took 12.6 s, the Pond's code loads, reuse is instant.
+   **Deferred: the object-store cache** (`{data_root}/_envs/{hash}.tar`). It would save roughly that
+   build time on a start that already includes an image pull, a venv isn't relocatable across paths or
+   interpreters (the key would have to include both), and it doesn't help a Duck without index access
+   (something with access must build it first). Revisit if a real Pond's cold build dominates its Fargate
+   start.
 
 ## Notes from phase 1
 

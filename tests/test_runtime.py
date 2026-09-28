@@ -1018,3 +1018,43 @@ def test_a_pond_runs_in_its_own_environment(runtime, tmp_path):
 
     data = root / "ponds" / "envp" / "m1" / "data" / "answer.parquet"
     assert duckdb.sql(f"SELECT n FROM '{data}'").fetchone() == (42,)
+
+
+@pytest.mark.timeout(300)
+def test_a_pool_duck_builds_its_ponds_environment(runtime, tmp_path, tmp_path_factory):
+    """A Duck on a Pool machine (here a local Pool agent with its own root: the same remote-boot path as
+    Fargate and EC2) starts with the machine's Python, fetches its code, builds the Pond's environment
+    on that machine and switches to it (plans/pond-environments.md, phases 2 and 3)."""
+    from tests.test_environments import _OFFLINE, _locked_env_pond, _zip
+
+    url, root = runtime
+    durable = tmp_path_factory.mktemp("env_pool_durable")
+    r = httpx.put(f"{url}/api/catchment/settings", json={"data_root": str(durable), "mode": "empty"}, timeout=10.0)
+    assert r.status_code == 200, r.text
+    r = httpx.post(f"{url}/api/catchment/duck-pools", json={"name": "envpool", "provider": "local"}, timeout=10.0)
+    assert r.status_code == 200, r.text
+
+    pond = _locked_env_pond(tmp_path)
+    r = httpx.post(
+        f"{url}/api/deploy",
+        files={"pond": ("pond.zip", _zip(pond), "application/zip")},
+        data={"name": "envp", "version": "1.0.0", "type": "inlet"},
+        timeout=280.0,
+    )
+    if r.status_code == 422 and any(s.lower() in r.text.lower() for s in _OFFLINE):
+        pytest.skip("uv can't reach the package index")
+    assert r.status_code == 200, r.text
+    r = httpx.post(f"{url}/api/ponds/envp/duck", json={"duck_target": "envpool"}, timeout=10.0)
+    assert r.status_code == 200, r.text
+
+    httpx.post(f"{url}/api/ponds/envp/tap", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "envp") or {}).get("end_f") is not None, timeout=240.0), \
+        f"envp never became fresh on the Pool: {_pond_status(url, 'envp')}"
+
+    import duckdb
+
+    agent_root = root / "pools" / "envpool"
+    envs = [p for p in (agent_root / "envs").iterdir() if (p / ".complete").exists()]
+    assert envs, "the Pool agent's machine built no environment"
+    data = agent_root / "ponds" / "envp" / "m1" / "data" / "answer.parquet"
+    assert duckdb.sql(f"SELECT n FROM '{data}'").fetchone() == (42,)

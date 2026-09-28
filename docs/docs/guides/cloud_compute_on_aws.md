@@ -83,7 +83,7 @@ Two security groups:
 - **`sg-catchment`**, on the Catchment: inbound on the Catchment's port (7474 by default) from `sg-duck`.
 - **`sg-duck`**, on Ducks: no inbound rules at all.
 
-Ducks also need a route to S3 and the Catchment: a public subnet with a public IP, or a private subnet with a NAT gateway or an S3 VPC endpoint.
+Ducks also need a route to S3 and the Catchment: a public subnet with a public IP, or a private subnet with a NAT gateway or an S3 VPC endpoint. A Duck for a Pond with its own Python dependencies also downloads them when it starts, so it needs a route to PyPI, or a package mirror set in the image with uv's `UV_DEFAULT_INDEX`.
 
 Ducks connect back to the address the Catchment is bound to. If that address isn't reachable from the Ducks' subnets, for example because the Catchment binds to `0.0.0.0` on a private network, set the address they should use:
 
@@ -125,7 +125,9 @@ Each Pond on a built-in size gets its own task. A pool you define, with `duckstr
 
 ### Building the image
 
-Duckstring doesn't publish a Duck image. The image runs in your account with access to your data, and must contain every package your Ponds import, so you build it and host it yourself. Cloud Ducks don't yet build the environment a Pond declares in its `pyproject.toml`; they run in the image's. A Duck downloads its Pond's code from the Catchment when it starts, so the image only needs dependencies, and needs rebuilding only when those change.
+Duckstring doesn't publish a Duck image. The image runs in your account with access to your data, so you build it and host it yourself. A Duck downloads its Pond's code from the Catchment when it starts, so the image only needs Duckstring and dependencies, and needs rebuilding only when those change.
+
+Ponds that declare their own [Python dependencies](writing_ripples.md#python-dependencies) need nothing extra in the image: the Duck builds the Pond's environment when it starts, installing the image's own Duckstring into it. This happens on every cold start: with only Duckstring's own dependencies it takes about 13 seconds, and more packages take longer. It also needs access to the package index (see [networking](#step-3-networking)). Ponds without a `pyproject.toml` run in the image's environment, so install whatever they import there.
 
 ```dockerfile
 FROM python:3.13-slim
@@ -137,7 +139,7 @@ ENV DUCKSTRING_STATE_ROOT=/var/lib/duckstring
 ENTRYPOINT ["python", "-m"]
 ```
 
-The repository's `Dockerfile` does the same from a locally built wheel. Push the image to a private ECR repository in the same account and region:
+The repository's `Dockerfile` does the same from a locally built wheel, which it keeps in the image at `/opt/duckstring/` so Ducks can install that same build into Pond environments. Push the image to a private ECR repository in the same account and region:
 
 ```bash
 docker build --platform linux/amd64 -t duckstring:0.5.0 .
@@ -228,6 +230,8 @@ duckstring do --all --sleep
 Ducks have no inbound access, so there's no SSH. Don't open it: a Duck holds credentials for your data.
 
 **Start with the Pond's failure message.** When a Duck fails, the Catchment asks AWS what happened and includes it: the ECS stop reason and the end of the task's CloudWatch log for Fargate, or the instance state and the end of its boot console for EC2.
+
+A Pond whose environment couldn't be built on the Duck fails with "Building the Pond's environment failed" and uv's output, usually a package the Duck couldn't download or that has no build for the Duck's platform.
 
 **Read the boot console** of an EC2 Duck that died before connecting:
 

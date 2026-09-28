@@ -69,6 +69,10 @@ class PoolAgent:
             return  # already running
         env = dict(os.environ)
         env.update(job.get("env") or {})
+        # The child starts with this machine's Python and switches to its Pond's own environment itself,
+        # building it here on first use (plans/pond-environments.md) — so it must not inherit the marker
+        # that says it already has.
+        env.pop("DUCKSTRING_IN_POND_ENV", None)
         argv = [
             sys.executable, "-m", "duckstring.duck",
             "--pond", job["pond"],

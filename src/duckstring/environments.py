@@ -63,24 +63,35 @@ def _extras() -> list[str]:
 
 
 def duckstring_requirement() -> list[str]:
-    """``uv pip install`` arguments installing the Catchment's own Duckstring (with its extras): the local
-    source for a development checkout, otherwise the same released version from the package index."""
+    """``uv pip install`` arguments installing this machine's own Duckstring (with its extras), so a Duck
+    runs exactly the Duckstring its Catchment, Pool agent or image has: the local source for a development
+    checkout, the same wheel or VCS commit it was installed from, otherwise the same released version from
+    the package index (also the fallback when the recorded wheel file is gone, as in the Docker image)."""
     from importlib import metadata
     from urllib.parse import unquote, urlparse
 
     dist = metadata.distribution("duckstring")
     extras = _extras()
     suffix = f"[{','.join(extras)}]" if extras else ""
+    released = [f"duckstring{suffix}=={dist.version}"]
     direct = dist.read_text("direct_url.json")
-    if direct:
-        info = json.loads(direct)
-        url = info.get("url", "")
-        if url.startswith("file://"):
-            path = unquote(urlparse(url).path)
-            if info.get("dir_info", {}).get("editable"):
-                return ["-e", f"{path}{suffix}"]
-            return [f"duckstring{suffix} @ {url}"]
-    return [f"duckstring{suffix}=={dist.version}"]
+    if not direct:
+        return released
+    info = json.loads(direct)
+    url = info.get("url", "")
+    if "vcs_info" in info:
+        vcs = info["vcs_info"]
+        return [f"duckstring{suffix} @ {vcs.get('vcs', 'git')}+{url}@{vcs.get('commit_id', '')}".rstrip("@")]
+    if url.startswith("file://"):
+        path = unquote(urlparse(url).path)
+        if not Path(path).exists():
+            return released
+        if info.get("dir_info", {}).get("editable"):
+            return ["-e", f"{path}{suffix}"]
+        return [f"duckstring{suffix} @ {url}"]
+    if url:
+        return [f"duckstring{suffix} @ {url}"]
+    return released
 
 
 def _interpreter(spec: EnvSpec) -> list[str]:
@@ -144,11 +155,16 @@ class _FileLock:
         self._fh.close()
 
 
-def ensure_env(root: Path, source_dir: Path) -> Path:
+def ensure_env(root: Path, source_dir: Path, *, check_lock: bool = True) -> Path:
     """The Python interpreter a Pond runs in, building its environment first if it isn't built yet.
     ``sys.executable`` for the default environment. Raises :class:`EnvError` on a missing/stale lock or a
     failed build (with uv's output). Also records the environment in the Pond's source dir
-    (:data:`ENV_MARKER`), for :func:`python_for`."""
+    (:data:`ENV_MARKER`), for :func:`python_for`.
+
+    ``check_lock`` (deploy) builds with ``uv sync --locked``, refusing a lock that no longer matches
+    ``pyproject.toml``. Without it (a Duck on another machine, for a Pond whose lock was checked when it
+    was deployed) the build is ``--frozen``: exactly what the lock says, without re-reading any source
+    it names, such as a local Duckstring checkout that exists only on the developer's machine."""
     source_dir = Path(source_dir)
     marker = source_dir / ENV_MARKER
     spec = pond_env(source_dir)
@@ -160,7 +176,10 @@ def ensure_env(root: Path, source_dir: Path) -> Path:
     with _FileLock(Path(root) / "envs" / f"{digest}.lock"):
         if not (env_dir / _COMPLETE).exists():
             shutil.rmtree(env_dir, ignore_errors=True)  # a previous build that didn't finish
-            _run_uv(["sync", "--locked", "--no-install-project", "--no-dev", "--quiet", *_interpreter(spec)],
+            # The locked Duckstring is skipped: this machine's own is installed next, and a lock made
+            # against a local checkout names a path that exists only on the developer's machine.
+            _run_uv(["sync", "--locked" if check_lock else "--frozen", "--no-install-project",
+                     "--no-install-package", "duckstring", "--no-dev", "--quiet", *_interpreter(spec)],
                     cwd=source_dir, env={"UV_PROJECT_ENVIRONMENT": str(env_dir)})
             _run_uv(["pip", "install", "--quiet", "--python", str(_python_in(env_dir)), *duckstring_requirement()],
                     cwd=source_dir)
@@ -203,3 +222,24 @@ def local_python(pond_dir: Path) -> Path | None:
 def has_duckstring(python: Path) -> bool:
     result = subprocess.run([str(python), "-c", "import duckstring"], capture_output=True)
     return result.returncode == 0
+
+
+def duck_python(root: Path, source_dir: Path) -> Path | None:
+    """For a Duck starting up: the interpreter to re-execute itself under, building the Pond's environment
+    on this machine first if it isn't built yet. ``None`` means carry on in this process: the Pond uses the
+    default environment, or this process already runs in the Pond's (the Catchment started it there, or
+    this is the re-executed Duck). Raises :class:`EnvError` if the environment can't be built.
+
+    This is how a Duck on a Pool machine or in the cloud gets the Pond's environment: it starts with the
+    machine's own Python, fetches the Pond's code, and switches."""
+    if os.environ.get(REEXEC_ENV):
+        return None
+    if "UV_CACHE_DIR" not in os.environ and "HOME" not in os.environ:
+        # cloud-init runs userdata with no HOME, and uv then has nowhere to cache
+        os.environ["UV_CACHE_DIR"] = str(Path(root) / "uv-cache")
+    python = ensure_env(root, source_dir, check_lock=False)  # checked by the Catchment at deploy
+    if python == Path(sys.executable):
+        return None  # the default environment
+    if Path(sys.prefix).resolve() == python.parent.parent.resolve():
+        return None  # already running in it
+    return python

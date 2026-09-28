@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from ..keys import split_pond_key
@@ -76,12 +77,17 @@ class SubprocessLauncher:
             if duck.get("flock_engine"):
                 env["DUCKSTRING_FLOCK_ENGINE"] = duck["flock_engine"]
             env["DUCKSTRING_FLOCK_OOM_POLICY"] = duck.get("oom_policy") or "fail_up"
-        from ..environments import python_for
+        from ..environments import REEXEC_ENV, python_for
 
+        # The Pond's own environment when it declares one and it's built (plans/pond-environments.md);
+        # otherwise the Duck starts here and builds or switches to it itself.
+        python = python_for(self.root, source_path)
+        env.pop(REEXEC_ENV, None)
+        if python != sys.executable:
+            env[REEXEC_ENV] = "1"
         self._procs[pond_key] = subprocess.Popen(
             [
-                # The Pond's own environment when it declares one (plans/pond-environments.md).
-                python_for(self.root, source_path), "-m", "duckstring.duck",
+                python, "-m", "duckstring.duck",
                 "--pond", name,
                 "--major", str(major),
                 "--version", version,
