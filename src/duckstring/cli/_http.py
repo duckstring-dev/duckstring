@@ -22,6 +22,10 @@ def request(method: str, url: str, auth: dict | None = None, **kwargs):
 
     from .config import auth_headers
 
+    # A Spout is addressed as "{pond}#{spout}". Catchment URLs never carry a fragment, so a "#" is always
+    # part of a name: encode it, or the client would treat the rest of the path as a fragment and drop it.
+    url = url.replace("#", "%23")
+
     raw_timeout = kwargs.pop("timeout", None)
     if raw_timeout is None:
         timeout = httpx.Timeout(60.0, connect=5.0)

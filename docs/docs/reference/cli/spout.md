@@ -8,7 +8,7 @@ sidebar_label: spout
 
 A Spout delivers a Pond's published tables to an external destination, such as an object store or a Postgres database, whenever the Pond publishes new output. Spouts are Catchment configuration and survive redeploys.
 
-A Spout never asks its Pond to run; it delivers whatever the Pond publishes. Keep the Pond fresh with a trigger, and limit how often a Spout delivers with a [window](trigger.md#window) on `{pond}#{spout}`. Each Spout has its own run history and failure state, visible in `status` and the UI.
+A Spout never asks its Pond to run; it delivers whatever the Pond publishes. Keep the Pond fresh with a trigger, and limit how often a Spout delivers with a [window](trigger.md#window) on `{pond}#{spout}`. Each Spout has its own run history and failure state, visible in `status` and the UI. A failed delivery is retried on the Pond's next 3 publishes; change the number with [`control failure-budget`](control.md#failure-budget) on `{pond}#{spout}`.
 
 Every command takes `-c` / `--catchment`, `-m` / `--major` and `-v` / `--version`; see [CLI Overview](index.md#choosing-a-major-version).
 

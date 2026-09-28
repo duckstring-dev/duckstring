@@ -184,6 +184,9 @@ IRREVERSIBLE_OPS = frozenset({"reset", "wipe", "remove"})
 # size means physically is the launcher's business (the local subprocess ignores it).
 FLOCK_MODES = ("off", "upgrade", "always")
 OOM_POLICIES = ("fail_up", "fail")
+# A Spout's default on-change retry budget: a failed delivery is retried on its Pond's next publishes.
+# Editable per Spout with `control failure-budget {pond}#{spout}`.
+SPOUT_SOURCE_RETRIES = 3
 POOL_PROVIDERS = ("fargate", "ec2", "local")  # local = a shared Pool machine on this box (dev/test)
 
 # Built-in preset Duck Pools (plans/cloud-config.md §4b): Fargate task sizes, always available so a
@@ -404,7 +407,9 @@ class Driver:
                 retry = db.execute(
                     "SELECT immediate_retries, source_retries FROM pond_retry WHERE pond_id = ?", (pond_id,)
                 ).fetchone()
-                imm, onc = retry if retry else (0, 0)
+                # A Spout with no budget set retries a failed delivery on its Pond's next few publishes
+                # (delivery failures are often transient); a Pond defaults to no retries.
+                imm, onc = retry if retry else (0, SPOUT_SOURCE_RETRIES if is_spout else 0)
                 duck_row = db.execute(
                     "SELECT duck_target, dedicated_instance_type, dedicated_auto_stop, "
                     "flock_mode, flock_engine, oom_policy, deploy_config FROM pond_duck WHERE pond_id = ?",

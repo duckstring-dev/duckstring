@@ -71,6 +71,12 @@ duckstring spout ls reports
 
 `ls` shows each Spout's destination, mode, last delivered freshness and state. A failed delivery shows its error there, in run history, and to any [alert channel](monitoring_and_failures.md#alerts) subscribed to `spout`. A Spout failure never affects its Pond.
 
+A failed delivery is retried the next time the Pond publishes, up to three times, since delivery failures are often temporary: a database restarting, a network blip. If the retries are used up, the Spout stays failed until you fix the cause and reset it with `spout clear`, `spout wake` or `spout force`. Change the number of retries per Spout, addressing it as `{pond}#{spout}`:
+
+```bash
+duckstring control failure-budget 'priced#priced_line' --on-change 10
+```
+
 ## Controlling when deliveries happen
 
 A Spout never asks its Pond to run. It delivers whatever the Pond publishes, so the Pond's own trigger decides how fresh the delivered data is.
@@ -93,4 +99,4 @@ duckstring spout force reports monthly_summary     # resume and deliver the curr
 duckstring spout resync reports monthly_summary    # deliver everything again in full
 ```
 
-Use `resync` after the destination was changed by hand or restored from a backup. A failed Spout stays failed until you fix the cause and reset it with `spout clear`, `spout wake` or `spout force`.
+Use `resync` after the destination was changed by hand or restored from a backup.

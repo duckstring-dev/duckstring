@@ -80,6 +80,8 @@ duckstring control failure-budget POND [--immediate N] [--on-change N]
 
 Shows the Pond's retry budgets, or sets them. These values replace the ones from `pond.toml` and persist across redeploys.
 
+It also works on a Spout, addressed as `{pond}#{spout}`. A Spout retries a failed delivery on its Pond's next 3 publishes by default; `--on-change` changes that number.
+
 | Option | Description |
 |---|---|
 | `--immediate`, `-i` | How many times a failed Ripple is retried within the same Pond Run. |

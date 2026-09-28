@@ -243,6 +243,77 @@ def test_worker_failure_records_failed_run_with_traceback(tmp_path):
     assert _would_dispatch(d, "sales#lake@1")
 
 
+# ─── Retries: a failed delivery is retried on the Source's next publishes ─────
+
+
+def _advance(d, day):
+    d.state.pond_states["sales@1"].end_f = datetime(2026, 6, day, tzinfo=UTC)
+
+
+def test_spout_defaults_to_three_on_change_retries(tmp_path):
+    d, _ = _with_spout(tmp_path, f"file://{tmp_path / 'o'}", name="lake")
+    assert d.retry_config("sales#lake@1") == {"immediate_retries": 0, "source_retries": 3}
+
+
+def test_failed_spout_retries_on_the_next_publishes_then_stops(tmp_path):
+    d, _ = _with_spout(tmp_path, "file:///dev/null/nope", name="lake")
+    _deliver(d, tmp_path)
+    assert _sp(d, "lake")["is_failed"] is True
+    for day in (2, 3, 4):  # three retries, each on a new publish
+        _advance(d, day)
+        assert _would_dispatch(d, "sales#lake@1")
+        _deliver(d, tmp_path)
+    _advance(d, 5)
+    assert not _would_dispatch(d, "sales#lake@1")  # budget spent: stays failed until reset
+    runs = d.run_history("sales#lake@1", lineage=False, ripples=False, limit=10)
+    assert [r["status"] for r in runs] == ["failed"] * 4
+
+
+def test_failed_spout_recovers_when_a_retry_succeeds(tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the output directory should be")
+    d, _ = _with_spout(tmp_path, f"file://{blocker / 'out'}", name="lake")
+    _deliver(d, tmp_path)
+    assert _sp(d, "lake")["is_failed"] is True
+    blocker.unlink()  # the cause is fixed outside Duckstring
+    _advance(d, 2)
+    _deliver(d, tmp_path)
+    assert _sp(d, "lake")["is_failed"] is False
+    assert (blocker / "out" / "revenue.parquet").exists()
+
+
+def test_spout_retry_budget_is_editable(tmp_path):
+    d, _ = _with_spout(tmp_path, "file:///dev/null/nope", name="lake")
+    d.set_retry("sales#lake@1", 0, 0)
+    _deliver(d, tmp_path)
+    _advance(d, 2)
+    assert not _would_dispatch(d, "sales#lake@1")  # no retries allowed
+    d2 = Driver(d.db, tmp_path, "http://x", NoopLauncher())  # the edit survives a restart
+    assert d2.retry_config("sales#lake@1") == {"immediate_retries": 0, "source_retries": 0}
+
+
+def test_cli_encodes_a_spout_address():
+    """A Spout is addressed as ``{pond}#{spout}``; the CLI must send the '#' encoded, or the rest of the
+    path would be treated as a URL fragment and dropped."""
+    import httpx
+
+    from duckstring.cli import _http
+
+    seen = {}
+
+    def fake_request(method, url, **kwargs):
+        seen["path"] = httpx.Request(method, url).url.raw_path
+        return httpx.Response(200, json={}, request=httpx.Request(method, url))
+
+    original = httpx.request
+    httpx.request = fake_request
+    try:
+        _http.get("http://c/api/ponds/sales#lake/budget")
+    finally:
+        httpx.request = original
+    assert seen["path"] == b"/api/ponds/sales%23lake/budget"
+
+
 # ─── The standing Wake: Control verbs (sleep/wake/kill/force/clear) ────────────
 
 
