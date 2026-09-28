@@ -132,10 +132,13 @@ def import_pond_module(source_dir: Path, entry: str):
     """Import the module at ``source_dir/entry`` for its decorator side-effects (``@ripple`` /
     ``@puddle``) and return it. The import is isolated: ``sys.path`` gains only the entry's parent
     for the duration, and any modules the import added are evicted afterwards so the next Pond's
-    code never sees stale state."""
+    code never sees stale state. The Ripple and Puddle registries are cleared first, so collecting
+    afterwards returns only what this import registered."""
     import importlib
     import sys
 
+    _RIPPLES.clear()
+    _PUDDLES.clear()
     entry_path = Path(source_dir) / entry
     parent = str(entry_path.parent)
     stem = entry_path.stem

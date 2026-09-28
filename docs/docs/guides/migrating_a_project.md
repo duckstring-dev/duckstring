@@ -76,7 +76,7 @@ Read connection details from environment variables on the Catchment rather than 
 
 ### Python dependencies
 
-Ripples run in the Catchment's Python environment, so any package a Ripple imports (`requests`, `scikit-learn`, a database driver) must be installed wherever the Catchment runs, and in the image used for [cloud compute](cloud_compute_on_aws.md).
+Declare the packages your Ripples import (`requests`, `scikit-learn`, a database driver) in the Pond's own `pyproject.toml` and lock them with uv. The Catchment builds that environment on deploy and runs the Pond in it. If the project has a `requirements.txt`, convert it with `uv init --bare`, `uv add -r requirements.txt` and `uv add duckstring`. See [Python dependencies](writing_ripples.md#python-dependencies).
 
 ### Replacing the scheduler
 

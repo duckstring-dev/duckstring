@@ -182,6 +182,25 @@ def notify(pond):
 
 Side effects can run more than once. A Ripple is retried after a failure, and runs again after a crash if it hadn't finished, so make external calls safe to repeat, for example by keying them on `pond.f`.
 
+## Python dependencies
+
+When Ripples import packages beyond Duckstring and DuckDB, give the Pond its own environment. In the Pond's directory:
+
+```bash
+uv init --bare                 # writes a minimal pyproject.toml
+uv add duckstring scikit-learn
+```
+
+This writes `pyproject.toml` and `uv.lock` and creates the environment in `.venv`. `duckstring pond run` and `pond hydrate` switch to that environment automatically, so local runs use the same packages a deployed run will. Commit both files.
+
+On deploy, the Catchment builds the environment from `uv.lock`, installs its own version of Duckstring into it, and runs the Pond's Ducks there. Environments are cached by the lock's contents, so redeploying with an unchanged lock is quick, and Ponds with identical locks share one. A deploy is refused if `uv.lock` is missing or out of date with `pyproject.toml`; run `uv lock` and deploy again. To pin a Python version, add a `.python-version` file (`uv python pin 3.12`). Otherwise the Pond uses the Catchment's Python.
+
+A Pond without a `pyproject.toml` runs in the Catchment's own environment.
+
+:::note
+Pond environments are built for Ducks on the Catchment's own machine. A Pond whose Duck runs on a pool or in the [cloud](cloud_compute_on_aws.md) still uses the packages installed there, such as those in the Duck image.
+:::
+
 ## Deploying
 
 From the Pond's directory:

@@ -9,17 +9,16 @@ A Catchment on your laptop stops when you close it. For pipelines that need to k
 
 ## Install
 
-Create a user for the Catchment and install Duckstring into a virtual environment, with any packages your Ripples import:
+Create a user for the Catchment and install Duckstring into a virtual environment:
 
 ```bash
 sudo useradd --system --create-home duckstring
 sudo -iu duckstring
 python3 -m venv ~/venv
 ~/venv/bin/pip install duckstring
-~/venv/bin/pip install 'duckstring[dbt]' scikit-learn   # whatever your Ponds need
 ```
 
-Ripples run in this environment, so install new dependencies here before deploying Ponds that use them.
+A Pond that declares its own [Python dependencies](writing_ripples.md#python-dependencies) runs in an environment the Catchment builds for it on deploy, under the Catchment's directory. A Pond that doesn't runs in this environment, so install any packages its Ripples import here.
 
 ## Create the Catchment
 

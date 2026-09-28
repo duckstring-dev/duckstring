@@ -125,7 +125,7 @@ Each Pond on a built-in size gets its own task. A pool you define, with `duckstr
 
 ### Building the image
 
-Duckstring doesn't publish a Duck image. The image runs in your account with access to your data, and must contain every package your Ponds import, so you build it and host it yourself. A Duck downloads its Pond's code from the Catchment when it starts, so the image only needs dependencies, and needs rebuilding only when those change.
+Duckstring doesn't publish a Duck image. The image runs in your account with access to your data, and must contain every package your Ponds import, so you build it and host it yourself. Cloud Ducks don't yet build the environment a Pond declares in its `pyproject.toml`; they run in the image's. A Duck downloads its Pond's code from the Catchment when it starts, so the image only needs dependencies, and needs rebuilding only when those change.
 
 ```dockerfile
 FROM python:3.13-slim

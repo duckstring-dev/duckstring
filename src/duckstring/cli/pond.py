@@ -50,6 +50,31 @@ def _write_pond_files(cwd: Path, toml_content: str, pond_py_content: str, readme
     (cwd / "README.md").write_text(readme_content, encoding="utf-8")
 
 
+def _use_pond_env() -> None:
+    """Re-run this command under the Pond's own environment (``.venv``, from ``uv sync``) when it declares
+    one, so a local run imports the same packages a deployed one does (plans/pond-environments.md)."""
+    import os
+    import sys
+
+    from ..environments import REEXEC_ENV, has_duckstring, local_python
+
+    cwd = Path.cwd()
+    python = local_python(cwd)
+    if python is None:
+        if (cwd / "pyproject.toml").is_file() and not (cwd / ".venv").exists() and not os.environ.get(REEXEC_ENV):
+            typer.echo("Warning: this Pond has a pyproject.toml but no .venv; running in the current "
+                       "environment. Run `uv sync` to create the Pond's environment.", err=True)
+        return
+    if not has_duckstring(python):
+        typer.echo("Error: the Pond's environment (.venv) doesn't have Duckstring installed. "
+                   "Add it with `uv add duckstring`.", err=True)
+        raise typer.Exit(1)
+    os.environ[REEXEC_ENV] = "1"
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(str(python), [str(python), "-m", "duckstring", *sys.argv[1:]])
+
+
 def _load_project():
     from ..local import load_project
 
@@ -211,6 +236,7 @@ def hydrate(
     ),
 ) -> None:
     """Build this Pond's Puddles into puddles/ for a local run."""
+    _use_pond_env()
     from rich.console import Console
 
     from ..local import hydrate as hydrate_project
@@ -252,6 +278,7 @@ def run(
     fresh: bool = typer.Option(False, "--fresh", help="Ignore the Pond's own Puddle and start from nothing."),
 ) -> None:
     """Run this Pond once on this machine against its Puddles, with no Catchment. Output goes to puddles/out/."""
+    _use_pond_env()
     from rich.console import Console
 
     from ..local import run_pond

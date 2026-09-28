@@ -21,7 +21,7 @@ from duckstring.catchment.asgi import app
 duckstring
 ```
 
-Add any packages your Ripples import to `requirements.txt`, since Ripples run in the app's environment. Deploy the bundle as an ASGI (FastAPI) app, using the platform's usual method.
+Ponds that declare their own [Python dependencies](writing_ripples.md#python-dependencies) get an environment built for them under the state directory. Ponds that don't run in the app's environment, so add any packages their Ripples import to `requirements.txt`. Deploy the bundle as an ASGI (FastAPI) app, using the platform's usual method.
 
 Configure the Catchment with environment variables in the platform's settings:
 

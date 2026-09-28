@@ -62,6 +62,10 @@ def _dry_run(console, pond_dir: Path) -> None:
     console.print(f"[dim]{len(files)} files, {_size(total)} (excluding files matched by {rules})[/dim]")
 
 
+# A first deploy of a Pond with its own environment builds that environment on the Catchment.
+_DEPLOY_TIMEOUT_S = 900
+
+
 def _deploy_one(
     console,
     pond_dir: Path,
@@ -79,6 +83,14 @@ def _deploy_one(
     name = pond_section.get("name", "unknown")
     version = pond_section.get("version", "0.0.0")
     pond_type = pond_section.get("type", "pond")
+
+    from ..environments import EnvError, pond_env
+
+    try:
+        pond_env(pond_dir)  # a pyproject.toml needs a uv.lock; fail here rather than after the upload
+    except EnvError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
 
     try:
         import httpx as _httpx
@@ -131,6 +143,7 @@ def _deploy_one(
         _http.post(
             f"{url}/api/deploy", auth=cfg,
             json={"name": name, "version": version, "type": pond_type, "git_ref": git, "repo_url": repo_url},
+            timeout=_DEPLOY_TIMEOUT_S,
         )
     else:
         count, total = _summary(pond_dir)
@@ -140,7 +153,7 @@ def _deploy_one(
             f"{url}/api/deploy", auth=cfg,
             files={"pond": ("pond.zip", archive, "application/zip")},
             data={"name": name, "version": version, "type": pond_type},
-            timeout=120,
+            timeout=_DEPLOY_TIMEOUT_S,
         )
 
     console.print(f"[green]Deployed[/green] [bold]{name}@{version}[/bold] to [bold]{catchment_name}[/bold].")

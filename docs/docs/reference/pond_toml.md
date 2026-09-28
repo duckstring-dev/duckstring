@@ -67,6 +67,31 @@ Allows over-sized computations to be sent to a serverless engine. See [Ducks and
 
 The defaults come from the Catchment (`DUCKSTRING_FLOCK_MODE`, `DUCKSTRING_FLOCK_ENGINE`, `DUCKSTRING_FLOCK_OOM_POLICY`) when the key is omitted. The Flock only takes effect when an engine is configured on the Catchment. Otherwise everything runs in the Duck. Operators can override these per Pond with [`duckstring duck set`](cli/duck.md#set).
 
+## Python dependencies
+
+A Pond's Python packages aren't declared in `pond.toml`, but in a standard `pyproject.toml` beside it, locked into a `uv.lock`:
+
+```toml
+# pyproject.toml
+[project]
+name = "sales"
+version = "1.2.0"
+requires-python = ">=3.10"
+dependencies = ["duckstring", "scikit-learn>=1.5"]
+```
+
+| Files present | Environment |
+|---|---|
+| Neither | The Catchment's own Python environment. |
+| `pyproject.toml` and `uv.lock` | The Pond's own, built by the Catchment from `uv.lock` on deploy. |
+| `pyproject.toml` only | Deploy is refused: run `uv lock`. |
+
+The Catchment builds the environment with `uv sync --locked`, so a `uv.lock` that no longer matches `pyproject.toml` is also refused. Dev dependencies are left out. The Catchment then installs its own version of Duckstring into the environment, replacing any version in the lock, since the Duck and the Catchment must match. The environment uses the Catchment's Python version, unless the Pond has a `.python-version` file.
+
+Environments are stored under the Catchment's state directory in `envs/`, one per distinct lock, and shared by every Pond with the same one. Only Ducks on the Catchment's own machine use them for now; Ducks on a pool or in the cloud use the packages installed where they run.
+
+`requirements.txt` isn't read. It has no lock, so the deployed environment could differ from the one the Pond was tested in.
+
 ## `[serve]`
 
 | Key | Type | Default | Description |

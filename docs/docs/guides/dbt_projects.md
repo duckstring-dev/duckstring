@@ -15,7 +15,7 @@ The worked example below is `shop_analytics`, created with `duckstring pond demo
 pip install 'duckstring[dbt]'
 ```
 
-This installs dbt-core and the dbt-duckdb adapter. Install it wherever the Catchment runs, since Ducks run the models there.
+This installs dbt-core and the dbt-duckdb adapter. Install it wherever the Catchment runs, since Ducks run the models there. Alternatively, give the dbt Pond its own [environment](writing_ripples.md#python-dependencies) with `uv add 'duckstring[dbt]'`, which also lets two dbt Ponds use different dbt versions.
 
 ## Set up the Pond
 

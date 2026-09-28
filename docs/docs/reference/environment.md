@@ -40,6 +40,7 @@ Run only one Catchment process against a state directory, and only one Catchment
 | `DUCKSTRING_MEMORY_LIMIT` | DuckDB's default | Memory limit for each Duck's DuckDB, such as `12GB`. Also sets the size at which the Flock takes over a computation. Set it to about 80% of the Duck's memory. |
 | `DUCKSTRING_DUCK_LAUNCHER` | built in | `module:Class` of a custom launcher that replaces how Ducks are started. |
 | `DUCKSTRING_DISABLE_DUCKS` | off | Start no Ducks at all. For testing the Catchment on its own. |
+| `DUCKSTRING_DISCOVER_TIMEOUT` | `300` | Seconds a deploy waits for the Pond's code to load while its Ripples are discovered. |
 
 ## Serving
 

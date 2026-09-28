@@ -990,3 +990,31 @@ def test_demo_chain_runs_on_iceberg_end_to_end(runtime_iceberg):
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()[0]["n"] >= 0
+
+
+@pytest.mark.timeout(300)
+def test_a_pond_runs_in_its_own_environment(runtime, tmp_path):
+    """A Pond whose Ripple imports a package only its own environment has: the Catchment builds the
+    environment at deploy, and the Duck runs there (plans/pond-environments.md)."""
+    from tests.test_environments import _OFFLINE, _locked_env_pond, _zip
+
+    url, root = runtime
+    pond = _locked_env_pond(tmp_path)
+    r = httpx.post(
+        f"{url}/api/deploy",
+        files={"pond": ("pond.zip", _zip(pond), "application/zip")},
+        data={"name": "envp", "version": "1.0.0", "type": "inlet"},
+        timeout=280.0,
+    )
+    if r.status_code == 422 and any(s.lower() in r.text.lower() for s in _OFFLINE):
+        pytest.skip("uv can't reach the package index")
+    assert r.status_code == 200, r.text
+
+    httpx.post(f"{url}/api/ponds/envp/tap", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "envp") or {}).get("end_f") is not None), \
+        f"envp never became fresh: {_pond_status(url, 'envp')}"
+
+    import duckdb
+
+    data = root / "ponds" / "envp" / "m1" / "data" / "answer.parquet"
+    assert duckdb.sql(f"SELECT n FROM '{data}'").fetchone() == (42,)

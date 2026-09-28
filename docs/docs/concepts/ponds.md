@@ -17,6 +17,8 @@ sales/
 │   ├── pond.py      # Ripples containing the transform code
 │   └── puddles.py   # Source snapshots for local testing
 ├── pond.toml        # name, version, type, Sources
+├── pyproject.toml   # optional: the Python packages the Ripples import
+├── uv.lock          #   ...and their exact versions
 ├── .gitignore
 ├── .pondignore      # files left out when deploying
 └── README.md
@@ -37,6 +39,10 @@ products = "1.0.0"
 Nowhere is the pipeline of Ponds specified outside of this list of dependencies. Declaring sources allows the Pond to consume from
 the listed parent Ponds provided they match their major version. That allows upgrades to be made upstream until a major (breaking)
 change is made.
+
+## Dependencies
+
+A Pond that imports Python packages declares them in a standard `pyproject.toml`, locked with [uv](https://docs.astral.sh/uv/) into `uv.lock`. The Catchment builds that environment when the Pond is deployed and runs the Pond's Ducks in it, so a deployed Pond runs with exactly the packages it was developed with. Two Ponds can depend on different versions of the same package, and upgrading one Pond's dependencies never touches another's. A Pond without a `pyproject.toml` runs in the Catchment's own environment, which suits Ponds written in SQL.
 
 ## Types
 

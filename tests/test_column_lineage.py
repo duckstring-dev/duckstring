@@ -180,7 +180,8 @@ def test_deploy_capture_stores_and_serves_column_lineage(tmp_path):
     from duckstring.catchment.db import connect, migrate
     from duckstring.catchment.driver import Driver
     from duckstring.catchment.launcher import NoopLauncher
-    from duckstring.catchment.routes.deploy import _capture_column_lineage, _register
+    from duckstring.catchment.routes.deploy import _register, _store_column_lineage
+    from duckstring.discover import capture_lineage_rows
 
     def priced(pond):  # a capturable Trickle ripple
         (pond.trickle("orders.order_line", p=1.0).alias("ol")
@@ -198,7 +199,7 @@ def test_deploy_capture_stores_and_serves_column_lineage(tmp_path):
     ripples = [{"func": priced, "name": "priced", "parents": []},
                {"func": raw, "name": "raw", "parents": []}]
     _register(db, "sales", "1.0.0", "pond", "ponds/sales/1.0.0", cfg, ripples)
-    _capture_column_lineage(db, "sales", "1.0.0", ripples)
+    _store_column_lineage(db, "sales", "1.0.0", capture_lineage_rows(ripples, {}))
 
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
     cols = d.lineage(pond="sales", columns=True)["ponds"][0]["columns"]
@@ -209,14 +210,15 @@ def test_deploy_capture_stores_and_serves_column_lineage(tmp_path):
     assert "t" not in cols  # the raw ripple contributed nothing — absent, not wrong
 
     # recomputed wholesale on redeploy (no stale rows)
-    _capture_column_lineage(db, "sales", "1.0.0", ripples[:1])
+    _store_column_lineage(db, "sales", "1.0.0", capture_lineage_rows(ripples[:1], {}))
     n = db.execute("SELECT count(DISTINCT \"table\") FROM pond_version_column_lineage").fetchone()[0]
     assert n == 1
 
 
 def test_deploy_capture_never_fails_the_deploy(tmp_path):
     from duckstring.catchment.db import connect, migrate
-    from duckstring.catchment.routes.deploy import _capture_column_lineage, _register
+    from duckstring.catchment.routes.deploy import _register, _store_column_lineage
+    from duckstring.discover import capture_lineage_rows
 
     def explodes(pond):
         raise RuntimeError("ripple import-time chaos")
@@ -226,7 +228,7 @@ def test_deploy_capture_never_fails_the_deploy(tmp_path):
     cfg = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": "inlet"}
     ripples = [{"func": explodes, "name": "boom", "parents": []}]
     _register(db, "src", "1.0.0", "inlet", "ponds/src/1.0.0", cfg, ripples)
-    _capture_column_lineage(db, "src", "1.0.0", ripples)  # must not raise
+    _store_column_lineage(db, "src", "1.0.0", capture_lineage_rows(ripples, {}))  # must not raise
     assert db.execute("SELECT count(*) FROM pond_version_column_lineage").fetchone()[0] == 0
 
 

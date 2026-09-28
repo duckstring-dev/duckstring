@@ -121,44 +121,6 @@ def _validate_choice(value, choices, label):
     return value
 
 
-def _discover_ripples(source_dir: Path) -> list[dict]:
-    from duckstring.core import collect_ripples, import_pond_module, pond_entrypoints, read_pond_toml
-    from duckstring.dbt_mode import dbt_project_subpath
-
-    info = read_pond_toml(source_dir)
-    if dbt_project_subpath(info):
-        return _discover_dbt_ripples(source_dir, info)  # dbt-mode: models → ripples (no @ripple code)
-
-    ripples_entry, _ = pond_entrypoints(info)
-    if not (source_dir / ripples_entry).exists():
-        return []
-    try:
-        import_pond_module(source_dir, ripples_entry)
-        return collect_ripples()
-    except Exception:
-        collect_ripples()
-        return []
-
-
-def _discover_dbt_ripples(source_dir: Path, info: dict) -> list[dict]:
-    """Translate a dbt-mode Pond's model graph into ripple rows (a model = a Ripple). Raises ValueError
-    (→ 422) with dbt's own error text if the project can't be parsed."""
-    import tempfile
-
-    from duckstring.dbt_mode import DbtError, manifest_to_ripples, parse_manifest, project_dir, write_profile
-
-    proj = project_dir(source_dir, info)
-    if not (proj / "dbt_project.yml").exists():
-        raise ValueError(f"dbt_project points at '{proj.name}/' but no dbt_project.yml is there")
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            profiles = write_profile(Path(tmp), ":memory:")  # parse touches no registry
-            manifest = parse_manifest(proj, profiles)
-        return manifest_to_ripples(manifest)
-    except DbtError as exc:
-        raise ValueError(str(exc)) from exc
-
-
 def _incoming_topology(ripples) -> dict[str, frozenset]:
     """The intra-Pond graph as {ripple_name: frozenset(parent_names)} — for comparing a redeploy
     against what's already stored (parents arrive as function refs, resolved to names here)."""
@@ -189,68 +151,46 @@ def _existing_topology(db, pv_id) -> dict[str, frozenset]:
     return {nm: frozenset(ps) for nm, ps in parents.items()}
 
 
-def _capture_column_lineage(db, name: str, version: str, ripples: list[dict]) -> None:
-    """Static column lineage at deploy (plans/lineage.md Phase 2): capture each ripple's plan
-    (:mod:`duckstring.trickle.capture`) and walk its column derivations
-    (:mod:`duckstring.trickle.lineage`), storing rows per ``pond_version``. **Best-effort and
-    per-ripple**: a non-capturable ripple (raw ``con`` access, callable metrics, plain
-    ``read_table``+``write_table`` code) simply contributes no rows — exact or absent, never a failed
-    deploy. Source schemas come from the deployed sources' captured contracts
-    (``pond_version_schema``) when available; explicit ``alias.col`` references stay provable without
-    them. Recomputed wholesale each deploy (lineage is a property of the version)."""
-    try:
-        from duckstring.trickle.capture import NonCapturable, capture_plan
-        from duckstring.trickle.lineage import column_lineage
+def _source_schemas(db, sources: dict) -> dict[str, list[str]]:
+    """The known columns of every table of the declared Sources (``{"source.table": [columns]}``), from
+    their captured contracts, for the discovery subprocess's column-lineage capture."""
+    catalog: dict[str, set] = {}
+    for src in sources:
+        for table, col in db.execute(
+            'SELECT DISTINCT s."table", s."column" FROM pond_version_schema s '
+            "JOIN pond_version pv ON pv.id = s.pond_version_id "
+            "JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = ?", (src,),
+        ):
+            catalog.setdefault(f"{src}.{table}", set()).add(col)
+    return {ref: sorted(cols) for ref, cols in catalog.items()}
 
+
+def _store_column_lineage(db, name: str, version: str, rows: list[list[str]]) -> None:
+    """Store the static column lineage discovery captured (plans/lineage.md Phase 2), replacing the
+    version's previous rows: lineage is a property of the version. Never fails a deploy."""
+    try:
         (pv_id,) = db.execute(
             "SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
             "WHERE pn.name = ? AND pv.version = ?", (name, version),
         ).fetchone()
-
-        def source_catalog(ref: str) -> dict:
-            src, table = ref.split(".", 1)
-            cols = [r[0] for r in db.execute(
-                'SELECT DISTINCT s."column" FROM pond_version_schema s '
-                "JOIN pond_version pv ON pv.id = s.pond_version_id "
-                "JOIN pond_name pn ON pn.id = pv.pond_name_id "
-                'WHERE pn.name = ? AND s."table" = ?', (src, table),
-            ).fetchall()]
-            entry = {"location": "__SRC__", "mode": None, "pk": None, "floor": None, "f": None}
-            if cols:
-                entry["schema"] = {c: "" for c in cols}
-            return entry
-
-        rows: list[tuple] = []
-        for r in ripples:
-            func = r.get("func")
-            if not callable(func):
-                continue  # dbt-mode rows carry model-name strings — Phase 3 (SQL parsing) territory
-            try:
-                body = capture_plan(lambda host, fn=func: fn(host), source_catalog=source_catalog)
-            except NonCapturable:
-                continue
-            except Exception:
-                continue  # a ripple import-time quirk must never fail lineage capture
-            for table, cols in column_lineage(body).items():
-                if cols is None:
-                    rows.append((pv_id, table, "", "opaque", "", ""))
-                    continue
-                for col, prov in cols.items():
-                    if prov is None:
-                        rows.append((pv_id, table, col, "opaque", "", ""))
-                    elif not prov:
-                        rows.append((pv_id, table, col, "constant", "", ""))
-                    else:
-                        rows.extend((pv_id, table, col, "exact", ref, sc) for ref, sc in sorted(prov))
         with db:
             db.execute("DELETE FROM pond_version_column_lineage WHERE pond_version_id = ?", (pv_id,))
             db.executemany(
                 'INSERT OR IGNORE INTO pond_version_column_lineage '
                 '(pond_version_id, "table", "column", kind, src_ref, src_column) VALUES (?, ?, ?, ?, ?, ?)',
-                rows,
+                [(pv_id, *row) for row in rows],
             )
     except Exception as exc:  # noqa: BLE001 — lineage is observability; a deploy must never fail on it
-        print(f"[catchment] column-lineage capture failed for {name}@{version}: {exc}", flush=True)
+        print(f"[catchment] storing column lineage failed for {name}@{version}: {exc}", flush=True)
+
+
+def _prepare(root: Path, staging: Path, db_catalog: dict) -> tuple[Path, dict]:
+    """Build the staged Pond's environment and discover its Ripples in it. Runs in a worker thread."""
+    from ...discover import discover
+    from ...environments import ensure_env
+
+    python = ensure_env(root, staging)
+    return python, discover(python, staging, db_catalog)
 
 
 def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
@@ -378,54 +318,78 @@ class _GitBody(BaseModel):
 
 @router.post("/deploy", dependencies=[auth.full])
 async def deploy(request: Request):
+    import asyncio
+    import tempfile
+
+    from ...discover import DiscoveryError
+    from ...environments import EnvError
+
     db = request.app.state.db
     root: Path = request.app.state.root
     ct = request.headers.get("content-type", "")
 
-    if "multipart/form-data" in ct:
-        form = await request.form()
-        name = form["name"]
-        version = form["version"]
-        kind = form.get("type", "pond")
-        archive_bytes = await form["pond"].read()
+    # The Pond is unpacked into a staging directory and only replaces the deployed copy once its
+    # environment builds and its code loads, so a failed deploy leaves the running version untouched.
+    (root / "ponds").mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=root / "ponds"))
+    try:
+        if "multipart/form-data" in ct:
+            form = await request.form()
+            name = form["name"]
+            version = form["version"]
+            kind = form.get("type", "pond")
+            archive_bytes = await form["pond"].read()
+            try:
+                with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
+                    zf.extractall(staging)
+            except zipfile.BadZipFile as exc:
+                raise HTTPException(status_code=422, detail="Uploaded file is not a valid zip archive") from exc
+        else:
+            body = _GitBody(**(await request.json()))
+            name, version, kind = body.name, body.version, body.type
+            shutil.rmtree(staging)  # git clone wants to create the directory itself
+            try:
+                subprocess.run(["git", "clone", body.repo_url, str(staging)], check=True, capture_output=True)
+                subprocess.run(["git", "-C", str(staging), "checkout", body.git_ref], check=True, capture_output=True)
+            except subprocess.CalledProcessError as exc:
+                raise HTTPException(status_code=422, detail=f"git clone failed: {exc.stderr.decode()}") from exc
+            from ...pondignore import prune
+
+            prune(staging)  # keep what a local deploy would upload (.pondignore or its defaults), and drop .git
+
+        try:
+            cfg = _pond_config(staging / "pond.toml")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if cfg["kind"]:
+            kind = cfg["kind"]
+        catalog = _source_schemas(db, cfg["sources"])
+        try:
+            _, found = await asyncio.to_thread(_prepare, root, staging, catalog)
+        except EnvError as exc:
+            raise HTTPException(status_code=422, detail=f"Building the Pond's environment failed: {exc}") from exc
+        except DiscoveryError as exc:
+            detail = f"Loading the Pond's code failed: {exc}"
+            if exc.detail:
+                detail += f"\n\n{exc.detail}"
+            raise HTTPException(status_code=422, detail=detail) from exc
 
         dest = root / "ponds" / name / version
         if dest.exists():
             shutil.rmtree(dest)
-        dest.mkdir(parents=True)
-        try:
-            with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
-                zf.extractall(dest)
-        except zipfile.BadZipFile as exc:
-            shutil.rmtree(dest, ignore_errors=True)
-            raise HTTPException(status_code=422, detail="Uploaded file is not a valid zip archive") from exc
-    else:
-        body = _GitBody(**(await request.json()))
-        name, version, kind = body.name, body.version, body.type
-        dest = root / "ponds" / name / version
-        if dest.exists():
-            shutil.rmtree(dest)
-        dest.mkdir(parents=True)
-        try:
-            subprocess.run(["git", "clone", body.repo_url, str(dest)], check=True, capture_output=True)
-            subprocess.run(["git", "-C", str(dest), "checkout", body.git_ref], check=True, capture_output=True)
-        except subprocess.CalledProcessError as exc:
-            shutil.rmtree(dest, ignore_errors=True)
-            raise HTTPException(status_code=422, detail=f"git clone failed: {exc.stderr.decode()}") from exc
-        from ...pondignore import prune
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        staging.rename(dest)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
-        prune(dest)  # keep what a local deploy would upload (.pondignore or its defaults), and drop .git
-
-    cfg = _pond_config(dest / "pond.toml")
-    if cfg["kind"]:
-        kind = cfg["kind"]
-    ripples = _discover_ripples(dest)
+    # Discovery returns names for func and parents, the row shape dbt mode has always used.
+    ripples = [{"func": r["name"], **r} for r in found["ripples"]]
     source_path = f"ponds/{name}/{version}"
     try:
         _register(db, name, version, kind, source_path, cfg, ripples)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    _capture_column_lineage(db, name, version, ripples)  # best-effort; never fails a deploy
+    _store_column_lineage(db, name, version, found["lineage"])
 
     if getattr(request.app.state, "driver", None) is not None:
         request.app.state.driver.reload()

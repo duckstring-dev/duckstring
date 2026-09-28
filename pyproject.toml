@@ -32,6 +32,9 @@ dependencies = [
   "pytz",
   # .pondignore matching with exact .gitignore semantics (negation, anchoring, **). Pure Python.
   "pathspec>=0.10",
+  # Builds each Pond's own environment from its pyproject.toml + uv.lock (plans/pond-environments.md).
+  # A self-contained binary wheel; duckstring.environments finds it with uv.find_uv_bin().
+  "uv>=0.5",
 ]
 
 [project.optional-dependencies]
