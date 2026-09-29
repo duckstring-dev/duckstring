@@ -217,7 +217,7 @@ The `Driver` holds one launcher, the **`DispatchingLauncher`** (`launcher.py`). 
 
 Deferred: warm-pool instance reuse across Ponds and the floor/ceiling/idle/keep-warm autoscaler (pool config exists, the pooling scheduler doesn't; v1 launches one instance per spawn), relay security-group scoping and TLS hardening, and real-AWS validation of the EC2/ssh/watchdog paths.
 
-The AWS setup guide (currently `docs/docs/old/guides/cloud.md`) records hard-won operational lessons: the cloud-enable gate, the three IAM roles (including the often-missed `ecs:TagResource` and `iam:PassRole`), security-group asymmetry (workers only dial out, so `sg-duck` has no inbound rules), Fargate and EC2 worker setup, the AMI python3 constraint, the build-your-own-image policy, the Flock's DuckDB-authority rules, and debugging through console output, CloudWatch or SSM instead of opening SSH. Carry these forward when rewriting it.
+The AWS setup guide (`docs/docs/guides/cloud_compute_on_aws.md`, rewritten from the old `cloud.md`) records hard-won operational lessons: the cloud-enable gate, the three IAM roles (including the often-missed `ecs:TagResource` and `iam:PassRole`), security-group asymmetry (workers only dial out, so `sg-duck` has no inbound rules), Fargate and EC2 worker setup, the AMI python3 constraint, the build-your-own-image policy, the Flock's DuckDB-authority rules, and debugging through console output, CloudWatch or SSM instead of opening SSH. Keep them when editing it.
 
 ## Triggers and control (CLI → `/api/ponds/{name}/…` → Driver)
 
@@ -308,7 +308,7 @@ A **Spout** is a Pond's egress binding `(pond, major, table|*, destination, mode
 
 **UI**: `PondNode` draws a Spout dashed with `[SPOUT]`. The Sidebar's `SpoutPanel` holds its control verbs and throttle `WindowEditor`. A source Pond's `SpoutEditor` lists and adds Spouts. Credentials are entered as names, either an env var or a stored secret (a datalist of stored secret names), and assembled into `${env:NAME}`/`${secret:NAME}`, so a value never crosses the wire. The add form's Test button calls `POST .../spouts/test`, and the result is tagged with its destination so editing clears it. The access badge shows three capabilities (`Manage | Demand | Read`, green ✓ when granted, grey – when not; labels stay white).
 
-Still to do: real-backend write e2es (MinIO/moto S3, containerised Postgres) in CI. Locally the Postgres logic is tested against a DuckDB-attached destination, which uses the same SQL. Tests: `tests/test_spout.py`, `tests/test_egress_credentials.py`, `tests/test_egress_file.py` (with a real-Duck e2e), `tests/test_engine.py` (standing Wake and windowed Spouts).
+CI runs the Postgres egress driver against a real Postgres (the `postgres-egress` job). Still to do: S3 egress against MinIO in CI (the `object-store` job covers only the data plane). Tests: `tests/test_spout.py`, `tests/test_egress_credentials.py`, `tests/test_egress_file.py` (with a real-Duck e2e), `tests/test_engine.py` (standing Wake and windowed Spouts).
 
 ## Secrets (`catchment/secrets.py`, `routes/secrets.py`, `cli/secret.py`)
 
