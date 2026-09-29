@@ -1,19 +1,21 @@
 ---
 title: Quickstart
-description: How to work with Duckstring
+description: Run a demo pipeline on your own machine.
 ---
 
 # Quickstart
 
+This guide runs Duckstring on your own machine: it starts a Catchment, deploys a small demo pipeline, runs it, and queries the result. It takes about five minutes.
+
 ## 1. Install
 
-Start by installing the package:
+Duckstring needs Python 3.10 or newer.
 
 ```bash
 pip install duckstring
 ```
 
-To enable the CLI completions, also run:
+The CLI is `duckstring`, or `ds` for short. To turn on tab completion for your shell:
 
 ```bash
 duckstring --install-completion
@@ -21,33 +23,32 @@ duckstring --install-completion
 
 ## 2. Start a Catchment
 
-Duckstring's execution environment is called a *Catchment* -  a FastAPI daemon either local (e.g. during development) or on a server. The Catchment hosts the code (Ponds), their configuration, execution state and references to their data (catalog). Think of it as a Pond's ecosystem.
-
-Start by creating one locally:
+A *Catchment* is Duckstring's runtime. It holds the code you deploy, decides when each part of a pipeline runs, runs it, and keeps a catalog of the data it produces. Start one on your machine:
 
 ```bash
 duckstring catchment init --name dev
 ```
 
-This registers a Catchment named `dev`, stores its data under `~/.duckstring/dev`, offers to make it your default, and starts the server at `http://127.0.0.1:7474` (configurable with `--host`/`--port`/`--root`). The web UI is served at that same address. You can have multiple different Catchments under various names.
+This creates a Catchment called `dev`, keeps its state in `~/.duckstring/dev`, offers to make it your default, and starts it at http://127.0.0.1:7474, where its web UI is also served. Use `--host`, `--port` and `--root` to change those.
 
-Leave it running and work from a second terminal. Later, restart it any time with:
+Leave it running and use a second terminal for the rest of this guide. To start it again later:
 
 ```bash
 duckstring catchment start dev
 ```
 
-See [Running on a Server](guides/running_on_a_server.md) for remote servers and multi-Catchment setups.
+To run a Catchment on a server instead, see [Running on a Server](guides/running_on_a_server.md).
 
-## 3. Create the Demo Ponds
+## 3. Create the demo Ponds
 
-From a scratch directory or repo root:
+In an empty directory:
 
 ```bash
-duckstring pond demo --ripple
+mkdir demo && cd demo
+duckstring pond demo
 ```
 
-This creates four Pond projects as subdirectories:
+This creates four *Ponds*, each in its own subdirectory. A Pond is a versioned project of transformations, and each step inside it is a *Ripple*:
 
 ```mermaid
 flowchart LR
@@ -70,82 +71,96 @@ flowchart LR
     sales --> reports
 ```
 
-This example demonstrates Duckstring's pull-based orchestration model. The data is synthetic, small, and each stage of the pipeline sleeps for the specified number of seconds to show how tasks are triggered.
+The pipeline isn't defined anywhere as a whole. Each Pond's `pond.toml` lists the Ponds it reads from, its *Sources*. Here is `sales/pond.toml`:
 
-Within each Pond are named "Ripples" - these are the true unit operations for the pipeline. Of all Ripples across the three Ponds in this example, the "join_lines" step takes the longest at 3s. Running the pipeline back to back, the orchestrator naturally throttles every *other* Ripple to the same 3s bottleneck - no wasted compute.
+```toml
+[pond]
+name = "sales"
+version = "1.0.0"
 
-The Ripple logic is held in the `src/pond.py` file within each Pond's code. Note that the Pond sequence (DAG) is never specified expliclity - it's impolied by each Pond's `[sources]` section in its `pond.toml` specification file. Similarly, the sequence of Ripples is implied at declaration:
+[sources]
+transactions = "1.0.0"
+products = "1.0.0"
+```
+
+In the same way, each Ripple in a Pond's `src/pond.py` names the Ripples it depends on:
 
 ```python
 @ripple(parents=[daily_sales, price_tiers])
+def join_lines(pond):
+    ...
 ```
 
-There's no hard rule that you **must** use multiple Ponds or even Ripples - however, in practice it can be very helpful to break up projects into distinct *versionable components* (Ponds), and distinct *logical units* (Ripples) within those components. Like software packages, by declaring only their direct dependencies, there's no need to separately manage their pipeline.
+The demo's data is small and synthetic, and each Ripple sleeps for the time shown above so you can watch the pipeline run.
 
-## 3. Deploy
+## 4. Deploy
 
-Deploy all four Ponds at once:
+Deploy all four Ponds:
 
 ```bash
 duckstring pond deploy --all --yes
 ```
 
-Each Pond is packaged and uploaded to the Catchment (`--yes` skips the per-Pond confirmation). 
-
-Uploading Ponds like this has a few behaviours:
-
-- If no Pond of that name exists, upload new
-- If a Pond with that name and version exists, overwrite
-- If a Pond with that name and *major* version exists, upgrade the existing node to this *minor*/*patch* version
-- If a Pond with that name and a *lower major* version exists, add a new node
-
-The Ponds are now visible in the web UI, and in:
+`--all` deploys every Pond in the subdirectories, and `--yes` skips the confirmation for each. The Ponds now appear in the web UI, and in:
 
 ```bash
 duckstring status --once
 ```
 
-Running without the `--once` flag polls the Catchment every 1s, allowing you to monitor state on the CLI.
+Without `--once`, `status` keeps refreshing until you stop it.
 
-## 4. Trigger
+Nothing has run yet. Duckstring only runs a Pond when something asks for its output.
 
-In Duckstring, runs are always triggered by the terminal Pond - an Outlet - and not the start of the pipeline. Trigger a run with:
+Deploying a Pond again follows its version number. A new minor or patch version replaces the running one, and a new major version runs alongside it. See [Upgrades and Breaking Changes](guides/upgrades.md).
+
+## 5. Run the pipeline
+
+Triggers go at the end of a pipeline, on the Pond whose output you want. Here that's `reports`. Run it once with a *Pulse*:
 
 ```bash
 duckstring trigger pulse reports
 ```
 
-This executes in sequence every dependency for the `reports` Pond. Mechanistically, this sends a `pulse` - a single request for data of a given freshness (now) from the target Pond to all its parents, recursively. Executing a trigger via CLI starts a `status` view, which updates until the pipeline settles (~7s).
+A Pulse brings `reports` up to date as of now. Duckstring works back through its Sources and runs `transactions` and `products`, then `sales`, then `reports`. The command shows the live status until everything settles, after about 12 seconds.
 
-To execute as frequently as possible (to minimise latency), you can instead execute a `wave`:
+To keep `reports` as fresh as the pipeline allows, use a *Wave*:
 
 ```bash
 duckstring trigger wave reports
 ```
 
-This functions like a `pulse`, but allows every dependency to run as frequently as it can be used - in this case 3s, equal to the `join_lines` bottleneck duration. Note that this actually runs two `sales` Ponds **concurrently** - execution is against a Ripple.
+No Pond runs more often than the slowest step can use its output, so every Pond settles at a run about every 3 seconds, the time `join_lines` takes. Runs of `sales` overlap: a new one starts while the previous one is still in `join_lines`, because each Ripple waits only for its own inputs.
 
-As the `wave` never stops, close the `status` view with `Ctrl+C`, then remove the trigger with:
+A Wave keeps going, so press `Ctrl+C` to leave the status view, then remove it:
 
 ```bash
 duckstring trigger remove reports
 ```
 
-On the UI, you can also simply click on the target Pond and hit the "Pulse" or "Wave" buttons to trigger the runs.
+The same triggers are on each Pond's panel in the web UI. There are four in all:
 
-See [Scheduling](guides/scheduling.md) for detail on each of the four trigger types:
+| Trigger | What it does |
+|---|---|
+| Tap | Asks once for newer data, running upstream Ponds only if nothing newer is already available |
+| Pulse | Brings the Pond up to date as of now, once |
+| Wave | Keeps the Pond as fresh as the pipeline allows |
+| Tide | Keeps the Pond no older than a limit, such as `1d` for a daily job |
 
-- Pulse: One request for a target freshness
-- Tide: A Pulse executed at a specified period (e.g. daily)
-- Tap: One request for fresh data from each parent (e.g. tied to queries, to scale update frequency according to usage)
-- Wave: A Tap executed upon every update
+See [Scheduling](guides/scheduling.md) for choosing between them.
 
-## 5. Query
+## 6. Query the results
 
-Tabular data is published as Parquet, as a named object, with the Pond's name as schema. You can query this with:
+The Catchment keeps a catalog of every Pond's tables, with each Pond as a schema. Query one:
 
 ```bash
 duckstring query reports monthly_summary
 ```
 
-This prints to console the result of the query `SELECT * FROM reports.monthly_summary LIMIT 10`. Run arbitrary SQL with `--sql`, or export with `--csv`/`--json`/`--parquet`. See [Querying](guides/querying.md).
+This runs `SELECT * FROM reports.monthly_summary LIMIT 10`. Use `--sql` to run any query, and `--csv`, `--json` or `--parquet` to export the result. See [Querying](guides/querying.md).
+
+## Next steps
+
+- [Ponds](concepts/ponds.md) and [Orchestration](concepts/orchestration.md) explain the ideas behind what you just ran.
+- [Writing Ripples](guides/writing_ripples.md) covers building your own Pond, and [Testing with Puddles](guides/testing_with_puddles.md) running it locally before deploying.
+- `duckstring pond demo --trickle` creates the incremental demo (`orders`, `catalog` → `priced` → `revenue`), explained in [Trickles](concepts/trickles.md).
+- The [Playground](https://playground.duckstring.com) simulates pull orchestration in the browser.
