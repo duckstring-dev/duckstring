@@ -75,6 +75,12 @@ def _aws_env(region: str | None) -> list[str]:
     return [f"export AWS_REGION={shlex.quote(region)} AWS_DEFAULT_REGION={shlex.quote(region)}"]
 
 
+# uv's cache for building Pond environments (plans/pond-environments.md). Fixed rather than left to HOME, so
+# an AMI baked with Duckstring installed through uv into this cache lets a Duck link Duckstring's
+# dependencies into a Pond's environment instead of downloading them again.
+_UV_CACHE = f"export UV_CACHE_DIR={_REMOTE_ROOT}/uv-cache"
+
+
 def _userdata(*, pond: str, major: int, version: str, source_path: str, catchment_url: str,
               token: str, data_root: str | None, pip_spec: str | None,
               region: str | None = None) -> str:
@@ -89,7 +95,7 @@ def _userdata(*, pond: str, major: int, version: str, source_path: str, catchmen
         f"--data-root={data_root or ''}",
     ]
     lines = ["#!/bin/bash", "set -euxo pipefail", _CONSOLE_TEE, *_aws_env(region),
-             f"mkdir -p {_REMOTE_ROOT}"]
+             f"mkdir -p {_REMOTE_ROOT}", _UV_CACHE]
     if pip_spec:
         lines.append(f"pip3 install --quiet {shlex.quote(pip_spec)}")
     lines.append("exec " + " ".join(shlex.quote(c) for c in cmd))
@@ -279,7 +285,7 @@ class Ec2Launcher:
         pip_spec = dc.get("pip_spec") if dc.get("pip_spec") is not None else self.pip_spec
         region = spec.get("region") or dc.get("region") or self.region
         lines = ["#!/bin/bash", "set -euxo pipefail", _CONSOLE_TEE, *_aws_env(region),
-                 f"mkdir -p {_REMOTE_ROOT}"]
+                 f"mkdir -p {_REMOTE_ROOT}", _UV_CACHE]
         if pip_spec:
             lines.append(f"pip3 install --quiet {shlex.quote(pip_spec)}")
         lines.append(f"exec python3 -m {module_cmd}")

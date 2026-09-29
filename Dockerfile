@@ -15,7 +15,12 @@ FROM python:3.13-slim
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    DUCKSTRING_STATE_ROOT=/var/lib/duckstring
+    DUCKSTRING_STATE_ROOT=/var/lib/duckstring \
+    UV_CACHE_DIR=/var/lib/duckstring/uv-cache \
+    UV_LINK_MODE=hardlink
+
+# A non-root runtime user with a writable hot-state root (data lives in the object store, not here).
+RUN useradd --create-home --uid 10001 duck
 
 # The prebuilt wheel (bundles the schema + web UI). Installed rather than `pip install duckstring` so the
 # image always matches the release being built, not whatever PyPI has. The [aws] extra (s3fs + boto3) is
@@ -23,11 +28,15 @@ ENV PYTHONUNBUFFERED=1 \
 # a Duck whose Pond declares its own environment installs this same Duckstring into it, from this file
 # (duckstring.environments.duckstring_requirement), so it works for an unreleased build too.
 COPY dist/*.whl /opt/duckstring/
-RUN whl=$(ls /opt/duckstring/*.whl) && pip install "${whl}[aws]"
 
-# A non-root runtime user with a writable hot-state root (data lives in the object store, not here).
-RUN useradd --create-home --uid 10001 duck \
-    && mkdir -p /var/lib/duckstring && chown duck:duck /var/lib/duckstring
+# Installed with uv, hardlinked from a uv cache kept in the image (plans/pond-environments.md). The
+# installed files ARE the cache's files, so the cache adds almost nothing to the image, and a Pond
+# environment built when a Duck starts links Duckstring's dependencies from it instead of downloading them
+# again (measured: 12.7 s -> 3.5 s). One layer, so the chown (uv needs a writable cache) copies nothing.
+RUN pip install uv \
+    && uv pip install --system "$(ls /opt/duckstring/*.whl)[aws]" \
+    && mkdir -p /var/lib/duckstring \
+    && chown -R duck:duck /var/lib/duckstring
 USER duck
 WORKDIR /var/lib/duckstring
 

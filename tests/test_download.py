@@ -88,3 +88,15 @@ def test_serving_spill_is_not_bundled(tmp_path):
     names = [arc for _p, arc in _root_files(tmp_path)]
     assert "duck.db" in names
     assert not any(n.startswith(".serving-tmp") for n in names)
+
+
+def test_pond_environments_are_not_bundled(tmp_path):
+    """Pond environments and uv's cache are rebuilt on demand and only work where they were built, so a
+    state bundle leaves them out (plans/pond-environments.md)."""
+    from duckstring.catchment.routes.catchment import _root_files
+
+    for rel in ("envs/abc/bin/python", "uv-cache/wheels/x.whl", "ponds/p/1.0.0/pond.toml"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_bytes(b"x")
+    names = [arc for _p, arc in _root_files(tmp_path)]
+    assert names == ["ponds/p/1.0.0/pond.toml"]

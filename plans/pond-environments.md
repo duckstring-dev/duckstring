@@ -143,11 +143,23 @@ If that environment lacks Duckstring, the message says to `uv add duckstring`.
    fallbacks and the failed-build report. Verified by hand in the repository's Docker image as the
    non-root user: the requirement resolves to the kept wheel, a cold build (empty uv cache, Duckstring's
    own dependencies plus a small local package) took 12.6 s, the Pond's code loads, reuse is instant.
+   **Image-side uv cache (built, 2026-09-29).** Measured in the Docker image with a pandas + scikit-learn
+   Pond (fresh container, home network to PyPI, Colima arm64): uv sync of the Pond's lock 6.2 s,
+   installing Duckstring 12.7 s (re-downloading dependencies the image already has), first import 1.9 s:
+   20.8 s. A separate warm uv cache in the image cut the Duckstring step to 1.7 s but added 138 MB
+   compressed to every task's pull (the same bytes, moved from PyPI to ECR). Installing the image's
+   Duckstring with `uv pip install --system` hardlinked from a cache kept in the image (one layer, chown
+   included) gives the cache for free: 772 MB image (smaller than before), Duckstring step 3.5 s (a
+   hardlink from a lower layer becomes a copy), 11.6 s total. The `Dockerfile` does this; EC2 userdata
+   exports `UV_CACHE_DIR={root}/uv-cache` so a baked AMI can do the same. `envs/` and `uv-cache/` are
+   excluded from `catchment download` (`routes/catchment._REBUILT_DIRS`).
    **Deferred: the object-store cache** (`{data_root}/_envs/{hash}.tar`). It would save roughly that
    build time on a start that already includes an image pull, a venv isn't relocatable across paths or
    interpreters (the key would have to include both), and it doesn't help a Duck without index access
-   (something with access must build it first). Revisit if a real Pond's cold build dominates its Fargate
-   start.
+   (something with access must build it first). Measured sizes for the pandas + scikit-learn environment:
+   637 MB as a tar (0.3 s to extract), 215 MB gzipped (5.5 s to compress, 3 s to extract); at an assumed
+   50-100 MB/s from S3 a restore is about 5-7 s against the linked build's 11.6 s. Revisit if a real
+   Pond's cold build dominates its Fargate start.
 
 ## Notes from phase 1
 

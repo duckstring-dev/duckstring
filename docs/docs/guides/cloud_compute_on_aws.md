@@ -127,17 +127,26 @@ Each Pond on a built-in size gets its own task. A pool you define, with `duckstr
 
 Duckstring doesn't publish a Duck image. The image runs in your account with access to your data, so you build it and host it yourself. A Duck downloads its Pond's code from the Catchment when it starts, so the image only needs Duckstring and dependencies, and needs rebuilding only when those change.
 
-Ponds that declare their own [Python dependencies](writing_ripples.md#python-dependencies) need nothing extra in the image: the Duck builds the Pond's environment when it starts, installing the image's own Duckstring into it. This happens on every cold start: with only Duckstring's own dependencies it takes about 13 seconds, and more packages take longer. It also needs access to the package index (see [networking](#step-3-networking)). Ponds without a `pyproject.toml` run in the image's environment, so install whatever they import there.
+Ponds that declare their own [Python dependencies](writing_ripples.md#python-dependencies) need nothing extra in the image: the Duck builds the Pond's environment when it starts, installing the image's own Duckstring into it. This happens on every cold start, and needs access to the package index (see [networking](#step-3-networking)). Ponds without a `pyproject.toml` run in the image's environment, so install whatever they import there.
+
+Install with uv, keeping uv's cache in the image, so that building a Pond's environment reuses what the image already has instead of downloading it again:
 
 ```dockerfile
 FROM python:3.13-slim
-RUN pip install "duckstring[aws]==0.5.0" pandas scikit-learn
-RUN useradd --create-home --uid 10001 duck && mkdir -p /var/lib/duckstring && chown duck /var/lib/duckstring
+ENV DUCKSTRING_STATE_ROOT=/var/lib/duckstring \
+    UV_CACHE_DIR=/var/lib/duckstring/uv-cache \
+    UV_LINK_MODE=hardlink
+RUN useradd --create-home --uid 10001 duck
+RUN pip install --no-cache-dir uv \
+    && uv pip install --system "duckstring[aws]==0.5.0" pandas scikit-learn \
+    && mkdir -p /var/lib/duckstring \
+    && chown -R duck:duck /var/lib/duckstring
 USER duck
 WORKDIR /var/lib/duckstring
-ENV DUCKSTRING_STATE_ROOT=/var/lib/duckstring
 ENTRYPOINT ["python", "-m"]
 ```
+
+Because the packages are hardlinked from the cache, the cache adds almost nothing to the image. Keep the install and the `chown` in one `RUN`, or the `chown` copies every file into a new layer. In a test with this image, building the environment for a Pond depending on pandas and scikit-learn took about 12 seconds, against 21 with a plain `pip install`, where most of the time went on downloading Duckstring's own dependencies again. A Pond locking the same versions of packages the image installs links those too.
 
 The repository's `Dockerfile` does the same from a locally built wheel, which it keeps in the image at `/opt/duckstring/` so Ducks can install that same build into Pond environments. Push the image to a private ECR repository in the same account and region:
 
@@ -174,7 +183,7 @@ Without them, AWS puts the instance in the VPC's default security group, which u
 :::warning The AMI's default Python
 An EC2 Duck boots by running `pip3 install` (when `DUCKSTRING_EC2_PIP_SPEC` is set) and then `python3 -m duckstring.duck`. The image's default `python3` must be 3.10 or newer, with a matching `pip3`. Stock Amazon Linux 2023 has 3.9, and a Duck on it exits without a word.
 
-Bake an AMI instead: launch a small instance, make Python 3.11 the default `python3`, install `duckstring[aws]` and your dependencies with `pip install --force-reinstall`, and create an image. Before creating it, check that `find /usr/local/lib/python3.11/site-packages -name '*.py' -size 0 | wc -l` prints `0`. An interrupted install can leave empty files that a later install skips, and a single one produced a Duck that started and exited successfully having done nothing.
+Bake an AMI instead: launch a small instance, make Python 3.11 the default `python3`, install `duckstring[aws]` and your dependencies with `pip install --force-reinstall`, and create an image. To let Ducks reuse those packages when building a Pond's environment, as in the container image above, install them with `UV_CACHE_DIR=/var/lib/duckstring/uv-cache UV_LINK_MODE=hardlink uv pip install --system` instead; EC2 Ducks use that cache directory. Before creating it, check that `find /usr/local/lib/python3.11/site-packages -name '*.py' -size 0 | wc -l` prints `0`. An interrupted install can leave empty files that a later install skips, and a single one produced a Duck that started and exited successfully having done nothing.
 :::
 
 ## Running cloud Ducks from a laptop

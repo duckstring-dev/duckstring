@@ -116,7 +116,7 @@ Replaces the Catchment's API keys and prints the new ones once. The old key for 
 duckstring catchment download [-c NAME] [--path DIR] [--yes]
 ```
 
-Downloads the Catchment's state directory: its database, deployed code, run ledgers and working databases. Use it to back up a Catchment, or to carry its state across a platform redeploy. Shows the size and asks for confirmation first. Secrets are never included. When the Catchment has an external data root, the published tables are not included, since they're already stored there.
+Downloads the Catchment's state directory: its database, deployed code, run ledgers and working databases. Use it to back up a Catchment, or to carry its state across a platform redeploy. Shows the size and asks for confirmation first. Secrets are never included, nor are Pond environments, which are rebuilt when needed. When the Catchment has an external data root, the published tables are not included, since they're already stored there.
 
 Download while nothing is running: the working databases are copied as they are.
 
