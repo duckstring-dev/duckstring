@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -130,10 +131,22 @@ class PoolAgent:
                 self._reap()
                 time.sleep(self.poll_interval)
         finally:
-            for key in list(self._procs):
-                self._terminate(key, wait=True)
+            self._stop_children()
             self._post_event({"kind": "agent_down"})
             self._client.close()
+
+    def _stop_children(self) -> None:
+        """Stop every child Duck: signal them all first, then wait, so the whole Pool stops within the
+        launcher's own grace period instead of one Duck's at a time."""
+        procs = [p for p in self._procs.values() if p.poll() is None]
+        self._procs.clear()
+        for proc in procs:
+            proc.terminate()
+        for proc in procs:
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
 
 
 def main() -> None:
@@ -145,6 +158,9 @@ def main() -> None:
     ap.add_argument("--data-root", default="")
     ap.add_argument("--persist-root", default="")
     args = ap.parse_args()
+    # The launcher stops the agent with SIGTERM. Python's default handling exits without running
+    # `finally`, which would leave every child Duck running with nothing supervising it; exit normally.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     PoolAgent(
         args.pool, args.catchment, args.token, Path(args.root),
         data_root=args.data_root or None, persist_root=args.persist_root or None,

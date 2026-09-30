@@ -11,6 +11,7 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
+import duckdb
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -755,6 +756,23 @@ def query(body: QueryRequest, request: Request):
         cols = [d[0] for d in rel.description]
         return [dict(zip(cols, row, strict=False)) for row in rel.fetchall()]
     except Exception as exc:
+        if not body.sql and body.ripple and isinstance(exc, duckdb.CatalogException):
+            raise HTTPException(status_code=400, detail=_missing_table_hint(con, body.pond, body.ripple)) from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         con.close()
+
+
+def _missing_table_hint(con, pond: str, table: str) -> str:
+    """For the default query of a table that isn't there: DuckDB's own message suggests unrelated system
+    tables, so say what's actually wrong, which for a new Pond is usually that it hasn't run yet."""
+    try:
+        tables = [r[0] for r in con.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = ? ORDER BY 1", [pond],
+        ).fetchall()]
+    except Exception:
+        tables = []
+    if not tables:
+        return (f"'{pond}' hasn't published any tables yet. Run it first, for example with "
+                f"`duckstring trigger pulse {pond}`.")
+    return f"'{pond}' has no table '{table}'. Its tables: {', '.join(tables)}."

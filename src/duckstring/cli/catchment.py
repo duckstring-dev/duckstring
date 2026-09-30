@@ -19,6 +19,17 @@ def _offer_default(name: str, yes: bool) -> None:
         typer.echo(f"Default catchment set to '{name}'.")
 
 
+def _is_loopback(host: str) -> bool:
+    import ipaddress
+
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False  # a hostname: assume it's reachable from elsewhere
+
+
 def _has_key_ladder(root: Path) -> bool:
     """Whether tiered read/demand/full keys are stored in this Catchment's database."""
     from duckstring.catchment.db import connect
@@ -102,8 +113,14 @@ def _launch(
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 7474
 
-    auth_line = "API key required" if (key or _has_key_ladder(root)) else "open (no API key)"
+    keyed = bool(key or _has_key_ladder(root))
+    auth_line = "API key required" if keyed else "open (no API key)"
     extra = ""
+    if not keyed and not _is_loopback(host):
+        # An open Catchment accepts deploys, and a deploy is code that runs on this machine.
+        extra += (f"\n\n  [bold yellow]Warning:[/bold yellow] [yellow]open to anyone who can reach {host}:{port}, "
+                  "and a deploy runs code on this machine. Use --generate-key, bind to 127.0.0.1, or put "
+                  "an authenticating proxy in front.[/yellow]")
     if data_root:
         extra += f"\n  [dim]data: {data_root}[/dim]"
     if state_backup:

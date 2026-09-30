@@ -345,6 +345,22 @@ def test_query_returns_rows(catchment_client):
     assert rows[0]["id"] == 1
 
 
+def test_query_of_a_missing_table_says_what_is_there(catchment_client):
+    _seed(catchment_client, "outlet", "daily")
+    r = catchment_client.post("/api/query", json={"pond": "outlet", "ripple": "monthly"})
+    assert r.status_code == 400
+    assert r.json()["detail"] == "'outlet' has no table 'monthly'. Its tables: daily."
+
+
+def test_query_before_a_pond_has_run_says_to_run_it(catchment_client):
+    _deploy(catchment_client, name="fresh", version="1.0.0", kind="inlet",
+            toml_text='[pond]\nname="fresh"\nversion="1.0.0"\ntype="inlet"\n')
+    r = catchment_client.post("/api/query", json={"pond": "fresh", "ripple": "summary"})
+    assert r.status_code == 400
+    assert "hasn't published any tables yet" in r.json()["detail"]
+    assert "duckstring trigger pulse fresh" in r.json()["detail"]
+
+
 def test_query_custom_sql(catchment_client):
     _seed(catchment_client, "outlet", "daily")
     r = catchment_client.post("/api/query", json={"pond": "outlet", "sql": 'SELECT * FROM "outlet"."daily" WHERE id = 1'})

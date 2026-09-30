@@ -124,45 +124,52 @@ def init(
     console.print("  [dim].pondignore[/dim]      — files deploy leaves out (puddles/, .env, caches)")
 
 
-# The two demo pipelines: the overwrite-Ripple set (the default) and the incremental-Trickle set. Each
-# entry is (pond name, deploy-order + one-line role); the command copies one set or the other.
+# The demo pipelines. Each entry is (pond name, one-line role), in pipeline order; the command copies one
+# set. Deploy order doesn't matter (a Sink can be deployed before its Sources), so the output only says
+# what each Pond is, then how to deploy and run the set (_DEMO_OUTLETS).
 _RIPPLE_DEMO = (
-    ("transactions", "deploy first  (POS event log, grows each run)"),
-    ("products", "deploy second (product catalogue, grows each run)"),
-    ("sales", "deploy third  (3 Ripples: daily_sales → price_tiers → join_lines)"),
-    ("reports", "deploy fourth, then: [dim]duckstring trigger pulse reports[/dim]"),
+    ("transactions", "Inlet: a point-of-sale event log that grows each run"),
+    ("products", "Inlet: a product catalogue that grows each run"),
+    ("sales", "3 Ripples: daily_sales and price_tiers in parallel, then join_lines"),
+    ("reports", "Outlet: a monthly summary"),
 )
 _TRICKLE_DEMO = (
-    ("orders", "deploy first  (append Trickle: insert-only order-line history)"),
-    ("catalog", "deploy second (merge Trickle: catalogue with CDC on price changes)"),
-    ("priced", "deploy third  (pond.trickle builder: incremental star enrichment)"),
-    ("revenue", "deploy fourth, then: [dim]duckstring trigger pulse revenue[/dim]"),
+    ("orders", "append Trickle: insert-only order-line history"),
+    ("catalog", "merge Trickle: a product catalogue whose price changes flow downstream"),
+    ("priced", "the Trickle builder: order lines joined to prices, incrementally"),
+    ("revenue", "Outlet: revenue by product"),
 )
-# The real-data Trickle demos (plans/real-data-testing.md): each has ≥4 Ponds, a cross-Pond join, and two
-# independent Outlets to demo running one path at a different cadence than another.
+# The real-data Trickle demos (plans/real-data-testing.md): each has at least 4 Ponds, a cross-Pond join,
+# and two independent Outlets, to show one path running at a different cadence from another.
 _TPCDS_DEMO = (
-    ("tpcds_sales", "deploy first  (append Trickle: TPC-DS store_sales fact, dsdgen-generated + streamed)"),
-    ("tpcds_items", "deploy second (merge Trickle: item dimension with CDC on price drift)"),
-    ("tpcds_stores", "deploy third  (merge Trickle: stable store dimension)"),
-    ("tpcds_priced", "deploy fourth (pond.trickle builder: 3-way incremental star join)"),
-    ("tpcds_category_revenue", "deploy fifth  (Outlet: revenue per category)"),
-    ("tpcds_store_revenue", "deploy sixth, then pulse either Outlet on its own cadence"),
+    ("tpcds_sales", "append Trickle: the TPC-DS store_sales fact, generated with dsdgen and streamed"),
+    ("tpcds_items", "merge Trickle: the item dimension, with price drift"),
+    ("tpcds_stores", "merge Trickle: the store dimension"),
+    ("tpcds_priced", "the Trickle builder: a 3-way incremental star join"),
+    ("tpcds_category_revenue", "Outlet: revenue per category"),
+    ("tpcds_store_revenue", "Outlet: revenue per store"),
 )
 _GHARCHIVE_DEMO = (
-    ("gh_events", "deploy first  (append Trickle: real GHArchive hourly event stream)"),
-    ("gh_actors", "deploy second (merge Trickle: actor dimension from the stream)"),
-    ("gh_pushes", "deploy third  (Path A builder: push events ⋈ gh_actors)"),
-    ("gh_repo_activity", "deploy fourth (Path A Outlet: activity per repo)"),
-    ("gh_stars", "deploy fifth  (Path B: star/fork signal, append Trickle)"),
-    ("gh_trending", "deploy sixth, then pulse either Outlet on its own cadence"),
+    ("gh_events", "append Trickle: the public GitHub event archive, hour by hour"),
+    ("gh_actors", "merge Trickle: the actor dimension, from the event stream"),
+    ("gh_pushes", "the Trickle builder: push events joined to gh_actors"),
+    ("gh_repo_activity", "Outlet: activity per repository"),
+    ("gh_stars", "append Trickle: star and fork events"),
+    ("gh_trending", "Outlet: repositories ranked by stars and forks"),
 )
-# A dbt-mode Pond deployed alongside a plain-Python Source (plans/dbt.md). shop_analytics is a dbt project
-# — each model a Ripple — reading shop_orders as a cross-Pond source(). Needs the dbt extra to deploy/run.
+# A dbt-mode Pond deployed alongside a plain-Python Source (plans/dbt.md). shop_analytics is a dbt project,
+# each model a Ripple, reading shop_orders as a cross-Pond source(). Needs the dbt extra to deploy/run.
 _DBT_DEMO = (
-    ("shop_orders", "deploy first  (plain @ripple inlet: generates the sales source)"),
-    ("shop_analytics", "deploy second (dbt-mode: 3 models → 3 Ripples), then: "
-                       "[dim]duckstring trigger pulse shop_analytics[/dim]"),
+    ("shop_orders", "Inlet: plain Python, generating the orders the dbt project reads"),
+    ("shop_analytics", "a dbt project deployed as a Pond: 3 models, one Ripple each"),
 )
+_DEMO_OUTLETS = {
+    _RIPPLE_DEMO: ("reports",),
+    _TRICKLE_DEMO: ("revenue",),
+    _TPCDS_DEMO: ("tpcds_category_revenue", "tpcds_store_revenue"),
+    _GHARCHIVE_DEMO: ("gh_repo_activity", "gh_trending"),
+    _DBT_DEMO: ("shop_analytics",),
+}
 _DEMO_PONDS = tuple(name for name, _ in _RIPPLE_DEMO)  # the default set (back-compat)
 
 
@@ -219,8 +226,12 @@ def demo(
         else "Ripple"
     )
     console.print(f"[green]Created[/green] {kind} demo pipeline:")
+    width = max(len(name) for name, _ in ponds) + 1
     for name, role in ponds:
-        console.print(f"  [bold]{name}/[/bold] — {role}")
+        console.print(f"  [bold]{name + '/':<{width}}[/bold]  {role}")
+    outlets = _DEMO_OUTLETS[ponds]
+    run = " or ".join(f"[bold]duckstring trigger pulse {o}[/bold]" for o in outlets)
+    console.print(f"\nNext: [bold]duckstring pond deploy --all --yes[/bold], then {run}.")
 
 
 @app.command()

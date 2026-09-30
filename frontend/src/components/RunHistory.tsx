@@ -138,7 +138,7 @@ export function RunHistory() {
 
       <div onScroll={onScroll} style={{ flex: 1, overflowY: 'auto', padding: '4px 10px 8px', fontSize: 11, lineHeight: 1.6 }}>
         {runs.length === 0 ? (
-          <div style={{ color: '#52525b' }}>No runs yet — send a Tap, Pulse, Wave, or Start.</div>
+          <div style={{ color: '#52525b' }}>No runs yet. Select a Pond and send it a trigger: Tap, Pulse, Wave or Tide.</div>
         ) : (
           (() => {
             let prevDay = '';
