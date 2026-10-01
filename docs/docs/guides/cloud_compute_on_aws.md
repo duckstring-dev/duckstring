@@ -98,7 +98,7 @@ Check that the value has a host. A URL built from an empty variable, such as an 
 Fargate is the default, and the fastest to start (about twenty seconds). Configure it with environment variables on the Catchment:
 
 ```bash
-DUCKSTRING_FARGATE_IMAGE=<account>.dkr.ecr.<region>.amazonaws.com/duckstring:0.5.0
+DUCKSTRING_FARGATE_IMAGE=ghcr.io/duckstring-dev/duckstring:0.5.0
 DUCKSTRING_FARGATE_CLUSTER=duckstring
 DUCKSTRING_FARGATE_SUBNETS=subnet-0abc
 DUCKSTRING_FARGATE_SECURITY_GROUPS=sg-duck
@@ -123,11 +123,17 @@ duck = "M"
 
 Each Pond on a built-in size gets its own task. A pool you define, with `duckstring duck pool add`, instead runs all of its Ponds' Ducks on one shared machine of its size.
 
-### Building the image
+### The Duck image
 
-Duckstring doesn't publish a Duck image. The image runs in your account with access to your data, so you build it and host it yourself. A Duck downloads its Pond's code from the Catchment when it starts, so the image only needs Duckstring and dependencies, and needs rebuilding only when those change.
+Each release of Duckstring publishes a Duck image at `ghcr.io/duckstring-dev/duckstring`, tagged with its version and built for both Fargate architectures. Use the tag that matches the Catchment's own version, since a Duck and its Catchment must run the same Duckstring.
 
-Ponds that declare their own [Python dependencies](writing_ripples.md#python-dependencies) need nothing extra in the image: the Duck builds the Pond's environment when it starts, installing the image's own Duckstring into it. This happens on every cold start, and needs access to the package index (see [networking](#step-3-networking)). Ponds without a `pyproject.toml` run in the image's environment, so install whatever they import there.
+A Duck downloads its Pond's code from the Catchment when it starts. A Pond that declares its own [Python dependencies](writing_ripples.md#python-dependencies) has its environment built at the same time, so the published image runs it as it is. That happens on every cold start, and needs access to the package index (see [networking](#step-3-networking)).
+
+Fargate pulls the image for every task. To pull it from ECR instead, for faster pulls within the region or from subnets with no route to the internet, mirror it with an ECR [pull-through cache](https://docs.aws.amazon.com/AmazonECR/latest/userguide/pull-through-cache.html) rule for `ghcr.io`, and set `DUCKSTRING_FARGATE_IMAGE` to the cached image's path. AWS requires GitHub credentials, stored in Secrets Manager, for that rule even though the image is public.
+
+### Building your own image
+
+Build your own image when Ponds without a `pyproject.toml` import packages the published image doesn't have, or when Ponds need system libraries that don't come with a Python package. Ponds without a `pyproject.toml` run in the image's environment, so install whatever they import there.
 
 Install with uv, keeping uv's cache in the image, so that building a Pond's environment reuses what the image already has instead of downloading it again:
 
@@ -148,7 +154,7 @@ ENTRYPOINT ["python", "-m"]
 
 Because the packages are hardlinked from the cache, the cache adds almost nothing to the image. Keep the install and the `chown` in one `RUN`, or the `chown` copies every file into a new layer. In a test with this image, building the environment for a Pond depending on pandas and scikit-learn took about 12 seconds, against 21 with a plain `pip install`, where most of the time went on downloading Duckstring's own dependencies again. A Pond locking the same versions of packages the image installs links those too.
 
-The repository's `Dockerfile` does the same from a locally built wheel, which it keeps in the image at `/opt/duckstring/` so Ducks can install that same build into Pond environments. Push the image to a private ECR repository in the same account and region:
+The repository's `Dockerfile`, which builds the published image, does the same from a locally built wheel. It keeps the wheel in the image at `/opt/duckstring/` so Ducks can install that same build into Pond environments. Push your image to a private ECR repository in the same account and region:
 
 ```bash
 docker build --platform linux/amd64 -t duckstring:0.5.0 .
@@ -277,5 +283,6 @@ If cloud Ducks don't start:
 - [ ] `sg-catchment` allows the Catchment's port from `sg-duck`
 - [ ] Ducks have both a subnet and a security group configured
 - [ ] The Ducks can reach the Catchment's address, or `DUCKSTRING_CATCHMENT_PUBLIC_URL` is set
-- [ ] The image's architecture matches `DUCKSTRING_FARGATE_CPU_ARCH`
+- [ ] The Duck image's version matches the Catchment's
+- [ ] An image you built yourself matches `DUCKSTRING_FARGATE_CPU_ARCH`'s architecture
 - [ ] For EC2, the AMI's default `python3` is 3.10 or newer, with no empty files in site-packages
