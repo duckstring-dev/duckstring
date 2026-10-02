@@ -1,8 +1,9 @@
 # Data plane: drop Iceberg, make versioned Parquet the default
 
-Status: **recommendation (2026-10-02)**, for the author to decide. Supersedes the "Iceberg stays the
-default" position of `plans/data-plane-iceberg.md` and `plans/data-plane-ducklake.md`. Depends on
-`plans/versioned-overwrite.md`.
+Status: **decided (2026-10-02), not built.** The author chose C: remove the Iceberg plane entirely, with
+no option to keep it. The lakehouse Spout is deferred indefinitely: nothing needs it now. Supersedes the
+"Iceberg stays the default" position of `plans/data-plane-iceberg.md` and `plans/data-plane-ducklake.md`.
+Depends on `plans/versioned-overwrite.md`, which is built first.
 
 ## Summary
 
@@ -118,12 +119,12 @@ extra, writing to their REST or Glue catalog).
    guide's data section, and CLAUDE.md's data-plane section.
 5. Later, if wanted: the lakehouse Spout (DuckLake first). Its own plan.
 
-## Decision needed
+## Decisions (author, 2026-10-02)
 
-- Remove the Iceberg plane (C), or keep it as an option behind `DUCKSTRING_DATA_PLANE=iceberg` with the
-  memory fix (A as an option, C as the default). Removing it is recommended: an option nobody can safely
-  use at scale is a maintenance cost with no user.
-- Whether the lakehouse Spout belongs in this release or later.
+- **Remove the Iceberg plane (C).** No `DUCKSTRING_DATA_PLANE=iceberg` option is kept: an option nobody
+  can safely use at scale is a maintenance cost with no user. Steps 1 to 4 above.
+- **The lakehouse Spout is deferred**, not part of this work or the next release; nothing needs it now.
+  Step 5 stays recorded as the route if external-engine interop is ever asked for.
 
 ## Sources
 

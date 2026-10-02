@@ -367,6 +367,11 @@ Pond names are labels, so restrict network access if they're sensitive. Tests: `
 
 ## Data plane (`dataplane.py`, `iceberg_plane.py`)
 
+**Decided 2026-10-02, not yet built:** the Iceberg plane is being removed and versioned Parquet becomes the
+only plane (`plans/versioned-overwrite.md`, then `plans/data-plane-choice.md`, which has the measurements
+and reasoning). Don't build anything new on Iceberg. A lakehouse Spout (Iceberg or DuckLake into the user's
+own catalog) is deferred indefinitely.
+
 The data plane is how a Pond publishes its tables for other Ponds and how it reads theirs. It's separate from the DuckDB registry where Ripples compute; Ripples always compute on the registry, and the data plane only handles export and interchange. It's pluggable behind `dataplane.get_data_plane()`, selected by `DUCKSTRING_DATA_PLANE` (default `iceberg`).
 
 **`IcebergDataPlane`** (default; pyiceberg is a core dependency, SQLAlchemy is not): an Apache Iceberg metadata and snapshot layer over Parquet data files.
