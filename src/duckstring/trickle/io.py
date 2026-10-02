@@ -249,7 +249,7 @@ def refresh_current_view(con, name: str) -> None:
         return
     con.execute(
         f"CREATE OR REPLACE VIEW {_q(name)} AS "
-        f"SELECT COLUMNS(c -> NOT starts_with(c, '{SYSTEM_PREFIX}')) FROM ({sql})"
+        f"SELECT COLUMNS(lambda c: NOT starts_with(c, '{SYSTEM_PREFIX}')) FROM ({sql})"
     )
     con.execute(f"COMMENT ON VIEW {_q(name)} IS '{CURRENT_VIEW_COMMENT}'")
 
