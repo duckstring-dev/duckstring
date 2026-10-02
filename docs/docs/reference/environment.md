@@ -12,7 +12,7 @@ These variables are read by the Catchment process, and passed on to its Ducks wh
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_STATE_ROOT` | `./.duckstring` | The state directory, for a Catchment started through the ASGI entry point (`duckstring.catchment.asgi`). Must be a local path. `DUCKSTRING_ROOT` is an alias. |
-| `DUCKSTRING_DATA_ROOT` | under the state directory | Where published tables are stored. See [Data root URIs](formats.md#data-root-uris). An object-store data root uses the Parquet data plane. |
+| `DUCKSTRING_DATA_ROOT` | under the state directory | Where published tables are stored. See [Data root URIs](formats.md#data-root-uris). |
 | `DUCKSTRING_STATE_BACKUP_URI` | none | Where state checkpoints are copied, so a Catchment on disposable storage can recover. A Catchment starting with an empty state directory restores from it. |
 | `DUCKSTRING_CHECKPOINT_INTERVAL` | `60s` | How often the state database is copied to the backup. |
 | `DUCKSTRING_API_KEY` | none | A single full-access API key. Leave unset when a hosting platform authenticates requests. |
