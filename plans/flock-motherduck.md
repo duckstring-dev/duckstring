@@ -1,7 +1,9 @@
 # The Flock on MotherDuck
 
 Status: **designed, not built** (2026-10-02). Agreed with the author: MotherDuck becomes the first-class
-Flock engine. Athena stays, for teams that need compute inside their own AWS account.
+Flock engine. Athena stays, for teams that need compute inside their own AWS account. `plans/duckdb-2-ready.md` (item 6)
+generalises this engine to a remote-DuckDB engine with a second, self-hosted target (a DuckDB 2.0 server
+in the user's account); build the two together.
 
 ## Why MotherDuck
 
