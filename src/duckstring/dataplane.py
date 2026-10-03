@@ -1067,6 +1067,12 @@ def _export_bands(con, data_dir: Path, main: str) -> None:
         )
 
 
+# The smallest chunk the cold base is split into. DuckDB 2.0's COPY rollover never terminates when
+# FILE_SIZE_BYTES is a few bytes (it opens empty files without end, filling the disk; 1.5 writes one file),
+# and a threshold that small is only ever set to make compaction eager, not to get byte-sized chunks.
+_MIN_CHUNK_BYTES = 64 * 1024
+
+
 def _publish_base_chunks(con, data_dir: Path, main: str, f, chunk_bytes: int) -> None:
     """Publish the registry base table ``main`` as a directory of size-bounded, freshness-ordered Parquet
     chunks (``{main}__base/``). **Lock-free, overlap-safe**: the new chunks are written under this
@@ -1083,7 +1089,7 @@ def _publish_base_chunks(con, data_dir: Path, main: str, f, chunk_bytes: int) ->
     staging_name = base_name + ".tmp"
     staging_store = data_dir.child(staging_name)
     fb = trickle._q(trickle.F_COL)
-    size = max(1, int(chunk_bytes))
+    size = max(_MIN_CHUNK_BYTES, int(chunk_bytes))
     written = []
     with data_dir.copy_dir_to(staging_name) as staging_uri:  # clears staging, yields the dir target
         con.execute(
