@@ -1,6 +1,7 @@
 # Repositioning: feature changes
 
-Status: **proposed.** The engineering half of `plans/documentation-rewrite.md`. Three features, each
+Status: **§1 skipped, §2 agreed (2026-10-04) and not built; §3.4 superseded by
+`plans/flock-motherduck.md`.** The engineering half of `plans/documentation-rewrite.md`. Three features, each
 motivated by a friction the rewrite would otherwise have to write around. None is load-bearing for the
 documentation work — the docs can ship without all three — but each removes a paragraph of apology.
 
@@ -12,169 +13,149 @@ documentation work — the docs can ship without all three — but each removes 
 
 ---
 
-## 1. Run instrumentation
+## 1. Run instrumentation: skipped (2026-10-04)
 
-**The problem.** A run that finishes in 40 ms cannot demonstrate anything by its duration, and the
-current output gives nothing else — `pond run` prints per-Ripple wall-clock only, and `ripple_run`
-records `started_at`/`finished_at` but no volumes. So a demo has to be either big or artificially slow
-to be legible, which is the trade-off `documentation-rewrite.md` §5 is trying to escape.
-
-**The claim.** Duckstring's central assertion is that it does the *minimum*. Measuring the minimum on
-the reader's own run is a stronger demonstration than any duration, and it reads identically well at
-50 MB and 50 GB:
-
-```
-4 Ponds · 1 ran · 3 skipped (no change)
-4,218,004 rows standing · 25,000 changed · 0.6% recomputed
-elapsed 71ms
-```
-
-No comparison to anyone, no number we assert, and the demo stops needing scale.
-
-### 1.1 Where the numbers come from
-
-**Piggyback on the lineage recorder, don't build a parallel path.** `core.Pond` already brokers every
-read and write a Ripple makes and records them for lineage — `_record_read` (`core.py:409`),
-`record_lineage_write` (`core.py:412`), drained per Ripple Run by `take_lineage` (`core.py:417`). That
-is exactly the set of events we want counted, it is already shipped on the `ripple` event, already
-persisted per run, and already documented as never failing a run. Widening those records from
-`(source, table)` to `(source, table, rows)` gets the whole feature almost for free.
-
-Cost of counting, per path:
-
-- **Trickle writes** — free. `apply_zset` already consolidates the delta before writing, so the change
-  row count is known without an extra pass. `merge_table`/`append_table` likewise.
-- **Overwrite writes** (`write_table`) — a `count(*)` on the just-written table. Cheap: DuckDB answers
-  from table metadata, and the relation is materialised at that point anyway.
-- **`read_delta`** — free, same reason as the Trickle write.
-- **`read_table`** — a `count(*)` over the source. Parquet-backed reads answer from file statistics; a
-  merge Trickle's reconstruction does not, so this one is worth gating (see below).
-
-**Gate the non-free counts.** `read_table` on a reconstructed merge main is a real query. Either count
-only what is free and report the rest as unknown, or put the expensive counts behind an opt-in. I'd
-start with free-only: the interesting numbers (delta size, rows written, skipped Ponds) are all in the
-free set, and "rows standing" can come from the sidecar/`consolidated_count_select` rather than a scan.
-
-### 1.2 Transport and storage
-
-- `duck/core.Event` gains `stats: dict | None` on the `ripple` event, beside the existing `changed`
-  and the Flock counters — same shape, same idempotency story.
-- `duck/executor.RippleExecutor.submit`'s `on_done(name, started, finished, lineage)` gains the stats
-  (or lineage carries them, since they are the same records).
-- Migration `029_run_stats.sql`: `ripple_run` gains `rows_read`, `rows_written`, `rows_changed`
-  (nullable — absent for old rows and for ungated counts). `pond_run` needs nothing; the Pond-level
-  numbers are a `SUM` over its Ripple rows, and "skipped" is already derivable from the no-change pass
-  rows `_record_pass` writes.
-- `Driver._record_lineage` is the natural place to persist them — it already runs on the same event.
-
-### 1.3 Surfaces
-
-- **`duckstring pond run`** (`local/runner.py` → `cli/pond.py:265`) — the local path has no Duck, but it
-  uses the same `Pond` handle, so it gets the same numbers with no extra plumbing. This is the
-  quickstart's surface and the most important one.
-- **One-shot triggers** (`tap`/`pulse`/`wake`/`force`) — these already hold the live status view open
-  until the pipeline settles. Print the summary when it closes.
-- **`duckstring status`** — last-run volumes per Pond.
-- **Web UI** — `RunDetail` shows them per attempt; the store already polls `/api/runs`.
-
-### 1.4 Risks
-
-- **Never let a counter fail a run.** Same contract as lineage: wrap and drop. A `count(*)` that throws
-  must produce a missing number, not a failed Ripple.
-- **Don't make the free path expensive.** The rule is that instrumentation may read metadata but must
-  not add a scan. Anything that would is either gated or reported as unknown.
+The idea was to record rows read, written and changed per Ripple run and print a "did the minimum"
+summary after each run. The author decided against it for now: printing it everywhere is more noise than
+use, a CLI `--stats` view needs more design than it would get here, and the UI shouldn't change for it.
+Revisit only with a fresh design.
 
 ---
 
-## 2. Native `.sql` Ripples
+## 2. SQL Ripples
 
-**The problem.** The quickstart's first step asks a reader holding a folder of SQL to put it inside a
-decorated Python function. For the migration audience that is the first hurdle and it is avoidable.
-dbt-mode already offers a SQL-only path, but it requires adopting dbt — a large ask for someone who
-just wants to see their query run.
+Agreed with the author on 2026-10-04. Replaces the earlier `[pond] sql = "models/"` design, which
+inferred dependencies.
 
-**The shape.** `pond.toml [pond] sql = "models/"`, mutually exclusive with `dbt_project` and with
-`@ripple` code, exactly as dbt-mode is. One `.sql` file per output table; the file stem is the Ripple
-name and the table name.
+**The problem.** A reader with a folder of SQL has to wrap each query in a decorated Python function, or
+adopt dbt. Both are a hurdle for someone who just wants their queries to run as a pipeline.
 
-### 2.1 Why this is much smaller than dbt-mode was
+**The rule: everything is explicit.** Nothing about a Ripple is inferred from its SQL. Every SQL Ripple
+is declared in `pond.toml`, with its parents, the Source tables it reads, and how it writes.
 
-dbt-mode needed its own executor (`duck/dbt_executor.py`) because **dbt owns its own connection** —
-two open DuckDB connections to one registry file conflict, so `DbtExecutor` holds none and serialises
-transient ones. A `.sql` Ripple has no such problem: it is just SQL run on the Pond's existing
-connection.
+### 2.1 Declaration
 
-So the whole runtime half collapses. Rather than a new executor, **synthesise the ripple callable**:
+```toml
+[sources]
+transactions = "1.0.0"
+products = "1.0.0"
+
+[ripples.sale_line]
+sql = "sql/sale_line.sql"
+reads = ["transactions.order_line", "products.product"]
+
+[ripples.daily_sales]
+sql = "sql/daily_sales.sql"
+parents = ["sale_line"]
+write = "merge"
+pk = ["day", "product_id"]
+
+[static.regions]
+path = "data/regions.csv"
+```
+
+`[ripples.NAME]`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `sql` | required | Path, relative to the Pond's directory, of a file holding one `SELECT`. The Ripple writes one table, named `NAME`. |
+| `parents` | `[]` | Ripples in this Pond (SQL or Python) that must finish first. |
+| `reads` | `[]` | Source tables the query reads, as `source.table`, each from a Source in `[sources]`. |
+| `write` | `"overwrite"` | `"overwrite"` (`write_table`), `"merge"` (`merge_table`) or `"append"` (`append_table`). |
+| `pk` | | Required for `merge`; optional for `append` (as `append_table`'s `pk`). A string or a list. |
+| `always_run` | `false` | As `@ripple(always_run=True)`. |
+
+`[static.NAME]`: a file shipped with the Pond's code (CSV, Parquet or JSON, by extension), with `path`
+relative to the Pond's directory. Every Ripple, SQL or Python, sees it as a read-only table `NAME`.
+Static tables take no part in ordering, so they're never listed in `parents` or `reads`. A changed file
+arrives with a redeploy and is used from the next run; it doesn't trigger a run by itself. Data from
+outside the Pond's code (`read_parquet('s3://...')`, an attached database, an API) belongs in an Inlet
+and is not declared here.
+
+Names: a Ripple name and a static name share the Pond's table namespace, so a clash is a deploy error,
+as is a static name clashing with a table a Python Ripple writes (found at its first run).
+
+### 2.2 Mixing with Python
+
+A Pond can have SQL Ripples and `@ripple` functions together. `parents` on either side can name the
+other kind: `@ripple(parents=...)` accepts names (strings) as well as function references. A dbt Pond
+still can't have either.
+
+The Ripple list is built in three places today, each mapping parent function references to names on its
+own: deploy discovery (`discover.run`), the Duck (`duck/executor.load_topology` / `_import_ripples`) and
+the local runner (`local/runner.py`). `load_topology` and the runner silently drop a parent they can't
+resolve (`if p in func_to_name`), which loses an ordering edge without a word. Replace all three with one
+function in `core.py` that imports the Python entrypoint (if present), adds the SQL Ripples from
+`pond.toml`, resolves every parent to a name, and raises on an unknown parent, a duplicate name or a
+cycle. Each SQL Ripple becomes an ordinary Ripple callable:
 
 ```python
-def _sql_ripple(text, name, mode, pk):
-    def run(pond):
-        rel = pond.con.sql(text)
-        if mode == "merge":
-            pond.merge_table(name, rel, pk=pk)
-        elif mode == "append":
-            pond.append_table(name, rel, pk=pk)
-        else:
-            pond.write_table(name, rel)
-    return run
+def run(pond):
+    for ref in reads:
+        pond.read_table(ref)            # registers the Source table for the query (see 2.3)
+    rel = pond.con.sql(text)
+    if write == "merge":
+        pond.merge_table(name, rel, pk=pk)
+    elif write == "append":
+        pond.append_table(name, rel, pk=pk)
+    else:
+        pond.write_table(name, rel)
 ```
 
-That is an ordinary Ripple. `RippleExecutor`, the freshness model, retries, contracts, lineage,
-Puddles and the Flock all work unchanged, because nothing downstream of discovery can tell the
-difference.
+Executor, freshness, retries, contracts, lineage, Puddles and the Flock all work unchanged. The
+`pond.trickle(...)` builder stays Python-only; a SQL user wanting an incremental join writes a merge
+over the join (comprehensive, correct), or a Python Ripple.
 
-### 2.2 Discovery and dependencies
+### 2.3 How Source and static tables are named in the SQL
 
-New module `sql_mode.py`, mirroring `dbt_mode.py`'s role but far thinner. It emits **the same ripple-row
-shape** everything else already consumes — `{"func", "name", "parents", "always_run"}` — which is what
-makes the rest free (`dbt_mode.manifest_to_ripples:97` documents that contract).
+`Pond.read_table` registers a foreign table as a view with the table's bare name. SQL users will
+naturally write `transactions.order_line`, matching the catalog, so for SQL Ripples register each `reads`
+entry in a schema named after the Source (`transactions.order_line`), on the Ripple's own connection.
+Decide in the build whether these are temporary (preferred: nothing lands in the registry) and whether
+the bare name stays available too. Static tables are views over the bundled file, registered under
+their bare name on every Ripple's connection.
 
-Dependency resolution, in precedence order:
+### 2.4 The reference check
 
-1. **Explicit** — a leading `-- depends: orders, catalog` comment. Always honoured, always wins.
-2. **Inferred** — parse the statement with **sqlglot** (already an optional dep for column lineage,
-   the `duckstring[lineage]` extra) and collect table references. A reference resolves to a sibling
-   Ripple if it matches another file's stem; to a cross-Pond read if it is `source.table` and `source`
-   is declared in `[sources]`; otherwise it is left alone (a CTE, a function, an attached database).
+At deploy, each SQL Ripple's query is parsed by DuckDB (`json_serialize_sql`) and its base-table
+references collected, excluding the query's own CTE names. Table functions (`read_parquet(...)`) aren't
+base tables and are ignored. Every remaining reference must be one of:
 
-Inference should require sqlglot rather than regex — guessing dependencies wrong produces a silently
-mis-ordered pipeline, which is far worse than an import error. If sqlglot is absent, require the
-explicit form and say so.
+- a Ripple in `parents`, or one further up its ancestry;
+- a `reads` entry;
+- a `[static]` table;
+- the Ripple's own table (a deliberate read of its previous output).
 
-### 2.3 Cross-Pond reads
+Anything else fails the deploy (a 422 naming the Ripple and the table), so a forgotten `parents` entry
+can't make a Ripple silently read the previous run's table. The declaration stays the source of truth:
+the check never adds an edge.
 
-`Pond.read_table` already registers a foreign Source's table as a temp view named after the table
-(the convention documented in CLAUDE.md, and the reason replacement scans are banned). So a `.sql`
-file referencing `transactions.order_line` is served by pre-registering its resolved sources before the
-statement runs — the same move `dbt_mode.materialize_sources:126` makes, minus dbt's schema mapping.
-
-### 2.4 Materialisation modes
-
-Frontmatter comments keep the Trickle surface reachable without Python:
-
-```sql
--- depends: orders, catalog
--- materialize: merge
--- pk: order_id
-SELECT ...
-```
-
-`overwrite` (default), `merge`, `append`. This is worth having in v1: without it, sql-mode is an
-overwrite-only ghetto and the docs would have to tell readers to leave it for anything incremental —
-which contradicts the "incremental is the default" beat.
-
-The `pond.trickle(...)` builder is **not** exposed in sql-mode. It is a Python DSL and it should stay
-one; a SQL user reaching for incremental joins writes a merge over a join and gets the comprehensive
-path, which is correct if not optimal. Say that plainly in the docs rather than hiding it.
+Python Ripples get a runtime version of the same check, on the reads the Pond handle brokers
+(`read_table`, `read_delta`, `pond.trickle(...)` on an own table): reading a sibling's table that isn't an
+ancestor fails the Ripple with the same message. SQL a Python Ripple runs directly on `pond.con` isn't
+visible to it; say so in the docs. Wrapping the connection to see it was judged too invasive.
 
 ### 2.5 Touch points
 
-- `routes/deploy._pond_config:84` reads `[pond] sql` alongside `dbt_project`.
-- `routes/deploy._discover_ripples:124` gains a third branch.
-- `duck/executor.load_topology:23` gains the matching branch (it already has one for dbt).
-- `duck/executor._import_ripples` gains the synthesised-callable path.
-- `cli/pond.py demo` — a `--sql` demo set, the same pipeline as the default one written as SQL files.
-- Validation: `sql`, `dbt_project` and `@ripple` code are mutually exclusive; 422 at deploy.
+- `core.py`: the shared Ripple collection (2.2); `@ripple(parents=...)` accepting names; the runtime
+  sibling-read check on brokered own-table reads.
+- `discover.py`, `duck/executor.py`, `local/runner.py`: use the shared collection.
+- Deploy (`routes/deploy.py`): the reference check (2.4); `[ripples]`/`[static]` validation (files
+  exist, `pk` present for merge, `reads` sources declared, names unique); 422s with the reason.
+- The Pond handle or executor: register static tables for every Ripple; SQL Ripples' `reads` views.
+- Puddles: `pond run` works unchanged (same collection, same handle). `[static]` files are in the
+  project directory, so they're there locally too.
+- `.pondignore`: `[static]` and `sql` files must not be excluded (check `DEFAULT_PATTERNS`).
+- `cli/pond.py demo`: a `--sql` demo, the default pipeline written as SQL files.
+- Docs: `pond_toml.md` (`[ripples]`, `[static]`), a Building Ponds guide page for SQL Ripples, the
+  decorators reference (`parents` takes names), and the Ripples concept page's mention of SQL.
+
+### 2.6 Tests
+
+Declaration validation (each 422); the reference check (an undeclared sibling, Source or file fails the
+deploy; CTEs, table functions, self-reads and ancestors pass); mixed Ponds in both directions; each write
+mode; static tables in SQL and Python Ripples; the Python runtime check; the shared collection raising on
+an unknown parent where it used to drop it; a deployed-Duck e2e of the SQL demo.
 
 ---
 
@@ -369,32 +350,21 @@ this as considered and rejected, not overlooked.
 
 ---
 
-## 4. Sequencing
+## 4. Sequencing (revised 2026-10-04)
 
-1. **Run instrumentation** (§1). Independent, small, and it changes what the quickstart and demo pages
-   say — so it should be decided early even if built later.
-2. **MotherDuck groundwork + `md://` Spout** (§3.0, §3.2). Small, self-contained, and it makes the
-   ecosystem positioning concrete rather than rhetorical.
-3. **Native `.sql` Ripples** (§2). Changes the shape of the quickstart, so it wants to land before the
-   Getting Started rewrite is finalised.
-4. **MotherDuck Flock engine** (§3.4). The largest of the three recommended items and the one with the
-   best ratio of capability to code, but it is the least urgent for the documentation rewrite.
-5. Deferred: MD data plane (§3.3), MD as Source first-class (§3.1), MD compute (§3.5), whole-terminal
-   dispatch (§3.4).
+1. **SQL Ripples** (§2). Next to build.
+2. **MotherDuck Flock engine**: built per `plans/flock-motherduck.md` once there's an account for its spike.
+3. **MotherDuck groundwork + `md://` Spout** (§3.0, §3.2): also needs an account; after the engine.
+4. Skipped: run instrumentation (§1). Deferred: MD data plane (§3.3), MD as Source first-class (§3.1), MD
+   compute (§3.5).
 
-## 5. Open questions
+## 5. Decisions (2026-10-04)
 
-- **Instrumentation: how much counting is free enough?** The proposal is metadata-only reads and a hard
-  rule against adding a scan, with unknowns reported as unknown. Is a `--stats` opt-in worth having for
-  the expensive counts, or does an unknown-shaped hole in the summary undermine the demo?
-- **`.sql` mode and sqlglot.** Dependency inference wants a real parser. Is a hard requirement on the
-  `duckstring[lineage]` extra acceptable for sql-mode, or should the explicit `-- depends:` form be the
-  only supported mechanism in v1?
-- **Does sql-mode make dbt-mode redundant?** No — dbt brings tests, docs, macros and an existing
-  investment. But the two overlap enough that the docs need a clear sentence on when to use which, and
-  it is worth deciding that sentence before building.
-- **MotherDuck destination URI shape.** `md://database/schema/table` is the obvious form, but MD's own
-  addressing conventions should win over ours where they differ.
-- **Does the MD Flock engine become the default** where MD is configured? Athena is the current default
-  and it is strictly more restricted. Defaulting to MD when both are available seems right, but it is a
-  behaviour change worth stating rather than sliding in.
+- SQL Ripples are declared in `pond.toml` (`[ripples.NAME]`), fully explicit, with no dependency
+  inference; sqlglot isn't involved.
+- SQL and Python Ripples can be mixed in one Pond.
+- The reference check applies to every SQL Ripple at deploy, and to Python Ripples' brokered reads at run
+  time.
+- Static content shipped with the Pond is declared in `[static.NAME]`.
+- Still open: when to use SQL Ripples rather than dbt mode needs one clear sentence in the docs, decided
+  before the docs are written. And the MotherDuck destination URI shape (§3.2), when that's built.
