@@ -13,15 +13,17 @@ bytes-scanned). The engine protocol has no cost surface — dispatch returns a r
 ``None``, nothing more.
 
 Posture ladder (a **Pond-level** setting — ``pond.toml [flock] mode`` coalesced with an operator
-override, threaded to the Duck as ``DUCKSTRING_FLOCK_MODE``; inert without a configured engine, so
-the same code runs anywhere — plans/cloud-config.md):
+override, carried to the Duck on each ``begin_run`` job (see :func:`job_settings`); inert without a
+configured engine, so the same code runs anywhere — plans/cloud-config.md):
 
 - **always** — every eligible terminal recomputes on the Flock (the known-heavy declaration).
 - **upgrade** — comprehensive-bound runs only: dispatch up front when *clearly* over the
   envelope, else run the local recompute bounded+materialised and fail up on OOM.
 - **off** — never.
 
-Config (env):
+Config (env names; the Catchment sends them on each ``begin_run`` job, which works for every launcher,
+including Fargate and EC2 Ducks that inherit no environment from it, and the Duck overlays them on its
+own environment for that run):
 
 - ``DUCKSTRING_FLOCK_ENGINE``  — engine name (default ``athena``); unknown/unconfigured ⇒ off.
 - ``DUCKSTRING_FLOCK_MODE``    — the Pond's resolved posture (off|upgrade|always; set by the Duck from
@@ -33,7 +35,8 @@ Config (env):
   "clearly over the envelope" row threshold is DERIVED from it (no abstract size preset — the box's
   real memory is the envelope). Absent ⇒ a conservative default.
 - engine-specific config lives under the engine's own namespace (Athena:
-  ``DUCKSTRING_FLOCK_ATHENA_{WORKGROUP,DATABASE,SCRATCH,REGION}``).
+  ``DUCKSTRING_FLOCK_ATHENA_{WORKGROUP,DATABASE,SCRATCH,REGION}``), and an engine's credentials are the
+  secret names it declares in ``SECRETS`` (see :func:`engine_secrets`).
 """
 
 from __future__ import annotations
@@ -167,6 +170,53 @@ class FlockEngine(Protocol):
     def dispatch(self, builder, out_pk): ...                # result relation, or None on failure
 
 
+# The Catchment-side keys the Duck takes from the Pond's effective config rather than the environment.
+_POSTURE_KEYS = ("DUCKSTRING_FLOCK_MODE", "DUCKSTRING_FLOCK_ENGINE", "DUCKSTRING_FLOCK_OOM_POLICY")
+# Built-in engine names, as the module:Class spec each stands for.
+_BUILTIN_ENGINES = {"athena": "duckstring.flock.engines.athena:AthenaEngine"}
+
+
+def engine_secrets(name: str | None) -> tuple[str, ...]:
+    """The credential names engine ``name`` needs: its class's ``SECRETS`` attribute (names in the
+    Catchment's secret store, else its environment). An engine the Catchment can't import declares none
+    (it may only be importable in the Duck's environment); that never fails a run."""
+    name = (name or "athena").strip()
+    spec = _BUILTIN_ENGINES.get(name.lower(), name)
+    if ":" not in spec:
+        return ()
+    import importlib
+
+    module_name, _, class_name = spec.partition(":")
+    try:
+        return tuple(getattr(getattr(importlib.import_module(module_name), class_name), "SECRETS", ()))
+    except Exception:  # noqa: BLE001
+        return ()
+
+
+def job_settings(duck_cfg: dict, environ=None, secret=None) -> dict[str, str]:
+    """The Flock settings a ``begin_run`` job carries, as an environment mapping the Duck overlays on its
+    own for that run (built on the Catchment): the Pond's effective posture from ``duck_cfg``
+    (``flock_mode``/``flock_engine``/``oom_policy``), the Catchment's other ``DUCKSTRING_FLOCK_*``
+    settings, and, only when the Flock is on, the engine's declared secrets, each from the secret store
+    (``secret(name)``) else the Catchment's environment. The job travels over the authenticated Duck
+    channel, so credentials stay out of task definitions and process listings, and a rotated secret is
+    used from the next run."""
+    e = os.environ if environ is None else environ
+    out = {k: v for k, v in e.items() if k.startswith("DUCKSTRING_FLOCK_") and k not in _POSTURE_KEYS}
+    mode = (duck_cfg.get("flock_mode") or "off").lower()
+    engine = duck_cfg.get("flock_engine") or e.get("DUCKSTRING_FLOCK_ENGINE")
+    out["DUCKSTRING_FLOCK_MODE"] = mode
+    out["DUCKSTRING_FLOCK_OOM_POLICY"] = (duck_cfg.get("oom_policy") or "fail_up").lower()
+    if engine:
+        out["DUCKSTRING_FLOCK_ENGINE"] = engine
+    if mode != "off":
+        for name in engine_secrets(engine):
+            value = (secret(name) if secret is not None else None) or e.get(name)
+            if value:
+                out[name] = value
+    return out
+
+
 def get_engine(env=None) -> FlockEngine | None:
     """The configured engine, or ``None`` when the Flock is off (no engine / not enabled).
 
@@ -255,16 +305,17 @@ def _probe_local(builder):
     return con.table(name)
 
 
-def comprehensive(builder, out_pk, *, pond_mode: str | None, comprehensive_bound: bool):
+def comprehensive(builder, out_pk, *, pond_mode: str | None, comprehensive_bound: bool, env=None):
     """Decide + run this terminal's comprehensive recompute on the Flock. Returns a result
     relation for the terminal's own comprehensive machinery, or ``None`` (run local — the common
     case). ``pond_mode`` is the Pond's resolved posture; ``comprehensive_bound`` is the caller's
     verdict that this run recomputes wholesale anyway (bootstrap / ``ivm=False``); incremental epochs
-    pass ``False`` and never dispatch."""
-    engine = get_engine()
+    pass ``False`` and never dispatch. ``env`` is the run's Flock settings (the job's, over the Duck's
+    environment); ``None`` reads the process environment."""
+    engine = get_engine(env)
     if engine is None:
         return None
-    mode = resolve_mode(pond_mode)
+    mode = resolve_mode(pond_mode, env)
     if mode == "off":
         return None
     # The engine decides what it can be trusted with: both what its compiler can express and which
@@ -278,7 +329,7 @@ def comprehensive(builder, out_pk, *, pond_mode: str | None, comprehensive_bound
     # upgrade: comprehensive-bound runs only; dispatch when clearly over, else local + OOM fail-up.
     if not comprehensive_bound:
         return None
-    if engine.estimate_rows(builder) >= _min_rows():
+    if engine.estimate_rows(builder) >= _min_rows(env):
         return _dispatch(engine, builder, out_pk)
     try:
         return _probe_local(builder)
@@ -288,7 +339,7 @@ def comprehensive(builder, out_pk, *, pond_mode: str | None, comprehensive_bound
         if not isinstance(exc, duckdb.OutOfMemoryException):
             raise
         # oom_policy=fail is the hard cap: surface the OOM as a Pond failure, don't offload.
-        if _oom_policy() == "fail":
+        if _oom_policy(env) == "fail":
             log.warning("flock: local comprehensive hit the memory limit and oom_policy=fail — not offloading")
             raise
         log.warning("flock: local comprehensive hit the memory limit (%s) — failing up", str(exc)[:200])

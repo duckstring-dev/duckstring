@@ -50,6 +50,8 @@ Run only one Catchment process against a state directory, and only one Catchment
 
 ## Flock
 
+Set these on the Catchment. It sends them to each Duck with every run, together with any credentials the engine needs, so Ducks in the cloud need no Flock settings of their own.
+
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_FLOCK_MODE` | `off` | Catchment default for [`[flock] mode`](pond_toml.md#flock). |

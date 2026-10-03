@@ -44,6 +44,13 @@ def set_secret_provider(fn: "Callable[[str], str | None] | None") -> None:
     _secret_provider = fn
 
 
+def secret_value(name: str) -> "str | None":
+    """A secret's value from the injected store, or ``None`` (unset, or no store attached). For callers
+    that hand a credential on rather than substituting a reference, such as the Flock settings on a
+    ``begin_run`` job. **Do not log or persist the result.**"""
+    return _secret_provider(name) if _secret_provider is not None else None
+
+
 @dataclass(frozen=True)
 class Reference:
     scheme: str  # 'env' | 'secret'

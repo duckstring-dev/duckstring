@@ -183,7 +183,7 @@ DuckDB is the authority on results: dispatch decides where work runs, never what
 2. `conform` casts the engine's result to `builder.schema()` (DuckDB's own bound schema) in DuckDB's column order, and rejects a differing column set.
 3. A rejected result falls back to local compute and counts as a failed dispatch, so non-conformance shows on /metrics instead of in the data.
 
-`DUCKSTRING_FLOCK_ENGINE` takes a built-in name or a `module:Class` spec. An unimportable spec turns the Flock off rather than failing a run; `tests/flock_fake_engine.py` makes the whole path testable offline. Every dispatch failure falls back to local compute, so the dispatch counters (`take_stats()`, shipped per Ripple Run) are the only sign a Flock is broken.
+The Flock settings reach every Duck on its `begin_run` job, not its environment (so Fargate and EC2 Ducks get them too): `flock.job_settings` builds a flat `DUCKSTRING_FLOCK_*` mapping from the Pond's effective config and the Catchment's own settings, plus the engine's declared `SECRETS` (secret store, else env; only when the mode isn't `off`); the Duck overlays it on its environment per Run (`RunInputs.flock_for` → `Pond.flock_env` → the builder → `flock.comprehensive(env=)`). `DUCKSTRING_FLOCK_ENGINE` takes a built-in name or a `module:Class` spec. An unimportable spec turns the Flock off rather than failing a run; `tests/flock_fake_engine.py` makes the whole path testable offline. Every dispatch failure falls back to local compute, so the dispatch counters (`take_stats()`, shipped per Ripple Run) are the only sign a Flock is broken.
 
 ## Runtime architecture (Catchment and Ducks)
 

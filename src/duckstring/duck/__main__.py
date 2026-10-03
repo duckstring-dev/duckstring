@@ -141,7 +141,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                         # overwrite versions, applied at its publish.
                         executor.begin_run_inputs(
                             datetime.fromisoformat(data["f"]), data.get("source_f"),
-                            _retain_from(data), force=data.get("force", False),
+                            _retain_from(data), force=data.get("force", False), flock=data.get("flock"),
                         )
                         if data.get("refresh"):
                             executor.wipe()  # cold reset: the run rebuilds from scratch

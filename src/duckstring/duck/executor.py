@@ -77,8 +77,13 @@ def _run_ripple(
     source_majors: dict[str, int], f: datetime | None, previous_f: datetime | None,
     data_root: str | None = None, sources_changed: bool = True, skip_sink=None,
     staging_dir=None, own_data_dir=None, source_f: dict[str, str] | None = None,
+    flock: dict[str, str] | None = None,
 ) -> dict:
     from ..core import Pond
+
+    # The run's Flock settings (from its begin_run job) over the Duck's own environment, so a Duck whose
+    # launcher passed no environment (Fargate, EC2) still has the Pond's posture, engine and credentials.
+    flock_env = {**os.environ, **flock} if flock else None
 
     # ``con`` is a cursor off the executor's single shared registry instance (see RippleExecutor).
     # Ripples run concurrently on pool threads, each with its own cursor — they share the one instance,
@@ -88,9 +93,9 @@ def _run_ripple(
         source_majors=source_majors, source_f=source_f, f=f, previous_f=previous_f, data_root=data_root,
         sources_changed=sources_changed, skip_sink=skip_sink,
         staging_dir=staging_dir, own_data_dir=own_data_dir,
-        # Flock is a Pond-level posture now (not per-Ripple): the Duck's config env carries the
-        # resolved mode. flock.comprehensive still applies engine-eligibility + the OOM fail-up.
-        flock=os.environ.get("DUCKSTRING_FLOCK_MODE"),
+        # Flock is a Pond-level posture (not per-Ripple). flock.comprehensive still applies
+        # engine-eligibility and the OOM fail-up.
+        flock=(flock_env or os.environ).get("DUCKSTRING_FLOCK_MODE"), flock_env=flock_env,
     )
     try:
         func(pond)
@@ -168,8 +173,9 @@ def open_registry(path: Path):
 
 class RunInputs:
     """What each ``begin_run`` job tells the Duck about its Run's inputs, kept per Run freshness so
-    pipelined Runs don't share them: the Sources' published freshness (the version pins its reads use)
-    and the Catchment's ``retain_from`` for this line's own overwrite versions. Shared by both executors."""
+    pipelined Runs don't share them: the Sources' published freshness (the version pins its reads use),
+    the Catchment's ``retain_from`` for this line's own overwrite versions, and the Pond's Flock settings
+    (``flock.job_settings``). Shared by both executors."""
 
     def _inputs(self) -> dict:
         if not hasattr(self, "_run_inputs"):
@@ -177,19 +183,25 @@ class RunInputs:
         return self._run_inputs
 
     def begin_run_inputs(self, f: datetime, source_f: dict[str, str] | None, retain_from=KEEP_ALL,
-                         force: bool = False) -> None:
+                         force: bool = False, flock: dict[str, str] | None = None) -> None:
         """Record Run ``f``'s inputs. The first job for ``f`` wins (a re-dispatch after a Catchment restart
         must not move a Run's pins under its running Ripples), unless ``force`` restarts the Run.
         ``retain_from`` is a datetime, ``None`` (keep only the newest version) or ``KEEP_ALL`` (no job
         value: prune nothing)."""
         self.source_f = source_f or {}  # the latest job's view (fallback for a Run with no recorded inputs)
+        self.flock = flock  # likewise
         inputs = self._inputs()
         if force or f not in inputs:
-            inputs[f] = {"source_f": dict(source_f or {}), "retain_from": retain_from}
+            inputs[f] = {"source_f": dict(source_f or {}), "retain_from": retain_from, "flock": flock}
 
     def source_f_for(self, f: datetime | None) -> dict[str, str]:
         rec = self._inputs().get(f)
         return rec["source_f"] if rec is not None else self.source_f
+
+    def flock_for(self, f: datetime | None) -> dict[str, str] | None:
+        """Run ``f``'s Flock settings from its job, or ``None`` (no job carried any: the environment's)."""
+        rec = self._inputs().get(f)
+        return rec["flock"] if rec is not None else getattr(self, "flock", None)
 
     def take_retain_from(self, f: datetime | None):
         """Run ``f``'s retention bound, consumed by its publish (``KEEP_ALL`` if no job recorded one)."""
@@ -306,6 +318,7 @@ class RippleExecutor(RunInputs):
                 func, self.pond_name, self.version, self._cursor(), str(self.root),
                 self.source_majors, f, previous_f, self.data_root,
                 sources_changed=sources_changed, skip_sink=skip_sink, source_f=self.source_f_for(f),
+                flock=self.flock_for(f),
                 staging_dir=self.staging_dir, own_data_dir=self.own_data_dir,
             )
 

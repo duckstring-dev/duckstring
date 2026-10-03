@@ -318,7 +318,6 @@ class PoolLauncher:
         self._lock = threading.Lock()
         self._jobs: list[dict] = []
         self._state: dict[str, str] = {}  # pond_key -> pending | running | exited
-        self._flock_env = {}  # per-spawn env carried on the ensure job
 
     # ── the launcher seam ─────────────────────────────────────────────────────
 
@@ -330,14 +329,9 @@ class PoolLauncher:
                 return
             self.machine.start()
             name, major = split_pond_key(pond_key)
-            env = {}
-            if duck:
-                env["DUCKSTRING_FLOCK_MODE"] = duck.get("flock_mode") or "off"
-                if duck.get("flock_engine"):
-                    env["DUCKSTRING_FLOCK_ENGINE"] = duck["flock_engine"]
-                env["DUCKSTRING_FLOCK_OOM_POLICY"] = duck.get("oom_policy") or "fail_up"
+            # The Pond's Flock settings travel on each begin_run job (flock.job_settings), not here.
             self._jobs.append({"kind": "ensure", "pond": name, "major": major,
-                               "version": version, "source_path": source_path, "env": env})
+                               "version": version, "source_path": source_path, "env": {}})
             self._state[pond_key] = "pending"
 
     def terminate(self, pond_key: str, wait: bool = False) -> None:

@@ -715,13 +715,15 @@ class TrickleBuilder:
         ⇒ pure OSS, everything local."""
         from .. import flock
 
-        if not flock.enabled():
+        env = getattr(self.ctx, "flock_env", None)  # the run's Flock settings (from its begin_run job)
+        if not flock.enabled(env):
             return None
         comprehensive_bound = (not ivm) or (name not in read_meta(self.ctx.con))
         return flock.comprehensive(
             self, out_pk,
             pond_mode=getattr(self.ctx, "flock", None),
             comprehensive_bound=comprehensive_bound,
+            env=env,
         )
 
     # ─── compute (the shared ΔO step behind .merge() and .append()) ───────────────

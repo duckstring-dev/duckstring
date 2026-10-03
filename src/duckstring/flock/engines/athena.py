@@ -93,6 +93,8 @@ _ALLOWED_FUNCS = frozenset({"round", "abs", "floor", "ceil", "ceiling", "coalesc
 class AthenaEngine:
     """A :class:`duckstring.flock.FlockEngine`. Holds the env config; one per resolve."""
 
+    SECRETS: tuple[str, ...] = ()  # credentials come from the Duck's IAM role, not a secret
+
     def __init__(self, env):
         self.workgroup = env.get("DUCKSTRING_FLOCK_ATHENA_WORKGROUP") or None
         self.database = env.get("DUCKSTRING_FLOCK_ATHENA_DATABASE") or None

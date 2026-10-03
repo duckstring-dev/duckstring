@@ -1,6 +1,7 @@
 # The Flock on MotherDuck
 
-Status: **designed, not built** (2026-10-02). Agreed with the author: MotherDuck becomes the first-class
+Status: **settings-in-the-job part built (2026-10-03)**, see "As built" at the end; the engine waits for
+the spike, which needs a MotherDuck account. Designed 2026-10-02 and agreed with the author: MotherDuck becomes the first-class
 Flock engine. Athena stays, for teams that need compute inside their own AWS account. `plans/duckdb-2-ready.md` (item 6)
 generalises this engine to a remote-DuckDB engine with a second, self-hosted target (a DuckDB 2.0 server
 in the user's account); build the two together.
@@ -133,3 +134,27 @@ day to move Flock settings into the job, half a day of docs.
 - [MotherDuck: Duckling sizes](https://motherduck.com/docs/about-motherduck/billing/duckling-sizes/)
 - [MotherDuck: Pricing model](https://motherduck.com/docs/about-motherduck/billing/pricing/)
 - [MotherDuck: Hypertenancy](https://motherduck.com/docs/concepts/hypertenancy/)
+
+## As built (2026-10-03): Flock settings in the job
+
+- `flock.job_settings(duck_cfg, environ, secret)` builds, on the Catchment, a flat environment mapping:
+  the Pond's effective `flock_mode`/`flock_engine`/`oom_policy` as `DUCKSTRING_FLOCK_MODE`/`_ENGINE`/
+  `_OOM_POLICY`, every other `DUCKSTRING_FLOCK_*` setting in the Catchment's environment (Athena's
+  workgroup and so on, `MIN_ROWS`), and the engine's credentials. `_dispatch_begin_run` puts it on the job
+  as `flock`.
+- Credentials are declared by the engine class as `SECRETS` (names), resolved from the secret store
+  (`credentials.secret_value`, new) else the Catchment's environment, and sent **only when the Pond's
+  mode isn't `off`**. Athena declares none (it uses the Duck's IAM role). An engine the Catchment can't
+  import declares none, so a `module:Class` engine only installed in Pond environments still works,
+  without credentials from the Catchment. The MotherDuck engine will declare `MOTHERDUCK_TOKEN` (and its
+  per-size profile names) here; its fallback to MotherDuck's own `motherduck_token` variable belongs in
+  the engine.
+- The Duck keeps the mapping per Run (`RunInputs.flock_for`), overlays it on its own environment and
+  passes it to the Pond handle as `flock_env`; the builder hands it to `flock.enabled`/`comprehensive`,
+  which thread it to `get_engine`, the mode, the row envelope and the OOM policy. The engine is built per
+  terminal, so a rotated secret is used from the next run.
+- The subprocess and Pool launchers no longer set the Flock variables. The Pool agent's generic `env`
+  channel on its ensure job stays, empty. `DUCKSTRING_MEMORY_LIMIT` stays a Duck environment setting,
+  since it describes the Duck's machine.
+- Tests: `tests/test_flock_job.py`.
+

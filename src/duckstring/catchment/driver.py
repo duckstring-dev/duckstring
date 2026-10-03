@@ -22,6 +22,7 @@ import os
 import threading
 from datetime import datetime, timedelta, timezone
 
+from ..egress.credentials import secret_value
 from ..engine import (
     NEVER,
     EngineState,
@@ -53,6 +54,7 @@ from ..engine import (
     tick,
     wake_pond,
 )
+from ..flock import job_settings as flock_job_settings
 from ..keys import pond_key
 
 # A Duck is presumed dead if it holds an in-flight Run but hasn't contacted the Catchment within this
@@ -3062,7 +3064,8 @@ class Driver:
                 self._pending_egress.append((pond, f))
             self._signal_egress()
             return
-        self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=self.duck_config(pond))
+        duck_cfg = self.duck_config(pond)
+        self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=duck_cfg)
         self.last_seen[pond] = now  # grace clock: a freshly (re)spawned Duck isn't immediately stale
         self._awaiting_first_contact.add(pond)  # until it speaks, judge it by the spawn grace (see below)
         self._idle_since.pop(pond, None)  # it's running again — reset its reap grace clock
@@ -3089,6 +3092,9 @@ class Driver:
             "source_f": pins,
             # How far back this line's own superseded overwrite versions must be kept (prune_versions).
             "retain_from": self._retain_from(pond),
+            # The Pond's Flock settings and its engine's credentials, for this run (flock.job_settings).
+            # On the job rather than the Duck's environment, so every launcher's Ducks get them.
+            "flock": flock_job_settings(duck_cfg, secret=secret_value),
         })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI. A Force re-opens the Run.

@@ -218,6 +218,8 @@ DUCKSTRING_FLOCK_ATHENA_DATABASE=duckstring_flock
 DUCKSTRING_FLOCK_ATHENA_SCRATCH=s3://acme-lake/flock-scratch
 ```
 
+Set these on the Catchment. It sends them to each Duck with every run, so cloud Ducks need no Flock settings of their own. Then allow it for a Pond:
+
 ```bash
 duckstring duck set priced --flock upgrade
 ```

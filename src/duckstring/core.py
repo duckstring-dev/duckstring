@@ -464,7 +464,7 @@ class Pond:
         source_majors: dict[str, int] | None = None, source_f: dict[str, str] | None = None,
         f=None, previous_f=None, data_root: str | None = None,
         sources_changed: bool = True, skip_sink=None, staging_dir=None, own_data_dir=None,
-        flock: str | None = None, sources=None,
+        flock: str | None = None, sources=None, flock_env: dict[str, str] | None = None,
     ) -> None:
         from .engine.core import NEVER
 
@@ -484,9 +484,11 @@ class Pond:
         self._staging_dir = staging_dir
         self._own_data_dir = own_data_dir
         self._object_scratch = None
-        # The Pond's resolved Flock posture (off|upgrade|always) — from the Pond's config, threaded in
-        # by the runtime (the Duck sets it from its config env); the trickle terminals read it.
+        # The Pond's resolved Flock posture (off|upgrade|always) and the run's Flock settings (an environment
+        # mapping: the begin_run job's over the Duck's own; None reads the process environment), threaded
+        # in by the runtime; the trickle terminals read both.
         self.flock = flock
+        self.flock_env = flock_env
         self.name = name
         self.version = version
         self.con = con
