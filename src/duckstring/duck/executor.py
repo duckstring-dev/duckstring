@@ -122,6 +122,50 @@ def _export_data(con, data_dir, f: datetime | None, contract=None, retain_from=K
         con.close()
 
 
+# DuckDB errors at open that mean the registry file can't be used by this DuckDB: written by a newer
+# storage version (a Pond environment can run a different DuckDB from the one that wrote it), not a DuckDB
+# file, or corrupt. Matched on the message, since they are all IOException; anything else (a lock held by
+# another process above all) is re-raised, because setting aside a file someone holds would be destructive.
+_UNREADABLE_MARKERS = (
+    "not a valid duckdb database file",
+    "trying to read a database file with version number",
+    "corrupt database file",
+    "checksum",
+    "replaying wal",
+)
+
+
+def _is_unreadable(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "lock" not in msg and any(m in msg for m in _UNREADABLE_MARKERS)
+
+
+def open_registry(path: Path):
+    """Open a Pond's registry, returning ``(connection, recovery)``: ``recovery`` is ``"missing"`` when
+    the file didn't exist, ``"unreadable"`` when it existed but this DuckDB can't open it (it is renamed
+    aside with its WAL, kept for inspection, and a fresh registry is created), else ``None``. Either
+    recovery means the caller should rebuild the registry from published state."""
+    import duckdb
+
+    if not path.exists():
+        return duckdb.connect(str(path)), "missing"
+    try:
+        return duckdb.connect(str(path)), None
+    except duckdb.Error as exc:
+        if not _is_unreadable(exc):
+            raise
+        reason = str(exc).splitlines()[0]
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    aside = path.with_name(f"{path.name}.unreadable-{stamp}")
+    path.rename(aside)
+    wal = path.with_name(f"{path.name}.wal")
+    if wal.exists():
+        wal.rename(aside.with_name(f"{aside.name}.wal"))
+    print(f"[executor] registry {path} is unreadable ({reason}); moved it to {aside.name} and rebuilding",
+          flush=True)
+    return duckdb.connect(str(path)), "unreadable"
+
+
 class RunInputs:
     """What each ``begin_run`` job tells the Duck about its Run's inputs, kept per Run freshness so
     pipelined Runs don't share them: the Sources' published freshness (the version pins its reads use)
@@ -163,8 +207,6 @@ class RunInputs:
 class RippleExecutor(RunInputs):
     def __init__(self, pond_name: str, major: int, version: str, source_path: str, root: Path,
                  max_workers: int = 8, data_root: str | None = None, persist_root: str | None = None):
-        import duckdb
-
         from ..core import read_pond_toml
         from ..keys import spec_major
 
@@ -189,16 +231,17 @@ class RippleExecutor(RunInputs):
         else:
             self.own_data_dir = pond_data_dir(root, pond_name, major, data_root)
             self.persist_dir = None
-        # Registry-loss recovery: the registry FILE is gone (host loss / migration / scale-to-zero)
-        # but published state survives → rebuild the registry from it (tiers + meta + the Extension-1
-        # agg/acc snapshots), so the next run resumes *incrementally* instead of re-bootstrapping.
-        # Deliberately keyed on the file's absence, NOT on an empty registry: a Refresh `wipe()` empties
-        # the file in place, and re-hydrating behind a wipe would defeat the cold rebuild.
-        recover = not self.registry_path.exists()
+        # Registry-loss recovery: the registry FILE is gone (host loss / migration / scale-to-zero) or this
+        # DuckDB can't read it (a newer storage version, corruption; set aside by open_registry), but
+        # published state survives → rebuild the registry from it (tiers + meta + the Extension-1 agg/acc
+        # snapshots), so the next run resumes *incrementally* instead of re-bootstrapping. Deliberately
+        # keyed on the file, NOT on an empty registry: a Refresh `wipe()` empties the file in place, and
+        # re-hydrating behind a wipe would defeat the cold rebuild.
         # ONE registry instance for the Duck's life: ripples (and the export) each run on a `.cursor()`
         # off it. Separate `connect()`s to the same file in one process raise a "file handle conflict"
         # (a Binder error, not a transient lock) the moment two overlap — single instance avoids it.
-        self._registry = duckdb.connect(str(self.registry_path))
+        self._registry, recovery = open_registry(self.registry_path)
+        recover = recovery is not None
         # A containerised Duck must hit DuckDB's own limit (a catchable OutOfMemoryException,
         # with disk spill first) rather than the kernel's cgroup OOM-kill: the launcher sets
         # DUCKSTRING_MEMORY_LIMIT to ~80% of the pod cap. Absent env => DuckDB defaults, no change.
@@ -225,7 +268,7 @@ class RippleExecutor(RunInputs):
             hydrated = hydrate_registry(self._registry, source_dir)
             if hydrated:
                 where = "persist layer" if source_dir is self.persist_dir else "published state"
-                print(f"[executor] registry file was missing — hydrated {len(hydrated)} table(s) "
+                print(f"[executor] registry file was {recovery} — hydrated {len(hydrated)} table(s) "
                       f"from the {where}: {', '.join(hydrated)}", flush=True)
         self._cursor_lock = threading.Lock()
         # Which major line of each Source this Pond's reads resolve to (its pond.toml pins).

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..catchment.registry import pond_data_dir, pond_major_dir, pond_registry_path
-from .executor import RunInputs, _export_data
+from .executor import RunInputs, _export_data, open_registry
 
 
 class DbtExecutor(RunInputs):
@@ -37,6 +37,10 @@ class DbtExecutor(RunInputs):
         self.data_root = data_root
         self.registry_path = pond_registry_path(root, pond_name, major)
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        # A registry this DuckDB can't read is set aside and replaced; every model is rebuilt on each run,
+        # so there is nothing to hydrate. Checked once here, since each step opens its own connection.
+        con, _ = open_registry(self.registry_path)
+        con.close()
         # Local-first publish + async persist, same as RippleExecutor (plans/persist.md).
         if persist_root:
             self.own_data_dir = pond_data_dir(root, pond_name, major, None)

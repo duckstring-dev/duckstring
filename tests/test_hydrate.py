@@ -145,3 +145,44 @@ def test_executor_recovers_lost_registry_but_not_wipe(tmp_path):
     ex2 = RippleExecutor("o", 1, "1.0.0", "sources/o", tmp_path)
     assert registry_tables(ex2) == set()
     ex2.shutdown()
+
+
+def test_executor_rebuilds_an_unreadable_registry(tmp_path):
+    """A registry this DuckDB can't open (here not a DuckDB file at all; in practice one written by a
+    newer storage version) is set aside, kept for inspection, and rebuilt from published state like a
+    missing one, instead of the Duck dying at start-up."""
+    from duckstring.duck.executor import RippleExecutor
+
+    src_dir = tmp_path / "sources" / "o"
+    (src_dir / "src").mkdir(parents=True)
+    (src_dir / "pond.toml").write_text('[pond]\nname = "o"\nversion = "1.0.0"\n')
+    (src_dir / "src" / "pond.py").write_text("")
+    data_dir = tmp_path / "ponds" / "o" / "m1" / "data"
+    con = _con()
+    T.merge_table(con, "m", con.sql("SELECT 1 AS id, 'a' AS v"), ts(1), ("id",))
+    ParquetDataPlane().export(con, data_dir, f=ts(1))
+    con.close()
+
+    registry = tmp_path / "ponds" / "o" / "m1" / "registry.duckdb"
+    registry.write_bytes(b"not a duckdb file, but long enough to have a header to check" * 100)
+    registry.with_name("registry.duckdb.wal").write_bytes(b"wal")
+
+    ex = RippleExecutor("o", 1, "1.0.0", "sources/o", tmp_path)
+    try:
+        assert T.read_meta(ex._registry).get("m", {}).get("mode") == "merge"
+        aside = sorted(p.name for p in registry.parent.iterdir() if ".unreadable-" in p.name)
+        assert len(aside) == 2 and aside[1].endswith(".wal")
+    finally:
+        ex.shutdown()
+
+
+def test_only_storage_errors_count_as_unreadable():
+    from duckstring.duck.executor import _is_unreadable
+
+    assert _is_unreadable(OSError('IO Error: The file "r.duckdb" exists, but it is not a valid DuckDB database file!'))
+    assert _is_unreadable(OSError("IO Error: Trying to read a database file with version number 999, but we can "
+                                  "only read versions between 64 and 68."))
+    assert _is_unreadable(OSError("Corrupt database file: computed checksum 1 does not match stored checksum 2"))
+    # Another process holding the file must never get it moved out from under it.
+    assert not _is_unreadable(OSError('IO Error: Could not set lock on file "r.duckdb": Conflicting lock is held'))
+    assert not _is_unreadable(OSError("IO Error: Permission denied"))

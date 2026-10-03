@@ -1,6 +1,7 @@
 # DuckDB 2.0 ready
 
-Status: **planned (2026-10-03)**; one fix already in (`1efd8af9`). DuckDB 2.0 is due in the second half of
+Status: **items 1 to 3 built (2026-10-03)**, see "As built" at the end; items 5 and 6 wait for DuckDB 2.0
+and quack 1.0. One earlier fix in `1efd8af9`. DuckDB 2.0 is due in the second half of
 October 2026. Goal: Duckstring works on it on release day, and uses the 2.0 features that matter to it.
 
 ## Why now
@@ -138,3 +139,33 @@ engine, so build them together.
 
 - [A Preview of DuckDB v2.0](https://duckdb.org/2026/08/17/duckdb-20-highlights)
 - [Try DuckDB v2.0-dev](https://duckdb.org/2026/09/02/try-duckdb-20-alpha)
+
+## As built (2026-10-03): items 1 to 3
+
+**1. Bounds and CI.** `duckdb>=1.5,<2`. CI gained `duckdb-floor` (the suite on `duckdb==1.5.0`) as well as
+the planned `duckdb-prerelease` (`pip install --pre --upgrade duckdb` past the ceiling,
+`continue-on-error`), since the floor had never been tested. Checked that a Pond environment can't drift:
+installing Duckstring into an environment holding `duckdb 2.0.0.dev…` replaced it with 1.5.6. The Python
+dependencies guide says so. Also fixed in passing: three tests import fixtures from the `tests` package,
+which only resolved under `python -m pytest`, so CI's bare `pytest` failed them; `pythonpath = ["."]`
+in the pytest config fixes it.
+
+**2. The chunked-base hang was narrower, and worse, than recorded.** Re-tested on the newest build
+(`2.0.0.dev2610011535`, the same one): the repro still fails, but it isn't a hang. The `COPY` loops
+forever creating empty `data_N.parquet` files, about 10,000 a second, until the disk is full (it filled
+this machine's during the re-test). It only happens when `FILE_SIZE_BYTES` is tiny: 1 and 4 bytes loop,
+16 bytes and above (up to a 3M-row table at 1 MB, 4 MB and 10 MB limits) roll over correctly, and 1.5
+writes a single file even at 1 byte. Production's 256 MiB threshold never reaches it; the tests that
+"hung" set `DUCKSTRING_COMPACT_THRESHOLD=1` to force compaction, which also made the chunk size 1 byte.
+So instead of per-chunk `COPY`s, the chunk size is floored at 64 KiB (`dataplane._MIN_CHUNK_BYTES`);
+compaction still triggers on the raw threshold. The four affected test files pass on 2.0. Still worth
+reporting upstream, with the runaway file creation as the headline.
+
+**3. Unreadable registry.** As planned, in `duck/executor.open_registry`: the errors are all
+`IOException`, so the message decides. A newer storage version ("Trying to read a database file with
+version number"), "not a valid DuckDB database file", corruption and checksum errors, and WAL replay
+failures count; a lock error never does, since moving a file another process holds would be destructive.
+The file and its WAL are renamed `registry.duckdb.unreadable-{UTC stamp}`. Verified with a registry
+written by 2.0 opened by an executor on 1.5. The dbt executor makes the same check at start and starts
+empty (its models are rebuilt every run).
+
