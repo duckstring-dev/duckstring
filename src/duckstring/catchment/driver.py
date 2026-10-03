@@ -946,8 +946,6 @@ class Driver:
             self.state_version += 1
             return {"ponds": len(lines)}
 
-    _MIGRATE_SKIP = frozenset({"catalog.json", "pond.db", "pond"})  # Iceberg pointer + namespace warehouse
-
     def migration_status(self) -> dict:
         """The current/last data-plane migration's progress (``status`` ∈ copying/adopting/done/failed,
         + file/byte counts + the pond in flight), or ``{"status": "idle"}`` if none has run."""
@@ -959,8 +957,7 @@ class Driver:
         carries the data across with no rebuild. Blocking (run it in a thread for a live migration); the
         long **copy runs off-lock** (so ``/api/status`` stays responsive), bracketed by two short locked
         phases: quiesce+plan, then re-point+adopt. Progress is published on ``self.migration`` throughout.
-        The Iceberg catalog/namespace are skipped (regenerated at the target — reads fall back to the flat
-        sidecars); the old location is left intact. Raises (and marks the migration ``failed``) on error."""
+        The old location is left intact. Raises (and marks the migration ``failed``) on error."""
         from pathlib import Path
 
         from ..storage import copy_tree, tree_size
@@ -989,7 +986,7 @@ class Driver:
                 dst = pond_data_dir(root, name, major, new_root)
                 if src.uri() == dst.uri():  # same physical location — nothing to copy
                     continue
-                f, b = tree_size(src, skip_top=self._MIGRATE_SKIP)
+                f, b = tree_size(src)
                 total_files += f
                 total_bytes += b
                 plan.append((name, src, dst))
@@ -1004,7 +1001,7 @@ class Driver:
                 self.migration["copied_bytes"] += nbytes
             for name, src, dst in plan:
                 self.migration["pond"] = name
-                copy_tree(src, dst, skip_top=self._MIGRATE_SKIP, on_file=_on)
+                copy_tree(src, dst, on_file=_on)
             # Phase 3 (locked): re-point. The target now holds a VERBATIM copy of the current data, so the
             # freshness ledger + registries already match it — just move the pointer. No adopt/re-read of
             # the target sidecar (which could come back empty and wrongly reset freshness), no rewind: a
@@ -3656,9 +3653,8 @@ class Driver:
     # ─── Status ───────────────────────────────────────────────────────────────
 
     def _exported_tables(self, key: str) -> set[str]:
-        """Names of the tables this major line has published to its data dir (the exported Parquet/
-        Iceberg snapshot). Best-effort — a data-read hiccup must never break ``status()``; a Draw has
-        no local output. ``list_tables`` globs the flat sidecar, so it needs no Iceberg extension.
+        """Names of the tables this major line has published to its data dir. Best-effort — a data-read
+        hiccup must never break ``status()``; a Draw has no local output.
 
         **Cached per ``data_version``** — this runs per Pond on every ~1 s status poll, and for a line
         with no local publish (a Pool/remote-run Pond) the resolve falls to the data root: an object-store

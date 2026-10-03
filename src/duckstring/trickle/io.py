@@ -907,7 +907,8 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     clog = changelog_name(name)
     clog_existed = _table_exists(con, clog)
 
-    # Consolidate by full row (the Z-set `distinct` operator); BIGINT weight (Iceberg can't hold a HUGEINT).
+    # Consolidate by full row (the Z-set `distinct` operator). The weight stays BIGINT (SUM would widen it to
+    # HUGEINT), so the changelog's column type is stable across runs and parts.
     consol = unique_name("consol")
     con.execute(
         f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '

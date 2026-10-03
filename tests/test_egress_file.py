@@ -24,12 +24,6 @@ UTC = timezone.utc
 _CFG = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": "outlet"}
 
 
-@pytest.fixture(autouse=True)
-def _parquet_plane(monkeypatch):
-    # Pin the offline/flat data plane so the worker's read needs no iceberg extension download.
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
-
-
 # ─── The seam ────────────────────────────────────────────────────────────────
 
 

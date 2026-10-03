@@ -8,8 +8,7 @@ Trino query; the Duck keeps the merge/diff/publish semantics locally.
 (``inner``/``left``/``right``/``full``), any number of ``.filter``s, at most one ``.select``,
 no ``.mutate``/``.aggregate``/``.accumulate``/``.sql``. Anything else refuses (→ the local
 engine). Sources are **staged**: each leaf's current state is written to the scratch prefix as
-parquet and registered as a temporary Glue external table — the cloud registers the published
-Iceberg plane instead; staging is the local-dev shim that works against any data root.
+parquet and registered as a temporary Glue external table, which works against any data root.
 
 **No metering.** OSS dispatches and runs; the cloud accounts for usage out of band (per-tenant
 workgroup → CloudWatch bytes-scanned). The one durable side effect is the query's result under

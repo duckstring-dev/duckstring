@@ -9,7 +9,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import duckdb
-import pytest
 
 from duckstring.dataplane import (
     ParquetDataPlane,
@@ -51,11 +50,6 @@ def _sink(root, pin, f=None, previous_f=None):
 
 def _versions(root, table="a"):
     return sorted(p.name for p in (_src_dir(root) / f"{table}__v").glob("*.parquet"))
-
-
-@pytest.fixture(autouse=True)
-def _parquet_plane(monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
 
 
 # ─── publish + pinned read ───────────────────────────────────────────────────────

@@ -107,7 +107,6 @@ def test_demo_both_flags_errors(runner, tmp_path, monkeypatch):
 def test_trickle_demo_runs_locally(runner, tmp_path, monkeypatch):
     # The Trickle demo runs end-to-end through the local runner: the inlets stand alone, and the builder
     # pond consumes its hydrated Trickle-shaped Sources. Pinned to the offline Parquet plane.
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     monkeypatch.chdir(tmp_path)
     runner.invoke(app, ["pond", "demo", "--trickle"], input="y\n")
 

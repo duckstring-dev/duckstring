@@ -81,51 +81,6 @@ def test_object_storage_missing_size_is_zero():
     assert o.parquet_names("nope") == []
 
 
-def test_warehouse_location_raw_vs_uri(tmp_path):
-    o = ObjectStorage("s3://bucket/prefix")
-    assert o.warehouse_location() == "s3://bucket/prefix"  # raw, for pyiceberg warehouse / FileIO
-    assert get_storage(tmp_path).warehouse_location().startswith("file://")  # local → file:// URI
-
-
-def test_iceberg_credential_property_mapping(monkeypatch):
-    monkeypatch.setenv("AWS_KEY", "AKIA")
-    monkeypatch.setenv("AWS_SECRET", "shh")
-    o = ObjectStorage("s3://bucket/p", {"region": "eu-west-1", "key_id": "${env:AWS_KEY}",
-                                        "secret": "${env:AWS_SECRET}"})
-    props = o.iceberg_properties()
-    assert props["s3.access-key-id"] == "AKIA"
-    assert props["s3.secret-access-key"] == "shh"
-    assert props["s3.region"] == "eu-west-1"
-    # a local data root carries no FileIO credentials
-    assert get_storage("/tmp/x").iceberg_properties() == {}
-
-
-def test_iceberg_plane_on_separate_local_data_root(tmp_path):
-    """The Iceberg plane writes its catalog + table metadata/data through the Storage seam at a data root
-    separate from the state root, and DuckDB reads it back — the same code path an object store takes,
-    validated here on a local (Volume-FUSE-equivalent) data root."""
-    from duckstring.iceberg_plane import IcebergDataPlane
-
-    data_root = tmp_path / "bucket"
-    storage = get_storage(data_root).child("sales", "m1", "data")
-    dp = IcebergDataPlane()
-    con = _con_with("CREATE TABLE revenue AS SELECT 1 AS id, 10 AS amt")
-    dp.prepare(con)
-    dp.export(con, storage)
-
-    # the catalog pointer + the Iceberg table live under the (separate) data root
-    assert (data_root / "sales" / "m1" / "data" / "catalog.json").exists()
-    assert (data_root / "sales" / "m1" / "data" / "pond" / "revenue" / "metadata").is_dir()
-    assert dp.list_tables(storage) == ["revenue"]
-    assert con.sql(dp.read_select(storage, "revenue")).fetchall() == [(1, 10)]
-
-    # a second overwrite commits a new snapshot and the GC reclaims the superseded data file
-    con.execute("DROP TABLE revenue")
-    con.execute("CREATE TABLE revenue AS SELECT 2 AS id, 20 AS amt")
-    dp.export(con, storage)
-    assert con.sql(dp.read_select(storage, "revenue")).fetchall() == [(2, 20)]
-
-
 def _con_with(table_sql):
     con = duckdb.connect()
     con.execute("SET TimeZone='UTC'")

@@ -55,7 +55,6 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
     con = duckdb.connect()  # in-memory: reads the exported snapshot, never the live registry
     try:
         con.execute("SET TimeZone='UTC'")
-        dp.prepare(con)
         data_dir.duckdb_setup(con)  # object store → httpfs + credentials (no-op local)
         sidecar = load_sidecar(data_dir)
         # An explicit table ships just that one; else the source's serviceable set (resolved by

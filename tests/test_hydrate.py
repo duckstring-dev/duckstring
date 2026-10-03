@@ -9,7 +9,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import duckdb
-import pytest
 
 from duckstring import agg
 from duckstring import trickle_io as T
@@ -22,11 +21,6 @@ UTC = timezone.utc
 
 def ts(hour: int) -> datetime:
     return datetime(2026, 6, 16, hour, tzinfo=UTC)
-
-
-@pytest.fixture(autouse=True)
-def _parquet_plane(monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
 
 
 def _con():

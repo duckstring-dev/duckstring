@@ -195,7 +195,6 @@ def test_a_chain_publishes_and_persists_to_s3(s3_env, tmp_path_factory, monkeypa
     port = _free_port()
     monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)   # real Duck subprocesses
     monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", f"http://127.0.0.1:{port}")
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     monkeypatch.setenv("DUCKSTRING_DEMO_PRODUCTS", "500")           # keep the fixture small
     monkeypatch.setenv("DUCKSTRING_DEMO_ORDERS", "500")
 

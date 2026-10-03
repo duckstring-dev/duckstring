@@ -11,8 +11,7 @@ from duckstring.storage import LocalStorage
 
 
 def _seed_local(root):
-    """A representative local publish: sidecar + wholesale table + a parts dir + state snapshots + the
-    (local-only) Iceberg catalog entries."""
+    """A representative local publish: sidecar + wholesale table + a parts dir + state snapshots."""
     root.mkdir(parents=True, exist_ok=True)
     (root / "_trickle.json").write_text(json.dumps({"t": {"mode": "append"}}))
     (root / "whole.parquet").write_bytes(b"v1")
@@ -21,12 +20,9 @@ def _seed_local(root):
     (root / "t" / "2026-01-02T00_00_00+00_00.parquet").write_bytes(b"p2")
     (root / "state" / "agg" / "t").mkdir(parents=True)
     (root / "state" / "agg" / "t" / "2026-01-02T00_00_00+00_00.parquet").write_bytes(b"s1")
-    (root / "catalog.json").write_text("{}")  # iceberg pointer — local-only
-    (root / "pond").mkdir()  # iceberg warehouse — local-only
-    (root / "pond" / "meta.json").write_text("{}")
 
 
-def test_persist_tree_mirrors_flat_layout_and_skips_iceberg(tmp_path):
+def test_persist_tree_mirrors_the_published_layout(tmp_path):
     local, dest = tmp_path / "local", LocalStorage(tmp_path / "durable")
     _seed_local(local)
     n = persist_tree(LocalStorage(local), dest)
@@ -36,8 +32,6 @@ def test_persist_tree_mirrors_flat_layout_and_skips_iceberg(tmp_path):
     assert sorted(p.name for p in (d / "t").glob("*.parquet")) == [
         "2026-01-01T00_00_00+00_00.parquet", "2026-01-02T00_00_00+00_00.parquet"]
     assert (d / "state" / "agg" / "t" / "2026-01-02T00_00_00+00_00.parquet").exists()
-    # The Iceberg catalog layer is local-only (its metadata embeds absolute local paths).
-    assert not (d / "catalog.json").exists() and not (d / "pond").exists()
 
 
 def test_persist_tree_incremental_and_floor_anchored_pruning(tmp_path):

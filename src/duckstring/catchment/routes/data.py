@@ -106,7 +106,6 @@ def _open_pond(request: Request, pond_name: str, major: int):
     con = duckdb.connect()  # in-memory: no file, no lock, no contention
     con.execute("SET TimeZone='UTC'")  # Trickle freshness is UTC; read/compare/render consistently
     _tune_read_con(con)  # spill instead of OOM (a big merge reconstruction) + cache Parquet footers over S3
-    dp.prepare(con)  # ready the connection to read the published format (e.g. load the iceberg ext)
     data_dir.duckdb_setup(con)  # object store → httpfs + credentials (no-op for local)
     con.execute(f'CREATE SCHEMA IF NOT EXISTS "{pond_name}"')
     for table in dp.list_tables(data_dir):
@@ -334,7 +333,6 @@ def trace_row(
     con = duckdb.connect()
     try:
         con.execute("SET TimeZone='UTC'")
-        dp.prepare(con)
         data_dir.duckdb_setup(con)
         try:
             sel = dp.read_select(data_dir, table)
@@ -634,7 +632,7 @@ def query_page(body: PageRequest, request: Request,
         return {"columns": cols, "rows": [[_json_safe(c) for c in row] for row in fetched[:limit]],
                 "has_more": len(fetched) > limit}
 
-    # The whole read is wrapped: opening the pond (Parquet/Iceberg views over the data plane), building the
+    # The whole read is wrapped: opening the pond (views over the data plane), building the
     # base query, and executing it can all fail — over S3 a listing/credentials/scan error must surface its
     # MESSAGE to the caller (a 400), never a bare, opaque 500. The connection spills to disk (`_tune_read_con`)
     # so a large merge reconstruction is slow, not fatal.
@@ -691,11 +689,9 @@ def query_history(body: HistoryRequest, request: Request,
         conds.append(f"{_qi(col)} IS NOT DISTINCT FROM ?")
         params.append(val)
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
-    # Materialise the record's changelog rows into a temp table first. The parameterised scan over the
-    # (iceberg_scan-backed) view serialises fine on its own, but the collapse below references those rows
-    # several times (GROUP BY + windowed self-join + the original-image lookup), producing iceberg_scans
-    # under joins — which can't be serialised inside the resulting prepared plan ("IcebergScan
-    # serialization not implemented"). Running the analytic step over the local temp sidesteps it.
+    # Materialise the record's changelog rows into a temp table first: the collapse below references them
+    # several times (GROUP BY + windowed self-join + the original-image lookup), so the changelog is
+    # scanned once rather than once per reference.
     analytic = (
         f"WITH _g AS (SELECT {fcol} AS _ds_f, bool_or({dcol} > 0) AS _ds_pos, bool_or({dcol} < 0) AS _ds_neg "
         f"FROM _ds_hist GROUP BY {fcol}), "

@@ -20,7 +20,6 @@ _RIPPLES = [{"func": "f", "name": "r", "parents": []}]
 
 
 def _server(tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     from duckstring.catchment.flight_sql import FlightSqlServer
 
     db = connect(tmp_path / "duck.db")

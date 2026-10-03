@@ -718,7 +718,6 @@ class Pond:
             self._record_read(source_pond, table)
             data_dir = self._source_data_dir(source_pond)
             dp = get_data_plane()
-            dp.prepare(self.con)  # ready the connection to read the Source's published format
             data_dir.duckdb_setup(self.con)  # object store → httpfs + credentials (no-op for local)
             try:
                 # Pinned reads: a Pond Run spans several Ripples and a Source can republish mid-run, so an
@@ -760,7 +759,6 @@ class Pond:
             self._record_read(source_pond, table)
             data_dir = self._source_data_dir(source_pond)
             dp = get_data_plane()
-            dp.prepare(self.con)
             data_dir.duckdb_setup(self.con)
             meta = trickle.load_sidecar(data_dir).get(table, {})
             (n,) = self.con.execute(
@@ -881,7 +879,6 @@ class Pond:
         self._record_read(source_pond, table)
         data_dir = self._source_data_dir(source_pond)
         dp = get_data_plane()
-        dp.prepare(self.con)
         data_dir.duckdb_setup(self.con)
         try:
             return trickle.read_delta(self.con, data_dir, table, self.previous_f, self.f, dp=dp,

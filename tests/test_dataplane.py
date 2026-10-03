@@ -1,5 +1,5 @@
-"""The data-plane seam (Phase 1 of plans/data-plane-iceberg.md): pluggable publish/consume of a
-Pond's tables, write modes, and the reserved ``_duckstring_*`` system-column namespace."""
+"""The data plane: publish/consume of a Pond's tables, write modes, and the reserved ``_duckstring_*``
+system-column namespace."""
 
 from __future__ import annotations
 
@@ -69,18 +69,5 @@ def test_read_missing_table_raises(tmp_path):
         ParquetDataPlane().read_select(tmp_path, "absent")
 
 
-def test_get_data_plane_defaults_to_iceberg(monkeypatch):
-    monkeypatch.delenv("DUCKSTRING_DATA_PLANE", raising=False)
-    from duckstring.iceberg_plane import IcebergDataPlane
-    assert isinstance(get_data_plane(), IcebergDataPlane)
-
-
-def test_get_data_plane_parquet_opt_out(monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
+def test_get_data_plane_is_the_parquet_plane():
     assert isinstance(get_data_plane(), ParquetDataPlane)
-
-
-def test_get_data_plane_unknown_backend_raises(monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "nonsense")
-    with pytest.raises(ValueError):
-        get_data_plane()

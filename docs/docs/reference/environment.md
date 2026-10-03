@@ -28,8 +28,6 @@ Run only one Catchment process against a state directory, and only one Catchment
 
 | Variable | Default | Description |
 |---|---|---|
-| `DUCKSTRING_DATA_PLANE` | `iceberg` | How published tables are stored: `iceberg` (Iceberg metadata over Parquet files) or `parquet` (plain Parquet files, and no download of DuckDB's Iceberg extension, for offline use). |
-| `DUCKSTRING_ICEBERG_KEEP_SNAPSHOTS` | `5` | How many snapshots to keep per Iceberg table. |
 | `DUCKSTRING_COMPACT_THRESHOLD` | `268435456` (256 MiB) | The size a merge Trickle's change log must reach before it's folded into the table's base. Can be set per table with `merge_table(compact_threshold=...)`. |
 | `DUCKSTRING_S3_ENDPOINT` | none | An S3-compatible endpoint, such as MinIO, for the data root. Equivalent to `?endpoint=` on the URI. |
 

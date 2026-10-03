@@ -1,16 +1,18 @@
 """The **data plane** — how a Pond *publishes* its tables for, and *reads* them from, other Ponds.
 
-This is the cross-Pond interchange layer, distinct from the DuckDB registry where Ripples compute.
-Today it is whole-table Parquet replace (overwrite-per-run); the :class:`DataPlane` interface is the
-seam an Iceberg snapshot/catalog backend slots into later (see ``plans/data-plane-iceberg.md``)
-*without touching call sites*. It already carries the shape that work needs:
+This is the cross-Pond interchange layer, distinct from the DuckDB registry where Ripples compute. Every
+published table is Parquet under the line's data directory (local or an object store, via
+:mod:`duckstring.storage`), with a ``_trickle.json`` sidecar describing each table:
 
-- a write ``mode`` — ``"overwrite"`` now; ``"append"`` / ``"merge"`` are **reserved** for Trickle and
-  raise until implemented, so call sites route a mode rather than baking overwrite in;
-- a per-run freshness stamp ``f`` — a no-op against plain Parquet (no snapshot metadata), but the hook
-  an Iceberg backend records on each snapshot so a run is resolvable from its freshness;
-- the reserved ``_duckstring_*`` system-column namespace, rejected at write so future framework columns
-  (``_duckstring_f`` and siblings) can be claimed without a later breaking rename.
+- a plain **overwrite** table is a directory of immutable versions, ``{table}__v/{f}.parquet``, one per run,
+  so a Sink run reads the version it is pinned to while the Source publishes the next
+  (``plans/versioned-overwrite.md``; retention in :func:`prune_versions`);
+- an **append-only** Trickle table (append history, ``__changelog``, ``__droplog``) is a directory of per-run
+  parts, ``{table}/{f}.parquet``;
+- a **merge** Trickle main is log-structured: hot changelog parts, warm ``__band/`` bands and a chunked cold
+  ``__base/``, reconstructed on read.
+
+The reserved ``_duckstring_*`` system-column namespace is rejected on plain output at publish.
 """
 
 from __future__ import annotations
@@ -59,10 +61,6 @@ class DataPlane:
         carrying a reserved (``_duckstring_*``) column."""
         raise NotImplementedError
 
-    def prepare(self, con) -> None:
-        """Make ``con`` able to read this backend's published tables (e.g. load a DuckDB extension).
-        Idempotent; a no-op for the Parquet backend. Call once before using ``read_select`` on ``con``."""
-
     def read_select(self, data_dir: Path, table: str, *, as_of=None, pin=None) -> str:
         """A DuckDB ``SELECT`` over a published Source ``table``, for registering as a view or relation.
         ``as_of`` (a freshness) is the **as-of read seam**: the Source snapshot whose ``f <= as_of``;
@@ -82,24 +80,18 @@ class DataPlane:
         if mode == "merge":
             return self._reconstruct_select(data_dir, table, meta, as_of)
         if mode == "append":
-            # An append-only Trickle is served from the flat parts layer — never the Iceberg catalog. Read it
-            # flat directly so the Iceberg plane doesn't build (and pay ~0.4s of catalog.json I/O over S3 for)
-            # a catalog it will only miss in.
-            return self._flat_read_select(data_dir, table, as_of=as_of)
+            return self._flat_read_select(data_dir, table, as_of=as_of)  # never versioned: skip that probe
         return self._raw_read_select(data_dir, table, as_of=pin if pin is not None else as_of)
 
     def _raw_read_select(self, data_dir: Path, table: str, *, as_of=None) -> str:
-        """A direct physical ``SELECT`` over a published table (no reconstruction) — the backend's storage
-        read. Used as-is for an **overwrite** table (which may live in the Iceberg catalog) and as the flat
-        fallback of :meth:`_flat_read_select`."""
+        """A direct physical ``SELECT`` over a published table (no reconstruction): an overwrite table's
+        version, else :meth:`_flat_read_select`."""
         raise NotImplementedError
 
     def _flat_read_select(self, data_dir: Path, table: str, *, as_of=None) -> str:
-        """A physical read that MUST bypass any catalog/metadata layer — the operands that are **always** flat
-        Parquet: a merge main's cold base and its ``__changelog`` / ``__band`` companions, and an append-only
-        table. The Iceberg base layer is overwrite-only, so these are never committed to it; reading them flat
-        skips the per-read pyiceberg catalog build (the dominant cost of a merge/append pipeline over S3). The
-        base backend has no catalog, so this defaults to the raw read; :class:`IcebergDataPlane` overrides it."""
+        """A physical read of an operand that is never versioned: a merge main's cold base and its
+        ``__changelog`` / ``__band`` companions, and an append-only table. Skipping the versions probe saves
+        a listing per operand, which is a round trip on an object store."""
         return self._raw_read_select(data_dir, table, as_of=as_of)
 
     def _reconstruct_select(self, data_dir: Path, table: str, meta: dict, as_of=None) -> str:
@@ -812,13 +804,6 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
     return hydrated
 
 
-# The Iceberg catalog layer is LOCAL-ONLY under local-first publish: its metadata files embed absolute
-# warehouse paths, so byte-copying them to another location yields pointers into the producer's filesystem.
-# The persisted layer is the FLAT layout (parts + wholesale files + sidecar) — complete and canonical; every
-# reader falls back to the flat read when no catalog.json is present (`IcebergDataPlane._load` → None).
-_PERSIST_SKIP = frozenset({"catalog.json", "pond"})
-
-
 def persist_tree(local_dir, dest) -> int:
     """Mirror a Pond's locally-published output to its durable **persist layer** (plans/persist.md) —
     the async Duck-side reconcile behind ``persisted_f``. Returns the number of files uploaded.
@@ -828,14 +813,11 @@ def persist_tree(local_dir, dest) -> int:
     - **top-level files** (the sidecar, a legacy single-file ``{table}.parquet``) — always uploaded
       (rewritten per run; small, or the table's whole content by design);
     - **directory files** (overwrite versions, append/changelog/band parts, base chunks, state snapshots)
-      — immutable and
-      idempotent **by name**: upload only what the destination lacks, and prune destination files their
-      local directory no longer holds (retention trims, checkpoint token swaps, warm folds, snapshot
-      pruning all propagate);
-    - **directories removed locally** (a folded-away ``__band/``, a dropped table's parts) — removed at
-      the destination;
-    - the **Iceberg catalog** (``catalog.json`` + the ``pond/`` warehouse) — skipped: local-only (its
-      metadata embeds absolute local paths; the flat layer is the canonical persisted form).
+      — immutable and idempotent **by name**: upload only what the destination lacks, and prune a
+      destination file only when the local sidecar's watermark covers it (version retention, append
+      retention, warm folds, checkpoint token swaps); snapshot pruning in ``state/`` propagates as is;
+    - **directories of tables the sidecar no longer declares** (a dropped table) — removed at the
+      destination.
 
     **Safety guard**: a local dir with no ``_trickle.json`` sidecar has published nothing — the mirror
     refuses to touch the destination at all (a fresh/lost box must never wipe the durable layer).
@@ -891,7 +873,7 @@ def persist_tree(local_dir, dest) -> int:
     # mirrored sidecar declares. Uploading it before its parts would expose a torn window (sidecar at f,
     # parts for f still in flight → a delta read misses rows). Directories, then plain files, then it.
     for p in sorted(root.iterdir()):
-        if p.name in _PERSIST_SKIP or p.name.endswith(".tmp"):
+        if p.name.endswith(".tmp"):
             continue
         if p.is_file():
             files.append(p)
@@ -904,7 +886,7 @@ def persist_tree(local_dir, dest) -> int:
     # Prune destination directories only for tables the local sidecar no longer DECLARES (a table
     # dropped/unpublished — an explicit signal); a declared table's missing local dir is left alone.
     for name in dest.subdir_names():
-        if name in local_dirs or name in _PERSIST_SKIP or name == "state":
+        if name in local_dirs or name == "state":
             continue
         if base_table_name(name) not in sidecar:
             dest.rmtree(name)
@@ -1120,29 +1102,5 @@ def _publish_base_chunks(con, data_dir: Path, main: str, f, chunk_bytes: int) ->
 
 
 def get_data_plane() -> DataPlane:
-    """The active data-plane backend, selected by ``DUCKSTRING_DATA_PLANE``:
-
-    - ``iceberg`` (default) — the Apache Iceberg base layer (snapshots + schema metadata over the
-      Parquet data files); its deps are in core, so it's available out of the box;
-    - ``parquet`` — the whole-table Parquet plane, the opt-out for the lightest footprint or for an
-      offline Catchment that can't fetch DuckDB's iceberg extension.
-
-    Iceberg is the default because the version-contract (schema) and incremental work build on its
-    metadata; ``parquet`` stays a first-class fallback."""
-    import os
-
-    backend = os.environ.get("DUCKSTRING_DATA_PLANE", "iceberg").lower()
-    if backend == "parquet":
-        return ParquetDataPlane()
-    if backend == "iceberg":
-        try:
-            from .iceberg_plane import IcebergDataPlane
-        except ImportError as exc:  # pragma: no cover - pyiceberg is a core dep, but guard a stripped install
-            raise NotImplementedError(
-                "the iceberg data plane needs pyiceberg (a core dependency) — reinstall duckstring, "
-                "or set DUCKSTRING_DATA_PLANE=parquet for the lighter plane"
-            ) from exc
-        return IcebergDataPlane()
-    raise ValueError(
-        f"unknown DUCKSTRING_DATA_PLANE {backend!r} (expected 'iceberg' or 'parquet')"
-    )
+    """The data plane: versioned Parquet (``plans/data-plane-choice.md`` removed the Iceberg plane)."""
+    return ParquetDataPlane()

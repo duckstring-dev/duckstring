@@ -1,6 +1,6 @@
 # Data plane: drop Iceberg, make versioned Parquet the default
 
-Status: **decided (2026-10-02), not built.** The author chose C: remove the Iceberg plane entirely, with
+Status: **built (2026-10-03).** See "As built" at the end. The author chose C: remove the Iceberg plane entirely, with
 no option to keep it. The lakehouse Spout is deferred indefinitely: nothing needs it now. Supersedes the
 "Iceberg stays the default" position of `plans/data-plane-iceberg.md` and `plans/data-plane-ducklake.md`.
 Depends on `plans/versioned-overwrite.md`, which is built first.
@@ -130,3 +130,19 @@ extra, writing to their REST or Glue catalog).
 
 - [DuckLake v1.0 announcement](https://ducklake.select/2026/04/13/ducklake-10/) (April 2026)
 - [DuckLake 1.0 coverage, InfoQ](https://www.infoq.com/news/2026/05/ducklake-sql-catalog/)
+
+## As built (2026-10-03)
+
+Steps 2 to 4 were done as one change, with these differences:
+
+- `DUCKSTRING_DATA_PLANE` was removed rather than defaulted to `parquet`: with one plane, the setting has
+  nothing to select. `get_data_plane()` returns `ParquetDataPlane`, and the `DataPlane` base class stays.
+- `DataPlane.prepare` was removed. It existed only to load DuckDB's `iceberg` extension.
+- The `routes/data.py` history query keeps its temp-table step, since the analysis references the record's
+  changelog rows several times and the temp table scans the changelog once. Only its Iceberg rationale
+  went.
+- `storage.py` lost `warehouse_location` and `iceberg_properties` (pyiceberg's FileIO), and the migration
+  copy lost its `skip_top` list along with `_MIGRATE_SKIP`. The Persist mirror lost `_PERSIST_SKIP`.
+- The AWS guide had no Iceberg or data-plane statements to change; only `reference/environment.md` did.
+- The `iceberg` optional extra (already empty) was removed with the pyiceberg dependency.
+

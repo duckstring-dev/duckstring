@@ -32,7 +32,6 @@ def _pv(db, name, version):
 
 
 def _server(tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     db = connect(tmp_path / "duck.db")
     migrate(db)
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(["revenue"]), _RIPPLES)

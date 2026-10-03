@@ -27,11 +27,6 @@ def ts(hour: int) -> datetime:
     return datetime(2026, 6, 16, hour, tzinfo=UTC)
 
 
-@pytest.fixture(autouse=True)
-def _parquet_plane(monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
-
-
 # ── the Pond handle records what it brokers ─────────────────────────────────────
 
 

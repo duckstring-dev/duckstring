@@ -20,11 +20,6 @@ pytestmark = pytest.mark.timeout(15)
 UTC = timezone.utc
 
 
-@pytest.fixture(autouse=True)
-def _parquet_plane(monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")  # offline/flat reads in the worker
-
-
 # ─── A driver whose ATTACH points at a DuckDB database (faithful to the SQL path) ──
 
 

@@ -11,11 +11,6 @@ from duckstring.core import Pond, Puddle, parse_ref
 from duckstring.dataplane import ParquetDataPlane
 
 
-@pytest.fixture(autouse=True)
-def _parquet_plane(monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
-
-
 @pytest.mark.parametrize("ref, expected", [
     ("sale_line", (None, "sale_line")),
     ("sales.sale_line", ("sales", "sale_line")),

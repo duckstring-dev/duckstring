@@ -19,12 +19,7 @@ dependencies = [
   "httpx>=0.25",
   "tomli>=2.0; python_version < '3.11'",
   "tomli-w>=1.0",
-  # The default data plane: an Apache Iceberg base layer (snapshots + schema metadata over the
-  # Parquet files we already write). Core deps because Iceberg is default-on; set
-  # DUCKSTRING_DATA_PLANE=parquet to opt out (the lighter fallback, also for offline Catchments that
-  # can't fetch DuckDB's iceberg extension). NB: we use our own file-backed catalog
-  # (duckstring.iceberg_catalog) rather than pyiceberg's SqlCatalog, so SQLAlchemy is NOT pulled in.
-  "pyiceberg>=0.7",
+  # Arrow interchange: the Flight SQL server and Arrow fetches from DuckDB.
   "pyarrow>=14",
   # DuckDB requires pytz to convert TIMESTAMPTZ columns to Python datetimes on fetch
   # (our _duckstring_f freshness column is TIMESTAMPTZ, read back in dataplane/trickle export).
@@ -38,8 +33,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Retained for back-compat: the Iceberg deps are in core now (Iceberg is the default plane).
-iceberg = []
 # dbt-mode Ponds (plans/dbt.md): deploy a dbt project as a Pond, each model a Ripple. Heavyweight and
 # opt-in — only pulled when a team actually runs dbt-mode. dbt-duckdb pulls dbt-core transitively.
 dbt = [
