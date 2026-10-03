@@ -10,7 +10,10 @@ authors = [
 ]
 
 dependencies = [
-  "duckdb>=0.10",
+  # The tested range: CI runs the suite on the floor and the latest release, and against the pre-release
+  # in an allowed-to-fail job. Raise the ceiling once the suite passes on the next major's release
+  # (plans/duckdb-2-ready.md). A Pond environment gets this Duckstring, so these bounds hold there too.
+  "duckdb>=1.5,<2",
   "rich>=13.7",
   "typer>=0.12",
   "fastapi>=0.111",
@@ -86,6 +89,9 @@ ds = "duckstring.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Some suites share fixtures by importing `tests.<module>`; put the repo root on the path so a bare
+# `pytest` (what CI runs) resolves them the same as `python -m pytest`.
+pythonpath = ["."]
 # Tight enough to catch an accidental real sleep (sim tests finish in ms), loose enough to absorb
 # cold-runner I/O on CI (SQLite migrate / uvicorn startup can exceed 1s on shared runners).
 timeout = 5

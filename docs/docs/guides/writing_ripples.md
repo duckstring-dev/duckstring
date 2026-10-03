@@ -193,7 +193,7 @@ uv add duckstring scikit-learn
 
 This writes `pyproject.toml` and `uv.lock` and creates the environment in `.venv`. `duckstring pond run` and `pond hydrate` switch to that environment automatically, so local runs use the same packages a deployed run will. Commit both files.
 
-On deploy, the Catchment builds the environment from `uv.lock`, installs its own version of Duckstring into it, and runs the Pond's Ducks there. A Duck on a pool or in the cloud builds the same environment on its own machine the first time it needs it. Environments are cached by the lock's contents, so redeploying with an unchanged lock is quick, and Ponds with identical locks share one. A deploy is refused if `uv.lock` is missing or out of date with `pyproject.toml`; run `uv lock` and deploy again. To pin a Python version, add a `.python-version` file (`uv python pin 3.12`). Otherwise the Pond uses the Catchment's Python.
+On deploy, the Catchment builds the environment from `uv.lock`, installs its own version of Duckstring into it, and runs the Pond's Ducks there. That install keeps DuckDB within the range Duckstring supports, so a DuckDB version in the lock outside that range is replaced. A Duck on a pool or in the cloud builds the same environment on its own machine the first time it needs it. Environments are cached by the lock's contents, so redeploying with an unchanged lock is quick, and Ponds with identical locks share one. A deploy is refused if `uv.lock` is missing or out of date with `pyproject.toml`; run `uv lock` and deploy again. To pin a Python version, add a `.python-version` file (`uv python pin 3.12`). Otherwise the Pond uses the Catchment's Python.
 
 A Pond without a `pyproject.toml` runs in the Catchment's own environment.
 

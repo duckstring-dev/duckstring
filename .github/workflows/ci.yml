@@ -22,6 +22,32 @@ jobs:
       - run: ruff check .
       - run: pytest
 
+  # The oldest DuckDB pyproject allows (its floor): the main job only ever installs the latest.
+  duckdb-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e .[dev] "duckdb==1.5.0"
+      - run: pytest
+
+  # The DuckDB pre-release, past pyproject's ceiling on purpose, so the next breaking change shows up
+  # before it ships rather than after. Allowed to fail: it is an early warning, not a gate.
+  duckdb-prerelease:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e .[dev]
+      - run: pip install --pre --upgrade duckdb
+      - run: python -c "import duckdb; print(duckdb.__version__)"
+      - run: pytest
+
   # The dbt extra (dbt-mode Ponds): the e2e importorskips without it, so exercise it explicitly.
   dbt:
     runs-on: ubuntu-latest
