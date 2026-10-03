@@ -161,6 +161,10 @@ So instead of per-chunk `COPY`s, the chunk size is floored at 64 KiB (`dataplane
 compaction still triggers on the raw threshold. The four affected test files pass on 2.0. Still worth
 reporting upstream, with the runaway file creation as the headline.
 
+**Suite results.** The full suite passes on `2.0.0.dev2610011535` (1095 passed, 5 skipped) and on the
+floor, `duckdb==1.5.0` (1093 passed; one status test timed out at its 5 s budget under load and passes
+on rerun). The `dbt` extra, Postgres egress and MinIO jobs were not run against 2.0.
+
 **3. Unreadable registry.** As planned, in `duck/executor.open_registry`: the errors are all
 `IOException`, so the message decides. A newer storage version ("Trying to read a database file with
 version number"), "not a valid DuckDB database file", corruption and checksum errors, and WAL replay
