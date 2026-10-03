@@ -19,7 +19,7 @@ Scaffolds a Pond project named `NAME` in the current directory: `pond.toml`, `sr
 ## `demo`
 
 ```bash
-duckstring pond demo [--ripple | --trickle | --tpcds | --gharchive | --dbt] [--yes]
+duckstring pond demo [--ripple | --trickle | --tpcds | --gharchive | --dbt | --sql] [--yes]
 ```
 
 Creates a set of demo Pond projects as subdirectories of the current directory.
@@ -31,6 +31,7 @@ Creates a set of demo Pond projects as subdirectories of the current directory.
 | `--tpcds` | Six `tpcds_*` Ponds over TPC-DS data generated locally. |
 | `--gharchive` | Six `gh_*` Ponds over the public GitHub event archive, fetched over HTTP. |
 | `--dbt` | `shop_orders` and `shop_analytics`, a dbt project deployed as a Pond. Needs the `duckstring[dbt]` extra to deploy and run. |
+| `--sql` | The `--ripple` set with `sales` and `reports` written as [SQL Ripples](../../guides/sql_ripples.md), including a static table. |
 | `--yes`, `-y` | Skip the confirmation. |
 
 ## `hydrate`

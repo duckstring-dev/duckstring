@@ -53,6 +53,8 @@ For a Trickle, the result is the clean current state, without the `_duckstring_f
 
 **Raises** `MissingSourceAsset` (a subclass of `FileNotFoundError`) when a Source table hasn't been published. Duckstring treats this as waiting rather than failing: the Pond is parked until the Source publishes again, with no retry spent and no alert sent.
 
+**Raises** `duckstring.core.RippleOrderError` when reading one of the Pond's own tables that another Ripple writes, if that Ripple isn't among this Ripple's parents (directly or further up). The read could otherwise see the previous run's data. `count_table` checks the same.
+
 :::note
 Refer to Source tables by their registered view name in SQL. Referring to a Python variable that holds a relation (`FROM rel`) relies on DuckDB scanning Python frames, which is unreliable under the Duck's threaded executor.
 :::

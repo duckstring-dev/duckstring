@@ -24,40 +24,35 @@ analytics/
 └── run.sh                        # runs them in order
 ```
 
-Scaffold a Pond in the project and move the SQL under `src/`:
+Scaffold a Pond in the project and declare each file as a [SQL Ripple](sql_ripples.md) in `pond.toml`:
 
 ```bash
 cd analytics
 duckstring pond init analytics
-mkdir -p src/sql && mv sql/*.sql src/sql/
+rm src/pond.py        # the scaffold's placeholder Python Ripple; this Pond is all SQL
 ```
 
-Everything in the project directory is uploaded when you deploy, apart from what `.pondignore` excludes (by default local test data, `.env` files, hidden directories and caches), so files next to `src/pond.py` are available at run time. `duckstring pond deploy --dry-run` lists exactly what would be uploaded. A small helper turns each file into a Ripple:
+```toml
+[pond]
+name = "analytics"
+version = "1.0.0"
 
-```python
-from pathlib import Path
+[ripples.stg_orders]
+sql = "sql/stg_orders.sql"
 
-from duckstring import ripple
+[ripples.stg_customers]
+sql = "sql/stg_customers.sql"
 
-SQL = Path(__file__).parent / "sql"
-
-
-def sql_ripple(name, parents=()):
-    """A Ripple that writes the table `name` from `sql/{name}.sql`."""
-    query = (SQL / f"{name}.sql").read_text()
-
-    def run(pond):
-        pond.write_table(name, pond.con.sql(query))
-
-    return ripple(name=name, parents=list(parents))(run)
-
-
-stg_orders = sql_ripple("stg_orders")
-stg_customers = sql_ripple("stg_customers")
-customer_revenue = sql_ripple("customer_revenue", parents=[stg_orders, stg_customers])
+[ripples.customer_revenue]
+sql = "sql/customer_revenue.sql"
+parents = ["stg_orders", "stg_customers"]
 ```
 
-Each SQL file refers to earlier tables by name, exactly as before, because they're all in the Pond's own database. The order that `run.sh` enforced is now the `parents` lists, and independent steps run in parallel.
+Each Ripple writes a table named after it, and each SQL file refers to earlier tables by name, exactly as before, because they're all in the Pond's own database. The order that `run.sh` enforced is now the `parents` lists, and independent steps run in parallel. Duckstring checks every query against its declaration, so a file that reads a table its entry doesn't list as a parent is reported before anything runs.
+
+Everything in the project directory is uploaded when you deploy, apart from what `.pondignore` excludes (by default local test data, `.env` files, hidden directories and caches). `duckstring pond deploy --dry-run` lists exactly what would be uploaded.
+
+If the project is a set of Python scripts instead, each step becomes a `@ripple` function in `src/pond.py`; see [Writing Ripples](writing_ripples.md). A project with both can keep both, since SQL and Python Ripples can depend on each other.
 
 ### Getting data in
 
@@ -112,7 +107,7 @@ version = "1.0.0"
 type = "inlet"
 ```
 
-In the original Pond, declare the new Source and read its tables through `read_table`, which registers them under their own names so the SQL still works:
+In the original Pond, declare the new Source, list the tables `customer_revenue` reads from it, and refer to them in the SQL as `staging.stg_orders` and `staging.stg_customers`:
 
 ```toml
 # analytics/pond.toml
@@ -122,14 +117,10 @@ version = "2.0.0"
 
 [sources]
 staging = "1.0.0"
-```
 
-```python
-@ripple
-def customer_revenue(pond):
-    pond.read_table("staging.stg_orders")
-    pond.read_table("staging.stg_customers")
-    pond.write_table("customer_revenue", pond.con.sql((SQL / "customer_revenue.sql").read_text()))
+[ripples.customer_revenue]
+sql = "sql/customer_revenue.sql"
+reads = ["staging.stg_orders", "staging.stg_customers"]
 ```
 
 `analytics` no longer publishes `stg_orders` or `stg_customers`, which is a breaking change for anything that read them there, so it moves to a new major version. Deploy `staging` first, then `analytics`:

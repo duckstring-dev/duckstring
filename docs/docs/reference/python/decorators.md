@@ -23,11 +23,13 @@ The decorated function takes one argument, the [Pond handle](pond.md), and its r
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `parents` | list of functions | `[]` | Ripples in the same Pond that must finish before this one starts, given as function references. Dependencies on other Ponds are declared in `pond.toml`, never here. |
+| `parents` | list of functions or names | `[]` | Ripples in the same Pond that must finish before this one starts, given as function references or as names. A name can also refer to a [SQL Ripple](../../guides/sql_ripples.md) declared in `pond.toml`. Dependencies on other Ponds are declared in `pond.toml`, never here. |
 | `name` | `str` | the function name | The Ripple's name, used in run history, the UI and `duckstring pond run --ripple`. |
 | `always_run` | `bool` | `False` | Run even when no Source has changed since the last Pond Run. Without it, such a run is skipped. Set this on a Ripple with side effects that must happen every run. If any Ripple in a Pond sets it, the whole Pond always runs. |
 
 Ripples with no parents in common run in parallel. A Ripple runs at most once at a time, but Ripples from consecutive Pond Runs can overlap.
+
+A parent that isn't a Ripple in the Pond, a duplicate name, or parents that form a cycle raise `duckstring.core.RippleDeclarationError` (a subclass of `ValueError`) when the Pond is deployed or run locally.
 
 ```python
 from duckstring import ripple

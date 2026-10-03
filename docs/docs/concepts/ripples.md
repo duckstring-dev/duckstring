@@ -5,7 +5,7 @@ description: Transformation Unit.
 
 # Ripples
 
-A **Ripple** is a single transformation inside a [Pond](ponds.md). It is a Python function marked with the `@ripple` decorator, and it declares which other Ripples in the same Pond it depends on.
+A **Ripple** is a single transformation inside a [Pond](ponds.md). It is usually a Python function marked with the `@ripple` decorator, or a SQL query declared in the Pond's `pond.toml`, and it declares which other Ripples in the same Pond it depends on.
 
 ## Structure
 
@@ -47,11 +47,15 @@ The Ripples in a Pond share one DuckDB database, so a Ripple can query tables wr
 
 By default a Ripple rewrites its tables in full on each run. A Ripple can instead write its tables incrementally, keeping a record of what changed so that downstream Ripples only process the changes. Tables written this way are called [Trickles](trickles.md).
 
+## SQL Ripples
+
+A Ripple can also be a single SQL query in a file, declared in `pond.toml` with the Ripples it depends on and the tables it reads from other Ponds. A Pond made only of SQL Ripples needs no Python, and SQL and Python Ripples can be mixed in one Pond. Each query is checked against its declaration when the Pond is deployed, so a query can't read a table from a Ripple it hasn't declared as a dependency.
+
 ## dbt Models
 
 An existing dbt project can be deployed as a Pond by pointing `pond.toml` at it. Each dbt model becomes a Ripple, and the `ref()` dependencies between models set their order.
 
 ## See also
 
-- Guides: [Writing Ripples](../guides/writing_ripples.md), [Testing with Puddles](../guides/testing_with_puddles.md), [dbt Projects](../guides/dbt_projects.md), [Append and Merge Tables](../guides/append_and_merge.md)
+- Guides: [Writing Ripples](../guides/writing_ripples.md), [SQL Ripples](../guides/sql_ripples.md), [Testing with Puddles](../guides/testing_with_puddles.md), [dbt Projects](../guides/dbt_projects.md), [Append and Merge Tables](../guides/append_and_merge.md)
 - Reference: [Decorators](../reference/python/decorators.md), [Pond Handle](../reference/python/pond.md)

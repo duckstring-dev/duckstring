@@ -5,7 +5,7 @@ description: Build a Pond's transformations in SQL and Python.
 
 # Writing Ripples
 
-This guide walks through writing the Ripples of a Pond: reading Sources, writing tables, splitting work into steps, and handling outputs that aren't tables. It assumes you've read [Ponds](../concepts/ponds.md) and [Ripples](../concepts/ripples.md).
+This guide walks through writing the Ripples of a Pond in Python: reading Sources, writing tables, splitting work into steps, and handling outputs that aren't tables. It assumes you've read [Ponds](../concepts/ponds.md) and [Ripples](../concepts/ripples.md). For Ripples written as plain SQL files, see [SQL Ripples](sql_ripples.md).
 
 ## Starting a Pond
 

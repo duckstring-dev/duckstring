@@ -26,6 +26,7 @@ const sidebars: SidebarsConfig = {
           label: 'Building Ponds',
           items: [
             'guides/writing_ripples',
+            'guides/sql_ripples',
             'guides/migrating_a_project',
             'guides/testing_with_puddles',
             'guides/dbt_projects',

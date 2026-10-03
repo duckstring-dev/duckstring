@@ -27,12 +27,12 @@ products = "1.1.0"
 | `name` | string | required | The Pond's name, unique within a Catchment. |
 | `version` | string | required | A semantic version, `MAJOR.MINOR.PATCH`. The major version decides which line a deployment joins: the same major upgrades the running line, a new major deploys alongside it. See [Versioning](../concepts/ponds.md#versioning). |
 | `type` | string | `"pond"` | `"inlet"`, `"pond"` or `"outlet"`. Descriptive: it records the Pond's intended role and is shown in the UI, but doesn't change how it runs. |
-| `ripples` | string | `"src/pond.py"` | Path to the module defining the Ripples. |
+| `ripples` | string | `"src/pond.py"` | Path to the module defining the Python Ripples. Optional when the Pond has only [SQL Ripples](#ripples). |
 | `puddles` | string | `"src/puddles.py"` | Path to the module defining the Puddles. |
 | `immediate_retries` | integer | `0` | How many times a failed Ripple is retried within the same Pond Run. |
 | `source_retries` | integer | `0` | How many times a failed Pond Run is retried when a Source next updates. |
 | `duck` | string | `"catchment"` | Where the Pond runs: `"catchment"` for the Catchment's own machine, a built-in pool (`"S"`, `"M"`, `"L"`, `"XL"`), or the name of a pool defined on the Catchment. Falls back to the Catchment's machine when cloud compute isn't configured or the pool doesn't exist. See [`duckstring duck`](cli/duck.md). |
-| `dbt_project` | string | | Path to a dbt project directory. Makes this a dbt Pond: each model becomes a Ripple, and the Pond can't also define `@ripple` functions. Needs the `duckstring[dbt]` extra. |
+| `dbt_project` | string | | Path to a dbt project directory. Makes this a dbt Pond: each model becomes a Ripple, and the Pond can't also define `@ripple` functions, SQL Ripples or static tables. Needs the `duckstring[dbt]` extra. |
 
 The two retry budgets set the starting values when a Pond is first deployed. After that the Catchment's values are authoritative, and are changed with [`duckstring control failure-budget`](cli/control.md#failure-budget).
 
@@ -54,6 +54,47 @@ products = "2.0.0?"        # optional: major version 2, at least 2.0.0
 Deployment enforces the pins in both directions: a Pond can't be deployed against a Source older than its minimum, and a Source can't be redeployed below a version that a deployed Pond requires. Both are rejected with an error.
 
 A Source doesn't need to be deployed first. A Pond whose Source is missing is held until it arrives.
+
+## `[ripples]`
+
+Declares [SQL Ripples](../guides/sql_ripples.md), one table per Ripple. They can be mixed with the Python Ripples in the [`ripples`](#pond) module.
+
+```toml
+[ripples.sale_line]
+sql = "sql/sale_line.sql"
+parents = ["daily_sales", "price_tiers"]
+reads = ["products.product"]
+write = "merge"
+pk = ["sale_date", "product_id"]
+```
+
+The entry's name (`sale_line`) is the Ripple's name and the name of the table it writes. Names are letters, digits and underscores, and are shared with Python Ripples and static tables, so each must be unique.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `sql` | string | required | Path, relative to the Pond's directory, of a file holding one `SELECT`. |
+| `parents` | list of strings | `[]` | Ripples in this Pond, SQL or Python, that must finish before this one starts. |
+| `reads` | list of strings | `[]` | Tables of other Ponds the query reads, as `source.table`, each from a Source in `[sources]`. The query refers to them by the same name. |
+| `write` | string | `"overwrite"` | `"overwrite"` replaces the table each run, `"merge"` records changes to a table whose query returns its complete current state, and `"append"` adds each run's rows to its history. See [Append and Merge Tables](../guides/append_and_merge.md). |
+| `pk` | string or list | | Primary key columns. Required for `"merge"`, optional for `"append"`, not allowed for `"overwrite"`. |
+| `always_run` | boolean | `false` | Run even when no Source has changed since the last Pond Run, as [`@ripple(always_run=True)`](python/decorators.md#ripple). |
+
+Each query may only read tables its declaration accounts for: an ancestor's table, an entry in `reads`, a static table, or its own previous output. A query reading anything else, an unknown parent, a cycle, or a missing file rejects the deployment and stops a local run, with a message naming the Ripple.
+
+## `[static]`
+
+Declares files shipped with the Pond's code as read-only tables, visible to every Ripple under the table's name.
+
+```toml
+[static.tier_bands]
+path = "data/tier_bands.csv"
+```
+
+| Key | Type | Description |
+|---|---|---|
+| `path` | string | Path relative to the Pond's directory. CSV (`.csv`, `.tsv`), Parquet (`.parquet`) or JSON (`.json`, `.jsonl`, `.ndjson`), chosen by the extension. |
+
+Static tables aren't published. A changed file takes effect from the first run after it's redeployed, and doesn't start a run by itself. The file must be included in the deployment, so check `.pondignore` doesn't exclude it.
 
 ## `[flock]`
 

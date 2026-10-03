@@ -83,6 +83,9 @@ The web UI prompts for a key on 401 and keeps it in localStorage. `_http.get/pos
 ```
 src/duckstring/
   core.py                  # Pond/Ripple handles, @ripple/@puddle decorators, Catchment client, pond.toml/entrypoint/import helpers.
+                           # load_ripples: THE one collection of a Pond's Ripples (Python + SQL), used by discovery, Duck, runner.
+  sql_ripples.py           # SQL Ripples ([ripples.NAME]) and static tables ([static.NAME]) from pond.toml: validation, the
+                           # json_serialize_sql reference check, source.table rewriting, the synthesised Ripple callable.
                            # Incremental I/O is a capability of the Pond handle; there is no separate @trickle node type.
   dataplane.py             # The data plane: how a Pond publishes and reads tables across Ponds (versioned Parquet).
                            # Also hydrate_registry (published state back into a registry: Duck registry-loss recovery and the
@@ -272,6 +275,16 @@ A Pond may ship a standard `pyproject.toml` + `uv.lock` (never `requirements.txt
 - `core.import_pond_module` clears the `@ripple`/`@puddle` registries before importing, so a collection only sees that import's registrations.
 
 Tests: `tests/test_environments.py` (incl. a real uv build of a Pond with a vendored path dependency, skipped when uv can't reach the index), `tests/test_discover.py`, `test_runtime.py::test_a_pond_runs_in_its_own_environment` and `::test_a_pool_duck_builds_its_ponds_environment` (the remote-boot path via a local Pool agent).
+
+## SQL Ripples (`sql_ripples.py`, `core.load_ripples`; see `plans/repositioning-features.md` §2)
+
+A Ripple can be one `SELECT` in a file, declared in `pond.toml` as `[ripples.NAME]` (`sql`, `parents`, `reads` as `source.table`, `write` = overwrite/merge/append, `pk`, `always_run`); it writes the table `NAME`. **Everything is explicit, nothing inferred.** SQL and Python Ripples mix freely: `parents` on either side names the other (`@ripple(parents=...)` takes names or functions). `[static.NAME]` declares a file shipped with the code (CSV/TSV/Parquet/JSON) that every Ripple sees as a connection-local temp view.
+
+- `core.load_ripples(source_dir)` is the single collection (deploy discovery, `executor.load_topology`/`_load_ripple`, `local/runner`). It resolves every parent to a name and raises `RippleDeclarationError` (a `ValueError`; a 422 at deploy, with no traceback) on an unknown parent, a duplicate name, a cycle, or a bad declaration. The old per-site mapping silently dropped an unresolvable parent.
+- **The reference check**: each SQL Ripple's query is parsed with DuckDB's `json_serialize_sql`; every base-table reference (minus its CTEs; table functions aren't base tables) must be an ancestor SQL Ripple, a `reads` entry (as `source.table`), a static, its own previous output, or a DuckDB system schema. An otherwise-unknown name passes only if a Python Ripple is an ancestor (its tables aren't known before it runs). Runs on every load, so deploy and `pond run` report the same errors.
+- **Source references**: DuckDB has no temp schemas and an attached catalog is instance-wide (shared by concurrent Ripples with different pins), so `source.table` is served by rewriting the parsed tree: each reference becomes a connection-local temp view `_duckstring_src__{source}__{table}` (`Pond.source_view`, the pinned version), aliased to the table, `source.table.col` column refs re-qualified, then `json_deserialize_sql`. A query reading no Source runs as written.
+- **Runtime check for Python**: `Pond._check_own_read` on `read_table`/`count_table` of own tables raises `RippleOrderError` when the table's writer isn't this Ripple or an ancestor. Writers = SQL Ripples statically, plus Python Ripples learned from lineage writes as they complete (executor `table_writers`, runner likewise). SQL run directly on `pond.con` isn't seen.
+- Demo: `duckstring pond demo --sql` (`demo/sql_sales`, `demo/sql_reports`, copied as `sales`/`reports`; price bands as a static CSV). Tests: `tests/test_sql_ripples.py`, `test_pond.test_sql_demo_runs_locally`, `test_runtime.test_sql_demo_chain_runs_end_to_end` and the deploy-refusal e2e.
 
 ## dbt-mode Ponds (`dbt_mode.py`, `duck/dbt_executor.py`; see `plans/dbt.md`)
 

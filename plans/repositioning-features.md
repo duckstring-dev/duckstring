@@ -1,6 +1,6 @@
 # Repositioning: feature changes
 
-Status: **§1 skipped, §2 agreed (2026-10-04) and not built; §3.4 superseded by
+Status: **§1 skipped; §2 built (2026-10-04, see "2.7 As built"); §3.4 superseded by
 `plans/flock-motherduck.md`.** The engineering half of `plans/documentation-rewrite.md`. Three features, each
 motivated by a friction the rewrite would otherwise have to write around. None is load-bearing for the
 documentation work — the docs can ship without all three — but each removes a paragraph of apology.
@@ -156,6 +156,33 @@ Declaration validation (each 422); the reference check (an undeclared sibling, S
 deploy; CTEs, table functions, self-reads and ancestors pass); mixed Ponds in both directions; each write
 mode; static tables in SQL and Python Ripples; the Python runtime check; the shared collection raising on
 an unknown parent where it used to drop it; a deployed-Duck e2e of the SQL demo.
+
+### 2.7 As built (2026-10-04)
+
+Built as designed, with these specifics:
+
+- **Source names in SQL.** Source tables must be written `source.table`; a bare Source table name fails
+  the check with a hint. DuckDB has no temporary schemas, and an attached catalog is shared by every
+  connection of the Duck (concurrent Ripples may be pinned to different versions), so the parsed query is
+  rewritten: each `source.table` becomes a connection-local temp view of the pinned version, aliased to
+  the table name, columns qualified `source.table.col` are re-qualified, and DuckDB turns the tree back
+  into SQL (`json_deserialize_sql`). A query that reads no Source runs exactly as written.
+- **Python ancestors.** A Python Ripple's tables can't be known before it runs, so a SQL Ripple may read
+  a name nothing else declares when a Python Ripple is among its ancestors. The Python-side runtime check
+  learns each Python Ripple's tables from its lineage writes as it completes.
+- **What else the check allows.** DuckDB's system schemas (`information_schema`, `pg_catalog`) and
+  `main.`-qualified own tables. Catalog-qualified (three-part) names are rejected.
+- **Validation** beyond the plan: `pk` with `write = "overwrite"` is an error, unknown keys are errors,
+  static files must be CSV, TSV, Parquet or JSON by extension, and a Ripple listing itself as a parent is
+  an error. `[ripples]`/`[static]` in a dbt Pond is an error.
+- **Parents.** The shared `core.load_ripples` replaced the three collection sites. An unresolvable Python
+  parent (a function that isn't a registered Ripple) used to be dropped silently by the Duck and the local
+  runner; it's now an error everywhere.
+- **Python entrypoint optional.** A Pond with only SQL Ripples needs no `src/pond.py`; `pond init` still
+  scaffolds one with a placeholder Ripple, which the migration guide says to delete.
+- **Not done:** column lineage for SQL Ripples (the Python capture doesn't apply; sqlglot over the query
+  would be the route). The one-sentence "SQL Ripples or dbt" guidance is drafted in the guide for the
+  author to confirm.
 
 ---
 
