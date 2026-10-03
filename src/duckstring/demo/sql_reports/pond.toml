@@ -1,0 +1,11 @@
+[pond]
+name = "reports"
+version = "1.0.0"
+type = "outlet"
+
+[sources]
+sales = "1.0.0"
+
+[ripples.monthly_summary]
+sql = "sql/monthly_summary.sql"
+reads = ["sales.sale_line"]

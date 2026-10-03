@@ -163,12 +163,20 @@ _DBT_DEMO = (
     ("shop_orders", "Inlet: plain Python, generating the orders the dbt project reads"),
     ("shop_analytics", "a dbt project deployed as a Pond: 3 models, one Ripple each"),
 )
+# A third element names the demo directory to copy when it differs from the Pond's name.
+_SQL_DEMO = (
+    ("transactions", "Inlet: a point-of-sale event log that grows each run"),
+    ("products", "Inlet: a product catalogue that grows each run"),
+    ("sales", "3 SQL Ripples declared in pond.toml, plus a static table of price bands", "sql_sales"),
+    ("reports", "Outlet: a monthly summary, as one SQL Ripple", "sql_reports"),
+)
 _DEMO_OUTLETS = {
     _RIPPLE_DEMO: ("reports",),
     _TRICKLE_DEMO: ("revenue",),
     _TPCDS_DEMO: ("tpcds_category_revenue", "tpcds_store_revenue"),
     _GHARCHIVE_DEMO: ("gh_repo_activity", "gh_trending"),
     _DBT_DEMO: ("shop_analytics",),
+    _SQL_DEMO: ("reports",),
 }
 _DEMO_PONDS = tuple(name for name, _ in _RIPPLE_DEMO)  # the default set (back-compat)
 
@@ -180,6 +188,7 @@ def demo(
     tpcds: bool = typer.Option(False, "--tpcds", help="Six Ponds over locally generated TPC-DS data."),
     gharchive: bool = typer.Option(False, "--gharchive", help="Six Ponds over the public GitHub event archive."),
     dbt: bool = typer.Option(False, "--dbt", help="A dbt project deployed as a Pond, and its Source."),
+    sql: bool = typer.Option(False, "--sql", help="The --ripple set with sales and reports written as SQL Ripples."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
     """Create a set of demo Pond projects as subdirectories.
@@ -193,41 +202,45 @@ def demo(
     console = Console()
     cwd = Path.cwd()
 
-    if sum((ripple, trickle, tpcds, gharchive, dbt)) > 1:
-        typer.echo("Error: pass only one of --ripple / --trickle / --tpcds / --gharchive / --dbt.", err=True)
+    if sum((ripple, trickle, tpcds, gharchive, dbt, sql)) > 1:
+        typer.echo("Error: pass only one of --ripple / --trickle / --tpcds / --gharchive / --dbt / --sql.",
+                   err=True)
         raise typer.Exit(1)
     ponds = (
-        _TPCDS_DEMO if tpcds
+        _SQL_DEMO if sql
+        else _TPCDS_DEMO if tpcds
         else _GHARCHIVE_DEMO if gharchive
         else _DBT_DEMO if dbt
         else _TRICKLE_DEMO if trickle
         else _RIPPLE_DEMO  # default (no flag) = the Ripple set
     )
 
-    existing = [name for name, _ in ponds if (cwd / name).exists()]
+    existing = [name for name, *_ in ponds if (cwd / name).exists()]
     if existing:
         for name in existing:
             typer.echo(f"Error: '{name}' already exists in this directory.", err=True)
         raise typer.Exit(1)
 
-    pond_list = ", ".join(f"[bold]{name}/[/bold]" for name, _ in ponds)
+    pond_list = ", ".join(f"[bold]{name}/[/bold]" for name, *_ in ponds)
     console.print(f"Will create {pond_list} in {cwd}")
     if not yes:
         typer.confirm("Continue?", default=True, abort=True)
 
-    for name, _ in ponds:
-        shutil.copytree(_DEMO_DIR / name, cwd / name)
+    for name, _role, *source in ponds:
+        shutil.copytree(_DEMO_DIR / (source[0] if source else name), cwd / name,
+                        ignore=shutil.ignore_patterns("__pycache__"))
 
     kind = (
-        "TPC-DS (real-data Trickle)" if tpcds
+        "SQL Ripple" if sql
+        else "TPC-DS (real-data Trickle)" if tpcds
         else "GHArchive (real-data Trickle)" if gharchive
         else "dbt-mode" if dbt
         else "Trickle (incremental)" if trickle
         else "Ripple"
     )
     console.print(f"[green]Created[/green] {kind} demo pipeline:")
-    width = max(len(name) for name, _ in ponds) + 1
-    for name, role in ponds:
+    width = max(len(name) for name, *_ in ponds) + 1
+    for name, role, *_ in ponds:
         console.print(f"  [bold]{name + '/':<{width}}[/bold]  {role}")
     outlets = _DEMO_OUTLETS[ponds]
     run = " or ".join(f"[bold]duckstring trigger pulse {o}[/bold]" for o in outlets)

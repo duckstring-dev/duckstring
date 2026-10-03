@@ -126,7 +126,7 @@ def _dbt_ripples(source_dir: Path, info: dict) -> list[dict]:
 
 def run(spec: dict) -> dict:
     """Discover the Pond described by ``spec`` (see the module docstring), in this process."""
-    from .core import collect_ripples, import_pond_module, pond_entrypoints, read_pond_toml
+    from .core import load_ripples, read_pond_toml
     from .dbt_mode import dbt_project_subpath
 
     source_dir = Path(spec["source_dir"])
@@ -136,20 +136,13 @@ def run(spec: dict) -> dict:
         return {"ripples": [{"name": r["name"], "parents": list(r["parents"]),
                              "always_run": bool(r.get("always_run"))} for r in rows], "lineage": []}
 
-    entry, _ = pond_entrypoints(info)
-    raw: list[dict] = []
-    if (source_dir / entry).exists():
-        try:
-            import_pond_module(source_dir, entry)
-        finally:
-            raw = collect_ripples()
-    func_to_name = {r["func"]: r["name"] for r in raw}
-    ripples = [{
-        "name": r["name"],
-        "parents": [func_to_name.get(p, getattr(p, "__name__", str(p))) for p in r["parents"]],
-        "always_run": bool(r.get("always_run")),
-    } for r in raw]
-    return {"ripples": ripples, "lineage": capture_lineage_rows(raw, spec.get("catalog") or {})}
+    # Python and SQL Ripples together, parents resolved and each SQL Ripple's query checked against its
+    # declaration; a RippleDeclarationError here is a failed deploy with the reason.
+    pond = load_ripples(source_dir, info)
+    ripples = [{"name": r["name"], "parents": list(r["parents"]), "always_run": r["always_run"]}
+               for r in pond.ripples]
+    python_rows = [r for r in pond.ripples if r["kind"] == "python"]  # column lineage is captured for these
+    return {"ripples": ripples, "lineage": capture_lineage_rows(python_rows, spec.get("catalog") or {})}
 
 
 def main(argv: list[str]) -> int:
@@ -157,7 +150,11 @@ def main(argv: list[str]) -> int:
     try:
         result = {"ok": True, **run(json.loads(inp.read_text()))}
     except BaseException as exc:  # noqa: BLE001 — report every failure, including SystemExit from Pond code
-        result = {"ok": False, "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()}
+        from .core import RippleDeclarationError
+
+        # A declaration problem is the user's config, not a crash: its message says what to fix.
+        tb = "" if isinstance(exc, RippleDeclarationError) else traceback.format_exc()
+        result = {"ok": False, "error": f"{type(exc).__name__}: {exc}", "traceback": tb}
     out.write_text(json.dumps(result))
     return 0
 

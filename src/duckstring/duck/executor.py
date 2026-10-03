@@ -22,22 +22,17 @@ _import_lock = threading.Lock()
 
 
 def load_topology(source_dir: Path) -> dict[str, list[str]]:
-    """Build the intra-Pond ``{ripple_name: [parent_names]}`` graph. For a normal Pond this imports the
-    deployed ripples entrypoint and reads the registered ripples; for a **dbt-mode** Pond it parses the
+    """Build the intra-Pond ``{ripple_name: [parent_names]}`` graph. For a normal Pond this collects its
+    Python and SQL Ripples (:func:`duckstring.core.load_ripples`); for a **dbt-mode** Pond it parses the
     dbt project and reads the model graph (a model = a Ripple). The Duck owns its own code either way."""
-    from ..core import read_pond_toml
+    from ..core import load_ripples, read_pond_toml
     from ..dbt_mode import dbt_project_subpath
 
     info = read_pond_toml(source_dir)
     if dbt_project_subpath(info):
         return _dbt_topology(source_dir, info)
-
-    ripples = _import_ripples(source_dir)
-    func_to_name = {r["func"]: r["name"] for r in ripples}
-    return {
-        r["name"]: [func_to_name[p] for p in r["parents"] if p in func_to_name]
-        for r in ripples
-    }
+    with _import_lock:
+        return load_ripples(source_dir, info).topology()
 
 
 def _dbt_topology(source_dir: Path, info: dict) -> dict[str, list[str]]:
@@ -51,25 +46,18 @@ def _dbt_topology(source_dir: Path, info: dict) -> dict[str, list[str]]:
     return manifest_topology(manifest)
 
 
-def _import_ripples(source_dir: Path) -> list[dict]:
-    from ..core import collect_ripples, import_pond_module, pond_entrypoints, read_pond_toml
-
-    ripples_entry, _ = pond_entrypoints(read_pond_toml(source_dir))
-    import_pond_module(source_dir, ripples_entry)
-    return collect_ripples()
-
 
 def _load_ripple(source_path: str, root: str, ripple_name: str):
-    """Load ``ripple_name``'s function from the deployed code. Importing here (lazily, per run) keeps
-    executor construction free of the Pond's code, so an executor can be stood up for export-only paths
-    that never import a ripple."""
-    from ..core import import_pond_module, pond_entrypoints, read_pond_toml
+    """Load ``ripple_name``'s function (Python or SQL) from the deployed code, with the Pond's Ripples
+    around it (:func:`duckstring.core.load_ripples`). Importing here (lazily, per run) keeps executor
+    construction free of the Pond's code, so an executor can be stood up for export-only paths that never
+    import a ripple. Returns ``(func, pond_ripples)``."""
+    from ..core import load_ripples
 
     source_dir = Path(root) / source_path
     with _import_lock:
-        ripples_entry, _ = pond_entrypoints(read_pond_toml(source_dir))
-        mod = import_pond_module(source_dir, ripples_entry)
-        return getattr(mod, ripple_name)
+        pond = load_ripples(source_dir)
+    return pond.by_name[ripple_name]["func"], pond
 
 
 def _run_ripple(
@@ -77,7 +65,7 @@ def _run_ripple(
     source_majors: dict[str, int], f: datetime | None, previous_f: datetime | None,
     data_root: str | None = None, sources_changed: bool = True, skip_sink=None,
     staging_dir=None, own_data_dir=None, source_f: dict[str, str] | None = None,
-    flock: dict[str, str] | None = None,
+    flock: dict[str, str] | None = None, scope: dict | None = None,
 ) -> dict:
     from ..core import Pond
 
@@ -96,6 +84,8 @@ def _run_ripple(
         # Flock is a Pond-level posture (not per-Ripple). flock.comprehensive still applies
         # engine-eligibility and the OOM fail-up.
         flock=(flock_env or os.environ).get("DUCKSTRING_FLOCK_MODE"), flock_env=flock_env,
+        # The Ripple's place in the Pond: its static tables, and what the own-table read check needs.
+        **(scope or {}),
     )
     try:
         func(pond)
@@ -290,6 +280,9 @@ class RippleExecutor(RunInputs):
         # and used to reject a stale LOCAL publish left behind by a Source that moved to a remote Pool.
         # Empty until a job supplies it; then the resolve is only ever more correct, never less.
         self.source_f: dict[str, str] = {}
+        # {table: the Ripple that writes it}, learned from each completed Ripple's lineage (a Python
+        # Ripple's tables aren't known until it runs). Backs Pond's own-table read check.
+        self.table_writers: dict[str, str] = {}
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
 
     def _cursor(self):
@@ -310,7 +303,7 @@ class RippleExecutor(RunInputs):
 
         def _task():
             timing["started"] = datetime.now(timezone.utc)
-            func = _load_ripple(self.source_path, str(self.root), ripple_name)
+            func, pond = _load_ripple(self.source_path, str(self.root), ripple_name)
             # Over-envelope offload happens inside the ripple, at the pond.trickle(...) terminals
             # (the Flock seam — duckstring.flock, env-gated, engine-pluggable). The executor just
             # runs the ripple classically; the terminal hook decides local-vs-Flock per output.
@@ -320,7 +313,13 @@ class RippleExecutor(RunInputs):
                 sources_changed=sources_changed, skip_sink=skip_sink, source_f=self.source_f_for(f),
                 flock=self.flock_for(f),
                 staging_dir=self.staging_dir, own_data_dir=self.own_data_dir,
+                scope={"static_tables": pond.statics, "ripple": ripple_name,
+                       "ancestors": pond.ancestors(ripple_name),
+                       "table_writers": {**self.table_writers, **pond.sql_writers()}},
             )
+            # Learn which Ripple writes which table, for the own-table read check in later Ripples.
+            for table in (timing["lineage"] or {}).get("writes", ()):
+                self.table_writers.setdefault(table, ripple_name)
 
         fut = self._pool.submit(_task)
 

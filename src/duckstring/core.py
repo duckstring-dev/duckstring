@@ -7,6 +7,17 @@ _RIPPLES: list[dict] = []
 _PUDDLES: list[dict] = []
 
 
+class RippleDeclarationError(ValueError):
+    """A Pond's Ripples are declared inconsistently: an unknown or cyclic parent, a duplicate name, an
+    invalid ``[ripples]`` or ``[static]`` entry in ``pond.toml``, or a SQL Ripple reading a table it
+    doesn't declare. Raised at deploy (a 422) and on a local run. A subclass of ``ValueError``."""
+
+
+class RippleOrderError(RuntimeError):
+    """A Ripple read a table that another Ripple in the Pond writes, without that Ripple among its
+    parents, so the read could see the previous run's data. Fails the Ripple."""
+
+
 def retry_on_lock(fn, attempts: int = 12, base: float = 0.05):
     """Run ``fn``, retrying on transient DuckDB lock/conflict errors so concurrent writers *queue*
     (back off and retry) rather than crashing. Covers the catalog write-write conflict, the read-only/
@@ -30,7 +41,8 @@ def ripple(func=None, *, parents=None, name=None, always_run=False):
 
     Args:
         parents: Ripples in the same Pond that must finish before this one starts, as function
-            references. Dependencies on other Ponds are declared in ``pond.toml``.
+            references or names (a name also reaches a SQL Ripple declared in ``pond.toml``).
+            Dependencies on other Ponds are declared in ``pond.toml``.
         name: The Ripple's name. Defaults to the function name.
         always_run: Run even when no Source has changed since the last Pond Run. If any Ripple in a Pond
             sets this, the whole Pond always runs.
@@ -65,6 +77,135 @@ def collect_ripples() -> list[dict]:
     result = list(_RIPPLES)
     _RIPPLES.clear()
     return result
+
+
+class PondRipples:
+    """Every Ripple of a Pond, Python and SQL, with parents resolved to names (see :func:`load_ripples`).
+
+    ``ripples`` rows are ``{"name", "func", "parents": [names], "always_run", "kind": "python"|"sql"}``;
+    ``statics`` maps each static table's name to its file."""
+
+    def __init__(self, ripples: list[dict], statics: dict[str, Path]):
+        self.ripples = ripples
+        self.statics = statics
+        self.by_name = {r["name"]: r for r in ripples}
+        self._ancestors: dict[str, set[str]] = {}
+
+    def topology(self) -> dict[str, list[str]]:
+        return {r["name"]: list(r["parents"]) for r in self.ripples}
+
+    def ancestors(self, name: str) -> set[str]:
+        if name not in self._ancestors:
+            seen: set[str] = set()
+            stack = list(self.by_name[name]["parents"])
+            while stack:
+                p = stack.pop()
+                if p not in seen:
+                    seen.add(p)
+                    stack.extend(self.by_name[p]["parents"])
+            self._ancestors[name] = seen
+        return self._ancestors[name]
+
+    def sql_writers(self) -> dict[str, str]:
+        """``{table: ripple}`` for the tables known before anything runs: each SQL Ripple's own."""
+        return {r["name"]: r["name"] for r in self.ripples if r["kind"] == "sql"}
+
+    def order(self) -> list[str]:
+        """The Ripple names in a dependency order (parents first; ties by name)."""
+        out: list[str] = []
+        done: set[str] = set()
+        remaining = self.topology()
+        while remaining:
+            ready = sorted(n for n, ps in remaining.items() if all(p in done for p in ps))
+            if not ready:
+                break  # a cycle: the rest can never run (load_ripples reports it)
+            for n in ready:
+                out.append(n)
+                done.add(n)
+                remaining.pop(n)
+        return out
+
+
+def load_ripples(source_dir: Path, info: dict | None = None, *, require_entry: bool = False) -> PondRipples:
+    """Every Ripple of the Pond at ``source_dir``: the ``@ripple`` functions in its Python entrypoint (when
+    it has one) and the SQL Ripples and static tables its ``pond.toml`` declares, with every parent
+    resolved to a Ripple name and each SQL Ripple's query checked against its declaration
+    (:mod:`duckstring.sql_ripples`). The one place a Pond's Ripples are collected: deploy discovery, the
+    Duck and the local runner all use it, so they agree. Raises :class:`RippleDeclarationError` on an
+    unknown parent, a duplicate name or a cycle; with ``require_entry``, also when there's no Python
+    entrypoint and no SQL Ripples."""
+    from . import sql_ripples
+
+    source_dir = Path(source_dir)
+    info = read_pond_toml(source_dir) if info is None else info
+    entry, _ = pond_entrypoints(info)
+    raw: list[dict] = []
+    if (source_dir / entry).exists():
+        try:
+            import_pond_module(source_dir, entry)
+        finally:
+            raw = collect_ripples()
+    sql, statics = sql_ripples.declared(source_dir, info)
+    if require_entry and not raw and not sql and not (source_dir / entry).exists():
+        raise FileNotFoundError(f"no ripples entrypoint at {entry} and no [ripples] in pond.toml — "
+                                "is this a Pond project?")
+
+    func_to_name = {r["func"]: r["name"] for r in raw}
+    rows: list[dict] = []
+    names: set[str] = set()
+    for r in raw:
+        if r["name"] in names:
+            raise RippleDeclarationError(f"two Ripples are named '{r['name']}'")
+        names.add(r["name"])
+    for r in sql:
+        if r.name in names:
+            raise RippleDeclarationError(f"pond.toml [ripples.{r.name}]: a Python Ripple has the same name")
+        if r.name in statics:
+            raise RippleDeclarationError(f"pond.toml [ripples.{r.name}]: a static table has the same name")
+        names.add(r.name)
+    for r in raw:
+        if r["name"] in statics:
+            raise RippleDeclarationError(f"Ripple '{r['name']}' has the same name as a static table")
+
+    def resolve(owner: str, p) -> str:
+        if isinstance(p, str):
+            name = p
+        elif p in func_to_name:
+            name = func_to_name[p]
+        else:
+            raise RippleDeclarationError(
+                f"Ripple '{owner}' has a parent that isn't a registered Ripple: {getattr(p, '__name__', p)!r}")
+        if name not in names:
+            raise RippleDeclarationError(f"Ripple '{owner}' has parent '{name}', which isn't a Ripple in this Pond")
+        if name == owner:
+            raise RippleDeclarationError(f"Ripple '{owner}' lists itself as a parent")
+        return name
+
+    for r in raw:
+        rows.append({"name": r["name"], "func": r["func"], "always_run": bool(r.get("always_run")),
+                     "parents": [resolve(r["name"], p) for p in r["parents"]], "kind": "python"})
+    for r in sql:
+        rows.append({"name": r.name, "func": sql_ripples.make_callable(r), "always_run": r.always_run,
+                     "parents": [resolve(r.name, p) for p in r.parents], "kind": "sql", "sql": r})
+    pond = PondRipples(rows, statics)
+    if len(pond.order()) != len(rows):
+        stuck = sorted(set(pond.by_name) - set(pond.order()))
+        raise RippleDeclarationError(f"the Ripples' parents form a cycle: {', '.join(stuck)}")
+
+    if sql:
+        import duckdb
+
+        con = duckdb.connect()
+        try:
+            sql_names = {r.name for r in sql}
+            for r in sql:
+                sql_ripples.parse(r, con)
+                ancestors = pond.ancestors(r.name)
+                sql_ripples.check(r, sql_names=sql_names, statics=set(statics), ancestors=ancestors,
+                                  python_ancestor=any(pond.by_name[a]["kind"] == "python" for a in ancestors))
+        finally:
+            con.close()
+    return pond
 
 
 def puddle(target: str):
@@ -465,6 +606,8 @@ class Pond:
         f=None, previous_f=None, data_root: str | None = None,
         sources_changed: bool = True, skip_sink=None, staging_dir=None, own_data_dir=None,
         flock: str | None = None, sources=None, flock_env: dict[str, str] | None = None,
+        static_tables: dict | None = None, ripple: str | None = None, ancestors=None,
+        table_writers: dict[str, str] | None = None,
     ) -> None:
         from .engine.core import NEVER
 
@@ -516,6 +659,30 @@ class Pond:
         # this Pond's own output names. Drained per Ripple Run by the executor (:meth:`take_lineage`) and
         # shipped on the ripple event; a plain dict/sets so recording costs nothing measurable.
         self._lineage: dict[str, set] = {"reads": set(), "writes": set()}
+        # Which Ripple this handle serves, its ancestors, and which Ripple writes each of the Pond's tables
+        # (as far as known), for the check that an own-table read only sees an ancestor's output. Set by
+        # the runtime; None outside a run, which disables the check.
+        self._ripple = ripple
+        self._ancestors = set(ancestors or ())
+        self._table_writers = table_writers
+        # Static tables declared in pond.toml ([static.NAME]): connection-local views over the shipped files.
+        if static_tables:
+            from .sql_ripples import register_statics
+
+            register_statics(con, static_tables)
+
+    def _check_own_read(self, table: str) -> None:
+        """Fail the read of one of this Pond's tables written by a Ripple that isn't this one or an
+        ancestor: that Ripple may not have run yet, so the read could see the previous run's data."""
+        if self._ripple is None or self._table_writers is None:
+            return
+        writer = self._table_writers.get(table)
+        if writer is None or writer == self._ripple or writer in self._ancestors:
+            return
+        raise RippleOrderError(
+            f"Ripple '{self._ripple}' reads '{table}', which Ripple '{writer}' writes, but '{writer}' isn't "
+            f"among its parents. Add it to parents so it runs first."
+        )
 
     # ─── observed lineage (plans/lineage.md) ───────────────────────────────────
 
@@ -710,26 +877,13 @@ class Pond:
         Refer to the registered view name in SQL rather than to a Python variable holding the relation, which
         is unreliable under the Duck's threaded executor.
 
-        Raises :class:`MissingSourceAsset` when a Source table isn't published.
+        Raises :class:`MissingSourceAsset` when a Source table isn't published, and :class:`RippleOrderError`
+        when reading one of the Pond's own tables that another Ripple writes, if that Ripple isn't among this
+        Ripple's parents (directly or further up).
         """
         source_pond, table = self._resolve_ref(ref)
         if source_pond is not None:
-            from .dataplane import get_data_plane
-            from .trickle_io import _strip_system
-
-            self._record_read(source_pond, table)
-            data_dir = self._source_data_dir(source_pond)
-            dp = get_data_plane()
-            data_dir.duckdb_setup(self.con)  # object store → httpfs + credentials (no-op for local)
-            try:
-                # Pinned reads: a Pond Run spans several Ripples and a Source can republish mid-run, so an
-                # overwrite table is read at the version the Source had published when this run started
-                # (`_pin`), and a Trickle table up to this run's freshness. Every Ripple of the run sees
-                # the same data, and the Source keeps the pinned version until the run is done.
-                select = dp.read_select(data_dir, table, as_of=self.f, pin=self._pin(source_pond))
-            except FileNotFoundError as exc:
-                raise MissingSourceAsset(source_pond, table) from exc
-            rel = _strip_system(self.con.sql(select))
+            rel = self._source_relation(source_pond, table)
             from .trickle_io import _is_current_view
 
             if not _is_current_view(self.con, table):  # never replace this Pond's own merge Trickle view
@@ -738,8 +892,40 @@ class Pond:
                 except Exception:
                     pass  # name taken by one of this Pond's own tables — the relation still works
             return rel
+        self._check_own_read(table)
         self._record_read(None, table)
         return self._own_current(table)
+
+    def _source_relation(self, source_pond: str, table: str):
+        """A Source table at this run's pinned version, without system columns (recorded as a read).
+
+        Pinned reads: a Pond Run spans several Ripples and a Source can republish mid-run, so an overwrite
+        table is read at the version the Source had published when this run started (`_pin`), and a
+        Trickle table up to this run's freshness. Every Ripple of the run sees the same data, and the
+        Source keeps the pinned version until the run is done."""
+        from .dataplane import get_data_plane
+        from .trickle_io import _strip_system
+
+        self._record_read(source_pond, table)
+        data_dir = self._source_data_dir(source_pond)
+        dp = get_data_plane()
+        data_dir.duckdb_setup(self.con)  # object store → httpfs + credentials (no-op for local)
+        try:
+            select = dp.read_select(data_dir, table, as_of=self.f, pin=self._pin(source_pond))
+        except FileNotFoundError as exc:
+            raise MissingSourceAsset(source_pond, table) from exc
+        return _strip_system(self.con.sql(select))
+
+    def source_view(self, source: str, table: str) -> str:
+        """Register a Source table at this run's pinned version as a view local to this connection and
+        return its name. How a SQL Ripple reads ``source.table`` (see :mod:`duckstring.sql_ripples`)."""
+        if self._declared_sources is not None and source not in self._declared_sources:
+            raise ValueError(f"'{source}' is not a declared Source of this Pond")
+        rel = self._source_relation(source, table)
+        name = f"_duckstring_src__{source}__{table}"
+        quoted = name.replace('"', '""')
+        self.con.execute(f'CREATE OR REPLACE TEMP VIEW "{quoted}" AS {rel.sql_query()}')
+        return name
 
     def _own_current(self, name: str):
         """Read one of this Pond's own registry tables as its current clean state — a merge Trickle is
@@ -767,6 +953,7 @@ class Pond:
                 dp.consolidated_count_select(data_dir, table, meta, as_of=self.f, pin=self._pin(source_pond))
             ).fetchone()
             return int(n)
+        self._check_own_read(table)
         return trickle.count_current(self.con, table)
 
     # ─── Trickle: incremental I/O (see duckstring.trickle_io / plans/trickle.md) ───

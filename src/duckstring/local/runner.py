@@ -6,7 +6,7 @@ import traceback as tb
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..core import Pond, collect_ripples, import_pond_module, retry_on_lock
+from ..core import Pond, load_ripples, retry_on_lock
 from .project import Project
 
 
@@ -29,36 +29,9 @@ class RunResult:
         return all(r.status == "ok" for r in self.ripples)
 
 
-def _load_ripples(project: Project) -> list[dict]:
-    entry = project.dir / project.ripples_entry
-    if not entry.exists():
-        raise FileNotFoundError(f"no ripples entrypoint at {project.ripples_entry} — is this a Pond project?")
-    try:
-        import_pond_module(project.dir, project.ripples_entry)
-    except Exception:
-        collect_ripples()
-        raise
-    return collect_ripples()
-
-
-def _topo_order(ripples: list[dict]) -> list[str]:
-    func_to_name = {r["func"]: r["name"] for r in ripples}
-    parents = {
-        r["name"]: [func_to_name[p] for p in r["parents"] if p in func_to_name]
-        for r in ripples
-    }
-    order: list[str] = []
-    done: set[str] = set()
-    remaining = dict(parents)
-    while remaining:
-        ready = sorted(n for n, ps in remaining.items() if all(p in done for p in ps))
-        if not ready:
-            raise ValueError(f"cycle in ripple graph: {', '.join(sorted(remaining))}")
-        for n in ready:
-            order.append(n)
-            done.add(n)
-            remaining.pop(n)
-    return order
+def _load_ripples(project: Project):
+    """The Pond's Python and SQL Ripples (:func:`duckstring.core.load_ripples`)."""
+    return load_ripples(project.dir, require_entry=True)
 
 
 def _registry_connect(project: Project):
@@ -120,9 +93,10 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
     it from a self-puddle unless ``fresh``) and executes every Ripple in topo order; ``ripple`` runs
     a single Ripple against the existing registry. Stops at the first failure; exports whatever the
     registry holds either way."""
-    ripples = _load_ripples(project)
-    by_name = {r["name"]: r for r in ripples}
-    order = _topo_order(ripples)
+    pond_ripples = _load_ripples(project)
+    by_name = pond_ripples.by_name
+    order = pond_ripples.order()
+    table_writers = pond_ripples.sql_writers()  # plus each Python Ripple's tables as it runs (lineage)
 
     if ripple is not None:
         if ripple not in by_name:
@@ -148,11 +122,14 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
         try:
             con = _registry_connect(project)
             try:
-                by_name[name]["func"](
-                    Pond(project.name, project.version, con, root=project.puddles_dir,
-                         f=run_f, previous_f=previous_f, sources=list(project.sources),
-                         staging_dir=_staging_dir(project), own_data_dir=project.out_dir)
-                )
+                handle = Pond(project.name, project.version, con, root=project.puddles_dir,
+                              f=run_f, previous_f=previous_f, sources=list(project.sources),
+                              staging_dir=_staging_dir(project), own_data_dir=project.out_dir,
+                              static_tables=pond_ripples.statics, ripple=name,
+                              ancestors=pond_ripples.ancestors(name), table_writers=dict(table_writers))
+                by_name[name]["func"](handle)
+                for table in handle.take_lineage()["writes"]:
+                    table_writers.setdefault(table, name)
             finally:
                 con.close()
             results.append(RippleResult(name, "ok", time.perf_counter() - started))

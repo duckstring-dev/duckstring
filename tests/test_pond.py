@@ -121,6 +121,31 @@ def test_trickle_demo_runs_locally(runner, tmp_path, monkeypatch):
         assert result.ok, [r.error for r in result.ripples if r.status != "ok"]
 
 
+def test_sql_demo_runs_locally(runner, tmp_path, monkeypatch):
+    """The --sql demo: the default pipeline with sales and reports as SQL Ripples declared in pond.toml,
+    run locally against the sales Puddles and the static price bands."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["pond", "demo", "--sql"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "sales" / "sql" / "sale_line.sql").exists()
+    assert not (tmp_path / "sales" / "src" / "pond.py").exists()  # no Python Ripples at all
+
+    from duckstring.local import hydrate, load_project, run_pond
+
+    project = load_project(tmp_path / "sales")
+    hydrate(project)
+    result = run_pond(project)
+    assert result.ok, [r.error for r in result.ripples if r.status != "ok"]
+    assert [r.name for r in result.ripples][-1] == "sale_line"
+    import duckdb
+
+    from duckstring.dataplane import ParquetDataPlane
+
+    path = ParquetDataPlane().table_path(tmp_path / "sales" / "puddles" / "out", "price_tiers")
+    tiers = duckdb.sql(f"SELECT DISTINCT price_tier FROM read_parquet('{path}')").fetchall()
+    assert {t for (t,) in tiers} <= {"budget", "standard", "premium"} and tiers
+
+
 def test_demo_copies_gitignore(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runner.invoke(app, ["pond", "demo"], input="y\n")

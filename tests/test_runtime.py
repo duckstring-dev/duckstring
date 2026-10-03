@@ -905,6 +905,38 @@ def test_overwrite_versions_are_trimmed_once_the_chain_goes_idle(runtime, monkey
         f"idle Ducks left superseded versions: {version_counts()}"
 
 
+def test_sql_demo_chain_runs_end_to_end(runtime):
+    """SQL Ripples deployed to real Ducks: discovery checks the declarations, the Duck runs each query with
+    its Sources pinned and the static table read from the deployed code, and reports reads sales'
+    SQL-written output."""
+    url, root = runtime
+    _deploy(url, ["transactions", "products", "sql_sales", "sql_reports"])
+    httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None), \
+        f"reports never became fresh: {_pond_status(url, 'sales')}"
+    rows = httpx.post(f"{url}/api/query", json={"pond": "sales", "sql":
+                      "SELECT count(*) AS n, count(DISTINCT price_tier) AS tiers FROM sale_line"},
+                      timeout=10.0).json()
+    assert rows[0]["n"] > 0 and rows[0]["tiers"] >= 1
+    summary = httpx.post(f"{url}/api/query", json={"pond": "reports", "sql":
+                         "SELECT count(*) AS n FROM monthly_summary"}, timeout=10.0).json()
+    assert summary[0]["n"] > 0
+
+
+def test_a_sql_ripple_reading_an_undeclared_table_is_refused_at_deploy(runtime, tmp_path):
+    url, _root = runtime
+    d = tmp_path / "bad"
+    (d / "sql").mkdir(parents=True)
+    (d / "pond.toml").write_text('[pond]\nname = "bad"\nversion = "1.0.0"\n\n'
+                                 '[ripples.a]\nsql = "sql/a.sql"\n\n[ripples.b]\nsql = "sql/b.sql"\n')
+    (d / "sql" / "a.sql").write_text("SELECT 1 AS x")
+    (d / "sql" / "b.sql").write_text("SELECT * FROM a")  # a isn't among b's parents
+    r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip_dir(d), "application/zip")},
+                   data={"name": "bad", "version": "1.0.0", "type": "pond"}, timeout=15.0)
+    assert r.status_code == 422, r.text
+    assert "isn't among its parents" in r.text
+
+
 def test_restart_restores_state_e2e(tmp_path_factory, monkeypatch):
     root = tmp_path_factory.mktemp("restart_root")
     port = _free_port()
