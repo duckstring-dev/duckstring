@@ -128,11 +128,21 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                 if kind == "job":
                     if data.get("kind") == "shutdown":
                         shutdown_requested = True
+                        # Going idle: trim the overwrite versions no Sink still reads, so a large table
+                        # isn't left on disk twice. Only when no Run is in flight (its publish prunes).
+                        if "retain_from" in data and core.idle():
+                            if executor.prune(_retain_from(data)) and core.last_begin_f > NEVER:
+                                _start_persist(core.last_begin_f)  # carry the deletions to the durable layer
                     elif data.get("kind") == "begin_run":
                         prev = data.get("previous_f")
-                        # What the Catchment says each Source has published — foreign reads use it to
-                        # reject a stale local publish (registry.resolve_data_dir).
-                        executor.source_f = data.get("source_f") or {}
+                        # What the Catchment says each Source has published when this Run started: it pins
+                        # the Run's overwrite Source reads to those versions, and rejects a stale local
+                        # publish (registry.resolve_data_dir). Plus the retention bound for this line's own
+                        # overwrite versions, applied at its publish.
+                        executor.begin_run_inputs(
+                            datetime.fromisoformat(data["f"]), data.get("source_f"),
+                            _retain_from(data), force=data.get("force", False),
+                        )
                         if data.get("refresh"):
                             executor.wipe()  # cold reset: the run rebuilds from scratch
                         _launch(core.begin_run(
@@ -209,6 +219,17 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
         stop.set()
         executor.shutdown()
         client.close()
+
+
+def _retain_from(job: dict):
+    """A job's ``retain_from``: a datetime, ``None`` (keep only the newest version), or ``KEEP_ALL`` when
+    the job carries none (prune nothing)."""
+    from ..dataplane import KEEP_ALL
+
+    if "retain_from" not in job:
+        return KEEP_ALL
+    raw = job["retain_from"]
+    return datetime.fromisoformat(raw) if raw else None
 
 
 def _msg(exc: BaseException) -> str:

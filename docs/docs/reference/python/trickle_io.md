@@ -121,7 +121,7 @@ What the delta contains depends on the Source table:
 |---|---|
 | Append Trickle | The rows appended in the window, all weighted `+1`. |
 | Merge Trickle | The change-log rows in the window, consolidated: weights of identical rows are summed and zero-weight rows dropped, so several changes to one row collapse to the net change. |
-| Plain table (`write_table`) | If it was published after `previous_f`, the whole table weighted `+1` with `is_full=True`. Otherwise an empty delta. |
+| Plain table (`write_table`) | If the version this run reads was published after `previous_f`, the whole table weighted `+1` with `is_full=True`. Otherwise an empty delta. |
 | Any table, on this Pond's first run or when `previous_f` is older than the Source's retained history | The whole table weighted `+1`, with `is_full=True`. |
 
 **Raises** `ValueError` if `ref` has no Source prefix, and `MissingSourceAsset` if the table isn't published.

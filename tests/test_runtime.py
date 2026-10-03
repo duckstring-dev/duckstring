@@ -15,6 +15,7 @@ import socket
 import threading
 import time
 import zipfile
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
@@ -877,6 +878,38 @@ def test_wave_then_remove(runtime):
     assert completed_runs() == settled
 
 
+def test_overwrite_versions_are_trimmed_once_the_chain_goes_idle(runtime, monkeypatch):
+    """Versioned overwrite tables on real Ducks (plans/versioned-overwrite.md): a Wave publishes a new
+    version per run, each publish prunes to its job's retain_from, and once the chain is idle the reap's
+    shutdown job trims every table down to its newest version."""
+    from duckstring.catchment import driver as driver_mod
+
+    url, root = runtime
+    monkeypatch.setattr(driver_mod, "_REAP_GRACE", timedelta(seconds=1))
+    _deploy_demo(url)
+    httpx.post(f"{url}/api/ponds/reports/wave", timeout=5.0)
+    rep_db = root / "ponds" / "reports" / "m1" / "pond.db"
+    from duckstring.engine import pond as ledger
+
+    def completed_runs() -> int:
+        if not rep_db.exists():
+            return 0
+        con = ledger.connect(rep_db)
+        n = con.execute("SELECT COUNT(*) FROM pond_run WHERE status = 'success'").fetchone()[0]
+        con.close()
+        return n
+
+    assert _wait(lambda: completed_runs() >= 3), "wave did not produce repeated runs"
+    httpx.post(f"{url}/api/ponds/reports/untrigger", timeout=5.0)
+
+    def version_counts() -> dict[str, int]:
+        return {str(d.relative_to(root)): len(list(d.glob("*.parquet")))
+                for d in (root / "ponds").glob("*/m1/data/*__v")}
+
+    assert _wait(lambda: version_counts() and all(n == 1 for n in version_counts().values()), timeout=60.0), \
+        f"idle Ducks left superseded versions: {version_counts()}"
+
+
 def test_restart_restores_state_e2e(tmp_path_factory, monkeypatch):
     root = tmp_path_factory.mktemp("restart_root")
     port = _free_port()
@@ -980,7 +1013,7 @@ def test_demo_chain_runs_on_iceberg_end_to_end(runtime_iceberg):
         data_dir = root / "ponds" / name / "m1" / "data"
         assert (data_dir / "catalog.json").exists(), f"{name}: no iceberg catalog"
         assert list(data_dir.rglob("*.metadata.json")), f"{name}: no iceberg metadata"
-        assert list(data_dir.glob("*.parquet")), f"{name}: no flat-parquet sidecar"
+        assert list(data_dir.glob("*__v/*.parquet")), f"{name}: no flat-parquet versions"
 
     # The exported data is queryable via /api/data (in-memory, iceberg-aware view registration).
     resp = httpx.post(
@@ -1016,7 +1049,7 @@ def test_a_pond_runs_in_its_own_environment(runtime, tmp_path):
 
     import duckdb
 
-    data = root / "ponds" / "envp" / "m1" / "data" / "answer.parquet"
+    data = next((root / "ponds" / "envp" / "m1" / "data" / "answer__v").glob("*.parquet"))
     assert duckdb.sql(f"SELECT n FROM '{data}'").fetchone() == (42,)
 
 
@@ -1056,5 +1089,5 @@ def test_a_pool_duck_builds_its_ponds_environment(runtime, tmp_path, tmp_path_fa
     agent_root = root / "pools" / "envpool"
     envs = [p for p in (agent_root / "envs").iterdir() if (p / ".complete").exists()]
     assert envs, "the Pool agent's machine built no environment"
-    data = agent_root / "ponds" / "envp" / "m1" / "data" / "answer.parquet"
+    data = next((agent_root / "ponds" / "envp" / "m1" / "data" / "answer__v").glob("*.parquet"))
     assert duckdb.sql(f"SELECT n FROM '{data}'").fetchone() == (42,)

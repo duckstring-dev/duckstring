@@ -497,8 +497,9 @@ class Pond:
         # Which major line of each Source this Pond consumes (from its pond.toml [sources] pins).
         # None/missing falls back to the flat puddles layout (local runs have no majors).
         self.source_majors = source_majors or {}
-        # The freshness the Catchment says each Source has published — lets a read reject a stale
-        # local publish (see catchment.registry.resolve_data_dir). Absent for puddle runs.
+        # The freshness the Catchment says each Source has published when this run started. It pins
+        # overwrite Source reads to that version (see _pin) and lets a read reject a stale local publish
+        # (catchment.registry.resolve_data_dir). Absent for puddle runs.
         self.source_f = source_f or {}
         # The run's freshness F (tz-aware UTC datetime): the ideal watermark/provenance stamp —
         # stable across crash recovery and retries, which all re-run at the same F (wall-clock
@@ -668,6 +669,15 @@ class Pond:
             self._object_scratch = Path(tempfile.mkdtemp(prefix="duckstring-obj-"))
         return self._object_scratch
 
+    def _pin(self, source_pond: str):
+        """The Source's published freshness when this run started (from the ``begin_run`` job), which
+        selects the version of its overwrite tables every Ripple of the run reads. ``None`` without a job
+        (a puddle run), where reads fall back to this run's own freshness."""
+        from datetime import datetime
+
+        iso = self.source_f.get(source_pond)
+        return datetime.fromisoformat(iso) if iso else None
+
     def _source_data_dir(self, source_pond: str):
         """The published data location for a foreign Source as a :class:`~duckstring.storage.Storage`,
         honouring this Pond's major pin and the configured data root (or the flat puddles layout in local
@@ -690,8 +700,9 @@ class Pond:
         """A relation over a table's current contents: ``"table"`` or ``"source.table"``.
 
         A Source table is also registered as a view under its bare name, so SQL can refer to it directly
-        (``FROM product``), unless one of this Pond's own tables has that name. Source reads are pinned to this
-        run's freshness where the data plane keeps history, so every Ripple in a run sees the same snapshot.
+        (``FROM product``), unless one of this Pond's own tables has that name. Source reads are pinned to the run:
+        a plain table is read at the version the Source had published when the run started, and a Trickle up to
+        the run's freshness, so every Ripple in a run sees the same Source data.
         For a Trickle, the result is the current state without the ``_duckstring_*`` system columns.
 
         Refer to the registered view name in SQL rather than to a Python variable holding the relation, which
@@ -710,12 +721,11 @@ class Pond:
             dp.prepare(self.con)  # ready the connection to read the Source's published format
             data_dir.duckdb_setup(self.con)  # object store → httpfs + credentials (no-op for local)
             try:
-                # As-of pin: read the Source snapshot at this run's freshness, NOT latest. A Pond Run
-                # spans wall-clock time over several Ripples; an upstream Source can republish mid-run.
-                # Pinning to `self.f` gives every Ripple the same consistent as-of-F view of the Source
-                # (no intra-run read skew / too-fresh data). Honoured by the Iceberg plane (retained
-                # snapshots); the Parquet plane has no history and reads latest regardless.
-                select = dp.read_select(data_dir, table, as_of=self.f)
+                # Pinned reads: a Pond Run spans several Ripples and a Source can republish mid-run, so an
+                # overwrite table is read at the version the Source had published when this run started
+                # (`_pin`), and a Trickle table up to this run's freshness. Every Ripple of the run sees
+                # the same data, and the Source keeps the pinned version until the run is done.
+                select = dp.read_select(data_dir, table, as_of=self.f, pin=self._pin(source_pond))
             except FileNotFoundError as exc:
                 raise MissingSourceAsset(source_pond, table) from exc
             rel = _strip_system(self.con.sql(select))
@@ -754,7 +764,7 @@ class Pond:
             data_dir.duckdb_setup(self.con)
             meta = trickle.load_sidecar(data_dir).get(table, {})
             (n,) = self.con.execute(
-                dp.consolidated_count_select(data_dir, table, meta, as_of=self.f)
+                dp.consolidated_count_select(data_dir, table, meta, as_of=self.f, pin=self._pin(source_pond))
             ).fetchone()
             return int(n)
         return trickle.count_current(self.con, table)
@@ -874,7 +884,8 @@ class Pond:
         dp.prepare(self.con)
         data_dir.duckdb_setup(self.con)
         try:
-            return trickle.read_delta(self.con, data_dir, table, self.previous_f, self.f, dp=dp)
+            return trickle.read_delta(self.con, data_dir, table, self.previous_f, self.f, dp=dp,
+                                      pin=self._pin(source_pond))
         except FileNotFoundError as exc:
             raise MissingSourceAsset(source_pond, table) from exc
 

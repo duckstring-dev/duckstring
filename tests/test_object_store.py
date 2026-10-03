@@ -123,6 +123,41 @@ def test_duckdb_reads_parquet_from_a_real_s3(s3_env, tmp_path):
     assert con.sql(f"SELECT id, name FROM read_parquet('{store.uri('t.parquet')}')").fetchone() == (1, "x")
 
 
+def test_versioned_overwrite_on_a_real_s3(s3_env, tmp_path):
+    """Overwrite versions on a bucket (plans/versioned-overwrite.md): each publish is a new object, a
+    pinned read selects its version, and retention deletes the superseded one."""
+    from datetime import datetime, timedelta, timezone
+
+    import duckdb
+
+    from duckstring.dataplane import ParquetDataPlane
+    from duckstring.storage import get_storage
+    from duckstring.trickle.io import part_name
+
+    _endpoint, client = s3_env
+    store = get_storage(f"s3://{_BUCKET}/versions")
+    dp = ParquetDataPlane()
+    f1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    f2 = f1 + timedelta(hours=1)
+    for f, value, retain in ((f1, 1, None), (f2, 2, f1)):
+        con = duckdb.connect()
+        con.execute(f"CREATE TABLE a AS SELECT {value} AS v")
+        dp.export(con, store, f=f, retain_from=retain)
+        con.close()
+    assert sorted(_keys(client, "versions/a__v/")) == [
+        f"versions/a__v/{part_name(f1)}", f"versions/a__v/{part_name(f2)}"]
+
+    con = duckdb.connect()
+    store.duckdb_setup(con)
+    assert con.sql(dp.read_select(store, "a", pin=f1)).fetchall() == [(1,)]
+    assert con.sql(dp.read_select(store, "a")).fetchall() == [(2,)]
+
+    from duckstring.dataplane import prune_versions
+
+    prune_versions(store, None)
+    assert _keys(client, "versions/a__v/") == [f"versions/a__v/{part_name(f2)}"]
+
+
 # ─── the full runtime, publishing to S3 ──────────────────────────────────────────
 
 

@@ -102,6 +102,8 @@ class ObjectStoreEgressDriver:
             changelog_name,
             load_sidecar,
             part_name,
+            table_versions,
+            version_dir_name,
             warm_name,
             write_sidecar,
         )
@@ -132,6 +134,18 @@ class ObjectStoreEgressDriver:
                 dest.write_bytes(source_store.read_bytes("state", kind, t, n), "state", kind, t, n)
             for n in sorted(dst_names - src_names):
                 dest.remove("state", kind, t, n)
+        # An overwrite table's versions: the destination holds just the source's newest (a reader of the
+        # mirror has no pin to honour), so ship it once and drop the version it supersedes.
+        versions = table_versions(source_store, t)
+        if versions:
+            vd = version_dir_name(t)
+            newest = versions[-1]
+            if not dest.exists(vd, newest):
+                dest.mkdir(vd)
+                dest.write_bytes(source_store.read_bytes(vd, newest), vd, newest)
+            for n in dest.parquet_names(vd):
+                if n != newest:
+                    dest.remove(vd, n)
         # Wholesale file (overwrite output / legacy single-file merge base): gate the O(base) copy on the
         # sidecar watermark it rewrites under — `f` for an overwrite table, `f_base` for a merge base.
         if source_store.exists(f"{t}.parquet"):

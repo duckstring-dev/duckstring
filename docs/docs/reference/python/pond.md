@@ -43,7 +43,7 @@ pond.read_table(ref) -> duckdb.DuckDBPyRelation
 
 Returns a relation over a table's current contents.
 
-For a Source table, it also registers a view with the table's bare name, so the SQL that follows can refer to it directly (`FROM product`). If one of this Pond's own tables already has that name, the view isn't created, but the returned relation still works. Source reads are pinned to this run's freshness where the data plane keeps history (the default Iceberg plane does), so every Ripple in a run sees the same Source snapshot even if the Source publishes again mid-run.
+For a Source table, it also registers a view with the table's bare name, so the SQL that follows can refer to it directly (`FROM product`). If one of this Pond's own tables already has that name, the view isn't created, but the returned relation still works. Source reads are pinned to the run: a plain table is read at the version the Source had published when the run started, and a Trickle up to the run's freshness. Every Ripple in a run therefore sees the same Source data, even if the Source publishes again while the run is in progress.
 
 For a Trickle, the result is the clean current state, without the `_duckstring_f` and `_duckstring_d` system columns.
 

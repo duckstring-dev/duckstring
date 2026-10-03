@@ -75,6 +75,10 @@ BASE_SUFFIX = "__base"
 # The warm tier (see :func:`warm_name`): consolidated freshness-range bands between the cold base and the
 # hot per-run changelog. Published as ``{table}__band/`` parts, one file per fold.
 WARM_SUFFIX = "__band"
+# A plain overwrite table is published as **versions**: one immutable file per run under ``{table}__v/``,
+# named by the run's freshness (:func:`part_name`), so a Sink run pinned to a Source version keeps reading
+# it while the Source publishes the next one. Retention trims superseded versions (see the data plane).
+VERSION_SUFFIX = "__v"
 # A ``.aggregate(...)`` output keeps its raw accumulators (count + per-summed-col sum & non-NULL count) in a
 # ``_duckstring_agg_{name}`` companion. Reserved prefix → ``registry_tables`` hides it from publish; the
 # published main holds only the derived user columns.
@@ -161,6 +165,17 @@ def warm_name(table: str) -> str:
     into here (collapsing a→b→c→d to its net change), so reconstruct reads fewer, denser files and the
     cold base is rewritten only at the rare k=1 cold compaction. Published as ``{table}__band/`` parts."""
     return f"{table}{WARM_SUFFIX}"
+
+
+def version_dir_name(table: str) -> str:
+    """The published-versions directory name for a plain overwrite ``table``."""
+    return f"{table}{VERSION_SUFFIX}"
+
+
+def table_versions(data_dir, table: str) -> list[str]:
+    """The published version **names** of an overwrite ``table`` (its ``{table}__v/`` directory), sorted
+    oldest-first (canonical-UTC part names sort in freshness order); ``[]`` when it has none."""
+    return _store(data_dir).parquet_names(version_dir_name(table))
 
 
 def base_chunks(data_dir, table: str) -> list[str]:
@@ -326,7 +341,7 @@ def drop_meta(con, table: str) -> None:
 
 # The published companion suffixes of a Trickle base table — a delete of any of these resolves to (and
 # takes) the whole base collection: deleting a changelog/band alone would corrupt the reconstructable main.
-_COMPANION_SUFFIXES = ("__changelog", "__band", DROPLOG_SUFFIX, BASE_SUFFIX)
+_COMPANION_SUFFIXES = ("__changelog", "__band", DROPLOG_SUFFIX, BASE_SUFFIX, VERSION_SUFFIX)
 
 
 def base_table_name(name: str) -> str:
@@ -506,10 +521,11 @@ def table_parts(data_dir, table: str) -> list[str]:
 def part_tables(data_dir) -> list[str]:
     """The names of the append-only (parts-directory) tables published under ``data_dir``. A merge main's
     ``{table}__base/`` directory is **excluded** — it is a wholesale base (rewritten at a checkpoint), not
-    a per-run-parts table, so the incremental-draw / ``landed_after`` machinery must not treat it as one."""
+    a per-run-parts table, so the incremental-draw / ``landed_after`` machinery must not treat it as one.
+    So is an overwrite table's ``{table}__v/`` versions directory: each version is a whole table."""
     store = _store(data_dir)
     return sorted(name for name in store.subdir_names()
-                  if not name.endswith(BASE_SUFFIX) and store.parquet_names(name))
+                  if not name.endswith((BASE_SUFFIX, VERSION_SUFFIX)) and store.parquet_names(name))
 
 
 def landed_after(data_dir) -> str | None:
@@ -2329,8 +2345,12 @@ class Delta:
         )
 
 
-def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp) -> Delta:
-    """Resolve ``table``'s mode in ``data_dir`` and read its Z-set change over ``(previous_f, f]``."""
+def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None) -> Delta:
+    """Resolve ``table``'s mode in ``data_dir`` and read its Z-set change over ``(previous_f, f]``.
+
+    ``pin`` is the Source's published freshness when this run started: an overwrite Source is read at the
+    version it names (``dp.read_select(..., pin=)``). A Trickle Source is bounded by ``f`` regardless, since
+    its delta windows must tile."""
     from datetime import datetime
 
     from .context import NEVER
@@ -2349,7 +2369,10 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp) -> Delta:
     # advanced past the consumer's previous_f, it is unchanged → an empty delta (stable history operand).
     # Otherwise (advanced / unknown / bootstrap) → a full read at +1, forcing the comprehensive path.
     src_f = datetime.fromisoformat(meta["f"]) if meta.get("f") else None
-    state = _strip_system(con.sql(dp.read_select(data_dir, table, as_of=f)))
+    if pin is not None and src_f is not None:
+        src_f = min(src_f, pin)  # the version actually read is at or below the pin
+    pinned = {"pin": pin} if pin is not None else {}
+    state = _strip_system(con.sql(dp.read_select(data_dir, table, as_of=f, **pinned)))
     if previous_f != NEVER and src_f is not None and src_f <= previous_f:
         return Delta(con, pk, _as_zset(state, 1).filter("1=0"), is_full=False)
     return Delta(con, pk, _as_zset(state, 1), is_full=True)

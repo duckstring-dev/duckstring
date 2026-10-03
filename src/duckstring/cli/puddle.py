@@ -28,6 +28,14 @@ def _inventory(project) -> list[dict]:
                 items.append({"pond": pond_dir.name, "table": pq.stem, "path": pq, "kind": "puddle"})
     for pq in sorted(project.out_dir.glob("*.parquet")):
         items.append({"pond": project.name, "table": pq.stem, "path": pq, "kind": "out"})
+    from ..trickle.io import VERSION_SUFFIX
+
+    # A run publishes each plain table as versions under {table}__v/; the newest is the run's output.
+    for vdir in sorted(project.out_dir.glob(f"*{VERSION_SUFFIX}")):
+        versions = sorted(vdir.glob("*.parquet")) if vdir.is_dir() else []
+        if versions:
+            items.append({"pond": project.name, "table": vdir.name[: -len(VERSION_SUFFIX)],
+                          "path": versions[-1], "kind": "out"})
     return items
 
 

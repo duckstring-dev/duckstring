@@ -143,7 +143,7 @@ def test_data_plane_writes_to_separate_local_data_root(tmp_path):
     con = _con_with("CREATE TABLE revenue AS SELECT 1 AS id, 10 AS amt")
     dp.export(con, storage)
 
-    assert (data_root / "sales" / "m1" / "data" / "revenue.parquet").exists()
+    assert list((data_root / "sales" / "m1" / "data" / "revenue__v").glob("*.parquet"))
     assert not state_root.exists()  # the state root is untouched
     assert dp.list_tables(storage) == ["revenue"]
     assert con.sql(dp.read_select(storage, "revenue")).fetchall() == [(1, 10)]

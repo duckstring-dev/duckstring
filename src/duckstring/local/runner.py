@@ -105,7 +105,8 @@ def _export(project: Project, f=None) -> None:
     def _copy() -> None:
         con = duckdb.connect(str(registry))
         try:
-            get_data_plane().export(con, project.out_dir, mode="overwrite", f=f)
+            # Nothing else reads a local run's output while it publishes, so keep only the newest version.
+            get_data_plane().export(con, project.out_dir, mode="overwrite", f=f, retain_from=None)
         finally:
             con.close()
 

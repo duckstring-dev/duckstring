@@ -2003,6 +2003,8 @@ class Driver:
                 tables = sorted(serviceable) if serviceable else None
                 jobs.append({
                     "spout_key": skey, "f": _iso(f), "source_f": source_f,
+                    # The source's overwrite version this delivery reads (pinned at dispatch).
+                    "pin": (self._run_pins(skey, _iso(f)) or {}).get(src["name"]),
                     "pond_name": src["name"], "major": src["major"],
                     "table": cfg.get("table"), "tables": tables,
                     "destination": cfg.get("destination"), "mode": cfg.get("mode"),
@@ -2535,7 +2537,25 @@ class Driver:
             self._record_ripple_run(pond, "draw", f, "success", started_at=started, finished_at=_iso(now))
             self.data_version += 1  # the Draw landed new data → the serving surface changed
             self._finish_pond_run(pond, f, now)
+            self._prune_draw_versions(pond)
             self._process(now, notify=False)  # poller-driven
+
+    def _prune_draw_versions(self, pond: str) -> None:
+        """A Draw has no Duck, so its landed overwrite versions are trimmed here, once the landing has
+        advanced its freshness: Sinks dispatched from now on pin the version just landed, and in-flight
+        ones are covered by ``_retain_from``. Housekeeping: a failure never fails the transfer."""
+        from pathlib import Path
+
+        from ..dataplane import prune_versions
+        from .registry import pond_data_dir
+
+        meta = self.meta[pond]
+        try:
+            raw = self._retain_from(pond)
+            prune_versions(pond_data_dir(Path(self.root), meta["name"], meta["major"], self.data_root),
+                           datetime.fromisoformat(raw) if raw else None)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[catchment] version prune for draw {pond} skipped: {exc}", flush=True)
 
     def fail_draw_transfer(self, pond: str, f: str, error: str) -> None:
         """The poller could not land a Draw's parquet: fail the transfer (blocks downstream until the
@@ -3033,10 +3053,12 @@ class Driver:
         # A Spout is the egress dual: not run by a Duck either — record the Run and hand the delivery to
         # the egress worker (it reads the source + writes out-of-lock, then reports via complete/fail).
         if meta.get("is_spout"):
+            # Pinned like any Sink run: the worker reads the source's overwrite tables at this version, and
+            # the source keeps it until the delivery is done.
             self.db.execute(
-                "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status) "
-                "VALUES (?, ?, ?, 'running')",
-                (meta["version_id"], _iso(f), _iso(now)),
+                "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status, source_pins) "
+                "VALUES (?, ?, ?, 'running', ?)",
+                (meta["version_id"], _iso(f), _iso(now), json.dumps(self._source_published_f(pond))),
             )
             self.db.commit()
             if (pond, f) not in self._pending_egress:
@@ -3049,6 +3071,11 @@ class Driver:
         self._idle_since.pop(pond, None)  # it's running again — reset its reap grace clock
         # Cancel any not-yet-collected shutdown: this Pond is running again, so the Duck must not exit.
         self.jobs[pond] = [j for j in self.jobs.get(pond, []) if j.get("kind") != "shutdown"]
+        # The Sources' published freshness this Run is pinned to. A re-dispatch of a Run already in flight
+        # (a Catchment restart) re-sends the pins it started with; a Force restarts the Run on fresh ones.
+        pins = None if force else self._run_pins(pond, _iso(f))
+        if pins is None:
+            pins = self._source_published_f(pond)
         self._enqueue_job(pond, {
             "kind": "begin_run", "f": _iso(f), "force": force, "refresh": refresh,
             "sources_changed": sources_changed,  # backs pond.sources_changed() (for always_run gating)
@@ -3059,17 +3086,22 @@ class Driver:
             # The major line's additive schema contract this Run must keep (vetted by the Duck before
             # publishing); None for a first run or a deliberate rollback (governed by min_version).
             "contract": self._contract_for(pond),
-            # What each Source has published ({name: iso}), so a foreign read can reject a stale LOCAL
-            # publish left behind by a Source that moved to a remote Pool (registry.resolve_data_dir).
-            "source_f": self._source_published_f(pond),
+            # What each Source has published ({name: iso}) when this Run started: the version its
+            # overwrite Source reads are pinned to, and the bar a LOCAL publish must meet to be read rather
+            # than a stale leftover of a Source that moved to a remote Pool (registry.resolve_data_dir).
+            "source_f": pins,
+            # How far back this line's own superseded overwrite versions must be kept (prune_versions).
+            "retain_from": self._retain_from(pond),
         })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI. A Force re-opens the Run.
         self.db.execute(
-            "INSERT OR REPLACE INTO pond_run (pond_version_id, f, started_at, status) VALUES (?, ?, ?, 'running')"
+            "INSERT OR REPLACE INTO pond_run (pond_version_id, f, started_at, status, source_pins) "
+            "VALUES (?, ?, ?, 'running', ?)"
             if force else
-            "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status) VALUES (?, ?, ?, 'running')",
-            (meta["version_id"], _iso(f), _iso(now)),
+            "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status, source_pins) "
+            "VALUES (?, ?, ?, 'running', ?)",
+            (meta["version_id"], _iso(f), _iso(now), json.dumps(pins)),
         )
         self.db.commit()
 
@@ -3096,7 +3128,8 @@ class Driver:
             # that re-runs on any sub-grace cadence keeps its Duck and never hits the reap/respawn race.
             since = self._idle_since.setdefault(name, now)
             if now - since >= _REAP_GRACE:
-                self._enqueue_job(name, {"kind": "shutdown"})
+                # Idle: the Duck trims the overwrite versions no Sink still reads before it exits.
+                self._enqueue_job(name, {"kind": "shutdown", "retain_from": self._retain_from(name)})
                 self._idle_since.pop(name, None)
 
     # ─── History + persistence ────────────────────────────────────────────────
@@ -3452,6 +3485,56 @@ class Driver:
             if f is not None:
                 out[meta["name"]] = f
         return out
+
+    def _run_pins(self, pond: str, f: str) -> dict[str, str] | None:
+        """The Source pins recorded for this Pond's Run at ``f`` (``None`` if the Run has no row yet)."""
+        row = self.db.execute(
+            "SELECT source_pins FROM pond_run WHERE pond_version_id = ? AND f = ?",
+            (self.meta[pond]["version_id"], f),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        try:
+            return json.loads(row[0])
+        except ValueError:
+            return None
+
+    def _retain_from(self, pond: str) -> str | None:
+        """The retention bound for ``pond``'s superseded overwrite versions (plans/versioned-overwrite.md):
+        the oldest version a reader may still need. That is the oldest pin on this line held by an in-flight
+        Sink run, lowered to this line's own published freshness now, since a Sink dispatched before the
+        line publishes again is pinned to that. ``None`` when neither exists (keep only the newest).
+
+        A Sink run with no pin for this line (dispatched before it first published) reads at its own
+        freshness, so that bounds it instead. Rows at or below the Sink's ``end_f`` are stranded, not in
+        flight, and are ignored."""
+        meta = self.meta[pond]
+        bounds: list[datetime] = []
+        ps = self.state.pond_states.get(pond)
+        if ps is not None and ps.changed_f > NEVER:
+            bounds.append(ps.changed_f)
+        for sink, sp in self.state.ponds.items():
+            if pond not in sp.sources or sink not in self.meta:
+                continue
+            sm = self.meta[sink]
+            sink_end = self.state.pond_states[sink].end_f
+            for f_raw, pins_raw in self.db.execute(
+                "SELECT pr.f, pr.source_pins FROM pond_run pr "
+                "JOIN pond_version pv ON pv.id = pr.pond_version_id "
+                "JOIN pond_name pn ON pn.id = pv.pond_name_id "
+                "WHERE pr.status = 'running' AND pn.name = ? AND pv.major = ?",
+                (sm["name"], sm["major"]),
+            ).fetchall():
+                run_f = datetime.fromisoformat(f_raw)
+                if run_f <= sink_end:
+                    continue
+                try:
+                    pins = json.loads(pins_raw) if pins_raw else {}
+                except ValueError:
+                    pins = {}
+                pin = pins.get(meta["name"])
+                bounds.append(datetime.fromisoformat(pin) if pin else run_f)
+        return _iso(min(bounds)) if bounds else None
 
     def published_f(self, name: str, major: int) -> str | None:
         """The freshness this Catchment believes ``name@major`` has PUBLISHED — its ``changed_f`` (the

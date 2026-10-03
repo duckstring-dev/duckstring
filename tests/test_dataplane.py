@@ -20,8 +20,9 @@ def test_parquet_roundtrip_write_then_read(tmp_path):
     dp.export(con, tmp_path)
 
     assert dp.list_tables(tmp_path) == ["event"]
-    assert (tmp_path / "event.parquet").exists()
-    assert dp.table_path(tmp_path, "event") == tmp_path / "event.parquet"
+    versions = sorted((tmp_path / "event__v").glob("*.parquet"))
+    assert len(versions) == 1 and not (tmp_path / "event.parquet").exists()
+    assert dp.table_path(tmp_path, "event") == versions[0]
 
     rel = con.sql(dp.read_select(tmp_path, "event"))
     assert rel.fetchall() == [(1, "a")]

@@ -41,9 +41,10 @@ def test_flat_parquet_sidecar_and_catalog_written(tmp_path):
     dp = IcebergDataPlane()
     dp.export(_con("CREATE TABLE event AS SELECT 1 AS id"), tmp_path, f=datetime(2026, 6, 16, tzinfo=UTC))
     # The compat sidecar (for draws / direct-serve / fallback) and the per-line catalog both exist.
-    assert (tmp_path / "event.parquet").exists()
+    version = tmp_path / "event__v" / "2026-06-16T00_00_00+00_00.parquet"
+    assert version.exists()
     assert (tmp_path / "catalog.json").exists()
-    assert dp.table_path(tmp_path, "event") == tmp_path / "event.parquet"
+    assert dp.table_path(tmp_path, "event") == version
 
 
 def test_one_snapshot_per_run_stamped_with_f(tmp_path):

@@ -41,7 +41,7 @@ Most Ripples read tables and write tables. A Ripple can also publish non-tabular
 
 ## Data
 
-The Ripples in a Pond share one DuckDB database, so a Ripple can query tables written by the Ripples before it directly. Tables from Source Ponds are read through the `pond` handle. Output is published only when the whole Pond Run succeeds. If a Ripple fails, downstream Ponds keep reading the last successful output.
+The Ripples in a Pond share one DuckDB database, so a Ripple can query tables written by the Ripples before it directly. Tables from Source Ponds are read through the `pond` handle, and every Ripple in a run reads the same version of each Source table, even if the Source publishes again during the run. Output is published only when the whole Pond Run succeeds. If a Ripple fails, downstream Ponds keep reading the last successful output.
 
 ## Trickles
 

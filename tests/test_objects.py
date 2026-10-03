@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from duckstring.dataplane import ParquetDataPlane
 from duckstring.local import hydrate, load_project, run_pond
 
 pytestmark = pytest.mark.timeout(15)
@@ -193,7 +194,7 @@ def test_read_object_from_source(tmp_path):
     assert [r.status for r in result.ripples] == ["ok"], result.ripples
     import duckdb
 
-    (n,) = duckdb.sql(f"SELECT n FROM read_parquet('{project.out_dir / 'out.parquet'}')").fetchone()
+    (n,) = duckdb.sql(f"SELECT n FROM read_parquet('{ParquetDataPlane().table_path(project.out_dir, 'out')}')").fetchone()
     assert n == len(b"source-object-bytes")
 
 

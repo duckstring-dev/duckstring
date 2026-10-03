@@ -219,11 +219,11 @@ def test_executor_export_gate_aborts_publish_and_preserves_last_good(tmp_path):
 
     with pytest.raises(ContractViolation, match="val"):
         ex.export(contract={"event": {"id": "INTEGER", "val": "VARCHAR"}})
-    assert not (data / "event.parquet").exists()  # nothing published — last-good intact
+    assert not (data / "event__v").exists()  # nothing published — last-good intact
 
     schema = ex.export(contract={"event": {"id": "INTEGER"}})  # additive-compatible → publishes
     assert schema == {"event": {"id": "INTEGER"}}
-    assert (data / "event.parquet").exists()
+    assert list((data / "event__v").glob("*.parquet"))
     ex.shutdown()
 
 

@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .dataplane import DataPlane, ParquetDataPlane, _as_storage
+from .dataplane import KEEP_ALL, DataPlane, ParquetDataPlane, _as_storage
 
 _NAMESPACE = "pond"  # the single namespace within each per-line catalog
 F_PROP = "duckstring.f"  # snapshot summary property carrying the Pond Run's freshness
@@ -101,7 +101,7 @@ class IcebergDataPlane(DataPlane):
 
     # ─── write ──────────────────────────────────────────────────────────────────
 
-    def export(self, con, data_dir: Path, *, mode: str = "overwrite", f=None) -> None:
+    def export(self, con, data_dir: Path, *, mode: str = "overwrite", f=None, retain_from=KEEP_ALL) -> None:
         from . import trickle_io
         from .dataplane import _check_mode, publish_plan
 
@@ -112,7 +112,7 @@ class IcebergDataPlane(DataPlane):
         tables = publish_plan(con, data_dir, f)
         # Flat-Parquet sidecar first (also the consistent fallback if the Iceberg commit fails). This also
         # runs ``data_dir.duckdb_setup(con)`` so the export connection can COPY to an object store.
-        self._parquet.export(con, data_dir, mode=mode, f=f)
+        self._parquet.export(con, data_dir, mode=mode, f=f, retain_from=retain_from)
         # Only plain **overwrite** tables go to Iceberg. A merge **main** is log-structured (a base + the
         # changelog) reconstructed on read; an **append-only** table (append history, ``__changelog``,
         # ``__droplog``) grows unboundedly in Iceberg metadata (its current snapshot references every data
@@ -256,7 +256,7 @@ class IcebergDataPlane(DataPlane):
     def _flat_read_select(self, data_dir: Path, table: str, *, as_of=None) -> str:
         # The always-flat operands (merge base + companions, append-only tables) live only on the flat parts
         # layer; read them directly and skip the pyiceberg catalog build entirely (no catalog.json I/O).
-        return self._parquet._raw_read_select(data_dir, table, as_of=as_of)
+        return self._parquet._flat_read_select(data_dir, table, as_of=as_of)
 
     def _raw_read_select(self, data_dir: Path, table: str, *, as_of=None) -> str:
         tbl = self._load(data_dir, table)

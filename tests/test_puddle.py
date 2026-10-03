@@ -18,6 +18,13 @@ pytestmark = pytest.mark.timeout(15)  # hydrate/run tests do real DuckDB + parqu
 _DEMO_DIR = Path(__file__).parent.parent / "src" / "duckstring" / "demo"
 
 
+
+def _out(out_dir, table):
+    """The newest published version of a local run's ``table`` (plain tables publish as versions)."""
+    from duckstring.dataplane import ParquetDataPlane
+
+    return ParquetDataPlane().table_path(out_dir, table)
+
 def _make_pond(
     path: Path,
     name: str = "salesish",
@@ -159,9 +166,9 @@ def test_run_full_pond_exports_output(tmp_path):
     assert result.ok
     assert [r.name for r in result.ripples] == ["shape", "total"]
     out = tmp_path / "puddles" / "out"
-    rows = duckdb.sql(f"SELECT grand FROM read_parquet('{out / 'total.parquet'}')").fetchall()
+    rows = duckdb.sql(f"SELECT grand FROM read_parquet('{_out(out, 'total')}')").fetchall()
     assert rows == [((0 + 10 + 20 + 30 + 40) * 2,)]  # sum(value) doubled
-    assert (out / "shaped.parquet").exists()
+    assert _out(out, "shaped").exists()
 
 
 def test_run_previous_f_never_then_prior_run(tmp_path):
@@ -182,9 +189,10 @@ def test_run_previous_f_never_then_prior_run(tmp_path):
         tmp_path, name="echoer", sources={}, pond_py=pond_py,
         puddles_py="from duckstring import puddle\n",
     ))
-    out = tmp_path / "puddles" / "out" / "meta.parquet"
+    out_dir = tmp_path / "puddles" / "out"
 
     run_pond(project)  # first run: no prior → NEVER
+    out = _out(out_dir, "meta")
     prev1, cur1 = duckdb.sql(f"SELECT prev, cur FROM read_parquet('{out}')").fetchone()
     assert prev1.startswith("0001-01-01")  # NEVER
 
@@ -194,11 +202,12 @@ def test_run_previous_f_never_then_prior_run(tmp_path):
     shutil.copy(out, selfdir / "meta.parquet")
 
     run_pond(project)  # second run: seeded → previous_f is the prior run's f
+    out = _out(out_dir, "meta")
     prev2, _ = duckdb.sql(f"SELECT prev, cur FROM read_parquet('{out}')").fetchone()
     assert prev2 == cur1
 
     run_pond(project, fresh=True)  # --fresh: not seeded → back to NEVER
-    prev3, _ = duckdb.sql(f"SELECT prev, cur FROM read_parquet('{out}')").fetchone()
+    prev3, _ = duckdb.sql(f"SELECT prev, cur FROM read_parquet('{_out(out_dir, 'meta')}')").fetchone()
     assert prev3.startswith("0001-01-01")
 
 
@@ -241,10 +250,10 @@ def test_run_overwrite_is_deterministic(tmp_path):
     project = load_project(_make_pond(tmp_path))
     hydrate(project)
     run_pond(project)
-    out = tmp_path / "puddles" / "out" / "total.parquet"
-    first = duckdb.sql(f"SELECT * FROM read_parquet('{out}')").fetchall()
+    out = tmp_path / "puddles" / "out"
+    first = duckdb.sql(f"SELECT * FROM read_parquet('{_out(out, 'total')}')").fetchall()
     run_pond(project)
-    assert duckdb.sql(f"SELECT * FROM read_parquet('{out}')").fetchall() == first
+    assert duckdb.sql(f"SELECT * FROM read_parquet('{_out(out, 'total')}')").fetchall() == first
 
 
 # ── incremental: self-puddle seed ────────────────────────────────────────────
@@ -277,15 +286,15 @@ def test_incremental_seed_makes_reruns_idempotent(tmp_path):
         _make_pond(tmp_path, name="growth", sources={}, pond_py=_INCREMENTAL_POND, puddles_py=_SELF_PUDDLE)
     )
     hydrate(project)
-    out = tmp_path / "puddles" / "out" / "events.parquet"
+    out = tmp_path / "puddles" / "out"
 
     result = run_pond(project)
     assert result.seeded
-    first = sorted(duckdb.sql(f"SELECT * FROM read_parquet('{out}')").fetchall())
+    first = sorted(duckdb.sql(f"SELECT * FROM read_parquet('{_out(out, 'events')}')").fetchall())
     assert len(first) == 4  # 3 seeded + 1 appended
 
     run_pond(project)  # re-seeded from the same puddle → identical result
-    assert sorted(duckdb.sql(f"SELECT * FROM read_parquet('{out}')").fetchall()) == first
+    assert sorted(duckdb.sql(f"SELECT * FROM read_parquet('{_out(out, 'events')}')").fetchall()) == first
 
 
 def test_fresh_skips_the_seed(tmp_path):
@@ -295,7 +304,7 @@ def test_fresh_skips_the_seed(tmp_path):
     hydrate(project)
     result = run_pond(project, fresh=True)
     assert not result.seeded
-    out = tmp_path / "puddles" / "out" / "events.parquet"
+    out = _out(tmp_path / "puddles" / "out", "events")
     assert len(duckdb.sql(f"SELECT * FROM read_parquet('{out}')").fetchall()) == 1
 
 
@@ -345,7 +354,7 @@ def test_demo_sales_hydrates_and_runs(tmp_path):
 
     result = run_pond(project)
     assert result.ok, [r.error for r in result.ripples]
-    out = tmp_path / "sales" / "puddles" / "out" / "sale_line.parquet"
+    out = _out(tmp_path / "sales" / "puddles" / "out", "sale_line")
     (count,) = duckdb.sql(f"SELECT count(*) FROM read_parquet('{out}')").fetchone()
     assert count > 0
 
@@ -365,7 +374,7 @@ def test_custom_entrypoints_run_locally(tmp_path):
     assert [r.status for r in results] == ["ok"]
     result = run_pond(project)
     assert result.ok
-    assert (tmp_path / "puddles" / "out" / "total.parquet").exists()
+    assert _out(tmp_path / "puddles" / "out", "total").exists()
 
 
 @pytest.mark.timeout(30)

@@ -1,6 +1,6 @@
 # Versioned overwrite tables on the Parquet plane
 
-Status: **designed, not built** (2026-10-02). Agreed with the author.
+Status: **built** (2026-10-03). See "As built" at the end for where it differs from the design below.
 
 ## Problem
 
@@ -101,3 +101,52 @@ starts later reads a version at least as new as the newest at this run's start, 
 ## Effort
 
 About a day to a day and a half.
+
+## As built (2026-10-03)
+
+Four things changed from the design above, agreed with the author before building.
+
+**The pin is the Source's published freshness, not the Sink's.** The design pinned every read to
+`as_of = Sink f`. But a Sink's `f` is the minimum over its required Sources' `end_f`, so when Sources have
+diverged (one also feeds another Outlet's Wave, or was tapped alone), reading the fresher Source "as of" the
+Sink's `f` selects an older version than the run was scheduled on, which can be staler than the `f` the
+Sink stamps, and with retention that older version is usually gone (a fallback warning every run). Each
+overwrite Source is instead read at the newest version at or below its **pin**: the Source's `changed_f`
+when the Sink run was dispatched, which the `begin_run` job already carried as `source_f`. Trickle reads
+stay bounded by the Sink's `f`, which their delta windows need. Without a job (puddle runs) the run's own
+`f` is used.
+
+**Pins are persisted per run.** The Duck held one `executor.source_f`, overwritten by every `begin_run`, so
+pipelined runs would have shared pins. The Duck now keeps inputs per Run freshness (`RunInputs`, first job
+wins, a Force replaces them), and the Catchment records them in `pond_run.source_pins` (migration `029`).
+A re-dispatch after a Catchment restart re-sends the original pins, and retention reads them back.
+
+**The retention rule closes a gap.** As written, a Source run could delete the version that was newest when
+it started: a Sink dispatched between the Source run's job and its publish is pinned to that version, and
+neither `retain_from` (built earlier) nor the "published after the run started" rule covers it. So
+`retain_from` is the minimum of the in-flight Sink runs' pins on this line **and the line's own
+`changed_f` at dispatch**. That subsumes the "published after the run started" rule (such a version is
+newer than `changed_f`), so the Duck applies one rule: keep the version `retain_from` resolves to and
+everything newer. A Sink run with no pin for this line reads at its own `f`, so that bounds it instead;
+`running` rows at or below the Sink's `end_f` are stranded and ignored.
+
+The cost is that a publish leaves the previous version behind (it was the newest at dispatch). To get back
+to one copy at rest, the reap's `shutdown` job also carries `retain_from` and the idle Duck prunes before it
+exits, then persists. A Draw has no Duck, so `complete_draw_transfer` prunes the landed versions in the
+Catchment, where the bound is exact.
+
+**Persist needed an explicit watermark.** `_mirror_dir` never prunes a destination file for being absent
+locally (plans/s3-resident-state.md), so local deletions did not propagate as the design assumed. Each
+overwrite table's sidecar entry now carries `v_floor` (the oldest retained version, carried across the
+per-publish sidecar rewrite by `publish_plan`), and the mirror prunes `__v/` files below it.
+
+Smaller points:
+- An export with `f=None` versions under the current time; Trickle companions exported without `f` keep the
+  single-file layout they had.
+- A single `{table}.parquet` is still read when a table has no versions: Puddle snapshots use that layout.
+- The ripple download route (`files_for`) serves the newest version under the name `{table}.parquet`.
+- Spouts are pinned like Sinks (their run row records pins; the worker reads `read_select(..., pin=)`), and
+  the `mode=append` mirror holds only the newest version.
+- The warm serving connection for full-access users holds views onto specific version files. A query in the
+  short gap between a prune and the next cache rebuild (on the publish's `data_version` bump) can hit a
+  deleted file. Accepted rather than adding machinery.

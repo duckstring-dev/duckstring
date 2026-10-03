@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..catchment.registry import pond_data_dir, pond_major_dir, pond_registry_path
+from ..dataplane import KEEP_ALL
 from ..objects import STAGING_DIR
 
 _import_lock = threading.Lock()
@@ -98,7 +99,7 @@ def _run_ripple(
         con.close()
 
 
-def _export_data(con, data_dir, f: datetime | None, contract=None) -> dict | None:
+def _export_data(con, data_dir, f: datetime | None, contract=None, retain_from=KEEP_ALL) -> dict | None:
     from ..dataplane import get_data_plane
     from ..schema_contract import CONTRACT_PREFIX, ContractViolation, contract_violations, extract_schema
 
@@ -115,13 +116,51 @@ def _export_data(con, data_dir, f: datetime | None, contract=None) -> dict | Non
             # The stable prefix is the failure's machine-readable sub-reason: the Catchment's status
             # derives failure_kind="contract" from it (survives restarts — no extra state to persist).
             raise ContractViolation(f"{CONTRACT_PREFIX}{'; '.join(violations)}")
-        get_data_plane().export(con, data_dir, mode="overwrite", f=f)
+        get_data_plane().export(con, data_dir, mode="overwrite", f=f, retain_from=retain_from)
         return schema
     finally:
         con.close()
 
 
-class RippleExecutor:
+class RunInputs:
+    """What each ``begin_run`` job tells the Duck about its Run's inputs, kept per Run freshness so
+    pipelined Runs don't share them: the Sources' published freshness (the version pins its reads use)
+    and the Catchment's ``retain_from`` for this line's own overwrite versions. Shared by both executors."""
+
+    def _inputs(self) -> dict:
+        if not hasattr(self, "_run_inputs"):
+            self._run_inputs: dict[datetime, dict] = {}
+        return self._run_inputs
+
+    def begin_run_inputs(self, f: datetime, source_f: dict[str, str] | None, retain_from=KEEP_ALL,
+                         force: bool = False) -> None:
+        """Record Run ``f``'s inputs. The first job for ``f`` wins (a re-dispatch after a Catchment restart
+        must not move a Run's pins under its running Ripples), unless ``force`` restarts the Run.
+        ``retain_from`` is a datetime, ``None`` (keep only the newest version) or ``KEEP_ALL`` (no job
+        value: prune nothing)."""
+        self.source_f = source_f or {}  # the latest job's view (fallback for a Run with no recorded inputs)
+        inputs = self._inputs()
+        if force or f not in inputs:
+            inputs[f] = {"source_f": dict(source_f or {}), "retain_from": retain_from}
+
+    def source_f_for(self, f: datetime | None) -> dict[str, str]:
+        rec = self._inputs().get(f)
+        return rec["source_f"] if rec is not None else self.source_f
+
+    def take_retain_from(self, f: datetime | None):
+        """Run ``f``'s retention bound, consumed by its publish (``KEEP_ALL`` if no job recorded one)."""
+        rec = self._inputs().pop(f, None)
+        return rec["retain_from"] if rec is not None else KEEP_ALL
+
+    def prune(self, retain_from) -> int:
+        """Trim superseded overwrite versions now (the Catchment's ``shutdown`` job, sent when the Pond goes
+        idle). See :func:`duckstring.dataplane.prune_versions`."""
+        from ..dataplane import prune_versions
+
+        return prune_versions(self.own_data_dir, retain_from)
+
+
+class RippleExecutor(RunInputs):
     def __init__(self, pond_name: str, major: int, version: str, source_path: str, root: Path,
                  max_workers: int = 8, data_root: str | None = None, persist_root: str | None = None):
         import duckdb
@@ -223,7 +262,7 @@ class RippleExecutor:
             timing["lineage"] = _run_ripple(
                 func, self.pond_name, self.version, self._cursor(), str(self.root),
                 self.source_majors, f, previous_f, self.data_root,
-                sources_changed=sources_changed, skip_sink=skip_sink, source_f=self.source_f,
+                sources_changed=sources_changed, skip_sink=skip_sink, source_f=self.source_f_for(f),
                 staging_dir=self.staging_dir, own_data_dir=self.own_data_dir,
             )
 
@@ -248,7 +287,7 @@ class RippleExecutor:
         is left intact). Returns the published output schema (for the Catchment to capture)."""
         from ..objects import commit_objects
 
-        schema = _export_data(self._cursor(), self.own_data_dir, f, contract)
+        schema = _export_data(self._cursor(), self.own_data_dir, f, contract, self.take_retain_from(f))
         # Objects commit only after the table publish passed the contract gate — a failed run leaves the
         # last-good Object intact (the staged writes are discarded on the next run / wipe).
         commit_objects(self.staging_dir, self.own_data_dir, f)

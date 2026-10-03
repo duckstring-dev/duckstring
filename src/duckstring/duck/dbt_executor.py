@@ -20,10 +20,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..catchment.registry import pond_data_dir, pond_major_dir, pond_registry_path
-from .executor import _export_data
+from .executor import RunInputs, _export_data
 
 
-class DbtExecutor:
+class DbtExecutor(RunInputs):
     def __init__(self, pond_name: str, major: int, version: str, source_path: str, root: Path,
                  data_root: str | None = None, persist_root: str | None = None):
         from ..core import read_pond_toml
@@ -111,7 +111,7 @@ class DbtExecutor:
         try:
             pond = Pond(
                 name=self.pond_name, version=self.version, con=con, root=Path(self.root),
-                source_majors=self.source_majors, source_f=self.source_f, f=f, previous_f=previous_f,
+                source_majors=self.source_majors, source_f=self.source_f_for(f), f=f, previous_f=previous_f,
                 data_root=self.data_root,
             )
             materialize_sources(pond, self.manifest, model_name, self.declared_sources)
@@ -132,7 +132,7 @@ class DbtExecutor:
 
         with self._lock:
             con = duckdb.connect(str(self.registry_path))
-            return _export_data(con.cursor(), self.own_data_dir, f, contract)
+            return _export_data(con.cursor(), self.own_data_dir, f, contract, self.take_retain_from(f))
 
     def persist(self) -> int:
         """Mirror the local publish to the durable layer — see :meth:`RippleExecutor.persist`."""
