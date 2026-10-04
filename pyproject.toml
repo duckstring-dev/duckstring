@@ -1,6 +1,6 @@
 [project]
 name = "duckstring"
-version = "0.6.0rc1"
+version = "0.6.0rc2"
 description = "An open source data engineering platform for DuckDB: versioned transformations, pull orchestration, incremental processing and a built-in catalog."
 readme = "README.md"
 requires-python = ">=3.10"
