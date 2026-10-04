@@ -572,9 +572,8 @@ def _export_parts(con, data_dir, table: str, f) -> None:
 
 
 def _export_companions(con, data_dir, f) -> None:
-    """Publish the registry aggregate/accumulate **state companions** as *state-format Extension 1*
-    snapshots (see ``plans/state-format.md`` — the DuckFlock consumer's normative layout, mirrored by
-    the Rust driver's ``publish_companions``).
+    """Publish the registry aggregate/accumulate **state companions** as snapshots ("Extension 1" of the
+    published layout).
 
     Incremental ``.aggregate()`` / ``.accumulate()`` keep their cross-run fold state in registry-only
     companion tables (``_duckstring_agg_{table}`` / ``_duckstring_acc_{table}``). A registry-less host
@@ -679,15 +678,12 @@ def _entry_schema(con, table: str) -> dict | None:
 
 
 def _enrich_sidecar(con, data_dir, f) -> None:
-    """Stamp each sidecar entry with *state-format Extension 2* planner hints (see the DuckFlock
-    ``plans/state-format.md``, mirrored from the Rust driver's ``write_publish_sidecar``): per entry
-    ``stats: {rows, bytes, delta_rows_last}``, a user-column ``schema`` map, and ``format: 2``.
+    """Stamp each sidecar entry with size and schema hints ("Extension 2" of the published layout): per
+    entry ``stats: {rows, bytes, delta_rows_last}``, a user-column ``schema`` map, and ``format: 2``.
 
-    These are what let a routing/planning consumer (the ``duckflock quote`` client, the DuckFlock driver)
-    **estimate without opening Parquet footers** — hints, never load-bearing (footers stay the source of
-    truth; the conformance differ compares only the named ``mode/pk/floor/f/f_base`` fields, so the
-    extension is additive on the wire too). **Best-effort:** a failure to compute a hint never breaks a
-    publish — the entry just goes un-stamped."""
+    They let a reader size or describe a table **without opening Parquet footers** (column lineage reads
+    the ``schema`` map). Hints only, never load-bearing: the footers stay the source of truth.
+    **Best-effort:** a failure to compute a hint never breaks a publish; the entry just goes un-stamped."""
     from . import trickle_io as trickle
 
     data_dir = _as_storage(data_dir)
@@ -717,9 +713,8 @@ def _enrich_sidecar(con, data_dir, f) -> None:
 
 
 def hydrate_registry(con, data_dir, tables=None) -> list[str]:
-    """Rebuild registry state **from the published layout** — the recovery inverse of :meth:`export`
-    (mirrors the DuckFlock driver's ``hydrate_output``; full-collection, because export mirrors the
-    registry back and a part left unhydrated would be pruned as retention-dropped).
+    """Rebuild registry state **from the published layout**, the recovery inverse of :meth:`export`
+    (full-collection for the tiers it copies, because export mirrors the registry back).
 
     For each sidecar base entry (or just ``tables`` when given): the base/main (an overwrite table's newest
     version;

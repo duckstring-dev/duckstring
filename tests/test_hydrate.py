@@ -1,5 +1,5 @@
 """Registry hydration — rebuilding registry state from the published layout (the recovery inverse of
-export, mirroring the DuckFlock driver's hydration). Covers the merge/append/overwrite tiers, the meta
+export). Covers the merge/append/overwrite tiers, the meta
 row (mode/pk/floor/f_base/f_warm), the Extension-1 agg/acc snapshots, resumption equivalence (an
 incremental next epoch on a hydrated registry equals an uninterrupted run), and the Duck executor's
 registry-file-loss recovery trigger (a wipe must NOT re-hydrate)."""

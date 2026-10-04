@@ -1,31 +1,26 @@
-"""Plan capture — serialise a Trickle ripple into the DuckFlock **plan IR** (``duckflock_plan: 1``).
+"""Plan capture: serialise a Trickle ripple into a logical plan, the input to static column lineage
+(:mod:`duckstring.trickle.lineage`, run at deploy).
 
 A ripple author writes normal ``pond.trickle(...)`` code; capture runs that code against a *recording*
-handle whose ``.trickle()`` returns a :class:`TrickleBuilder` **minus execution** — every
+handle whose ``.trickle()`` returns a :class:`TrickleBuilder` **minus execution**: every
 ``.merge()``/``.append()`` records a statement instead of computing, and ``read``s register catalog
-entries. The result is the logical plan a Duckstring Cloud runtime submits to DuckFlock (the normative
-schema is duckflock's ``plans/plan-ir.md``; this module mirrors the ``TrickleBuilder`` structure that doc
-mirrors, so capture is mechanical and semantics can't drift in translation).
+entries. The plan mirrors the ``TrickleBuilder`` structure, so capture is mechanical and its semantics
+can't drift from the builder's.
 
-**Additive & opt-in.** Nothing here touches the executing path. A ripple the recorder can't express — a
-raw ``con`` access, a callable metric (``agg.reduce`` / ``acc.scan``), an Ibis-expression ``.sql()`` —
-raises :class:`NonCapturable`; the caller falls back to classic execution. Capture fails loud, never
-silently wrong.
+**Additive & opt-in.** Nothing here touches the executing path. A ripple the recorder can't express (a
+raw ``con`` access, a callable metric such as ``agg.reduce`` / ``acc.scan``, an Ibis-expression ``.sql()``)
+raises :class:`NonCapturable`, and lineage records nothing for it. Capture fails loud, never silently
+wrong.
 
-**Byte-sensitive serialisation.** DuckFlock deserialises with ``preserve_order`` — mutate-column and
-metric order is semantic — so every dict here is emitted in declaration order; the key order within each
-statement/entry is fixed to the schema. Timestamps and the epoch envelope are the caller's concern (they
-are storage/run facts, not builder facts); this module emits only the builder-derived ``catalog`` +
-``statements`` body, plus an optional envelope wrapper.
+**Ordered serialisation.** Mutate-column and metric order is semantic, so every dict here is emitted in
+declaration order, and the key order within each statement or entry is fixed. This module emits only the
+builder-derived ``catalog`` + ``statements`` body.
 """
 
 from __future__ import annotations
 
 from .builder import BuildError, TrickleBuilder, _Join, _Source
 from .io import normalize_pk
-
-# The plan-IR envelope version. Additive fields only within a version (duckflock deserialises forward).
-DUCKFLOCK_PLAN = 1
 
 
 class NonCapturable(Exception):
@@ -85,7 +80,7 @@ def _acc_metric(m) -> dict:
 def _dag(node, alias_of: dict) -> dict:
     """Serialise a builder operator node. Source: {node, ref, alias, p}; join: {node, how, on, left,
     right}. ``alias`` is the *effective* alias (explicit ``.alias()`` else the positional ``s{i}`` the
-    compiler assigns) so DuckFlock never re-derives positionals."""
+    compiler assigns) so a reader of the plan never re-derives positionals."""
     if isinstance(node, _Source):
         return {"node": "source", "ref": node.ref, "alias": alias_of[id(node)], "p": node.p}
     if isinstance(node, _Join):
@@ -125,7 +120,7 @@ def _leaf_refs(node) -> list:
 
 def _merge_options(ivm, key_filter, retain_t, retain_n) -> dict:
     """Sparse ``options`` for a merge terminal — only non-default values (order: ivm, key_filter,
-    retain_t_s, retain_n). DuckFlock fills defaults on deserialise."""
+    retain_t_s, retain_n)."""
     opts: dict = {}
     if not ivm:
         opts["ivm"] = False
@@ -360,25 +355,7 @@ def capture_plan(run_python, *, source_catalog, own_location: str = "__OWN__") -
     ``run_python(host)`` is the user's ripple: it composes ``host.trickle(...)`` chains and terminates them
     with ``.merge()``/``.append()``. ``source_catalog(ref) -> {location, mode, pk, floor, f}`` supplies each
     source's storage facts; ``own_location`` is this pond's own-output location string. Raises
-    :class:`NonCapturable` on anything the recorder can't express (the opt-in, fail-loud contract). The
-    caller wraps the body in the ``duckflock_plan``/``job_id``/``pond``/``epoch``/``config`` envelope
-    (:func:`envelope`), which carries run/storage facts the builder doesn't hold."""
+    :class:`NonCapturable` on anything the recorder can't express (the opt-in, fail-loud contract)."""
     rec = PlanRecorder(source_catalog, own_location)
     run_python(CapturePond(rec))
     return {"catalog": rec.catalog(), "statements": rec.statements}
-
-
-def envelope(body: dict, *, job_id: str, tenant: str, pond: dict, epoch: dict, config: dict) -> dict:
-    """Wrap a captured body in the versioned plan-IR envelope. ``epoch`` is ``{"f", "previous_f"}`` as
-    ``isoformat()`` strings (``NEVER`` = ``0001-01-01T00:00:00+00:00``); ``pond`` is
-    ``{"name", "major", "version"}``. Additive fields only within ``duckflock_plan: 1``."""
-    return {
-        "duckflock_plan": DUCKFLOCK_PLAN,
-        "job_id": job_id,
-        "tenant": tenant,
-        "pond": pond,
-        "epoch": epoch,
-        "catalog": body["catalog"],
-        "statements": body["statements"],
-        "config": config,
-    }

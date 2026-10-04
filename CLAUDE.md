@@ -107,7 +107,7 @@ src/duckstring/
     builder.py             #   the pond.trickle(...) builder: a DAG of binary incremental joins (any key, any how, bushy)
     agg.py                 #   order-independent aggregate specs for .aggregate()
     acc.py                 #   order-dependent scan specs for .accumulate()
-    capture.py             #   plan capture: run a ripple against a recording handle → duckflock_plan:1 JSON (NonCapturable → classic)
+    capture.py             #   plan capture: run a ripple against a recording handle → a logical plan for column lineage (NonCapturable → none)
     lineage.py             #   column lineage from a captured plan (exact/constant/opaque, never inferred); sqlglot for kind:sql outputs
   trickle_io.py, trickle_builder.py, agg.py, acc.py
                            # compat shims (PEP-562 forwarding) to duckstring.trickle.*, so `from duckstring import agg` still works

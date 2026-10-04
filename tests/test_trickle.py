@@ -710,7 +710,7 @@ def test_agg_count_metric_is_incremental(tmp_path):
 def test_agg_companion_published_and_resumable(tmp_path):
     """State-format Extension 1: an incremental ``.aggregate()`` publishes its registry accumulator
     companion (``_duckstring_agg_{table}``) as a snapshot under ``state/agg/{table}/{f}.parquet`` — the
-    published form a registry-less host (DuckFlock) or a Duck recovering from registry loss hydrates to
+    published form a Duck recovering from registry loss hydrates to
     resume incremental compute. Round-trip: the snapshot is byte-faithful to the registry companion, the
     sidecar records it, only the latest snapshot is kept, it stays hidden from the read surface, and
     hydrating it into a fresh registry reproduces the exact accumulator state (identical resumption)."""
@@ -753,7 +753,7 @@ def test_agg_companion_published_and_resumable(tmp_path):
     assert persistent == [("A", 10, 1), ("B", 1, 2)]
 
     # Hydrate the (surviving) epoch-2 companion snapshot into a *fresh* registry and confirm it reproduces
-    # the registry accumulator state bit-for-bit — the resumption-sufficiency property DuckFlock relies on.
+    # the registry accumulator state bit-for-bit: enough to resume incremental compute.
     snap2 = snk_dir / "state" / "agg" / "by_k" / T.part_name(ts(2))
     reg2 = snk.sql('SELECT * FROM "_duckstring_agg_by_k" ORDER BY k').fetchall()
     fresh = duckdb.connect()
@@ -768,8 +768,7 @@ def test_agg_companion_published_and_resumable(tmp_path):
 def test_sidecar_extension2_stats(tmp_path):
     """State-format Extension 2: every published sidecar entry carries planner hints — ``stats``
     ({rows, bytes, delta_rows_last}), a user-column ``schema`` map (system columns excluded), and
-    ``format: 2``. Hints only (the conformance differ ignores them); what a routing consumer
-    (``duckflock quote``) sizes a plan by without opening Parquet footers."""
+    ``format: 2``. Hints only: what a reader sizes a table by without opening Parquet footers."""
     con = duckdb.connect()
     con.execute("SET TimeZone='UTC'")
     d = tmp_path / "data"
@@ -1460,7 +1459,7 @@ def test_builder_append_spine_pk_fast_path(tmp_path, monkeypatch):
 
 def test_builder_append_spine_pk_fast_path_same_f_replay(tmp_path):
     """Regression: a same-``f`` replay of a spine-PK append run must be idempotent (an at-least-once host —
-    retries, DuckFlock's replay contract — re-executes an epoch). The bug: ``_new_spine_rows`` counted the
+    retries, a crash replay — re-executes an epoch). The bug: ``_new_spine_rows`` counted the
     first attempt's own ``f``-stamped rows as history, so the replay ``DELETE(@f)`` dropped them and nothing
     re-inserted them — silent loss of the epoch's rows. The prefilter now excludes rows stamped at ``f``."""
     _cons, ol, pr = _star_sources(tmp_path)

@@ -161,7 +161,7 @@ def _dispatch(engine, builder, out_pk):
 
 class FlockEngine(Protocol):
     """A serverless big-compute backend behind the Flock tier. One implementation per engine
-    (Athena today; DuckFlock later). No metering surface — usage is accounted for out of band
+    (Athena today; MotherDuck planned). No metering surface — usage is accounted for out of band
     by the engine's cloud deployment."""
 
     def enabled(self) -> bool: ...

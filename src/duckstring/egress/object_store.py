@@ -7,7 +7,7 @@ Two write shapes, chosen by the Spout's ``mode``:
 - **mirror** (``mode=append``): the table's **published Duckstring collection** (per-run parts +
   changelog/band/base tiers + the sidecar + the Extension-1 ``state/`` snapshots), reconciled by file
   name per delivery — O(new parts), and the destination stays directly readable by any
-  Duckstring-layout consumer (``ParquetDataPlane.read_select``, a downstream Catchment, DuckFlock).
+  Duckstring-layout consumer (``ParquetDataPlane.read_select``, a downstream Catchment).
 
 - ``file://`` — local path, written atomically (tmp + ``os.replace``).
 - ``s3://`` / ``gs://`` — snapshots via DuckDB ``httpfs`` + the secret manager; mirrors via the
@@ -83,7 +83,7 @@ class ObjectStoreEgressDriver:
     def mirror(self, source_store, table: str, entry: dict, *, f: datetime | None = None) -> None:
         """Incrementally mirror ``table``'s **published collection** from the source data dir to the
         destination prefix — the same layout the data plane publishes, so any Duckstring-layout reader
-        (``ParquetDataPlane.read_select``, a downstream Catchment, DuckFlock) can consume the
+        (``ParquetDataPlane.read_select``, a downstream Catchment) can consume the
         destination directly.
 
         Per delivery it reconciles each artifact set by **name** (parts are immutable + idempotent by
@@ -93,7 +93,7 @@ class ObjectStoreEgressDriver:
         part is always re-copied (a same-``f`` replay may have rewritten its content), and wholesale
         files (an overwrite table; a legacy single-file merge base) copy only when the source entry's
         ``f``/``f_base`` advanced past the destination sidecar's. The Extension-1 ``state/`` snapshots
-        ride along (they make the mirror DuckFlock-resumable). The destination sidecar entry is written
+        ride along, so the mirror carries the incremental state too. The destination sidecar entry is written
         **last** — the commit point, exactly like a publish."""
         from ..storage import get_storage
         from ..trickle.io import (
