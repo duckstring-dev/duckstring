@@ -262,7 +262,7 @@ class Driver:
         self.data_root = data_root
         self.base_url = base_url
         self.launcher = launcher
-        self.lock = threading.RLock()
+        self.lock = getattr(db, "lock", None) or threading.RLock()  # the connection's (see db.Connection)
         self.state = EngineState()
         # All dicts below are keyed by the pond key "{name}@{major}" — one entry per major line.
         self.meta: dict[str, dict] = {}  # key -> {name, major, version_id, version, source_path, ...}

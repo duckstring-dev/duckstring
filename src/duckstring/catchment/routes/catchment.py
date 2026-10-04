@@ -22,6 +22,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import auth
+from ..db import locked
 
 router = APIRouter()
 
@@ -40,7 +41,9 @@ def _db(request: Request) -> sqlite3.Connection:
 
 @router.get("/health")
 def health(request: Request):
-    _db(request).execute("SELECT 1")
+    db = _db(request)
+    with locked(db):
+        db.execute("SELECT 1")
     return {"status": "ok"}
 
 
@@ -48,7 +51,9 @@ def health(request: Request):
 def identity(request: Request):
     """This Catchment's stable id + optional display name — how a downstream resolves cross-mesh
     identity (which upstream a duct points at, and cutting cycles in the recursive lineage view)."""
-    rows = dict(_db(request).execute("SELECT key, value FROM catchment_meta").fetchall())
+    db = _db(request)
+    with locked(db):
+        rows = dict(db.execute("SELECT key, value FROM catchment_meta").fetchall())
     return {"id": rows.get("id"), "name": rows.get("name")}
 
 
@@ -68,13 +73,16 @@ def get_settings(request: Request):
     status = cloud.cloud_status(getattr(app.state, "data_root", None),
                                 getattr(app.state, "secret_store", None),
                                 getattr(app.state, "cloud_creds", None))
-    status["has_data"] = cloud.has_published_data(_db(request))
+    db = _db(request)
+    with locked(db):
+        status["has_data"] = cloud.has_published_data(db)
     return status
 
 
 def _catchment_name(db) -> str:
     """The catchment's display name (the switch-confirm token), falling back to its id when unnamed."""
-    rows = dict(db.execute("SELECT key, value FROM catchment_meta").fetchall())
+    with locked(db):
+        rows = dict(db.execute("SELECT key, value FROM catchment_meta").fetchall())
     return rows.get("name") or rows.get("id") or "unknown"
 
 
@@ -132,12 +140,15 @@ def put_settings(request: Request, body: _SettingsBody):
     # published data (so it isn't done by accident). Reverting to local (new is None) is the safe escape
     # hatch — always allowed without confirmation (it needs no creds and keeps the old location intact).
     name = _catchment_name(db)
-    if new is not None and (current is not None or cloud.has_published_data(db)) and (body.confirm or "") != name:
+    with locked(db):
+        has_data = cloud.has_published_data(db)
+    if new is not None and (current is not None or has_data) and (body.confirm or "") != name:
         raise HTTPException(status_code=422, detail=(
             f"switching the data root empties the data plane (every Pond is left with no data and idle — "
             f"no auto-rebuild; the old location is kept as a backup); confirm by passing the catchment "
             f"name: {name!r}"))
-    owner_id = dict(db.execute("SELECT key, value FROM catchment_meta").fetchall()).get("id") or "unknown"
+    with locked(db):
+        owner_id = dict(db.execute("SELECT key, value FROM catchment_meta").fetchall()).get("id") or "unknown"
     # Take the single-writer lease on the new store (object stores only; local needs none). get_storage
     # validates the scheme.
     new_store = None
@@ -155,7 +166,8 @@ def put_settings(request: Request, body: _SettingsBody):
     def _commit_switch() -> None:
         # Persist the new root, release the previous store's lease, and refresh the cloud gate live (a
         # switch can flip cloud enabled if creds are already present) — the backends + the cred banner.
-        cloud.set_setting(db, cloud.DATA_ROOT_KEY, new)  # None → deletes the setting (back to local)
+        with locked(db):
+            cloud.set_setting(db, cloud.DATA_ROOT_KEY, new)  # None → deletes the setting (back to local)
         if old_lease is not None:
             try:
                 release_lease(old_lease[0], old_lease[1])

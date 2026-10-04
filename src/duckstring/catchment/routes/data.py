@@ -17,6 +17,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from .. import auth
+from ..db import locked
 
 router = APIRouter()
 
@@ -50,10 +51,11 @@ def _resolve_major(request: Request, pond_name: str, major: Optional[int], versi
     if version is not None:
         return int(version.split(".")[0])
     db = request.app.state.db
-    row = db.execute(
-        "SELECT MAX(p.major) FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id WHERE pn.name = ?",
-        (pond_name,),
-    ).fetchone()
+    with locked(db):
+        row = db.execute(
+            "SELECT MAX(p.major) FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id WHERE pn.name = ?",
+            (pond_name,),
+        ).fetchone()
     if row is not None and row[0] is not None:
         return row[0]
     on_disk = sorted(
@@ -118,18 +120,17 @@ def _open_pond(request: Request, pond_name: str, major: int):
 @router.get("/ponds/{name}/versions/{version}", dependencies=[auth.read])
 def get_pond_version(name: str, version: str, request: Request):
     db = request.app.state.db
-    row = db.execute(
-        """SELECT pv.id FROM pond_version pv
-           JOIN pond_name pn ON pn.id = pv.pond_name_id
-           WHERE pn.name = ? AND pv.version = ?""",
-        (name, version),
-    ).fetchone()
+    with locked(db):
+        row = db.execute(
+            """SELECT pv.id FROM pond_version pv
+               JOIN pond_name pn ON pn.id = pv.pond_name_id
+               WHERE pn.name = ? AND pv.version = ?""",
+            (name, version),
+        ).fetchone()
+        # "active" = this version is the one the pond pointer currently selects.
+        selected = row and db.execute("SELECT 1 FROM pond WHERE pond_version_id = ?", (row[0],)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"No version {version} of pond '{name}'")
-    # "active" = this version is the one the pond pointer currently selects.
-    selected = db.execute(
-        "SELECT 1 FROM pond WHERE pond_version_id = ?", (row[0],)
-    ).fetchone()
     return {"name": name, "version": version, "is_active": bool(selected)}
 
 

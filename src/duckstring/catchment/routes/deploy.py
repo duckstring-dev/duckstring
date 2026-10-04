@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from ...keys import version_key as _version_key
 from .. import auth
+from ..db import locked
 
 router = APIRouter()
 
@@ -363,7 +364,8 @@ async def deploy(request: Request):
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if cfg["kind"]:
             kind = cfg["kind"]
-        catalog = _source_schemas(db, cfg["sources"])
+        with locked(db):
+            catalog = _source_schemas(db, cfg["sources"])
         try:
             _, found = await asyncio.to_thread(_prepare, root, staging, catalog)
         except EnvError as exc:
@@ -386,10 +388,12 @@ async def deploy(request: Request):
     ripples = [{"func": r["name"], **r} for r in found["ripples"]]
     source_path = f"ponds/{name}/{version}"
     try:
-        _register(db, name, version, kind, source_path, cfg, ripples)
+        with locked(db):
+            _register(db, name, version, kind, source_path, cfg, ripples)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    _store_column_lineage(db, name, version, found["lineage"])
+    with locked(db):
+        _store_column_lineage(db, name, version, found["lineage"])
 
     if getattr(request.app.state, "driver", None) is not None:
         request.app.state.driver.reload()
