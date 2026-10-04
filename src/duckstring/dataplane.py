@@ -1212,25 +1212,36 @@ def rank_morton_sql(source: str, cols: list[str], bits: list[int], nullable: lis
             f'FROM (SELECT *, {", ".join(ranks)} FROM {source})')
 
 
+def cluster_order_select(con, source: str, spec: dict) -> str:
+    """``source`` (a relation name or a parenthesised query) in the order a :func:`cluster_spec
+    <duckstring.trickle.io.cluster_spec>` asks for: a sort by its columns, or by a rank-Morton key when it
+    interleaves two or more (``cluster_bits`` sized to the data when unset)."""
+    from . import trickle_io as trickle
+
+    q = trickle._q
+    cols = spec["by"]
+    if not spec["interleave"]:
+        return f"SELECT * FROM {source} ORDER BY {', '.join(q(c) for c in cols)}"
+    counts = con.execute(f"SELECT count(*), {', '.join(f'count(*) FILTER (WHERE {q(c)} IS NULL)' for c in cols)} "
+                         f"FROM {source}").fetchone()
+    total = spec.get("bits") or _auto_cluster_bits(counts[0], len(cols))
+    keyed = rank_morton_sql(source, cols, _split_bits(total, len(cols)), [n > 0 for n in counts[1:]])
+    return f'SELECT * EXCLUDE ("_duckstring_key") FROM ({keyed}) ORDER BY "_duckstring_key"'
+
+
 def _base_order_select(con, main: str, cold: str) -> str:
     """The cold base ``cold`` of merge main ``main`` in its stored order: by the ``cluster_by`` declared on
     its merge writes (sorted, or by a rank-Morton key when interleaving two or more columns), else by its
     primary key, so a read filtering on those columns skips most chunks and row groups."""
     from . import trickle_io as trickle
 
-    q = trickle._q
     meta = trickle.read_meta(con).get(main, {})
     spec = meta.get("cluster")
-    cols = spec["by"] if spec else list(meta.get("pk") or [])
-    if not cols:
-        return f"SELECT * FROM {q(cold)}"
-    if not spec or not spec["interleave"]:
-        return f"SELECT * FROM {q(cold)} ORDER BY {', '.join(q(c) for c in cols)}"
-    counts = con.execute(f"SELECT count(*), {', '.join(f'count(*) FILTER (WHERE {q(c)} IS NULL)' for c in cols)} "
-                         f"FROM {q(cold)}").fetchone()
-    total = spec.get("bits") or _auto_cluster_bits(counts[0], len(cols))
-    keyed = rank_morton_sql(q(cold), cols, _split_bits(total, len(cols)), [n > 0 for n in counts[1:]])
-    return f'SELECT * EXCLUDE ("_duckstring_key") FROM ({keyed}) ORDER BY "_duckstring_key"'
+    if spec is None and meta.get("pk"):
+        spec = {"by": list(meta["pk"]), "interleave": False, "bits": None}
+    if spec is None:
+        return f"SELECT * FROM {trickle._q(cold)}"
+    return cluster_order_select(con, trickle._q(cold), spec)
 
 
 def _publish_base_chunks(con, data_dir: Path, main: str, f, chunk_bytes: int) -> None:

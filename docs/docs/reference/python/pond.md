@@ -76,7 +76,7 @@ Returns the current number of rows in a table without scanning it where possible
 ### `write_table`
 
 ```python
-pond.write_table(name, relation) -> None
+pond.write_table(name, relation, *, cluster_by=None, interleave=True, cluster_bits=None) -> None
 ```
 
 Replaces the table `name` in the Pond's database with the contents of `relation`, in one transaction. A write that collides with another Ripple's write is retried rather than failing.
@@ -87,6 +87,9 @@ Every table in the Pond's database is published when the whole Pond Run succeeds
 |---|---|---|
 | `name` | `str` | Table name. Tables whose names start with `_duckstring_` are internal and never published, and columns with that prefix are rejected at publish. |
 | `relation` | `duckdb.DuckDBPyRelation` | The new contents. |
+| `cluster_by`, `interleave`, `cluster_bits` | | Order the table as it's written, as for [`merge_table`](trickle_io.md#merge_table), so reads filtering on those columns skip most of it. The table is sorted on every write. Without `cluster_by`, it keeps the order `relation` produced. |
+
+**Raises** `DeltaError` for an invalid clustering, such as a column `relation` doesn't have.
 
 To keep history for downstream incremental reads, use [`append_table`](trickle_io.md#append_table) or [`merge_table`](trickle_io.md#merge_table) instead.
 

@@ -97,6 +97,8 @@ To sort by several columns instead, pass `interleave=False`. The interleaved key
 
 Clustering changes how the base is stored, not its contents, so it never affects the version contract. It applies when the base is next rewritten by compaction, and it's declared on every write: leaving `cluster_by` out returns the base to primary-key order at its next compaction. Once a table is clustered by other columns, its primary-key order is gone, so if lookups by key matter too, include the key in `cluster_by`.
 
+A plain table written with `write_table` takes the same options. It's rewritten every run, so it's sorted on every write, and without `cluster_by` it keeps the order its query produced.
+
 ## Reading Trickles within the Pond
 
 Later Ripples in the same Pond can query a Trickle by name, like any other table:

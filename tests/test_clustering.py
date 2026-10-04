@@ -149,6 +149,53 @@ def test_the_builder_and_sql_ripples_declare_it_too(tmp_path):
     (tmp_path / "r.sql").write_text("SELECT 1 AS id, 2 AS a, 3 AS b")
     assert load_ripples(tmp_path).by_name["r"]["sql"].cluster == {"by": ["a", "b"], "interleave": True, "bits": 6}
     (tmp_path / "pond.toml").write_text(
-        '[pond]\nname = "p"\nversion = "1.0.0"\n\n[ripples.r]\nsql = "r.sql"\ncluster_by = ["a"]\n')
-    with pytest.raises(RippleDeclarationError, match="only to write"):
+        '[pond]\nname = "p"\nversion = "1.0.0"\n\n[ripples.r]\nsql = "r.sql"\nwrite = "append"\n'
+        'cluster_by = ["a"]\n')
+    with pytest.raises(RippleDeclarationError, match="not \"append\""):
         load_ripples(tmp_path)
+
+
+# ─── plain tables (write_table) ──────────────────────────────────────────────────
+
+
+def _published_groups(con, out, table):
+    """Per row group ``{column: (min, max)}`` of a plain table's published version."""
+    path = ParquetDataPlane().table_path(out, table)
+    groups: dict = {}
+    for rg, col, lo, hi in con.execute(
+        f"SELECT row_group_id, path_in_schema, stats_min_value, stats_max_value FROM parquet_metadata('{path}')"
+    ).fetchall():
+        groups.setdefault(rg, {})[col] = (int(lo), int(hi))
+    return list(groups.values())
+
+
+@pytest.mark.timeout(120)
+def test_a_plain_table_is_ordered_as_it_is_written(tmp_path):
+    from duckstring.core import Pond
+
+    values = random.Random(2).sample(range(1000), 50)
+    con = _con()
+    pond = Pond(name="p", version="1", con=con, root=tmp_path, f=F1)
+    pond.write_table("unordered", con.sql(_ROWS))
+    pond.write_table("by_a", con.sql(_ROWS), cluster_by="a")
+    pond.write_table("both", con.sql(_ROWS), cluster_by=["a", "b"])
+    ParquetDataPlane().export(con, tmp_path / "out", f=F1)
+
+    a_ranges = sorted(g["a"] for g in _published_groups(con, tmp_path / "out", "by_a"))
+    assert all(a_ranges[i][1] <= a_ranges[i + 1][0] for i in range(len(a_ranges) - 1))  # sorted by a
+    plain = _published_groups(con, tmp_path / "out", "unordered")
+    both = _published_groups(con, tmp_path / "out", "both")
+    for col in ("a", "b"):
+        assert _fraction_touched(both, col, values) < _fraction_touched(plain, col, values)
+    assert con.execute('SELECT count(*), sum(a) FROM "both"').fetchone() == \
+        con.execute(f"SELECT count(*), sum(a) FROM ({_ROWS})").fetchone()
+
+
+def test_write_table_refuses_an_unknown_cluster_column(tmp_path):
+    from duckstring.core import Pond
+
+    con = _con()
+    pond = Pond(name="p", version="1", con=con, root=tmp_path, f=F1)
+    with pytest.raises(DeltaError, match="not in 't'"):
+        pond.write_table("t", con.sql("SELECT 1 AS a"), cluster_by="nope")
+

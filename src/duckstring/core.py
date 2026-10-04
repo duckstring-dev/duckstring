@@ -729,14 +729,28 @@ class Pond:
         if self._skip_sink is not None:
             self._skip_sink()
 
-    def write_table(self, name: str, relation) -> None:
+    def write_table(self, name: str, relation, *, cluster_by=None, interleave=True, cluster_bits=None) -> None:
         """Replace the table ``name`` in the Pond's database with ``relation``, in one transaction.
 
         Every table in the database is published when the whole Pond Run succeeds; if any Ripple fails,
         nothing from the run is published. A write that collides with another Ripple's is retried. Tables whose
         names start with ``_duckstring_`` are never published, and columns with that prefix are rejected at
         publish. Use :meth:`append_table` or :meth:`merge_table` to keep history for incremental consumers.
+
+        ``cluster_by``, ``interleave`` and ``cluster_bits`` order the table as it's written, as for
+        :meth:`merge_table`, so reads filtering on those columns skip most of it. The table is sorted on every
+        write; without ``cluster_by`` it keeps the order ``relation`` produced.
         """
+        from . import trickle_io as trickle
+
+        spec = trickle.cluster_spec(cluster_by, interleave, cluster_bits)
+        if spec is not None:
+            from .dataplane import cluster_order_select
+
+            missing = [c for c in spec["by"] if c not in relation.columns]
+            if missing:
+                raise trickle.DeltaError(f"cluster_by column(s) {missing} not in '{name}'")
+            relation = self.con.sql(cluster_order_select(self.con, f"({relation.sql_query()})", spec))
         self.record_lineage_write(name)
         tmp = f"__tmp_{name}"
 

@@ -73,7 +73,15 @@ Close to the ideal `1 / groups^(1/columns)` (10% for two, 22% for three); the ga
 quadrant boundaries. With few row groups (under about 20) interleaving gains little, which the guide notes
 as a reason to keep the column list short. Tests: `tests/test_clustering.py`.
 
+## Plain tables (added 2026-10-04, on request)
+
+`write_table(name, relation, cluster_by=..., interleave=..., cluster_bits=...)` orders the relation as it
+writes it (`dataplane.cluster_order_select`, shared with the merge path). DuckDB preserves insertion order,
+so the published version keeps it, and no metadata is stored: the order is applied per write. The cost is a
+sort on every write, which the user opts into. Without `cluster_by` a plain table keeps its query's order
+(it has no primary key to fall back on). SQL Ripples accept the keys with `write = "overwrite"` too;
+`append` refuses them (a run's part is small, so ordering it buys little).
+
 ## Deferred
 
-- Clustering overwrite tables (`write_table`): it would sort the whole table on every run, so only on request.
 - A Hilbert curve instead of Z-order: better locality, but awkward in SQL; the author prefers rank-Morton.

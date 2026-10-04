@@ -134,8 +134,9 @@ def declared(source_dir: Path, info: dict) -> tuple[list[SqlRipple], dict[str, P
             raise _err(where, "always_run must be true or false")
         cluster = None
         if {"cluster_by", "interleave", "cluster_bits"} & set(cfg):
-            if write != "merge":
-                raise _err(where, "cluster_by, interleave and cluster_bits apply only to write = \"merge\"")
+            if write == "append":
+                raise _err(where, "cluster_by, interleave and cluster_bits apply to write = \"merge\" or "
+                                  "\"overwrite\", not \"append\"")
             from .trickle.io import DeltaError, cluster_spec
 
             try:
@@ -276,7 +277,9 @@ def make_callable(ripple: SqlRipple):
         elif ripple.write == "append":
             pond.append_table(ripple.name, rel, pk=list(ripple.pk) or None)
         else:
-            pond.write_table(ripple.name, rel)
+            c = ripple.cluster or {}
+            pond.write_table(ripple.name, rel, cluster_by=c.get("by"), interleave=c.get("interleave", True),
+                             cluster_bits=c.get("bits"))
 
     run.__name__ = ripple.name
     run.__qualname__ = f"sql_ripple[{ripple.name}]"

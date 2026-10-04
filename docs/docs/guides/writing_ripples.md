@@ -57,6 +57,14 @@ def daily_sales(pond):
 In SQL, refer to Source tables by the name `read_table` registers, not by a Python variable holding a relation (`FROM rel`). DuckDB resolves Python variables by scanning the call stack, which is unreliable when Ripples run in parallel.
 :::
 
+If downstream Ponds or queries filter a large table by a few columns, order it for them as it's written, so DuckDB can skip most of it:
+
+```python
+pond.write_table("daily_sales", agg, cluster_by=["product_id", "sale_date"])
+```
+
+The table is sorted on every write. [Clustering a merge table](append_and_merge.md#clustering-a-merge-table) explains how the ordering works and when it pays off.
+
 ## Splitting work into Ripples
 
 Give each logical step its own Ripple, and declare what it depends on with `parents`:
