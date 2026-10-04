@@ -240,10 +240,21 @@ class ObjectStoreEgressDriver:
             else:
                 clauses.append("PROVIDER credential_chain")
             add("region", "REGION")
-            add("endpoint", "ENDPOINT")
-            add("url_style", "URL_STYLE")
-            if "use_ssl" in q:
-                clauses.append(f"USE_SSL {'true' if q['use_ssl'].lower() in ('1', 'true', 'yes') else 'false'}")
+            # An S3-compatible endpoint (MinIO, Ceph, R2), from ?endpoint= or DUCKSTRING_S3_ENDPOINT, read
+            # the way the data plane reads it: DuckDB wants host:port, USE_SSL from the scheme, path style.
+            from ..storage import _s3_endpoint, _split_endpoint
+
+            endpoint = _s3_endpoint(q)
+            if endpoint:
+                host, ssl = _split_endpoint(endpoint)
+                clauses.append(f"ENDPOINT {_q(host)}")
+                ssl = q["use_ssl"].lower() in ("1", "true", "yes") if "use_ssl" in q else ssl
+                clauses.append(f"USE_SSL {'true' if ssl else 'false'}")
+                clauses.append(f"URL_STYLE {_q(q.get('url_style', 'path'))}")
+            else:
+                add("url_style", "URL_STYLE")
+                if "use_ssl" in q:
+                    clauses.append(f"USE_SSL {'true' if q['use_ssl'].lower() in ('1', 'true', 'yes') else 'false'}")
         return f"CREATE OR REPLACE SECRET {_SECRET} (" + ", ".join(clauses) + ")"
 
     def _prepare_remote(self, con) -> None:

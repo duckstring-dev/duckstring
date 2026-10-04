@@ -109,7 +109,8 @@ Writes `{prefix}/{table}.parquet`, or with `--mode append`, the table's per-run 
 | `key_id`, `secret` | Credentials. Required for `gs://` (as HMAC keys). For `s3://`, the AWS credential chain is used without them. |
 | `session_token` | An S3 session token. |
 | `region` | S3 region. |
-| `endpoint`, `url_style`, `use_ssl` | For S3-compatible stores. |
+| `endpoint` | An S3-compatible endpoint such as `http://minio:9000`, as for a [data root](#data-root-uris). Defaults to `DUCKSTRING_S3_ENDPOINT`. The scheme sets whether TLS is used, and addressing is path-style. |
+| `url_style`, `use_ssl` | Override the addressing style (`path` or `vhost`) and TLS for an endpoint. |
 
 ### `postgres://`
 

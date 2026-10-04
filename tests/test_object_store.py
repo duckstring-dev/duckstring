@@ -190,6 +190,46 @@ def test_warm_bands_are_read_from_a_real_s3(s3_env, monkeypatch):
     assert sorted(fresh.sql('SELECT id, v FROM "m"').fetchall()) == [(1, "A"), (2, "b"), (3, "c")]
 
 
+def test_a_spout_delivers_to_a_real_s3(s3_env, tmp_path):
+    """Spout egress to an S3 bucket through the real worker, in both modes: a full snapshot written by
+    DuckDB (its own secret, endpoint and signing) and the append-mode mirror of the published layout
+    (fsspec). Credentials are ${env:} references, resolved only at delivery."""
+    from datetime import datetime, timezone
+
+    import duckdb
+
+    from duckstring import trickle_io as T
+    from duckstring.catchment.egress_worker import _egress_spout
+    from duckstring.catchment.registry import pond_data_dir
+    from duckstring.dataplane import ParquetDataPlane
+    from duckstring.storage import get_storage
+
+    _endpoint, client = s3_env
+    f = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    con.execute("CREATE TABLE revenue AS SELECT * FROM (VALUES (1, 10), (2, 20)) t(id, amt)")
+    T.merge_table(con, "fact", con.sql("SELECT * FROM (VALUES (1, 'a'), (2, 'b')) t(id, v)"), f, ("id",))
+    ParquetDataPlane().export(con, pond_data_dir(tmp_path, "sales", 1).root, f=f)
+
+    creds = "key_id=${env:AWS_ACCESS_KEY_ID}&secret=${env:AWS_SECRET_ACCESS_KEY}"
+    job = {"pond_name": "sales", "major": 1, "f": f}
+    _egress_spout(tmp_path, {**job, "table": "revenue", "mode": "full",
+                             "destination": f"s3://{_BUCKET}/spout-full?{creds}"})
+    assert "spout-full/revenue.parquet" in _keys(client, "spout-full/")
+    reader = duckdb.connect()
+    get_storage(f"s3://{_BUCKET}/spout-full").duckdb_setup(reader)
+    rows = reader.sql(f"SELECT * FROM read_parquet('s3://{_BUCKET}/spout-full/revenue.parquet') ORDER BY id")
+    assert rows.fetchall() == [(1, 10), (2, 20)]
+
+    _egress_spout(tmp_path, {**job, "table": "fact", "mode": "append",
+                             "destination": f"s3://{_BUCKET}/spout-mirror?{creds}"})
+    mirror = get_storage(f"s3://{_BUCKET}/spout-mirror")
+    mirror.duckdb_setup(reader)
+    read = ParquetDataPlane().read_select(mirror, "fact")
+    assert sorted(reader.sql(f"SELECT id, v FROM ({read})").fetchall()) == [(1, "a"), (2, "b")]
+
+
 # ─── the full runtime, publishing to S3 ──────────────────────────────────────────
 
 
