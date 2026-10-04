@@ -282,3 +282,67 @@ def test_a_python_ripple_reading_a_sql_parents_table_passes(tmp_path):
     """)
     _run(tmp_path)
     assert _out(tmp_path, "copied") == [(5,)]
+
+
+# ─── column lineage ──────────────────────────────────────────────────────────────
+
+
+def _lineage(tmp_path, catalog):
+    pytest.importorskip("sqlglot")
+    from duckstring.sql_ripples import lineage_rows
+
+    return {(t, c): (k, s, sc) for t, c, k, s, sc in lineage_rows(load_ripples(tmp_path), catalog)
+            if k != "exact"} | {(t, c, s, sc): "exact" for t, c, k, s, sc in
+                                lineage_rows(load_ripples(tmp_path), catalog) if k == "exact"}
+
+
+def test_sql_ripple_column_lineage_is_exact_transitive_or_opaque(tmp_path):
+    _pond(tmp_path, """
+        [ripples.base]
+        sql = "base.sql"
+        reads = ["src.t"]
+
+        [ripples.top]
+        sql = "top.sql"
+        parents = ["base", "py"]
+
+        [static.labels]
+        path = "labels.csv"
+    """, {
+        "base.sql": "SELECT id, amount * 2 AS doubled, 7 AS seven FROM src.t",
+        "top.sql": "SELECT b.id, b.doubled, l.label, b.seven, x.whatever FROM base b JOIN labels l USING (id), "
+                   "made_by_py x",
+        "labels.csv": "id,label\n1,one\n",
+    }, python="from duckstring import ripple\n\n@ripple\ndef py(pond):\n    pass\n")
+    rows = _lineage(tmp_path, {"src.t": ["id", "amount"]})
+    assert rows[("base", "doubled", "src.t", "amount")] == "exact"
+    assert rows[("base", "seven")] == ("constant", "", "")
+    assert rows[("top", "doubled", "src.t", "amount")] == "exact"   # through the parent SQL Ripple
+    assert rows[("top", "label", "labels", "label")] == "exact"     # a static table, under its own name
+    assert rows[("top", "seven")] == ("constant", "", "")
+    assert rows[("top", "whatever")] == ("opaque", "", "")          # a Python parent's table: unknown
+
+
+def test_sql_ripple_lineage_without_source_schemas_keeps_only_what_is_certain(tmp_path):
+    _pond(tmp_path, '[ripples.r]\nsql = "r.sql"\nreads = ["src.t", "src.u"]\n',
+          {"r.sql": "SELECT t.id, amount FROM src.t AS t JOIN src.u AS u USING (id)"})
+    rows = _lineage(tmp_path, {})
+    assert rows[("r", "id", "src.t", "id")] == "exact"   # qualified: certain without a schema
+    assert rows[("r", "amount")] == ("opaque", "", "")   # unqualified over two tables, no schema: not guessed
+    rows = _lineage(tmp_path, {"src.t": ["id", "amount"], "src.u": ["id"]})
+    assert rows[("r", "amount", "src.t", "amount")] == "exact"  # the schemas place it
+
+
+def test_a_star_over_an_unknown_table_makes_the_table_opaque(tmp_path):
+    _pond(tmp_path, '[ripples.r]\nsql = "r.sql"\nreads = ["src.t"]\n', {"r.sql": "SELECT * FROM src.t"})
+    assert _lineage(tmp_path, {})[("r", "")] == ("opaque", "", "")
+    assert _lineage(tmp_path, {"src.t": ["id", "amount"]})[("r", "amount", "src.t", "amount")] == "exact"
+
+
+def test_deploy_discovery_records_sql_ripple_lineage(tmp_path):
+    pytest.importorskip("sqlglot")
+    from duckstring.discover import run
+
+    _pond(tmp_path, '[ripples.r]\nsql = "r.sql"\nreads = ["src.t"]\n', {"r.sql": "SELECT id, amount FROM src.t"})
+    found = run({"source_dir": str(tmp_path), "catalog": {"src.t": ["id", "amount"]}})
+    assert ["r", "amount", "exact", "src.t", "amount"] in found["lineage"]

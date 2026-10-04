@@ -180,9 +180,14 @@ Built as designed, with these specifics:
   runner; it's now an error everywhere.
 - **Python entrypoint optional.** A Pond with only SQL Ripples needs no `src/pond.py`; `pond init` still
   scaffolds one with a placeholder Ripple, which the migration guide says to delete.
-- **Not done:** column lineage for SQL Ripples (the Python capture doesn't apply; sqlglot over the query
-  would be the route). The one-sentence "SQL Ripples or dbt" guidance is drafted in the guide for the
-  author to confirm.
+- **Column lineage** (added 2026-10-04): `sql_ripples.lineage_rows`, run by deploy discovery, traces each
+  SQL Ripple's output columns with sqlglot's `lineage` (the `duckstring[lineage]` extra), in dependency
+  order so a parent SQL Ripple's provenance carries through. Source columns are exact; a static table's
+  columns are recorded under the static table's name; a constant (`COUNT(*)` included) has none; a column
+  sqlglot can't place (a Python parent's table, an unqualified name over several tables with no Source
+  schema yet, a `*` over an unknown table) is opaque. Qualified columns resolve without Source schemas,
+  so a first deploy records them too.
+- The one-sentence "SQL Ripples or dbt" guidance was confirmed by the author.
 
 ---
 

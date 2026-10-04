@@ -275,3 +275,127 @@ def register_statics(con, statics: dict[str, Path]) -> None:
         reader = _STATIC_READERS[path.suffix.lower()]
         literal = str(path).replace("'", "''")
         con.execute(f'CREATE OR REPLACE TEMP VIEW "{name}" AS SELECT * FROM {reader}(\'{literal}\')')
+
+
+# ─── column lineage ──────────────────────────────────────────────────────────────
+
+
+def _static_columns(path: Path) -> list[str]:
+    import duckdb
+
+    reader = _STATIC_READERS[path.suffix.lower()]
+    literal = str(path).replace("'", "''")
+    return [r[0] for r in duckdb.connect().execute(f"DESCRIBE SELECT * FROM {reader}('{literal}')").fetchall()]
+
+
+def lineage_rows(pond, catalog: dict[str, list[str]]) -> list[list[str]]:
+    """Static column lineage for every SQL Ripple of ``pond`` (a :class:`duckstring.core.PondRipples`), as
+    the ``[table, column, kind, src_ref, src_column]`` rows deploy stores (plans/lineage.md). Resolved with
+    sqlglot (the ``duckstring[lineage]`` extra; without it, nothing is recorded). Exact or absent, never
+    inferred:
+
+    - a Source column is ``(source.table, column)``. ``catalog`` holds the Sources' known columns, which
+      lets ``*`` and unqualified names resolve; a column qualified with its table resolves without them
+      (at a first deploy, before the Sources have run);
+    - a parent SQL Ripple's column resolves to that Ripple's own provenance, transitively;
+    - a static table's column is recorded under the static table's name;
+    - a constant has no source columns;
+    - anything sqlglot can't resolve (a Python parent's table, whose columns aren't known before it runs,
+      the Ripple's own previous output, an unknown Source schema) makes the column, or the whole table,
+      opaque.
+
+    Best effort: a Ripple that fails to resolve contributes an opaque table and never fails a deploy."""
+    try:
+        import sqlglot
+        from sqlglot import exp
+        from sqlglot.lineage import lineage
+        from sqlglot.optimizer.qualify import qualify
+    except ImportError:
+        return []
+
+    def norm(name: str) -> str:
+        return name.lower()
+
+    schema: dict[str, dict[str, dict[str, str]]] = {"main": {}}
+    originals: dict[tuple[str, str], tuple[str, dict[str, str]]] = {}  # (db, table) → (ref, {col: Col})
+    for ref, cols in catalog.items():
+        try:
+            src, table = parse_ref(ref)
+        except ValueError:
+            continue
+        if src is None or not cols:
+            continue
+        schema.setdefault(norm(src), {})[norm(table)] = {norm(c): "VARCHAR" for c in cols}
+        originals[(norm(src), norm(table))] = (ref, {norm(c): c for c in cols})
+    for name, path in pond.statics.items():
+        try:
+            cols = _static_columns(path)
+        except Exception:  # noqa: BLE001 — lineage never fails a deploy
+            continue
+        schema["main"][norm(name)] = {norm(c): "VARCHAR" for c in cols}
+        originals[("main", norm(name))] = (name, {norm(c): c for c in cols})
+
+    source_refs = {(norm(s), norm(t)): f"{s}.{t}" for r in pond.ripples if r["kind"] == "sql"
+                   for s, t in r["sql"].reads}
+    own: dict[str, dict | None] = {}  # SQL Ripple → {column: provenance | None}, or None when opaque
+    rows: list[list[str]] = []
+    for name in pond.order():
+        r = pond.by_name[name]
+        if r["kind"] != "sql":
+            continue
+        result = None
+        known = {db: tables for db, tables in schema.items() if tables}  # sqlglot rejects an empty database
+        try:
+            tree = qualify(sqlglot.parse_one(r["sql"].text, dialect="duckdb"), schema=known, db="main",
+                           dialect="duckdb", validate_qualify_columns=False)
+            names = [p.alias_or_name for p in tree.selects]
+            if "*" in names:
+                raise ValueError("a * over a table with unknown columns")  # the output columns aren't known
+            result = {}
+            for col in names:
+                if col in result:
+                    result[col] = None  # a repeated output name: ambiguous, so opaque
+                    continue
+                prov: set | None = set()
+                stack = [lineage(col, tree, schema=known, dialect="duckdb")]
+                while stack and prov is not None:
+                    node = stack.pop()
+                    if node.downstream:
+                        stack.extend(node.downstream)
+                        continue
+                    if isinstance(node.source, exp.Select) and not isinstance(node.expression, exp.Column):
+                        continue  # a constant or count(*): no source column
+                    if not isinstance(node.source, exp.Table):
+                        prov = None  # a column sqlglot couldn't place (no schema to resolve it against)
+                        continue
+                    db, table = norm(node.source.db or "main"), norm(node.source.name)
+                    leaf = norm(exp.to_column(node.name).name)
+                    if leaf == "*":
+                        prov = None
+                    elif db == "main" and table in own:  # a parent SQL Ripple: its provenance, transitively
+                        parent = own[table]
+                        p = None if parent is None else parent.get(leaf)
+                        prov = None if p is None else prov | p
+                    elif (db, table) in originals:
+                        ref, cols = originals[(db, table)]
+                        prov.add((ref, cols.get(leaf, leaf)))
+                    elif db != "main" and (db, table) in source_refs:  # a Source with no known schema yet
+                        prov.add((source_refs[(db, table)], leaf))
+                    else:
+                        prov = None
+                result[col] = prov
+        except Exception:  # noqa: BLE001 — unresolvable (an unknown table or column): opaque
+            result = None
+        own[norm(name)] = None if result is None else {norm(c): p for c, p in result.items()}
+        if result is None:
+            rows.append([name, "", "opaque", "", ""])
+            continue
+        schema["main"][norm(name)] = {norm(c): "VARCHAR" for c in result}
+        for col, prov in result.items():
+            if prov is None:
+                rows.append([name, col, "opaque", "", ""])
+            elif not prov:
+                rows.append([name, col, "constant", "", ""])
+            else:
+                rows.extend([name, col, "exact", ref, sc] for ref, sc in sorted(prov))
+    return rows

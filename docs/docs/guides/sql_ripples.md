@@ -157,6 +157,12 @@ def forecast(pond):
 
 Python Ripples get the same protection at run time for the reads that go through the `pond` handle (`read_table`, `count_table` and `pond.trickle(...)` on the Pond's own tables): reading a table written by a Ripple that isn't among its parents fails the Ripple with a message naming both. SQL run directly on `pond.con` isn't checked, so declare those parents carefully.
 
+## Column lineage
+
+When a Pond is deployed, each SQL Ripple's output columns are traced to the Source columns they come from, through its parents' queries, and `duckstring lineage --columns` shows the result (see [Monitoring and Failures](monitoring_and_failures.md#tracing-bad-data)). This needs the `duckstring[lineage]` extra on the Catchment.
+
+A column qualified with its table (`p.unit_price`) is traced even at the first deployment. An unqualified column in a query over several tables needs the Sources' columns, which are known once the Sources have published; redeploy to trace those. A column that can't be traced exactly, such as one read from a Python Ripple's table, is shown as opaque.
+
 ## Running
 
 SQL Ripples run like any other. `duckstring pond hydrate` and `duckstring pond run` work as described in [Testing with Puddles](testing_with_puddles.md), and `duckstring pond deploy` uploads the SQL and static files with the rest of the project. A declaration error, such as an unknown parent, a missing file or an undeclared table, stops both the local run and the deployment with the same message.

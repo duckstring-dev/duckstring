@@ -141,8 +141,15 @@ def run(spec: dict) -> dict:
     pond = load_ripples(source_dir, info)
     ripples = [{"name": r["name"], "parents": list(r["parents"]), "always_run": r["always_run"]}
                for r in pond.ripples]
-    python_rows = [r for r in pond.ripples if r["kind"] == "python"]  # column lineage is captured for these
-    return {"ripples": ripples, "lineage": capture_lineage_rows(python_rows, spec.get("catalog") or {})}
+    from .sql_ripples import lineage_rows as sql_lineage_rows
+
+    catalog = spec.get("catalog") or {}
+    python_rows = [r for r in pond.ripples if r["kind"] == "python"]  # captured from their plans
+    try:
+        sql_rows = sql_lineage_rows(pond, catalog)  # resolved from their queries
+    except Exception:  # noqa: BLE001 — lineage is observability; it never fails a deploy
+        sql_rows = []
+    return {"ripples": ripples, "lineage": capture_lineage_rows(python_rows, catalog) + sql_rows}
 
 
 def main(argv: list[str]) -> int:
