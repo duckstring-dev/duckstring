@@ -2,7 +2,7 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
-## 0.6.0 (unreleased)
+## 0.6.0 — 2026-10-05
 
 SQL Ripples, clustering, Pond environments and a simpler data plane. The Iceberg plane is gone: every
 Catchment now publishes versioned Parquet, which pins each run's Source reads and costs a third of the
