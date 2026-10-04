@@ -33,6 +33,11 @@ runtime end-to-end suite):
   The author to report it upstream. The four test files that cover chunked bases (`test_egress_file`,
   `test_iceberg`, `test_merge_view`, `test_trickle`) hang on it; their other tests pass.
 - **Everything else passes**: the other 65 test files, and the runtime suite with real Ducks (25 tests).
+- **Found later (2026-10-04, by the `duckdb-prerelease` CI job): a serialised table reference gained
+  `qualified_name.path`, and `json_deserialize_sql` reads that instead of `schema_name`/`table_name`.**
+  SQL Ripples (built after the test above) rewrite `source.table` by editing those fields, so on 2.0 the
+  rewrite was silently ignored and every SQL Ripple reading a Source failed with `schema "src" does not
+  exist`. Fixed: `sql_ripples._rewrite` sets the path too when it's present.
 - Not yet tested: the `dbt` extra (dbt-duckdb on 2.0), the Postgres egress extension and MinIO, which
   are CI jobs.
 

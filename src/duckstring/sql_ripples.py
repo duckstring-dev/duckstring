@@ -248,6 +248,8 @@ def _rewrite(tree: dict, views: dict[tuple[str, str], str]) -> dict:
                 aliases[key] = n.get("table_name")
                 n["schema_name"] = ""
                 n["table_name"] = views[key]
+                if isinstance(n.get("qualified_name"), dict):  # DuckDB 2.0 deserialises from this path
+                    n["qualified_name"]["path"] = [views[key]]
                 if not n.get("alias"):
                     n["alias"] = aliases[key]
         elif n.get("class") == "COLUMN_REF" and isinstance(n.get("column_names"), list):
