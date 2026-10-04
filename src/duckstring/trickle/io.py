@@ -75,6 +75,10 @@ BASE_SUFFIX = "__base"
 # The warm tier (see :func:`warm_name`): consolidated freshness-range bands between the cold base and the
 # hot per-run changelog. Published as ``{table}__band/`` parts, one file per fold.
 WARM_SUFFIX = "__band"
+# A fold stages its new band here until the data plane publishes it; the registry's ``{table}__band`` is
+# then a view over the published band files (plans/s3-resident-state.md), so the warm tier is never copied
+# into a fresh registry. Reserved prefix: never published as a table of its own.
+WARM_PENDING_PREFIX = "_duckstring_band_"
 # A plain overwrite table is published as **versions**: one immutable file per run under ``{table}__v/``,
 # named by the run's freshness (:func:`part_name`), so a Sink run pinned to a Source version keeps reading
 # it while the Source publishes the next one. Retention trims superseded versions (see the data plane).
@@ -176,6 +180,11 @@ def table_versions(data_dir, table: str) -> list[str]:
     """The published version **names** of an overwrite ``table`` (its ``{table}__v/`` directory), sorted
     oldest-first (canonical-UTC part names sort in freshness order); ``[]`` when it has none."""
     return _store(data_dir).parquet_names(version_dir_name(table))
+
+
+def warm_pending_name(table: str) -> str:
+    """The registry table where a warm fold stages its band until it's published (:func:`fold_warm`)."""
+    return f"{WARM_PENDING_PREFIX}{table}"
 
 
 def base_chunks(data_dir, table: str) -> list[str]:
@@ -359,7 +368,8 @@ def drop_table(con, name: str) -> None:
     Trickle that is the base/main + ``__changelog`` + warm ``__band`` + ``__droplog`` + the aggregate/scan
     state companions + the meta row/floor; for a plain overwrite table just the one table. Idempotent."""
     for t in (
-        name, cold_base_name(name), changelog_name(name), warm_name(name), f"{name}{DROPLOG_SUFFIX}",
+        name, cold_base_name(name), changelog_name(name), warm_name(name), warm_pending_name(name),
+        f"{name}{DROPLOG_SUFFIX}",
         f"{AGG_STATE_PREFIX}{name}", f"{ACC_STATE_PREFIX}{name}",
     ):
         _drop_relation(con, t)  # a merge main's name and cold base may be views
@@ -807,11 +817,13 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
 
 def _clog_union_sql(con, name: str) -> str | None:
     """The full Z-set log of merge main ``name`` above the cold base — the **warm tier** (consolidated
-    bands, :func:`warm_name`) ⊎ the **hot** ``__changelog`` (per-run). Their freshness ranges are disjoint
-    (a ``fold_warm`` moves a slice from hot to warm), so the union is the changelog ``> f_base`` with no
-    double-count. ``None`` when neither exists."""
-    clog, warm = changelog_name(name), warm_name(name)
-    parts = [f'SELECT * FROM {_q(t)}' for t in (clog, warm) if _table_exists(con, t)]
+    bands: the published ones through the ``{name}__band`` view, plus a fold's band not yet published, in
+    :func:`warm_pending_name`) ⊎ the **hot** ``__changelog`` (per-run). Their freshness ranges are disjoint
+    (a ``fold_warm`` moves a slice from hot to warm, and publishing moves a band from pending to the view in
+    one transaction), so the union is the changelog ``> f_base`` with no double-count. ``None`` when none
+    exists."""
+    clog, warm, pending = changelog_name(name), warm_name(name), warm_pending_name(name)
+    parts = [f'SELECT * FROM {_q(t)}' for t in (clog, warm, pending) if _table_exists(con, t)]
     if not parts:
         return None
     return " UNION ALL BY NAME ".join(parts)
@@ -975,8 +987,11 @@ def fold_warm(con, name: str, target_f) -> None:
     image's latest ``_duckstring_f`` preserved). This is the cheap, frequent compaction: it keeps reconstruct
     reading few dense files and defers the O(base) cold rewrite. It **raises the delta floor** to ``target_f``
     — the folded per-run windows are no longer available, so a consumer behind ``target_f`` full-reads (a
-    caught-up consumer reading the still-hot ``> target_f`` window is unaffected). Idempotent at ``target_f``."""
-    clog, warm = changelog_name(name), warm_name(name)
+    caught-up consumer reading the still-hot ``> target_f`` window is unaffected). Idempotent at ``target_f``.
+
+    The band is staged in :func:`warm_pending_name` (the published bands are a read-only view); the data
+    plane publishes it as a band file and swaps it into the view (``dataplane._export_bands``)."""
+    clog, pending = changelog_name(name), warm_pending_name(name)
     if not _table_exists(con, clog):
         return
     lo = _f_warm(con, name) or _f_base(con, name)
@@ -993,9 +1008,9 @@ def fold_warm(con, name: str, target_f) -> None:
         con.execute(f'DROP TABLE IF EXISTS {_q(band)}')
         # Still advance the watermark/floor: an empty net change over the slice is fully folded (nothing to keep).
     else:
-        if not _table_exists(con, warm):
-            con.execute(f'CREATE TABLE {_q(warm)} AS SELECT * FROM {_q(band)} LIMIT 0')
-        con.execute(f'INSERT INTO {_q(warm)} SELECT * FROM {_q(band)}')
+        if not _table_exists(con, pending):
+            con.execute(f'CREATE TABLE {_q(pending)} AS SELECT * FROM {_q(band)} LIMIT 0')
+        con.execute(f'INSERT INTO {_q(pending)} SELECT * FROM {_q(band)}')
         con.execute(f'DROP TABLE IF EXISTS {_q(band)}')
     # Remove the folded slice from the hot changelog (it now lives, consolidated, in the warm tier).
     con.execute(f'DELETE FROM {_q(clog)} WHERE {locond}{_q(F_COL)} <= {_ts(target_f)}')
@@ -1020,7 +1035,8 @@ def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> Non
     _drop_relation(con, cold)  # the base may be a VIEW over S3 chunks — CREATE OR REPLACE TABLE can't replace it
     con.execute(f'CREATE TABLE {_q(cold)} AS SELECT * FROM {_q(tmp)}')  # the new base, now a local table
     con.execute(f'DROP TABLE IF EXISTS {_q(tmp)}')
-    con.execute(f'DROP TABLE IF EXISTS {_q(warm)}')  # the warm tier is now folded into the cold base
+    _drop_relation(con, warm)  # the warm tier (a view over published bands) is now folded into the cold base
+    con.execute(f'DROP TABLE IF EXISTS {_q(warm_pending_name(name))}')
     _set_f_base(con, name, target_f)
     _set_f_warm(con, name, target_f)  # warm is empty; its watermark tracks the cold base
     cutoff = _apply_retention(con, clog, target_f, retain_t, retain_n)

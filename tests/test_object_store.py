@@ -158,6 +158,38 @@ def test_versioned_overwrite_on_a_real_s3(s3_env, tmp_path):
     assert _keys(client, "versions/a__v/") == [f"versions/a__v/{part_name(f2)}"]
 
 
+def test_warm_bands_are_read_from_a_real_s3(s3_env, monkeypatch):
+    """A merge table's warm bands, published to a bucket, are read there by a fresh registry through a view
+    over the band objects, never copied in (plans/s3-resident-state.md)."""
+    from datetime import datetime, timedelta, timezone
+
+    import duckdb
+
+    from duckstring import trickle_io as T
+    from duckstring.dataplane import ParquetDataPlane, hydrate_registry
+    from duckstring.storage import get_storage
+
+    monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", str(1 << 40))
+    _endpoint, client = s3_env
+    store = get_storage(f"s3://{_BUCKET}/warm")
+    f0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    for h, rows in ((1, "(1, 'a'), (2, 'b')"), (2, "(1, 'A'), (2, 'b'), (3, 'c')")):
+        T.merge_table(con, "m", con.sql(f"SELECT * FROM (VALUES {rows}) t(id, v)"), f0 + timedelta(hours=h), ("id",))
+        ParquetDataPlane().export(con, store, f=f0 + timedelta(hours=h))
+    T.fold_warm(con, "m", f0 + timedelta(hours=1))
+    ParquetDataPlane().export(con, store, f=f0 + timedelta(hours=2))
+    assert [k for k in _keys(client, "warm/m__band/") if k.endswith(".parquet")]
+
+    fresh = duckdb.connect()
+    fresh.execute("SET TimeZone='UTC'")
+    hydrate_registry(fresh, store)
+    sql = fresh.execute("SELECT sql FROM duckdb_views() WHERE view_name = 'm__band'").fetchone()[0]
+    assert "s3://" in sql
+    assert sorted(fresh.sql('SELECT id, v FROM "m"').fetchall()) == [(1, "A"), (2, "b"), (3, "c")]
+
+
 # ─── the full runtime, publishing to S3 ──────────────────────────────────────────
 
 

@@ -1,7 +1,8 @@
 # Plan: S3-resident state — hydrate nothing, read what you touch
 
-> **Status: steps 1 (retention decoupling) and 2 (base-as-view) IMPLEMENTED and verified; steps 3/4
-> designed, not built.**
+> **Status: steps 1 (retention decoupling), 2 (base-as-view) and warm-as-view IMPLEMENTED and verified
+> (warm: 2026-10-04, see "Warm bands as a reference (built 2026-10-04)" at the end). The rest is deferred
+> by the author's decision, with the reasons recorded there.**
 >
 > **Done (step 1 — the keystone):** pruning is **floor-anchored, never absence-inferred**, at BOTH prune
 > sites. `_export_parts` drops a published part only when the table's floor covers it (the explicit
@@ -251,3 +252,59 @@ compact threshold before it folds) and the accumulators — is bounded, so a fre
 O(bounded-hot), not O(history), for the motivating case. Steps 1–4 drive that last bounded cost toward zero
 and are worth doing, but each is a deliberate, independently-tested change to the core incremental engine, not
 a mechanical follow-through — they should land one at a time behind their own verification, not in a rush.
+
+## Warm bands as a reference (built 2026-10-04)
+
+**Why it was next.** "Practical read" above calls what remained after step 2 bounded. The warm tier isn't:
+a checkpoint runs only once the warm tier is as large as the cold base, so the warm tier grows to about the
+base's size. It was the one unbounded cost a fresh Duck still copied in.
+
+**As built.**
+
+- `fold_warm` stages its band in a reserved-prefix table, `_duckstring_band_{table}`
+  (`trickle.io.warm_pending_name`), instead of appending to a warm table. The Trickle engine stays
+  data-plane-agnostic.
+- `dataplane._export_bands` writes the staged rows as `{table}__band/{f_warm}.parquet`, then in one DuckDB
+  transaction repoints the registry's `{table}__band` at a view over an **explicit list** of the band files
+  above `f_base`, drops the staging table and refreshes the merge view. The explicit list means a new file
+  never shows up in the view before the staged rows are dropped, so a concurrent read never counts a band
+  twice. It runs at the start of every tiered publish too, so a band staged before a crash is published by
+  the next export.
+- A legacy registry whose warm tier is a table is converted on its next export: rows newer than the newest
+  published band are staged and published, the rest are already in band files.
+- `hydrate_registry` registers the same view (bands above `f_base` only; the warm watermark is the newest
+  of those, else `f_base`) instead of copying the bands.
+- Persist prunes band files by `f_base`, inclusive, including a band directory a checkpoint removed
+  locally. It used to prune them by the floor, which every fold raises while the older bands are still live.
+
+**Found on the way.**
+
+- Every export also wrote the whole warm table as a stray `{table}__band.parquet` (it fell through the
+  publish loop as a plain table), and `list_tables` showed it as a table: an O(warm) write and Persist
+  upload per run. Gone, since the warm tier is no longer a registry table.
+- A Duck that lost its local publish (local-first, box loss) rebuilt its registry from the durable layer
+  but left the local publish incomplete: no base chunks, since the base is a view, and after a fold the
+  persisted bands could be pruned. Ponds on the same machine read that local publish first, so they could
+  read a merge table without its base until the next checkpoint. The Duck now restores the local publish
+  from the durable layer first (`dataplane.restore_tree`, sidecar last so an interrupted restore is never
+  trusted), then hydrates from it. This copies the state in that one rare case, which is what keeps the
+  local layout complete. Cloud Ducks publish to the data root directly and never take this path.
+
+**Tests:** `tests/test_warm_resident.py`, `test_object_store.test_warm_bands_are_read_from_a_real_s3`.
+
+## Deferred (author decision, 2026-10-04)
+
+What a fresh Duck still copies, and why it stays for now:
+
+- **Append Trickle history** (not in the tiers table above): copied in full. But with a primary key and
+  the default `fail_on_conflict=True`, every run checks new rows against the whole history, so it's read
+  each run regardless; reading it from S3 would trade one copy at start for a scan per run. Only appends
+  without a key (or with checking off) would gain. A case-specific optimisation, deferred.
+- **Hot changelog** (step 3): bounded at about twice the compaction threshold before it folds, and the
+  most intricate change (mid-run chained reads, the pending/publish lifecycle). Deferred.
+- **Aggregate and accumulate state** (step 4): every run rewrites the whole snapshot, a per-run cost in
+  the number of groups as well as a startup copy. Worth it only for aggregates with millions of groups.
+  Deferred until such a workload exists.
+- **Overwrite tables** stay copied: the publish set is built from the registry, so an uncopied table would
+  drop out of the published output.
+

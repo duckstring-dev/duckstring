@@ -259,17 +259,18 @@ class RippleExecutor(RunInputs):
         # the first S3 read (typically hydration) fails with a 403 "no credentials provided".
         self.own_data_dir.duckdb_setup(self._registry)
         if recover:
-            from ..dataplane import hydrate_registry
+            from ..dataplane import hydrate_registry, restore_tree
 
-            # Hydrate from the local publish first (co-located, cheap). A true box loss (local publish
-            # gone too) falls back to the durable persist layer — the whole point of always-persist.
-            source_dir = self.own_data_dir
+            # Hydrate from the local publish (co-located, cheap). A true box loss (local publish gone too)
+            # first restores the local publish from the durable persist layer (the whole point of
+            # always-persist): the registry's views read it, and Ponds on this machine read it too.
+            where = "published state"
             if self.persist_dir is not None and not self.own_data_dir.exists("_trickle.json") \
                     and self.persist_dir.exists("_trickle.json"):
-                source_dir = self.persist_dir
-            hydrated = hydrate_registry(self._registry, source_dir)
+                restore_tree(self.persist_dir, self.own_data_dir)
+                where = "persist layer"
+            hydrated = hydrate_registry(self._registry, self.own_data_dir)
             if hydrated:
-                where = "persist layer" if source_dir is self.persist_dir else "published state"
                 print(f"[executor] registry file was {recovery} — hydrated {len(hydrated)} table(s) "
                       f"from the {where}: {', '.join(hydrated)}", flush=True)
         self._cursor_lock = threading.Lock()

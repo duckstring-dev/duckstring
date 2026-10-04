@@ -729,11 +729,13 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
     agg/acc accumulator snapshots (``state/{agg|acc}/{table}/``). Tables are ``CREATE OR REPLACE``d,
     so hydration is idempotent and safe over a partially-present registry.
 
-    Two callers: **Duck registry-loss recovery** (the registry *file* is gone — host loss, migration,
-    scale-to-zero — but the published state survives; see ``RippleExecutor``) and the **DuckFlock
-    routing path** (a remotely-executed ripple's outputs land in a scratch publish dir and are read
-    back so the run's normal export + contract gate + downstream ripples see them). Returns the
-    hydrated base-table names."""
+    A merge main's cold base and warm bands aren't copied: they're registered as views over the published
+    files (plans/s3-resident-state.md), so ``data_dir`` should be where this registry publishes. A Duck that
+    lost its local publish restores it first (:func:`restore_tree`).
+
+    The caller is **Duck registry-loss recovery** (the registry *file* is gone or unreadable: host loss,
+    migration, scale-to-zero, a fresh cloud Duck; the published state survives; see ``RippleExecutor``).
+    Returns the hydrated base-table names."""
     from . import trickle_io as trickle
 
     store = _as_storage(data_dir)
@@ -768,25 +770,28 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
                 sql = plane._raw_read_select(store, table)
                 con.execute(f'CREATE OR REPLACE TABLE {trickle._q(table)} AS {sql}')
                 loaded = True
-        for companion in (trickle.changelog_name(table), trickle.warm_name(table),
-                          f"{table}{trickle.DROPLOG_SUFFIX}"):
+        for companion in (trickle.changelog_name(table), f"{table}{trickle.DROPLOG_SUFFIX}"):
             if trickle.table_parts(store, companion):
                 sql = plane._flat_read_select(store, companion)
                 con.execute(f'CREATE OR REPLACE TABLE {trickle._q(companion)} AS {sql}')
                 loaded = True
-        if mode in ("merge", "append") and loaded:
-            from datetime import datetime
+        from datetime import datetime
 
+        f_base = datetime.fromisoformat(entry["f_base"]) if entry.get("f_base") else None
+        bands = _band_names(store, table, f_base) if mode == "merge" else []
+        loaded = loaded or bool(bands)
+        if mode in ("merge", "append") and loaded:
             trickle._record_meta(con, table, mode, tuple(entry.get("pk") or ()))
             if entry.get("floor"):
                 trickle._advance_floor(con, table, bootstrap_f=datetime.fromisoformat(entry["floor"]))
-            if entry.get("f_base"):
-                trickle._set_f_base(con, table, datetime.fromisoformat(entry["f_base"]))
-            band_fs = [trickle.part_f(n) for n in trickle.table_parts(store, trickle.warm_name(table))]
-            f_warm = max(band_fs) if band_fs else (
-                datetime.fromisoformat(entry["f_base"]) if entry.get("f_base") else None)
+            if f_base is not None:
+                trickle._set_f_base(con, table, f_base)
+            # The warm watermark is the newest band still above the base (a band at or below it is stale).
+            f_warm = max(trickle.part_f(n) for n in bands) if bands else f_base
             if f_warm is not None:
                 trickle._set_f_warm(con, table, f_warm)
+            if mode == "merge":
+                _set_band_view(con, store, table)
             trickle.refresh_current_view(con, table)
         # Extension 1: the agg/acc accumulator snapshots (latest snapshot per companion).
         for kind, prefix in (("agg", trickle.AGG_STATE_PREFIX), ("acc", trickle.ACC_STATE_PREFIX)):
@@ -802,6 +807,26 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
         if loaded:
             hydrated.append(table)
     return hydrated
+
+
+def restore_tree(src, dest) -> int:
+    """Copy a published layout from ``src`` (the durable persist layer) to ``dest`` (a lost local publish),
+    every file, with the ``_trickle.json`` sidecar last: a local sidecar is what makes a layout count as
+    published (``registry.resolve_data_dir``, Duck recovery), so an interrupted restore is never trusted.
+    The inverse of :func:`persist_tree` for a Duck whose machine lost its local publish: the local layout
+    must be complete again, since Ponds on the same machine read it and the registry's views point at it.
+    Returns the number of files copied."""
+    from .storage import copy_tree
+
+    src, dest = _as_storage(src), _as_storage(dest)
+    dest.mkdir()
+    count = 0
+    for sub in src.subdir_names():
+        count += copy_tree(src.child(sub), dest.child(sub))
+    for name in sorted(src.names(), key=lambda n: n == "_trickle.json"):
+        dest.write_bytes(src.read_bytes(name), name)
+        count += 1
+    return count
 
 
 def persist_tree(local_dir, dest) -> int:
@@ -844,11 +869,17 @@ def persist_tree(local_dir, dest) -> int:
         part merely absent locally is KEPT — absence is what a partial local (a future partially-hydrated
         box) looks like, and pruning on it would delete real history from the durable plane. ``None`` =
         no watermark → never prune this dir's files."""
-        from .trickle.io import BASE_SUFFIX, CHANGELOG_SUFFIX, VERSION_SUFFIX
+        from .trickle.io import BASE_SUFFIX, CHANGELOG_SUFFIX, VERSION_SUFFIX, WARM_SUFFIX
 
         entry = sidecar.get(base_table_name(dirname))
         if not isinstance(entry, dict):
             return None
+        if dirname.endswith(WARM_SUFFIX):
+            # Warm bands stay live until a checkpoint folds them into the base, so the base's watermark is
+            # the signal, inclusive: a band at or below f_base is in the base. (The floor rises with every
+            # fold while the older bands are still state; pruning by it lost them from the durable layer.)
+            iso = entry.get("f_base")
+            return (datetime.fromisoformat(iso), True) if iso else None
         if dirname.endswith(VERSION_SUFFIX):
             # Overwrite versions: the oldest version retention kept (prune_versions); older ones are gone.
             iso = entry.get("v_floor")
@@ -884,12 +915,22 @@ def persist_tree(local_dir, dest) -> int:
         dest.put_file(p, p.name)
         copied += 1
     # Prune destination directories only for tables the local sidecar no longer DECLARES (a table
-    # dropped/unpublished — an explicit signal); a declared table's missing local dir is left alone.
+    # dropped/unpublished — an explicit signal); a declared table's missing local dir is left alone, except
+    # warm bands, which are pruned up to the base watermark once a checkpoint has folded them.
+    from .trickle.io import WARM_SUFFIX, part_f
+
     for name in dest.subdir_names():
         if name in local_dirs or name == "state":
             continue
         if base_table_name(name) not in sidecar:
             dest.rmtree(name)
+        elif name.endswith(WARM_SUFFIX):
+            # A checkpoint removed the local band directory: its bands are in the base now.
+            mark = _drop_before(name)
+            for n in dest.parquet_names(name):
+                ff = _file_f(n, part_f)
+                if mark is not None and ff is not None and ff <= mark[0]:
+                    dest.remove(name, n)
     return copied
 
 
@@ -985,6 +1026,7 @@ def _publish_tiered_main(con, data_dir: Path, main: str, f) -> None:
     a fold/compaction trims the registry changelog."""
     from . import trickle_io as trickle
 
+    _export_bands(con, data_dir, main)  # a band staged but not yet published (a crash), or a legacy warm table
     threshold = _compact_threshold(con, main)
     clog, warm = trickle.changelog_name(main), trickle.warm_name(main)
     warm_store = data_dir.child(warm)
@@ -1041,30 +1083,78 @@ def _review_base(con, data_dir: Path, main: str) -> None:
     trickle.refresh_current_view(con, main)
 
 
-def _export_bands(con, data_dir: Path, main: str) -> None:
-    """Publish the merge main's warm tier as freshness-range **band** files (``{main}__band/{f}.parquet``),
-    one per fold, append-only. Each band keeps its rows' original ``_duckstring_f`` (so as-of reads stay
-    correct) and is named by its upper freshness. Idempotent: a band already on disk is not rewritten."""
+def _band_names(data_dir, main: str, f_base) -> list[str]:
+    """The published band files of merge main ``main`` still above its cold base (``f > f_base``); bands at
+    or below it were folded into the base by a checkpoint and are stale."""
+    from . import trickle_io as trickle
+
+    return [n for n in trickle.table_parts(data_dir, trickle.warm_name(main))
+            if f_base is None or trickle.part_f(n) > f_base]
+
+
+def _set_band_view(con, data_dir, main: str) -> None:
+    """Point the registry's ``{main}__band`` at the published band files (an explicit file list, so the view
+    changes only when it's recreated, never because a file appeared), or drop it when there are none. The
+    warm tier is read from where it's published and never copied into the registry
+    (plans/s3-resident-state.md)."""
     from . import trickle_io as trickle
 
     warm = trickle.warm_name(main)
-    f_warm = trickle._f_warm(con, main)
-    if not trickle._table_exists(con, warm) or f_warm is None:
-        return
+    names = _band_names(data_dir, main, trickle._f_base(con, main))
+    trickle._drop_relation(con, warm)  # a view, or a legacy table (its rows are published; see _export_bands)
+    if names:
+        files = ", ".join(f"'{data_dir.uri(warm, n)}'" for n in names)
+        con.execute(f'CREATE VIEW {trickle._q(warm)} AS '
+                    f'SELECT * FROM read_parquet([{files}], union_by_name=true)')
+
+
+def _export_bands(con, data_dir: Path, main: str) -> None:
+    """Publish the band a warm fold staged (``fold_warm`` → :func:`~duckstring.trickle.io.warm_pending_name`)
+    as ``{main}__band/{f_warm}.parquet``, then, in one transaction, repoint the ``{main}__band`` view to
+    include it and drop the staged rows, so a concurrent read sees the band exactly once. Each band keeps its
+    rows' original ``_duckstring_f`` (as-of reads stay correct) and is named by its upper freshness.
+
+    Idempotent: a band file already published isn't rewritten. Also converts a legacy registry, where the
+    warm tier was a table: its rows not yet in a published band are staged and published like a fold's. A
+    no-op when nothing is staged and the view is current."""
+    from . import trickle_io as trickle
+
+    warm, pending = trickle.warm_name(main), trickle.warm_pending_name(main)
+    q, fb = trickle._q, trickle._q(trickle.F_COL)
     band_store = data_dir.child(warm)
-    band_store.mkdir()
-    dest_name = trickle.part_name(f_warm)
-    if band_store.exists(dest_name):  # replay-idempotent
-        return
     published = [trickle.part_f(n) for n in band_store.parquet_names()]
     last_hi = max(published) if published else None
-    fb = f'"{trickle.F_COL}"'
-    lo = f"{fb} > {trickle._ts(last_hi)} AND " if last_hi is not None else ""
-    with band_store.copy_to(dest_name) as uri:
-        con.execute(
-            f'COPY (SELECT * FROM "{warm}" WHERE {lo}{fb} <= {trickle._ts(f_warm)}) '
-            f"TO '{uri}' (FORMAT PARQUET)"
-        )
+    above = f"{fb} > {trickle._ts(last_hi)}" if last_hi is not None else "1=1"
+
+    legacy = con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND schema_name = 'main'",
+                         [warm]).fetchone() is not None
+    if legacy:
+        if trickle._table_exists(con, pending):
+            con.execute(f'INSERT INTO {q(pending)} SELECT * FROM {q(warm)} WHERE {above}')
+        else:
+            con.execute(f'CREATE TABLE {q(pending)} AS SELECT * FROM {q(warm)} WHERE {above}')
+    staged = trickle._table_exists(con, pending)
+    if not legacy and not staged:
+        return
+
+    f_warm = trickle._f_warm(con, main)
+    if staged and f_warm is not None:
+        dest = trickle.part_name(f_warm)
+        rows = con.execute(f'SELECT count(*) FROM {q(pending)} WHERE {above}').fetchone()[0]
+        if rows and not band_store.exists(dest):
+            band_store.mkdir()
+            with band_store.copy_to(dest) as uri:
+                con.execute(f'COPY (SELECT * FROM {q(pending)} WHERE {above}) TO \'{uri}\' (FORMAT PARQUET)')
+
+    con.execute("BEGIN TRANSACTION")
+    try:
+        _set_band_view(con, data_dir, main)
+        con.execute(f'DROP TABLE IF EXISTS {q(pending)}')
+        trickle.refresh_current_view(con, main)
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
 
 
 # The smallest chunk the cold base is split into. DuckDB 2.0's COPY rollover never terminates when

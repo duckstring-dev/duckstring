@@ -88,8 +88,9 @@ src/duckstring/
                            # json_serialize_sql reference check, source.table rewriting, the synthesised Ripple callable.
                            # Incremental I/O is a capability of the Pond handle; there is no separate @trickle node type.
   dataplane.py             # The data plane: how a Pond publishes and reads tables across Ponds (versioned Parquet).
-                           # Also hydrate_registry (published state back into a registry: Duck registry-loss recovery and the
-                           # DuckFlock routing read-back), the Extension-1 state/ companion snapshots and Extension-2 sidecar stats.
+                           # Also hydrate_registry (published state back into a registry: Duck registry-loss recovery; the merge
+                           # base and warm bands become views over the published files), restore_tree (a lost local publish back
+                           # from the durable layer), the Extension-1 state/ companion snapshots and Extension-2 sidecar stats.
   flock/                   # The Flock: over-envelope compute. A pond.trickle(...) terminal's comprehensive recompute is dispatched to a
                            # serverless engine while the Duck keeps merge/diff/publish. See "The Flock" below.
   environments.py          # Pond environments: a Pond's pyproject.toml + uv.lock → an env built by uv under {root}/envs/{hash},
@@ -389,7 +390,7 @@ The data plane is how a Pond publishes its tables for other Ponds and how it rea
 
 **The merge main is a three-tier log-structured store** (`plans/trickle-main-incremental.md`):
 - **L0**: the hot `__changelog` (per-run parts; the source for `read_delta` windows).
-- **L1**: warm Z-set bands consolidated over freshness ranges (`{table}__band/`), written by `fold_warm` when the hot tier grows past twice the chunk threshold. It always leaves a hot window so caught-up consumers still get a delta, which raises the delta floor.
+- **L1**: warm Z-set bands consolidated over freshness ranges (`{table}__band/`), written by `fold_warm` when the hot tier grows past twice the chunk threshold. It always leaves a hot window so caught-up consumers still get a delta, which raises the delta floor. The warm tier grows to about the cold base's size before a checkpoint, so it isn't copied into a registry: `fold_warm` stages a band in `_duckstring_band_{table}` (`warm_pending_name`), `dataplane._export_bands` publishes it and, in one transaction, repoints the registry's `{table}__band` (a view over an explicit list of band files above `f_base`) and drops the staging table; hydration registers that view (`_set_band_view`). A legacy warm *table* is converted on the next export. Persist prunes bands by `f_base` (inclusive), never by the floor (bands below the floor are still state), including a band dir a checkpoint removed locally. A Duck that lost its local publish restores it from the durable layer (`restore_tree`, sidecar last) before hydrating, so the local layout the views and co-located Sinks read is complete.
 - **L2**: the cold clean base (strictly `d=+1`, one row per PK), published as size-bounded, freshness-ordered chunks in `{table}__base/` (DuckDB `FILE_SIZE_BYTES`, floored at `_MIN_CHUNK_BYTES` = 64 KiB: DuckDB 2.0's rollover loops forever, creating empty files, below about 16 bytes, and tests set the threshold to 1 to force compaction). It's rewritten only at a cold compaction (`checkpoint`, k=1: when warm ≥ cold, and never below `DUCKSTRING_COMPACT_THRESHOLD`, default 256 MiB, or a per-table override recorded at the merge write).
 - Per-run publishing is O(change); the O(base) cold rewrite is amortised by k=1.
 - Reading a merge main reconstructs the current state as latest-per-PK over the cold base plus warm and hot rows filtered to `> f_base`. The cold base is anti-joined by the retraction keys, never grouped (`DataPlane.read_select` over `_flat_read_select`, which skips the versions probe for never-versioned operands).

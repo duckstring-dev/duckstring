@@ -66,8 +66,8 @@ def test_plain_sql_reads_current_state_after_compaction(reg):
 def test_plain_sql_includes_the_warm_tier(reg):
     T.merge_table(reg, "dim", _state(reg, [(1, "a")]), ts(1), ("id",))
     T.merge_table(reg, "dim", _state(reg, [(1, "a"), (2, "b")]), ts(2), ("id",))
-    T.fold_warm(reg, "dim", ts(1))  # moves the first run's changes into a warm band
-    assert T._table_exists(reg, T.warm_name("dim"))
+    T.fold_warm(reg, "dim", ts(1))  # moves the first run's changes into a warm band, staged until published
+    assert T._table_exists(reg, T.warm_pending_name("dim"))
     assert _plain(reg) == _current(reg) == [(1, "a"), (2, "b")]
 
 
