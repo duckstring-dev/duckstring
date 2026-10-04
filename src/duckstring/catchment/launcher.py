@@ -282,6 +282,14 @@ class DispatchingLauncher:
         self._owner[pond_key] = backend
         backend.ensure(pond_key, version, source_path, duck=duck)
 
+    def release(self, pond_key: str) -> None:
+        """The Pond's Duck collected a shutdown and will exit on its own. A local process or a Pool
+        agent reports that exit itself; a remote task or instance record has to be dropped here, or
+        the next ensure() would take the departed Duck for a live one and launch nothing."""
+        owner = self._owner.get(pond_key)
+        if owner is not None and hasattr(owner, "release"):
+            owner.release(pond_key)
+
     def terminate(self, pond_key: str, wait: bool = False) -> None:
         owner = self._owner.pop(pond_key, None)
         if owner is not None:

@@ -86,7 +86,11 @@ def _userdata(*, pond: str, major: int, version: str, source_path: str, catchmen
               region: str | None = None) -> str:
     """The cloud-init shell that boots the Duck. It fetches its own source artifact over the duck
     channel (the dir won't exist on the box), so nothing but the reachable Catchment URL + token is
-    needed. ``pip_spec`` installs duckstring when the AMI doesn't already carry it."""
+    needed. ``pip_spec`` installs duckstring when the AMI doesn't already carry it.
+
+    A clean exit (the Catchment's shutdown) powers the instance off, and the launch sets shutdown to
+    terminate it, so an idle Duck's machine never outlives it. A crash leaves it up, so its console
+    can still be read (``diagnose``) until the liveness sweep terminates it."""
     cmd = [
         "python3", "-m", "duckstring.duck",
         "--pond", pond, "--major", str(major), "--version", version,
@@ -98,7 +102,7 @@ def _userdata(*, pond: str, major: int, version: str, source_path: str, catchmen
              f"mkdir -p {_REMOTE_ROOT}", _UV_CACHE]
     if pip_spec:
         lines.append(f"pip3 install --quiet {shlex.quote(pip_spec)}")
-    lines.append("exec " + " ".join(shlex.quote(c) for c in cmd))
+    lines.append(" ".join(shlex.quote(c) for c in cmd) + " && shutdown -h now")
     return "\n".join(lines) + "\n"
 
 
@@ -210,6 +214,7 @@ class Ec2Launcher:
             "InstanceType": instance_type,
             "MinCount": 1, "MaxCount": 1,
             "UserData": base64.b64encode(userdata.encode()).decode(),
+            "InstanceInitiatedShutdownBehavior": "terminate",  # a clean Duck exit ends the instance
             "TagSpecifications": [{
                 "ResourceType": "instance",
                 "Tags": [
@@ -358,6 +363,13 @@ class Ec2Launcher:
         keep = [ln for ln in out.splitlines()
                 if ln.strip() and not ln.startswith(("ci-info:", "[", "<"))]
         return " | ".join(keep[-lines:]) or None
+
+    def release(self, pond_key: str) -> None:
+        """The Duck was told to shut down: forget the instance without terminating it (the Duck may still
+        be persisting). A clean exit powers it off, which terminates it (see _userdata), and the next
+        ensure() launches a fresh one."""
+        self._pending.pop(pond_key, None)
+        self._instances.pop(pond_key, None)
 
     def terminate(self, pond_key: str, wait: bool = False) -> None:
         self._pending.pop(pond_key, None)

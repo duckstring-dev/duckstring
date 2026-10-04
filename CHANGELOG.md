@@ -73,6 +73,12 @@ export time. See "Upgrading" at the end.
   on the machine.
 - Querying a missing table says the Pond hasn't run yet, or lists the tables it has.
 - A Pool agent stopped with SIGTERM stops its Ducks.
+- A Fargate or EC2 Duck shut down for being idle is replaced on the Pond's next run. Before, the Catchment
+  kept the departed Duck's record, launched nothing, and failed the run as "Lost contact" three minutes
+  later.
+- An EC2 Duck's instance terminates when the Duck exits cleanly, instead of running, and billing, after
+  the Duck has gone. A Duck that crashes leaves its instance up so its console output can be read.
+- SQL Ripples that read a Source work on the DuckDB 2.0 pre-release.
 
 ### Documentation
 

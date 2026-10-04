@@ -483,3 +483,44 @@ def test_closing_abandoned_runs_never_rewrites_a_reported_outcome(tmp_path):
     assert rows[first.isoformat()] == "failed"
     (err,) = d.db.execute("SELECT error FROM pond_run WHERE f = ?", (first.isoformat(),)).fetchone()
     assert err == "boom", "the Duck's own failure message was overwritten"
+
+
+def test_a_reaped_remote_duck_is_replaced_on_the_next_run(tmp_path):
+    """A remote Duck exits on its own once it collects a shutdown, but its task record used to stay, so
+    the next Run took the departed Duck for a live one, launched nothing, and failed three minutes later
+    as "Lost contact" (found by the 0.6.0rc1 smoke test on Fargate). Collecting the shutdown now
+    releases the record."""
+    from duckstring.catchment.driver import _now
+
+    class _RecordLauncher(NoopLauncher):
+        manages_processes = True
+
+        def __init__(self):
+            self.records, self.launches = set(), 0
+
+        def is_running(self, pond_name: str) -> bool:
+            return pond_name in self.records
+
+        def ensure(self, pond_name, version, source_path, duck=None) -> None:
+            if pond_name not in self.records:  # a live record makes ensure a no-op, as on Fargate
+                self.records.add(pond_name)
+                self.launches += 1
+
+        def release(self, pond_name: str) -> None:
+            self.records.discard(pond_name)
+
+    lch = _RecordLauncher()
+    d = _inlet_driver(tmp_path, "reap.db", lch)
+    d.pulse("src@1")
+    d.take_jobs("src@1")
+    _complete_run(d, "src@1")
+    assert lch.launches == 1
+
+    d._reap_idle()  # starts the idle clock
+    d._idle_since["src@1"] = _now() - timedelta(minutes=1)
+    d._reap_idle()
+    assert [j["kind"] for j in d.take_jobs("src@1")] == ["shutdown"]
+    assert not lch.is_running("src@1")
+
+    d.pulse("src@1")
+    assert lch.launches == 2

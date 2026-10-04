@@ -2437,6 +2437,10 @@ class Driver:
             self._awaiting_first_contact.discard(pond)
             jobs = self.jobs.get(pond, [])
             self.jobs[pond] = []
+            if any(j.get("kind") == "shutdown" for j in jobs) and hasattr(self.launcher, "release"):
+                # The Duck exits once idle. Forget a remote task or instance now, so a Run that arrives
+                # after it has gone launches a new Duck instead of waiting on the departed one.
+                self.launcher.release(pond)
             return jobs
 
     # ─── Pond Draws (cross-Catchment) ───────────────────────────────────────────
