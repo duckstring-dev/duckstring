@@ -2,6 +2,96 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
+## 0.6.0 (unreleased)
+
+SQL Ripples, clustering, Pond environments and a simpler data plane. The Iceberg plane is gone: every
+Catchment now publishes versioned Parquet, which pins each run's Source reads and costs a third of the
+export time. See "Upgrading" at the end.
+
+### Building Ponds
+
+- **SQL Ripples**: a Ripple can be one `SELECT` in a file, declared in `pond.toml` under
+  `[ripples.NAME]` with its `parents`, the Source tables it `reads`, and how it writes (`overwrite`,
+  `merge` or `append`). Nothing is inferred from the SQL; each query is checked against its declaration
+  at deploy, so a forgotten parent is refused instead of silently reading the previous run's table. SQL
+  and Python Ripples mix freely (`@ripple(parents=...)` now takes names), and column lineage is
+  recorded for SQL Ripples too. `duckstring pond demo --sql` shows the default pipeline in SQL.
+- **Static tables**: files shipped with a Pond's code, declared under `[static.NAME]`, are read-only
+  tables every Ripple can query.
+- **Pond environments**: a Pond with a `pyproject.toml` and `uv.lock` runs in its own environment, built
+  at deploy on the Catchment and by cloud and Pool Ducks on their own machines. A missing or stale lock,
+  or code that won't import, now refuses the deploy with the reason (an import error used to register no
+  Ripples).
+- **`.pondignore`**: chooses which files a deploy uploads; by default `puddles/`, `.env` files, hidden
+  directories and caches stay behind.
+- Names containing dots can be referenced with backticks (``sales.`daily.v2` ``).
+- A merge Trickle's name is a view over its current state, so plain SQL in later Ripples reads what
+  `read_table` returns.
+
+### Performance
+
+- **Clustering**: `cluster_by` on `merge_table`, the builder's `.merge()`, `write_table` and SQL Ripples
+  orders a table for reads that filter on those columns. One column sorts; two or more are interleaved
+  with a rank-Morton order (each column's quantile ranks, bit-interleaved), so every listed column
+  prunes, skewed ones included. A merge table's compacted base is now ordered by its primary key by
+  default instead of by freshness, which no read could use.
+- A merge table's warm tier is read where it's published instead of being copied into a fresh Duck's
+  database, and is no longer also re-published in full on every export.
+
+### Data plane
+
+- **Versioned overwrite tables**: each run publishes a plain table as a new immutable version, and a
+  Sink run reads the version its Source had published when the run started, even if the Source publishes
+  again meanwhile. Superseded versions are kept only while a running Sink still reads them.
+- **The Iceberg plane is removed**, with `pyiceberg`, `DUCKSTRING_DATA_PLANE` and
+  `DUCKSTRING_ICEBERG_KEEP_SNAPSHOTS`. It cost about three times the export time, more than twice the
+  memory and over three times the disk of the Parquet plane, for interop no external engine could use.
+- A registry DuckDB can't open (written by a newer DuckDB, or corrupt) is set aside and rebuilt from
+  published state instead of stopping the Duck.
+
+### Cloud and egress
+
+- Flock settings and engine credentials travel with each run, so Fargate and EC2 Ducks can use the
+  Flock; they received neither before.
+- The **Duck image is published** to GHCR for amd64 and arm64, tagged with the version, so cloud Ducks
+  need no image of your own unless Ponds need system libraries.
+- The S3 Spout now honours `?endpoint=` and `DUCKSTRING_S3_ENDPOINT`, so it works with MinIO, R2 and
+  Ceph; it used to reach only AWS. Tested against MinIO in CI.
+- A failed Spout delivery is retried when its source next publishes, and a Spout or alert destination
+  can be a single `${env:...}` or `${secret:...}` reference.
+- A Pond Draw records its upstream's real version, so a `[sources]` pin above `{major}.0.0` deploys.
+- A Duck that lost its local publish restores it from the durable layer before rebuilding, so Ponds on
+  the same machine never read it incomplete; the durable copy no longer loses warm bands after such a
+  rebuild.
+
+### Correctness and operability
+
+- **DuckDB is bounded** to the tested range, `>=1.5,<2`, and CI tests the floor and the DuckDB 2.0
+  pre-release. A change to or from DuckDB 2.0's `VARIANT` type counts as breaking in the version
+  contract.
+- `catchment init` and `start` warn when an open Catchment binds beyond loopback, since a deploy runs code
+  on the machine.
+- Querying a missing table says the Pond hasn't run yet, or lists the tables it has.
+- A Pool agent stopped with SIGTERM stops its Ducks.
+
+### Documentation
+
+The documentation is rewritten: Quickstart, Concepts, task-led Guides and a full Reference (Python API,
+`pond.toml`, every CLI command group, the HTTP API, formats and environment variables), with the README and
+landing page repositioned around Duckstring as a data engineering platform for DuckDB.
+
+### Upgrading
+
+- **Published layout**: plain tables are now written as `{table}__v/{version}.parquet`. Readers still read
+  a Source's old single `{table}.parquet` until it publishes again, so Ponds can be upgraded in any order.
+- **Leftover Iceberg files**: a data directory published by the Iceberg plane keeps a `catalog.json` and a
+  `pond/` directory that nothing reads now. Delete them; on a Catchment using local-first publish with an
+  S3 data root, the Persist mirror would otherwise upload them.
+- **`DUCKSTRING_DATA_PLANE`** is no longer read; remove it from the environment.
+- **DuckDB 2.0** isn't supported yet: installing Duckstring keeps DuckDB below 2, including in Pond
+  environments that lock a newer one.
+- The Catchment database migrates itself on start (one new column).
+
 ## 0.5.0 — 2026-08-03
 
 The cloud release: a Catchment can now run its Ducks on AWS, keep its data on S3, and serve that data

@@ -98,7 +98,7 @@ Check that the value has a host. A URL built from an empty variable, such as an 
 Fargate is the default, and the fastest to start (about twenty seconds). Configure it with environment variables on the Catchment:
 
 ```bash
-DUCKSTRING_FARGATE_IMAGE=ghcr.io/duckstring-dev/duckstring:0.5.0
+DUCKSTRING_FARGATE_IMAGE=ghcr.io/duckstring-dev/duckstring:0.6.0
 DUCKSTRING_FARGATE_CLUSTER=duckstring
 DUCKSTRING_FARGATE_SUBNETS=subnet-0abc
 DUCKSTRING_FARGATE_SECURITY_GROUPS=sg-duck
@@ -144,7 +144,7 @@ ENV DUCKSTRING_STATE_ROOT=/var/lib/duckstring \
     UV_LINK_MODE=hardlink
 RUN useradd --create-home --uid 10001 duck
 RUN pip install --no-cache-dir uv \
-    && uv pip install --system "duckstring[aws]==0.5.0" pandas scikit-learn \
+    && uv pip install --system "duckstring[aws]==0.6.0" pandas scikit-learn \
     && mkdir -p /var/lib/duckstring \
     && chown -R duck:duck /var/lib/duckstring
 USER duck
@@ -157,10 +157,10 @@ Because the packages are hardlinked from the cache, the cache adds almost nothin
 The repository's `Dockerfile`, which builds the published image, does the same from a locally built wheel. It keeps the wheel in the image at `/opt/duckstring/` so Ducks can install that same build into Pond environments. Push your image to a private ECR repository in the same account and region:
 
 ```bash
-docker build --platform linux/amd64 -t duckstring:0.5.0 .
+docker build --platform linux/amd64 -t duckstring:0.6.0 .
 aws ecr create-repository --repository-name duckstring
-docker tag duckstring:0.5.0 <account>.dkr.ecr.<region>.amazonaws.com/duckstring:0.5.0
-docker push <account>.dkr.ecr.<region>.amazonaws.com/duckstring:0.5.0
+docker tag duckstring:0.6.0 <account>.dkr.ecr.<region>.amazonaws.com/duckstring:0.6.0
+docker push <account>.dkr.ecr.<region>.amazonaws.com/duckstring:0.6.0
 ```
 
 Build for the architecture the tasks use: `linux/amd64` by default, or `linux/arm64` with `DUCKSTRING_FARGATE_CPU_ARCH=ARM64`. An image built on an Apple-silicon laptop without `--platform` is arm64 and won't run on the default. Pin a version tag rather than `latest`, so the image never changes underneath a running pipeline.
