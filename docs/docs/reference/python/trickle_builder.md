@@ -274,7 +274,8 @@ b.sql(t.group_by("product_id").agg(median_revenue=t.revenue.median())).merge("me
 ### `.merge`
 
 ```python
-.merge(name, *, pk=None, ivm=True, key_filter=True, retain_t=None, retain_n=None) -> TrickleBuilder
+.merge(name, *, pk=None, ivm=True, key_filter=True, retain_t=None, retain_n=None,
+       cluster_by=None, interleave=True, cluster_bits=None) -> TrickleBuilder
 ```
 
 Computes the result and writes its changes to the merge Trickle `name`.
@@ -286,6 +287,7 @@ Computes the result and writes its changes to the merge Trickle `name`.
 | `ivm` | `bool` | `True` | `False` ignores source changes and recomputes the whole output each run, recording the difference. |
 | `key_filter` | `bool` | `True` | `False` keeps incremental computation but skips filtering each join to the changed keys. Can help when changes are large. No effect with `ivm=False`. |
 | `retain_t`, `retain_n` | | `None` | Change-log retention, as for [`merge_table`](trickle_io.md#merge_table). |
+| `cluster_by`, `interleave`, `cluster_bits` | | | How the output's compacted base is ordered, as for [`merge_table`](trickle_io.md#merge_table). |
 
 Only change `ivm` or `key_filter` after measuring that the default is slower for a particular build.
 

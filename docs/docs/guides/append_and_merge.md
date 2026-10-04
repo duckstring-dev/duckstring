@@ -71,6 +71,32 @@ def by_product(pond):
 
 The computation isn't incremental, but its output is: anything downstream receives only the products whose totals moved. For an aggregation maintained incrementally from the start, see [Aggregation and Accumulation](aggregation_and_accumulation.md).
 
+### Clustering a merge table
+
+A merge table's older rows are kept in a compacted base, stored as Parquet. Every row group in it records the smallest and largest value of each column, and DuckDB skips the row groups whose range rules out a filter. So a read that filters on a column (a query, a downstream Pond reading only the keys that changed, a lookup) touches little of the base when similar values are stored together, and nearly all of it when they're scattered.
+
+By default the base is ordered by the primary key, so filters on the key skip almost everything. To order it for other columns, declare them on the write:
+
+```python
+pond.merge_table("customer", state, pk="customer_id", cluster_by=["region", "signup_day"])
+```
+
+With one column, the base is sorted by it. With two or more, the columns are interleaved, because sorting by several columns only clusters the first: within each `region`, `signup_day` would be scattered. Interleaving builds a single ordering key in which rows that are close are close in every column. Duckstring first replaces each value with its rank in its column, in equal-sized buckets, so a skewed column (most customers in one region) is ordered as finely as an even one. It then interleaves the bits of those ranks, one bit from each column in turn. This is a Morton (Z-order) curve over the ranks rather than the raw values, which Duckstring calls a rank-Morton order.
+
+On a base of about 100 row groups with two evenly spread columns, the share of row groups a filter on one value touches was:
+
+| Order | Filter on the first column | Filter on the second column |
+|---|---|---|
+| Primary key | 100% | 100% |
+| Sorted by both | 1% | 100% |
+| Interleaved | 15% | 20% |
+
+Interleaving three columns touched about 30% for each. Every extra column dilutes the others, so list only the columns that reads filter on, most important first.
+
+To sort by several columns instead, pass `interleave=False`. The interleaved key splits the data into `2**cluster_bits` cells. By default Duckstring picks `cluster_bits` at each compaction so that a cell is a little under one row group, which is as fine as pruning can use; set it only to fix the precision. A column with NULLs keeps its top bucket for them.
+
+Clustering changes how the base is stored, not its contents, so it never affects the version contract. It applies when the base is next rewritten by compaction, and it's declared on every write: leaving `cluster_by` out returns the base to primary-key order at its next compaction. Once a table is clustered by other columns, its primary-key order is gone, so if lookups by key matter too, include the key in `cluster_by`.
+
 ## Reading Trickles within the Pond
 
 Later Ripples in the same Pond can query a Trickle by name, like any other table:

@@ -53,7 +53,8 @@ def ingest(pond):
 ### `merge_table`
 
 ```python
-pond.merge_table(name, relation, *, pk, retain_t=None, retain_n=None, compact_threshold=None) -> bool
+pond.merge_table(name, relation, *, pk, retain_t=None, retain_n=None, compact_threshold=None,
+                 cluster_by=None, interleave=True, cluster_bits=None) -> bool
 ```
 
 Merges the complete current state of a table into the merge Trickle `name`. Duckstring compares `relation` with the table's state before this run and records the difference (inserts, updates and deletes) in its change log. Pass the whole table every time; rows missing from `relation` are recorded as deleted.
@@ -66,10 +67,13 @@ Merges the complete current state of a table into the merge Trickle `name`. Duck
 | `retain_t` | `timedelta` | `None` | Drop change-log rows stamped earlier than `f - retain_t`. The current state is never trimmed. |
 | `retain_n` | `int` | `None` | Keep only the change-log rows from the newest `retain_n` runs. |
 | `compact_threshold` | `int` (bytes) | `None` | Override the size the change log must reach before it is folded into the table's base. Defaults to `DUCKSTRING_COMPACT_THRESHOLD` (256 MiB). |
+| `cluster_by` | `str` or list of `str` | `None` | Columns to order the compacted base by, so reads filtering on them skip most of it. `None` orders it by `pk`. Applies at the next compaction. See [Clustering a merge table](../../guides/append_and_merge.md#clustering-a-merge-table). |
+| `interleave` | `bool` | `True` | With two or more `cluster_by` columns, interleave them in a rank-Morton order so each is clustered. `False` sorts by them in order instead. |
+| `cluster_bits` | `int` | `None` | The interleaved order splits the data into `2**cluster_bits` cells, from one bit per column up to 63. `None` chooses it at each compaction so a cell is a little under one row group. Only with two or more interleaved columns. |
 
 **Returns** `True` if the state changed.
 
-**Raises** `DeltaError` if `pk` is empty or a `pk` column is missing from `relation`.
+**Raises** `DeltaError` if `pk` is empty or a `pk` column is missing from `relation`, or for an invalid clustering (an unknown column, `cluster_bits` without interleaving, or out of range).
 
 Within the Pond, `name` is a view over the table's current state, without system columns, so later Ripples can query it in SQL. The compacted base is stored as `{name}__base`. Don't write the same name with `write_table`.
 
@@ -83,7 +87,8 @@ def ingest(pond):
 ### `apply_zset`
 
 ```python
-pond.apply_zset(name, zset, *, pk, retain_t=None, retain_n=None, compact_threshold=None) -> bool
+pond.apply_zset(name, zset, *, pk, retain_t=None, retain_n=None, compact_threshold=None,
+                cluster_by=None, interleave=True, cluster_bits=None) -> bool
 ```
 
 Appends an already-computed change to the merge Trickle `name`, without comparing it with the existing state. This is the low-level write the builder uses for incremental results. The change is consolidated first: weights of identical rows are summed and rows that sum to zero are dropped.
@@ -93,7 +98,7 @@ Appends an already-computed change to the merge Trickle `name`, without comparin
 | `name` | `str` | | Table name. |
 | `zset` | `duckdb.DuckDBPyRelation` | | The change: your columns plus `_duckstring_d`. An update is a `-1` row with the old values and a `+1` row with the new. |
 | `pk` | `str` or list of `str` | required | The primary key. |
-| `retain_t`, `retain_n`, `compact_threshold` | | | As for `merge_table`. |
+| `retain_t`, `retain_n`, `compact_threshold`, `cluster_by`, `interleave`, `cluster_bits` | | | As for `merge_table`. |
 
 **Returns** `True` if the consolidated change is non-empty.
 

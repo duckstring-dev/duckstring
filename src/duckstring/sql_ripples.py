@@ -27,7 +27,7 @@ from .core import RippleDeclarationError, parse_ref
 
 WRITE_MODES = ("overwrite", "merge", "append")
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_RIPPLE_KEYS = {"sql", "parents", "reads", "write", "pk", "always_run"}
+_RIPPLE_KEYS = {"sql", "parents", "reads", "write", "pk", "always_run", "cluster_by", "interleave", "cluster_bits"}
 _STATIC_KEYS = {"path"}
 # Schemas whose tables a query may reference without declaring them (DuckDB's own metadata).
 _SYSTEM_SCHEMAS = {"information_schema", "pg_catalog"}
@@ -45,6 +45,7 @@ class SqlRipple:
     write: str = "overwrite"
     pk: tuple[str, ...] = ()
     always_run: bool = False
+    cluster: dict | None = None  # trickle.io.cluster_spec, for write = "merge"
     tree: dict | None = None  # the parsed query (json_serialize_sql), set by parse()
     refs: list[tuple[str, str, str]] = field(default_factory=list)  # (catalog, schema, table)
 
@@ -131,9 +132,20 @@ def declared(source_dir: Path, info: dict) -> tuple[list[SqlRipple], dict[str, P
         always_run = cfg.get("always_run", False)
         if not isinstance(always_run, bool):
             raise _err(where, "always_run must be true or false")
+        cluster = None
+        if {"cluster_by", "interleave", "cluster_bits"} & set(cfg):
+            if write != "merge":
+                raise _err(where, "cluster_by, interleave and cluster_bits apply only to write = \"merge\"")
+            from .trickle.io import DeltaError, cluster_spec
+
+            try:
+                cluster = cluster_spec(_str_list(cfg.get("cluster_by"), where, "cluster_by"),
+                                       cfg.get("interleave", True), cfg.get("cluster_bits"))
+            except DeltaError as exc:
+                raise _err(where, str(exc)) from None
         out.append(SqlRipple(name=name, path=cfg["sql"], text=sql_path.read_text(encoding="utf-8"),
                              parents=_str_list(cfg.get("parents"), where, "parents"), reads=reads,
-                             write=write, pk=pk, always_run=always_run))
+                             write=write, pk=pk, always_run=always_run, cluster=cluster))
     return out, statics
 
 
@@ -258,7 +270,9 @@ def make_callable(ripple: SqlRipple):
             sql = con.execute("SELECT json_deserialize_sql(?)", [json.dumps(tree)]).fetchone()[0]
         rel = con.sql(sql)
         if ripple.write == "merge":
-            pond.merge_table(ripple.name, rel, pk=list(ripple.pk))
+            c = ripple.cluster or {}
+            pond.merge_table(ripple.name, rel, pk=list(ripple.pk), cluster_by=c.get("by"),
+                             interleave=c.get("interleave", True), cluster_bits=c.get("bits"))
         elif ripple.write == "append":
             pond.append_table(ripple.name, rel, pk=list(ripple.pk) or None)
         else:

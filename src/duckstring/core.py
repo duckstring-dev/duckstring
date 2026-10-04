@@ -991,7 +991,7 @@ class Pond:
         )
 
     def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None,
-                    compact_threshold=None) -> bool:
+                    compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
         """Merge the complete current state ``relation`` into the merge Trickle ``name``.
 
         Duckstring compares ``relation`` with the table's state before this run and records the inserts,
@@ -1006,9 +1006,15 @@ class Pond:
             retain_n: Keep only the change-log rows from the newest ``retain_n`` runs.
             compact_threshold: Bytes the change log must reach before it is folded into the table's base.
                 Defaults to ``DUCKSTRING_COMPACT_THRESHOLD`` (256 MiB).
+            cluster_by: A column or columns to order the table's compacted base by, so reads filtering on
+                them skip most of it. Defaults to ordering by ``pk``. Takes effect at the next compaction.
+            interleave: With two or more ``cluster_by`` columns, interleave them (a rank-Morton order, so
+                each column is clustered about equally) rather than sort by them in order. Default ``True``.
+            cluster_bits: The interleaved order's precision: it splits the data into ``2**cluster_bits``
+                cells. Defaults to a size chosen at each compaction, about one row group per cell.
 
         Returns ``True`` if the state changed, the usual signal for :meth:`skip`. Raises ``DeltaError`` for a
-        missing or empty ``pk``.
+        missing or empty ``pk``, or an invalid clustering.
 
         Within the Pond, ``name`` is a view over the current state (no system columns), so later Ripples can
         query it in SQL; the compacted base is ``{name}__base``.
@@ -1021,16 +1027,17 @@ class Pond:
         return trickle.merge_table(
             self.con, name, relation, self.f, self._resolve_pk(pk),
             retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
+            cluster_by=cluster_by, interleave=interleave, cluster_bits=cluster_bits,
         )
 
     def apply_zset(self, name: str, zset, *, pk, retain_t=None, retain_n=None,
-                   compact_threshold=None) -> bool:
+                   compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
         """Append an already-computed change to the merge Trickle ``name`` without comparing it with the state.
 
         ``zset`` holds the table's columns plus ``_duckstring_d`` (``+1`` added, ``-1`` removed; an update is a
         ``-1`` of the old row and a ``+1`` of the new). It is consolidated before writing. ``pk`` is required;
-        ``retain_t``, ``retain_n`` and ``compact_threshold`` are as for :meth:`merge_table`. Returns ``True`` if
-        the consolidated change is non-empty.
+        ``retain_t``, ``retain_n``, ``compact_threshold``, ``cluster_by``, ``interleave`` and ``cluster_bits``
+        are as for :meth:`merge_table`. Returns ``True`` if the consolidated change is non-empty.
 
         This is the write the Trickle builder uses. Prefer :meth:`trickle` or :meth:`merge_table`: a wrong
         weight corrupts the table for every consumer.
@@ -1041,6 +1048,7 @@ class Pond:
         return trickle.apply_zset(
             self.con, name, zset, self.f, self._resolve_pk(pk),
             retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
+            cluster_by=cluster_by, interleave=interleave, cluster_bits=cluster_bits,
         )
 
     def read_delta(self, ref: str):

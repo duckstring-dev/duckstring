@@ -198,7 +198,7 @@ stats. The query reads `count(*), sum(a)`, so the `b` column (most of the file) 
 - **Layout decides the bytes.** Pruning needs data clustered by the join key. Keys shuffled across row
   groups read the whole key column of every row group whatever the version. A merge table's cold base is
   written ordered by `_duckstring_f` (`dataplane._publish_base_chunks`), so an affected-key read of it
-  can't skip anything; ordering the base by key is what `plans/data-plane-mash-clustering.md` proposes,
+  can't skip anything; ordering the base by key is what `plans/data-plane-clustering.md` proposes,
   and this is evidence for it.
 
 No change to the builder. The benchmark scripts were throwaway (scratchpad); rerun by recreating them from

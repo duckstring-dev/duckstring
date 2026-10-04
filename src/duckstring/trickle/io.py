@@ -67,9 +67,9 @@ CHANGELOG_SUFFIX = "__changelog"
 # published alongside the table (like ``__changelog``), one growing record of what each run dropped.
 DROPLOG_SUFFIX = "__droplog"
 # A merge main is log-structured: its folded **base** (the checkpointed state up to ``f_base``) is published
-# as a directory of size-bounded, freshness-ordered Parquet **chunks** under ``{table}__base/`` (so a single
-# base can hold far more than one Parquet file's worth, and a partition-granular checkpoint can rewrite just
-# the chunks holding changed PKs — see plans/trickle-main-incremental.md). The base is wholesale (rewritten
+# as a directory of size-bounded Parquet **chunks** under ``{table}__base/``, ordered by pk or ``cluster_by``,
+# so a single base can hold far more than one Parquet file's worth (see plans/trickle-main-incremental.md and
+# plans/data-plane-clustering.md). The base is wholesale (rewritten
 # at a checkpoint), distinct from the per-run append parts; ``part_tables`` excludes it for that reason.
 BASE_SUFFIX = "__base"
 # The warm tier (see :func:`warm_name`): consolidated freshness-range bands between the cold base and the
@@ -317,7 +317,7 @@ def _ensure_meta(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
         f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR, "
-        f"compact_threshold VARCHAR, f_warm VARCHAR)"
+        f"compact_threshold VARCHAR, f_warm VARCHAR, cluster VARCHAR)"
     )
     # Migrate an older meta table that predates a column: f_base (the cold-base fold watermark),
     # compact_threshold (the per-table checkpoint-size override), f_warm (the warm-tier fold watermark).
@@ -328,6 +328,8 @@ def _ensure_meta(con) -> None:
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN compact_threshold VARCHAR')
     if "f_warm" not in cols:
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN f_warm VARCHAR')
+    if "cluster" not in cols:  # the merge main's cold-base ordering (cluster_spec), JSON
+        con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN cluster VARCHAR')
 
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
@@ -437,15 +439,61 @@ def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
 
 def read_meta(con) -> dict[str, dict]:
     """``{table: {"mode", "pk": [...], "floor": iso|None, "f_base": iso|None,
-    "compact_threshold": int|None}}`` for every Trickle table."""
+    "compact_threshold": int|None, "f_warm": iso|None, "cluster": dict|None}}`` for every Trickle table."""
     if not _table_exists(con, META_TABLE):
         return {}
+    _ensure_meta(con)  # an older meta table may predate a column read here
     rows = con.execute(
-        f'SELECT table_name, mode, pk, floor, f_base, compact_threshold, f_warm FROM {_q(META_TABLE)}'
+        f'SELECT table_name, mode, pk, floor, f_base, compact_threshold, f_warm, cluster FROM {_q(META_TABLE)}'
     ).fetchall()
     return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else []), "floor": r[3], "f_base": r[4],
-                   "compact_threshold": (int(r[5]) if r[5] else None), "f_warm": r[6]}
+                   "compact_threshold": (int(r[5]) if r[5] else None), "f_warm": r[6],
+                   "cluster": (json.loads(r[7]) if r[7] else None)}
             for r in rows}
+
+
+def cluster_spec(cluster_by=None, interleave: bool = True, cluster_bits=None) -> dict | None:
+    """The cold-base ordering a merge write declares, validated, or ``None`` (order by the primary key).
+
+    ``cluster_by`` is a column or list of columns. One column, or ``interleave=False``, sorts by them in
+    order. Two or more with ``interleave`` (the default) order rows by a **rank-Morton** key: each column's
+    values are replaced by their quantile rank, and the ranks' bits are interleaved, so every column is
+    clustered about equally however its values are distributed. ``cluster_bits`` is the key's total bits
+    (the data is split into ``2**cluster_bits`` cells); ``None`` chooses it at each compaction from the
+    base's size, so a cell is just under one row group."""
+    cols = normalize_pk(cluster_by)
+    if not cols:
+        if cluster_bits is not None or interleave is not True:
+            raise DeltaError("interleave and cluster_bits need cluster_by")
+        return None
+    if len(set(cols)) != len(cols):
+        raise DeltaError(f"cluster_by lists a column twice: {list(cols)}")
+    if not isinstance(interleave, bool):
+        raise DeltaError("interleave must be True or False")
+    interleaved = interleave and len(cols) > 1
+    if cluster_bits is not None:
+        if not interleaved:
+            raise DeltaError("cluster_bits applies only when interleaving two or more cluster_by columns")
+        if isinstance(cluster_bits, bool) or not isinstance(cluster_bits, int) \
+                or not len(cols) <= cluster_bits <= 63:
+            raise DeltaError(f"cluster_bits must be an integer from {len(cols)} (one per column) to 63")
+    return {"by": list(cols), "interleave": interleaved, "bits": cluster_bits}
+
+
+def _set_cluster(con, table: str, spec: dict | None) -> None:
+    """Record merge main ``table``'s cold-base ordering (:func:`cluster_spec`); ``None`` clears it, so the
+    base goes back to primary-key order. Applied at the next compaction. Raises :class:`DeltaError` for a
+    ``cluster_by`` column the table doesn't have."""
+    if spec is not None:
+        src = changelog_name(table) if _table_exists(con, changelog_name(table)) else cold_base_name(table)
+        if _table_exists(con, src):
+            have = {r[0] for r in con.execute(f'DESCRIBE {_q(src)}').fetchall()}
+            missing = [c for c in spec["by"] if c not in have]
+            if missing:
+                raise DeltaError(f"cluster_by column(s) {missing} not in '{table}'")
+    _ensure_meta(con)
+    con.execute(f'UPDATE {_q(META_TABLE)} SET cluster = ? WHERE table_name = ?',
+                [json.dumps(spec) if spec is not None else None, table])
 
 
 def _set_compact_threshold(con, table: str, n) -> None:
@@ -889,7 +937,7 @@ def count_current(con, name: str) -> int:
 
 
 def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
-               compact_threshold=None) -> bool:
+               compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
     """Append a Z-set ``zset`` (user columns + ``_duckstring_d``) to the merge main's append-only
     ``__changelog``. The main is **log-structured**: the changelog is the source of truth and the clean
     current state is reconstructed on read (:func:`reconstruct_current`) from a base table (written only by
@@ -906,6 +954,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if not pk:
         raise DeltaError(f"apply_zset('{name}', ...) needs a primary key — pass pk=...")
+    cluster = cluster_spec(cluster_by, interleave, cluster_bits)  # validated before anything is written
     src = unique_name("zset")
     zset.create_view(src, replace=True)
     cols = list(zset.columns)
@@ -943,6 +992,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
             raise
     _record_meta(con, name, "merge", pk)
     _set_compact_threshold(con, name, compact_threshold)
+    _set_cluster(con, name, cluster)
     cutoff = _apply_retention(con, clog, f, retain_t, retain_n)
     _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None), cutoff=cutoff)
     refresh_current_view(con, name)
@@ -950,7 +1000,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
 
 
 def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
-                compact_threshold=None) -> bool:
+                compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
     """Comprehensive merge: ``relation`` is the **complete current state**. Diff it against the
     reconstructed prior state (base ⊎ changelog) as a full-row Z-set (``new(+1) ⊎ prior(-1)``, consolidated)
     and append the diff to the changelog. Returns whether the diff was non-empty (the state actually
@@ -978,7 +1028,8 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
     else:
         zset = con.sql(f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)}')
     return apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n,
-                      compact_threshold=compact_threshold)
+                      compact_threshold=compact_threshold, cluster_by=cluster_by, interleave=interleave,
+                      cluster_bits=cluster_bits)
 
 
 def fold_warm(con, name: str, target_f) -> None:

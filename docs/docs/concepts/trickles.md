@@ -156,7 +156,7 @@ When a consumer reads a window covering several runs, the changes are consolidat
 
 ### Compaction
 
-A change log can't grow forever. As it gets large, Duckstring folds older changes into consolidated batches, and eventually into the main table itself, keeping recent changes available for consumers that are keeping up. A consumer that falls behind what's still retained reads the whole table instead, so compaction affects cost, never correctness.
+A change log can't grow forever. As it gets large, Duckstring folds older changes into consolidated batches, and eventually into the main table itself, keeping recent changes available for consumers that are keeping up. A consumer that falls behind what's still retained reads the whole table instead, so compaction affects cost, never correctness. The compacted table is stored ordered by its primary key, or by columns you choose, so reads that filter on them skip most of it.
 
 ## See also
 

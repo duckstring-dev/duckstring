@@ -475,7 +475,8 @@ class TrickleBuilder:
     # ─── terminals ──────────────────────────────────────────────────────────────
 
     def merge(self, name: str, *, pk=None, ivm: bool = True, key_filter: bool = True,
-              retain_t=None, retain_n=None) -> "TrickleBuilder":
+              retain_t=None, retain_n=None, cluster_by=None, interleave: bool = True,
+              cluster_bits=None) -> "TrickleBuilder":
         """Compute the result and write its changes to the merge Trickle ``name``.
 
         Args:
@@ -485,10 +486,20 @@ class TrickleBuilder:
             ivm: ``False`` ignores source changes and recomputes the whole output each run.
             key_filter: ``False`` skips filtering each join to the changed keys. No effect with ``ivm=False``.
             retain_t, retain_n: Change-log retention, as for ``pond.merge_table``.
+            cluster_by, interleave, cluster_bits: How the table's compacted base is ordered, as for
+                ``pond.merge_table``.
 
         Only change ``ivm`` or ``key_filter`` after measuring that the default is slower. Returns a builder
         rooted at the written table, so the chain can continue; see :meth:`was_changed`.
         """
+        from .io import _set_cluster, cluster_spec
+
+        cluster = cluster_spec(cluster_by, interleave, cluster_bits)  # validated before anything runs
+        out = self._merge(name, pk=pk, ivm=ivm, key_filter=key_filter, retain_t=retain_t, retain_n=retain_n)
+        _set_cluster(self.ctx.con, name, cluster)  # every write path above; the default clears it
+        return out
+
+    def _merge(self, name: str, *, pk, ivm: bool, key_filter: bool, retain_t, retain_n) -> "TrickleBuilder":
         ctx = self.ctx
         if self._acc is not None:
             return self._merge_accumulate(name, pk=pk, retain_t=retain_t, retain_n=retain_n)

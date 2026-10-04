@@ -239,7 +239,9 @@ class CaptureBuilder(TrickleBuilder):
         return out
 
     def merge(self, name: str, *, pk=None, ivm: bool = True, key_filter: bool = True,
-              retain_t=None, retain_n=None) -> "CaptureBuilder":
+              retain_t=None, retain_n=None, cluster_by=None, interleave=True,
+              cluster_bits=None) -> "CaptureBuilder":
+        # Clustering orders the stored table; it changes no column's derivation, so lineage ignores it.
         options = _merge_options(ivm, key_filter, retain_t, retain_n)
         eff_pk = self._effective_pk(pk)
         self._emit(name, "merge", pk, eff_pk, options)

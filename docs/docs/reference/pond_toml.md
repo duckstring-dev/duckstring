@@ -78,6 +78,7 @@ The entry's name (`sale_line`) is the Ripple's name and the name of the table it
 | `write` | string | `"overwrite"` | `"overwrite"` replaces the table each run, `"merge"` records changes to a table whose query returns its complete current state, and `"append"` adds each run's rows to its history. See [Append and Merge Tables](../guides/append_and_merge.md). |
 | `pk` | string or list | | Primary key columns. Required for `"merge"`, optional for `"append"`, not allowed for `"overwrite"`. |
 | `always_run` | boolean | `false` | Run even when no Source has changed since the last Pond Run, as [`@ripple(always_run=True)`](python/decorators.md#ripple). |
+| `cluster_by`, `interleave`, `cluster_bits` | | | With `write = "merge"` only: how the table's compacted base is ordered, as for [`merge_table`](python/trickle_io.md#merge_table). |
 
 Each query may only read tables its declaration accounts for: an ancestor's table, an entry in `reads`, a static table, or its own previous output. A query reading anything else, an unknown parent, a cycle, or a missing file rejects the deployment and stops a local run, with a message naming the Ripple.
 
