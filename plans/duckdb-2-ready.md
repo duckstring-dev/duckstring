@@ -116,8 +116,8 @@ and with Duckstring choosing the DuckDB version at both ends.
 
 ## Lower priority
 
-- Measure 2.0's wider row-group pruning (`IN` filters and function predicates) against the Trickle
-  builder's key-filtered joins over Parquet; it may cut what an incremental join reads.
+- ~~Measure 2.0's wider row-group pruning against the Trickle builder's key-filtered joins~~ Measured
+  2026-10-04 (results below): no change in bytes read, about 2x faster wall time; nothing to change.
 - Partition-aware queries: little value while Duckstring's Parquet layout isn't Hive-partitioned.
 - ~~Recognise `VARIANT` in the schema contract's type handling~~ Done 2026-10-04: decided with the author
   that a change to or from `VARIANT` is breaking in both directions; `is_widening` already behaved that way
@@ -174,4 +174,33 @@ failures count; a lock error never does, since moving a file another process hol
 The file and its WAL are renamed `registry.duckdb.unreadable-{UTC stamp}`. Verified with a registry
 written by 2.0 opened by an executor on 1.5. The dbt executor makes the same check at start and starts
 empty (its models are rebuilt every run).
+
+## Measured: row-group pruning for the builder's key filter (2026-10-04)
+
+The builder restricts each side of an incremental join with `(key) IN (SELECT k0 FROM affected_keys)`
+(`TrickleBuilder._restricted_join`). Measured on DuckDB 1.5.5 and `2.0.0.dev2610011535` against a 5M-row
+Parquet file (`k BIGINT, a BIGINT, b VARCHAR`, about 41 row groups, 181 to 191 MB) served from moto over
+HTTP, one fresh connection per query with DuckDB's file caches off, bytes from `EXPLAIN ANALYZE`'s HTTP
+stats. The query reads `count(*), sum(a)`, so the `b` column (most of the file) is never fetched.
+
+| File layout | Affected keys | Fetched (both versions) | 1.5.5 | 2.0 dev |
+|---|---|---|---|---|
+| sorted by `k` | 10 or 1,000 clustered | 0.4% | 43 ms | 30 ms |
+| sorted by `k` | 10 spread | 2.9% | 254 ms | 139 ms |
+| sorted by `k` | 100 to 100,000 spread | 11.3% (the whole key column) | 985 ms | 505 ms |
+| shuffled | any | 14 to 16% | 640 to 1,040 ms | 530 ms |
+
+- **2.0 reads the same bytes as 1.5** for this predicate. Both already push the affected keys into the
+  scan (a key range, and for a small set the keys themselves: 10 spread keys skip most row groups), so
+  2.0's wider pruning adds nothing here.
+- **2.0 is about twice as fast on the same bytes** (async I/O), and the subquery form no longer costs
+  more than a literal list (on 1.5 it took twice as long).
+- **Layout decides the bytes.** Pruning needs data clustered by the join key. Keys shuffled across row
+  groups read the whole key column of every row group whatever the version. A merge table's cold base is
+  written ordered by `_duckstring_f` (`dataplane._publish_base_chunks`), so an affected-key read of it
+  can't skip anything; ordering the base by key is what `plans/data-plane-mash-clustering.md` proposes,
+  and this is evidence for it.
+
+No change to the builder. The benchmark scripts were throwaway (scratchpad); rerun by recreating them from
+this description if needed.
 
