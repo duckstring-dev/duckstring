@@ -100,3 +100,93 @@ def test_jobs_are_delivered_once(channel):
     first = httpx.get(f"{url}/api/duck/src/1/jobs", timeout=10.0).json()["jobs"]
     second = httpx.get(f"{url}/api/duck/src/1/jobs", timeout=10.0).json()["jobs"]
     assert first and not second
+
+
+# ─── an orphaned Duck exits ──────────────────────────────────────────────────────
+
+
+class _IdleCore:
+    pond_name = "p"
+    events: list = []
+    last_begin_f = None
+
+    def idle(self) -> bool:
+        return True
+
+    def flush(self, post) -> None:
+        pass
+
+
+class _Executor:
+    persist_dir = None
+
+    def shutdown(self) -> None:
+        pass
+
+
+class _Client:
+    """A Catchment link: unreachable (contact never refreshes), or answering, then sending a shutdown."""
+
+    def __init__(self, *, reachable: bool, shutdown_after: int = 0):
+        self.reachable, self.shutdown_after, self.polls = reachable, shutdown_after, 0
+        self.last_contact = time.monotonic() - 3600
+
+    def poll_jobs(self) -> list[dict]:
+        self.polls += 1
+        if not self.reachable:
+            return []
+        self.last_contact = time.monotonic()
+        return [{"kind": "shutdown"}] if self.polls >= self.shutdown_after else []
+
+    def post_event(self, payload: dict) -> bool:
+        return self.reachable
+
+    def close(self) -> None:
+        pass
+
+
+def test_an_idle_duck_with_no_catchment_exits():
+    """Ducks are spawned automatically; one whose Catchment is gone for good must not run, and bill,
+    forever."""
+    from duckstring.duck.__main__ import serve
+
+    started = time.monotonic()
+    serve(_IdleCore(), _Executor(), _Client(reachable=False), orphan_after=0.5)
+    assert time.monotonic() - started < 5
+
+
+def test_an_idle_duck_in_contact_stays():
+    from duckstring.duck.__main__ import serve
+
+    client = _Client(reachable=True, shutdown_after=5)  # ~1.5 s of answered polls, then a shutdown
+    started = time.monotonic()
+    serve(_IdleCore(), _Executor(), client, orphan_after=0.5)
+    assert client.polls >= 5 and time.monotonic() - started > 1.0  # only the shutdown ended it
+
+
+def test_the_orphan_limit_comes_from_the_environment(monkeypatch):
+    from duckstring.duck.__main__ import _orphan_after_s
+
+    monkeypatch.delenv("DUCKSTRING_DUCK_ORPHAN_MINUTES", raising=False)
+    assert _orphan_after_s() == 3600
+    monkeypatch.setenv("DUCKSTRING_DUCK_ORPHAN_MINUTES", "5")
+    assert _orphan_after_s() == 300
+    monkeypatch.setenv("DUCKSTRING_DUCK_ORPHAN_MINUTES", "0")
+    assert _orphan_after_s() is None
+
+
+def test_the_catchment_sends_its_orphan_limit_with_each_run(tmp_path, monkeypatch):
+    """A cloud Duck doesn't inherit the Catchment's environment, so the setting rides the job."""
+    from duckstring.catchment.db import connect, migrate
+    from duckstring.catchment.driver import Driver
+    from duckstring.catchment.launcher import NoopLauncher
+    from duckstring.catchment.routes.deploy import _register
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "src", "1.0.0", "inlet", "ponds/src/1.0.0", _CFG, _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    monkeypatch.setenv("DUCKSTRING_DUCK_ORPHAN_MINUTES", "15")
+    d.pulse("src@1")
+    (job,) = [j for j in d.take_jobs("src@1") if j["kind"] == "begin_run"]
+    assert job["orphan_minutes"] == "15"

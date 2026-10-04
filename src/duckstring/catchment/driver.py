@@ -3099,6 +3099,9 @@ class Driver:
             # The Pond's Flock settings and its engine's credentials, for this run (flock.job_settings).
             # On the job rather than the Duck's environment, so every launcher's Ducks get them.
             "flock": flock_job_settings(duck_cfg, secret=secret_value),
+            # How long the Duck waits, idle, without hearing from this Catchment before it exits. Sent
+            # here because a cloud Duck doesn't inherit the Catchment's environment.
+            "orphan_minutes": os.environ.get("DUCKSTRING_DUCK_ORPHAN_MINUTES"),
         })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI. A Force re-opens the Run.

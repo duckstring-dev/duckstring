@@ -269,7 +269,7 @@ Fargate Ducks log to the `/duckstring/duck` CloudWatch log group.
 Duckstring itself costs nothing; you pay AWS for:
 
 - the Catchment's machine, which runs continuously and is most of a small deployment's cost;
-- Ducks, per run, since each is stopped when its Pond goes idle;
+- Ducks, per run, since each is stopped when its Pond goes idle (a Duck that loses its Catchment stops itself after an hour idle; see `DUCKSTRING_DUCK_ORPHAN_MINUTES`);
 - Athena, per terabyte scanned, only when the Flock is used;
 - S3 storage and requests.
 

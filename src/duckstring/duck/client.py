@@ -9,6 +9,8 @@ replay.
 
 from __future__ import annotations
 
+import time
+
 import httpx
 
 
@@ -20,6 +22,9 @@ class CatchmentClient:
         self.token = token
         self.poll_timeout = poll_timeout
         self._client = httpx.Client(timeout=poll_timeout + 5.0, headers={"X-Duck-Token": token})
+        # When the Catchment last answered (time.monotonic()): a poll or an event it accepted. A refused
+        # request (a recreated Catchment's new token, a removed Pond) is no contact either.
+        self.last_contact = time.monotonic()
 
     def poll_jobs(self) -> list[dict]:
         """Long-poll for commands. Returns a list of ``{"kind": "begin_run", "f": ...}`` /
@@ -29,6 +34,7 @@ class CatchmentClient:
                 f"{self.base}/api/duck/{self.pond}/{self.major}/jobs", params={"wait": self.poll_timeout}
             )
             r.raise_for_status()
+            self.last_contact = time.monotonic()
             return r.json().get("jobs", [])
         except Exception:
             return []
@@ -46,6 +52,7 @@ class CatchmentClient:
         try:
             r = self._client.post(f"{self.base}/api/duck/{self.pond}/{self.major}/events", json=payload)
             r.raise_for_status()
+            self.last_contact = time.monotonic()
             return True
         except Exception:
             return False

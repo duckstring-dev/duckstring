@@ -37,6 +37,7 @@ Run only one Catchment process against a state directory, and only one Catchment
 |---|---|---|
 | `DUCKSTRING_MEMORY_LIMIT` | DuckDB's default | Memory limit for each Duck's DuckDB, such as `12GB`. Also sets the size at which the Flock takes over a computation. Set it to about 80% of the Duck's memory. |
 | `DUCKSTRING_DUCK_LAUNCHER` | built in | `module:Class` of a custom launcher that replaces how Ducks are started. |
+| `DUCKSTRING_DUCK_ORPHAN_MINUTES` | `60` | How long an idle Duck goes without contact from its Catchment before it exits, so a Duck whose Catchment is gone for good doesn't run indefinitely. A Duck mid-run finishes first. `0` keeps Ducks waiting forever. Set it on the Catchment, which passes it to every Duck, including cloud ones. Pool machines aren't affected. |
 | `DUCKSTRING_DISABLE_DUCKS` | off | Start no Ducks at all. For testing the Catchment on its own. |
 | `DUCKSTRING_DISCOVER_TIMEOUT` | `300` | Seconds a deploy waits for the Pond's code to load while its Ripples are discovered. |
 
