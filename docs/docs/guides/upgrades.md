@@ -17,6 +17,8 @@ Versions are `MAJOR.MINOR.PATCH`:
 | Additive change to output | a new table, a new column, a column type widened (such as `INTEGER` to `BIGINT`) | minor: `1.0.1` → `1.1.0` |
 | Anything a consumer could break on | a removed or renamed table or column, a narrowed type, a changed meaning | major: `1.1.0` → `2.0.0` |
 
+A type change counts as widening only when every existing value survives it: a larger integer type, a `DECIMAL` with no fewer digits on either side of the point, a finer timestamp, or `FLOAT` to `DOUBLE`. Any other change, including `INTEGER` to `DOUBLE` and any change to or from `VARIANT`, is breaking.
+
 Duckstring checks the shape of a Pond's output, but not what it means. If a column keeps its name but changes units, that's a breaking change only you can recognise, and it needs a new major version too.
 
 ## Compatible changes

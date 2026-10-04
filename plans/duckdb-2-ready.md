@@ -119,8 +119,10 @@ and with Duckstring choosing the DuckDB version at both ends.
 - Measure 2.0's wider row-group pruning (`IN` filters and function predicates) against the Trickle
   builder's key-filtered joins over Parquet; it may cut what an incremental join reads.
 - Partition-aware queries: little value while Duckstring's Parquet layout isn't Hive-partitioned.
-- Recognise `VARIANT` in the schema contract's type handling, and decide whether it's widening-compatible
-  with anything.
+- ~~Recognise `VARIANT` in the schema contract's type handling~~ Done 2026-10-04: decided with the author
+  that a change to or from `VARIANT` is breaking in both directions; `is_widening` already behaved that way
+  (only `VARIANT` → `VARIANT` passes), so this added the rationale, a test and a line in the upgrades guide.
+  DuckDB 2.0 reports the type as `VARIANT` (`STRUCT(a VARIANT)` nested).
 
 ## Order
 
