@@ -136,7 +136,23 @@ The builder supports joins of every type, filters, computed columns, aggregation
 
 A consumer reading a Trickle with `read_table` sees an ordinary table: the current state, without weights or freshness stamps. The change history is stored alongside it.
 
-<!-- DIAGRAM (mermaid): a merge Trickle as a main table plus a changelog of freshness-stamped changes, with a consumer's window (its previous run to this run) highlighted over the changelog. -->
+```mermaid
+flowchart LR
+    subgraph product ["catalog.product"]
+        direction TB
+        main[("Main table<br/>current state")]
+        subgraph log ["Change log"]
+            direction LR
+            r1["09:00"] --> r2["10:00"] --> r3["11:00"] --> r4["12:00"]
+        end
+    end
+    main -- "current state" --> reader["Any reader"]
+    r3 & r4 --> priced["priced<br/>last run 10:00, now 12:00:<br/>reads the 11:00 and 12:00 changes"]
+    classDef window stroke:#06c4e6,stroke-width:3px
+    class r3,r4 window
+```
+
+Each run of `catalog` adds its changes to the log, stamped with the run's freshness. `priced` last ran at 10:00 and is now running at 12:00, so it reads only the changes stamped 11:00 and 12:00.
 
 ### Main Table
 

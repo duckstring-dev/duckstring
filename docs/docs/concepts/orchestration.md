@@ -7,7 +7,12 @@ description: Pull-style Pond Execution.
 
 Duckstring doesn't run Ponds on schedules. Instead, you place a trigger on the Pond whose data you need, usually an Outlet, and Duckstring works backwards to decide what upstream has to run. A Pond that nothing downstream is asking for never runs.
 
-<!-- VIDEO: reuse the landing page's /img/ripple clip, showing a Wave throttling the demo pipeline to the join_lines bottleneck. -->
+<video autoplay loop muted playsinline style="width: 100%; border-radius: 8px;" aria-label="The demo pipeline in the web UI under a Wave on reports">
+  <source src="/img/ripple.webm" type="video/webm" />
+  <source src="/img/ripple.mp4" type="video/mp4" />
+</video>
+
+The demo pipeline in the web UI, kept current by a Wave on `reports`.
 
 ## Structure
 
@@ -112,7 +117,28 @@ Some Inlets read from systems that only update at certain times, such as a wareh
 
 Windows are set on the Catchment with `duckstring trigger window`, not in `pond.toml`, since they describe the environment rather than the code.
 
-<!-- DIAGRAM (mermaid gantt or timeline): daily windows on an Inlet, with runs landing once inside each window and demand held between them. -->
+Here an Inlet has a window from 02:00 to 03:00 each day, and a Wave on an Outlet downstream asks for data continuously. The Inlet runs once as each window opens, the run flows downstream, and the demand waits in between:
+
+```mermaid
+gantt
+    dateFormat YYYY-MM-DD HH:mm
+    axisFormat %a %H:%M
+    todayMarker off
+    section Wave
+    asking continuously :active, 2026-10-05 00:00, 3d
+    section Window
+    open :2026-10-05 02:00, 1h
+    open :2026-10-06 02:00, 1h
+    open :2026-10-07 02:00, 1h
+    section Inlet
+    run :crit, 2026-10-05 02:00, 20m
+    run :crit, 2026-10-06 02:00, 20m
+    run :crit, 2026-10-07 02:00, 20m
+    section Downstream
+    run :2026-10-05 02:20, 30m
+    run :2026-10-06 02:20, 30m
+    run :2026-10-07 02:20, 30m
+```
 
 ## Standard Patterns
 
