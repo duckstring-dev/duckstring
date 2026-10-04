@@ -108,8 +108,9 @@ def _deploy_demo(url: str) -> None:
 
 
 def _pond_status(url: str, name: str) -> dict | None:
-    rows = httpx.get(f"{url}/api/status", timeout=5.0).json()["ponds"]
-    return next((p for p in rows if p["name"] == name), None)
+    r = httpx.get(f"{url}/api/status", timeout=5.0)
+    assert r.status_code == 200 and "ponds" in r.text, f"/api/status answered {r.status_code}: {r.text[:500]}"
+    return next((p for p in r.json()["ponds"] if p["name"] == name), None)
 
 
 def _wait(predicate, timeout=45.0, interval=0.25):

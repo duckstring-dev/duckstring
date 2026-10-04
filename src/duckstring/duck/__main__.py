@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import queue
 import sys
 import threading
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +37,24 @@ _STUCK_GRACE_S = 30.0
 log = logging.getLogger("duckstring.duck")
 
 
+def _orphan_after_s() -> float | None:
+    """How long an idle Duck waits without hearing from its Catchment before it exits
+    (``DUCKSTRING_DUCK_ORPHAN_MINUTES``, default 60; 0 never exits). The Catchment's own setting arrives
+    on each ``begin_run`` job and replaces this, since a cloud Duck doesn't inherit the Catchment's
+    environment. Ducks are spawned automatically, so one whose Catchment is gone for good (deleted, or a
+    hard stop that skipped its own cleanup) would otherwise run, and on a cloud machine bill, forever. A
+    Duck with a Run in flight keeps going regardless: it finishes and persists, and the clock only
+    matters once it is idle."""
+    return _orphan_s(os.environ.get("DUCKSTRING_DUCK_ORPHAN_MINUTES"))
+
+
+def _orphan_s(raw) -> float | None:
+    """Minutes (a number or its text; blank for the default of 60) as seconds, or None for never."""
+    raw = str(raw).strip() if raw is not None else ""
+    minutes = float(raw) if raw else 60.0
+    return minutes * 60.0 if minutes > 0 else None
+
+
 # Idle poll backoff. Job delivery is a poll (routes/duck.py explains why it is not a long poll), so the
 # interval IS the dispatch latency — keep it short while there is any reason to expect work, and back off
 # when there is not. A flat 0.1 s meant ten requests a second forever: unnoticeable beside a local
@@ -51,8 +71,12 @@ def _poll_delay(idle_rounds: int) -> float:
     return min(_POLL_MIN_S * (2 ** idle_rounds), _POLL_MAX_S)
 
 
-def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> None:
-    """Single-threaded event loop fed by a poll thread (jobs) and executor callbacks (completions)."""
+def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
+          orphan_after: float | None = None) -> None:
+    """Single-threaded event loop fed by a poll thread (jobs) and executor callbacks (completions).
+    ``orphan_after`` (seconds) overrides :func:`_orphan_after_s`."""
+    if orphan_after is None:
+        orphan_after = _orphan_after_s()
     q: queue.Queue = queue.Queue()
     stop = threading.Event()
     inflight = 0  # Ripple Runs currently executing in the pool
@@ -134,6 +158,8 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
                             if executor.prune(_retain_from(data)) and core.last_begin_f > NEVER:
                                 _start_persist(core.last_begin_f)  # carry the deletions to the durable layer
                     elif data.get("kind") == "begin_run":
+                        if "orphan_minutes" in data:  # the Catchment's setting (see _orphan_after_s)
+                            orphan_after = _orphan_s(data["orphan_minutes"])
                         prev = data.get("previous_f")
                         # What the Catchment says each Source has published when this Run started: it pins
                         # the Run's overwrite Source reads to those versions, and rejects a stale local
@@ -214,6 +240,16 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient) -> 
             # mid-mirror persist is replay-safe but would leave persisted_f needlessly behind.
             if shutdown_requested and core.idle() and not core.events \
                     and not persist_state["running"] and persist_state["pending"] is None:
+                break
+
+            # Orphaned: idle, nothing persisting, and no word from the Catchment for orphan_after. Exit
+            # rather than wait forever. Buffered events are dropped with the Duck; a Catchment that does
+            # come back re-dispatches any Run it never heard finish, and the re-run is idempotent.
+            if orphan_after is not None and core.idle() and inflight == 0 \
+                    and not persist_state["running"] and persist_state["pending"] is None \
+                    and time.monotonic() - client.last_contact > orphan_after:
+                log.warning("[%s] no contact with the Catchment for %.0f minutes while idle; exiting",
+                            core.pond_name, orphan_after / 60)
                 break
     finally:
         stop.set()

@@ -258,3 +258,15 @@ def test_an_all_chatter_log_still_shows_something(tmp_path):
     lch = _fargate(ecs, logs_client=logs, region="ap-southeast-2")
     lch.ensure("a@1", "1", "ponds/a/1", duck=_duck())
     assert "/jobs" in (lch.log_tail("a@1") or "")
+
+
+def test_release_forgets_the_task_without_stopping_it(tmp_path):
+    """A Duck that collected a shutdown ends its own task (after persisting), so release drops the
+    record without StopTask, and the next ensure launches a new task."""
+    ecs = FakeEcs()
+    lch = _fargate(ecs)
+    lch.ensure("a@1", "1", "ponds/a/1", duck=_duck())
+    lch.release("a@1")
+    assert not lch.is_running("a@1") and ecs.stopped == []
+    lch.ensure("a@1", "1", "ponds/a/1", duck=_duck())
+    assert len(ecs.ran) == 2

@@ -31,6 +31,8 @@ from enum import IntEnum
 
 from fastapi import Depends, HTTPException, Request
 
+from .db import locked
+
 # Routes that need no credential at all (parity with the old open `/api/health`).
 PUBLIC_PATHS = {"/api/health"}
 
@@ -60,15 +62,17 @@ def generate(con: sqlite3.Connection, levels: list[str] | None = None) -> dict[s
     if bad:
         raise ValueError(f"unknown level(s): {', '.join(bad)} — use read/demand/full")
     out: dict[str, str] = {}
-    for lvl in chosen:
-        key = secrets.token_urlsafe(24)
-        con.execute(
-            "INSERT INTO catchment_key (level, hash) VALUES (?, ?) "
-            "ON CONFLICT(level) DO UPDATE SET hash = excluded.hash",
-            (lvl, hash_key(key)),
-        )
-        out[lvl] = key
-    con.commit()
+    with locked(con):
+        for lvl in chosen:
+            key = secrets.token_urlsafe(24)
+            con.execute(
+                "INSERT INTO catchment_key (level, hash) VALUES (?, ?) "
+                "ON CONFLICT(level) DO UPDATE SET hash = excluded.hash",
+                (lvl, hash_key(key)),
+            )
+            out[lvl] = key
+        con.commit()
+        _forget_key_hashes(con)
     return out
 
 
@@ -84,8 +88,30 @@ def ensure_duck_token(con: sqlite3.Connection) -> str:
     return token
 
 
+_KEY_CACHE = "_duckstring_key_hashes"
+
+
 def _key_hashes(con: sqlite3.Connection) -> dict[str, str]:
-    return {level: khash for level, khash in con.execute("SELECT level, hash FROM catchment_key")}
+    """``{level: hash}``, cached on the Catchment's connection (``db.Connection``) and dropped by
+    :func:`generate`, so a request normally needs no query: auth runs on every request, and the shared
+    connection is serialised by one lock with the Driver."""
+    cached = getattr(con, _KEY_CACHE, None)
+    if cached is not None:
+        return cached
+    with locked(con):
+        hashes = {level: khash for level, khash in con.execute("SELECT level, hash FROM catchment_key")}
+    try:
+        setattr(con, _KEY_CACHE, hashes)
+    except AttributeError:  # a plain sqlite3 connection takes no attributes: query each time
+        pass
+    return hashes
+
+
+def _forget_key_hashes(con: sqlite3.Connection) -> None:
+    try:
+        setattr(con, _KEY_CACHE, None)
+    except AttributeError:
+        pass
 
 
 def auth_configured(con: sqlite3.Connection | None, api_key: str | None) -> bool:
@@ -96,7 +122,7 @@ def auth_configured(con: sqlite3.Connection | None, api_key: str | None) -> bool
         return True
     if con is None:
         return False
-    return con.execute("SELECT 1 FROM catchment_key LIMIT 1").fetchone() is not None
+    return bool(_key_hashes(con))
 
 
 # ─── Request-time resolution ─────────────────────────────────────────────────

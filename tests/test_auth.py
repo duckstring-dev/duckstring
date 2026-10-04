@@ -12,6 +12,7 @@ import pytest
 import uvicorn
 from fastapi.testclient import TestClient
 
+from duckstring.catchment import auth
 from duckstring.catchment.app import create_app
 from duckstring.cli import app as cli_app
 
@@ -267,3 +268,75 @@ def test_init_generate_key_conflicts_with_key(runner, tmp_path):
     )
     assert result.exit_code == 1
     assert "mutually exclusive" in result.output
+
+
+# ─── the shared connection ───────────────────────────────────────────────────────
+
+
+@pytest.mark.timeout(60)
+def test_auth_is_right_while_the_driver_writes(tmp_path):
+    """One SQLite connection is shared by the Driver, the routes and auth. Unserialised, an open
+    Catchment's key check read a row from an empty table about one time in a hundred under load, and
+    answered 401 (found as a flaky KeyError: 'ponds' in CI)."""
+    import threading
+
+    from duckstring.catchment.db import connect, locked, migrate
+
+    con = connect(tmp_path / "duck.db")
+    migrate(con)
+    con.execute("CREATE TABLE scratch (i INTEGER, s TEXT)")
+    stop, seen, errors = threading.Event(), set(), []
+
+    def writer():  # the Driver's pattern: statements and commits under the connection's lock
+        i = 0
+        while not stop.is_set():
+            with locked(con):
+                con.execute("INSERT INTO scratch VALUES (?, ?)", (i, "x" * 50))
+                con.execute("SELECT * FROM scratch ORDER BY i DESC LIMIT 50").fetchall()
+                if i % 20 == 0:
+                    con.commit()
+            i += 1
+            time.sleep(0.0002)  # between statements, as the Driver is; a tight loop starves the readers
+
+    def reader():
+        for _ in range(1500):
+            auth._forget_key_hashes(con)  # force a query each time, the worst case
+            try:
+                seen.add(auth.auth_configured(con, None))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    writers = [threading.Thread(target=writer, daemon=True) for _ in range(2)]
+    readers = [threading.Thread(target=reader, daemon=True) for _ in range(4)]
+    for t in writers + readers:
+        t.start()
+    for t in readers:
+        t.join()
+    stop.set()
+    for t in writers:
+        t.join()
+    assert seen == {False} and not errors
+
+
+def test_the_key_cache_follows_generate(tmp_path):
+    from duckstring.catchment.db import connect, migrate
+
+    con = connect(tmp_path / "duck.db")
+    migrate(con)
+    assert not auth.auth_configured(con, None)
+    keys = auth.generate(con)
+    assert auth.auth_configured(con, None)
+    assert auth.level_for_key(con, None, keys["read"]) == auth.Level.READ
+    rotated = auth.generate(con, ["read"])
+    assert auth.level_for_key(con, None, keys["read"]) is None  # the old key stops working at once
+    assert auth.level_for_key(con, None, rotated["read"]) == auth.Level.READ
+
+
+def test_the_driver_shares_the_connections_lock(tmp_path):
+    from duckstring.catchment.db import connect, migrate
+    from duckstring.catchment.driver import Driver
+    from duckstring.catchment.launcher import NoopLauncher
+
+    con = connect(tmp_path / "duck.db")
+    migrate(con)
+    assert Driver(con, tmp_path, "http://x", NoopLauncher()).lock is con.lock

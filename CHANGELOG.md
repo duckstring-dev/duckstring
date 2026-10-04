@@ -73,6 +73,20 @@ export time. See "Upgrading" at the end.
   on the machine.
 - Querying a missing table says the Pond hasn't run yet, or lists the tables it has.
 - A Pool agent stopped with SIGTERM stops its Ducks.
+- A Fargate or EC2 Duck shut down for being idle is replaced on the Pond's next run. Before, the Catchment
+  kept the departed Duck's record, launched nothing, and failed the run as "Lost contact" three minutes
+  later.
+- An EC2 Duck's instance terminates when the Duck exits cleanly, instead of running, and billing, after
+  the Duck has gone. A Duck that crashes leaves its instance up so its console output can be read.
+- SQL Ripples that read a Source work on the DuckDB 2.0 pre-release.
+- A Catchment without API keys could answer a request with 401 under load. The Catchment's database
+  connection is shared by its threads, and the key check read it without the lock the engine holds,
+  so it sometimes saw a key that wasn't there. Every user of the connection now takes that lock, and
+  the key check is cached.
+- A Duck that has heard nothing from its Catchment for an hour while idle exits, so a Duck left behind by
+  a Catchment that was deleted or stopped hard doesn't run, and bill, indefinitely. Set
+  `DUCKSTRING_DUCK_ORPHAN_MINUTES` on the Catchment to change the limit, or `0` to turn it off. Pool
+  machines aren't affected.
 
 ### Documentation
 

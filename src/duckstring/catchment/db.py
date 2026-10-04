@@ -1,5 +1,7 @@
 import sqlite3
+import threading
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,8 +23,25 @@ def ensure_identity(con: sqlite3.Connection, name: str | None = None) -> None:
     con.commit()
 
 
+class Connection(sqlite3.Connection):
+    """The Catchment's one connection, shared by the Driver, the routes and auth across threads. SQLite
+    doesn't make concurrent use of one connection safe from Python: interleaved statements return wrong
+    rows (an open Catchment answered requests with 401) and one thread's commit can end another's
+    transaction. So every user holds ``lock``, which is also the Driver's lock."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lock = threading.RLock()
+
+
+def locked(con):
+    """``with locked(con):`` serialises use of a shared connection (a no-op for a plain sqlite3 one)."""
+    lock = getattr(con, "lock", None)
+    return lock if lock is not None else nullcontext()
+
+
 def connect(path: Path) -> sqlite3.Connection:
-    con = sqlite3.connect(path, check_same_thread=False)
+    con = sqlite3.connect(path, check_same_thread=False, factory=Connection)
     if path != Path(":memory:") and path.exists():
         path.chmod(0o600)  # may hold duct credentials (auth headers for upstream Catchments)
     con.execute("PRAGMA foreign_keys = ON")

@@ -458,3 +458,26 @@ def test_a_recovered_pool_stops_reporting_the_old_failure(tmp_path):
     machine._probed_at = 0.0
     assert machine.check() is True
     assert pool.launch_error("a@1") is None
+
+
+def test_a_clean_duck_exit_ends_its_instance(tmp_path):
+    """An idle Duck's instance must not outlive it: the boot script powers off after a clean exit (a
+    crash leaves it up for its console), and shutdown is set to terminate."""
+    ec2 = FakeEc2()
+    lch = _launcher(tmp_path, ec2)
+    lch.ensure("a@1", "1", "ponds/a/1", duck=_duck("heavy", pool={"instance_type": "m6i.large"}))
+    _, kw = ec2.launched[0]
+    assert kw["InstanceInitiatedShutdownBehavior"] == "terminate"
+    script = base64.b64decode(kw["UserData"]).decode()
+    assert "-m duckstring.duck" in script and script.rstrip().endswith("&& shutdown -h now")
+    assert "exec python3 -m duckstring.duck" not in script
+
+
+def test_release_forgets_the_instance_without_terminating_it(tmp_path):
+    ec2 = FakeEc2()
+    lch = _launcher(tmp_path, ec2)
+    lch.ensure("a@1", "1", "ponds/a/1", duck=_duck("heavy", pool={"instance_type": "m6i.large"}))
+    lch.release("a@1")
+    assert not lch.is_running("a@1") and ec2.terminated == []
+    lch.ensure("a@1", "1", "ponds/a/1", duck=_duck("heavy", pool={"instance_type": "m6i.large"}))
+    assert len(ec2.launched) == 2

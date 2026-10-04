@@ -276,6 +276,12 @@ class FargateLauncher:
             log.debug("fargate: log fetch failed for %s", pond_key, exc_info=True)
             return None
 
+    def release(self, pond_key: str) -> None:
+        """The Duck was told to shut down and its task ends when it exits: forget the task without
+        stopping it (it may still be persisting), so the next ensure() starts a fresh one."""
+        self._pending.pop(pond_key, None)
+        self._tasks.pop(pond_key, None)
+
     def terminate(self, pond_key: str, wait: bool = False) -> None:
         self._pending.pop(pond_key, None)
         self._launch_errors.pop(pond_key, None)
