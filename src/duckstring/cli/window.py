@@ -16,7 +16,7 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="Manage batch-availability windows on a Pond.", no_args_is_help=True)
+app = typer.Typer(help="Declare when an Inlet can produce new data.", no_args_is_help=True)
 
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 _EVERY_UNIT = {"s": "SECOND", "m": "MINUTE", "h": "HOUR", "d": "DAY", "w": "WEEK"}
@@ -90,17 +90,19 @@ def _main(ctx: typer.Context, pond: str = typer.Argument(..., help="The Pond who
 @app.command("add")
 def add(
     ctx: typer.Context,
-    name: str = typer.Option(..., "--name", "-n", help="Unique identifier for the window rule."),
-    every: str = typer.Option(..., "--every", "-e", help="Recurrence interval (single unit), e.g. 1d, 12h, 10s."),
-    start: Optional[str] = typer.Option(None, "--start", "-s", help="Window start (ISO 8601 or HH:MM); default 00:00 today."),
-    duration: Optional[str] = typer.Option(None, "--duration", "-d", help="Window length; default = --every (back-to-back)."),
-    on: Optional[str] = typer.Option(None, "--on", "-o", help="Restrict to weekdays, e.g. MON,WED,FRI."),
-    until: Optional[str] = typer.Option(None, "--until", "-u", help="Expiration (ISO 8601)."),
+    name: str = typer.Option(..., "--name", "-n", help="A name for the window, unique on this Pond."),
+    every: str = typer.Option(..., "--every", "-e", help="How often windows open, as one unit, e.g. 1d, 12h or 10s."),
+    start: Optional[str] = typer.Option(None, "--start", "-s", help="When the first window opens: ISO 8601, "
+                                                                "or HH:MM (UTC). Default 00:00 today."),
+    duration: Optional[str] = typer.Option(None, "--duration", "-d", help="How long each window stays open. "
+                                                                      "Defaults to --every."),
+    on: Optional[str] = typer.Option(None, "--on", "-o", help="Only open on these weekdays, e.g. MON,WED,FRI."),
+    until: Optional[str] = typer.Option(None, "--until", "-u", help="When the windows stop (ISO 8601)."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
 ) -> None:
-    """Add a recurring batch-availability window to the Pond."""
+    """Add a window: the Pond runs at most once per window, never between windows."""
     from . import _http
 
     unit, interval = _parse_every(every)
@@ -162,12 +164,12 @@ def list_(
 @app.command("remove")
 def remove(
     ctx: typer.Context,
-    window_name: str = typer.Argument(..., help="Name of the window rule to remove."),
+    window_name: str = typer.Argument(..., help="Name of the window to remove."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
 ) -> None:
-    """Remove a window from the Pond."""
+    """Remove a window."""
     from . import _http
 
     url, cfg = _resolve(catchment)

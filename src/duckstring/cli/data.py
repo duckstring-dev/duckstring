@@ -10,13 +10,13 @@ import typer
 
 def get(
     outlet: str = typer.Argument(..., help="Pond name."),
-    ripple: str = typer.Argument(..., help="Ripple name within the Pond."),
+    ripple: str = typer.Argument(..., metavar="TABLE", help="Table name within the Pond."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to read from (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line to read."),
-    path: Optional[Path] = typer.Option(None, "--path", help="Output directory (default: ./ponds/{outlet}/{ripple})."),
+    path: Optional[Path] = typer.Option(None, "--path", help="Output directory (default: ./ponds/{pond}/{table})."),
 ) -> None:
-    """Download a Ripple's output directory from a Catchment."""
+    """Download a table's published files from a Catchment."""
     from rich.console import Console
 
     from . import _http
@@ -51,7 +51,7 @@ def objects(
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to read from (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line to read."),
 ) -> None:
-    """List a Pond's published non-tabular Objects (models, blobs)."""
+    """List a Pond's published Objects."""
     from rich.console import Console
     from rich.table import Table
 
@@ -94,7 +94,7 @@ def get_object(
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line to read."),
     out: Optional[Path] = typer.Option(None, "--out", "-o", help="Output path (default ./{name}; a dir Object unzips here)."),
 ) -> None:
-    """Download a Pond's published Object (a single file, or a directory Object unzipped into a folder)."""
+    """Download a Pond's Object. A directory Object is unpacked into a folder."""
     from rich.console import Console
 
     from . import _http
@@ -129,8 +129,10 @@ def delete_table(
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Delete a table from a Pond (its data + registry state) now. It stays gone until the Pond next runs,
-    which recreates it only if the code still produces it. Requires the Pond to be idle."""
+    """Delete a table's published data and its state in the Pond's working database.
+
+    It reappears only if the Pond's code still writes it. The Pond must be idle.
+    """
     from duckstring.trickle_io import base_table_name
 
     from . import _http
@@ -165,7 +167,7 @@ def delete_object(
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Delete a non-tabular Object from a Pond. It returns only if a Ripple writes it again."""
+    """Delete a published Object. It reappears only if a Ripple writes it again."""
     from . import _http
     from .config import resolve_catchment
 
@@ -180,7 +182,9 @@ def delete_object(
 
 def query(
     outlet: str = typer.Argument(..., help="Pond name."),
-    ripple: Optional[str] = typer.Argument(None, help="Ripple name (default query: SELECT * LIMIT 10)."),
+    ripple: Optional[str] = typer.Argument(
+        None, metavar="[TABLE]", help="Table name, for the default query (SELECT * ... LIMIT 10)."
+    ),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to query (default: latest)."),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver whose major line to query."),
@@ -190,7 +194,10 @@ def query(
     parquet_out: Optional[str] = typer.Option(None, "--parquet", metavar="FILENAME", help="Write result as Parquet."),
     path: Optional[Path] = typer.Option(None, "--path", help="Output directory for file output (overrides default location)."),
 ) -> None:
-    """Run a SQL query against a Pond's tables and print or save the result."""
+    """Run read-only SQL against one Pond's published tables, and print or save the result.
+
+    With only TABLE, runs SELECT * FROM {pond}.{table} LIMIT 10.
+    """
     from rich.console import Console
     from rich.table import Table
 

@@ -1,11 +1,10 @@
 """A **writer lease** on the data root — defence against two Catchments operating on one lake.
 
-The Iceberg catalog pointer (``catalog.json``) is the one shared-mutable object the data plane has; a
-plain object PUT is safe **only** under single-writer-per-line, which the runtime already enforces (one
-Duck per ``name@major``, "run exactly ONE app process"). This lease guards the case that invariant can't:
-a *second Catchment* — a stray autoscaled app process, a rolling-deploy overlap, or two deployments
-misconfigured to share a data root — writing the same catalogs concurrently, which would race the pointer
-and (with the GC) dangle it.
+The data plane's plain object PUTs and deletes are safe **only** under single-writer-per-line, which the
+runtime already enforces (one Duck per ``name@major``, "run exactly ONE app process"). This lease guards
+the case that invariant can't: a *second Catchment* — a stray autoscaled app process, a rolling-deploy
+overlap, or two deployments misconfigured to share a data root — publishing the same lines concurrently.
+Each would rewrite the other's sidecars and prune versions the other's Sinks are pinned to.
 
 It is a **lease, not a distributed lock**: a small ``_duckstring_owner.json`` object at the data-root top
 level, written with a plain PUT (portable across S3/GCS/ABFS/local — no backend-specific conditional-PUT)

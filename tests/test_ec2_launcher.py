@@ -275,6 +275,7 @@ def test_pool_agent_boots_against_the_directory_the_userdata_creates(tmp_path):
     _iid, kw = ec2.launched[0]
     script = base64.b64decode(kw["UserData"]).decode()
     assert f"mkdir -p {_REMOTE_ROOT}" in script
+    assert f"export UV_CACHE_DIR={_REMOTE_ROOT}/uv-cache" in script  # Pond environments link from a baked cache
     assert f"--root {_REMOTE_ROOT}" in script, f"agent root must exist on the box:\n{script}"
     assert "/var/duckstring " not in script
 

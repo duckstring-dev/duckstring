@@ -1,5 +1,5 @@
 """The data-root writer lease (plans/storage-decoupling.md): refuse a *second* Catchment on one lake so
-two writers can't race the Iceberg catalog pointer. A lease, not a lock — same-id reclaim, TTL takeover,
+two writers can't publish the same lines. A lease, not a lock — same-id reclaim, TTL takeover,
 read-back race detection."""
 
 from __future__ import annotations

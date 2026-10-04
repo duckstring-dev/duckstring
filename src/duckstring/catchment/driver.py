@@ -22,6 +22,7 @@ import os
 import threading
 from datetime import datetime, timedelta, timezone
 
+from ..egress.credentials import secret_value
 from ..engine import (
     NEVER,
     EngineState,
@@ -53,6 +54,7 @@ from ..engine import (
     tick,
     wake_pond,
 )
+from ..flock import job_settings as flock_job_settings
 from ..keys import pond_key
 
 # A Duck is presumed dead if it holds an in-flight Run but hasn't contacted the Catchment within this
@@ -184,6 +186,9 @@ IRREVERSIBLE_OPS = frozenset({"reset", "wipe", "remove"})
 # size means physically is the launcher's business (the local subprocess ignores it).
 FLOCK_MODES = ("off", "upgrade", "always")
 OOM_POLICIES = ("fail_up", "fail")
+# A Spout's default on-change retry budget: a failed delivery is retried on its Pond's next publishes.
+# Editable per Spout with `control failure-budget {pond}#{spout}`.
+SPOUT_SOURCE_RETRIES = 3
 POOL_PROVIDERS = ("fargate", "ec2", "local")  # local = a shared Pool machine on this box (dev/test)
 
 # Built-in preset Duck Pools (plans/cloud-config.md §4b): Fargate task sizes, always available so a
@@ -233,6 +238,19 @@ def _duck_override_row(row) -> dict:
 _OL_PRODUCER = "https://github.com/duckstring/duckstring"
 _OL_SCHEMA_URL = "https://openlineage.io/spec/2-0-2/OpenLineage.json#/definitions/RunEvent"
 _OL_SCHEMA_FACET = "https://openlineage.io/spec/facets/1-1-1/SchemaDatasetFacet.json"
+
+
+def _draw_version_ok(version: str | None, major: int) -> bool:
+    """Whether ``version`` is a usable ``MAJOR.MINOR.PATCH`` release of the given major line."""
+    if not version:
+        return False
+    try:
+        from ..keys import version_key
+
+        version_key(version)
+        return int(version.split(".")[0]) == major
+    except (ValueError, TypeError):
+        return False
 
 
 class Driver:
@@ -391,7 +409,9 @@ class Driver:
                 retry = db.execute(
                     "SELECT immediate_retries, source_retries FROM pond_retry WHERE pond_id = ?", (pond_id,)
                 ).fetchone()
-                imm, onc = retry if retry else (0, 0)
+                # A Spout with no budget set retries a failed delivery on its Pond's next few publishes
+                # (delivery failures are often transient); a Pond defaults to no retries.
+                imm, onc = retry if retry else (0, SPOUT_SOURCE_RETRIES if is_spout else 0)
                 duck_row = db.execute(
                     "SELECT duck_target, dedicated_instance_type, dedicated_auto_stop, "
                     "flock_mode, flock_engine, oom_policy, deploy_config FROM pond_duck WHERE pond_id = ?",
@@ -928,8 +948,6 @@ class Driver:
             self.state_version += 1
             return {"ponds": len(lines)}
 
-    _MIGRATE_SKIP = frozenset({"catalog.json", "pond.db", "pond"})  # Iceberg pointer + namespace warehouse
-
     def migration_status(self) -> dict:
         """The current/last data-plane migration's progress (``status`` ∈ copying/adopting/done/failed,
         + file/byte counts + the pond in flight), or ``{"status": "idle"}`` if none has run."""
@@ -941,8 +959,7 @@ class Driver:
         carries the data across with no rebuild. Blocking (run it in a thread for a live migration); the
         long **copy runs off-lock** (so ``/api/status`` stays responsive), bracketed by two short locked
         phases: quiesce+plan, then re-point+adopt. Progress is published on ``self.migration`` throughout.
-        The Iceberg catalog/namespace are skipped (regenerated at the target — reads fall back to the flat
-        sidecars); the old location is left intact. Raises (and marks the migration ``failed``) on error."""
+        The old location is left intact. Raises (and marks the migration ``failed``) on error."""
         from pathlib import Path
 
         from ..storage import copy_tree, tree_size
@@ -971,7 +988,7 @@ class Driver:
                 dst = pond_data_dir(root, name, major, new_root)
                 if src.uri() == dst.uri():  # same physical location — nothing to copy
                     continue
-                f, b = tree_size(src, skip_top=self._MIGRATE_SKIP)
+                f, b = tree_size(src)
                 total_files += f
                 total_bytes += b
                 plan.append((name, src, dst))
@@ -986,7 +1003,7 @@ class Driver:
                 self.migration["copied_bytes"] += nbytes
             for name, src, dst in plan:
                 self.migration["pond"] = name
-                copy_tree(src, dst, skip_top=self._MIGRATE_SKIP, on_file=_on)
+                copy_tree(src, dst, on_file=_on)
             # Phase 3 (locked): re-point. The target now holds a VERBATIM copy of the current data, so the
             # freshness ledger + registries already match it — just move the pointer. No adopt/re-read of
             # the target sidecar (which could come back empty and wrongly reset freshness), no rewind: a
@@ -1834,7 +1851,7 @@ class Driver:
                 # source is caught at egress instead.
                 self._assert_transactional_pk(m["name"], m["major"], table)
             src_name, major = split_pond_key(pond)
-            final = name or self._default_spout_name(src_name, dest.scheme, table)
+            final = name or self._default_spout_name(src_name, dest.scheme or "spout", table)
             if self.meta.get(pond_key(f"{src_name}#{final}", major), {}).get("is_spout"):
                 raise ValueError(f"A spout named '{final}' already exists on '{pond}'")
             self._create_spout(src_name, major, final, destination, table, mode)
@@ -1985,6 +2002,8 @@ class Driver:
                 tables = sorted(serviceable) if serviceable else None
                 jobs.append({
                     "spout_key": skey, "f": _iso(f), "source_f": source_f,
+                    # The source's overwrite version this delivery reads (pinned at dispatch).
+                    "pin": (self._run_pins(skey, _iso(f)) or {}).get(src["name"]),
                     "pond_name": src["name"], "major": src["major"],
                     "table": cfg.get("table"), "tables": tables,
                     "destination": cfg.get("destination"), "mode": cfg.get("mode"),
@@ -2446,20 +2465,40 @@ class Driver:
             return out
 
     def observe_remote(
-        self, pond: str, remote_f: datetime | None, *, down: bool = False,
+        self, pond: str, remote_f: datetime | None, *, down: bool = False, version: str | None = None,
     ) -> None:
-        """The poller reports an upstream Pond's freshness + reachability for a Draw. Mirror them and
-        run the cascade — a transfer starts if there is downstream demand and the upstream is fresher."""
+        """The poller reports an upstream Pond's freshness, reachability and deployed version for a Draw.
+        Mirror them and run the cascade — a transfer starts if there is downstream demand and the upstream
+        is fresher. The version keeps local ``[sources]`` pins on the Draw checked against the real release."""
         with self.lock:
             ps = self.state.pond_states.get(pond)
             if ps is None or not self.meta.get(pond, {}).get("is_draw"):
                 return
+            if version is not None and version != self.meta[pond]["version"]:
+                self._set_draw_version(pond, version)
             if remote_f is not None:
                 ps.remote_f = remote_f
             if ps.remote_down != down:
                 ps.remote_down = down
                 derive_blocked(self.state, pond)
             self._process(_now(), notify=False)  # poller-driven; transfers handled in this cycle
+
+    def _set_draw_version(self, pond: str, version: str) -> None:
+        """Record a Draw's upstream version on its (single) version row, in place, so its run history and
+        engine state are untouched. Caller holds the lock. A version from another major line, or one that
+        collides with a retired local version row of the same name, is ignored."""
+        meta = self.meta[pond]
+        if not _draw_version_ok(version, meta["major"]):
+            return
+        import sqlite3
+
+        try:
+            self.db.execute("UPDATE pond_version SET version = ? WHERE id = ?", (version, meta["version_id"]))
+            self.db.commit()
+        except sqlite3.IntegrityError:
+            self.db.rollback()
+            return
+        meta["version"] = version
 
     def pond_observation(self, pond: str) -> dict:
         """A Pond's freshness + down-state, for the producer's ``…/wait`` long-poll (a downstream
@@ -2497,7 +2536,25 @@ class Driver:
             self._record_ripple_run(pond, "draw", f, "success", started_at=started, finished_at=_iso(now))
             self.data_version += 1  # the Draw landed new data → the serving surface changed
             self._finish_pond_run(pond, f, now)
+            self._prune_draw_versions(pond)
             self._process(now, notify=False)  # poller-driven
+
+    def _prune_draw_versions(self, pond: str) -> None:
+        """A Draw has no Duck, so its landed overwrite versions are trimmed here, once the landing has
+        advanced its freshness: Sinks dispatched from now on pin the version just landed, and in-flight
+        ones are covered by ``_retain_from``. Housekeeping: a failure never fails the transfer."""
+        from pathlib import Path
+
+        from ..dataplane import prune_versions
+        from .registry import pond_data_dir
+
+        meta = self.meta[pond]
+        try:
+            raw = self._retain_from(pond)
+            prune_versions(pond_data_dir(Path(self.root), meta["name"], meta["major"], self.data_root),
+                           datetime.fromisoformat(raw) if raw else None)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[catchment] version prune for draw {pond} skipped: {exc}", flush=True)
 
     def fail_draw_transfer(self, pond: str, f: str, error: str) -> None:
         """The poller could not land a Draw's parquet: fail the transfer (blocks downstream until the
@@ -2579,12 +2636,16 @@ class Driver:
             self.reload()
             return True
 
-    def add_duct_pond(self, origin: str, pond_name: str, major: int, incremental: bool = False) -> None:
+    def add_duct_pond(self, origin: str, pond_name: str, major: int, incremental: bool = False,
+                      version: str | None = None) -> None:
+        """Draw ``pond_name@major`` over the duct from ``origin``. ``version`` is the upstream's deployed
+        version when the caller knows it, so ``[sources]`` pins are checked against it from the start; the
+        poller keeps it current either way (:meth:`observe_remote`)."""
         with self.lock:
             row = self.db.execute("SELECT id FROM duct WHERE origin_catchment = ?", (origin,)).fetchone()
             if row is None:
                 raise KeyError(f"No duct from '{origin}' — create it first")
-            self._create_draw(pond_name, major)  # raises ValueError on a local-Pond collision
+            self._create_draw(pond_name, major, version)  # raises ValueError on a local-Pond collision
             self.db.execute(
                 "INSERT OR REPLACE INTO duct_to_pond (duct_id, source_pond_name, major, incremental) "
                 "VALUES (?, ?, ?, ?)",
@@ -2649,7 +2710,7 @@ class Driver:
                 })
             return out
 
-    def _create_draw(self, name: str, major: int) -> None:
+    def _create_draw(self, name: str, major: int, version: str | None = None) -> None:
         """Materialise a Pond Draw's identity rows (caller holds the lock and reloads). Real but
         synthetic: kind='inlet', is_draw=1, a single immutable pond_version + one ``"draw"`` ripple."""
         db = self.db
@@ -2663,7 +2724,14 @@ class Driver:
         if existing is not None and not existing[0]:
             raise ValueError(f"A local Pond '{name}@{major}' already exists — cannot draw it over a duct")
 
-        version = f"{major}.0.0"
+        existing_pv = db.execute(
+            "SELECT pv.version FROM pond p JOIN pond_version pv ON pv.id = p.pond_version_id "
+            "WHERE p.pond_name_id = ? AND p.major = ?", (pn_id, major),
+        ).fetchone()
+        if existing_pv is not None:  # re-drawing an existing Draw: keep its version row (and history)
+            version = existing_pv[0]
+        elif not _draw_version_ok(version, major):
+            version = f"{major}.0.0"  # unknown until the poller observes the upstream
         db.execute(
             "INSERT OR IGNORE INTO pond_version (pond_name_id, version, major, source_path) "
             "VALUES (?, ?, ?, ?)",
@@ -2984,22 +3052,30 @@ class Driver:
         # A Spout is the egress dual: not run by a Duck either — record the Run and hand the delivery to
         # the egress worker (it reads the source + writes out-of-lock, then reports via complete/fail).
         if meta.get("is_spout"):
+            # Pinned like any Sink run: the worker reads the source's overwrite tables at this version, and
+            # the source keeps it until the delivery is done.
             self.db.execute(
-                "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status) "
-                "VALUES (?, ?, ?, 'running')",
-                (meta["version_id"], _iso(f), _iso(now)),
+                "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status, source_pins) "
+                "VALUES (?, ?, ?, 'running', ?)",
+                (meta["version_id"], _iso(f), _iso(now), json.dumps(self._source_published_f(pond))),
             )
             self.db.commit()
             if (pond, f) not in self._pending_egress:
                 self._pending_egress.append((pond, f))
             self._signal_egress()
             return
-        self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=self.duck_config(pond))
+        duck_cfg = self.duck_config(pond)
+        self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=duck_cfg)
         self.last_seen[pond] = now  # grace clock: a freshly (re)spawned Duck isn't immediately stale
         self._awaiting_first_contact.add(pond)  # until it speaks, judge it by the spawn grace (see below)
         self._idle_since.pop(pond, None)  # it's running again — reset its reap grace clock
         # Cancel any not-yet-collected shutdown: this Pond is running again, so the Duck must not exit.
         self.jobs[pond] = [j for j in self.jobs.get(pond, []) if j.get("kind") != "shutdown"]
+        # The Sources' published freshness this Run is pinned to. A re-dispatch of a Run already in flight
+        # (a Catchment restart) re-sends the pins it started with; a Force restarts the Run on fresh ones.
+        pins = None if force else self._run_pins(pond, _iso(f))
+        if pins is None:
+            pins = self._source_published_f(pond)
         self._enqueue_job(pond, {
             "kind": "begin_run", "f": _iso(f), "force": force, "refresh": refresh,
             "sources_changed": sources_changed,  # backs pond.sources_changed() (for always_run gating)
@@ -3010,17 +3086,25 @@ class Driver:
             # The major line's additive schema contract this Run must keep (vetted by the Duck before
             # publishing); None for a first run or a deliberate rollback (governed by min_version).
             "contract": self._contract_for(pond),
-            # What each Source has published ({name: iso}), so a foreign read can reject a stale LOCAL
-            # publish left behind by a Source that moved to a remote Pool (registry.resolve_data_dir).
-            "source_f": self._source_published_f(pond),
+            # What each Source has published ({name: iso}) when this Run started: the version its
+            # overwrite Source reads are pinned to, and the bar a LOCAL publish must meet to be read rather
+            # than a stale leftover of a Source that moved to a remote Pool (registry.resolve_data_dir).
+            "source_f": pins,
+            # How far back this line's own superseded overwrite versions must be kept (prune_versions).
+            "retain_from": self._retain_from(pond),
+            # The Pond's Flock settings and its engine's credentials, for this run (flock.job_settings).
+            # On the job rather than the Duck's environment, so every launcher's Ducks get them.
+            "flock": flock_job_settings(duck_cfg, secret=secret_value),
         })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI. A Force re-opens the Run.
         self.db.execute(
-            "INSERT OR REPLACE INTO pond_run (pond_version_id, f, started_at, status) VALUES (?, ?, ?, 'running')"
+            "INSERT OR REPLACE INTO pond_run (pond_version_id, f, started_at, status, source_pins) "
+            "VALUES (?, ?, ?, 'running', ?)"
             if force else
-            "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status) VALUES (?, ?, ?, 'running')",
-            (meta["version_id"], _iso(f), _iso(now)),
+            "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status, source_pins) "
+            "VALUES (?, ?, ?, 'running', ?)",
+            (meta["version_id"], _iso(f), _iso(now), json.dumps(pins)),
         )
         self.db.commit()
 
@@ -3047,7 +3131,8 @@ class Driver:
             # that re-runs on any sub-grace cadence keeps its Duck and never hits the reap/respawn race.
             since = self._idle_since.setdefault(name, now)
             if now - since >= _REAP_GRACE:
-                self._enqueue_job(name, {"kind": "shutdown"})
+                # Idle: the Duck trims the overwrite versions no Sink still reads before it exits.
+                self._enqueue_job(name, {"kind": "shutdown", "retain_from": self._retain_from(name)})
                 self._idle_since.pop(name, None)
 
     # ─── History + persistence ────────────────────────────────────────────────
@@ -3404,6 +3489,56 @@ class Driver:
                 out[meta["name"]] = f
         return out
 
+    def _run_pins(self, pond: str, f: str) -> dict[str, str] | None:
+        """The Source pins recorded for this Pond's Run at ``f`` (``None`` if the Run has no row yet)."""
+        row = self.db.execute(
+            "SELECT source_pins FROM pond_run WHERE pond_version_id = ? AND f = ?",
+            (self.meta[pond]["version_id"], f),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        try:
+            return json.loads(row[0])
+        except ValueError:
+            return None
+
+    def _retain_from(self, pond: str) -> str | None:
+        """The retention bound for ``pond``'s superseded overwrite versions (plans/versioned-overwrite.md):
+        the oldest version a reader may still need. That is the oldest pin on this line held by an in-flight
+        Sink run, lowered to this line's own published freshness now, since a Sink dispatched before the
+        line publishes again is pinned to that. ``None`` when neither exists (keep only the newest).
+
+        A Sink run with no pin for this line (dispatched before it first published) reads at its own
+        freshness, so that bounds it instead. Rows at or below the Sink's ``end_f`` are stranded, not in
+        flight, and are ignored."""
+        meta = self.meta[pond]
+        bounds: list[datetime] = []
+        ps = self.state.pond_states.get(pond)
+        if ps is not None and ps.changed_f > NEVER:
+            bounds.append(ps.changed_f)
+        for sink, sp in self.state.ponds.items():
+            if pond not in sp.sources or sink not in self.meta:
+                continue
+            sm = self.meta[sink]
+            sink_end = self.state.pond_states[sink].end_f
+            for f_raw, pins_raw in self.db.execute(
+                "SELECT pr.f, pr.source_pins FROM pond_run pr "
+                "JOIN pond_version pv ON pv.id = pr.pond_version_id "
+                "JOIN pond_name pn ON pn.id = pv.pond_name_id "
+                "WHERE pr.status = 'running' AND pn.name = ? AND pv.major = ?",
+                (sm["name"], sm["major"]),
+            ).fetchall():
+                run_f = datetime.fromisoformat(f_raw)
+                if run_f <= sink_end:
+                    continue
+                try:
+                    pins = json.loads(pins_raw) if pins_raw else {}
+                except ValueError:
+                    pins = {}
+                pin = pins.get(meta["name"])
+                bounds.append(datetime.fromisoformat(pin) if pin else run_f)
+        return _iso(min(bounds)) if bounds else None
+
     def published_f(self, name: str, major: int) -> str | None:
         """The freshness this Catchment believes ``name@major`` has PUBLISHED — its ``changed_f`` (the
         content anchor: a pass advances end_f without writing anything). Passed to ``resolve_data_dir``
@@ -3524,9 +3659,8 @@ class Driver:
     # ─── Status ───────────────────────────────────────────────────────────────
 
     def _exported_tables(self, key: str) -> set[str]:
-        """Names of the tables this major line has published to its data dir (the exported Parquet/
-        Iceberg snapshot). Best-effort — a data-read hiccup must never break ``status()``; a Draw has
-        no local output. ``list_tables`` globs the flat sidecar, so it needs no Iceberg extension.
+        """Names of the tables this major line has published to its data dir. Best-effort — a data-read
+        hiccup must never break ``status()``; a Draw has no local output.
 
         **Cached per ``data_version``** — this runs per Pond on every ~1 s status poll, and for a line
         with no local publish (a Pool/remote-run Pond) the resolve falls to the data root: an object-store

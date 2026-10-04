@@ -67,14 +67,22 @@ CHANGELOG_SUFFIX = "__changelog"
 # published alongside the table (like ``__changelog``), one growing record of what each run dropped.
 DROPLOG_SUFFIX = "__droplog"
 # A merge main is log-structured: its folded **base** (the checkpointed state up to ``f_base``) is published
-# as a directory of size-bounded, freshness-ordered Parquet **chunks** under ``{table}__base/`` (so a single
-# base can hold far more than one Parquet file's worth, and a partition-granular checkpoint can rewrite just
-# the chunks holding changed PKs — see plans/trickle-main-incremental.md). The base is wholesale (rewritten
+# as a directory of size-bounded Parquet **chunks** under ``{table}__base/``, ordered by pk or ``cluster_by``,
+# so a single base can hold far more than one Parquet file's worth (see plans/trickle-main-incremental.md and
+# plans/data-plane-clustering.md). The base is wholesale (rewritten
 # at a checkpoint), distinct from the per-run append parts; ``part_tables`` excludes it for that reason.
 BASE_SUFFIX = "__base"
 # The warm tier (see :func:`warm_name`): consolidated freshness-range bands between the cold base and the
 # hot per-run changelog. Published as ``{table}__band/`` parts, one file per fold.
 WARM_SUFFIX = "__band"
+# A fold stages its new band here until the data plane publishes it; the registry's ``{table}__band`` is
+# then a view over the published band files (plans/s3-resident-state.md), so the warm tier is never copied
+# into a fresh registry. Reserved prefix: never published as a table of its own.
+WARM_PENDING_PREFIX = "_duckstring_band_"
+# A plain overwrite table is published as **versions**: one immutable file per run under ``{table}__v/``,
+# named by the run's freshness (:func:`part_name`), so a Sink run pinned to a Source version keeps reading
+# it while the Source publishes the next one. Retention trims superseded versions (see the data plane).
+VERSION_SUFFIX = "__v"
 # A ``.aggregate(...)`` output keeps its raw accumulators (count + per-summed-col sum & non-NULL count) in a
 # ``_duckstring_agg_{name}`` companion. Reserved prefix → ``registry_tables`` hides it from publish; the
 # published main holds only the derived user columns.
@@ -134,7 +142,9 @@ def _store(data_dir):
 
 
 class DeltaError(ValueError):
-    """A delta read or Trickle write was used incompatibly."""
+    """A Trickle write or delta read was used incorrectly: a missing or conflicting primary key, or a write
+    with no run freshness. A subclass of ``ValueError``.
+    """
 
 
 def changelog_name(table: str) -> str:
@@ -146,12 +156,35 @@ def base_dir_name(table: str) -> str:
     return f"{table}{BASE_SUFFIX}"
 
 
+def cold_base_name(table: str) -> str:
+    """The registry relation holding a merge main's **cold base** (``{table}__base``, matching its published
+    ``{table}__base/`` directory). The main's own name is a view over its current state
+    (:func:`refresh_current_view`), so plain SQL in a later Ripple reads what ``read_table`` returns."""
+    return f"{table}{BASE_SUFFIX}"
+
+
 def warm_name(table: str) -> str:
     """The **warm tier** companion of a merge main ``table`` — consolidated freshness-range Z-set bands
     between the cold base and the hot ``__changelog``. A ``fold_warm`` moves an older slice of the changelog
     into here (collapsing a→b→c→d to its net change), so reconstruct reads fewer, denser files and the
     cold base is rewritten only at the rare k=1 cold compaction. Published as ``{table}__band/`` parts."""
     return f"{table}{WARM_SUFFIX}"
+
+
+def version_dir_name(table: str) -> str:
+    """The published-versions directory name for a plain overwrite ``table``."""
+    return f"{table}{VERSION_SUFFIX}"
+
+
+def table_versions(data_dir, table: str) -> list[str]:
+    """The published version **names** of an overwrite ``table`` (its ``{table}__v/`` directory), sorted
+    oldest-first (canonical-UTC part names sort in freshness order); ``[]`` when it has none."""
+    return _store(data_dir).parquet_names(version_dir_name(table))
+
+
+def warm_pending_name(table: str) -> str:
+    """The registry table where a warm fold stages its band until it's published (:func:`fold_warm`)."""
+    return f"{WARM_PENDING_PREFIX}{table}"
 
 
 def base_chunks(data_dir, table: str) -> list[str]:
@@ -201,6 +234,50 @@ def _drop_relation(con, name: str) -> None:
         con.execute(f"DROP TABLE IF EXISTS {_q(name)}")
 
 
+# The comment marking the view Duckstring maintains under a merge main's name. A view without it is something
+# else (a legacy base registered as a view, or a user/Source view) and is never replaced by the refresh.
+CURRENT_VIEW_COMMENT = "duckstring:merge-current-state"
+
+
+def _is_current_view(con, name: str) -> bool:
+    row = con.execute("SELECT comment FROM duckdb_views() WHERE view_name = ?", [name]).fetchone()
+    return row is not None and row[0] == CURRENT_VIEW_COMMENT
+
+
+def _migrate_base(con, name: str) -> None:
+    """Move a **legacy** cold base, stored under the merge main's own name (a table, or a view over the
+    published chunks), to :func:`cold_base_name`. A no-op once migrated, or when there is no base yet."""
+    cold = cold_base_name(name)
+    if _table_exists(con, cold) or _is_current_view(con, name):
+        return
+    if con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ?", [name]).fetchone():
+        con.execute(f"ALTER VIEW {_q(name)} RENAME TO {_q(cold)}")
+    elif con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ?", [name]).fetchone():
+        con.execute(f"ALTER TABLE {_q(name)} RENAME TO {_q(cold)}")
+
+
+def refresh_current_view(con, name: str) -> None:
+    """(Re)create the view under merge main ``name`` over its current state, with system columns stripped:
+    the same relation :func:`current_state` returns, so ``SELECT ... FROM name`` in plain SQL is correct.
+    Called after every change to the main's storage (a merge write, a warm fold, a checkpoint, a rebuild),
+    since the view's SQL depends on which tiers exist and on ``f_base``. A relation under ``name`` that
+    isn't Duckstring's view (e.g. a Source view registered by ``read_table``) is left alone."""
+    from .context import SYSTEM_PREFIX
+
+    if read_meta(con).get(name, {}).get("mode") != "merge":
+        return
+    sql = _reconstruct_sql_for(con, name)
+    if sql is None:
+        return
+    if _table_exists(con, name) and not _is_current_view(con, name):
+        return
+    con.execute(
+        f"CREATE OR REPLACE VIEW {_q(name)} AS "
+        f"SELECT COLUMNS(lambda c: NOT starts_with(c, '{SYSTEM_PREFIX}')) FROM ({sql})"
+    )
+    con.execute(f"COMMENT ON VIEW {_q(name)} IS '{CURRENT_VIEW_COMMENT}'")
+
+
 def _user_cols(columns) -> list[str]:
     """The user columns of a relation — everything outside the reserved ``_duckstring_*`` namespace."""
     from .context import SYSTEM_PREFIX as RESERVED_PREFIX
@@ -240,7 +317,7 @@ def _ensure_meta(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
         f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR, "
-        f"compact_threshold VARCHAR, f_warm VARCHAR)"
+        f"compact_threshold VARCHAR, f_warm VARCHAR, cluster VARCHAR)"
     )
     # Migrate an older meta table that predates a column: f_base (the cold-base fold watermark),
     # compact_threshold (the per-table checkpoint-size override), f_warm (the warm-tier fold watermark).
@@ -251,6 +328,8 @@ def _ensure_meta(con) -> None:
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN compact_threshold VARCHAR')
     if "f_warm" not in cols:
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN f_warm VARCHAR')
+    if "cluster" not in cols:  # the merge main's cold-base ordering (cluster_spec), JSON
+        con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN cluster VARCHAR')
 
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
@@ -273,7 +352,7 @@ def drop_meta(con, table: str) -> None:
 
 # The published companion suffixes of a Trickle base table — a delete of any of these resolves to (and
 # takes) the whole base collection: deleting a changelog/band alone would corrupt the reconstructable main.
-_COMPANION_SUFFIXES = ("__changelog", "__band", DROPLOG_SUFFIX, BASE_SUFFIX)
+_COMPANION_SUFFIXES = ("__changelog", "__band", DROPLOG_SUFFIX, BASE_SUFFIX, VERSION_SUFFIX)
 
 
 def base_table_name(name: str) -> str:
@@ -291,10 +370,11 @@ def drop_table(con, name: str) -> None:
     Trickle that is the base/main + ``__changelog`` + warm ``__band`` + ``__droplog`` + the aggregate/scan
     state companions + the meta row/floor; for a plain overwrite table just the one table. Idempotent."""
     for t in (
-        name, changelog_name(name), warm_name(name), f"{name}{DROPLOG_SUFFIX}",
+        name, cold_base_name(name), changelog_name(name), warm_name(name), warm_pending_name(name),
+        f"{name}{DROPLOG_SUFFIX}",
         f"{AGG_STATE_PREFIX}{name}", f"{ACC_STATE_PREFIX}{name}",
     ):
-        con.execute(f'DROP TABLE IF EXISTS {_q(t)}')
+        _drop_relation(con, t)  # a merge main's name and cold base may be views
     drop_meta(con, name)
 
 
@@ -359,15 +439,61 @@ def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
 
 def read_meta(con) -> dict[str, dict]:
     """``{table: {"mode", "pk": [...], "floor": iso|None, "f_base": iso|None,
-    "compact_threshold": int|None}}`` for every Trickle table."""
+    "compact_threshold": int|None, "f_warm": iso|None, "cluster": dict|None}}`` for every Trickle table."""
     if not _table_exists(con, META_TABLE):
         return {}
+    _ensure_meta(con)  # an older meta table may predate a column read here
     rows = con.execute(
-        f'SELECT table_name, mode, pk, floor, f_base, compact_threshold, f_warm FROM {_q(META_TABLE)}'
+        f'SELECT table_name, mode, pk, floor, f_base, compact_threshold, f_warm, cluster FROM {_q(META_TABLE)}'
     ).fetchall()
     return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else []), "floor": r[3], "f_base": r[4],
-                   "compact_threshold": (int(r[5]) if r[5] else None), "f_warm": r[6]}
+                   "compact_threshold": (int(r[5]) if r[5] else None), "f_warm": r[6],
+                   "cluster": (json.loads(r[7]) if r[7] else None)}
             for r in rows}
+
+
+def cluster_spec(cluster_by=None, interleave: bool = True, cluster_bits=None) -> dict | None:
+    """The cold-base ordering a merge write declares, validated, or ``None`` (order by the primary key).
+
+    ``cluster_by`` is a column or list of columns. One column, or ``interleave=False``, sorts by them in
+    order. Two or more with ``interleave`` (the default) order rows by a **rank-Morton** key: each column's
+    values are replaced by their quantile rank, and the ranks' bits are interleaved, so every column is
+    clustered about equally however its values are distributed. ``cluster_bits`` is the key's total bits
+    (the data is split into ``2**cluster_bits`` cells); ``None`` chooses it at each compaction from the
+    base's size, so a cell is just under one row group."""
+    cols = normalize_pk(cluster_by)
+    if not cols:
+        if cluster_bits is not None or interleave is not True:
+            raise DeltaError("interleave and cluster_bits need cluster_by")
+        return None
+    if len(set(cols)) != len(cols):
+        raise DeltaError(f"cluster_by lists a column twice: {list(cols)}")
+    if not isinstance(interleave, bool):
+        raise DeltaError("interleave must be True or False")
+    interleaved = interleave and len(cols) > 1
+    if cluster_bits is not None:
+        if not interleaved:
+            raise DeltaError("cluster_bits applies only when interleaving two or more cluster_by columns")
+        if isinstance(cluster_bits, bool) or not isinstance(cluster_bits, int) \
+                or not len(cols) <= cluster_bits <= 63:
+            raise DeltaError(f"cluster_bits must be an integer from {len(cols)} (one per column) to 63")
+    return {"by": list(cols), "interleave": interleaved, "bits": cluster_bits}
+
+
+def _set_cluster(con, table: str, spec: dict | None) -> None:
+    """Record merge main ``table``'s cold-base ordering (:func:`cluster_spec`); ``None`` clears it, so the
+    base goes back to primary-key order. Applied at the next compaction. Raises :class:`DeltaError` for a
+    ``cluster_by`` column the table doesn't have."""
+    if spec is not None:
+        src = changelog_name(table) if _table_exists(con, changelog_name(table)) else cold_base_name(table)
+        if _table_exists(con, src):
+            have = {r[0] for r in con.execute(f'DESCRIBE {_q(src)}').fetchall()}
+            missing = [c for c in spec["by"] if c not in have]
+            if missing:
+                raise DeltaError(f"cluster_by column(s) {missing} not in '{table}'")
+    _ensure_meta(con)
+    con.execute(f'UPDATE {_q(META_TABLE)} SET cluster = ? WHERE table_name = ?',
+                [json.dumps(spec) if spec is not None else None, table])
 
 
 def _set_compact_threshold(con, table: str, n) -> None:
@@ -453,10 +579,11 @@ def table_parts(data_dir, table: str) -> list[str]:
 def part_tables(data_dir) -> list[str]:
     """The names of the append-only (parts-directory) tables published under ``data_dir``. A merge main's
     ``{table}__base/`` directory is **excluded** — it is a wholesale base (rewritten at a checkpoint), not
-    a per-run-parts table, so the incremental-draw / ``landed_after`` machinery must not treat it as one."""
+    a per-run-parts table, so the incremental-draw / ``landed_after`` machinery must not treat it as one.
+    So is an overwrite table's ``{table}__v/`` versions directory: each version is a whole table."""
     store = _store(data_dir)
     return sorted(name for name in store.subdir_names()
-                  if not name.endswith(BASE_SUFFIX) and store.parquet_names(name))
+                  if not name.endswith((BASE_SUFFIX, VERSION_SUFFIX)) and store.parquet_names(name))
 
 
 def landed_after(data_dir) -> str | None:
@@ -738,11 +865,13 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
 
 def _clog_union_sql(con, name: str) -> str | None:
     """The full Z-set log of merge main ``name`` above the cold base — the **warm tier** (consolidated
-    bands, :func:`warm_name`) ⊎ the **hot** ``__changelog`` (per-run). Their freshness ranges are disjoint
-    (a ``fold_warm`` moves a slice from hot to warm), so the union is the changelog ``> f_base`` with no
-    double-count. ``None`` when neither exists."""
-    clog, warm = changelog_name(name), warm_name(name)
-    parts = [f'SELECT * FROM {_q(t)}' for t in (clog, warm) if _table_exists(con, t)]
+    bands: the published ones through the ``{name}__band`` view, plus a fold's band not yet published, in
+    :func:`warm_pending_name`) ⊎ the **hot** ``__changelog`` (per-run). Their freshness ranges are disjoint
+    (a ``fold_warm`` moves a slice from hot to warm, and publishing moves a band from pending to the view in
+    one transaction), so the union is the changelog ``> f_base`` with no double-count. ``None`` when none
+    exists."""
+    clog, warm, pending = changelog_name(name), warm_name(name), warm_pending_name(name)
+    parts = [f'SELECT * FROM {_q(t)}' for t in (clog, warm, pending) if _table_exists(con, t)]
     if not parts:
         return None
     return " UNION ALL BY NAME ".join(parts)
@@ -752,11 +881,13 @@ def _reconstruct_sql_for(con, name: str, *, upper=None, before=None) -> str | No
     """Build :func:`reconstruct_sql` for a merge main ``name`` from the registry — the cold base table
     ``name`` overlaid by the warm tier ⊎ hot ``__changelog`` (:func:`_clog_union_sql`). ``None`` if nothing
     has been written yet (no base, no warm, no changelog)."""
+    _migrate_base(con, name)
+    cold = cold_base_name(name)
+    base_sql = f'SELECT * FROM {_q(cold)}' if _table_exists(con, cold) else None
     clog_sql = _clog_union_sql(con, name)
     if clog_sql is None:
-        return f'SELECT * FROM {_q(name)}' if _table_exists(con, name) else None
+        return base_sql
     pk = tuple(read_meta(con).get(name, {}).get("pk", ()))
-    base_sql = f'SELECT * FROM {_q(name)}' if _table_exists(con, name) else None
     return reconstruct_sql(base_sql, clog_sql, _f_base(con, name), pk, upper=upper, before=before)
 
 
@@ -789,10 +920,10 @@ def count_current(con, name: str) -> int:
       fold — making this equal to ``count(*)`` over the reconstruct, but as metadata + a small delta scan.
     - **append** history (and plain output): a direct ``count(*)`` — insert-only, no retractions.
     - nothing written yet: ``0``."""
-    if not _table_exists(con, name) and not _table_exists(con, changelog_name(name)):
-        return 0
     if read_meta(con).get(name, {}).get("mode") == "merge":
-        base = con.execute(f'SELECT count(*) FROM {_q(name)}').fetchone()[0] if _table_exists(con, name) else 0
+        _migrate_base(con, name)
+        cold = cold_base_name(name)
+        base = con.execute(f'SELECT count(*) FROM {_q(cold)}').fetchone()[0] if _table_exists(con, cold) else 0
         clog_sql = _clog_union_sql(con, name)
         if clog_sql is None:
             return int(base)
@@ -800,11 +931,13 @@ def count_current(con, name: str) -> int:
         lo = f' WHERE {_q(F_COL)} > {_ts(f_base)}' if f_base is not None else ''
         (delta,) = con.execute(f'SELECT coalesce(sum({_q(D_COL)}), 0) FROM ({clog_sql}){lo}').fetchone()
         return int(base) + int(delta)
+    if not _table_exists(con, name):
+        return 0
     return int(con.execute(f'SELECT count(*) FROM {_q(name)}').fetchone()[0])
 
 
 def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
-               compact_threshold=None) -> bool:
+               compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
     """Append a Z-set ``zset`` (user columns + ``_duckstring_d``) to the merge main's append-only
     ``__changelog``. The main is **log-structured**: the changelog is the source of truth and the clean
     current state is reconstructed on read (:func:`reconstruct_current`) from a base table (written only by
@@ -821,6 +954,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if not pk:
         raise DeltaError(f"apply_zset('{name}', ...) needs a primary key — pass pk=...")
+    cluster = cluster_spec(cluster_by, interleave, cluster_bits)  # validated before anything is written
     src = unique_name("zset")
     zset.create_view(src, replace=True)
     cols = list(zset.columns)
@@ -834,7 +968,8 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     clog = changelog_name(name)
     clog_existed = _table_exists(con, clog)
 
-    # Consolidate by full row (the Z-set `distinct` operator); BIGINT weight (Iceberg can't hold a HUGEINT).
+    # Consolidate by full row (the Z-set `distinct` operator). The weight stays BIGINT (SUM would widen it to
+    # HUGEINT), so the changelog's column type is stable across runs and parts.
     consol = unique_name("consol")
     con.execute(
         f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
@@ -857,13 +992,15 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
             raise
     _record_meta(con, name, "merge", pk)
     _set_compact_threshold(con, name, compact_threshold)
+    _set_cluster(con, name, cluster)
     cutoff = _apply_retention(con, clog, f, retain_t, retain_n)
     _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None), cutoff=cutoff)
+    refresh_current_view(con, name)
     return nonempty
 
 
 def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
-                compact_threshold=None) -> bool:
+                compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
     """Comprehensive merge: ``relation`` is the **complete current state**. Diff it against the
     reconstructed prior state (base ⊎ changelog) as a full-row Z-set (``new(+1) ⊎ prior(-1)``, consolidated)
     and append the diff to the changelog. Returns whether the diff was non-empty (the state actually
@@ -891,7 +1028,8 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
     else:
         zset = con.sql(f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)}')
     return apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n,
-                      compact_threshold=compact_threshold)
+                      compact_threshold=compact_threshold, cluster_by=cluster_by, interleave=interleave,
+                      cluster_bits=cluster_bits)
 
 
 def fold_warm(con, name: str, target_f) -> None:
@@ -900,8 +1038,11 @@ def fold_warm(con, name: str, target_f) -> None:
     image's latest ``_duckstring_f`` preserved). This is the cheap, frequent compaction: it keeps reconstruct
     reading few dense files and defers the O(base) cold rewrite. It **raises the delta floor** to ``target_f``
     — the folded per-run windows are no longer available, so a consumer behind ``target_f`` full-reads (a
-    caught-up consumer reading the still-hot ``> target_f`` window is unaffected). Idempotent at ``target_f``."""
-    clog, warm = changelog_name(name), warm_name(name)
+    caught-up consumer reading the still-hot ``> target_f`` window is unaffected). Idempotent at ``target_f``.
+
+    The band is staged in :func:`warm_pending_name` (the published bands are a read-only view); the data
+    plane publishes it as a band file and swaps it into the view (``dataplane._export_bands``)."""
+    clog, pending = changelog_name(name), warm_pending_name(name)
     if not _table_exists(con, clog):
         return
     lo = _f_warm(con, name) or _f_base(con, name)
@@ -918,14 +1059,15 @@ def fold_warm(con, name: str, target_f) -> None:
         con.execute(f'DROP TABLE IF EXISTS {_q(band)}')
         # Still advance the watermark/floor: an empty net change over the slice is fully folded (nothing to keep).
     else:
-        if not _table_exists(con, warm):
-            con.execute(f'CREATE TABLE {_q(warm)} AS SELECT * FROM {_q(band)} LIMIT 0')
-        con.execute(f'INSERT INTO {_q(warm)} SELECT * FROM {_q(band)}')
+        if not _table_exists(con, pending):
+            con.execute(f'CREATE TABLE {_q(pending)} AS SELECT * FROM {_q(band)} LIMIT 0')
+        con.execute(f'INSERT INTO {_q(pending)} SELECT * FROM {_q(band)}')
         con.execute(f'DROP TABLE IF EXISTS {_q(band)}')
     # Remove the folded slice from the hot changelog (it now lives, consolidated, in the warm tier).
     con.execute(f'DELETE FROM {_q(clog)} WHERE {locond}{_q(F_COL)} <= {_ts(target_f)}')
     _set_f_warm(con, name, target_f)
     _advance_floor(con, name, cutoff=target_f)  # the delta floor rises to the warm watermark
+    refresh_current_view(con, name)  # the view must now read the warm tier too
 
 
 def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> None:
@@ -939,15 +1081,18 @@ def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> Non
     if sql is None:
         return
     tmp = unique_name("ckpt")
+    cold = cold_base_name(name)
     con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(tmp)} AS {sql}')   # reads the OLD base + warm + changelog
-    _drop_relation(con, name)  # the base may be a VIEW over S3 chunks — CREATE OR REPLACE TABLE can't replace it
-    con.execute(f'CREATE TABLE {_q(name)} AS SELECT * FROM {_q(tmp)}')  # the new base, now a local table
+    _drop_relation(con, cold)  # the base may be a VIEW over S3 chunks — CREATE OR REPLACE TABLE can't replace it
+    con.execute(f'CREATE TABLE {_q(cold)} AS SELECT * FROM {_q(tmp)}')  # the new base, now a local table
     con.execute(f'DROP TABLE IF EXISTS {_q(tmp)}')
-    con.execute(f'DROP TABLE IF EXISTS {_q(warm)}')  # the warm tier is now folded into the cold base
+    _drop_relation(con, warm)  # the warm tier (a view over published bands) is now folded into the cold base
+    con.execute(f'DROP TABLE IF EXISTS {_q(warm_pending_name(name))}')
     _set_f_base(con, name, target_f)
     _set_f_warm(con, name, target_f)  # warm is empty; its watermark tracks the cold base
     cutoff = _apply_retention(con, clog, target_f, retain_t, retain_n)
     _advance_floor(con, name, cutoff=cutoff)
+    refresh_current_view(con, name)  # f_base moved: the view's window filter changes
 
 
 # ─── write: incremental aggregation (distributive / algebraic) ──────────────────
@@ -2216,15 +2361,17 @@ def _ensure_changelog(con, clog: str, schema_src: str) -> None:
 
 
 class Delta:
-    """A source's change over the window ``(previous_f, f]`` as a **Z-set** (:attr:`zset` — user columns +
-    ``_duckstring_d``).
+    """A Source table's changes over a run's window, returned by ``pond.read_delta``.
 
-    :attr:`is_full` is ``True`` when this is a *full read*, not a windowed delta — a bootstrap, a
-    coverage-miss (the consumer fell behind the source's retained history / its floor), or a **changed**
-    overwrite (plain Ripple) source. A full read is the whole current state at weight ``+1``; a consumer
-    must **absorb it comprehensively** (recompute its whole output and diff against its own main), never
-    treat it as an incremental slice. An *unchanged* overwrite source returns an **empty** Z-set
-    (``is_full`` False, no rows) — it contributes only as a stable history operand."""
+    Attributes:
+        zset: The changes: the Source's columns plus ``_duckstring_d`` (``+1`` added, ``-1`` removed).
+        is_full: ``True`` for a full read rather than a window of changes (a first run, a consumer
+            behind the Source's retained history, or a republished plain table). A full read must be
+            treated as a complete recompute, not an increment.
+        pk: The Source table's primary key, if it declared one.
+
+    Reference: https://docs.duckstring.com/reference/python/trickle_io
+    """
 
     def __init__(self, con, pk: tuple[str, ...], zset, *, is_full: bool = False) -> None:
         self.con = con
@@ -2233,22 +2380,22 @@ class Delta:
         self.is_full = is_full
 
     def is_empty(self) -> bool:
+        """Whether there are no changes."""
         return self.zset.aggregate("count(*) AS n").fetchone()[0] == 0
 
     def keys_count(self) -> int:
-        """Distinct rows that changed — the cost the change-fraction threshold measures against."""
+        """The number of changed rows."""
         return self.zset.aggregate("count(*) AS n").fetchone()[0]
 
     @property
     def upserts(self):
-        """The net present rows (weight ``> 0``), user columns only — a convenience for hand-rolled
-        consumers and the comprehensive case."""
+        """Rows present after the change (net weight above zero), without system columns."""
         consolidated = self._consolidated()
         return _strip_system(consolidated.filter(f"{_q(D_COL)} > 0"))
 
     @property
     def deletes(self):
-        """The PKs that were removed — keys appearing only with retractions (no surviving positive row)."""
+        """Primary key values removed and not re-added. Empty when the Source has no primary key."""
         if not self.pk:
             return self.zset.filter("1=0").project(", ".join(_q(c) for c in self.zset.columns if c != D_COL))
         consolidated = self._consolidated()
@@ -2266,8 +2413,12 @@ class Delta:
         )
 
 
-def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp) -> Delta:
-    """Resolve ``table``'s mode in ``data_dir`` and read its Z-set change over ``(previous_f, f]``."""
+def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None) -> Delta:
+    """Resolve ``table``'s mode in ``data_dir`` and read its Z-set change over ``(previous_f, f]``.
+
+    ``pin`` is the Source's published freshness when this run started: an overwrite Source is read at the
+    version it names (``dp.read_select(..., pin=)``). A Trickle Source is bounded by ``f`` regardless, since
+    its delta windows must tile."""
     from datetime import datetime
 
     from .context import NEVER
@@ -2286,7 +2437,10 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp) -> Delta:
     # advanced past the consumer's previous_f, it is unchanged → an empty delta (stable history operand).
     # Otherwise (advanced / unknown / bootstrap) → a full read at +1, forcing the comprehensive path.
     src_f = datetime.fromisoformat(meta["f"]) if meta.get("f") else None
-    state = _strip_system(con.sql(dp.read_select(data_dir, table, as_of=f)))
+    if pin is not None and src_f is not None:
+        src_f = min(src_f, pin)  # the version actually read is at or below the pin
+    pinned = {"pin": pin} if pin is not None else {}
+    state = _strip_system(con.sql(dp.read_select(data_dir, table, as_of=f, **pinned)))
     if previous_f != NEVER and src_f is not None and src_f <= previous_f:
         return Delta(con, pk, _as_zset(state, 1).filter("1=0"), is_full=False)
     return Delta(con, pk, _as_zset(state, 1), is_full=True)

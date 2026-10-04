@@ -49,11 +49,12 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
     # A real job (take_spout_jobs) carries ISO strings; the delta/as-of machinery needs datetimes.
     raw_f = job.get("source_f") or job["f"]
     f = datetime.fromisoformat(raw_f) if isinstance(raw_f, str) else raw_f
+    # The source's overwrite tables are read at the version this Spout run was pinned to at dispatch.
+    pin = datetime.fromisoformat(job["pin"]) if job.get("pin") else None
 
     con = duckdb.connect()  # in-memory: reads the exported snapshot, never the live registry
     try:
         con.execute("SET TimeZone='UTC'")
-        dp.prepare(con)
         data_dir.duckdb_setup(con)  # object store → httpfs + credentials (no-op local)
         sidecar = load_sidecar(data_dir)
         # An explicit table ships just that one; else the source's serviceable set (resolved by
@@ -85,13 +86,13 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
                         "not a merge Trickle with a declared pk (put a .merge(pk=…) before this Spout)"
                     )
                 previous_f = driver.watermark(con, table) or NEVER  # the in-destination cursor (exactly-once)
-                delta = read_delta(con, data_dir, table, previous_f, f, dp=dp)
+                delta = read_delta(con, data_dir, table, previous_f, f, dp=dp, pin=pin)
                 if delta.is_full:  # bootstrap / coverage-miss / changed overwrite source → reload
-                    driver.write_full(con, con.sql(dp.read_select(data_dir, table)), table=table, pk=pk, f=f)
+                    driver.write_full(con, con.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk, f=f)
                 else:
                     driver.apply_delta(con, delta, table=table, pk=pk, f=f)
             else:
-                driver.write_full(con, con.sql(dp.read_select(data_dir, table)), table=table, pk=pk, f=f)
+                driver.write_full(con, con.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk, f=f)
     finally:
         con.close()
 

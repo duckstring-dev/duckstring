@@ -1,3 +1,8 @@
+> **Obsolete (2026-10-04).** DuckFlock was abandoned. Nothing here constrains Duckstring any more, and the
+> cross-repo conformance gate below no longer applies. Pieces that began here and still serve Duckstring
+> (registry hydration, plan capture for column lineage, the sidecar size and schema hints) are described in
+> CLAUDE.md.
+
 # Duckstring changes for DuckFlock — the cross-repo plan
 
 **Written 2026-07-10, in the DuckFlock repo, designed to be run in the duckstring repo.** Copy

@@ -67,19 +67,21 @@ class SubprocessLauncher:
         if self.is_running(pond_key):
             return
         name, major = split_pond_key(pond_key)
-        # The Duck's effective compute config rides as env (plans/cloud-config.md): the Flock trio is
-        # the Pond's over-envelope offload posture (mode/engine/oom_policy), inert locally with no engine
-        # configured. duck_target (catchment/pool/dedicated) is read by a remote launcher, not here (the
+        # The Pond's Flock settings travel on each begin_run job (flock.job_settings), as for every other
+        # launcher. duck_target (catchment/pool/dedicated) is read by a remote launcher, not here (the
         # local subprocess is whatever the host is — no abstract size to set).
         env = dict(os.environ)
-        if duck:
-            env["DUCKSTRING_FLOCK_MODE"] = duck.get("flock_mode") or "off"
-            if duck.get("flock_engine"):
-                env["DUCKSTRING_FLOCK_ENGINE"] = duck["flock_engine"]
-            env["DUCKSTRING_FLOCK_OOM_POLICY"] = duck.get("oom_policy") or "fail_up"
+        from ..environments import REEXEC_ENV, python_for
+
+        # The Pond's own environment when it declares one and it's built (plans/pond-environments.md);
+        # otherwise the Duck starts here and builds or switches to it itself.
+        python = python_for(self.root, source_path)
+        env.pop(REEXEC_ENV, None)
+        if python != sys.executable:
+            env[REEXEC_ENV] = "1"
         self._procs[pond_key] = subprocess.Popen(
             [
-                sys.executable, "-m", "duckstring.duck",
+                python, "-m", "duckstring.duck",
                 "--pond", name,
                 "--major", str(major),
                 "--version", version,

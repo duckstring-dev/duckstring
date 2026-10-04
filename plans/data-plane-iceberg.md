@@ -1,5 +1,8 @@
 # Data plane: Iceberg base layer + version-contract enforcement
 
+> **Superseded (2026-10-02)** by `plans/data-plane-choice.md`: the Iceberg plane was removed on 2026-10-03. The
+> version-contract design here (Phase 2) stands; it never depended on Iceberg.
+
 Status: **partially implemented (2026-06-16)**. Covers **Phase 1** (swap the Parquet export/read for an
 Iceberg table layer) and **Phase 2** (enforce the version contract at Source→Sink boundaries).
 **Trickle** (append + `_duckstring_f` + merge + windowed incremental + incremental draws) is deferred to

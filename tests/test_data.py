@@ -189,7 +189,6 @@ def test_merge_browse_limit_pushes_down_through_the_base(tmp_path, monkeypatch):
     from duckstring.dataplane import ParquetDataPlane
     from duckstring.storage import LocalStorage
 
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     n = 200_000
     dd = tmp_path / "d"
     _seed_checkpointed_merge(dd, "dim", n)
@@ -301,7 +300,6 @@ def _seed_typed(root, pond, table):
 def test_less_than_predicate_on_floats(catchment_client, tmp_path, monkeypatch):
     # Regression: a `<` predicate on FLOAT/DOUBLE/DECIMAL must return rows (not silently zero) through
     # both /query/count and the wrapped /query/page — and agree with each other.
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_typed(tmp_path, "p", "t")
     _serve_pond(catchment_client, "p", ["t"])
     for col in ("f_real", "f_dbl", "f_dec"):
@@ -400,7 +398,6 @@ _MERGE_RUNS = [
 
 
 def test_tables_flags_trickle_mode_and_pk(catchment_client, tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     by = {t["name"]: t for t in catchment_client.get("/api/ponds/p/tables").json()["tables"]}
     assert by["priced"]["trickle"] == "merge" and by["priced"]["pk"] == ["id"]
@@ -409,7 +406,6 @@ def test_tables_flags_trickle_mode_and_pk(catchment_client, tmp_path, monkeypatc
 
 
 def test_freshness_lists_incremental_runs(catchment_client, tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     fr = catchment_client.get("/api/ponds/p/freshness?table=priced").json()
     # The main is log-structured, so the bootstrap (f1) writes the changelog too — both runs show
@@ -426,7 +422,6 @@ def _rows_by_id(page):
 
 
 def test_merge_consolidation_full_state(catchment_client, tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     page = catchment_client.post(
         "/api/query/page", json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"], "limit": 100}
@@ -447,7 +442,6 @@ def test_merge_consolidation_full_state(catchment_client, tmp_path, monkeypatch)
 def test_merge_default_is_scan_order_all_rows(catchment_client, tmp_path, monkeypatch):
     # The default page is the cheap scan order (no ORDER BY) so the LIMIT pushes down to the Parquet scan —
     # a big merge main is never force-sorted per page. Every current + deleted row is still present.
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     page = catchment_client.post(
         "/api/query/page", json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"], "limit": 100}
@@ -458,7 +452,6 @@ def test_merge_default_is_scan_order_all_rows(catchment_client, tmp_path, monkey
 
 def test_merge_order_by_pk_is_opt_in(catchment_client, tmp_path, monkeypatch):
     # PK order is available on demand (clicking the header) — only then is the full-scan sort paid.
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     page = catchment_client.post(
         "/api/query/page",
@@ -471,7 +464,6 @@ def test_merge_order_by_pk_is_opt_in(catchment_client, tmp_path, monkeypatch):
 
 def test_merge_order_by_freshness(catchment_client, tmp_path, monkeypatch):
     # Opt-in: the consolidated view can be re-sorted by any column, including freshness.
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     page = catchment_client.post(
         "/api/query/page",
@@ -485,7 +477,6 @@ def test_merge_order_by_freshness(catchment_client, tmp_path, monkeypatch):
 
 
 def test_merge_window_shows_only_changed_records(catchment_client, tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     f2 = catchment_client.get("/api/ponds/p/freshness?table=priced").json()["freshness"][0]
     page = catchment_client.post(
@@ -497,7 +488,6 @@ def test_merge_window_shows_only_changed_records(catchment_client, tmp_path, mon
 
 
 def test_merge_count_matches(catchment_client, tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     n = catchment_client.post(
         "/api/query/count", json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"]}
@@ -515,7 +505,6 @@ def test_merge_count_fast_path_matches_checkpointed(catchment_client, tmp_path, 
     from duckstring import trickle_io
     from duckstring.dataplane import ParquetDataPlane
 
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", "1024")  # tiny → force a checkpoint (real base + f_base)
     data_dir = tmp_path / "ponds" / "p" / "m1" / "data"
     data_dir.mkdir(parents=True)
@@ -569,7 +558,6 @@ def _seed_append_trickle(root, pond, table, runs):
 
 
 def test_append_window_filters_by_freshness(catchment_client, tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_append_trickle(tmp_path, "p", "orders", [
         ("2026-01-01T00:00:00+00:00", [(1, 1.0), (2, 2.0)]),
         ("2026-01-02T00:00:00+00:00", [(3, 3.0)]),
@@ -593,7 +581,6 @@ def test_append_window_filters_by_freshness(catchment_client, tmp_path, monkeypa
 
 
 def test_merge_row_history(catchment_client, tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     # id1 was bootstrap-created (10.0) then updated at f2 (15.0). The update is shown, and the original
     # bootstrap image is surfaced as a synthetic 'create' at the bottom (from the oldest -1).
@@ -609,7 +596,6 @@ def test_merge_row_history(catchment_client, tmp_path, monkeypatch):
 
 
 def test_merge_history_create_and_delete_events(catchment_client, tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     idx_of = lambda h: {c: i for i, c in enumerate(h["columns"])}  # noqa: E731
     # id3 was inserted at f2 → 'create'.

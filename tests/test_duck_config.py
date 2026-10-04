@@ -166,10 +166,14 @@ def test_status_and_routes_roundtrip(tmp_path, monkeypatch):
     assert client.get("/api/ponds/src/duck").json()["flock_mode"] == "off"
 
 
-def test_subprocess_launcher_passes_duck_env(tmp_path, monkeypatch):
+def test_subprocess_launcher_leaves_flock_settings_to_the_job(tmp_path, monkeypatch):
+    """The Flock posture travels on each begin_run job (tests/test_flock_job.py), as for every launcher,
+    so the subprocess launcher no longer sets it in the Duck's environment."""
     import duckstring.catchment.launcher as launcher_mod
 
     monkeypatch.delenv("DUCKSTRING_DUCK_SIZE", raising=False)
+    for k in ("DUCKSTRING_FLOCK_MODE", "DUCKSTRING_FLOCK_OOM_POLICY"):
+        monkeypatch.delenv(k, raising=False)
     captured = {}
 
     class _FakeProc:
@@ -185,8 +189,8 @@ def test_subprocess_launcher_passes_duck_env(tmp_path, monkeypatch):
     launcher.ensure("p@1", "1.0.0", "ponds/p/1.0.0",
                     duck={"flock_mode": "upgrade", "oom_policy": "fail"})
     assert "DUCKSTRING_DUCK_SIZE" not in captured["env"]  # the abstract size env is retired
-    assert captured["env"]["DUCKSTRING_FLOCK_MODE"] == "upgrade"
-    assert captured["env"]["DUCKSTRING_FLOCK_OOM_POLICY"] == "fail"
+    assert "DUCKSTRING_FLOCK_MODE" not in captured["env"]
+    assert "DUCKSTRING_FLOCK_OOM_POLICY" not in captured["env"]
 
 
 # ─── D6: the pluggable launcher spec ─────────────────────────────────────────────

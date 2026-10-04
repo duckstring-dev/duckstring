@@ -53,7 +53,7 @@ def _main(
     pass
 
 trigger_app = typer.Typer(
-    help="Send execution signals to Outlet Ponds.",
+    help="Create demand on a Pond: tap, wave, pulse, tide, and windows.",
     no_args_is_help=True,
 )
 trigger_app.command("tap")(tap)
@@ -64,7 +64,7 @@ trigger_app.command("remove")(remove)
 trigger_app.add_typer(window_app, name="window")
 
 control_app = typer.Typer(
-    help="Manage a Pond's execution & health: wake, sleep, force, kill, clear a failure, set budgets.",
+    help="Act directly on a Pond's execution: wake, force, refresh, repair, sleep, kill, clear, reset.",
     no_args_is_help=True,
 )
 control_app.command("force")(force)

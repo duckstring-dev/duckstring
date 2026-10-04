@@ -198,7 +198,7 @@ def create_app(
         data_root = get_setting(con, DATA_ROOT_KEY)
 
     # Writer lease on an external data root — refuse to start if a *different* live Catchment owns it (two
-    # Catchments racing one lake's Iceberg catalog would dangle its pointer). A same-id restart reclaims
+    # Catchments publishing and pruning the same lines would break single-writer-per-line). A same-id restart reclaims
     # instantly; only engaged for an external DUCKSTRING_DATA_ROOT, so the local default is untouched.
     data_lease = None
     if data_root:

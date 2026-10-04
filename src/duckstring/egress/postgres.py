@@ -53,7 +53,7 @@ class PostgresEgressDriver:
     # ─── connection / attach ────────────────────────────────────────────────
 
     def _schema(self) -> str:
-        q = parse_qs(urlsplit(self.dest.raw).query)
+        q = parse_qs(urlsplit(credentials.resolve(self.dest.raw)).query)  # the URI may be one ${env:} reference
         return q.get("schema", ["public"])[0]
 
     def _conn_string(self) -> str:

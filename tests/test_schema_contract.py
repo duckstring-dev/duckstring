@@ -219,11 +219,11 @@ def test_executor_export_gate_aborts_publish_and_preserves_last_good(tmp_path):
 
     with pytest.raises(ContractViolation, match="val"):
         ex.export(contract={"event": {"id": "INTEGER", "val": "VARCHAR"}})
-    assert not (data / "event.parquet").exists()  # nothing published — last-good intact
+    assert not (data / "event__v").exists()  # nothing published — last-good intact
 
     schema = ex.export(contract={"event": {"id": "INTEGER"}})  # additive-compatible → publishes
     assert schema == {"event": {"id": "INTEGER"}}
-    assert (data / "event.parquet").exists()
+    assert list((data / "event__v").glob("*.parquet"))
     ex.shutdown()
 
 
@@ -272,3 +272,16 @@ def test_executor_gate_message_carries_contract_prefix(tmp_path):
         ex.export(contract={"event": {"id": "INTEGER", "val": "VARCHAR"}})
     assert str(exc.value).startswith(CONTRACT_PREFIX)
     ex.shutdown()
+
+
+def test_a_change_to_or_from_variant_is_breaking():
+    """DuckDB 2.0's VARIANT holds any type, but a Sink reading a typed column can't take one, and a typed
+    column can't hold everything a VARIANT did: breaking both ways. VARIANT to VARIANT, nested too, is fine."""
+    from duckstring.schema_contract import is_widening
+
+    assert not is_widening("INTEGER", "VARIANT")
+    assert not is_widening("VARIANT", "VARCHAR")
+    assert not is_widening("STRUCT(a INTEGER)", "STRUCT(a VARIANT)")
+    assert is_widening("VARIANT", "VARIANT")
+    assert is_widening("STRUCT(a VARIANT)", "STRUCT(a VARIANT)")
+

@@ -1,65 +1,61 @@
 ---
 title: Ripples
-description: The execution units within a Pond.
+description: Transformation Unit.
 ---
 
 # Ripples
 
-A **Ripple** is a single unit operation inside a [Pond](ponds.md) — usually one transformation producing one table. Where the Pond is the unit of ownership and versioning, the Ripple is the unit of execution: it's Ripples that actually run, retry, and report durations.
+A **Ripple** is a single transformation inside a [Pond](ponds.md). It is usually a Python function marked with the `@ripple` decorator, or a SQL query declared in the Pond's `pond.toml`, and it declares which other Ripples in the same Pond it depends on.
 
-## Declaring Ripples
+## Structure
 
-Ripples are ordinary Python functions in the Pond's `src/pond.py`, registered with the `@ripple` decorator. Each takes a single `pond` argument — the runtime handle it uses to read and write tables:
+Ripples live in the Pond's `src/pond.py`. Each one receives a `pond` handle, which gives it a DuckDB connection and methods for reading and writing data. The `sales` Pond from the Quickstart has three:
 
 ```python
 from duckstring import ripple
 
-
 @ripple
 def daily_sales(pond):
-    pond.read_table("transactions.transaction")    # registers the view `transaction`
-    agg = pond.con.sql("""
-        SELECT product_id, created_at AS sale_date,
-               SUM(quantity) AS total_quantity, COUNT(*) AS tx_count
-        FROM "transaction"
-        GROUP BY product_id, created_at
-    """)
-    pond.write_table("daily_sales", agg)
-
+    ...
 
 @ripple
 def price_tiers(pond):
     ...
 
-
 @ripple(parents=[daily_sales, price_tiers])
 def join_lines(pond):
-    sales = pond.read_table("daily_sales")
-    tiers = pond.read_table("price_tiers")
     ...
 ```
 
-`parents` declares the intra-Pond dependencies: `join_lines` runs only after `daily_sales` and `price_tiers` have completed within the same Pond Run. Independent Ripples run in parallel. All intra-Pond dependencies are required — there are no optional edges inside a Pond.
+```mermaid
+flowchart LR
+    daily_sales --> join_lines
+    price_tiers --> join_lines
+```
 
-The full handle API — `read_table`, `write_table`, `pond.con` for arbitrary DuckDB SQL — is documented in the [Python API reference](../reference/python-api.md).
+As with Ponds, the order is implied by the declared dependencies. `daily_sales` and `price_tiers` run in parallel, and `join_lines` runs once both have finished. Dependencies on other Ponds are declared in `pond.toml`, not on Ripples.
 
-## Reading across the Pond boundary
+## Tabular and Generic
 
-A Ripple addresses its own Pond's tables by bare name (`"daily_sales"`) and a Source's tables as `"source_pond.table"` (`"transactions.transaction"`). The two reads are deliberately different things:
+Most Ripples read tables and write tables. A Ripple can also publish non-tabular output, such as a trained model or a rendered file, as a named Object. It can even write nothing at all and just call an external service, using Duckstring only for scheduling.
 
-- **Own tables** are read live from the Pond's private DuckDB registry — intermediate state flowing between Ripples within the run.
-- **Source tables** are read from the Source's published snapshot — the output of its last successful run, via the [data plane](../guides/running-a-catchment.md#the-data-plane). A Ripple never reaches into another Pond's internals.
+## Data
 
-## How Ripples execute
+The Ripples in a Pond share one DuckDB database, so a Ripple can query tables written by the Ripples before it directly. Tables from Source Ponds are read through the `pond` handle, and every Ripple in a run reads the same version of each Source table, even if the Source publishes again during the run. Output is published only when the whole Pond Run succeeds. If a Ripple fails, downstream Ponds keep reading the last successful output.
 
-When the Catchment starts a Pond Run, the Pond's worker executes every Ripple to the run's freshness, walking the intra-Pond graph: roots first, each Ripple starting as soon as all of its parents have finished. Each Ripple's wall-clock span is recorded in [run history](../guides/web-ui.md), and a failing Ripple — after its [immediate retries](../guides/fault-tolerance.md) — fails the Pond Run with its error and traceback attached.
+## Trickles
 
-Ripples are also the resolution at which the pull model operates. Demand propagates Ripple-to-Ripple, not just Pond-to-Pond — which is why a continuously-pulled pipeline throttles itself to the slowest *Ripple*, not the slowest Pond. [Freshness & Demand](freshness.md) explains the mechanics.
+By default a Ripple rewrites its tables in full on each run. A Ripple can instead write its tables incrementally, keeping a record of what changed so that downstream Ripples only process the changes. Tables written this way are called [Trickles](trickles.md).
 
-## The incremental capability: Trickles
+## SQL Ripples
 
-A Ripple overwrites its tables wholesale each run. When you'd rather preserve history — so a consumer reads only what changed — publish a [**Trickle**](trickle.md) table instead: write it with `pond.append_table` / `pond.merge_table` rather than `pond.write_table`. A Trickle is a *capability*, not a separate node type — there's no special decorator, and one Ripple can publish plain and Trickle tables side by side. The orchestration is identical (a node in the graph, run and retried the same way); only the I/O differs, writing an append history or a merge changelog rather than a full overwrite.
+A Ripple can also be a single SQL query in a file, declared in `pond.toml` with the Ripples it depends on and the tables it reads from other Ponds. A Pond made only of SQL Ripples needs no Python, and SQL and Python Ripples can be mixed in one Pond. Each query is checked against its declaration when the Pond is deployed, so a query can't read a table from a Ripple it hasn't declared as a dependency.
 
-## Granularity
+## dbt Models
 
-A good Ripple is one logical output: a table and the transformation that produces it. Splitting work into Ripples buys parallelism (independent Ripples run concurrently), precise retry scope (a retry re-runs the failed Ripple, not the whole Pond), and a legible run history. Work that always changes together belongs in one Ripple; work that can usefully run, fail, or be timed separately belongs in separate ones.
+An existing dbt project can be deployed as a Pond by pointing `pond.toml` at it. Each dbt model becomes a Ripple, and the `ref()` dependencies between models set their order.
+
+## See also
+
+- Guides: [Writing Ripples](../guides/writing_ripples.md), [SQL Ripples](../guides/sql_ripples.md), [Testing with Puddles](../guides/testing_with_puddles.md), [dbt Projects](../guides/dbt_projects.md), [Append and Merge Tables](../guides/append_and_merge.md)
+- Reference: [Decorators](../reference/python/decorators.md), [Pond Handle](../reference/python/pond.md)

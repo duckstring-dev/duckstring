@@ -1,5 +1,9 @@
 # Data plane: DuckLake as a third pluggable backend
 
+> **Superseded (2026-10-02)** by `plans/data-plane-choice.md`: DuckLake won't be an internal data plane
+> (catalog placement across machines, and it duplicates what the Catchment tracks). It remains the likely
+> first target for a deferred lakehouse Spout.
+
 Status: **proposed (2026-06-28)**, not implemented. Adds **DuckLake** as a third
 `DUCKSTRING_DATA_PLANE` backend alongside `iceberg` (the default) and `parquet`. **Additive, not a
 replacement** — Iceberg stays the default and nothing is built *exclusively* for DuckLake. The seam

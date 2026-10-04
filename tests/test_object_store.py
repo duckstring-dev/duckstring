@@ -123,6 +123,113 @@ def test_duckdb_reads_parquet_from_a_real_s3(s3_env, tmp_path):
     assert con.sql(f"SELECT id, name FROM read_parquet('{store.uri('t.parquet')}')").fetchone() == (1, "x")
 
 
+def test_versioned_overwrite_on_a_real_s3(s3_env, tmp_path):
+    """Overwrite versions on a bucket (plans/versioned-overwrite.md): each publish is a new object, a
+    pinned read selects its version, and retention deletes the superseded one."""
+    from datetime import datetime, timedelta, timezone
+
+    import duckdb
+
+    from duckstring.dataplane import ParquetDataPlane
+    from duckstring.storage import get_storage
+    from duckstring.trickle.io import part_name
+
+    _endpoint, client = s3_env
+    store = get_storage(f"s3://{_BUCKET}/versions")
+    dp = ParquetDataPlane()
+    f1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    f2 = f1 + timedelta(hours=1)
+    for f, value, retain in ((f1, 1, None), (f2, 2, f1)):
+        con = duckdb.connect()
+        con.execute(f"CREATE TABLE a AS SELECT {value} AS v")
+        dp.export(con, store, f=f, retain_from=retain)
+        con.close()
+    assert sorted(_keys(client, "versions/a__v/")) == [
+        f"versions/a__v/{part_name(f1)}", f"versions/a__v/{part_name(f2)}"]
+
+    con = duckdb.connect()
+    store.duckdb_setup(con)
+    assert con.sql(dp.read_select(store, "a", pin=f1)).fetchall() == [(1,)]
+    assert con.sql(dp.read_select(store, "a")).fetchall() == [(2,)]
+
+    from duckstring.dataplane import prune_versions
+
+    prune_versions(store, None)
+    assert _keys(client, "versions/a__v/") == [f"versions/a__v/{part_name(f2)}"]
+
+
+def test_warm_bands_are_read_from_a_real_s3(s3_env, monkeypatch):
+    """A merge table's warm bands, published to a bucket, are read there by a fresh registry through a view
+    over the band objects, never copied in (plans/s3-resident-state.md)."""
+    from datetime import datetime, timedelta, timezone
+
+    import duckdb
+
+    from duckstring import trickle_io as T
+    from duckstring.dataplane import ParquetDataPlane, hydrate_registry
+    from duckstring.storage import get_storage
+
+    monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", str(1 << 40))
+    _endpoint, client = s3_env
+    store = get_storage(f"s3://{_BUCKET}/warm")
+    f0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    for h, rows in ((1, "(1, 'a'), (2, 'b')"), (2, "(1, 'A'), (2, 'b'), (3, 'c')")):
+        T.merge_table(con, "m", con.sql(f"SELECT * FROM (VALUES {rows}) t(id, v)"), f0 + timedelta(hours=h), ("id",))
+        ParquetDataPlane().export(con, store, f=f0 + timedelta(hours=h))
+    T.fold_warm(con, "m", f0 + timedelta(hours=1))
+    ParquetDataPlane().export(con, store, f=f0 + timedelta(hours=2))
+    assert [k for k in _keys(client, "warm/m__band/") if k.endswith(".parquet")]
+
+    fresh = duckdb.connect()
+    fresh.execute("SET TimeZone='UTC'")
+    hydrate_registry(fresh, store)
+    sql = fresh.execute("SELECT sql FROM duckdb_views() WHERE view_name = 'm__band'").fetchone()[0]
+    assert "s3://" in sql
+    assert sorted(fresh.sql('SELECT id, v FROM "m"').fetchall()) == [(1, "A"), (2, "b"), (3, "c")]
+
+
+def test_a_spout_delivers_to_a_real_s3(s3_env, tmp_path):
+    """Spout egress to an S3 bucket through the real worker, in both modes: a full snapshot written by
+    DuckDB (its own secret, endpoint and signing) and the append-mode mirror of the published layout
+    (fsspec). Credentials are ${env:} references, resolved only at delivery."""
+    from datetime import datetime, timezone
+
+    import duckdb
+
+    from duckstring import trickle_io as T
+    from duckstring.catchment.egress_worker import _egress_spout
+    from duckstring.catchment.registry import pond_data_dir
+    from duckstring.dataplane import ParquetDataPlane
+    from duckstring.storage import get_storage
+
+    _endpoint, client = s3_env
+    f = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    con.execute("CREATE TABLE revenue AS SELECT * FROM (VALUES (1, 10), (2, 20)) t(id, amt)")
+    T.merge_table(con, "fact", con.sql("SELECT * FROM (VALUES (1, 'a'), (2, 'b')) t(id, v)"), f, ("id",))
+    ParquetDataPlane().export(con, pond_data_dir(tmp_path, "sales", 1).root, f=f)
+
+    creds = "key_id=${env:AWS_ACCESS_KEY_ID}&secret=${env:AWS_SECRET_ACCESS_KEY}"
+    job = {"pond_name": "sales", "major": 1, "f": f}
+    _egress_spout(tmp_path, {**job, "table": "revenue", "mode": "full",
+                             "destination": f"s3://{_BUCKET}/spout-full?{creds}"})
+    assert "spout-full/revenue.parquet" in _keys(client, "spout-full/")
+    reader = duckdb.connect()
+    get_storage(f"s3://{_BUCKET}/spout-full").duckdb_setup(reader)
+    rows = reader.sql(f"SELECT * FROM read_parquet('s3://{_BUCKET}/spout-full/revenue.parquet') ORDER BY id")
+    assert rows.fetchall() == [(1, 10), (2, 20)]
+
+    _egress_spout(tmp_path, {**job, "table": "fact", "mode": "append",
+                             "destination": f"s3://{_BUCKET}/spout-mirror?{creds}"})
+    mirror = get_storage(f"s3://{_BUCKET}/spout-mirror")
+    mirror.duckdb_setup(reader)
+    read = ParquetDataPlane().read_select(mirror, "fact")
+    assert sorted(reader.sql(f"SELECT id, v FROM ({read})").fetchall()) == [(1, "a"), (2, "b")]
+
+
 # ─── the full runtime, publishing to S3 ──────────────────────────────────────────
 
 
@@ -160,7 +267,6 @@ def test_a_chain_publishes_and_persists_to_s3(s3_env, tmp_path_factory, monkeypa
     port = _free_port()
     monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)   # real Duck subprocesses
     monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", f"http://127.0.0.1:{port}")
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     monkeypatch.setenv("DUCKSTRING_DEMO_PRODUCTS", "500")           # keep the fixture small
     monkeypatch.setenv("DUCKSTRING_DEMO_ORDERS", "500")
 

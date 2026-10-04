@@ -117,7 +117,9 @@ GPU/warm-pools — genuinely huge work is the Flock's job anyway.
   for its pool's provider (`dedicated` → the Catchment's default provider).
 - **The container image** (`Dockerfile`, GHCR via `release.yml`): `python -m` entrypoint over the
   installed wheel; a Duck runs `duckstring.duck <args>` as the task command. Ship an official image
-  alongside the PyPI package.
+  alongside the PyPI package. (2026-10-01: published public at `ghcr.io/duckstring-dev/duckstring:<version>`,
+  amd64 + arm64, no `latest`. It had been pushed private and amd64-only while the docs said to build
+  your own; Pond environments made a stock image viable for any Pond with a `uv.lock`.)
 
 ### Preset pools — S/M/L/XL (Fargate, built-in on OSS)
 

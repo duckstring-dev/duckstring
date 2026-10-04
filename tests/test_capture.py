@@ -1,7 +1,6 @@
-"""Plan capture → DuckFlock plan IR (``duckflock_plan: 1``). Capture runs a ripple's builder chain
-against a recording handle and serialises it to the logical plan IR (the duckstring↔duckflock contract,
-duckflock ``plans/plan-ir.md``). Comparisons are **order-sensitive** (JSON string equality) — duckflock
-deserialises with ``preserve_order``, so mutate-column / metric / dict-key order is semantic."""
+"""Plan capture (the input to static column lineage). Capture runs a ripple's builder chain against a
+recording handle and serialises it to a logical plan. Comparisons are **order-sensitive** (JSON string
+equality): mutate-column, metric and dict-key order is semantic."""
 
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ import json
 import pytest
 
 from duckstring import acc, agg
-from duckstring.trickle.capture import NonCapturable, capture_plan, envelope
+from duckstring.trickle.capture import NonCapturable, capture_plan
 
 
 def _src(ref):
@@ -33,7 +32,7 @@ def _cap(run_python):
 
 
 def _eq(got, want):
-    """Order-sensitive equality (JSON string) — the duckflock acceptance contract."""
+    """Order-sensitive equality (JSON string): declaration order is semantic."""
     assert json.dumps(got) == json.dumps(want), f"\n got={json.dumps(got, indent=2)}\nwant={json.dumps(want, indent=2)}"
 
 
@@ -291,23 +290,6 @@ def test_capture_join_types_how_passthrough():
             return []
 
         assert _cap(run)["statements"][0]["dag"]["how"] == how
-
-
-def test_capture_envelope_wraps_body():
-    def run(host):
-        host.trickle("src.line", p=1.0).merge("m", pk="id")
-        return []
-
-    body = _cap(run)
-    plan = envelope(
-        body, job_id="j-1", tenant="acme",
-        pond={"name": "m", "major": 1, "version": "0.0.1"},
-        epoch={"f": "2026-07-03T10:15:00+00:00", "previous_f": "0001-01-01T00:00:00+00:00"},
-        config={"refresh": False, "keep_warm_ttl_s": 0, "limits": {}},
-    )
-    assert plan["duckflock_plan"] == 1
-    assert list(plan) == ["duckflock_plan", "job_id", "tenant", "pond", "epoch", "catalog", "statements", "config"]
-    assert plan["statements"] == body["statements"]
 
 
 def test_capture_group_by_aggregate_alias():

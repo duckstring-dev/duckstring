@@ -65,13 +65,25 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
     ``after`` (a consumer's already-landed ``_duckstring_f``) makes a Trickle transfer **incremental**:
     an append-only table (append history, ``__changelog``, ``__band`` warm bands, ``__droplog``) is a
     directory of per-run parts, and only the parts newer than ``after`` are shipped (the small delta); a
-    plain Ripple output is a single file, always wholesale. A merge main's **cold base** (``__base/`` chunks)
+    plain Ripple output ships its newest version, always wholesale. A merge main's **cold base** (``__base/`` chunks)
     is wholesale but rewritten only at a rare cold compaction, so it ships only when its fold watermark
     ``f_base`` advanced past ``base_after`` (the consumer's held cold-base freshness) — otherwise the large
     base is not re-sent. Omit ``after``/``base_after`` (bootstrap) → the whole set."""
     from datetime import datetime
 
-    from ...trickle_io import BASE_SUFFIX, SIDECAR, base_chunks, base_dir_name, load_sidecar, part_f, part_tables, table_parts
+    from ...trickle_io import (
+        BASE_SUFFIX,
+        SIDECAR,
+        VERSION_SUFFIX,
+        base_chunks,
+        base_dir_name,
+        load_sidecar,
+        part_f,
+        part_tables,
+        table_parts,
+        table_versions,
+        version_dir_name,
+    )
 
     m = _resolve_major(request, name, major, None)
     data_dir = _data_dir(request, name, m)
@@ -86,7 +98,11 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
         d[: -len(BASE_SUFFIX)] for d in data_dir.subdir_names()
         if d.endswith(BASE_SUFFIX) and (wanted is None or d[: -len(BASE_SUFFIX)] in wanted)
     )
-    if not files and not dirs and not base_dirs and not data_dir.exists():
+    versioned = sorted(
+        d[: -len(VERSION_SUFFIX)] for d in data_dir.subdir_names()
+        if d.endswith(VERSION_SUFFIX) and (wanted is None or d[: -len(VERSION_SUFFIX)] in wanted)
+    )
+    if not files and not dirs and not base_dirs and not versioned and not data_dir.exists():
         raise HTTPException(status_code=404, detail=f"No exported data for '{name}' (major {m})")
     sidecar_meta = load_sidecar(data_dir)
 
@@ -94,6 +110,11 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for n in files:  # wholesale single-file tables (legacy merge base / plain output)
             zf.writestr(n, data_dir.read_bytes(n))
+        for table in versioned:  # an overwrite table: its newest version, landed as the consumer's own
+            versions = table_versions(data_dir, table)
+            if versions:
+                vd = version_dir_name(table)
+                zf.writestr(f"{vd}/{versions[-1]}", data_dir.child(vd).read_bytes(versions[-1]))
         for main in base_dirs:  # cold base chunks — wholesale, but only if f_base advanced past the consumer's
             fb = sidecar_meta.get(main, {}).get("f_base")
             if base_after_dt is not None and fb is not None and datetime.fromisoformat(fb) <= base_after_dt:

@@ -5,7 +5,7 @@ from pathlib import Path
 import typer
 
 app = typer.Typer(
-    help="Inspect this Pond's local puddles (Source snapshots) and run output.",
+    help="Inspect this Pond's local Puddles and run output.",
     add_completion=False,
     no_args_is_help=True,
 )
@@ -28,6 +28,14 @@ def _inventory(project) -> list[dict]:
                 items.append({"pond": pond_dir.name, "table": pq.stem, "path": pq, "kind": "puddle"})
     for pq in sorted(project.out_dir.glob("*.parquet")):
         items.append({"pond": project.name, "table": pq.stem, "path": pq, "kind": "out"})
+    from ..trickle.io import VERSION_SUFFIX
+
+    # A run publishes each plain table as versions under {table}__v/; the newest is the run's output.
+    for vdir in sorted(project.out_dir.glob(f"*{VERSION_SUFFIX}")):
+        versions = sorted(vdir.glob("*.parquet")) if vdir.is_dir() else []
+        if versions:
+            items.append({"pond": project.name, "table": vdir.name[: -len(VERSION_SUFFIX)],
+                          "path": versions[-1], "kind": "out"})
     return items
 
 
@@ -75,7 +83,7 @@ def _age(path: Path) -> str:
 
 @app.command("ls")
 def ls() -> None:
-    """List hydrated puddles and run output, with row counts, size, and age."""
+    """List hydrated Puddles and run output tables, with row counts, sizes and ages."""
     import duckdb
     from rich.console import Console
     from rich.table import Table
@@ -105,7 +113,7 @@ def show(
     ref: str = typer.Argument(..., help="Table to preview: {pond}.{table} or a bare table name."),
     limit: int = typer.Option(10, "--limit", "-n", help="Rows to show."),
 ) -> None:
-    """Preview a puddle or output table (output wins when a self-puddle shares the name)."""
+    """Print the first rows of a Puddle or output table. Output takes precedence over a Puddle of the same name."""
     from rich.console import Console
 
     console = Console()
@@ -127,7 +135,7 @@ def show(
 def query(
     sql: str = typer.Argument(..., help='SQL over the local tables, e.g. SELECT * FROM "sales"."sale_line".'),
 ) -> None:
-    """Run SQL across every puddle and output table ("{pond}"."{table}" or bare names)."""
+    """Run SQL over every Puddle and output table, as "{pond}"."{table}" or bare names."""
     from rich.console import Console
 
     console = Console()

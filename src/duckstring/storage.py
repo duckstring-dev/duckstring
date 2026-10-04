@@ -5,8 +5,8 @@ The Catchment runtime splits along two storage classes (see ``plans/storage-deco
 - **Hot state** (``duck.db``, the per-Pond ``pond.db`` ledgers, the ``registry.duckdb`` working
   registries, ``config.toml``) needs POSIX semantics — byte-range writes, ``fsync``, advisory locking —
   so it **always** lives on a local POSIX path and never routes through this seam.
-- **Data blobs** (Parquet parts, Iceberg metadata + data files, ``__base/`` chunks, ``__band/`` bands,
-  the ``_trickle.json`` sidecars, the catalog) are write-once / atomic-overwrite objects that only ever
+- **Data blobs** (overwrite versions, Parquet parts, ``__base/`` chunks, ``__band/`` bands, the
+  ``_trickle.json`` sidecars) are write-once / atomic-overwrite objects that only ever
   need an object-level atomic PUT — so they can live in an object store (S3/GCS/ABFS) or a Databricks
   Volume. This seam is what lets ``DUCKSTRING_DATA_ROOT`` be a URI rather than a local path.
 
@@ -19,7 +19,7 @@ Two implementations:
   filesystem). An atomic-overwrite is a single-object PUT — object stores make that atomic, so the
   rename dance is unnecessary; ``list`` is a list-prefix and ``delete`` is a delete-object.
 
-Bulk Parquet I/O (``COPY … TO`` / ``read_parquet`` / ``iceberg_scan``) does **not** go byte-by-byte
+Bulk Parquet I/O (``COPY … TO`` / ``read_parquet``) does **not** go byte-by-byte
 through this seam — DuckDB reads and writes object storage natively over ``httpfs``. So the seam returns
 **URIs** (:meth:`Storage.uri` / :meth:`Storage.glob`) that a DuckDB statement targets directly, and
 implements only the filesystem-shaped operations around them (list / exists / size / delete / atomic
@@ -117,25 +117,12 @@ class Storage:
         raise NotImplementedError
 
     def names(self, *parts: str) -> list[str]:
-        """*All* file names (not just ``*.parquet``) directly under the addressed dir, sorted — used by
-        the Iceberg orphan-file GC, which sweeps ``.metadata.json`` / ``.avro`` / data files alike."""
+        """*All* file names (not just ``*.parquet``) directly under the addressed dir, sorted."""
         raise NotImplementedError
 
     def subdir_names(self) -> list[str]:
         """The immediate subdirectory names of this dir, sorted."""
         raise NotImplementedError
-
-    def warehouse_location(self, *parts: str) -> str:
-        """The **raw** (un-escaped) location string for pyiceberg's ``warehouse`` / FileIO — a ``file://``
-        URI locally, the object URI (``s3://…``) on an object store. Distinct from :meth:`uri` (which
-        SQL-escapes for DuckDB interpolation)."""
-        raise NotImplementedError
-
-    def iceberg_properties(self) -> dict[str, str]:
-        """pyiceberg catalog/FileIO properties so its *own* writer can authenticate to this storage
-        (it writes table data/metadata itself, not via DuckDB). Empty for local; the resolved
-        ``s3.*`` / ``gcs.*`` / ``adls.*`` credentials for an object store."""
-        return {}
 
     # ─── mutation ────────────────────────────────────────────────────────────────
 
@@ -266,9 +253,6 @@ class LocalStorage(Storage):
 
     def subdir_names(self) -> list[str]:
         return sorted(p.name for p in self.root.iterdir() if p.is_dir()) if self.root.is_dir() else []
-
-    def warehouse_location(self, *parts: str) -> str:
-        return self._abs(*parts).as_uri()
 
     def mkdir(self, *parts: str) -> None:
         self._abs(*parts).mkdir(parents=True, exist_ok=True)
@@ -457,36 +441,6 @@ class ObjectStorage(Storage):
             if e.get("type") == "directory"
         )
 
-    def warehouse_location(self, *parts: str) -> str:
-        return self._key(*parts)
-
-    def iceberg_properties(self) -> dict[str, str]:
-        from .egress import credentials
-
-        scheme = urlsplit(self.base).scheme.lower()
-
-        def res(key: str) -> str | None:
-            val = self.params.get(key)
-            return credentials.resolve(val) if val else None
-
-        out: dict[str, str] = {}
-        if scheme in ("s3", "s3a"):
-            mapping = (("key_id", "s3.access-key-id"), ("key", "s3.access-key-id"),
-                       ("secret", "s3.secret-access-key"), ("region", "s3.region"),
-                       ("token", "s3.session-token"), ("endpoint", "s3.endpoint"))
-        elif scheme in ("gs", "gcs"):
-            mapping = (("token", "gcs.oauth2.token"), ("project", "gcs.project-id"))
-        elif scheme in ("abfs", "abfss", "az", "wasb", "wasbs"):
-            mapping = (("account_name", "adls.account-name"), ("account_key", "adls.account-key"),
-                       ("sas_token", "adls.sas-token"))
-        else:
-            mapping = ()
-        for src, dst in mapping:
-            val = res(src)
-            if val is not None:
-                out.setdefault(dst, val)  # key_id wins over key when both are given
-        return out
-
     # ─── mutation ────────────────────────────────────────────────────────────────
 
     def remove(self, *parts: str) -> None:
@@ -619,46 +573,35 @@ def _copy_file(src: "Storage", dst: "Storage", name: str) -> None:
         dst.write_bytes(src.read_bytes(name), name)
 
 
-def tree_size(src: "Storage", *, skip_top: "frozenset[str]" = frozenset()) -> "tuple[int, int]":
-    """``(file_count, byte_count)`` under ``src`` (recursive), with the same ``skip_top`` semantics as
-    :func:`copy_tree` — a metadata-only pass to seed a migration progress total. Missing/empty → ``(0, 0)``."""
+def tree_size(src: "Storage") -> "tuple[int, int]":
+    """``(file_count, byte_count)`` under ``src`` (recursive) — a metadata-only pass to seed a migration
+    progress total. Missing/empty → ``(0, 0)``."""
     if not src.exists() or not src.is_dir():
         return (0, 0)
     files, nbytes = 0, 0
     for name in src.names():
-        if name in skip_top:
-            continue
         files += 1
         nbytes += src.size(name)
     for sub in src.subdir_names():
-        if sub in skip_top:
-            continue
         f, b = tree_size(src.child(sub))
         files += f
         nbytes += b
     return (files, nbytes)
 
 
-def copy_tree(src: "Storage", dst: "Storage", *, skip_top: "frozenset[str]" = frozenset(), on_file=None) -> int:
-    """Recursively copy every file under ``src`` into ``dst``, returning the file count. ``skip_top`` names
-    (files or dirs) are skipped **at the top level only** — the data-plane migration passes the Iceberg
-    ``catalog.json`` + ``pond.db`` namespace here (self-contained flat Parquet is carried; the absolute-
-    pathed Iceberg metadata is left behind and regenerated at the target). ``on_file(nbytes)`` is called
-    after each file (for progress). Uses :func:`_copy_file`, so it is server-side for same-provider object
+def copy_tree(src: "Storage", dst: "Storage", *, on_file=None) -> int:
+    """Recursively copy every file under ``src`` into ``dst``, returning the file count. ``on_file(nbytes)``
+    is called after each file (for progress). Uses :func:`_copy_file`, so it is server-side for same-provider object
     stores. A missing/empty source is a no-op."""
     if not src.exists() or not src.is_dir():
         return 0
     count = 0
     for name in src.names():
-        if name in skip_top:
-            continue
         nbytes = src.size(name) if on_file else 0
         _copy_file(src, dst, name)
         count += 1
         if on_file:
             on_file(nbytes)
     for sub in src.subdir_names():
-        if sub in skip_top:
-            continue
-        count += copy_tree(src.child(sub), dst.child(sub), on_file=on_file)  # skip only applies at the top
+        count += copy_tree(src.child(sub), dst.child(sub), on_file=on_file)
     return count

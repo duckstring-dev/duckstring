@@ -1,7 +1,7 @@
 [project]
 name = "duckstring"
-version = "0.5.0"
-description = "Build data pipelines the way you build software: version each transform, declare its dependencies, and Duckstring resolves the execution DAG automatically."
+version = "0.6.0rc1"
+description = "An open source data engineering platform for DuckDB: versioned transformations, pull orchestration, incremental processing and a built-in catalog."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -10,7 +10,10 @@ authors = [
 ]
 
 dependencies = [
-  "duckdb>=0.10",
+  # The tested range: CI runs the suite on the floor and the latest release, and against the pre-release
+  # in an allowed-to-fail job. Raise the ceiling once the suite passes on the next major's release
+  # (plans/duckdb-2-ready.md). A Pond environment gets this Duckstring, so these bounds hold there too.
+  "duckdb>=1.5,<2",
   "rich>=13.7",
   "typer>=0.12",
   "fastapi>=0.111",
@@ -19,22 +22,20 @@ dependencies = [
   "httpx>=0.25",
   "tomli>=2.0; python_version < '3.11'",
   "tomli-w>=1.0",
-  # The default data plane: an Apache Iceberg base layer (snapshots + schema metadata over the
-  # Parquet files we already write). Core deps because Iceberg is default-on; set
-  # DUCKSTRING_DATA_PLANE=parquet to opt out (the lighter fallback, also for offline Catchments that
-  # can't fetch DuckDB's iceberg extension). NB: we use our own file-backed catalog
-  # (duckstring.iceberg_catalog) rather than pyiceberg's SqlCatalog, so SQLAlchemy is NOT pulled in.
-  "pyiceberg>=0.7",
+  # Arrow interchange: the Flight SQL server and Arrow fetches from DuckDB.
   "pyarrow>=14",
   # DuckDB requires pytz to convert TIMESTAMPTZ columns to Python datetimes on fetch
   # (our _duckstring_f freshness column is TIMESTAMPTZ, read back in dataplane/trickle export).
   # It is otherwise only present transitively (pandas), so a clean install lacks it.
   "pytz",
+  # .pondignore matching with exact .gitignore semantics (negation, anchoring, **). Pure Python.
+  "pathspec>=0.10",
+  # Builds each Pond's own environment from its pyproject.toml + uv.lock (plans/pond-environments.md).
+  # A self-contained binary wheel; duckstring.environments finds it with uv.find_uv_bin().
+  "uv>=0.5",
 ]
 
 [project.optional-dependencies]
-# Retained for back-compat: the Iceberg deps are in core now (Iceberg is the default plane).
-iceberg = []
 # dbt-mode Ponds (plans/dbt.md): deploy a dbt project as a Pond, each model a Ripple. Heavyweight and
 # opt-in — only pulled when a team actually runs dbt-mode. dbt-duckdb pulls dbt-core transitively.
 dbt = [
@@ -88,6 +89,9 @@ ds = "duckstring.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Some suites share fixtures by importing `tests.<module>`; put the repo root on the path so a bare
+# `pytest` (what CI runs) resolves them the same as `python -m pytest`.
+pythonpath = ["."]
 # Tight enough to catch an accidental real sleep (sim tests finish in ms), loose enough to absorb
 # cold-runner I/O on CI (SQLite migrate / uvicorn startup can exceed 1s on shared runners).
 timeout = 5

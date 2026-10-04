@@ -22,6 +22,32 @@ jobs:
       - run: ruff check .
       - run: pytest
 
+  # The oldest DuckDB pyproject allows (its floor): the main job only ever installs the latest.
+  duckdb-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e .[dev] "duckdb==1.5.0"
+      - run: pytest
+
+  # The DuckDB pre-release, past pyproject's ceiling on purpose, so the next breaking change shows up
+  # before it ships rather than after. Allowed to fail: it is an early warning, not a gate.
+  duckdb-prerelease:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e .[dev]
+      - run: pip install --pre --upgrade duckdb
+      - run: python -c "import duckdb; print(duckdb.__version__)"
+      - run: pytest
+
   # The dbt extra (dbt-mode Ponds): the e2e importorskips without it, so exercise it explicitly.
   dbt:
     runs-on: ubuntu-latest
@@ -70,15 +96,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      # MinIO no longer publishes community images (quay.io/minio/minio and minio/minio are gone), so this uses
+      # Chainguard's build. It runs as a non-root user, hence a data directory under /tmp.
       - name: Start MinIO
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=duckstringtest -e MINIO_ROOT_PASSWORD=duckstringtest \
-            quay.io/minio/minio server /data
+            chainguard/minio:latest server /tmp/minio
           for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:9000/minio/health/live && break
+            curl -sf http://127.0.0.1:9000/minio/health/live && exit 0
             sleep 2
           done
+          docker logs minio
+          exit 1
       - run: pip install -e .[dev]
       - run: pytest tests/test_object_store.py -v
         env:

@@ -78,7 +78,7 @@ def register(scheme: str, factory: Callable[[Destination], EgressDriver]) -> Non
 def get_egress(destination: str) -> EgressDriver:
     """Resolve the egress driver for a destination URI by its scheme. Raises :class:`DestinationError`
     for an unknown scheme, or for a known scheme whose driver is not implemented yet."""
-    dest = parse_destination(destination)  # validates scheme ∈ known + credential-reference syntax
+    dest = parse_destination(destination, resolve=True)  # scheme ∈ known (a whole reference is resolved first)
     factory = _REGISTRY.get(dest.scheme)
     if factory is None:
         raise DestinationError(

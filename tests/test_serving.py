@@ -125,7 +125,6 @@ def _publish(tmp_path, name, major, table, n):
 
 
 def test_serving_core_sandboxed(tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     db, mk = _driver(tmp_path)
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(serve_tables=["revenue"]), _RIPPLES)
     _add_output_tables(db, _pv_id(db, "sales", "1.0.0"), ["revenue", "secret_internal"])
@@ -160,7 +159,6 @@ def test_serving_core_sandboxed(tmp_path, monkeypatch):
 
 
 def test_full_connection_sees_all_tables(tmp_path, monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
     db, mk = _driver(tmp_path)
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(serve_tables=["revenue"]), _RIPPLES)
     _add_output_tables(db, _pv_id(db, "sales", "1.0.0"), ["revenue", "secret_internal"])

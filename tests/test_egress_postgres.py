@@ -20,11 +20,6 @@ pytestmark = pytest.mark.timeout(15)
 UTC = timezone.utc
 
 
-@pytest.fixture(autouse=True)
-def _parquet_plane(monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")  # offline/flat reads in the worker
-
-
 # ─── A driver whose ATTACH points at a DuckDB database (faithful to the SQL path) ──
 
 
@@ -247,7 +242,7 @@ def test_worker_routes_delta_vs_full(tmp_path, monkeypatch):
 
     monkeypatch.setattr(base, "get_egress", lambda dest: Fake())
 
-    def fake_read_delta(con, dd, table, previous_f, f, *, dp):
+    def fake_read_delta(con, dd, table, previous_f, f, *, dp, pin=None):
         read_args.append((table, previous_f, f))
         return _Delta(is_full=False)
 

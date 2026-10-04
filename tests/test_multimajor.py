@@ -181,8 +181,8 @@ def test_two_majors_execute_concurrently_e2e(tmp_path_factory, monkeypatch):
 
         # Per-major storage: each line exported its own data and kept its own ledger.
         for major, value in ((1, 1), (2, 2)):
-            data = root / "ponds" / "inlet" / f"m{major}" / "data" / "event.parquet"
-            assert data.exists(), f"no exported data for major {major}"
+            data = root / "ponds" / "inlet" / f"m{major}" / "data" / "event__v"
+            assert list(data.glob("*.parquet")), f"no exported data for major {major}"
             assert (root / "ponds" / "inlet" / f"m{major}" / "pond.db").exists()
             r = httpx.post(f"{url}/api/query", json={"pond": "inlet", "major": major, "ripple": "event"}, timeout=5.0)
             row = r.json()[0]

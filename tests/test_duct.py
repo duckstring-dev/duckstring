@@ -803,3 +803,65 @@ def test_repair_releases_children_as_parents_finish(tmp_path):
     assert "D@1" in d._repair["released"]
     d._advance_repair("D@1", _now())
     assert d._repair is None  # the whole scope rebuilt
+
+
+# ─── Draw versions: [sources] pins on a drawn Pond check against the upstream's real version ──────────
+
+
+def _draw_version(d, key="sales@1"):
+    return next(p["version"] for p in d.status()["ponds"] if p["id"] == key)
+
+
+def _check_sink_pin(d, pin):
+    from duckstring.catchment.routes.deploy import _check_version_contracts
+
+    _check_version_contracts(d.db, -1, "snk", "1.0.0", _cfg({"sales": pin}, kind="outlet"))
+
+
+def test_draw_records_the_upstream_version_it_was_added_with(tmp_path):
+    d = _driver(tmp_path)
+    d.create_duct("up", "http://up", None)
+    d.add_duct_pond("up", "sales", 1, version="1.4.0")
+    assert _draw_version(d) == "1.4.0"
+    _check_sink_pin(d, "1.2.0")  # satisfied by the upstream's 1.4.0
+    with pytest.raises(ValueError, match="selected version is 1.4.0"):
+        _check_sink_pin(d, "1.5.0")
+
+
+def test_draw_version_follows_the_upstream_and_survives_reload(tmp_path):
+    d = _driver(tmp_path)
+    d.create_duct("up", "http://up", None)
+    d.add_duct_pond("up", "sales", 1)  # upstream unknown at add time
+    assert _draw_version(d) == "1.0.0"
+    d.observe_remote("sales@1", _now(), version="1.3.0")
+    assert _draw_version(d) == "1.3.0"
+    _check_sink_pin(d, "1.3.0")
+    d2 = Driver(d.db, tmp_path, "http://x", NoopLauncher())  # restart
+    assert _draw_version(d2) == "1.3.0"
+
+
+def test_draw_version_ignores_another_major(tmp_path):
+    d = _driver(tmp_path)
+    d.create_duct("up", "http://up", None)
+    d.add_duct_pond("up", "sales", 1, version="2.0.0")  # wrong major → placeholder
+    assert _draw_version(d) == "1.0.0"
+    d.observe_remote("sales@1", _now(), version="2.1.0")
+    assert _draw_version(d) == "1.0.0"
+
+
+def test_poller_records_the_upstream_version(tmp_path):
+    d = _driver(tmp_path)
+    d.create_duct("up", "http://up", None)
+    d.add_duct_pond("up", "sales", 1)
+
+    def handler(request):
+        if request.url.path == "/api/status":
+            return httpx.Response(200, json={"ponds": [
+                {"name": "sales", "major": 1, "version": "1.6.2", "end_f": None, "status": "idle"}
+            ], "edges": []})
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    asyncio.run(poll_once(d, tmp_path, client))
+    asyncio.run(client.aclose())
+    assert _draw_version(d) == "1.6.2"

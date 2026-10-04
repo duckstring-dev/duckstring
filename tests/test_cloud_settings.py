@@ -254,13 +254,12 @@ def test_switch_data_root_migrate_copies_and_preserves_freshness(tmp_path):
     driver.wave(key)  # demand that must survive the migrate
     # Populate plane A FIRST (bytes precede claims — the reload below reconciles freshness against the
     # plane, and a claim no plane backs would be regressed as lost content; plans/persist.md phase 4):
-    # the flat, self-contained files (carried) + Iceberg catalog/namespace (skipped).
+    # the published files, which are carried verbatim.
     F = "2026-06-06T00:00:00+00:00"
     a = pond_data_dir(tmp_path, name, major, str(tmp_path / "planeA"))
     a.write_text(json.dumps({"orders": {"mode": "overwrite", "f": F}}), "_trickle.json")
     a.write_bytes(b"parquet-bytes", "orders.parquet")
-    a.write_text("{}", "catalog.json")                       # Iceberg pointer — must NOT travel
-    a.child("pond.db").write_bytes(b"meta", "v1.metadata.json")  # Iceberg namespace — must NOT travel
+    a.child("orders__v").write_bytes(b"version-bytes", "2026-06-06T00_00_00+00_00.parquet")
     # The Catchment is currently fresh at F (migrate carries a verbatim copy, so this must be KEPT — not
     # reset by re-reading the target sidecar).
     db.execute("UPDATE pond_state SET start_f=?, end_f=?, changed_f=? WHERE pond_id=?", (F, F, F, pond_id))
@@ -272,8 +271,7 @@ def test_switch_data_root_migrate_copies_and_preserves_freshness(tmp_path):
     b = pond_data_dir(tmp_path, name, major, str(tmp_path / "planeB"))
     assert b.read_bytes("orders.parquet") == b"parquet-bytes"   # flat data copied
     assert b.read_text("_trickle.json") is not None             # sidecar copied
-    assert not b.exists("catalog.json")                         # Iceberg catalog skipped
-    assert not b.exists("pond.db")                              # Iceberg namespace skipped
+    assert b.child("orders__v").read_bytes("2026-06-06T00_00_00+00_00.parquet") == b"version-bytes"
     assert a.read_bytes("orders.parquet") == b"parquet-bytes"   # old location left intact (backup)
     assert driver.data_root == str(tmp_path / "planeB")         # re-pointed
     start_f, end_f = db.execute("SELECT start_f, end_f FROM pond_state WHERE pond_id=?", (pond_id,)).fetchone()

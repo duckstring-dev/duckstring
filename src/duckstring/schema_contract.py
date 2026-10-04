@@ -65,7 +65,10 @@ def is_widening(old: str, new: str) -> bool:
     change: every value still fits.
 
     Deliberately conservative — INTEGER → DOUBLE is *not* accepted (a large BIGINT loses precision as a
-    double), and nested types must match exactly."""
+    double), and nested types must match exactly. DuckDB 2.0's ``VARIANT`` holds values of any type, but a
+    change to or from it is still breaking either way: a Sink reading a typed column can't take a
+    ``VARIANT``, and narrowing a ``VARIANT`` to one type drops what it held of others. Only ``VARIANT`` →
+    ``VARIANT`` passes (it falls through to "not in a chain", like any other type)."""
     old, new = old.strip().upper(), new.strip().upper()
     if old == new:
         return True

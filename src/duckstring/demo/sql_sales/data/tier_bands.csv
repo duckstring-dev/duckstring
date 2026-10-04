@@ -1,0 +1,4 @@
+price_tier,min_price,max_price
+budget,0,25
+standard,25,150
+premium,150,1000000000

@@ -28,6 +28,10 @@ router = APIRouter()
 _SKIP_SUFFIXES = (".db-wal", ".db-shm")  # subsumed by the SQLite snapshot
 _SKIP_NAMES = {"secrets.json", "secrets.json.tmp"}  # the write-only secret store never travels in a bundle
 _SERVING_TMP = ".serving-tmp"  # the sandbox's private spill dir (see serving._temp_dir)
+# Top-level dirs rebuilt on demand, never shipped: Pond environments and uv's cache
+# (plans/pond-environments.md). Hundreds of MB, and an environment only works at the path and with the
+# interpreter it was built for, so a copy elsewhere is useless; deploys and Ducks rebuild them.
+_REBUILT_DIRS = {"envs", "uv-cache"}
 
 
 def _db(request: Request) -> sqlite3.Connection:
@@ -391,7 +395,12 @@ def rotate_keys(request: Request, body: _RotateBody = _RotateBody()):
 def _root_files(root: Path) -> list[tuple[Path, str]]:
     """Every regular file in the root as (path, root-relative arcname), WAL sidecars skipped."""
     files = []
-    for path in sorted(root.rglob("*")):
+    paths = []
+    for top in root.iterdir():  # not a plain rglob: never descend into the rebuilt dirs' many files
+        if top.name in _REBUILT_DIRS and top.is_dir():
+            continue
+        paths.extend([top, *top.rglob("*")] if top.is_dir() else [top])
+    for path in sorted(paths):
         if not path.is_file() or path.name.endswith(_SKIP_SUFFIXES) or path.name in _SKIP_NAMES:
             continue
         if _SERVING_TMP in path.parts:

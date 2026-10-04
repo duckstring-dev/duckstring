@@ -7,7 +7,7 @@ Two write shapes, chosen by the Spout's ``mode``:
 - **mirror** (``mode=append``): the table's **published Duckstring collection** (per-run parts +
   changelog/band/base tiers + the sidecar + the Extension-1 ``state/`` snapshots), reconciled by file
   name per delivery — O(new parts), and the destination stays directly readable by any
-  Duckstring-layout consumer (``ParquetDataPlane.read_select``, a downstream Catchment, DuckFlock).
+  Duckstring-layout consumer (``ParquetDataPlane.read_select``, a downstream Catchment).
 
 - ``file://`` — local path, written atomically (tmp + ``os.replace``).
 - ``s3://`` / ``gs://`` — snapshots via DuckDB ``httpfs`` + the secret manager; mirrors via the
@@ -83,7 +83,7 @@ class ObjectStoreEgressDriver:
     def mirror(self, source_store, table: str, entry: dict, *, f: datetime | None = None) -> None:
         """Incrementally mirror ``table``'s **published collection** from the source data dir to the
         destination prefix — the same layout the data plane publishes, so any Duckstring-layout reader
-        (``ParquetDataPlane.read_select``, a downstream Catchment, DuckFlock) can consume the
+        (``ParquetDataPlane.read_select``, a downstream Catchment) can consume the
         destination directly.
 
         Per delivery it reconciles each artifact set by **name** (parts are immutable + idempotent by
@@ -93,7 +93,7 @@ class ObjectStoreEgressDriver:
         part is always re-copied (a same-``f`` replay may have rewritten its content), and wholesale
         files (an overwrite table; a legacy single-file merge base) copy only when the source entry's
         ``f``/``f_base`` advanced past the destination sidecar's. The Extension-1 ``state/`` snapshots
-        ride along (they make the mirror DuckFlock-resumable). The destination sidecar entry is written
+        ride along, so the mirror carries the incremental state too. The destination sidecar entry is written
         **last** — the commit point, exactly like a publish."""
         from ..storage import get_storage
         from ..trickle.io import (
@@ -102,6 +102,8 @@ class ObjectStoreEgressDriver:
             changelog_name,
             load_sidecar,
             part_name,
+            table_versions,
+            version_dir_name,
             warm_name,
             write_sidecar,
         )
@@ -132,6 +134,18 @@ class ObjectStoreEgressDriver:
                 dest.write_bytes(source_store.read_bytes("state", kind, t, n), "state", kind, t, n)
             for n in sorted(dst_names - src_names):
                 dest.remove("state", kind, t, n)
+        # An overwrite table's versions: the destination holds just the source's newest (a reader of the
+        # mirror has no pin to honour), so ship it once and drop the version it supersedes.
+        versions = table_versions(source_store, t)
+        if versions:
+            vd = version_dir_name(t)
+            newest = versions[-1]
+            if not dest.exists(vd, newest):
+                dest.mkdir(vd)
+                dest.write_bytes(source_store.read_bytes(vd, newest), vd, newest)
+            for n in dest.parquet_names(vd):
+                if n != newest:
+                    dest.remove(vd, n)
         # Wholesale file (overwrite output / legacy single-file merge base): gate the O(base) copy on the
         # sidecar watermark it rewrites under — `f` for an overwrite table, `f_base` for a merge base.
         if source_store.exists(f"{t}.parquet"):
@@ -226,10 +240,21 @@ class ObjectStoreEgressDriver:
             else:
                 clauses.append("PROVIDER credential_chain")
             add("region", "REGION")
-            add("endpoint", "ENDPOINT")
-            add("url_style", "URL_STYLE")
-            if "use_ssl" in q:
-                clauses.append(f"USE_SSL {'true' if q['use_ssl'].lower() in ('1', 'true', 'yes') else 'false'}")
+            # An S3-compatible endpoint (MinIO, Ceph, R2), from ?endpoint= or DUCKSTRING_S3_ENDPOINT, read
+            # the way the data plane reads it: DuckDB wants host:port, USE_SSL from the scheme, path style.
+            from ..storage import _s3_endpoint, _split_endpoint
+
+            endpoint = _s3_endpoint(q)
+            if endpoint:
+                host, ssl = _split_endpoint(endpoint)
+                clauses.append(f"ENDPOINT {_q(host)}")
+                ssl = q["use_ssl"].lower() in ("1", "true", "yes") if "use_ssl" in q else ssl
+                clauses.append(f"USE_SSL {'true' if ssl else 'false'}")
+                clauses.append(f"URL_STYLE {_q(q.get('url_style', 'path'))}")
+            else:
+                add("url_style", "URL_STYLE")
+                if "use_ssl" in q:
+                    clauses.append(f"USE_SSL {'true' if q['use_ssl'].lower() in ('1', 'true', 'yes') else 'false'}")
         return f"CREATE OR REPLACE SECRET {_SECRET} (" + ", ".join(clauses) + ")"
 
     def _prepare_remote(self, con) -> None:

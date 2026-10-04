@@ -49,6 +49,24 @@ def destroy_duct(origin: str, request: Request):
     return {"ok": True}
 
 
+def _upstream_version(driver, origin: str, pond: str, major: int) -> str | None:
+    """The upstream's deployed version of ``pond@major``, so a new Draw's version is right from the start;
+    ``None`` when the upstream can't be reached (the poller fills it in later)."""
+    target = next((d for d in driver.duct_targets() if d["origin"] == origin), None)
+    if target is None:
+        return None
+    try:
+        resp = httpx.get(f"{target['remote_url']}/api/status", headers=target["auth"],
+                         timeout=httpx.Timeout(10.0, connect=5.0))
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        return None
+    for p in resp.json().get("ponds", []):
+        if p.get("name") == pond and p.get("major") == major:
+            return p.get("version")
+    return None
+
+
 class _AddPondBody(BaseModel):
     pond: str
     major: int = 1
@@ -58,8 +76,10 @@ class _AddPondBody(BaseModel):
 @router.post("/duct/{origin}/ponds", dependencies=[auth.full])
 def add_pond(origin: str, body: _AddPondBody, request: Request):
     """Draw one upstream Pond over the duct (materialises a Pond Draw)."""
+    driver = _driver(request)
     try:
-        _driver(request).add_duct_pond(origin, body.pond, body.major, body.incremental)
+        version = _upstream_version(driver, origin, body.pond, body.major)
+        driver.add_duct_pond(origin, body.pond, body.major, body.incremental, version=version)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
     except ValueError as exc:
@@ -93,7 +113,7 @@ async def sync_duct(origin: str, request: Request):
     added = []
     for p in ponds:
         try:
-            driver.add_duct_pond(origin, p["name"], p["major"])
+            driver.add_duct_pond(origin, p["name"], p["major"], version=p.get("version"))
             added.append(f"{p['name']}@{p['major']}")
         except ValueError:
             continue  # a local Pond of that name@major already exists — skip it

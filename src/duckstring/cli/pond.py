@@ -38,13 +38,41 @@ Define one per Source table this Pond reads, then:
 
 
 def _write_pond_files(cwd: Path, toml_content: str, pond_py_content: str, readme_content: str) -> None:
+    from ..pondignore import DEFAULT_PATTERNS, IGNORE_FILE
+
     src = cwd / "src"
     src.mkdir(exist_ok=True)
     (src / "pond.py").write_text(pond_py_content, encoding="utf-8")
     (src / "puddles.py").write_text(_PUDDLES_PY, encoding="utf-8")
     (cwd / "pond.toml").write_text(toml_content, encoding="utf-8")
     (cwd / ".gitignore").write_text(_GITIGNORE, encoding="utf-8")
+    (cwd / IGNORE_FILE).write_text(DEFAULT_PATTERNS, encoding="utf-8")
     (cwd / "README.md").write_text(readme_content, encoding="utf-8")
+
+
+def _use_pond_env() -> None:
+    """Re-run this command under the Pond's own environment (``.venv``, from ``uv sync``) when it declares
+    one, so a local run imports the same packages a deployed one does (plans/pond-environments.md)."""
+    import os
+    import sys
+
+    from ..environments import REEXEC_ENV, has_duckstring, local_python
+
+    cwd = Path.cwd()
+    python = local_python(cwd)
+    if python is None:
+        if (cwd / "pyproject.toml").is_file() and not (cwd / ".venv").exists() and not os.environ.get(REEXEC_ENV):
+            typer.echo("Warning: this Pond has a pyproject.toml but no .venv; running in the current "
+                       "environment. Run `uv sync` to create the Pond's environment.", err=True)
+        return
+    if not has_duckstring(python):
+        typer.echo("Error: the Pond's environment (.venv) doesn't have Duckstring installed. "
+                   "Add it with `uv add duckstring`.", err=True)
+        raise typer.Exit(1)
+    os.environ[REEXEC_ENV] = "1"
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(str(python), [str(python), "-m", "duckstring", *sys.argv[1:]])
 
 
 def _load_project():
@@ -93,62 +121,80 @@ def init(
     console.print("  [dim]src/pond.py[/dim]      — define your Ripples here")
     console.print("  [dim]src/puddles.py[/dim]   — define Source snapshots for local testing")
     console.print("  [dim]pond.toml[/dim]        — Pond name, version, and Sources")
+    console.print("  [dim].pondignore[/dim]      — files deploy leaves out (puddles/, .env, caches)")
 
 
-# The two demo pipelines: the overwrite-Ripple set (the default) and the incremental-Trickle set. Each
-# entry is (pond name, deploy-order + one-line role); the command copies one set or the other.
+# The demo pipelines. Each entry is (pond name, one-line role), in pipeline order; the command copies one
+# set. Deploy order doesn't matter (a Sink can be deployed before its Sources), so the output only says
+# what each Pond is, then how to deploy and run the set (_DEMO_OUTLETS).
 _RIPPLE_DEMO = (
-    ("transactions", "deploy first  (POS event log, grows each run)"),
-    ("products", "deploy second (product catalogue, grows each run)"),
-    ("sales", "deploy third  (3 Ripples: daily_sales → price_tiers → join_lines)"),
-    ("reports", "deploy fourth, then: [dim]duckstring trigger pulse reports[/dim]"),
+    ("transactions", "Inlet: a point-of-sale event log that grows each run"),
+    ("products", "Inlet: a product catalogue that grows each run"),
+    ("sales", "3 Ripples: daily_sales and price_tiers in parallel, then join_lines"),
+    ("reports", "Outlet: a monthly summary"),
 )
 _TRICKLE_DEMO = (
-    ("orders", "deploy first  (append Trickle: insert-only order-line history)"),
-    ("catalog", "deploy second (merge Trickle: catalogue with CDC on price changes)"),
-    ("priced", "deploy third  (pond.trickle builder: incremental star enrichment)"),
-    ("revenue", "deploy fourth, then: [dim]duckstring trigger pulse revenue[/dim]"),
+    ("orders", "append Trickle: insert-only order-line history"),
+    ("catalog", "merge Trickle: a product catalogue whose price changes flow downstream"),
+    ("priced", "the Trickle builder: order lines joined to prices, incrementally"),
+    ("revenue", "Outlet: revenue by product"),
 )
-# The real-data Trickle demos (plans/real-data-testing.md): each has ≥4 Ponds, a cross-Pond join, and two
-# independent Outlets to demo running one path at a different cadence than another.
+# The real-data Trickle demos (plans/real-data-testing.md): each has at least 4 Ponds, a cross-Pond join,
+# and two independent Outlets, to show one path running at a different cadence from another.
 _TPCDS_DEMO = (
-    ("tpcds_sales", "deploy first  (append Trickle: TPC-DS store_sales fact, dsdgen-generated + streamed)"),
-    ("tpcds_items", "deploy second (merge Trickle: item dimension with CDC on price drift)"),
-    ("tpcds_stores", "deploy third  (merge Trickle: stable store dimension)"),
-    ("tpcds_priced", "deploy fourth (pond.trickle builder: 3-way incremental star join)"),
-    ("tpcds_category_revenue", "deploy fifth  (Outlet: revenue per category)"),
-    ("tpcds_store_revenue", "deploy sixth, then pulse either Outlet on its own cadence"),
+    ("tpcds_sales", "append Trickle: the TPC-DS store_sales fact, generated with dsdgen and streamed"),
+    ("tpcds_items", "merge Trickle: the item dimension, with price drift"),
+    ("tpcds_stores", "merge Trickle: the store dimension"),
+    ("tpcds_priced", "the Trickle builder: a 3-way incremental star join"),
+    ("tpcds_category_revenue", "Outlet: revenue per category"),
+    ("tpcds_store_revenue", "Outlet: revenue per store"),
 )
 _GHARCHIVE_DEMO = (
-    ("gh_events", "deploy first  (append Trickle: real GHArchive hourly event stream)"),
-    ("gh_actors", "deploy second (merge Trickle: actor dimension from the stream)"),
-    ("gh_pushes", "deploy third  (Path A builder: push events ⋈ gh_actors)"),
-    ("gh_repo_activity", "deploy fourth (Path A Outlet: activity per repo)"),
-    ("gh_stars", "deploy fifth  (Path B: star/fork signal, append Trickle)"),
-    ("gh_trending", "deploy sixth, then pulse either Outlet on its own cadence"),
+    ("gh_events", "append Trickle: the public GitHub event archive, hour by hour"),
+    ("gh_actors", "merge Trickle: the actor dimension, from the event stream"),
+    ("gh_pushes", "the Trickle builder: push events joined to gh_actors"),
+    ("gh_repo_activity", "Outlet: activity per repository"),
+    ("gh_stars", "append Trickle: star and fork events"),
+    ("gh_trending", "Outlet: repositories ranked by stars and forks"),
 )
-# A dbt-mode Pond deployed alongside a plain-Python Source (plans/dbt.md). shop_analytics is a dbt project
-# — each model a Ripple — reading shop_orders as a cross-Pond source(). Needs the dbt extra to deploy/run.
+# A dbt-mode Pond deployed alongside a plain-Python Source (plans/dbt.md). shop_analytics is a dbt project,
+# each model a Ripple, reading shop_orders as a cross-Pond source(). Needs the dbt extra to deploy/run.
 _DBT_DEMO = (
-    ("shop_orders", "deploy first  (plain @ripple inlet: generates the sales source)"),
-    ("shop_analytics", "deploy second (dbt-mode: 3 models → 3 Ripples), then: "
-                       "[dim]duckstring trigger pulse shop_analytics[/dim]"),
+    ("shop_orders", "Inlet: plain Python, generating the orders the dbt project reads"),
+    ("shop_analytics", "a dbt project deployed as a Pond: 3 models, one Ripple each"),
 )
+# A third element names the demo directory to copy when it differs from the Pond's name.
+_SQL_DEMO = (
+    ("transactions", "Inlet: a point-of-sale event log that grows each run"),
+    ("products", "Inlet: a product catalogue that grows each run"),
+    ("sales", "3 SQL Ripples declared in pond.toml, plus a static table of price bands", "sql_sales"),
+    ("reports", "Outlet: a monthly summary, as one SQL Ripple", "sql_reports"),
+)
+_DEMO_OUTLETS = {
+    _RIPPLE_DEMO: ("reports",),
+    _TRICKLE_DEMO: ("revenue",),
+    _TPCDS_DEMO: ("tpcds_category_revenue", "tpcds_store_revenue"),
+    _GHARCHIVE_DEMO: ("gh_repo_activity", "gh_trending"),
+    _DBT_DEMO: ("shop_analytics",),
+    _SQL_DEMO: ("reports",),
+}
 _DEMO_PONDS = tuple(name for name, _ in _RIPPLE_DEMO)  # the default set (back-compat)
 
 
 @app.command()
 def demo(
-    ripple: bool = typer.Option(False, "--ripple", help="The overwrite-Ripple pipeline (the default set)."),
-    trickle: bool = typer.Option(False, "--trickle", help="The incremental-Trickle pipeline."),
-    tpcds: bool = typer.Option(False, "--tpcds", help="The TPC-DS real-data Trickle pipeline (generated)."),
-    gharchive: bool = typer.Option(False, "--gharchive", help="The GHArchive real-data Trickle pipeline (streamed)."),
-    dbt: bool = typer.Option(False, "--dbt", help="A dbt-mode Pond (a dbt project as a Pond) + its Source."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt (scripted use)."),
+    ripple: bool = typer.Option(False, "--ripple", help="transactions, products, sales, reports: plain Ripples (the default)."),
+    trickle: bool = typer.Option(False, "--trickle", help="orders, catalog, priced, revenue: incremental Trickles."),
+    tpcds: bool = typer.Option(False, "--tpcds", help="Six Ponds over locally generated TPC-DS data."),
+    gharchive: bool = typer.Option(False, "--gharchive", help="Six Ponds over the public GitHub event archive."),
+    dbt: bool = typer.Option(False, "--dbt", help="A dbt project deployed as a Pond, and its Source."),
+    sql: bool = typer.Option(False, "--sql", help="The --ripple set with sales and reports written as SQL Ripples."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Create a demo pipeline as subdirectories: the overwrite-Ripple set (default / --ripple), the
-    incremental-Trickle set (--trickle), a real-data Trickle set (--tpcds / --gharchive), or a dbt-mode
-    Pond (--dbt; deploying/running it needs the dbt extra: pip install 'duckstring[dbt]')."""
+    """Create a set of demo Pond projects as subdirectories.
+
+    --dbt needs the dbt extra to deploy and run: pip install 'duckstring[dbt]'.
+    """
     import shutil
 
     from rich.console import Console
@@ -156,41 +202,49 @@ def demo(
     console = Console()
     cwd = Path.cwd()
 
-    if sum((ripple, trickle, tpcds, gharchive, dbt)) > 1:
-        typer.echo("Error: pass only one of --ripple / --trickle / --tpcds / --gharchive / --dbt.", err=True)
+    if sum((ripple, trickle, tpcds, gharchive, dbt, sql)) > 1:
+        typer.echo("Error: pass only one of --ripple / --trickle / --tpcds / --gharchive / --dbt / --sql.",
+                   err=True)
         raise typer.Exit(1)
     ponds = (
-        _TPCDS_DEMO if tpcds
+        _SQL_DEMO if sql
+        else _TPCDS_DEMO if tpcds
         else _GHARCHIVE_DEMO if gharchive
         else _DBT_DEMO if dbt
         else _TRICKLE_DEMO if trickle
         else _RIPPLE_DEMO  # default (no flag) = the Ripple set
     )
 
-    existing = [name for name, _ in ponds if (cwd / name).exists()]
+    existing = [name for name, *_ in ponds if (cwd / name).exists()]
     if existing:
         for name in existing:
             typer.echo(f"Error: '{name}' already exists in this directory.", err=True)
         raise typer.Exit(1)
 
-    pond_list = ", ".join(f"[bold]{name}/[/bold]" for name, _ in ponds)
+    pond_list = ", ".join(f"[bold]{name}/[/bold]" for name, *_ in ponds)
     console.print(f"Will create {pond_list} in {cwd}")
     if not yes:
         typer.confirm("Continue?", default=True, abort=True)
 
-    for name, _ in ponds:
-        shutil.copytree(_DEMO_DIR / name, cwd / name)
+    for name, _role, *source in ponds:
+        shutil.copytree(_DEMO_DIR / (source[0] if source else name), cwd / name,
+                        ignore=shutil.ignore_patterns("__pycache__"))
 
     kind = (
-        "TPC-DS (real-data Trickle)" if tpcds
+        "SQL Ripple" if sql
+        else "TPC-DS (real-data Trickle)" if tpcds
         else "GHArchive (real-data Trickle)" if gharchive
         else "dbt-mode" if dbt
         else "Trickle (incremental)" if trickle
         else "Ripple"
     )
     console.print(f"[green]Created[/green] {kind} demo pipeline:")
-    for name, role in ponds:
-        console.print(f"  [bold]{name}/[/bold] — {role}")
+    width = max(len(name) for name, *_ in ponds) + 1
+    for name, role, *_ in ponds:
+        console.print(f"  [bold]{name + '/':<{width}}[/bold]  {role}")
+    outlets = _DEMO_OUTLETS[ponds]
+    run = " or ".join(f"[bold]duckstring trigger pulse {o}[/bold]" for o in outlets)
+    console.print(f"\nNext: [bold]duckstring pond deploy --all --yes[/bold], then {run}.")
 
 
 @app.command()
@@ -199,13 +253,14 @@ def hydrate(
         None, "--source", "-s", help="Hydrate only these Sources (repeatable)."
     ),
     catchment: Optional[str] = typer.Option(
-        None, "--catchment", "-c", help="Catchment for puddles that pull (uses default if omitted)."
+        None, "--catchment", "-c", help="Catchment used by Puddles that read from one, and by --from-catchment."
     ),
     from_catchment: bool = typer.Option(
-        False, "--from-catchment", help="Fill Sources that have no puddle definition from the Catchment."
+        False, "--from-catchment", help="Fill Sources with no Puddle definition from the Catchment."
     ),
 ) -> None:
-    """Materialise this Pond's puddles (Source snapshots) into puddles/ for a local run."""
+    """Build this Pond's Puddles into puddles/ for a local run."""
+    _use_pond_env()
     from rich.console import Console
 
     from ..local import hydrate as hydrate_project
@@ -242,10 +297,12 @@ def hydrate(
 
 @app.command()
 def run(
-    ripple: Optional[str] = typer.Option(None, "--ripple", "-r", help="Run a single Ripple against the existing local state."),
-    fresh: bool = typer.Option(False, "--fresh", help="Ignore a self-puddle seed (start from nothing)."),
+    ripple: Optional[str] = typer.Option(None, "--ripple", "-r", help="Run only this Ripple, against the existing local "
+                                                                      "output."),
+    fresh: bool = typer.Option(False, "--fresh", help="Ignore the Pond's own Puddle and start from nothing."),
 ) -> None:
-    """Execute this Pond locally against its hydrated puddles (no Catchment, no Duck)."""
+    """Run this Pond once on this machine against its Puddles, with no Catchment. Output goes to puddles/out/."""
+    _use_pond_env()
     from rich.console import Console
 
     from ..local import run_pond

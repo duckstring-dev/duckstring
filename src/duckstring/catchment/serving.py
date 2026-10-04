@@ -81,7 +81,6 @@ def build_serving_con(driver, *, sandboxed: bool):
     except Exception:
         pass
     dp = get_data_plane()
-    dp.prepare(con)
     root = Path(driver.root)
 
     for name, served, majors in _served_ponds(driver):

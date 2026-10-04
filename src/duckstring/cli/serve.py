@@ -8,14 +8,14 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="The Catalog: query, expose, and promote served data.", no_args_is_help=True)
+app = typer.Typer(help="The catalog: query it, and control what it exposes.", no_args_is_help=True)
 
 _CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment (uses default if omitted).")
 
 
 @app.command()
 def status(catchment: Optional[str] = _CATCHMENT) -> None:
-    """List the serviceable surface: each pond, its served major, and its exposed tables."""
+    """List each Pond with its served major, its deployed majors, and its exposed tables."""
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -35,11 +35,12 @@ def status(catchment: Optional[str] = _CATCHMENT) -> None:
 
 @app.command()
 def query(
-    sql: str = typer.Argument(..., help="Read-only SQL over the catalog (pond=schema; served or _vN)."),
+    sql: str = typer.Argument(..., help="Read-only SQL. Each Pond is a schema: {pond} for the served major, {pond}_v{major} "
+                                        "for a specific one."),
     catchment: Optional[str] = _CATCHMENT,
     limit: int = typer.Option(1000, "--limit", "-n", help="Row cap for the printed result."),
 ) -> None:
-    """Run a query against the serving surface (sandboxed for read users)."""
+    """Run read-only SQL across the catalog. Read-level keys see only exposed tables."""
     from rich.console import Console
     from rich.table import Table
 
@@ -58,11 +59,13 @@ def query(
 @app.command()
 def promote(
     pond: str = typer.Argument(..., help="Pond name."),
-    major: int = typer.Option(..., "--major", "-m", help="Major to make the served default."),
+    major: int = typer.Option(..., "--major", "-m", help="Major version to serve under the bare Pond name."),
     catchment: Optional[str] = _CATCHMENT,
 ) -> None:
-    """Promote a major to the served default (blue-green flip). Refused if it doesn't publish the
-    currently-served tables."""
+    """Make a major version the one the bare Pond name refers to in catalog SQL.
+
+    Refused if that major doesn't publish every table currently served.
+    """
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
@@ -78,9 +81,9 @@ def expose(
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major line (default: latest)."),
     on: bool = typer.Option(False, "--on", help="Expose the table."),
     off: bool = typer.Option(False, "--off", help="Hide the table."),
-    default: bool = typer.Option(False, "--default", help="Clear the override (revert to pond.toml)."),
+    default: bool = typer.Option(False, "--default", help="Remove the override and follow pond.toml."),
 ) -> None:
-    """Toggle a table's operational exposure (the eye). One of --on / --off / --default."""
+    """Show or hide a table from read-level users, overriding pond.toml [serve] tables."""
     from . import _http
     from .config import resolve_catchment
     if sum((on, off, default)) != 1:

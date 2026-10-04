@@ -15,6 +15,7 @@ import socket
 import threading
 import time
 import zipfile
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
@@ -74,17 +75,12 @@ def _free_port() -> int:
 
 @pytest.fixture
 def runtime(tmp_path_factory, monkeypatch):
-    """A real uvicorn Catchment with Duck spawning ENABLED, reachable by the spawned subprocesses.
-
-    Pinned to the Parquet data plane: it keeps this broad subprocess suite fast and network-free (no
-    DuckDB iceberg-extension fetch), and is the end-to-end coverage of the ``parquet`` opt-out. The
-    default Iceberg plane gets its own e2e proof in ``test_demo_chain_runs_on_iceberg_end_to_end``."""
+    """A real uvicorn Catchment with Duck spawning ENABLED, reachable by the spawned subprocesses."""
     root = tmp_path_factory.mktemp("runtime_root")
     port = _free_port()
     url = f"http://127.0.0.1:{port}"
     monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)  # enable real Ducks
     monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")  # inherited by the Duck subprocesses
 
     server, thread = _serve(root, port)
     yield url, root
@@ -877,6 +873,70 @@ def test_wave_then_remove(runtime):
     assert completed_runs() == settled
 
 
+def test_overwrite_versions_are_trimmed_once_the_chain_goes_idle(runtime, monkeypatch):
+    """Versioned overwrite tables on real Ducks (plans/versioned-overwrite.md): a Wave publishes a new
+    version per run, each publish prunes to its job's retain_from, and once the chain is idle the reap's
+    shutdown job trims every table down to its newest version."""
+    from duckstring.catchment import driver as driver_mod
+
+    url, root = runtime
+    monkeypatch.setattr(driver_mod, "_REAP_GRACE", timedelta(seconds=1))
+    _deploy_demo(url)
+    httpx.post(f"{url}/api/ponds/reports/wave", timeout=5.0)
+    rep_db = root / "ponds" / "reports" / "m1" / "pond.db"
+    from duckstring.engine import pond as ledger
+
+    def completed_runs() -> int:
+        if not rep_db.exists():
+            return 0
+        con = ledger.connect(rep_db)
+        n = con.execute("SELECT COUNT(*) FROM pond_run WHERE status = 'success'").fetchone()[0]
+        con.close()
+        return n
+
+    assert _wait(lambda: completed_runs() >= 3), "wave did not produce repeated runs"
+    httpx.post(f"{url}/api/ponds/reports/untrigger", timeout=5.0)
+
+    def version_counts() -> dict[str, int]:
+        return {str(d.relative_to(root)): len(list(d.glob("*.parquet")))
+                for d in (root / "ponds").glob("*/m1/data/*__v")}
+
+    assert _wait(lambda: version_counts() and all(n == 1 for n in version_counts().values()), timeout=60.0), \
+        f"idle Ducks left superseded versions: {version_counts()}"
+
+
+def test_sql_demo_chain_runs_end_to_end(runtime):
+    """SQL Ripples deployed to real Ducks: discovery checks the declarations, the Duck runs each query with
+    its Sources pinned and the static table read from the deployed code, and reports reads sales'
+    SQL-written output."""
+    url, root = runtime
+    _deploy(url, ["transactions", "products", "sql_sales", "sql_reports"])
+    httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None), \
+        f"reports never became fresh: {_pond_status(url, 'sales')}"
+    rows = httpx.post(f"{url}/api/query", json={"pond": "sales", "sql":
+                      "SELECT count(*) AS n, count(DISTINCT price_tier) AS tiers FROM sale_line"},
+                      timeout=10.0).json()
+    assert rows[0]["n"] > 0 and rows[0]["tiers"] >= 1
+    summary = httpx.post(f"{url}/api/query", json={"pond": "reports", "sql":
+                         "SELECT count(*) AS n FROM monthly_summary"}, timeout=10.0).json()
+    assert summary[0]["n"] > 0
+
+
+def test_a_sql_ripple_reading_an_undeclared_table_is_refused_at_deploy(runtime, tmp_path):
+    url, _root = runtime
+    d = tmp_path / "bad"
+    (d / "sql").mkdir(parents=True)
+    (d / "pond.toml").write_text('[pond]\nname = "bad"\nversion = "1.0.0"\n\n'
+                                 '[ripples.a]\nsql = "sql/a.sql"\n\n[ripples.b]\nsql = "sql/b.sql"\n')
+    (d / "sql" / "a.sql").write_text("SELECT 1 AS x")
+    (d / "sql" / "b.sql").write_text("SELECT * FROM a")  # a isn't among b's parents
+    r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip_dir(d), "application/zip")},
+                   data={"name": "bad", "version": "1.0.0", "type": "pond"}, timeout=15.0)
+    assert r.status_code == 422, r.text
+    assert "isn't among its parents" in r.text
+
+
 def test_restart_restores_state_e2e(tmp_path_factory, monkeypatch):
     root = tmp_path_factory.mktemp("restart_root")
     port = _free_port()
@@ -944,49 +1004,69 @@ def test_status_and_runs_feed_live(runtime):
     assert {r["pond"] for r in only} == {"reports"}
 
 
-@pytest.fixture
-def runtime_iceberg(tmp_path_factory, monkeypatch):
-    """Like ``runtime`` but with the Iceberg data plane enabled — the spawned Ducks inherit the env,
-    so the demo chain publishes to and reads from Iceberg in real subprocesses. Skipped without
-    pyiceberg (SQLAlchemy is deliberately not required)."""
-    pytest.importorskip("pyiceberg")
-    root = tmp_path_factory.mktemp("runtime_iceberg_root")
-    port = _free_port()
-    url = f"http://127.0.0.1:{port}"
-    monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)
-    monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "iceberg")  # inherited by the Duck subprocesses
+@pytest.mark.timeout(300)
+def test_a_pond_runs_in_its_own_environment(runtime, tmp_path):
+    """A Pond whose Ripple imports a package only its own environment has: the Catchment builds the
+    environment at deploy, and the Duck runs there (plans/pond-environments.md)."""
+    from tests.test_environments import _OFFLINE, _locked_env_pond, _zip
 
-    server, thread = _serve(root, port)
-    yield url, root
-    server.should_exit = True
-    thread.join(timeout=5)
-
-
-def test_demo_chain_runs_on_iceberg_end_to_end(runtime_iceberg):
-    url, root = runtime_iceberg
-    _deploy_demo(url)
-
-    httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
-
-    # reports reaching a freshness proves the whole chain ran — including sales reading its Sources
-    # (transactions, products) *through Iceberg* in the Duck subprocess.
-    assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None), \
-        "reports never became fresh on the iceberg data plane"
-
-    # The Iceberg base layer was actually used: each pond line has a catalog + committed metadata,
-    # alongside the flat-Parquet compat sidecar.
-    for name in _PONDS:
-        data_dir = root / "ponds" / name / "m1" / "data"
-        assert (data_dir / "catalog.json").exists(), f"{name}: no iceberg catalog"
-        assert list(data_dir.rglob("*.metadata.json")), f"{name}: no iceberg metadata"
-        assert list(data_dir.glob("*.parquet")), f"{name}: no flat-parquet sidecar"
-
-    # The exported data is queryable via /api/data (in-memory, iceberg-aware view registration).
-    resp = httpx.post(
-        f"{url}/api/query",
-        json={"pond": "reports", "sql": "SELECT COUNT(*) AS n FROM monthly_summary"},
-        timeout=10.0,
+    url, root = runtime
+    pond = _locked_env_pond(tmp_path)
+    r = httpx.post(
+        f"{url}/api/deploy",
+        files={"pond": ("pond.zip", _zip(pond), "application/zip")},
+        data={"name": "envp", "version": "1.0.0", "type": "inlet"},
+        timeout=280.0,
     )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()[0]["n"] >= 0
+    if r.status_code == 422 and any(s.lower() in r.text.lower() for s in _OFFLINE):
+        pytest.skip("uv can't reach the package index")
+    assert r.status_code == 200, r.text
+
+    httpx.post(f"{url}/api/ponds/envp/tap", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "envp") or {}).get("end_f") is not None), \
+        f"envp never became fresh: {_pond_status(url, 'envp')}"
+
+    import duckdb
+
+    data = next((root / "ponds" / "envp" / "m1" / "data" / "answer__v").glob("*.parquet"))
+    assert duckdb.sql(f"SELECT n FROM '{data}'").fetchone() == (42,)
+
+
+@pytest.mark.timeout(300)
+def test_a_pool_duck_builds_its_ponds_environment(runtime, tmp_path, tmp_path_factory):
+    """A Duck on a Pool machine (here a local Pool agent with its own root: the same remote-boot path as
+    Fargate and EC2) starts with the machine's Python, fetches its code, builds the Pond's environment
+    on that machine and switches to it (plans/pond-environments.md, phases 2 and 3)."""
+    from tests.test_environments import _OFFLINE, _locked_env_pond, _zip
+
+    url, root = runtime
+    durable = tmp_path_factory.mktemp("env_pool_durable")
+    r = httpx.put(f"{url}/api/catchment/settings", json={"data_root": str(durable), "mode": "empty"}, timeout=10.0)
+    assert r.status_code == 200, r.text
+    r = httpx.post(f"{url}/api/catchment/duck-pools", json={"name": "envpool", "provider": "local"}, timeout=10.0)
+    assert r.status_code == 200, r.text
+
+    pond = _locked_env_pond(tmp_path)
+    r = httpx.post(
+        f"{url}/api/deploy",
+        files={"pond": ("pond.zip", _zip(pond), "application/zip")},
+        data={"name": "envp", "version": "1.0.0", "type": "inlet"},
+        timeout=280.0,
+    )
+    if r.status_code == 422 and any(s.lower() in r.text.lower() for s in _OFFLINE):
+        pytest.skip("uv can't reach the package index")
+    assert r.status_code == 200, r.text
+    r = httpx.post(f"{url}/api/ponds/envp/duck", json={"duck_target": "envpool"}, timeout=10.0)
+    assert r.status_code == 200, r.text
+
+    httpx.post(f"{url}/api/ponds/envp/tap", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "envp") or {}).get("end_f") is not None, timeout=240.0), \
+        f"envp never became fresh on the Pool: {_pond_status(url, 'envp')}"
+
+    import duckdb
+
+    agent_root = root / "pools" / "envpool"
+    envs = [p for p in (agent_root / "envs").iterdir() if (p / ".complete").exists()]
+    assert envs, "the Pool agent's machine built no environment"
+    data = next((agent_root / "ponds" / "envp" / "m1" / "data" / "answer__v").glob("*.parquet"))
+    assert duckdb.sql(f"SELECT n FROM '{data}'").fetchone() == (42,)

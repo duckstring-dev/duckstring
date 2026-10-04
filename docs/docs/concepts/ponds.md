@@ -1,27 +1,30 @@
 ---
 title: Ponds
-description: The versioned package boundary — the unit of ownership, deployment, and dependency.
+description: Versioning and Packaging of Transformations.
 ---
 
 # Ponds
 
-A **Pond** is a versioned Python package containing data transforms. It is the unit of everything organisational in Duckstring: one Pond has one owner, one version number, one deploy, and one declared set of dependencies. Everything inside a Pond is private; everything a Pond publishes is a versioned contract.
+A **Pond** is a versioned set of data transformations. You can think of a Pond as a package with dependencies, much like software packages. It is the main organisational unit in Duckstring. 
 
-## A Pond is a package
+## Structure
 
 A Pond project looks like a small Python package:
 
 ```text
 sales/
 ├── src/
-│   ├── pond.py      # the Ripples — the transform code
+│   ├── pond.py      # Ripples containing the transform code
 │   └── puddles.py   # Source snapshots for local testing
 ├── pond.toml        # name, version, type, Sources
+├── pyproject.toml   # optional: the Python packages the Ripples import
+├── uv.lock          #   ...and their exact versions
 ├── .gitignore
+├── .pondignore      # files left out when deploying
 └── README.md
 ```
 
-The manifest carries its identity and its dependencies:
+`pond.toml` specifies a Pond's identity and its dependencies.
 
 ```toml
 [pond]
@@ -33,28 +36,83 @@ transactions = "1.0.0"
 products = "1.0.0"
 ```
 
-That `[sources]` section is the entire pipeline definition, from this Pond's point of view. There is no global DAG file; the graph is the union of every Pond's declared Sources, exactly as a package index's dependency graph is the union of every package's requirements. See the [pond.toml reference](../reference/pond-toml.md) for every field.
+Nowhere is the pipeline of Ponds specified outside of this list of dependencies. Declaring sources allows the Pond to consume from
+the listed parent Ponds provided they match their major version. That allows upgrades to be made upstream until a major (breaking)
+change is made.
 
-## Kinds and relationships
+## Dependencies
 
-Relative to one another, Ponds are **Sources** (parents) and **Sinks** (children). By position in the graph, a Pond is one of three kinds, declared as `type` in `pond.toml`:
+A Pond that imports Python packages declares them in a standard `pyproject.toml`, locked with [uv](https://docs.astral.sh/uv/) into `uv.lock`. The Catchment builds that environment when the Pond is deployed and runs the Pond's Ducks in it, so a deployed Pond runs with exactly the packages it was developed with. Two Ponds can depend on different versions of the same package, and upgrading one Pond's dependencies never touches another's. A Pond without a `pyproject.toml` runs in the Catchment's own environment, which suits Ponds written in SQL.
 
-- **Inlet** — no Sources. Inlets ingest from external systems (an API, a warehouse export, a file drop) and are where [Windows](../guides/windows.md) apply, since their availability is governed by the outside world.
-- **Pond** — the default: transforms with both Sources and Sinks.
-- **Outlet** — no Sinks. Outlets produce the final data products that applications and analysts consume, and are the natural place to attach [triggers](../guides/triggers.md).
+## Types
 
-## What's inside: Ripples
+Ponds can have **Sources** (parents) and **Sinks** (children). By position in the graph, a Pond is one of three kinds, declared as `type` in `pond.toml`:
 
-The executable content of a Pond is its [Ripples](ripples.md) — typically one per output table. When a Pond runs (a **Pond Run**), every Ripple in it runs, ordered by their declared intra-Pond dependencies. The Pond's boundary is what its Sinks see: a Sink never depends on an individual Ripple, only on the Pond and the tables it publishes.
+- **Inlet**: no Sources. Inlets ingest from external systems (an API, a warehouse export, a file drop).
+- **Pond**: both Sources and Sinks.
+- **Outlet**: no Sinks. Outlets produce the final data products that applications and analysts consume.
 
-## What a Pond publishes
+These are more guidelines than hard rules. However, if a Pond was built as an Outlet, typically it is worth remaking as a new Pond if a need
+arises for another Pond to draw from it. Building for consumers typically comes with quite different design considerations than building for
+a pipeline - mandating a Pond strictly as an Outlet avoids the inevitable spaghetti that comes with broadening scope beyond its initial purpose.
 
-Each successful run exports the Pond's tables as Parquet snapshots — the published, consistent output that Sinks and [queries](../guides/querying-data.md) read. A Sink reading `transactions.transaction` reads the last successfully exported snapshot, never a half-written intermediate state, and never contends with the Source's in-flight run.
+## Ripples
 
-## Why the package boundary matters
+Where a Pond is the primary *organisational* unit, a [Ripple](ripples.md) is the primary *operational* unit, where Ripples belong to Ponds. These are similarly organised into a pipeline *within* the Pond. The same Ripple may not run simultaneously, but multiple instances of the same Pond may run concurrently. The main difference is that individual Ripples are not versioned, and dependencies are managed at the Pond level. 
 
-Because the Pond is a package, it inherits the package ecosystem's answers to coordination problems:
+Of course, there's nothing stopping you from using only one Ripple in a Pond - but the purpose of the separation is to split the concepts of
+logical units (Ripples) from ownership, versioning and dependencies (Ponds).
 
-- **Ownership** — a team owns its Pond's repository and releases on its own schedule. Changing a transform never means editing shared orchestration code.
-- **Versioning** — Ponds use SemVer, and a new major version runs *concurrently* with the old until every Sink has migrated. Breaking changes stop being organisation-wide events. See [Versioning](versioning.md).
-- **Deployment** — deploys are atomic and per-Pond, like publishing a package. Deploy order doesn't matter; a Sink can even deploy before its Source exists. See [Deploying](../guides/deploying.md).
+## Versioning
+
+Ponds are deployed to a [Catchment](catchments.md) by name. If a Pond of that name already exists, it's either:
+
+- Upgraded if the existing Pond is within the same major version
+- Added in parallel to the existing Pond if it is a new major version
+
+The purpose of this is to allow seamless upgrades for non-breaking changes, and to retain the existing Pond for all its downstream dependencies
+for breaking changes. Following these rules, you can confidently upload changes and upgrade downstream Ponds when possible - no need for strong
+governance on simultaneous upgrades.
+
+Each entry under `[sources]` pins both a major version and a minimum version: `transactions = "1.2.0"` means major version 1, at least 1.2.0.
+A deployment that would break a pin is refused. A Sink can't be deployed against a Source older than its minimum, and a Source can't be rolled
+back below a version that a deployed Sink requires.
+
+Within a major version, a Pond's output may only grow. New tables, new columns and widening a column's type (such as `INTEGER` to `BIGINT`) are
+fine. Removing a table or column, or narrowing a type, is a breaking change and needs a new major version. As a Pond's output is only known once
+it runs, this is checked when a run publishes: a run whose output breaks the rule fails without publishing anything, and downstream Ponds keep
+reading the last good output.
+
+## Deployment and Execution
+
+The *execution context* for Duckstring is the [Catchment](catchments.md). This manages execution, orchestration, data cataloging, querying
+and cloud compute configuration. Because orchestration is set against the *downstream* Ponds (**Outlets**), uploaded Ponds are not executed
+until something downstream depends on them.
+
+## Data
+
+Data is considered to be co-located with a Pond - objects exist adjacent to the logic generating them. A Pond's name and major version 
+defines the *Schema* for its objects. A table `monthly_summary` in the `reports` Pond, under major version 2, may be queried by:
+
+```
+SELECT * FROM reports_v2.monthly_summary
+```
+
+Each Pond also has a *served* major version, which can be queried without the suffix. This is the first major version deployed, until you promote another one (`duckstring serve promote`), so consumers can be moved to a new major version in a single step:
+
+```
+SELECT * FROM reports.monthly_summary
+```
+
+It is however safer to be explicit, so it's recommended to always include the major version.
+
+## Puddles
+
+Developing and testing against the entire live dataset is generally slow and wasteful. A Puddle defines queries against the Catchment
+for generating a sample snapshot of every Source object used in the Pond. Transformations can then be executed against this locally
+for testing.
+
+## See also
+
+- Guides: [Writing Ripples](../guides/writing_ripples.md), [Migrating a Project](../guides/migrating_a_project.md), [Testing with Puddles](../guides/testing_with_puddles.md), [Upgrades and Breaking Changes](../guides/upgrades.md)
+- Reference: [pond.toml](../reference/pond_toml.md), [duckstring pond](../reference/cli/pond.md), [Pond Handle](../reference/python/pond.md)

@@ -1,4 +1,4 @@
-"""Phase 2 (min_version) of plans/data-plane-iceberg.md: the version contract is enforced at deploy.
+"""The version contract's min_version half, enforced at deploy.
 A Sink can't deploy against a Source selected below its pin, and a Source can't be selected below an
 existing downstream pin — except via a major bump, the sanctioned breaking-change escape hatch."""
 

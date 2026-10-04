@@ -11,7 +11,7 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="Manage the Catchment's write-only secret store (referenced as ${secret:NAME}).",
+app = typer.Typer(help="The Catchment's write-only secret store, referenced as ${secret:NAME}.",
                   no_args_is_help=True)
 
 
@@ -25,10 +25,10 @@ def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
 def set_(
     name: str = typer.Argument(..., help="Secret name (letters, digits, underscores)."),
     value: str = typer.Option(..., "--value", prompt="Secret value", hide_input=True,
-                              help="The value (prompted hidden if omitted, so it stays out of argv/history)."),
+                              help="The value. Prompted for without echoing if omitted, which keeps it out of shell history."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
-    """Set (or overwrite) a secret. Stored write-only — it is never read back."""
+    """Set or replace a secret. Values are never read back."""
     from . import _http
 
     url, cfg = _resolve(catchment)
@@ -40,7 +40,7 @@ def set_(
 def ls(
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
-    """List secret names (never values)."""
+    """List secret names and when each was set. Never values."""
     from rich.console import Console
     from rich.table import Table
 
@@ -64,7 +64,7 @@ def rm(
     name: str = typer.Argument(..., help="Secret name to remove."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
-    """Remove a secret."""
+    """Delete a secret."""
     from . import _http
 
     url, cfg = _resolve(catchment)

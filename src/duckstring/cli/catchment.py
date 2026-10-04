@@ -5,7 +5,7 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="Work with Catchments.", add_completion=False, no_args_is_help=True)
+app = typer.Typer(help="Create, register, start and manage Catchments.", add_completion=False, no_args_is_help=True)
 
 
 def _offer_default(name: str, yes: bool) -> None:
@@ -17,6 +17,17 @@ def _offer_default(name: str, yes: bool) -> None:
     if yes or typer.confirm(f"Set '{name}' as default catchment?", default=True):
         set_default_catchment(name)
         typer.echo(f"Default catchment set to '{name}'.")
+
+
+def _is_loopback(host: str) -> bool:
+    import ipaddress
+
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False  # a hostname: assume it's reachable from elsewhere
 
 
 def _has_key_ladder(root: Path) -> bool:
@@ -102,8 +113,14 @@ def _launch(
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 7474
 
-    auth_line = "API key required" if (key or _has_key_ladder(root)) else "open (no API key)"
+    keyed = bool(key or _has_key_ladder(root))
+    auth_line = "API key required" if keyed else "open (no API key)"
     extra = ""
+    if not keyed and not _is_loopback(host):
+        # An open Catchment accepts deploys, and a deploy is code that runs on this machine.
+        extra += (f"\n\n  [bold yellow]Warning:[/bold yellow] [yellow]open to anyone who can reach {host}:{port}, "
+                  "and a deploy runs code on this machine. Use --generate-key, bind to 127.0.0.1, or put "
+                  "an authenticating proxy in front.[/yellow]")
     if data_root:
         extra += f"\n  [dim]data: {data_root}[/dim]"
     if state_backup:
@@ -194,9 +211,8 @@ def _parse_headers(values: Optional[list[str]]) -> Optional[dict[str, str]]:
 
 
 _HEADER_HELP = (
-    "Extra header attached to every request to this Catchment, as 'Name: value' (repeatable). "
-    "For auth handled by the platform in front of the Catchment, e.g. 'Authorization: Key …' "
-    "for Posit Connect."
+    "A header sent with every request to this Catchment, as 'Name: value'. Repeatable. For a hosting "
+    "platform that authenticates requests, e.g. 'Authorization: Key ...' for Posit Connect."
 )
 
 
@@ -206,39 +222,42 @@ def init(
     host: str = typer.Option("127.0.0.1", "--host", help="Host to bind to."),
     port: int = typer.Option(7474, "--port", "-p", help="Port to listen on."),
     root: Optional[Path] = typer.Option(
-        None, "--root", help="Local hot-state directory (duck.db, ledgers, registries). Must be a local "
-                             "POSIX path — never an object store."
+        None, "--root", help="Directory for the Catchment's state. Must be a local path. "
+                             "Defaults to ~/.duckstring/{name}."
     ),
     data_root: Optional[str] = typer.Option(
-        None, "--data-root", help="Where the data plane publishes tables: a local path or an object-store "
-                                  "/ Volume URI (s3://…, gs://…, abfss://…, /Volumes/…). Credentials as "
-                                  "${env:NAME} refs in the URI query. Default: under the state root."
+        None, "--data-root", help="Where published tables are stored: a local path, or a URI such as "
+                                  "s3://, gs://, abfss:// or /Volumes/. Credentials as ${env:NAME} in the "
+                                  "URI query. Defaults to under --root."
     ),
     state_backup: Optional[str] = typer.Option(
-        None, "--state-backup", help="Where Tier-1/2 hot-state checkpoints sync (object store / Volume / "
-                                     "path) so an ephemeral / scale-to-zero node survives. Default: no sync."
+        None, "--state-backup", help="Where to copy state checkpoints (object store or path), so a "
+                                     "Catchment on disposable storage can recover. Default: none."
     ),
     checkpoint_every: Optional[str] = typer.Option(
-        None, "--checkpoint-every", help="Tier-1 (duck.db) backup cadence, e.g. 30s. Default 60s."
+        None, "--checkpoint-every", help="How often to copy state to --state-backup, e.g. 30s. Default 60s."
     ),
     key: Optional[str] = typer.Option(
-        None, "--key", help="A single full-access API key the server requires (and the CLI then sends)."
+        None, "--key", help="A single full-access API key the server requires. The CLI stores and sends it."
     ),
     generate_key: bool = typer.Option(
         False, "--generate-key",
-        help="Generate the three-tier key ladder (read/demand/full), print them once, and start the "
-             "server. The full key is stored in the registration so `catchment start` reuses it. "
-             "Mutually exclusive with --key.",
+        help="Generate read, demand and full API keys and print them once. The full key is stored "
+             "for the CLI. Can't be combined with --key.",
     ),
     header: Optional[list[str]] = typer.Option(None, "--header", help=_HEADER_HELP),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Automatically set as default catchment."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Make it the default Catchment without asking."),
     no_start: bool = typer.Option(
         False, "--no-start",
-        help="Register (and mint keys) without starting the server — for scripted provisioning where a "
-             "supervisor (systemd, a container runtime) owns the process via `catchment start`.",
+        help="Register (and generate keys) without starting the server, for when a process "
+             "supervisor will run `catchment start`.",
     ),
 ) -> None:
-    """Create and register a new local Catchment, then start the server (or stop short with --no-start)."""
+    """Create a Catchment on this machine, register it, and start the server.
+
+    Running it again with an existing name updates the registration. Use --no-start to register without
+    starting.
+    """
     from .config import CONFIG_DIR, list_catchments
 
     if generate_key and key:
@@ -296,9 +315,9 @@ def init(
 
 @app.command()
 def start(
-    name: str = typer.Argument(..., help="Name of the registered local Catchment to start."),
+    name: str = typer.Argument(..., help="Name of a Catchment registered on this machine."),
 ) -> None:
-    """Start the server for a registered local Catchment."""
+    """Start the server for a Catchment registered on this machine."""
     from .config import list_catchments
 
     registered = dict(list_catchments())
@@ -325,13 +344,15 @@ def start(
 def rotate_keys(
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to rotate (uses default if omitted)."),
     level: Optional[list[str]] = typer.Option(
-        None, "--level", help="Level(s) to reroll: read/demand/full (repeatable). Default: all three."
+        None, "--level", help="Level to replace: read, demand or full. Repeatable. Default: all three."
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
 ) -> None:
-    """Reroll a Catchment's access keys, printing the new ones once. Rerolling invalidates the old key
-    for each rotated level; the internal Duck token is untouched (running Ducks keep working). Requires
-    a full-access key on the registration."""
+    """Replace the Catchment's API keys and print the new ones once.
+
+    The old key for each replaced level stops working. Running Ducks are unaffected. Needs a full-access
+    key in the registration, which is updated with the new full key.
+    """
     from . import _http
     from .config import resolve_catchment, update_catchment_key
 
@@ -353,11 +374,13 @@ def rotate_keys(
 def settings(
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment (uses default if omitted)."),
     data_root: Optional[str] = typer.Option(
-        None, "--data-root", help="Attach the data-plane target (s3://…, gs://…, or a shared path)."),
+        None, "--data-root", help="Set where published tables are stored: s3://, gs:// or a shared path."),
 ) -> None:
-    """Show the Catchment's cloud config, or with --data-root attach the object-store data plane.
-    Attaching is set-once in practice — refused once the Catchment has published data (it would strand
-    it). Remote compute (Duck Pools / Flock) unlocks when the data root is remote AND AWS creds are set."""
+    """Show the Catchment's cloud configuration, or set where published tables are stored.
+
+    The data root can only be changed before any Pond has published data. Cloud compute is enabled once the
+    data root is remote and AWS credentials are available.
+    """
     from . import _http
     from .config import resolve_catchment
 
@@ -381,9 +404,11 @@ def reset(
     clear_history: bool = typer.Option(False, "--clear-history", help="Also delete all run history."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
 ) -> None:
-    """Reset the whole Catchment to a fresh-deploy state — scrub every Pond's registry, published data, and
-    ledger and rewind all freshness. Keeps deployed code, operational config, secrets, and keys. The
-    sanctioned replacement for deleting `.duckstring`; stop-the-world (every Duck restarts)."""
+    """Return every Pond to its freshly deployed state.
+
+    Deletes all published data and working databases and resets freshness. Keeps deployed code, triggers,
+    windows, Spouts, alerts, secrets and keys. Every Duck restarts.
+    """
     from . import _http
     from .config import resolve_catchment
 
@@ -400,14 +425,14 @@ def reset(
 @app.command()
 def connect(
     name: str = typer.Option(..., "--name", "-n", help="Name to register this Catchment under."),
-    path: str = typer.Option(..., "--path", help="URL of the remote Catchment server."),
+    path: str = typer.Option(..., "--path", help="The Catchment's URL."),
     key: Optional[str] = typer.Option(
-        None, "--key", help="API key the server requires; sent with every request to this Catchment."
+        None, "--key", help="An API key to send with every request to this Catchment."
     ),
     header: Optional[list[str]] = typer.Option(None, "--header", help=_HEADER_HELP),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Automatically set as default catchment."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Make it the default Catchment without asking."),
 ) -> None:
-    """Register a remote Catchment server by name."""
+    """Register a Catchment running elsewhere."""
     from rich.console import Console
 
     _register_or_abort(name, url=path, kind="remote", key=key, headers=_parse_headers(header))
@@ -418,7 +443,7 @@ def connect(
 
 @app.command(name="list")
 def list_cmd() -> None:
-    """List all registered Catchments."""
+    """List registered Catchments."""
     from rich.console import Console
     from rich.table import Table
 
@@ -456,7 +481,7 @@ def disconnect(
     name: str = typer.Argument(..., help="Name of the registered Catchment to remove."),
     purge: bool = typer.Option(False, "--purge", help="Delete the local data directory without prompting."),
 ) -> None:
-    """Remove a registered Catchment."""
+    """Remove a registered Catchment, optionally deleting its local data directory."""
     from .config import list_catchments, unregister_catchment
 
     registered = dict(list_catchments())
@@ -500,14 +525,16 @@ def download(
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to download (uses default if omitted)."),
     path: Path = typer.Option(
         Path(".duckstring"), "--path",
-        help="Destination directory for the Catchment root (default ./.duckstring — drops straight "
-             "into a platform deploy bundle).",
+        help="Where to write the state. The default, ./.duckstring, is where a platform-hosted "
+             "Catchment reads it on start.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the size confirmation."),
 ) -> None:
-    """Download a Catchment's **state root** (database, deployed artifacts, ledgers, registries) into a
-    local directory — e.g. to carry state across a platform redeploy, or as a backup. With an external
-    data root (``--data-root``) the data plane is already durable on its own and is **not** included."""
+    """Download the Catchment's state directory: its database, deployed code, run ledgers and working databases.
+
+    Use it for a backup, or to carry state across a platform redeploy. Secrets are never included, and
+    neither are published tables held in an external data root. Download while nothing is running.
+    """
     import tarfile
     import tempfile
 
@@ -572,15 +599,17 @@ def download(
 
 @app.command()
 def restore(
-    from_uri: str = typer.Option(..., "--from", help="State-backup URI to restore from (object store / "
-                                                     "Volume / path) — a DUCKSTRING_STATE_BACKUP_URI target."),
+    from_uri: str = typer.Option(..., "--from", help="The state backup location to restore "
+                                                     "from, as given to --state-backup."),
     path: Path = typer.Option(
-        Path(".duckstring"), "--path", help="Local state root to restore into (default ./.duckstring)."
+        Path(".duckstring"), "--path", help="State directory to restore into (default ./.duckstring)."
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the overwrite confirmation."),
 ) -> None:
-    """Restore hot state (duck.db + ledgers/registries) from a state backup into a local directory — the
-    explicit inverse of the boot-time auto-restore, for seeding a fresh node by hand."""
+    """Restore state from a --state-backup location into a local directory, to seed a new machine by hand.
+
+    A Catchment with a state backup configured does this automatically when its state directory is empty.
+    """
     from duckstring.catchment.state_sync import restore_state
 
     _validate_data_uri(from_uri, flag="--from")
@@ -601,7 +630,7 @@ def restore(
 def set_default(
     name: str = typer.Argument(..., help="Name of the registered Catchment to use as default."),
 ) -> None:
-    """Set the default Catchment used when none is specified on a command."""
+    """Set the Catchment used when -c is omitted."""
     from .config import list_catchments, set_default_catchment
 
     registered = {n for n, _ in list_catchments()}

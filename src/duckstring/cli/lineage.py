@@ -17,13 +17,13 @@ import typer
 
 def show(
     pond: Optional[str] = typer.Argument(None, help="Pond name (default: every pond with recorded lineage)."),
-    table: Optional[str] = typer.Option(None, "--table", "-t", help="Only the Ripples touching this table."),
+    table: Optional[str] = typer.Option(None, "--table", "-t", help="Only Ripples that read or wrote this table."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major line (default: highest deployed)."),
-    columns: bool = typer.Option(False, "--columns", help="Also show the deploy-captured column lineage "
-                                                          "(which source columns each output column derives from)."),
+    columns: bool = typer.Option(False, "--columns", help="Also show which source columns each output "
+                                                          "column is derived from."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
-    """Show the observed table-level lineage — what each Ripple actually read and wrote."""
+    """Show the tables each Ripple actually read and wrote."""
     from rich.console import Console
     from rich.tree import Tree
 
@@ -69,17 +69,17 @@ def show(
 
 def trace(
     ref: str = typer.Argument(..., help="The row's table as {pond}.{table}."),
-    where: Optional[str] = typer.Option(None, "--where", "-w", help="SQL predicate selecting the row(s), "
+    where: Optional[str] = typer.Option(None, "--where", "-w", help="SQL condition selecting the rows, "
                                                                     "e.g. \"order_id = 42\". Omit for the whole table."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major line (default: highest deployed)."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
-    """Temporal provenance: which run produced the selected row(s), from which input window.
+    """Find the run that produced some published rows.
 
-    Every Trickle row carries the freshness of the run that wrote it; trace resolves that run's
-    version, timings, and the window ``(previous_f, f]`` each Source was read over::
+    Shows the newest run among the matching rows, with its version, timings and status, and the window of
+    Source data it read::
 
-        duckstring trace revenue.by_product --where "product_id = 7"
+        duckstring trace revenue.revenue_by_product --where "product_id = 7"
     """
     from urllib.parse import quote
 

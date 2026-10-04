@@ -29,11 +29,6 @@ def ts(hour: int) -> datetime:
     return datetime(2026, 6, 16, hour, tzinfo=UTC)
 
 
-@pytest.fixture(autouse=True)
-def _parquet_plane(monkeypatch):
-    monkeypatch.setenv("DUCKSTRING_DATA_PLANE", "parquet")
-
-
 @pytest.fixture
 def reg(tmp_path):
     """A persistent producer registry (so Trickle history accumulates across simulated runs)."""
@@ -157,7 +152,7 @@ def test_merge_main_checkpoint_folds_into_base(reg, tmp_path, monkeypatch):
     sc = run([(1, "a"), (2, "b")], ts(1))           # bootstrap → the first cold base
     assert T.base_chunks(snk_dir, "dim") and sc["f_base"] == ts(1).isoformat()
     assert rows(reg, snk_dir, "dim", "id, v") == [(1, "a"), (2, "b")]
-    assert "_duckstring_f" in reg.sql("SELECT * FROM dim LIMIT 0").columns
+    assert "_duckstring_f" in reg.sql("SELECT * FROM dim__base LIMIT 0").columns  # the cold base keeps f
 
     run([(1, "A"), (2, "b"), (3, "c")], ts(2))      # update 1, insert 3, keep 2
     assert rows(reg, snk_dir, "dim", "id, v") == [(1, "A"), (2, "b"), (3, "c")]
@@ -189,9 +184,9 @@ def test_base_hydrates_as_a_view_not_a_copy(reg, tmp_path, monkeypatch):
     fresh = duckdb.connect(str(tmp_path / "fresh.duckdb"))
     try:
         hydrate_registry(fresh, snk_dir)
-        # The base "dim" is a VIEW, not a materialised table.
-        assert fresh.execute("SELECT count(*) FROM duckdb_views() WHERE view_name = 'dim'").fetchone()[0] == 1
-        assert fresh.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'dim'").fetchone()[0] == 0
+        # The cold base "dim__base" is a VIEW over the chunks, not a materialised table.
+        assert fresh.execute("SELECT count(*) FROM duckdb_views() WHERE view_name = 'dim__base'").fetchone()[0] == 1
+        assert fresh.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'dim__base'").fetchone()[0] == 0
         # Reconstruction over the view is correct (current state after the update/insert/delete).
         rel = T.reconstruct_current(fresh, "dim")
         assert sorted(fresh.sql(f"SELECT id, v FROM ({rel.sql_query()})").fetchall()) == [(1, "A"), (3, "c")]
@@ -715,7 +710,7 @@ def test_agg_count_metric_is_incremental(tmp_path):
 def test_agg_companion_published_and_resumable(tmp_path):
     """State-format Extension 1: an incremental ``.aggregate()`` publishes its registry accumulator
     companion (``_duckstring_agg_{table}``) as a snapshot under ``state/agg/{table}/{f}.parquet`` — the
-    published form a registry-less host (DuckFlock) or a Duck recovering from registry loss hydrates to
+    published form a Duck recovering from registry loss hydrates to
     resume incremental compute. Round-trip: the snapshot is byte-faithful to the registry companion, the
     sidecar records it, only the latest snapshot is kept, it stays hidden from the read surface, and
     hydrating it into a fresh registry reproduces the exact accumulator state (identical resumption)."""
@@ -758,7 +753,7 @@ def test_agg_companion_published_and_resumable(tmp_path):
     assert persistent == [("A", 10, 1), ("B", 1, 2)]
 
     # Hydrate the (surviving) epoch-2 companion snapshot into a *fresh* registry and confirm it reproduces
-    # the registry accumulator state bit-for-bit — the resumption-sufficiency property DuckFlock relies on.
+    # the registry accumulator state bit-for-bit: enough to resume incremental compute.
     snap2 = snk_dir / "state" / "agg" / "by_k" / T.part_name(ts(2))
     reg2 = snk.sql('SELECT * FROM "_duckstring_agg_by_k" ORDER BY k').fetchall()
     fresh = duckdb.connect()
@@ -773,8 +768,7 @@ def test_agg_companion_published_and_resumable(tmp_path):
 def test_sidecar_extension2_stats(tmp_path):
     """State-format Extension 2: every published sidecar entry carries planner hints — ``stats``
     ({rows, bytes, delta_rows_last}), a user-column ``schema`` map (system columns excluded), and
-    ``format: 2``. Hints only (the conformance differ ignores them); what a routing consumer
-    (``duckflock quote``) sizes a plan by without opening Parquet footers."""
+    ``format: 2``. Hints only: what a reader sizes a table by without opening Parquet footers."""
     con = duckdb.connect()
     con.execute("SET TimeZone='UTC'")
     d = tmp_path / "data"
@@ -1465,7 +1459,7 @@ def test_builder_append_spine_pk_fast_path(tmp_path, monkeypatch):
 
 def test_builder_append_spine_pk_fast_path_same_f_replay(tmp_path):
     """Regression: a same-``f`` replay of a spine-PK append run must be idempotent (an at-least-once host —
-    retries, DuckFlock's replay contract — re-executes an epoch). The bug: ``_new_spine_rows`` counted the
+    retries, a crash replay — re-executes an epoch). The bug: ``_new_spine_rows`` counted the
     first attempt's own ``f``-stamped rows as history, so the replay ``DELETE(@f)`` dropped them and nothing
     re-inserted them — silent loss of the epoch's rows. The prefilter now excludes rows stamped at ``f``."""
     _cons, ol, pr = _star_sources(tmp_path)

@@ -72,8 +72,12 @@ jobs:
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-  # The Duck/Catchment container image (for the Fargate launcher + containerised hosting). Built from the
-  # same wheel the PyPI release uses and pushed to GHCR (no extra secret — GITHUB_TOKEN, packages: write).
+  # The official Duck image (plans/pond-environments.md), public at ghcr.io/duckstring-dev/duckstring: what a
+  # Fargate Duck runs unless the operator builds their own. Built from the same wheel the PyPI release uses,
+  # for both Fargate architectures (X86_64 and ARM64), and tagged with the bare version only (0.6.0, as on
+  # PyPI). No `latest`: a Duck must run the same Duckstring as its Catchment, so it's always pinned.
+  # GITHUB_TOKEN is enough to push (packages: write). The package's visibility is a one-time setting on
+  # GitHub (Package settings -> Change visibility -> Public); it can't be set from here.
   image:
     needs: build
     runs-on: ubuntu-latest
@@ -86,6 +90,10 @@ jobs:
         with:
           name: dist
           path: dist/
+      - id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -94,7 +102,10 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:latest
+          tags: ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0

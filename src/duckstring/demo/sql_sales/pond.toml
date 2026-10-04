@@ -1,0 +1,22 @@
+[pond]
+name = "sales"
+version = "1.0.0"
+
+[sources]
+transactions = "1.0.0"
+products = "1.0.0"
+
+[ripples.daily_sales]
+sql = "sql/daily_sales.sql"
+reads = ["transactions.transaction"]
+
+[ripples.price_tiers]
+sql = "sql/price_tiers.sql"
+reads = ["products.product"]
+
+[ripples.sale_line]
+sql = "sql/sale_line.sql"
+parents = ["daily_sales", "price_tiers"]
+
+[static.tier_bands]
+path = "data/tier_bands.csv"
