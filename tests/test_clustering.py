@@ -1,5 +1,5 @@
 """Ordering a merge table's cold base (plans/data-plane-clustering.md): by its primary key by default, by
-``cluster_by`` when declared (a plain sort for one column or ``interleave=False``, a rank-Morton key for
+``cluster_by`` when declared (a plain sort for one column or ``interleave=False``, a rank-Hilbert key for
 two or more), so reads filtering on those columns skip most row groups."""
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import duckdb
 import pytest
 
 from duckstring import trickle_io as T
-from duckstring.dataplane import ParquetDataPlane, _auto_cluster_bits, _split_bits, rank_morton_sql
+from duckstring.dataplane import ParquetDataPlane, _auto_cluster_bits, _bits_per_column, rank_hilbert_sql
 from duckstring.trickle.io import DeltaError
 
 F1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
@@ -75,17 +75,17 @@ def test_an_interleaved_base_prunes_on_every_clustered_column(tmp_path, monkeypa
 
     monkeypatch.setattr(dataplane, "_ROW_GROUP_ROWS", 10_000)
     values = random.Random(1).sample(range(1000), 50)
-    plain, sort, morton = tmp_path / "plain", tmp_path / "sort", tmp_path / "morton"
+    plain, sort, hilbert = tmp_path / "plain", tmp_path / "sort", tmp_path / "hilbert"
     _publish(_con(), plain, _ROWS)
     _publish(_con(), sort, _ROWS, cluster_by=["a", "b"], interleave=False)
-    _publish(_con(), morton, _ROWS, cluster_by=["a", "b"])
+    _publish(_con(), hilbert, _ROWS, cluster_by=["a", "b"])
     touched = {name: {col: _fraction_touched(_row_groups(d), col, values) for col in ("a", "b")}
-               for name, d in (("plain", plain), ("sort", sort), ("morton", morton))}
+               for name, d in (("plain", plain), ("sort", sort), ("hilbert", hilbert))}
     assert touched["plain"]["a"] > 0.95 and touched["plain"]["b"] > 0.95  # pk order: no help on either
     assert touched["sort"]["a"] < 0.05 and touched["sort"]["b"] > 0.9    # sorted: only the first column
-    assert touched["morton"]["a"] < 0.3 and touched["morton"]["b"] < 0.3  # rank-Morton: both
+    assert touched["hilbert"]["a"] < 0.25 and touched["hilbert"]["b"] < 0.25  # rank-Hilbert: both
     con = _con()
-    read = ParquetDataPlane().read_select(morton, "m")
+    read = ParquetDataPlane().read_select(hilbert, "m")
     assert con.execute(f"SELECT count(*), sum(a), sum(b) FROM ({read})").fetchone() == \
         con.execute(f"SELECT count(*), sum(a), sum(b) FROM ({_ROWS})").fetchone()
 
@@ -100,16 +100,82 @@ def test_one_column_or_interleave_false_is_a_plain_sort(tmp_path):
     assert all(b_ranges[i][1] <= b_ranges[i + 1][0] for i in range(len(b_ranges) - 1))
 
 
-def test_the_rank_morton_key():
+def test_the_rank_hilbert_key():
     con = duckdb.connect()
     con.execute("CREATE TABLE t AS SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (NULL, 'e')) v(x, y)")
-    rows = con.sql(rank_morton_sql('"t"', ["x", "y"], [2, 2]) + ' ORDER BY "_duckstring_key"').fetchall()
-    # x ranks 0,0,1,2 (NULL: the reserved top bucket, 3); y ranks 0,0,1,1,2. Bits interleave x1 y1 x0 y0.
-    assert rows == [(1, "a", 0), (2, "b", 0), (3, "c", 3), (4, "d", 9), (None, "e", 14)]
-    assert _split_bits(11, 2) == [6, 5] and _split_bits(7, 3) == [3, 2, 2]
+    rows = con.sql(rank_hilbert_sql('"t"', ["x", "y"], 2, [True, False]) + ' ORDER BY "_duckstring_key"').fetchall()
+    # x ranks 0,0,1,2 (three buckets; NULL takes the reserved top bucket, 3); y ranks 0,0,1,2,3. On the 4x4
+    # Hilbert curve those cells are visited at positions 0, 0, 2, 8 and 10.
+    assert rows == [(1, "a", 0), (2, "b", 0), (3, "c", 2), (4, "d", 8), (None, "e", 10)]
+    assert _bits_per_column(11, 2) == 6 and _bits_per_column(7, 3) == 3 and _bits_per_column(63, 2) == 31
     assert _auto_cluster_bits(100_000_000, 2) == 11  # ~814 row groups: cells just under one row group
     assert _auto_cluster_bits(1_000, 3) == 3         # at least one bit per column
     assert _auto_cluster_bits(10**30, 2) == 63
+
+
+def test_the_hilbert_key_visits_every_cell_through_neighbours():
+    """Over a full grid of distinct values the key is a bijection onto [0, 2**(k*b)) whose consecutive values
+    are grid neighbours: the defining property of a Hilbert curve."""
+    import itertools
+
+    con = duckdb.connect()
+    for k, b in [(2, 3), (3, 2), (4, 1)]:
+        side = 1 << b
+        cells = list(itertools.product(range(side), repeat=k))
+        cols = [f"c{i}" for i in range(k)]
+        values = ", ".join("(" + ", ".join(map(str, c)) + ")" for c in cells)
+        con.execute(f"CREATE OR REPLACE TABLE g AS SELECT * FROM (VALUES {values}) v({', '.join(cols)})")
+        rows = con.sql(rank_hilbert_sql("g", cols, b, [False] * k) + ' ORDER BY "_duckstring_key"').fetchall()
+        assert [r[-1] for r in rows] == list(range(side ** k))
+        for a, c in zip(rows, rows[1:], strict=False):
+            assert sum(abs(x - y) for x, y in zip(a[:-1], c[:-1], strict=True)) == 1
+
+
+def test_equal_values_share_a_bucket():
+    """A boundary is a value, not a row position, so ties never straddle buckets and the key is
+    deterministic."""
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t AS SELECT i AS id, i % 3 AS a, (i * 7) % 5 AS b FROM range(3000) r(i)")
+    sql = rank_hilbert_sql("t", ["a", "b"], 3, [False, False])
+    keys = con.sql(f'SELECT a, b, count(DISTINCT "_duckstring_key") FROM ({sql}) GROUP BY ALL').fetchall()
+    assert all(n == 1 for _, _, n in keys)
+    first = con.sql(f'SELECT id, "_duckstring_key" FROM ({sql}) ORDER BY id').fetchall()
+    assert first == con.sql(f'SELECT id, "_duckstring_key" FROM ({sql}) ORDER BY id').fetchall()
+
+
+def test_approximate_boundaries_cluster_like_exact_ones():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t AS SELECT i AS id, exp((i % 1000) / 100.0) AS a, (i * 7919) % 1000 AS b "
+                "FROM range(200000) r(i)")
+    exact = rank_hilbert_sql("t", ["a", "b"], 4, [False, False])
+    approx = rank_hilbert_sql("t", ["a", "b"], 4, [False, False], [True, True])
+    # Ranking flattens the skewed column, so each sixteenth of the curve holds about a sixteenth of the rows.
+    for sql in (exact, approx):
+        sizes = [n for (n,) in con.sql(f'SELECT count(*) FROM ({sql}) GROUP BY "_duckstring_key" >> 4').fetchall()]
+        assert len(sizes) <= 16 and max(sizes) < 2 * 200000 / 16
+
+
+@pytest.mark.timeout(120)
+def test_a_large_base_uses_approximate_boundaries(tmp_path, monkeypatch):
+    """Past the exact-quantile threshold a numeric column's boundaries come from approx_quantile; a string
+    column, which approx_quantile can't take, stays exact. Both still cluster."""
+    from duckstring import dataplane
+
+    monkeypatch.setattr(dataplane, "_EXACT_QUANTILE_ROWS", 1000)
+    monkeypatch.setattr(dataplane, "_ROW_GROUP_ROWS", 10_000)
+    rows = ("SELECT i AS id, hash(i) % 1000 AS a, lpad((hash(i * 31) % 1000)::VARCHAR, 4, '0') AS b "
+            "FROM range(1000000) r(i) ORDER BY hash(i * 7)")
+    _publish(_con(), tmp_path, rows, cluster_by=["a", "b"])
+    con = duckdb.connect()
+    groups: dict = {}
+    for file, rg, col, lo, hi in con.execute(
+            f"SELECT file_name, row_group_id, path_in_schema, stats_min_value, stats_max_value "
+            f"FROM parquet_metadata('{tmp_path}/m__base/*.parquet')").fetchall():
+        if col in ("a", "b"):
+            groups.setdefault((file, rg), {})[col] = (int(lo), int(hi))
+    values = random.Random(3).sample(range(1000), 50)
+    for col in ("a", "b"):
+        assert _fraction_touched(list(groups.values()), col, values) < 0.25
 
 
 @pytest.mark.parametrize("kwargs, message", [

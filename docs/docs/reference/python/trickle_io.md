@@ -68,8 +68,8 @@ Merges the complete current state of a table into the merge Trickle `name`. Duck
 | `retain_n` | `int` | `None` | Keep only the change-log rows from the newest `retain_n` runs. |
 | `compact_threshold` | `int` (bytes) | `None` | Override the size the change log must reach before it is folded into the table's base. Defaults to `DUCKSTRING_COMPACT_THRESHOLD` (256 MiB). |
 | `cluster_by` | `str` or list of `str` | `None` | Columns to order the compacted base by, so reads filtering on them skip most of it. `None` orders it by `pk`. Applies at the next compaction. See [Clustering a merge table](../../guides/append_and_merge.md#clustering-a-merge-table). |
-| `interleave` | `bool` | `True` | With two or more `cluster_by` columns, interleave them in a rank-Morton order so each is clustered. `False` sorts by them in order instead. |
-| `cluster_bits` | `int` | `None` | The interleaved order splits the data into `2**cluster_bits` cells, from one bit per column up to 63. `None` chooses it at each compaction so a cell is a little under one row group. Only with two or more interleaved columns. |
+| `interleave` | `bool` | `True` | With two or more `cluster_by` columns, interleave them in a rank-Hilbert order so each is clustered. `False` sorts by them in order instead. |
+| `cluster_bits` | `int` | `None` | The interleaved order splits the data into `2**cluster_bits` cells, from one bit per column up to 63, rounded up to a multiple of the column count. `None` chooses it at each compaction so a cell is a little under one row group. Only with two or more interleaved columns. |
 
 **Returns** `True` if the state changed.
 

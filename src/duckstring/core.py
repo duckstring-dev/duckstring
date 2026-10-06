@@ -1022,10 +1022,11 @@ class Pond:
                 Defaults to ``DUCKSTRING_COMPACT_THRESHOLD`` (256 MiB).
             cluster_by: A column or columns to order the table's compacted base by, so reads filtering on
                 them skip most of it. Defaults to ordering by ``pk``. Takes effect at the next compaction.
-            interleave: With two or more ``cluster_by`` columns, interleave them (a rank-Morton order, so
+            interleave: With two or more ``cluster_by`` columns, interleave them (a rank-Hilbert order, so
                 each column is clustered about equally) rather than sort by them in order. Default ``True``.
             cluster_bits: The interleaved order's precision: it splits the data into ``2**cluster_bits``
-                cells. Defaults to a size chosen at each compaction, about one row group per cell.
+                cells, rounded up to a multiple of the column count. Defaults to a size chosen at each
+                compaction, about one row group per cell.
 
         Returns ``True`` if the state changed, the usual signal for :meth:`skip`. Raises ``DeltaError`` for a
         missing or empty ``pk``, or an invalid clustering.

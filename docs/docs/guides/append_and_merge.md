@@ -81,7 +81,7 @@ By default the base is ordered by the primary key, so filters on the key skip al
 pond.merge_table("customer", state, pk="customer_id", cluster_by=["region", "signup_day"])
 ```
 
-With one column, the base is sorted by it. With two or more, the columns are interleaved, because sorting by several columns only clusters the first: within each `region`, `signup_day` would be scattered. Interleaving builds a single ordering key in which rows that are close are close in every column. Duckstring first replaces each value with its rank in its column, in equal-sized buckets, so a skewed column (most customers in one region) is ordered as finely as an even one. It then interleaves the bits of those ranks, one bit from each column in turn. This is a Morton (Z-order) curve over the ranks rather than the raw values, which Duckstring calls a rank-Morton order.
+With one column, the base is sorted by it. With two or more, the columns are interleaved, because sorting by several columns only clusters the first: within each `region`, `signup_day` would be scattered. Interleaving builds a single ordering key in which rows that are close are close in every column. Duckstring first replaces each value with its rank in its column, in buckets holding about the same number of rows, so a skewed column (most customers in one region) is ordered as finely as an even one. It then walks the grid of buckets along a Hilbert curve, a path that visits every cell and only ever steps to a neighbouring one, and the position along that path is the key. Duckstring calls this a rank-Hilbert order.
 
 On a base of about 100 row groups with two evenly spread columns, the share of row groups a filter on one value touches was:
 
@@ -89,11 +89,11 @@ On a base of about 100 row groups with two evenly spread columns, the share of r
 |---|---|---|
 | Primary key | 100% | 100% |
 | Sorted by both | 1% | 100% |
-| Interleaved | 15% | 20% |
+| Interleaved | 13% | 14% |
 
-Interleaving three columns touched about 30% for each. Every extra column dilutes the others, so list only the columns that reads filter on, most important first.
+Interleaving three columns touched about 27% for each. Every extra column dilutes the others, so list only the columns that reads filter on, most important first.
 
-To sort by several columns instead, pass `interleave=False`. The interleaved key splits the data into `2**cluster_bits` cells. By default Duckstring picks `cluster_bits` at each compaction so that a cell is a little under one row group, which is as fine as pruning can use; set it only to fix the precision. A column with NULLs keeps its top bucket for them.
+To sort by several columns instead, pass `interleave=False`. The interleaved key splits the data into `2**cluster_bits` cells, with the same number of bits for every column (`cluster_bits` is rounded up to a multiple of the column count). By default Duckstring picks `cluster_bits` at each compaction so that a cell is a little under one row group, which is as fine as pruning can use; set it only to fix the precision. A column with NULLs keeps its top bucket for them. On a base of more than ten million rows, the bucket boundaries are approximate quantiles, which cluster just as well and avoid sorting each column first.
 
 Clustering changes how the base is stored, not its contents, so it never affects the version contract. It applies when the base is next rewritten by compaction, and it's declared on every write: leaving `cluster_by` out returns the base to primary-key order at its next compaction. Once a table is clustered by other columns, its primary-key order is gone, so if lookups by key matter too, include the key in `cluster_by`.
 

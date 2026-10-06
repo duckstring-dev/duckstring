@@ -1159,17 +1159,27 @@ _MIN_CHUNK_BYTES = 64 * 1024
 
 
 # Rows per row group in a cold base chunk: DuckDB's default, set explicitly because the automatic
-# cluster_bits sizes rank-Morton cells against it.
+# cluster_bits sizes rank-Hilbert cells against it.
 _ROW_GROUP_ROWS = 122_880
 
+# Up to this many rows, a clustering column's bucket boundaries are exact quantiles (deterministic: the same data
+# gives the same layout). Above it they come from approx_quantile, a one-pass t-digest, because an exact quantile
+# sorts the column and the boundaries only need to be close.
+_EXACT_QUANTILE_ROWS = 10_000_000
 
-def _split_bits(total: int, k: int) -> list[int]:
-    """``total`` key bits shared across ``k`` columns: equal shares, the remainder to the first columns."""
-    return [total // k + (1 if i < total % k else 0) for i in range(k)]
+# Types approx_quantile accepts. Others (strings, booleans, UUIDs, intervals) always use exact quantiles.
+_APPROX_QUANTILE_TYPES = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT",
+                          "UINTEGER", "UBIGINT", "UHUGEINT", "FLOAT", "DOUBLE", "DECIMAL", "DATE", "TIMESTAMP")
+
+
+def _bits_per_column(total: int, k: int) -> int:
+    """Bits per column for a ``total``-bit key over ``k`` columns: the Hilbert curve needs every column to have
+    the same bits, so ``total`` is rounded up to a multiple of ``k``, within the 63 bits a BIGINT key holds."""
+    return max(1, min(-(-total // k), 63 // k))
 
 
 def _auto_cluster_bits(rows: int, k: int) -> int:
-    """Rank-Morton bits for a base of ``rows`` rows: enough cells that each is just under one row group
+    """Rank-Hilbert bits for a base of ``rows`` rows: enough cells that each is just under one row group
     (``2**n`` cells of at most one row group), at least one bit per column, at most 63."""
     import math
 
@@ -1178,43 +1188,87 @@ def _auto_cluster_bits(rows: int, k: int) -> int:
     return max(k, min(63, n))
 
 
-def rank_morton_sql(source: str, cols: list[str], bits: list[int], nullable: list[bool] | None = None) -> str:
-    """``source`` with a ``_duckstring_key`` column: the **rank-Morton** key over ``cols``, ``bits[i]`` bits
-    for column ``i``.
+def rank_hilbert_sql(source: str, cols: list[str], b: int, nullable: list[bool] | None = None,
+                     approx: list[bool] | None = None) -> str:
+    """``source`` with a ``_duckstring_key`` column: the **rank-Hilbert** key over ``cols``, ``b`` bits each.
 
-    Each column is replaced by its quantile rank in ``2**bits[i]`` equal-population buckets (``NTILE``), so
-    every column's distribution is flattened to uniform (its empirical copula). A column that has NULLs
-    (``nullable[i]``) keeps its top bucket for them and ranks its other values in the rest, so many NULLs
-    don't skew its buckets; one without NULLs uses every bucket. The ranks' bits
-    are then interleaved, most significant first, taking one bit from each column in list order per round
-    (a Morton or Z-order over the ranks). Rows close in the key are close in every column, so sorting by it
-    gives each row group narrow ranges on all of ``cols``."""
+    Each column is replaced by its quantile rank in ``2**b`` buckets of about equal population, so every
+    column's distribution is flattened to uniform and skewed columns get as much ordering as even ones. A
+    column that has NULLs (``nullable[i]``) keeps its top bucket for them and ranks its other values in the
+    rest. The ranks are then mapped onto a Hilbert curve, so rows close in the key are close in every column
+    and sorting by it gives each row group narrow ranges on all of ``cols``.
+
+    The bucket boundaries come from one aggregate over ``source``: exact quantiles, or ``approx_quantile`` for
+    the columns where ``approx[i]`` is set. A row's rank is then found by binary search, one comparison per
+    bit, most significant first: the boundary compared at each level is picked by the bits found so far.
+    Equal values always share a bucket. The rank is mapped onto the curve with Skilling's transpose
+    ("Programming the Hilbert curve", 2004), unrolled into one projection per step, and the result's bits
+    are interleaved, most significant first, one per column per round in list order."""
     from . import trickle_io as trickle
 
     q = trickle._q
-    nullable = nullable if nullable is not None else [True] * len(cols)
-    ranks = []
-    for i, (c, b, has_null) in enumerate(zip(cols, bits, nullable, strict=True)):
-        if has_null:
-            top = (1 << b) - 1  # the reserved NULL bucket
-            ranks.append(f'CASE WHEN {q(c)} IS NULL THEN {top} ELSE NTILE({max(top, 1)}) OVER '
-                         f'(PARTITION BY {q(c)} IS NULL ORDER BY {q(c)}) - 1 END AS "_duckstring_r{i}"')
-        else:
-            ranks.append(f'NTILE({1 << b}) OVER (ORDER BY {q(c)}) - 1 AS "_duckstring_r{i}"')
-    positions, p = [], sum(bits) - 1
-    for depth in range(max(bits)):
-        for i, b in enumerate(bits):
-            if depth < b:
-                positions.append(f'((("_duckstring_r{i}" >> {b - 1 - depth}) & 1) << {p})')
-                p -= 1
-    rank_cols = ", ".join(f'"_duckstring_r{i}"' for i in range(len(cols)))
-    return (f'SELECT * EXCLUDE ({rank_cols}), CAST({" + ".join(positions)} AS BIGINT) AS "_duckstring_key" '
-            f'FROM (SELECT *, {", ".join(ranks)} FROM {source})')
+    k = len(cols)
+    nullable = nullable if nullable is not None else [True] * k
+    approx = approx if approx is not None else [False] * k
+    r = [f'"_duckstring_r{i}"' for i in range(k)]
+    bounds, levels = [], []
+    for i, (c, has_null, apx) in enumerate(zip(cols, nullable, approx, strict=True)):
+        buckets = max((1 << b) - 1, 1) if has_null else 1 << b
+        if buckets > 1:
+            fn, cast = ("approx_quantile", "::FLOAT") if apx else ("quantile_disc", "")
+            fractions = ", ".join(f"({j}/{buckets}){cast}" for j in range(1, buckets))
+            bounds.append(f'{fn}({q(c)}, [{fractions}]) AS "_duckstring_q{i}"')
+            levels.append(i)
+    # A boundary past the end of the list (a NULL bucket's) is NULL, which no value exceeds.
+    sql = f"SELECT *, {', '.join(f'0::BIGINT AS {x}' for x in r)} FROM {source}"
+    if bounds:
+        sql = f"SELECT * FROM ({sql}) CROSS JOIN (SELECT {', '.join(bounds)} FROM {source})"
+
+    def layer(sql: str, assigns: dict[str, str]) -> str:
+        return f"SELECT * REPLACE ({', '.join(f'{e} AS {c}' for c, e in assigns.items())}) FROM ({sql})"
+
+    for depth in range(b):
+        step = 1 << (b - 1 - depth)
+        if levels:
+            sql = layer(sql, {r[i]: f'{r[i]} * 2 + coalesce({q(cols[i])} > "_duckstring_q{i}"[({r[i]} * 2 + 1) * {step}], '
+                                    f'false)::BIGINT' for i in levels})
+    nulls = {r[i]: f"CASE WHEN {q(cols[i])} IS NULL THEN {(1 << b) - 1} ELSE {r[i]} END"
+             for i in range(k) if nullable[i]}
+    if nulls:
+        sql = layer(sql, nulls)
+    big_q = 1 << (b - 1)
+    qq = big_q
+    while qq > 1:  # Skilling's AxestoTranspose: undo the excess work
+        p = qq - 1
+        sql = layer(sql, {r[0]: f"CASE WHEN ({r[0]} & {qq}) <> 0 THEN xor({r[0]}, {p}) ELSE {r[0]} END"})
+        for i in range(1, k):
+            t = f"(xor({r[0]}, {r[i]}) & {p})"
+            sql = layer(sql, {r[0]: f"CASE WHEN ({r[i]} & {qq}) <> 0 THEN xor({r[0]}, {p}) ELSE xor({r[0]}, {t}) END",
+                              r[i]: f"CASE WHEN ({r[i]} & {qq}) <> 0 THEN {r[i]} ELSE xor({r[i]}, {t}) END"})
+        qq >>= 1
+    for i in range(1, k):  # Gray encode
+        sql = layer(sql, {r[i]: f"xor({r[i]}, {r[i - 1]})"})
+    terms, qq = [], big_q
+    while qq > 1:
+        terms.append(f"CASE WHEN ({r[k - 1]} & {qq}) <> 0 THEN {qq - 1} ELSE 0 END")
+        qq >>= 1
+    if terms:
+        t = terms[0]
+        for term in terms[1:]:
+            t = f"xor({t}, {term})"
+        sql = layer(sql, {x: f"xor({x}, {t})" for x in r})
+    positions, p = [], k * b - 1
+    for depth in range(b):
+        for i in range(k):
+            positions.append(f"((({r[i]} >> {b - 1 - depth}) & 1) << {p})")
+            p -= 1
+    helpers = ", ".join([*r, *(f'"_duckstring_q{i}"' for i in levels)])
+    return f'SELECT * EXCLUDE ({helpers}), CAST({" + ".join(positions)} AS BIGINT) AS "_duckstring_key" FROM ({sql})'
 
 
 def cluster_order_select(con, source: str, spec: dict) -> str:
     """``source`` (a relation name or a parenthesised query) in the order a :func:`cluster_spec
-    <duckstring.trickle.io.cluster_spec>` asks for: a sort by its columns, or by a rank-Morton key when it
+    <duckstring.trickle.io.cluster_spec>` asks for: a sort by its columns, or by a rank-Hilbert key when it
     interleaves two or more (``cluster_bits`` sized to the data when unset)."""
     from . import trickle_io as trickle
 
@@ -1224,14 +1278,17 @@ def cluster_order_select(con, source: str, spec: dict) -> str:
         return f"SELECT * FROM {source} ORDER BY {', '.join(q(c) for c in cols)}"
     counts = con.execute(f"SELECT count(*), {', '.join(f'count(*) FILTER (WHERE {q(c)} IS NULL)' for c in cols)} "
                          f"FROM {source}").fetchone()
+    types = dict(con.execute(f"SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM {source})").fetchall())
+    large = counts[0] > _EXACT_QUANTILE_ROWS
+    approx = [large and types[c].upper().startswith(_APPROX_QUANTILE_TYPES) for c in cols]
     total = spec.get("bits") or _auto_cluster_bits(counts[0], len(cols))
-    keyed = rank_morton_sql(source, cols, _split_bits(total, len(cols)), [n > 0 for n in counts[1:]])
+    keyed = rank_hilbert_sql(source, cols, _bits_per_column(total, len(cols)), [n > 0 for n in counts[1:]], approx)
     return f'SELECT * EXCLUDE ("_duckstring_key") FROM ({keyed}) ORDER BY "_duckstring_key"'
 
 
 def _base_order_select(con, main: str, cold: str) -> str:
     """The cold base ``cold`` of merge main ``main`` in its stored order: by the ``cluster_by`` declared on
-    its merge writes (sorted, or by a rank-Morton key when interleaving two or more columns), else by its
+    its merge writes (sorted, or by a rank-Hilbert key when interleaving two or more columns), else by its
     primary key, so a read filtering on those columns skips most chunks and row groups."""
     from . import trickle_io as trickle
 
