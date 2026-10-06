@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 376" width="720" height="376" role="img" aria-label="Share of rows read, clustered on (date, net paid)" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title>Share of rows read, clustered on (date, net paid)</title>
+<rect width="720" height="376" rx="8" fill="#1a1a19"/>
+<text x="20.0" y="26.0" font-size="15" fill="#ffffff" text-anchor="start" font-weight="600">Share of rows read, clustered on (date, net paid)</text>
+<rect x="150" y="38" width="12" height="12" rx="3" fill="#3987e5"/>
+<text x="168.0" y="48.0" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">1% range on ss_net_paid</text>
+<rect x="341.6" y="38" width="12" height="12" rx="3" fill="#d95926"/>
+<text x="359.6" y="48.0" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">1% range on ss_sold_date_sk</text>
+<line x1="150.0" y1="50" x2="150.0" y2="310" stroke="#383835" stroke-width="1"/>
+<text x="150.0" y="326.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">0%</text>
+<line x1="275.0" y1="50" x2="275.0" y2="310" stroke="#383835" stroke-width="1"/>
+<text x="275.0" y="326.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">25%</text>
+<line x1="400.0" y1="50" x2="400.0" y2="310" stroke="#383835" stroke-width="1"/>
+<text x="400.0" y="326.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">50%</text>
+<line x1="525.0" y1="50" x2="525.0" y2="310" stroke="#383835" stroke-width="1"/>
+<text x="525.0" y="326.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">75%</text>
+<line x1="650.0" y1="50" x2="650.0" y2="310" stroke="#383835" stroke-width="1"/>
+<text x="650.0" y="326.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">100%</text>
+<text x="138.0" y="75.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Random</text>
+<path d="M150.0,56.0 h496.0 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-496.0 z" fill="#3987e5"/>
+<text x="656.0" y="67.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">100%</text>
+<path d="M150.0,72.0 h496.0 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-496.0 z" fill="#d95926"/>
+<text x="656.0" y="83.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">100%</text>
+<text x="138.0" y="119.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Sorted (lexicographic)</text>
+<path d="M150.0,100.0 h408.3 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-408.3 z" fill="#3987e5"/>
+<text x="568.3" y="111.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">82%</text>
+<path d="M150.0,116.0 h2.6 a2.560026453606688,2.560026453606688 0 0 1 2.560026453606688,2.560026453606688 v8.9 a2.560026453606688,2.560026453606688 0 0 1 -2.560026453606688,2.560026453606688 h-2.6 z" fill="#d95926"/>
+<text x="161.1" y="127.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">1.0%</text>
+<text x="138.0" y="163.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Morton</text>
+<path d="M150.0,144.0 h76.9 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-76.9 z" fill="#3987e5"/>
+<text x="236.9" y="155.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">16%</text>
+<path d="M150.0,160.0 h8.8 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-8.8 z" fill="#d95926"/>
+<text x="168.8" y="171.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">2.6%</text>
+<text x="138.0" y="207.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Hilbert</text>
+<path d="M150.0,188.0 h55.7 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-55.7 z" fill="#3987e5"/>
+<text x="215.7" y="199.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">12%</text>
+<path d="M150.0,204.0 h7.7 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-7.7 z" fill="#d95926"/>
+<text x="167.7" y="215.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">2.3%</text>
+<text x="138.0" y="251.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Rank-Morton</text>
+<path d="M150.0,232.0 h20.3 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-20.3 z" fill="#3987e5"/>
+<text x="180.3" y="243.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">4.9%</text>
+<path d="M150.0,248.0 h19.1 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-19.1 z" fill="#d95926"/>
+<text x="179.1" y="259.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">4.6%</text>
+<text x="138.0" y="295.5" font-size="13" fill="#ffffff" text-anchor="end" font-weight="600">Rank-Hilbert</text>
+<path d="M150.0,276.0 h13.7 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-13.7 z" fill="#3987e5"/>
+<text x="173.7" y="287.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">3.5%</text>
+<path d="M150.0,292.0 h16.4 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-16.4 z" fill="#d95926"/>
+<text x="176.4" y="303.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">4.1%</text>
+<text x="20.0" y="362.0" font-size="12" fill="#8a897f" text-anchor="start" font-weight="400">TPC-DS SF100, 288M rows, 2,344 row groups. Lower is better.</text>
+</svg>

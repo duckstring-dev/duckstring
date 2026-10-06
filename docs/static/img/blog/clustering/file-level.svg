@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 352" width="720" height="352" role="img" aria-label="Share of rows read: sorting inside files, or only between them" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title>Share of rows read: sorting inside files, or only between them</title>
+<rect width="720" height="352" rx="8" fill="#1a1a19"/>
+<text x="20.0" y="26.0" font-size="15" fill="#ffffff" text-anchor="start" font-weight="600">Share of rows read: sorting inside files, or only between them</text>
+<rect x="180" y="38" width="12" height="12" rx="3" fill="#3987e5"/>
+<text x="198.0" y="48.0" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">Sorted within files</text>
+<rect x="342.8" y="38" width="12" height="12" rx="3" fill="#d95926"/>
+<text x="360.8" y="48.0" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">Files by key range, 256 MB</text>
+<rect x="556.0" y="38" width="12" height="12" rx="3" fill="#199e70"/>
+<text x="574.0" y="48.0" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">Files by key range, 1 GB</text>
+<line x1="180.0" y1="50" x2="180.0" y2="286" stroke="#383835" stroke-width="1"/>
+<text x="180.0" y="302.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">0%</text>
+<line x1="274.0" y1="50" x2="274.0" y2="286" stroke="#383835" stroke-width="1"/>
+<text x="274.0" y="302.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">10%</text>
+<line x1="368.0" y1="50" x2="368.0" y2="286" stroke="#383835" stroke-width="1"/>
+<text x="368.0" y="302.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">20%</text>
+<line x1="462.0" y1="50" x2="462.0" y2="286" stroke="#383835" stroke-width="1"/>
+<text x="462.0" y="302.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">30%</text>
+<line x1="556.0" y1="50" x2="556.0" y2="286" stroke="#383835" stroke-width="1"/>
+<text x="556.0" y="302.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">40%</text>
+<line x1="650.0" y1="50" x2="650.0" y2="286" stroke="#383835" stroke-width="1"/>
+<text x="650.0" y="302.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">50%</text>
+<text x="168.0" y="83.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">1% range on ss_net_paid</text>
+<path d="M180.0,56.0 h29.4 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-29.4 z" fill="#3987e5"/>
+<text x="219.4" y="67.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">3.6%</text>
+<path d="M180.0,72.0 h139.9 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-139.9 z" fill="#d95926"/>
+<text x="329.9" y="83.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">15%</text>
+<path d="M180.0,88.0 h239.2 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-239.2 z" fill="#199e70"/>
+<text x="429.2" y="99.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">26%</text>
+<text x="168.0" y="143.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">1% range on date</text>
+<path d="M180.0,116.0 h33.3 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-33.3 z" fill="#3987e5"/>
+<text x="223.3" y="127.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">4.0%</text>
+<path d="M180.0,132.0 h146.0 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-146.0 z" fill="#d95926"/>
+<text x="336.0" y="143.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">16%</text>
+<path d="M180.0,148.0 h294.6 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-294.6 z" fill="#199e70"/>
+<text x="484.6" y="159.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">32%</text>
+<text x="168.0" y="203.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">0.1% box on both</text>
+<path d="M180.0,176.0 h1.6 a1.6443903253666954,1.6443903253666954 0 0 1 1.6443903253666954,1.6443903253666954 v10.7 a1.6443903253666954,1.6443903253666954 0 0 1 -1.6443903253666954,1.6443903253666954 h-1.6 z" fill="#3987e5"/>
+<text x="189.3" y="187.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">0.3%</text>
+<path d="M180.0,192.0 h19.4 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-19.4 z" fill="#d95926"/>
+<text x="209.4" y="203.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">2.5%</text>
+<path d="M180.0,208.0 h73.5 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-73.5 z" fill="#199e70"/>
+<text x="263.5" y="219.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">8.2%</text>
+<text x="168.0" y="263.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">November join</text>
+<path d="M180.0,236.0 h48.5 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-48.5 z" fill="#3987e5"/>
+<text x="238.5" y="247.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">5.6%</text>
+<path d="M180.0,252.0 h200.0 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-200.0 z" fill="#d95926"/>
+<text x="390.0" y="263.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">22%</text>
+<path d="M180.0,268.0 h434.9 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-434.9 z" fill="#199e70"/>
+<text x="624.9" y="279.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">47%</text>
+<text x="20.0" y="338.0" font-size="12" fill="#8a897f" text-anchor="start" font-weight="400">TPC-DS SF100, rank-Hilbert key on (date, net paid). Lower is better.</text>
+</svg>
