@@ -1,0 +1,44 @@
+{
+  "sf": 10,
+  "sets": {
+    "keys": [
+      "ss_sold_date_sk",
+      "ss_item_sk",
+      "ss_customer_sk"
+    ],
+    "skewed": [
+      "ss_sold_date_sk",
+      "ss_net_paid"
+    ]
+  },
+  "layouts": [
+    "generated",
+    "hash",
+    "lexicographic",
+    "morton",
+    "hilbert",
+    "rank_morton",
+    "rank_hilbert",
+    "qrank_morton",
+    "qrank_hilbert",
+    "arank_morton",
+    "arank_hilbert"
+  ],
+  "repeat": 5,
+  "warmup": 1,
+  "per_family": 5,
+  "seed": 42,
+  "row_group_rows": 122880,
+  "file_size": "256MB",
+  "duckdb": "1.5.6",
+  "threads": 10,
+  "memory_limit": "25.5 GiB",
+  "machine": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "cpu_count": 10,
+  "started": "20261006T041043Z",
+  "resumed": [
+    "20261006T050747Z",
+    "20261006T060913Z",
+    "20261006T060936Z"
+  ]
+}

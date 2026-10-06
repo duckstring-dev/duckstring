@@ -1,0 +1,20 @@
+{"layout": "generated", "stats_s": 0.0, "key_s": 0.0, "write_s": 27.6225432909996, "bytes": 14407274841, "files": 49, "set": "keys", "bits_per_column": 5, "rows": 287997024}
+{"layout": "hash", "stats_s": 0.0, "key_s": 0.45098875000257976, "write_s": 192.04254762500204, "bytes": 21090859136, "files": 72, "set": "keys", "bits_per_column": 5, "rows": 287997024}
+{"layout": "lexicographic", "stats_s": 0.0, "key_s": 0.0, "write_s": 158.2973060420045, "bytes": 18075165757, "files": 64, "set": "keys", "bits_per_column": 5, "rows": 287997024}
+{"layout": "morton", "stats_s": 1.1610390830028336, "key_s": 4.997372666999581, "write_s": 177.91462150000007, "bytes": 19286438866, "files": 69, "set": "keys", "bits_per_column": 5, "rows": 287997024}
+{"layout": "hilbert", "stats_s": 1.1610390830028336, "key_s": 12.449587082999642, "write_s": 212.65160441699845, "bytes": 19235453553, "files": 66, "set": "keys", "bits_per_column": 5, "rows": 287997024}
+{"set": "keys", "layout": "rank_morton", "bits_per_column": 5, "rows": 287997024, "error": "OutOfMemoryException: Out of Memory Error: failed to offload data block of size 128.0 KiB (60.0 GiB/60.0 GiB used)."}
+{"layout": "qrank_morton", "stats_s": 24.334240249001596, "key_s": 16.083873833005782, "write_s": 224.31488674999855, "bytes": 19300862500, "files": 69, "set": "keys", "bits_per_column": 5, "rows": 287997024}
+{"layout": "qrank_hilbert", "stats_s": 24.727666665996367, "key_s": 27.078735250004684, "write_s": 205.20257170900004, "bytes": 19249759342, "files": 68, "set": "keys", "bits_per_column": 5, "rows": 287997024}
+{"layout": "generated", "stats_s": 0.0, "key_s": 0.0, "write_s": 31.360398875011015, "bytes": 14407236742, "files": 48, "set": "skewed", "bits_per_column": 7, "rows": 287997024}
+{"layout": "hash", "stats_s": 0.0, "key_s": 0.46696841600351036, "write_s": 213.37817991699558, "bytes": 21090860223, "files": 74, "set": "skewed", "bits_per_column": 7, "rows": 287997024}
+{"layout": "lexicographic", "stats_s": 0.0, "key_s": 0.0, "write_s": 161.90828104200773, "bytes": 17809968940, "files": 64, "set": "skewed", "bits_per_column": 7, "rows": 287997024}
+{"layout": "morton", "stats_s": 0.7585558330029016, "key_s": 3.7688809579994995, "write_s": 180.45310600000084, "bytes": 18650350625, "files": 65, "set": "skewed", "bits_per_column": 7, "rows": 287997024}
+{"layout": "hilbert", "stats_s": 0.7585558330029016, "key_s": 9.482836167007918, "write_s": 214.39248787499673, "bytes": 18493176170, "files": 64, "set": "skewed", "bits_per_column": 7, "rows": 287997024}
+{"set": "skewed", "layout": "rank_morton", "bits_per_column": 7, "rows": 287997024, "error": "OutOfMemoryException: Out of Memory Error: failed to offload data block of size 96.0 KiB (59.9 GiB/60.0 GiB used)."}
+{"layout": "qrank_morton", "stats_s": 44.74032866700145, "key_s": 68.89840224999352, "write_s": 211.605058791989, "bytes": 18883724601, "files": 66, "set": "skewed", "bits_per_column": 7, "rows": 287997024}
+{"layout": "qrank_hilbert", "stats_s": 48.98081491600897, "key_s": 88.06837966699095, "write_s": 255.184237458001, "bytes": 18735179446, "files": 66, "set": "skewed", "bits_per_column": 7, "rows": 287997024}
+{"layout": "arank_morton", "stats_s": 4.771241791997454, "key_s": 7.069812333007576, "write_s": 180.52303616699646, "bytes": 19301042223, "files": 68, "set": "keys", "bits_per_column": 5, "rows": 287997024}
+{"layout": "arank_hilbert", "stats_s": 5.092943416995695, "key_s": 10.99490025000705, "write_s": 166.39361741699395, "bytes": 19250894208, "files": 68, "set": "keys", "bits_per_column": 5, "rows": 287997024}
+{"layout": "arank_morton", "stats_s": 3.8702317489951383, "key_s": 15.015469417005079, "write_s": 195.106913584008, "bytes": 18883161925, "files": 66, "set": "skewed", "bits_per_column": 7, "rows": 287997024}
+{"layout": "arank_hilbert", "stats_s": 4.181225707987323, "key_s": 18.381785167002818, "write_s": 198.53006283300056, "bytes": 18737774624, "files": 66, "set": "skewed", "bits_per_column": 7, "rows": 287997024}
