@@ -9,3 +9,7 @@ npm install
 npm start        # dev server with live reload
 npm run build    # static build into build/ (fails on broken links)
 ```
+
+## Blog
+
+Posts live in `blog/` and are served at `duckstring.com/blog`. To write one, copy `blog/_template.md` to `blog/YYYY-MM-DD-short-name.md`. Each post must set an explicit `slug` (the build fails without one) so its URL survives the blog's eventual move to the commercial site, and must have a `<!-- truncate -->` marker below its opening. Authors are defined in `blog/authors.yml`. Posts with `draft: true` show in `npm start` but are left out of the build.

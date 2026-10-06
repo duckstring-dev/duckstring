@@ -48,6 +48,18 @@
   }
 }
 
+/* Blog pages have no docs sidebar, so on desktop the navbar comes back as their only navigation
+   (Docs / Blog). html carries .blog-wrapper on every blog route. */
+@media (min-width: 997px) {
+  html.blog-wrapper {
+    --ifm-navbar-height: 3.75rem;
+  }
+
+  html.blog-wrapper .navbar {
+    display: flex;
+  }
+}
+
 /* The landing page starts at the very top of the window now, so the doc chrome above it reads as
    dead space: the container's standard top padding, plus a breadcrumb trail whose only entry is
    "Home" — on the home page. Scoped to that one doc (html carries .docs-doc-id-index), so every

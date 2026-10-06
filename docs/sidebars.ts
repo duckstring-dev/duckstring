@@ -112,6 +112,7 @@ const sidebars: SidebarsConfig = {
         'reference/environment',
       ],
     },
+    {type: 'link', label: 'Blog', href: '/blog'},
   ],
 };
 
