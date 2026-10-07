@@ -131,7 +131,7 @@ def fig_row_groups() -> str:
                         f'stroke-opacity="{1 if hit else 0.7}"/>')
         body.append(text(ox + size / 2, oy + size + 24, f"reads {read} of {groups} row groups", 13,
                          TEXT if read < groups else TEXT_2, "middle", 600 if read < groups else 400))
-    return svg(width, height, body, "Row-group bounding boxes under random, sorted, Z-order and Hilbert orders", crop=(34, 40))
+    return svg(width, height, body, "Row group bounding boxes under random, sorted, Z-order and Hilbert orders", crop=(34, 40))
 
 
 def fig_buckets() -> str:
@@ -224,6 +224,60 @@ def fig_file_level() -> str:
                  pct, [0, 0.1, 0.2, 0.3, 0.4, 0.5], label_w=180)
 
 
+RAMP = ["#9ec5f4", "#5598e7", "#2a78d6", "#1c5cab"]  # one hue, light to dark, validated as an ordinal ramp
+
+
+def fig_bound() -> str:
+    """The lower bound on rows read for a 1% range on one clustered column, s + N^(-1/k), against the number of
+    row groups N, for k clustered columns. Theory only: the measured results are charted in their own sections."""
+    import math
+
+    s = 0.01
+    width, height = 720, 380
+    x0, y0, pw, ph = 70, 30, 520, 290
+    nmin, nmax, ymin, ymax = 10, 1e6, 0.005, 1.0
+
+    def px(n):
+        return x0 + pw * (math.log10(n) - math.log10(nmin)) / (math.log10(nmax) - math.log10(nmin))
+
+    def py(v):
+        return y0 + ph - ph * (math.log10(v) - math.log10(ymin)) / (math.log10(ymax) - math.log10(ymin))
+
+    body = []
+    for v, label in [(0.01, "1%"), (0.02, "2%"), (0.05, "5%"), (0.1, "10%"), (0.2, "20%"), (0.5, "50%"), (1.0, "100%")]:
+        body.append(f'<line x1="{x0}" y1="{py(v):.1f}" x2="{x0 + pw}" y2="{py(v):.1f}" stroke="{GRID}"/>')
+        body.append(text(x0 - 8, py(v) + 4, label, 11, MUTED, "end"))
+    for n, label in [(10, "10"), (100, "100"), (1e3, "1k"), (1e4, "10k"), (1e5, "100k"), (1e6, "1M")]:
+        body.append(f'<line x1="{px(n):.1f}" y1="{y0}" x2="{px(n):.1f}" y2="{y0 + ph}" stroke="{GRID}"/>')
+        body.append(text(px(n), y0 + ph + 18, label, 11, MUTED, "middle"))
+    body.append(text(x0 + pw / 2, y0 + ph + 38, "row groups (N)", 12, TEXT_2, "middle"))
+    # The two scales tested: store_sales at SF10 and SF100, in 122,880-row row groups.
+    for rows, label in ((28_800_991, "SF10"), (287_997_024, "SF100")):
+        n = rows / 122_880
+        body.append(f'<line x1="{px(n):.1f}" y1="{y0}" x2="{px(n):.1f}" y2="{y0 + ph}" stroke="{MUTED}" '
+                    f'stroke-width="1" stroke-dasharray="2 3"/>')
+        body.append(text(px(n) + 4, y0 + 12, label, 11, MUTED))
+    # The floor: only the matching rows.
+    body.append(f'<line x1="{x0}" y1="{py(s):.1f}" x2="{x0 + pw}" y2="{py(s):.1f}" stroke="{TEXT_2}" '
+                f'stroke-width="1.5" stroke-dasharray="6 4"/>')
+    for k in range(1, 5):
+        pts = []
+        for i in range(0, 121):
+            n = 10 ** (math.log10(nmin) + i / 120 * (math.log10(nmax) - math.log10(nmin)))
+            pts.append(f"{px(n):.1f},{py(min(ymax, s + n ** (-1 / k))):.1f}")
+        body.append(f'<polyline points="{" ".join(pts)}" fill="none" stroke="{RAMP[k - 1]}" stroke-width="2"/>')
+        # Labels where the curves are well apart: 1 and 2 columns on the curve itself, 3 and 4 at the right end.
+        label = "1 column" if k == 1 else f"{k} columns"
+        at = {1: 25, 2: 3e4, 3: nmax, 4: nmax}[k]
+        y = py(s + at ** (-1 / k))
+        if k <= 2:
+            body.append(text(px(at) + 6, y - 8, label, 12, RAMP[k - 1]))
+        else:
+            body.append(text(x0 + pw + 8, y + 4, label, 12, RAMP[k - 1]))
+    return svg(width, height, body, "The lowest possible share of rows read for a 1% range, against the number of "
+               "row groups, for one to four clustered columns")
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     q = families("sf100")
@@ -231,7 +285,7 @@ def main() -> None:
     figs = {"curves.svg": fig_curves(), "row-groups.svg": fig_row_groups(), "buckets.svg": fig_buckets(),
             "pruning-skewed.svg": fig_pruning_skewed(q), "pruning-keys.svg": fig_pruning_keys(q),
             "query-time.svg": fig_query_time(q), "write-cost.svg": fig_write_cost(e),
-            "file-level.svg": fig_file_level()}
+            "file-level.svg": fig_file_level(), "bound.svg": fig_bound()}
     for name, content in figs.items():
         (OUT / name).write_text(content)
         print(OUT / name)

@@ -14,13 +14,13 @@ It's a great introduction to space-filling curves and why they're
 relevant for optimizing queries that could target multiple columns - well worth a read. The gist is that 
 the multiple columns used for some downstream purpose (e.g. querying or joins) form a multi-dimensional space, but 
 the row order - imperative for skipping row groups - is inherently one-dimensional. The task for optimizing for 
-multi-column queries becomes one of effectively reducing this multi-dimensional space to a one dimensional order.
+multi-column queries becomes one of effectively reducing this multi-dimensional space to a one-dimensional order.
 
 Getting this right is especially important for multi-step data transformation pipelines, where the same table might
 be used for multiple purposes downstream.
 
-The key insight of this article is that space-filling the *potential* values in the dataset is necessarily sub-optimal. 
-By first *ranking* the values from each column, and interleaving those *ranks*, much better performance can be achieved.
+The key insight of this article is that space-filling the *potential* values in the dataset is sub-optimal for an uneven 
+distribution of values. By first *ranking* the values from each column, and interleaving those *ranks*, much better performance can be achieved.
 This is valuable when writes are irregular, such as during a compaction operation over an appended changelog, so that the
 ranks remain relevant. Here I present a variety of alternative methods for comparison on the TPC-DS dataset.
 
@@ -46,11 +46,11 @@ there is a trade off - ordering first by the first 'most important' column might
 ordered at all (depending on the first's cardinality). Typical lexicographic ordering like this can help very little if
 the columns are not selected carefully.
 
-**Row-group skipping under multiple orders**
+**Row group skipping under multiple orders**
 
 ![Four small tables, each 32 by 32 cells, showing the min/max box of every row group under random order, a sort, Z-order and Hilbert order, with a horizontal band for a filter on the second column](/img/blog/clustering/row-groups.svg)
 
-*Shaded band is the filter, blue boxes are candidate row-groups, unshaded boxes are skipped row-groups.*
+*Shaded band is the filter, blue boxes are candidate row groups, unshaded boxes are skipped row groups.*
 
 The figure above shows the problem on a toy table: every cell of a 32 by 32 grid, written in four different orders
 and split into row groups of 48 rows. Each box is one row group's min/max range, and the shaded band is a filter on
@@ -67,7 +67,7 @@ This is very useful in multiple fields, due to these mappings approximately pres
 space when condensed down to the single dimension path.
 
 The Hilbert curve is a particularly beautiful variant, where each step is adjacent to the previous - a property that 
-also makes it near theoretical best for the purpose of dimension reduction. The Morton 'Z-order' however is used 
+also makes it more effective for the purpose of dimension reduction. The Morton 'Z-order' however is used 
 more commonly, as its construction is very straightforward:  the first bit of the first column is taken, then the first of the 
 second, and so on, then the second bit of the first column, until some bit depth is reached or the data is exhausted - a process
 called 'bit-interleaving'. This has the neat effect of drawing a series of 'Z' shapes, themselves ordered into 'Z' shapes, snaking 
@@ -79,19 +79,19 @@ their way through the multi-dimensional space.
 
 *Morton and Hilbert curves in two dimensions.*
 
-Both visit every cell only once, but the Z-order makes long jumps at the edge of each quadrant - row-groups that cover either end
+Both visit every cell only once, but the Z-order makes long jumps at the edge of each quadrant - row groups that cover either end
 of these extremes have very poor separation. The Hilbert curve, coparatively, only ever steps to a neighbouring cell. 
-The question for which to use comes down to whether the extra complexity of evaluating the Hilbert curve is deserved in
+The question for which to use comes down to whether the extra complexity of evaluating the Hilbert curve is deserved through
 performance improvements.
 
 ## Rank-space vs value-space
 
 Consider two columns of 4-bit values. Each cell may take one of 16 possible values, and bit-interleaving the pair gives
-2^(4+4)=256 possible ordering values. This might be a perfectly good structure, if the true values in the data 
+$2^{4+4} = 256$ possible ordering values. This might be a perfectly good structure, if the true values in the data 
 **span the entire range of possibilities**. In practice, the distribution of values is rarely evenly distributed
 across this potential *value-space*, and are instead clustered around some set of common values. If, say, only the
-first and last quarters of the possible values are used in each column (0000 to 0011, 1010 to 1111), the order curve 
-will assume values 0111 and 1000 are distant, despite being adjacent in the true data.
+first and last quarters of the possible values are used in each column (0 to 3, 12 to 15), the order curve 
+will assume values 3 and 12 are distant, despite being adjacent in the true data.
 
 Consider instead taking any two columns, ordering them, and breaking them into 16 equal-sized chunks, where each
 chunk is assigned a 4-bit value. This creates a *rank-space*, which necessarily better approximates the distribution
@@ -116,8 +116,9 @@ where one might otherwise use a hash, I've found using these keys to be more spa
 bonus of providing a natural row order and partitioning axis.
 
 Throughout this article, I'll call the value-space ordering simply "Morton" and "Hilbert", and the rank-space variants
-"rank-Morton" and "rank-Hilbert", respectively. In my own use, I've been calling it a 'mash', as a drop-in 
-replacement for a hash. Given its ability to approximate the higher-dimensional distribution - or its manifold - 
+"rank-Morton" and "rank-Hilbert", respectively. In my own use, I've been calling it a 'mash', as a 
+replacement for a hash - though given the ranks change with each evaluation, it's not appropriate for every situation. 
+Given its ability to approximate the higher-dimensional distribution - or its manifold - 
 a viable backronym might be "Manifold-Approximate Sorting Hierarchy". But, let's stick to the rank-* naming here!
 
 This isn't an entirely new idea. Delta Lake's `OPTIMIZE ... ZORDER BY` passes each column through a function called
@@ -139,11 +140,41 @@ million rows, 14.4 GB of Parquet. I then wrote it in each of these orders, with 
 I clustered on two sets of columns. The first pairs the sale date with the skewed `ss_net_paid`. The second is three
 surrogate keys (date, item and customer), which are spread fairly evenly. Each layout then ran the same seeded set
 of reads: ranges on each column selecting 0.1%, 1% and 10% of rows, boxes over all of the clustering columns, and a
-few joins in the style of TPC-DS.
+few joins in the style of TPC-DS. The metric to pay attention to is the 'share of rows read' - the proportion of the 
+table's rows that could not be skipped. This is then independent of hardware.
 
 Query time is the median of five warm runs on a 10-core laptop with 32 GB of memory, using DuckDB 1.5. Everything is in the
 [benchmark directory](https://github.com/duckstring-dev/duckstring/tree/main/bench/clustering) for anyone who wants
 to run it themselves.
+
+### Theory
+
+In a perfect reduction, every clustered column is spread evenly between the minimum and maximum. For $k$ clustered columns,
+this forms a $k$-dimensional unit cube, with rows spread evenly through it.
+
+Each of the $N$ row groups holds $1/N$ of the rows, so the box spanned by its min/max values has a volume of at least
+$1/N$. A range query selecting a fraction $s$ of one column is a slab of width $s$ through the cube, and a row group has
+to be read whenever its box overlaps the slab. For a row group whose box spans a width $w$ along that column, that
+happens with probability $s + w$, so the expected share of rows read is $s$ plus the average width of the row groups
+along that column.
+
+If every clustered column matters equally, the quantity to minimise is that average width across all $k$ columns.
+For boxes of a fixed volume, it's smallest when every side is equal - a cube with a side of $N^{-1/k}$. So, averaged
+across the clustered columns, no layout can read less than:
+
+$$
+s + N^{-1/k}
+$$
+
+A layout can beat this for one column by favouring it - lexicographic ordering reads close to $s$ for its first
+column, but at the expense of the others. For the SF100 tests, with $N = 2{,}344$ row groups, the bound for a 1%
+range is 3.1% with two clustered columns and 8.5% with three.
+
+**Lowest possible share of rows read for a 1% range**
+
+![The bound s + N^(-1/k) against the number of row groups for one to four clustered columns, each falling towards the 1% line, more slowly with more columns](/img/blog/clustering/bound.svg)
+
+*The bound $s + N^{-1/k}$ for $k$ clustered columns. The dashed line is $s = 1\%$, the matching rows themselves.*
 
 ## Results
 
@@ -158,12 +189,12 @@ to run it themselves.
 In this test, a range query for 1% of `ss_sold_date_sk` values, and separately a range query for 1% of `ss_net_paid`, 
 was executed for clusters based on (`ss_sold_date_sk`, `ss_net_paid`).
 
-As expected, the random order does not manage to skip any row-group at all, and 100% of the data is read for both the 
+As expected, the random order does not manage to skip any row group at all, and 100% of the data is read for both the 
 `ss_sold_date_sk` and `ss_net_paid` ranges.
 
-Ordered lexicographically, given that the `ss_sold_date_sk` values are mostly unique (high cardinality), the `ss_net_paid`
-values are mostly unordered. The result is optimal performance on the `ss_sold_date_sk` range at 1%, but poor performance
-on `ss_net_paid` at 82% of rows read.
+The `ss_sold_date_sk` column has around 1,800 distinct values across 288M rows, resulting in around one per row group. 
+That doesn't give much room for `ss_net_paid` to do much to the order beyond that. Ordered lexicographically, the result
+is optimal performance on the `ss_sold_date_sk` range at 1%, but poor performance on `ss_net_paid` at 82% of rows read.
 
 The Morton and Hilbert (value-space) orders do a much better job at supporting queries on `ss_net_paid`, cutting it down 
 to 12-16% and sacrificing little to the performance against `ss_sold_date_sk`. This would be much better though, if not 
@@ -198,25 +229,44 @@ approximately equally-weighted.
 
 ### Calculation and writing costs
 
-All of this is paid for once, when the table is written, and the sort itself is most of it:
+Rank-Hilbert is the clear winner when it comes to performance, but evaluating the curve is complex. 
+Its use over Morton is only justified if it's not too expensive to create, though in many cases this operation
+can be done rarely to mitigate the cost (e.g. during compaction of a large dataset into cold storage).
 
 **Time to write the clustered table**
 
 ![Time to write the clustered table for each order](/img/blog/clustering/write-cost.svg)
 
-*TPC-DS SF100, clustered on (date, net paid), 7 bits per column. One run each; runs varied by about 20%.*
+*TPC-DS SF100, clustered on (date, net paid), 7 bits per column. One run each.*
 
-Writing the table without sorting took 31 seconds. The sorted layouts took between 160 and 215 seconds, and the
-differences between them are mostly noise - the same layout varied by about 20% from run to run. Computing the
-curve itself is a small part of this: the plain Morton key alone took 4 seconds and the rank-Hilbert key 18.
+This shows the results of one run - note that between-run variance was around 20%, so much of the performance difference is
+hidden behind noise. The ranks need not be exact, so the ranking part of the process used approximate quantiles.
 
-Ranking needs each column's bucket boundaries, which come from one aggregate pass per column, e.g.
-`approx_quantile(col, [1/128, 2/128, ...])`. Approximate quantiles are sufficient for this purpose: they pruned just
-as well as exact ones on every read I ran, and avoid sorting each column to find them.
+Writing the table without sorting took around 30 seconds. The lexicographic sort approximates the minimum that could be 
+expected by any sorted write, taking around 160 seconds - anything beyond this is likely the evaluation time. 
+Morton added around 20s, while rank-Morton was another 20s beyond that. The ranking itself appears to cost 
+around 20s.
 
-### Sorting within files matters for DuckDB
+Interestingly, rank-Hilbert took around the same time as rank-Morton, indicating that the difference in evaluation
+costs is well below the noise. 
 
-Delta Lake doesn't sort rows within a file by default. It range-partitions rows into files by the curve key, so
+As each row's key depends only on its own values, DuckDB is able to stream the calculation rather than requiring the
+entire table to be held in memory. The memory costs are therefore surprisingly light. 
+Evaluating the `approx_quantile` pass and key calculation cost directly, to disentangle from sort costs:
+
+| Key | Time | Peak memory |
+|---|---|---|
+| Morton | 3.6 s | 130 MB |
+| Hilbert | 7.1 s | 150 MB |
+| Rank-Morton | 16 s | 220 MB |
+| Rank-Hilbert | 20 s | 260 MB |
+
+From a memory perspective there is minimal difference. Compared to Morton, the Rank-Hilbert method adds no more than 20% 
+to total write time.
+
+### Sorting within files
+
+The Delta Lake implementation doesn't sort rows within a file by default. It range-partitions rows into files by the curve key, so
 each file covers a slice of the curve, and leaves the rows inside each file unordered. That makes sense for Delta,
 which records each file's min and max in its transaction log and skips whole files without opening them - on object
 storage, that saves a request per file. I tried the same, partitioning into files of 256 MB and 1 GB:
@@ -262,32 +312,29 @@ cell per row group, since finer cells can't help a min/max check. On TPC-DS at s
 million rows in about 6 seconds, and a 1% range on `ss_net_paid` then read 23 of 235 row groups. NULLs land in
 bucket 0 here, which is fine for most tables.
 
-## How Duckstring uses it
+## In Duckstring
 
-[Duckstring](https://duckstring.com) is a data engineering platform built on DuckDB, and it publishes every table as
-Parquet. As of the next release, `cluster_by` uses the rank-Hilbert order described here. The columns to cluster on
+As of `v0.6.1` of [Duckstring](https://duckstring.com), `cluster_by` uses the rank-Hilbert order described here. The columns to cluster on
 are declared when a table is written:
 
 ```python
 pond.merge_table("sales", rows, pk="ticket_id", cluster_by=["sold_date", "net_paid"])
 ```
 
+For merge tables this applies only during compaction, which occurs any time a table's warm, freshness-tagged data
+exceeds the existing cold, compacted data. That keeps recent data recency-ordered (which tends to be most useful in
+incremental pipelines), and older data rank-Hilbert-ordered. For overwritten tables (using `pond.write_table()`), it's
+applied at every write.
+
 Duckstring picks the number of buckets from the table's size, so that each cell is just under one row group. It
 keeps a separate bucket for NULLs, uses exact quantiles for tables under ten million rows (so small tables come out
-identical every time) and approximate ones above that, and only reorders a table's compacted history when it's being
-rewritten anyway, so the sort is paid rarely. The
-[guide](/guides/append_and_merge#clustering-a-merge-table) has the details.
+identical every time) and approximate ones above that. The
+[guide](/guides/append_and_merge#clustering-a-merge-table) has additional details.
 
 ## Summary
 
-- When reads filter or join on a column, the order rows are written in decides how much of the table can be
-  skipped, and matters more than almost anything else about the file.
-- For a single column, a plain sort is hard to beat. For two or more, a Hilbert curve consistently read fewer rows
-  than the z-order.
-- Ranking each column before mapping it onto the curve gives skewed columns their share of the order, and costs
-  little on evenly spread ones.
-- Approximate quantiles are good enough for the ranks, and when DuckDB is the reader, sorting within files is well
-  worth the extra write time.
-- Every extra clustering column dilutes the others, so it pays to list only the columns that reads actually use.
-
-The full benchmark, including every timing and the scripts to reproduce it, is in the Duckstring repository.
+- In Parquet, the single row order matters enormously for query performance, especially against multiple columns.
+- The Hilbert curve outperforms Morton Z-order slightly, and lexicographic sort dramatically.
+- Ranking each column before mapping helps address skew and unevenness.
+- Write and evaluation times are mild against the minimum time to order.
+- In DuckDB, sorting within files is generally worthwhile.

@@ -61,6 +61,9 @@ const config: Config = {
           authorsMapPath: 'authors.yml',
           onInlineAuthors: 'throw',
           onUntruncatedBlogPosts: 'throw',
+          // LaTeX in posts ($...$ inline, $$...$$ display), as in the docs. A literal dollar is written \$.
+          remarkPlugins: [remarkMath],
+          rehypePlugins: [rehypeKatex],
           feedOptions: {
             type: ['rss', 'atom'],
             xslt: true,
