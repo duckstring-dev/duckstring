@@ -1,11 +1,11 @@
 ---
 title: "Rank-Based Clustering for Improved Pipeline Performance"
 slug: clustering-for-pipelines
-date: 2026-10-06
+date: 2026-10-08
 authors: [isaac]
 tags: [duckdb, parquet, performance]
 description: How to order Parquet files for efficient pipelines using multiple columns for downstream queries.
-draft: true
+draft: false
 ---
 
 The DuckDB team wrote a great post on why you might worry about the write order in tables prepared for analytical purposes:

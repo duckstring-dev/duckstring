@@ -2,7 +2,7 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
-## Unreleased
+## 0.6.1 — 2026-10-08
 
 ### Performance
 
@@ -12,8 +12,9 @@ Notable changes per release. Versions before 0.5.0 are recorded in the git histo
   quantile boundaries computed in one pass (approximate on tables over ten million rows), replacing
   window functions that sorted every row once per column: on 288 million rows the old encoding filled
   60 GiB of spill and failed, and the new one adds a few seconds to the sort. Equal values now always
-  share a bucket, so the order is deterministic. `cluster_bits` is rounded up to a multiple of the
-  number of columns. A table already clustered is reordered at its next compaction.
+  share a bucket, so the order is deterministic for tables under ten million rows (above that, the
+  approximate boundaries can shift slightly between rewrites). `cluster_bits` is rounded up to a
+  multiple of the number of columns. A table already clustered is reordered at its next compaction.
 
 ## 0.6.0 — 2026-10-05
 
