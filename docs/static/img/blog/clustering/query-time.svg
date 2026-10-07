@@ -1,34 +1,32 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 264" width="720" height="264" role="img" aria-label="Query time for a 1% range on ss_net_paid (ms)" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 220" width="720" height="220" role="img" aria-label="Query time for a 1% range on ss_net_paid (ms)" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif">
 <title>Query time for a 1% range on ss_net_paid (ms)</title>
-<rect width="720" height="264" rx="8" fill="#1a1a19"/>
-<text x="20.0" y="26.0" font-size="15" fill="#ffffff" text-anchor="start" font-weight="600">Query time for a 1% range on ss_net_paid (ms)</text>
-<line x1="150.0" y1="34" x2="150.0" y2="198" stroke="#383835" stroke-width="1"/>
-<text x="150.0" y="214.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">0 ms</text>
-<line x1="275.0" y1="34" x2="275.0" y2="198" stroke="#383835" stroke-width="1"/>
-<text x="275.0" y="214.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">70 ms</text>
-<line x1="400.0" y1="34" x2="400.0" y2="198" stroke="#383835" stroke-width="1"/>
-<text x="400.0" y="214.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">140 ms</text>
-<line x1="525.0" y1="34" x2="525.0" y2="198" stroke="#383835" stroke-width="1"/>
-<text x="525.0" y="214.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">210 ms</text>
-<line x1="650.0" y1="34" x2="650.0" y2="198" stroke="#383835" stroke-width="1"/>
-<text x="650.0" y="214.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">280 ms</text>
-<text x="138.0" y="51.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Random</text>
-<path d="M150.0,40.0 h351.9 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-351.9 z" fill="#6f6e66"/>
-<text x="511.9" y="51.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">199 ms</text>
-<text x="138.0" y="79.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Sorted (lexicographic)</text>
-<path d="M150.0,68.0 h190.5 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-190.5 z" fill="#6f6e66"/>
-<text x="350.5" y="79.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">109 ms</text>
-<text x="138.0" y="107.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Morton</text>
-<path d="M150.0,96.0 h58.6 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-58.6 z" fill="#6f6e66"/>
-<text x="218.6" y="107.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">35 ms</text>
-<text x="138.0" y="135.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Hilbert</text>
-<path d="M150.0,124.0 h39.0 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-39.0 z" fill="#6f6e66"/>
-<text x="199.0" y="135.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">24 ms</text>
-<text x="138.0" y="163.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Rank-Morton</text>
-<path d="M150.0,152.0 h32.2 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-32.2 z" fill="#6f6e66"/>
-<text x="192.2" y="163.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">20 ms</text>
-<text x="138.0" y="191.5" font-size="13" fill="#ffffff" text-anchor="end" font-weight="600">Rank-Hilbert</text>
-<path d="M150.0,180.0 h29.8 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-29.8 z" fill="#3987e5"/>
-<text x="189.8" y="191.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">19 ms</text>
-<text x="20.0" y="250.0" font-size="12" fill="#8a897f" text-anchor="start" font-weight="400">TPC-DS SF100, median of 5 warm runs. A count and a sum over the matching rows.</text>
+<rect y="0" width="720" height="220" rx="8" fill="#1a1a19"/>
+<line x1="150.0" y1="12" x2="150.0" y2="176" stroke="#383835" stroke-width="1"/>
+<text x="150.0" y="192.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">0 ms</text>
+<line x1="275.0" y1="12" x2="275.0" y2="176" stroke="#383835" stroke-width="1"/>
+<text x="275.0" y="192.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">70 ms</text>
+<line x1="400.0" y1="12" x2="400.0" y2="176" stroke="#383835" stroke-width="1"/>
+<text x="400.0" y="192.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">140 ms</text>
+<line x1="525.0" y1="12" x2="525.0" y2="176" stroke="#383835" stroke-width="1"/>
+<text x="525.0" y="192.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">210 ms</text>
+<line x1="650.0" y1="12" x2="650.0" y2="176" stroke="#383835" stroke-width="1"/>
+<text x="650.0" y="192.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">280 ms</text>
+<text x="138.0" y="29.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Random</text>
+<path d="M150.0,18.0 h351.9 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-351.9 z" fill="#6f6e66"/>
+<text x="511.9" y="29.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">199 ms</text>
+<text x="138.0" y="57.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Sorted (lexicographic)</text>
+<path d="M150.0,46.0 h190.5 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-190.5 z" fill="#6f6e66"/>
+<text x="350.5" y="57.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">109 ms</text>
+<text x="138.0" y="85.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Morton</text>
+<path d="M150.0,74.0 h58.6 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-58.6 z" fill="#6f6e66"/>
+<text x="218.6" y="85.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">35 ms</text>
+<text x="138.0" y="113.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Hilbert</text>
+<path d="M150.0,102.0 h39.0 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-39.0 z" fill="#6f6e66"/>
+<text x="199.0" y="113.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">24 ms</text>
+<text x="138.0" y="141.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Rank-Morton</text>
+<path d="M150.0,130.0 h32.2 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-32.2 z" fill="#6f6e66"/>
+<text x="192.2" y="141.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">20 ms</text>
+<text x="138.0" y="169.5" font-size="13" fill="#ffffff" text-anchor="end" font-weight="600">Rank-Hilbert</text>
+<path d="M150.0,158.0 h29.8 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-29.8 z" fill="#3987e5"/>
+<text x="189.8" y="169.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">19 ms</text>
 </svg>

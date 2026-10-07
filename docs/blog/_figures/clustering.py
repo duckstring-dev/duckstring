@@ -68,7 +68,7 @@ def fig_curves() -> str:
     panel = n * cell
     width = 2 * panel + 3 * pad + 60
     height = panel + 110
-    body = [text(20, 26, "Two ways to walk a grid", 15, TEXT, weight=600)]
+    body = []
     for pi, (name, key) in enumerate([("Z-order (Morton)", lambda x, y: z_index(x, y, 3)),
                                       ("Hilbert", lambda x, y: hilbert_index(n, x, y))]):
         ox = 40 + pi * (panel + pad + 20)
@@ -87,9 +87,7 @@ def fig_curves() -> str:
         body.append(text(ox + panel / 2, oy + panel + 22, "first column →", 11, MUTED, "middle"))
         body.append(f'<text x="{ox - 10}" y="{oy + panel / 2}" font-size="11" fill="{MUTED}" text-anchor="middle" '
                     f'transform="rotate(-90 {ox - 10} {oy + panel / 2})">second column →</text>')
-    body.append(text(20, height - 12, "Both visit every cell once. Z-order jumps at the edge of each quadrant; Hilbert only "
-                     "ever steps to a neighbour.", 12, MUTED))
-    return svg(width, height, body, "Z-order and Hilbert curves on an 8 by 8 grid")
+    return svg(width, height, body, "Z-order and Hilbert curves on an 8 by 8 grid", crop=(24, 20))
 
 
 def fig_row_groups() -> str:
@@ -110,7 +108,7 @@ def fig_row_groups() -> str:
     size, pad = 150, 26
     width = 4 * size + 3 * pad + 60
     height = size + 146
-    body = [text(20, 26, "Row-group boxes in four orders, and a filter on the second column", 15, TEXT, weight=600)]
+    body = []
     for pi, (name, order) in enumerate(orders):
         ox, oy = 30 + pi * (size + pad), 66
         s = size / n
@@ -133,11 +131,7 @@ def fig_row_groups() -> str:
                         f'stroke-opacity="{1 if hit else 0.7}"/>')
         body.append(text(ox + size / 2, oy + size + 24, f"reads {read} of {groups} row groups", 13,
                          TEXT if read < groups else TEXT_2, "middle", 600 if read < groups else 400))
-    body.append(text(20, height - 30, "1,024 rows (every cell of a 32 by 32 grid), 48 rows per row group. Shaded band: "
-                     "the filter. Blue: row groups whose", 12, MUTED))
-    body.append(text(20, height - 12, "min/max can't rule it out. In random order every box spans the whole grid.", 12,
-                     MUTED))
-    return svg(width, height, body, "Row-group bounding boxes under random, sorted, Z-order and Hilbert orders")
+    return svg(width, height, body, "Row-group bounding boxes under random, sorted, Z-order and Hilbert orders", crop=(34, 40))
 
 
 def fig_buckets() -> str:
@@ -146,7 +140,7 @@ def fig_buckets() -> str:
     width, plot_h, pad = 720, 150, 40
     panel_w = (width - 3 * pad - 30) / 2
     height = plot_h + 140
-    body = [text(20, 26, "Rows per bucket for ss_net_paid, 16 buckets", 15, TEXT, weight=600)]
+    body = []
     ymax = 0.6
     for pi, (name, key, color) in enumerate([("Scaled between min and max", "scaled", ORANGE),
                                              ("Ranked (equal population)", "ranked", BLUE)]):
@@ -172,10 +166,7 @@ def fig_buckets() -> str:
             body.append(text(ox + panel_w / 2, oy + plot_h - plot_h * (1 / 16) / ymax - 8, "6.25% each", 12, TEXT_2,
                              "middle"))
         body.append(text(ox + panel_w / 2, oy + plot_h + 20, "bucket, low to high values", 11, MUTED, "middle"))
-    body.append(text(20, height - 30, f"TPC-DS SF10 store_sales, {total / 1e6:.1f}M non-NULL rows. The median is 865, "
-                     f"the maximum {b['max']:,.0f}: scaling puts most rows in the first", 12, MUTED))
-    body.append(text(20, height - 12, "few buckets, so the curve has almost nothing to order them by.", 12, MUTED))
-    return svg(width, height, body, "Bucket populations for a skewed column: scaled against ranked")
+    return svg(width, height, body, "Bucket populations for a skewed column: scaled against ranked", crop=(32, 44))
 
 
 LAYOUT_NAMES = [("hash", "Random"), ("lexicographic", "Sorted (lexicographic)"), ("morton", "Morton"),
@@ -189,7 +180,7 @@ def fig_pruning_skewed(q) -> str:
               ("1% range on ss_sold_date_sk", ORANGE,
                [q[("skewed", lay, "range ss_sold_date_sk 1.0%")]["read"] for lay, _ in LAYOUT_NAMES])]
     return hbars("Share of rows read, clustered on (date, net paid)", cats, series, 1.0, pct,
-                 [0, 0.25, 0.5, 0.75, 1.0], note="TPC-DS SF100, 288M rows, 2,344 row groups. Lower is better.",
+                 [0, 0.25, 0.5, 0.75, 1.0],
                  highlight="Rank-Hilbert")
 
 
@@ -200,7 +191,7 @@ def fig_pruning_keys(q) -> str:
             ("1% range on customer", AQUA, "range ss_customer_sk 1.0%")]
     series = [(n, c, [q[("keys", lay, f)]["read"] for lay, _ in LAYOUT_NAMES]) for n, c, f in fams]
     return hbars("Share of rows read, clustered on (date, item, customer)", cats, series, 1.0, pct,
-                 [0, 0.25, 0.5, 0.75, 1.0], note="TPC-DS SF100. Lower is better.", highlight="Rank-Hilbert")
+                 [0, 0.25, 0.5, 0.75, 1.0], highlight="Rank-Hilbert")
 
 
 def fig_query_time(q) -> str:
@@ -208,7 +199,7 @@ def fig_query_time(q) -> str:
     series = [("1% range on ss_net_paid", NEUTRAL,
                [q[("skewed", lay, "range ss_net_paid 1.0%")]["ms"] for lay, _ in LAYOUT_NAMES])]
     return hbars("Query time for a 1% range on ss_net_paid (ms)", cats, series, 280, lambda v: f"{v:.0f} ms",
-                 [0, 70, 140, 210, 280], note="TPC-DS SF100, median of 5 warm runs. A count and a sum over the matching rows.",
+                 [0, 70, 140, 210, 280],
                  highlight="Rank-Hilbert")
 
 
@@ -219,7 +210,6 @@ def fig_write_cost(e) -> str:
     vals = [e[k]["stats_s"] + e[k]["write_s"] for _, k in rows]
     return hbars("Time to write the clustered table (s)", [n for n, _ in rows], [("seconds", NEUTRAL, vals)], 240,
                  lambda v: f"{v:.0f} s", [0, 60, 120, 180, 240], label_w=190,
-                 note="TPC-DS SF100, clustered on (date, net paid), 7 bits per column. One run each; runs varied by ~20%.",
                  highlight="Rank-Hilbert")
 
 
@@ -231,8 +221,7 @@ def fig_file_level() -> str:
               ("Files by key range, 256 MB", ORANGE, [r["256MB"]["families"][f]["part_rg"] for _, f in fams]),
               ("Files by key range, 1 GB", AQUA, [r["1GB"]["families"][f]["part_rg"] for _, f in fams])]
     return hbars("Share of rows read: sorting inside files, or only between them", [n for n, _ in fams], series, 0.5,
-                 pct, [0, 0.1, 0.2, 0.3, 0.4, 0.5], label_w=180,
-                 note="TPC-DS SF100, rank-Hilbert key on (date, net paid). Lower is better.")
+                 pct, [0, 0.1, 0.2, 0.3, 0.4, 0.5], label_w=180)
 
 
 def main() -> None:

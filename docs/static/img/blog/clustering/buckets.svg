@@ -1,7 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 290" width="720" height="290" role="img" aria-label="Bucket populations for a skewed column: scaled against ranked" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 32 720 214" width="720" height="214" role="img" aria-label="Bucket populations for a skewed column: scaled against ranked" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif">
 <title>Bucket populations for a skewed column: scaled against ranked</title>
-<rect width="720" height="290" rx="8" fill="#1a1a19"/>
-<text x="20.0" y="26.0" font-size="15" fill="#ffffff" text-anchor="start" font-weight="600">Rows per bucket for ss_net_paid, 16 buckets</text>
+<rect y="32" width="720" height="214" rx="8" fill="#1a1a19"/>
 <text x="50.0" y="52.0" font-size="13" fill="#ffffff" text-anchor="start" font-weight="600">Scaled between min and max</text>
 <line x1="50.0" y1="210.0" x2="335.0" y2="210.0" stroke="#383835"/>
 <text x="42.0" y="214.0" font-size="11" fill="#8a897f" text-anchor="end" font-weight="400">0%</text>
@@ -53,6 +52,4 @@
 <text x="398.8" y="206.4" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400"></text>
 <text x="517.5" y="186.4" font-size="12" fill="#c3c2b7" text-anchor="middle" font-weight="400">6.25% each</text>
 <text x="517.5" y="230.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">bucket, low to high values</text>
-<text x="20.0" y="260.0" font-size="12" fill="#8a897f" text-anchor="start" font-weight="400">TPC-DS SF10 store_sales, 27.5M non-NULL rows. The median is 865, the maximum 19,562: scaling puts most rows in the first</text>
-<text x="20.0" y="278.0" font-size="12" fill="#8a897f" text-anchor="start" font-weight="400">few buckets, so the curve has almost nothing to order them by.</text>
 </svg>

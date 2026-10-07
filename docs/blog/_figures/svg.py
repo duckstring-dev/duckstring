@@ -1,6 +1,9 @@
 """Shared SVG helpers for the blog figures: the dark chart palette (the site is dark only), text, bars and a
 grouped horizontal bar chart. Categorical blue, orange and aqua, in that fixed order, are validated for
-colour-vision deficiency on the dark surface; neutral grey is for reference bars."""
+colour-vision deficiency on the dark surface; neutral grey is for reference bars.
+
+A figure carries no title or caption of its own: those are written in the post, under the image, so they can be
+edited as text. The ``title`` passed to :func:`svg` is only the image's accessible name."""
 
 from __future__ import annotations
 
@@ -14,11 +17,15 @@ NEUTRAL = "#6f6e66"
 FONT = "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif"
 
 
-def svg(width: int, height: int, body: list[str], title: str) -> str:
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" '
-            f'height="{height}" role="img" aria-label="{title}" font-family="{FONT}">\n'
+def svg(width: int, height: int, body: list[str], title: str, crop: tuple[int, int] = (0, 0)) -> str:
+    """The figure as an SVG document. ``crop`` trims ``(top, bottom)`` pixels off a drawing laid out with room
+    for a title and caption, now that those live in the post."""
+    top, bottom = crop
+    h = height - top - bottom
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 {top} {width} {h}" width="{width}" '
+            f'height="{h}" role="img" aria-label="{title}" font-family="{FONT}">\n'
             f'<title>{title}</title>\n'
-            f'<rect width="{width}" height="{height}" rx="8" fill="{SURFACE}"/>\n' + "\n".join(body) + "\n</svg>\n")
+            f'<rect y="{top}" width="{width}" height="{h}" rx="8" fill="{SURFACE}"/>\n' + "\n".join(body) + "\n</svg>\n")
 
 
 def text(x, y, s, size=13, fill=TEXT_2, anchor="start", weight=400) -> str:
@@ -46,16 +53,17 @@ def legend(x, y, items) -> list[str]:
 
 
 def hbars(title: str, categories: list[str], series: list[tuple[str, str, list]], xmax: float, fmt, ticks,
-          width=720, label_w=150, note=None, highlight=None) -> str:
-    """Grouped horizontal bars: one group per category, one bar per series, values labelled at the bar end."""
-    top = 56 if len(series) > 1 else 40
+          width=720, label_w=150, highlight=None) -> str:
+    """Grouped horizontal bars: one group per category, one bar per series, values labelled at the bar end.
+    ``title`` is the image's accessible name; the visible title goes in the post's caption."""
+    top = 36 if len(series) > 1 else 18
     bar_h, gap, group_gap = 14, 2, 14
     group_h = len(series) * (bar_h + gap) - gap
     plot_w = width - label_w - 70
-    height = top + len(categories) * (group_h + group_gap) + 34 + (22 if note else 0)
-    body = [text(20, 26, title, 15, TEXT, weight=600)]
+    height = top + len(categories) * (group_h + group_gap) + 34
+    body = []
     if len(series) > 1:
-        body += legend(label_w, 48, [(n, c) for n, c, _ in series])
+        body += legend(label_w, 24, [(n, c) for n, c, _ in series])
     x0 = label_w
     bottom = top + len(categories) * (group_h + group_gap) - group_gap
     for t in ticks:
@@ -74,8 +82,6 @@ def hbars(title: str, categories: list[str], series: list[tuple[str, str, list]]
                 color = BLUE
             body.append(bar(x0, y, w, bar_h, color))
             body.append(text(x0 + w + 6, y + bar_h - 3, fmt(v), 12, TEXT_2))
-    if note:
-        body.append(text(20, height - 14, note, 12, MUTED))
     return svg(width, height, body, title)
 
 

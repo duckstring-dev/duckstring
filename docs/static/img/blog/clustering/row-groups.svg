@@ -1,7 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 738 296" width="738" height="296" role="img" aria-label="Row-group bounding boxes under random, sorted, Z-order and Hilbert orders" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 34 738 222" width="738" height="222" role="img" aria-label="Row-group bounding boxes under random, sorted, Z-order and Hilbert orders" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif">
 <title>Row-group bounding boxes under random, sorted, Z-order and Hilbert orders</title>
-<rect width="738" height="296" rx="8" fill="#1a1a19"/>
-<text x="20.0" y="26.0" font-size="15" fill="#ffffff" text-anchor="start" font-weight="600">Row-group boxes in four orders, and a filter on the second column</text>
+<rect y="34" width="738" height="222" rx="8" fill="#1a1a19"/>
 <text x="105.0" y="54.0" font-size="13" fill="#ffffff" text-anchor="middle" font-weight="600">Random</text>
 <rect x="30" y="66" width="150" height="150" fill="none" stroke="#383835"/>
 <rect x="30" y="141.0" width="150" height="14.1" fill="#d95926" fill-opacity="0.22"/>
@@ -106,6 +105,4 @@
 <rect x="671.5" y="179.5" width="35.5" height="35.5" rx="2" fill="none" fill-opacity="0" stroke="#8a897f" stroke-width="1" stroke-opacity="0.7"/>
 <rect x="690.2" y="198.2" width="16.8" height="16.8" rx="2" fill="none" fill-opacity="0" stroke="#8a897f" stroke-width="1" stroke-opacity="0.7"/>
 <text x="633.0" y="240.0" font-size="13" fill="#ffffff" text-anchor="middle" font-weight="600">reads 5 of 22 row groups</text>
-<text x="20.0" y="266.0" font-size="12" fill="#8a897f" text-anchor="start" font-weight="400">1,024 rows (every cell of a 32 by 32 grid), 48 rows per row group. Shaded band: the filter. Blue: row groups whose</text>
-<text x="20.0" y="284.0" font-size="12" fill="#8a897f" text-anchor="start" font-weight="400">min/max can't rule it out. In random order every box spans the whole grid.</text>
 </svg>
