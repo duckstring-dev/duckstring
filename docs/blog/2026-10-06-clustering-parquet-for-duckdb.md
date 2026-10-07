@@ -4,7 +4,7 @@ slug: clustering-for-pipelines
 date: 2026-10-06
 authors: [isaac]
 tags: [duckdb, parquet, performance]
-description: How to order Parquet files for efficient pipelines using multiple columns for joins.
+description: How to order Parquet files for efficient pipelines using multiple columns downstream queries.
 draft: true
 ---
 
@@ -68,7 +68,7 @@ space when condensed down to the single dimension path.
 
 The Hilbert curve is a particularly beautiful variant, where each step is adjacent to the previous - a property that 
 also makes it more effective for the purpose of dimension reduction. The Morton 'Z-order' however is used 
-more commonly, as its construction is very straightforward:  the first bit of the first column is taken, then the first of the 
+more commonly, as its construction is very straightforward: the first bit of the first column is taken, then the first of the 
 second, and so on, then the second bit of the first column, until some bit depth is reached or the data is exhausted - a process
 called 'bit-interleaving'. This has the neat effect of drawing a series of 'Z' shapes, themselves ordered into 'Z' shapes, snaking 
 their way through the multi-dimensional space.
@@ -80,20 +80,20 @@ their way through the multi-dimensional space.
 *Morton and Hilbert curves in two dimensions.*
 
 Both visit every cell only once, but the Z-order makes long jumps at the edge of each quadrant - row groups that cover either end
-of these extremes have very poor separation. The Hilbert curve, coparatively, only ever steps to a neighbouring cell. 
+of these extremes have very poor separation. The Hilbert curve, comparatively, only ever steps to a neighbouring cell. 
 The question for which to use comes down to whether the extra complexity of evaluating the Hilbert curve is deserved through
 performance improvements.
 
 ## Rank-space vs value-space
 
-Consider two columns of 4-bit values. Each cell may take one of 16 possible values, and bit-interleaving the pair gives
+Consider two columns of 4-bit values. Each value may be one of 16 possibilities, and bit-interleaving the pair gives
 $2^{4+4} = 256$ possible ordering values. This might be a perfectly good structure, if the true values in the data 
-**span the entire range of possibilities**. In practice, the distribution of values is rarely evenly distributed
+**span the entire range of possibilities**. In practice, values are rarely spread evenly
 across this potential *value-space*, and are instead clustered around some set of common values. If, say, only the
 first and last quarters of the possible values are used in each column (0 to 3, 12 to 15), the order curve 
 will assume values 3 and 12 are distant, despite being adjacent in the true data.
 
-Consider instead taking any two columns, ordering them, and breaking them into 16 equal-sized chunks, where each
+Consider instead taking any two columns, ordering each, and breaking each into 16 equal-sized chunks, where each
 chunk is assigned a 4-bit value. This creates a *rank-space*, which necessarily better approximates the distribution
 of real data. The *labels* for these groups may then be interleaved to create the order key. 
 
@@ -137,20 +137,22 @@ million rows, 14.4 GB of Parquet. I then wrote it in each of these orders, with 
 | Morton, Hilbert | the curve over each column scaled between its min and max |
 | Rank-Morton, rank-Hilbert | the curve over each column's quantile rank |
 
-I clustered on two sets of columns. The first pairs the sale date with the skewed `ss_net_paid`. The second is three
-surrogate keys (date, item and customer), which are spread fairly evenly. Each layout then ran the same seeded set
+I clustered on two sets of columns. The first pairs `ss_sold_date_sk` with the skewed `ss_net_paid`. The second is
+three surrogate keys (`ss_sold_date_sk`, `ss_item_sk` and `ss_customer_sk`), which are spread fairly evenly. Each layout then ran the same seeded set
 of reads: ranges on each column selecting 0.1%, 1% and 10% of rows, boxes over all of the clustering columns, and a
-few joins in the style of TPC-DS. The metric to pay attention to is the 'share of rows read' - the proportion of the 
+few joins in the style of TPC-DS. This article reports only the 1% results, but you can see the other results in the 
+[benchmark directory](https://github.com/duckstring-dev/duckstring/tree/main/bench/clustering). 
+The metric to pay attention to is the 'share of rows read' - the proportion of the 
 table's rows that could not be skipped. This is then independent of hardware.
 
 Query time is the median of five warm runs on a 10-core laptop with 32 GB of memory, using DuckDB 1.5. Everything is in the
-[benchmark directory](https://github.com/duckstring-dev/duckstring/tree/main/bench/clustering) for anyone who wants
-to run it themselves.
+benchmark directory for anyone who wants to run it themselves.
 
 ### Theory
 
-In a perfect reduction, every clustered column is spread evenly between the minimum and maximum. For $k$ clustered columns,
-this forms a $k$-dimensional unit cube, with rows spread evenly through it.
+In a perfect reduction, assuming independent columns, every clustered column is spread evenly between the minimum and maximum. 
+For $k$ clustered columns, this forms a $k$-dimensional unit cube, with rows spread evenly through it. Correlation between 
+columns allows better performance - for the TPC-DS dataset used in these tests, the columns are near independent.
 
 Each of the $N$ row groups holds $1/N$ of the rows, so the box spanned by its min/max values has a volume of at least
 $1/N$. A range query selecting a fraction $s$ of one column is a slab of width $s$ through the cube, and a row group has
@@ -216,14 +218,14 @@ gap to be wider.
 
 ### Hilbert beats Morton on performance
 
-**Share of rows read, clustered on (date, item, customer)**
+**Share of rows read for a 1% range, clustered on (`ss_sold_date_sk`, `ss_item_sk`, `ss_customer_sk`)**
 
-![Share of rows read for 1% ranges on date, item and customer, for six orders clustered on all three](/img/blog/clustering/pruning-keys.svg)
+![Share of rows read for 1% ranges on ss_sold_date_sk, ss_item_sk and ss_customer_sk, for six orders clustered on all three](/img/blog/clustering/pruning-keys.svg)
 
 *TPC-DS SF100. Lower is better.*
 
 Using instead three non-skewed columns, the value-space and rank-space methods are around the same. However, 
-Hilbert consistently beats Morton for the lowest-importance `customer` dimension, giving 9-10% across the board, 
+Hilbert consistently beats Morton for the lowest-importance `ss_customer_sk` column, giving 9-10% across the board, 
 against a theoretical best of 8.5%. Hilbert is worthwhile where there's a need for all included columns to be 
 approximately equally-weighted.
 
@@ -239,7 +241,7 @@ can be done rarely to mitigate the cost (e.g. during compaction of a large datas
 
 *TPC-DS SF100, clustered on (date, net paid), 7 bits per column. One run each.*
 
-This shows the results of one run - note that between-run variance was around 20%, so much of the performance difference is
+This shows the results of one run - note that between-run variation was around 20%, so much of the performance difference is
 hidden behind noise. The ranks need not be exact, so the ranking part of the process used approximate quantiles.
 
 Writing the table without sorting took around 30 seconds. The lexicographic sort approximates the minimum that could be 
