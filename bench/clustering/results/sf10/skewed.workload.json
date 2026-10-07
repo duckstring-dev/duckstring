@@ -1,0 +1,726 @@
+[
+  {
+    "family": "point ss_sold_date_sk",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2452506",
+        "2452506"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk = 2452506"
+  },
+  {
+    "family": "point ss_sold_date_sk",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451138",
+        "2451138"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk = 2451138"
+  },
+  {
+    "family": "point ss_sold_date_sk",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2450925",
+        "2450925"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk = 2450925"
+  },
+  {
+    "family": "point ss_sold_date_sk",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451526",
+        "2451526"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk = 2451526"
+  },
+  {
+    "family": "point ss_sold_date_sk",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451488",
+        "2451488"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk = 2451488"
+  },
+  {
+    "family": "range ss_sold_date_sk 0.1%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451251",
+        "2451255"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451251 AND 2451255"
+  },
+  {
+    "family": "range ss_sold_date_sk 0.1%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2452219",
+        "2452220"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2452219 AND 2452220"
+  },
+  {
+    "family": "range ss_sold_date_sk 0.1%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2452137",
+        "2452138"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2452137 AND 2452138"
+  },
+  {
+    "family": "range ss_sold_date_sk 0.1%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2452524",
+        "2452525"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2452524 AND 2452525"
+  },
+  {
+    "family": "range ss_sold_date_sk 0.1%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451056",
+        "2451057"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451056 AND 2451057"
+  },
+  {
+    "family": "range ss_sold_date_sk 1.0%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451600",
+        "2451632"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451600 AND 2451632"
+  },
+  {
+    "family": "range ss_sold_date_sk 1.0%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2450910",
+        "2450941"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2450910 AND 2450941"
+  },
+  {
+    "family": "range ss_sold_date_sk 1.0%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451229",
+        "2451262"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451229 AND 2451262"
+  },
+  {
+    "family": "range ss_sold_date_sk 1.0%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451804",
+        "2451818"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451804 AND 2451818"
+  },
+  {
+    "family": "range ss_sold_date_sk 1.0%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2450900",
+        "2450931"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2450900 AND 2450931"
+  },
+  {
+    "family": "range ss_sold_date_sk 10.0%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451162",
+        "2451408"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451162 AND 2451408"
+  },
+  {
+    "family": "range ss_sold_date_sk 10.0%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451898",
+        "2452149"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451898 AND 2452149"
+  },
+  {
+    "family": "range ss_sold_date_sk 10.0%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451790",
+        "2451903"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451790 AND 2451903"
+  },
+  {
+    "family": "range ss_sold_date_sk 10.0%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451179",
+        "2451435"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451179 AND 2451435"
+  },
+  {
+    "family": "range ss_sold_date_sk 10.0%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451846",
+        "2452009"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451846 AND 2452009"
+  },
+  {
+    "family": "point ss_net_paid",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "0.00",
+        "0.00"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid = 0.00"
+  },
+  {
+    "family": "point ss_net_paid",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "190.40",
+        "190.40"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid = 190.40"
+  },
+  {
+    "family": "point ss_net_paid",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "6824.80",
+        "6824.80"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid = 6824.80"
+  },
+  {
+    "family": "point ss_net_paid",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "1215.29",
+        "1215.29"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid = 1215.29"
+  },
+  {
+    "family": "point ss_net_paid",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "756.00",
+        "756.00"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid = 756.00"
+  },
+  {
+    "family": "range ss_net_paid 0.1%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "284.31",
+        "286.30"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 284.31 AND 286.30"
+  },
+  {
+    "family": "range ss_net_paid 0.1%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "184.80",
+        "186.10"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 184.80 AND 186.10"
+  },
+  {
+    "family": "range ss_net_paid 0.1%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "2506.95",
+        "2516.74"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 2506.95 AND 2516.74"
+  },
+  {
+    "family": "range ss_net_paid 0.1%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "59.84",
+        "60.76"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 59.84 AND 60.76"
+  },
+  {
+    "family": "range ss_net_paid 0.1%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "501.58",
+        "504.05"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 501.58 AND 504.05"
+  },
+  {
+    "family": "range ss_net_paid 1.0%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "443.25",
+        "467.18"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 443.25 AND 467.18"
+  },
+  {
+    "family": "range ss_net_paid 1.0%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "409.32",
+        "432.10"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 409.32 AND 432.10"
+  },
+  {
+    "family": "range ss_net_paid 1.0%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "257.28",
+        "273.92"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 257.28 AND 273.92"
+  },
+  {
+    "family": "range ss_net_paid 1.0%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "17.00",
+        "23.31"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 17.00 AND 23.31"
+  },
+  {
+    "family": "range ss_net_paid 1.0%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "714.70",
+        "748.02"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 714.70 AND 748.02"
+  },
+  {
+    "family": "range ss_net_paid 10.0%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "69.00",
+        "180.73"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 69.00 AND 180.73"
+  },
+  {
+    "family": "range ss_net_paid 10.0%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "3321.86",
+        "5571.44"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 3321.86 AND 5571.44"
+  },
+  {
+    "family": "range ss_net_paid 10.0%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "35.50",
+        "128.48"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 35.50 AND 128.48"
+  },
+  {
+    "family": "range ss_net_paid 10.0%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "260.50",
+        "463.40"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 260.50 AND 463.40"
+  },
+  {
+    "family": "range ss_net_paid 10.0%",
+    "ranges": [
+      [
+        "ss_net_paid",
+        "1149.20",
+        "1704.11"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_net_paid BETWEEN 1149.20 AND 1704.11"
+  },
+  {
+    "family": "box all 0.01%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2452503",
+        "2452517"
+      ],
+      [
+        "ss_net_paid",
+        "449.19",
+        "473.34"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2452503 AND 2452517 AND ss_net_paid BETWEEN 449.19 AND 473.34"
+  },
+  {
+    "family": "box all 0.01%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451172",
+        "2451181"
+      ],
+      [
+        "ss_net_paid",
+        "34.16",
+        "41.43"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451172 AND 2451181 AND ss_net_paid BETWEEN 34.16 AND 41.43"
+  },
+  {
+    "family": "box all 0.01%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2452085",
+        "2452116"
+      ],
+      [
+        "ss_net_paid",
+        "2533.60",
+        "2643.20"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2452085 AND 2452116 AND ss_net_paid BETWEEN 2533.60 AND 2643.20"
+  },
+  {
+    "family": "box all 0.01%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2452620",
+        "2452630"
+      ],
+      [
+        "ss_net_paid",
+        "3578.80",
+        "3746.04"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2452620 AND 2452630 AND ss_net_paid BETWEEN 3578.80 AND 3746.04"
+  },
+  {
+    "family": "box all 0.01%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2452463",
+        "2452491"
+      ],
+      [
+        "ss_net_paid",
+        "493.58",
+        "518.96"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2452463 AND 2452491 AND ss_net_paid BETWEEN 493.58 AND 518.96"
+  },
+  {
+    "family": "box all 0.10%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451668",
+        "2451763"
+      ],
+      [
+        "ss_net_paid",
+        "3023.04",
+        "3463.68"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451668 AND 2451763 AND ss_net_paid BETWEEN 3023.04 AND 3463.68"
+  },
+  {
+    "family": "box all 0.10%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451142",
+        "2451171"
+      ],
+      [
+        "ss_net_paid",
+        "417.80",
+        "492.08"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451142 AND 2451171 AND ss_net_paid BETWEEN 417.80 AND 492.08"
+  },
+  {
+    "family": "box all 0.10%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2452067",
+        "2452143"
+      ],
+      [
+        "ss_net_paid",
+        "1798.56",
+        "2037.75"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2452067 AND 2452143 AND ss_net_paid BETWEEN 1798.56 AND 2037.75"
+  },
+  {
+    "family": "box all 0.10%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2452108",
+        "2452161"
+      ],
+      [
+        "ss_net_paid",
+        "34.30",
+        "58.60"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2452108 AND 2452161 AND ss_net_paid BETWEEN 34.30 AND 58.60"
+  },
+  {
+    "family": "box all 0.10%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451960",
+        "2452060"
+      ],
+      [
+        "ss_net_paid",
+        "936.00",
+        "1070.55"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451960 AND 2452060 AND ss_net_paid BETWEEN 936.00 AND 1070.55"
+  },
+  {
+    "family": "box all 1.00%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451242",
+        "2451466"
+      ],
+      [
+        "ss_net_paid",
+        "599.04",
+        "931.38"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451242 AND 2451466 AND ss_net_paid BETWEEN 599.04 AND 931.38"
+  },
+  {
+    "family": "box all 1.00%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451315",
+        "2451494"
+      ],
+      [
+        "ss_net_paid",
+        "3363.85",
+        "5666.67"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451315 AND 2451494 AND ss_net_paid BETWEEN 3363.85 AND 5666.67"
+  },
+  {
+    "family": "box all 1.00%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451974",
+        "2452197"
+      ],
+      [
+        "ss_net_paid",
+        "161.40",
+        "322.56"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451974 AND 2452197 AND ss_net_paid BETWEEN 161.40 AND 322.56"
+  },
+  {
+    "family": "box all 1.00%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451426",
+        "2451539"
+      ],
+      [
+        "ss_net_paid",
+        "1884.00",
+        "2820.00"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2451426 AND 2451539 AND ss_net_paid BETWEEN 1884.00 AND 2820.00"
+  },
+  {
+    "family": "box all 1.00%",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2450973",
+        "2451136"
+      ],
+      [
+        "ss_net_paid",
+        "2281.44",
+        "3467.52"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(ss_net_paid) FROM {ss} WHERE ss_sold_date_sk BETWEEN 2450973 AND 2451136 AND ss_net_paid BETWEEN 2281.44 AND 3467.52"
+  },
+  {
+    "family": "join_month",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2452215",
+        "2452244"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(s.ss_net_paid) FROM {ss} s JOIN date_dim d ON s.ss_sold_date_sk = d.d_date_sk WHERE d_year = 2001 AND d_moy = 11"
+  },
+  {
+    "family": "join_quarter",
+    "ranges": [
+      [
+        "ss_sold_date_sk",
+        "2451636",
+        "2451726"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(s.ss_net_paid) FROM {ss} s JOIN date_dim d ON s.ss_sold_date_sk = d.d_date_sk WHERE d_year = 2000 AND d_qoy = 2"
+  },
+  {
+    "family": "join_category",
+    "ranges": [
+      [
+        "ss_item_sk",
+        "44",
+        "101993"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(s.ss_net_paid) FROM {ss} s JOIN item d ON s.ss_item_sk = d.i_item_sk WHERE i_category = 'Music' AND i_class = 'rock'"
+  },
+  {
+    "family": "join_customer",
+    "ranges": [
+      [
+        "ss_customer_sk",
+        "13",
+        "499590"
+      ]
+    ],
+    "sql": "SELECT count(*), sum(s.ss_net_paid) FROM {ss} s JOIN customer d ON s.ss_customer_sk = d.c_customer_sk WHERE c_birth_year = 1970 AND c_birth_month = 3"
+  }
+]

@@ -48,6 +48,18 @@
   }
 }
 
+/* Blog pages have no docs sidebar, so on desktop the navbar comes back as their only navigation
+   (Docs / Blog). html carries .blog-wrapper on every blog route. */
+@media (min-width: 997px) {
+  html.blog-wrapper {
+    --ifm-navbar-height: 3.75rem;
+  }
+
+  html.blog-wrapper .navbar {
+    display: flex;
+  }
+}
+
 /* The landing page starts at the very top of the window now, so the doc chrome above it reads as
    dead space: the container's standard top padding, plus a breadcrumb trail whose only entry is
    "Home" — on the home page. Scoped to that one doc (html carries .docs-doc-id-index), so every
@@ -73,4 +85,17 @@
   .navbar__brand {
     display: none;
   }
+}
+
+/* Figures in blog posts are plain Markdown: a bold line (`**Title**`), the image on its own line, then a single
+   italic run (`*Caption.*`). These rules set the title tight above its image and the caption tight below it,
+   smaller and muted, so the text of both is edited in the post and moves with it. */
+.markdown p:has(> strong:only-child):has(+ p > img:only-child) {
+  margin-bottom: 0.5rem;
+}
+
+.markdown p:has(> img:only-child) + p:has(> em:only-child) {
+  margin-top: calc(0.5rem - var(--ifm-paragraph-margin-bottom));
+  font-size: 0.875rem;
+  color: var(--ifm-color-emphasis-700);
 }

@@ -456,11 +456,12 @@ def cluster_spec(cluster_by=None, interleave: bool = True, cluster_bits=None) ->
     """The cold-base ordering a merge write declares, validated, or ``None`` (order by the primary key).
 
     ``cluster_by`` is a column or list of columns. One column, or ``interleave=False``, sorts by them in
-    order. Two or more with ``interleave`` (the default) order rows by a **rank-Morton** key: each column's
-    values are replaced by their quantile rank, and the ranks' bits are interleaved, so every column is
-    clustered about equally however its values are distributed. ``cluster_bits`` is the key's total bits
-    (the data is split into ``2**cluster_bits`` cells); ``None`` chooses it at each compaction from the
-    base's size, so a cell is just under one row group."""
+    order. Two or more with ``interleave`` (the default) order rows by a **rank-Hilbert** key: each column's
+    values are replaced by their quantile rank, and the ranks are mapped onto a Hilbert curve, so every
+    column is clustered about equally however its values are distributed. ``cluster_bits`` is the key's
+    total bits (the data is split into ``2**cluster_bits`` cells; rounded up to a multiple of the column
+    count, since every column gets the same bits); ``None`` chooses it at each compaction from the base's
+    size, so a cell is just under one row group."""
     cols = normalize_pk(cluster_by)
     if not cols:
         if cluster_bits is not None or interleave is not True:

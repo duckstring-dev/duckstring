@@ -1,6 +1,6 @@
 # Data plane: clustering a merge table's cold base
 
-Status: **built (2026-10-04).** Designed with the author on 2026-10-04, replacing a June proposal that
+Status: **built (2026-10-04); encoding revised to rank-Hilbert (2026-10-06, see the last section).** Designed with the author on 2026-10-04, replacing a June proposal that
 paired the ordering with Parquet bloom filters and external pk indexes (dropped: blooms are DuckDB's own
 business, and native min/max pruning needs no index once the data is ordered well).
 
@@ -82,6 +82,38 @@ sort on every write, which the user opts into. Without `cluster_by` a plain tabl
 (it has no primary key to fall back on). SQL Ripples accept the keys with `write = "overwrite"` too;
 `append` refuses them (a run's part is small, so ordering it buys little).
 
+## Revised: rank-Hilbert with quantile boundaries (2026-10-06)
+
+Benchmarked on TPC-DS `store_sales` up to SF100 (288M rows) in `bench/clustering/` (README and results
+there). Two findings changed the implementation:
+
+- **`NTILE` doesn't scale.** Each window sorted every full-width row once per column before the final sort.
+  On 288M rows it filled a 60 GiB spill cap and failed, on both a 2- and a 3-column set; at SF10 it wrote at
+  2.5x the cost of a plain Morton order. It also split tied values across a bucket boundary in plan order,
+  so the key wasn't deterministic.
+- **Hilbert beats Morton at the same cost.** Over the same ranks, a filter on one clustered column read
+  20 to 40% fewer rows (customer range 10% against 17% of rows), boxes slightly fewer, and the key took a
+  few seconds longer on a sort of minutes. Delta Lake makes the same split: `OPTIMIZE ZORDER BY` is
+  sampled ranks plus Z-order, Liquid Clustering the same ranks plus Hilbert.
+
+`dataplane.rank_hilbert_sql` now computes each column's bucket boundaries in one aggregate (exact
+`quantile_disc` up to `_EXACT_QUANTILE_ROWS` = 10M rows so small tables stay deterministic, else
+`approx_quantile`, a t-digest, for the numeric and temporal types it accepts), finds a row's bucket by binary
+search (one comparison per bit; the boundary at each level is picked by the bits so far, read from the
+boundary list by index, so no branching), and maps the buckets onto the curve with Skilling's transpose
+unrolled into projections. Approximate boundaries pruned identically to exact ones on every benchmark
+query; they vary slightly between multi-threaded runs, so only large layouts can differ run to run.
+Equal values share a bucket. The Hilbert transform needs equal bits per column, so `cluster_bits` is
+rounded up to a multiple of the column count (capped at 63 total); the old unequal split, remainder to
+the first columns, is gone. Measured on the unit-test shape above (1M rows, 98 row groups), two columns
+now touch 13% and 14% (rank-Morton: 15%, 20%) and three about 27%.
+
+Also considered: Delta's default of range-partitioning rows into files without sorting inside them saves
+25 to 40% of the write, but read 4 to 8 times more rows at 256 MB files (8 to 30 times at 1 GB). Delta
+skips whole files from its log; DuckDB skips row groups inside a file, so Duckstring keeps the global
+sort.
+
 ## Deferred
 
-- A Hilbert curve instead of Z-order: better locality, but awkward in SQL; the author prefers rank-Morton.
+- Splitting a very large base into key ranges and sorting each separately (bounded memory, parallel), if a
+  global sort ever spills too much. Not needed at 288M rows.

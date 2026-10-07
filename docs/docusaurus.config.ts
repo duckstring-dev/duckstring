@@ -47,7 +47,37 @@ const config: Config = {
           remarkPlugins: [remarkMath],
           rehypePlugins: [rehypeKatex],
         },
-        blog: false,
+        // Posts live in blog/ and are served at duckstring.com/blog. The blog moves to the commercial
+        // site when duckstring.com stops serving this build, so every post must set an explicit `slug`:
+        // URLs then don't depend on file names or Docusaurus's date-based routing, and survive the move.
+        blog: {
+          path: 'blog',
+          routeBasePath: 'blog',
+          blogTitle: 'Duckstring blog',
+          blogDescription: 'Engineering notes on Duckstring and data engineering with DuckDB.',
+          blogSidebarTitle: 'All posts',
+          blogSidebarCount: 'ALL',
+          showReadingTime: true,
+          authorsMapPath: 'authors.yml',
+          onInlineAuthors: 'throw',
+          onUntruncatedBlogPosts: 'throw',
+          // LaTeX in posts ($...$ inline, $$...$$ display), as in the docs. A literal dollar is written \$.
+          remarkPlugins: [remarkMath],
+          rehypePlugins: [rehypeKatex],
+          feedOptions: {
+            type: ['rss', 'atom'],
+            xslt: true,
+            copyright: `Copyright © ${new Date().getFullYear()} Duckstring.`,
+          },
+          processBlogPosts: async ({blogPosts}) => {
+            const missing = blogPosts.filter((post) => !post.metadata.frontMatter.slug);
+            if (missing.length > 0) {
+              const files = missing.map((post) => post.metadata.source).join(', ');
+              throw new Error(`Blog posts must set an explicit slug in their front matter: ${files}`);
+            }
+            return undefined;
+          },
+        },
         theme: {
           customCss: './src/css/custom.css',
         },
@@ -69,9 +99,12 @@ const config: Config = {
         alt: 'Duckstring',
         src: 'img/logo-mark.svg',
       },
-      // No items: the landing page IS the docs index, so every page already has the sidebar open —
-      // a "Docs" link would only point at the page you are on.
-      items: [],
+      // The navbar is hidden on desktop docs pages (see custom.css) and only shown on blog pages,
+      // which have no docs sidebar; these items are the way between the two.
+      items: [
+        {label: 'Docs', to: '/', activeBaseRegex: '^/(?!blog)'},
+        {label: 'Blog', to: '/blog'},
+      ],
     },
     footer: {
       style: 'dark',
@@ -87,6 +120,7 @@ const config: Config = {
         {
           title: 'More',
           items: [
+            {label: 'Blog', to: '/blog'},
             {label: 'Playground', href: 'https://playground.duckstring.com'},
             {label: 'GitHub', href: 'https://github.com/duckstring-dev/duckstring'},
             {label: 'Contact', href: 'mailto:dev@duckstring.com'},

@@ -1,0 +1,166 @@
+{
+  "256MB": {
+    "files": 64,
+    "sorted_write_s": 130.0752909169969,
+    "partitioned_write_s": 79.07239775000198,
+    "families": {
+      "point ss_sold_date_sk": {
+        "sorted_rg": 0.02585626718142754,
+        "sorted_file": 0.15479626622808434,
+        "part_rg": 0.1462363812481618
+      },
+      "range ss_sold_date_sk 0.1%": {
+        "sorted_rg": 0.02807495677455334,
+        "sorted_file": 0.15513760308856525,
+        "part_rg": 0.15169181331540424
+      },
+      "range ss_sold_date_sk 1.0%": {
+        "sorted_rg": 0.039680410030903654,
+        "sorted_file": 0.16153766922258198,
+        "part_rg": 0.1595627154813933
+      },
+      "range ss_sold_date_sk 10.0%": {
+        "sorted_rg": 0.1210892512555963,
+        "sorted_file": 0.2634267220761281,
+        "part_rg": 0.25596328870398327
+      },
+      "point ss_net_paid": {
+        "sorted_rg": 0.02506485900354304,
+        "sorted_file": 0.1415460626426473,
+        "part_rg": 0.1447961080320052
+      },
+      "range ss_net_paid 0.1%": {
+        "sorted_rg": 0.02406424866390286,
+        "sorted_file": 0.1437028182624554,
+        "part_rg": 0.1522891382377618
+      },
+      "range ss_net_paid 1.0%": {
+        "sorted_rg": 0.03558436770513295,
+        "sorted_file": 0.14948214464882806,
+        "part_rg": 0.1531297691465034
+      },
+      "range ss_net_paid 10.0%": {
+        "sorted_rg": 0.122881269773121,
+        "sorted_file": 0.247298555418406,
+        "part_rg": 0.2376495939069148
+      },
+      "box all 0.01%": {
+        "sorted_rg": 0.0013653474419235666,
+        "sorted_file": 0.032512335960804925,
+        "part_rg": 0.030574074265434077
+      },
+      "box all 0.10%": {
+        "sorted_rg": 0.003498702819929139,
+        "sorted_file": 0.02474692238486464,
+        "part_rg": 0.024902366352230084
+      },
+      "box all 1.00%": {
+        "sorted_rg": 0.015445492936760346,
+        "sorted_file": 0.070059390613703,
+        "part_rg": 0.06532934868104748
+      },
+      "join_month": {
+        "sorted_rg": 0.05589391090374601,
+        "sorted_file": 0.26282938257028654,
+        "part_rg": 0.21700688129332893
+      },
+      "join_quarter": {
+        "sorted_rg": 0.05760059520615046,
+        "sorted_file": 0.18944195756689486,
+        "part_rg": 0.17191827996111517
+      },
+      "join_category": {
+        "sorted_rg": 1.0,
+        "sorted_file": 1.0,
+        "part_rg": 1.0
+      },
+      "join_customer": {
+        "sorted_rg": 1.0,
+        "sorted_file": 1.0,
+        "part_rg": 1.0
+      }
+    }
+  },
+  "1GB": {
+    "files": 17,
+    "sorted_write_s": 116.54005149999284,
+    "partitioned_write_s": 89.27994258400577,
+    "families": {
+      "point ss_sold_date_sk": {
+        "sorted_rg": 0.02585626718142754,
+        "sorted_file": 0.27210741177658837,
+        "part_rg": 0.24625849467111158
+      },
+      "range ss_sold_date_sk 0.1%": {
+        "sorted_rg": 0.02807495677455334,
+        "sorted_file": 0.3186998932322301,
+        "part_rg": 0.3045691506867793
+      },
+      "range ss_sold_date_sk 1.0%": {
+        "sorted_rg": 0.039680410030903654,
+        "sorted_file": 0.32128331992763925,
+        "part_rg": 0.3177120045518248
+      },
+      "range ss_sold_date_sk 10.0%": {
+        "sorted_rg": 0.1210892512555963,
+        "sorted_file": 0.439471207869148,
+        "part_rg": 0.398563979605567
+      },
+      "point ss_net_paid": {
+        "sorted_rg": 0.02506485900354304,
+        "sorted_file": 0.26832930606949607,
+        "part_rg": 0.2822666077271688
+      },
+      "range ss_net_paid 0.1%": {
+        "sorted_rg": 0.02406424866390286,
+        "sorted_file": 0.3172258113333838,
+        "part_rg": 0.2706271082856745
+      },
+      "range ss_net_paid 1.0%": {
+        "sorted_rg": 0.03558436770513295,
+        "sorted_file": 0.29864635267897766,
+        "part_rg": 0.2587233887527949
+      },
+      "range ss_net_paid 10.0%": {
+        "sorted_rg": 0.122881269773121,
+        "sorted_file": 0.32985527517117674,
+        "part_rg": 0.3065422863536257
+      },
+      "box all 0.01%": {
+        "sorted_rg": 0.0013653474419235666,
+        "sorted_file": 0.11033714015044822,
+        "part_rg": 0.07075447418512212
+      },
+      "box all 0.10%": {
+        "sorted_rg": 0.003498702819929139,
+        "sorted_file": 0.09395297084736542,
+        "part_rg": 0.08240229662928739
+      },
+      "box all 1.00%": {
+        "sorted_rg": 0.015445492936760346,
+        "sorted_file": 0.15394292407688212,
+        "part_rg": 0.1880607981560254
+      },
+      "join_month": {
+        "sorted_rg": 0.05589391090374601,
+        "sorted_file": 0.4864050261852706,
+        "part_rg": 0.46696084956766776
+      },
+      "join_quarter": {
+        "sorted_rg": 0.05760059520615046,
+        "sorted_file": 0.29568305539157236,
+        "part_rg": 0.29418667534564524
+      },
+      "join_category": {
+        "sorted_rg": 1.0,
+        "sorted_file": 1.0,
+        "part_rg": 1.0
+      },
+      "join_customer": {
+        "sorted_rg": 1.0,
+        "sorted_file": 1.0,
+        "part_rg": 1.0
+      }
+    }
+  }
+}
