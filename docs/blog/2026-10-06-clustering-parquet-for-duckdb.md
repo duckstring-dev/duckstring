@@ -4,7 +4,7 @@ slug: clustering-for-pipelines
 date: 2026-10-06
 authors: [isaac]
 tags: [duckdb, parquet, performance]
-description: How to order Parquet files for efficient pipelines using multiple columns downstream queries.
+description: How to order Parquet files for efficient pipelines using multiple columns for downstream queries.
 draft: true
 ---
 
@@ -21,8 +21,8 @@ be used for multiple purposes downstream.
 
 The key insight of this article is that space-filling the *potential* values in the dataset is sub-optimal for an uneven 
 distribution of values. By first *ranking* the values from each column, and interleaving those *ranks*, much better performance can be achieved.
-This is valuable when writes are irregular, such as during a compaction operation over an appended changelog, so that the
-ranks remain relevant. Here I present a variety of alternative methods for comparison on the TPC-DS dataset.
+This is especially valuable where it's fine for a row's key to change as the table does, such as when the whole table is rewritten. 
+Here I present a variety of alternative methods for comparison on the TPC-DS dataset.
 
 <!-- truncate -->
 
@@ -61,7 +61,7 @@ the second still reads 21 of the 22.
 ## Space-filling curves for dimension reduction
 
 Space-filling curves are a mathematical construction that threads a one-dimensional path (curve) through a higher-dimensional
-space. They are self-similar at various scales, and as their fidelity increases, it enables these higher-dimensional spaces 
+space. They are self-similar at various scales, and as their fidelity increases, they enable these higher-dimensional spaces 
 to be mapped entirely by the path.
 This is very useful in multiple fields, due to these mappings approximately preserving proximity in the higher-dimensional
 space when condensed down to the single dimension path.
@@ -81,7 +81,7 @@ their way through the multi-dimensional space.
 
 Both visit every cell only once, but the Z-order makes long jumps at the edge of each quadrant - row groups that cover either end
 of these extremes have very poor separation. The Hilbert curve, comparatively, only ever steps to a neighbouring cell. 
-The question for which to use comes down to whether the extra complexity of evaluating the Hilbert curve is deserved through
+The question for which to use comes down to whether the extra complexity of evaluating the Hilbert curve is justified by
 performance improvements.
 
 ## Rank-space vs value-space
@@ -145,13 +145,12 @@ few joins in the style of TPC-DS. This article reports only the 1% results, but 
 The metric to pay attention to is the 'share of rows read' - the proportion of the 
 table's rows that could not be skipped. This is then independent of hardware.
 
-Query time is the median of five warm runs on a 10-core laptop with 32 GB of memory, using DuckDB 1.5. Everything is in the
-benchmark directory for anyone who wants to run it themselves.
+Query time is the median of five warm runs on a 10-core laptop with 32 GB of memory, using DuckDB 1.5. 
 
 ### Theory
 
-In a perfect reduction, assuming independent columns, every clustered column is spread evenly between the minimum and maximum. 
-For $k$ clustered columns, this forms a $k$-dimensional unit cube, with rows spread evenly through it. Correlation between 
+Measured by rank, every clustered column is spread evenly between the minimum and maximum. Assuming independence, 
+for $k$ clustered columns, this forms a $k$-dimensional unit cube, with rows spread evenly through it. Correlation between 
 columns allows better performance - for the TPC-DS dataset used in these tests, the columns are near independent.
 
 Each of the $N$ row groups holds $1/N$ of the rows, so the box spanned by its min/max values has a volume of at least
@@ -239,7 +238,7 @@ can be done rarely to mitigate the cost (e.g. during compaction of a large datas
 
 ![Time to write the clustered table for each order](/img/blog/clustering/write-cost.svg)
 
-*TPC-DS SF100, clustered on (date, net paid), 7 bits per column. One run each.*
+*TPC-DS SF100, clustered on (`ss_sold_date_sk`, `ss_net_paid`), 7 bits per column. One run each.*
 
 This shows the results of one run - note that between-run variation was around 20%, so much of the performance difference is
 hidden behind noise. The ranks need not be exact, so the ranking part of the process used approximate quantiles.
@@ -247,7 +246,7 @@ hidden behind noise. The ranks need not be exact, so the ranking part of the pro
 Writing the table without sorting took around 30 seconds. The lexicographic sort approximates the minimum that could be 
 expected by any sorted write, taking around 160 seconds - anything beyond this is likely the evaluation time. 
 Morton added around 20s, while rank-Morton was another 20s beyond that. The ranking itself appears to cost 
-around 20s.
+around 20s - though closer to 12s when measured directly below.
 
 Interestingly, rank-Hilbert took around the same time as rank-Morton, indicating that the difference in evaluation
 costs is well below the noise. 
@@ -277,7 +276,7 @@ storage, that saves a request per file. I tried the same, partitioning into file
 
 ![Share of rows read when rows are sorted within files, against files that only cover key ranges, at 256 MB and 1 GB](/img/blog/clustering/file-level.svg)
 
-*TPC-DS SF100, rank-Hilbert key on (date, net paid). Lower is better.*
+*TPC-DS SF100, rank-Hilbert key on (`ss_sold_date_sk`, `ss_net_paid`). Lower is better.*
 
 It saved 25 to 40% of the write time, but read 4 to 8 times more rows with 256 MB files, and more again with 1 GB
 files. DuckDB prunes at the row group, inside the file, so for DuckDB most of the benefit comes from the order
@@ -324,7 +323,7 @@ pond.merge_table("sales", rows, pk="ticket_id", cluster_by=["sold_date", "net_pa
 ```
 
 For merge tables this applies only during compaction, which occurs any time a table's warm, freshness-tagged data
-exceeds the existing cold, compacted data. That keeps recent data recency-ordered (which tends to be most useful in
+exceeds the existing cold, compacted data (after reaching a minimum size). That keeps recent data recency-ordered (which tends to be most useful in
 incremental pipelines), and older data rank-Hilbert-ordered. For overwritten tables (using `pond.write_table()`), it's
 applied at every write.
 

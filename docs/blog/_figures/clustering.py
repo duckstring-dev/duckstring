@@ -224,17 +224,6 @@ def fig_file_level() -> str:
                  pct, [0, 0.1, 0.2, 0.3, 0.4, 0.5], label_w=180)
 
 
-def fig_joins(q) -> str:
-    """Rows read by joins through a filtered dimension, clustered on (date, item, customer). DuckDB passes the min
-    and max of the matching keys into the fact table's scan, so only a narrow key range prunes."""
-    cats = [n for _, n in LAYOUT_NAMES]
-    joins = [("November 2001 (dates)", BLUE, "join_month"), ("Q2 2000 (dates)", ORANGE, "join_quarter"),
-             ("Music, rock (items)", AQUA, "join_category")]
-    series = [(n, c, [q[("keys", lay, f)]["read"] for lay, _ in LAYOUT_NAMES]) for n, c, f in joins]
-    return hbars("Share of rows read by joins through a filtered dimension", cats, series, 1.0, pct,
-                 [0, 0.25, 0.5, 0.75, 1.0], highlight="Rank-Hilbert")
-
-
 RAMP = ["#9ec5f4", "#5598e7", "#2a78d6", "#1c5cab"]  # one hue, light to dark, validated as an ordinal ramp
 
 
@@ -296,7 +285,7 @@ def main() -> None:
     figs = {"curves.svg": fig_curves(), "row-groups.svg": fig_row_groups(), "buckets.svg": fig_buckets(),
             "pruning-skewed.svg": fig_pruning_skewed(q), "pruning-keys.svg": fig_pruning_keys(q),
             "query-time.svg": fig_query_time(q), "write-cost.svg": fig_write_cost(e),
-            "file-level.svg": fig_file_level(), "bound.svg": fig_bound(), "joins.svg": fig_joins(q)}
+            "file-level.svg": fig_file_level(), "bound.svg": fig_bound()}
     for name, content in figs.items():
         (OUT / name).write_text(content)
         print(OUT / name)
