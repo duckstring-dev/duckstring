@@ -1,107 +1,19 @@
-"""SVG figures for the clustering blog post, drawn from the saved results (no plotting dependency):
+"""SVG figures for the clustering post, drawn from the benchmark's saved results in bench/clustering/results:
 
-    uv run python bench/clustering/figures.py [OUT_DIR]
-
-OUT_DIR defaults to docs/static/img/blog/clustering. The figures use the dark chart palette, since the site is
-dark only: categorical blue, orange and aqua in that fixed order (validated for colour-vision deficiency on the
-dark surface), neutral grey for reference bars.
+    uv run python docs/blog/_figures/clustering.py
 """
 
 from __future__ import annotations
 
 import json
 import random
-import sys
 from pathlib import Path
 
-HERE = Path(__file__).parent
-OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parents[1] / "docs" / "static" / "img" / "blog" / "clustering"
+from svg import AQUA, BLUE, GRID, MUTED, NEUTRAL, ORANGE, SURFACE, TEXT, TEXT_2, hbars, pct, svg, text
 
-SURFACE = "#1a1a19"
-TEXT = "#ffffff"
-TEXT_2 = "#c3c2b7"
-MUTED = "#8a897f"
-GRID = "#383835"
-BLUE, ORANGE, AQUA = "#3987e5", "#d95926", "#199e70"
-NEUTRAL = "#6f6e66"
-FONT = "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif"
-
-
-def svg(width: int, height: int, body: list[str], title: str) -> str:
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" '
-            f'height="{height}" role="img" aria-label="{title}" font-family="{FONT}">\n'
-            f'<title>{title}</title>\n'
-            f'<rect width="{width}" height="{height}" rx="8" fill="{SURFACE}"/>\n' + "\n".join(body) + "\n</svg>\n")
-
-
-def text(x, y, s, size=13, fill=TEXT_2, anchor="start", weight=400) -> str:
-    s = s.replace("&", "&amp;").replace("<", "&lt;")
-    return (f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" fill="{fill}" text-anchor="{anchor}" '
-            f'font-weight="{weight}">{s}</text>')
-
-
-def bar(x, y, w, h, fill, rounded="end") -> str:
-    """A horizontal bar anchored at ``x``; the data end (right) gets a 4px radius."""
-    if w <= 0:
-        return ""
-    r = min(4, w / 2, h / 2)
-    return (f'<path d="M{x:.1f},{y:.1f} h{w - r:.1f} a{r},{r} 0 0 1 {r},{r} v{h - 2 * r:.1f} '
-            f'a{r},{r} 0 0 1 -{r},{r} h-{w - r:.1f} z" fill="{fill}"/>')
-
-
-def legend(x, y, items) -> list[str]:
-    out = []
-    for name, color in items:
-        out.append(f'<rect x="{x}" y="{y - 10}" width="12" height="12" rx="3" fill="{color}"/>')
-        out.append(text(x + 18, y, name, 13, TEXT_2))
-        x += 26 + 7.2 * len(name)
-    return out
-
-
-def hbars(title: str, categories: list[str], series: list[tuple[str, str, list]], xmax: float, fmt, ticks,
-          width=720, label_w=150, note=None, highlight=None) -> str:
-    """Grouped horizontal bars: one group per category, one bar per series, values labelled at the bar end.
-    A ``None`` value draws a dashed "did not finish" outline instead of a bar."""
-    top = 56 if len(series) > 1 else 40
-    bar_h, gap, group_gap = 14, 2, 14
-    group_h = len(series) * (bar_h + gap) - gap
-    plot_w = width - label_w - 70
-    height = top + len(categories) * (group_h + group_gap) + 34 + (22 if note else 0)
-    body = [text(20, 26, title, 15, TEXT, weight=600)]
-    if len(series) > 1:
-        body += legend(label_w, 48, [(n, c) for n, c, _ in series])
-    x0 = label_w
-    bottom = top + len(categories) * (group_h + group_gap) - group_gap
-    for t in ticks:
-        x = x0 + plot_w * t / xmax
-        body.append(f'<line x1="{x:.1f}" y1="{top - 6}" x2="{x:.1f}" y2="{bottom + 4}" stroke="{GRID}" stroke-width="1"/>')
-        body.append(text(x, bottom + 20, fmt(t), 11, MUTED, "middle"))
-    for gi, cat in enumerate(categories):
-        gy = top + gi * (group_h + group_gap)
-        weight = 600 if highlight and cat == highlight else 400
-        body.append(text(x0 - 12, gy + group_h / 2 + 4.5, cat, 13, TEXT if weight == 600 else TEXT_2, "end", weight))
-        for si, (_, color, values) in enumerate(series):
-            v = values[gi]
-            y = gy + si * (bar_h + gap)
-            if v is None:
-                w = plot_w
-                body.append(f'<rect x="{x0}" y="{y}" width="{w}" height="{bar_h}" rx="4" fill="none" '
-                            f'stroke="{MUTED}" stroke-width="1.5" stroke-dasharray="4 3"/>')
-                body.append(text(x0 + 10, y + bar_h - 3, "did not finish: 60 GiB of spill", 12, TEXT_2))
-                continue
-            w = max(2.0, plot_w * min(v, xmax) / xmax)
-            if len(series) == 1 and highlight and cat == highlight:
-                color = BLUE
-            body.append(bar(x0, y, w, bar_h, color))
-            body.append(text(x0 + w + 6, y + bar_h - 3, fmt(v), 12, TEXT_2))
-    if note:
-        body.append(text(20, height - 14, note, 12, MUTED))
-    return svg(width, height, body, title)
-
-
-def pct(v: float) -> str:
-    return f"{v:.0%}" if v >= 0.095 or v == 0 else f"{v:.1%}"
-
+ROOT = Path(__file__).resolve().parents[3]
+HERE = ROOT / "bench" / "clustering"
+OUT = ROOT / "docs" / "static" / "img" / "blog" / "clustering"
 
 # ---------------------------------------------------------------------------------------------- data
 
@@ -303,15 +215,10 @@ def fig_query_time(q) -> str:
 def fig_write_cost(e) -> str:
     rows = [("No sort", ("skewed", "generated")), ("Sorted (lexicographic)", ("skewed", "lexicographic")),
             ("Morton", ("skewed", "morton")), ("Hilbert", ("skewed", "hilbert")),
-            ("Rank-Morton, window ranks", ("skewed", "rank_morton")),
-            ("Rank-Hilbert, exact ranks", ("skewed", "qrank_hilbert")),
-            ("Rank-Hilbert", ("skewed", "arank_hilbert"))]
-    vals = []
-    for _, k in rows:
-        r = e.get(k)
-        vals.append(None if r is None or r.get("error") else r["stats_s"] + r["write_s"])
-    return hbars("Time to write the clustered table (s)", [n for n, _ in rows], [("seconds", NEUTRAL, vals)], 320,
-                 lambda v: f"{v:.0f} s", [0, 80, 160, 240, 320], label_w=210,
+            ("Rank-Morton", ("skewed", "arank_morton")), ("Rank-Hilbert", ("skewed", "arank_hilbert"))]
+    vals = [e[k]["stats_s"] + e[k]["write_s"] for _, k in rows]
+    return hbars("Time to write the clustered table (s)", [n for n, _ in rows], [("seconds", NEUTRAL, vals)], 240,
+                 lambda v: f"{v:.0f} s", [0, 60, 120, 180, 240], label_w=190,
                  note="TPC-DS SF100, clustered on (date, net paid), 7 bits per column. One run each; runs varied by ~20%.",
                  highlight="Rank-Hilbert")
 
