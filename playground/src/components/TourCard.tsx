@@ -3,13 +3,13 @@
 import { useEffect, useRef } from 'react';
 import { usePlaygroundStore, THEME_BRAND } from '@/lib/store';
 import { useIsMobile } from '@/lib/useIsMobile';
-import { useTourStore, REVEAL_MS } from '@/lib/tour';
+import { useTourStore } from '@/lib/tour';
 import { TOUR_STEPS, CHAPTER_TITLES } from '@/lib/tourSteps';
 import { initialTourMode } from '@/lib/tourStorage';
 
 // The tour's card. On desktop and tablets it floats over the bottom-left of the canvas, clear of the
 // sidebar. On a phone it spans the screen: above the bottom sheet when the step points at a sidebar
-// control, at the bottom otherwise, and it hides after each step so the visitor can see the UI.
+// control, at the bottom otherwise.
 
 // `backticks` → code.
 function Copy({ text }: { text: string }) {
@@ -107,17 +107,17 @@ export function TourCard() {
         if (t.phase === 'prompt' || t.phase === 'confirm') t.decline();
         else t.skip();
       } else if (e.key === 'ArrowRight' && t.phase === 'step') {
-        t.primary({ mobile: isMobile });
+        t.primary();
       } else if (e.key === 'ArrowLeft' && t.phase === 'step') {
         t.back();
-      } else if (e.key === 'ArrowRight' && (t.phase === 'waiting' || t.phase === 'revealing')) {
+      } else if (e.key === 'ArrowRight' && t.phase === 'waiting') {
         t.hurry();
       } else return;
       e.preventDefault();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, isMobile, tour]);
+  }, [phase, tour]);
 
   // The action buttons re-render with the store, so a done action shows as Next.
   const actionDone = usePlaygroundStore((s) => (step.action ? step.action.done(s) : true));
@@ -148,23 +148,15 @@ export function TourCard() {
     outline: 'none',
   };
 
-  if (phase === 'waiting' || phase === 'revealing') {
+  if (phase === 'waiting') {
     return (
       <div id="ds-tour-card" data-testid="tour-pill" role="status" style={{ ...panel, padding: '4px 4px 4px 14px', overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ flex: 1, fontSize: 12, color: '#a1a1aa' }}>
-            {phase === 'waiting' ? `${waitLabel ?? 'Running'}…` : 'Have a look…'}
-          </span>
+          <span style={{ flex: 1, fontSize: 12, color: '#a1a1aa' }}>{`${waitLabel ?? 'Running'}…`}</span>
           <Button onClick={() => tour().hurry()} testId="tour-hurry">
-            {phase === 'waiting' ? 'Skip ahead' : 'Next'}
+            Skip ahead
           </Button>
         </div>
-        {phase === 'revealing' && (
-          <div
-            className="ds-tour-progress"
-            style={{ position: 'absolute', left: 0, bottom: 0, height: 2, background: THEME_BRAND, animationDuration: `${REVEAL_MS}ms` }}
-          />
-        )}
       </div>
     );
   }
@@ -259,7 +251,7 @@ export function TourCard() {
             Finish
           </Button>
         )}
-        <Button primary onClick={() => tour().primary({ mobile: isMobile })} testId="tour-next">
+        <Button primary onClick={() => tour().primary()} testId="tour-next">
           {primaryLabel}
         </Button>
       </div>

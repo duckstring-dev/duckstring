@@ -158,11 +158,17 @@ aren't called push triggers). Curly brackets say what the tour does on screen.
 ## As built
 
 - Phone portrait: the card spans the screen width, at the top when the step outlines a sidebar control (so
-  the open bottom sheet stays visible) and at the bottom otherwise. After each Next the card hides for 2.5 s
-  (a small "Have a look" bar with a Next button stays) so the visitor sees what it covered. Desktop moves on
-  straight away. The canvas framing pads whichever edge the card covers.
-- While a step waits on the simulation, the card shrinks to a bar with "Skip ahead", the speed goes to 10x,
-  and it returns to 1x when the wait ends. The visitor's own speed comes back when the tour ends.
+  the open bottom sheet stays visible) and at the bottom otherwise. The canvas framing pads whichever edge
+  the card covers. A pause after every step (card hidden so the visitor sees what it covered) was tried and
+  dropped: only the Wave's start-up needs it, and that's already a wait.
+- While a step waits on the simulation, the card shrinks to a bar with "Skip ahead". The Wave's start-up (the
+  visitor's first look at the pipeline running) plays at 1x and settles in about 20 s; the later waits run
+  at 10x. Speed returns to 1x when a wait ends, and the visitor's own speed comes back when the tour ends.
+- Highlights: canvas targets get a cyan ring and sidebar controls an outline, both pulsing. On desktop, where
+  a target is small against the screen, each step opens with about a second of large flashes before the
+  pulse. The flash class alternates by step so it restarts even when the target doesn't change.
+- Step 3 is two steps (`transactions.ingest`, then `reports`), one sentence each, so the highlight doesn't
+  jump while the card is up. Chapter 1 has seven steps.
 - Pressing the real control (Wave, Tide, σ) also advances the tour, as the card's button would.
 - The mobile bottom sheet's open state, the Tide input's draft value and a `formEpoch` (remounts the
   uncontrolled sidebar inputs after the tour sets a value) moved into the Playground store.

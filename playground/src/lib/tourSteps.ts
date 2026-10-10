@@ -18,8 +18,6 @@ export interface TourContext {
   store: PlaygroundState;
   // Select and ring a target, outline its control and frame it ('all' frames the whole graph).
   focus(target: TourTarget, frame?: 'all' | 'target'): void;
-  // Run `fn` after `ms`, unless the step changes first.
-  later(ms: number, fn: () => void): void;
 }
 
 export interface TourWait {
@@ -27,6 +25,7 @@ export interface TourWait {
   until: (s: PlaygroundState, since: PlaygroundState) => boolean;
   fallbackMs: number; // real time, so the tour can't hang
   label: string; // shown while the tour is hidden
+  speed?: number; // simulation speed while waiting (default WAIT_SPEED)
 }
 
 export interface TourStep {
@@ -140,12 +139,19 @@ export const TOUR_STEPS: TourStep[] = [
     advance: 'next',
   },
   {
+    id: 'shorter-ripples',
+    chapter: 1,
+    title: 'Shorter steps',
+    body: "Ideally, shorter Ripples like this one wouldn't run more often than that.",
+    target: { ripple: 'transactions.ingest' },
+    advance: 'next',
+  },
+  {
     id: 'from-the-end',
     chapter: 1,
     title: 'Running from the end',
-    body: "Ideally, shorter Ripples like this one wouldn't run more often than that. To do this, Duckstring runs from the end of the pipeline instead of the beginning, sending demand to everything upstream.",
-    target: { ripple: 'transactions.ingest' },
-    setup: (ctx) => ctx.later(2500, () => ctx.focus({ pond: 'reports' })),
+    body: 'To do this, Duckstring runs from the end of the pipeline instead of the beginning, sending demand to everything upstream.',
+    target: { pond: 'reports' },
     advance: 'next',
   },
   {
@@ -162,11 +168,13 @@ export const TOUR_STEPS: TourStep[] = [
       },
       done: (s) => hasTrigger(s, 'reports', 'wave'),
     },
+    // The visitor's first look at the pipeline running, so at real speed: it settles in about 20 s.
     advance: {
-      label: 'Running fast until the pipeline settles',
+      label: 'Watching the pipeline start up',
+      speed: 1,
       until: (s, since) =>
         rippleSettled(s, since, 'reports.monthly_summary') && rippleSettled(s, since, 'transactions.ingest'),
-      fallbackMs: 10000,
+      fallbackMs: 40000,
     },
   },
   {

@@ -72,23 +72,56 @@ body {
 .ds-tour-outline {
   border-radius: 6px;
 }
-@keyframes ds-tour-progress {
-  from { width: 0; }
-  to { width: 100%; }
+/* On desktop the target is small against a wide screen, so it opens with a second of large flashes
+   before settling into the pulse. The two names are identical: the tour alternates them by step so
+   the flash restarts even when the target doesn't change. */
+@keyframes ds-tour-flash-0 {
+  0%, 50% {
+    outline-width: 6px;
+    outline-offset: 24px;
+    box-shadow: 0 0 0 20px rgba(6, 196, 230, 0.3), 0 0 48px 24px rgba(6, 196, 230, 0.45);
+  }
+  25%, 75% {
+    outline-width: 3px;
+    outline-offset: 6px;
+    box-shadow: 0 0 0 6px rgba(6, 196, 230, 0.2), 0 0 24px 8px rgba(6, 196, 230, 0.25);
+  }
+  100% {
+    outline-width: 2px;
+    outline-offset: 3px;
+    box-shadow: 0 0 0 0 rgba(6, 196, 230, 0.7);
+  }
 }
-.ds-tour-progress {
-  animation-name: ds-tour-progress;
-  animation-timing-function: linear;
-  animation-fill-mode: forwards;
+@keyframes ds-tour-flash-1 {
+  0%, 50% {
+    outline-width: 6px;
+    outline-offset: 24px;
+    box-shadow: 0 0 0 20px rgba(6, 196, 230, 0.3), 0 0 48px 24px rgba(6, 196, 230, 0.45);
+  }
+  25%, 75% {
+    outline-width: 3px;
+    outline-offset: 6px;
+    box-shadow: 0 0 0 6px rgba(6, 196, 230, 0.2), 0 0 24px 8px rgba(6, 196, 230, 0.25);
+  }
+  100% {
+    outline-width: 2px;
+    outline-offset: 3px;
+    box-shadow: 0 0 0 0 rgba(6, 196, 230, 0.7);
+  }
+}
+@media (min-width: 769px) {
+  .ds-tour-flash-0 {
+    animation: ds-tour-flash-0 1.2s ease-in-out, ds-tour-pulse 1.6s ease-out 1.2s infinite;
+  }
+  .ds-tour-flash-1 {
+    animation: ds-tour-flash-1 1.2s ease-in-out, ds-tour-pulse 1.6s ease-out 1.2s infinite;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .ds-tour-ring,
-  .ds-tour-outline {
+  .ds-tour-outline,
+  .ds-tour-flash-0,
+  .ds-tour-flash-1 {
     animation: none;
-  }
-  .ds-tour-progress {
-    animation: none;
-    width: 100%;
-    opacity: 0.4;
   }
 }

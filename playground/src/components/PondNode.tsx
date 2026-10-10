@@ -3,7 +3,7 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, stateColor, nodeFill, THEME_PUSH } from '@/lib/store';
-import { useTourStore } from '@/lib/tour';
+import { useTourRing } from '@/lib/tour';
 import { DemandIndicators } from './DemandIndicators';
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
@@ -20,7 +20,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const selectedPondId = usePlaygroundStore((s) => s.selectedPondId);
   const selectPond = usePlaygroundStore((s) => s.selectPond);
   const now = usePlaygroundStore((s) => s.now);
-  const ringed = useTourStore((t) => t.ring === pondId);
+  const ringClass = useTourRing(pondId);
   const pulseTagGen = usePlaygroundStore((s) => s.pulseTags[pondId]);
 
   if (!pond || !ps) return null;
@@ -32,7 +32,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
 
   return (
     <div
-      className={ringed ? 'ds-tour-ring' : undefined}
+      className={ringClass}
       onClick={(e) => {
         e.stopPropagation();
         selectPond(pondId);

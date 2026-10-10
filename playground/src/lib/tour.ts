@@ -8,12 +8,10 @@ import { TOUR_STEPS, pondByName, rippleByName, type TourControl, type TourStep, 
 // drives the Playground store, and runs the simulation fast while a step waits on it.
 
 // prompt: the first-visit offer · confirm: asking before a reset · step: a card is showing ·
-// waiting: hidden while the simulation runs to a condition · revealing: hidden briefly (phones) so
-// the visitor can see what the card was covering.
-export type TourPhase = 'off' | 'prompt' | 'confirm' | 'step' | 'waiting' | 'revealing';
+// waiting: hidden while the simulation runs to a condition.
+export type TourPhase = 'off' | 'prompt' | 'confirm' | 'step' | 'waiting';
 
 export const WAIT_SPEED = 10;
-export const REVEAL_MS = 2500;
 
 interface TourState {
   phase: TourPhase;
@@ -28,7 +26,7 @@ interface TourState {
   offer(): void;
   requestStart(): void;
   start(): void;
-  primary(opts: { mobile: boolean }): void;
+  primary(): void;
   back(): void;
   finish(): void;
   skip(): void;
@@ -81,7 +79,7 @@ export const useTourStore = create<TourState>((set, get) => {
     const s = play();
     s.setTideDraft(null);
     focus(step.target ?? {}, step.frame);
-    step.setup?.({ store: play(), focus, later });
+    step.setup?.({ store: play(), focus });
     watchAction(step);
   }
 
@@ -93,7 +91,7 @@ export const useTourStore = create<TourState>((set, get) => {
       if (get().phase === 'step' && action.done(s)) {
         unsubscribe?.();
         unsubscribe = null;
-        get().primary({ mobile: false });
+        get().primary();
       }
     });
   }
@@ -104,7 +102,7 @@ export const useTourStore = create<TourState>((set, get) => {
     clearPending();
     const since = play();
     if (since.paused) since.togglePause();
-    since.setSpeed(WAIT_SPEED);
+    since.setSpeed(w.speed ?? WAIT_SPEED);
     set((t) => ({ phase: 'waiting', waitLabel: w.label, frame: { ids: null, seq: t.frame.seq + 1 } }));
     let resolved = false;
     const done = (how: 'until' | 'fallback' | 'hurry') => {
@@ -164,8 +162,8 @@ export const useTourStore = create<TourState>((set, get) => {
     },
 
     // The card's main button: run the step's action if it hasn't been done, then move on (through
-    // the step's wait, or a short reveal on phones, or straight to the next step).
-    primary({ mobile }) {
+    // the step's wait, if it has one).
+    primary() {
       const { index, phase } = get();
       if (phase !== 'step') return;
       clearPending(); // drop the action watcher before the action itself would trigger it
@@ -173,13 +171,6 @@ export const useTourStore = create<TourState>((set, get) => {
       if (step.action && !step.action.done(play())) step.action.run(play());
       if (index === TOUR_STEPS.length - 1) return end('done');
       if (step.advance !== 'next') return wait(index, step);
-      if (mobile) {
-        clearPending();
-        set({ phase: 'revealing' });
-        hurryNow = () => open(index + 1);
-        later(REVEAL_MS, () => open(index + 1));
-        return;
-      }
       open(index + 1);
     },
 
@@ -208,9 +199,22 @@ export const useTourStore = create<TourState>((set, get) => {
   };
 });
 
+// The highlight's flash class alternates by step, so its animation restarts on every step even when
+// the same element stays highlighted (a changed animation-name restarts it).
+function flashClass(index: number): string {
+  return `ds-tour-flash-${index % 2}`;
+}
+
+// The class for a canvas node: the ring while the current step targets it.
+export function useTourRing(nodeId: string): string | undefined {
+  return useTourStore((t) => (t.ring === nodeId && t.phase !== 'off' ? `ds-tour-ring ${flashClass(t.index)}` : undefined));
+}
+
 // Props for a sidebar control the tour can point at: its `data-tour` name, plus the outline class
 // while the current step targets it.
 export function useTourMark(control: TourControl): { 'data-tour': TourControl; className?: string } {
-  const outlined = useTourStore((t) => t.outline === control && t.phase !== 'off');
-  return { 'data-tour': control, className: outlined ? 'ds-tour-outline' : undefined };
+  const className = useTourStore((t) =>
+    t.outline === control && t.phase !== 'off' ? `ds-tour-outline ${flashClass(t.index)}` : undefined
+  );
+  return { 'data-tour': control, className };
 }
