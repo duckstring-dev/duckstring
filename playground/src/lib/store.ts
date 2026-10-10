@@ -59,7 +59,7 @@ function initialPondState(): PondRunState {
     isBlocked: false,
     runsStarted: 0,
     runsCompleted: 0,
-    genStartTimes: {},
+    startTimesByF: {},
     completionTimes: [],
     durations: [],
   };
@@ -134,6 +134,22 @@ function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'pondStates' | 'rippl
 
 const demoState = buildDemoState();
 
+// A name-based fingerprint of the graph a visitor can edit (Ponds, Sources, Ripples, parents, durations,
+// variability, windows), so "has the visitor changed the example?" doesn't depend on generated ids.
+export function graphSignature(s: Pick<PlaygroundState, 'ponds' | 'ripples'>): string {
+  const pn = (id: PondId) => s.ponds[id]?.name ?? id;
+  const rn = (id: RippleId) => s.ripples[id]?.name ?? id;
+  const ponds = Object.values(s.ponds)
+    .map((p) => `${p.name}<${p.sources.map(pn).sort().join(',')}>${JSON.stringify(p.windows ?? [])}`)
+    .sort();
+  const ripples = Object.values(s.ripples)
+    .map((r) => `${pn(r.pondId)}.${r.name}<${r.parents.map(rn).sort().join(',')}>${r.durationMs}~${r.variability}`)
+    .sort();
+  return `${ponds.join('|')}#${ripples.join('|')}`;
+}
+
+const DEMO_SIGNATURE = graphSignature(demoState);
+
 export interface PlaygroundState {
   ponds: Record<PondId, Pond>;
   pondStates: Record<PondId, PondRunState>;
@@ -148,8 +164,17 @@ export interface PlaygroundState {
   selectedTriggerId: PondId | null;
   triggers: Record<PondId, ActiveTrigger>;
   pulseTags: Record<PondId, number>;
+  // Mobile bottom sheet: open/closed. Selecting a node opens it; the tour also sets it directly.
+  sheetOpen: boolean;
+  // The Tide staleness input (seconds) under the Triggers row; null while hidden.
+  tideDraft: string | null;
+  // Bumped when something other than the inputs themselves changes a value they show (the tour, a
+  // reset), so the uncontrolled sidebar inputs remount with the new value.
+  formEpoch: number;
 
-  addPond(): void;
+  // Adds a Pond with one 1 s Ripple and selects it. With no options it links as a Sink of the
+  // selected Pond (the sidebar's behaviour); `source` names the Source explicitly. Returns its id.
+  addPond(opts?: { name?: string; rippleName?: string; source?: PondId }): PondId;
   addRipple(pondId: PondId, parentId?: RippleId): void;
   renamePond(pondId: PondId, name: string): void;
   setPondWindows(pondId: PondId, windows: Window[]): void;
@@ -182,6 +207,14 @@ export interface PlaygroundState {
   kill(pondId: PondId): void;
 
   clearLogs(): void;
+
+  // Rebuild the example pipeline and clear triggers, logs and selection.
+  resetToDemo(): void;
+  // Whether the graph still matches the example (ignoring run state and triggers).
+  isDemoGraph(): boolean;
+  setSheetOpen(open: boolean): void;
+  setTideDraft(draft: string | null): void;
+  bumpFormEpoch(): void;
 
   setSpeed(speed: number): void;
   togglePause(): void;
@@ -229,18 +262,22 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   selectedTriggerId: null,
   triggers: {},
   pulseTags: {},
+  sheetOpen: false,
+  tideDraft: null,
+  formEpoch: 0,
 
-  addPond() {
+  addPond(opts) {
     // If a pond is selected, link the new pond as its sink.
-    const sourcePondId = get().selectedPondId;
+    const sourcePondId = opts ? opts.source : get().selectedPondId;
     const id = newPondId();
-    const pond: Pond = { id, name: newPondName(), sources: [] };
+    const pond: Pond = { id, name: opts?.name ?? newPondName(), sources: [] };
     rippleCounters[id] = 0;
     const rippleId = newRippleId();
+    const rippleName = newRippleName(id);
     const ripple: Ripple = {
       id: rippleId,
       pondId: id,
-      name: newRippleName(id),
+      name: opts?.rippleName ?? rippleName,
       parents: [],
       durationMs: 1000,
       variability: 0,
@@ -257,6 +294,7 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     if (sourcePondId && get().ponds[sourcePondId]) {
       get().linkPonds(sourcePondId, id);
     }
+    return id;
   },
 
   addRipple(pondId, parentId) {
@@ -435,20 +473,31 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   },
 
   selectPond(pondId) {
-    set({ selectedPondId: pondId, selectedRippleId: null, selectedTriggerId: null });
+    set((s) => ({
+      selectedPondId: pondId,
+      selectedRippleId: null,
+      selectedTriggerId: null,
+      sheetOpen: pondId ? true : s.sheetOpen,
+    }));
   },
 
   selectRipple(rippleId) {
     const ripple = get().ripples[rippleId ?? ''];
-    set({
+    set((s) => ({
       selectedRippleId: rippleId,
       selectedPondId: ripple?.pondId ?? null,
       selectedTriggerId: null,
-    });
+      sheetOpen: rippleId ? true : s.sheetOpen,
+    }));
   },
 
   selectTrigger(pondId) {
-    set({ selectedTriggerId: pondId, selectedRippleId: null, selectedPondId: null });
+    set((s) => ({
+      selectedTriggerId: pondId,
+      selectedRippleId: null,
+      selectedPondId: null,
+      sheetOpen: pondId ? true : s.sheetOpen,
+    }));
   },
 
   clearSelection() {
@@ -510,6 +559,38 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
 
   clearLogs() {
     set({ logs: [] });
+  },
+
+  resetToDemo() {
+    // Settle the engine's log buffer first, so events from the old graph don't land after the reset.
+    drainLog();
+    set((s) => ({
+      ...buildDemoState(),
+      triggers: {},
+      pulseTags: {},
+      logs: [],
+      selectedPondId: null,
+      selectedRippleId: null,
+      selectedTriggerId: null,
+      tideDraft: null,
+      formEpoch: s.formEpoch + 1,
+    }));
+  },
+
+  isDemoGraph() {
+    return graphSignature(get()) === DEMO_SIGNATURE;
+  },
+
+  setSheetOpen(open) {
+    set({ sheetOpen: open });
+  },
+
+  setTideDraft(draft) {
+    set({ tideDraft: draft });
+  },
+
+  bumpFormEpoch() {
+    set((s) => ({ formEpoch: s.formEpoch + 1 }));
   },
 
   setSpeed(speed) {

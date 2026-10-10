@@ -331,7 +331,7 @@ function startPondRun(s: OrchestrState, pid: PondId, now: number): void {
   for (const r of ripplesOf(s, pid)) rippleAddTarget(s, r, ps.startF);
 
   ps.runsStarted += 1;
-  ps.genStartTimes = { ...ps.genStartTimes, [ps.runsStarted]: now };
+  ps.startTimesByF = { ...ps.startTimesByF, [ps.startF]: now };
   emit('pond-start', `${pname(s, pid)} pond run #${ps.runsStarted} started (${startedAsPush ? 'push' : 'pull'}, freshness age ${ageStr(ps.startF, now)})`);
 }
 
@@ -384,11 +384,15 @@ function completeRipple(s: OrchestrState, rid: RippleId, now: number): boolean {
     ps.endF = newEnd;
     ps.runsCompleted += 1;
     ps.completionTimes = pushHistory(ps.completionTimes, now);
-    const started = ps.genStartTimes[ps.runsCompleted];
+    // Runs are matched by freshness, as the Catchment's pond_run rows are. Pairing the Nth completion
+    // with the Nth start drifts once a newer Run absorbs an older one in flight (its Ripples skip to
+    // the fresher target, so the older Run never completes on its own): every later duration would be
+    // measured from an ever-older start. Older entries are dropped as absorbed.
+    const started = ps.startTimesByF[newEnd];
     if (started != null) ps.durations = pushHistory(ps.durations, now - started);
-    const gst = { ...ps.genStartTimes };
-    delete gst[ps.runsCompleted];
-    ps.genStartTimes = gst;
+    const pending: Record<number, number> = {};
+    for (const [f, t] of Object.entries(ps.startTimesByF)) if (Number(f) > newEnd) pending[Number(f)] = t;
+    ps.startTimesByF = pending;
     emit('pond-done', `${pname(s, pid)} pond run #${ps.runsCompleted} completed (freshness age ${ageStr(ps.endF, now)})`);
     return true;
   }

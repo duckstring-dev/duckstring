@@ -3,6 +3,7 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { usePlaygroundStore, getRippleVisualState, formatAge, pushTargetF, stateColor, nodeFill } from '@/lib/store';
+import { useTourRing } from '@/lib/tour';
 import { DemandIndicators } from './DemandIndicators';
 
 export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
@@ -14,6 +15,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
   const selectedRippleId = usePlaygroundStore((s) => s.selectedRippleId);
   const selectRipple = usePlaygroundStore((s) => s.selectRipple);
   const now = usePlaygroundStore((s) => s.now);
+  const ringClass = useTourRing(rippleId);
 
   if (!ripple || !rs) return null;
 
@@ -25,6 +27,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
 
   return (
     <div
+      className={ringClass}
       onClick={(e) => {
         e.stopPropagation();
         selectRipple(rippleId);

@@ -7,6 +7,8 @@ import { useIsMobile } from '@/lib/useIsMobile';
 import { DagCanvas } from './DagCanvas';
 import { Sidebar } from './Sidebar';
 import { ConsolePanel } from './ConsolePanel';
+import { TourCard } from './TourCard';
+import { TourSpotlight } from './TourSpotlight';
 
 export function Playground() {
   const isMobile = useIsMobile();
@@ -29,13 +31,15 @@ export function Playground() {
       {/* On mobile the sidebar drops below the canvas as a collapsible bottom sheet. */}
       <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', flex: 1, minHeight: 0 }}>
         <ReactFlowProvider>
-          <div style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0, position: 'relative' }}>
             <DagCanvas />
+            <TourCard />
           </div>
         </ReactFlowProvider>
         <Sidebar mobile={isMobile} />
       </div>
       <ConsolePanel />
+      <TourSpotlight />
     </div>
   );
 }
