@@ -7,6 +7,8 @@ description: The formal model behind Duckstring's orchestration.
 
 This document is the formal model behind Duckstring's orchestration. The engine implements it rule for rule, and the pseudocode under [Pond State Variables](#pond-state-variables) is the exact state machine. For an introduction, read [Orchestration](../concepts/orchestration.md) first.
 
+The [Playground](https://playground.duckstring.com) simulates this model in the browser. Most of the examples below can be rebuilt there, with each node as a Pond holding one Ripple, so you can watch the rules play out step by step.
+
 ## Motivation
 
 Most of the time when running a sequence of data transformations (a pipeline), the process is set to run either on a schedule (e.g. cron job) or continuously (new run triggered immediately upon completion of previous). This certainly satisfies many purposes, but can often be wasteful - in staleness (data age), compute, or both.
@@ -117,6 +119,8 @@ Each node follows the simple rules:
 To handle starts from an idle state, when demand is received it is immediately sent to any parent that is idle (not running and has no demand).
 
 #### Examples
+
+To follow these in the [Playground](https://playground.duckstring.com), build the chain from three Ponds and send a Tap to the last one.
 
 Consider a simple chain of nodes:
 
@@ -497,6 +501,8 @@ flowchart LR
 
 `A` runs exactly once per cycle, matching `B`'s 3-second period, neither over- nor under-producing. The bottleneck sets the rhythm for the *entire* chain, both upstream and down. The mechanism that achieves this is that a node holding standing demand re-arms its parent only *one generation ahead*: enough to keep the bottleneck fed without it ever idling, but never enough to pile up unconsumed work.
 
+To watch this in the [Playground](https://playground.duckstring.com), give three chained Ponds Ripples of 1, 3 and 1 seconds and put a Wave on the last. Each Ripple's run chart settles at 3 seconds between runs.
+
 ### Push (To Meet Demand)
 
 When continuously demanded, **pull** orchestration maintains low staleness effectively and returns updates as frequently as possible. However, executing demand against a node will only ever take data as fresh as its immediate parents - if there is a requirement for the result of the run to produce data that results from sources *at the time of the request*, the more familiar **push** orchestration is needed. 
@@ -519,6 +525,8 @@ Under *push*, each node follows the simple rules:
     - Set my freshness to that of my parents
 
 #### Examples
+
+In the [Playground](https://playground.duckstring.com), a Pulse on the last Pond of the chain sends this kind of demand.
 
 ##### Cold Start
 
@@ -894,6 +902,8 @@ flowchart LR
 The Wave throttles itself to once per day, with no superfluous runs anywhere in the chain, purely because `A`'s freshness only advances daily. When a root node has a window, Wave execution naturally throttles to that window's period. 
 
 This is a convenient result. Any pipeline requiring periodic execution due to supply limitations can be managed at the *root* through windows, with downstream consuming eagerly, and the DAG will naturally throttle to avoid wasted runs. This allows the choice of execution mode (Wave/Tide, or Tap/Pulse upon request) to be explicitly about the *service requirements*, with no care needed about the *supply conditions*.
+
+The [Playground](https://playground.duckstring.com) can reproduce this with a window on the first Pond. A window of a few seconds, repeating every 30 seconds, shows the same throttling within a minute or two.
 
 ## Ponds and Ripples
 

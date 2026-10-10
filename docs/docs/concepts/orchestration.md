@@ -14,6 +14,8 @@ Duckstring doesn't run Ponds on schedules. Instead, you place a trigger on the P
 
 The demo pipeline in the web UI, kept current by a Wave on `reports`.
 
+The [Playground](https://playground.duckstring.com) runs the same pipeline in your browser, with nothing to install. A short guided tour walks through the main ideas on this page as the pipeline runs, and afterwards you can change step durations, add Ponds and try each trigger yourself.
+
 ## Structure
 
 The same rules apply at two levels: between Ponds, following the dependencies in `pond.toml`, and between the Ripples inside each Pond. A Pond starts a run when it has been asked for data and its Sources have something newer to give it. There is no limit on how many Pond Runs happen at once, so a Pond can be working on a new run while its downstream Ponds are still processing the previous one.
@@ -88,7 +90,7 @@ gantt
 
 Every step runs once per 3 seconds, the duration of `B`. In the Quickstart demo the slowest step is `join_lines` at 3 seconds, so under a Wave every Pond settles to running about every 3 seconds, with no work produced that nothing uses.
 
-To see this for yourself, the [Orchestration Playground](https://playground.duckstring.com) lets you build a pipeline in the browser, set step durations and triggers, and watch demand and freshness move through it.
+The [Playground](https://playground.duckstring.com) tour shows this on the same pipeline: under a Wave on `reports`, every Ripple settles to running every 3 seconds, and the pipeline keeps pace when the duration of `join_lines` starts to vary.
 
 ### Skipping unchanged work
 
@@ -110,6 +112,8 @@ A Tap is satisfied by any newer data. If a Pond's Sources have nothing newer, th
 A Tide is how you run something daily. `duckstring trigger tide reports 1d` behaves like a Pulse every day. More precisely, it keeps `reports` at least as fresh as one day old, sending a Pulse whenever the data would pass that age.
 
 Triggers can be placed on any Pond, but we strongly recommend placing them only on Outlets. Demand then always comes from something that genuinely consumes the data, and every Pond upstream runs only as often as its consumers need.
+
+You can try each trigger in the [Playground](https://playground.duckstring.com), on the demo pipeline or on one you build.
 
 ## Windows
 
@@ -153,3 +157,4 @@ gantt
 
 - Guides: [Scheduling](../guides/scheduling.md), [Monitoring and Failures](../guides/monitoring_and_failures.md)
 - Reference: [Orchestration Theory](../reference/orchestration_theory.md), [duckstring trigger](../reference/cli/trigger.md), [duckstring control](../reference/cli/control.md)
+- [Playground](https://playground.duckstring.com): this model simulated in the browser, with a guided tour

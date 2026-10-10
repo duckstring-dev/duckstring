@@ -7,6 +7,10 @@ description: Run a demo pipeline on your own machine.
 
 This guide runs Duckstring on your own machine: it starts a Catchment, deploys a small demo pipeline, runs it, and queries the result. It takes about five minutes.
 
+:::tip
+To see how the demo pipeline is scheduled before installing anything, the [Playground](https://playground.duckstring.com) runs it in your browser, with a short guided tour.
+:::
+
 ## 1. Install
 
 Duckstring needs Python 3.10 or newer.
@@ -163,4 +167,4 @@ This runs `SELECT * FROM reports.monthly_summary LIMIT 10`. Use `--sql` to run a
 - [Ponds](concepts/ponds.md) and [Orchestration](concepts/orchestration.md) explain the ideas behind what you just ran.
 - [Writing Ripples](guides/writing_ripples.md) covers building your own Pond, and [Testing with Puddles](guides/testing_with_puddles.md) running it locally before deploying.
 - `duckstring pond demo --trickle` creates the incremental demo (`orders`, `catalog` → `priced` → `revenue`), explained in [Trickles](concepts/trickles.md).
-- The [Playground](https://playground.duckstring.com) simulates pull orchestration in the browser.
+- The [Playground](https://playground.duckstring.com) runs the same demo pipeline in the browser, with a guided tour of how it's scheduled.

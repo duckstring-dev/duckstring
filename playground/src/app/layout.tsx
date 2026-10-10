@@ -3,9 +3,15 @@ import { Analytics } from '@vercel/analytics/next';
 import { SpeedInsights } from '@vercel/speed-insights/next';
 import "./globals.css";
 
+const description = "Duckstring's pull orchestration, simulated in your browser, with a guided tour.";
+
+// metadataBase makes the Open Graph image URL (app/opengraph-image.png) absolute for link previews.
 export const metadata: Metadata = {
+  metadataBase: new URL('https://playground.duckstring.com'),
   title: "Playground | Duckstring",
-  description: "There is no DAG.",
+  description,
+  openGraph: { title: "Duckstring Playground", description, url: '/', siteName: 'Duckstring' },
+  twitter: { card: 'summary_large_image', title: "Duckstring Playground", description },
   icons: {
     icon: '/favicon.svg',
   }
