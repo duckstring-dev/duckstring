@@ -104,10 +104,16 @@ export const useTourStore = create<TourState>((set, get) => {
     const since = play();
     if (since.paused) since.togglePause();
     since.setSpeed(w.speed ?? WAIT_SPEED);
+    // The pipeline gets the whole screen while it runs: nothing selected or highlighted, and the
+    // mobile bottom sheet closed. The next step selects what it needs.
+    since.clearSelection();
+    since.setSheetOpen(false);
     set((t) => ({
       phase: 'waiting',
       waitLabel: w.label,
       wait: { startedAt: performance.now(), expectedMs: w.expectedMs },
+      ring: null,
+      outline: null,
       frame: { ids: null, seq: t.frame.seq + 1 },
     }));
     let resolved = false;

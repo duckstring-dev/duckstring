@@ -163,7 +163,9 @@ aren't called push triggers). Curly brackets say what the tour does on screen.
   dropped: only the Wave's start-up needs it, and that's already a wait.
 - While a step waits on the simulation, the card shrinks to a bar with "Skip ahead" and a progress bar,
   paced by each wait's measured typical time (`expectedMs`: 17.5 s, 2.9 s, 3.7 s): linear to 90%, then
-  creeping, so a slow wait never looks frozen or finished. The Wave's start-up (the
+  creeping, so a slow wait never looks frozen or finished.
+  During a wait nothing is selected or highlighted and the mobile bottom sheet closes, so the running
+  pipeline has the whole screen; the next step selects what it needs. The Wave's start-up (the
   visitor's first look at the pipeline running) plays at 1x and settles in about 20 s; the later waits run
   at 10x. Speed returns to 1x when a wait ends, and the visitor's own speed comes back when the tour ends.
 - Highlights: on each step a white pill fades in as it contracts onto the target from about 160 px out,
