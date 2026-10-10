@@ -40,6 +40,11 @@ test('the tour runs end to end', async ({ page }, info) => {
     // The buttons are reachable without scrolling the card.
     await expect(page.getByTestId('tour-next')).toBeInViewport({ ratio: 1 });
     await page.getByTestId('tour-next').click();
+    if (step.advance !== 'next') {
+      // While the tour waits on the simulation, its progress bar moves.
+      const bar = page.getByTestId('tour-progress');
+      await expect.poll(async () => (await bar.boundingBox())?.width ?? 0).toBeGreaterThan(5);
+    }
   }
 
   await expect(card).toHaveCount(0);

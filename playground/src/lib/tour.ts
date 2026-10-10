@@ -20,6 +20,7 @@ interface TourState {
   outline: TourControl | null; // sidebar control with the outline
   frame: { ids: string[] | null; seq: number }; // a request to fit the canvas (null ids = whole graph)
   waitLabel: string | null;
+  wait: { startedAt: number; expectedMs: number } | null; // the current wait, for its progress bar
   // How the last wait ended (the end-to-end test checks that conditions fire before their fallback).
   lastAdvance: 'until' | 'fallback' | 'hurry' | null;
 
@@ -75,7 +76,7 @@ export const useTourStore = create<TourState>((set, get) => {
   function open(index: number): void {
     clearPending();
     const step = TOUR_STEPS[index];
-    set({ phase: 'step', index, waitLabel: null, ring: null, outline: null });
+    set({ phase: 'step', index, waitLabel: null, wait: null, ring: null, outline: null });
     const s = play();
     s.setTideDraft(null);
     focus(step.target ?? {}, step.frame);
@@ -103,7 +104,12 @@ export const useTourStore = create<TourState>((set, get) => {
     const since = play();
     if (since.paused) since.togglePause();
     since.setSpeed(w.speed ?? WAIT_SPEED);
-    set((t) => ({ phase: 'waiting', waitLabel: w.label, frame: { ids: null, seq: t.frame.seq + 1 } }));
+    set((t) => ({
+      phase: 'waiting',
+      waitLabel: w.label,
+      wait: { startedAt: performance.now(), expectedMs: w.expectedMs },
+      frame: { ids: null, seq: t.frame.seq + 1 },
+    }));
     let resolved = false;
     const done = (how: 'until' | 'fallback' | 'hurry') => {
       if (resolved) return;
@@ -126,7 +132,7 @@ export const useTourStore = create<TourState>((set, get) => {
     if (visitorSpeed !== null) play().setSpeed(visitorSpeed);
     visitorSpeed = null;
     play().setTideDraft(null);
-    set({ phase: 'off', ring: null, outline: null, waitLabel: null });
+    set({ phase: 'off', ring: null, outline: null, waitLabel: null, wait: null });
     writeTourMemory(reason);
     const step = phase === 'prompt' || phase === 'confirm' ? 0 : index + 1;
     track(reason === 'done' ? 'tour_complete' : 'tour_skip', { step });
@@ -139,6 +145,7 @@ export const useTourStore = create<TourState>((set, get) => {
     outline: null,
     frame: { ids: null, seq: 0 },
     waitLabel: null,
+    wait: null,
     lastAdvance: null,
 
     offer() {

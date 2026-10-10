@@ -64,6 +64,34 @@ function Button({
   );
 }
 
+// Progress through a wait, paced by its measured typical duration: linear to 90% at the expected
+// time, then creeping towards the end, so a slow wait never looks finished or frozen.
+function WaitProgress() {
+  const wait = useTourStore((t) => t.wait);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!wait) return;
+    let raf = 0;
+    const frame = (now: number) => {
+      const x = (now - wait.startedAt) / wait.expectedMs;
+      const p = x < 0.9 ? x : 0.9 + 0.09 * (1 - Math.exp(-(x - 0.9) * 2));
+      if (ref.current) ref.current.style.width = `${(Math.max(0, p) * 100).toFixed(2)}%`;
+      raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+  }, [wait]);
+  return (
+    <div
+      ref={ref}
+      data-testid="tour-progress"
+      role="progressbar"
+      aria-label="Waiting for the simulation"
+      style={{ position: 'absolute', left: 0, bottom: 0, height: 3, width: 0, background: THEME_BRAND }}
+    />
+  );
+}
+
 export function TourCard() {
   const isMobile = useIsMobile();
   const phase = useTourStore((t) => t.phase);
@@ -157,6 +185,7 @@ export function TourCard() {
             Skip ahead
           </Button>
         </div>
+        <WaitProgress />
       </div>
     );
   }

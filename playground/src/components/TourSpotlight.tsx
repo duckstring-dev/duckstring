@@ -103,7 +103,7 @@ export function TourSpotlight() {
   // every step even when the target doesn't change.
   const targets: { selector: string; delay: number }[] = [];
   if (ring) targets.push({ selector: '.ds-tour-ring', delay: 150 });
-  if (outline) targets.push({ selector: '.ds-tour-outline', delay: ring ? 750 : 150 });
+  if (outline) targets.push({ selector: '.ds-tour-outline', delay: 150 });
   return (
     <>
       {targets.map((t) => (

@@ -26,6 +26,7 @@ export interface TourWait {
   fallbackMs: number; // real time, so the tour can't hang
   label: string; // shown while the tour is hidden
   speed?: number; // simulation speed while waiting (default WAIT_SPEED)
+  expectedMs: number; // typical real time it takes, measured in the browser: paces the progress bar
 }
 
 export interface TourStep {
@@ -174,6 +175,7 @@ export const TOUR_STEPS: TourStep[] = [
     advance: {
       label: 'Watching the pipeline start up',
       speed: 1,
+      expectedMs: 17500,
       until: (s, since) =>
         rippleSettled(s, since, 'reports.monthly_summary') && rippleSettled(s, since, 'transactions.ingest'),
       fallbackMs: 40000,
@@ -214,6 +216,7 @@ export const TOUR_STEPS: TourStep[] = [
     },
     advance: {
       label: 'Running fast for a few cycles',
+      expectedMs: 2900,
       until: (s, since) => rippleRunsSince(s, since, 'transactions.ingest') >= 8,
       fallbackMs: 10000,
     },
@@ -245,6 +248,7 @@ export const TOUR_STEPS: TourStep[] = [
     },
     advance: {
       label: 'Running fast until the Tide settles',
+      expectedMs: 3700,
       until: (s, since) => pondSettled(s, since, 'reports'),
       fallbackMs: 15000,
     },

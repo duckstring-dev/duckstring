@@ -161,14 +161,16 @@ aren't called push triggers). Curly brackets say what the tour does on screen.
   the open bottom sheet stays visible) and at the bottom otherwise. The canvas framing pads whichever edge
   the card covers. A pause after every step (card hidden so the visitor sees what it covered) was tried and
   dropped: only the Wave's start-up needs it, and that's already a wait.
-- While a step waits on the simulation, the card shrinks to a bar with "Skip ahead". The Wave's start-up (the
+- While a step waits on the simulation, the card shrinks to a bar with "Skip ahead" and a progress bar,
+  paced by each wait's measured typical time (`expectedMs`: 17.5 s, 2.9 s, 3.7 s): linear to 90%, then
+  creeping, so a slow wait never looks frozen or finished. The Wave's start-up (the
   visitor's first look at the pipeline running) plays at 1x and settles in about 20 s; the later waits run
   at 10x. Speed returns to 1x when a wait ends, and the visitor's own speed comes back when the tour ends.
 - Highlights: on each step a white pill fades in as it contracts onto the target from about 160 px out,
   over about a second, while the rest of the screen dims slightly (`TourSpotlight`, which tracks the target every frame as the canvas pans), then fades
   to a steady pulsing white ring on the node or control. White because every other colour on the canvas
-  means a state; a cyan ring read as one more running node. When a step has both a node and a control, the
-  node goes first and the control 0.6 s later. The dim never takes pointer events and doesn't persist.
+  means a state; a cyan ring read as one more running node. When a step has both a node and a control, both
+  contract at once. The dim never takes pointer events and doesn't persist.
 - The closing step suggests what to try next (a trigger on `forecast`; more Ponds to see how more complex
   dependencies interact) before the docs links. On a phone the card's header and buttons stay put and only
   its text scrolls, so Close is always reachable at 360 x 640.
