@@ -167,6 +167,9 @@ aren't called push triggers). Curly brackets say what the tour does on screen.
 - Highlights: canvas targets get a cyan ring and sidebar controls an outline, both pulsing. On desktop, where
   a target is small against the screen, each step opens with about a second of large flashes before the
   pulse. The flash class alternates by step so it restarts even when the target doesn't change.
+- The closing step suggests what to try next (a trigger on `forecast`; more Ponds to see how more complex
+  dependencies interact) before the docs links. On a phone the card's header and buttons stay put and only
+  its text scrolls, so Close is always reachable at 360 x 640.
 - Step 3 is two steps (`transactions.ingest`, then `reports`), one sentence each, so the highlight doesn't
   jump while the card is up. Chapter 1 has seven steps.
 - Pressing the real control (Wave, Tide, σ) also advances the tour, as the card's button would.

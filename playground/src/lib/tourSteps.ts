@@ -40,6 +40,8 @@ export interface TourStep {
   advance: 'next' | TourWait;
   // "Do it for me": the primary button runs this. If the visitor does it themselves, the tour moves on.
   action?: { label: string; run: (s: PlaygroundState) => void; done: (s: PlaygroundState) => boolean };
+  suggestions?: string[]; // a bulleted list after the body
+  footer?: string; // a closing line after the suggestions
   links?: { label: string; href: string }[];
 }
 
@@ -275,7 +277,12 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'done',
     chapter: 3,
     title: "That's most of it",
-    body: 'The docs cover the rest, from Windows and failures to versioning and incremental processing.',
+    body: 'Some things to try from here:',
+    suggestions: [
+      `Put a trigger on \`${NEW_POND}\`.`,
+      'Add a few more Ponds to see how more complex dependencies interact. A new Pond reads from whichever Pond is selected.',
+    ],
+    footer: 'The docs cover the rest, from Windows and failures to versioning and incremental processing.',
     frame: 'all',
     setup: ({ store }) => store.clearSelection(),
     advance: 'next',

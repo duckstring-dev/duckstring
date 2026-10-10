@@ -37,6 +37,8 @@ test('the tour runs end to end', async ({ page }, info) => {
     }
     await page.waitForTimeout(500); // let the framing animation finish before the screenshot
     await page.screenshot({ path: info.outputPath(`${String(i + 1).padStart(2, '0')}-${step.id}.png`) });
+    // The buttons are reachable without scrolling the card.
+    await expect(page.getByTestId('tour-next')).toBeInViewport({ ratio: 1 });
     await page.getByTestId('tour-next').click();
   }
 

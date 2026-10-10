@@ -209,9 +209,16 @@ export function TourCard() {
       data-testid="tour-card"
       data-step={step.id}
       data-last-advance={lastAdvance ?? undefined}
-      style={{ ...panel, padding: '10px 14px 12px', maxHeight: isMobile ? '42dvh' : undefined, overflowY: 'auto' }}
+      // Header and buttons stay put; only the text scrolls if a phone runs out of height.
+      style={{
+        ...panel,
+        padding: '10px 14px 12px',
+        display: 'flex',
+        flexDirection: 'column',
+        maxHeight: isMobile ? '60dvh' : undefined,
+      }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 44, marginTop: -6 }}>
+      <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 44, marginTop: -6 }}>
         <span style={{ fontSize: 10, fontWeight: 700, color: '#71717a', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
           Chapter {step.chapter} · {position} of {chapterSteps.length}
         </span>
@@ -221,25 +228,41 @@ export function TourCard() {
           </Button>
         )}
       </div>
-      {position === 1 && (
-        <div style={{ fontSize: 11, color: THEME_BRAND, marginBottom: 4 }}>{CHAPTER_TITLES[step.chapter]}</div>
-      )}
-      <div aria-live="polite">
-        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>{step.title}</div>
-        <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
-          <Copy text={step.body} />
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+        {position === 1 && (
+          <div style={{ fontSize: 11, color: THEME_BRAND, marginBottom: 4 }}>{CHAPTER_TITLES[step.chapter]}</div>
+        )}
+        <div aria-live="polite">
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>{step.title}</div>
+          <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
+            <Copy text={step.body} />
+          </div>
+          {step.suggestions && (
+            <ul style={{ margin: '6px 0 0', paddingLeft: 18, listStyle: 'disc', fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
+              {step.suggestions.map((t) => (
+                <li key={t} style={{ marginBottom: 4 }}>
+                  <Copy text={t} />
+                </li>
+              ))}
+            </ul>
+          )}
+          {step.footer && (
+            <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55, marginTop: 6 }}>
+              <Copy text={step.footer} />
+            </div>
+          )}
         </div>
+        {step.links && (
+          <div style={{ display: 'flex', gap: 14, marginTop: 10, fontSize: 13 }}>
+            {step.links.map((l) => (
+              <a key={l.href} href={l.href} target="_blank" rel="noopener noreferrer" style={{ color: THEME_BRAND, textDecoration: 'underline' }}>
+                {l.label}
+              </a>
+            ))}
+          </div>
+        )}
       </div>
-      {step.links && (
-        <div style={{ display: 'flex', gap: 14, marginTop: 10, fontSize: 13 }}>
-          {step.links.map((l) => (
-            <a key={l.href} href={l.href} target="_blank" rel="noopener noreferrer" style={{ color: THEME_BRAND, textDecoration: 'underline' }}>
-              {l.label}
-            </a>
-          ))}
-        </div>
-      )}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 12 }}>
+      <div style={{ flexShrink: 0, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 12 }}>
         {index > 0 && (
           <Button onClick={() => tour().back()} testId="tour-back">
             Back

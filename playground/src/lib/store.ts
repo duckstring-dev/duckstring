@@ -59,7 +59,7 @@ function initialPondState(): PondRunState {
     isBlocked: false,
     runsStarted: 0,
     runsCompleted: 0,
-    genStartTimes: {},
+    startTimesByF: {},
     completionTimes: [],
     durations: [],
   };

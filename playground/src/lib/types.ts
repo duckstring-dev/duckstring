@@ -74,7 +74,7 @@ export interface PondRunState {
   // Trace data for the sidebar charts:
   runsStarted: number;
   runsCompleted: number;
-  genStartTimes: Record<number, number>;
+  startTimesByF: Record<number, number>; // wall-clock start of each in-flight Pond Run, by its startF
   completionTimes: number[];
   durations: number[];
 }
