@@ -199,22 +199,17 @@ export const useTourStore = create<TourState>((set, get) => {
   };
 });
 
-// The highlight's flash class alternates by step, so its animation restarts on every step even when
-// the same element stays highlighted (a changed animation-name restarts it).
-function flashClass(index: number): string {
-  return `ds-tour-flash-${index % 2}`;
-}
-
-// The class for a canvas node: the ring while the current step targets it.
+// The class for a canvas node: the ring while the current step targets it. (TourSpotlight finds
+// the target by this class too.)
 export function useTourRing(nodeId: string): string | undefined {
-  return useTourStore((t) => (t.ring === nodeId && t.phase !== 'off' ? `ds-tour-ring ${flashClass(t.index)}` : undefined));
+  return useTourStore((t) => (t.ring === nodeId && t.phase !== 'off' ? 'ds-tour-ring' : undefined));
 }
 
 // Props for a sidebar control the tour can point at: its `data-tour` name, plus the outline class
 // while the current step targets it.
 export function useTourMark(control: TourControl): { 'data-tour': TourControl; className?: string } {
   const className = useTourStore((t) =>
-    t.outline === control && t.phase !== 'off' ? `ds-tour-outline ${flashClass(t.index)}` : undefined
+    t.outline === control && t.phase !== 'off' ? 'ds-tour-outline' : undefined
   );
   return { 'data-tour': control, className };
 }

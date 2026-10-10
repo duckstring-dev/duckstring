@@ -164,9 +164,11 @@ aren't called push triggers). Curly brackets say what the tour does on screen.
 - While a step waits on the simulation, the card shrinks to a bar with "Skip ahead". The Wave's start-up (the
   visitor's first look at the pipeline running) plays at 1x and settles in about 20 s; the later waits run
   at 10x. Speed returns to 1x when a wait ends, and the visitor's own speed comes back when the tour ends.
-- Highlights: canvas targets get a cyan ring and sidebar controls an outline, both pulsing. On desktop, where
-  a target is small against the screen, each step opens with about a second of large flashes before the
-  pulse. The flash class alternates by step so it restarts even when the target doesn't change.
+- Highlights: on each step a large white pill contracts onto the target over about a second while the rest
+  of the screen dims (`TourSpotlight`, which tracks the target every frame as the canvas pans), then fades
+  to a steady pulsing white ring on the node or control. White because every other colour on the canvas
+  means a state; a cyan ring read as one more running node. When a step has both a node and a control, the
+  node goes first and the control 0.6 s later. The dim never takes pointer events and doesn't persist.
 - The closing step suggests what to try next (a trigger on `forecast`; more Ponds to see how more complex
   dependencies interact) before the docs links. On a phone the card's header and buttons stay put and only
   its text scrolls, so Close is always reachable at 360 x 640.

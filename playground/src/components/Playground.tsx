@@ -8,6 +8,7 @@ import { DagCanvas } from './DagCanvas';
 import { Sidebar } from './Sidebar';
 import { ConsolePanel } from './ConsolePanel';
 import { TourCard } from './TourCard';
+import { TourSpotlight } from './TourSpotlight';
 
 export function Playground() {
   const isMobile = useIsMobile();
@@ -38,6 +39,7 @@ export function Playground() {
         <Sidebar mobile={isMobile} />
       </div>
       <ConsolePanel />
+      <TourSpotlight />
     </div>
   );
 }
