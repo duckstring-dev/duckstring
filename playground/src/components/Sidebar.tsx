@@ -12,6 +12,7 @@ import {
   THEME_BLOCKED,
   THEME_WAKE,
 } from '@/lib/store';
+import { useTourStore, useTourMark } from '@/lib/tour';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
 
@@ -21,16 +22,19 @@ function Btn({
   color = THEME_PUSH,
   small = false,
   block = false,
+  mark,
 }: {
   onClick: () => void;
   children: React.ReactNode;
   color?: string;
   small?: boolean;
   block?: boolean;
+  mark?: { 'data-tour': string; className?: string };
 }) {
   return (
     <button
       onClick={onClick}
+      {...mark}
       style={{
         background: 'transparent',
         border: `1px solid ${color}`,
@@ -60,8 +64,41 @@ function Label({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Section({ children }: { children: React.ReactNode }) {
-  return <div style={{ borderTop: '1px solid #27272a', paddingTop: 14, marginTop: 14 }}>{children}</div>;
+function Section({ children, mark }: { children: React.ReactNode; mark?: { 'data-tour': string; className?: string } }) {
+  return (
+    <div {...mark} style={{ borderTop: '1px solid #27272a', paddingTop: 14, marginTop: 14 }}>
+      {children}
+    </div>
+  );
+}
+
+// Starts (or restarts) the guided tour.
+function TourButton() {
+  const requestStart = useTourStore((t) => t.requestStart);
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        requestStart();
+      }}
+      data-testid="tour-button"
+      style={{
+        background: 'transparent',
+        border: `1px solid ${THEME_BRAND}`,
+        color: THEME_BRAND,
+        borderRadius: 5,
+        padding: '2px 10px',
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: '0.06em',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        textTransform: 'none',
+      }}
+    >
+      Tour
+    </button>
+  );
 }
 
 const numInput: React.CSSProperties = {
@@ -108,8 +145,16 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const sleep = usePlaygroundStore((s) => s.sleep);
   const kill = usePlaygroundStore((s) => s.kill);
 
-  const [tidePeriod, setTidePeriod] = useState('2');
-  const [showTideInput, setShowTideInput] = useState(false);
+  const tideDraft = usePlaygroundStore((s) => s.tideDraft);
+  const setTideDraft = usePlaygroundStore((s) => s.setTideDraft);
+  const formEpoch = usePlaygroundStore((s) => s.formEpoch);
+  const sheetOpen = usePlaygroundStore((s) => s.sheetOpen);
+  const setSheetOpen = usePlaygroundStore((s) => s.setSheetOpen);
+  const markWave = useTourMark('wave');
+  const markTide = useTourMark('tide');
+  const markDuration = useTourMark('ripple-duration');
+  const markVariability = useTourMark('ripple-variability');
+  const markChart = useTourMark('run-chart');
   const [showAddSourcePond, setShowAddSourcePond] = useState(false);
   const [showAddParentRipple, setShowAddParentRipple] = useState(false);
   const [allVar, setAllVar] = useState('0');
@@ -137,15 +182,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
       )
     : [];
 
-  // Mobile: the sidebar is a collapsible bottom sheet; selecting a node opens it
-  // (state adjusted during render, per the React "you might not need an effect" pattern).
-  const [collapsed, setCollapsed] = useState(true);
-  const selectionKey = selectedRippleId ?? selectedTriggerId ?? selectedPondId;
-  const [prevSelectionKey, setPrevSelectionKey] = useState(selectionKey);
-  if (selectionKey !== prevSelectionKey) {
-    setPrevSelectionKey(selectionKey);
-    if (mobile && selectionKey) setCollapsed(false);
-  }
+  // Mobile: the sidebar is a collapsible bottom sheet. Selecting a node opens it (in the store, so
+  // the tour can open and close it too).
+  const collapsed = !sheetOpen;
 
   const headerContext = selectedTriggerId
     ? `${ponds[selectedTriggerId]?.name ?? ''} trigger`
@@ -155,7 +194,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
 
   const content = (
     <>
-      <Btn onClick={addPond} color={THEME_BRAND}>+ Add Pond</Btn>
+      <Btn onClick={() => addPond()} color={THEME_BRAND}>+ Add Pond</Btn>
       {selectedPond && !selectedRipple && (
         <div style={{ fontSize: 10, color: '#52525b', marginTop: 4 }}>links as a sink of {selectedPond.name}</div>
       )}
@@ -174,7 +213,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
                 min="1"
                 step="1"
                 defaultValue={((triggers[selectedTriggerId]?.stalenessMs ?? 1000) / 1000).toFixed(1)}
-                key={`tide-${selectedTriggerId}`}
+                key={`tide-${selectedTriggerId}-${formEpoch}`}
                 onChange={(e) => {
                   const ms = parseFloat(e.target.value) * 1000;
                   if (!isNaN(ms) && ms > 0) triggerTide(selectedTriggerId, Math.max(100, ms));
@@ -195,7 +234,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             <Label>Pond: {selectedPond.name}</Label>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
               <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Name</span>
-              <input type="text" defaultValue={selectedPond.name} key={`pn-${selectedPond.id}`}
+              <input type="text" defaultValue={selectedPond.name} key={`pn-${selectedPond.id}-${formEpoch}`}
                 onChange={(e) => { const v = e.target.value.trim(); if (v) renamePond(selectedPond.id, v); }}
                 style={{ ...numInput, width: 140 }} />
             </div>
@@ -254,16 +293,16 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               <>
                 <div style={quadRow}>
                   <Btn block onClick={() => triggerTap(selectedPond.id)} color={THEME_PULL}>Tap</Btn>
-                  <Btn block onClick={() => triggerWave(selectedPond.id)} color={THEME_PULL}>Wave</Btn>
+                  <Btn block onClick={() => triggerWave(selectedPond.id)} color={THEME_PULL} mark={markWave}>Wave</Btn>
                   <Btn block onClick={() => triggerPulse(selectedPond.id)} color={THEME_PUSH}>Pulse</Btn>
-                  <Btn block onClick={() => setShowTideInput((v) => !v)} color={THEME_PUSH}>Tide</Btn>
+                  <Btn block onClick={() => setTideDraft(tideDraft === null ? '2' : null)} color={THEME_PUSH} mark={markTide}>Tide</Btn>
                 </div>
-                {showTideInput && (
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
+                {tideDraft !== null && (
+                  <div {...markTide} style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
                     <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
-                    <input type="number" min="1" step="1" value={tidePeriod} onChange={(e) => setTidePeriod(e.target.value)} style={numInput} />
+                    <input type="number" min="1" step="1" value={tideDraft} onChange={(e) => setTideDraft(e.target.value)} style={numInput} />
                     <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
-                    <Btn small onClick={() => { triggerTide(selectedPond.id, Math.max(100, parseFloat(tidePeriod) * 1000)); setShowTideInput(false); }} color={THEME_PUSH}>Set</Btn>
+                    <Btn small onClick={() => { triggerTide(selectedPond.id, Math.max(100, parseFloat(tideDraft) * 1000)); setTideDraft(null); }} color={THEME_PUSH}>Set</Btn>
                   </div>
                 )}
               </>
@@ -298,7 +337,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             </div>
           </Section>
 
-          <Section>
+          <Section mark={markChart}>
             <TraceChart
               times={pondStates[selectedPond.id]?.completionTimes ?? []}
               durations={pondStates[selectedPond.id]?.durations ?? []}
@@ -318,22 +357,22 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
               <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Name</span>
-              <input type="text" defaultValue={selectedRipple.name} key={`n-${selectedRippleId}`}
+              <input type="text" defaultValue={selectedRipple.name} key={`n-${selectedRippleId}-${formEpoch}`}
                 onChange={(e) => { const v = e.target.value.trim(); if (v) renameRipple(selectedRippleId!, v); }}
                 style={{ ...numInput, width: 140 }} />
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <div {...markDuration} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
               <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Duration</span>
-              <input type="number" min="1" step="1" defaultValue={(selectedRipple.durationMs / 1000).toFixed(1)} key={`d-${selectedRippleId}`}
+              <input type="number" min="1" step="1" defaultValue={(selectedRipple.durationMs / 1000).toFixed(1)} key={`d-${selectedRippleId}-${formEpoch}`}
                 onChange={(e) => { const ms = Math.max(100, parseFloat(e.target.value) * 1000); if (!isNaN(ms)) setRippleDuration(selectedRippleId!, ms); }}
                 style={numInput} />
               <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <div {...markVariability} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
               <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Variability</span>
-              <input type="number" min="0" step="0.1" defaultValue={selectedRipple.variability.toFixed(1)} key={`v-${selectedRippleId}`}
+              <input type="number" min="0" step="0.1" defaultValue={selectedRipple.variability.toFixed(1)} key={`v-${selectedRippleId}-${formEpoch}`}
                 onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v >= 0) setRippleVariability(selectedRippleId!, v); }}
                 style={numInput} />
               <span style={{ fontSize: 11, color: '#71717a' }}>σ(ln)</span>
@@ -384,7 +423,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             )}
           </Section>
 
-          <Section>
+          <Section mark={markChart}>
             <TraceChart
               times={rippleStates[selectedRippleId!]?.completionTimes ?? []}
               durations={rippleStates[selectedRippleId!]?.durations ?? []}
@@ -426,13 +465,14 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
         }}
       >
         <div
-          onClick={() => setCollapsed((v) => !v)}
-          style={{ display: 'flex', alignItems: 'center', padding: '8px 14px', cursor: 'pointer', userSelect: 'none', flexShrink: 0 }}
+          onClick={() => setSheetOpen(collapsed)}
+          style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', cursor: 'pointer', userSelect: 'none', flexShrink: 0 }}
         >
-          <span style={{ fontSize: 11, fontWeight: 700, color: '#a1a1aa', letterSpacing: '0.08em' }}>
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, fontWeight: 700, color: '#a1a1aa', letterSpacing: '0.08em' }}>
             {collapsed ? '▸' : '▾'} PLAYGROUND
             {headerContext && <span style={{ color: '#52525b', fontWeight: 400, marginLeft: 8 }}>{headerContext}</span>}
           </span>
+          <TourButton />
         </div>
         {!collapsed && <div style={{ overflowY: 'auto', padding: '0 14px 14px' }}>{content}</div>}
       </div>
@@ -455,8 +495,11 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
         fontFamily: 'inherit',
       }}
     >
-      <div style={{ fontSize: 11, fontWeight: 700, color: '#52525b', letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 16 }}>
-        Playground
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: '#52525b', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+          Playground
+        </span>
+        <TourButton />
       </div>
       {content}
     </div>

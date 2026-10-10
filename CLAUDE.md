@@ -538,7 +538,7 @@ The Catchment serves a read-mostly Next.js UI (static export mounted at `/`; `np
 - Colours are defined centrally in `store.ts`. A node's fill is a wash of its rim colour. Brand cyan (`THEME_BRAND` `#06c4e6`) marks the running state and is the default accent for UI chrome with no semantic reason for another colour (for example the Selector banner and its primary buttons). Use other colours only where their meaning applies: red for destructive or failed, green for success, amber for pull, green-yellow for push.
 - Built with Next 16. Read `frontend/AGENTS.md` (breaking changes; check `node_modules/next/dist/docs/` before editing frontend code).
 
-The playground (`playground/`) is the standalone in-memory simulation, headed for its own repo and `playground.duckstring.com`. It shares no code with the product UI.
+The playground (`playground/`) is the standalone in-memory simulation, headed for its own repo and `playground.duckstring.com`. It shares no code with the product UI. It has a guided tour (steps as data in `src/lib/tourSteps.ts`, `?tour=1`/`?tour=0`), tested with Playwright (`npm test`: unit tests plus the tour end to end at two phone sizes and desktop). The tour's copy makes behavioural claims about the simulation, so re-run the tests after engine changes.
 
 ## Fault tolerance
 

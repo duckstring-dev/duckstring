@@ -55,3 +55,40 @@ body {
   max-width: 14px;
   max-height: 14px;
 }
+
+/* Guided tour. The ring marks a canvas node, the outline a sidebar control; both in THEME_BRAND
+   cyan. No dimmed overlay: on a phone it would block the canvas and fight the bottom sheet. */
+@keyframes ds-tour-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(6, 196, 230, 0.7); }
+  70% { box-shadow: 0 0 0 10px rgba(6, 196, 230, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(6, 196, 230, 0); }
+}
+.ds-tour-ring,
+.ds-tour-outline {
+  outline: 2px solid #06c4e6;
+  outline-offset: 3px;
+  animation: ds-tour-pulse 1.6s ease-out infinite;
+}
+.ds-tour-outline {
+  border-radius: 6px;
+}
+@keyframes ds-tour-progress {
+  from { width: 0; }
+  to { width: 100%; }
+}
+.ds-tour-progress {
+  animation-name: ds-tour-progress;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ds-tour-ring,
+  .ds-tour-outline {
+    animation: none;
+  }
+  .ds-tour-progress {
+    animation: none;
+    width: 100%;
+    opacity: 0.4;
+  }
+}

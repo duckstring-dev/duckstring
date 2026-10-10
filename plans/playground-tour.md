@@ -1,6 +1,7 @@
 # A guided tour for the Playground
 
-Status: **plan** (2026-10-09). Nothing built yet.
+Status: **built** (2026-10-10, branch `playground-tour`), except steps 12 to 14 (see "Deferred: the second
+Tide"). The code is `playground/src/lib/{tour,tourSteps,tourStorage}.ts` and `components/TourCard.tsx`.
 
 ## Why
 
@@ -153,6 +154,43 @@ aren't called push triggers). Curly brackets say what the tour does on screen.
 
 `@vercel/analytics` is already installed. If the Vercel plan supports custom events, record `tour_start`,
 `tour_complete` and `tour_skip` with the step reached, to see where people drop off.
+
+## As built
+
+- Phone portrait: the card spans the screen width, at the top when the step outlines a sidebar control (so
+  the open bottom sheet stays visible) and at the bottom otherwise. After each Next the card hides for 2.5 s
+  (a small "Have a look" bar with a Next button stays) so the visitor sees what it covered. Desktop moves on
+  straight away. The canvas framing pads whichever edge the card covers.
+- While a step waits on the simulation, the card shrinks to a bar with "Skip ahead", the speed goes to 10x,
+  and it returns to 1x when the wait ends. The visitor's own speed comes back when the tour ends.
+- Pressing the real control (Wave, Tide, σ) also advances the tour, as the card's button would.
+- The mobile bottom sheet's open state, the Tide input's draft value and a `formEpoch` (remounts the
+  uncontrolled sidebar inputs after the tour sets a value) moved into the Playground store.
+- Chapter 3 turns the σ on `join_lines` back to 0 first: with σ = 0.2 the Tide's cadence jitters around 5 s,
+  which undercuts "every 5 s".
+- Copy changes from the outline: step 5 says `sales` takes 5 s from start to finish (so two runs overlap)
+  instead of "running twice simultaneously"; step 10 describes the Tide as asking for newer data every 5 s
+  rather than "any time the data is older than 5 s", because with an 8 s lead the data at `reports` is
+  always 5 to 10 s old.
+- Analytics: `tour_start`, `tour_complete` and `tour_skip` (with the step reached; 0 means the first-visit
+  offer was declined) through `@vercel/analytics` `track`. They're dropped if the plan has no custom events.
+
+## Deferred: the second Tide (steps 12 to 14)
+
+Simulated against `orchestration.ts`, two 5 s Tides only line up when they fire on the same tick. Set at any
+other moment (as the tour would, or a visitor pressing Set), the second Tide runs out of phase: `sales` and
+the Inlets run every 3 s instead of 5 s, and `reports` and the new Pond alternate 3 s and 6 s indefinitely.
+A Wake on the new Pond first doesn't help, because with an 8 s lead and a 5 s period `reports` always holds
+a pending target, so the Tide clock is the wall-clock time of its last push. So steps 13 ("they naturally
+synchronise") and 14 ("`reports` keeps updating every 5 s") aren't true of the engine today. This is the
+"two Tides at different times stack" concern from the 2026-10-10 Tide study; aligned Tides (request the
+latest multiple of the period from a fixed anchor) would make the steps true.
+
+The tour stops after step 11 (the untriggered Pond doesn't run) and goes to the closing step. To restore the
+steps once Tides align, add them back to `TOUR_STEPS` after `new-output`: a `second-tide` step (action: a 5 s
+Tide on `forecast`, wait until `forecast`'s completions settle), then `synchronised` (`sales` run chart) and
+`freshness-kept` (`reports` run chart). The end-to-end test asserts each wait ends on its condition, so it
+would catch a regression.
 
 ## Out of scope
 

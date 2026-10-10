@@ -21,6 +21,7 @@ import '@xyflow/react/dist/style.css';
 
 import { usePlaygroundStore, consumeEdgeColor, formatAge, pushTargetF, THEME_PULL, THEME_PUSH } from '@/lib/store';
 import { useIsMobile } from '@/lib/useIsMobile';
+import { useTourStore } from '@/lib/tour';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
@@ -78,6 +79,43 @@ const edgeTypes: EdgeTypes = {
   triggerEdge: TriggerEdge as EdgeTypes[string],
 };
 
+// ─── Tour framing ────────────────────────────────────────────────────────────
+
+// Fits the canvas to what the tour points at, leaving room for the tour card where it overlaps the
+// canvas. Waits a moment so the mobile bottom sheet can open (and the canvas resize) first.
+function TourFramer() {
+  const { fitView } = useReactFlow();
+  const frame = useTourStore((t) => t.frame);
+  useEffect(() => {
+    if (frame.seq === 0) return;
+    const t = setTimeout(() => {
+      const canvas = document.getElementById('ds-canvas')?.getBoundingClientRect();
+      const card = document.getElementById('ds-tour-card')?.getBoundingClientRect();
+      const pad = { top: 24, right: 24, bottom: 24, left: 24 };
+      if (canvas && card && card.width > 0) {
+        const overlaps =
+          card.left < canvas.right && card.right > canvas.left && card.top < canvas.bottom && card.bottom > canvas.top;
+        // The card sits along the top or bottom edge: pad that edge by how far it reaches in, capped
+        // so the graph always keeps some room.
+        if (overlaps && card.top + card.height / 2 < canvas.top + canvas.height / 2) {
+          pad.top += Math.min(card.bottom - canvas.top, canvas.height * 0.6);
+        } else if (overlaps) {
+          pad.bottom += Math.min(canvas.bottom - card.top, canvas.height * 0.6);
+        }
+      }
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      fitView({
+        nodes: frame.ids ? frame.ids.map((id) => ({ id })) : undefined,
+        padding: { top: `${pad.top}px`, right: `${pad.right}px`, bottom: `${pad.bottom}px`, left: `${pad.left}px` },
+        maxZoom: frame.ids ? 1.2 : 1,
+        duration: reduce ? 0 : 400,
+      });
+    }, 250);
+    return () => clearTimeout(t);
+  }, [frame, fitView]);
+  return null;
+}
+
 // ─── Main canvas ─────────────────────────────────────────────────────────────
 
 export function DagCanvas() {
@@ -100,13 +138,15 @@ export function DagCanvas() {
   const { fitView } = useReactFlow();
   const updateNodeInternals = useUpdateNodeInternals();
   const isMobile = useIsMobile();
+  // The tour frames the canvas itself (TourFramer), so this would fight it.
+  const touring = useTourStore((t) => t.phase !== 'off');
   useEffect(() => {
-    if (!isMobile) return;
+    if (!isMobile || touring) return;
     const id = selectedRippleId ?? (selectedTriggerId ? `trigger-${selectedTriggerId}` : selectedPondId);
     if (!id) return;
     const t = setTimeout(() => fitView({ nodes: [{ id }], duration: 350, padding: 0.15, maxZoom: 1.1 }), 120);
     return () => clearTimeout(t);
-  }, [isMobile, selectedPondId, selectedRippleId, selectedTriggerId, fitView]);
+  }, [isMobile, touring, selectedPondId, selectedRippleId, selectedTriggerId, fitView]);
 
   // Recompute layout whenever graph structure changes (not on every sim tick)
   const layoutKey = useMemo(
@@ -198,7 +238,7 @@ export function DagCanvas() {
   const onEdgesChange = useCallback((_: EdgeChange[]) => {}, []);
 
   return (
-    <div style={{ width: '100%', height: '100%', background: '#0f0f14' }}>
+    <div id="ds-canvas" style={{ width: '100%', height: '100%', background: '#0f0f14' }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -218,6 +258,7 @@ export function DagCanvas() {
         style={{ background: '#0f0f14' }}
       >
         <Background color="#2a2a35" gap={24} size={1} />
+        <TourFramer />
         <Panel position="top-left">
           <SimControls />
         </Panel>
