@@ -20,7 +20,7 @@ import {
 import '@xyflow/react/dist/style.css';
 
 import { usePlaygroundStore, consumeEdgeColor, formatAge, pushTargetF, THEME_PULL, THEME_PUSH } from '@/lib/store';
-import { useIsMobile } from '@/lib/useIsMobile';
+import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
 import { useTourStore } from '@/lib/tour';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { PondNode } from './PondNode';
@@ -140,6 +140,8 @@ export function DagCanvas() {
   const isMobile = useIsMobile();
   // The tour frames the canvas itself (TourFramer), so this would fight it.
   const touring = useTourStore((t) => t.phase !== 'off');
+  // On a short screen the tour card is a bar along the canvas's bottom edge, over the zoom controls.
+  const hideControls = useIsShort() && !isMobile && touring;
   useEffect(() => {
     if (!isMobile || touring) return;
     const id = selectedRippleId ?? (selectedTriggerId ? `trigger-${selectedTriggerId}` : selectedPondId);
@@ -264,6 +266,7 @@ export function DagCanvas() {
         </Panel>
         <Controls
           style={{
+            display: hideControls ? 'none' : undefined,
             background: '#1a1a1f',
             border: '1px solid #3f3f46',
             borderRadius: 6,

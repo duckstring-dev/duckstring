@@ -26,7 +26,7 @@ The steps are data in `src/lib/tourSteps.ts`; the runner is `src/lib/tour.ts`.
 
 ```bash
 npx playwright install chromium   # once
-npm test                          # unit tests, plus the tour end to end at 360x640, 390x844 and 1280x800
+npm test                          # unit tests, plus the tour end to end at 360x640, 390x844, 844x390 and 1280x800
 ```
 
 The end-to-end run saves a screenshot per tour step under `test-results/`.

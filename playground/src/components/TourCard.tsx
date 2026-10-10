@@ -2,14 +2,15 @@
 
 import { useEffect, useRef } from 'react';
 import { usePlaygroundStore, THEME_BRAND } from '@/lib/store';
-import { useIsMobile } from '@/lib/useIsMobile';
+import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
 import { useTourStore } from '@/lib/tour';
 import { TOUR_STEPS, CHAPTER_TITLES } from '@/lib/tourSteps';
 import { initialTourMode } from '@/lib/tourStorage';
 
 // The tour's card. On desktop and tablets it floats over the bottom-left of the canvas, clear of the
 // sidebar. On a phone it spans the screen: above the bottom sheet when the step points at a sidebar
-// control, at the bottom otherwise.
+// control, at the bottom otherwise. On a short screen (a phone in landscape) it's a flat bar along the
+// bottom of the canvas, so the graph keeps most of the height.
 
 // `backticks` → code.
 function Copy({ text }: { text: string }) {
@@ -54,6 +55,7 @@ function Button({
         cursor: 'pointer',
         fontFamily: 'inherit',
         letterSpacing: '0.02em',
+        whiteSpace: 'nowrap',
         background: primary ? THEME_BRAND : 'transparent',
         color: primary ? '#0f0f14' : quiet ? '#71717a' : '#e4e4e7',
         border: primary ? `1px solid ${THEME_BRAND}` : quiet ? '1px solid transparent' : '1px solid #3f3f46',
@@ -94,6 +96,7 @@ function WaitProgress() {
 
 export function TourCard() {
   const isMobile = useIsMobile();
+  const flat = useIsShort() && !isMobile;
   const phase = useTourStore((t) => t.phase);
   const index = useTourStore((t) => t.index);
   const waitLabel = useTourStore((t) => t.waitLabel);
@@ -163,14 +166,16 @@ export function TourCard() {
           ? { top: 'calc(8px + env(safe-area-inset-top))' }
           : { bottom: 'calc(8px + env(safe-area-inset-bottom))' }),
       }
-    : { position: 'absolute', left: 56, bottom: 16, width: 320 };
+    : flat
+      ? { position: 'absolute', left: 0, right: 0, bottom: 0 }
+      : { position: 'absolute', left: 56, bottom: 16, width: 320 };
   const panel: React.CSSProperties = {
     ...anchor,
     zIndex: 50,
     background: '#18181d',
     border: '1px solid #3f3f46',
-    borderRadius: 10,
-    boxShadow: '0 12px 32px rgba(0, 0, 0, 0.55)',
+    ...(flat ? { borderBottom: 'none', borderRadius: '10px 10px 0 0' } : { borderRadius: 10 }),
+    boxShadow: flat ? '0 -8px 24px rgba(0, 0, 0, 0.5)' : '0 12px 32px rgba(0, 0, 0, 0.55)',
     color: '#e4e4e7',
     fontFamily: 'ui-monospace, SFMono-Regular, monospace',
     outline: 'none',
@@ -226,6 +231,16 @@ export function TourCard() {
   const position = chapterSteps.indexOf(step) + 1;
   const isLast = index === TOUR_STEPS.length - 1;
   const chapterEnd = !isLast && TOUR_STEPS[index + 1].chapter !== step.chapter;
+  const chapterLabel = (
+    <span style={{ fontSize: 10, fontWeight: 700, color: '#71717a', letterSpacing: '0.08em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
+      Chapter {step.chapter} · {position} of {chapterSteps.length}
+    </span>
+  );
+  const skip = !isLast && (
+    <Button quiet onClick={() => tour().skip()} testId="tour-skip">
+      Skip tour
+    </Button>
+  );
   const primaryLabel = isLast ? 'Close' : step.action && !actionDone ? step.action.label : chapterEnd ? 'Continue' : 'Next';
 
   return (
@@ -238,74 +253,98 @@ export function TourCard() {
       data-testid="tour-card"
       data-step={step.id}
       data-last-advance={lastAdvance ?? undefined}
-      // Header and buttons stay put; only the text scrolls if a phone runs out of height.
+      // Header and buttons stay put; only the text scrolls if a phone runs out of height. Flat: one
+      // full-width line on top, then text on the left and buttons on the right. That row never wraps
+      // (the flat layout always has a canvas at least ~480 px wide), so the text takes the bar's capped
+      // height and scrolls.
       style={{
         ...panel,
-        padding: '10px 14px 12px',
+        padding: flat ? '8px 14px 8px' : '10px 14px 12px',
         display: 'flex',
         flexDirection: 'column',
-        maxHeight: isMobile ? '60dvh' : undefined,
+        maxHeight: isMobile ? '60dvh' : flat ? '55dvh' : undefined,
       }}
     >
-      <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 44, marginTop: -6 }}>
-        <span style={{ fontSize: 10, fontWeight: 700, color: '#71717a', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-          Chapter {step.chapter} · {position} of {chapterSteps.length}
-        </span>
-        {!isLast && (
-          <Button quiet onClick={() => tour().skip()} testId="tour-skip">
-            Skip tour
-          </Button>
-        )}
-      </div>
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-        {position === 1 && (
-          <div style={{ fontSize: 11, color: THEME_BRAND, marginBottom: 4 }}>{CHAPTER_TITLES[step.chapter]}</div>
-        )}
-        <div aria-live="polite">
-          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>{step.title}</div>
-          <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
-            <Copy text={step.body} />
-          </div>
-          {step.suggestions && (
-            <ul style={{ margin: '6px 0 0', paddingLeft: 18, listStyle: 'disc', fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
-              {step.suggestions.map((t) => (
-                <li key={t} style={{ marginBottom: 4 }}>
-                  <Copy text={t} />
-                </li>
-              ))}
-            </ul>
+      {flat ? (
+        // Where we are, the chapter's title on its first step, and Skip. Skip keeps its 44 px tap area
+        // without adding to the bar's height.
+        <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10, height: 20, marginBottom: 2 }}>
+          {chapterLabel}
+          {position === 1 && (
+            <span style={{ minWidth: 0, fontSize: 11, color: THEME_BRAND, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {CHAPTER_TITLES[step.chapter]}
+            </span>
           )}
-          {step.footer && (
-            <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55, marginTop: 6 }}>
-              <Copy text={step.footer} />
+          <span style={{ flex: 1 }} />
+          {skip}
+        </div>
+      ) : (
+        <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 44, marginTop: -6 }}>
+          {chapterLabel}
+          {skip}
+        </div>
+      )}
+      <div style={flat ? { flex: 1, minHeight: 0, display: 'flex', alignItems: 'stretch', gap: 16 } : { display: 'contents' }}>
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto' }}>
+          {!flat && position === 1 && (
+            <div style={{ fontSize: 11, color: THEME_BRAND, marginBottom: 4 }}>{CHAPTER_TITLES[step.chapter]}</div>
+          )}
+          <div aria-live="polite">
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>{step.title}</div>
+            <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
+              <Copy text={step.body} />
+            </div>
+            {step.suggestions && (
+              <ul style={{ margin: '6px 0 0', paddingLeft: 18, listStyle: 'disc', fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
+                {step.suggestions.map((t) => (
+                  <li key={t} style={{ marginBottom: 4 }}>
+                    <Copy text={t} />
+                  </li>
+                ))}
+              </ul>
+            )}
+            {step.footer && (
+              <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55, marginTop: 6 }}>
+                <Copy text={step.footer} />
+              </div>
+            )}
+          </div>
+          {step.links && (
+            <div style={{ display: 'flex', gap: 14, marginTop: 10, fontSize: 13 }}>
+              {step.links.map((l) => (
+                <a key={l.href} href={l.href} target="_blank" rel="noopener noreferrer" style={{ color: THEME_BRAND, textDecoration: 'underline' }}>
+                  {l.label}
+                </a>
+              ))}
             </div>
           )}
         </div>
-        {step.links && (
-          <div style={{ display: 'flex', gap: 14, marginTop: 10, fontSize: 13 }}>
-            {step.links.map((l) => (
-              <a key={l.href} href={l.href} target="_blank" rel="noopener noreferrer" style={{ color: THEME_BRAND, textDecoration: 'underline' }}>
-                {l.label}
-              </a>
-            ))}
-          </div>
-        )}
-      </div>
-      <div style={{ flexShrink: 0, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 12 }}>
-        {index > 0 && (
-          <Button onClick={() => tour().back()} testId="tour-back">
-            Back
+        <div
+          style={{
+            flexShrink: 0,
+            alignSelf: flat ? 'flex-end' : undefined,
+            display: 'flex',
+            justifyContent: 'flex-end',
+            alignItems: 'center',
+            gap: 8,
+            marginTop: flat ? 4 : 12,
+          }}
+        >
+          {index > 0 && (
+            <Button onClick={() => tour().back()} testId="tour-back">
+              Back
+            </Button>
+          )}
+          <span style={{ flex: 1 }} />
+          {chapterEnd && (
+            <Button onClick={() => tour().finish()} testId="tour-finish">
+              Finish
+            </Button>
+          )}
+          <Button primary onClick={() => tour().primary()} testId="tour-next">
+            {primaryLabel}
           </Button>
-        )}
-        <span style={{ flex: 1 }} />
-        {chapterEnd && (
-          <Button onClick={() => tour().finish()} testId="tour-finish">
-            Finish
-          </Button>
-        )}
-        <Button primary onClick={() => tour().primary()} testId="tour-next">
-          {primaryLabel}
-        </Button>
+        </div>
       </div>
     </div>
   );

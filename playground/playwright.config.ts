@@ -1,6 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
 
-// Unit tests run in Node; the end-to-end tour runs against a production build at three viewports.
+// Unit tests run in Node; the end-to-end tour runs against a production build at four viewports.
 const PORT = 3123;
 
 export default defineConfig({
@@ -19,6 +19,12 @@ export default defineConfig({
       name: 'phone-390',
       testDir: 'tests/e2e',
       use: { ...devices['iPhone 13'], browserName: 'chromium', viewport: { width: 390, height: 844 } },
+    },
+    {
+      // Landscape phones get the desktop layout with little height: the tour card is a flat bar.
+      name: 'phone-landscape',
+      testDir: 'tests/e2e',
+      use: { ...devices['iPhone 13 landscape'], browserName: 'chromium', viewport: { width: 844, height: 390 } },
     },
     {
       name: 'desktop',
