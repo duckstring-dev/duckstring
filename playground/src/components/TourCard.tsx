@@ -34,12 +34,14 @@ function Button({
   children,
   primary = false,
   quiet = false,
+  block = false,
   testId,
 }: {
   onClick: () => void;
   children: React.ReactNode;
   primary?: boolean;
   quiet?: boolean;
+  block?: boolean; // fill a column; a long label wraps instead of widening it
   testId?: string;
 }) {
   return (
@@ -48,14 +50,16 @@ function Button({
       data-testid={testId}
       style={{
         minHeight: 44,
-        padding: quiet ? '0 6px' : '0 14px',
+        width: block ? '100%' : undefined,
+        padding: quiet ? '0 6px' : block ? '6px 10px' : '0 14px',
+        lineHeight: block ? 1.25 : undefined,
         borderRadius: 6,
         fontSize: quiet ? 12 : 13,
         fontWeight: 600,
         cursor: 'pointer',
         fontFamily: 'inherit',
         letterSpacing: '0.02em',
-        whiteSpace: 'nowrap',
+        whiteSpace: block ? 'normal' : 'nowrap',
         background: primary ? THEME_BRAND : 'transparent',
         color: primary ? '#0f0f14' : quiet ? '#71717a' : '#e4e4e7',
         border: primary ? `1px solid ${THEME_BRAND}` : quiet ? '1px solid transparent' : '1px solid #3f3f46',
@@ -236,6 +240,11 @@ export function TourCard() {
       Chapter {step.chapter} · {position} of {chapterSteps.length}
     </span>
   );
+  const backQuiet = index > 0 && (
+    <Button quiet onClick={() => tour().back()} testId="tour-back">
+      ‹ Back
+    </Button>
+  );
   const skip = !isLast && (
     <Button quiet onClick={() => tour().skip()} testId="tour-skip">
       Skip tour
@@ -276,6 +285,7 @@ export function TourCard() {
             </span>
           )}
           <span style={{ flex: 1 }} />
+          {backQuiet}
           {skip}
         </div>
       ) : (
@@ -319,32 +329,37 @@ export function TourCard() {
             </div>
           )}
         </div>
-        <div
-          style={{
-            flexShrink: 0,
-            alignSelf: flat ? 'flex-end' : undefined,
-            display: 'flex',
-            justifyContent: 'flex-end',
-            alignItems: 'center',
-            gap: 8,
-            marginTop: flat ? 4 : 12,
-          }}
-        >
-          {index > 0 && (
-            <Button onClick={() => tour().back()} testId="tour-back">
-              Back
+        {flat ? (
+          // A narrow column: the main button, with Finish under it at a chapter's end. Back is in
+          // the top line, so the text keeps nearly the whole width.
+          <div style={{ flexShrink: 0, width: 120, alignSelf: 'flex-end', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Button primary block onClick={() => tour().primary()} testId="tour-next">
+              {primaryLabel}
             </Button>
-          )}
-          <span style={{ flex: 1 }} />
-          {chapterEnd && (
-            <Button onClick={() => tour().finish()} testId="tour-finish">
-              Finish
+            {chapterEnd && (
+              <Button block onClick={() => tour().finish()} testId="tour-finish">
+                Finish
+              </Button>
+            )}
+          </div>
+        ) : (
+          <div style={{ flexShrink: 0, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 12 }}>
+            {index > 0 && (
+              <Button onClick={() => tour().back()} testId="tour-back">
+                Back
+              </Button>
+            )}
+            <span style={{ flex: 1 }} />
+            {chapterEnd && (
+              <Button onClick={() => tour().finish()} testId="tour-finish">
+                Finish
+              </Button>
+            )}
+            <Button primary onClick={() => tour().primary()} testId="tour-next">
+              {primaryLabel}
             </Button>
-          )}
-          <Button primary onClick={() => tour().primary()} testId="tour-next">
-            {primaryLabel}
-          </Button>
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -162,8 +162,9 @@ aren't called push triggers). Curly brackets say what the tour does on screen.
   the card covers. A pause after every step (card hidden so the visitor sees what it covered) was tried and
   dropped: only the Wave's start-up needs it, and that's already a wait.
 - Phone landscape (and any screen under 500 px tall above the phone breakpoint) gets the desktop layout, so
-  the card is a flat bar flush along the bottom of the canvas: one line for the chapter and Skip, then text
-  on the left (scrolling if it must) and buttons on the right. The canvas's zoom controls hide while it's up.
+  the card is a flat bar flush along the bottom of the canvas: one line for the chapter, Back and Skip (quiet
+  text buttons), then text on the left (scrolling if it must) and a 120 px column on the right with the main
+  button, and Finish under it at a chapter's end. Long button labels wrap rather than widen the column. The canvas's zoom controls hide while it's up.
   Tested at 844 x 390. Phones narrower than 768 px in landscape (667 x 375) still get the portrait layout,
   because the app's breakpoint is width-only.
 - While a step waits on the simulation, the card shrinks to a bar with "Skip ahead" and a progress bar,
