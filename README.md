@@ -30,6 +30,8 @@ Schedules are set on the Ponds whose output is actually used, at the end of the 
 duckstring trigger tide reports 1d
 ```
 
+The [Playground](https://playground.duckstring.com) runs the demo pipeline in your browser, with a short guided tour of how it's scheduled.
+
 ## Incremental processing
 
 A *Trickle* stores a table's changes as a Z-set: rows weighted +1 when added and -1 when removed. Joins and aggregations written with the Trickle builder recompute only the keys that changed since the last run, and handle updates and deletes correctly across any shape of join:
@@ -96,7 +98,7 @@ The [Quickstart](https://docs.duckstring.com/quickstart) goes through the same s
 
 ## Documentation
 
-[docs.duckstring.com](https://docs.duckstring.com) has the concepts, task guides, and a reference for the CLI, Python API, `pond.toml` and HTTP API. To try pull orchestration without installing anything, use the [Playground](https://playground.duckstring.com).
+[docs.duckstring.com](https://docs.duckstring.com) has the concepts, task guides, and a reference for the CLI, Python API, `pond.toml` and HTTP API. To try pull orchestration without installing anything, the [Playground](https://playground.duckstring.com) simulates it in the browser, with a guided tour.
 
 ## Status
 

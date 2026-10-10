@@ -18,6 +18,7 @@ The landing page (`docs/src/components/Landing/index.tsx`) is the source of trut
 - Tagline: "Get your ducks in a row." It is the hero lead on the landing page.
 - Speed claims are acceptable when framed as the platform making good use of DuckDB's speed. This is a loose preference, not a hard rule.
 - Analogies are fine when the other domain is broadly known. Avoid ones that need their own explanation.
+- The Playground (playground.duckstring.com) is the no-install way into pull orchestration: the demo pipeline in the browser with a guided tour. Link it (plain URL; the tour offers itself on a first visit) wherever orchestration is explained: the Orchestration concept page, Orchestration Theory, the Quickstart, the Scheduling guide, the README and the landing page.
 
 ## Terminology for user-facing text
 

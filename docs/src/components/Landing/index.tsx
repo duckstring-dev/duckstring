@@ -191,7 +191,8 @@ function PullOrchestration(): ReactNode {
       <p className={styles.proseMuted}>
         No sophisticated prediction of run times is required. Duckstring uses the same scheduling system that keeps
         modern manufacturing processes humming. See{' '}
-        <Link to="/concepts/orchestration">Orchestration</Link>.
+        <Link to="/concepts/orchestration">Orchestration</Link>, or watch it run in the{' '}
+        <Link href="https://playground.duckstring.com">Playground</Link>.
       </p>
     </Section>
   );
@@ -268,7 +269,7 @@ const ROUTES: {title: string; body: string; to?: string; href?: string}[] = [
   },
   {
     title: 'Orchestration Playground',
-    body: 'Experiment with Pull-based scheduling with a browser toy.',
+    body: 'A guided tour of pull orchestration, running in your browser with nothing to install.',
     href: 'https://playground.duckstring.com',
   },
   {

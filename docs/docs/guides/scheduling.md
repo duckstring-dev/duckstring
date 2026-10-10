@@ -5,7 +5,7 @@ description: Choose triggers and windows for common schedules.
 
 # Scheduling
 
-Duckstring schedules from the end of the pipeline: you put a trigger on the Pond whose data someone uses, and everything upstream runs as needed to supply it. This guide covers the common schedules and how to set them up. See [Orchestration](../concepts/orchestration.md) for how triggers work.
+Duckstring schedules from the end of the pipeline: you put a trigger on the Pond whose data someone uses, and everything upstream runs as needed to supply it. This guide covers the common schedules and how to set them up. See [Orchestration](../concepts/orchestration.md) for how triggers work, and the [Playground](https://playground.duckstring.com) to try them in the browser before setting them on a Catchment.
 
 ## Where to put triggers
 

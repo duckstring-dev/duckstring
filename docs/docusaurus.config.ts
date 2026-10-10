@@ -115,13 +115,13 @@ const config: Config = {
             {label: 'Concepts', to: '/concepts/ponds'},
             {label: 'Quickstart', to: '/quickstart'},
             {label: 'Orchestration', to: '/concepts/orchestration'},
+            {label: 'Playground', href: 'https://playground.duckstring.com'},
           ],
         },
         {
           title: 'More',
           items: [
             {label: 'Blog', to: '/blog'},
-            {label: 'Playground', href: 'https://playground.duckstring.com'},
             {label: 'GitHub', href: 'https://github.com/duckstring-dev/duckstring'},
             {label: 'Contact', href: 'mailto:dev@duckstring.com'},
           ],
