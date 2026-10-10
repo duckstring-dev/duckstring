@@ -3,8 +3,8 @@
 import { useEffect, useRef } from 'react';
 import { useTourStore } from '@/lib/tour';
 
-// Guides the eye to each step's target: a large white pill contracts onto it while the rest of the
-// screen dims, then fades, leaving the steady white ring (.ds-tour-ring/.ds-tour-outline in
+// Guides the eye to each step's target: a white pill fades in as it contracts onto it, with the rest of
+// the screen dimming slightly, then fades, leaving the steady white ring (.ds-tour-ring/.ds-tour-outline in
 // globals.css). White, because every other colour on the canvas already means a state. It never
 // takes pointer events, so the canvas and the bottom sheet stay usable underneath.
 
@@ -12,7 +12,8 @@ const DURATION_MS = 900;
 const FADE_MS = 200;
 const PAD = 6; // gap between the landed pill and the target
 const RADIUS = 12; // the landed pill's corner radius
-const DIM = 0.55; // the dim's strongest opacity, while it closes in
+const START = 160; // how far the pill starts out from the target on every side
+const DIM = 0.4; // the dim's strongest opacity, mid-contraction
 
 // The box around every element matching `selector` (a control can be marked on more than one).
 function targetRect(selector: string): DOMRect | null {
@@ -55,11 +56,11 @@ function Contraction({ selector, delay }: { selector: string; delay: number }) {
         return;
       }
       const e = easeOut(Math.min(1, p));
-      // Starts large enough to enclose the screen, so the dim closes in from the edges.
-      const inflate = (1 - e) * Math.hypot(window.innerWidth, window.innerHeight);
+      // Starts invisible and a little larger than the target, and gains opacity as it closes in.
+      const inflate = (1 - e) * START;
       const w = rect.width + 2 * (PAD + inflate);
       const h = rect.height + 2 * (PAD + inflate);
-      el.style.opacity = String(1 - smoothstep(1, 1 + FADE_MS / DURATION_MS, p));
+      el.style.opacity = String(smoothstep(0, 0.6, p) * (1 - smoothstep(1, 1 + FADE_MS / DURATION_MS, p)));
       el.style.left = `${rect.left - PAD - inflate}px`;
       el.style.top = `${rect.top - PAD - inflate}px`;
       el.style.width = `${w}px`;
