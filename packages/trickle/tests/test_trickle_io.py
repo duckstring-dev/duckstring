@@ -255,9 +255,11 @@ def test_floor_anchors_at_bootstrap_and_retention_advances_it(db):
     _dim(db, [(1, "b")], ts(2))
     assert T.read_meta(db)["dim"]["floor"] == ts(1).isoformat()
     _dim(db, [(1, "c")], ts(3), retain_n=1)
-    assert T.read_meta(db)["dim"]["floor"] == ts(3).isoformat()
-    # A consumer behind the raised floor reads the table in full.
-    assert at(db, ts(3), ts(2)).read_delta("dim").is_full
+    # Retention folds the changes before the newest run into the warm tier, so the floor is the last of them:
+    # a consumer that last read at ts(2) still has its whole window in the change log.
+    assert T.read_meta(db)["dim"]["floor"] == ts(2).isoformat()
+    assert not at(db, ts(3), ts(2)).read_delta("dim").is_full
+    assert at(db, ts(3), ts(1)).read_delta("dim").is_full  # one behind the floor reads in full
 
 
 # ─── write return values (the no-change signal) ──────────────────────────────────
@@ -273,3 +275,26 @@ def test_write_return_values_signal_change(db):
     assert _dim(db, [(1, "a"), (2, "b")], ts(1)) is True
     assert _dim(db, [(1, "a"), (2, "b")], ts(2)) is False
     assert _dim(db, [(1, "A"), (2, "b")], ts(3)) is True
+
+
+@pytest.mark.parametrize("retain", [{"retain_n": 1}, {"retain_n": 2}, {"retain_t": timedelta(minutes=90)}])
+def test_merge_retention_keeps_the_state(db, retain):
+    """Retention bounds a merge table's change log, never its state: the dropped changes are folded into the
+    warm tier first. A row written once and never changed again outlives any retention window."""
+    import random
+
+    rng = random.Random(3)
+    state: dict[int, str] = {}
+    for h in range(1, 13):
+        for _ in range(3):
+            k = rng.randint(1, 8)
+            if rng.random() < 0.25:
+                state.pop(k, None)
+            else:
+                state[k] = f"v{h}_{rng.randint(0, 9)}"
+        _dim(db, sorted(state.items()), ts(h), **retain)
+        assert rows(db, "dim") == sorted(state.items()), f"run {h}"
+        assert sorted(db.sql("SELECT * FROM dim").fetchall()) == sorted(state.items())
+    hot = [r[0] for r in db.sql(f"SELECT DISTINCT {T.F_COL} FROM dim__changelog").fetchall()]
+    assert len(hot) <= retain.get("retain_n", 2)  # the change log itself is bounded
+    assert at(db, ts(12), ts(1)).read_delta("dim").is_full  # a consumer behind the window reads in full

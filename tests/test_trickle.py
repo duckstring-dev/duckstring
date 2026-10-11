@@ -1271,7 +1271,8 @@ def test_floor_anchors_at_bootstrap_and_retention_advances_it(reg, tmp_path):
     T.merge_table(reg, "dim", _state(reg, [(1, "b")]), ts(2), ("id",))
     assert T.load_sidecar(publish(reg, tmp_path / "d2", f=ts(2)))["dim"]["floor"] == ts(1).isoformat()
     T.merge_table(reg, "dim", _state(reg, [(1, "c")]), ts(3), ("id",), retain_n=1)
-    assert T.load_sidecar(publish(reg, tmp_path / "d3", f=ts(3)))["dim"]["floor"] == ts(3).isoformat()
+    # Retention folds the older changes into the warm tier: the floor is the last folded run.
+    assert T.load_sidecar(publish(reg, tmp_path / "d3", f=ts(3)))["dim"]["floor"] == ts(2).isoformat()
 
 
 # ─── a merge Ripple threading through the local runner ───────────────────────────
@@ -1387,3 +1388,15 @@ def test_builder_was_changed_tracks_output(tmp_path):
     pr([("p1", 9)], ts(3))                       # reprice → output total changes
     assert run(ts(3), ts(2)) is True
     snk.close()
+
+
+def test_merge_retention_keeps_the_published_state(reg, tmp_path):
+    """Retention on a merge table folds the dropped changes into a warm band, which publishing carries, so the
+    published table keeps every row (before, the changes were deleted and rows written once were lost)."""
+    snk = tmp_path / "data"
+    state = {}
+    for h, (k, v) in enumerate([(1, "a"), (2, "b"), (3, "c"), (1, "A"), (4, "d")], start=1):
+        state[k] = v
+        T.merge_table(reg, "dim", _state(reg, sorted(state.items())), ts(h), ("id",), retain_n=1)
+        publish(reg, snk, f=ts(h))
+        assert rows(reg, snk, "dim", "id, v") == sorted(state.items()), f"run {h}"

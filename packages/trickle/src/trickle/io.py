@@ -306,6 +306,34 @@ def _user_cols(columns) -> list[str]:
     return [c for c in columns if not c.startswith(RESERVED_PREFIX)]
 
 
+def _retention_cutoff(con, table: str, f, retain_t, retain_n):
+    """The oldest freshness ``retain_t``/``retain_n`` keep in ``table`` (see :func:`_apply_retention`), or
+    ``None`` when neither applies."""
+    cutoff = f - retain_t if retain_t is not None else None
+    if retain_n is not None and retain_n >= 1:
+        kept_min = con.execute(
+            f'SELECT min(g) FROM (SELECT DISTINCT {_q(F_COL)} AS g FROM {_q(table)} '
+            f'ORDER BY g DESC LIMIT {int(retain_n)})'
+        ).fetchone()[0]
+        if kept_min is not None:
+            cutoff = kept_min if cutoff is None else max(cutoff, kept_min)
+    return cutoff
+
+
+def _retain_merge(con, name: str, f, retain_t, retain_n) -> None:
+    """Retention for a merge table: bound the change log without losing state. The change log holds the
+    table's state until a checkpoint folds it into the base, so the changes older than the cutoff are folded
+    into the warm tier (:func:`fold_warm`, which also raises the delta floor) rather than deleted. Deleting
+    them, as append retention does, dropped every row not written again inside the window."""
+    clog = changelog_name(name)
+    cutoff = _retention_cutoff(con, clog, f, retain_t, retain_n)
+    if cutoff is None:
+        return
+    (target,) = con.execute(f'SELECT max({_q(F_COL)}) FROM {_q(clog)} WHERE {_q(F_COL)} < {_ts(cutoff)}').fetchone()
+    if target is not None:
+        fold_warm(con, name, target)
+
+
 def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
     """Bound a history/changelog table's retained window at write time — a **lag SLA**, not a
     correctness control (a consumer behind the retained window falls back to a full read of the clean
@@ -1035,8 +1063,8 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     _record_meta(con, name, "merge", pk)
     _set_compact_threshold(con, name, compact_threshold)
     _set_cluster(con, name, cluster)
-    cutoff = _apply_retention(con, clog, f, retain_t, retain_n)
-    _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None), cutoff=cutoff)
+    _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None))
+    _retain_merge(con, name, f, retain_t, retain_n)
     refresh_current_view(con, name)
     return nonempty
 
@@ -1118,7 +1146,7 @@ def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> Non
     amortised O(base) write that keeps the per-run cost O(change); triggered at k=1 (warm ≥ base). Crash-safe
     and lock-free: ``f_base`` is advanced *after* the base is replaced, and reads are latest-per-PK over
     ``base ⊎ warm ⊎ changelog``, so an interrupted checkpoint just leaves a redundant (idempotent) window."""
-    clog, warm = changelog_name(name), warm_name(name)
+    warm = warm_name(name)
     sql = _reconstruct_sql_for(con, name, upper=target_f)
     if sql is None:
         return
@@ -1132,8 +1160,7 @@ def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> Non
     con.execute(f'DROP TABLE IF EXISTS {_q(warm_pending_name(name))}')
     _set_f_base(con, name, target_f)
     _set_f_warm(con, name, target_f)  # warm is empty; its watermark tracks the cold base
-    cutoff = _apply_retention(con, clog, target_f, retain_t, retain_n)
-    _advance_floor(con, name, cutoff=cutoff)
+    _retain_merge(con, name, target_f, retain_t, retain_n)
     refresh_current_view(con, name)  # f_base moved: the view's window filter changes
 
 
