@@ -52,13 +52,15 @@ class DataPlane:
     """The cross-Pond data interchange contract. Backends implement publish (``export``) and consume
     (``read_select`` / ``list_tables`` / ``table_path``)."""
 
-    def export(self, con, data_dir: Path, *, mode: str = "overwrite", f=None, retain_from=KEEP_ALL) -> None:
+    def export(self, con, data_dir: Path, *, mode: str = "overwrite", f=None, retain_from=KEEP_ALL,
+               held=frozenset()) -> None:
         """Publish every table in ``con``'s registry to ``data_dir`` for cross-Pond consumption.
 
         ``mode`` selects the write semantic (only ``"overwrite"`` in Phase 1). ``f`` is the run's
         freshness, which names the overwrite versions this publish writes. ``retain_from`` is the
-        Catchment's retention bound for superseded versions (see :func:`prune_versions`). Rejects any table
-        carrying a reserved (``_duckstring_*``) column."""
+        Catchment's retention bound for superseded versions (see :func:`prune_versions`). ``held`` names
+        tables the run checked as unchanged, which keep their published copy. Rejects any table carrying a
+        reserved (``_duckstring_*``) column."""
         raise NotImplementedError
 
     def read_select(self, data_dir: Path, table: str, *, as_of=None, pin=None) -> str:
@@ -72,10 +74,11 @@ class DataPlane:
         A **merge Trickle main** is log-structured (a base + the ``__changelog``), so it is *reconstructed*
         here (latest-per-PK over the base ⊎ the changelog newer than the fold watermark ``f_base``); every
         other table is a direct physical read (:meth:`_raw_read_select`)."""
-        from .trickle.io import load_sidecar
+        from .trickle.io import check_format_version, load_sidecar
 
         data_dir = _as_storage(data_dir)
         meta = load_sidecar(data_dir).get(table, {})
+        check_format_version(meta.get("format_version"), table)
         mode = meta.get("mode")
         if mode == "merge":
             return self._reconstruct_select(data_dir, table, meta, as_of)
@@ -283,9 +286,7 @@ def prune_versions(data_dir, retain_from, tables=None) -> int:
     sidecar = trickle.load_sidecar(store)
     removed = 0
     changed = False
-    for table, entry in sidecar.items():
-        if table in ("objects", "state") or not isinstance(entry, dict):
-            continue
+    for table, entry in trickle.sidecar_tables(sidecar).items():
         if entry.get("mode", "overwrite") != "overwrite" or (tables is not None and table not in tables):
             continue
         names = trickle.table_versions(store, table)
@@ -336,10 +337,12 @@ def registry_tables(con) -> list[str]:
     a Trickle main/changelog), never a view. ``read_table("source.table")`` registers each foreign Source
     as a same-named *view* so SQL can ``FROM table`` it — those must NOT be published (``SHOW TABLES``
     lists views too, so this filtered ``duckdb_tables()`` query is what stops a Pond from re-exporting a
-    full copy of every Source it reads)."""
+    full copy of every Source it reads). Only the registry's own database counts: a database a Ripple
+    attaches to read from (another DuckDB file, SQLite, Postgres) is never republished."""
     return [
         t for (t,) in con.execute(
-            "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main' ORDER BY table_name"
+            "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main' "
+            "AND database_name = current_database() ORDER BY table_name"
         ).fetchall() if not t.startswith(RESERVED_PREFIX)
     ]
 
@@ -354,7 +357,7 @@ def validate_publish(con, table: str) -> None:
         )
 
 
-def publish_plan(con, data_dir: Path, f=None) -> list[str]:
+def publish_plan(con, data_dir: Path, f=None, held=frozenset()) -> list[str]:
     """Validate the publish set, write the ``_trickle.json`` sidecar, and return the tables to publish.
 
     Trickle tables (a clean *main* + its ``__changelog`` Z-set companion) legitimately carry
@@ -363,7 +366,13 @@ def publish_plan(con, data_dir: Path, f=None) -> list[str]:
     a Trickle, ``{mode: "overwrite"}`` for plain output — each stamped with this run's freshness ``f`` so a
     cross-Pond reader can resolve a Trickle's coverage *and* detect whether an overwrite source advanced
     (its ``f`` vs the consumer's ``previous_f``). Call this *before* writing anything so a reserved-column
-    violation aborts the whole publish (last-good left intact)."""
+    violation aborts the whole publish (last-good left intact).
+
+    An overwrite table in ``held`` (checked unchanged this run, see plans/change-detection.md) keeps its
+    prior entry, so its ``f`` stays at the run that last changed it; :func:`held_tables` says which can be.
+    An overwrite entry carries the table's fingerprint (``fp``) when its last write recorded one. The
+    sidecar's run stamp (:data:`~duckstring.trickle.io.RUN_KEY`) records this publish's ``f``, which a held
+    entry no longer shows."""
     from datetime import timezone
 
     from . import trickle_io as trickle
@@ -376,18 +385,26 @@ def publish_plan(con, data_dir: Path, f=None) -> list[str]:
     tables = registry_tables(con)
     f_iso = f.astimezone(timezone.utc).isoformat() if f is not None else None
     existing = trickle.load_sidecar(data_dir)
+    kept = held_tables(data_dir, held, existing)
+    fps = registry_fingerprints(con)
     payload: dict[str, dict] = {}
     for table in tables:
         if table in meta or table in changelogs or table in droplogs or table in warms or table in colds:
             continue  # Trickle base/companion — base added below; the __changelog/__band/__droplog
             #            companions are exported as files (reserved system columns) but take no sidecar entry.
         validate_publish(con, table)
+        if table in kept:
+            payload[table] = dict(existing[table])  # unchanged: the published version and its stamp stand
+            continue
         payload[table] = {"mode": "overwrite", "f": f_iso}
+        if table in fps:
+            payload[table]["fp"] = fps[table]
         prior = existing.get(table)
         if isinstance(prior, dict) and prior.get("v_floor"):
             payload[table]["v_floor"] = prior["v_floor"]  # the retention watermark (see prune_versions)
     for base, m in meta.items():
-        entry = {"mode": m["mode"], "pk": list(m["pk"]), "floor": m.get("floor"), "f": f_iso}
+        entry = {"mode": m["mode"], "pk": list(m["pk"]), "floor": m.get("floor"), "f": f_iso,
+                 "format_version": m["format_version"]}
         if m["mode"] == "merge":
             entry["f_base"] = m.get("f_base")  # fold watermark — the read reconstructs base ⊎ changelog>f_base
         payload[base] = entry
@@ -396,8 +413,77 @@ def publish_plan(con, data_dir: Path, f=None) -> list[str]:
     existing_objects = existing.get("objects")
     if existing_objects:
         payload["objects"] = existing_objects
+    if f_iso is not None:
+        payload[trickle.RUN_KEY] = {"f": f_iso}
     trickle.write_sidecar(data_dir, payload)
     return tables
+
+
+def held_tables(data_dir, held, sidecar=None) -> set[str]:
+    """Which of ``held`` can be held at publish: overwrite tables with a published version to keep. A name
+    without one (never published, or an Object) is published as usual."""
+    from . import trickle_io as trickle
+
+    if not held:
+        return set()
+    entries = trickle.sidecar_tables(trickle.load_sidecar(data_dir) if sidecar is None else sidecar)
+    return {t for t in held if entries.get(t, {}).get("mode", "overwrite") == "overwrite" and t in entries
+            and trickle.table_versions(data_dir, t)}
+
+
+# ─── change detection for plain tables (plans/change-detection.md) ─────────────
+#
+# An overwrite table can carry a fingerprint: an order-independent digest of its content and schema. The
+# published one (the sidecar entry's ``fp``) is the baseline a new value is compared with. The registry keeps
+# its own copy in FP_TABLE, so a check can also tell whether the registry still holds the published content
+# (a failed run leaves its writes in the registry without publishing them).
+
+FP_TABLE = f"{RESERVED_PREFIX}fp"
+# The fingerprint format. DuckDB's hash() isn't guaranteed stable across versions, so the tag carries the
+# DuckDB major.minor: after an upgrade no fingerprint matches, which costs one republish per table.
+_FP_FORMAT = "fp1"
+
+
+def _fp_tag() -> str:
+    import duckdb
+
+    return f"{_FP_FORMAT}-duckdb{'.'.join(duckdb.__version__.split('.')[:2])}"
+
+
+def fingerprint(relation) -> str:
+    """A digest of ``relation``'s content and schema: the row count and the sum of every row's hash
+    (independent of row order, and counting duplicate rows), combined with the column names and types in
+    order and a format tag. Costs one scan. Floating-point edge cases (``-0.0``, NaN payloads) follow
+    DuckDB's ``hash``."""
+    import hashlib
+    import json
+
+    count, total = relation.aggregate("count(*), sum(hash(*COLUMNS(*))::HUGEINT)").fetchone()
+    schema = [[c, str(t)] for c, t in zip(relation.columns, relation.types, strict=True)]
+    tag = _fp_tag()
+    digest = hashlib.sha256(json.dumps([tag, schema, int(count), str(total or 0)]).encode()).hexdigest()
+    return f"{tag}:{digest}"
+
+
+def _ensure_fp_table(con) -> None:
+    con.execute(f'CREATE TABLE IF NOT EXISTS "{FP_TABLE}" (table_name VARCHAR PRIMARY KEY, fp VARCHAR, f TIMESTAMPTZ)')
+
+
+def registry_fingerprints(con) -> dict[str, str]:
+    """``{table: fp}`` for the registry tables whose last write recorded a fingerprint."""
+    from . import trickle_io as trickle
+
+    if not trickle._table_exists(con, FP_TABLE):
+        return {}
+    return dict(con.execute(f'SELECT table_name, fp FROM "{FP_TABLE}"').fetchall())
+
+
+def set_registry_fingerprint(con, table: str, fp: str | None, f=None) -> None:
+    """Record (or, with ``fp=None``, clear) ``table``'s registry fingerprint. Call inside the transaction
+    that writes the table, so the two never disagree."""
+    con.execute(f'DELETE FROM "{FP_TABLE}" WHERE table_name = ?', [table])
+    if fp is not None:
+        con.execute(f'INSERT INTO "{FP_TABLE}" VALUES (?, ?, ?)', [table, fp, f])
 
 
 def unpublish_table(data_dir, name: str) -> None:
@@ -429,9 +515,11 @@ class ParquetDataPlane(DataPlane):
     fold watermark outgrows the base, past ``DUCKSTRING_COMPACT_THRESHOLD``); reads reconstruct
     base ⊎ changelog (see :meth:`DataPlane.read_select`)."""
 
-    def export(self, con, data_dir, *, mode: str = "overwrite", f=None, retain_from=KEEP_ALL) -> None:
+    def export(self, con, data_dir, *, mode: str = "overwrite", f=None, retain_from=KEEP_ALL,
+               held=frozenset()) -> None:
         """See :meth:`DataPlane.export`. ``retain_from`` drives version retention after the publish (see
-        :func:`prune_versions`); the default keeps every version."""
+        :func:`prune_versions`); the default keeps every version. ``held`` names the overwrite tables this run
+        checked as unchanged: they keep their published version and sidecar entry (:func:`publish_plan`)."""
         from datetime import datetime, timezone
 
         from . import trickle_io as trickle
@@ -442,12 +530,13 @@ class ParquetDataPlane(DataPlane):
         data_dir.duckdb_setup(con)  # object store → load httpfs + register the credential secret (no-op local)
         data_dir.mkdir()
 
-        tables = publish_plan(con, data_dir, f)
+        kept = held_tables(data_dir, held)  # unchanged overwrite tables: no new version, entry carried
+        tables = publish_plan(con, data_dir, f, held=kept)
         meta = trickle.read_meta(con)
         incremental = trickle.incremental_tables(meta) if f is not None else set()
         version_f = f if f is not None else datetime.now(timezone.utc)  # an unstamped publish still versions
-        plain = {t for t, e in trickle.load_sidecar(data_dir).items()
-                 if isinstance(e, dict) and e.get("mode") == "overwrite"}  # publish_plan just wrote it
+        plain = {t for t, e in trickle.sidecar_tables(trickle.load_sidecar(data_dir)).items()
+                 if e.get("mode") == "overwrite"}  # publish_plan just wrote it
         merge_mains = {t for t, m in meta.items() if m.get("mode") == "merge"}
         colds = {trickle.cold_base_name(t) for t in merge_mains}
 
@@ -455,8 +544,8 @@ class ParquetDataPlane(DataPlane):
             for table in tables:
                 if table in incremental:
                     _export_parts(con, data_dir, table, f)
-                elif table in merge_mains or table in colds:
-                    continue  # the base is published only at a checkpoint (below), not per run
+                elif table in merge_mains or table in colds or table in kept:
+                    continue  # a base is published only at a checkpoint (below); a held table not at all
                 elif table not in plain:  # a Trickle companion published without a run freshness
                     with data_dir.copy_to(f"{table}.parquet") as uri:
                         con.execute(f'COPY "{table}" TO \'{uri}\' (FORMAT PARQUET)')
@@ -470,7 +559,7 @@ class ParquetDataPlane(DataPlane):
             for main in merge_mains:
                 _publish_tiered_main(con, data_dir, main, f)
             if merge_mains:  # a checkpoint may have advanced f_base → refresh the sidecar
-                publish_plan(con, data_dir, f)
+                publish_plan(con, data_dir, f, held=kept)
             if retain_from is not KEEP_ALL:
                 prune_versions(data_dir, retain_from)  # after the new version is in place
             _export_companions(con, data_dir, f)  # state-format Extension 1 (runs after the sidecar is final)
@@ -517,7 +606,8 @@ class ParquetDataPlane(DataPlane):
         parts = set(trickle.part_tables(data_dir))
         # A merge main is reconstructed from its changelog; it is a published table even before its base
         # exists (no checkpoint yet → no `{main}.parquet`), so surface it from the sidecar.
-        mains = {t for t, m in trickle.load_sidecar(data_dir).items() if m.get("mode") == "merge"}
+        mains = {t for t, m in trickle.sidecar_tables(trickle.load_sidecar(data_dir)).items()
+                 if m.get("mode") == "merge"}
         return sorted(files | versioned | parts | mains)
 
 
@@ -689,9 +779,7 @@ def _enrich_sidecar(con, data_dir, f) -> None:
     data_dir = _as_storage(data_dir)
     sidecar = trickle.load_sidecar(data_dir)
     changed = False
-    for table, entry in sidecar.items():
-        if table in ("objects", "state") or not isinstance(entry, dict):
-            continue
+    for table, entry in trickle.sidecar_tables(sidecar).items():
         mode = entry.get("mode", "overwrite")
         try:
             delta = _delta_rows_last(con, table, mode, f)
@@ -704,7 +792,7 @@ def _enrich_sidecar(con, data_dir, f) -> None:
             schema = _entry_schema(con, table)
             if schema is not None:
                 entry["schema"] = schema
-            entry["format"] = 2
+            entry["format"] = 2  # the hints' layout (stats/schema), separate from Trickle's format_version
             changed = True
         except Exception:  # a hint, not a publish invariant
             continue
@@ -738,11 +826,10 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
     plane = ParquetDataPlane()  # hydration reads the flat layer (every backend also writes it)
     sidecar = trickle.load_sidecar(store)
     hydrated: list[str] = []
-    for table, entry in sidecar.items():
-        if table in ("objects", "state") or not isinstance(entry, dict):
-            continue
+    for table, entry in trickle.sidecar_tables(sidecar).items():
         if tables is not None and table not in tables:
             continue
+        trickle.check_format_version(entry.get("format_version"), table)
         mode = entry.get("mode", "overwrite")
         loaded = False
         if mode == "merge":

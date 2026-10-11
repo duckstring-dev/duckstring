@@ -72,9 +72,9 @@ class DbtExecutor(RunInputs):
         self._pool = ThreadPoolExecutor(max_workers=1)
 
     def submit(self, ripple_name, f, previous_f, on_done, on_error,
-               sources_changed: bool = True, skip_sink=None):
+               sources_changed: bool = True, skip_sink=None, change_sink=None):
         """Run the dbt model ``ripple_name`` at freshness ``f``. dbt models are plain overwrite nodes, so
-        ``sources_changed``/``skip_sink`` (the no-change-skip hooks) don't apply. Callbacks fire on the
+        ``sources_changed``/``skip_sink``/``change_sink`` (the change hooks) don't apply. Callbacks fire on the
         pool thread, matching RippleExecutor — ``on_done(name, started, finished, lineage)``, where the
         model's lineage is the cross-Pond sources it materialised (observed via the Pond handle) plus its
         parent models (from the manifest — dbt's ``ref()`` graph is declared, no observation needed)."""
@@ -128,10 +128,10 @@ class DbtExecutor(RunInputs):
 
         run_model(self.proj_dir, self.profiles_dir, model_name, self.target_dir)
 
-    def export(self, f: datetime | None = None, contract=None) -> dict | None:
+    def export(self, f: datetime | None = None, contract=None, held=frozenset()) -> dict | None:
         """Publish the models (the ``main``-schema tables dbt built) via the data plane, contract-gated.
         The materialised Source relations live in their own schemas, so the ``main``-only export never
-        republishes them."""
+        republishes them. ``held`` is ignored: a dbt model is never checked for change."""
         import duckdb
 
         with self._lock:

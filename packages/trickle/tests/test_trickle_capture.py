@@ -7,9 +7,8 @@ from __future__ import annotations
 import json
 
 import pytest
-
-from duckstring import acc, agg
-from duckstring.trickle.capture import NonCapturable, capture_plan
+from trickle import acc, agg
+from trickle.capture import NonCapturable, capture_plan
 
 
 def _src(ref):

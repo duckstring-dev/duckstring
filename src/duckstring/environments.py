@@ -62,18 +62,33 @@ def _extras() -> list[str]:
     return extras
 
 
+# The distributions a Pond environment gets from the machine building it rather than from the Pond's lock:
+# Duckstring and the Trickle engine it depends on. A Duck writes the storage format its Catchment reads, so
+# both must be exactly the Catchment's.
+_HOST_DISTRIBUTIONS = ("duckstring-trickle", "duckstring")
+
+
 def duckstring_requirement() -> list[str]:
-    """``uv pip install`` arguments installing this machine's own Duckstring (with its extras), so a Duck
-    runs exactly the Duckstring its Catchment, Pool agent or image has: the local source for a development
-    checkout, the same wheel or VCS commit it was installed from, otherwise the same released version from
-    the package index (also the fallback when the recorded wheel file is gone, as in the Docker image)."""
+    """``uv pip install`` arguments installing this machine's own Duckstring (with its extras) and its own
+    Trickle engine (``duckstring-trickle``), so a Duck runs exactly what its Catchment, Pool agent or image
+    has: the local source for a development checkout, the same wheel or VCS commit it was installed from,
+    otherwise the same released version from the package index (also the fallback when the recorded wheel
+    file is gone, as in the Docker image)."""
+    extras = _extras()
+    return [*_requirement("duckstring-trickle", []), *_requirement("duckstring", extras)]
+
+
+def _requirement(name: str, extras: list[str]) -> list[str]:
+    """The ``uv pip install`` arguments reproducing this machine's install of the distribution ``name``."""
     from importlib import metadata
     from urllib.parse import unquote, urlparse
 
-    dist = metadata.distribution("duckstring")
-    extras = _extras()
+    try:
+        dist = metadata.distribution(name)
+    except metadata.PackageNotFoundError:
+        return []
     suffix = f"[{','.join(extras)}]" if extras else ""
-    released = [f"duckstring{suffix}=={dist.version}"]
+    released = [f"{name}{suffix}=={dist.version}"]
     direct = dist.read_text("direct_url.json")
     if not direct:
         return released
@@ -81,16 +96,17 @@ def duckstring_requirement() -> list[str]:
     url = info.get("url", "")
     if "vcs_info" in info:
         vcs = info["vcs_info"]
-        return [f"duckstring{suffix} @ {vcs.get('vcs', 'git')}+{url}@{vcs.get('commit_id', '')}".rstrip("@")]
+        spec = f"{name}{suffix} @ {vcs.get('vcs', 'git')}+{url}@{vcs.get('commit_id', '')}".rstrip("@")
+        return [spec + (f"#subdirectory={info['subdirectory']}" if info.get("subdirectory") else "")]
     if url.startswith("file://"):
         path = unquote(urlparse(url).path)
         if not Path(path).exists():
             return released
         if info.get("dir_info", {}).get("editable"):
             return ["-e", f"{path}{suffix}"]
-        return [f"duckstring{suffix} @ {url}"]
+        return [f"{name}{suffix} @ {url}"]
     if url:
-        return [f"duckstring{suffix} @ {url}"]
+        return [f"{name}{suffix} @ {url}"]
     return released
 
 
@@ -176,10 +192,11 @@ def ensure_env(root: Path, source_dir: Path, *, check_lock: bool = True) -> Path
     with _FileLock(Path(root) / "envs" / f"{digest}.lock"):
         if not (env_dir / _COMPLETE).exists():
             shutil.rmtree(env_dir, ignore_errors=True)  # a previous build that didn't finish
-            # The locked Duckstring is skipped: this machine's own is installed next, and a lock made
-            # against a local checkout names a path that exists only on the developer's machine.
-            _run_uv(["sync", "--locked" if check_lock else "--frozen", "--no-install-project",
-                     "--no-install-package", "duckstring", "--no-dev", "--quiet", *_interpreter(spec)],
+            # The locked Duckstring and Trickle are skipped: this machine's own are installed next, and a lock
+            # made against a local checkout names a path that exists only on the developer's machine.
+            skip = [arg for name in _HOST_DISTRIBUTIONS for arg in ("--no-install-package", name)]
+            _run_uv(["sync", "--locked" if check_lock else "--frozen", "--no-install-project", *skip,
+                     "--no-dev", "--quiet", *_interpreter(spec)],
                     cwd=source_dir, env={"UV_PROJECT_ENVIRONMENT": str(env_dir)})
             _run_uv(["pip", "install", "--quiet", "--python", str(_python_in(env_dir)), *duckstring_requirement()],
                     cwd=source_dir)

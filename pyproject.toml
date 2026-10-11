@@ -14,6 +14,9 @@ dependencies = [
   # in an allowed-to-fail job. Raise the ceiling once the suite passes on the next major's release
   # (plans/duckdb-2-ready.md). A Pond environment gets this Duckstring, so these bounds hold there too.
   "duckdb>=1.5,<2",
+  # The incremental engine (packages/trickle), released separately. A compatible range: while it's 0.x a
+  # minor release can change its API or storage format, so Duckstring moves to one deliberately.
+  "duckstring-trickle>=0.1,<0.2",
   "rich>=13.7",
   "typer>=0.12",
   "fastapi>=0.111",
@@ -77,6 +80,12 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.uv.workspace]
+members = ["packages/trickle"]
+
+[tool.uv.sources]
+duckstring-trickle = { workspace = true }
+
 [project.urls]
 Homepage = "https://duckstring.com"
 Documentation = "https://docs.duckstring.com"
@@ -88,7 +97,7 @@ duckstring = "duckstring.cli:main"
 ds = "duckstring.cli:main"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "packages/trickle/tests"]
 # Some suites share fixtures by importing `tests.<module>`; put the repo root on the path so a bare
 # `pytest` (what CI runs) resolves them the same as `python -m pytest`.
 pythonpath = ["."]
@@ -104,3 +113,8 @@ extend-exclude = ["experiment"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
 ignore = ["B008"]  # typer.Option/Argument in defaults is intentional
+
+[tool.ruff.lint.isort]
+# Explicit, because ruff versions disagree on modules that only resolve through an alias: newer ones class
+# duckstring.trickle.* (now packages/trickle, aliased) as third-party. `trickle` itself is third-party here.
+known-first-party = ["duckstring"]

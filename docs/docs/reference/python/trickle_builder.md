@@ -26,7 +26,7 @@ Nothing runs until a terminal is called. Every method except the terminals, `cou
 On each run the builder reads the changes to each source over the run's window and works out the change to its output from them, touching only the join keys that changed. It falls back to recomputing the output in full, and recording only the difference, when:
 
 - a source is being read for the first time, or the Pond has fallen behind that source's retained history;
-- a source is a plain table (written with `write_table`) that was republished since the last run;
+- a source is a plain table (written with `write_table`) that was republished since the last run. A Source that writes it with `if_changed=True` doesn't republish it when its content is the same, so it doesn't trigger this;
 - a source's changes touch more than its threshold `p` of its rows;
 - the output table doesn't exist yet;
 - `ivm=False` is passed to the terminal.
@@ -50,7 +50,7 @@ Starts a builder on a source table.
 | `ref` | `str` | | `"source.table"`. Any published table works: an append or merge Trickle, or a plain table. To use one of this Pond's own tables, write it with a terminal earlier in the same chain (see [Chaining](#chaining)). |
 | `p` | `float` | `0.3` | Change-fraction threshold. If this source's changes touch more than `p` of its current rows, the builder recomputes in full for that run, since filtering by key no longer saves work. `1.0` disables the check and skips the row count it needs. |
 
-A plain table that hasn't changed since the last run contributes no changes and costs nothing. One that has changed forces a full recompute, so for large, frequently changing inputs it's worth making the upstream table a Trickle.
+A plain table that hasn't changed since the last run contributes no changes and costs nothing. One that has changed forces a full recompute, so for large, frequently changing inputs it's worth making the upstream table a Trickle. A plain table counts as unchanged when the Source didn't republish it: either it didn't run, or it wrote the table with `write_table(..., if_changed=True)` and the content was the same.
 
 ### `.alias`
 

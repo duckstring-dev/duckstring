@@ -59,6 +59,18 @@ def notify(pond):
     ...                              # only when a Source changed
 ```
 
+To act on one Source table only, ask about it with [`changed`](pond.md#changed):
+
+```python
+@ripple(always_run=True)
+def notify(pond):
+    send_heartbeat()
+    if not pond.changed("sales.sale_line"):
+        pond.skip()
+        return
+    ...                              # only when sale_line changed
+```
+
 ## `@puddle`
 
 ```python

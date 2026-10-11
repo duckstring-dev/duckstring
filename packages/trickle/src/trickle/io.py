@@ -95,6 +95,11 @@ ACC_STATE_PREFIX = "_duckstring_acc_"
 # The mode/PK registry: one row per Trickle output table. Named in the reserved namespace so
 # ``registry_tables`` hides it from the publish set.
 META_TABLE = "_duckstring_trickle"
+# The version of the storage format this code writes and reads: the system columns, the companion tables
+# and tiers, the meta table and the published layout. Recorded per table in the meta table and on each
+# Trickle entry of the sidecar (``format_version``; absent means 1), so a later format change can migrate
+# what it finds instead of guessing, and code reading a newer format refuses instead of misreading it.
+FORMAT_VERSION = 1
 # The published sidecar carrying mode/PK/floor + the source run freshness to cross-Pond readers.
 SIDECAR = "_trickle.json"
 
@@ -134,11 +139,27 @@ class _PathStore:
     def mkdir(self, *parts: str) -> None:
         self._abs(*parts).mkdir(parents=True, exist_ok=True)
 
+    def uri(self, *parts: str) -> str:
+        return str(self._abs(*parts)).replace("'", "''")
+
 
 def _store(data_dir):
     """Coerce a ``data_dir`` (a ``Storage`` from the host, or a bare ``Path``/str) to the directory
     interface the helpers below use. A ``Storage`` (object-store-capable) passes through unchanged."""
     return data_dir if hasattr(data_dir, "parquet_names") else _PathStore(data_dir)
+
+
+class FormatVersionError(RuntimeError):
+    """A Trickle table was written in a newer storage format than this code reads."""
+
+
+def check_format_version(version, table: str) -> None:
+    """Raise :class:`FormatVersionError` if ``version`` (``None`` means 1) is newer than :data:`FORMAT_VERSION`."""
+    if version is not None and int(version) > FORMAT_VERSION:
+        raise FormatVersionError(
+            f"Trickle table '{table}' uses storage format {int(version)}, but this version reads format "
+            f"{FORMAT_VERSION} at most. Upgrade to read it."
+        )
 
 
 class DeltaError(ValueError):
@@ -285,6 +306,34 @@ def _user_cols(columns) -> list[str]:
     return [c for c in columns if not c.startswith(RESERVED_PREFIX)]
 
 
+def _retention_cutoff(con, table: str, f, retain_t, retain_n):
+    """The oldest freshness ``retain_t``/``retain_n`` keep in ``table`` (see :func:`_apply_retention`), or
+    ``None`` when neither applies."""
+    cutoff = f - retain_t if retain_t is not None else None
+    if retain_n is not None and retain_n >= 1:
+        kept_min = con.execute(
+            f'SELECT min(g) FROM (SELECT DISTINCT {_q(F_COL)} AS g FROM {_q(table)} '
+            f'ORDER BY g DESC LIMIT {int(retain_n)})'
+        ).fetchone()[0]
+        if kept_min is not None:
+            cutoff = kept_min if cutoff is None else max(cutoff, kept_min)
+    return cutoff
+
+
+def _retain_merge(con, name: str, f, retain_t, retain_n) -> None:
+    """Retention for a merge table: bound the change log without losing state. The change log holds the
+    table's state until a checkpoint folds it into the base, so the changes older than the cutoff are folded
+    into the warm tier (:func:`fold_warm`, which also raises the delta floor) rather than deleted. Deleting
+    them, as append retention does, dropped every row not written again inside the window."""
+    clog = changelog_name(name)
+    cutoff = _retention_cutoff(con, clog, f, retain_t, retain_n)
+    if cutoff is None:
+        return
+    (target,) = con.execute(f'SELECT max({_q(F_COL)}) FROM {_q(clog)} WHERE {_q(F_COL)} < {_ts(cutoff)}').fetchone()
+    if target is not None:
+        fold_warm(con, name, target)
+
+
 def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
     """Bound a history/changelog table's retained window at write time — a **lag SLA**, not a
     correctness control (a consumer behind the retained window falls back to a full read of the clean
@@ -317,7 +366,7 @@ def _ensure_meta(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
         f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR, "
-        f"compact_threshold VARCHAR, f_warm VARCHAR, cluster VARCHAR)"
+        f"compact_threshold VARCHAR, f_warm VARCHAR, cluster VARCHAR, format_version INTEGER)"
     )
     # Migrate an older meta table that predates a column: f_base (the cold-base fold watermark),
     # compact_threshold (the per-table checkpoint-size override), f_warm (the warm-tier fold watermark).
@@ -330,15 +379,21 @@ def _ensure_meta(con) -> None:
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN f_warm VARCHAR')
     if "cluster" not in cols:  # the merge main's cold-base ordering (cluster_spec), JSON
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN cluster VARCHAR')
+    if "format_version" not in cols:  # FORMAT_VERSION; NULL (a row from before it was recorded) means 1
+        con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN format_version INTEGER')
 
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
     _ensure_meta(con)
+    row = con.execute(f'SELECT format_version FROM {_q(META_TABLE)} WHERE table_name = ?', [table]).fetchone()
+    if row is not None:
+        check_format_version(row[0], table)  # never overwrite a newer format's table as if it were ours
     # Preserve any existing floor / f_base (a normal incremental run must not reset them).
     con.execute(
-        f'INSERT INTO {_q(META_TABLE)} (table_name, mode, pk) VALUES (?, ?, ?) '
-        f'ON CONFLICT (table_name) DO UPDATE SET mode=excluded.mode, pk=excluded.pk',
-        [table, mode, ",".join(pk)],
+        f'INSERT INTO {_q(META_TABLE)} (table_name, mode, pk, format_version) VALUES (?, ?, ?, ?) '
+        f'ON CONFLICT (table_name) DO UPDATE SET mode=excluded.mode, pk=excluded.pk, '
+        f'format_version=excluded.format_version',
+        [table, mode, ",".join(pk), FORMAT_VERSION],
     )
 
 
@@ -439,16 +494,18 @@ def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
 
 def read_meta(con) -> dict[str, dict]:
     """``{table: {"mode", "pk": [...], "floor": iso|None, "f_base": iso|None,
-    "compact_threshold": int|None, "f_warm": iso|None, "cluster": dict|None}}`` for every Trickle table."""
+    "compact_threshold": int|None, "f_warm": iso|None, "cluster": dict|None, "format_version": int}}`` for
+    every Trickle table (``format_version`` 1 when unrecorded)."""
     if not _table_exists(con, META_TABLE):
         return {}
     _ensure_meta(con)  # an older meta table may predate a column read here
     rows = con.execute(
-        f'SELECT table_name, mode, pk, floor, f_base, compact_threshold, f_warm, cluster FROM {_q(META_TABLE)}'
+        f'SELECT table_name, mode, pk, floor, f_base, compact_threshold, f_warm, cluster, format_version '
+        f'FROM {_q(META_TABLE)}'
     ).fetchall()
     return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else []), "floor": r[3], "f_base": r[4],
                    "compact_threshold": (int(r[5]) if r[5] else None), "f_warm": r[6],
-                   "cluster": (json.loads(r[7]) if r[7] else None)}
+                   "cluster": (json.loads(r[7]) if r[7] else None), "format_version": r[8] or 1}
             for r in rows}
 
 
@@ -525,6 +582,18 @@ def load_sidecar(data_dir) -> dict[str, dict]:
         return json.loads(text)
     except ValueError:
         return {}
+
+
+# The sidecar keys that aren't table entries: the host's Objects section, the published agg/acc state
+# snapshots, and the run stamp (the freshness of the last publish, which a held table's entry no longer
+# shows). The run stamp uses the reserved prefix so it can never collide with a table's name.
+RUN_KEY = "_duckstring_run"
+SIDECAR_SECTIONS = ("objects", "state", RUN_KEY)
+
+
+def sidecar_tables(sidecar: dict) -> dict[str, dict]:
+    """The table entries of a loaded sidecar, without its sections (:data:`SIDECAR_SECTIONS`)."""
+    return {k: v for k, v in sidecar.items() if k not in SIDECAR_SECTIONS and isinstance(v, dict)}
 
 
 # ─── incremental publish + draw (per-run parts) ────────────────────────────────
@@ -994,8 +1063,8 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     _record_meta(con, name, "merge", pk)
     _set_compact_threshold(con, name, compact_threshold)
     _set_cluster(con, name, cluster)
-    cutoff = _apply_retention(con, clog, f, retain_t, retain_n)
-    _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None), cutoff=cutoff)
+    _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None))
+    _retain_merge(con, name, f, retain_t, retain_n)
     refresh_current_view(con, name)
     return nonempty
 
@@ -1077,7 +1146,7 @@ def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> Non
     amortised O(base) write that keeps the per-run cost O(change); triggered at k=1 (warm ≥ base). Crash-safe
     and lock-free: ``f_base`` is advanced *after* the base is replaced, and reads are latest-per-PK over
     ``base ⊎ warm ⊎ changelog``, so an interrupted checkpoint just leaves a redundant (idempotent) window."""
-    clog, warm = changelog_name(name), warm_name(name)
+    warm = warm_name(name)
     sql = _reconstruct_sql_for(con, name, upper=target_f)
     if sql is None:
         return
@@ -1091,8 +1160,7 @@ def checkpoint(con, name: str, target_f, *, retain_t=None, retain_n=None) -> Non
     con.execute(f'DROP TABLE IF EXISTS {_q(warm_pending_name(name))}')
     _set_f_base(con, name, target_f)
     _set_f_warm(con, name, target_f)  # warm is empty; its watermark tracks the cold base
-    cutoff = _apply_retention(con, clog, target_f, retain_t, retain_n)
-    _advance_floor(con, name, cutoff=cutoff)
+    _retain_merge(con, name, target_f, retain_t, retain_n)
     refresh_current_view(con, name)  # f_base moved: the view's window filter changes
 
 
@@ -2425,6 +2493,7 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None) 
     from .context import NEVER
 
     meta = load_sidecar(data_dir).get(table, {})
+    check_format_version(meta.get("format_version"), table)
     mode = meta.get("mode", "overwrite")
     pk = tuple(meta.get("pk", ()))
     floor = datetime.fromisoformat(meta["floor"]) if meta.get("floor") else None
@@ -2434,17 +2503,64 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None) 
     if mode == "merge":
         return _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
 
-    # overwrite source (a plain Ripple): no history. If its published freshness `f` shows it has not
-    # advanced past the consumer's previous_f, it is unchanged → an empty delta (stable history operand).
+    # overwrite source (a plain Ripple): no history. If the version this run reads was published at or
+    # before the consumer's previous_f, it is unchanged → an empty delta (stable history operand).
     # Otherwise (advanced / unknown / bootstrap) → a full read at +1, forcing the comprehensive path.
-    src_f = datetime.fromisoformat(meta["f"]) if meta.get("f") else None
-    if pin is not None and src_f is not None:
-        src_f = min(src_f, pin)  # the version actually read is at or below the pin
+    src_f = overwrite_version_f(data_dir, table, pin if pin is not None else f)
+    if src_f is None:  # an unversioned table (the earlier single-file layout): its sidecar stamp
+        src_f = datetime.fromisoformat(meta["f"]) if meta.get("f") else None
     pinned = {"pin": pin} if pin is not None else {}
     state = _strip_system(con.sql(dp.read_select(data_dir, table, as_of=f, **pinned)))
     if previous_f != NEVER and src_f is not None and src_f <= previous_f:
         return Delta(con, pk, _as_zset(state, 1).filter("1=0"), is_full=False)
     return Delta(con, pk, _as_zset(state, 1), is_full=True)
+
+
+def window_changed(con, data_dir, table: str, previous_f, f) -> bool:
+    """Whether a published Trickle ``table`` changed over ``(previous_f, f]``, without reading its data:
+    the per-run parts in the window (the append history, or a merge's ``__changelog`` and warm bands) are
+    found by name and their rows counted from the Parquet footers. A 0-row marker part is no change. A
+    window the published history doesn't cover (a bootstrap, a consumer behind retention) counts as
+    changed, as :func:`read_delta` would read it in full."""
+    from datetime import datetime
+
+    from .context import NEVER
+
+    if previous_f == NEVER:
+        return True
+    meta = load_sidecar(data_dir).get(table, {})
+    check_format_version(meta.get("format_version"), table)
+    floor = datetime.fromisoformat(meta["floor"]) if meta.get("floor") else None
+    store = _store(data_dir)
+    if meta.get("mode") == "merge":
+        log = changelog_name(table)
+        dirs = [log, warm_name(table)]
+    else:
+        log = table
+        dirs = [table]
+    log_parts = table_parts(data_dir, log)
+    if not log_parts and meta.get("mode") == "merge":
+        return True  # no changelog published: read_delta reads the table in full
+    oldest = part_f(log_parts[0]) if log_parts else None
+    if not _covered(previous_f, NEVER, floor, oldest):
+        return True
+    window = [store.uri(d, n) for d in dirs for n in table_parts(data_dir, d) if previous_f < part_f(n) <= f]
+    if not window:
+        return False
+    files = ", ".join(f"'{u}'" for u in window)
+    (rows,) = con.execute(f"SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata([{files}])").fetchone()
+    return rows > 0
+
+
+def overwrite_version_f(data_dir, table: str, at):
+    """The freshness of the overwrite version a read at ``at`` resolves to: the newest version with
+    ``f <= at``, else the newest (the data plane's ``select_version`` rule). A held table publishes no new
+    version, so this is the freshness of the run that last changed it. ``None`` for an unversioned table."""
+    versions = table_versions(data_dir, table)
+    if not versions:
+        return None
+    eligible = [n for n in versions if at is None or part_f(n) <= at]
+    return part_f(eligible[-1] if eligible else versions[-1])
 
 
 def _as_zset(relation, weight: int):
@@ -2513,7 +2629,7 @@ def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, flo
     return Delta(con, pk, zset, is_full=False)
 
 
-def read_registry_delta(con, table, previous_f, f, pk) -> Delta:
+def read_registry_delta(con, table, previous_f, f, pk=None) -> Delta:
     """The Z-set change a **just-written** Trickle ``table`` exposes over ``(previous_f, f]``, read back from
     the **registry** (its clean main + ``__changelog`` for a merge, or its history for an append) rather than
     the published data plane. Used to thread a mid-chain ``pond.trickle(...).merge(name)`` / ``.append(name)``
@@ -2521,14 +2637,17 @@ def read_registry_delta(con, table, previous_f, f, pk) -> Delta:
     in the same Ripple can't go through the normal (data-plane) ``read_delta``. The coverage rule is
     identical to the published read — a bootstrap (floor just set to ``f``) or a retention/coverage gap
     yields a full read (``is_full``), forcing the downstream comprehensive path; otherwise a windowed delta
-    (empty if the write produced nothing this run)."""
+    (empty if the write produced nothing this run).
+
+    Any window works, not only the current run's: the standalone host (:mod:`.session`) reads every source
+    this way over the pipeline's ``(previous_f, f]``. ``pk`` defaults to the table's recorded key."""
     from datetime import datetime
 
     from .context import NEVER
 
     m = read_meta(con).get(table, {})
     floor = datetime.fromisoformat(m["floor"]) if m.get("floor") else None
-    out_pk = normalize_pk(pk)
+    out_pk = normalize_pk(pk if pk is not None else m.get("pk", ()))
     if m.get("mode") == "append":
         return _append_delta_from_sql(con, f'SELECT * FROM {_q(table)}', previous_f, f, out_pk, NEVER, floor)
     clog = changelog_name(table)

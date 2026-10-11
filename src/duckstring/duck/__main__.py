@@ -135,6 +135,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                 on_error=lambda n, exc, started, finished: q.put(("error", (n, exc, started, finished))),
                 sources_changed=core.sources_changed_for(start_f),  # backs pond.sources_changed()
                 skip_sink=(lambda f=start_f: core.mark_skipped(f)),  # backs pond.skip() for this Run
+                change_sink=core.change_sink(start_f, name),  # backs pond.changed() and held tables
             )
 
     poller = threading.Thread(target=_poll_loop, daemon=True)
@@ -185,7 +186,9 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                     name, started, finished, lineage = data
                     events_before = len(core.events)
                     _launch(core.ripple_completed(
-                        name, _now(), started_at=started, finished_at=finished, export=executor.export,
+                        name, _now(), started_at=started, finished_at=finished,
+                        # the publish keeps the published copy of what the Run held unchanged
+                        export=lambda f, contract: executor.export(f, contract, held=core.held_for(f)),
                         lineage=lineage,
                     ))
                     # A run just completed (locally published) → kick off/queue the async persist for it.

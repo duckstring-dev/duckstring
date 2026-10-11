@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duckstring-trickle"
+version = "0.1.0"
+description = "Trickle: incremental joins and aggregates for DuckDB. Write a query once and it updates from the changes to its inputs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Duckstring", email = "dev@duckstring.com" }
+]
+keywords = ["duckdb", "incremental", "ivm", "dbsp", "z-sets", "materialized views", "cdc"]
+dependencies = [
+  # The range Duckstring tests; CI runs the floor and the latest release.
+  "duckdb>=1.5,<2",
+  # DuckDB needs pytz to fetch TIMESTAMPTZ values (every epoch stamp) as Python datetimes.
+  "pytz",
+]
+
+[project.optional-dependencies]
+# Column lineage through .sql() statements: a real SQL parser. Without it those outputs are opaque.
+lineage = ["sqlglot>=23"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-timeout>=0.5", "sqlglot>=23"]
+
+[project.urls]
+Homepage = "https://duckstring.com"
+Documentation = "https://docs.duckstring.com"
+Repository = "https://github.com/duckstring-dev/duckstring"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 30

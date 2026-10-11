@@ -158,6 +158,44 @@ def test_versioned_overwrite_on_a_real_s3(s3_env, tmp_path):
     assert _keys(client, "versions/a__v/") == [f"versions/a__v/{part_name(f2)}"]
 
 
+def test_change_detection_on_a_real_s3(s3_env, tmp_path):
+    """Change detection with the data plane on a bucket (plans/change-detection.md): an unchanged table is
+    held (no new version object, its sidecar ``f`` kept), and a Sink's ``changed`` reads the held table's
+    version and a Trickle's part footers over httpfs."""
+    from datetime import datetime, timedelta, timezone
+
+    import duckdb
+
+    from duckstring.changes import ChangeLedger
+    from duckstring.core import Pond
+    from duckstring.dataplane import ParquetDataPlane
+    from duckstring.storage import get_storage
+    from duckstring.trickle.io import load_sidecar, part_name
+
+    _endpoint, client = s3_env
+    data_root = f"s3://{_BUCKET}/changes"
+    store = get_storage(data_root).child("src", "m1", "data")
+    con = duckdb.connect(str(tmp_path / "src.duckdb"))
+    store.duckdb_setup(con)
+    ledger = ChangeLedger()
+    f1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    f2 = f1 + timedelta(hours=1)
+    for f, events in ((f1, "SELECT 1 AS id"), (f2, "SELECT 2 AS id WHERE false")):
+        p = Pond("src", "1.0.0", con, tmp_path, f=f, own_data_dir=store, change_sink=ledger.begin(f, "r"))
+        p.write_table("t", con.sql("SELECT 1 AS v"), if_changed=True)
+        p.append_table("e", con.sql(events))
+        ParquetDataPlane().export(con, store, f=f, held=ledger.held(f))
+    assert _keys(client, "changes/src/m1/data/t__v/") == [f"changes/src/m1/data/t__v/{part_name(f1)}"]
+    assert load_sidecar(store)["t"]["f"] == f1.isoformat()
+
+    sink = Pond("snk", "1.0.0", duckdb.connect(), tmp_path / "snk", source_majors={"src": 1}, f=f2,
+                previous_f=f1, data_root=data_root, source_f={"src": f2.isoformat()})
+    assert not sink.changed("src.t") and not sink.changed("src.e")
+    first = Pond("snk", "1.0.0", duckdb.connect(), tmp_path / "snk", source_majors={"src": 1}, f=f1,
+                 previous_f=f1 - timedelta(hours=1), data_root=data_root, source_f={"src": f1.isoformat()})
+    assert first.changed("src.t") and first.changed("src.e")
+
+
 def test_warm_bands_are_read_from_a_real_s3(s3_env, monkeypatch):
     """A merge table's warm bands, published to a bucket, are read there by a fresh registry through a view
     over the band objects, never copied in (plans/s3-resident-state.md)."""

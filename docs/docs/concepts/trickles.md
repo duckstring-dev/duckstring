@@ -116,6 +116,8 @@ Because each join is handled the same way, this also works through chains of joi
 
 If a large fraction of a source changes (by default, more than 30% of its rows), filtering by key stops being worthwhile, and Duckstring recomputes that part of the result in full. It still records only the difference, so downstream Ponds still receive just the changes.
 
+A source can also be an ordinary table, which keeps no record of its changes. When it changes, the result is recomputed in full; when it hasn't, it contributes nothing. The Pond that writes it can check each new version against the one it last published and keep the published copy when nothing differs, so a re-run that produces the same table doesn't count as a change downstream.
+
 ## Builder
 
 Writing these rules by hand is error-prone, so Duckstring provides a query builder, `pond.trickle(...)`, that applies them for you. This is the whole of the `priced` Ripple:

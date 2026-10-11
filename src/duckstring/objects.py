@@ -10,8 +10,10 @@ Layout under a Pond line's ``data_dir`` (local or object store), addressed via t
     {data_dir}/objects/{name}/data{ext}     # a single-file Object (ext preserved, e.g. `.pkl`)
     {data_dir}/objects/{name}/<tree>        # a directory Object (published/read as one unit)
 
-The ``_trickle.json`` sidecar gains an ``"objects"`` section — ``{name: {f, is_dir, ext, size}}`` —
+The ``_trickle.json`` sidecar gains an ``"objects"`` section, ``{name: {f, is_dir, ext, size, sha256}}``,
 carried forward across runs (Objects **persist until overwritten**, like a table, not per-run declared).
+``sha256`` is the payload's digest (:func:`object_digest`), the baseline a change check compares with
+(plans/change-detection.md).
 
 Write is **staged then committed at export** so publish stays atomic: a Ripple exception after a
 ``write_object`` leaves last-good intact (the commit only runs once the run's export passes the contract
@@ -59,10 +61,69 @@ def _as_storage(data_dir) -> Storage:
 # ─── write: stage during the run, commit at export ─────────────────────────────
 
 
-def stage_object(staging_root: Path, name: str, src) -> None:
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _combine(kind: str, ext: str, body) -> str:
+    """An Object digest: the payload's own digest with its shape (file or directory, and a file's
+    extension, which is part of what is published)."""
+    import hashlib
+
+    return hashlib.sha256(json.dumps([kind, ext, body]).encode()).hexdigest()
+
+
+def _dir_digest(root: Path) -> str:
+    rows = sorted((f.relative_to(root).as_posix(), f.stat().st_size, _sha256_file(f))
+                  for f in root.rglob("*") if f.is_file())
+    return _combine("dir", "", rows)
+
+
+def _bytes_digest(data: bytes, ext: str = "") -> str:
+    import hashlib
+
+    return _combine("file", ext, hashlib.sha256(data).hexdigest())
+
+
+def object_digest(src) -> str:
+    """The digest of an Object payload as :func:`stage_object` would publish it, without staging it: a
+    sha256 over the bytes (in memory, or a file streamed in place), or over a directory's sorted
+    ``(relative path, size, sha256)`` list. A binary file-like is read once and rewound when it can be."""
+    if isinstance(src, (str, Path)):
+        p = Path(src).expanduser()
+        if not p.exists():
+            raise ObjectError(f"object source path does not exist: {p}")
+        if p.is_dir():
+            return _dir_digest(p)
+        return _combine("file", p.suffix, _sha256_file(p))
+    if isinstance(src, (bytes, bytearray)):
+        return _bytes_digest(bytes(src))
+    pos = src.tell() if hasattr(src, "seekable") and src.seekable() else None
+    data = src.read()
+    if not isinstance(data, (bytes, bytearray)):
+        raise ObjectError(f"expected bytes, a path, or a binary file-like, got {type(src).__name__}")
+    if pos is not None:
+        src.seek(pos)
+    return _bytes_digest(bytes(data))
+
+
+def unstage_object(staging_root: Path, name: str) -> None:
+    """Discard any staged payload for ``name`` (a held Object, or a leftover from a failed run), so it can't
+    be committed later."""
+    shutil.rmtree(Path(staging_root) / name, ignore_errors=True)
+
+
+def stage_object(staging_root: Path, name: str, src) -> str:
     """Stage one Object write locally (payload + manifest). ``src`` is a filesystem ``Path`` (a file or a
     directory), raw ``bytes``, or a binary file-like. The payload is written in its final shape under
-    ``{staging_root}/{name}/payload/`` so the commit is a single directory publish."""
+    ``{staging_root}/{name}/payload/`` so the commit is a single directory publish. Returns the payload's
+    digest (:func:`object_digest`), which the commit records as the sidecar entry's ``sha256``."""
     validate_object_name(name)
     dest = staging_root / name
     shutil.rmtree(dest, ignore_errors=True)  # a later same-name write in one run wins
@@ -77,19 +138,23 @@ def stage_object(staging_root: Path, name: str, src) -> None:
             shutil.rmtree(payload)
             shutil.copytree(p, payload)
             is_dir, ext = True, ""
+            digest = _dir_digest(payload)
         else:
             ext = p.suffix
             shutil.copyfile(p, payload / f"data{ext}")
             is_dir = False
+            digest = _combine("file", ext, _sha256_file(payload / f"data{ext}"))
     else:
         data = src if isinstance(src, (bytes, bytearray)) else src.read()
         if not isinstance(data, (bytes, bytearray)):
             raise ObjectError(f"object {name!r}: expected bytes, a path, or a binary file-like, got {type(src).__name__}")
         (payload / "data").write_bytes(bytes(data))
         is_dir, ext = False, ""
+        digest = _bytes_digest(bytes(data))
 
     size = sum(f.stat().st_size for f in payload.rglob("*") if f.is_file())
-    (dest / _MANIFEST).write_text(json.dumps({"is_dir": is_dir, "ext": ext, "size": size}))
+    (dest / _MANIFEST).write_text(json.dumps({"is_dir": is_dir, "ext": ext, "size": size, "sha256": digest}))
+    return digest
 
 
 def staged_names(staging_root: Path) -> list[str]:
@@ -98,16 +163,17 @@ def staged_names(staging_root: Path) -> list[str]:
     return sorted(p.name for p in staging_root.iterdir() if (p / _MANIFEST).exists())
 
 
-def commit_objects(staging_root: Path, data_dir, f) -> dict[str, dict]:
+def commit_objects(staging_root: Path, data_dir, f, held=frozenset()) -> dict[str, dict]:
     """Publish every staged Object into ``{data_dir}/objects/{name}/``, **fold** their entries into the
     sidecar's ``objects`` section (upsert — Objects persist across runs), and clear the staging root. Must
     run *after* the table export (which writes the sidecar carrying the prior ``objects`` section forward).
-    Returns the newly-committed entries (``{}`` when nothing was staged)."""
+    An Object in ``held`` (checked unchanged this run) is never committed, even if a payload for it was left
+    staged. Returns the newly-committed entries (``{}`` when nothing was staged)."""
     from datetime import timezone
 
     from .trickle.io import load_sidecar, write_sidecar
 
-    names = staged_names(staging_root)
+    names = [n for n in staged_names(staging_root) if n not in held]
     if not names:
         shutil.rmtree(staging_root, ignore_errors=True)
         return {}
@@ -118,6 +184,8 @@ def commit_objects(staging_root: Path, data_dir, f) -> dict[str, dict]:
         manifest = json.loads((staging_root / name / _MANIFEST).read_text())
         store.put_tree(staging_root / name / _PAYLOAD, OBJECTS_DIR, name)
         entries[name] = {"f": f_iso, "is_dir": manifest["is_dir"], "ext": manifest["ext"], "size": manifest["size"]}
+        if manifest.get("sha256"):
+            entries[name]["sha256"] = manifest["sha256"]
     sidecar = load_sidecar(store)
     section = dict(sidecar.get(OBJECTS_KEY) or {})
     section.update(entries)
