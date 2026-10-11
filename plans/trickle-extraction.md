@@ -1,6 +1,6 @@
 # Extracting Trickle into its own package
 
-Status: **plan** (2026-10-09). Nothing built yet.
+Status: **in progress**. Phase 1 done (2026-10-11); phases 2 to 5 to come.
 
 ## Why
 
@@ -90,11 +90,11 @@ with trickle.run(con, pipeline="nightly") as t:
    instead of in the name, which also avoids leaning on the DuckDB Foundation's trademark. The PyPI `trickle` is
    a Tornado IOStream wrapper with a single 0.1 release from 2013, so an import clash is very unlikely.
    `import duckstring.trickle` is ruled out because it would collide with Duckstring's own package.
-2. **Separate repo or a second package in this repo.** A separate repo (`duckstring-dev/trickle`) gets its own
-   README, stars and issue tracker, which is most of the point of extracting it. A package in this repo (a uv
-   workspace member) keeps one CI and lets one change touch both sides atomically. Recommendation: a separate
-   repo, because discoverability is the goal, with Duckstring depending on a pinned range. Engine changes then
-   need a release before Duckstring can use them, which is the trade.
+2. **Separate repo or a second package in this repo.** Decided (2026-10-11): a second package in this repo, a
+   uv workspace member published to PyPI on its own. Trickle's documentation stays on docs.duckstring.com, and
+   agents can be pointed at one repo holding both the docs and the code they're checked against. Engine and
+   Duckstring changes land atomically, with no release in between. The package keeps its own PyPI page and
+   README; a separate Trickle-only repo was the alternative, traded away for those reasons.
 3. **The `_duckstring_` column prefix.** Every Trickle table carries `_duckstring_f`/`_duckstring_d` and
    `_duckstring_*` companions (43 literal uses in `trickle/` besides `SYSTEM_PREFIX`). Renaming to `_trickle_`
    is a storage format change for every existing Duckstring registry and published table, so it needs a
@@ -104,7 +104,13 @@ with trickle.run(con, pipeline="nightly") as t:
 
 ## Phases
 
-### 1. Close the seam (in this repo, no behaviour change)
+### 1. Close the seam (in this repo, no behaviour change). Done 2026-10-11
+
+Built as below. One finding: the builder also calls `ctx.merge_table` and `ctx.apply_zset` (the `.merge()`
+terminal's writes), which the `Context` protocol didn't list. They're now part of it, and the optional hooks are
+documented there too. Guarded by `tests/test_trickle_isolation.py`: a static check that no module imports
+outside `trickle/` (catching function-level imports, as the Flock's was), a run of `trickle/` loaded as a
+top-level `trickle` package with `duckstring` imports blocked, and the newer-format refusal.
 
 - Replace the Flock import with an optional host hook: `getattr(ctx, "dispatch_comprehensive", None)`, called
   with what `flock.comprehensive` takes today and returning a relation or `None`. `Pond` implements it by
@@ -137,17 +143,23 @@ with trickle.run(con, pipeline="nightly") as t:
 
 ### 4. Move the code
 
-- Create the new repo with the package, the moved tests, CI on the DuckDB floor and pre-release (matching
-  Duckstring's `duckdb>=1.5,<2`), `ruff`, and a release workflow with PyPI Trusted Publishing.
+- Make the repo a uv workspace with the package at `packages/trickle/` (its own `pyproject.toml`, distribution
+  `duckstring-trickle`, import `trickle`, Apache-2.0) and move `src/duckstring/trickle/` there with the moved
+  tests.
+- CI runs the package's tests on the DuckDB floor and pre-release (matching Duckstring's `duckdb>=1.5,<2`) in
+  the existing workflow. A release workflow keyed on its own tag (`trickle-v*`) publishes it with PyPI Trusted
+  Publishing, separately from Duckstring's `v*` releases.
 - Extras: `duckstring-trickle[lineage]` for `sqlglot`. `ibis` stays an undeclared lazy import, as now.
-- In Duckstring: depend on `duckstring-trickle` with a compatible range, make `duckstring.trickle` a forwarding
-  shim like the existing ones, and delete the moved code and tests.
+- In Duckstring: depend on `duckstring-trickle` with a compatible range (the workspace resolves it to the local
+  package in development), make `duckstring.trickle` a forwarding shim like the existing ones, and delete the
+  moved code.
 - **Pond environments:** the Catchment's Duckstring is installed into each Pond environment last, which already
   overrides a Pond's locked DuckDB. The same must hold for `duckstring-trickle`, because a Pond's Ducks write the
   format the Catchment reads. Check `environments.duckstring_requirement` and the `--no-install-package` step
-  install it from the Catchment's own environment, and add a test.
+  install it from the Catchment's own environment (editable from a dev checkout), and add a test. The published
+  Duck image must carry the matching wheel too.
 - Exit: Duckstring's full suite, including the Trickle e2e (`test_trickle_chain_runs_end_to_end`), passes
-  against the published package.
+  with the package installed from its own wheel.
 
 ### 5. Docs and launch
 
@@ -162,7 +174,7 @@ with trickle.run(con, pipeline="nightly") as t:
 
 - **Versions drifting apart.** A Duckstring release built against one Trickle format must not read another
   silently. `format_version` (phase 1) plus a compatible range in Duckstring's dependency covers this.
-- **Two places to fix a bug.** Engine bugs found through Duckstring need a Trickle release first. A short
-  release checklist in the new repo keeps that cheap.
+- **Two releases to coordinate.** Code changes land atomically in one repo, but a Duckstring release that
+  needs an engine change also needs a Trickle release first, with Duckstring's range raised to it.
 - **Standalone semantics that differ from Pond semantics.** Both hosts must give the same answers for the same
   inputs. The thin Duckstring-side suite in phase 3 is the guard.

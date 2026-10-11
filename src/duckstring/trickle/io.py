@@ -95,6 +95,11 @@ ACC_STATE_PREFIX = "_duckstring_acc_"
 # The mode/PK registry: one row per Trickle output table. Named in the reserved namespace so
 # ``registry_tables`` hides it from the publish set.
 META_TABLE = "_duckstring_trickle"
+# The version of the storage format this code writes and reads: the system columns, the companion tables
+# and tiers, the meta table and the published layout. Recorded per table in the meta table and on each
+# Trickle entry of the sidecar (``format_version``; absent means 1), so a later format change can migrate
+# what it finds instead of guessing, and code reading a newer format refuses instead of misreading it.
+FORMAT_VERSION = 1
 # The published sidecar carrying mode/PK/floor + the source run freshness to cross-Pond readers.
 SIDECAR = "_trickle.json"
 
@@ -142,6 +147,19 @@ def _store(data_dir):
     """Coerce a ``data_dir`` (a ``Storage`` from the host, or a bare ``Path``/str) to the directory
     interface the helpers below use. A ``Storage`` (object-store-capable) passes through unchanged."""
     return data_dir if hasattr(data_dir, "parquet_names") else _PathStore(data_dir)
+
+
+class FormatVersionError(RuntimeError):
+    """A Trickle table was written in a newer storage format than this code reads."""
+
+
+def check_format_version(version, table: str) -> None:
+    """Raise :class:`FormatVersionError` if ``version`` (``None`` means 1) is newer than :data:`FORMAT_VERSION`."""
+    if version is not None and int(version) > FORMAT_VERSION:
+        raise FormatVersionError(
+            f"Trickle table '{table}' uses storage format {int(version)}, but this version reads format "
+            f"{FORMAT_VERSION} at most. Upgrade to read it."
+        )
 
 
 class DeltaError(ValueError):
@@ -320,7 +338,7 @@ def _ensure_meta(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
         f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR, "
-        f"compact_threshold VARCHAR, f_warm VARCHAR, cluster VARCHAR)"
+        f"compact_threshold VARCHAR, f_warm VARCHAR, cluster VARCHAR, format_version INTEGER)"
     )
     # Migrate an older meta table that predates a column: f_base (the cold-base fold watermark),
     # compact_threshold (the per-table checkpoint-size override), f_warm (the warm-tier fold watermark).
@@ -333,15 +351,21 @@ def _ensure_meta(con) -> None:
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN f_warm VARCHAR')
     if "cluster" not in cols:  # the merge main's cold-base ordering (cluster_spec), JSON
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN cluster VARCHAR')
+    if "format_version" not in cols:  # FORMAT_VERSION; NULL (a row from before it was recorded) means 1
+        con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN format_version INTEGER')
 
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
     _ensure_meta(con)
+    row = con.execute(f'SELECT format_version FROM {_q(META_TABLE)} WHERE table_name = ?', [table]).fetchone()
+    if row is not None:
+        check_format_version(row[0], table)  # never overwrite a newer format's table as if it were ours
     # Preserve any existing floor / f_base (a normal incremental run must not reset them).
     con.execute(
-        f'INSERT INTO {_q(META_TABLE)} (table_name, mode, pk) VALUES (?, ?, ?) '
-        f'ON CONFLICT (table_name) DO UPDATE SET mode=excluded.mode, pk=excluded.pk',
-        [table, mode, ",".join(pk)],
+        f'INSERT INTO {_q(META_TABLE)} (table_name, mode, pk, format_version) VALUES (?, ?, ?, ?) '
+        f'ON CONFLICT (table_name) DO UPDATE SET mode=excluded.mode, pk=excluded.pk, '
+        f'format_version=excluded.format_version',
+        [table, mode, ",".join(pk), FORMAT_VERSION],
     )
 
 
@@ -442,16 +466,18 @@ def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
 
 def read_meta(con) -> dict[str, dict]:
     """``{table: {"mode", "pk": [...], "floor": iso|None, "f_base": iso|None,
-    "compact_threshold": int|None, "f_warm": iso|None, "cluster": dict|None}}`` for every Trickle table."""
+    "compact_threshold": int|None, "f_warm": iso|None, "cluster": dict|None, "format_version": int}}`` for
+    every Trickle table (``format_version`` 1 when unrecorded)."""
     if not _table_exists(con, META_TABLE):
         return {}
     _ensure_meta(con)  # an older meta table may predate a column read here
     rows = con.execute(
-        f'SELECT table_name, mode, pk, floor, f_base, compact_threshold, f_warm, cluster FROM {_q(META_TABLE)}'
+        f'SELECT table_name, mode, pk, floor, f_base, compact_threshold, f_warm, cluster, format_version '
+        f'FROM {_q(META_TABLE)}'
     ).fetchall()
     return {r[0]: {"mode": r[1], "pk": (r[2].split(",") if r[2] else []), "floor": r[3], "f_base": r[4],
                    "compact_threshold": (int(r[5]) if r[5] else None), "f_warm": r[6],
-                   "cluster": (json.loads(r[7]) if r[7] else None)}
+                   "cluster": (json.loads(r[7]) if r[7] else None), "format_version": r[8] or 1}
             for r in rows}
 
 
@@ -2440,6 +2466,7 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None) 
     from .context import NEVER
 
     meta = load_sidecar(data_dir).get(table, {})
+    check_format_version(meta.get("format_version"), table)
     mode = meta.get("mode", "overwrite")
     pk = tuple(meta.get("pk", ()))
     floor = datetime.fromisoformat(meta["floor"]) if meta.get("floor") else None
@@ -2475,6 +2502,7 @@ def window_changed(con, data_dir, table: str, previous_f, f) -> bool:
     if previous_f == NEVER:
         return True
     meta = load_sidecar(data_dir).get(table, {})
+    check_format_version(meta.get("format_version"), table)
     floor = datetime.fromisoformat(meta["floor"]) if meta.get("floor") else None
     store = _store(data_dir)
     if meta.get("mode") == "merge":

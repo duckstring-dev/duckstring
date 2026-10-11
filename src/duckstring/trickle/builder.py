@@ -527,7 +527,7 @@ class TrickleBuilder:
         if self._materialised is not None:  # comprehensive mode (post-.sql) → diff the relation vs prior main
             changed = ctx.merge_table(name, self._materialised, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
             return self._chain(name, out_pk, changed=changed)
-        remote = self._flock_comprehensive(name, out_pk, ivm)  # env-gated; None ⇒ the local path below
+        remote = self._dispatch_comprehensive(name, out_pk, ivm)  # None ⇒ the local path below
         if remote is not None:
             changed = ctx.merge_table(name, remote, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
             return self._chain(name, out_pk, changed=changed)
@@ -587,7 +587,7 @@ class TrickleBuilder:
             )
             return self._chain(name, out_pk, changed=changed)
 
-        remote = self._flock_comprehensive(name, out_pk, ivm)  # env-gated; None ⇒ the local path below
+        remote = self._dispatch_comprehensive(name, out_pk, ivm)  # None ⇒ the local path below
         if remote is not None:
             changed = trickle.append_zset(
                 ctx.con, name, trickle._as_zset(remote, 1), ctx.f, out_pk,
@@ -714,28 +714,20 @@ class TrickleBuilder:
             f'(SELECT {out_cols} FROM {_q(name)} WHERE {_q(F_COL)} < {_ts(self.ctx.f)})'
         )
 
-    # ─── the Flock dispatch hook (over-envelope tier; env-gated, no-op in pure OSS) ──
+    # ─── the comprehensive-dispatch hook (optional host capability) ─────────────────
 
-    def _flock_comprehensive(self, name: str, out_pk, ivm: bool):
-        """Consult the **Flock** (duckstring's over-envelope compute tier — a serverless engine,
-        Athena by default) for this terminal's comprehensive recompute. Returns a relation to
-        hand to the terminal's own comprehensive machinery, or ``None`` (the local path — the
-        overwhelmingly common case). The mode ladder + OOM fail-up live in :mod:`duckstring.flock`;
-        this hook only supplies the Ripple's posture and whether the run is comprehensive-bound
-        (incremental epochs never dispatch — kind preservation). Env-gated: no engine configured
-        ⇒ pure OSS, everything local."""
-        from .. import flock
-
-        env = getattr(self.ctx, "flock_env", None)  # the run's Flock settings (from its begin_run job)
-        if not flock.enabled(env):
+    def _dispatch_comprehensive(self, name: str, out_pk, ivm: bool):
+        """Offer this terminal's comprehensive recompute to the host, which may run it elsewhere (Duckstring's
+        Flock sends an over-envelope recompute to a serverless engine). An optional host capability, read
+        like ``record_lineage_write``: a host without ``dispatch_comprehensive`` computes locally. The hook
+        receives the builder, the output key and whether this run recomputes wholesale anyway (a bootstrap
+        or ``ivm=False``; an incremental run must never be dispatched), and returns a relation for the
+        terminal's own comprehensive machinery, or ``None`` for the local path."""
+        hook = getattr(self.ctx, "dispatch_comprehensive", None)
+        if hook is None:
             return None
         comprehensive_bound = (not ivm) or (name not in read_meta(self.ctx.con))
-        return flock.comprehensive(
-            self, out_pk,
-            pond_mode=getattr(self.ctx, "flock", None),
-            comprehensive_bound=comprehensive_bound,
-            env=env,
-        )
+        return hook(self, out_pk, comprehensive_bound=comprehensive_bound)
 
     # ─── compute (the shared ΔO step behind .merge() and .append()) ───────────────
 

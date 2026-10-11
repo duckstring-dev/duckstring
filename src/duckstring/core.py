@@ -905,6 +905,18 @@ class Pond:
         Trickle builder's terminals call, as for :meth:`record_lineage_write`."""
         self._changes.record_write(name, changed)
 
+    def dispatch_comprehensive(self, builder, out_pk, *, comprehensive_bound: bool):
+        """The Trickle builder's comprehensive-dispatch hook: offer a terminal's comprehensive recompute to the
+        Flock (:mod:`duckstring.flock`), under this Pond's posture and the run's Flock settings. ``None`` (the
+        common case: no engine configured, an incremental run, or the mode ladder keeps it local) runs it
+        locally."""
+        from . import flock
+
+        if not flock.enabled(self.flock_env):
+            return None
+        return flock.comprehensive(builder, out_pk, pond_mode=self.flock,
+                                   comprehensive_bound=comprehensive_bound, env=self.flock_env)
+
     def write_table(self, name: str, relation, *, if_changed: bool = False, cluster_by=None, interleave=True,
                     cluster_bits=None) -> bool:
         """Replace the table ``name`` in the Pond's database with ``relation``, in one transaction.

@@ -38,10 +38,19 @@ class Context(Protocol):
       (system columns stripped).
     - ``read_delta(ref)`` — the source's **Z-set change** over ``(previous_f, f]`` as a
       :class:`~duckstring.trickle.io.Delta`.
+    - ``merge_table(name, rel, *, pk, retain_t, retain_n) -> bool`` and ``apply_zset(name, zset, *, pk,
+      retain_t, retain_n) -> bool`` — the ``.merge()`` terminal's writes, at ``f``. A host normally forwards
+      them to :func:`~duckstring.trickle.io.merge_table` / :func:`~duckstring.trickle.io.apply_zset` on
+      ``con``, adding its own bookkeeping.
 
-    A host **may** also offer ``count_table(ref) -> int`` — a metadata-fast current-row count of a source
-    (no scan). It is optional: the builder's ``.count()`` uses it when present and otherwise falls back to
-    ``count(*)`` over :meth:`read_table`.
+    A host **may** also offer these optional hooks, each read with ``getattr`` and skipped when absent:
+
+    - ``count_table(ref) -> int`` — a metadata-fast current-row count of a source (no scan); the builder's
+      ``.count()`` otherwise falls back to ``count(*)`` over :meth:`read_table`.
+    - ``record_lineage_write(name)`` and ``record_change(name, changed)`` — told after each terminal writes
+      ``name``, and whether the write changed it.
+    - ``dispatch_comprehensive(builder, out_pk, *, comprehensive_bound) -> relation | None`` — offered a
+      terminal's comprehensive recompute to run elsewhere; ``None`` computes it locally.
     """
 
     con: object
@@ -51,3 +60,7 @@ class Context(Protocol):
     def read_table(self, ref: str): ...
 
     def read_delta(self, ref: str): ...
+
+    def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None) -> bool: ...
+
+    def apply_zset(self, name: str, zset, *, pk, retain_t=None, retain_n=None) -> bool: ...

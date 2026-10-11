@@ -74,10 +74,11 @@ class DataPlane:
         A **merge Trickle main** is log-structured (a base + the ``__changelog``), so it is *reconstructed*
         here (latest-per-PK over the base ⊎ the changelog newer than the fold watermark ``f_base``); every
         other table is a direct physical read (:meth:`_raw_read_select`)."""
-        from .trickle.io import load_sidecar
+        from .trickle.io import check_format_version, load_sidecar
 
         data_dir = _as_storage(data_dir)
         meta = load_sidecar(data_dir).get(table, {})
+        check_format_version(meta.get("format_version"), table)
         mode = meta.get("mode")
         if mode == "merge":
             return self._reconstruct_select(data_dir, table, meta, as_of)
@@ -402,7 +403,8 @@ def publish_plan(con, data_dir: Path, f=None, held=frozenset()) -> list[str]:
         if isinstance(prior, dict) and prior.get("v_floor"):
             payload[table]["v_floor"] = prior["v_floor"]  # the retention watermark (see prune_versions)
     for base, m in meta.items():
-        entry = {"mode": m["mode"], "pk": list(m["pk"]), "floor": m.get("floor"), "f": f_iso}
+        entry = {"mode": m["mode"], "pk": list(m["pk"]), "floor": m.get("floor"), "f": f_iso,
+                 "format_version": m["format_version"]}
         if m["mode"] == "merge":
             entry["f_base"] = m.get("f_base")  # fold watermark — the read reconstructs base ⊎ changelog>f_base
         payload[base] = entry
@@ -790,7 +792,7 @@ def _enrich_sidecar(con, data_dir, f) -> None:
             schema = _entry_schema(con, table)
             if schema is not None:
                 entry["schema"] = schema
-            entry["format"] = 2
+            entry["format"] = 2  # the hints' layout (stats/schema), separate from Trickle's format_version
             changed = True
         except Exception:  # a hint, not a publish invariant
             continue
@@ -827,6 +829,7 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
     for table, entry in trickle.sidecar_tables(sidecar).items():
         if tables is not None and table not in tables:
             continue
+        trickle.check_format_version(entry.get("format_version"), table)
         mode = entry.get("mode", "overwrite")
         loaded = False
         if mode == "merge":
