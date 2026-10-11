@@ -142,6 +142,9 @@ def test_a_plain_source_is_read_in_full(con, monkeypatch):
     assert sorted(con.sql("FROM line").fetchall()) == [(1, 30), (2, 30), (3, 75)]
 
 
+# Twelve runs, each checked against a recompute from scratch: a simulation, so it gets more than the suite's
+# 5 s default (about 0.6 s on DuckDB 1.5 locally, 2.5x that on the 2.0 pre-release, and slower on CI runners).
+@pytest.mark.timeout(60)
 def test_the_readme_pipeline_matches_a_recompute_over_many_runs(con):
     rng = random.Random(7)
     for i in range(12):
