@@ -1145,6 +1145,9 @@ class TrickleBuilder:
         hook = getattr(self.ctx, "record_lineage_write", None)
         if hook is not None:
             hook(name)
+        hook = getattr(self.ctx, "record_change", None)  # likewise for the host's change tracking
+        if hook is not None:
+            hook(name, changed)
         threaded = read_registry_delta(self.ctx.con, name, self.ctx.previous_f, self.ctx.f, out_pk)
         nxt = TrickleBuilder(self.ctx, name, _spine_delta=threaded)
         nxt._was_changed = changed

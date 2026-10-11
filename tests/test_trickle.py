@@ -1000,6 +1000,46 @@ def test_builder_unchanged_ripple_is_stable_history(tmp_path, monkeypatch):
     snk.close()
 
 
+def test_builder_held_ripple_dimension_stays_incremental(tmp_path, monkeypatch):
+    """A plain dimension re-run with identical content and ``write_table(..., if_changed=True)`` is held: no
+    new version, its sidecar ``f`` stays put, so the consumer's delta of it is empty and the builder stays
+    incremental (plans/change-detection.md). Without the check it would force a comprehensive recompute."""
+    from duckstring.changes import ChangeLedger
+
+    f_con, f_dir = _producer(tmp_path, "fact")
+    d_con, d_dir = _producer(tmp_path, "dim")
+    ledger = ChangeLedger()
+
+    def dim_run(f):
+        p = Pond("dim", "1.0.0", d_con, root=tmp_path, f=f, own_data_dir=d_dir, change_sink=ledger.begin(f, "r"))
+        p.write_table("m", d_con.sql("SELECT * FROM (VALUES ('X','xan'),('Y','yur')) v(code,label)"), if_changed=True)
+        ParquetDataPlane().export(d_con, d_dir, f=f, held=ledger.held(f))
+
+    T.merge_table(f_con, "f", f_con.sql("SELECT * FROM (VALUES (1,'X'),(2,'Y')) v(id,code)"), ts(1), ("id",))
+    publish(f_con, f_dir, f=ts(1))
+    dim_run(ts(1))
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "o" / "m1" / "data"
+    paths = _spy_paths(monkeypatch)
+
+    def run(f, pf):
+        p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1, "dim": 1}, f=f, previous_f=pf,
+                 source_f={"fact": f.isoformat(), "dim": f.isoformat()})
+        (p.trickle("fact.f", p=1.0).join(p.trickle("dim.m", p=1.0), on="code")
+           .select("s0.id, s0.code, s1.label").merge("o", pk="id"))
+        publish(snk, snk_dir, f=f)
+
+    run(ts(1), NEVER)
+    paths.clear()
+    T.merge_table(f_con, "f", f_con.sql("SELECT * FROM (VALUES (1,'X'),(2,'Y'),(3,'X')) v(id,code)"), ts(2), ("id",))
+    publish(f_con, f_dir, f=ts(2))
+    dim_run(ts(2))  # the dim runs again with the same content: held
+    run(ts(2), ts(1))
+    assert paths == ["incremental"]
+    assert rows(snk, snk_dir, "o", "id, label") == [(1, "xan"), (2, "yur"), (3, "xan")]
+    snk.close()
+
+
 def test_builder_changed_ripple_forces_comprehensive(tmp_path, monkeypatch):
     f_con, f_dir = _producer(tmp_path, "fact")
     d_con, d_dir = _producer(tmp_path, "dim")

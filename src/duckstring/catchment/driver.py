@@ -92,7 +92,16 @@ def _plane_freshness(sidecar: dict) -> str | None:
     run's ``f``). ``None`` for an empty plane (no sidecar). The ``state`` section (agg/acc companion
     snapshots) is skipped — it is bounded by its base table's ``f``. ISO-8601 sorts lexically, so ``max``
     over the strings is correct. This is the last *published* freshness (== ``changed_f``), not the
-    pass-heartbeat ``end_f`` (a no-change pass writes nothing to the plane) — coherent with the bytes."""
+    pass-heartbeat ``end_f`` (a no-change pass writes nothing to the plane) — coherent with the bytes.
+
+    A publish stamps the sidecar's run key (``RUN_KEY``) with its ``f``, which is read first: a table held
+    unchanged keeps an older ``f`` (plans/change-detection.md), so the max over entries can understate the
+    publish. Sidecars written before the stamp fall back to that max."""
+    from ..trickle.io import RUN_KEY
+
+    run = sidecar.get(RUN_KEY)
+    if isinstance(run, dict) and run.get("f"):
+        return run["f"]
     fs: list[str] = []
     for key, entry in sidecar.items():
         if key == "objects" and isinstance(entry, dict):
@@ -1873,12 +1882,12 @@ class Driver:
         the requirement at egress time."""
         from pathlib import Path
 
-        from ..trickle_io import load_sidecar
+        from ..trickle_io import load_sidecar, sidecar_tables
         from .registry import resolve_data_dir
 
         sidecar = load_sidecar(resolve_data_dir(Path(self.root), name, major, self.data_root,
                                                 expected_f=self.published_f(name, major)))
-        targets = [table] if table else list(sidecar)
+        targets = [table] if table else list(sidecar_tables(sidecar))
         for t in targets:
             meta = sidecar.get(t)
             if meta is not None and (meta.get("mode") != "merge" or not meta.get("pk")):

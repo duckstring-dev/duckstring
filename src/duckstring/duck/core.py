@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from ..changes import ChangeLedger
 from ..engine import NEVER, worker
 from ..engine import pond as ledger
 from ..schema_contract import ContractViolation
@@ -92,6 +93,19 @@ class DuckCore:
         # ``_sources_changed`` is the engine's verdict (exposed to Ripples as ``pond.sources_changed()``).
         self._skipped: set[datetime] = set()
         self._sources_changed: dict[datetime, bool] = {}
+        # Per-object change (plans/change-detection.md): what each Ripple of each Run wrote, checked or
+        # held. Consulted by Ripple code (``pond.changed``) and by the publish (held tables keep their
+        # published copy). In memory only: lost with the Duck, which republishes rather than misses.
+        self.changes = ChangeLedger()
+
+    def change_sink(self, f: datetime, ripple: str):
+        """The change sink for a launch of ``ripple`` in the Run at ``f``. A relaunch (an immediate retry,
+        a forced restart) clears what the earlier attempt recorded."""
+        return self.changes.begin(f, ripple)
+
+    def held_for(self, f: datetime) -> frozenset[str]:
+        """The tables and Objects the Run at ``f`` holds unchanged (checked, not written)."""
+        return self.changes.held(f)
 
     def mark_skipped(self, f: datetime) -> None:
         """A Ripple called ``pond.skip()`` for the Run at ``f`` — report it as a pass (changed=False)."""
@@ -164,11 +178,13 @@ class DuckCore:
                     schema = export(rc.f, self.contract)
                 except ContractViolation as exc:
                     self._previous_f.pop(rc.f, None)
+                    self.changes.drop(rc.f)
                     ledger.record_pond_run_finish(self.con, rc.f, now, status="failed")  # don't re-run on restart
                     self.events.append(Event(kind="contract_failed", f=rc.f, status="failed", error=str(exc)))
                     return self._advance(now)
             ledger.record_pond_run_finish(self.con, rc.f, now)
             self._previous_f.pop(rc.f, None)  # the Run is done; drop its carried previous_f
+            self.changes.drop(rc.f)
             self.events.append(Event(kind="run_completed", f=rc.f, schema=schema, changed=changed))
         return self._advance(now)
 
@@ -191,6 +207,7 @@ class DuckCore:
             self.attempts[name] = attempt + 1  # next launch of this Ripple is the next attempt
         else:  # immediate budget exhausted — this Pond Run failed at the Ripple's freshness
             ledger.record_pond_run_finish(self.con, rf.f, now, status="failed")
+            self.changes.drop(rf.f)
             self.events.append(Event(
                 kind="failed", ripple=name, f=rf.f, status="failed",
                 retry=attempt, error=error, traceback=traceback, started_at=started_at, finished_at=finished_at,
@@ -209,6 +226,7 @@ class DuckCore:
         ledger.record_ripple_failed(self.con, name)
         f = rf.f if rf is not None else self.state.states[name].start_f
         ledger.record_pond_run_finish(self.con, f, now, status="failed")  # don't re-run on restart
+        self.changes.drop(f)
         self.events.append(Event(
             kind="missing_source", ripple=name, f=f, status="failed", source=source, table=table,
             started_at=started_at, finished_at=finished_at,

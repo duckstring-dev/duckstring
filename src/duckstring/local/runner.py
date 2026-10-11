@@ -6,6 +6,7 @@ import traceback as tb
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..changes import ChangeLedger
 from ..core import Pond, load_ripples, retry_on_lock
 from .project import Project
 
@@ -65,7 +66,7 @@ def _staging_dir(project: Project) -> Path:
     return project.out_dir / STAGING_DIR
 
 
-def _export(project: Project, f=None) -> None:
+def _export(project: Project, f=None, held=frozenset()) -> None:
     registry = project.out_dir / "registry.duckdb"
     if not registry.exists():
         return
@@ -78,14 +79,14 @@ def _export(project: Project, f=None) -> None:
         con = duckdb.connect(str(registry))
         try:
             # Nothing else reads a local run's output while it publishes, so keep only the newest version.
-            get_data_plane().export(con, project.out_dir, mode="overwrite", f=f, retain_from=None)
+            get_data_plane().export(con, project.out_dir, mode="overwrite", f=f, retain_from=None, held=held)
         finally:
             con.close()
 
     retry_on_lock(_copy)
     # Objects publish after the table export (which writes the sidecar); the staging under out_dir is
     # created during the run and cleared here.
-    commit_objects(_staging_dir(project), project.out_dir, f)
+    commit_objects(_staging_dir(project), project.out_dir, f, held)
 
 
 def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -> RunResult:
@@ -116,6 +117,7 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
     # The prior run's freshness, mirroring the deployed pond.previous_f: when this run is seeded from a
     # self-puddle (an incremental rerun), the previous local run's f; NEVER on a fresh/first run.
     previous_f = _read_previous_f(project) if seeded else None
+    changes = ChangeLedger()  # what each Ripple wrote, checked or held: pond.changed() and held tables
     results: list[RippleResult] = []
     for name in targets:
         started = time.perf_counter()
@@ -126,7 +128,8 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
                               f=run_f, previous_f=previous_f, sources=list(project.sources),
                               staging_dir=_staging_dir(project), own_data_dir=project.out_dir,
                               static_tables=pond_ripples.statics, ripple=name,
-                              ancestors=pond_ripples.ancestors(name), table_writers=dict(table_writers))
+                              ancestors=pond_ripples.ancestors(name), table_writers=dict(table_writers),
+                              change_sink=changes.begin(run_f, name))
                 by_name[name]["func"](handle)
                 for table in handle.take_lineage()["writes"]:
                     table_writers.setdefault(table, name)
@@ -142,7 +145,7 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
             )
             break
 
-    _export(project, run_f)
+    _export(project, run_f, changes.held(run_f))
     _write_previous_f(project, run_f)  # record this run's freshness for the next run's previous_f
     return RunResult(seeded=seeded, ripples=results)
 

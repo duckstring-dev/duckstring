@@ -96,6 +96,10 @@ The [Playground](https://playground.duckstring.com) tour shows this on the same 
 
 If none of a Pond's Sources has changed since its last run, Duckstring skips the run and passes the new freshness through without recomputing anything.
 
+Only an Inlet can see whether the outside world has changed, so an Inlet always runs. When it finds nothing new, for example an export file that hasn't been replaced since the last run, it can mark its run as producing no change. The Ponds downstream of it then pass in turn without running, so a pipeline with nothing new to process costs only its Inlet runs. Any other Pond can mark a run the same way when it recomputes and finds its output is the same. This is always the Pond's own decision, because a Pond that calls an API or sends a report may need to run even when its tables wouldn't change.
+
+Each table and Object a Pond publishes also records when it last changed, so a Pond that does run can skip just the work that depends on an unchanged input. If `transactions` changed but `products` didn't, `sales` can recompute its daily totals and keep its price tiers as they were.
+
 ## Triggers
 
 There are four triggers, set with `duckstring trigger` or from the web UI:

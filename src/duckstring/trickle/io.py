@@ -134,6 +134,9 @@ class _PathStore:
     def mkdir(self, *parts: str) -> None:
         self._abs(*parts).mkdir(parents=True, exist_ok=True)
 
+    def uri(self, *parts: str) -> str:
+        return str(self._abs(*parts)).replace("'", "''")
+
 
 def _store(data_dir):
     """Coerce a ``data_dir`` (a ``Storage`` from the host, or a bare ``Path``/str) to the directory
@@ -525,6 +528,18 @@ def load_sidecar(data_dir) -> dict[str, dict]:
         return json.loads(text)
     except ValueError:
         return {}
+
+
+# The sidecar keys that aren't table entries: the host's Objects section, the published agg/acc state
+# snapshots, and the run stamp (the freshness of the last publish, which a held table's entry no longer
+# shows). The run stamp uses the reserved prefix so it can never collide with a table's name.
+RUN_KEY = "_duckstring_run"
+SIDECAR_SECTIONS = ("objects", "state", RUN_KEY)
+
+
+def sidecar_tables(sidecar: dict) -> dict[str, dict]:
+    """The table entries of a loaded sidecar, without its sections (:data:`SIDECAR_SECTIONS`)."""
+    return {k: v for k, v in sidecar.items() if k not in SIDECAR_SECTIONS and isinstance(v, dict)}
 
 
 # ─── incremental publish + draw (per-run parts) ────────────────────────────────
@@ -2434,17 +2449,63 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None) 
     if mode == "merge":
         return _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
 
-    # overwrite source (a plain Ripple): no history. If its published freshness `f` shows it has not
-    # advanced past the consumer's previous_f, it is unchanged → an empty delta (stable history operand).
+    # overwrite source (a plain Ripple): no history. If the version this run reads was published at or
+    # before the consumer's previous_f, it is unchanged → an empty delta (stable history operand).
     # Otherwise (advanced / unknown / bootstrap) → a full read at +1, forcing the comprehensive path.
-    src_f = datetime.fromisoformat(meta["f"]) if meta.get("f") else None
-    if pin is not None and src_f is not None:
-        src_f = min(src_f, pin)  # the version actually read is at or below the pin
+    src_f = overwrite_version_f(data_dir, table, pin if pin is not None else f)
+    if src_f is None:  # an unversioned table (the earlier single-file layout): its sidecar stamp
+        src_f = datetime.fromisoformat(meta["f"]) if meta.get("f") else None
     pinned = {"pin": pin} if pin is not None else {}
     state = _strip_system(con.sql(dp.read_select(data_dir, table, as_of=f, **pinned)))
     if previous_f != NEVER and src_f is not None and src_f <= previous_f:
         return Delta(con, pk, _as_zset(state, 1).filter("1=0"), is_full=False)
     return Delta(con, pk, _as_zset(state, 1), is_full=True)
+
+
+def window_changed(con, data_dir, table: str, previous_f, f) -> bool:
+    """Whether a published Trickle ``table`` changed over ``(previous_f, f]``, without reading its data:
+    the per-run parts in the window (the append history, or a merge's ``__changelog`` and warm bands) are
+    found by name and their rows counted from the Parquet footers. A 0-row marker part is no change. A
+    window the published history doesn't cover (a bootstrap, a consumer behind retention) counts as
+    changed, as :func:`read_delta` would read it in full."""
+    from datetime import datetime
+
+    from .context import NEVER
+
+    if previous_f == NEVER:
+        return True
+    meta = load_sidecar(data_dir).get(table, {})
+    floor = datetime.fromisoformat(meta["floor"]) if meta.get("floor") else None
+    store = _store(data_dir)
+    if meta.get("mode") == "merge":
+        log = changelog_name(table)
+        dirs = [log, warm_name(table)]
+    else:
+        log = table
+        dirs = [table]
+    log_parts = table_parts(data_dir, log)
+    if not log_parts and meta.get("mode") == "merge":
+        return True  # no changelog published: read_delta reads the table in full
+    oldest = part_f(log_parts[0]) if log_parts else None
+    if not _covered(previous_f, NEVER, floor, oldest):
+        return True
+    window = [store.uri(d, n) for d in dirs for n in table_parts(data_dir, d) if previous_f < part_f(n) <= f]
+    if not window:
+        return False
+    files = ", ".join(f"'{u}'" for u in window)
+    (rows,) = con.execute(f"SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata([{files}])").fetchone()
+    return rows > 0
+
+
+def overwrite_version_f(data_dir, table: str, at):
+    """The freshness of the overwrite version a read at ``at`` resolves to: the newest version with
+    ``f <= at``, else the newest (the data plane's ``select_version`` rule). A held table publishes no new
+    version, so this is the freshness of the run that last changed it. ``None`` for an unversioned table."""
+    versions = table_versions(data_dir, table)
+    if not versions:
+        return None
+    eligible = [n for n in versions if at is None or part_f(n) <= at]
+    return part_f(eligible[-1] if eligible else versions[-1])
 
 
 def _as_zset(relation, weight: int):

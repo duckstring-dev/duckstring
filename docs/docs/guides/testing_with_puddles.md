@@ -128,6 +128,8 @@ A Source that is itself a Trickle needs its change history, not just a table, fo
 
 ## What a local run doesn't do
 
-A local run is a single Pond Run of one Pond. It doesn't involve freshness, triggers, retries or other Ponds. `pond.sources_changed()` always returns `True` and `pond.skip()` does nothing. For the full behaviour, deploy to a Catchment on your own machine; see [Local Execution](../concepts/management_and_execution.md#local-execution).
+A local run is a single Pond Run of one Pond. It doesn't involve freshness, triggers, retries or other Ponds. `pond.sources_changed()` always returns `True` and `pond.skip()` does nothing.
+
+`pond.changed()` works on the Pond's own tables and Objects as it does in a deployed run, so you can check that a Ripple asking it before `pond.skip()` sees what you expect. Asked about a Source, it reports `True` on a first run (every full `pond run` without a Puddle of the Pond's own output). A full run starts from an empty `puddles/out/`, so `pond.detect_change` and `if_changed=True` have nothing published to compare with, and always write. For the full behaviour, deploy to a Catchment on your own machine; see [Local Execution](../concepts/management_and_execution.md#local-execution).
 
 The `puddles/` directory is for your machine only. The scaffolded `.gitignore` keeps it out of version control, and `.pondignore` keeps it out of deployments.

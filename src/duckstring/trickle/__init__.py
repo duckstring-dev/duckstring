@@ -46,6 +46,7 @@ from .io import (
     read_registry_delta,
     reconstruct_current,
     reconstruct_sql,
+    sidecar_tables,
     table_parts,
     unique_name,
     write_sidecar,
@@ -62,7 +63,7 @@ __all__ = [
     "checkpoint", "reconstruct_current", "reconstruct_sql", "current_state",
     "read_delta", "read_registry_delta", "read_meta", "normalize_pk", "changelog_name", "unique_name",
     # io: sidecar / cross-catchment draw (per-run parts)
-    "write_sidecar", "load_sidecar", "landed_after", "incremental_tables",
+    "write_sidecar", "load_sidecar", "sidecar_tables", "landed_after", "incremental_tables",
     "part_name", "part_f", "table_parts", "part_tables",
     # io: system-column / table-name constants
     "F_COL", "D_COL", "CHANGELOG_SUFFIX", "DROPLOG_SUFFIX", "AGG_STATE_PREFIX", "META_TABLE", "SIDECAR",

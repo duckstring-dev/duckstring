@@ -58,6 +58,7 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
         landed_after,
         load_sidecar,
         part_f,
+        sidecar_tables,
         warm_name,
     )
 
@@ -66,7 +67,7 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
     # The cold base is wholesale but rewritten rarely — tell the producer the oldest cold-base freshness we
     # already hold so it re-ships a base only when its fold watermark has advanced past it.
     held = load_sidecar(data_dir)
-    f_bases = [m.get("f_base") for m in held.values() if m.get("mode") == "merge" and isinstance(m, dict)]
+    f_bases = [m.get("f_base") for m in sidecar_tables(held).values() if m.get("mode") == "merge"]
     base_after = min(f_bases) if f_bases and all(f_bases) else None
     # Objects are overwrite-only; tell the producer the oldest Object freshness we hold so it re-ships an
     # Object only when its freshness advanced past that (see draw._ship_objects).
@@ -104,7 +105,7 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
     # Reclaim warm bands / hot changelog parts now subsumed by the (possibly advanced) cold base: anything
     # at-or-below a merge main's published f_base is folded into the base, so reconstruct ignores it
     # (it filters `> f_base`). Storage-only — correctness already holds via that filter.
-    for main, m in load_sidecar(data_dir).items():
+    for main, m in sidecar_tables(load_sidecar(data_dir)).items():
         if m.get("mode") != "merge" or not m.get("f_base"):
             continue
         f_base = datetime.fromisoformat(m["f_base"])

@@ -938,6 +938,121 @@ def test_a_sql_ripple_reading_an_undeclared_table_is_refused_at_deploy(runtime, 
     assert "isn't among its parents" in r.text
 
 
+_CHANGE_PONDS = {
+    "feed": ("inlet", None, """
+        import json
+        from duckstring import ripple
+
+        @ripple
+        def load(pond):
+            control = json.loads(open({control!r}).read())
+            for t in ("a", "b"):
+                pond.write_table(t, pond.con.sql(f"SELECT {{int(control[t])}} AS v"), if_changed=True)
+
+        @ripple(parents=[load])
+        def done(pond):
+            if not pond.changed():
+                pond.skip()
+    """),
+    "mid": ("pond", "feed", """
+        from duckstring import ripple
+
+        def _copy(pond, t):
+            if not pond.changed(f"feed.{{t}}"):
+                return  # this Ripple's output stays as it was
+            pond.read_table(f"feed.{{t}}")
+            pond.write_table(f"{{t}}_copy", pond.con.sql(f"SELECT v, '{{pond.f.isoformat()}}' AS at FROM {{t}}"))
+
+        @ripple
+        def use_a(pond):
+            _copy(pond, "a")
+
+        @ripple
+        def use_b(pond):
+            _copy(pond, "b")
+
+        @ripple(parents=[use_a, use_b])
+        def done(pond):
+            if not pond.changed():
+                pond.skip()
+    """),
+    "out": ("outlet", "mid", """
+        from duckstring import ripple
+
+        @ripple
+        def report(pond):
+            pond.write_table("report", pond.read_table("mid.b_copy"))
+    """),
+}
+
+
+def test_per_object_change_skips_work_and_downstream_ponds(runtime, tmp_path):
+    """plans/change-detection.md end to end on real Ducks: an Inlet holds the table that didn't change, a
+    Sink Ripple returns early for it and recomputes the other, and once nothing changes the Inlet's terminal
+    ``pond.skip()`` makes the next Pond pass in the engine, with no Duck."""
+    import json
+    import textwrap
+
+    import duckdb
+
+    from duckstring.dataplane import ParquetDataPlane
+    from duckstring.engine import pond as ledger
+    from duckstring.trickle.io import load_sidecar
+
+    url, root = runtime
+    control = tmp_path / "control.json"
+    control.write_text(json.dumps({"a": 1, "b": 1}))
+    for name, (kind, source, code) in _CHANGE_PONDS.items():
+        d = tmp_path / name
+        (d / "src").mkdir(parents=True)
+        toml = f'[pond]\nname = "{name}"\nversion = "1.0.0"\ntype = "{kind}"\n'
+        if source:
+            toml += f'\n[sources]\n{source} = "1.0.0"\n'
+        (d / "pond.toml").write_text(toml)
+        (d / "src" / "pond.py").write_text(textwrap.dedent(code.format(control=str(control))))
+        r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip_dir(d), "application/zip")},
+                       data={"name": name, "version": "1.0.0", "type": kind}, timeout=15.0)
+        assert r.status_code == 200, r.text
+
+    def runs(name) -> int:  # Pond Runs a Duck completed (an engine pass never reaches the ledger)
+        db = root / "ponds" / name / "m1" / "pond.db"
+        if not db.exists():
+            return 0
+        con = ledger.connect(db)
+        n = con.execute("SELECT COUNT(*) FROM pond_run WHERE status = 'success'").fetchone()[0]
+        con.close()
+        return n
+
+    def data(name):
+        return root / "ponds" / name / "m1" / "data"
+
+    def rows(name, table):
+        return duckdb.sql(ParquetDataPlane().read_select(data(name), table)).fetchall()
+
+    def pulse_and_settle():
+        before = (_pond_status(url, "out") or {}).get("end_f")
+        httpx.post(f"{url}/api/ponds/out/pulse", timeout=5.0)
+        assert _wait(lambda: (_pond_status(url, "out") or {}).get("end_f") not in (None, before), timeout=45.0)
+        assert _wait(lambda: all((_pond_status(url, n) or {}).get("status") == "idle" for n in _CHANGE_PONDS))
+
+    pulse_and_settle()
+    assert [runs(n) for n in _CHANGE_PONDS] == [1, 1, 1]
+    f1 = load_sidecar(data("feed"))["a"]["f"]
+    a_at = rows("mid", "a_copy")[0][1]
+
+    control.write_text(json.dumps({"a": 1, "b": 2}))  # only b changes
+    pulse_and_settle()
+    assert [runs(n) for n in _CHANGE_PONDS] == [2, 2, 2]
+    sidecar = load_sidecar(data("feed"))
+    assert sidecar["a"]["f"] == f1 and sidecar["b"]["f"] != f1  # a held, b republished
+    assert rows("mid", "a_copy")[0][1] == a_at                     # use_a returned early
+    assert rows("mid", "b_copy")[0][0] == 2                        # use_b recomputed
+    assert rows("out", "report")[0][0] == 2
+
+    pulse_and_settle()  # nothing changes: feed runs (an Inlet always does) and skips
+    assert [runs(n) for n in _CHANGE_PONDS] == [3, 2, 2]
+
+
 def test_restart_restores_state_e2e(tmp_path_factory, monkeypatch):
     root = tmp_path_factory.mktemp("restart_root")
     port = _free_port()

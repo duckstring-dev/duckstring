@@ -34,6 +34,11 @@ const sidebars: SidebarsConfig = {
         },
         {
           type: 'category',
+          label: 'Getting Data In',
+          items: ['guides/ingesting_data'],
+        },
+        {
+          type: 'category',
           label: 'Incremental Ponds',
           items: [
             'guides/append_and_merge',

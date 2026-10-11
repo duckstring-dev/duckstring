@@ -141,7 +141,14 @@ def ingest(pond):
         pond.skip()
 ```
 
-If a Pond writes several tables, only skip when none of them changed.
+If a Pond writes several tables, only skip when none of them changed. `pond.changed()` keeps track for you: asked from a Ripple that runs after the writers, it reports whether any table the run wrote changed.
+
+```python
+@ripple(parents=[ingest_products, ingest_prices])
+def done(pond):
+    if not pond.changed():
+        pond.skip()
+```
 
 ## Retention
 

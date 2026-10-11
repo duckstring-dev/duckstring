@@ -71,3 +71,16 @@ def test_read_missing_table_raises(tmp_path):
 
 def test_get_data_plane_is_the_parquet_plane():
     assert isinstance(get_data_plane(), ParquetDataPlane)
+
+
+def test_an_attached_database_is_not_published(tmp_path):
+    """An Inlet reading from an attached database (here another DuckDB file) publishes only its own tables."""
+    import duckdb
+
+    from duckstring.dataplane import registry_tables
+
+    duckdb.connect(str(tmp_path / "shop.duckdb")).execute("CREATE TABLE customer AS SELECT 1 AS id").close()
+    con = duckdb.connect(str(tmp_path / "registry.duckdb"))
+    con.execute("CREATE TABLE customer_copy AS SELECT 1 AS id")
+    con.execute(f"ATTACH '{tmp_path / 'shop.duckdb'}' AS shop (READ_ONLY)")
+    assert registry_tables(con.cursor()) == ["customer_copy"]

@@ -82,7 +82,7 @@ def test_publish_through_compaction_keeps_the_view_and_the_published_set(reg, tm
     # Nothing new is published: no file or sidecar entry for the registry's __base relation or the view.
     assert not (out / "dim__base.parquet").exists()
     assert not (out / "dim.parquet").exists()
-    assert set(T.load_sidecar(out)) - {"objects", "state"} == {"dim"}
+    assert set(T.sidecar_tables(T.load_sidecar(out))) == {"dim"}
     assert T.base_chunks(out, "dim")  # the published base is still the chunk directory
     read = ParquetDataPlane().read_select(out, "dim")
     assert sorted(reg.sql(f"SELECT id, v FROM ({read})").fetchall()) == [(1, "A"), (3, "c")]

@@ -65,7 +65,7 @@ def _run_ripple(
     source_majors: dict[str, int], f: datetime | None, previous_f: datetime | None,
     data_root: str | None = None, sources_changed: bool = True, skip_sink=None,
     staging_dir=None, own_data_dir=None, source_f: dict[str, str] | None = None,
-    flock: dict[str, str] | None = None, scope: dict | None = None,
+    flock: dict[str, str] | None = None, scope: dict | None = None, change_sink=None,
 ) -> dict:
     from ..core import Pond
 
@@ -79,7 +79,7 @@ def _run_ripple(
     pond = Pond(
         name=pond_name, version=version, con=con, root=Path(root_str),
         source_majors=source_majors, source_f=source_f, f=f, previous_f=previous_f, data_root=data_root,
-        sources_changed=sources_changed, skip_sink=skip_sink,
+        sources_changed=sources_changed, skip_sink=skip_sink, change_sink=change_sink,
         staging_dir=staging_dir, own_data_dir=own_data_dir,
         # Flock is a Pond-level posture (not per-Ripple). flock.comprehensive still applies
         # engine-eligibility and the OOM fail-up.
@@ -94,7 +94,8 @@ def _run_ripple(
         con.close()
 
 
-def _export_data(con, data_dir, f: datetime | None, contract=None, retain_from=KEEP_ALL) -> dict | None:
+def _export_data(con, data_dir, f: datetime | None, contract=None, retain_from=KEEP_ALL,
+                 held=frozenset()) -> dict | None:
     from ..dataplane import get_data_plane
     from ..schema_contract import CONTRACT_PREFIX, ContractViolation, contract_violations, extract_schema
 
@@ -111,7 +112,7 @@ def _export_data(con, data_dir, f: datetime | None, contract=None, retain_from=K
             # The stable prefix is the failure's machine-readable sub-reason: the Catchment's status
             # derives failure_kind="contract" from it (survives restarts — no extra state to persist).
             raise ContractViolation(f"{CONTRACT_PREFIX}{'; '.join(violations)}")
-        get_data_plane().export(con, data_dir, mode="overwrite", f=f, retain_from=retain_from)
+        get_data_plane().export(con, data_dir, mode="overwrite", f=f, retain_from=retain_from, held=held)
         return schema
     finally:
         con.close()
@@ -293,13 +294,14 @@ class RippleExecutor(RunInputs):
             return self._registry.cursor()
 
     def submit(self, ripple_name: str, f: datetime | None, previous_f: datetime | None, on_done, on_error,
-               sources_changed: bool = True, skip_sink=None):
+               sources_changed: bool = True, skip_sink=None, change_sink=None):
         """Load and run ``ripple_name`` at freshness ``f`` (exposed to the ripple as ``pond.f``, with
         the prior run's freshness as ``pond.previous_f``); call ``on_done(name, started_at,
         finished_at, lineage)`` on success — ``lineage`` is the Ripple's observed reads/writes
         (plans/lineage.md) — and ``on_error(name, exc, started_at, finished_at)`` on failure
         (timings wall-clock UTC, for the run-history duration; both fire on a pool thread).
-        ``sources_changed``/``skip_sink`` back ``pond.sources_changed()`` / ``pond.skip()``."""
+        ``sources_changed``/``skip_sink`` back ``pond.sources_changed()`` / ``pond.skip()``; ``change_sink``
+        is the Run's change ledger for this Ripple (``pond.changed()``, held tables)."""
         timing: dict = {}
 
         def _task():
@@ -311,7 +313,8 @@ class RippleExecutor(RunInputs):
             timing["lineage"] = _run_ripple(
                 func, self.pond_name, self.version, self._cursor(), str(self.root),
                 self.source_majors, f, previous_f, self.data_root,
-                sources_changed=sources_changed, skip_sink=skip_sink, source_f=self.source_f_for(f),
+                sources_changed=sources_changed, skip_sink=skip_sink, change_sink=change_sink,
+                source_f=self.source_f_for(f),
                 flock=self.flock_for(f),
                 staging_dir=self.staging_dir, own_data_dir=self.own_data_dir,
                 scope={"static_tables": pond.statics, "ripple": ripple_name,
@@ -336,17 +339,18 @@ class RippleExecutor(RunInputs):
         fut.add_done_callback(_cb)
         return fut
 
-    def export(self, f: datetime | None = None, contract=None) -> dict | None:
+    def export(self, f: datetime | None = None, contract=None, held=frozenset()) -> dict | None:
         """Publish the Pond's tables for cross-Pond consumption via the data plane, stamped with the
         run's freshness ``f`` (recorded by snapshotting backends). ``contract`` is the major line's
         additive contract — a violation raises :class:`ContractViolation` *before* publishing (last-good
-        is left intact). Returns the published output schema (for the Catchment to capture)."""
+        is left intact). ``held`` names the tables and Objects the run checked as unchanged, which keep
+        their published copy. Returns the published output schema (for the Catchment to capture)."""
         from ..objects import commit_objects
 
-        schema = _export_data(self._cursor(), self.own_data_dir, f, contract, self.take_retain_from(f))
+        schema = _export_data(self._cursor(), self.own_data_dir, f, contract, self.take_retain_from(f), held)
         # Objects commit only after the table publish passed the contract gate — a failed run leaves the
         # last-good Object intact (the staged writes are discarded on the next run / wipe).
-        commit_objects(self.staging_dir, self.own_data_dir, f)
+        commit_objects(self.staging_dir, self.own_data_dir, f, held)
         return schema
 
     def persist(self) -> int:

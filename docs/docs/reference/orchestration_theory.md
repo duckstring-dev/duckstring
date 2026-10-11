@@ -1161,6 +1161,8 @@ Some Ponds must always run regardless: an **Inlet** (it alone can tell whether t
 
 The practical consequence is the desired one: under a standing Wave with nothing changing, only the Inlets keep executing (polling the outside world, throttled in turn by any **window** on them), while the entire interior of the graph goes quiet, each Pond passing its freshness along without running.
 
+`changedF` is held only by an explicit skip from the Pond's own code (`pond.skip()`): many Ponds exist for a side effect, and an automatic hold there would be a surprise. Below the Pond level, each published table and Object also carries its own change freshness (the `f` of the run that last changed it: a Trickle's per-run parts, an Object's publish, or a plain table that a run checked as unchanged and kept). That finer signal is consulted only by Ripple code, through `pond.changed(...)`, to skip the work that depends on an unchanged input. The engine's pass rule above is unchanged: it sees Ponds only.
+
 ### Triggers
 
 Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundary nodes) attached as child to the Pond. These each have special properties:

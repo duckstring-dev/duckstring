@@ -1,7 +1,11 @@
 # Per-object change detection
 
-Status: **planned** (2026-10-11). Builds on `plans/no-change-skip.md` (the Pond-level `changed_f`, the engine
-pass, `pond.skip()`), `plans/versioned-overwrite.md` (versions and pins) and `plans/objects.md`.
+Status: **implemented** (2026-10-11). Two departures from the text below: the sidecar's run stamp is keyed
+`_duckstring_run` (`trickle.io.RUN_KEY`) rather than `"run"`, so it can't collide with a table named `run`;
+and `registry_tables` now ignores attached databases, which the Ingesting Data guide relies on.
+
+Builds on `plans/no-change-skip.md` (the Pond-level `changed_f`, the engine pass, `pond.skip()`),
+`plans/versioned-overwrite.md` (versions and pins) and `plans/objects.md`.
 
 ## Problem
 

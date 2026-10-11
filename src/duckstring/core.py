@@ -565,6 +565,18 @@ class Puddle:
         return Catchment(url, con=self.con, default_pond=self.source, default_table=self.table, headers=headers)
 
 
+def _parse_f(iso: str):
+    from datetime import datetime
+
+    return datetime.fromisoformat(iso)
+
+
+def _is_relation(value) -> bool:
+    import duckdb
+
+    return isinstance(value, duckdb.DuckDBPyRelation)
+
+
 class MissingSourceAsset(FileNotFoundError):
     """A Source table or Object that a Ripple read has not been published.
 
@@ -607,8 +619,9 @@ class Pond:
         sources_changed: bool = True, skip_sink=None, staging_dir=None, own_data_dir=None,
         flock: str | None = None, sources=None, flock_env: dict[str, str] | None = None,
         static_tables: dict | None = None, ripple: str | None = None, ancestors=None,
-        table_writers: dict[str, str] | None = None,
+        table_writers: dict[str, str] | None = None, change_sink=None,
     ) -> None:
+        from .changes import ChangeLedger
         from .engine.core import NEVER
 
         # The declared Sources, when known (a deployed run's pins, or a local run's pond.toml), so a
@@ -621,6 +634,12 @@ class Pond:
         # Both default to the always-changed / no-op behaviour for local (puddle) runs.
         self._sources_changed = sources_changed
         self._skip_sink = skip_sink
+        # Per-object change detection (plans/change-detection.md): the run's change ledger, which records
+        # what this Ripple wrote, checked and held. The runtime passes the Run's; a handle made without one
+        # (a test, a standalone call) keeps its own, so own-object ``changed`` still works.
+        self._changes = change_sink if change_sink is not None else ChangeLedger().begin(f, ripple or "")
+        self._checks: dict[str, tuple] = {}  # name → (relation, fingerprint) from the last detect_change
+        self._own_sidecar_cache: dict | None = None
         # Non-tabular Objects (see objects.py / plans/objects.md). ``staging_dir`` is the local dir a
         # ``write_object`` stages into (committed at export by the runtime); ``own_data_dir`` is where this
         # Pond's own Objects are published (for own reads). Both set by the runtime; None outside a run.
@@ -723,13 +742,171 @@ class Pond:
     def skip(self) -> None:
         """Mark this Pond Run as producing no change.
 
-        Downstream Ponds then treat this Pond's output as unchanged and can skip their own runs. Freshness
-        still advances. Has no effect in a local run.
+        Downstream Ponds then treat this Pond's output as unchanged, and a Pond whose Sources are all
+        unchanged passes without running. Freshness still advances. Calling it from any Ripple marks the
+        whole run, so call it once you know nothing the Pond publishes changed, usually from a Ripple that
+        runs last (see :meth:`changed`). Has no effect in a local run.
         """
         if self._skip_sink is not None:
             self._skip_sink()
 
-    def write_table(self, name: str, relation, *, cluster_by=None, interleave=True, cluster_bits=None) -> None:
+    # ─── change detection (plans/change-detection.md) ──────────────────────────
+
+    def changed(self, *refs: str) -> bool:
+        """Whether any of ``refs`` (``"name"`` or ``"source.name"``) changed, as seen by this run. With no
+        arguments, whether this run has changed any of the Pond's own tables or Objects so far.
+
+        - A Source's plain table: the version this run reads was published after the previous run.
+        - A Source's append or merge Trickle: rows were added, changed or removed in the window
+          ``(previous_f, f]``, or the window can't be read as changes (the Pond's first run, or
+          ``previous_f`` older than the Source's retained history).
+        - A Source's Object: it was written after the previous run.
+        - One of this Pond's own tables or Objects: this run wrote it and didn't keep the published copy. A
+          Trickle write counts only if it changed the table.
+
+        The own forms only see writes made through the handle (``write_table``, ``write_object``,
+        ``append_table``, ``merge_table``, ``apply_zset`` and the builder's terminals) and checks made with
+        :meth:`detect_change`. A table changed with SQL on :attr:`con` doesn't count. A Source is compared
+        with the previous run's freshness, so when Sources share an upstream it can occasionally report
+        ``True`` for a change the previous run already read: a redundant recompute, never a missed change.
+
+        Raises :class:`RippleOrderError` for one of the Pond's own tables written by a Ripple that isn't
+        this Ripple or one of its ancestors, and :class:`MissingSourceAsset` for a Source table or Object
+        that hasn't been published.
+
+        Example, in a Ripple that runs after the others::
+
+            if not pond.changed():
+                pond.skip()
+
+        Reference: https://docs.duckstring.com/reference/python/pond#changed
+        """
+        if not refs:
+            return self._changes.any_changed()
+        for ref in refs:
+            source, name = self._resolve_ref(ref)
+            if source is None:
+                self._check_own_read(name)
+                if self._changes.changed(name):
+                    return True
+            elif self._source_changed(source, name):
+                return True
+        return False
+
+    def _source_changed(self, source: str, name: str) -> bool:
+        from . import trickle_io as trickle
+        from .dataplane import get_data_plane
+        from .engine.core import NEVER
+
+        if self.previous_f == NEVER:
+            return True
+        data_dir = self._source_data_dir(source)
+        sidecar = trickle.load_sidecar(data_dir)
+        entry = trickle.sidecar_tables(sidecar).get(name)
+        if entry is None:
+            obj = (sidecar.get("objects") or {}).get(name)
+            if obj is not None:
+                return not obj.get("f") or _parse_f(obj["f"]) > self.previous_f
+            try:  # a table published without a sidecar entry (a Puddle snapshot): its age is unknown
+                get_data_plane().read_select(data_dir, name)
+            except FileNotFoundError as exc:
+                raise MissingSourceAsset(source, name) from exc
+            return True
+        if entry.get("mode", "overwrite") == "overwrite":
+            pin = self._pin(source)
+            version_f = trickle.overwrite_version_f(data_dir, name, pin if pin is not None else self.f)
+            if version_f is None:
+                version_f = _parse_f(entry["f"]) if entry.get("f") else None
+            return version_f is None or version_f > self.previous_f
+        data_dir.duckdb_setup(self.con)
+        return trickle.window_changed(self.con, data_dir, name, self.previous_f, self.f)
+
+    def detect_change(self, name: str, value, *, exact: bool = False) -> bool:
+        """Whether ``value`` differs from what is published as this Pond's own table or Object ``name``.
+        Nothing is written.
+
+        ``value`` is a ``duckdb.DuckDBPyRelation``, compared as a table, or a path, bytes or a binary
+        file-like, compared as an Object (a file-like is read, then rewound when it can be). A table is
+        compared by fingerprint: a hash over every row, independent of row order and counting duplicate rows,
+        combined with the column names and types. It costs one scan of ``value``. With ``exact=True``
+        (tables only) the rows themselves are compared with the Pond's copy of the table (``EXCEPT ALL`` in
+        both directions), which is slower but can't be fooled by a hash collision. An Object is compared by
+        a SHA-256 of its payload, with a directory hashed file by file.
+
+        Returns ``True`` whenever it can't show the two are the same: nothing published yet, a table last
+        written without a fingerprint, a fingerprint taken by a different DuckDB version, or a Pond database
+        that no longer holds the published table (a failed run left newer data there).
+
+        If it returns ``False`` and the run doesn't then write ``name``, the published copy is kept. Writing
+        anyway is always allowed and counts as a change. ``write_table(..., if_changed=True)`` and
+        ``write_object(..., if_changed=True)`` are shorthands for checking and then writing, and a
+        ``write_table`` of the same relation object right after a check records its fingerprint.
+
+        Reference: https://docs.duckstring.com/reference/python/pond#detect_change
+        """
+        source, name = self._resolve_ref(name, "table or Object")
+        if source is not None:
+            raise ValueError(f"detect_change compares this Pond's own output; got a Source reference '{source}.{name}'")
+        if _is_relation(value):
+            unchanged = not self._table_changed(name, value, exact)
+        else:
+            from .objects import object_digest
+
+            entry = (self._own_sidecar().get("objects") or {}).get(name)
+            unchanged = entry is not None and entry.get("sha256") == object_digest(value)
+            if unchanged and not self._changes.written(name) and self._staging_dir is not None:
+                from .objects import unstage_object
+
+                unstage_object(Path(self._staging_dir), name)  # a payload a failed run left staged
+        self._changes.record_check(name, unchanged)
+        return not unchanged
+
+    def _table_changed(self, name: str, relation, exact: bool) -> bool:
+        from .dataplane import fingerprint, registry_fingerprints
+
+        fp = fingerprint(relation)
+        self._checks[name] = (relation, fp)
+        from .trickle_io import sidecar_tables
+
+        published = sidecar_tables(self._own_sidecar()).get(name) or {}
+        baseline = published.get("fp") if published.get("mode", "overwrite") == "overwrite" else None
+        # The Pond database must hold exactly the published table too, because later Ripples read it there.
+        if baseline is None or registry_fingerprints(self.con).get(name) != baseline:
+            return True
+        if exact:
+            return not self._same_rows(name, relation)
+        return fp != baseline
+
+    def _same_rows(self, name: str, relation) -> bool:
+        """Whether ``relation`` holds exactly the rows of the Pond's table ``name`` (as a multiset)."""
+        q = name.replace('"', '""')
+        try:
+            current = self.con.sql(f'SELECT * FROM "{q}" LIMIT 0')
+            if list(current.columns) != list(relation.columns) or \
+                    [str(t) for t in current.types] != [str(t) for t in relation.types]:
+                return False
+            v = "_duckstring_detect_new"
+            (diff,) = relation.query(v, f'SELECT count(*) FROM ((SELECT * FROM {v} EXCEPT ALL SELECT * FROM "{q}") '
+                                        f'UNION ALL (SELECT * FROM "{q}" EXCEPT ALL SELECT * FROM {v}))').fetchone()
+        except Exception:  # not comparable here (a relation on another connection): treat as changed
+            return False
+        return diff == 0
+
+    def _own_sidecar(self) -> dict:
+        """This Pond's published sidecar, read once per handle (``{}`` outside a run)."""
+        if self._own_sidecar_cache is None:
+            from .trickle_io import load_sidecar
+
+            self._own_sidecar_cache = load_sidecar(self._own_store()) if self._own_data_dir is not None else {}
+        return self._own_sidecar_cache
+
+    def record_change(self, name: str, changed: bool) -> None:
+        """Record that this run wrote ``name`` and whether the write changed it: the optional host hook the
+        Trickle builder's terminals call, as for :meth:`record_lineage_write`."""
+        self._changes.record_write(name, changed)
+
+    def write_table(self, name: str, relation, *, if_changed: bool = False, cluster_by=None, interleave=True,
+                    cluster_bits=None) -> bool:
         """Replace the table ``name`` in the Pond's database with ``relation``, in one transaction.
 
         Every table in the database is published when the whole Pond Run succeeds; if any Ripple fails,
@@ -737,12 +914,24 @@ class Pond:
         names start with ``_duckstring_`` are never published, and columns with that prefix are rejected at
         publish. Use :meth:`append_table` or :meth:`merge_table` to keep history for incremental consumers.
 
+        With ``if_changed=True`` the table is written only if :meth:`detect_change` finds that ``relation``
+        differs from the published table. When it doesn't, nothing is written and the published table is
+        kept as it is.
+
         ``cluster_by``, ``interleave`` and ``cluster_bits`` order the table as it's written, as for
         :meth:`merge_table`, so reads filtering on those columns skip most of it. The table is sorted on every
         write; without ``cluster_by`` it keeps the order ``relation`` produced.
+
+        Returns ``True`` if the table was written. Without ``if_changed`` it always is.
         """
         from . import trickle_io as trickle
+        from .dataplane import FP_TABLE, _ensure_fp_table, set_registry_fingerprint
 
+        if if_changed and not self.detect_change(name, relation):
+            return False
+        # A fingerprint taken of this same relation lets the next run's check compare with this write.
+        check = self._checks.pop(name, None)
+        fp = check[1] if check is not None and check[0] is relation else None
         spec = trickle.cluster_spec(cluster_by, interleave, cluster_bits)
         if spec is not None:
             from .dataplane import cluster_order_select
@@ -753,6 +942,11 @@ class Pond:
             relation = self.con.sql(cluster_order_select(self.con, f"({relation.sql_query()})", spec))
         self.record_lineage_write(name)
         tmp = f"__tmp_{name}"
+        # The registry fingerprint is set by a fingerprinted write and cleared by any other, so it never
+        # describes content it wasn't taken from.
+        track_fp = fp is not None or trickle._table_exists(self.con, FP_TABLE)
+        if fp is not None:
+            retry_on_lock(lambda: _ensure_fp_table(self.con))
 
         def _write() -> None:
             self.con.execute("BEGIN TRANSACTION")
@@ -761,29 +955,47 @@ class Pond:
                 relation.create(f'"{tmp}"')
                 self.con.execute(f'DROP TABLE IF EXISTS "{name}"')
                 self.con.execute(f'ALTER TABLE "{tmp}" RENAME TO "{name}"')
+                if track_fp:
+                    set_registry_fingerprint(self.con, name, fp, self.f)
                 self.con.execute("COMMIT")
             except Exception:
                 self.con.execute("ROLLBACK")  # release the txn so a retry starts clean
                 raise
 
         retry_on_lock(_write)  # a concurrent write conflict queues + retries rather than failing
+        self._changes.record_write(name, True)
+        return True
 
-    def write_object(self, name: str, src) -> None:
+    def write_object(self, name: str, src, *, if_changed: bool = False) -> bool:
         """Stage a non-tabular Object (a model, a file, a directory) to be published with the run's tables.
 
         ``name`` is letters, digits and underscores, optionally with single dots between parts
         (``model.pkl``); read a dotted name back with backticks, ``read_object("`model.pkl`")``.
 
         ``src`` is a file or directory path, ``bytes``, or a binary file-like. The Object is replaced as one
-        unit when the run publishes; a later Ripple failure leaves the previous Object in place. Raises
+        unit when the run publishes; a later Ripple failure leaves the previous Object in place.
+
+        With ``if_changed=True`` the Object is published only if its content differs from the published
+        Object, compared by a SHA-256 of the payload. When it doesn't, the published Object is kept, with
+        the freshness of the run that last changed it.
+
+        Returns ``True`` if the Object was staged for publishing; without ``if_changed`` it always is. Raises
         ``RuntimeError`` outside a Pond Run.
         """
-        from .objects import stage_object
+        from .objects import stage_object, unstage_object
 
         if self._staging_dir is None:
             raise RuntimeError("write_object is only available inside a Pond Run (no staging context)")
+        digest = stage_object(Path(self._staging_dir), name, src)
+        if if_changed:
+            entry = (self._own_sidecar().get("objects") or {}).get(name)
+            if entry is not None and entry.get("sha256") == digest:
+                unstage_object(Path(self._staging_dir), name)
+                self._changes.record_check(name, True)
+                return False
         self.record_lineage_write(name)
-        stage_object(Path(self._staging_dir), name, src)
+        self._changes.record_write(name, True)
+        return True
 
     def read_object(self, ref: str) -> bytes:
         """The bytes of a single-file Object: ``"name"`` for this Pond's own, ``"source.name"`` for a Source's.
@@ -999,10 +1211,12 @@ class Pond:
         from . import trickle_io as trickle
 
         self.record_lineage_write(name)
-        return trickle.append_table(
+        changed = trickle.append_table(
             self.con, name, relation, self.f, self._resolve_pk(pk),
             fail_on_conflict=fail_on_conflict, retain_t=retain_t, retain_n=retain_n,
         )
+        self._changes.record_write(name, changed)
+        return changed
 
     def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None,
                     compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
@@ -1039,11 +1253,13 @@ class Pond:
         from . import trickle_io as trickle
 
         self.record_lineage_write(name)
-        return trickle.merge_table(
+        changed = trickle.merge_table(
             self.con, name, relation, self.f, self._resolve_pk(pk),
             retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
             cluster_by=cluster_by, interleave=interleave, cluster_bits=cluster_bits,
         )
+        self._changes.record_write(name, changed)
+        return changed
 
     def apply_zset(self, name: str, zset, *, pk, retain_t=None, retain_n=None,
                    compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
@@ -1060,11 +1276,13 @@ class Pond:
         from . import trickle_io as trickle
 
         self.record_lineage_write(name)
-        return trickle.apply_zset(
+        changed = trickle.apply_zset(
             self.con, name, zset, self.f, self._resolve_pk(pk),
             retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
             cluster_by=cluster_by, interleave=interleave, cluster_bits=cluster_bits,
         )
+        self._changes.record_write(name, changed)
+        return changed
 
     def read_delta(self, ref: str):
         """The changes to a Source table (``"source.table"``) over this run's window ``(previous_f, f]``.

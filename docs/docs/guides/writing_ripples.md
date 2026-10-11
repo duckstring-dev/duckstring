@@ -122,29 +122,7 @@ pond.con.execute("CREATE TEMP TABLE recent AS SELECT * FROM sale_line WHERE sale
 
 ## Inlets: reading from outside
 
-An Inlet has no Sources, so its Ripples fetch data from somewhere else: an API, a database, files in object storage. DuckDB reads most of these directly:
-
-```python
-@ripple
-def ingest(pond):
-    pond.write_table("exchange_rate", pond.con.sql("""
-        SELECT * FROM read_json_auto('https://example.com/rates/latest.json')
-    """))
-```
-
-When an Inlet should add to what it already has rather than replace it, read its own table first. `pond.f`, the run's freshness, makes a stable stamp: a retried or recovered run reuses the same `f`, so rows it stamps are identical on replay.
-
-```python
-@ripple
-def ingest(pond):
-    new = pond.con.sql(f"""
-        SELECT *, TIMESTAMPTZ '{pond.f.isoformat()}' AS ingested_at
-        FROM read_parquet('s3://drops/events/*.parquet')
-    """)
-    pond.append_table("event", new)
-```
-
-`append_table` is covered in [Append and merge tables](append_and_merge.md). It keeps history in a form downstream Ponds can read incrementally, and a replay at the same `f` replaces that run's rows instead of duplicating them.
+An Inlet has no Sources, so its Ripples fetch data from somewhere else: an API, a database, files in object storage. [Ingesting Data](ingesting_data.md) covers reading from those systems, choosing a table type, incremental pulls and skipping runs when nothing new has arrived.
 
 ## Outputs that aren't tables
 
@@ -186,7 +164,16 @@ def notify(pond):
     post_summary(pond.con.sql("SELECT SUM(revenue) FROM sale_line").fetchone()[0])
 ```
 
-`pond.skip()` marks the run as producing no change, so Ponds downstream can skip their own runs too. You can call it from any Ripple that detects it had nothing new to write.
+`pond.skip()` marks the run as producing no change, so Ponds downstream can skip their own runs too. A call from any Ripple marks the whole run, so only call it once you know nothing the Pond publishes changed. For a Pond with several Ripples, the simplest way is a Ripple that runs after the others and asks whether any of them changed anything:
+
+```python
+@ripple(parents=[daily_sales, price_tiers, join_lines])
+def done(pond):
+    if not pond.changed():
+        pond.skip()
+```
+
+`pond.changed()` with no arguments reports whether this run changed any of the Pond's tables or Objects. It counts what the run wrote through the Pond handle: a Trickle write that changed nothing, and a table written with `if_changed=True` whose content was the same, don't count. A table changed with SQL on `pond.con` isn't seen. With references, `pond.changed("products.product")` asks about specific tables, which lets one Ripple skip its own work when the input it reads didn't change; see [Change detection](../reference/python/pond.md#change-detection).
 
 Side effects can run more than once. A Ripple is retried after a failure, and runs again after a crash if it hadn't finished, so make external calls safe to repeat, for example by keying them on `pond.f`.
 

@@ -48,7 +48,7 @@ A Pond that imports Python packages declares them in a standard `pyproject.toml`
 
 Ponds can have **Sources** (parents) and **Sinks** (children). By position in the graph, a Pond is one of three kinds, declared as `type` in `pond.toml`:
 
-- **Inlet**: no Sources. Inlets ingest from external systems (an API, a warehouse export, a file drop).
+- **Inlet**: no Sources. Inlets [ingest from external systems](../guides/ingesting_data.md) (an API, a warehouse export, a file drop).
 - **Pond**: both Sources and Sinks.
 - **Outlet**: no Sinks. Outlets produce the final data products that applications and analysts consume.
 
