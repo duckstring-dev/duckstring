@@ -13,13 +13,13 @@ from duckstring.dataplane import ParquetDataPlane
 
 
 def test_the_old_names_are_the_package():
-    import duckstring.trickle.builder
-    import duckstring.trickle.io
     import trickle
-    from duckstring.trickle.io import read_delta
 
     import duckstring.trickle
+    import duckstring.trickle.builder
+    import duckstring.trickle.io
     from duckstring import acc, agg, trickle_builder, trickle_io
+    from duckstring.trickle.io import read_delta
 
     assert duckstring.trickle is trickle
     assert duckstring.trickle.io is trickle.io and duckstring.trickle.builder is trickle.builder

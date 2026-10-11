@@ -113,3 +113,8 @@ extend-exclude = ["experiment"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
 ignore = ["B008"]  # typer.Option/Argument in defaults is intentional
+
+[tool.ruff.lint.isort]
+# Explicit, because ruff versions disagree on modules that only resolve through an alias: newer ones class
+# duckstring.trickle.* (now packages/trickle, aliased) as third-party. `trickle` itself is third-party here.
+known-first-party = ["duckstring"]
