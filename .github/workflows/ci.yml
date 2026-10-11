@@ -66,7 +66,9 @@ jobs:
       - run: pip install -e packages/trickle -e .[dev]
       - run: pip install --pre --upgrade duckdb
       - run: python -c "import duckdb; print(duckdb.__version__)"
-      - run: pytest
+      # A longer default timeout: the 2.0 alpha runs this suite about 2.5x slower than 1.5, which put tests late
+      # in the run past the 5 s default. Measured: no hangs; this job watches for breakage, not speed.
+      - run: pytest --timeout=30
 
   # The dbt extra (dbt-mode Ponds): the e2e importorskips without it, so exercise it explicitly.
   dbt:
