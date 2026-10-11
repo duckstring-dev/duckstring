@@ -37,23 +37,23 @@ def _publish(p, build) -> None:
 
 @puddle("orders")
 def orders(p):
-    from duckstring import trickle_io
+    import trickle
 
     def build(con):
         vals = ", ".join(f"({o}, {pid}, {q})" for o, pid, q in _ORDERS)
         rel = con.sql(f"SELECT * FROM (VALUES {vals}) v(order_id, product_id, quantity)")
-        trickle_io.append_table(con, "order_line", rel, _F, ("order_id",))
+        trickle.append_table(con, "order_line", rel, _F, ("order_id",))
 
     _publish(p, build)
 
 
 @puddle("catalog")
 def catalog(p):
-    from duckstring import trickle_io
+    import trickle
 
     def build(con):
         vals = ", ".join(f"({pid}, '{n}', '{c}', {pr})" for pid, n, c, pr in _PRODUCTS)
         rel = con.sql(f"SELECT * FROM (VALUES {vals}) v(product_id, name, category, unit_price)")
-        trickle_io.merge_table(con, "product", rel, _F, ("product_id",))
+        trickle.merge_table(con, "product", rel, _F, ("product_id",))
 
     _publish(p, build)

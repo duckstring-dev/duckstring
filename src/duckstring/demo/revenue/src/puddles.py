@@ -19,8 +19,8 @@ _PRICED = [  # order_id, product_id, quantity, unit_price, revenue
 @puddle("priced")
 def priced(p):
     import duckdb
+    import trickle
 
-    from duckstring import trickle_io
     from duckstring.dataplane import ParquetDataPlane
 
     con = duckdb.connect()
@@ -29,7 +29,7 @@ def priced(p):
         rel = con.sql(
             f"SELECT * FROM (VALUES {vals}) v(order_id, product_id, quantity, unit_price, revenue)"
         )
-        trickle_io.merge_table(con, "priced_line", rel, _F, ("order_id",))
+        trickle.merge_table(con, "priced_line", rel, _F, ("order_id",))
         ParquetDataPlane().export(con, p.path)
     finally:
         con.close()
