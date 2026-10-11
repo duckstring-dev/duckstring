@@ -29,7 +29,8 @@ _RIPPLES = [{"func": "f1", "name": "r1", "parents": []}]
 
 def _cfg(sources=None, kind="inlet", **declared):
     cfg = {"sources": sources or {}, "immediate_retries": 0, "source_retries": 0, "kind": kind,
-           "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None}
+           "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None,
+           "flock_accept": None}
     cfg.update(declared)
     return cfg
 
@@ -52,7 +53,8 @@ def _client(driver):
 
 
 def _clear_env(monkeypatch):
-    for k in ("DUCKSTRING_FLOCK_MODE", "DUCKSTRING_FLOCK_ENGINE", "DUCKSTRING_FLOCK_OOM_POLICY"):
+    for k in ("DUCKSTRING_FLOCK_MODE", "DUCKSTRING_FLOCK_ENGINE", "DUCKSTRING_FLOCK_OOM_POLICY",
+              "DUCKSTRING_FLOCK_ACCEPT"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -120,6 +122,33 @@ def test_set_duck_rejects_unknown_values(tmp_path):
         d.set_duck("src@1", flock_mode="sometimes")
     with pytest.raises(ValueError):
         d.set_duck("src@1", oom_policy="explode")
+
+
+def test_flock_acceptances_are_declared_overridden_and_sent_on_the_job(tmp_path, monkeypatch):
+    """``[flock] accept`` in pond.toml, an operator override (``none`` accepts nothing over a declaration),
+    and the run's job carrying the effective list to the Duck."""
+    from duckstring import flock
+    from duckstring.catchment.routes.deploy import _flock_accept
+
+    _clear_env(monkeypatch)
+    assert _flock_accept(["float_order", "float_order"]) == "float_order"
+    with pytest.raises(ValueError, match="unknown"):
+        _flock_accept(["close_enough"])
+    d = _driver(tmp_path, cfg=_cfg(flock_mode="upgrade", flock_accept="float_order"))
+    cfg = d.duck_config("src@1")
+    assert cfg["flock_accept"] == "float_order" and cfg["declared"]["flock_accept"] == "float_order"
+    assert flock.job_settings(cfg, {})["DUCKSTRING_FLOCK_ACCEPT"] == "float_order"
+    d.set_duck("src@1", flock_accept="none")
+    cfg = d.duck_config("src@1")
+    assert cfg["flock_accept"] is None and "DUCKSTRING_FLOCK_ACCEPT" not in flock.job_settings(cfg, {})
+    d.set_duck("src@1", flock_accept="half_rounding, float_order")
+    d.reload()
+    assert d.duck_config("src@1")["flock_accept"] == "half_rounding,float_order"
+    with pytest.raises(ValueError, match="unknown"):
+        d.set_duck("src@1", flock_accept="close_enough")
+    # The Catchment's own environment is not passed through as an acceptance: it's the Pond's choice.
+    assert "DUCKSTRING_FLOCK_ACCEPT" not in flock.job_settings({"flock_mode": "upgrade"},
+                                                                {"DUCKSTRING_FLOCK_ACCEPT": "float_order"})
 
 
 def test_duck_override_survives_reload(tmp_path):

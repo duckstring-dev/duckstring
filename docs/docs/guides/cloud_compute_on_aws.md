@@ -1,6 +1,6 @@
 ---
 title: Cloud Compute on AWS
-description: Run Ponds on Fargate or EC2, and offload large recomputes to Athena.
+description: Run Ponds on Fargate or EC2, and offload large recomputes to Athena or StarRocks.
 ---
 
 # Cloud Compute on AWS
@@ -207,30 +207,19 @@ DUCKSTRING_RELAY_SECURITY_GROUP=sg-relay   # inbound SSH from you, and the relay
 
 Set `DUCKSTRING_RELAY=off` to disable it. A Catchment with a reachable address, or with `DUCKSTRING_CATCHMENT_PUBLIC_URL` set, never uses the relay.
 
-## The Flock: offloading large recomputes
+## The Flock on Athena
 
-Sometimes a Pond has to recompute a Trickle in full, after a refresh or when most of a source changed, and the recompute won't fit in its Duck's memory. The Flock sends that computation to Athena, while the Duck keeps the incremental bookkeeping and the publish.
+The [Flock](offloading_large_recomputes.md) sends a recompute too large for a Duck to another engine. To use Athena, configure it on the Catchment:
 
 ```bash
-DUCKSTRING_FLOCK_ENGINE=athena
 DUCKSTRING_FLOCK_ATHENA_WORKGROUP=duckstring-flock
 DUCKSTRING_FLOCK_ATHENA_DATABASE=duckstring_flock
 DUCKSTRING_FLOCK_ATHENA_SCRATCH=s3://acme-lake/flock-scratch
 ```
 
-Set these on the Catchment. It sends them to each Duck with every run, so cloud Ducks need no Flock settings of their own. Then allow it for a Pond:
+The Duck's role, which dispatches the work, also needs Athena and Glue access, plus `s3:GetBucketLocation` and `s3:ListBucketMultipartUploads` on the scratch bucket. Without those, Athena reports "Unable to verify/create output bucket". Give the scratch prefix a lifecycle rule, since everything in it is temporary. StarRocks reads the same kind of scratch prefix with its own instance profile, so on AWS its role needs read and write access to it too.
 
-```bash
-duckstring duck set priced --flock upgrade
-```
-
-`upgrade` sends a recompute to Athena when it's clearly too large for the Duck, or after it runs out of memory locally. `always` sends every eligible recompute. The default is `off`, and `DUCKSTRING_FLOCK_MODE` changes the default for the whole Catchment. The size threshold comes from `DUCKSTRING_MEMORY_LIMIT`, so set it on Ducks that use the Flock.
-
-The Duck's role also needs Athena and Glue access, plus `s3:GetBucketLocation` and `s3:ListBucketMultipartUploads` on the scratch bucket. Without those, Athena reports "Unable to verify/create output bucket". Give the scratch prefix a lifecycle rule, since everything in it is temporary.
-
-DuckDB stays the authority on results. Only expressions known to give identical results on both engines are sent: arithmetic without division, `round`, `abs`, `floor`, `ceil` and `coalesce`, among others. Division and `CAST` aren't, because Athena and DuckDB disagree on them. Athena's result is cast to the schema DuckDB would have produced, and rejected if its columns differ. Anything unsupported, rejected or failed runs in the Duck instead.
-
-That fallback means a broken Flock never shows in your data, only in cost and speed. Watch `duckstring_flock_dispatch_failures_total` on [`/metrics`](monitoring_and_failures.md#metrics), and the `flock_error` field in a Pond's status.
+DuckDB stays the authority on results: Athena only gets constructs measured to agree with DuckDB, and every result is cast to DuckDB's schema and checked against a local recompute of a sample before it's used. Anything else runs in the Duck. [Offloading Large Recomputes](offloading_large_recomputes.md#accuracy-on-starrocks-and-athena) has the detail.
 
 ## Where data goes
 
@@ -270,7 +259,7 @@ Duckstring itself costs nothing; you pay AWS for:
 
 - the Catchment's machine, which runs continuously and is most of a small deployment's cost;
 - Ducks, per run, since each is stopped when its Pond goes idle (a Duck that loses its Catchment stops itself after an hour idle; see `DUCKSTRING_DUCK_ORPHAN_MINUTES`);
-- Athena, per terabyte scanned, only when the Flock is used;
+- the Flock's engine (Athena per terabyte scanned, StarRocks or MotherDuck while running), only when the Flock is used;
 - S3 storage and requests.
 
 `/metrics` includes each Pond's total run time (`duckstring_pond_run_seconds_total`) and where it runs (`duckstring_pond_duck_target`), for attributing cost to Ponds.

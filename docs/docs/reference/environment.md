@@ -51,18 +51,31 @@ Run only one Catchment process against a state directory, and only one Catchment
 
 ## Flock
 
-Set these on the Catchment. It sends them to each Duck with every run, together with any credentials the engine needs, so Ducks in the cloud need no Flock settings of their own.
+Set these on the Catchment. It sends them to each Duck with every run, together with any credentials the engine needs, so Ducks in the cloud need no Flock settings of their own. See [Offloading Large Recomputes](../guides/offloading_large_recomputes.md).
 
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_FLOCK_MODE` | `off` | Catchment default for [`[flock] mode`](pond_toml.md#flock). |
-| `DUCKSTRING_FLOCK_ENGINE` | `athena` | Catchment default engine: a built-in name, or `module:Class`. An engine that can't be loaded turns the Flock off. |
+| `DUCKSTRING_FLOCK_ENGINE` | the first configured | Catchment default engine: `motherduck`, `motherduck/<profile>`, `starrocks`, `athena`, or `module:Class`. Unset, the first of `motherduck`, `starrocks` and `athena` that is configured. An engine that can't be loaded turns the Flock off. |
 | `DUCKSTRING_FLOCK_OOM_POLICY` | `fail_up` | Catchment default for `[flock] oom_policy`. |
+| `DUCKSTRING_FLOCK_ACCEPT` | | Catchment default for `[flock] accept`, comma-separated. |
 | `DUCKSTRING_FLOCK_MIN_ROWS` | from `DUCKSTRING_MEMORY_LIMIT` | The row count above which `upgrade` mode sends a computation to the Flock up front. |
+| `DUCKSTRING_FLOCK_VERIFY_KEYS` | `1000` | How many keys of a StarRocks or Athena result are recomputed in the Duck and compared before it's used. `0` turns verification off. |
+| `DUCKSTRING_FLOCK_MOTHERDUCK_DATABASE` | `duckstring_flock` | The MotherDuck database that sources are uploaded to for a job. |
+| `DUCKSTRING_FLOCK_STARROCKS_HOST` | | StarRocks frontend host. |
+| `DUCKSTRING_FLOCK_STARROCKS_PORT` | `9030` | StarRocks MySQL-protocol port. |
+| `DUCKSTRING_FLOCK_STARROCKS_USER` | | StarRocks user. The password is the secret `STARROCKS_PASSWORD`. |
+| `DUCKSTRING_FLOCK_STARROCKS_WAREHOUSE` | | Warehouse to run in. |
+| `DUCKSTRING_FLOCK_STARROCKS_SCRATCH` | | S3 prefix for staged sources and results. |
+| `DUCKSTRING_FLOCK_STARROCKS_REGION` | | Region of the scratch bucket. |
+| `DUCKSTRING_FLOCK_STARROCKS_S3_ENDPOINT` | | The scratch bucket's endpoint as StarRocks sees it, for an S3-compatible store. |
+| `DUCKSTRING_FLOCK_STARROCKS_TIMEOUT` | `900` | Seconds a job may run on StarRocks, including a suspended warehouse resuming. |
 | `DUCKSTRING_FLOCK_ATHENA_WORKGROUP` | | Athena workgroup. |
 | `DUCKSTRING_FLOCK_ATHENA_DATABASE` | | Athena database. |
-| `DUCKSTRING_FLOCK_ATHENA_SCRATCH` | | S3 location for Athena query results. |
+| `DUCKSTRING_FLOCK_ATHENA_SCRATCH` | | S3 location for staged sources and Athena results. |
 | `DUCKSTRING_FLOCK_ATHENA_REGION` | | Athena region. |
+
+The engines' credentials are secrets (`duckstring secret set`), sent with each run only while the Pond's Flock is on: `MOTHERDUCK_TOKEN` (or `MOTHERDUCK_TOKEN_<PROFILE>` for `motherduck/<profile>`), and `STARROCKS_PASSWORD`, `STARROCKS_S3_ACCESS_KEY` and `STARROCKS_S3_SECRET_KEY`. Athena uses the Duck's IAM role.
 
 ## Cloud Ducks on Fargate
 

@@ -49,8 +49,10 @@ class Context(Protocol):
       ``.count()`` otherwise falls back to ``count(*)`` over :meth:`read_table`.
     - ``record_lineage_write(name)`` and ``record_change(name, changed)`` — told after each terminal writes
       ``name``, and whether the write changed it.
-    - ``dispatch_comprehensive(builder, out_pk, *, comprehensive_bound) -> relation | None`` — offered a
-      terminal's comprehensive recompute to run elsewhere; ``None`` computes it locally.
+    - ``dispatch_comprehensive(job) -> relation | None``: offered a terminal's comprehensive recompute (a
+      :class:`~trickle.builder.ComprehensiveJob`) to run elsewhere; ``None`` computes it locally. Only a
+      run that recomputes wholesale anyway is offered (a bootstrap, ``ivm=False``, a coverage miss, a source
+      over its ``p`` threshold, or a ``.sql()`` result), never an incremental one.
     """
 
     con: object

@@ -68,6 +68,7 @@ const sidebars: SidebarsConfig = {
             'guides/running_on_a_server',
             'guides/hosting_on_a_platform',
             'guides/cloud_compute_on_aws',
+            'guides/offloading_large_recomputes',
             'guides/connecting_catchments',
           ],
         },

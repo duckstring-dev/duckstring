@@ -99,15 +99,16 @@ Static tables aren't published. A changed file takes effect from the first run a
 
 ## `[flock]`
 
-Allows over-sized computations to be sent to a serverless engine. See [Ducks and Flocks](../concepts/management_and_execution.md#ducks-and-flocks).
+Allows over-sized computations to be sent to a larger engine. See [Offloading Large Recomputes](../guides/offloading_large_recomputes.md).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `mode` | string | `"off"` | `"off"`: never send work out. `"upgrade"`: send a full recompute out only when it is clearly too large for the Duck, or after it runs out of memory locally. `"always"`: send every eligible full recompute out. |
-| `engine` | string | `"athena"` | The engine to use. A built-in name, or `module:Class` for a custom engine. |
+| `engine` | string | the first configured | The engine to use: `motherduck`, `motherduck/<profile>`, `starrocks`, `athena`, or `module:Class` for a custom engine. Without one, the first configured engine in that order. |
 | `oom_policy` | string | `"fail_up"` | `"fail_up"`: when a local recompute runs out of memory, retry it on the engine. `"fail"`: let it fail. |
+| `accept` | list of strings | `[]` | Known differences to accept from an engine that isn't DuckDB: `"float_order"`, `"half_rounding"`. See [Accepting known differences](../guides/offloading_large_recomputes.md#accepting-known-differences). |
 
-The defaults come from the Catchment (`DUCKSTRING_FLOCK_MODE`, `DUCKSTRING_FLOCK_ENGINE`, `DUCKSTRING_FLOCK_OOM_POLICY`) when the key is omitted. The Flock only takes effect when an engine is configured on the Catchment. Otherwise everything runs in the Duck. Operators can override these per Pond with [`duckstring duck set`](cli/duck.md#set).
+The defaults come from the Catchment (`DUCKSTRING_FLOCK_MODE`, `DUCKSTRING_FLOCK_ENGINE`, `DUCKSTRING_FLOCK_OOM_POLICY`, `DUCKSTRING_FLOCK_ACCEPT`) when the key is omitted. The Flock only takes effect when an engine is configured on the Catchment. Otherwise everything runs in the Duck. Operators can override these per Pond with [`duckstring duck set`](cli/duck.md#set).
 
 ## Python dependencies
 

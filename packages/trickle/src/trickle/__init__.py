@@ -14,7 +14,7 @@ alias of this package).
 from __future__ import annotations
 
 from . import acc, agg, builder, context, io, session
-from .builder import BuildError, TrickleBuilder
+from .builder import BuildError, ComprehensiveJob, TrickleBuilder
 from .context import NEVER, SYSTEM_PREFIX, Context
 from .io import (
     AGG_STATE_PREFIX,
@@ -26,6 +26,7 @@ from .io import (
     SIDECAR,
     Delta,
     DeltaError,
+    agg_rebuild_select,
     append_table,
     append_zset,
     apply_aggregate,
@@ -55,14 +56,14 @@ from .session import Epoch, Run, at, run
 
 __all__ = [
     # host seam
-    "Context", "NEVER", "SYSTEM_PREFIX",
+    "Context", "NEVER", "SYSTEM_PREFIX", "ComprehensiveJob",
     # builder
     "TrickleBuilder", "BuildError", "agg", "acc",
     # the standalone host
     "run", "Run", "at", "Epoch",
     # io: classes + the write/read API
     "Delta", "DeltaError",
-    "append_table", "append_zset", "apply_zset", "merge_table", "apply_aggregate",
+    "append_table", "append_zset", "apply_zset", "merge_table", "apply_aggregate", "agg_rebuild_select",
     "checkpoint", "reconstruct_current", "reconstruct_sql", "current_state",
     "read_delta", "read_registry_delta", "read_meta", "normalize_pk", "changelog_name", "unique_name",
     # io: sidecar / cross-catchment draw (per-run parts)

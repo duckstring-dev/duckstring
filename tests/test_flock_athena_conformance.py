@@ -1,8 +1,8 @@
 """Differential conformance: Athena (Trino) vs DuckDB, measured rather than assumed.
 
-Everything in the Athena engine's allow-list is there because Trino's *documented* semantics match
-DuckDB's *measured* behaviour. Documentation is not evidence about the engine you are actually running,
-so this runs each candidate expression on BOTH and compares the answers.
+Everything in the Athena engine's allow-list is there because its translation (sqlglot, DuckDB to Trino, as
+the engine sends it) was measured to agree with DuckDB. Documentation is not evidence about the engine you
+are actually running, so this runs each candidate expression on BOTH and compares the answers.
 
 It is the gate for changing that list: an expression joins the allow-list when this passes for it, and
 leaves the list when this fails. Nothing is admitted on reasoning alone.
@@ -64,7 +64,10 @@ def _athena_values(exprs: list[str], cast_to: list[str] | None = None) -> list[s
     ``round(x, 2)`` keeps scale 3 (``2.350``) where DuckDB rescales to 2 (``2.35``), and conform casts
     that back. What matters is whether the values agree AFTER that, so that is what we compare."""
     import boto3
+    import sqlglot
 
+    # What the engine would actually send: the translation, not the DuckDB text.
+    exprs = [sqlglot.transpile(e, read="duckdb", write="athena")[0] for e in exprs]
     region = os.environ.get("DUCKSTRING_FLOCK_ATHENA_REGION")
     athena = boto3.client("athena", **({"region_name": region} if region else {}))
     if cast_to:

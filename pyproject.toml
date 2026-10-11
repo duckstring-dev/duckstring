@@ -16,7 +16,7 @@ dependencies = [
   "duckdb>=1.5,<2",
   # The incremental engine (packages/trickle), released separately. A compatible range: while it's 0.x a
   # minor release can change its API or storage format, so Duckstring moves to one deliberately.
-  "duckstring-trickle>=0.1,<0.2",
+  "duckstring-trickle>=0.2,<0.3",
   "rich>=13.7",
   "typer>=0.12",
   "fastapi>=0.111",
@@ -51,10 +51,19 @@ lineage = [
 ]
 # AWS / cloud (plans/cloud-config.md): the object-store data plane + egress (s3fs — fsspec's small-file
 # work; DuckDB does the bulk Parquet I/O over httpfs on its own), and the remote-compute launchers
-# (EC2/Fargate/relay) + the Athena Flock engine (boto3). Opt-in — a local/offline Catchment needs none.
+# (EC2/Fargate/relay) + the Athena Flock engine (boto3, and sqlglot to translate its jobs). Opt-in: a
+# local/offline Catchment needs none.
 aws = [
   "s3fs>=2023.1",
   "boto3>=1.34",
+  "sqlglot>=30.21,<31",
+]
+# The StarRocks Flock engine (plans/flock-coverage.md): the MySQL-protocol client, and sqlglot to translate
+# jobs. sqlglot is pinned to one major because what an engine is trusted with is measured against its
+# translations: re-run tests/test_flock_starrocks_conformance.py before widening it.
+starrocks = [
+  "pymysql>=1.1",
+  "sqlglot>=30.21,<31",
 ]
 dev = [
   "pytest>=8.0",
@@ -64,10 +73,11 @@ dev = [
   "ruff>=0.3",
   "mypy>=1.8",
   "dbt-duckdb>=1.9",
-  "sqlglot>=23",
+  "sqlglot>=30.21,<31",
   "s3fs>=2023.1",
   "boto3>=1.34",
   "pg8000>=1.31",
+  "pymysql>=1.1",
 ]
 
 [tool.setuptools]

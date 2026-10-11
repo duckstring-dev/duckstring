@@ -234,7 +234,7 @@ from duckstring import acc
 
 Runs any SQL over the result so far, for operations the builder doesn't maintain incrementally: window functions, `DISTINCT`, set operations, holistic aggregates such as a median. The result so far is computed in full and exposed under the builder's `.alias()` name, then `query` runs over it.
 
-The builder that comes back is fully recomputed each run, but its terminal still writes only the rows that changed, so downstream consumers still receive a small change. After `.sql()`, only `.alias()`, `.sql()`, `.schema()`, `.count()` and the terminals are available.
+The builder that comes back is fully recomputed each run, but its terminal still writes only the rows that changed, so downstream consumers still receive a small change. The query runs when the terminal does, which lets the [Flock](../../guides/offloading_large_recomputes.md) take it. After `.sql()`, only `.alias()`, `.sql()`, `.schema()`, `.count()` and the terminals are available.
 
 | Parameter | Type | Description |
 |---|---|---|

@@ -1179,7 +1179,8 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     builder's ``_compute`` class for the input:
     ``incremental`` (a Z-set ΔO → fold weighted contributions, O(δ); min/max extend on insert and **rescan**
     ``current`` — the full current join output — on a retraction of the supporting row), ``comprehensive`` (a
-    full clean output → rebuild the accumulators wholesale), or ``empty`` (no-op)."""
+    full clean output → rebuild the accumulators wholesale), ``state`` (the accumulators already rebuilt
+    elsewhere, as :func:`agg_rebuild_select` computes them → install them), or ``empty`` (no-op)."""
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if kind == "empty":
@@ -1209,9 +1210,14 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         + [col for p in range(len(prod_cols)) for col in (f"_p_cnt_{p}", f"_p_nz_{p}", f"_p_nn_{p}", f"_p_sl_{p}")]
     )
 
-    if kind == "comprehensive":
-        _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_units, arg_specs, sg_specs,
-                     prod_cols, f)
+    if kind in ("comprehensive", "state"):
+        if kind == "state":
+            src = unique_name("aggstate")
+            rel.create_view(src, replace=True)
+            con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
+            con.execute(f"CREATE TABLE {_q(state)} AS SELECT * FROM {_q(src)}")
+        else:
+            _agg_rebuild(con, state, rel, by, metrics, f)
         derived = con.sql(f"SELECT {by_list}, {_agg_derive(metrics, idx)} FROM {_q(state)} WHERE _a_cnt > 0")
         merge_table(con, name, derived, f, by, retain_t=retain_t, retain_n=retain_n)
         return
@@ -2325,12 +2331,12 @@ def _sg_merge_exprs(sg_specs) -> list[str]:
     return out
 
 
-def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_units, arg_specs, sg_specs,
-                 prod_cols, f) -> None:
-    """(Re)build the accumulator state wholesale from a clean full output ``rel`` — the comprehensive path
-    (bootstrap / coverage-miss). Idempotent: same input → same state."""
-    src = unique_name("aggfull")
-    rel.create_view(src, replace=True)
+def agg_rebuild_select(src: str, by, metrics, f) -> str:
+    """The ``SELECT`` that builds an aggregate's accumulator state wholesale from the clean full input in the
+    relation named ``src``: one row per group, the raw accumulators :func:`apply_aggregate` maintains, stamped
+    ``f``. Plain DuckDB SQL over ``src`` alone, so it can run wherever the input is."""
+    add_cols, ext_cols, co_pairs, wgt_units, arg_specs, sg_specs, prod_cols = _agg_families(metrics)
+    by_list = ", ".join(_q(b) for b in by)
     exprs = ["CAST(count(*) AS BIGINT) AS _a_cnt"]
     for i, c in enumerate(add_cols):
         exprs.append(f"COALESCE(SUM({_q(c)}), 0) AS _a_sum_{i}")
@@ -2346,11 +2352,16 @@ def _agg_rebuild(con, state, rel, by_list, add_cols, ext_cols, co_pairs, wgt_uni
     exprs += _arg_rebuild_exprs(arg_specs)
     exprs += _sg_rebuild_exprs(sg_specs)
     exprs += _prod_rebuild_exprs(prod_cols)
+    return f"SELECT {by_list}, {', '.join(exprs)}, {_ts(f)} AS {_q(F_COL)} FROM {_q(src)} GROUP BY {by_list}"
+
+
+def _agg_rebuild(con, state, rel, by, metrics, f) -> None:
+    """(Re)build the accumulator state wholesale from a clean full output ``rel``: the comprehensive path
+    (bootstrap / coverage-miss). Idempotent: same input → same state."""
+    src = unique_name("aggfull")
+    rel.create_view(src, replace=True)
     con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
-    con.execute(
-        f"CREATE TABLE {_q(state)} AS "
-        f"SELECT {by_list}, {', '.join(exprs)}, {_ts(f)} AS {_q(F_COL)} FROM {_q(src)} GROUP BY {by_list}"
-    )
+    con.execute(f"CREATE TABLE {_q(state)} AS {agg_rebuild_select(src, by, metrics, f)}")
 
 
 def _agg_derive(metrics, idx) -> str:

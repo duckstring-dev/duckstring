@@ -30,17 +30,17 @@ class RecordingEngine:
     def enabled(self):
         return self.token is not None
 
-    def eligible(self, builder):
+    def eligible(self, job):
         return None
 
-    def estimate_rows(self, builder):
+    def estimate_rows(self, job):
         return 10_000_000
 
-    def dispatch(self, builder, out_pk):
+    def dispatch(self, job):
         RecordingEngine.seen.append(self.token)
-        con = builder.ctx.con
+        con = job.ctx.con
         name = f"_ds_rec_{uuid.uuid4().hex[:8]}"
-        con.execute(f"CREATE TEMP TABLE {name} AS {builder._full_join().sql_query()}")
+        con.execute(f"CREATE TEMP TABLE {name} AS {job.relation().sql_query()}")
         return con.table(name)
 
 
