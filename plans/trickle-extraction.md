@@ -1,6 +1,6 @@
 # Extracting Trickle into its own package
 
-Status: **in progress**. Phases 1 and 2 done (2026-10-11); phases 3 to 5 to come.
+Status: **in progress**. Phases 1 to 3 done (2026-10-11); phases 4 and 5 to come.
 
 ## Why
 
@@ -148,7 +148,25 @@ Built as below: `trickle.run(con, pipeline=...)` returns a `Run` (`trickle/sessi
   README example end to end with values checked against a from-scratch recompute.
 - Exit: the README example runs with nothing from Duckstring imported.
 
-### 3. Split the tests
+### 3. Split the tests. Done 2026-10-11
+
+The engine tests are in `tests/trickle/` (about 130 tests: I/O and the merge view, the builder, joins, aggregates
+and scans, capture, column lineage, the standalone host), laid out to move to the package as they are:
+
+- They import the engine as `trickle`. Until the move, `tests/trickle/conftest.py` aliases `duckstring.trickle`
+  under that name and is the only file there allowed to import Duckstring; `test_trickle_isolation.py` checks.
+- The builder tests were rewritten from separate producer databases, published Parquet and `Pond` to one
+  database and explicit windows. That needed a stateless host, so `trickle.at(con, f, previous_f)` (an `Epoch`)
+  was added and `Run` became an `Epoch` with stored run state. It's public: a caller that tracks runs itself
+  (another orchestrator) is exactly that host.
+- Shared helpers are in `tests/trickle/trickle_support.py`; file names carry a `trickle_` prefix because pytest
+  imports test modules by base name and `tests/` has its own `test_capture.py`-style names.
+- `tests/test_trickle.py` keeps the host side (the published layout, delta reads over Parquet, plain-table
+  Sources, the local runner, draws) and a thin suite of 16 builder scenarios still driven through `Pond`. The
+  ported duplicates were removed from it, and `test_merge_view.py` and `test_column_lineage.py` were split
+  the same way.
+
+The original plan for this phase:
 
 - Inventory `test_trickle.py`, `test_merge_view.py`, `test_capture.py` and `test_column_lineage.py`. Tests of
   engine behaviour (joins, aggregates, scans, Z-set I/O, retention, capture, lineage) move to the standalone

@@ -9,10 +9,9 @@ from datetime import datetime, timedelta, timezone
 
 import duckdb
 import pytest
-
-from duckstring import trickle
-from duckstring.trickle import NEVER, agg
-from duckstring.trickle.session import RUN_TABLE, Run
+import trickle
+from trickle import NEVER, agg
+from trickle.session import RUN_TABLE, Run
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 

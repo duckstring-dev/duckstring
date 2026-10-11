@@ -34,6 +34,20 @@ def test_no_module_in_trickle_reaches_outside_it():
     assert not leaks, "trickle/ imports from the rest of Duckstring:\n" + "\n".join(leaks)
 
 
+def test_the_engine_tests_import_only_the_engine():
+    """``tests/trickle/`` moves to the package unchanged, so only its conftest (the ``trickle`` alias) may
+    import Duckstring."""
+    leaks = []
+    for path in sorted((Path(__file__).parent / "trickle").glob("*.py")):
+        if path.name == "conftest.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else \
+                [node.module or ""] if isinstance(node, ast.ImportFrom) else []
+            leaks += [f"{path.name}:{node.lineno} {n}" for n in names if n.split(".")[0] == "duckstring"]
+    assert not leaks, "engine tests import Duckstring:\n" + "\n".join(leaks)
+
+
 def test_trickle_runs_as_a_top_level_package_without_duckstring():
     """Load ``trickle/`` as a top-level package named ``trickle`` (as it will be once published) with every
     ``duckstring`` import blocked, import each module, run a builder join against a minimal host, and run the

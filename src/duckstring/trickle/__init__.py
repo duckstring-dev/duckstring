@@ -51,7 +51,7 @@ from .io import (
     unique_name,
     write_sidecar,
 )
-from .session import Run, run
+from .session import Epoch, Run, at, run
 
 __all__ = [
     # host seam
@@ -59,7 +59,7 @@ __all__ = [
     # builder
     "TrickleBuilder", "BuildError", "agg", "acc",
     # the standalone host
-    "run", "Run",
+    "run", "Run", "at", "Epoch",
     # io: classes + the write/read API
     "Delta", "DeltaError",
     "append_table", "append_zset", "apply_zset", "merge_table", "apply_aggregate",

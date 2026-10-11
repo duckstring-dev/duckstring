@@ -53,43 +53,21 @@ def _utc(value):
     return value.astimezone(timezone.utc) if value is not None else None
 
 
-class Run:
-    """One run of a pipeline: the host the builder and the write methods work against. Use it as a context
-    manager (``with trickle.run(con) as t``), which commits the epoch when the block finishes and leaves it
-    pending, to be replayed, when the block raises.
+class Epoch:
+    """A host for one window ``(previous_f, f]`` over one database, with no run state of its own: the caller
+    chooses the epochs (:func:`at`). :class:`Run` is this plus epochs kept in the database. Use it directly
+    when something else already tracks runs, as a scheduler or another orchestrator would.
 
     Attributes:
         con: The DuckDB connection.
-        pipeline: The pipeline's name.
         f: This run's epoch (timezone-aware UTC), stamped on every row it writes.
-        previous_f: The epoch of the pipeline's last committed run, or :data:`~trickle.context.NEVER` on its
-            first. Sources are read over ``(previous_f, f]``.
-        replay: Whether this run reuses the epoch of a run that didn't finish.
+        previous_f: The epoch the window starts after, or :data:`~trickle.context.NEVER` to read everything.
     """
 
-    def __init__(self, con, pipeline: str = "default", *, now=None) -> None:
+    def __init__(self, con, f, previous_f=NEVER) -> None:
         self.con = con
-        self.pipeline = pipeline
-        self.f, self.previous_f, self.replay = _begin(con, pipeline, now)
-        self.committed = False
-
-    # ─── run lifecycle ─────────────────────────────────────────────────────────
-
-    def __enter__(self) -> Run:
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        if exc_type is None:
-            self.commit()
-        return False  # a failed run's epoch stays pending, for the next run to replay
-
-    def commit(self) -> None:
-        """Record this run's epoch as the pipeline's last, so its next run reads from here."""
-        if self.committed:
-            return
-        self.con.execute(f"UPDATE {io._q(RUN_TABLE)} SET last_f = ?, pending_f = NULL WHERE pipeline = ?",
-                         [self.f, self.pipeline])
-        self.committed = True
+        self.f = _utc(f)
+        self.previous_f = _utc(previous_f) if previous_f != NEVER else NEVER
 
     # ─── reading ───────────────────────────────────────────────────────────────
 
@@ -133,6 +111,50 @@ class Run:
         """Append an already-computed change to the merge Trickle ``name``. See :func:`trickle.io.apply_zset`."""
         return io.apply_zset(self.con, name, zset, self.f, io.normalize_pk(pk),
                              retain_t=retain_t, retain_n=retain_n, **kw)
+
+
+class Run(Epoch):
+    """One run of a pipeline: an :class:`Epoch` whose epochs are kept in the database. Use it as a context
+    manager (``with trickle.run(con) as t``), which commits the epoch when the block finishes and leaves it
+    pending, to be replayed, when the block raises.
+
+    Attributes:
+        con: The DuckDB connection.
+        pipeline: The pipeline's name.
+        f: This run's epoch (timezone-aware UTC), stamped on every row it writes.
+        previous_f: The epoch of the pipeline's last committed run, or :data:`~trickle.context.NEVER` on its
+            first. Sources are read over ``(previous_f, f]``.
+        replay: Whether this run reuses the epoch of a run that didn't finish.
+    """
+
+    def __init__(self, con, pipeline: str = "default", *, now=None) -> None:
+        f, previous_f, self.replay = _begin(con, pipeline, now)
+        super().__init__(con, f, previous_f)
+        self.pipeline = pipeline
+        self.committed = False
+
+    def __enter__(self) -> Run:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is None:
+            self.commit()
+        return False  # a failed run's epoch stays pending, for the next run to replay
+
+    def commit(self) -> None:
+        """Record this run's epoch as the pipeline's last, so its next run reads from here."""
+        if self.committed:
+            return
+        self.con.execute(f"UPDATE {io._q(RUN_TABLE)} SET last_f = ?, pending_f = NULL WHERE pipeline = ?",
+                         [self.f, self.pipeline])
+        self.committed = True
+
+
+def at(con, f, previous_f=NEVER) -> Epoch:
+    """A host for the window ``(previous_f, f]`` over the database ``con``, with no run state: the caller
+    keeps track of epochs. ``f`` must be later than any epoch already written to the tables it touches, and
+    reusing an ``f`` replays that run."""
+    return Epoch(con, f, previous_f)
 
 
 def run(con, pipeline: str = "default", *, now=None) -> Run:
