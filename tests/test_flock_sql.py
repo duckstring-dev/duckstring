@@ -143,8 +143,9 @@ def test_an_aggregate_comes_back_as_its_accumulators_with_the_stamp_added_locall
         "Product", n=agg.count(), s=agg.sum("amount"), v=agg.var("amount"), lo=agg.min("placed")),
         kind="aggregate", pk=("Product",))
     assert remote is not None and len(local) == 6
-    for a, b in zip(local, remote, strict=True):
-        assert a == pytest.approx(b, rel=1e-12)
+    for lr, rr in zip(local, remote, strict=True):
+        for a, b in zip(lr, rr, strict=True):  # floats may differ in the last bit; everything else exactly
+            assert a == pytest.approx(b, rel=1e-12) if isinstance(a, float) else a == b
     assert "_duckstring_f" not in engine.executed[-1]  # the constant stamp is never sent
 
 
