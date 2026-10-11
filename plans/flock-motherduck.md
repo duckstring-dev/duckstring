@@ -80,6 +80,8 @@ A built-in engine named `motherduck`, implementing the existing `FlockEngine` pr
 
 `DUCKSTRING_FLOCK_ENGINE` unset currently means `athena`. It becomes: `motherduck` if a MotherDuck token
 is configured, else `athena` if Athena is configured, else off. Explicit settings are unchanged.
+(Superseded 2026-10-11 by the engine order in `plans/flock-coverage.md`: motherduck, duckdb-server,
+starrocks, athena.)
 
 ### Getting Flock settings to every Duck (a gap found while planning)
 

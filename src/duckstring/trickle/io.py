@@ -2602,7 +2602,7 @@ def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, flo
     return Delta(con, pk, zset, is_full=False)
 
 
-def read_registry_delta(con, table, previous_f, f, pk) -> Delta:
+def read_registry_delta(con, table, previous_f, f, pk=None) -> Delta:
     """The Z-set change a **just-written** Trickle ``table`` exposes over ``(previous_f, f]``, read back from
     the **registry** (its clean main + ``__changelog`` for a merge, or its history for an append) rather than
     the published data plane. Used to thread a mid-chain ``pond.trickle(...).merge(name)`` / ``.append(name)``
@@ -2610,14 +2610,17 @@ def read_registry_delta(con, table, previous_f, f, pk) -> Delta:
     in the same Ripple can't go through the normal (data-plane) ``read_delta``. The coverage rule is
     identical to the published read — a bootstrap (floor just set to ``f``) or a retention/coverage gap
     yields a full read (``is_full``), forcing the downstream comprehensive path; otherwise a windowed delta
-    (empty if the write produced nothing this run)."""
+    (empty if the write produced nothing this run).
+
+    Any window works, not only the current run's: the standalone host (:mod:`.session`) reads every source
+    this way over the pipeline's ``(previous_f, f]``. ``pk`` defaults to the table's recorded key."""
     from datetime import datetime
 
     from .context import NEVER
 
     m = read_meta(con).get(table, {})
     floor = datetime.fromisoformat(m["floor"]) if m.get("floor") else None
-    out_pk = normalize_pk(pk)
+    out_pk = normalize_pk(pk if pk is not None else m.get("pk", ()))
     if m.get("mode") == "append":
         return _append_delta_from_sql(con, f'SELECT * FROM {_q(table)}', previous_f, f, out_pk, NEVER, floor)
     clog = changelog_name(table)

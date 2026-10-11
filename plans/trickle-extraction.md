@@ -1,6 +1,6 @@
 # Extracting Trickle into its own package
 
-Status: **in progress**. Phase 1 done (2026-10-11); phases 2 to 5 to come.
+Status: **in progress**. Phases 1 and 2 done (2026-10-11); phases 3 to 5 to come.
 
 ## Why
 
@@ -72,8 +72,8 @@ with trickle.run(con, pipeline="nightly") as t:
     # Written once; each run only recomputes the order lines whose order or product changed.
     (t.source("orders")
        .join(t.source("products"), on="product_id")
-       .mutate(revenue="s0.quantity * s1.unit_price")
-       .aggregate(by="s1.category", revenue=agg.sum("revenue"), orders=agg.count())
+       .select("s1.category, s0.quantity * s1.unit_price AS revenue")
+       .aggregate(by="category", revenue=agg.sum("revenue"), orders=agg.count())
        .merge("revenue_by_category"))
 ```
 
@@ -121,7 +121,23 @@ top-level `trickle` package with `duckstring` imports blocked, and the newer-for
   seam can't regress.
 - Exit: full suite green; `grep "from \.\." src/duckstring/trickle` is empty.
 
-### 2. Build the standalone host (in this repo, inside `trickle/`)
+### 2. Build the standalone host (in this repo, inside `trickle/`). Done 2026-10-11
+
+Built as below: `trickle.run(con, pipeline=...)` returns a `Run` (`trickle/session.py`), with run state in
+`_duckstring_trickle_run` (per pipeline: `last_f`, `pending_f`). Notes from building it:
+
+- The sketch above originally aggregated `by="s1.category"`, which the builder rejects: `.aggregate(by=...)`
+  names output columns, so the join is projected with `.select(...)` first. Fixed here and in the docstring.
+- Epochs are minted past every epoch recorded in the database, across pipelines, not just the pipeline's own,
+  so `_duckstring_f` stays monotonic when pipelines share tables. Runs that share tables still shouldn't
+  overlap (documented on the module).
+- A replay whose input changed after the failed run (rows updated, inserted and deleted, in a group the failed
+  run had already aggregated) still matches a from-scratch recompute; there's a test for it.
+- `read_registry_delta`'s `pk` now defaults to the table's recorded key; no other engine change was needed.
+- Tests: `tests/test_trickle_session.py` (bootstrap, incremental, clock going back, two pipelines, a plain
+  source read in full, a failed run replayed with changed input, a consumer pipeline's window, and the README
+  pipeline checked against a recompute over twelve runs of random changes). The README example also runs in
+  `test_trickle_isolation.py` with every `duckstring` import blocked.
 
 - `trickle/session.py`: `run(con, pipeline=...)` as above, with the epoch table, pending-epoch replay and
   commit on clean exit.

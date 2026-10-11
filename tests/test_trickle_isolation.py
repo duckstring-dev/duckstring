@@ -36,7 +36,8 @@ def test_no_module_in_trickle_reaches_outside_it():
 
 def test_trickle_runs_as_a_top_level_package_without_duckstring():
     """Load ``trickle/`` as a top-level package named ``trickle`` (as it will be once published) with every
-    ``duckstring`` import blocked, import each module, and run a merge, a delta read and a builder join."""
+    ``duckstring`` import blocked, import each module, run a builder join against a minimal host, and run the
+    README example through the standalone host (``trickle.run``)."""
     code = textwrap.dedent(f"""
         import importlib, importlib.util, sys
         from datetime import datetime, timezone
@@ -52,7 +53,7 @@ def test_trickle_runs_as_a_top_level_package_without_duckstring():
         trickle = importlib.util.module_from_spec(spec)
         sys.modules["trickle"] = trickle
         spec.loader.exec_module(trickle)
-        for mod in ("context", "io", "builder", "agg", "acc", "capture", "lineage"):
+        for mod in ("context", "io", "builder", "agg", "acc", "capture", "lineage", "session"):
             importlib.import_module(f"trickle.{{mod}}")
 
         import duckdb
@@ -79,6 +80,26 @@ def test_trickle_runs_as_a_top_level_package_without_duckstring():
             .select("s0.id, s0.v, s1.p").merge("out", pk="id")
         assert io.current_state(con, "out").fetchall() == [(1, "a", 9)], io.current_state(con, "out").fetchall()
         assert io.read_meta(con)["out"]["format_version"] == io.FORMAT_VERSION
+
+        # The README example, through the standalone host.
+        from trickle import agg
+        con = duckdb.connect()
+        con.execute("CREATE TABLE raw_orders AS SELECT * FROM (VALUES (1, 10, 2), (2, 11, 1)) "
+                    "t(order_id, product_id, quantity)")
+        con.execute("CREATE TABLE raw_products AS SELECT * FROM (VALUES (10, 'Books', 12.5), (11, 'Home', 30.0)) "
+                    "t(product_id, category, unit_price)")
+        for _ in range(2):
+            with trickle.run(con, pipeline="nightly") as t:
+                t.merge_table("orders", con.sql("FROM raw_orders"), pk="order_id")
+                t.merge_table("products", con.sql("FROM raw_products"), pk="product_id")
+                (t.source("orders")
+                   .join(t.source("products"), on="product_id")
+                   .select("s1.category, s0.quantity * s1.unit_price AS revenue")
+                   .aggregate(by="category", revenue=agg.sum("revenue"), orders=agg.count())
+                   .merge("revenue_by_category"))
+            con.execute("UPDATE raw_products SET unit_price = 20 WHERE product_id = 11")
+        got = sorted(con.sql("SELECT category, revenue::DOUBLE, orders FROM revenue_by_category").fetchall())
+        assert got == [("Books", 25.0, 1), ("Home", 20.0, 1)], got
         assert not [m for m in sys.modules if m == "duckstring" or m.startswith("duckstring.")]
         print("ok")
     """)

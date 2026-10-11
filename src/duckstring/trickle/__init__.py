@@ -13,7 +13,7 @@ aliases that forward here.
 
 from __future__ import annotations
 
-from . import agg, builder, context, io
+from . import acc, agg, builder, context, io, session
 from .builder import BuildError, TrickleBuilder
 from .context import NEVER, SYSTEM_PREFIX, Context
 from .io import (
@@ -51,12 +51,15 @@ from .io import (
     unique_name,
     write_sidecar,
 )
+from .session import Run, run
 
 __all__ = [
     # host seam
     "Context", "NEVER", "SYSTEM_PREFIX",
     # builder
-    "TrickleBuilder", "BuildError", "agg",
+    "TrickleBuilder", "BuildError", "agg", "acc",
+    # the standalone host
+    "run", "Run",
     # io: classes + the write/read API
     "Delta", "DeltaError",
     "append_table", "append_zset", "apply_zset", "merge_table", "apply_aggregate",
@@ -68,5 +71,5 @@ __all__ = [
     # io: system-column / table-name constants
     "F_COL", "D_COL", "CHANGELOG_SUFFIX", "DROPLOG_SUFFIX", "AGG_STATE_PREFIX", "META_TABLE", "SIDECAR",
     # submodules
-    "io", "builder", "context",
+    "io", "builder", "context", "session",
 ]
