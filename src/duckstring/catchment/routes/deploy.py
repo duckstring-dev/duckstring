@@ -82,11 +82,26 @@ def _check_version_contracts(db, pn_id: int, name: str, version: str, cfg: dict)
             )
 
 
+def _flock_accept(value) -> str | None:
+    """``[flock] accept``: a list of acceptance names (``translate.ACCEPTANCES``), stored comma-separated."""
+    if value is None:
+        return None
+    from ...flock.translate import ACCEPTANCES
+
+    names = [value] if isinstance(value, str) else list(value)
+    unknown = [n for n in names if n not in ACCEPTANCES]
+    if unknown:
+        raise ValueError(f"pond.toml [flock] accept: unknown {', '.join(map(str, unknown))} "
+                         f"(expected any of {', '.join(ACCEPTANCES)})")
+    return ",".join(dict.fromkeys(names))
+
+
 def _pond_config(toml_path: Path) -> dict:
     """Extract the deploy-relevant config from pond.toml: sources, retries, kind, dbt_project. (Windows
     are operational config managed via `duckstring trigger window`, not declared at deploy time.)"""
     cfg = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": None, "dbt_project": None,
-           "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None}
+           "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None,
+           "flock_accept": None}
     if not toml_path.exists():
         return cfg
     info = _read_toml(toml_path.read_text(encoding="utf-8"))
@@ -106,6 +121,7 @@ def _pond_config(toml_path: Path) -> dict:
     cfg["flock_mode"] = _validate_choice(flock.get("mode"), ("off", "upgrade", "always"), "[flock] mode")
     cfg["flock_engine"] = flock.get("engine")
     cfg["oom_policy"] = _validate_choice(flock.get("oom_policy"), ("fail_up", "fail"), "[flock] oom_policy")
+    cfg["flock_accept"] = _flock_accept(flock.get("accept"))
     # DECLARED serviceable tables (the pond's public data products; plans/data-serving.md). Absent ⇒
     # nothing served (opt tables IN). A hint — operationally overridable, reset to this on a new major.
     serve = info.get("serve", {})
@@ -226,19 +242,19 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
             db.execute(
                 "UPDATE pond_version SET source_path = ?, major = ?, immediate_retries = ?, "
                 "source_retries = ?, deployed_at = ?, duck_pool = ?, flock_mode = ?, flock_engine = ?, "
-                "oom_policy = ?, dbt = ? WHERE id = ?",
+                "oom_policy = ?, flock_accept = ?, dbt = ? WHERE id = ?",
                 (source_path, major, cfg["immediate_retries"], cfg["source_retries"], deployed_at,
                  cfg.get("duck_pool"), cfg.get("flock_mode"), cfg.get("flock_engine"),
-                 cfg.get("oom_policy"), int(bool(cfg.get("dbt_project"))), pv_id),
+                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))), pv_id),
             )
         else:
             db.execute(
                 "INSERT INTO pond_version (pond_name_id, version, major, source_path, "
                 "immediate_retries, source_retries, deployed_at, duck_pool, flock_mode, flock_engine, "
-                "oom_policy, dbt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "oom_policy, flock_accept, dbt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (pn_id, version, major, source_path, cfg["immediate_retries"], cfg["source_retries"],
                  deployed_at, cfg.get("duck_pool"), cfg.get("flock_mode"), cfg.get("flock_engine"),
-                 cfg.get("oom_policy"), int(bool(cfg.get("dbt_project")))),
+                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project")))),
             )
             (pv_id,) = db.execute(
                 "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)

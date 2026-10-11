@@ -136,6 +136,42 @@ jobs:
           DUCKSTRING_TEST_S3_KEY: duckstringtest
           DUCKSTRING_TEST_S3_SECRET: duckstringtest
 
+  # The StarRocks Flock engine against a real StarRocks (plans/flock-coverage.md): every construct the
+  # engine sends is run on both StarRocks and DuckDB and must agree, through the engine's real path (sources
+  # staged to MinIO, read with FILES(), the result unloaded with INSERT INTO FILES). StarRocks reaches MinIO
+  # by its network alias; the tests reach both on localhost.
+  starrocks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Start MinIO and StarRocks
+        run: |
+          docker network create flock
+          docker run -d --name minio --network flock --network-alias minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=duckstringtest -e MINIO_ROOT_PASSWORD=duckstringtest \
+            chainguard/minio:latest server /tmp/minio
+          docker run -d --name starrocks --network flock -p 9030:9030 starrocks/allin1-ubuntu:latest
+      - run: pip install -e packages/trickle -e .[dev,starrocks]
+      - name: Wait for both
+        run: |
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 2; done
+          for i in $(seq 1 90); do
+            python -c "import pymysql; pymysql.connect(host='127.0.0.1', port=9030, user='root').cursor().execute('SHOW BACKENDS')" && exit 0
+            sleep 3
+          done
+          docker logs starrocks | tail -50
+          exit 1
+      - run: pytest tests/test_flock_starrocks_conformance.py -v
+        env:
+          DUCKSTRING_TEST_STARROCKS: 127.0.0.1:9030
+          DUCKSTRING_TEST_S3: http://127.0.0.1:9000
+          DUCKSTRING_TEST_STARROCKS_S3_ENDPOINT: http://minio:9000
+          DUCKSTRING_TEST_S3_KEY: duckstringtest
+          DUCKSTRING_TEST_S3_SECRET: duckstringtest
+
   # The web UI: typecheck + the vitest unit suite (pure lib/component logic).
   frontend:
     runs-on: ubuntu-latest

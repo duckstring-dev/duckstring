@@ -66,15 +66,15 @@ class _Engine:
     def enabled(self):
         return True
 
-    def eligible(self, builder):
+    def eligible(self, job):
         return None
 
-    def estimate_rows(self, builder):
+    def estimate_rows(self, job):
         return 10_000_000
 
-    def dispatch(self, builder, out_pk):
+    def dispatch(self, job):
         self.dispatched = True
-        rel = builder._full_join()
+        rel = job.builder._full_join()
         return self.distort(rel) if self.distort else rel
 
 
@@ -158,51 +158,63 @@ def test_an_extra_column_is_refused(tmp_path, monkeypatch):
     assert flock.stats()["failed"] == 1
 
 
-# ─── the whitelist: what is allowed to be dispatched at all ─────────────────────
+# ─── the allow-list: what is allowed to be dispatched at all ─────────────────────
 
 
-class _Builder:
-    def __init__(self, ops):
-        self._ops = ops
-        self._materialised = self._agg = self._acc = None
+@pytest.fixture
+def _wide(tmp_path):
+    """A source with the columns the expressions below use."""
+    pond = _pond(tmp_path)
+    pond.merge_table("w", pond.con.sql(
+        "SELECT range AS id, range AS a, range + 1 AS b, CAST(range AS DECIMAL(10,2)) AS q, "
+        "CAST(range AS DECIMAL(10,2)) AS p, 'n' || range AS name FROM range(5)"), pk="id")
+    return pond
 
 
-def _athena_reason(expr_kind, expr):
-    """Athena's own verdict — equivalence is a property of the expression AND the engine that runs it,
-    so the lists live with the engine rather than in a universal 'safe SQL' notion."""
-    from duckstring.flock import equivalence
-    from duckstring.flock.engines.athena import _ALLOWED_FUNCS, _ALLOWED_NODES
+def _athena_reason(pond, expr_kind, expr):
+    """Athena's own verdict. Equivalence is a property of the expression AND the engine that runs it, so
+    the list lives with the engine rather than in a universal 'safe SQL' notion."""
+    from trickle.builder import ComprehensiveJob
 
-    return equivalence.unproven(_Builder([(expr_kind, expr)]), _ALLOWED_NODES, _ALLOWED_FUNCS)
+    from duckstring.flock import translate
+    from duckstring.flock.engines.athena import PROFILE
+
+    b = pond.trickle("w")
+    b = b.select(f"s0.id, {expr}") if expr_kind == "select" else b.filter(expr)
+    return translate.translate(ComprehensiveJob(b, ("id",)), PROFILE).reason
 
 
 @pytest.mark.parametrize("expr", [
-    "s0.a, s1.b",                          # bare columns
-    "s0.a AS x, s1.b AS y",                # renamed
-    "s0.q * s1.p AS gross",                # decimal arithmetic: same result-type rule, exact
-    "round(s0.q * s1.p, 2) AS r",          # both round half away from zero
-    "coalesce(s0.a, 0) AS a",              # null semantics agree
+    "s0.a, s0.b",                          # bare columns
+    "s0.a AS x, s0.b AS y",                # renamed
+    "s0.q * s0.p AS gross",                # decimal arithmetic: same result-type rule, exact
+    "round(s0.q * s0.p, 2) AS r",          # both round half away from zero
+    "coalesce(s0.a, 0) AS a0",             # null semantics agree
 ])
-def test_expressions_trino_evaluates_like_duckdb_are_dispatchable(expr):
-    assert _athena_reason("select", expr) is None
+def test_expressions_trino_evaluates_like_duckdb_are_dispatchable(_wide, expr):
+    pytest.importorskip("sqlglot")
+    assert _athena_reason(_wide, "select", expr) is None
 
 
 @pytest.mark.parametrize("expr,why", [
     ("s0.a / s0.b AS r",
      "DuckDB `/` is TRUE division (7/2 = 3.5 DOUBLE); Trino's is integer division (3). conform would "
      "cast Trino's 3 to DOUBLE and publish 3.0 — right type, WRONG VALUE"),
-    ("CAST(s0.a AS INTEGER) AS a",
-     "at .5 DuckDB casts to even (CAST(2.5 AS INTEGER)=2), Trino rounds half up (3)"),
+    ("CAST(s0.q AS INTEGER) AS a2",
+     "at .5 DuckDB and Trino round differently"),
     ("upper(trim(s0.name)) AS n", "trimming and collation are unverified"),
 ])
-def test_expressions_with_a_known_divergence_stay_local(expr, why):
-    assert _athena_reason("select", expr) is not None, f"{expr} must not dispatch: {why}"
+def test_expressions_with_a_known_divergence_stay_local(_wide, expr, why):
+    pytest.importorskip("sqlglot")
+    assert _athena_reason(_wide, "select", expr) is not None, f"{expr} must not dispatch: {why}"
 
 
-def test_filters_are_judged_too():
-    assert _athena_reason("filter", "s0.a > 5 AND s1.b IS NOT NULL") is None
-    assert _athena_reason("filter", "s0.a / 2 > 5") is not None
+def test_filters_are_judged_too(_wide):
+    pytest.importorskip("sqlglot")
+    assert _athena_reason(_wide, "filter", "s0.a > 5 AND s0.b IS NOT NULL") is None
+    assert _athena_reason(_wide, "filter", "s0.a / 2 > 5") is not None
 
 
-def test_unparseable_sql_is_never_assumed_safe():
-    assert _athena_reason("select", "this is not sql (((") is not None
+def test_unparseable_sql_is_never_assumed_safe(_wide):
+    pytest.importorskip("sqlglot")
+    assert _athena_reason(_wide, "select", "this is not sql (((") is not None

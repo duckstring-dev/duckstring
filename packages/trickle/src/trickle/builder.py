@@ -247,7 +247,10 @@ class TrickleBuilder:
         # deterministic map, so the whole pipeline distributes over the Z-set delta — incrementally free.
         self._ops: list[tuple[str, object]] = []
         self._alias: str | None = None  # this node's alias (the spine's, for .select refs / the .sql table)
-        self._materialised = None  # a full relation after .sql() → comprehensive mode (no incremental compute)
+        # After .sql(): ``(parent, query, alias)``, the deferred query over the parent's full result, run at the
+        # terminal (locally, or offered to the host first). ``_materialised`` caches its result relation.
+        self._sql_of = None
+        self._materialised = None
         self._agg = None  # {"by": (...), "metrics": {out: agg.Metric}} after .aggregate()
         self._agg_by: tuple[str, ...] | None = None
         self._along: str | None = None  # the monotonic order axis for .accumulate() (set by .along())
@@ -256,6 +259,9 @@ class TrickleBuilder:
         # compile-scoped caches (rebuilt per terminal): leaf → alias, leaf → bare cols
         self._alias_of: dict[int, str] = {}
         self._cols_cache: dict[int, list[str]] = {}
+        # While emitting a comprehensive recompute as one query (:meth:`_query_sql`), every view the compile
+        # creates is also logged here as ``(name, sql, leaf)``; ``leaf`` is set for a source's base read.
+        self._view_log: list | None = None
 
     # ─── fluent surface ─────────────────────────────────────────────────────────
 
@@ -287,7 +293,7 @@ class TrickleBuilder:
             raise BuildError(f"join(how={how!r}): one of {sorted(_JOIN_SQL)}")
         if not isinstance(dimension, TrickleBuilder):
             raise BuildError("join() takes another pond.trickle(...) operand")
-        if dimension._materialised is not None or dimension._agg is not None:
+        if dimension._is_sql or dimension._agg is not None:
             raise BuildError("join(): a .sql()/.aggregate() result can't be a join operand — do it downstream")
         if dimension._ops:
             raise BuildError(
@@ -344,8 +350,13 @@ class TrickleBuilder:
     def _has_mutate(self) -> bool:
         return any(kind == "mutate" for kind, _ in self._ops)
 
+    @property
+    def _is_sql(self) -> bool:
+        """Whether this builder is a :meth:`sql` result (comprehensive mode)."""
+        return self._sql_of is not None or self._materialised is not None
+
     def _ensure_incremental(self, op: str) -> None:
-        if self._materialised is not None:
+        if self._is_sql:
             raise BuildError(
                 f".{op}() isn't available after .sql() (the result is materialised, no longer a Z-set) — "
                 f"compose joins/filters/projection before .sql(), or chain another .sql()"
@@ -441,31 +452,48 @@ class TrickleBuilder:
         The result so far is computed in full and exposed under this builder's :meth:`alias`; ``query`` is a
         SQL string selecting from it, or an Ibis expression (compiled lazily; needs ``ibis-framework``). The
         returned builder is recomputed in full each run, but its terminal still writes only changed rows.
-        Afterwards only ``.alias()``, ``.sql()``, ``.schema()``, ``.count()`` and the terminals are available.
+        The query runs when the terminal does. Afterwards only ``.alias()``, ``.sql()``, ``.schema()``, ``.count()``
+        and the terminals are available.
         """
-        ctx = self.ctx
         if self._agg is not None:
             raise BuildError(".sql() can't follow .aggregate() — aggregate is terminal-bound to .merge()")
         if self._alias is None:
             raise BuildError(".sql() needs a table name to reference — call .alias('t') first, then '… FROM t'")
-        # A joined DAG with no .select() resolves via the bare `*` (join keys deduplicated); a genuine name
-        # collision raises a precise BuildError from _star_output when _full_join projects.
-        base = self._materialised if self._materialised is not None else self._full_join()
-        table = self._alias
-        base.create_view(table, replace=True)
         if not isinstance(query, str):  # an Ibis expression → compile to DuckDB SQL (ibis only imported here)
             import ibis
 
             query = str(ibis.to_sql(query, dialect="duckdb"))
-        out_table = unique_name("sqlout")
-        ctx.con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(out_table)} AS {query}')
-        out = TrickleBuilder(ctx, out_table)
-        out._materialised = ctx.con.sql(f'SELECT * FROM {_q(out_table)}')
+        out = TrickleBuilder(self.ctx, unique_name("sqlout"))
+        out._sql_of = (self, query.strip().rstrip(";").strip(), self._alias)
         return out
+
+    def _materialise(self):
+        """Run a :meth:`sql` builder's query locally (once) and return its result relation: the parent's full
+        result is exposed under the alias, and the query lands in a temp table."""
+        if self._materialised is None:
+            parent, query, alias = self._sql_of
+            # A joined DAG with no .select() resolves via the bare `*` (join keys deduplicated); a genuine name
+            # collision raises a precise BuildError from _star_output when _full_join projects.
+            base = parent._materialise() if parent._is_sql else parent._full_join()
+            base.create_view(alias, replace=True)
+            self.ctx.con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(self.spine_ref)} AS {query}')
+            self._materialised = self.ctx.con.sql(f'SELECT * FROM {_q(self.spine_ref)}')
+        return self._materialised
+
+    def _bound(self):
+        """This builder's full result as a relation that is bound but not run (for its schema). A :meth:`sql`
+        builder binds its query over the parent's bound result, so nothing executes."""
+        if not self._is_sql:
+            return self._full_join()
+        if self._materialised is not None:
+            return self._materialised
+        parent, query, alias = self._sql_of
+        parent._bound().create_view(alias, replace=True)
+        return self.ctx.con.sql(query)
 
     def schema(self) -> dict[str, str]:
         """The current output's columns and DuckDB types, without writing anything."""
-        rel = self._materialised if self._materialised is not None else self._full_join()
+        rel = self._bound()
         return {c: str(t) for c, t in zip(rel.columns, rel.types, strict=True)}
 
     def to_ibis_schema(self) -> dict[str, str]:
@@ -515,7 +543,7 @@ class TrickleBuilder:
             out_pk = normalize_pk(pk) if pk is not None else by
             required = tuple(dict.fromkeys(
                 by + tuple(c for m in metrics.values() for c in (m.col, m.col2) if c is not None)))
-            kind, rel = self._compute(required, name, ivm=ivm, key_filter=key_filter)
+            kind, rel = self._compute(required, name, ivm=ivm, key_filter=key_filter, offer="aggregate")
             needs_current = kind == "incremental" and any(m.kind in RESCAN_KINDS for m in metrics.values())
             current = self._full_join() if needs_current else None
             trickle.apply_aggregate(ctx.con, name, by, metrics, kind, rel, current, ctx.f,
@@ -524,14 +552,10 @@ class TrickleBuilder:
         out_pk = normalize_pk(pk)
         if not out_pk:
             raise BuildError(f"pond.trickle('{self.spine_ref}')...merge('{name}'): pass the output key, merge(pk=...)")
-        if self._materialised is not None:  # comprehensive mode (post-.sql) → diff the relation vs prior main
-            changed = ctx.merge_table(name, self._materialised, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
+        if self._is_sql:  # comprehensive mode (post-.sql) → diff the relation vs prior main
+            changed = ctx.merge_table(name, self._sql_result(out_pk), pk=out_pk, retain_t=retain_t, retain_n=retain_n)
             return self._chain(name, out_pk, changed=changed)
-        remote = self._dispatch_comprehensive(name, out_pk, ivm)  # None ⇒ the local path below
-        if remote is not None:
-            changed = ctx.merge_table(name, remote, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
-            return self._chain(name, out_pk, changed=changed)
-        kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter)
+        kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter, offer="rows")
         if kind == "comprehensive":
             changed = ctx.merge_table(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
         elif kind == "incremental":
@@ -570,9 +594,9 @@ class TrickleBuilder:
         out_pk = normalize_pk(pk)
         from . import io as trickle
 
-        if self._materialised is not None:  # comprehensive mode (post-.sql) → +1 the relation, append-filter
+        if self._is_sql:  # comprehensive mode (post-.sql) → +1 the relation, append-filter
             changed = trickle.append_zset(
-                ctx.con, name, trickle._as_zset(self._materialised, 1), ctx.f, out_pk,
+                ctx.con, name, trickle._as_zset(self._sql_result(out_pk), 1), ctx.f, out_pk,
                 fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
             )
             return self._chain(name, out_pk, changed=changed)
@@ -587,14 +611,7 @@ class TrickleBuilder:
             )
             return self._chain(name, out_pk, changed=changed)
 
-        remote = self._dispatch_comprehensive(name, out_pk, ivm)  # None ⇒ the local path below
-        if remote is not None:
-            changed = trickle.append_zset(
-                ctx.con, name, trickle._as_zset(remote, 1), ctx.f, out_pk,
-                fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
-            )
-            return self._chain(name, out_pk, changed=changed)
-        kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter)
+        kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter, offer="rows")
         changed = False
         if kind != "empty":
             zset = trickle._as_zset(rel, 1) if kind == "comprehensive" else rel
@@ -651,7 +668,7 @@ class TrickleBuilder:
 
         con = self.ctx.con
         bare = (isinstance(self._root, _Source) and not self._ops
-                and self._materialised is None and self._agg is None)
+                and not self._is_sql and self._agg is None)
         if bare:
             ref = self._root.ref
             if (trickle.read_meta(con).get(ref) or {}).get("mode") in ("merge", "append"):
@@ -666,7 +683,7 @@ class TrickleBuilder:
             by = ", ".join(_q(c) for c in self._agg["by"])
             self._full_join().create_view(view, replace=True)
             return int(con.execute(f'SELECT count(*) FROM (SELECT DISTINCT {by} FROM {_q(view)})').fetchone()[0])
-        rel = self._materialised if self._materialised is not None else self._full_join()
+        rel = self._materialise() if self._is_sql else self._full_join()
         rel.create_view(view, replace=True)
         return int(con.execute(f'SELECT count(*) FROM {_q(view)}').fetchone()[0])
 
@@ -714,28 +731,35 @@ class TrickleBuilder:
             f'(SELECT {out_cols} FROM {_q(name)} WHERE {_q(F_COL)} < {_ts(self.ctx.f)})'
         )
 
-    # ─── the comprehensive-dispatch hook (optional host capability) ─────────────────
+    # ─── offering a comprehensive recompute to the host (optional host capability) ─────
 
-    def _dispatch_comprehensive(self, name: str, out_pk, ivm: bool):
-        """Offer this terminal's comprehensive recompute to the host, which may run it elsewhere (Duckstring's
-        Flock sends an over-envelope recompute to a serverless engine). An optional host capability, read
-        like ``record_lineage_write``: a host without ``dispatch_comprehensive`` computes locally. The hook
-        receives the builder, the output key and whether this run recomputes wholesale anyway (a bootstrap
-        or ``ivm=False``; an incremental run must never be dispatched), and returns a relation for the
-        terminal's own comprehensive machinery, or ``None`` for the local path."""
+    def _offer(self, job: "ComprehensiveJob"):
+        """Offer ``job`` to the host, which may run it elsewhere (Duckstring's Flock sends an over-envelope
+        recompute to another engine). An optional host capability, read like ``record_lineage_write``: a host
+        without ``dispatch_comprehensive`` computes locally. Returns the job's result relation, or ``None``
+        for the local path. Only a recompute that happens anyway is offered, never an incremental run."""
         hook = getattr(self.ctx, "dispatch_comprehensive", None)
-        if hook is None:
-            return None
-        comprehensive_bound = (not ivm) or (name not in read_meta(self.ctx.con))
-        return hook(self, out_pk, comprehensive_bound=comprehensive_bound)
+        return None if hook is None else hook(job)
+
+    def _sql_result(self, out_pk):
+        """A :meth:`sql` builder's result: offered to the host first (it is recomputed in full every run),
+        else run locally."""
+        if self._materialised is None:
+            remote = self._offer(ComprehensiveJob(self, out_pk, "rows"))
+            if remote is not None:
+                self._materialised = remote
+        return self._materialise()
 
     # ─── compute (the shared ΔO step behind .merge() and .append()) ───────────────
 
-    def _compute(self, out_pk, name: str, *, ivm: bool = True, key_filter: bool = True):
+    def _compute(self, out_pk, name: str, *, ivm: bool = True, key_filter: bool = True, offer: str | None = None):
         """Compose this DAG's change once. Returns ``(kind, rel)``: ``("comprehensive", o_prime)`` (whole
         output recomputed, clean rows — the caller diffs it against the stored main), ``("incremental",
-        delta)`` (the Z-set ΔO, user cols + ``_duckstring_d``), or ``("empty", None)`` (nothing changed).
-        Validates ``.select`` is present for a joined DAG and that it includes the PK.
+        delta)`` (the Z-set ΔO, user cols + ``_duckstring_d``), ``("empty", None)`` (nothing changed), or
+        ``("state", state)`` when an ``offer="aggregate"`` recompute was run by the host and returned the
+        aggregate's accumulator state. Validates ``.select`` is present for a joined DAG and that it includes
+        the PK. ``offer`` (``"rows"`` or ``"aggregate"``) is what a wholesale recompute is offered to the host
+        as (see :meth:`_offer`); ``None`` never offers.
 
         Two orthogonal strategy flags, both default ``True`` (the normal path), exposed on the terminals as
         manual escapes — reach for them only when you've measured the default hurts a specific build:
@@ -755,30 +779,102 @@ class TrickleBuilder:
         # (not raw table-existence — a young merge main has only a changelog pre-checkpoint) is the signal.
         # See plans/deletes.md. `ivm=False` is the manual sibling escape.
         if not ivm or name not in read_meta(self.ctx.con):
-            o_prime = self._full_join()
-            self._require_pk(out_pk, o_prime.columns)
-            return "comprehensive", o_prime
+            return self._comprehensive(out_pk, offer)
         self._key_filter = key_filter
         self._prepare_leaves()
         state = self._compile(self._root)
-        if state.is_full:
-            o_prime = self._project_current(state)
-            self._require_pk(out_pk, o_prime.columns)
-            return "comprehensive", o_prime
+        if state.is_full:  # a coverage miss, a changed overwrite source, or a source over its p threshold
+            return self._comprehensive(out_pk, offer, state)
         if not state.changed:
             return "empty", None
         delta_rel = self._project_delta(state)
         self._require_pk(out_pk, [c for c in delta_rel.columns if c != D_COL])
         return "incremental", delta_rel
 
+    def _comprehensive(self, out_pk, offer: str | None, state: _NodeState | None = None):
+        """The wholesale recompute: offered to the host first, else built locally (from ``state`` when the
+        compile already produced it)."""
+        if offer is not None:
+            remote = self._offer(ComprehensiveJob(self, out_pk, offer))
+            if remote is not None:
+                if offer == "aggregate":
+                    return "state", remote
+                self._require_pk(out_pk, remote.columns)
+                return "comprehensive", remote
+        o_prime = self._project_current(state) if state is not None else self._full_join()
+        self._require_pk(out_pk, o_prime.columns)
+        return "comprehensive", o_prime
+
     def _full_join(self, spine_rel=None):
         """The clean current output (filter + projection applied), recomputed from the current source
         states — the comprehensive recompute, also reused by ``.sql``/``.schema``/aggregate-rescan. With a
         ``spine_rel`` the leftmost leaf is backed by that relation (the append spine-PK fast path)."""
+        return self.ctx.con.sql(self._full_join_sql(spine_rel))
+
+    def _full_join_sql(self, spine_rel=None) -> str:
         self._prepare_leaves()
         cols, current = self._compile_current(self._root, spine_rel)
-        state = _NodeState(cols, current, current, None, False, False)
-        return self._project_current(state)
+        return self._pipeline_sql(current, cols, is_delta=False)
+
+    def _query_sql(self, leaf_sql) -> str:
+        """This builder's full result as **one self-contained DuckDB query**: the comprehensive recompute's
+        views become ``NOT MATERIALIZED`` CTEs (so the planner inlines them, as it does the views), and each
+        source's base read becomes ``leaf_sql(leaf)``, a query over that source's current state with the same
+        columns as ``ctx.read_table(leaf.ref)``. A :meth:`sql` builder wraps its query over the parent's."""
+        if self._sql_of is not None:
+            parent, query, alias = self._sql_of
+            return (f"WITH {_q(alias)} AS NOT MATERIALIZED ({parent._query_sql(leaf_sql)}) "
+                    f"SELECT * FROM ({query}) AS {_q('_duckstring_sql')}")
+        self._view_log = log = []
+        try:
+            final = self._full_join_sql()
+        finally:
+            self._view_log = None
+        ctes = ", ".join(f"{_q(name)} AS NOT MATERIALIZED ({leaf_sql(leaf) if leaf is not None else sql})"
+                         for name, sql, leaf in log)
+        return f"WITH {ctes} {final}"
+
+    def _key_source(self, name: str):
+        """The leaf and column an output column ``name`` passes through from **verbatim**, or ``None`` when it
+        can't be traced exactly (computed, renamed through several selects, or after ``.sql()``). Restricting
+        that leaf to some values of the column restricts the output to exactly the rows with those values,
+        because joins, filters and computed columns all work row by row on the leaf's rows."""
+        if self._is_sql:
+            return None
+        self._prepare_leaves()
+        selects = [i for i, (kind, _) in enumerate(self._ops) if kind == "select"]
+        if len(selects) > 1:
+            return None
+        start = selects[0] if selects else -1
+        if any(kind == "mutate" and name in payload for kind, payload in self._ops[start + 1:]):
+            return None  # replaced or added after the projection
+        output = [leaf for leaf in self._output_leaves()]
+        if selects:
+            for item in _select_items(self._ops[start][1]):
+                for leaf in output:
+                    m = _passthrough_re(self._alias_for(leaf)).match(item.strip())
+                    if m and (m.group(4) or m.group(2)) == name and m.group(2) in self._bare_cols(leaf):
+                        return leaf, m.group(2)
+            return None
+        if any(kind == "mutate" and name in payload for kind, payload in self._ops):
+            return None
+        for leaf in output:  # the bare * output takes the leftmost copy of a name
+            if name in self._bare_cols(leaf):
+                return leaf, name
+        return None
+
+    def _output_leaves(self) -> list[_Source]:
+        """The leaves whose columns reach the output (not the right side of a semi or anti join)."""
+        def walk(node):
+            if isinstance(node, _Source):
+                return [node]
+            return walk(node.left) + ([] if node.how in _LEFT_ONLY else walk(node.right))
+
+        return walk(self._root)
+
+    def _query_leaves(self) -> list[_Source]:
+        """The sources :meth:`_query_sql` reads (through a :meth:`sql` chain to the composed DAG)."""
+        return self._sql_of[0]._query_leaves() if self._sql_of is not None else self._leaves()
 
     # ─── leaf bookkeeping ────────────────────────────────────────────────────────
 
@@ -840,6 +936,8 @@ class TrickleBuilder:
                 cols = [f"{a}.{c}" for c in bare]
                 base = unique_name("src")
                 rel.create_view(base, replace=True)
+                if self._view_log is not None:
+                    self._view_log.append((base, None, node))
             sel = ", ".join(f'{_q(c)} AS {_q(f"{a}.{c}")}' for c in bare)
             return cols, self._view(f"SELECT {sel} FROM {_q(base)}")
         # _Join — the leftmost leaf lives in the left subtree, so the override goes left.
@@ -1168,4 +1266,75 @@ class TrickleBuilder:
     def _view(self, sql: str) -> str:
         v = unique_name("dag")
         self.ctx.con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(v)} AS {sql}")
+        if self._view_log is not None:
+            self._view_log.append((v, sql, None))
         return v
+
+
+class ComprehensiveJob:
+    """A terminal's comprehensive recompute, offered to the host's ``dispatch_comprehensive`` hook so it can
+    run elsewhere. The host returns a relation with exactly :meth:`schema`'s columns, or ``None`` to compute
+    locally.
+
+    - ``kind`` is ``"rows"`` (the terminal's full output) or ``"aggregate"`` (the accumulator state of an
+      ``.aggregate()``, one row per group, which the terminal installs and derives its columns from, so the
+      large joined input never has to travel back).
+    - :meth:`sql` is the whole job as one self-contained DuckDB query, given each source's read; a host
+      running DuckDB elsewhere can run it unchanged.
+    - :meth:`relation` is the same job over the local connection, not yet run (the local recompute).
+    """
+
+    def __init__(self, builder: TrickleBuilder, out_pk, kind: str = "rows") -> None:
+        self.builder = builder
+        self.ctx = builder.ctx
+        self.out_pk = tuple(out_pk or ())
+        self.kind = kind
+
+    def leaves(self) -> list[_Source]:
+        """The sources the job reads; each has ``.ref`` (what ``ctx.read_table`` takes) and an alias."""
+        return self.builder._query_leaves()
+
+    def columns(self, leaf: _Source) -> list[str]:
+        """A leaf's columns, as ``ctx.read_table(leaf.ref)`` gives them."""
+        b = self.builder
+        while b._sql_of is not None:
+            b = b._sql_of[0]
+        return list(b._bare_cols(leaf))
+
+    def queries(self) -> list[str]:
+        """The user SQL the job runs: each :meth:`TrickleBuilder.sql` query in the chain, innermost first."""
+        out, b = [], self.builder
+        while b._sql_of is not None:
+            out.append(b._sql_of[1])
+            b = b._sql_of[0]
+        return out[::-1]
+
+    def sql(self, leaf_sql) -> str:
+        """The job as one self-contained DuckDB query. ``leaf_sql(leaf)`` gives a query over a leaf's current
+        state, with the same columns as ``ctx.read_table(leaf.ref)``."""
+        body = self.builder._query_sql(leaf_sql)
+        if self.kind == "aggregate":
+            from .io import agg_rebuild_select
+
+            src = "_duckstring_agg_input"
+            agg = self.builder._agg
+            return (f"WITH {_q(src)} AS NOT MATERIALIZED ({body}) "
+                    f"{agg_rebuild_select(src, agg['by'], agg['metrics'], self.ctx.f)}")
+        return body
+
+    def relation(self):
+        """The job over the local connection, bound but not run."""
+        rel = self.builder._bound()
+        if self.kind != "aggregate":
+            return rel
+        from .io import agg_rebuild_select
+
+        src = unique_name("agginput")
+        rel.create_view(src, replace=True)
+        agg = self.builder._agg
+        return self.ctx.con.sql(agg_rebuild_select(src, agg["by"], agg["metrics"], self.ctx.f))
+
+    def schema(self) -> dict[str, str]:
+        """The job's columns and DuckDB types, from binding it locally: what any engine's result must match."""
+        rel = self.relation()
+        return {c: str(t) for c, t in zip(rel.columns, rel.types, strict=True)}

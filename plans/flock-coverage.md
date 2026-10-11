@@ -1,6 +1,7 @@
 # Flock coverage
 
-Status: **designed 2026-10-11 with the author; nothing built.** Builds on `plans/flock-motherduck.md` (the
+Status: **built 2026-10-11** (see "As built" at the end), except the `duckdb-server` engine, which waits
+for quack 1.0. Builds on `plans/flock-motherduck.md` (the
 MotherDuck engine and the job-carried settings) and `plans/duckdb-2-ready.md` item 6 (the self-hosted
 DuckDB server engine), and replaces the default-engine rule in the former.
 
@@ -225,3 +226,37 @@ is decided during the build. On by default for SQL engines, off for DuckDB engin
 - [CelerData: resume a warehouse (API)](https://docs.celerdata.com/BYOC/docs/API/actions/warehouses/create_and_manage_warehouses/resume_warehouse)
 - [StarRocks: FILES()](https://docs.starrocks.io/docs/sql-reference/sql-functions/table-functions/files)
 - [StarRocks: unload using INSERT INTO FILES](https://docs.starrocks.io/docs/unloading/unload_using_insert_into_files)
+
+## As built (2026-10-11)
+
+- **The job and the offer point.** The builder offers a `trickle.ComprehensiveJob` (Trickle 0.2; the hook is
+  `dispatch_comprehensive(job)`) where `_compute` decides to recompute wholesale, so a coverage miss and an
+  over-`p` source are offered too (the `upgrade` gap). `.sql()` is lazy and offered at its terminal. An
+  `.aggregate()` is offered as its accumulator rebuild (`kind="aggregate"`, `agg_rebuild_select`), all
+  families. An incremental run is never offered, also under `always` (the old code dispatched it).
+- **Part 1, compiler coverage**: instead of growing `athena._compile_select`, the job's own DuckDB SQL is the
+  input for every engine. SQL engines translate it with sqlglot after `qualify` expands `*` and `* EXCLUDE`
+  against the leaves' schemas, so every join shape, `.mutate`, several selects and `.sql()` work structurally.
+  `_compile_select` and `flock/equivalence.py` are gone.
+- **Part 2, translation**: `flock/translate.py` (`Profile`, `translate`, `ACCEPTANCES`). An engine's profile
+  lists constructs measured equal, and its `rewrite` spells out DuckDB semantics where a translation was
+  measured wrong (see `engines/starrocks.py` for the list of divergences found and the fixes). sqlglot is
+  pinned `>=30.21,<31` in the `aws` and `starrocks` extras; the measurements passed on 28.5 and 30.21.
+- **StarRocks**: `engines/starrocks.py` on `engines/sql_engine.py` (staging, restore). Spike answers: FILES()
+  infers the schema as planned; a FILES() alias can't qualify columns (wrapped in a subquery);
+  `INSERT INTO FILES` writes plain Parquet; StarRocks evaluates CASE branches eagerly (`raise_error` in a
+  branch fires for every row; `assert_true` is per row and is what aborts an unrepresentable division);
+  StarRocks can't produce NaN. The suspended-warehouse resume question needs CelerData and stays open
+  (`DUCKSTRING_FLOCK_STARROCKS_TIMEOUT` covers the wait). Conformance runs in CI (`starrocks` job).
+- **Athena**: on the same base; its expression list is unchanged (measured 2026-08-03), so shapes widen but
+  division and aggregates stay local until measured with the translated SQL.
+- **Parts 3 and 4**: acceptances (`float_order`, `half_rounding`; `[flock] accept`, `duck set --accept`,
+  migration `030`, `DUCKSTRING_FLOCK_ACCEPT` on the job) and sampled verification (`flock/verify.py`). Keys are
+  sampled from the source column the output key passes through from (`TrickleBuilder._key_source`), not
+  from the result, so missing rows are caught as well as wrong ones. A Pond with acceptances but an
+  untraceable key still dispatches (verification skipped and logged); revisit if that proves too loose.
+- **Decided while building**: an aggregate with `sum`/`mean` keeps the variance accumulator (`var_pop`), so on
+  a SQL engine it needs `float_order`; functions over a TIMESTAMPTZ are sent only when the Duck runs in UTC;
+  a CAST from a string or of a float to text is never sent.
+- Tests: `packages/trickle/tests/test_trickle_offer.py`, `tests/test_flock_sql.py` (DuckDB as a stand-in
+  SQL engine: translation, staging, restore, verification), `tests/test_flock_starrocks_conformance.py`.

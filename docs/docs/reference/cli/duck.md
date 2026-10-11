@@ -32,8 +32,9 @@ Sets an override for a Pond. Only the options given change. Overrides persist ac
 | `--instance-type` | The EC2 instance type for a dedicated Duck running on EC2. |
 | `--auto-stop` / `--no-auto-stop` | Whether a dedicated machine stops after each run. |
 | `--flock` | `off`, `upgrade` or `always`. See [`[flock]`](../pond_toml.md#flock). |
-| `--engine` | The Flock engine, such as `athena`. |
+| `--engine` | The Flock engine: `motherduck`, `motherduck/<profile>`, `starrocks` or `athena`. |
 | `--oom` | `fail_up` or `fail`. |
+| `--accept` | Known differences a SQL engine may have, comma-separated (`float_order`, `half_rounding`), or `none`. See [`[flock]`](../pond_toml.md#flock). |
 | `--clear` | Remove the Pond's override, reverting to `pond.toml` and the Catchment defaults. |
 
 ## `pool`

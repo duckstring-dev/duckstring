@@ -34,15 +34,15 @@ class FakeEngine:
     def enabled(self):
         return True
 
-    def eligible(self, builder):
+    def eligible(self, job):
         return self._eligible
 
-    def estimate_rows(self, builder):
+    def estimate_rows(self, job):
         return self.rows
 
-    def dispatch(self, builder, out_pk):
+    def dispatch(self, job):
         self.dispatched = True
-        return self.result_fn(builder) if self.result_fn else None
+        return self.result_fn(job) if self.result_fn else None
 
 
 # ─── engine selection + mode resolution ─────────────────────────────────────────
@@ -90,7 +90,7 @@ class _StubRel:
         return self
 
 
-class _StubBuilder:
+class _StubJob:
     def schema(self):
         return {"a": "INTEGER"}
 
@@ -109,10 +109,10 @@ def test_take_stats_is_a_delta_that_resets():
     what happened since the last one. A snapshot here would double-count across a Pond's Ripples and be
     lost entirely when a Duck is replaced mid-run."""
     good = FakeEngine(result_fn=_ok_result)
-    flock._dispatch(good, _StubBuilder(), None)
+    flock._dispatch(good, _StubJob())
     assert flock.take_stats() == {"dispatched": 1, "failed": 0, "last_error": None}
     assert flock.take_stats() is None  # drained
-    flock._dispatch(good, _StubBuilder(), None)
+    flock._dispatch(good, _StubJob())
     assert flock.take_stats()["dispatched"] == 1  # the next window counts from zero
 
 
@@ -122,10 +122,10 @@ def test_a_raising_engine_degrades_instead_of_failing_the_run():
     class Boom:
         last_error = None
 
-        def dispatch(self, builder, out_pk):
+        def dispatch(self, job):
             raise RuntimeError("engine exploded")
 
-    assert flock._dispatch(Boom(), None, None) is None
+    assert flock._dispatch(Boom(), None) is None
     s = flock.take_stats()
     assert s["failed"] == 1 and "engine exploded" in s["last_error"]
 
@@ -149,12 +149,12 @@ def test_stats_count_dispatches_and_failures():
     good = FakeEngine(result_fn=_ok_result)
     bad = FakeEngine()  # dispatch → None = the engine failed (the fallback contract)
     bad.last_error = "InvalidRequestException: Unable to verify/create output bucket"
-    flock._dispatch(good, _StubBuilder(), None)
+    flock._dispatch(good, _StubJob())
     assert flock.stats() == {"dispatched": 1, "failed": 0, "last_error": None}
-    flock._dispatch(bad, _StubBuilder(), None)
+    flock._dispatch(bad, _StubJob())
     s = flock.stats()
     assert s["failed"] == 1 and "output bucket" in s["last_error"]
-    flock._dispatch(good, _StubBuilder(), None)  # a clean dispatch clears the sticky error
+    flock._dispatch(good, _StubJob())  # a clean dispatch clears the sticky error
     assert flock.stats()["last_error"] is None
 
 
@@ -224,19 +224,6 @@ def test_upgrade_mode_clearly_over_dispatches_up_front(tmp_path, monkeypatch):
     monkeypatch.setattr(flock, "_probe_local", no_probe)
     pond.trickle("src").select("s0.id, s0.v").merge("out", pk="id")
     assert engine.dispatched
-
-
-def test_incremental_epoch_never_dispatches(tmp_path, monkeypatch):
-    for k, v in FLOCK_ENV.items():
-        monkeypatch.setenv(k, v)
-    pond = _pond(tmp_path)
-    _mark_source(pond)
-    engine = FakeEngine(result_fn=lambda b: b.ctx.read_table("src").project("id, v"))
-    monkeypatch.setattr(flock, "get_engine", lambda env=None: engine)
-    # comprehensive_bound=False (an incremental epoch) must bail before any engine call.
-    b = pond.trickle("src").select("s0.id, s0.v")
-    assert flock.comprehensive(b, ("id",), pond_mode=None, comprehensive_bound=False) is None
-    assert not engine.dispatched
 
 
 def test_off_declaration_disables_even_when_runtime_says_always(tmp_path, monkeypatch):

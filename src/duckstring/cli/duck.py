@@ -41,6 +41,7 @@ def _fmt(cfg: dict) -> str:
     if cfg["flock_mode"] != "off":
         parts.append(f"engine: {cfg.get('flock_engine') or 'default'}")
         parts.append(f"oom: {cfg['oom_policy']}")
+        parts.append(f"accept: {cfg.get('flock_accept') or 'none'}")
     if cfg["duck_target"] == "dedicated" and cfg.get("dedicated_instance_type"):
         auto = " auto-stop" if cfg.get("dedicated_auto_stop") else ""
         parts.append(f"instance: {cfg['dedicated_instance_type']}{auto}")
@@ -80,8 +81,12 @@ def set_(
     major: Optional[int] = _MAJOR,
     duck: Optional[str] = typer.Option(None, "--duck", help="Where the Pond runs: catchment, a pool name, or dedicated."),
     flock: Optional[str] = typer.Option(None, "--flock", help="Flock mode: off, upgrade or always."),
-    engine: Optional[str] = typer.Option(None, "--engine", help="Flock engine (e.g. athena)."),
+    engine: Optional[str] = typer.Option(
+        None, "--engine", help="Flock engine: motherduck, motherduck/<profile>, starrocks or athena."),
     oom: Optional[str] = typer.Option(None, "--oom", help="On running out of memory: fail_up (retry on the Flock) or fail."),
+    accept: Optional[str] = typer.Option(
+        None, "--accept",
+        help="Known differences a SQL engine may have, comma-separated (float_order, half_rounding), or none."),
     instance_type: Optional[str] = typer.Option(None, "--instance-type", help="EC2 instance type for a dedicated Duck."),
     auto_stop: Optional[bool] = typer.Option(None, "--auto-stop/--no-auto-stop",
                                              help="Stop a dedicated Duck after each run."),
@@ -93,8 +98,8 @@ def set_(
     """
     from . import _http
     from .config import resolve_catchment
-    fields = {"duck_target": duck, "flock_mode": flock, "flock_engine": engine,
-              "oom_policy": oom, "dedicated_instance_type": instance_type, "dedicated_auto_stop": auto_stop}
+    fields = {"duck_target": duck, "flock_mode": flock, "flock_engine": engine, "oom_policy": oom,
+              "flock_accept": accept, "dedicated_instance_type": instance_type, "dedicated_auto_stop": auto_stop}
     if not clear and all(v is None for v in fields.values()):
         typer.echo("Error: nothing to set — pass a flag, or --clear.", err=True)
         raise typer.Exit(1)

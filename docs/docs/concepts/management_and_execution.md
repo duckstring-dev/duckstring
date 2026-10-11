@@ -31,7 +31,7 @@ By default, Ponds run on the Catchment's own machine. Individual Ponds can inste
 
 Each running Pond gets its own worker process, called a **Duck**, which runs the Pond's Ripples with DuckDB. A Duck starts when its Pond has work and stops when the Pond goes idle. If the Catchment becomes unavailable mid-run, the Duck finishes the run and reports back once it can.
 
-Occasionally one computation is too large for a Duck's memory, usually when a Trickle has to be recomputed in full. A Pond can allow that work to be sent to a serverless query engine, called a **Flock**, with Amazon Athena as the default. DuckDB stays the authority on the result. Only computations known to give identical results on both engines are sent, and the result is checked against the schema DuckDB would have produced. If anything goes wrong, the work runs in the Duck instead.
+Occasionally one computation is too large for a Duck's memory, usually when a Trickle has to be recomputed in full. A Pond can allow that work to be sent to a larger engine, called a **Flock**: MotherDuck, which runs DuckDB itself, or a distributed engine such as StarRocks or Amazon Athena. DuckDB stays the authority on the result. On an engine that isn't DuckDB, only computations measured to give DuckDB's results are sent, and a sample of each result is recomputed in the Duck and compared before it's used. If anything goes wrong, the work runs in the Duck instead.
 
 ## Failures
 

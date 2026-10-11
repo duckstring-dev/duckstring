@@ -905,17 +905,16 @@ class Pond:
         Trickle builder's terminals call, as for :meth:`record_lineage_write`."""
         self._changes.record_write(name, changed)
 
-    def dispatch_comprehensive(self, builder, out_pk, *, comprehensive_bound: bool):
-        """The Trickle builder's comprehensive-dispatch hook: offer a terminal's comprehensive recompute to the
-        Flock (:mod:`duckstring.flock`), under this Pond's posture and the run's Flock settings. ``None`` (the
-        common case: no engine configured, an incremental run, or the mode ladder keeps it local) runs it
-        locally."""
+    def dispatch_comprehensive(self, job):
+        """The Trickle builder's comprehensive-dispatch hook: offer a terminal's comprehensive recompute (a
+        :class:`trickle.ComprehensiveJob`) to the Flock (:mod:`duckstring.flock`), under this Pond's posture
+        and the run's Flock settings. ``None`` (the common case: no engine configured, or the mode ladder
+        keeps it local) runs it locally."""
         from . import flock
 
         if not flock.enabled(self.flock_env):
             return None
-        return flock.comprehensive(builder, out_pk, pond_mode=self.flock,
-                                   comprehensive_bound=comprehensive_bound, env=self.flock_env)
+        return flock.comprehensive(job, pond_mode=self.flock, env=self.flock_env)
 
     def write_table(self, name: str, relation, *, if_changed: bool = False, cluster_by=None, interleave=True,
                     cluster_bits=None) -> bool:
@@ -1164,6 +1163,40 @@ class Pond:
         quoted = name.replace('"', '""')
         self.con.execute(f'CREATE OR REPLACE TEMP VIEW "{quoted}" AS {rel.sql_query()}')
         return name
+
+    def flock_source_select(self, ref: str, columns, *, object_store_only: bool = True) -> str | None:
+        """A query over a Source table's published copy at this run's pinned version, for an engine that
+        reads the data root itself (the Flock), or ``None`` when it should be sent the data instead: an own
+        table, a puddle run, or a data root the engine can't reach. ``columns`` are the user columns, as
+        :meth:`read_table` gives them.
+
+        A Source co-located on this machine is read locally (:meth:`_source_data_dir`) and is mirrored to
+        the data root after it publishes, so the data root's copy is used only when its sidecar shows it has
+        caught up with the version this run reads."""
+        from .catchment.registry import local_publish_f, pond_data_dir
+        from .dataplane import get_data_plane
+        from .storage import is_object_uri
+        from .trickle_io import _q
+
+        source, table = self._resolve_ref(ref)
+        if source is None:
+            return None
+        major = self.source_majors.get(source)
+        if major is None or self.data_root is None or not is_object_uri(self.data_root):
+            if object_store_only:  # a puddle run or a local data root: only this machine can read it
+                return None
+            data_dir = self._source_data_dir(source)
+        else:
+            data_dir = pond_data_dir(Path(self.root), source, major, self.data_root)
+            expected = self.source_f.get(source)
+            if expected is not None and (local_publish_f(data_dir) or "") < expected:
+                return None
+        try:
+            select = get_data_plane().read_select(data_dir, table, as_of=self.f, pin=self._pin(source))
+        except FileNotFoundError:
+            return None
+        cols = ", ".join(_q(c) for c in columns)
+        return f"SELECT {cols} FROM ({select}) AS {_q('_duckstring_leaf')}"
 
     def _own_current(self, name: str):
         """Read one of this Pond's own registry tables as its current clean state — a merge Trickle is

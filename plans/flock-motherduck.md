@@ -1,7 +1,8 @@
 # The Flock on MotherDuck
 
-Status: **settings-in-the-job part built (2026-10-03)**, see "As built" at the end; the engine waits for
-the spike, which needs a MotherDuck account. Designed 2026-10-02 and agreed with the author: MotherDuck becomes the first-class
+Status: **built (2026-10-03 settings in the job; 2026-10-11 the engine)**, see "As built" at the end. The
+engine is tested against a separate DuckDB standing in for MotherDuck; the spike against a real account is
+still open (no token was available), and `tests/test_flock_motherduck_conformance.py` runs once one is. Designed 2026-10-02 and agreed with the author: MotherDuck becomes the first-class
 Flock engine. Athena stays, for teams that need compute inside their own AWS account. `plans/duckdb-2-ready.md` (item 6)
 generalises this engine to a remote-DuckDB engine with a second, self-hosted target (a DuckDB 2.0 server
 in the user's account); build the two together.
@@ -160,3 +161,30 @@ day to move Flock settings into the job, half a day of docs.
   since it describes the Duck's machine.
 - Tests: `tests/test_flock_job.py`.
 
+
+## As built (2026-10-11): the engine
+
+Built together with `plans/flock-coverage.md` (its "As built" covers the builder seam and the SQL engines).
+
+- **The builder seam** (Trickle 0.2): a terminal offers a `trickle.ComprehensiveJob`, and `job.sql(leaf_sql)`
+  is the whole recompute as one self-contained DuckDB query, with the compile's views as `NOT MATERIALIZED`
+  CTEs and each leaf's base read replaced. This is the "builder seam that emits its own SQL with substituted
+  leaves". `.sql()` is lazy (it runs at the terminal), so it is offered too, and an `.aggregate()` is offered
+  as its accumulator rebuild (`agg_rebuild_select`), which the plan left for a second step.
+- **`engines/remote_duckdb.py`** is the shared remote-DuckDB engine (`duckdb-server` will be a second target
+  when quack 1.0 ships, `plans/duckdb-2-ready.md` item 6). Everything SQL is eligible.
+- **Leaves**: read in place through `Pond.flock_source_select` when the Source's copy on an object-store data
+  root has caught up with the run's pin (`source_f`; Persist mirrors after the local publish, so it can lag),
+  else **uploaded** through Arrow into `{DUCKSTRING_FLOCK_MOTHERDUCK_DATABASE}.main.dsflock_*`, cast to the
+  local types, dropped after the job. This departs from "disabled on a local data root": with the author's
+  2026-10-11 direction that MotherDuck accept every job plain DuckDB would run, a local data root uploads
+  rather than refuses. Tables a `.sql()` query reads by name are uploaded and shadowed as CTEs.
+- **Result**: streamed back as Arrow into a temp table (not via a scratch prefix).
+- **Profiles**: `motherduck/<profile>` → secret `MOTHERDUCK_TOKEN_<PROFILE>` (`secrets_for`); the default
+  profile also reads MotherDuck's own `motherduck_token`.
+- **`estimate_rows`**: `flock.leaf_rows`, through `Pond.count_table` (sidecar and footers, no scan).
+- Tests: `tests/test_flock_remote.py` (every shape, aggregates, `.sql()` chains, uploads, in-place reads,
+  fallback, the coverage-miss offer, the default order, MotherDuck with its connection replaced).
+- **Still open (spike)**: whether `read_parquet('s3://…')` on an `md:` connection runs remotely by default
+  (`MD_RUN=AUTO`), the exact `CREATE SECRET … IN MOTHERDUCK` scoping, which client DuckDB versions MotherDuck
+  accepts, and per-size memory.

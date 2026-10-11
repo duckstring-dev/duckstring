@@ -228,13 +228,26 @@ def _load_json(s):
         return None
 
 
+def _accept_value(value) -> str:
+    """An acceptance override as stored: comma-separated known names, or ``'none'`` for none at all."""
+    from ..flock.translate import ACCEPTANCES
+
+    names = [n.strip() for n in (value.split(",") if isinstance(value, str) else value) if n.strip()]
+    if names in ([], ["none"]):
+        return "none"
+    unknown = [n for n in names if n not in ACCEPTANCES]
+    if unknown:
+        raise ValueError(f"unknown Flock acceptance {', '.join(unknown)} (any of {', '.join(ACCEPTANCES)}, or none)")
+    return ",".join(dict.fromkeys(names))
+
+
 def _duck_override_row(row) -> dict:
     """A pond_duck row → the nullable override dict (plans/cloud-config.md). Sizing is concrete now
     (a pool / dedicated instance type), so there is no abstract size field. ``deploy_config`` is a Pond's
     dedicated-Duck deployment config (JSON; plans/compute-config-ui.md), carrying its provider + AWS
     image/AMI/VPC/IAM settings."""
     keys = ("duck_target", "dedicated_instance_type", "dedicated_auto_stop",
-            "flock_mode", "flock_engine", "oom_policy", "deploy_config")
+            "flock_mode", "flock_engine", "oom_policy", "deploy_config", "flock_accept")
     if row is None:
         return {k: None for k in keys}
     o = dict(zip(keys, row, strict=True))
@@ -423,17 +436,19 @@ class Driver:
                 imm, onc = retry if retry else (0, SPOUT_SOURCE_RETRIES if is_spout else 0)
                 duck_row = db.execute(
                     "SELECT duck_target, dedicated_instance_type, dedicated_auto_stop, "
-                    "flock_mode, flock_engine, oom_policy, deploy_config FROM pond_duck WHERE pond_id = ?",
+                    "flock_mode, flock_engine, oom_policy, deploy_config, flock_accept FROM pond_duck "
+                    "WHERE pond_id = ?",
                     (pond_id,)
                 ).fetchone()
                 self.duck_overrides[key] = _duck_override_row(duck_row)
                 declared = db.execute(
-                    "SELECT duck_pool, flock_mode, flock_engine, oom_policy FROM pond_version WHERE id = ?",
+                    "SELECT duck_pool, flock_mode, flock_engine, oom_policy, flock_accept FROM pond_version "
+                    "WHERE id = ?",
                     (pv_id,),
                 ).fetchone()
                 self.duck_declared[key] = {
                     "duck_target": declared[0], "flock_mode": declared[1],
-                    "flock_engine": declared[2], "oom_policy": declared[3],
+                    "flock_engine": declared[2], "oom_policy": declared[3], "flock_accept": declared[4],
                 } if declared else {}
                 # always_run is a Pond property ORed up from its Ripples: any always_run Ripple means
                 # the Pond runs every time (never engine-passed). See plans/no-change-skip.md.
@@ -1397,10 +1412,11 @@ class Driver:
             "flock_mode": mode if mode in FLOCK_MODES else "off",
             "flock_engine": os.environ.get("DUCKSTRING_FLOCK_ENGINE") or None,
             "oom_policy": (os.environ.get("DUCKSTRING_FLOCK_OOM_POLICY") or "fail_up").lower(),
+            "flock_accept": os.environ.get("DUCKSTRING_FLOCK_ACCEPT") or None,
         }
 
     _DUCK_OVERRIDE_FIELDS = ("duck_target", "dedicated_instance_type", "dedicated_auto_stop", "deploy_config",
-                             "flock_mode", "flock_engine", "oom_policy")
+                             "flock_mode", "flock_engine", "oom_policy", "flock_accept")
 
     def set_duck(self, pond: str, clear: bool = False, **fields) -> None:
         """Set (or with ``clear`` drop) a Pond's compute override (persisted to pond_duck; operator-owned,
@@ -1411,6 +1427,8 @@ class Driver:
             raise ValueError(f"flock_mode must be one of {', '.join(FLOCK_MODES)}")
         if fields.get("oom_policy") is not None and fields["oom_policy"] not in OOM_POLICIES:
             raise ValueError(f"oom_policy must be one of {', '.join(OOM_POLICIES)}")
+        if fields.get("flock_accept") is not None:
+            fields["flock_accept"] = _accept_value(fields["flock_accept"])
         with self.lock:
             pond_id = self.meta[pond]["pond_id"]
             if clear:
@@ -1436,20 +1454,20 @@ class Driver:
                     new["deploy_config"] = {"provider": provider, **cloud_deploy.clean(provider, dc)}
                 self.db.execute(
                     "INSERT INTO pond_duck (pond_id, duck_target, dedicated_instance_type, "
-                    "dedicated_auto_stop, flock_mode, flock_engine, oom_policy, deploy_config) "
+                    "dedicated_auto_stop, flock_mode, flock_engine, oom_policy, deploy_config, flock_accept) "
                     "VALUES (:id, :duck_target, :dedicated_instance_type, :dedicated_auto_stop, "
-                    ":flock_mode, :flock_engine, :oom_policy, :deploy_config) "
+                    ":flock_mode, :flock_engine, :oom_policy, :deploy_config, :flock_accept) "
                     "ON CONFLICT(pond_id) DO UPDATE SET duck_target = excluded.duck_target, "
                     "dedicated_instance_type = excluded.dedicated_instance_type, "
                     "dedicated_auto_stop = excluded.dedicated_auto_stop, flock_mode = excluded.flock_mode, "
                     "flock_engine = excluded.flock_engine, oom_policy = excluded.oom_policy, "
-                    "deploy_config = excluded.deploy_config",
+                    "deploy_config = excluded.deploy_config, flock_accept = excluded.flock_accept",
                     {"id": pond_id, "duck_target": new["duck_target"],
                      "dedicated_instance_type": new["dedicated_instance_type"],
                      "dedicated_auto_stop": (None if new["dedicated_auto_stop"] is None
                                              else int(new["dedicated_auto_stop"])),
                      "flock_mode": new["flock_mode"], "flock_engine": new["flock_engine"],
-                     "oom_policy": new["oom_policy"],
+                     "oom_policy": new["oom_policy"], "flock_accept": new.get("flock_accept"),
                      "deploy_config": (json.dumps(new["deploy_config"]) if new.get("deploy_config") else None)},
                 )
                 self.duck_overrides[pond] = new
@@ -1527,6 +1545,8 @@ class Driver:
             "flock_mode": pick("flock_mode"),
             "flock_engine": pick("flock_engine"),
             "oom_policy": pick("oom_policy"),
+            # 'none' (an override accepting nothing over a declaration) reads as no acceptances.
+            "flock_accept": None if pick("flock_accept") in (None, "none") else pick("flock_accept"),
             "declared": decl,
             "override": {k: o[k] for k in self._DUCK_OVERRIDE_FIELDS},
             "defaults": d,

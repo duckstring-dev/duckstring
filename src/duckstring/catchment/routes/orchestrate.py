@@ -375,6 +375,7 @@ class _DuckBody(BaseModel):
     flock_mode: str | None = None               # 'off' | 'upgrade' | 'always'
     flock_engine: str | None = None             # 'athena' | …
     oom_policy: str | None = None               # 'fail_up' | 'fail'
+    flock_accept: str | None = None             # 'float_order,half_rounding' | 'none'
     clear: bool = False
 
 
@@ -392,6 +393,7 @@ def set_duck(
             dedicated_instance_type=body.dedicated_instance_type,
             dedicated_auto_stop=body.dedicated_auto_stop, deploy_config=body.deploy_config,
             flock_mode=body.flock_mode, flock_engine=body.flock_engine, oom_policy=body.oom_policy,
+            flock_accept=body.flock_accept,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
