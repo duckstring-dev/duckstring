@@ -54,8 +54,10 @@ def test_the_hash_follows_the_lock_and_the_python_pin(tmp_path):
 
 
 def test_duckstring_requirement_is_the_catchments_own():
+    """This checkout installs both packages editable from the workspace, Trickle first."""
     req = envs.duckstring_requirement()
-    assert req[0] == "-e" or req[0].startswith("duckstring")  # a dev checkout, or a released version
+    assert req[:2] == ["-e", str(Path(__file__).parent.parent / "packages" / "trickle")]
+    assert req[2] == "-e" and req[3].split("[")[0] == str(Path(__file__).parent.parent)
 
 
 # ── where a deployed Pond's Duck runs ──────────────────────────────────────────
@@ -233,39 +235,59 @@ class _FakeDist:
         return self._direct
 
 
-def _requirement(monkeypatch, direct):
+def _requirement(monkeypatch, direct, trickle=None):
+    """``duckstring_requirement()`` with Duckstring installed as ``direct`` describes and the Trickle engine
+    as ``trickle`` does (``None``: a released install of each)."""
     import json
     from importlib import metadata
 
-    monkeypatch.setattr(metadata, "distribution", lambda _name: _FakeDist(json.dumps(direct) if direct else None))
+    installs = {"duckstring": direct, "duckstring-trickle": trickle}
+    monkeypatch.setattr(metadata, "distribution",
+                        lambda name: _FakeDist(json.dumps(installs[name]) if installs[name] else None))
     monkeypatch.setattr(envs, "_extras", lambda: ["aws"])
     return envs.duckstring_requirement()
 
 
+RELEASED_TRICKLE = ["duckstring-trickle==9.9.9"]
+
+
 def test_requirement_for_a_released_install(monkeypatch):
-    assert _requirement(monkeypatch, None) == ["duckstring[aws]==9.9.9"]
+    assert _requirement(monkeypatch, None) == [*RELEASED_TRICKLE, "duckstring[aws]==9.9.9"]
 
 
 def test_requirement_for_an_editable_checkout(monkeypatch, tmp_path):
+    """A development checkout: both packages from the workspace, editable."""
+    trickle_dir = tmp_path / "packages" / "trickle"
+    trickle_dir.mkdir(parents=True)
     direct = {"url": tmp_path.as_uri(), "dir_info": {"editable": True}}
-    assert _requirement(monkeypatch, direct) == ["-e", f"{tmp_path}[aws]"]
+    trickle = {"url": trickle_dir.as_uri(), "dir_info": {"editable": True}}
+    assert _requirement(monkeypatch, direct, trickle) == ["-e", str(trickle_dir), "-e", f"{tmp_path}[aws]"]
 
 
 def test_requirement_for_a_kept_wheel(monkeypatch, tmp_path):
+    """The Duck image keeps both wheels, so a Pond environment installs the same build."""
     wheel = tmp_path / "duckstring-9.9.9-py3-none-any.whl"
+    trickle_wheel = tmp_path / "duckstring_trickle-9.9.9-py3-none-any.whl"
     wheel.write_bytes(b"")
-    assert _requirement(monkeypatch, {"url": wheel.as_uri(), "archive_info": {}}) == \
-        [f"duckstring[aws] @ {wheel.as_uri()}"]
+    trickle_wheel.write_bytes(b"")
+    assert _requirement(monkeypatch, {"url": wheel.as_uri(), "archive_info": {}},
+                        {"url": trickle_wheel.as_uri(), "archive_info": {}}) == \
+        [f"duckstring-trickle @ {trickle_wheel.as_uri()}", f"duckstring[aws] @ {wheel.as_uri()}"]
 
 
 def test_requirement_falls_back_when_the_wheel_is_gone(monkeypatch, tmp_path):
     gone = (tmp_path / "deleted.whl").as_uri()
-    assert _requirement(monkeypatch, {"url": gone, "archive_info": {}}) == ["duckstring[aws]==9.9.9"]
+    assert _requirement(monkeypatch, {"url": gone, "archive_info": {}}) == [*RELEASED_TRICKLE, "duckstring[aws]==9.9.9"]
 
 
 def test_requirement_for_a_vcs_install(monkeypatch):
-    direct = {"url": "https://github.com/x/duckstring", "vcs_info": {"vcs": "git", "commit_id": "abc123"}}
-    assert _requirement(monkeypatch, direct) == ["duckstring[aws] @ git+https://github.com/x/duckstring@abc123"]
+    repo = "https://github.com/x/duckstring"
+    direct = {"url": repo, "vcs_info": {"vcs": "git", "commit_id": "abc123"}}
+    trickle = {**direct, "subdirectory": "packages/trickle"}
+    assert _requirement(monkeypatch, direct, trickle) == [
+        f"duckstring-trickle @ git+{repo}@abc123#subdirectory=packages/trickle",
+        f"duckstring[aws] @ git+{repo}@abc123",
+    ]
 
 
 # ── a Duck switching to its Pond's environment ─────────────────────────────────

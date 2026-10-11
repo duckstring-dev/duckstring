@@ -1,6 +1,8 @@
 # Extracting Trickle into its own package
 
-Status: **in progress**. Phases 1 to 3 done (2026-10-11); phases 4 and 5 to come.
+Status: **in progress**. Phases 1 to 4 done (2026-10-11); phase 5 (docs and launch) to come. Before the
+first release: register the PyPI Trusted Publisher for `duckstring-trickle` (workflow `release-trickle.yml`,
+environment `pypi`), then tag `trickle-v0.1.0`, then the next Duckstring `v*` (which depends on it).
 
 ## Why
 
@@ -175,7 +177,36 @@ The original plan for this phase:
   covered.
 - Exit: the moved tests pass against the standalone host only.
 
-### 4. Move the code
+### 4. Move the code. Done 2026-10-11
+
+Built as below, with these specifics:
+
+- The package is `packages/trickle/` (setuptools, `src/trickle`, version 0.1.0, depending on `duckdb>=1.5,<2`
+  and `pytz`, which DuckDB needs to fetch the TIMESTAMPTZ epoch stamps; a `[lineage]` extra for `sqlglot`).
+  Its tests moved with `git mv` (history follows), and its `README.md` is a placeholder until phase 5.
+- `duckstring.trickle` is an alias, not a forwarding module: `src/duckstring/trickle/__init__.py` registers
+  `trickle` and each submodule under the old names, so they are the same objects (`isinstance` checks and
+  monkeypatches keep working). Forwarding through `__getattr__` would have broken both.
+- Duckstring depends on `duckstring-trickle>=0.1,<0.2`; `uv.lock` resolves it to the workspace member. The
+  root pytest `testpaths` collects the package's tests too, and it also runs on its own from its directory.
+- CI installs both everywhere (`pip install -e packages/trickle -e .[dev]`) and gains a `trickle` job that
+  installs the package without Duckstring, on the DuckDB floor with Python 3.10 and on the latest release.
+- Releases: `release-trickle.yml` (tag `trickle-v*`) tests the package alone and with Duckstring, checks the
+  tag against its version and that the wheel holds no `duckstring/`, and publishes. `release.yml` installs
+  both for its tests, checks the Duckstring wheel no longer carries engine files, and builds a Trickle wheel
+  only for the Duck image. The Dockerfile installs both wheels and keeps them in `/opt/duckstring/`.
+- Pond environments: `environments.duckstring_requirement` returns the Catchment's own `duckstring-trickle`
+  (editable from a checkout, the kept wheel, a VCS commit with its `#subdirectory`, else the released
+  version) before its Duckstring, and the Pond's lock skips both with `--no-install-package`.
+  `test_environments.py` covers each install kind, and the real-build tests in `test_runtime.py` run a
+  Ripple in a built environment.
+- Found on the way: a local setuptools `build/` directory left from before the move put the old engine files
+  back into a locally built Duckstring wheel (CI builds from a clean checkout). The release check above
+  catches it; locally, delete `build/` before building.
+
+The original plan for this phase:
+
+### 4 (original). Move the code
 
 - Make the repo a uv workspace with the package at `packages/trickle/` (its own `pyproject.toml`, distribution
   `duckstring-trickle`, import `trickle`, Apache-2.0) and move `src/duckstring/trickle/` there with the moved

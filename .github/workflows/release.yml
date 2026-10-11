@@ -3,6 +3,10 @@ name: Release
 # Tag a release (e.g. `git tag v0.2.0 && git push origin v0.2.0`) to build and publish to PyPI.
 # Publishing uses PyPI Trusted Publishing (OIDC) — configure the `pypi` environment for this repo
 # and register the publisher on PyPI (project: duckstring, workflow: release.yml, environment: pypi).
+#
+# Duckstring depends on the Trickle engine (packages/trickle, released as duckstring-trickle by
+# release-trickle.yml on a `trickle-v*` tag). Release the Trickle version this Duckstring needs first:
+# the test job below installs it from the repo, but users install it from PyPI.
 
 on:
   push:
@@ -16,7 +20,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install -e .[dev]
+      - run: pip install -e packages/trickle -e .[dev]
       - run: ruff check .
       - run: pytest
 
@@ -40,12 +44,17 @@ jobs:
           python-version: "3.13"
       - run: pip install build
       - run: python -m build
+      # The Trickle wheel for the Duck image only (it's published by release-trickle.yml, not here), so the
+      # image carries the engine this repo state builds and installs both from local files.
+      - run: python -m build packages/trickle --wheel --outdir dist-trickle
       # Fail loudly if the wheel is missing its data files (UI or schema).
       - name: Verify wheel contents
         run: |
           wheel=$(ls dist/*.whl)
           unzip -l "$wheel" | grep -q "duckstring/catchment/static/index.html" || { echo "wheel missing web UI"; exit 1; }
           unzip -l "$wheel" | grep -q "duckstring/catchment/schema/001_init.sql" || { echo "wheel missing schema"; exit 1; }
+          # The engine ships in duckstring-trickle; Duckstring keeps only the duckstring.trickle alias.
+          if unzip -l "$wheel" | grep -q "duckstring/trickle/io.py"; then echo "wheel carries the Trickle engine"; exit 1; fi
           # Subpath hosting: the UI must reference its assets relatively, never origin-absolute.
           if grep -qE '(src|href)="/' src/duckstring/catchment/static/index.html; then
             echo "web UI has origin-absolute asset paths (breaks subpath hosting)"; exit 1
@@ -58,6 +67,10 @@ jobs:
         with:
           name: dist
           path: dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-trickle
+          path: dist-trickle/
 
   publish:
     needs: build
@@ -89,6 +102,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-trickle
           path: dist/
       - id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"

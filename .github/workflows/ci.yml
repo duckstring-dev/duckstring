@@ -18,9 +18,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e .[dev]
+      - run: pip install -e packages/trickle -e .[dev]
       - run: ruff check .
       - run: pytest
+
+  # The Trickle engine on its own (packages/trickle, released as duckstring-trickle): no Duckstring
+  # installed, so a stray import of its host fails here, on the DuckDB floor and the latest release.
+  trickle:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { python: "3.10", duckdb: "duckdb==1.5.0" }
+          - { python: "3.13", duckdb: "duckdb" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e packages/trickle "${{ matrix.duckdb }}" pytest pytest-timeout sqlglot
+      - run: python -c "import importlib.util as u; assert u.find_spec('duckstring') is None"
+      - run: pytest
+        working-directory: packages/trickle
 
   # The oldest DuckDB pyproject allows (its floor): the main job only ever installs the latest.
   duckdb-floor:
@@ -30,7 +50,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install -e .[dev] "duckdb==1.5.0"
+      - run: pip install -e packages/trickle -e .[dev] "duckdb==1.5.0"
       - run: pytest
 
   # The DuckDB pre-release, past pyproject's ceiling on purpose, so the next breaking change shows up
@@ -43,7 +63,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install -e .[dev]
+      - run: pip install -e packages/trickle -e .[dev]
       - run: pip install --pre --upgrade duckdb
       - run: python -c "import duckdb; print(duckdb.__version__)"
       - run: pytest
@@ -56,7 +76,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install -e .[dev,dbt]
+      - run: pip install -e packages/trickle -e .[dev,dbt]
       - run: pytest -k dbt
 
   # Real-backend egress: the Postgres CDC driver against an actual Postgres (the DuckDB-attached
@@ -81,7 +101,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install -e .[dev]
+      - run: pip install -e packages/trickle -e .[dev]
       - run: pytest tests/test_egress_postgres.py tests/test_egress_file.py tests/test_spout.py
         env:
           DUCKSTRING_TEST_PG: postgres://ds:ds@127.0.0.1:5432/ds
@@ -109,7 +129,7 @@ jobs:
           done
           docker logs minio
           exit 1
-      - run: pip install -e .[dev]
+      - run: pip install -e packages/trickle -e .[dev]
       - run: pytest tests/test_object_store.py -v
         env:
           DUCKSTRING_TEST_S3: http://127.0.0.1:9000

@@ -1,0 +1,65 @@
+name: Release Trickle
+
+# Tag a Trickle release (e.g. `git tag trickle-v0.1.0 && git push origin trickle-v0.1.0`) to build the
+# engine package (packages/trickle) and publish it to PyPI as duckstring-trickle. Separate from
+# Duckstring's `v*` releases: Duckstring depends on a compatible range of it, so a Trickle release goes out
+# first when a Duckstring release needs it.
+#
+# Publishing uses PyPI Trusted Publishing (OIDC): register a publisher on PyPI for the project
+# duckstring-trickle with workflow release-trickle.yml and environment pypi.
+
+on:
+  push:
+    tags: ["trickle-v*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # The package alone (its own suite), then with Duckstring (which uses it as a host).
+      - run: pip install -e packages/trickle pytest pytest-timeout sqlglot
+      - run: pytest
+        working-directory: packages/trickle
+      - run: pip install -e .[dev]
+      - run: pytest
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install build
+      - run: python -m build packages/trickle --outdir dist
+      - name: Verify tag matches package version
+        run: |
+          pkg_version=$(python -c "import tomllib; print(tomllib.load(open('packages/trickle/pyproject.toml','rb'))['project']['version'])")
+          [ "trickle-v$pkg_version" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} != trickle-v$pkg_version"; exit 1; }
+      - name: Verify the wheel is the engine alone
+        run: |
+          wheel=$(ls dist/*.whl)
+          unzip -l "$wheel" | grep -q "trickle/builder.py" || { echo "wheel missing the engine"; exit 1; }
+          if unzip -l "$wheel" | grep -q "duckstring/"; then echo "wheel contains duckstring"; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

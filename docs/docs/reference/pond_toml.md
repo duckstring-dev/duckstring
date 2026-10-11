@@ -128,7 +128,7 @@ dependencies = ["duckstring", "scikit-learn>=1.5"]
 | `pyproject.toml` and `uv.lock` | The Pond's own, built by the Catchment from `uv.lock` on deploy. |
 | `pyproject.toml` only | Deploy is refused: run `uv lock`. |
 
-The Catchment builds the environment with `uv sync --locked`, so a `uv.lock` that no longer matches `pyproject.toml` is also refused. Dev dependencies are left out. The Catchment then installs its own version of Duckstring into the environment, replacing any version in the lock, since the Duck and the Catchment must match. The environment uses the Catchment's Python version, unless the Pond has a `.python-version` file.
+The Catchment builds the environment with `uv sync --locked`, so a `uv.lock` that no longer matches `pyproject.toml` is also refused. Dev dependencies are left out. The Catchment then installs its own version of Duckstring into the environment, with its own version of the Trickle engine (`duckstring-trickle`), replacing any versions in the lock, since the Duck and the Catchment must match. The environment uses the Catchment's Python version, unless the Pond has a `.python-version` file.
 
 Lock against a released Duckstring. A lock made against a local checkout (`uv add --editable ../duckstring`) names a path that exists only on your machine, so a Catchment elsewhere refuses it.
 

@@ -1,7 +1,5 @@
-"""The Trickle engine stands alone (plans/trickle-extraction.md, phase 1): ``duckstring/trickle/`` imports
-nothing else from Duckstring, so it can be published as its own package. Host concerns reach it only
-through its ``Context`` and optional hooks read with ``getattr`` (``record_lineage_write``,
-``record_change``, ``count_table``, ``dispatch_comprehensive``)."""
+"""The package stands alone: nothing in ``trickle`` (or its tests) imports Duckstring, its host. Host
+concerns reach the engine only through ``Context`` and the optional hooks it lists."""
 
 from __future__ import annotations
 
@@ -12,63 +10,53 @@ import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
-import duckdb
 import pytest
+import trickle
+from trickle import io
 
-from duckstring.dataplane import ParquetDataPlane
-from duckstring.trickle import io
-
-TRICKLE = Path(__file__).parent.parent / "src" / "duckstring" / "trickle"
+PACKAGE = Path(trickle.__file__).parent
+TESTS = Path(__file__).parent
 
 
-def test_no_module_in_trickle_reaches_outside_it():
-    """Static, so an import inside a function (how the Flock leaked in before) is caught too."""
+def _duckstring_imports(directory: Path) -> list[str]:
+    """Every import of Duckstring, or reach above the package with a relative import, in ``directory``'s
+    modules. Static, so an import inside a function is caught too."""
     leaks = []
-    for path in sorted(TRICKLE.glob("*.py")):
+    for path in sorted(directory.glob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
-            if isinstance(node, ast.ImportFrom) and (node.level > 1 or (node.module or "").startswith("duckstring")):
-                leaks.append(f"{path.name}:{node.lineno} from {'.' * node.level}{node.module or ''}")
+            if isinstance(node, ast.ImportFrom):
+                if node.level > 1 or (node.module or "").split(".")[0] == "duckstring":
+                    leaks.append(f"{path.name}:{node.lineno} from {'.' * node.level}{node.module or ''}")
             elif isinstance(node, ast.Import):
                 leaks += [f"{path.name}:{node.lineno} import {a.name}" for a in node.names
                           if a.name.split(".")[0] == "duckstring"]
-    assert not leaks, "trickle/ imports from the rest of Duckstring:\n" + "\n".join(leaks)
+    return leaks
 
 
-def test_the_engine_tests_import_only_the_engine():
-    """``tests/trickle/`` moves to the package unchanged, so only its conftest (the ``trickle`` alias) may
-    import Duckstring."""
-    leaks = []
-    for path in sorted((Path(__file__).parent / "trickle").glob("*.py")):
-        if path.name == "conftest.py":
-            continue
-        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
-            names = [a.name for a in node.names] if isinstance(node, ast.Import) else \
-                [node.module or ""] if isinstance(node, ast.ImportFrom) else []
-            leaks += [f"{path.name}:{node.lineno} {n}" for n in names if n.split(".")[0] == "duckstring"]
-    assert not leaks, "engine tests import Duckstring:\n" + "\n".join(leaks)
+def test_the_package_imports_nothing_from_duckstring():
+    assert not _duckstring_imports(PACKAGE)
+
+
+def test_the_tests_import_nothing_from_duckstring():
+    assert not _duckstring_imports(TESTS)
 
 
 def test_trickle_runs_as_a_top_level_package_without_duckstring():
-    """Load ``trickle/`` as a top-level package named ``trickle`` (as it will be once published) with every
-    ``duckstring`` import blocked, import each module, run a builder join against a minimal host, and run the
-    README example through the standalone host (``trickle.run``)."""
-    code = textwrap.dedent(f"""
-        import importlib, importlib.util, sys
+    """Import ``trickle`` with every ``duckstring`` import blocked, import each module, run a builder join
+    against a minimal host (only what ``Context`` lists), and run the README example through ``trickle.run``."""
+    code = textwrap.dedent("""
+        import importlib, sys
         from datetime import datetime, timezone
 
         class Block:
             def find_spec(self, name, path=None, target=None):
                 if name == "duckstring" or name.startswith("duckstring."):
-                    raise ImportError(f"blocked: {{name}}")
+                    raise ImportError(f"blocked: {name}")
 
         sys.meta_path.insert(0, Block())
-        spec = importlib.util.spec_from_file_location(
-            "trickle", {str(TRICKLE / "__init__.py")!r}, submodule_search_locations=[{str(TRICKLE)!r}])
-        trickle = importlib.util.module_from_spec(spec)
-        sys.modules["trickle"] = trickle
-        spec.loader.exec_module(trickle)
+        import trickle
         for mod in ("context", "io", "builder", "agg", "acc", "capture", "lineage", "session"):
-            importlib.import_module(f"trickle.{{mod}}")
+            importlib.import_module(f"trickle.{mod}")
 
         import duckdb
         from trickle import NEVER, TrickleBuilder, io
@@ -121,21 +109,10 @@ def test_trickle_runs_as_a_top_level_package_without_duckstring():
     assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr[-3000:]
 
 
-def test_a_newer_storage_format_is_refused(tmp_path):
-    con = duckdb.connect()
+def test_a_newer_storage_format_is_refused(db):
     f = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    io.merge_table(con, "m", con.sql("SELECT 1 AS id"), f, ("id",))
-    ParquetDataPlane().export(con, tmp_path, f=f)
-    assert io.load_sidecar(tmp_path)["m"]["format_version"] == io.FORMAT_VERSION
-
-    sidecar = io.load_sidecar(tmp_path)
-    sidecar["m"]["format_version"] = io.FORMAT_VERSION + 1
-    io.write_sidecar(tmp_path, sidecar)
+    io.merge_table(db, "m", db.sql("SELECT 1 AS id"), f, ("id",))
+    assert io.read_meta(db)["m"]["format_version"] == io.FORMAT_VERSION
+    db.execute(f"UPDATE {io.META_TABLE} SET format_version = {io.FORMAT_VERSION + 1}")
     with pytest.raises(io.FormatVersionError):
-        ParquetDataPlane().read_select(tmp_path, "m")
-    with pytest.raises(io.FormatVersionError):
-        io.read_delta(con, tmp_path, "m", f, f, dp=ParquetDataPlane())
-
-    con.execute(f"UPDATE {io.META_TABLE} SET format_version = {io.FORMAT_VERSION + 1}")
-    with pytest.raises(io.FormatVersionError):
-        io.merge_table(con, "m", con.sql("SELECT 2 AS id"), f, ("id",))
+        io.merge_table(db, "m", db.sql("SELECT 2 AS id"), f, ("id",))
