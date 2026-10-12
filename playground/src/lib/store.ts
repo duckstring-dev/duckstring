@@ -133,7 +133,7 @@ function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'pondStates' | 'rippl
 }
 
 // ─── Example graphs ──────────────────────────────────────────────────────────
-// Topologies for exploring Pulse release, matching the ones it was simulated on. Each Pond lists its
+// Topologies for exploring the Pulse throttle, matching the ones it was simulated on. Each Pond lists its
 // Sources by name and its Ripples as [name, seconds] (a single Ripple unless noted).
 
 interface ExampleSpec {
@@ -266,8 +266,8 @@ export interface PlaygroundState {
   // Bumped when something other than the inputs themselves changes a value they show (the tour, a
   // reset), so the uncontrolled sidebar inputs remount with the new value.
   formEpoch: number;
-  // Experimental Pulse release mode (see orchestration.ts). Off = the current engine.
-  pulseRelease: boolean;
+  // Experimental Pulse throttle mode (see orchestration.ts). Off = the current engine.
+  pulseThrottle: boolean;
 
   // Adds a Pond with one 1 s Ripple and selects it. With no options it links as a Sink of the
   // selected Pond (the sidebar's behaviour); `source` names the Source explicitly. Returns its id.
@@ -309,7 +309,7 @@ export interface PlaygroundState {
   resetToDemo(): void;
   // Replace the graph with one of EXAMPLES (or the demo for 'demo'), clearing run state and triggers.
   loadExample(key: string): void;
-  setPulseRelease(on: boolean): void;
+  setPulseThrottle(on: boolean): void;
   // Whether the graph still matches the example (ignoring run state and triggers).
   isDemoGraph(): boolean;
   setSheetOpen(open: boolean): void;
@@ -328,7 +328,7 @@ function toOrchestrState(state: PlaygroundState): OrchestrState {
     ripples: state.ripples,
     rippleStates: state.rippleStates,
     triggers: state.triggers,
-    pulseRelease: state.pulseRelease,
+    pulseThrottle: state.pulseThrottle,
   };
 }
 
@@ -366,7 +366,7 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   sheetOpen: false,
   tideDraft: null,
   formEpoch: 0,
-  pulseRelease: false,
+  pulseThrottle: false,
 
   addPond(opts) {
     // If a pond is selected, link the new pond as its sink.
@@ -698,8 +698,8 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     }));
   },
 
-  setPulseRelease(on) {
-    set({ pulseRelease: on });
+  setPulseThrottle(on) {
+    set({ pulseThrottle: on });
   },
 
   isDemoGraph() {

@@ -12,14 +12,14 @@ import { TourSpotlight } from './TourSpotlight';
 
 export function Playground() {
   const isMobile = useIsMobile();
-  // ?example=<key> loads an example graph, ?release=1 turns Pulse release on, and ?tide=<seconds> or
+  // ?example=<key> loads an example graph, ?throttle=1 turns the Pulse throttle on, and ?tide=<seconds> or
   // ?wave=1 sets that trigger on every Outlet, so a setup can be opened straight from a link.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const store = usePlaygroundStore.getState();
     const example = params.get('example');
     if (example) store.loadExample(example);
-    if (params.get('release') === '1') store.setPulseRelease(true);
+    if (params.get('throttle') === '1') store.setPulseThrottle(true);
     const ponds = usePlaygroundStore.getState().ponds;
     const outlets = Object.keys(ponds).filter((id) => !Object.values(ponds).some((p) => p.sources.includes(id)));
     const tide = parseFloat(params.get('tide') ?? '');

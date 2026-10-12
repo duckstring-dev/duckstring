@@ -51,7 +51,6 @@ export interface RippleRunState {
   // Run bookkeeping (the simulation of an actual run taking time):
   isRunning: boolean;
   runStartedAt: number | null;
-  lastStartedAt?: number; // wall-clock start of the most recent run (kept after it completes)
   currentRunDurationMs: number | null;
   lastDurationMs: number | null;
   // Trace data for the sidebar charts:
@@ -79,19 +78,16 @@ export interface PondRunState {
   completionTimes: number[];
   durations: number[];
   ages?: number[]; // data age (now - endF) at each completion
-  // Pulse release bookkeeping (only used while the release mode is on).
-  release?: ReleaseState;
+  // Pulse throttle bookkeeping (only used while the throttle mode is on).
+  throttle?: ThrottleState;
 }
 
-// Pulse release, per Pond (see orchestration.ts "Pulse release"). A witness is one of the Pond's own
-// Ripples (`r:<id>`) or one of its Source Ponds (`p:<id>`); a witness's runs are told apart by its
-// `runsStarted`, so every counter is keyed to "the witness's current run" without timestamps.
-export interface ReleaseState {
-  counts: Record<string, { run: number; n: number }>; // demands that reached this Pond during each witness's current run
-  saturated: string[]; // witnesses proven slower than the demand (two demands arrived during one of their runs)
-  forwardedIn: Record<string, number>; // each Ripple witness's run number when this Pond last forwarded demand upstream
-  forwardedAt: number; // when this Pond last forwarded demand upstream (a Source turns over by starting work later)
-  held: number; // demands held back (kept as this Pond's own targets, not yet forwarded)
+// Pulse throttle, per Pond (see orchestration.ts "Pulse throttle").
+export interface ThrottleState {
+  counts: Record<string, { run: number; n: number }>; // demands that reached this Pond during each of its Ripples' current runs
+  slow: string[]; // own Ripples that saw two demands in one run, until they sit idle with no demand waiting
+  queued: boolean; // a trigger's Pulse waiting to be sent (Outlets only; at most one)
+  sentAt: Record<string, { run: number; idle: boolean }>; // each upstream slow Ripple when this Outlet last sent a Pulse
 }
 
 // Persistent triggers only (Tap and Pulse are one-shot, no entity).
@@ -111,6 +107,6 @@ export type PondVisualState = 'killed' | 'blocked' | 'running' | 'queued' | 'idl
 // A single logged orchestration event, for the console panel.
 export interface LogEntry {
   t: number; // wall-clock ms of the event
-  kind: string; // short category, e.g. 'tap', 'pond-start', 'ripple-done', 'hold', 'release'
+  kind: string; // short category, e.g. 'tap', 'pond-start', 'ripple-done', 'queue', 'release'
   msg: string; // human-readable description
 }

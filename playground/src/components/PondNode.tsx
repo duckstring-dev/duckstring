@@ -2,6 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
+import { isThrottled } from '@/lib/orchestration';
 import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, stateColor, nodeFill, THEME_PUSH, THEME_PULL } from '@/lib/store';
 import { useTourRing } from '@/lib/tour';
 import { DemandIndicators } from './DemandIndicators';
@@ -22,12 +23,12 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const now = usePlaygroundStore((s) => s.now);
   const ringClass = useTourRing(pondId);
   const pulseTagGen = usePlaygroundStore((s) => s.pulseTags[pondId]);
-  // Pulse release: which witnesses this Pond has found saturated, by name (for the badge's tooltip).
-  const saturatedNames = usePlaygroundStore((s) =>
-    (s.pondStates[pondId]?.release?.saturated ?? [])
-      .map((w) => (w.startsWith('r:') ? s.ripples[w.slice(2)]?.name : s.ponds[w.slice(2)]?.name) ?? w)
-      .join(', ')
+  // Pulse throttle: this Pond's own slow Ripples, whether it is throttled from upstream, and a queued Pulse.
+  const slowNames = usePlaygroundStore((s) =>
+    (s.pondStates[pondId]?.throttle?.slow ?? []).map((r) => s.ripples[r]?.name ?? r).join(', ')
   );
+  const throttled = usePlaygroundStore((s) => !!s.pulseThrottle && !!s.ponds[pondId] && isThrottled(s, pondId));
+  const queued = usePlaygroundStore((s) => !!s.pondStates[pondId]?.throttle?.queued);
 
   if (!pond || !ps) return null;
 
@@ -35,8 +36,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const borderColor = stateColor(visualState, ps.hasPull || ps.hasReceivedPull, pushTargetF(ps.targets));
   const isSelected = selectedPondId === pondId;
   const showPulseTag = pulseTagGen !== undefined && ps.runsCompleted <= pulseTagGen;
-  const held = ps.release?.held ?? 0;
-  const releaseTag = held > 0 ? `holding ${held}` : saturatedNames ? 'saturated' : null;
+  const throttleTag = queued ? 'queued' : slowNames ? 'slow' : throttled ? 'throttled' : null;
 
   return (
     <div
@@ -110,10 +110,10 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
         </div>
       )}
 
-      {releaseTag && (
+      {throttleTag && (
         <div
-          data-testid="release-badge"
-          title={`saturated: ${saturatedNames}`}
+          data-testid="throttle-badge"
+          title={slowNames ? `slow: ${slowNames}` : 'throttled by a slow Pond upstream'}
           style={{
             position: 'absolute',
             top: -10,
@@ -128,7 +128,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
             whiteSpace: 'nowrap',
           }}
         >
-          {releaseTag}
+          {throttleTag}
         </div>
       )}
 

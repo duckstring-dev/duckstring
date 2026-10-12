@@ -15,8 +15,8 @@ export function SimControls() {
   const speed = usePlaygroundStore((s) => s.speed);
   const togglePause = usePlaygroundStore((s) => s.togglePause);
   const setSpeed = usePlaygroundStore((s) => s.setSpeed);
-  const release = usePlaygroundStore((s) => s.pulseRelease);
-  const setRelease = usePlaygroundStore((s) => s.setPulseRelease);
+  const throttle = usePlaygroundStore((s) => s.pulseThrottle);
+  const setThrottle = usePlaygroundStore((s) => s.setPulseThrottle);
 
   return (
     <div
@@ -64,17 +64,17 @@ export function SimControls() {
       })}
       <span style={{ width: 1, alignSelf: 'stretch', background: '#3f3f46', margin: '0 2px' }} />
       <button
-        onClick={() => setRelease(!release)}
-        title="Pulse release (experimental): a Pond that sees two demands arrive during one run of its own Ripple or a Source holds further demand and forwards one Pulse per turnover"
-        data-testid="release-toggle"
+        onClick={() => setThrottle(!throttle)}
+        title="Pulse throttle (experimental): a Ripple that sees two demands in one run throttles its Pond and everything downstream; a throttled Outlet sends one queued Pulse each time the slow Ripple turns over"
+        data-testid="throttle-toggle"
         style={{
           ...btnBase,
-          color: release ? '#0f0f14' : '#a1a1aa',
-          background: release ? THEME_PULL : 'transparent',
-          borderColor: release ? THEME_PULL : '#3f3f46',
+          color: throttle ? '#0f0f14' : '#a1a1aa',
+          background: throttle ? THEME_PULL : 'transparent',
+          borderColor: throttle ? THEME_PULL : '#3f3f46',
         }}
       >
-        Release {release ? 'on' : 'off'}
+        Throttle {throttle ? 'on' : 'off'}
       </button>
     </div>
   );

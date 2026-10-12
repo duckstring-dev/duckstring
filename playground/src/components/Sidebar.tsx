@@ -143,8 +143,8 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const setRippleVariability = usePlaygroundStore((s) => s.setRippleVariability);
   const setAllVariability = usePlaygroundStore((s) => s.setAllVariability);
   const loadExample = usePlaygroundStore((s) => s.loadExample);
-  const pulseRelease = usePlaygroundStore((s) => s.pulseRelease);
-  const setPulseRelease = usePlaygroundStore((s) => s.setPulseRelease);
+  const pulseThrottle = usePlaygroundStore((s) => s.pulseThrottle);
+  const setPulseThrottle = usePlaygroundStore((s) => s.setPulseThrottle);
   const linkPonds = usePlaygroundStore((s) => s.linkPonds);
   const unlinkPonds = usePlaygroundStore((s) => s.unlinkPonds);
   const linkRipples = usePlaygroundStore((s) => s.linkRipples);
@@ -449,17 +449,18 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
         </>
       )}
 
-      {/* Nothing selected: Pulse release, examples, global variability */}
+      {/* Nothing selected: Pulse throttle, examples, global variability */}
       {!selectedPond && !selectedRipple && !selectedTriggerId && (
         <Section>
-          <Label>Pulse release (experimental)</Label>
-          <Btn small onClick={() => setPulseRelease(!pulseRelease)} color={THEME_PULL}>
-            {pulseRelease ? 'On: turn off' : 'Off: turn on'}
+          <Label>Pulse throttle (experimental)</Label>
+          <Btn small onClick={() => setPulseThrottle(!pulseThrottle)} color={THEME_PULL}>
+            {pulseThrottle ? 'On: turn off' : 'Off: turn on'}
           </Btn>
           <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
-            A Pond counts the demands that reach it during each run of its own Ripples and its Sources. Two in one
-            run means that run is slower than the demand: the Pond holds further demand and forwards one Pulse
-            each time the slow run turns over. Held Ponds show a badge. Try a Tide of 0s (Wave-like) or 1s.
+            A Ripple that sees two demands arrive during one of its runs can&apos;t keep up: its Pond is throttled,
+            and so is everything downstream. A throttled Outlet queues at most one Pulse and sends it each time
+            the slow Ripple starts a new run (or sits starved), so upstream runs at the bottleneck&apos;s pace. Try a
+            Tide of 0s (Wave-like) or 1s.
           </div>
         </Section>
       )}

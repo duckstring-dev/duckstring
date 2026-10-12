@@ -19,8 +19,9 @@ const KIND_COLOR: Record<string, string> = {
   'ripple-start': '#a1a1aa',
   'ripple-done': '#71717a',
   'pond-done': '#e4e4e7',
-  saturated: THEME_PULL,
-  hold: THEME_PULL,
+  throttled: THEME_PULL,
+  unthrottled: '#71717a',
+  queue: THEME_PULL,
   release: THEME_PUSH,
 };
 
