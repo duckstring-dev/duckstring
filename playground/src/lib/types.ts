@@ -87,7 +87,7 @@ export interface ThrottleState {
   counts: Record<string, { run: number; n: number }>; // demands that reached this Pond during each of its Ripples' current runs
   slow: string[]; // own Ripples that saw two demands in one run, until they sit idle with no demand waiting
   queued: boolean; // a trigger's Pulse waiting to be sent (Outlets only; at most one)
-  sentAt: Record<string, { run: number; idle: boolean }>; // each upstream slow Ripple when this Outlet last sent a Pulse
+  lastDemand: Record<string, { run: number; idle: boolean }>; // where each Ripple was when demand last reached this Pond
 }
 
 // Persistent triggers only (Tap and Pulse are one-shot, no entity).

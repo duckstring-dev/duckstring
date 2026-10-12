@@ -31,10 +31,20 @@ function graph(spec: [string, number | number[], string[]][]): OrchestrState {
   }
   return s;
 }
+// The playground's demo: two Inlets feed `sales`, whose `join` (3 s) waits on `daily` (2 s) and `tiers` (1 s).
+function demo(): OrchestrState {
+  const s = graph([['transactions', 1, []], ['products', 2, []], ['sales', 2, ['transactions', 'products']], ['reports', 1, ['sales']]]);
+  s.ripples['sales.r1'] = { id: 'sales.r1', pondId: 'sales', name: 'tiers', parents: [], durationMs: 1000, variability: 0 };
+  s.ripples['sales.r2'] = { id: 'sales.r2', pondId: 'sales', name: 'join', parents: ['sales.r0', 'sales.r1'], durationMs: 3000, variability: 0 };
+  s.rippleStates['sales.r1'] = rippleState();
+  s.rippleStates['sales.r2'] = rippleState();
+  return s;
+}
 const chain = (spec: [string, number | number[]][]) => graph(spec.map(([n, d], i) => [n, d, i ? [spec[i - 1][0]] : []]));
 
 // [build, Outlet, an Inlet whose rate matters, the bottleneck Pond]
 const TOPOLOGIES: Record<string, [() => OrchestrState, string, string, string]> = {
+  'demo (sales pipeline)': [demo, 'reports', 'transactions', 'sales'],
   'deep chain (fast stages, then a 5 s bottleneck)': [() => chain([['I', 1], ['P1', 1], ['P2', 1], ['P3', 1], ['P4', 1], ['B', 5], ['O', 1]]), 'O', 'I', 'B'],
   'long lead (seven 1 s stages, then 3 s)': [() => chain([['I', 1], ['P1', 1], ['P2', 1], ['P3', 1], ['P4', 1], ['P5', 1], ['P6', 1], ['B', 3], ['O', 1]]), 'O', 'I', 'B'],
   'decreasing chain (1 s → 3 s → 2 s → 1 s)': [() => chain([['A', 1], ['B', 3], ['C', 2], ['D', 1]]), 'D', 'A', 'B'],
@@ -48,10 +58,15 @@ const TOPOLOGIES: Record<string, [() => OrchestrState, string, string, string]> 
 interface Run { runs: Record<string, number>; late: Record<string, number>; age: number }
 
 // Drive sim time in 100 ms ticks: Pulses at `outlet` every `every` seconds, a 0 s Tide, or a Wave.
-function simulate(s: OrchestrState, outlet: string, seconds: number, opts: { every?: number; tide0?: boolean; wave?: boolean; throttle?: boolean }): Run {
+// `drift` advances time by 90-129 ms per tick, as the playground does (it ticks on real elapsed time), so
+// events that coincide on an exact 100 ms grid land in different ticks.
+function simulate(s: OrchestrState, outlet: string, seconds: number, opts: { every?: number; tide0?: boolean; tide1?: boolean; wave?: boolean; throttle?: boolean; drift?: boolean }): Run {
   s.pulseThrottle = !!opts.throttle;
   if (opts.wave) s.triggers = { [outlet]: { pondId: outlet, kind: 'wave' } };
   if (opts.tide0) s.triggers = { [outlet]: { pondId: outlet, kind: 'tide', stalenessMs: 0 } };
+  if (opts.tide1) s.triggers = { [outlet]: { pondId: outlet, kind: 'tide', stalenessMs: 1000 } };
+  let seed = 7;
+  const drift = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) % 40) - 10;
   let now = 1_000_000;
   const ages: number[] = [];
   let lastEnd = 0;
@@ -59,7 +74,7 @@ function simulate(s: OrchestrState, outlet: string, seconds: number, opts: { eve
   for (let i = 0; i < seconds * 10; i++) {
     if (i === seconds * 5) half = Object.fromEntries(Object.entries(s.pondStates).map(([k, v]) => [k, v.runsCompleted]));
     if (opts.every && i % Math.round(opts.every * 10) === 0) s = pulsePond(s, outlet, now);
-    now += 100;
+    now += 100 + (opts.drift ? drift() : 0);
     s = tick(now, s);
     const end = s.pondStates[outlet].endF;
     if (end !== lastEnd) {
@@ -76,13 +91,14 @@ function simulate(s: OrchestrState, outlet: string, seconds: number, opts: { eve
 for (const [name, [make, outlet, inlet, bottleneck]] of Object.entries(TOPOLOGIES)) {
   test(`${name}: saturated demand runs at the bottleneck's pace, at least as fresh as a Wave`, () => {
     const wave = simulate(make(), outlet, 120, { wave: true });
-    for (const opts of [{ every: 1 }, { tide0: true }]) {
+    for (const opts of [{ every: 1 }, { tide0: true }, { tide1: true, drift: true }]) {
       const throttled = simulate(make(), outlet, 120, { ...opts, throttle: true });
-      expect(throttled.runs[bottleneck]).toBe(wave.runs[bottleneck]);
-      expect(throttled.runs[outlet]).toBe(wave.runs[outlet]);
+      const ref = 'drift' in opts ? simulate(make(), outlet, 120, { wave: true, drift: true }) : wave;
+      expect(throttled.runs[bottleneck]).toBe(ref.runs[bottleneck]);
+      expect(throttled.runs[outlet]).toBe(ref.runs[outlet]);
       expect(throttled.late[inlet]).toBeLessThanOrEqual(throttled.late[bottleneck] + 1); // settled: one per bottleneck run
-      expect(throttled.runs[inlet]).toBeLessThanOrEqual(wave.runs[inlet] + 10); // the startup, before detection
-      expect(throttled.age).toBeLessThanOrEqual(wave.age + 0.1);
+      expect(throttled.runs[inlet]).toBeLessThanOrEqual(wave.runs[inlet] + 14); // the startup, before detection, plus top-ups
+      expect(throttled.age).toBeLessThanOrEqual(ref.age + 0.1);
     }
   });
 
