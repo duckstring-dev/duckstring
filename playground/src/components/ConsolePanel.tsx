@@ -22,6 +22,8 @@ const KIND_COLOR: Record<string, string> = {
   throttled: THEME_PULL,
   unthrottled: '#71717a',
   queue: THEME_PULL,
+  hold: THEME_PULL,
+  emit: THEME_PUSH,
   release: THEME_PUSH,
 };
 

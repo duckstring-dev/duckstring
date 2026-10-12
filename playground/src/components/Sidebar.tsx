@@ -457,10 +457,10 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             {pulseThrottle ? 'On: turn off' : 'Off: turn on'}
           </Btn>
           <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
-            A Ripple that sees two demands arrive during one of its runs can&apos;t keep up: its Pond is throttled,
-            and so is everything downstream. A throttled Outlet queues at most one Pulse and sends it each time
-            the slow Ripple starts a new run (or sits starved), so upstream runs at the bottleneck&apos;s pace. Try a
-            Tide of 0s (Wave-like) or 1s.
+            A Ripple that sees two demands arrive during one of its runs is slow until it goes idle; its Pond and
+            everything downstream is throttled. A throttled Outlet still takes every demand but sends one Pulse
+            upstream per completion. The first slow Pond on a path holds the demand reaching it and sends one Pulse
+            upstream each time its slow Ripple starts a run. Try a Tide of 0s (Wave-like) or 1s.
           </div>
         </Section>
       )}

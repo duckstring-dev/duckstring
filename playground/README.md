@@ -26,14 +26,20 @@ The steps are data in `src/lib/tourSteps.ts`; the runner is `src/lib/tour.ts`.
 
 **Throttle** in the sim controls (or the sidebar with nothing selected) switches on an experimental
 rule for Pulses that arrive faster than the pipeline can deliver. A Ripple that sees two demands
-arrive during one of its runs can't keep up, so its Pond is throttled, and so is every Pond
-downstream (it passes down like Blocked). A throttled Outlet queues at most one Pulse and sends it
-each time the slow Ripple upstream starts a new run, or sits starved for input, so everything
-upstream runs at the bottleneck's pace instead of once per Pulse. The throttle lifts when the slow
-Ripple is idle with no demand waiting. With the throttle on, an Inlet also doesn't start a Pond Run
-while its first Ripples are busy, so its freshness stamp matches when it reads.
+arrive during one of its runs is slow until it goes idle, and its Pond and every Pond downstream
+are throttled (it passes down like Blocked). Then:
 
-Ponds show `slow`, `throttled` or `queued` badges, the console logs each change, and a Pond's chart
+- a throttled Outlet still takes every Pulse as its own target, but sends at most one Pulse
+  upstream per completion;
+- the first slow Pond on a path (none of its Sources throttled) holds the demand reaching it and,
+  while it has demand to meet, sends one Pulse upstream each time its slow Ripple starts a run.
+
+So new demand enters at the rate the Outlet is served, and travels upstream timed to the
+bottleneck's starts. With the throttle on, an Inlet also doesn't start a Pond Run while its first
+Ripples are busy (so its freshness stamp matches when it reads), and a demand for a time a run
+already in flight covers counts as met.
+
+Ponds show `slow`, `throttled`, `throttled outlet` or `holding N` badges, the console logs each change, and a Pond's chart
 adds the data age at each completion. A Tide of 0s with the throttle on behaves like a Wave.
 
 The sidebar's **Examples** load the topologies it was explored on, and a setup can be opened from a

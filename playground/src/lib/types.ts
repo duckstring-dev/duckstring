@@ -85,9 +85,10 @@ export interface PondRunState {
 // Pulse throttle, per Pond (see orchestration.ts "Pulse throttle").
 export interface ThrottleState {
   counts: Record<string, { run: number; n: number }>; // demands that reached this Pond during each of its Ripples' current runs
-  slow: string[]; // own Ripples that saw two demands in one run, until they sit idle with no demand waiting
-  queued: boolean; // a trigger's Pulse waiting to be sent (Outlets only; at most one)
-  lastDemand: Record<string, { run: number; idle: boolean }>; // where each Ripple was when demand last reached this Pond
+  slow: string[]; // own Ripples that saw two demands in one run, until idle with no demand waiting
+  queued: boolean; // trigger demand taken but not yet sent upstream (Outlets only; one Pulse per completion)
+  held: number; // demands held at this Pond since its last forward (shown in the UI)
+  forwardedIn: Record<string, { run: number; idle: boolean }>; // each Ripple's run (and idleness) at this Pond's last forward
 }
 
 // Persistent triggers only (Tap and Pulse are one-shot, no entity).
