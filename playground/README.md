@@ -29,8 +29,8 @@ rule for stacked Pulses. A Pond counts the demands that reach it during each run
 and its Sources. Two in one run means that run can't keep up, so the Pond holds further demand
 (still meeting it itself) and forwards one Pulse, at the current time, each time the slow run turns
 over. A Source has turned over once it is idle or one of its first Ripples starts later work, and
-with release on an Inlet doesn't start a Pond Run while its Ripple is busy (so its freshness stamp
-matches when it reads). Held Ponds show a `holding N` or `saturated` badge, the console logs each hold and release,
+with release on an Inlet doesn't start a Pond Run while its first Ripples are busy (so its freshness
+stamp matches when it reads; later Ripples still pipeline). Held Ponds show a `holding N` or `saturated` badge, the console logs each hold and release,
 and a Pond's chart adds the data age at each completion. A Tide of 0s with release on behaves like a
 Wave.
 

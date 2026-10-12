@@ -32,6 +32,8 @@ const decreasing = () => graph([['A', 1, []], ['B', 3, ['A']], ['C', 2, ['B']], 
 const diamond = () => graph([['A', 1, []], ['B', 5, ['A']], ['D', 1, ['A']], ['C', 1, ['B', 'D']]]);
 const diamondLeadOnSlow = () =>
   graph([['A', 1, []], ['L1', 1, ['A']], ['L2', 1, ['L1']], ['L3', 1, ['L2']], ['L4', 1, ['L3']], ['L5', 1, ['L4']], ['B', 3, ['L5']], ['D', 1, ['A']], ['C', 1, ['B', 'D']]]);
+const longLead = () =>
+  graph([['I', 1, []], ['P1', 1, ['I']], ['P2', 1, ['P1']], ['P3', 1, ['P2']], ['P4', 1, ['P3']], ['P5', 1, ['P4']], ['P6', 1, ['P5']], ['B', 3, ['P6']], ['O', 1, ['B']]]);
 const sibling = () => graph([['F', 1, []], ['S', 6, []], ['X', 1, ['F', 'S']], ['O', 1, ['X']]]);
 
 interface Run { runs: Record<string, number>; age: number }
@@ -104,6 +106,33 @@ test('diamond with a long lead on the slow path keeps the bottleneck busy', () =
   const wave = simulate(diamondLeadOnSlow(), 'C', 120, { trigger: 'wave', release: false });
   expect(release.runs.B).toBe(wave.runs.B);
   expect(release.runs.D).toBeLessThan(wave.runs.D + 10);
+  expect(release.age).toBeLessThan(wave.age / 1.5);
+});
+
+// An Inlet whose three Ripples run in sequence (1 s → 2 s → 1.5 s), feeding one 1 s Sink. Pipelined,
+// it completes every 2 s; held back until all three are idle, it would complete every 4.5 s.
+function pipelinedInlet(): OrchestrState {
+  const s = graph([['I', 1, []], ['O', 1, ['I']]]);
+  s.ripples['I.r2'] = { id: 'I.r2', pondId: 'I', name: 'r2', parents: ['I.r'], durationMs: 2000, variability: 0 };
+  s.ripples['I.r3'] = { id: 'I.r3', pondId: 'I', name: 'r3', parents: ['I.r2'], durationMs: 1500, variability: 0 };
+  s.rippleStates['I.r2'] = rippleState();
+  s.rippleStates['I.r3'] = rippleState();
+  return s;
+}
+
+test('a multi-Ripple Inlet still pipelines its Ripples', () => {
+  const off = simulate(pipelinedInlet(), 'O', 60, { every: 1, release: false });
+  const on = simulate(pipelinedInlet(), 'O', 60, { every: 1, release: true });
+  const wave = simulate(pipelinedInlet(), 'O', 60, { trigger: 'wave', release: false });
+  near(on.runs.O, off.runs.O, 2); // a run every 2 s, not one every 4.5 s
+  expect(on.age).toBeLessThanOrEqual(wave.age + 0.1);
+});
+
+test('a long lead above the bottleneck keeps it busy', () => {
+  const release = simulate(longLead(), 'O', 120, { every: 1, release: true });
+  const wave = simulate(longLead(), 'O', 120, { trigger: 'wave', release: false });
+  expect(release.runs.B).toBe(wave.runs.B);
+  near(release.runs.I, wave.runs.I, 3);
   expect(release.age).toBeLessThan(wave.age / 1.5);
 });
 
