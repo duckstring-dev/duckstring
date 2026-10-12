@@ -2,6 +2,23 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
+## Unreleased
+
+### Orchestration
+
+- **A Pulse or Tide no longer refreshes an optional Source after its first build.** Push demand now
+  propagates only to a Pond's required Sources, as the orchestration spec describes: a Pond never waits
+  for an optional Source, so asking it to reach the target ran it for nothing. An optional Source that
+  has never run still gets one Pulse, so its Sink has output to read, and a Pond whose Sources are all
+  optional still pushes to every one of them. Tap and Wave are unchanged and still reach every Source.
+  If an optional Source needs a cadence of its own, give it its own Tide.
+- **A repeat request for the freshness a Pond is already running is ignored.** It used to start a second
+  Run at the same freshness, which the no-change skip then completed as a pass, ending the Run in flight
+  early. A duct re-sending its downstream's target could cause it.
+- **Push demand is no longer lost at a halted Source.** A Pond that stops being blocked (after Clear, a
+  recovery or a redeploy) re-sends its newest unmet push target upstream. Before, a Pulse waiting on a
+  Source whose Run had failed or been killed stranded after Clear until something else demanded the path.
+
 ## 0.6.1 — 2026-10-08
 
 ### Performance

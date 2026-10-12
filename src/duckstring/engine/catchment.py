@@ -50,6 +50,7 @@ __all__ = [
     "pond_set_has_pull",
     "ripple_set_has_pull",
     "pond_add_target",
+    "push_sources",
     "ripple_add_target",
     "complete_ripple",
     "fail_ripple",
@@ -262,10 +263,35 @@ def pond_add_target(s: EngineState, pid: PondId, t: datetime) -> None:
     ps = s.pond_states[pid]
     if ps.is_blocked:  # no new push enters a blocked Pond (and none propagates upstream from it)
         return
-    if t <= ps.end_f or t in ps.targets:
+    if t <= ps.end_f or t in ps.targets:  # already satisfied, or already requested
         return
+    if t <= ps.start_f:  # a Run already in flight at or past t will satisfy it (a repeat request for the
+        return           # epoch it is running would otherwise re-run it, or complete it early as a pass)
     ps.targets.append(t)
-    for sp in s.ponds[pid].sources:
+    _forward(s, pid, t)
+
+
+def push_sources(s: EngineState, pid: PondId) -> list[PondId]:
+    """The Sources push demand propagates to: the required ones (an optional Source is never waited for,
+    so forcing it to a target is pointless), plus, once, an **unbuilt** optional Source (never started a
+    Run and holding no target; a Sink would otherwise read output nobody builds). With no required
+    Sources, all of them: the Pond runs on whichever is fresher, so it needs them asked. Pull is
+    unaffected and still reaches every Source."""
+    pond = s.ponds[pid]
+    required = [sp for sp in pond.sources if sp not in pond.optional_sources]
+    if not required:
+        return list(pond.sources)
+
+    def unbuilt(sp: PondId) -> bool:
+        sps = s.pond_states[sp]
+        return sps.start_f == NEVER and not any(t > NEVER for t in sps.targets)
+
+    return [sp for sp in pond.sources if sp not in pond.optional_sources or unbuilt(sp)]
+
+
+def _forward(s: EngineState, pid: PondId, t: datetime) -> None:
+    """Send push target ``t`` from this Pond to its push Sources."""
+    for sp in push_sources(s, pid):
         pond_add_target(s, sp, t)
 
 
@@ -287,7 +313,10 @@ def required_sinks(s: EngineState, pid: PondId) -> list[PondId]:
 def derive_blocked(s: EngineState, pid: PondId) -> None:
     """Recompute ``is_blocked`` from this Pond's own failure and its required Sources, and — only if it
     changed — propagate to the Sinks so they re-derive. This is the single signal that travels
-    downstream; a Pond still reads its blocked state solely from itself and its Sources."""
+    downstream; a Pond still reads its blocked state solely from itself and its Sources.
+
+    A Pond that unblocks re-sends its newest unmet target to its push Sources: demand forwarded while a
+    Source was blocked (or dropped there, as a halted Run's is) was refused, and would otherwise strand."""
     ps = s.pond_states[pid]
     pond = s.ponds[pid]
     blocked = ps.is_failed or ps.is_killed or ps.remote_down or ps.missing_asset is not None \
@@ -299,6 +328,9 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
     )
     if blocked != ps.is_blocked:
         ps.is_blocked = blocked
+        unmet = [t for t in ps.targets if t > NEVER]
+        if not blocked and unmet:
+            _forward(s, pid, max(unmet))
         for q in required_sinks(s, pid):
             derive_blocked(s, q)
 

@@ -35,6 +35,7 @@ from duckstring.engine import (
     pond_set_has_pull,
     pond_source_f,
     pulse_pond,
+    push_sources,
     ripple_source_f,
     sentinel,
     sleep_pond,
@@ -216,6 +217,24 @@ def diamond_topology(triggers: list[Trigger] | None = None) -> tuple[EngineState
     ripples = [Ripple(n.lower(), n, n) for n in ("S", "A", "B", "X")]
     durations = {"s": secs(1), "a": secs(1), "b": secs(1), "x": secs(1)}
     return build(ponds, ripples, triggers), durations
+
+
+def graph(spec: list[tuple[str, float | list[float], list[str]]]) -> tuple[EngineState, dict[str, timedelta]]:
+    """Ponds as ``(name, seconds or a sequence of Ripples' seconds, sources)``; a Pond's Ripples run in
+    sequence as ``{name}.r{i}``. The shape of the playground's throttle tests."""
+    ponds, ripples, durations = [], [], {}
+    for name, sec, sources in spec:
+        ponds.append(Pond(name, name, sources=list(sources)))
+        for i, d in enumerate(sec if isinstance(sec, list) else [sec]):
+            rid = f"{name}.r{i}"
+            ripples.append(Ripple(rid, name, f"r{i}", parents=[f"{name}.r{i - 1}"] if i else []))
+            durations[rid] = secs(d)
+    return build(ponds, ripples), durations
+
+
+def chain(*spec: tuple[str, float | list[float]]) -> tuple[EngineState, dict[str, timedelta]]:
+    """A linear :func:`graph`, each Pond reading the one before it."""
+    return graph([(name, sec, [spec[i - 1][0]] if i else []) for i, (name, sec) in enumerate(spec)])
 
 
 # ─── Driver (plays the orchestrator) ──────────────────────────────────────────
@@ -872,6 +891,96 @@ def test_kill_parks_terminal_and_blocks_downstream():
     # Clear lifts it and unblocks downstream.
     cleared = clear_pond(out, "p1", T0 + secs(8))
     assert not cleared.pond_states["p1"].is_killed and not cleared.pond_states["p2"].is_blocked
+
+
+# ─── Push propagation (plans/pulse-throttle.md rules 6 to 8) ───────────────────
+
+
+@pytest.mark.timeout(1)
+def test_push_sources_are_required_plus_an_unbuilt_optional_or_all():
+    s, _ = graph([("A", 1, []), ("B", 1, []), ("C", 1, ["A", "B"])])
+    assert push_sources(s, "C") == ["A", "B"]
+    s.ponds["C"].optional_sources = {"B"}
+    assert push_sources(s, "C") == ["A", "B"]  # B has never run: asked, to build its first output
+    s.pond_states["B"].targets = [T0]
+    assert push_sources(s, "C") == ["A"]  # already asked
+    s.pond_states["B"].targets = []
+    s.pond_states["B"].start_f = T0
+    assert push_sources(s, "C") == ["A"]  # built: an optional Source is never waited for
+    s.ponds["C"].optional_sources = {"A", "B"}
+    assert push_sources(s, "C") == ["A", "B"]  # only optional: the Pond runs on whichever is fresher
+
+
+@pytest.mark.timeout(5)
+def test_pulses_build_an_optional_source_once_and_pull_still_reaches_it():
+    # C requires the 1 s A and takes the 4 s B optionally.
+    s, dur = graph([("A", 1, []), ("B", 4, []), ("C", 1, ["A", "B"])])
+    s.ponds["C"].optional_sources = {"B"}
+    d = Driver(s, dur)
+    for _ in range(30):
+        d.pulse("C")
+        d.run(1)
+    d.run(5)
+    assert d.state.pond_states["B"].runs_completed == 1  # asked once, to build its first output
+    assert d.state.pond_states["C"].runs_completed >= 25  # paced by A, never by B
+    d.tap("C")
+    d.run(10)
+    assert d.state.pond_states["B"].runs_completed > 1  # a Tap still reaches every Source
+
+
+@pytest.mark.timeout(5)
+def test_pulses_reach_every_source_when_all_are_optional():
+    s, dur = graph([("A", 1, []), ("B", 1, []), ("C", 1, ["A", "B"])])
+    s.ponds["C"].optional_sources = {"A", "B"}
+    d = Driver(s, dur)
+    for _ in range(2):
+        d.pulse("C")
+        d.run(5)
+    assert d.state.pond_states["A"].runs_completed == 2
+    assert d.state.pond_states["B"].runs_completed == 2
+
+
+@pytest.mark.timeout(5)
+def test_repeat_pulse_for_the_running_epoch_neither_reruns_nor_passes_it():
+    """Rule 6: a target a Run in flight covers counts as met. A repeat request for the epoch O is running
+    (a duct re-sending the downstream's target, or a throttle release in the same instant) used to start a
+    second Run at the same freshness, which the no-change skip then completed as a pass, ending the
+    in-flight Run early."""
+    s, dur = chain(("I", 1), ("O", 2))
+    d = Driver(s, dur)
+    d.pulse("O")
+    d.run(1.5)  # I done; O running at freshness T0
+    assert d.state.ripple_states["O.r0"].is_running
+    d.state = pulse_pond(d.state, "O", T0)  # the same epoch again
+    d._react()
+    o = d.state.pond_states["O"]
+    assert o.runs_started == 1 and d.state.pending_passes == []
+    assert d.state.ripple_states["O.r0"].is_running  # the in-flight Run is not completed early
+    d.run(5)
+    assert d.state.pond_states["O"].runs_completed == 1 and d.state.pond_states["O"].end_f == T0
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("halted", ["I", "M"])
+def test_demand_lost_at_a_halted_source_is_resent_when_it_unblocks(halted):
+    """Rule 8. A Run halted mid-flight drops the demand it was serving (its targets cleared at start), and
+    Clear returns it to idle without running. Each Pond that unblocks re-sends its newest unmet target, so
+    the demand reaches the halted Source again (the Inlet, when it was the one halted) and the Outlet is
+    served. Without the re-send the whole chain strands."""
+    s, dur = chain(("I", 1), ("M", 1), ("N", 1), ("O", 1))
+    d = Driver(s, dur)
+    d.pulse("O")
+    d.run(0.5 if halted == "I" else 1.5)
+    assert d.state.ripple_states[f"{halted}.r0"].is_running
+    d.state = fail_pond(d.state, halted, d.now)
+    del d.inflight[f"{halted}.r0"]  # its Duck died with it
+    assert d.state.pond_states["O"].is_blocked
+    d.state = clear_pond(d.state, halted, d.now)
+    d._react()
+    d.run(10)
+    for pid in ("I", "M", "N", "O"):
+        assert d.state.pond_states[pid].runs_completed == 1, pid
+    assert d.state.pond_states["O"].end_f == T0
 
 
 # ─── No-change skip: content freshness (changed_f) and the Pond pass ───────────
