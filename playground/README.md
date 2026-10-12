@@ -22,30 +22,28 @@ sidebar header restarts it. The choice is remembered in `localStorage` (`ds-play
 
 The steps are data in `src/lib/tourSteps.ts`; the runner is `src/lib/tour.ts`.
 
-## Pulse throttle (experimental)
+## Pulse throttle
 
-**Throttle** in the sim controls (or the sidebar with nothing selected) switches on an experimental
-rule for Pulses that arrive faster than the pipeline can deliver. A Ripple that sees two demands
-arrive during one of its runs is slow until it goes idle, and its Pond and every Pond downstream
-are throttled (it passes down like Blocked). Then:
+Pulses that arrive faster than the pipeline can serve them are paced by the bottleneck. A Ripple that
+sees two demands arrive during one of its runs is slow until it goes idle, and its Pond and every Pond
+downstream are throttled (it passes down like Blocked, through required Sources only). Then:
 
-- a throttled Outlet still takes every Pulse as its own target, but sends at most one Pulse
-  upstream per completion;
+- a throttled Outlet still takes every Pulse as its own target, but sends at most one Pulse upstream
+  per completion;
 - any other Pond with a slow Ripple holds the demand reaching it and, while it has demand to meet,
   sends one Pulse upstream each time that Ripple starts a run.
 
-So new demand enters at the rate the Outlet is served, and travels upstream timed to the
-bottleneck's starts. With the throttle on, an Inlet also doesn't start a Pond Run while its first
-Ripples are busy (so its freshness stamp matches when it reads), and a demand for a time a run
-already in flight covers counts as met.
+So new demand enters at the rate the Outlet is served and travels upstream timed to the bottleneck's
+starts. Sparse Pulses are never affected. An Inlet doesn't start a Pond Run while its first Ripples are
+busy (so its freshness stamp matches when it reads), and a demand for a time a run already in flight
+covers counts as met.
 
-Ponds show `slow`, `throttled`, `throttled outlet` or `holding N` badges, the console logs each change, and a Pond's chart
-adds the data age at each completion. A Tide of 0s with the throttle on behaves like a Wave.
+Ponds show `slow`, `throttled` or `holding N` badges, the console logs each change, and a Pond's chart
+adds the data age at each completion. A Tide of 0s behaves like a Wave.
 
 The sidebar's **Examples** load the topologies it was explored on, and a setup can be opened from a
-link: `?example=deep|decreasing|sibling|diamond|diamondlead|long|demo`, `?throttle=1`, and
-`?tide=<seconds>` or `?wave=1` for a trigger on every Outlet. For example
-`/?tour=0&example=diamond&throttle=1&tide=1`.
+link: `?example=deep|decreasing|sibling|diamond|diamondlead|long|demo`, and `?tide=<seconds>` or
+`?wave=1` for a trigger on every Outlet. For example `/?tour=0&example=diamond&tide=1`.
 
 ## Test
 

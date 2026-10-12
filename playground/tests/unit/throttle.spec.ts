@@ -4,9 +4,9 @@ import type { PondRunState, RippleRunState } from '../../src/lib/types';
 
 // Pulse throttle: checked on the topologies it was developed against. Under saturated demand, the
 // bottleneck runs as often as under a Wave, upstream settles at the bottleneck's rate, and the data is at
-// least as fresh as a Wave's. Sparse demand behaves exactly like Pulse. Until the bottleneck has started
-// its first run nothing can be detected, so the startup runs as plain Pulse: up to one extra upstream
-// run per Pulse for the length of the lead.
+// least as fresh as a Wave's. Sparse demand runs every Pond once per Pulse. Until the bottleneck has
+// started its first run nothing can be detected, so the startup runs as plain Pulse: up to one extra
+// upstream run per Pulse for the length of the lead.
 
 const pondState = (): PondRunState => ({
   startF: 0, endF: 0, D: 0, hasReceivedPull: false, hasPull: false, pullLocal: false, targets: [], isKilled: false,
@@ -62,8 +62,7 @@ interface Run { runs: Record<string, number>; late: Record<string, number>; age:
 // Drive sim time in 100 ms ticks: Pulses at `outlet` every `every` seconds, a 0 s Tide, or a Wave.
 // `drift` advances time by 90-129 ms per tick, as the playground does (it ticks on real elapsed time), so
 // events that coincide on an exact 100 ms grid land in different ticks.
-function simulate(s: OrchestrState, outlet: string, seconds: number, opts: { every?: number; tide0?: boolean; tide1?: boolean; wave?: boolean; throttle?: boolean; drift?: boolean }): Run {
-  s.pulseThrottle = !!opts.throttle;
+function simulate(s: OrchestrState, outlet: string, seconds: number, opts: { every?: number; tide0?: boolean; tide1?: boolean; wave?: boolean; drift?: boolean }): Run {
   if (opts.wave) s.triggers = { [outlet]: { pondId: outlet, kind: 'wave' } };
   if (opts.tide0) s.triggers = { [outlet]: { pondId: outlet, kind: 'tide', stalenessMs: 0 } };
   if (opts.tide1) s.triggers = { [outlet]: { pondId: outlet, kind: 'tide', stalenessMs: 1000 } };
@@ -94,7 +93,7 @@ for (const [name, [make, outlet, inlet, bottleneck]] of Object.entries(TOPOLOGIE
   test(`${name}: saturated demand runs at the bottleneck's pace, at least as fresh as a Wave`, () => {
     const wave = simulate(make(), outlet, 120, { wave: true });
     for (const opts of [{ every: 1 }, { tide0: true }, { tide1: true, drift: true }]) {
-      const throttled = simulate(make(), outlet, 120, { ...opts, throttle: true });
+      const throttled = simulate(make(), outlet, 120, opts);
       const ref = 'drift' in opts ? simulate(make(), outlet, 120, { wave: true, drift: true }) : wave;
       expect(throttled.runs[bottleneck]).toBe(ref.runs[bottleneck]);
       expect(throttled.runs[outlet]).toBe(ref.runs[outlet]);
@@ -104,30 +103,25 @@ for (const [name, [make, outlet, inlet, bottleneck]] of Object.entries(TOPOLOGIE
     }
   });
 
-  test(`${name}: sparse Pulses are untouched`, () => {
-    expect(simulate(make(), outlet, 120, { every: 60, throttle: true })).toEqual(simulate(make(), outlet, 120, { every: 60 }));
+  test(`${name}: sparse Pulses run every Pond once per Pulse`, () => {
+    const sparse = simulate(make(), outlet, 120, { every: 60 });
+    for (const [pond, runs] of Object.entries(sparse.runs)) expect(runs, pond).toBe(2);
   });
 }
 
-test('plain Pulse over-runs upstream; the throttle does not', () => {
-  const [make] = TOPOLOGIES['diamond, bottleneck on one path'];
-  expect(simulate(make(), 'C', 120, { every: 1 }).runs.D).toBeGreaterThan(100);
-  expect(simulate(make(), 'C', 120, { every: 1, throttle: true }).runs.D).toBeLessThan(30);
+test('a slow optional Source neither throttles its Sink nor is asked again once it has run', () => {
+  // `C` requires the 1 s `A` and takes the 4 s `B` optionally.
+  const s = graph([['A', 1, []], ['B', 4, []], ['C', 1, ['A', 'B']]]);
+  s.ponds.C.optionalSources = ['B'];
+  const r = simulate(s, 'C', 120, { every: 1 });
+  expect(r.runs.B).toBe(1); // asked once, to build its first output; never again
+  expect(r.runs.C).toBeGreaterThan(50); // paced by A (and its own 1 s run), never by B
 });
 
-test('turning the throttle off sends any held demand', () => {
-  let s = TOPOLOGIES['deep chain (fast stages, then a 5 s bottleneck)'][0]();
-  s.pulseThrottle = true;
-  let now = 1_000_000;
-  const holding = () => Object.values(s.pondStates).some((p) => (p.throttle?.held ?? 0) > 0);
-  for (let i = 0; i < 400 && !(i > 100 && holding()); i++) {
-    if (i % 10 === 0) s = pulsePond(s, 'O', now);
-    now += 100;
-    s = tick(now, s);
-  }
-  expect(holding()).toBe(true);
-  s.pulseThrottle = false;
-  s = tick(now + 100, s);
-  expect(holding()).toBe(false);
-  drainLog();
+test('a Pond with only optional Sources is throttled only when all of them are', () => {
+  const s = graph([['A', 1, []], ['B', 4, []], ['C', 1, ['A', 'B']]]);
+  s.ponds.C.optionalSources = ['A', 'B'];
+  const r = simulate(s, 'C', 120, { every: 1 });
+  expect(r.runs.A).toBeGreaterThan(50); // B is slow, A isn't, so C isn't throttled and A keeps up
+  expect(r.runs.C).toBeGreaterThan(50);
 });

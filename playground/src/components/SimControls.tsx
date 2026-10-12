@@ -1,6 +1,6 @@
 'use client';
 
-import { usePlaygroundStore, THEME_BRAND, THEME_SUCCESS, THEME_PULL } from '@/lib/store';
+import { usePlaygroundStore, THEME_BRAND, THEME_SUCCESS } from '@/lib/store';
 
 // Selectable run speeds (multipliers of real time).
 const SPEEDS = [0.1, 0.5, 1, 2, 10];
@@ -15,15 +15,12 @@ export function SimControls() {
   const speed = usePlaygroundStore((s) => s.speed);
   const togglePause = usePlaygroundStore((s) => s.togglePause);
   const setSpeed = usePlaygroundStore((s) => s.setSpeed);
-  const throttle = usePlaygroundStore((s) => s.pulseThrottle);
-  const setThrottle = usePlaygroundStore((s) => s.setPulseThrottle);
 
   return (
     <div
       style={{
         display: 'flex',
         alignItems: 'center',
-        flexWrap: 'wrap',
         gap: 4,
         background: '#1a1a1f',
         border: '1px solid #3f3f46',
@@ -62,20 +59,6 @@ export function SimControls() {
           </button>
         );
       })}
-      <span style={{ width: 1, alignSelf: 'stretch', background: '#3f3f46', margin: '0 2px' }} />
-      <button
-        onClick={() => setThrottle(!throttle)}
-        title="Pulse throttle (experimental): a Ripple that sees two demands in one run throttles its Pond and everything downstream; a throttled Outlet sends one queued Pulse each time the slow Ripple turns over"
-        data-testid="throttle-toggle"
-        style={{
-          ...btnBase,
-          color: throttle ? '#0f0f14' : '#a1a1aa',
-          background: throttle ? THEME_PULL : 'transparent',
-          borderColor: throttle ? THEME_PULL : '#3f3f46',
-        }}
-      >
-        Throttle {throttle ? 'on' : 'off'}
-      </button>
     </div>
   );
 }

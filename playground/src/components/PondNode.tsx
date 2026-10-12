@@ -27,7 +27,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const slowNames = usePlaygroundStore((s) =>
     (s.pondStates[pondId]?.throttle?.slow ?? []).map((r) => s.ripples[r]?.name ?? r).join(', ')
   );
-  const throttled = usePlaygroundStore((s) => !!s.pulseThrottle && !!s.ponds[pondId] && isThrottled(s, pondId));
+  const throttled = usePlaygroundStore((s) => !!s.ponds[pondId] && isThrottled(s, pondId));
   const held = usePlaygroundStore((s) => s.pondStates[pondId]?.throttle?.held ?? 0);
 
   if (!pond || !ps) return null;

@@ -143,8 +143,6 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const setRippleVariability = usePlaygroundStore((s) => s.setRippleVariability);
   const setAllVariability = usePlaygroundStore((s) => s.setAllVariability);
   const loadExample = usePlaygroundStore((s) => s.loadExample);
-  const pulseThrottle = usePlaygroundStore((s) => s.pulseThrottle);
-  const setPulseThrottle = usePlaygroundStore((s) => s.setPulseThrottle);
   const linkPonds = usePlaygroundStore((s) => s.linkPonds);
   const unlinkPonds = usePlaygroundStore((s) => s.unlinkPonds);
   const linkRipples = usePlaygroundStore((s) => s.linkRipples);
@@ -449,21 +447,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
         </>
       )}
 
-      {/* Nothing selected: Pulse throttle, examples, global variability */}
-      {!selectedPond && !selectedRipple && !selectedTriggerId && (
-        <Section>
-          <Label>Pulse throttle (experimental)</Label>
-          <Btn small onClick={() => setPulseThrottle(!pulseThrottle)} color={THEME_PULL}>
-            {pulseThrottle ? 'On: turn off' : 'Off: turn on'}
-          </Btn>
-          <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
-            A Ripple that sees two demands arrive during one of its runs is slow until it goes idle; its Pond and
-            everything downstream is throttled. A throttled Outlet still takes every demand but sends one Pulse
-            upstream per completion. Any other Pond with a slow Ripple holds the demand reaching it and sends one
-            Pulse upstream each time that Ripple starts a run. Try a Tide of 0s (Wave-like) or 1s.
-          </div>
-        </Section>
-      )}
+      {/* Nothing selected: examples, global variability */}
       {!selectedPond && !selectedRipple && !selectedTriggerId && (
         <Section>
           <Label>Examples</Label>
