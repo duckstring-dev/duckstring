@@ -459,8 +459,8 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
           <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
             A Ripple that sees two demands arrive during one of its runs is slow until it goes idle; its Pond and
             everything downstream is throttled. A throttled Outlet still takes every demand but sends one Pulse
-            upstream per completion. The first slow Pond on a path holds the demand reaching it and sends one Pulse
-            upstream each time its slow Ripple starts a run. Try a Tide of 0s (Wave-like) or 1s.
+            upstream per completion. Any other Pond with a slow Ripple holds the demand reaching it and sends one
+            Pulse upstream each time that Ripple starts a run. Try a Tide of 0s (Wave-like) or 1s.
           </div>
         </Section>
       )}

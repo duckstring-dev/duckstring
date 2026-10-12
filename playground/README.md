@@ -31,8 +31,8 @@ are throttled (it passes down like Blocked). Then:
 
 - a throttled Outlet still takes every Pulse as its own target, but sends at most one Pulse
   upstream per completion;
-- the first slow Pond on a path (none of its Sources throttled) holds the demand reaching it and,
-  while it has demand to meet, sends one Pulse upstream each time its slow Ripple starts a run.
+- any other Pond with a slow Ripple holds the demand reaching it and, while it has demand to meet,
+  sends one Pulse upstream each time that Ripple starts a run.
 
 So new demand enters at the rate the Outlet is served, and travels upstream timed to the
 bottleneck's starts. With the throttle on, an Inlet also doesn't start a Pond Run while its first

@@ -96,7 +96,6 @@ function clone(s: OrchestrState): OrchestrState {
       throttle: v.throttle && {
         counts: { ...v.throttle.counts },
         slow: [...v.throttle.slow],
-        queued: v.throttle.queued,
         held: v.throttle.held,
         forwardedIn: { ...v.throttle.forwardedIn },
       },
@@ -256,7 +255,7 @@ function rippleSetHasPull(s: OrchestrState, rid: RippleId, now: number): void {
 
 // A Pond receives a push target T: record it (if unsatisfied and new) and propagate eagerly
 // upstream to required Sources. The set keeps every outstanding request, not just the latest.
-function pondAddTarget(s: OrchestrState, pid: PondId, T: number): void {
+function pondAddTarget(s: OrchestrState, pid: PondId, T: number, fromTrigger = false): void {
   const ps = s.pondStates[pid];
   if (ps.isBlocked) return; // no new push enters a blocked Pond (and none propagates upstream from it)
   if (T <= ps.endF || ps.targets.includes(T)) return; // already satisfied, or already requested
@@ -267,7 +266,9 @@ function pondAddTarget(s: OrchestrState, pid: PondId, T: number): void {
   emit('pond-push', `${pname(s, pid)} pond push target → age ${ageStr(T, logNow)}`);
   if (s.pulseThrottle) {
     countThrottle(s, pid);
-    if (s.ponds[pid].sources.length > 0 && holdsDemand(s, pid)) {
+    // Hold: a Pond with a slow Ripple holds what reaches it, and so does a throttled trigger Pond (the
+    // Outlet). The demand is still this Pond's target, so it runs on anything fresher that arrives.
+    if (s.ponds[pid].sources.length > 0 && (hasSlow(s, pid) || (fromTrigger && isThrottled(s, pid)))) {
       throttleOf(s, pid).held += 1;
       emit('hold', `${pname(s, pid)} holds the demand (${throttleOf(s, pid).held} held)`);
       return;
@@ -278,24 +279,24 @@ function pondAddTarget(s: OrchestrState, pid: PondId, T: number): void {
 
 // ─── Pulse throttle (experimental) ────────────────────────────────────────────
 //
-// Two parts, sharing one detection: a Ripple that sees two demands reach its Pond during one of its runs
-// can't keep up, so it is *slow*. A Pond with a slow Ripple, or with a throttled Source, is *throttled*
+// Detection is per Ripple: a Ripple that sees two demands reach its Pond during one of its runs can't keep
+// up, so it is *slow*, until it goes idle (an idle stage isn't the bottleneck: a stage below the bottleneck
+// idles every cycle waiting for it, and a stray flag from one long noisy run clears the same way). A Pond
+// with a slow Ripple, or with a throttled Source, is *throttled*; that flag is all that passes between Ponds
 // (read from Sources, like Blocked).
 //
-//   Outlet throttle    A throttled trigger Pond (the Outlet) takes each trigger's demand as its own target
-//                      but sends at most one Pulse upstream per completion, so new demand enters the
-//                      pipeline at the rate the Outlet is actually served.
-//   Bottleneck release The first slow Pond on a path (none of its Sources throttled) holds all arriving
-//                      demand and, while it has demand to meet, forwards one Pulse (at `now`) each time
-//                      its slow Ripple starts a new run, plus one if that Ripple sits idle (starved). So
-//                      requests go upstream at the bottleneck's pace, timed to its starts, the moment a
-//                      Wave re-arms. Slow Ponds further down are idle because of it, so they don't act.
-//
-// A slow Ripple stops being slow once it is idle with no demand waiting at its Pond.
+// Two kinds of Pond hold the demand that reaches them, keeping it as their own targets (so they still run
+// on anything fresher that arrives) but not passing it upstream straight away:
+//   - a Pond with a slow Ripple (the bottleneck), and
+//   - a throttled trigger Pond (the Outlet; the only reader of the throttled flag).
+// Each sends one Pulse upstream (at `now`) per turn, while it has demand to meet: the bottleneck's turn is
+// its slow Ripples starting a new run (when a Wave would re-arm), the Outlet's is completing a run. So
+// demand travels upstream at the bottleneck's pace, and enters at the rate the Outlet is served, which
+// bounds every path into it, diamonds and siblings included.
 
 function throttleOf(s: OrchestrState, pid: PondId): ThrottleState {
   const ps = s.pondStates[pid];
-  if (!ps.throttle) ps.throttle = { counts: {}, slow: [], queued: false, held: 0, forwardedIn: {} };
+  if (!ps.throttle) ps.throttle = { counts: {}, slow: [], held: 0, forwardedIn: {} };
   return ps.throttle;
 }
 
@@ -314,42 +315,34 @@ function countThrottle(s: OrchestrState, pid: PondId): void {
   }
 }
 
-// Bottleneck release: a Pond leading the throttle holds all arriving demand (it joins the Pond's targets)
-// and forwards on its own schedule instead (see `releaseDue`).
-function holdsDemand(s: OrchestrState, pid: PondId): boolean {
-  return leadsThrottle(s, pid);
-}
 
-// Forward demand upstream, noting where each Ripple was (which run, and whether idle).
+// Forward demand upstream, noting which run each Ripple was in.
 function forwardDemand(s: OrchestrState, pid: PondId, T: number): void {
+  if (s.pondStates[pid].throttle) s.pondStates[pid].throttle!.held = 0;
   if (s.pulseThrottle) {
     const th = throttleOf(s, pid);
-    th.held = 0;
-    for (const rid of ripplesOf(s, pid)) {
-      const rs = s.rippleStates[rid];
-      th.forwardedIn[rid] = { run: rs.runsStarted, idle: !rs.isRunning };
-    }
+    for (const rid of ripplesOf(s, pid)) th.forwardedIn[rid] = s.rippleStates[rid].runsStarted;
   }
   for (const sp of s.ponds[pid].sources) pondAddTarget(s, sp, T);
 }
 
-// The leading slow Pond's schedule, while it has demand to meet: forward once each time every slow Ripple
-// has started a new run since the last forward, and once more if one sits idle (starved: too few requests
-// in flight to keep it busy).
+// A slow Pond's schedule, while it has demand to meet: forward once each time every slow Ripple has started
+// a new run since the last forward.
 function releaseDue(s: OrchestrState, pid: PondId): boolean {
   const th = s.pondStates[pid].throttle!;
   if (!s.pondStates[pid].targets.some((t) => Number.isFinite(t))) return false;
   return th.slow.every((rid) => {
     const rs = s.rippleStates[rid];
-    const last = th.forwardedIn[rid];
-    return !last || rs.runsStarted > last.run;
+    return rs.runsStarted > (th.forwardedIn[rid] ?? -1);
   });
 }
 
-// Does this Pond lead the throttle on its paths: it has a slow Ripple and none of its Sources is throttled?
-// A slow Pond below another one is idle because of the one above it, so only the first acts.
-function leadsThrottle(s: OrchestrState, pid: PondId): boolean {
-  return (s.pondStates[pid].throttle?.slow.length ?? 0) > 0 && !s.ponds[pid].sources.some((sp) => isThrottled(s, sp));
+// Does this Pond pace demand on its own slow Ripple? A trigger Pond never does: it takes raw trigger
+// demand, so under a fast trigger its own Ripple looks slow whether or not it is the bottleneck. It paces
+// on its completions instead, whenever it is throttled (which its own slow Ripple also makes it).
+function hasSlow(s: OrchestrState, pid: PondId): boolean {
+  const th = s.pondStates[pid].throttle;
+  return !!th && th.slow.length > 0 && !th.trigger;
 }
 
 export function isThrottled(s: OrchestrState, pid: PondId): boolean {
@@ -357,25 +350,14 @@ export function isThrottled(s: OrchestrState, pid: PondId): boolean {
   return s.ponds[pid].sources.some((sp) => isThrottled(s, sp));
 }
 
-// A trigger's demand at its Pond (Pulse or Tide). A throttled Pond still takes it as its own target, so it
-// runs on whatever fresher data arrives, but holds back sending it upstream until its next completion.
+// A trigger's demand at its Pond (Pulse or Tide).
 function triggerDemand(s: OrchestrState, pid: PondId, now: number): void {
-  if (!s.pulseThrottle || !isThrottled(s, pid)) {
-    pondAddTarget(s, pid, now);
-    return;
-  }
-  const ps = s.pondStates[pid];
-  if (ps.isBlocked || now <= ps.endF || ps.targets.includes(now)) return;
-  ps.targets.push(now);
-  countThrottle(s, pid);
-  const th = throttleOf(s, pid);
-  if (!th.queued) emit('queue', `${pname(s, pid)} is throttled: holding its demand until its next completion`);
-  th.queued = true;
+  if (s.pulseThrottle) throttleOf(s, pid).trigger = true;
+  pondAddTarget(s, pid, now, true);
 }
 
-// After the tick's starts: lift idle slow Ripples with no demand waiting, release held demand at Ponds
-// whose slow Ripples turned over, and emit queued Pulses from Outlets that completed (or are no longer
-// throttled). Returns whether anything changed.
+// After the tick's starts: clear slow Ripples that went idle, then let each Pond holding demand send one
+// Pulse upstream if its turn has come. Returns whether anything changed.
 function settleThrottle(s: OrchestrState, now: number, completed: Set<PondId>): boolean {
   let changed = false;
   for (const pid of Object.keys(s.pondStates)) {
@@ -389,15 +371,16 @@ function settleThrottle(s: OrchestrState, now: number, completed: Set<PondId>): 
         changed = true;
       }
     }
-    if (s.pulseThrottle ? leadsThrottle(s, pid) && releaseDue(s, pid) : th.held > 0) {
-      emit('release', `${pname(s, pid)} releases one Pulse upstream (${th.held} held)`);
-      forwardDemand(s, pid, now);
-      changed = true;
-    }
-    if (th.queued && (!s.pulseThrottle || !isThrottled(s, pid) || completed.has(pid))) {
-      th.queued = false;
-      completed.delete(pid); // one Pulse upstream per completion
-      emit('emit', `${pname(s, pid)} sends one Pulse upstream`);
+    // Release one Pulse per turn: a slow Pond's turn is its slow Ripples starting a new run; any other
+    // Pond holding demand (a throttled Outlet) turns when it completes a run, or once it isn't throttled.
+    const due = !s.pulseThrottle
+      ? th.held > 0
+      : hasSlow(s, pid)
+        ? releaseDue(s, pid)
+        : th.held > 0 && (completed.has(pid) || !isThrottled(s, pid));
+    if (due) {
+      emit('release', `${pname(s, pid)} sends one Pulse upstream (${th.held} held)`);
+      completed.delete(pid);
       forwardDemand(s, pid, now);
       changed = true;
     }

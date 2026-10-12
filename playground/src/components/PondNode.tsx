@@ -28,7 +28,6 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
     (s.pondStates[pondId]?.throttle?.slow ?? []).map((r) => s.ripples[r]?.name ?? r).join(', ')
   );
   const throttled = usePlaygroundStore((s) => !!s.pulseThrottle && !!s.ponds[pondId] && isThrottled(s, pondId));
-  const queued = usePlaygroundStore((s) => !!s.pondStates[pondId]?.throttle?.queued);
   const held = usePlaygroundStore((s) => s.pondStates[pondId]?.throttle?.held ?? 0);
 
   if (!pond || !ps) return null;
@@ -37,7 +36,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const borderColor = stateColor(visualState, ps.hasPull || ps.hasReceivedPull, pushTargetF(ps.targets));
   const isSelected = selectedPondId === pondId;
   const showPulseTag = pulseTagGen !== undefined && ps.runsCompleted <= pulseTagGen;
-  const throttleTag = queued ? 'throttled outlet' : held > 0 ? `holding ${held}` : slowNames ? 'slow' : throttled ? 'throttled' : null;
+  const throttleTag = held > 0 ? `holding ${held}` : slowNames ? 'slow' : throttled ? 'throttled' : null;
 
   return (
     <div

@@ -52,6 +52,8 @@ const TOPOLOGIES: Record<string, [() => OrchestrState, string, string, string]> 
   'diamond, bottleneck on one path': [() => graph([['A', 1, []], ['B', 5, ['A']], ['D', 1, ['A']], ['C', 1, ['B', 'D']]]), 'C', 'A', 'B'],
   'diamond, long lead on the slow path': [() => graph([['A', 1, []], ['L1', 1, ['A']], ['L2', 1, ['L1']], ['L3', 1, ['L2']], ['L4', 1, ['L3']], ['L5', 1, ['L4']], ['B', 3, ['L5']], ['D', 1, ['A']], ['C', 1, ['B', 'D']]]), 'C', 'D', 'B'],
   'Inlet with Ripples in sequence (1 s → 2 s → 1.5 s)': [() => chain([['I', [1, 2, 1.5]], ['O', 1]]), 'O', 'I', 'I'],
+  'Outlet is the bottleneck (1 s → 4 s)': [() => chain([['I', 1], ['O', 4]]), 'O', 'I', 'O'],
+  'Outlet is the bottleneck behind a long lead (six 1 s stages, then 4 s)': [() => chain([['I', 1], ['P1', 1], ['P2', 1], ['P3', 1], ['P4', 1], ['P5', 1], ['O', 4]]), 'O', 'I', 'O'],
   'bottleneck inside a Pond (1 s → 4 s → 1 s)': [() => chain([['I', 1], ['P', [1, 4, 1]], ['O', 1]]), 'O', 'I', 'P'],
 };
 
@@ -113,18 +115,19 @@ test('plain Pulse over-runs upstream; the throttle does not', () => {
   expect(simulate(make(), 'C', 120, { every: 1, throttle: true }).runs.D).toBeLessThan(30);
 });
 
-test('turning the throttle off sends any queued Pulse', () => {
+test('turning the throttle off sends any held demand', () => {
   let s = TOPOLOGIES['deep chain (fast stages, then a 5 s bottleneck)'][0]();
   s.pulseThrottle = true;
   let now = 1_000_000;
-  for (let i = 0; i < 200; i++) {
+  const holding = () => Object.values(s.pondStates).some((p) => (p.throttle?.held ?? 0) > 0);
+  for (let i = 0; i < 400 && !(i > 100 && holding()); i++) {
     if (i % 10 === 0) s = pulsePond(s, 'O', now);
     now += 100;
     s = tick(now, s);
   }
-  expect(s.pondStates.O.throttle?.queued).toBe(true);
+  expect(holding()).toBe(true);
   s.pulseThrottle = false;
   s = tick(now + 100, s);
-  expect(s.pondStates.O.throttle?.queued).toBe(false);
+  expect(holding()).toBe(false);
   drainLog();
 });
