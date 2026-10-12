@@ -51,6 +51,7 @@ export interface RippleRunState {
   // Run bookkeeping (the simulation of an actual run taking time):
   isRunning: boolean;
   runStartedAt: number | null;
+  lastStartedAt?: number; // wall-clock start of the most recent run (kept after it completes)
   currentRunDurationMs: number | null;
   lastDurationMs: number | null;
   // Trace data for the sidebar charts:
@@ -88,8 +89,8 @@ export interface PondRunState {
 export interface ReleaseState {
   counts: Record<string, { run: number; n: number }>; // demands that reached this Pond during each witness's current run
   saturated: string[]; // witnesses proven slower than the demand (two demands arrived during one of their runs)
-  forwardedIn: Record<string, number>; // each witness's run number when this Pond last forwarded demand upstream
-  forwardedAt: number; // when this Pond last forwarded demand upstream (a Source turns over by starting a later Pond Run)
+  forwardedIn: Record<string, number>; // each Ripple witness's run number when this Pond last forwarded demand upstream
+  forwardedAt: number; // when this Pond last forwarded demand upstream (a Source turns over by starting work later)
   held: number; // demands held back (kept as this Pond's own targets, not yet forwarded)
 }
 

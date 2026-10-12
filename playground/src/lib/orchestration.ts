@@ -281,6 +281,10 @@ function forwardDemand(s: OrchestrState, pid: PondId, T: number): void {
 // (started a new run, or stopped) since the last forward, the Pond *releases*, sending one Pulse at
 // `now` upstream. `now` covers every held target. Saturation clears once every witness turns over
 // with nothing held.
+//
+// One engine change goes with it: an Inlet doesn't start a Pond Run while its Ripples are busy. An
+// Inlet stamps its freshness when its Pond Run starts, but reads its data when its Ripple runs, so a
+// Pond Run queued behind a busy Ripple would be labelled older than the data it reads.
 
 function releaseOf(s: OrchestrState, pid: PondId): ReleaseState {
   const ps = s.pondStates[pid];
@@ -313,16 +317,18 @@ function witnessRun(s: OrchestrState, w: string): { running: boolean; run: numbe
 }
 
 // Has a witness turned over since this Pond last forwarded demand? A Ripple has once it starts a new run
-// (or stops). A Source Pond has once it is idle, or has started a Pond Run *after* the forward. Its Pond
-// Runs overlap, so counting the run our own forward started would release straight away: an Inlet
-// starts that run at the same instant, so it effectively waits until the Inlet is free, while a Source
-// with work upstream starts its next run only once data reaches it, so the next request travels while it works.
+// (or stops). A Source Pond has once it is idle, or once one of its first Ripples started a run at a
+// strictly later instant than the forward: it has taken on new work since. Pond-level signals don't
+// work here, because a Source's Pond Runs queue behind its busy Ripples (a slow Source with a fast
+// Source of its own would look ready every second), and a run it started on our own forward, at the
+// same instant, is our demand, not a turnover.
 function turnedOver(s: OrchestrState, rel: ReleaseState, w: string): boolean {
   const { running, run } = witnessRun(s, w);
   if (!running) return true;
   if (w.startsWith('r:')) return run !== rel.forwardedIn[w];
-  const ps = s.pondStates[w.slice(2)];
-  return (ps.startTimesByF[ps.startF] ?? -Infinity) > rel.forwardedAt;
+  const sp = w.slice(2);
+  const roots = ripplesOf(s, sp).filter((r) => intraParents(s, r).length === 0);
+  return Math.max(...roots.map((r) => s.rippleStates[r].lastStartedAt ?? -Infinity)) > rel.forwardedAt;
 }
 
 // Count this demand against every running witness, and decide whether to hold it.
@@ -409,6 +415,8 @@ function deriveBlocked(s: OrchestrState, pid: PondId): void {
 function canStartPond(s: OrchestrState, pid: PondId, now: number): boolean {
   const ps = s.pondStates[pid];
   if (ps.isKilled) return false; // terminal until an operator Wake/Force
+  // Pulse release: an Inlet waits for its Ripples, so its freshness stamp matches when it reads.
+  if (s.pulseRelease && s.ponds[pid].sources.length === 0 && anyRippleBusy(s, pid)) return false;
   const { F } = pondSourceF(s, pid, now);
   if (F == null) return false;
   // Push: run when the inputs can satisfy the oldest outstanding request (the run takes the freshest
@@ -475,6 +483,7 @@ function startRipple(s: OrchestrState, rid: RippleId, now: number): void {
   rs.startF = sourceF;
   rs.isRunning = true;
   rs.runStartedAt = now;
+  rs.lastStartedAt = now;
   rs.currentRunDurationMs = sampleDuration(r.durationMs, r.variability);
   rs.runsStarted += 1;
   emit('ripple-start', `${rfullname(s, rid)} started (freshness age ${ageStr(sourceF, now)}, ~${((rs.currentRunDurationMs ?? 0) / 1000).toFixed(1)}s)`);

@@ -172,6 +172,25 @@ export const EXAMPLES: Record<string, ExampleSpec> = {
       { name: 'outlet', sources: ['join'], ripples: [['r1', 1]] },
     ],
   },
+  diamond: {
+    label: 'Diamond (5s bottleneck on one path)',
+    ponds: [
+      { name: 'a', ripples: [['ingest', 1]] },
+      { name: 'b', sources: ['a'], ripples: [['slow', 5]] },
+      { name: 'd', sources: ['a'], ripples: [['r1', 1]] },
+      { name: 'c', sources: ['b', 'd'], ripples: [['r1', 1]] },
+    ],
+  },
+  diamondlead: {
+    label: 'Diamond, long lead on the slow path (five 1s stages, then 3s)',
+    ponds: [
+      { name: 'a', ripples: [['ingest', 1]] },
+      ...[1, 2, 3, 4, 5].map((i) => ({ name: `l${i}`, sources: [i === 1 ? 'a' : `l${i - 1}`], ripples: [['r1', 1]] as [string, number][] })),
+      { name: 'b', sources: ['l5'], ripples: [['slow', 3]] },
+      { name: 'd', sources: ['a'], ripples: [['r1', 1]] },
+      { name: 'c', sources: ['b', 'd'], ripples: [['r1', 1]] },
+    ],
+  },
   long: {
     label: 'Long lead (seven 1s stages, then a 3s bottleneck)',
     ponds: [

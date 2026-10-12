@@ -28,12 +28,14 @@ The steps are data in `src/lib/tourSteps.ts`; the runner is `src/lib/tour.ts`.
 rule for stacked Pulses. A Pond counts the demands that reach it during each run of its own Ripples
 and its Sources. Two in one run means that run can't keep up, so the Pond holds further demand
 (still meeting it itself) and forwards one Pulse, at the current time, each time the slow run turns
-over. Held Ponds show a `holding N` or `saturated` badge, the console logs each hold and release,
+over. A Source has turned over once it is idle or one of its first Ripples starts later work, and
+with release on an Inlet doesn't start a Pond Run while its Ripple is busy (so its freshness stamp
+matches when it reads). Held Ponds show a `holding N` or `saturated` badge, the console logs each hold and release,
 and a Pond's chart adds the data age at each completion. A Tide of 0s with release on behaves like a
 Wave.
 
 The sidebar's **Examples** load the topologies it was explored on, and a setup can be opened from a
-link: `?example=deep|decreasing|sibling|long|demo`, `?release=1`, and `?tide=<seconds>` or `?wave=1`
+link: `?example=deep|decreasing|sibling|diamond|diamondlead|long|demo`, `?release=1`, and `?tide=<seconds>` or `?wave=1`
 for a trigger on every Outlet. For example `/?tour=0&example=deep&release=1&tide=1`.
 
 ## Test

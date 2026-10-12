@@ -29,6 +29,9 @@ function graph(spec: [string, number, string[]][]): OrchestrState {
 
 const deep = () => graph([['I', 1, []], ['P1', 1, ['I']], ['P2', 1, ['P1']], ['P3', 1, ['P2']], ['P4', 1, ['P3']], ['B', 5, ['P4']], ['O', 1, ['B']]]);
 const decreasing = () => graph([['A', 1, []], ['B', 3, ['A']], ['C', 2, ['B']], ['D', 1, ['C']]]);
+const diamond = () => graph([['A', 1, []], ['B', 5, ['A']], ['D', 1, ['A']], ['C', 1, ['B', 'D']]]);
+const diamondLeadOnSlow = () =>
+  graph([['A', 1, []], ['L1', 1, ['A']], ['L2', 1, ['L1']], ['L3', 1, ['L2']], ['L4', 1, ['L3']], ['L5', 1, ['L4']], ['B', 3, ['L5']], ['D', 1, ['A']], ['C', 1, ['B', 'D']]]);
 const sibling = () => graph([['F', 1, []], ['S', 6, []], ['X', 1, ['F', 'S']], ['O', 1, ['X']]]);
 
 interface Run { runs: Record<string, number>; age: number }
@@ -85,6 +88,25 @@ test('slow sibling: the fast Inlet is paced by the slow one', () => {
   expect(release.age).toBeLessThan(wave.age + 0.5);
 });
 
+test('diamond: the fast path is paced by the slow one', () => {
+  const pulse = simulate(diamond(), 'C', 120, { every: 1, release: false });
+  const release = simulate(diamond(), 'C', 120, { every: 1, release: true });
+  const wave = simulate(diamond(), 'C', 120, { trigger: 'wave', release: false });
+  expect(pulse.runs.D).toBeGreaterThan(100); // plain Pulse routes around the bottleneck
+  near(release.runs.A, wave.runs.A, 2);
+  near(release.runs.D, wave.runs.D, 2);
+  expect(release.runs.C).toBe(wave.runs.C);
+  expect(release.age).toBeLessThanOrEqual(wave.age + 0.1);
+});
+
+test('diamond with a long lead on the slow path keeps the bottleneck busy', () => {
+  const release = simulate(diamondLeadOnSlow(), 'C', 120, { every: 1, release: true });
+  const wave = simulate(diamondLeadOnSlow(), 'C', 120, { trigger: 'wave', release: false });
+  expect(release.runs.B).toBe(wave.runs.B);
+  expect(release.runs.D).toBeLessThan(wave.runs.D + 10);
+  expect(release.age).toBeLessThan(wave.age / 1.5);
+});
+
 test('sparse Pulses are untouched', () => {
   const pulse = simulate(deep(), 'O', 120, { every: 60, release: false });
   const release = simulate(deep(), 'O', 120, { every: 60, release: true });
@@ -92,10 +114,12 @@ test('sparse Pulses are untouched', () => {
 });
 
 test('a zero-bound Tide with release behaves like a Wave', () => {
-  for (const [make, outlet] of [[deep, 'O'], [decreasing, 'D'], [sibling, 'O']] as const) {
+  for (const [make, outlet] of [[deep, 'O'], [decreasing, 'D'], [sibling, 'O'], [diamond, 'C']] as const) {
     const tide0 = simulate(make(), outlet, 120, { trigger: 'tide', release: true });
     const wave = simulate(make(), outlet, 120, { trigger: 'wave', release: false });
     expect(tide0.runs[outlet]).toBe(wave.runs[outlet]);
+    const inlet = Object.keys(tide0.runs)[0];
+    expect(tide0.runs[inlet]).toBeLessThan(wave.runs[inlet] * 1.25);
     expect(tide0.age).toBeLessThan(wave.age + 0.5);
   }
 });
