@@ -1,6 +1,6 @@
 'use client';
 
-import { THEME_PULL, THEME_RUNNING } from '@/lib/store';
+import { THEME_PULL, THEME_PUSH, THEME_RUNNING } from '@/lib/store';
 
 // Run-cadence + run-duration trace. Two lines share one y-axis so the run duration can be
 // read against the cadence (≈ the bottleneck): well below it ⇒ this node isn't the bottleneck;
@@ -8,6 +8,7 @@ import { THEME_PULL, THEME_RUNNING } from '@/lib/store';
 // proportional to the mean) so aberrant gaps — e.g. after a sleep — don't squash the rest.
 const INTERVAL_COLOR = THEME_PULL; // run cadence, tied to Wave/pull (≈ bottleneck under a Wave)
 const DURATION_COLOR = THEME_RUNNING; // run duration, tied to the running state
+const AGE_COLOR = THEME_PUSH; // data age at publish (Ponds only), tied to push/freshness
 
 function quantile(sortedAsc: number[], q: number): number {
   if (sortedAsc.length === 0) return 0;
@@ -15,7 +16,7 @@ function quantile(sortedAsc: number[], q: number): number {
   return sortedAsc[i];
 }
 
-export function TraceChart({ times, durations }: { times: number[]; durations: number[] }) {
+export function TraceChart({ times, durations, ages }: { times: number[]; durations: number[]; ages?: number[] }) {
   const W = 256;
   const H = 100;
   const padL = 6;
@@ -27,11 +28,13 @@ export function TraceChart({ times, durations }: { times: number[]; durations: n
   const intervals: number[] = [];
   for (let i = 1; i < times.length; i++) intervals.push((times[i] - times[i - 1]) / 1000);
   const durs = durations.map((d) => d / 1000);
+  const ageVals = (ages ?? []).map((a) => a / 1000);
 
   const header = (
     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#a1a1aa', marginBottom: 4 }}>
       <span style={{ color: INTERVAL_COLOR }}>● interval</span>
       <span style={{ color: DURATION_COLOR }}>● run dur</span>
+      {ages && <span style={{ color: AGE_COLOR }}>● data age</span>}
       <span style={{ color: '#71717a' }}>(s)</span>
     </div>
   );
@@ -46,13 +49,13 @@ export function TraceChart({ times, durations }: { times: number[]; durations: n
   }
 
   // Clip the y-axis: 75th percentile of all plotted values + margin ∝ mean.
-  const all = [...intervals, ...durs];
+  const all = [...intervals, ...durs, ...ageVals];
   const sorted = [...all].sort((a, b) => a - b);
   const mean = all.reduce((a, b) => a + b, 0) / all.length;
   const yMax = Math.max(quantile(sorted, 0.9) + 0.4 * mean, 0.01);
 
   // Shared x-index by completion number (durations has one point per completion).
-  const n = Math.max(durs.length, intervals.length + 1);
+  const n = Math.max(durs.length, intervals.length + 1, ageVals.length);
   const x = (i: number) => (n <= 1 ? padL : padL + (i / (n - 1)) * (W - padL - padR));
   const y = (v: number) => padT + (1 - Math.min(v, yMax) / yMax) * (H - padT - padB);
 
@@ -75,6 +78,7 @@ export function TraceChart({ times, durations }: { times: number[]; durations: n
   };
   const intMean = meanLast3(intervals);
   const durMean = meanLast3(durs);
+  const ageMean = meanLast3(ageVals);
 
   const meanLine = (m: number | null, color: string) =>
     m == null ? null : (
@@ -93,6 +97,8 @@ export function TraceChart({ times, durations }: { times: number[]; durations: n
         <line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="#27272a" strokeWidth={1} />
         {meanLine(intMean, INTERVAL_COLOR)}
         {meanLine(durMean, DURATION_COLOR)}
+        {meanLine(ageMean, AGE_COLOR)}
+        {line(ageVals, AGE_COLOR)}
         {line(durs, DURATION_COLOR)}
         {line(intervals, INTERVAL_COLOR)}
       </svg>

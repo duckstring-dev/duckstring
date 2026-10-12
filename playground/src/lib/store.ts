@@ -132,6 +132,82 @@ function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'pondStates' | 'rippl
   };
 }
 
+// ─── Example graphs ──────────────────────────────────────────────────────────
+// Topologies for exploring Pulse release, matching the ones it was simulated on. Each Pond lists its
+// Sources by name and its Ripples as [name, seconds] (a single Ripple unless noted).
+
+interface ExampleSpec {
+  label: string;
+  ponds: { name: string; sources?: string[]; ripples: [string, number][] }[];
+}
+
+export const EXAMPLES: Record<string, ExampleSpec> = {
+  deep: {
+    label: 'Deep chain (fast stages, then a 5s bottleneck)',
+    ponds: [
+      { name: 'inlet', ripples: [['ingest', 1]] },
+      { name: 'p1', sources: ['inlet'], ripples: [['r1', 1]] },
+      { name: 'p2', sources: ['p1'], ripples: [['r1', 1]] },
+      { name: 'p3', sources: ['p2'], ripples: [['r1', 1]] },
+      { name: 'p4', sources: ['p3'], ripples: [['r1', 1]] },
+      { name: 'bottleneck', sources: ['p4'], ripples: [['slow', 5]] },
+      { name: 'outlet', sources: ['bottleneck'], ripples: [['r1', 1]] },
+    ],
+  },
+  decreasing: {
+    label: 'Decreasing chain (1s → 3s → 2s → 1s)',
+    ponds: [
+      { name: 'a', ripples: [['r1', 1]] },
+      { name: 'b', sources: ['a'], ripples: [['r1', 3]] },
+      { name: 'c', sources: ['b'], ripples: [['r1', 2]] },
+      { name: 'd', sources: ['c'], ripples: [['r1', 1]] },
+    ],
+  },
+  sibling: {
+    label: 'Slow sibling (a fast and a 6s Inlet feed one Pond)',
+    ponds: [
+      { name: 'fast', ripples: [['ingest', 1]] },
+      { name: 'slow', ripples: [['ingest', 6]] },
+      { name: 'join', sources: ['fast', 'slow'], ripples: [['r1', 1]] },
+      { name: 'outlet', sources: ['join'], ripples: [['r1', 1]] },
+    ],
+  },
+  long: {
+    label: 'Long lead (seven 1s stages, then a 3s bottleneck)',
+    ponds: [
+      { name: 'inlet', ripples: [['ingest', 1]] },
+      ...[1, 2, 3, 4, 5, 6].map((i) => ({ name: `p${i}`, sources: [i === 1 ? 'inlet' : `p${i - 1}`], ripples: [['r1', 1]] as [string, number][] })),
+      { name: 'bottleneck', sources: ['p6'], ripples: [['slow', 3]] },
+      { name: 'outlet', sources: ['bottleneck'], ripples: [['r1', 1]] },
+    ],
+  },
+};
+
+function buildExampleState(spec: ExampleSpec): Pick<PlaygroundState, 'ponds' | 'pondStates' | 'ripples' | 'rippleStates'> {
+  const ids: Record<string, PondId> = {};
+  const out: Pick<PlaygroundState, 'ponds' | 'pondStates' | 'ripples' | 'rippleStates'> = {
+    ponds: {},
+    pondStates: {},
+    ripples: {},
+    rippleStates: {},
+  };
+  for (const p of spec.ponds) {
+    const id = newPondId();
+    ids[p.name] = id;
+    out.ponds[id] = { id, name: p.name, sources: (p.sources ?? []).map((n) => ids[n]) };
+    out.pondStates[id] = initialPondState();
+    rippleCounters[id] = p.ripples.length;
+    let prev: RippleId | null = null;
+    for (const [name, secs] of p.ripples) {
+      const rid = newRippleId();
+      out.ripples[rid] = { id: rid, pondId: id, name, parents: prev ? [prev] : [], durationMs: secs * 1000, variability: 0 };
+      out.rippleStates[rid] = initialRippleState();
+      prev = rid;
+    }
+  }
+  return out;
+}
+
 const demoState = buildDemoState();
 
 // A name-based fingerprint of the graph a visitor can edit (Ponds, Sources, Ripples, parents, durations,
@@ -171,6 +247,8 @@ export interface PlaygroundState {
   // Bumped when something other than the inputs themselves changes a value they show (the tour, a
   // reset), so the uncontrolled sidebar inputs remount with the new value.
   formEpoch: number;
+  // Experimental Pulse release mode (see orchestration.ts). Off = the current engine.
+  pulseRelease: boolean;
 
   // Adds a Pond with one 1 s Ripple and selects it. With no options it links as a Sink of the
   // selected Pond (the sidebar's behaviour); `source` names the Source explicitly. Returns its id.
@@ -210,6 +288,9 @@ export interface PlaygroundState {
 
   // Rebuild the example pipeline and clear triggers, logs and selection.
   resetToDemo(): void;
+  // Replace the graph with one of EXAMPLES (or the demo for 'demo'), clearing run state and triggers.
+  loadExample(key: string): void;
+  setPulseRelease(on: boolean): void;
   // Whether the graph still matches the example (ignoring run state and triggers).
   isDemoGraph(): boolean;
   setSheetOpen(open: boolean): void;
@@ -228,6 +309,7 @@ function toOrchestrState(state: PlaygroundState): OrchestrState {
     ripples: state.ripples,
     rippleStates: state.rippleStates,
     triggers: state.triggers,
+    pulseRelease: state.pulseRelease,
   };
 }
 
@@ -265,6 +347,7 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   sheetOpen: false,
   tideDraft: null,
   formEpoch: 0,
+  pulseRelease: false,
 
   addPond(opts) {
     // If a pond is selected, link the new pond as its sink.
@@ -575,6 +658,29 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
       tideDraft: null,
       formEpoch: s.formEpoch + 1,
     }));
+  },
+
+  loadExample(key) {
+    if (key === 'demo' || !EXAMPLES[key]) {
+      get().resetToDemo();
+      return;
+    }
+    drainLog();
+    set((s) => ({
+      ...buildExampleState(EXAMPLES[key]),
+      triggers: {},
+      pulseTags: {},
+      logs: [],
+      selectedPondId: null,
+      selectedRippleId: null,
+      selectedTriggerId: null,
+      tideDraft: null,
+      formEpoch: s.formEpoch + 1,
+    }));
+  },
+
+  setPulseRelease(on) {
+    set({ pulseRelease: on });
   },
 
   isDemoGraph() {

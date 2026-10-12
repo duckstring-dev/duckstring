@@ -4,6 +4,7 @@ import { useState } from 'react';
 import {
   usePlaygroundStore,
   formatAge,
+  EXAMPLES,
   THEME_BRAND,
   THEME_PULL,
   THEME_PUSH,
@@ -101,6 +102,18 @@ function TourButton() {
   );
 }
 
+const exampleBtn: React.CSSProperties = {
+  background: '#1e1e26',
+  border: '1px solid #3f3f46',
+  borderRadius: 4,
+  color: '#a1a1aa',
+  padding: '4px 8px',
+  fontSize: 11,
+  cursor: 'pointer',
+  textAlign: 'left',
+  fontFamily: 'inherit',
+};
+
 const numInput: React.CSSProperties = {
   width: 64,
   background: '#1a1a1f',
@@ -129,6 +142,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const renameRipple = usePlaygroundStore((s) => s.renameRipple);
   const setRippleVariability = usePlaygroundStore((s) => s.setRippleVariability);
   const setAllVariability = usePlaygroundStore((s) => s.setAllVariability);
+  const loadExample = usePlaygroundStore((s) => s.loadExample);
+  const pulseRelease = usePlaygroundStore((s) => s.pulseRelease);
+  const setPulseRelease = usePlaygroundStore((s) => s.setPulseRelease);
   const linkPonds = usePlaygroundStore((s) => s.linkPonds);
   const unlinkPonds = usePlaygroundStore((s) => s.unlinkPonds);
   const linkRipples = usePlaygroundStore((s) => s.linkRipples);
@@ -210,13 +226,13 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
               <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
               <input
                 type="number"
-                min="1"
+                min="0"
                 step="1"
                 defaultValue={((triggers[selectedTriggerId]?.stalenessMs ?? 1000) / 1000).toFixed(1)}
                 key={`tide-${selectedTriggerId}-${formEpoch}`}
                 onChange={(e) => {
                   const ms = parseFloat(e.target.value) * 1000;
-                  if (!isNaN(ms) && ms > 0) triggerTide(selectedTriggerId, Math.max(100, ms));
+                  if (!isNaN(ms) && ms >= 0) triggerTide(selectedTriggerId, ms);
                 }}
                 style={numInput}
               />
@@ -300,9 +316,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
                 {tideDraft !== null && (
                   <div {...markTide} style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
                     <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
-                    <input type="number" min="1" step="1" value={tideDraft} onChange={(e) => setTideDraft(e.target.value)} style={numInput} />
+                    <input type="number" min="0" step="1" value={tideDraft} onChange={(e) => setTideDraft(e.target.value)} style={numInput} />
                     <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
-                    <Btn small onClick={() => { triggerTide(selectedPond.id, Math.max(100, parseFloat(tideDraft) * 1000)); setTideDraft(null); }} color={THEME_PUSH}>Set</Btn>
+                    <Btn small onClick={() => { const ms = parseFloat(tideDraft) * 1000; if (!isNaN(ms) && ms >= 0) { triggerTide(selectedPond.id, ms); setTideDraft(null); } }} color={THEME_PUSH}>Set</Btn>
                   </div>
                 )}
               </>
@@ -341,6 +357,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             <TraceChart
               times={pondStates[selectedPond.id]?.completionTimes ?? []}
               durations={pondStates[selectedPond.id]?.durations ?? []}
+              ages={pondStates[selectedPond.id]?.ages ?? []}
             />
           </Section>
         </>
@@ -432,7 +449,31 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
         </>
       )}
 
-      {/* Nothing selected: global variability */}
+      {/* Nothing selected: Pulse release, examples, global variability */}
+      {!selectedPond && !selectedRipple && !selectedTriggerId && (
+        <Section>
+          <Label>Pulse release (experimental)</Label>
+          <Btn small onClick={() => setPulseRelease(!pulseRelease)} color={THEME_PULL}>
+            {pulseRelease ? 'On: turn off' : 'Off: turn on'}
+          </Btn>
+          <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
+            A Pond counts the demands that reach it during each run of its own Ripples and its Sources. Two in one
+            run means that run is slower than the demand: the Pond holds further demand and forwards one Pulse
+            each time the slow run turns over. Held Ponds show a badge. Try a Tide of 0s (Wave-like) or 1s.
+          </div>
+        </Section>
+      )}
+      {!selectedPond && !selectedRipple && !selectedTriggerId && (
+        <Section>
+          <Label>Examples</Label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <button onClick={() => loadExample('demo')} style={exampleBtn}>Demo (sales pipeline)</button>
+            {Object.entries(EXAMPLES).map(([key, ex]) => (
+              <button key={key} onClick={() => loadExample(key)} style={exampleBtn}>{ex.label}</button>
+            ))}
+          </div>
+        </Section>
+      )}
       {!selectedPond && !selectedRipple && !selectedTriggerId && (
         <Section>
           <Label>Variability (all ripples)</Label>

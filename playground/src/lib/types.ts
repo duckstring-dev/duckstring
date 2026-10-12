@@ -77,6 +77,20 @@ export interface PondRunState {
   startTimesByF: Record<number, number>; // wall-clock start of each in-flight Pond Run, by its startF
   completionTimes: number[];
   durations: number[];
+  ages?: number[]; // data age (now - endF) at each completion
+  // Pulse release bookkeeping (only used while the release mode is on).
+  release?: ReleaseState;
+}
+
+// Pulse release, per Pond (see orchestration.ts "Pulse release"). A witness is one of the Pond's own
+// Ripples (`r:<id>`) or one of its Source Ponds (`p:<id>`); a witness's runs are told apart by its
+// `runsStarted`, so every counter is keyed to "the witness's current run" without timestamps.
+export interface ReleaseState {
+  counts: Record<string, { run: number; n: number }>; // demands that reached this Pond during each witness's current run
+  saturated: string[]; // witnesses proven slower than the demand (two demands arrived during one of their runs)
+  forwardedIn: Record<string, number>; // each witness's run number when this Pond last forwarded demand upstream
+  forwardedAt: number; // when this Pond last forwarded demand upstream (a Source turns over by starting a later Pond Run)
+  held: number; // demands held back (kept as this Pond's own targets, not yet forwarded)
 }
 
 // Persistent triggers only (Tap and Pulse are one-shot, no entity).
@@ -96,6 +110,6 @@ export type PondVisualState = 'killed' | 'blocked' | 'running' | 'queued' | 'idl
 // A single logged orchestration event, for the console panel.
 export interface LogEntry {
   t: number; // wall-clock ms of the event
-  kind: string; // short category, e.g. 'tap', 'pond-start', 'ripple-done'
+  kind: string; // short category, e.g. 'tap', 'pond-start', 'ripple-done', 'hold', 'release'
   msg: string; // human-readable description
 }

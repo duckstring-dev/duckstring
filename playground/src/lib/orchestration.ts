@@ -9,6 +9,7 @@ import type {
   LogEntry,
   Window,
   Weekday,
+  ReleaseState,
 } from './types';
 
 // "-Inf" freshness sentinel: a push target below every real timestamp (and below the 0 "never run"
@@ -32,6 +33,9 @@ export interface OrchestrState {
   ripples: Record<RippleId, Ripple>;
   rippleStates: Record<RippleId, RippleRunState>;
   triggers: Record<PondId, ActiveTrigger>;
+  // Pulse release (experimental): hold demand at a Pond whose own Ripples or Sources are proven slower
+  // than the demand, and forward one Pulse per turnover instead. Off = the current engine.
+  pulseRelease?: boolean;
 }
 
 const MAX_HISTORY = 500;
@@ -84,10 +88,18 @@ function sampleDuration(baseMs: number, variability: number): number {
 // Work on a shallow-cloned draft so cascades can mutate in place; the store replaces the slice.
 function clone(s: OrchestrState): OrchestrState {
   const pondStates: Record<PondId, PondRunState> = {};
-  for (const [k, v] of Object.entries(s.pondStates)) pondStates[k] = { ...v, targets: [...v.targets] };
+  for (const [k, v] of Object.entries(s.pondStates)) {
+    pondStates[k] = { ...v, targets: [...v.targets], release: v.release && cloneRelease(v.release) };
+  }
   const rippleStates: Record<RippleId, RippleRunState> = {};
   for (const [k, v] of Object.entries(s.rippleStates)) rippleStates[k] = { ...v, targets: [...v.targets] };
   return { ...s, pondStates, rippleStates, triggers: { ...s.triggers } };
+}
+
+function cloneRelease(r: ReleaseState): ReleaseState {
+  const counts: ReleaseState['counts'] = {};
+  for (const [k, v] of Object.entries(r.counts)) counts[k] = { ...v };
+  return { counts, saturated: [...r.saturated], forwardedIn: { ...r.forwardedIn }, forwardedAt: r.forwardedAt, held: r.held };
 }
 
 // ─── Push target sets ─────────────────────────────────────────────────────────
@@ -235,15 +247,128 @@ function rippleSetHasPull(s: OrchestrState, rid: RippleId, now: number): void {
 
 // A Pond receives a push target T: record it (if unsatisfied and new) and propagate eagerly
 // upstream to required Sources. The set keeps every outstanding request, not just the latest.
+// With Pulse release on, a Pond may hold the target instead of propagating it (see below).
 function pondAddTarget(s: OrchestrState, pid: PondId, T: number): void {
   const ps = s.pondStates[pid];
   if (ps.isBlocked) return; // no new push enters a blocked Pond (and none propagates upstream from it)
   if (T <= ps.endF || ps.targets.includes(T)) return; // already satisfied, or already requested
   ps.targets.push(T);
   emit('pond-push', `${pname(s, pid)} pond push target → age ${ageStr(T, logNow)}`);
+  if (s.pulseRelease && s.ponds[pid].sources.length > 0 && holdDemand(s, pid)) return;
+  forwardDemand(s, pid, T);
+}
+
+function forwardDemand(s: OrchestrState, pid: PondId, T: number): void {
+  if (s.pulseRelease) {
+    // Remember which run each witness was in when demand last went upstream (the turnover reference).
+    const rel = releaseOf(s, pid);
+    for (const w of witnesses(s, pid)) rel.forwardedIn[w] = witnessRun(s, w).run;
+    rel.forwardedAt = logNow;
+  }
   for (const sp of s.ponds[pid].sources) {
     pondAddTarget(s, sp, T);
   }
+}
+
+// ─── Pulse release (experimental) ─────────────────────────────────────────────
+//
+// A Pond sees only itself (its Ripples) and its Sources. Each of those is a *witness*. A Pond counts
+// the demands that reach it during each witness's current run. If a demand arrives while a witness is
+// in a run during which a demand already arrived, that witness's run takes longer than the gap between
+// the two demands: it can't keep up, so it is *saturated*. From then on the Pond holds new demand (it
+// keeps the target as its own, so it still runs to meet it, but doesn't forward it), and forwards at
+// most once per run of its slowest saturated witness: when every saturated witness has turned over
+// (started a new run, or stopped) since the last forward, the Pond *releases*, sending one Pulse at
+// `now` upstream. `now` covers every held target. Saturation clears once every witness turns over
+// with nothing held.
+
+function releaseOf(s: OrchestrState, pid: PondId): ReleaseState {
+  const ps = s.pondStates[pid];
+  if (!ps.release) ps.release = { counts: {}, saturated: [], forwardedIn: {}, forwardedAt: -Infinity, held: 0 };
+  return ps.release;
+}
+
+function witnesses(s: OrchestrState, pid: PondId): string[] {
+  return [...ripplesOf(s, pid).map((r) => `r:${r}`), ...s.ponds[pid].sources.map((sp) => `p:${sp}`)];
+}
+
+function witnessName(s: OrchestrState, w: string): string {
+  const id = w.slice(2);
+  return w.startsWith('r:') ? rfullname(s, id) : pname(s, id);
+}
+
+// A witness's current run: whether it is in one, and which. A Ripple's runs never overlap, so its
+// runsStarted names the run. A Source Pond's runs do overlap (a new Pond Run can start on every demand
+// while its Ripples are still busy), so it is "in a run" while busy and a run ends at a completion:
+// its runsCompleted names the run in progress.
+function witnessRun(s: OrchestrState, w: string): { running: boolean; run: number } {
+  const id = w.slice(2);
+  if (w.startsWith('r:')) {
+    const rs = s.rippleStates[id];
+    return { running: !!rs?.isRunning, run: rs?.runsStarted ?? 0 };
+  }
+  const ps = s.pondStates[id];
+  if (!ps) return { running: false, run: 0 };
+  return { running: ps.startF > ps.endF || anyRippleBusy(s, id), run: ps.runsCompleted };
+}
+
+// Has a witness turned over since this Pond last forwarded demand? A Ripple has once it starts a new run
+// (or stops). A Source Pond has once it is idle, or has started a Pond Run *after* the forward. Its Pond
+// Runs overlap, so counting the run our own forward started would release straight away: an Inlet
+// starts that run at the same instant, so it effectively waits until the Inlet is free, while a Source
+// with work upstream starts its next run only once data reaches it, so the next request travels while it works.
+function turnedOver(s: OrchestrState, rel: ReleaseState, w: string): boolean {
+  const { running, run } = witnessRun(s, w);
+  if (!running) return true;
+  if (w.startsWith('r:')) return run !== rel.forwardedIn[w];
+  const ps = s.pondStates[w.slice(2)];
+  return (ps.startTimesByF[ps.startF] ?? -Infinity) > rel.forwardedAt;
+}
+
+// Count this demand against every running witness, and decide whether to hold it.
+function holdDemand(s: OrchestrState, pid: PondId): boolean {
+  const rel = releaseOf(s, pid);
+  let hold = false;
+  for (const w of witnesses(s, pid)) {
+    const { running, run } = witnessRun(s, w);
+    if (!running) continue;
+    const c = rel.counts[w]?.run === run ? rel.counts[w] : { run, n: 0 };
+    rel.counts[w] = { run, n: c.n + 1 };
+    const proof = c.n >= 1; // a second demand during the same run
+    const sticky = rel.saturated.includes(w) && !turnedOver(s, rel, w); // already forwarded during this run
+    if (proof && !rel.saturated.includes(w)) {
+      rel.saturated.push(w);
+      emit('saturated', `${pname(s, pid)}: ${witnessName(s, w)} is saturated (2 demands in one run)`);
+    }
+    if (proof || sticky) hold = true;
+  }
+  if (hold) {
+    rel.held += 1;
+    emit('hold', `${pname(s, pid)} holds the demand (${rel.held} held)`);
+  }
+  return hold;
+}
+
+// Release held demand where every saturated witness has turned over. Returns whether anything changed.
+function settleReleases(s: OrchestrState, now: number): boolean {
+  let changed = false;
+  for (const pid of Object.keys(s.pondStates)) {
+    const rel = s.pondStates[pid].release;
+    if (!rel) continue;
+    if (s.pulseRelease && rel.saturated.length === 0 && rel.held === 0) continue;
+    const turned = !s.pulseRelease || rel.saturated.every((w) => turnedOver(s, rel, w));
+    if (!turned) continue;
+    if (rel.held > 0) {
+      emit('release', `${pname(s, pid)} releases ${rel.held} held → one Pulse upstream`);
+      rel.held = 0;
+      forwardDemand(s, pid, now);
+      changed = true;
+    } else {
+      rel.saturated = [];
+    }
+    if (!s.pulseRelease) s.pondStates[pid].release = undefined;
+  }
+  return changed;
 }
 
 // A Ripple receives a push target T (from the Pond's run-start stamp). The Pond stamps every
@@ -390,6 +515,7 @@ function completeRipple(s: OrchestrState, rid: RippleId, now: number): boolean {
     // measured from an ever-older start. Older entries are dropped as absorbed.
     const started = ps.startTimesByF[newEnd];
     if (started != null) ps.durations = pushHistory(ps.durations, now - started);
+    ps.ages = pushHistory(ps.ages ?? [], now - newEnd);
     const pending: Record<number, number> = {};
     for (const [f, t] of Object.entries(ps.startTimesByF)) if (Number(f) > newEnd) pending[Number(f)] = t;
     ps.startTimesByF = pending;
@@ -436,6 +562,7 @@ export function sleepPond(state: OrchestrState, pid: PondId, now: number, upstre
     ps.hasPull = false;
     ps.hasReceivedPull = false;
     ps.targets = [];
+    ps.release = undefined;
     for (const r of ripplesOf(s, cur)) {
       s.rippleStates[r].hasPull = false; // keep targets (push) so started runs complete
     }
@@ -493,6 +620,7 @@ export function killPond(state: OrchestrState, pid: PondId, now: number): Orches
   ps.hasReceivedPull = false;
   ps.pullLocal = false;
   ps.targets = [];
+  ps.release = undefined;
   for (const r of ripplesOf(s, pid)) {
     const rs = s.rippleStates[r];
     rs.isRunning = false;
@@ -557,22 +685,26 @@ export function tick(now: number, stateIn: OrchestrState): OrchestrState {
     }
   }
 
-  // 3. Start everything runnable, to a fixpoint (a start can cascade demand that enables more).
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const pid of Object.keys(s.pondStates)) {
-      if (canStartPond(s, pid, now)) {
-        startPondRun(s, pid, now);
-        changed = true;
+  // 3. Start everything runnable, to a fixpoint (a start can cascade demand that enables more). Then
+  // release held demand whose witnesses turned over (a release can enable more starts, so repeat).
+  for (let round = 0; round < 16; round++) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const pid of Object.keys(s.pondStates)) {
+        if (canStartPond(s, pid, now)) {
+          startPondRun(s, pid, now);
+          changed = true;
+        }
+      }
+      for (const rid of Object.keys(s.rippleStates)) {
+        if (canStartRipple(s, rid)) {
+          startRipple(s, rid, now);
+          changed = true;
+        }
       }
     }
-    for (const rid of Object.keys(s.rippleStates)) {
-      if (canStartRipple(s, rid)) {
-        startRipple(s, rid, now);
-        changed = true;
-      }
-    }
+    if (!settleReleases(s, now)) break;
   }
 
   return s;

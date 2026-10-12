@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, stateColor, nodeFill, THEME_PUSH } from '@/lib/store';
+import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, stateColor, nodeFill, THEME_PUSH, THEME_PULL } from '@/lib/store';
 import { useTourRing } from '@/lib/tour';
 import { DemandIndicators } from './DemandIndicators';
 
@@ -22,6 +22,12 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const now = usePlaygroundStore((s) => s.now);
   const ringClass = useTourRing(pondId);
   const pulseTagGen = usePlaygroundStore((s) => s.pulseTags[pondId]);
+  // Pulse release: which witnesses this Pond has found saturated, by name (for the badge's tooltip).
+  const saturatedNames = usePlaygroundStore((s) =>
+    (s.pondStates[pondId]?.release?.saturated ?? [])
+      .map((w) => (w.startsWith('r:') ? s.ripples[w.slice(2)]?.name : s.ponds[w.slice(2)]?.name) ?? w)
+      .join(', ')
+  );
 
   if (!pond || !ps) return null;
 
@@ -29,6 +35,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const borderColor = stateColor(visualState, ps.hasPull || ps.hasReceivedPull, pushTargetF(ps.targets));
   const isSelected = selectedPondId === pondId;
   const showPulseTag = pulseTagGen !== undefined && ps.runsCompleted <= pulseTagGen;
+  const held = ps.release?.held ?? 0;
+  const releaseTag = held > 0 ? `holding ${held}` : saturatedNames ? 'saturated' : null;
 
   return (
     <div
@@ -99,6 +107,28 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           }}
         >
           Pulse
+        </div>
+      )}
+
+      {releaseTag && (
+        <div
+          data-testid="release-badge"
+          title={`saturated: ${saturatedNames}`}
+          style={{
+            position: 'absolute',
+            top: -10,
+            left: 8,
+            fontSize: 10,
+            fontWeight: 700,
+            color: THEME_PULL,
+            border: `1px solid ${THEME_PULL}`,
+            borderRadius: 10,
+            padding: '1px 7px',
+            background: '#0f0f14',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {releaseTag}
         </div>
       )}
 
