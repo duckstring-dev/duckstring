@@ -1,7 +1,8 @@
 # One trigger: Refresh
 
-Status: **planned, not built.** Settled with the author on 2026-10-13, after the Pulse throttle
-(`plans/pulse-throttle.md`, merged in #34) made a fast Pulse pace itself to the bottleneck.
+Status: **planned, not built.** Settled with the author on 2026-10-13 and 2026-10-14, after the Pulse
+throttle (`plans/pulse-throttle.md`, merged in #34) made a fast Pulse pace itself to the bottleneck. Two
+sections are proposals still awaiting the author: "Removing pull" and "On request: Taps".
 
 ## Why
 
@@ -19,7 +20,7 @@ user cares about: you refresh `reports`, and Duckstring works out what runs.
 - **One trigger, Refresh.** It asks for data at least as fresh as now (today's Pulse). Tap, Wave, Pulse and
   Tide leave every user surface (CLI, HTTP API, web UI, docs, Playground).
 - **A standing Refresh repeats it**, with the same recurrence vocabulary windows use:
-  - `--every D`, **floating**: due `D` after the previous request, so any refresh (a manual one, an
+  - `refresh add POND --every D`, **floating**: due `D` after the previous request, so any refresh (a manual one, an
     anchored one) resets its phase. This is today's Tide clock. The bound is a request period, so data
     can be up to `D` plus the pipeline's run time old; "max age" was rejected as a name for that reason.
   - `--every D --start HH:MM`, **anchored**: fires on its grid regardless of other refreshes.
@@ -29,23 +30,29 @@ user cares about: you refresh `reports`, and Duckstring works out what runs.
 - **Several per Pond, like windows.** Any number of anchored refreshes; at most one floating refresh
   (continuous included), and adding another **replaces it silently**, as setting a Wave or Tide does
   today. Several floating refreshes would add nothing, since any refresh resets the floating phase.
-- **"On request" is just Refresh**, sent from wherever the request starts (CLI, HTTP, a query).
+- **"On request" means any time the data is queried**, and it is configured in Duckstring by the data
+  engineer, not left to each app to send a refresh with its queries. It evolves from the duct's
+  `--tap-on-get`. Inspection inside Duckstring (the web UI, the CLI's data commands) never triggers runs.
+  The proposed design is in "On request: Taps".
 - **Windows are the mirror image**: a window says when data may be requested from an Inlet, a refresh
   says when it is requested of an Outlet. A business-hours shape ("every 30 min from 08:00 for 10 h,
   weekdays") comes later, on both.
 - **The existing control Refresh is renamed Rebuild** (it is a cold wipe-and-rebuild), freeing the word.
   Repair stays Force plus Rebuild.
-- **Pull stays in the engine.** Wake, Spouts' standing Wake, ducts and the theory still use it; it stops
-  being a user-facing trigger. The throttle and its tests keep using a Wave as their yardstick (below).
+- **CLI: every group is `group verb POND`**, as `spout` and `alert` already are: `refresh add|ls|rm POND`
+  and `window add|ls|rm POND`, both top-level, with the bare `refresh POND` as the one-shot. The `trigger`
+  group goes.
+- **Internal names follow the product**: Trigger, Pulse and Tide become Refresh in code too, and push
+  becomes **demand** (a Pond's `targets` are its demanded freshnesses). See "Internal names".
 
 ## The model
 
 | Need | CLI | Engine |
 |---|---|---|
 | Refresh now, or on request | `duckstring refresh reports` | `pond_add_target(now, from_trigger=True)` |
-| Refresh periodically | `refresh reports --every 1d` | floating: today's Tide rule, bound = `every` |
-| Refresh at set times | `refresh reports --every 1d --start 06:00 [--on MON,...] [--until T]` | anchored: the latest occurrence `c <= now` as a target |
-| As fresh as possible | `refresh reports --continuous` (= `--every 0s`) | floating with bound 0 |
+| Refresh periodically | `refresh add reports --every 1d` | floating: today's Tide rule, bound = `every` |
+| Refresh at set times | `refresh add reports --every 1d --start 06:00 [--on MON,...] [--until T]` | anchored: the latest occurrence `c <= now` as a target |
+| As fresh as possible | `refresh add reports --continuous` (= `--every 0s`) | floating with bound 0 |
 
 **Anchored refreshes request the occurrence time, not `now`.** Each tick, an anchored refresh adds target
 `c`, the latest kept occurrence at or before `now` (`start + k * every`, filtered by days and `until`).
@@ -70,11 +77,48 @@ Anchored and manual refreshes add targets too, so they reset the floating phase,
 - `refresh_pond` (today the Rebuild flag) is renamed `rebuild_pond`, `PondState.refresh_pending` becomes
   `rebuild_pending`, and `BeginRun.refresh` becomes `rebuild` (the Duck job field too; a Duck must match
   its Catchment's version, so no wire compatibility is needed). The Duck executor and dbt executor follow.
-- `Trigger(kind="wave")` and the Wave re-tap in `_complete_pond_run` stay for now: the throttle's tests
-  (and the playground's) measure against a Wave, and the noisy-run-times comparison below needs it. No
-  product surface sets one. Delete it once the measurement is settled.
-- `pulse_pond` becomes the one-shot entry point (rename to `refresh_now` or keep; internal only).
-  `tap_pond` stays for Wake-like internal use and ducts.
+- `pulse_pond` becomes `refresh_now`; see "Internal names" for the rest. Pull goes with "Removing pull".
+
+## Removing pull (proposed)
+
+With Tap and Wave gone, nothing a user sets creates pull. What remains uses it only as a local "run when a
+Source is fresher" signal, and each case is a demand target that isn't forwarded:
+
+| Today (pull) | Becomes |
+|---|---|
+| Wake: a one-shot, non-propagating pull | a local demand at the current `sourceF` (if `> end_f`), not forwarded; still clears a failure |
+| A Spout's standing Wake | each tick, a local demand at its Source's visible freshness when it is newer than its own `start_f` (per window, as now) |
+| Missing-asset retry (`block_on_missing_asset`) | a local demand gated by `missing_asset_f`, as the pull was |
+| Tap-on-get | the on-request refresh (below) |
+| Duct pull forwarding (poller to upstream `/tap`) | gone; a Draw only ever carries demand |
+| `restore_demand` | gone; demand is restored by reload's `resend_held_demand`, rule 8 and the standing refreshes |
+
+That removes `has_pull`, `has_received_pull`, `pull_m`, `pull_local`, the Ripples' `has_pull`,
+`pond_receive_pull`, `pond_set_has_pull`, `ripple_set_has_pull`, `tap_pond`, `restore_demand`, the Wave
+branch and re-tap, and the `startF` cold-start guards (one of the subtle rules in CLAUDE.md). Migration
+`031` drops the `pond_state` pull columns. One demand mechanism is easier to reason about, document and
+test, and the theory doc's model shrinks to demand plus the throttle (the Kanban idea survives as the
+motivation for the bottleneck's release at its starts).
+
+It depends on "Measure first": if a continuous refresh needs lookahead under noisy run times, that is added
+as a demand-side rule, not by keeping pull. The throttle tests' Wave yardstick becomes fixed expected
+numbers recorded from today's engines before the removal. The playground engine loses pull too, so the two
+engines stay a port of each other.
+
+## Internal names
+
+Code and docs stay findable from each other:
+
+- `Trigger`/`EngineState.triggers` become `Refresh`/`refreshes`; `pulse_pond` becomes `refresh_now`;
+  `from_trigger` becomes `from_refresh`; Tide wording in comments becomes floating refresh.
+- Push becomes **demand**: `PondState.targets`/`RippleState.targets` become `demand`, `pond_add_target`
+  becomes `add_demand`, `ripple_add_target` becomes `ripple_add_demand`, `push_sources` becomes
+  `demand_sources`, `min_target`/`max_target` become `min_demand`/`max_demand`. The `pond_target` table
+  becomes `pond_demand` in `031`.
+- The control Refresh becomes Rebuild throughout (above).
+- The throttle's names (`ThrottleState`, slow, held, release) stay.
+- CLAUDE.md's "Terminology for user-facing text" keeps "pull" only as positioning language (demand starts
+  at the end of the pipeline, as the landing page's pillar says); inside the engine there is only demand.
 
 ## Persistence (migration `031`)
 
@@ -116,26 +160,58 @@ change in bold for anyone scripting the old Rebuild route.
 
 ## CLI
 
+Every group follows the existing `group verb POND [NAME]` shape (`spout add POND`, `spout rm POND NAME`):
+
 ```
 duckstring refresh POND                              # refresh now (opens the live status view, as pulse does)
-duckstring refresh POND --every 30m                  # floating; replaces the floating one
-duckstring refresh POND --every 1d --start 06:00 --on MON,TUE,WED,THU,FRI --name morning
-duckstring refresh POND --continuous                 # = --every 0s
-duckstring refresh POND --list
-duckstring refresh POND --remove NAME                # or --remove-all
-duckstring window POND add|list|remove ...           # today's `trigger window`, moved
+duckstring refresh add POND --every 30m              # floating; replaces the floating one silently
+duckstring refresh add POND --every 1d --start 06:00 --on MON,TUE,WED,THU,FRI --name morning
+duckstring refresh add POND --continuous             # = --every 0s
+duckstring refresh ls POND
+duckstring refresh rm POND NAME
+duckstring window add POND --every 1d --start 02:00 --duration 1h [--on ...] [--until ...] [--name ...]
+duckstring window ls POND
+duckstring window rm POND NAME
 duckstring control rebuild POND [--clear]            # today's `control refresh`
 ```
 
-The `trigger` group goes. For one release `duckstring trigger tap|wave|pulse|tide|remove|window` remain as
-hidden aliases that print the new command. `duckstring pond deploy`'s next-step hint (`cli/pond.py`) and the
+`refresh` is a group whose bare form takes a Pond: a custom Click group resolves `add`, `ls` and `rm` as
+subcommands and anything else as the Pond to refresh now (a Pond named `add`, `ls` or `rm` is refreshed with
+`refresh -- add`). The `trigger` group goes; for one release `duckstring trigger tap|wave|pulse|tide|remove|
+window` remain as hidden aliases that print the new command. `duckstring pond deploy`'s next-step hint (`cli/pond.py`) and the
 missing-data hint in `routes/data.py` (`trigger pulse`) change to `refresh`. CLI docstrings and `help=`
 strings match `docs/docs/reference/cli/`, so change both together.
 
-`duckstring duct open --tap-on-get` becomes `--refresh-on-get` (each query sends a one-shot refresh). This is
-heavier than a Tap (everything older than now runs, where a Tap took whatever was next), but bursts of
-queries are paced by the throttle. Keep `--tap-on-get` as a hidden alias; the stored `pond_open` flag keeps
-its column name or is renamed in `031`.
+`duckstring duct open --tap-on-get` is superseded by on-request refresh (below); keep it as a hidden alias
+for one release.
+
+## On request: Taps (proposed)
+
+A query is a demand signal: if an app is being used, its data should stay fresh, and when it stops, the
+pipeline should go quiet. That is pull orchestration carried to the consumer's edge, and a feature no
+scheduler offers. It belongs to the data engineer, so it is configured in Duckstring, not by each app
+sending refreshes with its queries.
+
+The policy belongs to the **access point**, not the Pond: one Pond can serve an app that wants freshness and
+a notebook that is happy with whatever is there, and inspection inside Duckstring must never trigger runs.
+So the proposal is a named access point on a Pond, a **Tap** (the name freed by the old trigger; Spouts push
+data out, Taps let apps draw it):
+
+- **Scope**: a Pond (one major line), optionally limited to some tables.
+- **Credential**: its own key. Queries are classified by the credential they arrive with, so the web UI,
+  the CLI and any other key never match a Tap and never refresh. The key reads the Tap's scope and implies
+  only the Tap's refresh, so an app can't trigger arbitrary refreshes.
+- **Policy**: `--fresh-within D`. On a query through the Tap, if the data is older than `D`, send a
+  one-shot refresh (served immediately from the current snapshot, as tap-on-get did; `--wait` blocks until
+  it lands, with a timeout). While queries keep arriving, the data stays within `D` plus the pipeline's run
+  time; when they stop, so do the runs. Bursts of queries are paced by the throttle. `--fresh-within 0`
+  refreshes on every query; no policy serves as is.
+- **Surface**: `duckstring tap add|ls|rm POND` (as `spout`), the query route taking the Tap's key (and later
+  the Flight SQL and Postgres wire adapters, by credential), a Taps section in the web UI next to Spouts,
+  and query counts per Tap in `/metrics`.
+
+Building on `pond_open`/tap-on-get and the serving core (`catchment/serving.py`). Deserves its own plan
+(`plans/taps.md`) once the shape is agreed; it can ship after the trigger change.
 
 ## Web UI (`frontend/`)
 
@@ -179,10 +255,9 @@ smaller:
   point of a toy, and removing a refresh stops a pipeline. Windows, durations, variability and adding
   Ponds stay.
 - **Engine** (`orchestration.ts`): add anchored refreshes and multiple refreshes per Pond, mirroring the
-  Python engine, so the cross-check (`tests/throttle_crosscheck.mts`) can cover them. Keep pull (`tapPond`,
-  the Wave branch in `tick`, `wakePond`) unexposed: the throttle spec and the Python tests use a Wave as
-  their yardstick, and it is the reference the Python port is checked against. Kill, Sleep and Force stay
-  in the engine for parity (their UI goes).
+  Python engine, so the cross-check (`tests/throttle_crosscheck.mts`) can cover them. Pull goes with
+  "Removing pull" (the spec's Wave yardstick becomes recorded numbers), and the internal renames apply.
+  Kill, Sleep and Force stay in the engine for parity (their UI goes).
 - **Types and store** (`types.ts`, `store.ts`): `ActiveTrigger` becomes a list of refreshes per Pond;
   actions `triggerTap`, `triggerWave`, `triggerPulse`, `triggerTide`, `setTideDraft` and the control
   actions give way to `refreshNow`, `addRefresh`, `removeRefresh`.
@@ -195,8 +270,8 @@ smaller:
   everything at one freshness), **Refresh continuously** (paced to the slowest step: the throttle chapter
   that was D5 of the throttle plan), the run chart, noise, **Refresh every N s**, a second output, done.
   Check the `noise`/`adapts` claim under continuous refresh first (see "Measure first").
-- **Tests**: `tests/unit/orchestration.spec.ts` and `throttle.spec.ts` keep their Wave yardstick; the tour
-  e2e changes with the steps (`npm test` runs it at four viewports).
+- **Tests**: `tests/unit/orchestration.spec.ts` and `throttle.spec.ts` swap the Wave yardstick for recorded
+  numbers; the tour e2e changes with the steps (`npm test` runs it at four viewports).
 
 ## Docs to rewrite
 
@@ -208,7 +283,7 @@ The concept and guide pages need rewriting, not search and replace: much of thei
 |---|---|
 | `concepts/orchestration.md` (19) | The Triggers section and table become Refresh and its standing forms. "Throttling to the bottleneck" teaches pacing through the throttle under a continuous refresh, not the Wave's one-run-ahead rule (keep the gantt idea). Standard Patterns table. The video caption ("kept current by a Wave"), and the video itself (`/img/ripple.webm`, `.mp4`), re-recorded under a continuous refresh. The optional-Source paragraph. |
 | `guides/scheduling.md` (21) | Restructure around `refresh`: now, `--every`, `--start` (new: refresh at set times), `--continuous`, several refreshes per Pond, windows (`duckstring window`), different cadences, optional Sources, stopping (`--remove`). |
-| `reference/orchestration_theory.md` (45) | Keep pull and push as the model (pull still drives Wake and Spouts), but the Triggers section, its table and "Which Should You Use?" become Refresh and its forms (one-shot, floating, anchored, continuous); Saturated Push's examples use a continuous refresh; the pseudocode's trigger pseudo-nodes gain the anchored rule; Rebuild replaces Refresh where the flag appears. |
+| `reference/orchestration_theory.md` (45) | A substantial rewrite. With pull removed, the model is demand plus the throttle: Kanban stays as motivation for the bottleneck's release at its starts, the Pull section and its examples go, Push becomes Demand, the Triggers section and "Which Should You Use?" become Refresh and its forms (one-shot, floating, anchored, continuous), and the pseudocode loses the pull state and handlers and gains the anchored rule and local demand (Wake, Spouts). Rebuild replaces Refresh where the flag appears. |
 | `reference/cli/trigger.md` (13) | Replaced by `reference/cli/refresh.md` and `reference/cli/window.md`; `cli/index.md` (2) and the sidebar (`docs/sidebars.ts`) follow. |
 | `reference/cli/control.md` | `refresh` becomes `rebuild`. |
 | `reference/cli/do.md` | The `refresh` operation becomes `rebuild`. |
@@ -216,7 +291,7 @@ The concept and guide pages need rewriting, not search and replace: much of thei
 | `quickstart.md` (10) | "Run it once with a Pulse" becomes `duckstring refresh reports`; the trigger table becomes the refresh forms. |
 | `guides/connecting_catchments.md` (4) | Duct demand, `--refresh-on-get`. |
 | `guides/monitoring_and_failures.md` | Rebuild. |
-| `guides/querying.md` | Tap-on-get becomes refresh-on-get; any Rebuild mention. |
+| `guides/querying.md` | Tap-on-get becomes Taps (on-request freshness); any Rebuild mention. A Taps guide (or a section here) when Taps ship. |
 | `guides/migrating_a_project.md` (3), `guides/upgrades.md`, `guides/dbt_projects.md`, `guides/cloud_compute_on_aws.md`, `concepts/management_and_execution.md`, `reference/pond_toml.md`, `reference/formats.md`, `reference/cli/catchment.md` (1 to 2 each) | Single mentions: reword. |
 | `README.md` (2) | `trigger tide reports 1d` and `trigger pulse reports` become `refresh`. |
 | `CHANGELOG.md` | An Unreleased entry: the new trigger, the removed ones, Rebuild, the `/refresh` route change in bold, and the aliases' end-of-life. |
@@ -226,7 +301,8 @@ The concept and guide pages need rewriting, not search and replace: much of thei
 `docs/documentation_style.md` applies (no em-dashes; check every claim against the code). CLAUDE.md's
 "Terminology for user-facing text" section (Pull and push, Tide leading with "every x") is rewritten for
 Refresh: lead with "every", and say that `--every` is a request period, so data can be up to the period
-plus the pipeline's run time old.
+plus the pipeline's run time old. Its structure map, the orchestration model (the subtle rules lose the
+cold-start guards if pull goes) and the Triggers and control section follow the renames.
 
 ## Tests
 
@@ -250,23 +326,21 @@ some lookahead (for example, release one request ahead at the bottleneck) before
 
 ## Ship order
 
-1. **Measure** (above), and settle the open questions below.
-2. **Engine**: `Refresh`, anchored and floating rules, `next_wake`, the Rebuild rename; tests.
+1. **Measure** (above), and settle the proposals and open questions.
+2. **Engine**: `Refresh`, anchored and floating rules, `next_wake`, the Rebuild rename, pull removed and
+   push renamed demand; tests (recording the Wave yardstick numbers first).
 3. **Driver, migration `031`, HTTP API**, aliases; tests.
 4. **CLI**: `refresh`, `window`, `control rebuild`, `do`, aliases; CLI reference pages together.
 5. **Web UI**: the Refresh section, trigger node, Selector rename.
 6. **Playground**: engine parity, UI cut-down, tour rewrite.
 7. **Docs** (the table above), CLAUDE.md, the changelog.
-8. A later release: remove the aliases, move the poller to `/refresh`, and decide whether the engine's
-   Wave yardstick goes.
+8. A later release: remove the aliases and move the poller to `/refresh`.
+9. **Taps**, from their own plan.
 
 ## Open questions
 
-- **CLI listing and removal**: flags on one command (`refresh POND --list`, `--remove NAME`, above) or
-  subcommands (`refresh POND now|add|ls|rm`, mirroring `window POND add|list|remove`)? Flags keep the
-  one-shot as `refresh POND`; subcommands are more regular.
-- **Where windows live**: `duckstring window POND ...` (above) or under another group?
-- **`--refresh-on-get`**: keep it (a heavier on-request refresh, paced by the throttle), or drop it, since a
-  query can simply be followed by a refresh?
-- **Engine names**: rename `Trigger`/`triggers`, `pulse_pond`, and the Tide wording in code comments to
-  Refresh (a larger diff, but code and docs findable from each other), or leave internal names alone?
+- **Removing pull** and **Taps** (above) await the author.
+- **Taps' default**: does a Tap without `--fresh-within` serve as is, or should freshness be the default,
+  since it is the reason to create one?
+- **Positioning**: with no pull inside the engine, does the landing page keep "pull orchestration" (the
+  lean-manufacturing sense: demand starts at the end), or say "demand-driven orchestration"?
