@@ -104,10 +104,8 @@ branch and re-tap, and the `startF` cold-start guards (one of the subtle rules i
 test, and the theory doc's model shrinks to demand plus the throttle (the Kanban idea survives as the
 motivation for the bottleneck's release at its starts).
 
-If "Measure first" shows a continuous refresh needs lookahead under noisy run times, that is added as a
-demand-side rule, not by keeping pull. The throttle tests' Wave yardstick becomes fixed expected
-numbers recorded from today's engines before the removal. The playground engine loses pull too, so the two
-engines stay a port of each other.
+"Measure first" found no need for lookahead: a continuous refresh delivers fresher data than a Wave even
+where noise costs it Outlet runs.
 
 ## Internal names
 
@@ -276,7 +274,8 @@ smaller:
   a Tide. A sketch: the pipeline, the slowest step, running from the end, **Refresh now** (one pass,
   everything at one freshness), **Refresh continuously** (paced to the slowest step: the throttle chapter
   that was D5 of the throttle plan), the run chart, noise, **Refresh every N s**, a second output, done.
-  Check the `noise`/`adapts` claim under continuous refresh first (see "Measure first").
+  The `noise`/`adapts` claim holds on the demo under a continuous refresh (3% fewer Outlet runs at sigma
+  0.5, with fresher data; `bench/continuous_refresh/`).
 - **Tests**: `tests/unit/orchestration.spec.ts` and `throttle.spec.ts` swap the Wave yardstick for recorded
   numbers; the tour e2e changes with the steps (`npm test` runs it at four viewports).
 
@@ -328,15 +327,23 @@ Playground-linking list ("Link it wherever orchestration is explained") drop Orc
 
 ## Measure first
 
-Before the Wave disappears from the docs, compare a continuous refresh with a Wave under noisy run times
-in both engines. The throttle plan measured the long lead at σ 0.5 at 29 Outlet runs against a Wave's 36,
-and the Playground tour's `noise`/`adapts` steps claim the pipeline keeps pace under noise. If the gap
-holds, decide whether that is acceptable for "as fresh as possible", or whether `--continuous` should keep
-some lookahead (for example, release one request ahead at the bottleneck) before Wave goes.
+Measured 2026-10-14 (`bench/continuous_refresh/`): a continuous refresh against a Wave on the 11 throttle
+topologies, with lognormal run-time noise (sigma 0 to 1), 8 paired seeds, in both engines.
+
+- Without noise it matches the Wave's Outlet runs everywhere, with data at least as fresh (two to three
+  times fresher on long pipelines).
+- With noise it completes fewer Outlet runs on long pipelines (long lead: 16% fewer at sigma 0.5, 26% at
+  sigma 1), but its data is still fresher: mean age no higher in 42 of 44 cases and about half the Wave's
+  on long pipelines, p95 too. For "as fresh as possible", age is the measure, so **pull can go without a
+  lookahead rule**.
+- Two refinements for later, neither blocking: a bottleneck that is itself an Inlet runs 7 to 13% staler
+  under heavy noise (pacing falls to the Outlet's completions, which lag the Inlet), and upstream compute
+  rises by a median of 1 to 4% (at most 24%) because the slow flag clears whenever the bottleneck idles and
+  the pipeline refills. Both are throttle tuning, not reasons to keep pull.
 
 ## Ship order
 
-1. **Measure** (above), and settle the proposals and open questions.
+1. Measure: done (see "Measure first").
 2. **Engine**: `Refresh`, anchored and floating rules, `next_wake`, the Rebuild rename, pull removed and
    push renamed demand; tests (recording the Wave yardstick numbers first).
 3. **Driver, migration `031`, HTTP API**, aliases; tests.
@@ -349,5 +356,4 @@ some lookahead (for example, release one request ahead at the bottleneck) before
 
 ## Open questions
 
-None outstanding for this stage. "Measure first" may add a lookahead rule for `--continuous`; Taps' open
-questions belong to their own plan.
+None outstanding for this stage. Taps' open questions belong to their own plan.
