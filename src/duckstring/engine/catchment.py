@@ -54,6 +54,7 @@ __all__ = [
     "pond_add_target",
     "push_sources",
     "is_throttled",
+    "resend_held_demand",
     "ripple_add_target",
     "complete_ripple",
     "fail_ripple",
@@ -344,6 +345,17 @@ def _forward(s: EngineState, pid: PondId, t: datetime, release: bool = False) ->
 # start rather than the release time (which can be a whole run earlier when the Inlet is busy). The state
 # is soft (``PondState.throttle``, never persisted) and the throttle is silent: it changes only what is
 # forwarded and how a released Inlet stamps.
+
+
+def resend_held_demand(s: EngineState) -> None:
+    """Re-send each unblocked Pond's newest unmet push target to its push Sources. Held demand is ordinary
+    (persisted) targets, but the throttle state that would release it is soft, so after a reload nothing
+    else would send it on. Upstream ignores what is already requested or covered (rule 6), so this costs
+    at most one extra upstream run per path."""
+    for pid, ps in s.pond_states.items():
+        unmet = [t for t in ps.targets if t > NEVER]
+        if unmet and not ps.is_blocked:
+            _forward(s, pid, max(unmet))
 
 
 def _throttle(s: EngineState, pid: PondId) -> ThrottleState:

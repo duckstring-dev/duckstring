@@ -1,6 +1,6 @@
 # Pulse throttle: pacing saturated push demand by the bottleneck
 
-Status: **D1 (rules 6 to 8) and D2 (the throttle) built in the Python engine; D3 to D5 pending.** The reference implementation is
+Status: **D1 (rules 6 to 8), D2 (the throttle) and D3 (the reload re-send) built in the Python engine; D4 and D5 pending.** The reference implementation is
 the playground's TypeScript engine on branch `playground-pulse-release` (`playground/src/lib/
 orchestration.ts`, commit `58876400`), with its tests in `playground/tests/unit/throttle.spec.ts`. This
 plan ports it to `engine/catchment.py` and the Driver. Per CLAUDE.md the Python engine is a
@@ -329,7 +329,8 @@ The Duck's `WorkerEngine` is unchanged: it pushes one Pond Run to completion and
 
 Only two changes, both silent:
 
-- `Driver.reload`: the restart re-send above, after state is restored and before the first `_process`.
+- `Driver.reload`: the restart re-send above, after state is restored and before the first `_process`
+  (as built: `engine.resend_held_demand`, skipping blocked Ponds, which solicit nothing).
 - Nothing else: no setting, no status or metrics fields, no logs. The Web UI and CLI are unchanged.
 
 ## Docs
