@@ -1,6 +1,6 @@
 # Pulse throttle: pacing saturated push demand by the bottleneck
 
-Status: **designed and simulated; not built in the Python engine.** The reference implementation is
+Status: **D1 (rules 6 to 8) and D2 (the throttle) built in the Python engine; D3 to D5 pending.** The reference implementation is
 the playground's TypeScript engine on branch `playground-pulse-release` (`playground/src/lib/
 orchestration.ts`, commit `58876400`), with its tests in `playground/tests/unit/throttle.spec.ts`. This
 plan ports it to `engine/catchment.py` and the Driver. Per CLAUDE.md the Python engine is a
@@ -62,6 +62,13 @@ Detection is per Ripple, pacing per Pond, and one derived flag crosses a Pond bo
    intra-Pond parent) is busy. An Inlet stamps its freshness when its Pond Run starts but reads its data
    when its first Ripples run, so a run queued behind a busy first Ripple would be labelled up to a whole
    run older than its data. Later Ripples may still be busy; runs pipeline through them.
+5a. **Release stamp** (Python only; settled 2026-10-13). A release is pacing and carries no epoch anyone
+   asked for, so an Inlet a release reaches stamps its next Run's **start**, not the release time. Under
+   the minted-freshness rule an Inlet stamps the newest epoch it was asked for, and a trigger Pond's
+   release can reach a busy bottleneck Inlet a whole run before that Inlet can start: the slow-sibling
+   topology read 12 s against a Wave's 8 s until this rule. A user's Pulse, Tide or duct epoch still
+   stamps its minted epoch. The playground stamps every Inlet Run's start (it has no minted epochs), so
+   this brings the two engines together.
 
 Three fixes go with it and stand on their own (D1):
 
@@ -140,6 +147,7 @@ class ThrottleState:
     sent_at: dict[RippleId, int] = field(default_factory=dict)  # each Ripple's runs_started at the last send
     trigger: bool = False              # a trigger targets this Pond (cleared when its demand drains)
     completed: bool = False            # completed a run since the last send
+    released: bool = False             # Inlets: a release reached it, so its next Run stamps its start
 
 @dataclass
 class PondState:
@@ -153,22 +161,23 @@ numbers, not timestamps, identify a Ripple's runs (a Ripple's runs never overlap
 ## Engine changes (`engine/catchment.py`)
 
 ```python
-def pond_add_target(s, pid, t, from_trigger=False):
+def pond_add_target(s, pid, t, from_trigger=False, release=False):
     ps = s.pond_states[pid]
     if ps.is_blocked or t <= ps.end_f or t in ps.targets:
         return
     if t <= ps.start_f:                      # 6: a run in flight already covers it
         return
     ps.targets.append(t)
+    if release and not s.ponds[pid].sources: # 5a: an Inlet stamps its next Run's start
+        _throttle(s, pid).released = True
     if from_trigger:
         _throttle(s, pid).trigger = True
-    if t == NEVER:                           # Force's sentinel is not demand
-        return
-    _count_demand(s, pid)
-    if _holds(s, pid):
-        _throttle(s, pid).held += 1
-        return
-    _forward(s, pid, t)
+    if not ps.repairing:                     # (Force's NEVER never gets here: NEVER <= end_f)
+        _count_demand(s, pid)
+        if _holds(s, pid):
+            _throttle(s, pid).held += 1
+            return
+    _forward(s, pid, t, release)
 
 def push_sources(s, pid):                    # 7
     pond = s.ponds[pid]
@@ -180,12 +189,12 @@ def push_sources(s, pid):                    # 7
         return sps.start_f == NEVER and not any(t > NEVER for t in sps.targets)
     return [sp for sp in pond.sources if sp not in pond.optional_sources or unbuilt(sp)]
 
-def _forward(s, pid, t):
+def _forward(s, pid, t, release=False):
     th = _throttle(s, pid)
     th.held, th.completed = 0, False
     th.sent_at = {r: s.ripple_states[r].runs_started for r in ripples_of(s, pid)}
     for sp in push_sources(s, pid):
-        pond_add_target(s, sp, t)
+        pond_add_target(s, sp, t, release=release)
 
 def _count_demand(s, pid):
     th = _throttle(s, pid)
@@ -211,7 +220,7 @@ def is_throttled(s, pid):                    # 2: never across an optional edge
 
 def _holds(s, pid):                          # 3
     pond, ps = s.ponds[pid], s.pond_states[pid]
-    if not push_sources(s, pid) or pond.is_draw or pond.is_spout or ps.repairing:
+    if not push_sources(s, pid) or pond.is_draw or pond.is_spout:
         return False
     th = ps.throttle
     return is_throttled(s, pid) if th.trigger else bool(th.slow)
@@ -236,7 +245,7 @@ def _settle_throttle(s, now) -> bool:        # inside sentinel, after the start 
             th.trigger, th.held = False, 0   # demand drained
             continue
         if push_sources(s, pid) and _release_due(s, pid):
-            _forward(s, pid, now)
+            _forward(s, pid, now, release=True)
             changed = True
     return changed
 ```
@@ -252,6 +261,8 @@ Wiring:
 - **Triggers.** `pulse_pond` and the Tide branch of `tick` call `pond_add_target(..., from_trigger=True)`.
   `Driver.pulse` (the API route, including duct Pulses) goes through `pulse_pond` already.
 - **`can_start_pond`.** Rule 5: an Inlet that isn't a Draw doesn't start while a first Ripple is running.
+- **`start_pond_run`.** Rule 5a: a non-windowed Inlet with `throttle.released` adds `now` to the epochs it
+  stamps from (so it stamps its start) and clears the flag.
 - **`derive_blocked`.** Rule 8: when `is_blocked` changes to false, `_forward(max(unmet finite targets))`
   before recursing to the Sinks.
 - **`sleep_pond`, `kill_pond`, `clear_pond`.** Drop `ps.throttle`. `force_pond` and `refresh_pond` are
@@ -266,7 +277,9 @@ The Duck's `WorkerEngine` is unchanged: it pushes one Pond Run to completion and
 
 - **Inlets** can be slow (their first Ripple runs while demand arrives) and so throttle everything
   downstream, but can't hold: they have no Sources. A Pulse's minted epoch is the max target at the
-  Inlet's Pond start, so waiting for the first Ripple makes the stamp later and truer, never earlier.
+  Inlet's Pond start, so waiting for the first Ripple makes the stamp later and truer, never earlier; a
+  release's is the start itself (rule 5a). Before detection (the startup) a user's Pulse can still reach a
+  busy Inlet and stamp its own, older epoch, which is that Pulse's meaning.
 - **Windowed Inlets.** Freshness is the window end, so rule 5 changes nothing material. Between windows the
   Inlet is idle, so any slow flag clears.
 - **Multi-Ripple Ponds.** Slowness is per Ripple, and a bottleneck releases only when all its slow Ripples
@@ -352,7 +365,8 @@ Port `playground/tests/unit/throttle.spec.ts` to `tests/test_engine.py` using it
 - **Saturation.** The nine topologies above, under Pulses every 1 s, a 0 s Tide, and a 1 s Tide with
   drifting ticks (extend the harness with a seeded drift of −10 to +29 ms per 100 ms step, as the
   playground's real-time ticks drift). For each: bottleneck and Outlet runs equal a Wave's; over the
-  second half, upstream runs at most one per bottleneck run; data age at most a Wave's.
+  second half, upstream runs at most one per bottleneck run and data age at most a Wave's (age over the
+  whole run includes the startup, where a user's Pulse at a busy Inlet keeps its minted epoch).
 - **Sparse.** Pulses every 60 s run every Pond exactly once per Pulse.
 - **Optional Sources.** A slow optional Source neither throttles its Sink nor is asked again after its
   first build (one run under Pulses every 1 s); a Pond with only optional Sources is throttled only when

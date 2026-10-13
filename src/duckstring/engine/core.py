@@ -190,6 +190,24 @@ class BeginRun:
 
 
 @dataclass
+class ThrottleState:
+    """The Pulse throttle's per-Pond bookkeeping (plans/pulse-throttle.md). Soft: in memory only, rebuilt
+    by observation; losing it falls back to plain Pulse until two demands land in one run again. Runs are
+    identified by a Ripple's ``runs_started`` (a Ripple's runs never overlap), never by durations."""
+
+    counts: dict[RippleId, tuple[int, int]] = field(default_factory=dict)  # ripple -> (run, demands seen in it)
+    slow: set[RippleId] = field(default_factory=set)  # Ripples that saw two demands in one run, until idle
+    held: int = 0  # demands held at this Pond since it last sent a Pulse upstream
+    sent_at: dict[RippleId, int] = field(default_factory=dict)  # each Ripple's runs_started at the last send
+    trigger: bool = False  # a trigger targets this Pond (cleared when its demand drains)
+    completed: bool = False  # completed a Pond Run since the last send
+    released: bool = False  # Inlets: a release reached it, so its next Run stamps its start
+
+    def copy(self) -> ThrottleState:
+        return replace(self, counts=dict(self.counts), slow=set(self.slow), sent_at=dict(self.sent_at))
+
+
+@dataclass
 class PondState:
     start_f: datetime = NEVER  # freshness of the most recently started Pond Run
     end_f: datetime = NEVER  # freshness of the most recently completed Pond Run
@@ -236,6 +254,7 @@ class PondState:
     runs_completed: int = 0
     gen_start_times: dict[int, datetime] = field(default_factory=dict)
     completion_times: list[datetime] = field(default_factory=list)
+    throttle: ThrottleState | None = None  # the Pulse throttle's soft state, created on first use
 
     def copy(self) -> PondState:
         return replace(
@@ -243,6 +262,7 @@ class PondState:
             targets=list(self.targets),
             gen_start_times=dict(self.gen_start_times),
             completion_times=list(self.completion_times),
+            throttle=self.throttle.copy() if self.throttle is not None else None,
         )
 
 

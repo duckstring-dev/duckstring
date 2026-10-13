@@ -735,6 +735,43 @@ def test_pulse_at_makes_an_inlet_stamp_the_forwarded_epoch(tmp_path):
     assert d.state.pond_states["transactions@1"].start_f == T
 
 
+def _complete_run(d, key):
+    """Drive the Pond Run in flight on ``key`` to completion via simulated Duck events."""
+    f = d.state.pond_states[key].start_f.isoformat()
+    d.on_event(key, {"kind": "ripple", "f": f, "ripple": "r1", "status": "success"})
+    d.on_event(key, {"kind": "run_completed", "f": f})
+
+
+def test_duct_pulses_are_paced_by_the_upstream_throttle(tmp_path):
+    """The producer side of a duct under saturated demand: each downstream Pulse arrives through
+    ``Driver.pulse(at=...)``, so the exported Pond is a trigger Pond here and this Catchment's throttle paces
+    its own graph. Once the slow Pond has seen two demands in one run, further Pulses are held instead of
+    re-running the Inlet, and the slow Pond sends one Pulse upstream per new run (plans/pulse-throttle.md)."""
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "inlet", "1.0.0", "inlet", "ponds/inlet/1.0.0", _cfg(), _RIPPLES)
+    _register(db, "slow", "1.0.0", "pond", "ponds/slow/1.0.0", _cfg(sources={"inlet": "1.0.0"}, kind="pond"), _RIPPLES)
+    _register(db, "out", "1.0.0", "outlet", "ponds/out/1.0.0", _cfg(sources={"slow": "1.0.0"}, kind="outlet"),
+              _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    t1, t2, t3, t4 = (_now() - timedelta(seconds=n) for n in (40, 30, 20, 10))
+
+    d.pulse("out@1", at=t1)
+    _complete_run(d, "inlet@1")  # slow starts at t1
+    d.pulse("out@1", at=t2)  # one demand during slow's run: forwarded, so the Inlet runs at t2
+    _complete_run(d, "inlet@1")
+    d.pulse("out@1", at=t3)  # the second in the same run: slow is the bottleneck and holds it
+    d.pulse("out@1", at=t4)  # the Outlet is throttled now and holds it
+    inlet = d.state.pond_states["inlet@1"]
+    assert inlet.runs_started == 2 and inlet.targets == []
+    assert d.state.pond_states["slow@1"].throttle.held == 1
+    assert d.state.pond_states["out@1"].throttle.held == 1
+
+    _complete_run(d, "slow@1")  # slow restarts at t2, its turn: one Pulse upstream
+    assert d.state.pond_states["slow@1"].start_f == t2
+    assert d.state.pond_states["inlet@1"].runs_started == 3
+
+
 def test_poller_blocks_draw_when_upstream_unreachable(tmp_path):
     d = _driver(tmp_path)
     d.create_duct("up", "http://up", None)
