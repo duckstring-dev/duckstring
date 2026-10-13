@@ -78,7 +78,8 @@ def pulse(
 ) -> None:
     """Ask for data at least as fresh as now.
 
-    Every older Pond upstream runs, and the result flows down to this Pond.
+    Every older Pond upstream runs (an optional Source only if it has never run), and the result flows
+    down to this Pond.
     """
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)

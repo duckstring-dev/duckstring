@@ -9,7 +9,12 @@ just the ``now`` argument, fully decoupled from wall-clock — the loop never sl
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +25,7 @@ from duckstring.engine import (
     PondState,
     Ripple,
     RippleState,
+    ThrottleState,
     Trigger,
     Window,
     block_on_missing_asset,
@@ -30,11 +36,14 @@ from duckstring.engine import (
     fail_pond,
     fail_ripple,
     force_pond,
+    is_throttled,
     kill_pond,
     next_wake,
+    pond_add_target,
     pond_set_has_pull,
     pond_source_f,
     pulse_pond,
+    push_sources,
     ripple_source_f,
     sentinel,
     sleep_pond,
@@ -218,17 +227,48 @@ def diamond_topology(triggers: list[Trigger] | None = None) -> tuple[EngineState
     return build(ponds, ripples, triggers), durations
 
 
+def graph(spec: list[tuple[str, float | list[float], list[str]]]) -> tuple[EngineState, dict[str, timedelta]]:
+    """Ponds as ``(name, seconds or a sequence of Ripples' seconds, sources)``; a Pond's Ripples run in
+    sequence as ``{name}.r{i}``. The shape of the playground's throttle tests."""
+    ponds, ripples, durations = [], [], {}
+    for name, sec, sources in spec:
+        ponds.append(Pond(name, name, sources=list(sources)))
+        for i, d in enumerate(sec if isinstance(sec, list) else [sec]):
+            rid = f"{name}.r{i}"
+            ripples.append(Ripple(rid, name, f"r{i}", parents=[f"{name}.r{i - 1}"] if i else []))
+            durations[rid] = secs(d)
+    return build(ponds, ripples), durations
+
+
+def chain(*spec: tuple[str, float | list[float]]) -> tuple[EngineState, dict[str, timedelta]]:
+    """A linear :func:`graph`, each Pond reading the one before it."""
+    return graph([(name, sec, [spec[i - 1][0]] if i else []) for i, (name, sec) in enumerate(spec)])
+
+
 # ─── Driver (plays the orchestrator) ──────────────────────────────────────────
 
 
 class Driver:
-    def __init__(self, state: EngineState, durations: dict[str, timedelta], now: datetime = T0):
+    def __init__(self, state: EngineState, durations: dict[str, timedelta], now: datetime = T0,
+                 drift: bool = False):
         self.state = state
         self.durations = durations
         self.now = now
         self.inflight: dict[str, datetime] = {}  # rid -> scheduled completion time
         self.fail_counts: dict[str, int] = {}  # rid -> remaining runs to fail instead of complete
         self.unchanged: set[str] = set()  # rids whose completions report no output change (changed=False)
+        # Drift: each step advances 90 to 129 ms instead of 100, from the playground's seeded generator, as
+        # its real-time ticks drift. Events that coincide on an exact grid then land in different steps.
+        self.drift = drift
+        self._seed = 7
+
+    def advance(self) -> None:
+        """Move sim time on by one step (with drift, if enabled)."""
+        jitter = 0
+        if self.drift:
+            self._seed = (self._seed * 1664525 + 1013904223) & 0xFFFFFFFF
+            jitter = self._seed % 40 - 10
+        self.now += STEP + timedelta(milliseconds=jitter)
 
     def fail_next(self, rid: str, n: int = 1) -> None:
         """Make the next ``n`` runs of ``rid`` error (the Duck gave up) rather than complete."""
@@ -259,7 +299,12 @@ class Driver:
         self._react()
 
     def step(self) -> None:
-        due = [rid for rid, t in self.inflight.items() if t <= self.now]
+        self.process()
+        self.advance()
+
+    def process(self) -> None:
+        """At ``now``: feed back every due completion (in Ripple order), tick, and react."""
+        due = [rid for rid in self.state.ripple_states if rid in self.inflight and self.inflight[rid] <= self.now]
         for rid in due:
             del self.inflight[rid]
             if self.fail_counts.get(rid, 0) > 0:
@@ -269,7 +314,6 @@ class Driver:
                 self.state = complete_ripple(self.state, rid, self.now, changed=rid not in self.unchanged)
         self.state = tick(self.now, self.state)
         self._react()
-        self.now += STEP
 
     def run(self, seconds: float, stop_when=None) -> None:
         steps = int(seconds / 0.1)
@@ -872,6 +916,368 @@ def test_kill_parks_terminal_and_blocks_downstream():
     # Clear lifts it and unblocks downstream.
     cleared = clear_pond(out, "p1", T0 + secs(8))
     assert not cleared.pond_states["p1"].is_killed and not cleared.pond_states["p2"].is_blocked
+
+
+# ─── Push propagation (plans/pulse-throttle.md rules 6 to 8) ───────────────────
+
+
+@pytest.mark.timeout(1)
+def test_push_sources_are_required_plus_an_unbuilt_optional_or_all():
+    s, _ = graph([("A", 1, []), ("B", 1, []), ("C", 1, ["A", "B"])])
+    assert push_sources(s, "C") == ["A", "B"]
+    s.ponds["C"].optional_sources = {"B"}
+    assert push_sources(s, "C") == ["A", "B"]  # B has never run: asked, to build its first output
+    s.pond_states["B"].targets = [T0]
+    assert push_sources(s, "C") == ["A"]  # already asked
+    s.pond_states["B"].targets = []
+    s.pond_states["B"].start_f = T0
+    assert push_sources(s, "C") == ["A"]  # built: an optional Source is never waited for
+    s.ponds["C"].optional_sources = {"A", "B"}
+    assert push_sources(s, "C") == ["A", "B"]  # only optional: the Pond runs on whichever is fresher
+
+
+@pytest.mark.timeout(5)
+def test_pulses_build_an_optional_source_once_and_pull_still_reaches_it():
+    # C requires the 1 s A and takes the 4 s B optionally.
+    s, dur = graph([("A", 1, []), ("B", 4, []), ("C", 1, ["A", "B"])])
+    s.ponds["C"].optional_sources = {"B"}
+    d = Driver(s, dur)
+    for _ in range(30):
+        d.pulse("C")
+        d.run(1)
+    d.run(5)
+    assert d.state.pond_states["B"].runs_completed == 1  # asked once, to build its first output
+    assert d.state.pond_states["C"].runs_completed >= 25  # paced by A, never by B
+    d.tap("C")
+    d.run(10)
+    assert d.state.pond_states["B"].runs_completed > 1  # a Tap still reaches every Source
+
+
+@pytest.mark.timeout(5)
+def test_pulses_reach_every_source_when_all_are_optional():
+    s, dur = graph([("A", 1, []), ("B", 1, []), ("C", 1, ["A", "B"])])
+    s.ponds["C"].optional_sources = {"A", "B"}
+    d = Driver(s, dur)
+    for _ in range(2):
+        d.pulse("C")
+        d.run(5)
+    assert d.state.pond_states["A"].runs_completed == 2
+    assert d.state.pond_states["B"].runs_completed == 2
+
+
+@pytest.mark.timeout(5)
+def test_repeat_pulse_for_the_running_epoch_neither_reruns_nor_passes_it():
+    """Rule 6: a target a Run in flight covers counts as met. A repeat request for the epoch O is running
+    (a duct re-sending the downstream's target, or a throttle release in the same instant) used to start a
+    second Run at the same freshness, which the no-change skip then completed as a pass, ending the
+    in-flight Run early."""
+    s, dur = chain(("I", 1), ("O", 2))
+    d = Driver(s, dur)
+    d.pulse("O")
+    d.run(1.5)  # I done; O running at freshness T0
+    assert d.state.ripple_states["O.r0"].is_running
+    d.state = pulse_pond(d.state, "O", T0)  # the same epoch again
+    d._react()
+    o = d.state.pond_states["O"]
+    assert o.runs_started == 1 and d.state.pending_passes == []
+    assert d.state.ripple_states["O.r0"].is_running  # the in-flight Run is not completed early
+    d.run(5)
+    assert d.state.pond_states["O"].runs_completed == 1 and d.state.pond_states["O"].end_f == T0
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("halted", ["I", "M"])
+def test_demand_lost_at_a_halted_source_is_resent_when_it_unblocks(halted):
+    """Rule 8. A Run halted mid-flight drops the demand it was serving (its targets cleared at start), and
+    Clear returns it to idle without running. Each Pond that unblocks re-sends its newest unmet target, so
+    the demand reaches the halted Source again (the Inlet, when it was the one halted) and the Outlet is
+    served. Without the re-send the whole chain strands."""
+    s, dur = chain(("I", 1), ("M", 1), ("N", 1), ("O", 1))
+    d = Driver(s, dur)
+    d.pulse("O")
+    d.run(0.5 if halted == "I" else 1.5)
+    assert d.state.ripple_states[f"{halted}.r0"].is_running
+    d.state = fail_pond(d.state, halted, d.now)
+    del d.inflight[f"{halted}.r0"]  # its Duck died with it
+    assert d.state.pond_states["O"].is_blocked
+    d.state = clear_pond(d.state, halted, d.now)
+    d._react()
+    d.run(10)
+    for pid in ("I", "M", "N", "O"):
+        assert d.state.pond_states[pid].runs_completed == 1, pid
+    assert d.state.pond_states["O"].end_f == T0
+
+
+# ─── Pulse throttle (plans/pulse-throttle.md) ─────────────────────────────────
+# Ported from the playground's playground/tests/unit/throttle.spec.ts, the reference implementation. Under
+# saturated demand the bottleneck runs as often as under a Wave, upstream settles at the bottleneck's rate,
+# and the data is at least as fresh as a Wave's. Sparse demand runs every Pond once per Pulse. Until the
+# bottleneck has started its first run nothing can be detected, so the startup runs as plain Pulse; data
+# age is therefore compared over the second half, as upstream run counts are. (The startup matters for age
+# here and not in the playground: a user's Pulse that reaches a busy Inlet keeps its minted epoch, which
+# the playground doesn't model.)
+
+Spec = list[tuple[str, float | list[float], list[str]]]
+
+
+def _chain_spec(*spec: tuple[str, float | list[float]]) -> Spec:
+    return [(name, sec, [spec[i - 1][0]] if i else []) for i, (name, sec) in enumerate(spec)]
+
+
+# name -> (spec, Outlet, an Inlet whose rate matters, the bottleneck Pond)
+THROTTLE_TOPOLOGIES: dict[str, tuple[Spec, str, str, str]] = {
+    "demo": ([("transactions", 1, []), ("products", 2, []), ("sales", 2, ["transactions", "products"]),
+              ("reports", 1, ["sales"])], "reports", "transactions", "sales"),
+    "deep chain": (_chain_spec(("I", 1), ("P1", 1), ("P2", 1), ("P3", 1), ("P4", 1), ("B", 5), ("O", 1)), "O", "I", "B"),
+    "long lead": (_chain_spec(("I", 1), ("P1", 1), ("P2", 1), ("P3", 1), ("P4", 1), ("P5", 1), ("P6", 1), ("B", 3),
+                              ("O", 1)), "O", "I", "B"),
+    "decreasing chain": (_chain_spec(("A", 1), ("B", 3), ("C", 2), ("D", 1)), "D", "A", "B"),
+    "slow sibling Inlet": ([("F", 1, []), ("S", 6, []), ("X", 1, ["F", "S"]), ("O", 1, ["X"])], "O", "F", "S"),
+    "diamond": ([("A", 1, []), ("B", 5, ["A"]), ("D", 1, ["A"]), ("C", 1, ["B", "D"])], "C", "A", "B"),
+    "diamond, long lead on the slow path": (
+        [("A", 1, []), ("L1", 1, ["A"]), ("L2", 1, ["L1"]), ("L3", 1, ["L2"]), ("L4", 1, ["L3"]), ("L5", 1, ["L4"]),
+         ("B", 3, ["L5"]), ("D", 1, ["A"]), ("C", 1, ["B", "D"])], "C", "D", "B"),
+    "Inlet with Ripples in sequence": (_chain_spec(("I", [1, 2, 1.5]), ("O", 1)), "O", "I", "I"),
+    "Outlet is the bottleneck": (_chain_spec(("I", 1), ("O", 4)), "O", "I", "O"),
+    "Outlet is the bottleneck behind a long lead": (
+        _chain_spec(("I", 1), ("P1", 1), ("P2", 1), ("P3", 1), ("P4", 1), ("P5", 1), ("O", 4)), "O", "I", "O"),
+    "bottleneck inside a Pond": (_chain_spec(("I", 1), ("P", [1, 4, 1]), ("O", 1)), "O", "I", "P"),
+}
+
+
+def _throttle_graph(name: str) -> tuple[EngineState, dict[str, timedelta]]:
+    s, dur = graph(THROTTLE_TOPOLOGIES[name][0])
+    if name == "demo":  # the playground's demo: `sales.join` (3 s) waits on `daily` (2 s) and `tiers` (1 s)
+        for rid, rname, parents, d in (("sales.r1", "tiers", [], 1), ("sales.r2", "join", ["sales.r0", "sales.r1"], 3)):
+            s.ripples[rid] = Ripple(rid, "sales", rname, parents=parents)
+            s.ripple_states[rid] = RippleState()
+            dur[rid] = secs(d)
+    return s, dur
+
+
+@dataclass
+class SimRun:
+    runs: dict[str, int]  # completed Pond Runs
+    late: dict[str, int]  # completed Pond Runs in the second half only
+    age: float  # mean data age (now - freshness) at the Outlet's completions in the second half, seconds
+    passes: int
+    completions: dict[str, list[datetime]]
+
+
+def simulate(made: tuple[EngineState, dict[str, timedelta]], outlet: str, seconds: int, *, every: float | None = None,
+             tide: float | None = None, wave: bool = False, drift: bool = False) -> SimRun:
+    """Drive sim time as the playground's tests do: Pulses at ``outlet`` every ``every`` seconds (landing
+    on the next step), a Tide with bound ``tide``, or a Wave; then per step advance, complete, tick, react."""
+    s, dur = made
+    if wave:
+        s.triggers = {outlet: Trigger(outlet, "wave")}
+    if tide is not None:
+        s.triggers = {outlet: Trigger(outlet, "tide", secs(tide))}
+    d = Driver(s, dur, drift=drift)
+    ages: list[float] = []
+    last_end, half = NEVER, {}
+    for i in range(seconds * 10):
+        if i == seconds * 5:
+            half = {pid: ps.runs_completed for pid, ps in d.state.pond_states.items()}
+        if every and i % round(every * 10) == 0:
+            d.state = pulse_pond(d.state, outlet, d.now)
+        d.advance()
+        d.process()
+        end = d.state.pond_states[outlet].end_f
+        if end != last_end:
+            last_end = end
+            if i >= seconds * 5:
+                ages.append((d.now - end).total_seconds())
+    runs = {pid: ps.runs_completed for pid, ps in d.state.pond_states.items()}
+    return SimRun(
+        runs=runs,
+        late={pid: n - half.get(pid, 0) for pid, n in runs.items()},
+        age=sum(ages) / max(1, len(ages)),
+        passes=len(d.state.pending_passes),
+        completions={pid: ps.completion_times for pid, ps in d.state.pond_states.items()},
+    )
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", list(THROTTLE_TOPOLOGIES))
+def test_saturated_demand_runs_at_the_bottlenecks_pace(name):
+    _, outlet, inlet, bottleneck = THROTTLE_TOPOLOGIES[name]
+    wave = simulate(_throttle_graph(name), outlet, 120, wave=True)
+    wave_drift = simulate(_throttle_graph(name), outlet, 120, wave=True, drift=True)
+    for opts, ref in ((dict(every=1), wave), (dict(tide=0), wave), (dict(tide=1, drift=True), wave_drift)):
+        r = simulate(_throttle_graph(name), outlet, 120, **opts)
+        assert r.runs[bottleneck] == ref.runs[bottleneck], opts
+        assert r.runs[outlet] == ref.runs[outlet], opts
+        assert r.late[inlet] <= r.late[bottleneck] + 1, opts  # settled: one per bottleneck run
+        assert r.runs[inlet] <= wave.runs[inlet] + 14, opts  # the startup, before detection, plus top-ups
+        assert r.age <= ref.age + 0.1, opts
+        assert r.passes == 0, opts  # rule 6: no repeat request completes a Run early as a pass
+
+
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("name", list(THROTTLE_TOPOLOGIES))
+def test_sparse_pulses_run_every_pond_once_per_pulse(name):
+    _, outlet, _, _ = THROTTLE_TOPOLOGIES[name]
+    r = simulate(_throttle_graph(name), outlet, 120, every=60)
+    assert r.runs == {pid: 2 for pid in r.runs}
+
+
+@pytest.mark.timeout(5)
+def test_an_inlet_stamps_a_release_at_its_start_and_a_pulse_at_its_epoch():
+    """A throttle release carries no epoch anyone asked for, so a busy Inlet it reaches stamps its next Run's
+    start. A user's Pulse keeps its minted epoch however late the Inlet gets to it."""
+    for release in (False, True):
+        d = Driver(*chain(("I", 4), ("O", 1)))
+        d.pulse("O")
+        d.run(1)  # I busy until T0+4
+        t = d.now
+        pond_add_target(d.state, "I", t, release=release)
+        d.run(4)  # I's first Ripple frees at T0+4 and the next Run starts
+        assert d.state.pond_states["I"].start_f == (T0 + secs(4) if release else t)
+
+
+@pytest.mark.timeout(10)
+def test_a_slow_optional_source_neither_throttles_its_sink_nor_is_asked_again():
+    # C requires the 1 s A and takes the 4 s B optionally.
+    s, dur = graph([("A", 1, []), ("B", 4, []), ("C", 1, ["A", "B"])])
+    s.ponds["C"].optional_sources = {"B"}
+    r = simulate((s, dur), "C", 120, every=1)
+    assert r.runs["B"] == 1  # asked once, to build its first output; never again
+    assert r.runs["C"] > 50  # paced by A (and its own 1 s run), never by B
+
+    # Slow on its own Tide, B is throttled, and the flag still doesn't cross the optional edge.
+    s, dur = graph([("A", 1, []), ("B", 4, []), ("C", 1, ["A", "B"])])
+    s.ponds["C"].optional_sources = {"B"}
+    s.triggers = {"B": Trigger("B", "tide", secs(0))}
+    d = Driver(s, dur)
+    for _ in range(30):
+        d.pulse("C")
+        d.run(1)
+    assert is_throttled(d.state, "B") and not is_throttled(d.state, "C")
+    assert d.state.pond_states["C"].runs_completed >= 25
+
+
+@pytest.mark.timeout(10)
+def test_a_pond_with_only_optional_sources_is_throttled_only_when_all_of_them_are():
+    s, dur = graph([("A", 1, []), ("B", 4, []), ("C", 1, ["A", "B"])])
+    s.ponds["C"].optional_sources = {"A", "B"}
+    r = simulate((s, dur), "C", 120, every=1)
+    assert r.runs["A"] > 50  # B is slow, A isn't, so C isn't throttled and A keeps up
+    assert r.runs["C"] > 50
+
+
+def _saturated_deep_chain(seconds: int = 30) -> Driver:
+    """The deep chain under a Pulse every second, long enough for B (5 s) to be the detected bottleneck."""
+    d = Driver(*_throttle_graph("deep chain"))
+    for _ in range(seconds):
+        d.pulse("O")
+        d.run(1)
+    assert d.state.pond_states["B"].throttle.slow == {"B.r0"}
+    assert is_throttled(d.state, "O") and d.state.pond_states["O"].throttle.trigger
+    return d
+
+
+@pytest.mark.timeout(5)
+def test_sleep_kill_and_clear_drop_throttle_state():
+    d = _saturated_deep_chain()
+    slept = sleep_pond(d.state, "O", d.now, upstream=True)
+    assert all(ps.throttle is None for ps in slept.pond_states.values())
+    killed = kill_pond(d.state, "B", d.now)
+    assert killed.pond_states["B"].throttle is None and not is_throttled(killed, "O")
+    cleared = clear_pond(d.state, "B", d.now)
+    assert cleared.pond_states["B"].throttle is None
+
+
+@pytest.mark.timeout(5)
+def test_force_is_neither_counted_nor_held_and_a_failed_bottleneck_clears():
+    d = _saturated_deep_chain()
+    for pid in ("B", "O"):
+        forced = force_pond(d.state, pid, d.now)
+        assert forced.pond_states[pid].throttle == d.state.pond_states[pid].throttle
+
+    failed = fail_pond(d.state, "B", d.now)
+    failed, _ = sentinel(d.now, failed)
+    assert not failed.pond_states["B"].throttle.slow  # its Ripple isn't running: slow clears
+    assert not is_throttled(failed, "O")
+
+
+@pytest.mark.timeout(5)
+def test_a_repairing_pond_neither_counts_nor_holds():
+    for repairing in (False, True):
+        d = Driver(*chain(("I", 1), ("B", 5), ("O", 1)))
+        d.pulse("O")
+        d.run(1.5)  # I done; B running
+        d.state.pond_states["B"].repairing = repairing
+        t1, t2 = d.now, d.now + STEP
+        pond_add_target(d.state, "B", t1)
+        pond_add_target(d.state, "B", t2)  # the second demand in one of B's runs
+        th = d.state.pond_states["B"].throttle
+        if repairing:
+            assert not th.slow and d.state.pond_states["I"].targets == [t1, t2]
+        else:
+            assert th.slow == {"B.r0"} and th.held == 1 and d.state.pond_states["I"].targets == [t1]
+
+
+@pytest.mark.timeout(5)
+def test_a_pass_counts_as_a_trigger_pond_completion():
+    """A throttled trigger Pond releases held demand on its completions, and a no-change pass is one."""
+    t1, t2, t3, now = (T0 + secs(n) for n in (1, 2, 3, 4))
+    for passes in (False, True):
+        s, _ = chain(("I", 1), ("B", 5), ("O", 1))
+        s.pond_states["I"].start_f = s.pond_states["I"].end_f = s.pond_states["I"].changed_f = t2
+        b = s.pond_states["B"]  # the bottleneck, slow, running at t2; its last Run (t1) changed nothing
+        b.start_f, b.end_f, b.changed_f = t2, t1, T0
+        s.ripple_states["B.r0"] = RippleState(start_f=t2, end_f=t1, is_running=True, runs_started=3)
+        b.throttle = ThrottleState(slow={"B.r0"}, sent_at={"B.r0": 3})
+        o = s.pond_states["O"]  # the Outlet, idle at T0, holding a Pulse at t3
+        o.start_f = o.end_f = o.changed_f = T0
+        o.targets = [t1, t3] if passes else [t3]
+        o.throttle = ThrottleState(trigger=True, held=1)
+
+        s, _ = sentinel(now, s)
+        if passes:  # O ran at t1 as a pass (B's output unchanged), which is its turn to release
+            assert s.pending_passes == [("O", t1)]
+            assert s.pond_states["O"].throttle.held == 0 and now in s.pond_states["B"].targets
+        else:
+            assert s.pond_states["O"].throttle.held == 1 and s.pond_states["B"].targets == []
+
+
+_PLAYGROUND_ENGINE = Path(__file__).parent.parent / "playground" / "src" / "lib" / "orchestration.ts"
+
+
+def _node_runs_typescript() -> bool:
+    node = shutil.which("node")
+    if node is None or not _PLAYGROUND_ENGINE.exists():
+        return False
+    out = subprocess.run([node, "--version"], capture_output=True, text=True).stdout.strip().lstrip("v")
+    major, minor = (int(x) for x in out.split(".")[:2])
+    return (major, minor) >= (22, 6)  # --experimental-strip-types
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.skipif(not _node_runs_typescript(), reason="needs Node 22.6+ and the playground source")
+@pytest.mark.parametrize("name,opts", [
+    ("deep chain", dict(every=1)),
+    ("diamond", dict(tide=1, drift=True)),
+    ("Outlet is the bottleneck", dict(tide=0)),
+    ("bottleneck inside a Pond", dict(every=1)),
+])
+def test_the_throttle_matches_the_playground_engine(name, opts):
+    """Cross-check against the reference: the same scenario through the playground's TypeScript engine and
+    this one gives the same Pond Runs at the same times. (They can differ where a user's Pulse reaches a busy
+    Inlet, which stamps the Pulse's minted epoch here and its start time in the playground.)"""
+    spec, outlet, _, _ = THROTTLE_TOPOLOGIES[name]
+    scenario = {"spec": spec, "outlet": outlet, "seconds": 120, **opts}
+    out = subprocess.run(
+        ["node", "--experimental-strip-types", str(Path(__file__).parent / "throttle_crosscheck.mts"),
+         json.dumps(scenario)],
+        capture_output=True, text=True, check=True,
+    )
+    ts = json.loads(out.stdout)
+    py = simulate(_throttle_graph(name), outlet, 120, **opts)
+    assert py.runs == ts["runs"]
+    ms = {pid: [round((t - T0) / timedelta(milliseconds=1)) for t in times] for pid, times in py.completions.items()}
+    assert ms == ts["completions"]
 
 
 # ─── No-change skip: content freshness (changed_f) and the Pond pass ───────────

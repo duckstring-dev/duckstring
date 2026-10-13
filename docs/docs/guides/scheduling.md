@@ -35,6 +35,14 @@ duckstring trigger wave reports
 
 Each Pond runs only as often as the slowest step in the pipeline can use its output, and a Pond whose inputs haven't changed skips its run. A Wave over a pipeline whose data rarely changes is cheap: only the Inlets keep checking for new data.
 
+A Tide with a limit shorter than the pipeline's slowest step is the alternative:
+
+```bash
+duckstring trigger tide reports 1s
+```
+
+Duckstring paces the Pulses to the slowest step, so every Pond runs as often as under a Wave, and each Pulse still travels through the pipeline in one pass. The data then arrives at least as fresh as under a Wave, and on a long pipeline much fresher, because a Wave leaves each step one run behind the step before it. A Wave keeps more work in flight, though, so on a long pipeline whose run times vary a lot it completes more runs. Bursts of Pulses, such as one per dashboard view, are paced the same way. The [Playground](https://playground.duckstring.com) shows both on the demo pipeline.
+
 ## Refresh on request
 
 A one-off refresh, for example after fixing bad data upstream:
@@ -92,6 +100,16 @@ duckstring trigger wave live_sales
 ```
 
 `sales` and its Inlets run as often as `live_sales` needs, and `reports` runs once a day from whatever `sales` has. If `live_sales` is later removed, `sales` drops to once a day with no change to anything else.
+
+## Optional Sources
+
+A Source marked optional in `pond.toml` is read but never waited for. Suppose `sales` took `products` as optional. A Pulse or Tide on `reports` builds `products` once, so `sales` has something to read, but doesn't ask for it again after that, since `sales` would never wait for it. A Tap or Wave still reaches it. To keep an optional Source current under a Pulse or Tide, give it its own trigger:
+
+```bash
+duckstring trigger tide products 1d
+```
+
+This is the one case where a trigger belongs on a Pond in the middle of a pipeline.
 
 ## Stopping
 

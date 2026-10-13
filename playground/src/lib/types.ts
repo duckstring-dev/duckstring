@@ -77,6 +77,18 @@ export interface PondRunState {
   startTimesByF: Record<number, number>; // wall-clock start of each in-flight Pond Run, by its startF
   completionTimes: number[];
   durations: number[];
+  ages?: number[]; // data age (now - endF) at each completion
+  // Pulse throttle bookkeeping (only used while the throttle mode is on).
+  throttle?: ThrottleState;
+}
+
+// Pulse throttle, per Pond (see orchestration.ts "Pulse throttle").
+export interface ThrottleState {
+  counts: Record<string, { run: number; n: number }>; // demands that reached this Pond during each of its Ripples' current runs
+  slow: string[]; // own Ripples that saw two demands in one run, until idle with no demand waiting
+  held: number; // demands held at this Pond since it last sent a Pulse upstream
+  trigger?: boolean; // a trigger (Pulse, Tide) targets this Pond: when throttled it paces on its completions
+  forwardedIn: Record<string, number>; // each Ripple's runsStarted when this Pond last sent a Pulse upstream
 }
 
 // Persistent triggers only (Tap and Pulse are one-shot, no entity).
@@ -96,6 +108,6 @@ export type PondVisualState = 'killed' | 'blocked' | 'running' | 'queued' | 'idl
 // A single logged orchestration event, for the console panel.
 export interface LogEntry {
   t: number; // wall-clock ms of the event
-  kind: string; // short category, e.g. 'tap', 'pond-start', 'ripple-done'
+  kind: string; // short category, e.g. 'tap', 'pond-start', 'ripple-done', 'queue', 'release'
   msg: string; // human-readable description
 }

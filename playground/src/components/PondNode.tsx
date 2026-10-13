@@ -2,7 +2,8 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, stateColor, nodeFill, THEME_PUSH } from '@/lib/store';
+import { isThrottled } from '@/lib/orchestration';
+import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, stateColor, nodeFill, THEME_PUSH, THEME_PULL } from '@/lib/store';
 import { useTourRing } from '@/lib/tour';
 import { DemandIndicators } from './DemandIndicators';
 
@@ -22,6 +23,12 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const now = usePlaygroundStore((s) => s.now);
   const ringClass = useTourRing(pondId);
   const pulseTagGen = usePlaygroundStore((s) => s.pulseTags[pondId]);
+  // Pulse throttle: this Pond's own slow Ripples, whether it is throttled from upstream, and a queued Pulse.
+  const slowNames = usePlaygroundStore((s) =>
+    (s.pondStates[pondId]?.throttle?.slow ?? []).map((r) => s.ripples[r]?.name ?? r).join(', ')
+  );
+  const throttled = usePlaygroundStore((s) => !!s.ponds[pondId] && isThrottled(s, pondId));
+  const held = usePlaygroundStore((s) => s.pondStates[pondId]?.throttle?.held ?? 0);
 
   if (!pond || !ps) return null;
 
@@ -29,6 +36,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const borderColor = stateColor(visualState, ps.hasPull || ps.hasReceivedPull, pushTargetF(ps.targets));
   const isSelected = selectedPondId === pondId;
   const showPulseTag = pulseTagGen !== undefined && ps.runsCompleted <= pulseTagGen;
+  const throttleTag = held > 0 ? `holding ${held}` : slowNames ? 'slow' : throttled ? 'throttled' : null;
 
   return (
     <div
@@ -99,6 +107,28 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           }}
         >
           Pulse
+        </div>
+      )}
+
+      {throttleTag && (
+        <div
+          data-testid="throttle-badge"
+          title={slowNames ? `slow: ${slowNames}` : 'throttled by a slow Pond upstream'}
+          style={{
+            position: 'absolute',
+            top: -10,
+            left: 8,
+            fontSize: 10,
+            fontWeight: 700,
+            color: THEME_PULL,
+            border: `1px solid ${THEME_PULL}`,
+            borderRadius: 10,
+            padding: '1px 7px',
+            background: '#0f0f14',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {throttleTag}
         </div>
       )}
 

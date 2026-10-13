@@ -705,6 +705,27 @@ flowchart LR
 
 Just as with pull, the unconsumed path (`A` and the join `C`) is left stale and no compute is spent on it. The difference between push and pull is *how much* of a demanded path runs (push brings it fully current, pull advances it one step), not *which* paths run. Both are triggered from the point of demand, so both leave low-demand sub-graphs quiet.
 
+A push that reaches a node already running towards its target freshness is already met: the run in flight will deliver it, so the request is dropped there (`T <= startF`). A repeated request for the same freshness therefore never starts a second run.
+
+### Saturated Push
+
+Push requests can arrive faster than the pipeline can serve them: a burst of requests, or a continuous push (see [Triggers](#triggers)) whose period is shorter than the bottleneck. Every request propagates eagerly to every required ancestor, so each node upstream of the bottleneck runs once per request while the bottleneck absorbs several requests in each of its runs. The upstream work is wasted, and a fast sibling path (one side of a diamond, or a second root feeding a join) runs at the request rate instead of the join's.
+
+Pull avoids this, because a node re-arms its parents only when it starts, but it pays in staleness: each node holds a different generation, so data ages by one bottleneck period per stage. Push moves one generation through the pipeline back to back. Duckstring keeps that, and adds pull's pacing only when push demand saturates, using a **throttle** that is detected per node and passed downstream as a single flag:
+
+1. **Slow.** A node is slow once two requests reach it during one of its runs, since its run takes longer than the gap between them. It stays slow until it goes idle (finishes without immediately starting again). A node downstream of the real bottleneck idles every cycle waiting for it, so only the bottleneck stays slow.
+2. **Throttled.** A node is throttled if it is slow or any required parent is throttled (with only optional parents, if all of them are). Like a block (see [Fault Tolerance](#fault-tolerance)), it is read from the parents, and it never crosses an optional edge.
+3. **Hold.** Two kinds of node keep the requests that reach them as their own targets, so they still run on anything fresh enough, but don't pass them upstream straight away: the node a trigger targets, while it is throttled, and any other slow node (the bottleneck).
+4. **Release.** Each holding node sends one request upstream, for `now`, per turn while it has unmet targets. The bottleneck's turn comes when it starts a new run, the moment a pull would re-arm its parents. The trigger node's turn comes when it completes a run, or stops being throttled, so new demand enters at the rate the trigger node is served, which bounds every path into it. A trigger node never paces on its own slowness: under a fast trigger it always looks slow, and pacing on both schedules would send two requests per cycle.
+
+A release carries no epoch anyone asked for, so a root it reaches takes the start of its next run as its freshness instead of the time of the release (see [Freshness](#freshness)).
+
+Sparse requests are never throttled, because no node sees two in one run. Under saturation, the bottleneck and the trigger node run as often as under a continuous pull, everything upstream settles at one run per bottleneck run, and the data is at least as fresh. On a chain of five 1-second nodes, a 5-second bottleneck and a 1-second final node, a request every second keeps the data about 11 seconds old, against 31 under a continuous pull. Until the bottleneck has started its first run nothing can be detected, so the first lead time runs as plain push.
+
+The throttle's state is held in memory only. After a restart, each node re-sends its newest unmet request once, and detection starts again.
+
+To watch it, put a Tide shorter than the bottleneck on the last Pond of a chain in the [Playground](https://playground.duckstring.com).
+
 ## Triggers
 
 The **pull** and **push** methods can both be executed either once (e.g. linked to a single notification from a consumer) or continuously (e.g. executed back-to-back or on a schedule). Duckstring names each of these four trigger types explicitly:
@@ -729,15 +750,15 @@ These are intentionally water-themed, to extend the natural fluid-oriented nomen
 - **Tide**
     - Executes a new Pulse every time the staleness, or the last Pulse time, exceeds a maximum, to keep the data no more stale than that (if possible)
     - Has the effect of executing the DAG with a period equal to this "maximum staleness" (e.g. staleness of 1 day creates a daily execution)
-    - If an upstream **bottleneck** (the slowest unit operation) is longer than the bound, the DAG naturally throttles to that bottleneck with no accumulation of Pulses
+    - If an upstream **bottleneck** (the slowest unit operation) is longer than the bound, the [throttle](#saturated-push) paces the DAG to that bottleneck
 
 ### Which Should You Use?
 
 The two families answer different questions, and the right choice follows from how often an Outlet is consumed relative to how long its pipeline takes to run.
 
-**Reach for push (Pulse/Tide) when consumption is infrequent**, such as a daily report over an hour-long pipeline, or anything updated far less often than it takes to produce. Push is the intuitive, conventional behaviour: it guarantees that on completion the result is no older than the request, and runs nothing unnecessary. Its only weakness is that if requests arrive faster than the bottleneck can supply, upstream nodes outpace it, but a Tide avoids this too, throttling to the bottleneck with no accumulation.
+**Reach for push (Pulse/Tide) when you need a bound on age**, such as a daily report over an hour-long pipeline. Push is the intuitive, conventional behaviour: it guarantees that on completion the result is no older than the request, and runs nothing unnecessary. When requests arrive faster than the bottleneck can supply them, the [throttle](#saturated-push) paces them to it, so a Tide with a short bound runs as often as a Wave and usually delivers fresher data.
 
-**Reach for pull (Tap/Wave) when consumption is frequent**, at or above the bottleneck's rate. Pull guarantees that no node ever runs faster than it is consumed, and that nothing is more stale than strictly necessary. A Wave on an Outlet keeps it as fresh as the slowest required input allows, with no wasted runs anywhere upstream.
+**Reach for pull (Tap/Wave) when you want data as current as the pipeline allows without choosing a bound.** Pull guarantees that no node ever runs faster than it is consumed. A Wave on an Outlet keeps every stage one generation ahead of its consumer, which costs staleness on a long pipeline but keeps more work in flight, so it holds its throughput better than a saturated push when run times vary. A Tap is the lightest way to refresh on request.
 
 In practice the choice need not be agonised over, because **the two compose freely**: a node may hold pull and push demand at once. It runs whenever its parents are fresher than itself (servicing the pull and re-arming upstream), and separately clears its push once the target freshness is reached. A common arrangement is a Tide setting a freshness floor on an Outlet, with ad-hoc Taps from queries layered on top to pull it fresher on demand. The two never conflict, since demand is simply *any*.
 
@@ -751,9 +772,11 @@ So far every parent has been treated as essential: a node waits for *all* of the
 The distinction changes both gating rules:
 
 - A node runs when its **required** parents satisfy the condition (fresher than itself for pull, at-or-past the target for push). Optional parents are ignored when deciding *whether* to run.
-- A push target propagates upward only to **required** parents. There is no point forcing an optional parent to a target the node will not wait for; it is taken on a best-effort basis at whatever freshness it has reached.
+- A push target propagates upward only to **required** parents. There is no point forcing an optional parent to a target the node will not wait for; it is taken on a best-effort basis at whatever freshness it has reached. The exception is an optional parent that has never run, which receives one push so that the node has something to read. A node with only optional parents pushes to all of them, since it runs on whichever is fresher.
 
 This means an optional path is never on the critical path. A slow optional parent does not hold up its child, and is itself only run as often as some *other*, demanded path happens to pull it.
+
+Under push, then, an optional parent is refreshed after its first build only when something else asks for it: another path on which it is required, a trigger of its own, or a pull (a Tap or Wave reaches every parent, optional ones included). If an optional parent needs a cadence under push, give it its own Tide.
 
 ##### Example: an optional node slower than the bottleneck
 
@@ -798,7 +821,7 @@ m & \text{No parents exist (root node)}
 \end{cases}
 $$
 
-Where there are required parents, a node is only as fresh as the stalest of the set it was waiting on. Where there are only optional parents, a node is as fresh as the freshest, as it was not waiting on any of the others. If there aren't any parents at all, it is the **demand epoch** $m$: the time at which the demand that reached the root was issued. Every trigger mints its epoch as the time it fires, and an idle node passes an incoming epoch to its parents unchanged, so a Tap or Pulse issued at time $T$ gives every root it reaches the freshness $T$, however late each one physically runs. The exceptions are a root with windows (see below), which takes its window end, and a Force, which takes the time of the run.
+Where there are required parents, a node is only as fresh as the stalest of the set it was waiting on. Where there are only optional parents, a node is as fresh as the freshest, as it was not waiting on any of the others. If there aren't any parents at all, it is the **demand epoch** $m$: the time at which the demand that reached the root was issued. Every trigger mints its epoch as the time it fires, and an idle node passes an incoming epoch to its parents unchanged, so a Tap or Pulse issued at time $T$ gives every root it reaches the freshness $T$, however late each one physically runs. The exceptions are a root with windows (see below), which takes its window end, and a Force or a [throttle release](#saturated-push), which take the time of the run.
 
 Using **freshness**, the change gating rules for *push* and *pull* are:
 
@@ -1029,6 +1052,13 @@ Pond:
         pullM           # demand epoch carried by the pull (the latest wins)
         targets         # set of unsatisfied push target freshnesses (empty if none)
 
+        # Throttle state (see Saturated Push), held in memory only:
+        slow            # Ripples that saw two push targets arrive during one of their runs, until idle
+        held            # push targets held here since the last send upstream
+        trigger         # a Pulse or Tide targets this Pond (cleared when its targets drain)
+        completed       # a Pond Run completed since the last send upstream
+        released        # Inlet only: a release reached it, so its next Run stamps its start
+
     # sourceF is recomputed from the Sources (or window, for an Inlet):
     derive sourceF:
         if Inlet (no Sources):
@@ -1055,6 +1085,18 @@ Pond:
         else:
             visibleF = Source.persistedF            # <= endF: only ever delays, never invents
 
+    derive pushSources:                             # where push targets propagate
+        if any Source is Required:
+            pushSources = Required Sources, plus any optional Source that has never started a Run
+                          and holds no target       # one push, to build its first output
+        else:
+            pushSources = all Sources               # it runs on whichever is fresher
+
+    derive throttled:                               # read from the Sources, like isBlocked
+        if slow is nonempty:            throttled = true
+        else if any Source is Required: throttled = any Required Source is throttled
+        else:                           throttled = Sources exist and all are throttled
+
     on hasReceivedPull becomes true, carrying epoch m:
         pullM = max(pullM, m)
         if startF == endF:                          # cold start: wake the whole Pond
@@ -1068,15 +1110,43 @@ Pond:
         for each Source where Source.startF <= startF:    # any Source that has not started work ahead of this Pond
             Source.hasReceivedPull = true, carrying pullM   # cold-start propagation: the epoch passes through unchanged
 
-    on receiving a push target T (from a Pulse, Tide, or Sink):
+    on receiving a push target T (from a Pulse, Tide, or Sink; a Sink's may be marked as a release):
         if T <= endF or T in targets: return        # already satisfied, or already requested
+        if T <= startF: return                      # a Run in flight already covers it
         add T to targets                            # keep every outstanding request, not just the latest
-        for each required Source:
-            send push target T to Source            # push propagates eagerly upstream
+        if from a Pulse or Tide: trigger = true
+        if a release and Inlet: released = true
+        for each running Ripple:                    # count T against the Ripple's current run
+            if it is the second target in that run: add the Ripple to slow
+        if pushSources nonempty and (throttled if trigger else slow nonempty):
+            held += 1                               # hold: keep T as a target, don't send it on yet
+        else:
+            send(T)                                 # push propagates eagerly upstream (a release stays one)
+
+    send(T):
+        held = 0 ; completed = false
+        note each Ripple's run count                # for the bottleneck's next turn
+        for each Source in pushSources:
+            send push target T to Source
+
+    after every Run that can start has started (repeated while anything changes):
+        remove from slow every Ripple that is not running      # idle: not the bottleneck
+        if targets holds no real target:
+            trigger = false ; held = 0              # demand drained
+        else if pushSources nonempty and turn():
+            send(now), marked as a release          # one request upstream per turn
+
+    turn():
+        if slow nonempty and not trigger:           # the bottleneck: when a Wave would re-arm
+            return every slow Ripple has started a new run since the last send
+        else:                                       # a trigger Pond (or one whose slow Ripple went idle)
+            return held > 0 and (completed or not throttled)
 
     start a Pond Run when:
-        (targets nonempty and sourceF >= min(targets))   # inputs can satisfy the oldest request, OR
-        or (hasPull and sourceF > startF)                # pull with fresher input
+        not (Inlet and any root Ripple is running)       # an Inlet stamps when its Run starts but reads
+                                                         # when its root Ripples run, so it waits for them
+        and ( (targets nonempty and sourceF >= min(targets))   # inputs can satisfy the oldest request, OR
+              or (hasPull and sourceF > startF) )              # pull with fresher input
 
     on starting a Pond Run:
         priorF  = startF                            # the freshness this Run builds on (captured first)
@@ -1084,7 +1154,8 @@ Pond:
             for each Source: 
                 Source.hasReceivedPull = true, carrying now   # sustaining re-arm: mint this Pond's start time
         if Inlet without windows:                   # minted freshness: an Inlet stamps its demand epoch
-            sourceF = max(targets, and pullM if hasPull)   # a Force with no real epoch keeps now
+            sourceF = max(targets, pullM if hasPull, and now if released)   # a Force with no real
+            released = false                        # epoch keeps now; a release mints at the start
         startF  = sourceF                           # won't restart in pull until sourceF advances
         hasPull = false                             # won't restart in pull until renewed
         pullM = NEVER
@@ -1108,6 +1179,7 @@ Ripple:
         sourceF             # freshness available from this Ripple's parents (derived)
         hasPull
         targets
+        runsStarted         # Ripple Runs started; identifies its current run for the throttle
 
     derive sourceF:
         if root (no parent Ripples): sourceF = Pond.startF
@@ -1131,6 +1203,7 @@ Ripple:
 
     on starting a Ripple Run:
         startF = sourceF
+        runsStarted += 1
         if hasPull:
             if not root: Parent.hasPull = true for all parents   # pull propagation upstream
             hasPull = false                         # cleared; must be renewed before next run
@@ -1139,6 +1212,7 @@ Ripple:
     on completing a Ripple Run:
         endF = startF                               # notify children
         Pond.endF = min(Ripple.endF over all Ripples)   # if advanced, the Pond Run completed
+        # on the Pond Run completing (a pass included): Pond.completed = true
         # on the Pond Run completing: persistedF = endF unless the publish is mirrored
         # asynchronously; then a later persist-completion event advances it (monotonically)
 ```
@@ -1169,8 +1243,8 @@ Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundar
 
 - **Tap**: Sets `Source.hasReceivedPull = true` carrying the epoch `now`, then deletes itself
 - **Wave**: Sets `Source.hasReceivedPull = true` carrying the epoch `now` every time the pseudo-node runs (whenever the Pond is idle)
-- **Pulse**: Adds `now` to the Source's targets, then deletes itself
-- **Tide**: Adds `now` to the Source's targets whenever `now + Source.D - (max(Source.targets) ?? Source.startF) >= limit`, using the staleness of either the most recently started run or the most recent *push* target
+- **Pulse**: Adds `now` to the Source's targets as a trigger, then deletes itself
+- **Tide**: Adds `now` to the Source's targets as a trigger whenever `now + Source.D - (max(Source.targets) ?? Source.startF) >= limit`, using the staleness of either the most recently started run or the most recent *push* target
 
 The trigger is, in effect, just another Sink.
 
@@ -1402,7 +1476,7 @@ Each has a budget (default 0). If the *Retry Immediately* budget is 1 and the *R
 
 *Retry On Change* runs when its counter is non-zero, `Pond.sourceF > Pond.startF` and `Pond.isFailed = true` - in essence acting as another type of demand. A Pond is considered recovered if `Pond.endF > Pond.failedF`, resetting budgets and clearing fail states.
 
-When a Pond fails it also becomes *blocked* (`Pond.isBlocked = true`), and a Pond with any blocked *required* Source is blocked in turn, so the condition carries all the way down to the Outlets. A blocked Pond still processes any of its existing demand, but won't accept new demand, as to do so would attempt work guaranteed to fail.
+When a Pond fails it also becomes *blocked* (`Pond.isBlocked = true`), and a Pond with any blocked *required* Source is blocked in turn, so the condition carries all the way down to the Outlets. A blocked Pond still processes any of its existing demand, but won't accept new demand, as to do so would attempt work guaranteed to fail. A push target sent to it is refused, so when a Pond unblocks it re-sends its newest unmet push target to its Sources.
 
 A Pond is unblocked by clearing the failure beneath it (e.g. by acknowledging a fix, or directly restarting the Pond):
 - `Pond.isFailed = false`
@@ -1458,6 +1532,8 @@ Pond (added state):
     setBlocked(b):                              # write isBlocked; on a change, tell the Sinks
         if b == isBlocked: return
         isBlocked = b
+        if not b and targets holds a real target:
+            send(max(targets))                      # demand refused upstream while blocked is sent again
         notify each Sink                            # the one signal that travels downstream
 
     on a Source becoming (un)failed or (un)blocked:     # a Sink reads only its own Sources
@@ -1475,7 +1551,7 @@ Conventional pipelines are triggered from the *point of supply*: a schedule or a
 Duckstring instead triggers from the *point of demand*. Two complementary methods drive a graph of unit operations:
 
 - **Pull** is demand-driven resupply, borrowed from Kanban. A node runs when something downstream has asked for its output *and* it has fresher input to consume, re-arming its own parents as it goes. This throttles every path to its actual consumption rate, both upstream *and* downstream of any bottleneck, and leaves unused paths idle at no cost.
-- **Push** is a demand-driven *priority order*. A target freshness propagates eagerly from the consumer up through its ancestors, bringing the whole demanded path current in a single coordinated run. This is the familiar behaviour of triggering a DAG, but still initiated by the consumer so unused paths stay quiet.
+- **Push** is a demand-driven *priority order*. A target freshness propagates eagerly from the consumer up through its required ancestors, bringing the whole demanded path current in a single coordinated run. This is the familiar behaviour of triggering a DAG, but still initiated by the consumer so unused paths stay quiet. When requests arrive faster than the bottleneck can serve them, a throttle paces them to it.
 
 Both reduce to a single quantity, **freshness**: a timestamp describing how current a node's output is, inherited from its parents (the stalest of the required ones). Demand is a simple boolean (*is there any?*), so shared and branching paths need no per-consumer accounting, and a slow *optional* parent never holds up a fast required path.
 

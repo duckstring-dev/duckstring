@@ -9,6 +9,7 @@ import type {
   LogEntry,
   Window,
   Weekday,
+  ThrottleState,
 } from './types';
 
 // "-Inf" freshness sentinel: a push target below every real timestamp (and below the 0 "never run"
@@ -84,7 +85,19 @@ function sampleDuration(baseMs: number, variability: number): number {
 // Work on a shallow-cloned draft so cascades can mutate in place; the store replaces the slice.
 function clone(s: OrchestrState): OrchestrState {
   const pondStates: Record<PondId, PondRunState> = {};
-  for (const [k, v] of Object.entries(s.pondStates)) pondStates[k] = { ...v, targets: [...v.targets] };
+  for (const [k, v] of Object.entries(s.pondStates)) {
+    pondStates[k] = {
+      ...v,
+      targets: [...v.targets],
+      throttle: v.throttle && {
+        counts: { ...v.throttle.counts },
+        slow: [...v.throttle.slow],
+        held: v.throttle.held,
+        trigger: v.throttle.trigger,
+        forwardedIn: { ...v.throttle.forwardedIn },
+      },
+    };
+  }
   const rippleStates: Record<RippleId, RippleRunState> = {};
   for (const [k, v] of Object.entries(s.rippleStates)) rippleStates[k] = { ...v, targets: [...v.targets] };
   return { ...s, pondStates, rippleStates, triggers: { ...s.triggers } };
@@ -110,6 +123,10 @@ function leavesOf(s: OrchestrState, pid: PondId): RippleId[] {
   const childIds = new Set<RippleId>();
   for (const id of inPond) for (const p of intraParents(s, id)) childIds.add(p);
   return inPond.filter((id) => !childIds.has(id));
+}
+// A Pond's first Ripples: those with no parent inside the Pond (they read its Sources, or for an Inlet, its data).
+function rootsOf(s: OrchestrState, pid: PondId): RippleId[] {
+  return ripplesOf(s, pid).filter((r) => intraParents(s, r).length === 0);
 }
 function anyRippleBusy(s: OrchestrState, pid: PondId): boolean {
   return ripplesOf(s, pid).some((id) => s.rippleStates[id].isRunning);
@@ -233,17 +250,156 @@ function rippleSetHasPull(s: OrchestrState, rid: RippleId, now: number): void {
   }
 }
 
-// A Pond receives a push target T: record it (if unsatisfied and new) and propagate eagerly
-// upstream to required Sources. The set keeps every outstanding request, not just the latest.
+// A Pond receives a push target T: record it (if unsatisfied and new) and propagate it upstream (see
+// `pushSources`), unless the throttle holds it here. The set keeps every outstanding request, not just
+// the latest.
 function pondAddTarget(s: OrchestrState, pid: PondId, T: number): void {
   const ps = s.pondStates[pid];
   if (ps.isBlocked) return; // no new push enters a blocked Pond (and none propagates upstream from it)
   if (T <= ps.endF || ps.targets.includes(T)) return; // already satisfied, or already requested
+  if (T <= ps.startF) return; // a Run already in flight at or past T will satisfy it
   ps.targets.push(T);
   emit('pond-push', `${pname(s, pid)} pond push target → age ${ageStr(T, logNow)}`);
-  for (const sp of s.ponds[pid].sources) {
-    pondAddTarget(s, sp, T);
+  if (!Number.isFinite(T)) return; // Force's NEVER is not demand
+  countThrottle(s, pid);
+  if (holdsDemand(s, pid)) {
+    throttleOf(s, pid).held += 1;
+    emit('hold', `${pname(s, pid)} holds the demand (${throttleOf(s, pid).held} held)`);
+    return;
   }
+  forwardDemand(s, pid, T);
+}
+
+// The Sources push demand propagates to: the required ones (an optional Source is never waited for, so
+// forcing it to a target is pointless), plus, once, an optional Source that has never started a run (a Sink
+// would otherwise read output nobody builds). With no required Sources, all of them: the Pond runs on
+// whichever is fresher, so it needs them asked.
+function pushSources(s: OrchestrState, pid: PondId): PondId[] {
+  const pond = s.ponds[pid];
+  const opt = new Set(pond.optionalSources ?? []);
+  const required = pond.sources.filter((sp) => !opt.has(sp));
+  if (required.length === 0) return pond.sources;
+  const unbuilt = (sp: PondId) => {
+    const sps = s.pondStates[sp];
+    return !!sps && sps.runsStarted === 0 && !sps.targets.some((t) => Number.isFinite(t));
+  };
+  return pond.sources.filter((sp) => !opt.has(sp) || unbuilt(sp));
+}
+
+// ─── Pulse throttle ───────────────────────────────────────────────────────────
+//
+// Paces push demand that arrives faster than the pipeline can serve it. Sparse demand never triggers it.
+//
+// Detection is per Ripple: a Ripple that sees two demands reach its Pond during one of its runs can't keep
+// up, so it is *slow*, until it goes idle (an idle stage isn't the bottleneck: a stage below the bottleneck
+// idles every cycle waiting for it, and a stray flag from one long noisy run clears the same way). A Pond
+// with a slow Ripple, or a throttled required Source, is *throttled*; that flag is all that passes between
+// Ponds (read from Sources, like Blocked, and never across an optional edge).
+//
+// Two kinds of Pond hold the demand that reaches them, keeping it as their own targets (so they still run
+// on anything fresher that arrives) but not passing it upstream straight away:
+//   - a throttled trigger Pond (the Outlet; the only reader of the throttled flag), on its completions;
+//   - any other Pond with a slow Ripple (the bottleneck), on that Ripple's starts.
+// Each sends one Pulse upstream (at `now`) per turn while it has demand to meet. So demand travels upstream
+// at the bottleneck's pace, timed to its starts (when a Wave would re-arm), and enters at the rate the Outlet
+// is served, which bounds every path into it, diamonds and siblings included. A trigger Pond never paces on
+// its own slow Ripple: it takes raw trigger demand, so under a fast trigger its Ripple always looks slow.
+
+function throttleOf(s: OrchestrState, pid: PondId): ThrottleState {
+  const ps = s.pondStates[pid];
+  if (!ps.throttle) ps.throttle = { counts: {}, slow: [], held: 0, forwardedIn: {} };
+  return ps.throttle;
+}
+
+// Demand reached this Pond: count it against each running Ripple's current run.
+function countThrottle(s: OrchestrState, pid: PondId): void {
+  const th = throttleOf(s, pid);
+  for (const rid of ripplesOf(s, pid)) {
+    const rs = s.rippleStates[rid];
+    if (!rs.isRunning) continue;
+    const c = th.counts[rid]?.run === rs.runsStarted ? th.counts[rid].n : 0;
+    th.counts[rid] = { run: rs.runsStarted, n: c + 1 };
+    if (c + 1 >= 2 && !th.slow.includes(rid)) {
+      th.slow.push(rid);
+      emit('throttled', `${rfullname(s, rid)} can't keep up (2 demands in one run): ${pname(s, pid)} is throttled`);
+    }
+  }
+}
+
+// Does this Pond hold the demand reaching it? A trigger Pond while throttled; any other while it has a slow
+// Ripple. (A Pond with nowhere to send demand, an Inlet, never holds.)
+function holdsDemand(s: OrchestrState, pid: PondId): boolean {
+  if (pushSources(s, pid).length === 0) return false;
+  const th = s.pondStates[pid].throttle;
+  if (!th) return false;
+  return th.trigger ? isThrottled(s, pid) : th.slow.length > 0;
+}
+
+// Forward demand upstream, noting which run each Ripple was in.
+function forwardDemand(s: OrchestrState, pid: PondId, T: number): void {
+  const th = throttleOf(s, pid);
+  th.held = 0;
+  for (const rid of ripplesOf(s, pid)) th.forwardedIn[rid] = s.rippleStates[rid].runsStarted;
+  for (const sp of pushSources(s, pid)) pondAddTarget(s, sp, T);
+}
+
+// Is a holding Pond's turn due? A bottleneck's turn: every slow Ripple has started a new run since the last
+// send. A trigger Pond's (or a Pond whose slow Ripple has since gone idle): it completed a run since the last
+// send, or it is no longer throttled.
+function releaseDue(s: OrchestrState, pid: PondId, completed: Set<PondId>): boolean {
+  const th = s.pondStates[pid].throttle!;
+  if (!th.trigger && th.slow.length > 0) {
+    return th.slow.every((rid) => s.rippleStates[rid].runsStarted > (th.forwardedIn[rid] ?? -1));
+  }
+  return th.held > 0 && (completed.has(pid) || !isThrottled(s, pid));
+}
+
+// Throttled: a slow Ripple of its own, or a throttled required Source (with only optional Sources, all of
+// them, since it runs on whichever is fresher). Never across an optional edge.
+export function isThrottled(s: OrchestrState, pid: PondId): boolean {
+  if ((s.pondStates[pid]?.throttle?.slow.length ?? 0) > 0) return true;
+  const pond = s.ponds[pid];
+  const opt = new Set(pond.optionalSources ?? []);
+  const required = pond.sources.filter((sp) => !opt.has(sp));
+  if (required.length > 0) return required.some((sp) => isThrottled(s, sp));
+  return pond.sources.length > 0 && pond.sources.every((sp) => isThrottled(s, sp));
+}
+
+// A trigger's demand at its Pond (Pulse or Tide): marks it a trigger Pond until its demand drains.
+function triggerDemand(s: OrchestrState, pid: PondId, now: number): void {
+  throttleOf(s, pid).trigger = true;
+  pondAddTarget(s, pid, now);
+}
+
+// After the tick's starts: clear slow Ripples that went idle, then let each Pond holding demand send one
+// Pulse upstream if its turn has come. Returns whether anything changed.
+function settleThrottle(s: OrchestrState, now: number, completed: Set<PondId>): boolean {
+  let changed = false;
+  for (const pid of Object.keys(s.pondStates)) {
+    const ps = s.pondStates[pid];
+    const th = ps.throttle;
+    if (!th) continue;
+    if (th.slow.length > 0) {
+      const idle = th.slow.filter((rid) => !s.rippleStates[rid]?.isRunning);
+      if (idle.length > 0) {
+        th.slow = th.slow.filter((rid) => !idle.includes(rid));
+        for (const rid of idle) emit('unthrottled', `${rfullname(s, rid)} went idle: no longer slow`);
+        changed = true;
+      }
+    }
+    if (!ps.targets.some((t) => Number.isFinite(t))) {
+      th.trigger = false; // demand drained
+      th.held = 0;
+      continue;
+    }
+    if (pushSources(s, pid).length > 0 && releaseDue(s, pid, completed)) {
+      emit('release', `${pname(s, pid)} sends one Pulse upstream (${th.held} held)`);
+      completed.delete(pid);
+      forwardDemand(s, pid, now);
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 // A Ripple receives a push target T (from the Pond's run-start stamp). The Pond stamps every
@@ -275,6 +431,10 @@ function deriveBlocked(s: OrchestrState, pid: PondId): void {
     pond.sources.some((sp) => !optSrc.has(sp) && (s.pondStates[sp].isBlocked || s.pondStates[sp].isKilled));
   if (blocked !== ps.isBlocked) {
     ps.isBlocked = blocked;
+    // Unblocked: demand forwarded while a Source was blocked was refused there, so send the newest unmet
+    // target up again.
+    const unmet = ps.targets.filter((t) => Number.isFinite(t));
+    if (!blocked && unmet.length > 0) forwardDemand(s, pid, Math.max(...unmet));
     for (const q of requiredSinks(s, pid)) deriveBlocked(s, q);
   }
 }
@@ -284,6 +444,11 @@ function deriveBlocked(s: OrchestrState, pid: PondId): void {
 function canStartPond(s: OrchestrState, pid: PondId, now: number): boolean {
   const ps = s.pondStates[pid];
   if (ps.isKilled) return false; // terminal until an operator Wake/Force
+  // An Inlet waits until its first Ripples (the ones that read) are free, so its freshness stamp matches when
+  // it reads rather than when a Pond Run queued. Later Ripples may still be busy; its Runs pipeline through them.
+  if (s.ponds[pid].sources.length === 0 && rootsOf(s, pid).some((r) => s.rippleStates[r].isRunning)) {
+    return false;
+  }
   const { F } = pondSourceF(s, pid, now);
   if (F == null) return false;
   // Push: run when the inputs can satisfy the oldest outstanding request (the run takes the freshest
@@ -390,6 +555,7 @@ function completeRipple(s: OrchestrState, rid: RippleId, now: number): boolean {
     // measured from an ever-older start. Older entries are dropped as absorbed.
     const started = ps.startTimesByF[newEnd];
     if (started != null) ps.durations = pushHistory(ps.durations, now - started);
+    ps.ages = pushHistory(ps.ages ?? [], now - newEnd);
     const pending: Record<number, number> = {};
     for (const [f, t] of Object.entries(ps.startTimesByF)) if (Number(f) > newEnd) pending[Number(f)] = t;
     ps.startTimesByF = pending;
@@ -413,7 +579,7 @@ export function pulsePond(state: OrchestrState, pid: PondId, now: number): Orche
   logNow = now;
   const s = clone(state);
   emit('pulse', `Pulse on ${pname(s, pid)}`);
-  pondAddTarget(s, pid, now);
+  triggerDemand(s, pid, now);
   return s;
 }
 
@@ -436,6 +602,7 @@ export function sleepPond(state: OrchestrState, pid: PondId, now: number, upstre
     ps.hasPull = false;
     ps.hasReceivedPull = false;
     ps.targets = [];
+    ps.throttle = undefined;
     for (const r of ripplesOf(s, cur)) {
       s.rippleStates[r].hasPull = false; // keep targets (push) so started runs complete
     }
@@ -493,6 +660,7 @@ export function killPond(state: OrchestrState, pid: PondId, now: number): Orches
   ps.hasReceivedPull = false;
   ps.pullLocal = false;
   ps.targets = [];
+  ps.throttle = undefined;
   for (const r of ripplesOf(s, pid)) {
     const rs = s.rippleStates[r];
     rs.isRunning = false;
@@ -535,6 +703,7 @@ export function tick(now: number, stateIn: OrchestrState): OrchestrState {
     }
   }
 
+
   // 2. Standing triggers (modelled as a Sink re-asserting demand).
   for (const [pid, trig] of Object.entries(s.triggers)) {
     const ps = s.pondStates[pid];
@@ -552,27 +721,31 @@ export function tick(now: number, stateIn: OrchestrState): OrchestrState {
       const limit = trig.stalenessMs ?? 0;
       const ref = maxTarget(ps.targets) ?? ps.startF;
       if (now + ps.D - ref >= limit) {
-        pondAddTarget(s, pid, now);
+        triggerDemand(s, pid, now);
       }
     }
   }
 
-  // 3. Start everything runnable, to a fixpoint (a start can cascade demand that enables more).
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const pid of Object.keys(s.pondStates)) {
-      if (canStartPond(s, pid, now)) {
-        startPondRun(s, pid, now);
-        changed = true;
+  // 3. Start everything runnable, to a fixpoint (a start can cascade demand that enables more). Then
+  // settle the throttle: a heartbeat can send a queued Pulse, which can enable more starts, so repeat.
+  for (let round = 0; round < 16; round++) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const pid of Object.keys(s.pondStates)) {
+        if (canStartPond(s, pid, now)) {
+          startPondRun(s, pid, now);
+          changed = true;
+        }
+      }
+      for (const rid of Object.keys(s.rippleStates)) {
+        if (canStartRipple(s, rid)) {
+          startRipple(s, rid, now);
+          changed = true;
+        }
       }
     }
-    for (const rid of Object.keys(s.rippleStates)) {
-      if (canStartRipple(s, rid)) {
-        startRipple(s, rid, now);
-        changed = true;
-      }
-    }
+    if (!settleThrottle(s, now, completedPonds)) break;
   }
 
   return s;

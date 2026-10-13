@@ -115,9 +115,13 @@ A Tap is satisfied by any newer data. If a Pond's Sources have nothing newer, th
 
 A Tide is how you run something daily. `duckstring trigger tide reports 1d` behaves like a Pulse every day. More precisely, it keeps `reports` at least as fresh as one day old, sending a Pulse whenever the data would pass that age.
 
+Pulses can arrive faster than the pipeline can serve them, for example from a Tide with a limit shorter than the slowest step. Duckstring then paces them to that step: the Ponds before it run once per run of the slowest step, as under a Wave, and each request still travels through the pipeline in one pass, so the data is at least as fresh as under a Wave and often fresher. Occasional Pulses aren't affected.
+
 Triggers can be placed on any Pond, but we strongly recommend placing them only on Outlets. Demand then always comes from something that genuinely consumes the data, and every Pond upstream runs only as often as its consumers need.
 
-You can try each trigger in the [Playground](https://playground.duckstring.com), on the demo pipeline or on one you build.
+A Pond can also take a Source as optional, using whatever that Source has published without waiting for it. A Pulse or Tide builds an optional Source once, so there is something to read, but doesn't refresh it after that; a Tap or Wave reaches it as usual. If an optional Source needs to stay current under a Pulse or Tide, give it a Tide of its own.
+
+You can try each trigger in the [Playground](https://playground.duckstring.com), on the demo pipeline or on one you build. A Tide shorter than the slowest step shows the pacing.
 
 ## Windows
 

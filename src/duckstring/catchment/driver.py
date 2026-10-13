@@ -48,6 +48,7 @@ from ..engine import (
     record_persist,
     refresh_pond,
     repair_pond,
+    resend_held_demand,
     sentinel,
     sleep_pond,
     tap_pond,
@@ -554,6 +555,9 @@ class Driver:
                 else:
                     st.persisted_f = st.end_f
             self._reconcile_lost_publishes()
+            # Demand the Pulse throttle was holding is persisted as plain targets, but the soft state that
+            # would release it is gone: send each Pond's newest unmet target on once (plans/pulse-throttle.md).
+            resend_held_demand(self.state)
             self.jobs = {key: self.jobs.get(key, []) for key in ponds}
             self.state_version += 1  # topology/config (deploy, ducts, windows) changed
 

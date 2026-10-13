@@ -4,7 +4,7 @@ resume Pond Runs that were in flight when it stopped — not come up as if fresh
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -82,6 +82,49 @@ def test_restart_resumes_incomplete_run(tmp_path):
     d2.resume_incomplete()
     # The incomplete run is re-dispatched to the (would-be) Duck as a begin_run job.
     assert any(j["kind"] == "begin_run" and j["f"] == f for j in d2.jobs.get("p@1", []))
+
+
+def _complete(driver, key):
+    """Complete the single-Ripple Pond Run in flight on ``key`` via simulated Duck events."""
+    f = driver.state.pond_states[key].start_f.isoformat()
+    driver.on_event(key, {"kind": "ripple", "f": f, "ripple": "r1", "status": "success"})
+    driver.on_event(key, {"kind": "run_completed", "f": f})
+
+
+def test_restart_resends_demand_the_pulse_throttle_held(tmp_path):
+    """Demand the Pulse throttle holds is persisted as plain targets, but the soft state that would release
+    it is lost on restart. The reload re-sends each Pond's newest unmet target once, so it reaches the Inlet
+    instead of stranding behind the bottleneck (plans/pulse-throttle.md)."""
+    one = [{"func": "f1", "name": "r1", "parents": []}]
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "inlet", "1.0.0", "inlet", "ponds/inlet/1.0.0", _CFG, one)
+    _register(db, "slow", "1.0.0", "pond", "ponds/slow/1.0.0", {**_CFG, "kind": "pond", "sources": {"inlet": "1.0.0"}},
+              one)
+    _register(db, "out", "1.0.0", "outlet", "ponds/out/1.0.0", {**_CFG, "kind": "outlet", "sources": {"slow": "1.0.0"}},
+              one)
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    now = datetime.now(timezone.utc)
+    t1, t2, t3, t4 = (now - timedelta(seconds=n) for n in (40, 30, 20, 10))
+    d.pulse("out@1", at=t1)
+    _complete(d, "inlet@1")  # slow starts at t1
+    d.pulse("out@1", at=t2)
+    _complete(d, "inlet@1")
+    d.pulse("out@1", at=t3)  # two demands in slow's run: it holds this one
+    d.pulse("out@1", at=t4)  # and the throttled Outlet holds this one
+    assert d.state.pond_states["inlet@1"].targets == []
+    assert d.state.pond_states["out@1"].throttle.held == 1
+
+    runs = d.state.pond_states["inlet@1"].runs_started
+    d2 = Driver(d.db, tmp_path, "http://x", NoopLauncher())
+    th = d2.state.pond_states["out@1"].throttle
+    assert th is None or th.held == 0  # the throttle state is soft
+    d2._process(datetime.now(timezone.utc))
+    inlet = d2.state.pond_states["inlet@1"]
+    assert inlet.runs_started == runs + 1 and inlet.start_f == t4  # one Run serves the newest held demand
+    assert inlet.targets == []
+    d2.reload()  # a later reload adds nothing: the Run in flight covers it
+    assert d2.state.pond_states["inlet@1"].targets == []
 
 
 # ─── start / stop demand controls ───────────────────────────────────────────────
