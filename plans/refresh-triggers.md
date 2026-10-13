@@ -1,8 +1,8 @@
 # One trigger: Refresh
 
 Status: **planned, not built.** Settled with the author on 2026-10-13 and 2026-10-14, after the Pulse
-throttle (`plans/pulse-throttle.md`, merged in #34) made a fast Pulse pace itself to the bottleneck. Two
-sections are proposals still awaiting the author: "Removing pull" and "On request: Taps".
+throttle (`plans/pulse-throttle.md`, merged in #34) made a fast Pulse pace itself to the bottleneck. Taps
+(on-request freshness) are agreed in outline and get their own plan and stage.
 
 ## Why
 
@@ -33,7 +33,11 @@ user cares about: you refresh `reports`, and Duckstring works out what runs.
 - **"On request" means any time the data is queried**, and it is configured in Duckstring by the data
   engineer, not left to each app to send a refresh with its queries. It evolves from the duct's
   `--tap-on-get`. Inspection inside Duckstring (the web UI, the CLI's data commands) never triggers runs.
-  The proposed design is in "On request: Taps".
+  The design is outlined in "On request: Taps", a separate stage.
+- **Pull leaves the engine**: see "Removing pull".
+- **Positioning keeps "pull orchestration"** (demand starts at the end of the pipeline). "Demand-driven"
+  suggests learned load balancing more than a different kind of orchestrator. Inside the engine there is
+  only demand.
 - **Windows are the mirror image**: a window says when data may be requested from an Inlet, a refresh
   says when it is requested of an Outlet. A business-hours shape ("every 30 min from 08:00 for 10 h,
   weekdays") comes later, on both.
@@ -79,7 +83,7 @@ Anchored and manual refreshes add targets too, so they reset the floating phase,
   its Catchment's version, so no wire compatibility is needed). The Duck executor and dbt executor follow.
 - `pulse_pond` becomes `refresh_now`; see "Internal names" for the rest. Pull goes with "Removing pull".
 
-## Removing pull (proposed)
+## Removing pull
 
 With Tap and Wave gone, nothing a user sets creates pull. What remains uses it only as a local "run when a
 Source is fresher" signal, and each case is a demand target that isn't forwarded:
@@ -100,8 +104,8 @@ branch and re-tap, and the `startF` cold-start guards (one of the subtle rules i
 test, and the theory doc's model shrinks to demand plus the throttle (the Kanban idea survives as the
 motivation for the bottleneck's release at its starts).
 
-It depends on "Measure first": if a continuous refresh needs lookahead under noisy run times, that is added
-as a demand-side rule, not by keeping pull. The throttle tests' Wave yardstick becomes fixed expected
+If "Measure first" shows a continuous refresh needs lookahead under noisy run times, that is added as a
+demand-side rule, not by keeping pull. The throttle tests' Wave yardstick becomes fixed expected
 numbers recorded from today's engines before the removal. The playground engine loses pull too, so the two
 engines stay a port of each other.
 
@@ -117,8 +121,9 @@ Code and docs stay findable from each other:
   becomes `pond_demand` in `031`.
 - The control Refresh becomes Rebuild throughout (above).
 - The throttle's names (`ThrottleState`, slow, held, release) stay.
-- CLAUDE.md's "Terminology for user-facing text" keeps "pull" only as positioning language (demand starts
-  at the end of the pipeline, as the landing page's pillar says); inside the engine there is only demand.
+- CLAUDE.md's "Terminology for user-facing text" keeps "pull" as positioning language only (demand starts
+  at the end of the pipeline, as the landing page's pillar says, and the landing page keeps it); inside
+  the engine there is only demand.
 
 ## Persistence (migration `031`)
 
@@ -185,7 +190,7 @@ strings match `docs/docs/reference/cli/`, so change both together.
 `duckstring duct open --tap-on-get` is superseded by on-request refresh (below); keep it as a hidden alias
 for one release.
 
-## On request: Taps (proposed)
+## On request: Taps (separate stage)
 
 A query is a demand signal: if an app is being used, its data should stay fresh, and when it stops, the
 pipeline should go quiet. That is pull orchestration carried to the consumer's edge, and a feature no
@@ -201,17 +206,19 @@ data out, Taps let apps draw it):
 - **Credential**: its own key. Queries are classified by the credential they arrive with, so the web UI,
   the CLI and any other key never match a Tap and never refresh. The key reads the Tap's scope and implies
   only the Tap's refresh, so an app can't trigger arbitrary refreshes.
-- **Policy**: `--fresh-within D`. On a query through the Tap, if the data is older than `D`, send a
-  one-shot refresh (served immediately from the current snapshot, as tap-on-get did; `--wait` blocks until
-  it lands, with a timeout). While queries keep arriving, the data stays within `D` plus the pipeline's run
-  time; when they stop, so do the runs. Bursts of queries are paced by the throttle. `--fresh-within 0`
-  refreshes on every query; no policy serves as is.
+- **Policy**: `--fresh-within D`, **default 0** (freshness is the reason to create a Tap). It uses the
+  floating refresh's clock, evaluated on a query instead of on a tick: a query sends a one-shot refresh
+  when the most recent demand on the Pond (or, with none pending, its freshness) is older than `D`, i.e.
+  `now + D_window - (max(demand) ?? start_f) >= D`. So `--fresh-within 1d` behaves like `--every 1d` while
+  the app is in use, and does nothing when it isn't. The query is served immediately from the current
+  snapshot, as tap-on-get did; `--wait` blocks until the refresh lands, with a timeout. Bursts of queries
+  are paced by the throttle.
 - **Surface**: `duckstring tap add|ls|rm POND` (as `spout`), the query route taking the Tap's key (and later
   the Flight SQL and Postgres wire adapters, by credential), a Taps section in the web UI next to Spouts,
   and query counts per Tap in `/metrics`.
 
-Building on `pond_open`/tap-on-get and the serving core (`catchment/serving.py`). Deserves its own plan
-(`plans/taps.md`) once the shape is agreed; it can ship after the trigger change.
+Building on `pond_open`/tap-on-get and the serving core (`catchment/serving.py`). Agreed in outline
+(2026-10-14); it gets its own plan (`plans/taps.md`) and ships after the trigger change.
 
 ## Web UI (`frontend/`)
 
@@ -283,7 +290,7 @@ The concept and guide pages need rewriting, not search and replace: much of thei
 |---|---|
 | `concepts/orchestration.md` (19) | The Triggers section and table become Refresh and its standing forms. "Throttling to the bottleneck" teaches pacing through the throttle under a continuous refresh, not the Wave's one-run-ahead rule (keep the gantt idea). Standard Patterns table. The video caption ("kept current by a Wave"), and the video itself (`/img/ripple.webm`, `.mp4`), re-recorded under a continuous refresh. The optional-Source paragraph. |
 | `guides/scheduling.md` (21) | Restructure around `refresh`: now, `--every`, `--start` (new: refresh at set times), `--continuous`, several refreshes per Pond, windows (`duckstring window`), different cadences, optional Sources, stopping (`--remove`). |
-| `reference/orchestration_theory.md` (45) | A substantial rewrite. With pull removed, the model is demand plus the throttle: Kanban stays as motivation for the bottleneck's release at its starts, the Pull section and its examples go, Push becomes Demand, the Triggers section and "Which Should You Use?" become Refresh and its forms (one-shot, floating, anchored, continuous), and the pseudocode loses the pull state and handlers and gains the anchored rule and local demand (Wake, Spouts). Rebuild replaces Refresh where the flag appears. |
+| `reference/orchestration_theory.md` (45) | **Removed** (the author is turning it into a blog post). Its links go: the sidebar (`docs/sidebars.ts`), the concept page's "See also", and CLAUDE.md (below). Precise rules a reader needs (the forms of Refresh, that `--every` is a request period, the window delay) move to the Scheduling guide and the `refresh`/`window` CLI reference; the formal model lives in the code and the playground engine. If the post is written from it, it describes the new model: demand plus the throttle, with Kanban as the motivation for the bottleneck's release at its starts. |
 | `reference/cli/trigger.md` (13) | Replaced by `reference/cli/refresh.md` and `reference/cli/window.md`; `cli/index.md` (2) and the sidebar (`docs/sidebars.ts`) follow. |
 | `reference/cli/control.md` | `refresh` becomes `rebuild`. |
 | `reference/cli/do.md` | The `refresh` operation becomes `rebuild`. |
@@ -302,7 +309,10 @@ The concept and guide pages need rewriting, not search and replace: much of thei
 "Terminology for user-facing text" section (Pull and push, Tide leading with "every x") is rewritten for
 Refresh: lead with "every", and say that `--every` is a request period, so data can be up to the period
 plus the pipeline's run time old. Its structure map, the orchestration model (the subtle rules lose the
-cold-start guards if pull goes) and the Triggers and control section follow the renames.
+cold-start guards) and the Triggers and control section follow the renames. With Orchestration Theory gone,
+its opening paragraph names the code as the source of truth and `playground/src/lib/orchestration.ts` as the
+simulation it is ported from and cross-checked against; the "Writing docs" list of Reference pages and the
+Playground-linking list ("Link it wherever orchestration is explained") drop Orchestration Theory.
 
 ## Tests
 
@@ -339,8 +349,5 @@ some lookahead (for example, release one request ahead at the bottleneck) before
 
 ## Open questions
 
-- **Removing pull** and **Taps** (above) await the author.
-- **Taps' default**: does a Tap without `--fresh-within` serve as is, or should freshness be the default,
-  since it is the reason to create one?
-- **Positioning**: with no pull inside the engine, does the landing page keep "pull orchestration" (the
-  lean-manufacturing sense: demand starts at the end), or say "demand-driven orchestration"?
+None outstanding for this stage. "Measure first" may add a lookahead rule for `--continuous`; Taps' open
+questions belong to their own plan.
