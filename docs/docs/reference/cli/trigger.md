@@ -32,7 +32,7 @@ A standing Tap: repeats whenever the Pond finishes a run, so the pipeline runs a
 duckstring trigger pulse POND [--silent] [--watch]
 ```
 
-Asks for data at least as fresh as the moment the command runs. Every Pond upstream that is older runs, and the result flows down to `POND`. Opens the live status view until the Pond settles.
+Asks for data at least as fresh as the moment the command runs. Every Pond upstream that is older runs (an optional Source only if it has never run), and the result flows down to `POND`. Pulses that arrive faster than the pipeline can serve them are paced to its slowest step. Opens the live status view until the Pond settles.
 
 ## `tide`
 
@@ -40,7 +40,7 @@ Asks for data at least as fresh as the moment the command runs. Every Pond upstr
 duckstring trigger tide POND BOUND [--silent]
 ```
 
-A standing Pulse that keeps `POND` no older than `BOUND`. In effect it runs the pipeline every `BOUND`: `duckstring trigger tide reports 1d` refreshes `reports` daily. Precisely, it sends a Pulse whenever the data would otherwise become older than `BOUND`. If the pipeline takes longer than `BOUND`, it runs back to back without piling up requests.
+A standing Pulse that keeps `POND` no older than `BOUND`. In effect it runs the pipeline every `BOUND`: `duckstring trigger tide reports 1d` refreshes `reports` daily. Precisely, it sends a Pulse whenever the data would otherwise become older than `BOUND`. If the pipeline takes longer than `BOUND`, its Pulses are paced to the slowest step, so it runs as often as a Wave without piling up requests.
 
 | Argument | Description |
 |---|---|

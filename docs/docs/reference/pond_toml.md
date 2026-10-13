@@ -49,7 +49,7 @@ products = "2.0.0?"        # optional: major version 2, at least 2.0.0
 | Value | Meaning |
 |---|---|
 | `"MAJOR.MINOR.PATCH"` | A required Source. The Pond reads that major line, and the deployed version must be at least this one. The Pond waits for the Source before running, and its freshness is the oldest of its required Sources. |
-| `"MAJOR.MINOR.PATCH?"` | An optional Source. The Pond uses whatever the Source has published but never waits for it. A Pond with only optional Sources takes the freshness of the freshest. |
+| `"MAJOR.MINOR.PATCH?"` | An optional Source. The Pond uses whatever the Source has published but never waits for it. A Pond with only optional Sources takes the freshness of the freshest. A Pulse or Tide builds an optional Source once and doesn't refresh it after that (unless all the Pond's Sources are optional); a Tap or Wave reaches it as usual. |
 
 Deployment enforces the pins in both directions: a Pond can't be deployed against a Source older than its minimum, and a Source can't be redeployed below a version that a deployed Pond requires. Both are rejected with an error.
 

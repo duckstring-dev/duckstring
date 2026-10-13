@@ -1,6 +1,6 @@
 # Pulse throttle: pacing saturated push demand by the bottleneck
 
-Status: **D1 (rules 6 to 8), D2 (the throttle) and D3 (the reload re-send) built in the Python engine; D4 and D5 pending.** The reference implementation is
+Status: **D1 to D4 built (engine, reload re-send, docs and CLAUDE.md); D5, the playground tour chapter, pending.** The reference implementation is
 the playground's TypeScript engine on branch `playground-pulse-release` (`playground/src/lib/
 orchestration.ts`, commit `58876400`), with its tests in `playground/tests/unit/throttle.spec.ts`. This
 plan ports it to `engine/catchment.py` and the Driver. Per CLAUDE.md the Python engine is a
