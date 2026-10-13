@@ -93,6 +93,7 @@ function clone(s: OrchestrState): OrchestrState {
         counts: { ...v.throttle.counts },
         slow: [...v.throttle.slow],
         held: v.throttle.held,
+        trigger: v.throttle.trigger,
         forwardedIn: { ...v.throttle.forwardedIn },
       },
     };
