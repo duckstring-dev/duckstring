@@ -3,18 +3,18 @@ import { tick, drainLog, type OrchestrState } from '../../src/lib/orchestration'
 import type { PondRunState, Ripple, RippleRunState } from '../../src/lib/types';
 
 const pondState = (): PondRunState => ({
-  startF: 0, endF: 0, D: 0, hasReceivedPull: false, hasPull: false, pullLocal: false, targets: [], isKilled: false,
+  startF: 0, endF: 0, D: 0, targets: [], isKilled: false,
   isBlocked: false, runsStarted: 0, runsCompleted: 0, startTimesByF: {}, completionTimes: [], durations: [],
 });
 const rippleState = (): RippleRunState => ({
-  startF: 0, endF: 0, hasPull: false, targets: [], isRunning: false, runStartedAt: null, currentRunDurationMs: null,
+  startF: 0, endF: 0, targets: [], isRunning: false, runStartedAt: null, currentRunDurationMs: null,
   lastDurationMs: null, runsStarted: 0, runsCompleted: 0, completionTimes: [], durations: [],
 });
 const ripple = (id: string, pondId: string, durationMs: number, parents: string[] = [], variability = 0): Ripple => ({
   id, pondId, name: id, parents, durationMs, variability,
 });
 
-// The example graph plus a second output on `sales`, under Tides of 5 s and 7 s, with noise on the
+// The example graph plus a second output on `sales`, under Refreshes every 5 s and 7 s, with noise on the
 // bottleneck. A slow `join_lines` lets a newer `sales` Run absorb an older one still in flight.
 function twoTides(): OrchestrState {
   return {
@@ -36,9 +36,9 @@ function twoTides(): OrchestrState {
       fr: ripple('fr', 'forecast', 1000),
     },
     rippleStates: Object.fromEntries(['txi', 'pi', 'ds', 'pt', 'jl', 'ms', 'fr'].map((id) => [id, rippleState()])),
-    triggers: {
-      reports: { pondId: 'reports', kind: 'tide', stalenessMs: 5000 },
-      forecast: { pondId: 'forecast', kind: 'tide', stalenessMs: 7000 },
+    refreshes: {
+      reports: [{ name: 'every 5 s', everyMs: 5000 }],
+      forecast: [{ name: 'every 7 s', everyMs: 7000 }],
     },
   };
 }

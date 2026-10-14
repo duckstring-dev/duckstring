@@ -3,16 +3,17 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { isThrottled } from '@/lib/orchestration';
-import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, stateColor, nodeFill, THEME_PUSH, THEME_PULL } from '@/lib/store';
+import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, stateColor, nodeFill, pondLabel, THEME_DEMAND, THEME_AMBER } from '@/lib/store';
 import { useTourRing } from '@/lib/tour';
 import { DemandIndicators } from './DemandIndicators';
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
-  // TB (mobile) layout: flow enters at the top and leaves at the bottom; the trigger pill
+  // TB (mobile) layout: flow enters at the top and leaves at the bottom; the Refresh pill
   // hangs below the outlet, so its edge also lands on the bottom.
   const vertical = data.vertical as boolean | undefined;
   const pond = usePlaygroundStore((s) => s.ponds[pondId]);
+  const label = usePlaygroundStore((s) => pondLabel(s.ponds, pondId));
   const ps = usePlaygroundStore((s) => s.pondStates[pondId]);
   // A Pond is running while any of its Ripples is (the Catchment's notion of a running Pond).
   const busy = usePlaygroundStore((s) =>
@@ -22,8 +23,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const selectPond = usePlaygroundStore((s) => s.selectPond);
   const now = usePlaygroundStore((s) => s.now);
   const ringClass = useTourRing(pondId);
-  const pulseTagGen = usePlaygroundStore((s) => s.pulseTags[pondId]);
-  // Pulse throttle: this Pond's own slow Ripples, whether it is throttled from upstream, and a queued Pulse.
+  const refreshTagGen = usePlaygroundStore((s) => s.refreshTags[pondId]);
+  // The throttle: this Pond's own slow Ripples, whether it is throttled from upstream, and held requests.
   const slowNames = usePlaygroundStore((s) =>
     (s.pondStates[pondId]?.throttle?.slow ?? []).map((r) => s.ripples[r]?.name ?? r).join(', ')
   );
@@ -33,9 +34,9 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   if (!pond || !ps) return null;
 
   const visualState = getPondVisualState(ps, busy);
-  const borderColor = stateColor(visualState, ps.hasPull || ps.hasReceivedPull, pushTargetF(ps.targets));
+  const borderColor = stateColor(visualState);
   const isSelected = selectedPondId === pondId;
-  const showPulseTag = pulseTagGen !== undefined && ps.runsCompleted <= pulseTagGen;
+  const showRefreshTag = refreshTagGen !== undefined && ps.runsCompleted <= refreshTagGen;
   const throttleTag = held > 0 ? `holding ${held}` : slowNames ? 'slow' : throttled ? 'throttled' : null;
 
   return (
@@ -82,16 +83,16 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
         }}
       >
         <span style={{ fontSize: 13, fontWeight: 700, color: '#e4e4e7', letterSpacing: '0.04em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {pond.name}
+          {label}
         </span>
         <span style={{ fontSize: 11, color: '#71717a', display: 'flex', alignItems: 'center', gap: 6 }}>
-          <DemandIndicators hasPull={ps.hasPull || ps.hasReceivedPull} targetF={pushTargetF(ps.targets)} now={now} />
+          <DemandIndicators targetF={pushTargetF(ps.targets)} now={now} />
           <span style={{ color: '#a1a1aa' }}>↑{formatAge(ps.startF, now)} ({ps.runsStarted})</span>
           <span>✓{formatAge(ps.endF, now)} ({ps.runsCompleted})</span>
         </span>
       </div>
 
-      {showPulseTag && (
+      {showRefreshTag && (
         <div
           style={{
             position: 'absolute',
@@ -99,14 +100,14 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
             right: 8,
             fontSize: 10,
             fontWeight: 700,
-            color: THEME_PUSH,
-            border: `1px solid ${THEME_PUSH}`,
+            color: THEME_DEMAND,
+            border: `1px solid ${THEME_DEMAND}`,
             borderRadius: 10,
             padding: '1px 7px',
             background: '#0f0f14',
           }}
         >
-          Pulse
+          Refresh
         </div>
       )}
 
@@ -120,8 +121,8 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
             left: 8,
             fontSize: 10,
             fontWeight: 700,
-            color: THEME_PULL,
-            border: `1px solid ${THEME_PULL}`,
+            color: THEME_AMBER,
+            border: `1px solid ${THEME_AMBER}`,
             borderRadius: 10,
             padding: '1px 7px',
             background: '#0f0f14',

@@ -1,6 +1,7 @@
 import dagre from '@dagrejs/dagre';
 import type { Node, Edge } from '@xyflow/react';
-import type { PondId, RippleId, Pond, Ripple, ActiveTrigger } from './types';
+import type { PondId, RippleId, Pond, Ripple, Refresh } from './types';
+import { pondLabel } from './store';
 
 const MIN_RIPPLE_W = 200;
 const RIPPLE_H = 80;
@@ -46,7 +47,7 @@ const POND_PAD_BOTTOM = 24;
 const MIN_POND_W = 160;
 const MIN_POND_H = 120;
 
-const TRIGGER_W = 120;
+const TRIGGER_W = 168;
 const TRIGGER_H = 36;
 
 interface LayoutResult {
@@ -132,7 +133,7 @@ function buildRippleLayout(
 export function computeLayout(
   ponds: Record<PondId, Pond>,
   ripples: Record<RippleId, Ripple>,
-  triggers: Record<PondId, ActiveTrigger>,
+  refreshes: Record<PondId, Refresh[]>,
   floors?: ContentFloors,
   direction: 'LR' | 'TB' = 'LR'
 ): LayoutResult {
@@ -152,7 +153,7 @@ export function computeLayout(
   for (const pond of pondList) {
     const layout = buildRippleLayout(pond.id, ripples, floors?.ripples, direction);
     // Floor the pond width to fit its title line and its (live) stats line.
-    layout.width = Math.max(layout.width, pondNameWidth(pond.name), floors?.ponds?.[pond.id] ?? 0);
+    layout.width = Math.max(layout.width, pondNameWidth(pondLabel(ponds, pond.id)), floors?.ponds?.[pond.id] ?? 0);
     pondLayouts[pond.id] = layout;
   }
 
@@ -225,10 +226,9 @@ export function computeLayout(
       }
     }
 
-    // Trigger node — to the right of the pond (LR), or below it (TB, where the right edge is the
-    // narrow phone's margin and an outlet's bottom is free).
-    const triggerInfo = triggers[pond.id];
-    if (triggerInfo) {
+    // Refresh pill: to the right of the pond (LR), or below it (TB, where the right edge is the narrow phone's
+    // margin and an outlet's bottom is free).
+    if (refreshes[pond.id]?.length) {
       const triggerId = `trigger-${pond.id}`;
       nodes.push({
         id: triggerId,

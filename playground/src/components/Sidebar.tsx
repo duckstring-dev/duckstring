@@ -1,26 +1,16 @@
 'use client';
 
 import { useState } from 'react';
-import {
-  usePlaygroundStore,
-  formatAge,
-  EXAMPLES,
-  THEME_BRAND,
-  THEME_PULL,
-  THEME_PUSH,
-  THEME_SUCCESS,
-  THEME_DANGER,
-  THEME_BLOCKED,
-  THEME_WAKE,
-} from '@/lib/store';
+import { usePlaygroundStore, formatAge, pondLabel, EXAMPLES, THEME_BRAND, THEME_DANGER } from '@/lib/store';
 import { useTourStore, useTourMark } from '@/lib/tour';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
+import { RefreshEditor } from './RefreshEditor';
 
 function Btn({
   onClick,
   children,
-  color = THEME_PUSH,
+  color = THEME_BRAND,
   small = false,
   block = false,
   mark,
@@ -53,9 +43,6 @@ function Btn({
     </button>
   );
 }
-
-// A 4-column row of equal-width buttons — so the Trigger and Control rows line up.
-const quadRow: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 };
 
 function Label({ children }: { children: React.ReactNode }) {
   return (
@@ -132,10 +119,9 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const rippleStates = usePlaygroundStore((s) => s.rippleStates);
   const selectedPondId = usePlaygroundStore((s) => s.selectedPondId);
   const selectedRippleId = usePlaygroundStore((s) => s.selectedRippleId);
-  const selectedTriggerId = usePlaygroundStore((s) => s.selectedTriggerId);
-  const triggers = usePlaygroundStore((s) => s.triggers);
 
   const addPond = usePlaygroundStore((s) => s.addPond);
+  const addMajorVersion = usePlaygroundStore((s) => s.addMajorVersion);
   const addRipple = usePlaygroundStore((s) => s.addRipple);
   const renamePond = usePlaygroundStore((s) => s.renamePond);
   const setRippleDuration = usePlaygroundStore((s) => s.setRippleDuration);
@@ -149,23 +135,11 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
 
   const deletePond = usePlaygroundStore((s) => s.deletePond);
   const deleteRipple = usePlaygroundStore((s) => s.deleteRipple);
-  const triggerPulse = usePlaygroundStore((s) => s.triggerPulse);
-  const triggerWave = usePlaygroundStore((s) => s.triggerWave);
-  const triggerTide = usePlaygroundStore((s) => s.triggerTide);
-  const triggerTap = usePlaygroundStore((s) => s.triggerTap);
-  const removeTrigger = usePlaygroundStore((s) => s.removeTrigger);
-  const force = usePlaygroundStore((s) => s.force);
-  const wake = usePlaygroundStore((s) => s.wake);
-  const sleep = usePlaygroundStore((s) => s.sleep);
-  const kill = usePlaygroundStore((s) => s.kill);
 
-  const tideDraft = usePlaygroundStore((s) => s.tideDraft);
-  const setTideDraft = usePlaygroundStore((s) => s.setTideDraft);
   const formEpoch = usePlaygroundStore((s) => s.formEpoch);
   const sheetOpen = usePlaygroundStore((s) => s.sheetOpen);
   const setSheetOpen = usePlaygroundStore((s) => s.setSheetOpen);
-  const markWave = useTourMark('wave');
-  const markTide = useTourMark('tide');
+  const markNewMajor = useTourMark('new-major');
   const markDuration = useTourMark('ripple-duration');
   const markVariability = useTourMark('ripple-variability');
   const markChart = useTourMark('run-chart');
@@ -179,7 +153,6 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const isOutlet = selectedPondId
     ? !Object.values(ponds).some((p) => p.sources.includes(selectedPondId))
     : false;
-  const trigger = selectedPondId ? triggers[selectedPondId] : undefined;
 
   const availableSourcePonds = selectedPondId
     ? Object.values(ponds).filter(
@@ -200,52 +173,23 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   // the tour can open and close it too).
   const collapsed = !sheetOpen;
 
-  const headerContext = selectedTriggerId
-    ? `${ponds[selectedTriggerId]?.name ?? ''} trigger`
-    : selectedRipple
-      ? `${selectedPond?.name ?? ''} / ${selectedRipple.name}`
-      : selectedPond?.name ?? null;
+  const selectedLabel = selectedPondId ? pondLabel(ponds, selectedPondId) : '';
+  const headerContext = selectedRipple
+    ? `${selectedLabel} / ${selectedRipple.name}`
+    : selectedPond ? selectedLabel : null;
 
   const content = (
     <>
       <Btn onClick={() => addPond()} color={THEME_BRAND}>+ Add Pond</Btn>
       {selectedPond && !selectedRipple && (
-        <div style={{ fontSize: 10, color: '#52525b', marginTop: 4 }}>links as a sink of {selectedPond.name}</div>
-      )}
-
-      {/* Trigger node selected */}
-      {selectedTriggerId && (
-        <Section>
-          <Label>Trigger</Label>
-          {triggers[selectedTriggerId]?.kind === 'wave' ? (
-            <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 10 }}>Wave trigger</div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-              <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
-              <input
-                type="number"
-                min="0"
-                step="1"
-                defaultValue={((triggers[selectedTriggerId]?.stalenessMs ?? 1000) / 1000).toFixed(1)}
-                key={`tide-${selectedTriggerId}-${formEpoch}`}
-                onChange={(e) => {
-                  const ms = parseFloat(e.target.value) * 1000;
-                  if (!isNaN(ms) && ms >= 0) triggerTide(selectedTriggerId, ms);
-                }}
-                style={numInput}
-              />
-              <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
-            </div>
-          )}
-          <Btn onClick={() => removeTrigger(selectedTriggerId)} color={THEME_DANGER}>Delete Trigger</Btn>
-        </Section>
+        <div style={{ fontSize: 10, color: '#52525b', marginTop: 4 }}>links as a sink of {selectedLabel}</div>
       )}
 
       {/* Pond selected */}
       {selectedPond && !selectedRippleId && (
         <>
           <Section>
-            <Label>Pond: {selectedPond.name}</Label>
+            <Label>Pond: {selectedLabel}</Label>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
               <span style={{ fontSize: 11, color: '#71717a', width: 64 }}>Name</span>
               <input type="text" defaultValue={selectedPond.name} key={`pn-${selectedPond.id}-${formEpoch}`}
@@ -259,6 +203,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               <Btn onClick={() => addRipple(selectedPond.id)} color={THEME_BRAND}>+ Add Ripple</Btn>
+              <Btn onClick={() => addMajorVersion(selectedPond.id)} color={THEME_BRAND} mark={markNewMajor}>+ New Major Version</Btn>
               <Btn onClick={() => deletePond(selectedPond.id)} color={THEME_DANGER}>Delete Pond</Btn>
             </div>
 
@@ -267,7 +212,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
                 <Label>Sources</Label>
                 {selectedPond.sources.map((sid) => (
                   <div key={sid} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                    <span style={{ fontSize: 12, color: '#a1a1aa' }}>{ponds[sid]?.name ?? sid}</span>
+                    <span style={{ fontSize: 12, color: '#a1a1aa' }}>{pondLabel(ponds, sid)}</span>
                     <button onClick={() => unlinkPonds(sid, selectedPond.id)} style={{ background: 'none', border: 'none', color: '#52525b', cursor: 'pointer', fontSize: 14 }}>✕</button>
                   </div>
                 ))}
@@ -283,7 +228,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
                     availableSourcePonds.map((p) => (
                       <button key={p.id} onClick={() => { linkPonds(p.id, selectedPond.id); setShowAddSourcePond(false); }}
                         style={{ background: '#1e1e26', border: '1px solid #3f3f46', borderRadius: 4, color: '#a1a1aa', padding: '3px 8px', fontSize: 12, cursor: 'pointer', textAlign: 'left' }}>
-                        {p.name}
+                        {pondLabel(ponds, p.id)}
                       </button>
                     ))
                   )}
@@ -300,55 +245,14 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             </Section>
           )}
 
-          {/* Trigger section */}
+          {/* Refresh: refresh now, the standing Refreshes, and adding one (Outlets only) */}
           <Section>
-            <Label>Triggers</Label>
+            <Label>Refresh</Label>
             {isOutlet ? (
-              <>
-                <div style={quadRow}>
-                  <Btn block onClick={() => triggerTap(selectedPond.id)} color={THEME_PULL}>Tap</Btn>
-                  <Btn block onClick={() => triggerWave(selectedPond.id)} color={THEME_PULL} mark={markWave}>Wave</Btn>
-                  <Btn block onClick={() => triggerPulse(selectedPond.id)} color={THEME_PUSH}>Pulse</Btn>
-                  <Btn block onClick={() => setTideDraft(tideDraft === null ? '2' : null)} color={THEME_PUSH} mark={markTide}>Tide</Btn>
-                </div>
-                {tideDraft !== null && (
-                  <div {...markTide} style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
-                    <span style={{ fontSize: 11, color: '#71717a' }}>max staleness</span>
-                    <input type="number" min="0" step="1" value={tideDraft} onChange={(e) => setTideDraft(e.target.value)} style={numInput} />
-                    <span style={{ fontSize: 11, color: '#71717a' }}>s</span>
-                    <Btn small onClick={() => { const ms = parseFloat(tideDraft) * 1000; if (!isNaN(ms) && ms >= 0) { triggerTide(selectedPond.id, ms); setTideDraft(null); } }} color={THEME_PUSH}>Set</Btn>
-                  </div>
-                )}
-              </>
+              <RefreshEditor pond={selectedPond} key={`rf-${selectedPond.id}-${formEpoch}`} />
             ) : (
-              <div style={{ fontSize: 11, color: '#52525b' }}>Not an outlet — triggers live on outlet ponds.</div>
+              <div style={{ fontSize: 11, color: '#52525b' }}>Not an outlet: Refreshes live on outlet ponds.</div>
             )}
-            {trigger && (
-              <div style={{ marginTop: 8 }}>
-                <Btn small onClick={() => removeTrigger(selectedPond.id)} color={THEME_DANGER}>
-                  Delete {trigger.kind === 'wave' ? 'Wave' : 'Tide'} Trigger
-                </Btn>
-              </div>
-            )}
-          </Section>
-
-          {/* Control: Force/Wake (go) and Sleep/Kill (stop) — the Pond's execution lifecycle */}
-          <Section>
-            <Label>Control</Label>
-            <div style={quadRow}>
-              <Btn block onClick={() => force(selectedPond.id)} color={THEME_SUCCESS}>Force</Btn>
-              <Btn block onClick={() => wake(selectedPond.id)} color={THEME_WAKE}>Wake</Btn>
-              <Btn block onClick={() => sleep(selectedPond.id)} color={THEME_BLOCKED}>Sleep</Btn>
-              <Btn block onClick={() => kill(selectedPond.id)} color={THEME_DANGER}>Kill</Btn>
-            </div>
-            <div style={{ fontSize: 10, color: '#52525b', marginTop: 6, lineHeight: 1.5 }}>
-              Force: recompute now at the current freshness. Wake: run once if Sources are fresher
-              (no upstream pull); clears a kill. Sleep: clear demand and the standing trigger.
-              Kill: cancel the run and park the Pond until a Wake/Force.
-            </div>
-            <div style={{ marginTop: 6 }}>
-              <Btn small onClick={() => sleep(selectedPond.id, true)} color={THEME_BLOCKED}>Sleep Upstream</Btn>
-            </div>
           </Section>
 
           <Section mark={markChart}>
@@ -448,7 +352,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
       )}
 
       {/* Nothing selected: examples, global variability */}
-      {!selectedPond && !selectedRipple && !selectedTriggerId && (
+      {!selectedPond && !selectedRipple && (
         <Section>
           <Label>Examples</Label>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -459,7 +363,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
           </div>
         </Section>
       )}
-      {!selectedPond && !selectedRipple && !selectedTriggerId && (
+      {!selectedPond && !selectedRipple && (
         <Section>
           <Label>Variability (all ripples)</Label>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

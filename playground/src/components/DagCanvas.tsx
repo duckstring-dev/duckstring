@@ -19,7 +19,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { usePlaygroundStore, consumeEdgeColor, formatAge, pushTargetF, THEME_PULL, THEME_PUSH } from '@/lib/store';
+import { usePlaygroundStore, consumeEdgeColor, formatAge, pushTargetF, THEME_DEMAND } from '@/lib/store';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
 import { useTourStore } from '@/lib/tour';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
@@ -50,10 +50,8 @@ function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   return <BaseEdge id={id} path={edgePath} interactionWidth={0} style={{ stroke: color, strokeWidth: 2 }} />;
 }
 
-function TriggerEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
-  const pondId = (data as { pondId: string }).pondId;
-  const trigger = usePlaygroundStore((s) => s.triggers[pondId]);
-  const color = trigger?.kind === 'wave' ? THEME_PULL : THEME_PUSH;
+function TriggerEdge({ id, sourceX, sourceY, targetX, targetY }: EdgeProps) {
+  const color = THEME_DEMAND;
   const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
   return (
     <BaseEdge
@@ -121,7 +119,7 @@ function TourFramer() {
 export function DagCanvas() {
   const ponds = usePlaygroundStore((s) => s.ponds);
   const ripples = usePlaygroundStore((s) => s.ripples);
-  const triggers = usePlaygroundStore((s) => s.triggers);
+  const refreshes = usePlaygroundStore((s) => s.refreshes);
   const pondStates = usePlaygroundStore((s) => s.pondStates);
   const rippleStates = usePlaygroundStore((s) => s.rippleStates);
   const now = usePlaygroundStore((s) => s.now);
@@ -130,7 +128,6 @@ export function DagCanvas() {
   const clearSelection = usePlaygroundStore((s) => s.clearSelection);
   const selectedPondId = usePlaygroundStore((s) => s.selectedPondId);
   const selectedRippleId = usePlaygroundStore((s) => s.selectedRippleId);
-  const selectedTriggerId = usePlaygroundStore((s) => s.selectedTriggerId);
 
   // On mobile, tapping a node zooms to it — the clear "this is selected" signal, and the
   // only way the node text gets readable. The delay lets the bottom sheet open (the canvas
@@ -144,22 +141,22 @@ export function DagCanvas() {
   const hideControls = useIsShort() && !isMobile && touring;
   useEffect(() => {
     if (!isMobile || touring) return;
-    const id = selectedRippleId ?? (selectedTriggerId ? `trigger-${selectedTriggerId}` : selectedPondId);
+    const id = selectedRippleId ?? selectedPondId;
     if (!id) return;
     const t = setTimeout(() => fitView({ nodes: [{ id }], duration: 350, padding: 0.15, maxZoom: 1.1 }), 120);
     return () => clearTimeout(t);
-  }, [isMobile, touring, selectedPondId, selectedRippleId, selectedTriggerId, fitView]);
+  }, [isMobile, touring, selectedPondId, selectedRippleId, fitView]);
 
   // Recompute layout whenever graph structure changes (not on every sim tick)
   const layoutKey = useMemo(
     () =>
       JSON.stringify({
-        ponds: Object.values(ponds).map((p) => ({ id: p.id, sources: p.sources, name: p.name })),
+        ponds: Object.values(ponds).map((p) => ({ id: p.id, sources: p.sources, name: p.name, major: p.major })),
         // name affects ripple width, so reflow on rename too
         ripples: Object.values(ripples).map((r) => ({ id: r.id, parents: r.parents, pondId: r.pondId, name: r.name })),
-        triggers: Object.keys(triggers),
+        refreshes: Object.keys(refreshes),
       }),
-    [ponds, ripples, triggers]
+    [ponds, ripples, refreshes]
   );
 
   // Each box's minimum width to fit its live stats line (grows with run counts / longer ages).
@@ -206,7 +203,7 @@ export function DagCanvas() {
   }, [floors]);
 
   const { nodes, edges } = useMemo(
-    () => computeLayout(ponds, ripples, triggers, floors, isMobile ? 'TB' : 'LR'),
+    () => computeLayout(ponds, ripples, refreshes, floors, isMobile ? 'TB' : 'LR'),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [layoutKey, widthKey, isMobile]
   );

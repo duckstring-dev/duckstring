@@ -1,26 +1,29 @@
 import { test, expect } from '@playwright/test';
-import { tick, pulsePond, drainLog, type OrchestrState } from '../../src/lib/orchestration';
+import { tick, refreshNow, drainLog, type OrchestrState } from '../../src/lib/orchestration';
 import type { PondRunState, RippleRunState } from '../../src/lib/types';
 
-// Pulse throttle: checked on the topologies it was developed against. Under saturated demand, the
-// bottleneck runs as often as under a Wave, upstream settles at the bottleneck's rate, and the data is at
-// least as fresh as a Wave's. Sparse demand runs every Pond once per Pulse. Until the bottleneck has
-// started its first run nothing can be detected, so the startup runs as plain Pulse: up to one extra
-// upstream run per Pulse for the length of the lead. Data age is therefore compared over the second half, as
+// The throttle: checked on the topologies it was developed against. Under saturated demand (one-off Refreshes
+// every second, a continuous Refresh, or one every 1 s with drifting ticks), the bottleneck runs as often as
+// under a Wave, upstream settles at the bottleneck's rate, and the data is at least as fresh as a Wave's. Sparse
+// Refreshes run every Pond once each. Until the bottleneck has started its first run nothing can be detected, so
+// the startup runs unthrottled: up to one extra upstream run per Refresh for the length of the lead.
+//
+// The engine had a pull trigger, the Wave, until Refresh replaced it; WAVE holds what it measured on each
+// topology (this simulation, 120 s), as the yardstick. Data age is therefore compared over the second half, as
 // upstream run counts are (and as the Python port does).
 
 const pondState = (): PondRunState => ({
-  startF: 0, endF: 0, D: 0, hasReceivedPull: false, hasPull: false, pullLocal: false, targets: [], isKilled: false,
+  startF: 0, endF: 0, D: 0, targets: [], isKilled: false,
   isBlocked: false, runsStarted: 0, runsCompleted: 0, startTimesByF: {}, completionTimes: [], durations: [],
 });
 const rippleState = (): RippleRunState => ({
-  startF: 0, endF: 0, hasPull: false, targets: [], isRunning: false, runStartedAt: null, currentRunDurationMs: null,
+  startF: 0, endF: 0, targets: [], isRunning: false, runStartedAt: null, currentRunDurationMs: null,
   lastDurationMs: null, runsStarted: 0, runsCompleted: 0, completionTimes: [], durations: [],
 });
 
 // Ponds as [name, seconds (or a sequence of Ripples' seconds), sources].
 function graph(spec: [string, number | number[], string[]][]): OrchestrState {
-  const s: OrchestrState = { ponds: {}, pondStates: {}, ripples: {}, rippleStates: {}, triggers: {} };
+  const s: OrchestrState = { ponds: {}, pondStates: {}, ripples: {}, rippleStates: {}, refreshes: {} };
   for (const [name, secs, sources] of spec) {
     s.ponds[name] = { id: name, name, sources };
     s.pondStates[name] = pondState();
@@ -59,14 +62,18 @@ const TOPOLOGIES: Record<string, [() => OrchestrState, string, string, string]> 
 };
 
 interface Run { runs: Record<string, number>; late: Record<string, number>; age: number }
+interface Recorded { runs: Record<string, number>; age: number }
 
-// Drive sim time in 100 ms ticks: Pulses at `outlet` every `every` seconds, a 0 s Tide, or a Wave.
+// What a Wave measured on each topology, exact and with drifting ticks (see the top of the file).
+const WAVE: Record<string, { wave: Recorded; waveDrift: Recorded }> = {"demo (sales pipeline)": {"wave": {"runs": {"transactions": 41, "products": 40, "sales": 38, "reports": 38}, "age": 10}, "waveDrift": {"runs": {"transactions": 44, "products": 43, "sales": 41, "reports": 41}, "age": 10.2378}}, "deep chain (fast stages, then a 5 s bottleneck)": {"wave": {"runs": {"I": 28, "P1": 27, "P2": 26, "P3": 25, "P4": 24, "B": 22, "O": 22}, "age": 31}, "waveDrift": {"runs": {"I": 30, "P1": 29, "P2": 28, "P3": 27, "P4": 26, "B": 24, "O": 24}, "age": 31.5025}}, "long lead (seven 1 s stages, then 3 s)": {"wave": {"runs": {"I": 45, "P1": 44, "P2": 43, "P3": 42, "P4": 41, "P5": 40, "P6": 39, "B": 37, "O": 37}, "age": 25}, "waveDrift": {"runs": {"I": 48, "P1": 47, "P2": 46, "P3": 45, "P4": 44, "P5": 43, "P6": 42, "B": 40, "O": 40}, "age": 25.5173}}, "decreasing chain (1 s \u2192 3 s \u2192 2 s \u2192 1 s)": {"wave": {"runs": {"A": 41, "B": 39, "C": 38, "D": 38}, "age": 9}, "waveDrift": {"runs": {"A": 44, "B": 42, "C": 41, "D": 41}, "age": 9.1988}}, "slow sibling Inlet": {"wave": {"runs": {"F": 20, "S": 19, "X": 19, "O": 19}, "age": 8}, "waveDrift": {"runs": {"F": 22, "S": 21, "X": 21, "O": 21}, "age": 8.2089}}, "diamond, bottleneck on one path": {"wave": {"runs": {"A": 25, "B": 23, "D": 24, "C": 23}, "age": 11}, "waveDrift": {"runs": {"A": 27, "B": 25, "D": 26, "C": 25}, "age": 11.1607}}, "diamond, long lead on the slow path": {"wave": {"runs": {"A": 81, "L1": 43, "L2": 42, "L3": 41, "L4": 40, "L5": 39, "B": 37, "D": 38, "C": 37}, "age": 21}, "waveDrift": {"runs": {"A": 87, "L1": 46, "L2": 45, "L3": 44, "L4": 43, "L5": 42, "B": 40, "D": 41, "C": 40}, "age": 21.277}}, "Inlet with Ripples in sequence (1 s \u2192 2 s \u2192 1.5 s)": {"wave": {"runs": {"I": 58, "O": 58}, "age": 6.5}, "waveDrift": {"runs": {"I": 62, "O": 61}, "age": 6.7288}}, "Outlet is the bottleneck (1 s \u2192 4 s)": {"wave": {"runs": {"I": 31, "O": 29}, "age": 8}, "waveDrift": {"runs": {"I": 33, "O": 32}, "age": 8.0872}}, "Outlet is the bottleneck behind a long lead (six 1 s stages, then 4 s)": {"wave": {"runs": {"I": 35, "P1": 34, "P2": 33, "P3": 32, "P4": 31, "P5": 30, "O": 28}, "age": 28}, "waveDrift": {"runs": {"I": 37, "P1": 36, "P2": 35, "P3": 34, "P4": 33, "P5": 32, "O": 30}, "age": 28.3933}}, "bottleneck inside a Pond (1 s \u2192 4 s \u2192 1 s)": {"wave": {"runs": {"I": 32, "P": 29, "O": 28}, "age": 14}, "waveDrift": {"runs": {"I": 34, "P": 31, "O": 31}, "age": 14.3099}}};
+
+// Drive sim time in 100 ms ticks: one-off Refreshes at `outlet` every `every` seconds, a continuous Refresh
+// (tide0), or a Refresh every 1 s (tide1).
 // `drift` advances time by 90-129 ms per tick, as the playground does (it ticks on real elapsed time), so
 // events that coincide on an exact 100 ms grid land in different ticks.
-function simulate(s: OrchestrState, outlet: string, seconds: number, opts: { every?: number; tide0?: boolean; tide1?: boolean; wave?: boolean; drift?: boolean }): Run {
-  if (opts.wave) s.triggers = { [outlet]: { pondId: outlet, kind: 'wave' } };
-  if (opts.tide0) s.triggers = { [outlet]: { pondId: outlet, kind: 'tide', stalenessMs: 0 } };
-  if (opts.tide1) s.triggers = { [outlet]: { pondId: outlet, kind: 'tide', stalenessMs: 1000 } };
+function simulate(s: OrchestrState, outlet: string, seconds: number, opts: { every?: number; tide0?: boolean; tide1?: boolean; drift?: boolean }): Run {
+  if (opts.tide0) s.refreshes = { [outlet]: [{ name: 'continuous', everyMs: 0 }] };
+  if (opts.tide1) s.refreshes = { [outlet]: [{ name: 'every 1 s', everyMs: 1000 }] };
   let seed = 7;
   const drift = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) % 40) - 10;
   let now = 1_000_000;
@@ -75,7 +82,7 @@ function simulate(s: OrchestrState, outlet: string, seconds: number, opts: { eve
   let half: Record<string, number> = {};
   for (let i = 0; i < seconds * 10; i++) {
     if (i === seconds * 5) half = Object.fromEntries(Object.entries(s.pondStates).map(([k, v]) => [k, v.runsCompleted]));
-    if (opts.every && i % Math.round(opts.every * 10) === 0) s = pulsePond(s, outlet, now);
+    if (opts.every && i % Math.round(opts.every * 10) === 0) s = refreshNow(s, outlet, now);
     now += 100 + (opts.drift ? drift() : 0);
     s = tick(now, s);
     const end = s.pondStates[outlet].endF;
@@ -92,10 +99,10 @@ function simulate(s: OrchestrState, outlet: string, seconds: number, opts: { eve
 
 for (const [name, [make, outlet, inlet, bottleneck]] of Object.entries(TOPOLOGIES)) {
   test(`${name}: saturated demand runs at the bottleneck's pace, at least as fresh as a Wave`, () => {
-    const wave = simulate(make(), outlet, 120, { wave: true });
+    const wave = WAVE[name].wave;
     for (const opts of [{ every: 1 }, { tide0: true }, { tide1: true, drift: true }]) {
       const throttled = simulate(make(), outlet, 120, opts);
-      const ref = 'drift' in opts ? simulate(make(), outlet, 120, { wave: true, drift: true }) : wave;
+      const ref = 'drift' in opts ? WAVE[name].waveDrift : wave;
       expect(throttled.runs[bottleneck]).toBe(ref.runs[bottleneck]);
       expect(throttled.runs[outlet]).toBe(ref.runs[outlet]);
       expect(throttled.late[inlet]).toBeLessThanOrEqual(throttled.late[bottleneck] + 1); // settled: one per bottleneck run
@@ -104,7 +111,7 @@ for (const [name, [make, outlet, inlet, bottleneck]] of Object.entries(TOPOLOGIE
     }
   });
 
-  test(`${name}: sparse Pulses run every Pond once per Pulse`, () => {
+  test(`${name}: sparse Refreshes run every Pond once each`, () => {
     const sparse = simulate(make(), outlet, 120, { every: 60 });
     for (const [pond, runs] of Object.entries(sparse.runs)) expect(runs, pond).toBe(2);
   });

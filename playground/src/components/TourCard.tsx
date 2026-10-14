@@ -12,7 +12,7 @@ import { initialTourMode } from '@/lib/tourStorage';
 // control, at the bottom otherwise. On a short screen (a phone in landscape) it's a flat bar along the
 // bottom of the canvas, so the graph keeps most of the height.
 
-// `backticks` → code.
+// `backticks` → code, **double asterisks** → bold.
 function Copy({ text }: { text: string }) {
   return (
     <>
@@ -22,7 +22,7 @@ function Copy({ text }: { text: string }) {
             {part}
           </code>
         ) : (
-          part
+          part.split('**').map((bit, j) => (j % 2 ? <strong key={`${i}-${j}`} style={{ color: '#e4e4e7' }}>{bit}</strong> : bit))
         )
       )}
     </>
@@ -216,7 +216,7 @@ export function TourCard() {
         </div>
         <div style={{ fontSize: 12, color: '#a1a1aa', lineHeight: 1.5, marginBottom: 12 }}>
           {isPrompt
-            ? 'A short guided run through the example pipeline, in three chapters.'
+            ? 'A short guided run through the example pipeline, in four chapters.'
             : 'The tour resets the Playground to the example pipeline, so your changes will be lost.'}
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>

@@ -1,14 +1,14 @@
 'use client';
 
-import { THEME_PULL, THEME_PUSH, THEME_RUNNING } from '@/lib/store';
+import { THEME_AMBER, THEME_DEMAND, THEME_RUNNING } from '@/lib/store';
 
 // Run-cadence + run-duration trace. Two lines share one y-axis so the run duration can be
 // read against the cadence (≈ the bottleneck): well below it ⇒ this node isn't the bottleneck;
 // close to it ⇒ it is. The y-axis is clipped near the 75th percentile (plus a margin
 // proportional to the mean) so aberrant gaps — e.g. after a sleep — don't squash the rest.
-const INTERVAL_COLOR = THEME_PULL; // run cadence, tied to Wave/pull (≈ bottleneck under a Wave)
+const INTERVAL_COLOR = THEME_AMBER; // run cadence (the bottleneck's pace under saturation)
 const DURATION_COLOR = THEME_RUNNING; // run duration, tied to the running state
-const AGE_COLOR = THEME_PUSH; // data age at publish (Ponds only), tied to push/freshness
+const AGE_COLOR = THEME_DEMAND; // data age at publish (Ponds only), tied to demand/freshness
 
 function quantile(sortedAsc: number[], q: number): number {
   if (sortedAsc.length === 0) return 0;

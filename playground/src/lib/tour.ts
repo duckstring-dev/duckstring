@@ -77,8 +77,6 @@ export const useTourStore = create<TourState>((set, get) => {
     clearPending();
     const step = TOUR_STEPS[index];
     set({ phase: 'step', index, waitLabel: null, wait: null, ring: null, outline: null });
-    const s = play();
-    s.setTideDraft(null);
     focus(step.target ?? {}, step.frame);
     step.setup?.({ store: play(), focus });
     watchAction(step);
@@ -97,6 +95,27 @@ export const useTourStore = create<TourState>((set, get) => {
     });
   }
 
+  // An animated action: its stages run one after another at real speed, with the card hidden and each stage
+  // free to point the canvas at what it changes. Then the step moves on as usual.
+  function animate(index: number, step: TourStep): void {
+    const stages = step.action!.stages!;
+    clearPending();
+    const s = play();
+    if (s.paused) s.togglePause();
+    s.setSpeed(1);
+    const total = stages.reduce((sum, st) => sum + st.ms, 0);
+    set({ phase: 'waiting', waitLabel: step.action!.label, wait: { startedAt: performance.now(), expectedMs: total }, outline: null });
+    let at = 0;
+    for (const st of stages) {
+      at += st.ms;
+      later(at, () => st.run({ store: play(), focus }));
+    }
+    later(at + 50, () => {
+      if (step.advance !== 'next') wait(index, step);
+      else open(index + 1);
+    });
+  }
+
   function wait(index: number, step: TourStep): void {
     const w = step.advance;
     if (w === 'next') return;
@@ -104,17 +123,20 @@ export const useTourStore = create<TourState>((set, get) => {
     const since = play();
     if (since.paused) since.togglePause();
     since.setSpeed(w.speed ?? WAIT_SPEED);
+    if (w.speedAfter) later(w.speedAfter.ms, () => play().setSpeed(w.speedAfter!.speed));
     // The pipeline gets the whole screen while it runs: nothing selected or highlighted, and the
-    // mobile bottom sheet closed. The next step selects what it needs.
-    since.clearSelection();
-    since.setSheetOpen(false);
+    // mobile bottom sheet closed (unless the step keeps its target in view). The next step selects what it needs.
+    if (!w.keepFocus) {
+      since.clearSelection();
+      since.setSheetOpen(false);
+    }
     set((t) => ({
       phase: 'waiting',
       waitLabel: w.label,
       wait: { startedAt: performance.now(), expectedMs: w.expectedMs },
-      ring: null,
+      ring: w.keepFocus ? t.ring : null,
       outline: null,
-      frame: { ids: null, seq: t.frame.seq + 1 },
+      frame: w.keepFocus ? t.frame : { ids: null, seq: t.frame.seq + 1 },
     }));
     let resolved = false;
     const done = (how: 'until' | 'fallback' | 'hurry') => {
@@ -137,7 +159,6 @@ export const useTourStore = create<TourState>((set, get) => {
     clearPending();
     if (visitorSpeed !== null) play().setSpeed(visitorSpeed);
     visitorSpeed = null;
-    play().setTideDraft(null);
     set({ phase: 'off', ring: null, outline: null, waitLabel: null, wait: null });
     writeTourMemory(reason);
     const step = phase === 'prompt' || phase === 'confirm' ? 0 : index + 1;
@@ -181,7 +202,8 @@ export const useTourStore = create<TourState>((set, get) => {
       if (phase !== 'step') return;
       clearPending(); // drop the action watcher before the action itself would trigger it
       const step = TOUR_STEPS[index];
-      if (step.action && !step.action.done(play())) step.action.run(play());
+      if (step.action?.stages && !step.action.done(play())) return animate(index, step);
+      if (step.action && !step.action.done(play())) step.action.run?.(play());
       if (index === TOUR_STEPS.length - 1) return end('done');
       if (step.advance !== 'next') return wait(index, step);
       open(index + 1);

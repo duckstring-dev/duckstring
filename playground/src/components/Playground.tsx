@@ -12,8 +12,9 @@ import { TourSpotlight } from './TourSpotlight';
 
 export function Playground() {
   const isMobile = useIsMobile();
-  // ?example=<key> loads an example graph, and ?tide=<seconds> or
-  // ?wave=1 sets that trigger on every Outlet, so a setup can be opened straight from a link.
+  // ?example=<key> loads an example graph, and ?every=<seconds> (0 = continuous) puts that Refresh on every
+  // Outlet, so a setup can be opened straight from a link. (?tide=<seconds> and ?wave=1, from before Refresh,
+  // still work.)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const store = usePlaygroundStore.getState();
@@ -21,11 +22,9 @@ export function Playground() {
     if (example) store.loadExample(example);
     const ponds = usePlaygroundStore.getState().ponds;
     const outlets = Object.keys(ponds).filter((id) => !Object.values(ponds).some((p) => p.sources.includes(id)));
-    const tide = parseFloat(params.get('tide') ?? '');
-    for (const id of outlets) {
-      if (!isNaN(tide) && tide >= 0) store.triggerTide(id, tide * 1000);
-      else if (params.get('wave') === '1') store.triggerWave(id);
-    }
+    let every = parseFloat(params.get('every') ?? params.get('tide') ?? '');
+    if (isNaN(every) && params.get('wave') === '1') every = 0;
+    if (!isNaN(every) && every >= 0) for (const id of outlets) store.addRefresh(id, { everyMs: every * 1000 });
   }, []);
   useEffect(() => {
     // Real-time driver. Sim time advances by (real elapsed × speed); frozen while paused.
