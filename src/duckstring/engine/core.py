@@ -202,9 +202,13 @@ class ThrottleState:
     trigger: bool = False  # a trigger targets this Pond (cleared when its demand drains)
     completed: bool = False  # completed a Pond Run since the last send
     released: bool = False  # Inlets: a release reached it, so its next Run stamps its start
+    deferred: dict[PondId, tuple[datetime, bool]] = field(default_factory=dict)  # Source -> (newest target
+                                                    # held back from it, whether a release)
+    deferred_at: dict[PondId, int] = field(default_factory=dict)  # throttled Sources' runs_started then
 
     def copy(self) -> ThrottleState:
-        return replace(self, counts=dict(self.counts), slow=set(self.slow), sent_at=dict(self.sent_at))
+        return replace(self, counts=dict(self.counts), slow=set(self.slow), sent_at=dict(self.sent_at),
+                       deferred=dict(self.deferred), deferred_at=dict(self.deferred_at))
 
 
 @dataclass

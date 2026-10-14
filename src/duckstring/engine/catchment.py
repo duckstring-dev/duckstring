@@ -313,13 +313,67 @@ def push_sources(s: EngineState, pid: PondId) -> list[PondId]:
     return [sp for sp in pond.sources if sp not in pond.optional_sources or unbuilt(sp)]
 
 
+_ALIGN = True  # prototype switch for benchmarking the sibling alignment; not a setting
+
+
 def _forward(s: EngineState, pid: PondId, t: datetime, release: bool = False) -> None:
-    """Send push target ``t`` from this Pond to its push Sources, noting which run each Ripple was in."""
+    """Send push target ``t`` from this Pond to its push Sources, noting which run each Ripple was in.
+
+    Sibling alignment: when some required push Sources are throttled and others aren't, ``t`` goes to the
+    throttled ones now and is held back from the rest until each throttled one has started a new Run (its
+    turn, when a Wave would re-arm; ``_flush_deferred``), so the Sources read at about the same time and the
+    join's freshness isn't dragged down by a fast Source that read early."""
     th = _throttle(s, pid)
     th.held, th.completed = 0, False
     th.sent_at = {rid: s.ripple_states[rid].runs_started for rid in ripples_of(s, pid)}
-    for sp in push_sources(s, pid):
+    sources = push_sources(s, pid)
+    lead = _lead_sources(s, pid, sources)
+    hold = bool(lead) and len(lead) < len(sources)
+    if hold and not th.deferred:
+        th.deferred_at = {sp: s.pond_states[sp].runs_started for sp in lead}
+    for sp in sources:
+        if hold and sp not in lead:
+            held = th.deferred.get(sp)
+            if held is None or t > held[0]:
+                th.deferred[sp] = (t, release)
+            continue
+        held = th.deferred.get(sp)
+        if held is not None and held[0] <= t:
+            del th.deferred[sp]  # this target covers what was held back from it
         pond_add_target(s, sp, t, release=release)
+    if not th.deferred:
+        th.deferred_at = {}
+
+
+def _lead_sources(s: EngineState, pid: PondId, sources: list[PondId]) -> list[PondId]:
+    """The throttled required Sources among ``sources``: the ones the others are aligned to."""
+    if not _ALIGN:
+        return []
+    optional = s.ponds[pid].optional_sources
+    return [sp for sp in sources if sp not in optional and is_throttled(s, sp)]
+
+
+def _flush_deferred(s: EngineState, pid: PondId) -> bool:
+    """Send each held-back target on once every throttled Source has started a new Run since it was held,
+    or once none is throttled any more. A held-back Source that has since become throttled itself gets its
+    target at once; one that is no longer a push Source (an optional Source now built) is dropped. Returns
+    whether anything changed."""
+    th = s.pond_states[pid].throttle
+    if th is None or not th.deferred:
+        return False
+    sources = push_sources(s, pid)
+    lead = _lead_sources(s, pid, sources)
+    due = all(s.pond_states[sp].runs_started > th.deferred_at.get(sp, -1) for sp in lead)
+    changed = False
+    for sp, (t, release) in list(th.deferred.items()):
+        if due or sp in lead or sp not in sources:
+            del th.deferred[sp]
+            if sp in sources:
+                pond_add_target(s, sp, t, release=release)
+            changed = True
+    if not th.deferred:
+        th.deferred_at = {}
+    return changed
 
 
 # ─── Pulse throttle (plans/pulse-throttle.md) ─────────────────────────────────
@@ -425,8 +479,11 @@ def _settle_throttle(s: EngineState, now: datetime) -> bool:
         if idle:
             th.slow -= idle
             changed = True
+        if _flush_deferred(s, pid):
+            changed = True
         if not any(t > NEVER for t in ps.targets):
             th.trigger, th.held = False, 0  # demand drained
+            th.deferred, th.deferred_at = {}, {}
             continue
         if push_sources(s, pid) and _release_due(s, pid):
             _forward(s, pid, now, release=True)
