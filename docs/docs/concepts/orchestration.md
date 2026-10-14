@@ -113,7 +113,7 @@ There are four triggers, set with `duckstring trigger` or from the web UI:
 
 A Tap is satisfied by any newer data. If a Pond's Sources have nothing newer, the request passes further upstream until it reaches a Pond that can run. A Pulse is stricter: everything upstream of the target runs until its data is at least as fresh as the time of the Pulse, and the result flows down to the target.
 
-A Tide is how you run something daily. `duckstring trigger tide reports 1d` sends a Pulse every day: a day after the previous one, so `reports` is never more than a day plus the pipeline's run time old.
+A Tide is how you run something daily. `duckstring trigger tide reports 1d` sends a Pulse every day: a day after `reports` was last requested or refreshed, so it is never more than a day plus the pipeline's run time old.
 
 Pulses can arrive faster than the pipeline can serve them, for example from a Tide with a limit shorter than the slowest step. Duckstring then paces them to that step: the Ponds before it run once per run of the slowest step, as under a Wave, and each request still travels through the pipeline in one pass, so the data is at least as fresh as under a Wave and often fresher. Occasional Pulses aren't affected.
 

@@ -260,7 +260,6 @@ class PondState:
     gen_start_times: dict[int, datetime] = field(default_factory=dict)
     completion_times: list[datetime] = field(default_factory=list)
     throttle: ThrottleState | None = None  # the Pulse throttle's soft state, created on first use
-    last_request: datetime = NEVER  # newest trigger request accepted (soft): the floating clock's reference
 
     def copy(self) -> PondState:
         return replace(

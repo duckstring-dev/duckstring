@@ -109,7 +109,7 @@ def tide(
 ) -> None:
     """Refresh the Pond every BOUND, e.g. `tide reports 1d` to refresh it daily.
 
-    Sends a Pulse BOUND after the previous one, so the data is at most BOUND plus the pipeline's run time old.
+    Sends a Pulse once BOUND has passed since the last Pulse or the last refresh of the data, whichever is later.
     """
     from .config import resolve_catchment
     from .window import _parse_duration

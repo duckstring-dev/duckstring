@@ -413,18 +413,15 @@ export function isThrottled(s: OrchestrState, pid: PondId): boolean {
 
 // A trigger's demand at its Pond (Pulse or Tide): marks it a trigger Pond until its demand drains.
 function triggerDemand(s: OrchestrState, pid: PondId, now: number): void {
-  const ps = s.pondStates[pid];
   throttleOf(s, pid).trigger = true;
-  if (!ps.isBlocked && now > (ps.lastRequest ?? -Infinity)) ps.lastRequest = now;
   pondAddTarget(s, pid, now);
 }
 
-// A Tide's reference: its newest request (pending or served), else its freshness. It counts from requests, not
-// from the freshness a request was served with: a busy neighbour on shared upstream can serve a request with a
-// later generation, and counting from that would stretch every cycle.
+// A Tide's reference: the later of its newest pending request and the Pond's freshness. A request is only
+// dropped once a run at or past it has started, so this is never earlier than the newest request; and a run the
+// Tide didn't ask for (a manual Pulse, a Force) counts too. Port of engine/catchment.py:_clock_ref.
 function clockRef(ps: PondRunState): number {
-  const ref = Math.max(ps.lastRequest ?? -Infinity, maxTarget(ps.targets) ?? -Infinity);
-  return Number.isFinite(ref) ? ref : ps.startF;
+  return Math.max(maxTarget(ps.targets) ?? -Infinity, ps.startF);
 }
 
 // After the tick's starts: clear slow Ripples that went idle, then let each Pond holding demand send one
@@ -781,9 +778,9 @@ export function tick(now: number, stateIn: OrchestrState): OrchestrState {
       const idle = ps.startF === ps.endF && !ps.hasPull && ps.targets.length === 0 && !anyRippleBusy(s, pid);
       if (completedPonds.has(pid) || idle) pondReceivePull(s, pid, now);
     } else {
-      // Tide: a clock. It adds a fresh push target `now` every time its last request has aged past `limit`
-      // (`clockRef`: the newest request, pending or served, else `startF`; reading endF would mistime the
-      // clock, as it lags by the lead). Pulses pipeline freely: a limit below the lead time just means several
+      // Tide: a clock. It adds a fresh push target `now` every time its last request, or the Pond's freshness
+      // if later, has aged past `limit` (`clockRef`; reading endF would mistime the clock, as it lags by the
+      // lead). Pulses pipeline freely: a limit below the lead time just means several
       // targets are outstanding at once, each served in turn via the push run condition, so completions still
       // land every `limit` (down to the bottleneck).
       const limit = trig.stalenessMs ?? 0;

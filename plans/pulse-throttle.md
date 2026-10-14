@@ -399,10 +399,12 @@ Node cross-check covering them.
   Inlet: 7 to 13% staler than a Wave under noise before). Releasing on the throttled Source's next start, not
   once it starts a Run at or past the target, keeps a shared upstream fed (the diamond with a long lead starved
   under the stricter rule).
-- **The floating clock counts from requests.** A Tide's reference is its newest trigger request (pending or
-  served; `PondState.last_request`, soft), else `start_f`. Counting from the freshness a request was served with
-  stretched a Tide beside a busier Outlet on shared upstream (10 s to 12 s), since that freshness runs ahead of
-  the request.
+- **The floating clock: request and freshness.** Counting a Tide from its last request alone was measured
+  (it keeps a strict cadence beside a busy neighbour, where counting from freshness stretched 10 s to 12 s) and
+  rejected by the author: a Tide counts from the later of its newest pending request and the Pond's freshness
+  (`_clock_ref`, `max(max(targets), start_f)`), so a Run it didn't ask for restarts the count (a manual refresh
+  30 minutes before an hourly Tide is set makes it fire in 30 minutes), and a strict cadence is what an anchored
+  refresh is for. Beside a busy neighbour each cycle stretches by at most one upstream run.
 - **Sleep re-sends other Ponds' demand** to the Sources it cleared (only to them, so it doesn't count as a
   release anywhere else). Before, Sleep stranded a pending request another Pond had forwarded to a slept Source.
 

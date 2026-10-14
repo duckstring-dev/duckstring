@@ -278,8 +278,6 @@ def pond_add_target(s: EngineState, pid: PondId, t: datetime, from_trigger: bool
     ps = s.pond_states[pid]
     if ps.is_blocked:  # no new push enters a blocked Pond (and none propagates upstream from it)
         return
-    if from_trigger and t > ps.last_request:
-        ps.last_request = t  # the floating refresh counts from its requests (_clock_ref)
     if t <= ps.end_f or t in ps.targets:  # already satisfied, or already requested
         return
     if t <= ps.start_f:  # a Run already in flight at or past t will satisfy it (a repeat request for the
@@ -1080,11 +1078,11 @@ def tick(now: datetime, state: EngineState) -> EngineState:
 
 
 def _clock_ref(ps: PondState) -> datetime:
-    """The floating refresh's reference: its newest request (pending or served), else its freshness. It counts
-    from requests, not from the freshness a request was served with: a busy neighbour on shared upstream can
-    serve a request with a later generation, and counting from that would stretch every cycle."""
-    ref = max(ps.last_request, max_target(ps.targets) or NEVER)
-    return ref if ref > NEVER else ps.start_f
+    """The floating refresh's reference: the later of its newest pending request and the Pond's freshness. A
+    request is only dropped once a Run at or past it has started, so this is never earlier than the newest
+    request; and a Run the Tide didn't ask for (a manual refresh, a Force, a Sink's demand) counts too. A strict
+    cadence regardless of freshness is what an anchored refresh is for."""
+    return max(max_target(ps.targets) or NEVER, ps.start_f)
 
 
 def next_wake(now: datetime, state: EngineState) -> datetime | None:

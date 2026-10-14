@@ -1,6 +1,6 @@
 # Sibling alignment, the request clock, and multi-Outlet cadence
 
-Three refinements to the Pulse throttle (`plans/pulse-throttle.md`, "Refinements"), measured on 2026-10-14 in
+Refinements to the Pulse throttle (`plans/pulse-throttle.md`, "Refinements"), measured on 2026-10-14 in
 the Python engine with the run-time noise model of `bench/continuous_refresh/`. The scripts compared each
 refinement against the throttle without it through switches in the engine that were removed when the
 refinements were adopted; they and their raw results are at commit `52abf511` (`bench/sibling_alignment/`).
@@ -29,10 +29,12 @@ refinements were adopted; they and their raw results are at commit `52abf511` (`
   runs in a few noisy cases (mostly with fresher data) and one regression, a slow sibling behind a lead 6%
   staler at sigma 1. The fuzz found one bug in the first version (a target held back from a Source that then
   became throttled was lost); fixed by tracking held-back targets per Source.
-- **The request clock** puts every designed multi-Outlet scenario within about 1% of its target (with the
-  freshness clock a 10 s Tide beside a continuous neighbour ran at 12 s, a 20 s one at 24 s) and is neutral on
-  saturated pipelines. In the random graphs, Tides whose target is at least 1.5 times their path's limit run
-  at their target (median 1.000, p90 1.007).
+- **A request clock** (counting a Tide from its last request only) put every designed multi-Outlet scenario
+  within about 1% of its target, where the existing clock (the later of the pending request and the freshness)
+  ran a 10 s Tide beside a continuous neighbour at 12 s and a 20 s one at 24 s. It was not adopted: the author
+  prefers that any refresh restarts the count (a strict cadence belongs to an anchored refresh), and the stretch
+  is at most one upstream run per cycle. In the random graphs, Tides whose target is at least 1.5 times their
+  path's limit run at their target (median 1.000).
 - **Known limit**: about 5% of Tides in the random multi-Outlet graphs run slower than target when another
   trigger saturates shared upstream or the bottleneck is several stages away (p99 1.5 times, worst 2.3 times
   at Tides of 2 to 30 s). A throttled trigger Pond releases on its completions, so the stages between it and

@@ -1287,17 +1287,40 @@ def test_a_held_back_source_that_becomes_throttled_gets_its_target_at_once():
     assert t in s.pond_states["F"].targets and s.pond_states["X"].throttle.deferred == {}
 
 
+@pytest.mark.timeout(5)
+def test_every_counts_from_the_later_of_its_request_and_the_freshness():
+    """A Tide set on a Pond refreshed by hand 30 s earlier first fires 60 s after that refresh's freshness: it
+    counts from the later of its own newest request and the Pond's freshness, so a Run it didn't ask for counts."""
+    d = Driver(*chain(("I", 1), ("O", 1)))
+    d.pulse("O")  # a manual refresh at T0
+    d.run(30)
+    d.state.triggers = {"O": Trigger("O", "tide", secs(60))}
+    d.run(65)
+    o = d.state.pond_states["O"]
+    assert o.runs_completed == 2 and o.end_f == T0 + secs(60)
+
+    # A Run the Tide didn't ask for also counts: M's own Tide fires at T0, O's Pulse refreshes M at T0+20, so
+    # M's next request is due at T0+80 (counting from its last request alone would make it T0+60).
+    d = Driver(*chain(("I", 1), ("M", 1), ("O", 1)))
+    d.state.triggers = {"M": Trigger("M", "tide", secs(60))}
+    d.run(20)
+    d.pulse("O")
+    d.run(65)
+    m = d.state.pond_states["M"]
+    assert m.runs_completed == 3 and m.end_f == T0 + secs(80)
+
+
 @pytest.mark.timeout(10)
-def test_every_counts_from_requests_beside_a_busy_neighbour():
-    """A floating refresh (Tide) counts from its requests. Beside a continuous neighbour on shared upstream, each
-    request is served by a slightly later generation; counting from that freshness stretched 10 s to 12 s."""
+def test_every_beside_a_busy_neighbour_stretches_by_at_most_one_upstream_run():
+    """Beside a continuous neighbour on shared upstream, a request can be served by a later generation; the next
+    request then counts from that fresher data, so each cycle stretches by at most one run of S (3 s)."""
     s, dur = graph([("I", 1, []), ("S", 3, ["I"]), ("O1", 1, ["S"]), ("O2", 1, ["S"])])
     s.triggers = {"O1": Trigger("O1", "tide", secs(0)), "O2": Trigger("O2", "tide", secs(10))}
     d = Driver(s, dur)
     d.run(300)
     late = [t for t in d.state.pond_states["O2"].completion_times if t >= T0 + secs(150)]
     gaps = gaps_seconds(late)
-    assert abs(sum(gaps) / len(gaps) - 10) < 0.15
+    assert 10 <= sum(gaps) / len(gaps) <= 13
 
 
 @pytest.mark.timeout(5)

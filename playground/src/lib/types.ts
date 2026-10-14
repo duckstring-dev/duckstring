@@ -80,7 +80,6 @@ export interface PondRunState {
   ages?: number[]; // data age (now - endF) at each completion
   // Pulse throttle bookkeeping.
   throttle?: ThrottleState;
-  lastRequest?: number; // newest trigger request: a Tide counts from its requests
 }
 
 // Pulse throttle, per Pond (see orchestration.ts "Pulse throttle").

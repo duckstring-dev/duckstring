@@ -750,7 +750,7 @@ These are intentionally water-themed, to extend the natural fluid-oriented nomen
     - A single priority order, like requesting a custom product
     - Causes data at the specified freshness to flow from the roots to the target node
 - **Tide**
-    - Executes a new Pulse every time the last Pulse has aged past a set period, so the data is never older than the period plus the lead time
+    - Executes a new Pulse every time the last Pulse, or the data's freshness if later, has aged past a set period, so the data is never older than the period plus the lead time
     - Has the effect of executing the DAG with that period (e.g. a period of 1 day creates a daily execution)
     - If an upstream **bottleneck** (the slowest unit operation) is longer than the bound, the [throttle](#saturated-push) paces the DAG to that bottleneck
 
@@ -1246,7 +1246,7 @@ Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundar
 - **Tap**: Sets `Source.hasReceivedPull = true` carrying the epoch `now`, then deletes itself
 - **Wave**: Sets `Source.hasReceivedPull = true` carrying the epoch `now` every time the pseudo-node runs (whenever the Pond is idle)
 - **Pulse**: Adds `now` to the Source's targets as a trigger, then deletes itself
-- **Tide**: Adds `now` to the Source's targets as a trigger whenever `now + Source.D - ref >= limit`, where `ref` is the Source's newest trigger request (pending or served), or its `startF` before it has had one. It counts from requests: a request served by a later generation (another consumer keeping shared upstream fresh) would otherwise stretch every cycle
+- **Tide**: Adds `now` to the Source's targets as a trigger whenever `now + Source.D - max(max(Source.targets), Source.startF) >= limit`: counting from the later of its newest pending request and the Source's freshness, so a run the Tide didn't ask for (a Pulse, a Force, a Sink's demand) restarts the count
 
 The trigger is, in effect, just another Sink.
 

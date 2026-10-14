@@ -157,7 +157,5 @@ quiet. It needs only the demand-at-now path the playground already has, plus the
   or convert each open Pond with it set into a Tap whose key the operator then rotates to obtain?
 - **Wait timeout default**, and whether `--wait` should be allowed with a non-zero `--fresh-within`.
 - **Rate limiting** per Tap, or is the throttle enough (it bounds runs, not query load on the serving core)?
-- **The policy clock** (raised 2026-10-14, after `--every` moved to counting from requests): the recommendation
-  is that `--fresh-within` counts from the newer of the last request and the Pond's freshness, so a Tap never
-  refreshes data something else already keeps fresh, while `--every` counts from requests alone (a cadence).
-  Awaiting the author.
+- ~~The policy clock~~: settled 2026-10-14. `--fresh-within` and `--every` share one clock, the later of the
+  newest request and the Pond's freshness, so neither refreshes data something else already keeps fresh.
