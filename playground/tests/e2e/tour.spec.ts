@@ -62,7 +62,7 @@ test('a first visit is offered the tour once', async ({ page }) => {
   await expect(page.getByTestId('tour-prompt')).toHaveCount(0);
   // The Tour button restarts it at any time.
   await page.getByTestId('tour-button').click();
-  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', 'pipeline');
+  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', TOUR_STEPS[0].id);
 });
 
 test('?tour=0 suppresses the prompt', async ({ page }) => {
@@ -81,7 +81,7 @@ test('blocked storage still offers and runs the tour', async ({ page }) => {
   });
   await page.goto('/');
   await page.getByTestId('tour-start').click();
-  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', 'pipeline');
+  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', TOUR_STEPS[0].id);
   await page.getByTestId('tour-skip').click();
   await expect(page.getByTestId('tour-card')).toHaveCount(0);
 });
@@ -93,5 +93,5 @@ test('starting the tour over a changed graph asks first', async ({ page }) => {
   await page.getByTestId('tour-button').click();
   await expect(page.getByTestId('tour-confirm')).toBeVisible();
   await page.getByTestId('tour-start').click();
-  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', 'pipeline');
+  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', TOUR_STEPS[0].id);
 });

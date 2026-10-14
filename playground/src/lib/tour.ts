@@ -135,9 +135,15 @@ export const useTourStore = create<TourState>((set, get) => {
       waitLabel: w.label,
       wait: { startedAt: performance.now(), expectedMs: w.expectedMs },
       ring: w.keepFocus ? t.ring : null,
-      outline: null,
+      outline: w.keepFocus ? (w.show ?? null) : null,
       frame: w.keepFocus ? t.frame : { ids: null, seq: t.frame.seq + 1 },
     }));
+    if (w.keepFocus && w.show) {
+      later(250, () => {
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        document.querySelector(`[data-tour="${w.show}"]`)?.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
+      });
+    }
     let resolved = false;
     const done = (how: 'until' | 'fallback' | 'hurry') => {
       if (resolved) return;

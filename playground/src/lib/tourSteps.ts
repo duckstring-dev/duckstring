@@ -28,6 +28,7 @@ export interface TourWait {
   speed?: number; // simulation speed while waiting (default WAIT_SPEED)
   speedAfter?: { ms: number; speed: number }; // change the speed this long (real time) into the wait
   keepFocus?: boolean; // keep the step's target selected and in view while waiting
+  show?: TourControl; // with keepFocus: outline this sidebar control and scroll it into view while waiting
   expectedMs: number; // typical real time it takes, measured in the browser: paces the progress bar
 }
 
@@ -40,6 +41,7 @@ export interface TourStage {
 export interface TourStep {
   id: string;
   chapter: 1 | 2 | 3 | 4;
+  intro?: boolean; // a chapter's opening card: its title is the chapter's
   title: string;
   body: string; // one or two sentences
   target?: TourTarget;
@@ -217,6 +219,15 @@ function upgraded(s: PlaygroundState, pond: string): boolean {
 export const TOUR_STEPS: TourStep[] = [
   // Chapter 1: running at the bottleneck's pace
   {
+    id: 'intro-1',
+    chapter: 1,
+    intro: true,
+    title: CHAPTER_TITLES[1],
+    body: "Duckstring decides what runs by working back from the data you need. This chapter runs an example pipeline once, then on a cadence, then as often as it can.",
+    frame: 'all',
+    advance: 'next',
+  },
+  {
     id: 'pipeline',
     chapter: 1,
     title: 'An example pipeline',
@@ -285,14 +296,32 @@ export const TOUR_STEPS: TourStep[] = [
       run: (s) => setRefreshEvery(s, 'reports', 4000),
       done: (s) => hasRefresh(s, 'reports', 4000),
     },
+    // Real speed for 8 s (two Refreshes, one run end to end), then faster until the cadence settles.
     advance: {
       label: 'Running a few rounds',
       speed: 1,
-      speedAfter: { ms: 3000, speed: 10 },
-      expectedMs: 5000,
+      speedAfter: { ms: 8000, speed: 10 },
+      expectedMs: 9800,
       until: (s, since) => pondSettled(s, since, 'reports'),
-      fallbackMs: 20000,
+      fallbackMs: 25000,
     },
+  },
+  {
+    id: 'steady',
+    chapter: 1,
+    title: 'Steady state',
+    body: 'At steady state, every Ripple, upstream and downstream, runs every 4 s. `sales` takes 5 s from start to finish, so two of its runs are in flight at once.',
+    target: { pond: 'sales' },
+    frame: 'all',
+    advance: 'next',
+  },
+  {
+    id: 'run-chart',
+    chapter: 1,
+    title: 'The run chart',
+    body: "Each Ripple's run chart shows its run time and the time between its runs. Every one shows 4 s between runs.",
+    target: { ripple: 'transactions.ingest', control: 'run-chart' },
+    advance: 'next',
   },
   {
     id: 'continuous',
@@ -305,35 +334,38 @@ export const TOUR_STEPS: TourStep[] = [
       run: (s) => setRefreshEvery(s, 'reports', 0),
       done: (s) => hasRefresh(s, 'reports', 0),
     },
-    // At real speed, as the pipeline settles into its pace: about 20 s.
+    // Real speed for 6 s (two cycles), then faster until it settles, with `reports`' run chart in view.
     advance: {
       label: 'Watching the pipeline settle',
       speed: 1,
-      expectedMs: 17500,
+      speedAfter: { ms: 6000, speed: 10 },
+      keepFocus: true,
+      show: 'run-chart',
+      expectedMs: 7800,
       until: (s, since) =>
         rippleSettled(s, since, 'reports.monthly_summary') && rippleSettled(s, since, 'transactions.ingest'),
-      fallbackMs: 40000,
+      fallbackMs: 30000,
     },
   },
   {
-    id: 'steady',
+    id: 'throttled',
     chapter: 1,
-    title: 'Steady state',
-    body: "Throttling the Refreshes that can't be delivered in time, at steady state, every Ripple, upstream and downstream, runs every 3 s. `sales` takes 5 s from start to finish, so two of its runs are in flight at once.",
-    target: { pond: 'sales' },
-    frame: 'all',
-    advance: 'next',
-  },
-  {
-    id: 'run-chart',
-    chapter: 1,
-    title: 'The run chart',
-    body: "Each Ripple's run chart shows its run time and the time between its runs. Every one shows 3 s between runs.",
-    target: { ripple: 'transactions.ingest', control: 'run-chart' },
+    title: 'Throttled',
+    body: "Throttling the Refreshes that can't be delivered in time, at steady state, every Ripple, upstream and downstream, runs every 3 s.",
+    target: { pond: 'reports', control: 'run-chart' },
     advance: 'next',
   },
 
   // Chapter 2: noise
+  {
+    id: 'intro-2',
+    chapter: 2,
+    intro: true,
+    title: CHAPTER_TITLES[2],
+    body: "Real run times vary from one run to the next. This chapter makes the slowest step unpredictable, to see how the pipeline copes.",
+    frame: 'all',
+    advance: 'next',
+  },
   {
     id: 'noise',
     chapter: 2,
@@ -366,6 +398,16 @@ export const TOUR_STEPS: TourStep[] = [
 
   // Chapter 3: several outputs
   {
+    id: 'intro-3',
+    chapter: 3,
+    intro: true,
+    title: CHAPTER_TITLES[3],
+    body: 'A pipeline usually feeds more than one output, and each may be needed at its own cadence. This chapter adds a second output to the pipeline and refreshes it separately.',
+    frame: 'all',
+    setup: ({ store }) => setJoinVariability(store, 0), // the cadences in this chapter are without noise
+    advance: 'next',
+  },
+  {
     id: 'new-output',
     chapter: 3,
     title: 'A second output',
@@ -396,6 +438,7 @@ export const TOUR_STEPS: TourStep[] = [
     advance: {
       label: 'Running fast for a few cycles',
       keepFocus: true,
+      show: 'run-chart',
       expectedMs: 4000,
       until: (s, since) => pondRunsSince(s, since, NEW_POND) >= 7,
       fallbackMs: 15000,
@@ -404,9 +447,19 @@ export const TOUR_STEPS: TourStep[] = [
 
   // Chapter 4: upgrades
   {
+    id: 'intro-4',
+    chapter: 4,
+    intro: true,
+    title: CHAPTER_TITLES[4],
+    body: "Changes that break what's downstream are the hardest to roll out. This chapter makes one to `sales` and moves its readers across one at a time.",
+    frame: 'all',
+    setup: ({ store }) => store.clearSelection(),
+    advance: 'next',
+  },
+  {
     id: 'upgrades',
     chapter: 4,
-    title: 'Upgrades',
+    title: 'A breaking change',
     body: 'If a breaking change (e.g. column delete) is introduced to `sales`, both `reports` and `forecast` would need to also update, which can be difficult to co-ordinate. Instead, we keep the old versions running and add a "v2" for `sales`',
     target: { pond: 'sales', control: 'new-major' },
     action: {
@@ -469,6 +522,7 @@ export const TOUR_STEPS: TourStep[] = [
       'Minor covers extension of scope, where upgrading is fine, but downgrading could break downstream',
       'Patch covers any change that would not break upon either upgrade or downgrade',
     ],
+    footer: 'Execution and data belong to a Pond major: each major runs as its own Pond, with its own Refreshes, runs and tables, which is how both versions of `sales` ran side by side.',
     frame: 'all',
     setup: ({ store }) => store.clearSelection(),
     advance: 'next',
@@ -477,12 +531,7 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'done',
     chapter: 4,
     title: "That's most of it",
-    body: 'Some things to try from here:',
-    suggestions: [
-      `Put a trigger on \`${NEW_POND}\`.`,
-      'Add a few more Ponds to see how more complex dependencies interact. A new Pond reads from whichever Pond is selected.',
-    ],
-    footer: 'See the docs for more detail:',
+    body: 'See the docs for more detail:',
     frame: 'all',
     setup: ({ store }) => store.clearSelection(),
     advance: 'next',

@@ -279,7 +279,7 @@ export function TourCard() {
         // without adding to the bar's height.
         <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10, height: 20, marginBottom: 2 }}>
           {chapterLabel}
-          {position === 1 && (
+          {position === 1 && !step.intro && (
             <span style={{ minWidth: 0, fontSize: 11, color: THEME_BRAND, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {CHAPTER_TITLES[step.chapter]}
             </span>
@@ -296,7 +296,7 @@ export function TourCard() {
       )}
       <div style={flat ? { flex: 1, minHeight: 0, display: 'flex', alignItems: 'stretch', gap: 16 } : { display: 'contents' }}>
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto' }}>
-          {!flat && position === 1 && (
+          {!flat && position === 1 && !step.intro && (
             <div style={{ fontSize: 11, color: THEME_BRAND, marginBottom: 4 }}>{CHAPTER_TITLES[step.chapter]}</div>
           )}
           <div aria-live="polite">
