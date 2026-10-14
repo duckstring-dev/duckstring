@@ -107,9 +107,9 @@ def tide(
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3."),
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
 ) -> None:
-    """Keep the Pond no older than BOUND, e.g. `tide reports 1d` to refresh it daily.
+    """Refresh the Pond every BOUND, e.g. `tide reports 1d` to refresh it daily.
 
-    Sends a Pulse whenever the data would otherwise become older than BOUND.
+    Sends a Pulse BOUND after the previous one, so the data is at most BOUND plus the pipeline's run time old.
     """
     from .config import resolve_catchment
     from .window import _parse_duration

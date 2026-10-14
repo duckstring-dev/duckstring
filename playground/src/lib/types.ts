@@ -78,8 +78,9 @@ export interface PondRunState {
   completionTimes: number[];
   durations: number[];
   ages?: number[]; // data age (now - endF) at each completion
-  // Pulse throttle bookkeeping (only used while the throttle mode is on).
+  // Pulse throttle bookkeeping.
   throttle?: ThrottleState;
+  lastRequest?: number; // newest trigger request: a Tide counts from its requests
 }
 
 // Pulse throttle, per Pond (see orchestration.ts "Pulse throttle").
@@ -89,6 +90,8 @@ export interface ThrottleState {
   held: number; // demands held at this Pond since it last sent a Pulse upstream
   trigger?: boolean; // a trigger (Pulse, Tide) targets this Pond: when throttled it paces on its completions
   forwardedIn: Record<string, number>; // each Ripple's runsStarted when this Pond last sent a Pulse upstream
+  deferred: Record<string, number>; // sibling alignment: newest target held back from each unthrottled Source
+  deferredAt: Record<string, number>; // the throttled Sources' runsStarted when targets were first held back
 }
 
 // Persistent triggers only (Tap and Pulse are one-shot, no entity).

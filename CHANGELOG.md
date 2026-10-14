@@ -15,6 +15,14 @@ Notable changes per release. Versions before 0.5.0 are recorded in the git histo
 - **A repeat request for the freshness a Pond is already running is ignored.** It used to start a second
   Run at the same freshness, which the no-change skip then completed as a pass, ending the Run in flight
   early. A duct re-sending its downstream's target could cause it.
+- **A Tide counts from its requests.** A Tide sends its next Pulse its bound after the previous one. It used
+  to count from the freshness its last Pulse was served with, which another Outlet keeping shared upstream
+  busy pushes ahead of the request, so a Tide beside a busy neighbour ran slow (a 10 s Tide at 12 s).
+- **A join's Sources read together under saturation.** When some of a Pond's Sources are throttled and others
+  aren't, its requests reach the faster Sources only once the throttled ones start their next run, so a join
+  isn't held back by a fast Source that read early.
+- **Sleep keeps other Ponds' demand.** Sleeping a Pond (or a path with `--upstream`) clears its own demand, but a
+  pending request from another Pond it was serving is now sent to it again; before, that request stranded.
 - **Push demand is no longer lost at a halted Source.** A Pond that stops being blocked (after Clear, a
   recovery or a redeploy) re-sends its newest unmet push target upstream. Before, a Pulse waiting on a
   Source whose Run had failed or been killed stranded after Clear until something else demanded the path.

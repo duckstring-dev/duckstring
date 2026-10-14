@@ -278,8 +278,8 @@ def pond_add_target(s: EngineState, pid: PondId, t: datetime, from_trigger: bool
     ps = s.pond_states[pid]
     if ps.is_blocked:  # no new push enters a blocked Pond (and none propagates upstream from it)
         return
-    if from_trigger and _EVERY_FROM_REQUEST and t > ps.last_request:
-        ps.last_request = t
+    if from_trigger and t > ps.last_request:
+        ps.last_request = t  # the floating refresh counts from its requests (_clock_ref)
     if t <= ps.end_f or t in ps.targets:  # already satisfied, or already requested
         return
     if t <= ps.start_f:  # a Run already in flight at or past t will satisfy it (a repeat request for the
@@ -315,9 +315,6 @@ def push_sources(s: EngineState, pid: PondId) -> list[PondId]:
     return [sp for sp in pond.sources if sp not in pond.optional_sources or unbuilt(sp)]
 
 
-_ALIGN = True  # prototype switch for benchmarking the sibling alignment; not a setting
-
-
 def _forward(s: EngineState, pid: PondId, t: datetime, release: bool = False) -> None:
     """Send push target ``t`` from this Pond to its push Sources, noting which run each Ripple was in.
 
@@ -349,8 +346,6 @@ def _forward(s: EngineState, pid: PondId, t: datetime, release: bool = False) ->
 
 def _lead_sources(s: EngineState, pid: PondId, sources: list[PondId]) -> list[PondId]:
     """The throttled required Sources among ``sources``: the ones the others are aligned to."""
-    if not _ALIGN:
-        return []
     optional = s.ponds[pid].optional_sources
     return [sp for sp in sources if sp not in optional and is_throttled(s, sp)]
 
@@ -396,6 +391,10 @@ def _flush_deferred(s: EngineState, pid: PondId) -> bool:
 # at the bottleneck's pace, timed to its starts (when a Wave would re-arm), and enters at the rate the
 # Outlet is served, which bounds every path into it. A trigger Pond never paces on its own slow Ripple: it
 # takes raw trigger demand, so under a fast trigger its Ripple always looks slow.
+#
+# At a join whose required Sources are only partly throttled, a request goes to the throttled ones at once and
+# is held back from the others until each throttled one starts a new Run, so the Sources read together and the
+# join's freshness isn't dragged down by a fast Source that read early (sibling alignment, ``_forward``).
 #
 # A release is pacing and carries no epoch anyone asked for, so an Inlet it reaches stamps its next Run's
 # start rather than the release time (which can be a whole run earlier when the Inlet is busy). The state
@@ -885,6 +884,16 @@ def sleep_pond(state: EngineState, pid: PondId, now: datetime, upstream: bool = 
             for sp in s.ponds[cur].sources:
                 if sp not in seen:
                     queue.append(sp)
+    # Demand other Ponds still hold was cleared at the slept Sources they forwarded it to: send each one's
+    # newest unmet target to those Sources again, so another consumer's pending refresh isn't stranded.
+    for q, qs in s.pond_states.items():
+        unmet = [t for t in qs.targets if t > NEVER]
+        if q in seen or qs.is_blocked or not unmet:
+            continue
+        held_back = qs.throttle.deferred if qs.throttle is not None else {}
+        for sp in push_sources(s, q):
+            if sp in seen and sp not in held_back:
+                pond_add_target(s, sp, max(unmet))
     return s
 
 
@@ -1070,11 +1079,10 @@ def tick(now: datetime, state: EngineState) -> EngineState:
     return s
 
 
-_EVERY_FROM_REQUEST = True  # prototype switch for benchmarking; not a setting
-
-
 def _clock_ref(ps: PondState) -> datetime:
-    """The floating refresh's reference: its newest request (pending or served), else the freshness."""
+    """The floating refresh's reference: its newest request (pending or served), else its freshness. It counts
+    from requests, not from the freshness a request was served with: a busy neighbour on shared upstream can
+    serve a request with a later generation, and counting from that would stretch every cycle."""
     ref = max(ps.last_request, max_target(ps.targets) or NEVER)
     return ref if ref > NEVER else ps.start_f
 

@@ -720,6 +720,8 @@ Pull avoids this, because a node re-arms its parents only when it starts, but it
 
 A release carries no epoch anyone asked for, so a root it reaches takes the start of its next run as its freshness instead of the time of the release (see [Freshness](#freshness)).
 
+At a join whose required parents are only partly throttled, a request goes to the throttled parents at once and is held back from the others until each throttled parent starts a new run. The parents then read at about the same time, and the join's freshness, the oldest of theirs, isn't dragged down by a fast parent that read early.
+
 Sparse requests are never throttled, because no node sees two in one run. Under saturation, the bottleneck and the trigger node run as often as under a continuous pull, everything upstream settles at one run per bottleneck run, and the data is at least as fresh. On a chain of five 1-second nodes, a 5-second bottleneck and a 1-second final node, a request every second keeps the data about 11 seconds old, against 31 under a continuous pull. Until the bottleneck has started its first run nothing can be detected, so the first lead time runs as plain push.
 
 The throttle's state is held in memory only. After a restart, each node re-sends its newest unmet request once, and detection starts again.
@@ -748,8 +750,8 @@ These are intentionally water-themed, to extend the natural fluid-oriented nomen
     - A single priority order, like requesting a custom product
     - Causes data at the specified freshness to flow from the roots to the target node
 - **Tide**
-    - Executes a new Pulse every time the staleness, or the last Pulse time, exceeds a maximum, to keep the data no more stale than that (if possible)
-    - Has the effect of executing the DAG with a period equal to this "maximum staleness" (e.g. staleness of 1 day creates a daily execution)
+    - Executes a new Pulse every time the last Pulse has aged past a set period, so the data is never older than the period plus the lead time
+    - Has the effect of executing the DAG with that period (e.g. a period of 1 day creates a daily execution)
     - If an upstream **bottleneck** (the slowest unit operation) is longer than the bound, the [throttle](#saturated-push) paces the DAG to that bottleneck
 
 ### Which Should You Use?
@@ -1244,7 +1246,7 @@ Triggers are each modelled as a zero-duration pseudo-node (like a Pond's boundar
 - **Tap**: Sets `Source.hasReceivedPull = true` carrying the epoch `now`, then deletes itself
 - **Wave**: Sets `Source.hasReceivedPull = true` carrying the epoch `now` every time the pseudo-node runs (whenever the Pond is idle)
 - **Pulse**: Adds `now` to the Source's targets as a trigger, then deletes itself
-- **Tide**: Adds `now` to the Source's targets as a trigger whenever `now + Source.D - (max(Source.targets) ?? Source.startF) >= limit`, using the staleness of either the most recently started run or the most recent *push* target
+- **Tide**: Adds `now` to the Source's targets as a trigger whenever `now + Source.D - ref >= limit`, where `ref` is the Source's newest trigger request (pending or served), or its `startF` before it has had one. It counts from requests: a request served by a later generation (another consumer keeping shared upstream fresh) would otherwise stretch every cycle
 
 The trigger is, in effect, just another Sink.
 

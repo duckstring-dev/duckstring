@@ -15,7 +15,7 @@ When several Outlets share upstream Ponds, give each its own trigger. The shared
 
 ## A daily job
 
-A Tide keeps a Pond no older than a limit. With a limit of a day, the pipeline runs once a day:
+A Tide sends a Pulse at a set interval. With an interval of a day, the pipeline runs once a day:
 
 ```bash
 duckstring trigger tide reports 1d

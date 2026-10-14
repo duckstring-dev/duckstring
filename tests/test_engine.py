@@ -1043,6 +1043,10 @@ THROTTLE_TOPOLOGIES: dict[str, tuple[Spec, str, str, str]] = {
         _chain_spec(("I", 1), ("P1", 1), ("P2", 1), ("P3", 1), ("P4", 1), ("P5", 1), ("O", 4)), "O", "I", "O"),
     "bottleneck inside a Pond": (_chain_spec(("I", 1), ("P", [1, 4, 1]), ("O", 1)), "O", "I", "P"),
 }
+# Beyond the playground spec's topologies: only cross-checked, not part of the saturation port.
+CROSSCHECK_ONLY = {
+    "two Outlets on a shared chain": ([("I", 1, []), ("S", 3, ["I"]), ("O1", 1, ["S"]), ("O2", 1, ["S"])], "O1", "I", "S"),
+}
 
 
 def _throttle_graph(name: str) -> tuple[EngineState, dict[str, timedelta]]:
@@ -1065,7 +1069,8 @@ class SimRun:
 
 
 def simulate(made: tuple[EngineState, dict[str, timedelta]], outlet: str, seconds: int, *, every: float | None = None,
-             tide: float | None = None, wave: bool = False, drift: bool = False) -> SimRun:
+             tide: float | None = None, wave: bool = False, drift: bool = False,
+             tides: dict[str, float] | None = None) -> SimRun:
     """Drive sim time as the playground's tests do: Pulses at ``outlet`` every ``every`` seconds (landing
     on the next step), a Tide with bound ``tide``, or a Wave; then per step advance, complete, tick, react."""
     s, dur = made
@@ -1073,6 +1078,8 @@ def simulate(made: tuple[EngineState, dict[str, timedelta]], outlet: str, second
         s.triggers = {outlet: Trigger(outlet, "wave")}
     if tide is not None:
         s.triggers = {outlet: Trigger(outlet, "tide", secs(tide))}
+    for pond, bound in (tides or {}).items():  # further Outlets with their own cadences
+        s.triggers[pond] = Trigger(pond, "tide", secs(bound))
     d = Driver(s, dur, drift=drift)
     ages: list[float] = []
     last_end, half = NEVER, {}
@@ -1242,6 +1249,86 @@ def test_a_pass_counts_as_a_trigger_pond_completion():
             assert s.pond_states["O"].throttle.held == 1 and s.pond_states["B"].targets == []
 
 
+@pytest.mark.timeout(10)
+def test_a_join_aligns_a_fast_source_with_a_throttled_one():
+    """Sibling alignment: S (6 s) is throttled and F (1 s) isn't, so a request reaches S at once and F only when
+    S starts its next Run. The two read together, and the join's freshness isn't the older of two stamps (before
+    this, F read early and the stamps sat 2 s apart)."""
+    s, dur = graph([("F", 1, []), ("S", 6, []), ("X", 1, ["F", "S"]), ("O", 1, ["X"])])
+    s.triggers = {"O": Trigger("O", "tide", secs(0))}
+    d = Driver(s, dur)
+    seen, gaps = 0, []
+    for i in range(1200):
+        d.step()
+        if d.state.pond_states["X"].runs_started != seen:
+            seen = d.state.pond_states["X"].runs_started
+            if i > 600:
+                gaps.append(abs(d.state.pond_states["F"].end_f - d.state.pond_states["S"].end_f))
+    assert gaps and max(gaps) == timedelta(0)
+    assert d.state.pond_states["O"].runs_completed >= 18  # still paced by S: one run per 6 s
+
+
+@pytest.mark.timeout(5)
+def test_a_held_back_source_that_becomes_throttled_gets_its_target_at_once():
+    """A target held back from F (while S is the throttled Source) goes to F as soon as F is throttled itself.
+    Releasing only to Sources not throttled at that moment once lost it (a random-graph fuzz found 68 targets
+    stranded that way)."""
+    s, dur = graph([("F", 1, []), ("S", 6, []), ("X", 1, ["F", "S"])])
+    for src in ("F", "S"):
+        s.ripple_states[f"{src}.r0"] = RippleState(start_f=T0, is_running=True, runs_started=1)
+        s.pond_states[src].start_f = T0
+    s.pond_states["S"].throttle = ThrottleState(slow={"S.r0"})
+    t = T0 + secs(1)
+    pond_add_target(s, "X", t)
+    assert t in s.pond_states["S"].targets and s.pond_states["F"].targets == []
+    assert s.pond_states["X"].throttle.deferred == {"F": (t, False)}
+    s.pond_states["F"].throttle = ThrottleState(slow={"F.r0"})  # F becomes throttled before S starts again
+    s, _ = sentinel(t, s)
+    assert t in s.pond_states["F"].targets and s.pond_states["X"].throttle.deferred == {}
+
+
+@pytest.mark.timeout(10)
+def test_every_counts_from_requests_beside_a_busy_neighbour():
+    """A floating refresh (Tide) counts from its requests. Beside a continuous neighbour on shared upstream, each
+    request is served by a slightly later generation; counting from that freshness stretched 10 s to 12 s."""
+    s, dur = graph([("I", 1, []), ("S", 3, ["I"]), ("O1", 1, ["S"]), ("O2", 1, ["S"])])
+    s.triggers = {"O1": Trigger("O1", "tide", secs(0)), "O2": Trigger("O2", "tide", secs(10))}
+    d = Driver(s, dur)
+    d.run(300)
+    late = [t for t in d.state.pond_states["O2"].completion_times if t >= T0 + secs(150)]
+    gaps = gaps_seconds(late)
+    assert abs(sum(gaps) / len(gaps) - 10) < 0.15
+
+
+@pytest.mark.timeout(5)
+def test_sleeping_a_mid_pipeline_pond_keeps_the_demand_below_it():
+    """Sleep clears a Pond's own demand, but a Sink's pending request it was serving is sent to it again, so the
+    Sink's refresh still completes instead of stranding."""
+    d = Driver(*chain(("I", 1), ("M", 1), ("O", 1)))
+    d.pulse("O")
+    d.run(0.5)  # I running; M and O waiting for T0
+    d.state = sleep_pond(d.state, "M", d.now)
+    d._react()
+    d.run(10)
+    assert d.state.pond_states["O"].end_f == T0 and d.state.pond_states["O"].targets == []
+
+
+@pytest.mark.timeout(5)
+def test_sleeping_one_outlet_upstream_keeps_another_outlets_demand():
+    """Sleeping A with its upstream sweeps the shared Source S; B's pending request at S is sent again."""
+    d = Driver(*graph([("S", 1, []), ("A", 1, ["S"]), ("B", 1, ["S"])]))
+    d.pulse("A")  # S runs for A at T0
+    d.run(0.5)
+    b_at = d.now
+    d.pulse("B")  # S is busy, so B's request waits at S
+    assert b_at in d.state.pond_states["S"].targets
+    d.state = sleep_pond(d.state, "A", d.now, upstream=True)
+    d._react()
+    d.run(10)
+    assert d.state.pond_states["B"].end_f == b_at
+    assert d.state.pond_states["A"].runs_completed == 0  # A was still waiting on S: its demand is gone
+
+
 _PLAYGROUND_ENGINE = Path(__file__).parent.parent / "playground" / "src" / "lib" / "orchestration.ts"
 
 
@@ -1261,12 +1348,14 @@ def _node_runs_typescript() -> bool:
     ("diamond", dict(tide=1, drift=True)),
     ("Outlet is the bottleneck", dict(tide=0)),
     ("bottleneck inside a Pond", dict(every=1)),
+    ("slow sibling Inlet", dict(tide=0)),  # sibling alignment at the join
+    ("two Outlets on a shared chain", dict(tide=0, tides={"O2": 10})),  # a Tide beside a continuous neighbour
 ])
 def test_the_throttle_matches_the_playground_engine(name, opts):
     """Cross-check against the reference: the same scenario through the playground's TypeScript engine and
     this one gives the same Pond Runs at the same times. (They can differ where a user's Pulse reaches a busy
     Inlet, which stamps the Pulse's minted epoch here and its start time in the playground.)"""
-    spec, outlet, _, _ = THROTTLE_TOPOLOGIES[name]
+    spec, outlet, _, _ = THROTTLE_TOPOLOGIES.get(name) or CROSSCHECK_ONLY[name]
     scenario = {"spec": spec, "outlet": outlet, "seconds": 120, **opts}
     out = subprocess.run(
         ["node", "--experimental-strip-types", str(Path(__file__).parent / "throttle_crosscheck.mts"),
@@ -1274,7 +1363,7 @@ def test_the_throttle_matches_the_playground_engine(name, opts):
         capture_output=True, text=True, check=True,
     )
     ts = json.loads(out.stdout)
-    py = simulate(_throttle_graph(name), outlet, 120, **opts)
+    py = simulate(_throttle_graph(name) if name in THROTTLE_TOPOLOGIES else graph(spec), outlet, 120, **opts)
     assert py.runs == ts["runs"]
     ms = {pid: [round((t - T0) / timedelta(milliseconds=1)) for t in times] for pid, times in py.completions.items()}
     assert ms == ts["completions"]

@@ -387,7 +387,34 @@ Port `playground/tests/unit/throttle.spec.ts` to `tests/test_engine.py` using it
 A cross-check is cheap and worth having: run the same deterministic scenario through the TypeScript and
 Python engines and compare per-Pond run counts and completion times.
 
+## Refinements (2026-10-14)
+
+Adopted after testing (`bench/continuous_refresh/`, `bench/sibling_alignment/`); in both engines, with the
+Node cross-check covering them.
+
+- **Sibling alignment.** A Pond whose required push Sources are partly throttled sends a target to the
+  throttled ones now and holds it back, per Source, from the others until each throttled one starts a new Run
+  (its turn). A held-back Source that becomes throttled itself gets its target at once. The faster Sources then
+  read with the slow one, so the join's freshness isn't the older of two stamps that drifted apart (slow sibling
+  Inlet: 7 to 13% staler than a Wave under noise before). Releasing on the throttled Source's next start, not
+  once it starts a Run at or past the target, keeps a shared upstream fed (the diamond with a long lead starved
+  under the stricter rule).
+- **The floating clock counts from requests.** A Tide's reference is its newest trigger request (pending or
+  served; `PondState.last_request`, soft), else `start_f`. Counting from the freshness a request was served with
+  stretched a Tide beside a busier Outlet on shared upstream (10 s to 12 s), since that freshness runs ahead of
+  the request.
+- **Sleep re-sends other Ponds' demand** to the Sources it cleared (only to them, so it doesn't count as a
+  release anywhere else). Before, Sleep stranded a pending request another Pond had forwarded to a slept Source.
+
 ## Known limits
+
+- **A Tide beside a saturating neighbour** (or with the bottleneck several stages up) can run slower than its
+  target: a throttled trigger Pond releases on its completions, so the stages between it and the bottleneck carry
+  one of its requests at a time. About 5% of Tides in random multi-Outlet graphs (p99 1.5 times, worst 2.3 times,
+  at Tides of 2 to 30 s); bounded by that lead time, so negligible when the period is much longer than the
+  pipeline. A release turn on the trigger Pond's Sources' starts was tried and rejected (it over-released under
+  the trigger's own saturation); the bottleneck's own turn, passed downstream like the throttled flag, would be
+  the signal to use if this is ever worth fixing.
 
 - **Startup.** Nothing is detected until the bottleneck has started a run, so the first lead time runs as
   plain Pulse: roughly one extra upstream run per Pulse for the length of the lead.

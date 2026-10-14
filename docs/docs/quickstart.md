@@ -148,7 +148,7 @@ The same triggers are on each Pond's panel in the web UI. There are four in all:
 | Tap | Asks once for newer data, running upstream Ponds only if nothing newer is already available |
 | Pulse | Brings the Pond up to date as of now, once |
 | Wave | Keeps the Pond as fresh as the pipeline allows |
-| Tide | Keeps the Pond no older than a limit, such as `1d` for a daily job |
+| Tide | Brings the Pond up to date at a set interval, such as `1d` for a daily job |
 
 See [Scheduling](guides/scheduling.md) for choosing between them.
 

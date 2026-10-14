@@ -6,7 +6,8 @@ import type { PondRunState, RippleRunState } from '../../src/lib/types';
 // bottleneck runs as often as under a Wave, upstream settles at the bottleneck's rate, and the data is at
 // least as fresh as a Wave's. Sparse demand runs every Pond once per Pulse. Until the bottleneck has
 // started its first run nothing can be detected, so the startup runs as plain Pulse: up to one extra
-// upstream run per Pulse for the length of the lead.
+// upstream run per Pulse for the length of the lead. Data age is therefore compared over the second half, as
+// upstream run counts are (and as the Python port does).
 
 const pondState = (): PondRunState => ({
   startF: 0, endF: 0, D: 0, hasReceivedPull: false, hasPull: false, pullLocal: false, targets: [], isKilled: false,
@@ -80,13 +81,13 @@ function simulate(s: OrchestrState, outlet: string, seconds: number, opts: { eve
     const end = s.pondStates[outlet].endF;
     if (end !== lastEnd) {
       lastEnd = end;
-      ages.push((now - end) / 1000);
+      if (i >= seconds * 5) ages.push((now - end) / 1000); // second half only
     }
   }
   drainLog();
   const runs = Object.fromEntries(Object.entries(s.pondStates).map(([k, v]) => [k, v.runsCompleted]));
   const late = Object.fromEntries(Object.entries(runs).map(([k, v]) => [k, v - (half[k] ?? 0)])); // second half only
-  return { runs, late, age: ages.slice(1).reduce((a, b) => a + b, 0) / Math.max(1, ages.length - 1) };
+  return { runs, late, age: ages.reduce((a, b) => a + b, 0) / Math.max(1, ages.length) };
 }
 
 for (const [name, [make, outlet, inlet, bottleneck]] of Object.entries(TOPOLOGIES)) {

@@ -95,6 +95,8 @@ function clone(s: OrchestrState): OrchestrState {
         held: v.throttle.held,
         trigger: v.throttle.trigger,
         forwardedIn: { ...v.throttle.forwardedIn },
+        deferred: { ...v.throttle.deferred },
+        deferredAt: { ...v.throttle.deferredAt },
       },
     };
   }
@@ -307,7 +309,7 @@ function pushSources(s: OrchestrState, pid: PondId): PondId[] {
 
 function throttleOf(s: OrchestrState, pid: PondId): ThrottleState {
   const ps = s.pondStates[pid];
-  if (!ps.throttle) ps.throttle = { counts: {}, slow: [], held: 0, forwardedIn: {} };
+  if (!ps.throttle) ps.throttle = { counts: {}, slow: [], held: 0, forwardedIn: {}, deferred: {}, deferredAt: {} };
   return ps.throttle;
 }
 
@@ -335,12 +337,56 @@ function holdsDemand(s: OrchestrState, pid: PondId): boolean {
   return th.trigger ? isThrottled(s, pid) : th.slow.length > 0;
 }
 
-// Forward demand upstream, noting which run each Ripple was in.
+// Forward demand upstream, noting which run each Ripple was in. Sibling alignment: when some required push
+// Sources are throttled and others aren't, T goes to the throttled ones now and is held back from the rest
+// until each throttled one has started a new run (its turn), so the Sources read at about the same time and
+// the join's freshness isn't dragged down by a fast Source that read early.
 function forwardDemand(s: OrchestrState, pid: PondId, T: number): void {
   const th = throttleOf(s, pid);
   th.held = 0;
   for (const rid of ripplesOf(s, pid)) th.forwardedIn[rid] = s.rippleStates[rid].runsStarted;
-  for (const sp of pushSources(s, pid)) pondAddTarget(s, sp, T);
+  const sources = pushSources(s, pid);
+  const lead = leadSources(s, pid, sources);
+  const hold = lead.length > 0 && lead.length < sources.length;
+  if (hold && Object.keys(th.deferred).length === 0) {
+    th.deferredAt = Object.fromEntries(lead.map((sp) => [sp, s.pondStates[sp].runsStarted]));
+  }
+  for (const sp of sources) {
+    if (hold && !lead.includes(sp)) {
+      if (th.deferred[sp] == null || T > th.deferred[sp]) th.deferred[sp] = T;
+      continue;
+    }
+    if (th.deferred[sp] != null && th.deferred[sp] <= T) delete th.deferred[sp]; // T covers what was held back
+    pondAddTarget(s, sp, T);
+  }
+  if (Object.keys(th.deferred).length === 0) th.deferredAt = {};
+}
+
+// The throttled required Sources among `sources`: the ones the others are aligned to.
+function leadSources(s: OrchestrState, pid: PondId, sources: PondId[]): PondId[] {
+  const opt = new Set(s.ponds[pid].optionalSources ?? []);
+  return sources.filter((sp) => !opt.has(sp) && isThrottled(s, sp));
+}
+
+// Send each held-back target on once every throttled Source has started a new run since it was held, or once
+// none is throttled. A held-back Source that has since become throttled itself gets its target at once; one that
+// is no longer a push Source (an optional Source now built) is dropped. Returns whether anything changed.
+function flushDeferred(s: OrchestrState, pid: PondId): boolean {
+  const th = s.pondStates[pid].throttle;
+  if (!th || Object.keys(th.deferred).length === 0) return false;
+  const sources = pushSources(s, pid);
+  const lead = leadSources(s, pid, sources);
+  const due = lead.every((sp) => s.pondStates[sp].runsStarted > (th.deferredAt[sp] ?? -1));
+  let changed = false;
+  for (const [sp, T] of Object.entries(th.deferred)) {
+    if (due || lead.includes(sp) || !sources.includes(sp)) {
+      delete th.deferred[sp];
+      if (sources.includes(sp)) pondAddTarget(s, sp, T);
+      changed = true;
+    }
+  }
+  if (Object.keys(th.deferred).length === 0) th.deferredAt = {};
+  return changed;
 }
 
 // Is a holding Pond's turn due? A bottleneck's turn: every slow Ripple has started a new run since the last
@@ -367,8 +413,18 @@ export function isThrottled(s: OrchestrState, pid: PondId): boolean {
 
 // A trigger's demand at its Pond (Pulse or Tide): marks it a trigger Pond until its demand drains.
 function triggerDemand(s: OrchestrState, pid: PondId, now: number): void {
+  const ps = s.pondStates[pid];
   throttleOf(s, pid).trigger = true;
+  if (!ps.isBlocked && now > (ps.lastRequest ?? -Infinity)) ps.lastRequest = now;
   pondAddTarget(s, pid, now);
+}
+
+// A Tide's reference: its newest request (pending or served), else its freshness. It counts from requests, not
+// from the freshness a request was served with: a busy neighbour on shared upstream can serve a request with a
+// later generation, and counting from that would stretch every cycle.
+function clockRef(ps: PondRunState): number {
+  const ref = Math.max(ps.lastRequest ?? -Infinity, maxTarget(ps.targets) ?? -Infinity);
+  return Number.isFinite(ref) ? ref : ps.startF;
 }
 
 // After the tick's starts: clear slow Ripples that went idle, then let each Pond holding demand send one
@@ -387,9 +443,12 @@ function settleThrottle(s: OrchestrState, now: number, completed: Set<PondId>): 
         changed = true;
       }
     }
+    if (flushDeferred(s, pid)) changed = true;
     if (!ps.targets.some((t) => Number.isFinite(t))) {
       th.trigger = false; // demand drained
       th.held = 0;
+      th.deferred = {};
+      th.deferredAt = {};
       continue;
     }
     if (pushSources(s, pid).length > 0 && releaseDue(s, pid, completed)) {
@@ -612,6 +671,16 @@ export function sleepPond(state: OrchestrState, pid: PondId, now: number, upstre
       }
     }
   }
+  // Demand other Ponds still hold was cleared at the slept Sources they forwarded it to: send each one's newest
+  // unmet target to those Sources again, so another consumer's pending request isn't stranded.
+  for (const [q, qs] of Object.entries(s.pondStates)) {
+    const unmet = qs.targets.filter((t) => Number.isFinite(t));
+    if (seen.has(q) || qs.isBlocked || unmet.length === 0) continue;
+    const heldBack = qs.throttle?.deferred ?? {};
+    for (const sp of pushSources(s, q)) {
+      if (seen.has(sp) && heldBack[sp] == null) pondAddTarget(s, sp, Math.max(...unmet));
+    }
+  }
   return s;
 }
 
@@ -712,14 +781,13 @@ export function tick(now: number, stateIn: OrchestrState): OrchestrState {
       const idle = ps.startF === ps.endF && !ps.hasPull && ps.targets.length === 0 && !anyRippleBusy(s, pid);
       if (completedPonds.has(pid) || idle) pondReceivePull(s, pid, now);
     } else {
-      // Tide: a clock. It adds a fresh push target `now` every time the freshness it last *requested*
-      // has itself aged past `limit`. The reference is the newest pending target if any, else `startF`
-      // (set to sourceF *before* targets are cleared, so it preserves the satisfied target; reading
-      // endF would mistime the clock, as it lags by the lead). Pulses pipeline freely: a limit below
-      // the lead time just means several targets are outstanding at once, each served in turn via the
-      // push run condition, so completions still land every `limit` (down to the bottleneck).
+      // Tide: a clock. It adds a fresh push target `now` every time its last request has aged past `limit`
+      // (`clockRef`: the newest request, pending or served, else `startF`; reading endF would mistime the
+      // clock, as it lags by the lead). Pulses pipeline freely: a limit below the lead time just means several
+      // targets are outstanding at once, each served in turn via the push run condition, so completions still
+      // land every `limit` (down to the bottleneck).
       const limit = trig.stalenessMs ?? 0;
-      const ref = maxTarget(ps.targets) ?? ps.startF;
+      const ref = clockRef(ps);
       if (now + ps.D - ref >= limit) {
         triggerDemand(s, pid, now);
       }

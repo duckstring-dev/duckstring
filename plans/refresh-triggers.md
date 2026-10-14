@@ -21,7 +21,7 @@ user cares about: you refresh `reports`, and Duckstring works out what runs.
   Tide leave every user surface (CLI, HTTP API, web UI, docs, Playground).
 - **A standing Refresh repeats it**, with the same recurrence vocabulary windows use:
   - `refresh add POND --every D`, **floating**: due `D` after the previous request, so any refresh (a manual one, an
-    anchored one) resets its phase. This is today's Tide clock. The bound is a request period, so data
+    anchored one) resets its phase. This is the Tide clock (from requests since 2026-10-14). The bound is a request period, so data
     can be up to `D` plus the pipeline's run time old; "max age" was rejected as a name for that reason.
   - `--every D --start HH:MM`, **anchored**: fires on its grid regardless of other refreshes.
   - `--on DAYS` and `--until T` filter and end the recurrence, as on a window.
@@ -65,7 +65,8 @@ user cares about: you refresh `reports`, and Duckstring works out what runs.
 The trade-off: the Inlet stamps the minted epoch `c`, so after downtime the data is labelled 06:00 even if
 read at 09:00. That is conservative (never fresher than labelled) and matches the minted-freshness rule.
 
-**Floating refreshes keep today's Tide clock**: fire when `now + D - (max(targets) ?? start_f) >= every`.
+**Floating refreshes keep the Tide clock**: fire when `now + D - ref >= every`, where `ref` is the newest trigger
+request (`last_request` or a pending target), else `start_f`.
 Anchored and manual refreshes add targets too, so they reset the floating phase, as decided.
 
 `next_wake` covers both: an anchored refresh's next occurrence, and the floating deadline as today.

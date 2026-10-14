@@ -4,13 +4,15 @@
 //   node --experimental-strip-types tests/throttle_crosscheck.mts '<scenario JSON>'
 //
 // Scenario: {"spec": [[pond, seconds | [seconds, ...], [sources]], ...], "outlet": pond, "seconds": n,
-// "every"?: s, "tide"?: s, "wave"?: true, "drift"?: true}. Prints {"runs": {pond: completed Pond Runs},
+// "every"?: s, "tide"?: s, "wave"?: true, "drift"?: true, "tides"?: {pond: s}}. `tides` adds Tides on
+// further Ponds (several Outlets with their own cadences). Prints {"runs": {pond: completed Pond Runs},
 // "completions": {pond: [ms after the start, ...]}}.
 import { pulsePond, tick, type OrchestrState } from '../playground/src/lib/orchestration.ts';
 
 type Spec = [string, number | number[], string[]][];
 const sc = JSON.parse(process.argv[2]) as {
   spec: Spec; outlet: string; seconds: number; every?: number; tide?: number; wave?: boolean; drift?: boolean;
+  tides?: Record<string, number>;
 };
 
 let s: OrchestrState = { ponds: {}, pondStates: {}, ripples: {}, rippleStates: {}, triggers: {} };
@@ -31,6 +33,7 @@ for (const [name, secs, sources] of sc.spec) {
 }
 if (sc.wave) s.triggers = { [sc.outlet]: { pondId: sc.outlet, kind: 'wave' } };
 if (sc.tide != null) s.triggers = { [sc.outlet]: { pondId: sc.outlet, kind: 'tide', stalenessMs: sc.tide * 1000 } };
+for (const [pond, secs] of Object.entries(sc.tides ?? {})) s.triggers[pond] = { pondId: pond, kind: 'tide', stalenessMs: secs * 1000 };
 
 let seed = 7;
 const drift = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) % 40) - 10;

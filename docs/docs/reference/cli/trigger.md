@@ -40,7 +40,7 @@ Asks for data at least as fresh as the moment the command runs. Every Pond upstr
 duckstring trigger tide POND BOUND [--silent]
 ```
 
-A standing Pulse that keeps `POND` no older than `BOUND`. In effect it runs the pipeline every `BOUND`: `duckstring trigger tide reports 1d` refreshes `reports` daily. Precisely, it sends a Pulse whenever the data would otherwise become older than `BOUND`. If the pipeline takes longer than `BOUND`, its Pulses are paced to the slowest step, so it runs as often as a Wave without piling up requests.
+A standing Pulse that runs the pipeline every `BOUND`: `duckstring trigger tide reports 1d` refreshes `reports` daily. Precisely, it sends a Pulse `BOUND` after the previous one (any other Pulse on the Pond also restarts the count), so the data is at most `BOUND` plus the pipeline's run time old. If the pipeline takes longer than `BOUND`, its Pulses are paced to the slowest step, so it runs as often as a Wave without piling up requests.
 
 | Argument | Description |
 |---|---|
