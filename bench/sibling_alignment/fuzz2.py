@@ -22,7 +22,7 @@ def make(rng):
 
 def run(args):
     case, align = args
-    rng = random.Random(case); catchment._ALIGN = align
+    rng = random.Random(case); catchment._ALIGN = catchment._SOURCE_TURN = catchment._EVERY_FROM_REQUEST = align
     s, dur = make(rng)
     sinks = {sp for p in s.ponds.values() for sp in p.sources}
     outlets = [p for p in s.ponds if p not in sinks]

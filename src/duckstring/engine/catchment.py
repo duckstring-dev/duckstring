@@ -278,6 +278,8 @@ def pond_add_target(s: EngineState, pid: PondId, t: datetime, from_trigger: bool
     ps = s.pond_states[pid]
     if ps.is_blocked:  # no new push enters a blocked Pond (and none propagates upstream from it)
         return
+    if from_trigger and _EVERY_FROM_REQUEST and t > ps.last_request:
+        ps.last_request = t
     if t <= ps.end_f or t in ps.targets:  # already satisfied, or already requested
         return
     if t <= ps.start_f:  # a Run already in flight at or past t will satisfy it (a repeat request for the
@@ -1061,11 +1063,20 @@ def tick(now: datetime, state: EngineState) -> EngineState:
                 pond_receive_pull(s, pid, now, now)  # Wave-on-idle: a fresh demand epoch
         elif trig.kind == "tide":
             bound = trig.bound or ZERO
-            ref = max_target(ps.targets) or ps.start_f
+            ref = _clock_ref(ps)
             if now + ps.d - ref >= bound:
                 pond_add_target(s, pid, now, from_trigger=True)
     restore_demand(s, now)  # re-derive any demand lost upstream (reset / crash / blocked-refusal)
     return s
+
+
+_EVERY_FROM_REQUEST = True  # prototype switch for benchmarking; not a setting
+
+
+def _clock_ref(ps: PondState) -> datetime:
+    """The floating refresh's reference: its newest request (pending or served), else the freshness."""
+    ref = max(ps.last_request, max_target(ps.targets) or NEVER)
+    return ref if ref > NEVER else ps.start_f
 
 
 def next_wake(now: datetime, state: EngineState) -> datetime | None:
@@ -1084,7 +1095,7 @@ def next_wake(now: datetime, state: EngineState) -> datetime | None:
         if trig.kind != "tide":
             continue
         ps = state.pond_states[pid]
-        ref = max_target(ps.targets) or ps.start_f
+        ref = _clock_ref(ps)
         deadline = ref + (trig.bound or ZERO) - ps.d
         candidates.append(deadline if deadline > now else now)
     future = [c for c in candidates if c >= now]

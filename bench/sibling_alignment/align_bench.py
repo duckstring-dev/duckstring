@@ -21,7 +21,7 @@ JOINS = {"demo": ["sales"], "slow sibling Inlet": ["X"], "diamond": ["C"], "diam
 
 def run(args):
     name, mode, sigma, seed, seconds = args
-    catchment._ALIGN = mode != "old"
+    catchment._ALIGN = catchment._SOURCE_TURN = catchment._EVERY_FROM_REQUEST = mode != "old"
     _, outlet, inlet, bottleneck = te.THROTTLE_TOPOLOGIES[name]
     s, dur = te._throttle_graph(name)
     s.triggers = {outlet: Trigger(outlet, "wave") if mode == "wave" else Trigger(outlet, "tide", te.secs(0))}
