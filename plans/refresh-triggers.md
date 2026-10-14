@@ -336,10 +336,14 @@ topologies, with lognormal run-time noise (sigma 0 to 1), 8 paired seeds, in bot
   sigma 1), but its data is still fresher: mean age no higher in 42 of 44 cases and about half the Wave's
   on long pipelines, p95 too. For "as fresh as possible", age is the measure, so **pull can go without a
   lookahead rule**.
-- Two refinements for later, neither blocking: a bottleneck that is itself an Inlet runs 7 to 13% staler
-  under heavy noise (pacing falls to the Outlet's completions, which lag the Inlet), and upstream compute
-  rises by a median of 1 to 4% (at most 24%) because the slow flag clears whenever the bottleneck idles and
-  the pipeline refills. Both are throttle tuning, not reasons to keep pull.
+- Two refinements for later, neither blocking. A slow Inlet joined with a fast sibling Inlet runs 7 to 13%
+  staler under heavy noise: a release reaches both at once, the fast one reads while the slow one is still
+  busy, and the join takes the older stamp (under a Wave both are asked when the join starts, so they read
+  together). Being an Inlet isn't the cause; a slow Inlet alone matches the Wave. A possible fix: a Pond
+  with a throttled required Source sends a release to its other Sources only when the throttled one starts
+  the run that serves it. And upstream compute rises by a median of 1 to 4% (at most 24%) because the slow
+  flag clears whenever the bottleneck idles and the pipeline refills. Both are throttle tuning, not reasons
+  to keep pull.
 
 ## Ship order
 

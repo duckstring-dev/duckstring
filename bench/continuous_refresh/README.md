@@ -58,8 +58,13 @@ Across all 11 topologies:
 - **The data is still fresher.** Mean age is no higher in 42 of the 44 cases, and about half the Wave's on long
   pipelines at every noise level (p95 too). Fewer, fresher completions beat more, staler ones for "as fresh
   as possible".
-- **The exception is a bottleneck that is itself an Inlet** (slow sibling Inlet): 7% and 13% older at sigma
-  0.5 and 1. An Inlet can't hold demand, so pacing falls to the Outlet's completions, which lag the Inlet.
+- **The exception is a slow Inlet joined with a fast sibling Inlet** (slow sibling Inlet): 7% and 13% older at
+  sigma 0.5 and 1. Being an Inlet isn't the cause: the same 6 s Inlet on its own, or as a non-Inlet behind a
+  fast Inlet, matches the Wave (within 1% and 3%). Under a Wave one demand reaches both Inlets when the join
+  starts, so they read together and stamp the same epoch. Under a continuous refresh a release reaches both
+  at once, the fast Inlet reads straight away while the slow one is often still busy, and their stamps drift
+  apart (4 s on average at sigma 1). Each Inlet's data is as fresh as under the Wave, but the join takes the
+  older of the two.
 - **It costs more upstream.** Inlet runs rise by up to 62% and total compute by a median of 1 to 4% (at most
   24%): when the bottleneck idles, its slow flag clears and the pipeline refills before detection resumes.
 - **The engines agree** on every run count in 638 of 704 runs. The others are the existing pull difference on
