@@ -1,13 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { usePlaygroundStore, THEME_BRAND, THEME_DEMAND } from '@/lib/store';
+import { usePlaygroundStore, THEME_BRAND, THEME_DANGER, THEME_DEMAND } from '@/lib/store';
 import { useTourMark } from '@/lib/tour';
 import type { FreqUnit, Pond, Refresh } from '@/lib/types';
 
-// A Pond's Refresh: refresh now, and its one standing Refresh. The Every box shows the standing Refresh and edits
-// it in place (applied on Enter or on leaving the box; emptied, it removes it); Continuous toggles a Refresh every
-// 0 s.
+// A Pond's Refresh: refresh now, and its one standing Refresh. The Every box shows the standing Refresh; an edit is
+// a draft until Set (or Enter) applies it. Continuous sets a Refresh every 0 s, and Remove drops the Refresh.
 
 const UNITS: { value: FreqUnit; label: string }[] = [
   { value: 'SECOND', label: 'sec' },
@@ -43,26 +42,30 @@ function Button({
   color,
   mark,
   active,
+  disabled,
 }: {
   onClick: () => void;
   children: React.ReactNode;
   color: string;
   mark?: object;
   active?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
       aria-pressed={active}
+      disabled={disabled}
       {...mark}
       style={{
+        opacity: disabled ? 0.35 : 1,
         background: active ? color : 'transparent',
         border: `1px solid ${color}`,
         color: active ? '#0b0b0e' : color,
         borderRadius: 5,
         padding: '4px 12px',
         fontSize: 12,
-        cursor: 'pointer',
+        cursor: disabled ? 'default' : 'pointer',
         fontWeight: 600,
         letterSpacing: '0.04em',
         whiteSpace: 'nowrap',
@@ -84,7 +87,7 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
   const continuous = current != null && current.startAnchor == null && current.everyMs <= 0;
   const shown = current && current.everyMs > 0 ? splitPeriod(current.everyMs) : null;
 
-  // The Every box shows the standing Refresh until the visitor types; a draft is applied on Enter or blur.
+  // The Every box shows the standing Refresh until the visitor edits it; Set (or Enter) applies the draft.
   const [draft, setDraft] = useState<string | null>(null);
   const [draftUnit, setDraftUnit] = useState<FreqUnit | null>(null);
   const value = draft ?? shown?.value ?? '';
@@ -92,13 +95,22 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
 
   const apply = (everyMs: number) => setRefresh(pond.id, { everyMs });
 
-  const commit = (text = value, u = unit) => {
+  const n = parseFloat(value);
+  const draftMs = value.trim() !== '' && !isNaN(n) && n >= 0 ? n * UNIT_MS[unit] : null;
+  const canSet = draftMs != null && !(current && current.startAnchor == null && current.everyMs === draftMs);
+
+  const clearDraft = () => {
     setDraft(null);
     setDraftUnit(null);
-    if (text.trim() === '') return setRefresh(pond.id, null); // emptied: no standing Refresh
-    const n = parseFloat(text);
-    if (isNaN(n) || n < 0) return; // nothing to apply: the box shows the Refresh again
-    apply(n * UNIT_MS[u]);
+  };
+  const commit = () => {
+    if (!canSet) return;
+    clearDraft();
+    apply(draftMs);
+  };
+  const remove = () => {
+    clearDraft();
+    setRefresh(pond.id, null);
   };
 
   return (
@@ -123,13 +135,9 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
             placeholder={continuous ? '–' : ''}
             value={value}
             onChange={(e) => setDraft(e.target.value)}
-            onBlur={() => draft != null && commit()}
             onKeyDown={(e) => {
               if (e.key === 'Enter') commit();
-              if (e.key === 'Escape') {
-                setDraft(null);
-                setDraftUnit(null);
-              }
+              if (e.key === 'Escape') clearDraft();
             }}
             style={numInput}
           />
@@ -137,9 +145,8 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
             value={unit}
             aria-label="Unit"
             onChange={(e) => {
-              const u = e.target.value as FreqUnit;
-              if (value.trim() !== '') commit(value, u);
-              else setDraftUnit(u);
+              setDraft(value);
+              setDraftUnit(e.target.value as FreqUnit);
             }}
             style={selectInput}
           >
@@ -147,14 +154,17 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
               <option key={u.value} value={u.value}>{u.label}</option>
             ))}
           </select>
+          <Button onClick={commit} color={THEME_BRAND} disabled={!canSet}>
+            Set
+          </Button>
         </span>
-        <Button
-          onClick={() => (continuous ? setRefresh(pond.id, null) : apply(0))}
-          color={THEME_BRAND}
-          mark={markContinuous}
-          active={continuous}
-        >
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+        <Button onClick={() => apply(0)} color={THEME_BRAND} mark={markContinuous} active={continuous}>
           Continuous
+        </Button>
+        <Button onClick={remove} color={THEME_DANGER} disabled={!current}>
+          Remove
         </Button>
       </div>
     </>
