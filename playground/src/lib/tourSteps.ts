@@ -6,7 +6,7 @@ import type { PlaygroundState } from './store';
 // the example graph and are resolved to ids when a step opens.
 
 // Sidebar controls the tour can outline. Each matches a `data-tour` attribute in the Sidebar.
-export type TourControl = 'refresh-now' | 'refresh-continuous' | 'refresh-add' | 'refresh-list' | 'new-major' | 'ripple-duration' | 'ripple-variability' | 'run-chart';
+export type TourControl = 'refresh-now' | 'refresh-every' | 'refresh-continuous' | 'new-major' | 'ripple-duration' | 'ripple-variability' | 'run-chart';
 
 export interface TourTarget {
   pond?: string; // a Pond name, or "name@major" (a bare name is major 1)
@@ -135,7 +135,7 @@ function hasRefresh(s: PlaygroundState, ref: string, everyMs?: number): boolean 
 
 function setRefreshEvery(s: PlaygroundState, ref: string, everyMs: number): void {
   const id = pondByName(s, ref);
-  if (id) s.addRefresh(id, { everyMs });
+  if (id) s.setRefresh(id, { everyMs });
 }
 
 function setJoinVariability(s: PlaygroundState, v: number): void {
@@ -180,7 +180,7 @@ function upgradeStages(pond: string, removeOldSales: boolean): TourStage[] {
       run: (ctx) => {
         const from = pondByName(ctx.store, pond);
         const to = pondByName(ctx.store, `${pond}@2`);
-        if (from && to) ctx.store.moveRefreshes(from, to);
+        if (from && to) ctx.store.moveRefresh(from, to);
         point(ctx, `${pond}@2`);
       },
     },
@@ -272,11 +272,11 @@ export const TOUR_STEPS: TourStep[] = [
         return !!id && (s.pondStates[id]?.targets.length > 0 || (s.pondStates[id]?.runsCompleted ?? 0) > 0);
       },
     },
-    // The visitor's first look at the pipeline running, so at real speed: once through takes about 7 s.
+    // The visitor's first look at the pipeline running, so at real speed: once through takes about 6.5 s.
     advance: {
       label: 'Watching the pipeline run once',
       speed: 1,
-      expectedMs: 7300,
+      expectedMs: 6800,
       until: (s, since) => pondRunsSince(s, since, 'reports') >= 1,
       fallbackMs: 20000,
     },
@@ -295,8 +295,8 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'refresh-every',
     chapter: 2,
     title: 'Refresh Every',
-    body: 'That took about 7 s. A Refresh can be set to send every 4 s - more specifically, any time the data is less fresh than 4 s, or 4 s after the previous Refresh was requested.',
-    target: { pond: 'reports', control: 'refresh-add' },
+    body: 'That took about 6.5 s. A Refresh can be set to send every 4 s - more specifically, any time the data is less fresh than 4 s, or 4 s after the previous Refresh was requested.',
+    target: { pond: 'reports', control: 'refresh-every' },
     action: {
       label: 'Refresh every 4 s',
       run: (s) => setRefreshEvery(s, 'reports', 4000),
@@ -341,16 +341,19 @@ export const TOUR_STEPS: TourStep[] = [
       run: (s) => setRefreshEvery(s, 'reports', 0),
       done: (s) => hasRefresh(s, 'reports', 0),
     },
-    // Real speed for 6 s (two cycles), then faster until it settles, with `reports`' run chart in view.
+    // Real speed for 6 s (two cycles), then faster for a dozen more runs, so the chart shows a steady state and its
+    // averages rest on it. `reports`' run chart stays in view.
     advance: {
       label: 'Watching the pipeline settle',
       speed: 1,
       speedAfter: { ms: 6000, speed: 10, label: 'Speeding up until it settles' },
       keepFocus: true,
       show: 'run-chart',
-      expectedMs: 7800,
+      expectedMs: 9800,
       until: (s, since) =>
-        rippleSettled(s, since, 'reports.monthly_summary') && rippleSettled(s, since, 'transactions.ingest'),
+        pondRunsSince(s, since, 'reports') >= 14 &&
+        rippleSettled(s, since, 'reports.monthly_summary') &&
+        rippleSettled(s, since, 'transactions.ingest'),
       fallbackMs: 30000,
     },
   },

@@ -100,8 +100,8 @@ function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'pondStates' | 'rippl
       [reportsId]: initialPondState(),
     },
     ripples: {
-      [txIngestId]: { id: txIngestId, pondId: txId, name: 'ingest', parents: [], durationMs: 1000, variability: 0 },
-      [prodIngestId]: { id: prodIngestId, pondId: prodId, name: 'ingest', parents: [], durationMs: 1000, variability: 0 },
+      [txIngestId]: { id: txIngestId, pondId: txId, name: 'ingest', parents: [], durationMs: 500, variability: 0 },
+      [prodIngestId]: { id: prodIngestId, pondId: prodId, name: 'ingest', parents: [], durationMs: 500, variability: 0 },
       [dailySalesId]: { id: dailySalesId, pondId: salesId, name: 'daily_sales', parents: [], durationMs: 2000, variability: 0 },
       [priceTiersId]: { id: priceTiersId, pondId: salesId, name: 'price_tiers', parents: [], durationMs: 1000, variability: 0 },
       [joinLinesId]: { id: joinLinesId, pondId: salesId, name: 'join_lines', parents: [dailySalesId, priceTiersId], durationMs: 3000, variability: 0 },
@@ -276,11 +276,11 @@ export interface PlaygroundState {
 
   // Refresh now: one request for data as fresh as the current moment.
   refreshNow(pondId: PondId): void;
-  // Add a standing Refresh (Outlets only). A floating one replaces the Pond's floating one; anchored ones add up.
-  addRefresh(pondId: PondId, refresh: Omit<Refresh, 'name'> & { name?: string }): void;
-  removeRefresh(pondId: PondId, name: string): void;
-  // Move every standing Refresh from one Pond to another (an upgrade moving its Refresh to the new major).
-  moveRefreshes(fromPondId: PondId, toPondId: PondId): void;
+  // Set the Pond's standing Refresh (Outlets only), replacing any it had; null removes it. The engine takes a list
+  // per Pond (the Catchment allows several); the playground keeps one.
+  setRefresh(pondId: PondId, refresh: Omit<Refresh, 'name'> | null): void;
+  // Move the standing Refresh from one Pond to another (an upgrade moving its Refresh to the new major).
+  moveRefresh(fromPondId: PondId, toPondId: PondId): void;
 
   clearLogs(): void;
 
@@ -631,35 +631,23 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     }));
   },
 
-  addRefresh(pondId, refresh) {
-    if (!isOutlet(get().ponds, pondId)) return;
-    const anchored = refresh.startAnchor != null;
-    if (anchored && refresh.everyMs <= 0) return;
+  setRefresh(pondId, refresh) {
+    if (refresh && !isOutlet(get().ponds, pondId)) return;
+    if (refresh && refresh.startAnchor != null && refresh.everyMs <= 0) return; // a schedule needs a period
     set((s) => {
-      const existing = (s.refreshes[pondId] ?? []).filter((r) => anchored || r.startAnchor != null);
-      const base = refresh.name?.trim() || refreshLabel(refresh);
-      let name = base;
-      for (let n = 2; existing.some((r) => r.name === name); n++) name = `${base}-${n}`;
-      return { refreshes: { ...s.refreshes, [pondId]: [...existing, { ...refresh, name }] } };
-    });
-  },
-
-  removeRefresh(pondId, name) {
-    set((s) => {
-      const left = (s.refreshes[pondId] ?? []).filter((r) => r.name !== name);
       const refreshes = { ...s.refreshes };
-      if (left.length) refreshes[pondId] = left;
+      if (refresh) refreshes[pondId] = [{ ...refresh, name: refreshLabel(refresh) }];
       else delete refreshes[pondId];
       return { refreshes };
     });
   },
 
-  moveRefreshes(fromPondId, toPondId) {
+  moveRefresh(fromPondId, toPondId) {
     set((s) => {
-      const moving = s.refreshes[fromPondId] ?? [];
+      const moving = s.refreshes[fromPondId];
       const refreshes = { ...s.refreshes };
       delete refreshes[fromPondId];
-      if (moving.length) refreshes[toPondId] = [...(refreshes[toPondId] ?? []), ...moving];
+      if (moving?.length) refreshes[toPondId] = moving;
       return { refreshes };
     });
   },

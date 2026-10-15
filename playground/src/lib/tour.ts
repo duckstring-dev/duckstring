@@ -23,6 +23,7 @@ interface TourState {
   wait: { startedAt: number; expectedMs: number } | null; // the current wait, for its progress bar
   // How the last wait ended (the end-to-end test checks that conditions fire before their fallback).
   lastAdvance: 'until' | 'fallback' | 'hurry' | null;
+  collapsed: boolean; // the card folded to a bar so a phone can see the graph; each step opens unfolded
 
   offer(): void;
   requestStart(): void;
@@ -33,6 +34,7 @@ interface TourState {
   skip(): void;
   decline(): void;
   hurry(): void;
+  setCollapsed(collapsed: boolean): void;
 }
 
 // ─── Runner internals (module scope: timers and subscriptions aren't state) ──
@@ -77,9 +79,9 @@ export const useTourStore = create<TourState>((set, get) => {
     clearPending();
     const step = TOUR_STEPS[index];
     if (step.frame === 'keep') {
-      set({ phase: 'step', index, waitLabel: null, wait: null });
+      set({ phase: 'step', index, waitLabel: null, wait: null, collapsed: false });
     } else {
-      set({ phase: 'step', index, waitLabel: null, wait: null, ring: null, outline: null });
+      set({ phase: 'step', index, waitLabel: null, wait: null, ring: null, outline: null, collapsed: false });
       focus(step.target ?? {}, step.frame);
     }
     step.setup?.({ store: play(), focus });
@@ -193,6 +195,7 @@ export const useTourStore = create<TourState>((set, get) => {
     waitLabel: null,
     wait: null,
     lastAdvance: null,
+    collapsed: false,
 
     offer() {
       set({ phase: 'prompt' });
@@ -249,6 +252,10 @@ export const useTourStore = create<TourState>((set, get) => {
 
     hurry() {
       hurryNow?.();
+    },
+
+    setCollapsed(collapsed) {
+      set({ collapsed });
     },
   };
 });

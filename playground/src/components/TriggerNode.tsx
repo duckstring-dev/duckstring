@@ -4,8 +4,7 @@ import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { usePlaygroundStore, refreshLabel, THEME_DEMAND, nodeFill } from '@/lib/store';
 
-// A Pond's standing Refreshes, as one pill beside it: its floating Refresh (or first anchored one) and how many
-// more. Clicking it selects the Pond, whose sidebar lists them.
+// A Pond's standing Refresh, as a pill beside it. Clicking it selects the Pond, whose sidebar edits it.
 export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
   // TB (mobile) layout: the pill hangs below its pond, so the edge leaves from the top.
@@ -15,9 +14,7 @@ export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
   const selectPond = usePlaygroundStore((s) => s.selectPond);
 
   if (!refreshes?.length) return null;
-  const first = refreshes.find((r) => r.startAnchor == null) ?? refreshes[0];
-  const more = refreshes.length - 1;
-  const label = `${refreshLabel(first)}${more ? ` · +${more}` : ''}`;
+  const label = refreshLabel(refreshes[0]);
   const color = THEME_DEMAND;
 
   return (

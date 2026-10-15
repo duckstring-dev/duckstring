@@ -102,3 +102,22 @@ test('starting the tour over a changed graph asks first', async ({ page }) => {
   await page.getByTestId('tour-start').click();
   await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', TOUR_STEPS[0].id);
 });
+
+test('a phone can fold the card away and back', async ({ page, isMobile }, info) => {
+  test.skip(!isMobile && info.project.name !== 'phone-landscape', 'phones only');
+  await page.goto('/?tour=1');
+  const card = page.getByTestId('tour-card');
+  await expect(card).toHaveAttribute('data-step', TOUR_STEPS[0].id);
+  const open = (await card.boundingBox())!.height;
+  await page.getByTestId('tour-hide').click();
+  await expect(card).toHaveAttribute('data-collapsed', 'true');
+  expect((await card.boundingBox())!.height).toBeLessThan(open);
+  await page.getByTestId('tour-show').click();
+  await expect(page.getByTestId('tour-next')).toBeVisible();
+  // Each step opens unfolded.
+  await page.getByTestId('tour-hide').click();
+  await page.getByTestId('tour-show').click();
+  await page.getByTestId('tour-next').click();
+  await expect(card).toHaveAttribute('data-step', TOUR_STEPS[1].id);
+  await expect(card).not.toHaveAttribute('data-collapsed', 'true');
+});

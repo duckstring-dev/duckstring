@@ -106,6 +106,7 @@ export function TourCard() {
   const waitLabel = useTourStore((t) => t.waitLabel);
   const speed = usePlaygroundStore((s) => s.speed);
   const lastAdvance = useTourStore((t) => t.lastAdvance);
+  const collapsed = useTourStore((t) => t.collapsed);
   const tour = useTourStore.getState;
   const cardRef = useRef<HTMLDivElement>(null);
 
@@ -254,6 +255,35 @@ export function TourCard() {
       Skip tour
     </Button>
   );
+  // Phones and short screens can fold the card to a bar to see more of the graph.
+  const canCollapse = isMobile || flat;
+  const hide = canCollapse && (
+    <Button quiet onClick={() => tour().setCollapsed(true)} testId="tour-hide">
+      Hide ▾
+    </Button>
+  );
+  if (canCollapse && collapsed) {
+    return (
+      <div
+        id="ds-tour-card"
+        role="dialog"
+        aria-label="Playground tour"
+        data-testid="tour-card"
+        data-step={step.id}
+        data-collapsed="true"
+        style={{ ...panel, padding: '4px 4px 4px 14px' }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: '#a1a1aa', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {step.title}
+          </span>
+          <Button onClick={() => tour().setCollapsed(false)} testId="tour-show">
+            Show ▴
+          </Button>
+        </div>
+      </div>
+    );
+  }
   const primaryLabel = isLast ? 'Close' : step.action && !actionDone ? step.action.label : chapterEnd ? 'Continue' : 'Next';
 
   return (
@@ -290,12 +320,16 @@ export function TourCard() {
           )}
           <span style={{ flex: 1 }} />
           {backQuiet}
+          {hide}
           {skip}
         </div>
       ) : (
         <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 44, marginTop: -6 }}>
           {chapterLabel}
-          {skip}
+          <span style={{ display: 'flex', alignItems: 'center' }}>
+            {hide}
+            {skip}
+          </span>
         </div>
       )}
       <div style={flat ? { flex: 1, minHeight: 0, display: 'flex', alignItems: 'stretch', gap: 16 } : { display: 'contents' }}>

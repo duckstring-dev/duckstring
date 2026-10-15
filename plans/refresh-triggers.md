@@ -267,7 +267,11 @@ smaller:
   Kill, Sleep and Force stay in the engine for parity (their UI goes).
 - **Types and store** (`types.ts`, `store.ts`): `ActiveTrigger` becomes a list of refreshes per Pond;
   actions `triggerTap`, `triggerWave`, `triggerPulse`, `triggerTide`, `setTideDraft` and the control
-  actions give way to `refreshNow`, `addRefresh`, `removeRefresh`.
+  actions give way to `refreshNow`, `setRefresh`, `moveRefresh`.
+- **One Refresh per Pond in the playground** (the author's call, 2026-10-15): the engine keeps a list per
+  Pond for parity with the Catchment, which allows several, but the store holds at most one and the
+  sidebar edits it in place (an Every box applied on Enter or blur, a Continuous toggle, and the start,
+  days and until options on the same Refresh). Adding several was awkward for a toy.
 - **Canvas** (`TriggerNode.tsx`, `PondNode.tsx`, `DagCanvas.tsx`, `DemandIndicators.tsx`): as the web UI.
 - **Console** (`ConsolePanel.tsx`) and the engine's log messages: "Pulse on", "Tap on", "Sleep on" and
   similar become refresh wording; throttle log lines stay (the playground is where they are useful).

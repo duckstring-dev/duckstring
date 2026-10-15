@@ -7,10 +7,12 @@ import { THEME_AMBER, THEME_DEMAND, THEME_RUNNING } from '@/lib/store';
 // close to it ⇒ it is. The y-axis is clipped near the 75th percentile (plus a margin
 // proportional to the mean) so aberrant gaps — e.g. after a sleep — don't squash the rest.
 // Data age is a sawtooth: at each completion it drops to the age of the data just published, then grows with the
-// time until the next one, so its peak is that age plus the interval. Its dashed line is the time-averaged age.
+// time until the next one, so its peak is that age plus the interval. Dashed lines are averages over the last
+// MEAN_WINDOW runs (the age's weighted by time).
 const INTERVAL_COLOR = THEME_AMBER; // run cadence (the bottleneck's pace under saturation)
 const DURATION_COLOR = THEME_RUNNING; // run duration, tied to the running state
 const AGE_COLOR = THEME_DEMAND; // data age (Ponds only), tied to demand/freshness
+const MEAN_WINDOW = 6;
 
 function quantile(sortedAsc: number[], q: number): number {
   if (sortedAsc.length === 0) return 0;
@@ -101,12 +103,12 @@ export function TraceChart({ times, durations, ages }: { times: number[]; durati
     );
   };
 
-  // The time-averaged age over the last three intervals: across each one it grows linearly from the previous
+  // The time-averaged age over the last MEAN_WINDOW intervals: across each one it grows linearly from the previous
   // completion's age, so it averages that age plus half the interval.
   const ageAverage = (() => {
     let area = 0;
     let span = 0;
-    for (let i = Math.max(1, ageVals.length - 3); i < ageVals.length; i++) {
+    for (let i = Math.max(1, ageVals.length - MEAN_WINDOW); i < ageVals.length; i++) {
       const gap = intervalBefore(i);
       if (gap == null) continue;
       area += (ageVals[i - 1] + gap / 2) * gap;
@@ -115,12 +117,12 @@ export function TraceChart({ times, durations, ages }: { times: number[]; durati
     return span > 0 ? area / span : null;
   })();
 
-  const meanLast3 = (vals: number[]) => {
-    const last3 = vals.slice(-3);
-    return last3.length ? last3.reduce((a, b) => a + b, 0) / last3.length : null;
+  const meanRecent = (vals: number[]) => {
+    const recent = vals.slice(-MEAN_WINDOW);
+    return recent.length ? recent.reduce((a, b) => a + b, 0) / recent.length : null;
   };
-  const intMean = meanLast3(intervals);
-  const durMean = meanLast3(durs);
+  const intMean = meanRecent(intervals);
+  const durMean = meanRecent(durs);
   const ageMean = ageAverage;
 
   const meanLine = (m: number | null, color: string) =>
