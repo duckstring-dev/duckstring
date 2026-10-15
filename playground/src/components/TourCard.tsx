@@ -104,6 +104,7 @@ export function TourCard() {
   const phase = useTourStore((t) => t.phase);
   const index = useTourStore((t) => t.index);
   const waitLabel = useTourStore((t) => t.waitLabel);
+  const speed = usePlaygroundStore((s) => s.speed);
   const lastAdvance = useTourStore((t) => t.lastAdvance);
   const tour = useTourStore.getState;
   const cardRef = useRef<HTMLDivElement>(null);
@@ -190,6 +191,9 @@ export function TourCard() {
       <div id="ds-tour-card" data-testid="tour-pill" role="status" style={{ ...panel, padding: '4px 4px 4px 14px', overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ flex: 1, fontSize: 12, color: '#a1a1aa' }}>{`${waitLabel ?? 'Running'}…`}</span>
+          <span data-testid="tour-speed" style={{ fontSize: 11, color: speed > 1 ? THEME_BRAND : '#71717a', whiteSpace: 'nowrap' }}>
+            {speed > 1 ? `${speed}× speed` : 'real time'}
+          </span>
           <Button onClick={() => tour().hurry()} testId="tour-hurry">
             Skip ahead
           </Button>

@@ -255,7 +255,7 @@ export interface PlaygroundState {
   // selected Pond (the sidebar's behaviour); `source` names the Source explicitly. Returns its id.
   addPond(opts?: { name?: string; rippleName?: string; source?: PondId }): PondId;
   // A new major version of a Pond: a copy of its Ripples with the same Sources and nobody reading it. Returns its id.
-  addMajorVersion(pondId: PondId): PondId;
+  addMajorVersion(pondId: PondId, sources?: PondId[]): PondId; // sources default to the copied Pond's
   addRipple(pondId: PondId, parentId?: RippleId): void;
   renamePond(pondId: PondId, name: string): void;
   setPondWindows(pondId: PondId, windows: Window[]): void;
@@ -391,7 +391,7 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     return id;
   },
 
-  addMajorVersion(pondId) {
+  addMajorVersion(pondId, sources) {
     const s = get();
     const orig = s.ponds[pondId];
     const id = newPondId();
@@ -406,7 +406,17 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     }
     rippleCounters[id] = rippleCounters[pondId] ?? own.length;
     set((st) => ({
-      ponds: { ...st.ponds, [id]: { id, name: orig.name, major, sources: [...orig.sources], optionalSources: orig.optionalSources, windows: orig.windows } },
+      ponds: {
+        ...st.ponds,
+        [id]: {
+          id,
+          name: orig.name,
+          major,
+          sources: [...(sources ?? orig.sources)],
+          optionalSources: orig.optionalSources?.filter((o) => (sources ?? orig.sources).includes(o)),
+          windows: orig.windows,
+        },
+      },
       pondStates: { ...st.pondStates, [id]: initialPondState() },
       ripples: { ...st.ripples, ...ripples },
       rippleStates: { ...st.rippleStates, ...rippleStates },

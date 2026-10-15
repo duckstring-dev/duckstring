@@ -76,8 +76,12 @@ export const useTourStore = create<TourState>((set, get) => {
   function open(index: number): void {
     clearPending();
     const step = TOUR_STEPS[index];
-    set({ phase: 'step', index, waitLabel: null, wait: null, ring: null, outline: null });
-    focus(step.target ?? {}, step.frame);
+    if (step.frame === 'keep') {
+      set({ phase: 'step', index, waitLabel: null, wait: null });
+    } else {
+      set({ phase: 'step', index, waitLabel: null, wait: null, ring: null, outline: null });
+      focus(step.target ?? {}, step.frame);
+    }
     step.setup?.({ store: play(), focus });
     watchAction(step);
   }
@@ -123,10 +127,19 @@ export const useTourStore = create<TourState>((set, get) => {
     const since = play();
     if (since.paused) since.togglePause();
     since.setSpeed(w.speed ?? WAIT_SPEED);
-    if (w.speedAfter) later(w.speedAfter.ms, () => play().setSpeed(w.speedAfter!.speed));
+    if (w.speedAfter) {
+      const after = w.speedAfter;
+      later(after.ms, () => {
+        play().setSpeed(after.speed);
+        if (after.label) set({ waitLabel: after.label });
+      });
+    }
     // The pipeline gets the whole screen while it runs: nothing selected or highlighted, and the
-    // mobile bottom sheet closed (unless the step keeps its target in view). The next step selects what it needs.
-    if (!w.keepFocus) {
+    // mobile bottom sheet closed (unless the step keeps its target, or another, in view). The next step selects
+    // what it needs.
+    const keepFocus = w.keepFocus || !!w.focus;
+    if (w.focus) focus(w.focus, 'all');
+    if (!keepFocus) {
       since.clearSelection();
       since.setSheetOpen(false);
     }
@@ -134,11 +147,11 @@ export const useTourStore = create<TourState>((set, get) => {
       phase: 'waiting',
       waitLabel: w.label,
       wait: { startedAt: performance.now(), expectedMs: w.expectedMs },
-      ring: w.keepFocus ? t.ring : null,
-      outline: w.keepFocus ? (w.show ?? null) : null,
-      frame: w.keepFocus ? t.frame : { ids: null, seq: t.frame.seq + 1 },
+      ring: keepFocus ? t.ring : null,
+      outline: keepFocus ? (w.show ?? null) : null,
+      frame: keepFocus ? t.frame : { ids: null, seq: t.frame.seq + 1 },
     }));
-    if (w.keepFocus && w.show) {
+    if (keepFocus && w.show) {
       later(250, () => {
         const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
         document.querySelector(`[data-tour="${w.show}"]`)?.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });

@@ -44,6 +44,13 @@ test('the tour runs end to end', async ({ page }, info) => {
       // While the tour waits on the simulation, its progress bar moves.
       const bar = page.getByTestId('tour-progress');
       await expect.poll(async () => (await bar.boundingBox())?.width ?? 0).toBeGreaterThan(5);
+      // A wait that speeds up part way says so on the pill.
+      if (step.advance.speedAfter) {
+        await expect(page.getByTestId('tour-speed')).toHaveText('real time');
+        await expect(page.getByTestId('tour-speed')).toHaveText(`${step.advance.speedAfter.speed}× speed`, { timeout: 15_000 });
+        await onScreen(page, '[data-testid="tour-pill"]');
+        await page.screenshot({ path: info.outputPath(`${String(i + 1).padStart(2, '0')}-${step.id}-faster.png`) });
+      }
     }
   }
 

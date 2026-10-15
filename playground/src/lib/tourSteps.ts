@@ -6,7 +6,7 @@ import type { PlaygroundState } from './store';
 // the example graph and are resolved to ids when a step opens.
 
 // Sidebar controls the tour can outline. Each matches a `data-tour` attribute in the Sidebar.
-export type TourControl = 'refresh-now' | 'refresh-add' | 'refresh-list' | 'new-major' | 'ripple-duration' | 'ripple-variability' | 'run-chart';
+export type TourControl = 'refresh-now' | 'refresh-continuous' | 'refresh-add' | 'refresh-list' | 'new-major' | 'ripple-duration' | 'ripple-variability' | 'run-chart';
 
 export interface TourTarget {
   pond?: string; // a Pond name, or "name@major" (a bare name is major 1)
@@ -26,8 +26,9 @@ export interface TourWait {
   fallbackMs: number; // real time, so the tour can't hang
   label: string; // shown while the tour is hidden
   speed?: number; // simulation speed while waiting (default WAIT_SPEED)
-  speedAfter?: { ms: number; speed: number }; // change the speed this long (real time) into the wait
+  speedAfter?: { ms: number; speed: number; label?: string }; // change the speed (and label) this long (real time) into the wait
   keepFocus?: boolean; // keep the step's target selected and in view while waiting
+  focus?: TourTarget; // select and ring this instead while waiting (implies keepFocus)
   show?: TourControl; // with keepFocus: outline this sidebar control and scroll it into view while waiting
   expectedMs: number; // typical real time it takes, measured in the browser: paces the progress bar
 }
@@ -45,7 +46,9 @@ export interface TourStep {
   title: string;
   body: string; // one or two sentences ('' on a chapter's opening card)
   target?: TourTarget;
-  frame?: 'all' | 'target'; // default: the target's node if it has one, else the whole graph
+  // Default: the target's node if it has one, else the whole graph. 'keep' leaves the view, selection and
+  // highlights as the previous step left them (a chapter's opening card, so its last chart stays in view).
+  frame?: 'all' | 'target' | 'keep';
   setup?: (ctx: TourContext) => void; // runs when the step opens, after `target` is applied
   // 'next' moves straight on; a wait hides the tour and runs the simulation fast until `until` holds.
   advance: 'next' | TourWait;
@@ -155,27 +158,20 @@ function readsFrom(s: PlaygroundState, sink: string, source: string): boolean {
   return !!k && !!src && s.ponds[k].sources.includes(src);
 }
 
-// An upgrade animated stage by stage: a new major of `pond`, linked to `sales` v2 in place of v1, its Refresh
-// moved across, the old major removed (and, last, `sales` v1 when nothing reads it any more).
+// An upgrade animated stage by stage: a new major of `pond` reading `sales` v2 in place of v1, its Refresh moved
+// across, the old major removed (and, last, `sales` v1 when nothing reads it any more).
 function upgradeStages(pond: string, removeOldSales: boolean): TourStage[] {
   const stages: TourStage[] = [
     {
       ms: 400,
       run: (ctx) => {
-        const id = pondByName(ctx.store, pond);
-        if (id && !pondByName(ctx.store, `${pond}@2`)) ctx.store.addMajorVersion(id);
-        point(ctx, `${pond}@2`);
-      },
-    },
-    {
-      ms: STAGE_MS,
-      run: (ctx) => {
         const s = ctx.store;
-        const v2 = pondByName(s, `${pond}@2`);
+        const id = pondByName(s, pond);
         const salesV1 = pondByName(s, 'sales');
         const salesV2 = pondByName(s, 'sales@2');
-        if (v2 && salesV1) s.unlinkPonds(salesV1, v2);
-        if (v2 && salesV2) s.linkPonds(salesV2, v2);
+        if (id && salesV2 && !pondByName(s, `${pond}@2`)) {
+          s.addMajorVersion(id, s.ponds[id].sources.map((src) => (src === salesV1 ? salesV2 : src)));
+        }
         point(ctx, `${pond}@2`);
       },
     },
@@ -292,7 +288,7 @@ export const TOUR_STEPS: TourStep[] = [
     intro: true,
     title: CHAPTER_TITLES[2],
     body: '',
-    frame: 'all',
+    frame: 'keep',
     advance: 'next',
   },
   {
@@ -310,7 +306,7 @@ export const TOUR_STEPS: TourStep[] = [
     advance: {
       label: 'Running a few rounds',
       speed: 1,
-      speedAfter: { ms: 8000, speed: 10 },
+      speedAfter: { ms: 8000, speed: 10, label: 'Speeding up to steady state' },
       expectedMs: 9800,
       until: (s, since) => pondSettled(s, since, 'reports'),
       fallbackMs: 25000,
@@ -329,8 +325,9 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'run-chart',
     chapter: 2,
     title: 'The run chart',
-    body: "Each Ripple's run chart shows its run time and the time between its runs. Every one shows 4 s between runs.",
-    target: { ripple: 'transactions.ingest', control: 'run-chart' },
+    body: "Each Ripple's run chart shows its run time and the time between its runs. Every one shows 4 s between runs. Try looking at the others too.",
+    target: { pond: 'sales', control: 'run-chart' },
+    frame: 'all',
     advance: 'next',
   },
   {
@@ -338,9 +335,9 @@ export const TOUR_STEPS: TourStep[] = [
     chapter: 2,
     title: 'Continuous Refresh',
     body: 'What if the Refresh rate is faster than the pipeline can deliver? Or in the extreme, every 0 s?',
-    target: { pond: 'reports', control: 'refresh-add' },
+    target: { pond: 'reports', control: 'refresh-continuous' },
     action: {
-      label: 'Refresh every 0 s',
+      label: 'Refresh continuously',
       run: (s) => setRefreshEvery(s, 'reports', 0),
       done: (s) => hasRefresh(s, 'reports', 0),
     },
@@ -348,7 +345,7 @@ export const TOUR_STEPS: TourStep[] = [
     advance: {
       label: 'Watching the pipeline settle',
       speed: 1,
-      speedAfter: { ms: 6000, speed: 10 },
+      speedAfter: { ms: 6000, speed: 10, label: 'Speeding up until it settles' },
       keepFocus: true,
       show: 'run-chart',
       expectedMs: 7800,
@@ -382,6 +379,8 @@ export const TOUR_STEPS: TourStep[] = [
     },
     advance: {
       label: 'Running fast for a few cycles',
+      focus: { pond: 'sales' },
+      show: 'run-chart',
       expectedMs: 2900,
       until: (s, since) => rippleRunsSince(s, since, 'transactions.ingest') >= 8,
       fallbackMs: 10000,
@@ -403,7 +402,7 @@ export const TOUR_STEPS: TourStep[] = [
     intro: true,
     title: CHAPTER_TITLES[3],
     body: '',
-    frame: 'all',
+    frame: 'keep',
     setup: ({ store }) => setJoinVariability(store, 0), // the cadences in this chapter are without noise
     advance: 'next',
   },
@@ -452,8 +451,7 @@ export const TOUR_STEPS: TourStep[] = [
     intro: true,
     title: CHAPTER_TITLES[4],
     body: '',
-    frame: 'all',
-    setup: ({ store }) => store.clearSelection(),
+    frame: 'keep',
     advance: 'next',
   },
   {

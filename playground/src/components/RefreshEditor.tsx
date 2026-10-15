@@ -8,16 +8,15 @@ import type { FreqUnit, Pond, Refresh, Weekday } from '@/lib/types';
 
 // A Pond's Refreshes: refresh now, the standing Refreshes with when each next sends, and a form to add one. The
 // form follows the WindowEditor's shape: every + name always shown, the rest behind "Options". A floating Refresh
-// (no start) replaces the Pond's floating one; one with a start fires on its grid and adds up.
+// (no start) replaces the Pond's floating one; one with a start fires on its grid and adds up. Continuous (a
+// floating Refresh every 0 s) has its own button.
 
-type Unit = FreqUnit | 'CONTINUOUS';
-const UNITS: { value: Unit; label: string }[] = [
+const UNITS: { value: FreqUnit; label: string }[] = [
   { value: 'SECOND', label: 'sec' },
   { value: 'MINUTE', label: 'min' },
   { value: 'HOUR', label: 'hr' },
   { value: 'DAY', label: 'day' },
   { value: 'WEEK', label: 'wk' },
-  { value: 'CONTINUOUS', label: 'continuously' },
 ];
 const UNIT_MS: Record<FreqUnit, number> = { SECOND: 1000, MINUTE: 60000, HOUR: 3600000, DAY: 86400000, WEEK: 604800000 };
 const ALL_DAYS: Weekday[] = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
@@ -57,19 +56,33 @@ function dueText(due: number | null, now: number, continuous: boolean): string {
   return `next ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-function Button({ onClick, children, color, mark }: { onClick: () => void; children: React.ReactNode; color: string; mark?: object }) {
+function Button({
+  onClick,
+  children,
+  color,
+  mark,
+  disabled,
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+  color: string;
+  mark?: object;
+  disabled?: boolean;
+}) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
       {...mark}
       style={{
+        opacity: disabled ? 0.4 : 1,
         background: 'transparent',
         border: `1px solid ${color}`,
         color,
         borderRadius: 5,
         padding: '4px 12px',
         fontSize: 12,
-        cursor: 'pointer',
+        cursor: disabled ? 'default' : 'pointer',
         fontWeight: 600,
         letterSpacing: '0.04em',
       }}
@@ -86,11 +99,12 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
   const addRefresh = usePlaygroundStore((s) => s.addRefresh);
   const removeRefresh = usePlaygroundStore((s) => s.removeRefresh);
   const markNow = useTourMark('refresh-now');
+  const markContinuous = useTourMark('refresh-continuous');
   const markList = useTourMark('refresh-list');
   const markAdd = useTourMark('refresh-add');
 
   const [every, setEvery] = useState('10');
-  const [unit, setUnit] = useState<Unit>('SECOND');
+  const [unit, setUnit] = useState<FreqUnit>('SECOND');
   const [name, setName] = useState('');
   const [nameDirty, setNameDirty] = useState(false);
   const [showOptions, setShowOptions] = useState(false);
@@ -98,9 +112,10 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
   const [days, setDays] = useState<Set<Weekday>>(new Set());
   const [until, setUntil] = useState('');
 
-  const continuous = unit === 'CONTINUOUS';
-  const everyMs = continuous ? 0 : Math.max(0, parseFloat(every) || 0) * UNIT_MS[unit as FreqUnit];
-  const startAnchor = !continuous && start.trim() ? (todayAt(start) ?? undefined) : undefined;
+  const everyMs = Math.max(0, parseFloat(every) || 0) * UNIT_MS[unit];
+  const startAnchor = start.trim() ? (todayAt(start) ?? undefined) : undefined;
+  const isContinuous = (r: Refresh) => r.startAnchor == null && r.everyMs <= 0;
+  const continuousOn = refreshes.some(isContinuous);
   const selectedDays = ALL_DAYS.filter((d) => days.has(d));
   const draft: Omit<Refresh, 'name'> = {
     everyMs,
@@ -135,12 +150,15 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <span style={{ fontSize: 10, color: '#52525b', lineHeight: 1.5, marginRight: 8 }}>
-          Ask for this Pond&apos;s data as of now, or keep asking.
-        </span>
+      <div style={{ fontSize: 10, color: '#52525b', lineHeight: 1.5, marginBottom: 6 }}>
+        Ask for this Pond&apos;s data as of now, or keep asking.
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
         <Button onClick={() => refreshNow(pond.id)} color={THEME_DEMAND} mark={markNow}>
           Refresh now
+        </Button>
+        <Button onClick={() => addRefresh(pond.id, { everyMs: 0 })} color={THEME_BRAND} mark={markContinuous} disabled={continuousOn}>
+          Continuous
         </Button>
       </div>
 
@@ -150,7 +168,7 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
             <span style={{ fontSize: 12, color: '#a1a1aa', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</span>
             <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
               <span style={{ fontSize: 10, color: '#71717a' }}>
-                {dueText(refreshNextDue(state, pond.id, r, now), now, r.startAnchor == null && r.everyMs <= 0)}
+                {dueText(refreshNextDue(state, pond.id, r, now), now, isContinuous(r))}
               </span>
               <button
                 onClick={() => removeRefresh(pond.id, r.name)}
@@ -167,8 +185,8 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
       <div {...markAdd} style={{ marginTop: 8 }}>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           <span style={{ fontSize: 11, color: '#71717a', width: 40 }}>Every</span>
-          {!continuous && <input type="number" min="0" value={every} onChange={(e) => setEvery(e.target.value)} style={numInput} />}
-          <select value={unit} onChange={(e) => setUnit(e.target.value as Unit)} style={selectInput}>
+          <input type="number" min="0" value={every} onChange={(e) => setEvery(e.target.value)} style={numInput} />
+          <select value={unit} onChange={(e) => setUnit(e.target.value as FreqUnit)} style={selectInput}>
             {UNITS.map((u) => (
               <option key={u.value} value={u.value}>{u.label}</option>
             ))}
@@ -187,17 +205,15 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
           />
         </div>
 
-        {!continuous && (
-          <div style={{ marginTop: 8 }}>
-            <button
-              onClick={() => setShowOptions((v) => !v)}
-              style={{ background: 'none', border: 'none', color: THEME_BRAND, cursor: 'pointer', fontSize: 11, padding: 0 }}
-            >
-              {showOptions ? '▾ Options' : '▸ Options'}
-            </button>
-          </div>
-        )}
-        {!continuous && showOptions && (
+        <div style={{ marginTop: 8 }}>
+          <button
+            onClick={() => setShowOptions((v) => !v)}
+            style={{ background: 'none', border: 'none', color: THEME_BRAND, cursor: 'pointer', fontSize: 11, padding: 0 }}
+          >
+            {showOptions ? '▾ Options' : '▸ Options'}
+          </button>
+        </div>
+        {showOptions && (
           <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <span style={{ fontSize: 11, color: '#71717a', width: 56 }}>Start</span>
