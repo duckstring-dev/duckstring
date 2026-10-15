@@ -98,6 +98,9 @@ function clone(s: OrchestrState): OrchestrState {
         forwardedIn: { ...v.throttle.forwardedIn },
         deferred: { ...v.throttle.deferred },
         deferredAt: { ...v.throttle.deferredAt },
+        leads: v.throttle.leads && { ...v.throttle.leads },
+        seenF: v.throttle.seenF && { ...v.throttle.seenF },
+        launchAt: v.throttle.launchAt,
       },
     };
   }
@@ -405,6 +408,54 @@ export function refreshNextDue(s: OrchestrState, pid: PondId, r: Refresh, now: n
   return Math.max(now, clockRef(ps) + r.everyMs - ps.D);
 }
 
+// ─── Launch alignment (EXPERIMENT, switchable) ───────────────────────────────
+//
+// A bottleneck releases on its starts, so the Inlets start at once and their data reaches it after the lead (the
+// time from the Inlets' start to its input being ready). With a lead shorter than its run, that data waits for the
+// rest of the run; with a lead just over a whole number of runs, nearly a whole run. Launch alignment holds the
+// release until the slot the data will feed, minus the lead and a margin, so the data arrives as the bottleneck
+// frees. The lead is read from freshness (when an input became ready, less its freshness, the Inlets' start), so
+// delaying the release doesn't change it: there is no feedback loop. Estimates are conservative (the longest recent
+// lead, the shortest recent run) so data is early rather than late; late data idles the bottleneck only for the
+// lateness. Windowed freshness (D > 0) isn't a start time, so it falls back to releasing at once.
+export const launchAlign = { on: false, margin: 0.1, window: 4, spread: 0, gate: 0.1 };
+
+// Record each Ripple's lead when its input freshness advances (it became ready now).
+function sampleLeads(s: OrchestrState, pid: PondId, now: number): void {
+  const ps = s.pondStates[pid];
+  const th = throttleOf(s, pid);
+  for (const rid of ripplesOf(s, pid)) {
+    const f = rippleSourceF(s, rid);
+    const seen = th.seenF?.[rid];
+    if (seen != null && f <= seen) continue;
+    th.seenF = { ...th.seenF, [rid]: f };
+    if (seen == null || ps.D > 0 || f <= 0 || now < f) continue;
+    th.leads = { ...th.leads, [rid]: [...(th.leads?.[rid] ?? []), now - f].slice(-launchAlign.window) };
+  }
+}
+
+// When a bottleneck's due release should go out: for each slow Ripple, the first slot time (its run's start plus
+// whole recent run times) less the lead and the margin that isn't already past; the earliest over its slow Ripples.
+// `now` when there's nothing to go on.
+function launchTime(s: OrchestrState, pid: PondId, now: number): number {
+  const th = s.pondStates[pid].throttle!;
+  let launch = Infinity;
+  for (const rid of th.slow) {
+    const rs = s.rippleStates[rid];
+    const leads = th.leads?.[rid] ?? [];
+    const runs = rs.durations.slice(-launchAlign.window);
+    if (rs.runStartedAt == null || leads.length === 0 || runs.length === 0) return now;
+    const period = Math.min(...runs);
+    // Cushion: a share of the run, plus the recent spread of leads and runs (so noise shrinks the delay).
+    const spread = Math.max(...leads) - Math.min(...leads) + Math.max(...runs) - period;
+    if (spread > launchAlign.gate * period) return now; // not steady enough to time: release as today
+    const lead = Math.max(...leads) + launchAlign.margin * period + launchAlign.spread * spread;
+    const k = Math.max(1, Math.ceil((now - rs.runStartedAt + lead) / period));
+    launch = Math.min(launch, rs.runStartedAt + k * period - lead);
+  }
+  return Number.isFinite(launch) ? Math.min(Math.max(launch, now), now + Math.max(0, ...th.slow.map((r) => s.rippleStates[r].durations.at(-1) ?? 0))) : now;
+}
+
 // After the tick's starts: clear slow Ripples that went idle, then let each Pond holding demand send one
 // request upstream if its turn has come. Returns whether anything changed.
 function settleThrottle(s: OrchestrState, now: number, completed: Set<PondId>): boolean {
@@ -418,10 +469,12 @@ function settleThrottle(s: OrchestrState, now: number, completed: Set<PondId>): 
       if (idle.length > 0) {
         th.slow = th.slow.filter((rid) => !idle.includes(rid));
         for (const rid of idle) emit('unthrottled', `${rfullname(s, rid)} went idle: no longer slow`);
+        if (th.slow.length === 0) th.launchAt = null;
         changed = true;
       }
     }
     if (flushDeferred(s, pid)) changed = true;
+    if (launchAlign.on) sampleLeads(s, pid, now);
     if (!ps.targets.some((t) => Number.isFinite(t))) {
       th.trigger = false; // demand drained
       th.held = 0;
@@ -430,6 +483,11 @@ function settleThrottle(s: OrchestrState, now: number, completed: Set<PondId>): 
       continue;
     }
     if (pushSources(s, pid).length > 0 && releaseDue(s, pid, completed)) {
+      if (launchAlign.on && !th.trigger && th.slow.length > 0) {
+        if (th.launchAt == null) th.launchAt = launchTime(s, pid, now);
+        if (now < th.launchAt) continue;
+      }
+      th.launchAt = null;
       emit('release', `${pname(s, pid)} sends one request upstream (${th.held} held)`);
       completed.delete(pid);
       forwardDemand(s, pid, now);

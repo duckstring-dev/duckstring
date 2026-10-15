@@ -88,6 +88,11 @@ export interface ThrottleState {
   forwardedIn: Record<string, number>; // each Ripple's runsStarted when this Pond last sent a request upstream
   deferred: Record<string, number>; // sibling alignment: newest target held back from each unthrottled Source
   deferredAt: Record<string, number>; // the throttled Sources' runsStarted when targets were first held back
+  // Launch alignment (EXPERIMENT): each Ripple's recent leads (from the freshness of an input to when it was ready),
+  // the input freshness last seen, and when a bottleneck's due release goes out.
+  leads?: Record<string, number[]>;
+  seenF?: Record<string, number>;
+  launchAt?: number | null;
 }
 
 // A standing Refresh on a Pond. Floating (no `startAnchor`): a request once `everyMs` has passed since the later of
