@@ -301,9 +301,11 @@ export function TourCard() {
           )}
           <div aria-live="polite">
             <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>{step.title}</div>
-            <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
-              <Copy text={step.body} />
-            </div>
+            {step.body && (
+              <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
+                <Copy text={step.body} />
+              </div>
+            )}
             {step.suggestions && (
               <ul style={{ margin: '6px 0 0', paddingLeft: 18, listStyle: 'disc', fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
                 {step.suggestions.map((t) => (

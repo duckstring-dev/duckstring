@@ -43,7 +43,7 @@ export interface TourStep {
   chapter: 1 | 2 | 3 | 4;
   intro?: boolean; // a chapter's opening card: its title is the chapter's
   title: string;
-  body: string; // one or two sentences
+  body: string; // one or two sentences ('' on a chapter's opening card)
   target?: TourTarget;
   frame?: 'all' | 'target'; // default: the target's node if it has one, else the whole graph
   setup?: (ctx: TourContext) => void; // runs when the step opens, after `target` is applied
@@ -58,9 +58,9 @@ export interface TourStep {
 }
 
 export const CHAPTER_TITLES: Record<TourStep['chapter'], string> = {
-  1: "Running at the bottleneck's pace",
-  2: 'Noise',
-  3: 'Several outputs',
+  1: 'Running Pipelines',
+  2: 'Repeated Refresh',
+  3: 'Multiple Triggers',
   4: 'Upgrades',
 };
 
@@ -217,13 +217,13 @@ function upgraded(s: PlaygroundState, pond: string): boolean {
 // ─── Steps ───────────────────────────────────────────────────────────────────
 
 export const TOUR_STEPS: TourStep[] = [
-  // Chapter 1: running at the bottleneck's pace
+  // Chapter 1: running pipelines
   {
     id: 'intro-1',
     chapter: 1,
     intro: true,
     title: CHAPTER_TITLES[1],
-    body: "Duckstring decides what runs by working back from the data you need. This chapter runs an example pipeline once, then on a cadence, then as often as it can.",
+    body: '',
     frame: 'all',
     advance: 'next',
   },
@@ -285,9 +285,19 @@ export const TOUR_STEPS: TourStep[] = [
       fallbackMs: 20000,
     },
   },
+  // Chapter 2: repeated refresh
+  {
+    id: 'intro-2',
+    chapter: 2,
+    intro: true,
+    title: CHAPTER_TITLES[2],
+    body: '',
+    frame: 'all',
+    advance: 'next',
+  },
   {
     id: 'refresh-every',
-    chapter: 1,
+    chapter: 2,
     title: 'Refresh Every',
     body: 'That took about 8 s. A Refresh can be set to send every 4 s - more specifically, any time the data is less fresh than 4 s, or 4 s after the previous Refresh was requested.',
     target: { pond: 'reports', control: 'refresh-add' },
@@ -308,7 +318,7 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     id: 'steady',
-    chapter: 1,
+    chapter: 2,
     title: 'Steady state',
     body: 'At steady state, every Ripple, upstream and downstream, runs every 4 s. `sales` takes 5 s from start to finish, so two of its runs are in flight at once.',
     target: { pond: 'sales' },
@@ -317,7 +327,7 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     id: 'run-chart',
-    chapter: 1,
+    chapter: 2,
     title: 'The run chart',
     body: "Each Ripple's run chart shows its run time and the time between its runs. Every one shows 4 s between runs.",
     target: { ripple: 'transactions.ingest', control: 'run-chart' },
@@ -325,7 +335,7 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     id: 'continuous',
-    chapter: 1,
+    chapter: 2,
     title: 'Continuous Refresh',
     body: 'What if the Refresh rate is faster than the pipeline can deliver? Or in the extreme, every 0 s?',
     target: { pond: 'reports', control: 'refresh-add' },
@@ -349,23 +359,13 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     id: 'throttled',
-    chapter: 1,
+    chapter: 2,
     title: 'Throttled',
     body: "Throttling the Refreshes that can't be delivered in time, at steady state, every Ripple, upstream and downstream, runs every 3 s.",
     target: { pond: 'reports', control: 'run-chart' },
     advance: 'next',
   },
 
-  // Chapter 2: noise
-  {
-    id: 'intro-2',
-    chapter: 2,
-    intro: true,
-    title: CHAPTER_TITLES[2],
-    body: "Real run times vary from one run to the next. This chapter makes the slowest step unpredictable, to see how the pipeline copes.",
-    frame: 'all',
-    advance: 'next',
-  },
   {
     id: 'noise',
     chapter: 2,
@@ -396,13 +396,13 @@ export const TOUR_STEPS: TourStep[] = [
     advance: 'next',
   },
 
-  // Chapter 3: several outputs
+  // Chapter 3: multiple triggers
   {
     id: 'intro-3',
     chapter: 3,
     intro: true,
     title: CHAPTER_TITLES[3],
-    body: 'A pipeline usually feeds more than one output, and each may be needed at its own cadence. This chapter adds a second output to the pipeline and refreshes it separately.',
+    body: '',
     frame: 'all',
     setup: ({ store }) => setJoinVariability(store, 0), // the cadences in this chapter are without noise
     advance: 'next',
@@ -451,7 +451,7 @@ export const TOUR_STEPS: TourStep[] = [
     chapter: 4,
     intro: true,
     title: CHAPTER_TITLES[4],
-    body: "Changes that break what's downstream are the hardest to roll out. This chapter makes one to `sales` and moves its readers across one at a time.",
+    body: '',
     frame: 'all',
     setup: ({ store }) => store.clearSelection(),
     advance: 'next',
@@ -522,7 +522,7 @@ export const TOUR_STEPS: TourStep[] = [
       'Minor covers extension of scope, where upgrading is fine, but downgrading could break downstream',
       'Patch covers any change that would not break upon either upgrade or downgrade',
     ],
-    footer: 'Execution and data belong to a Pond major: each major runs as its own Pond, with its own Refreshes, runs and tables, which is how both versions of `sales` ran side by side.',
+    footer: 'Both data and execution are against each **major** Pond version.',
     frame: 'all',
     setup: ({ store }) => store.clearSelection(),
     advance: 'next',

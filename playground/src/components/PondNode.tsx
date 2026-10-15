@@ -24,7 +24,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const now = usePlaygroundStore((s) => s.now);
   const ringClass = useTourRing(pondId);
   const refreshTagGen = usePlaygroundStore((s) => s.refreshTags[pondId]);
-  // The throttle: this Pond's own slow Ripples, whether it is throttled from upstream, and held requests.
+  // The throttle: this Pond's own slow Ripples, whether it is throttled from upstream, and whether it holds requests.
   const slowNames = usePlaygroundStore((s) =>
     (s.pondStates[pondId]?.throttle?.slow ?? []).map((r) => s.ripples[r]?.name ?? r).join(', ')
   );
@@ -37,7 +37,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const borderColor = stateColor(visualState);
   const isSelected = selectedPondId === pondId;
   const showRefreshTag = refreshTagGen !== undefined && ps.runsCompleted <= refreshTagGen;
-  const throttleTag = held > 0 ? `holding ${held}` : slowNames ? 'slow' : throttled ? 'throttled' : null;
+  const throttleTag = held > 0 ? 'holding' : slowNames ? 'slow' : throttled ? 'throttled' : null;
 
   return (
     <div
