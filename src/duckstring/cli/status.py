@@ -94,8 +94,8 @@ def _make_table(component_ponds: list[dict]) -> object:
     table.add_column("Version")
     table.add_column("Status")
     table.add_column("Gen", justify="right")
-    table.add_column("Pull", justify="center")
-    table.add_column("TargetF")
+    table.add_column("Refresh")
+    table.add_column("DemandF")
     table.add_column("StartF")
     table.add_column("EndF")
 
@@ -106,9 +106,9 @@ def _make_table(component_ponds: list[dict]) -> object:
             status_str += f" [dim]{pond.get('failures', 0)}/{pond.get('source_retries', 0)}[/dim]"
         gen = pond.get("gen", 0)
         gen_str = str(gen) if gen else "[dim]—[/dim]"
-        pull_str = "[orange3]●[/orange3]" if pond.get("has_pull") else ""
-        target = pond.get("target_f")
-        target_str = f"[orange3]{_fmt_ts(target)}[/orange3]" if target else "[dim]—[/dim]"
+        refresh_str = ", ".join(r["name"] for r in pond.get("refreshes") or []) or ""
+        demand = pond.get("demand_f")
+        demand_str = f"[orange3]{_fmt_ts(demand)}[/orange3]" if demand else "[dim]—[/dim]"
 
         table.add_row(
             pond.get("name", "?"),
@@ -116,8 +116,8 @@ def _make_table(component_ponds: list[dict]) -> object:
             pond.get("version", "?"),
             status_str,
             gen_str,
-            pull_str,
-            target_str,
+            refresh_str,
+            demand_str,
             _fmt_ts(pond.get("start_f")),
             _fmt_ts(pond.get("end_f")),
         )
@@ -220,7 +220,7 @@ def _run_live(
             else:
                 body = _build_renderable(ponds, edges)
                 if not watch and until_idle_pond:
-                    # One-shot trigger (Tap/Pulse): close once the target Pond settles — back to idle,
+                    # A one-shot request (refresh now, wake, force): close once the Pond settles — back to idle,
                     # or stuck failed/blocked (which never returns to idle on its own).
                     tgts = [p for p in ponds if p["name"] == until_idle_pond]
                     done = bool(tgts) and all(
@@ -257,7 +257,7 @@ def status(
     ),
     once: bool = typer.Option(False, "--once", help="Print a single snapshot and exit without live updates."),
 ) -> None:
-    """Show every Pond's state, freshness and trigger, refreshing until Ctrl+C. --once prints one snapshot."""
+    """Show every Pond's state, freshness and Refreshes, updating until Ctrl+C. --once prints one snapshot."""
     from rich.console import Console
 
     from .config import resolve_catchment

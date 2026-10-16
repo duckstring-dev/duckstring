@@ -406,7 +406,7 @@ def reset(
 ) -> None:
     """Return every Pond to its freshly deployed state.
 
-    Deletes all published data and working databases and resets freshness. Keeps deployed code, triggers,
+    Deletes all published data and working databases and resets freshness. Keeps deployed code, Refreshes,
     windows, Spouts, alerts, secrets and keys. Every Duck restarts.
     """
     from . import _http

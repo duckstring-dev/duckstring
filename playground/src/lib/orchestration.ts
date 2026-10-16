@@ -346,13 +346,16 @@ function flushDeferred(s: OrchestrState, pid: PondId): boolean {
 
 // Is a holding Pond's turn due? A bottleneck's turn: every slow Ripple has started a new run since the last
 // send. A trigger Pond's (or a Pond whose slow Ripple has since gone idle): it completed a run since the last
-// send, or it is no longer throttled.
+// send (or has never sent), or it is no longer throttled.
 function releaseDue(s: OrchestrState, pid: PondId, completed: Set<PondId>): boolean {
   const th = s.pondStates[pid].throttle!;
   if (!th.trigger && th.slow.length > 0) {
     return th.slow.every((rid) => s.rippleStates[rid].runsStarted > (th.forwardedIn[rid] ?? -1));
   }
-  return th.held > 0 && (completed.has(pid) || !isThrottled(s, pid));
+  // Never sent: no request is outstanding, so there is nothing to wait for (else a trigger Pond already throttled
+  // through a Source another Refresh paces would hold its first request until a completion it is needed for).
+  const neverSent = Object.keys(th.forwardedIn).length === 0;
+  return th.held > 0 && (completed.has(pid) || neverSent || !isThrottled(s, pid));
 }
 
 // Throttled: a slow Ripple of its own, or a throttled required Source (with only optional Sources, all of

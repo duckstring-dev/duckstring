@@ -1,15 +1,16 @@
-"""The Catchment engine: the full freshness state machine (Ponds **and** Ripples, pull + push).
+"""The Catchment engine: the full freshness state machine (Ponds **and** Ripples, demand and Refreshes).
 
-This is the orchestration brain the Catchment runs. It is a faithful port of the validated
-playground engine — it models ripple-level state so the ripple pull cascade still drives multiple
-Pond Runs (e.g. a single Tap advancing an Inlet through its internal depth) and the bottleneck
-cadence. The difference from a flat simulator: it does not execute or time runs. It is *told* a
-Ripple completed (via :func:`complete_ripple`, fed by Duck events), and every time it starts a Pond
-Run it records a :class:`BeginRun` command on ``state.pending_begin_runs`` for the Catchment to
-dispatch to that Pond's Duck.
+This is the orchestration brain the Catchment runs. It is a faithful port of the playground engine
+(``playground/src/lib/orchestration.ts``): it models Ripple-level state so the throttle can pace demand to
+the bottleneck. The difference from a flat simulator: it does not execute or time runs. It is *told* a
+Ripple completed (via :func:`complete_ripple`, fed by Duck events), and every time it starts a Pond Run it
+records a :class:`BeginRun` command on ``state.pending_begin_runs`` for the Catchment to dispatch to that
+Pond's Duck.
 
-Execution lives in the Duck (push-only); the Catchment owns all pull/triggers/freshness here. State
-in → state out; cascades mutate a clone synchronously to a fixpoint, exactly as the playground did.
+There is one kind of demand: a set of requested freshnesses per Pond (``demand``), sent upstream from where
+it is asked for (a Refresh on an Outlet) to the Inlets. Execution lives in the Duck; the Catchment owns
+demand, Refreshes and freshness here. State in → state out; cascades mutate a clone synchronously to a
+fixpoint, exactly as the playground does.
 """
 
 from __future__ import annotations
@@ -24,14 +25,14 @@ from .core import (
     Pond,
     PondId,
     PondState,
+    Refresh,
     Ripple,
     RippleId,
     RippleState,
     ThrottleState,
-    Trigger,
     Window,
-    max_target,
-    min_target,
+    max_demand,
+    min_demand,
 )
 
 __all__ = [
@@ -42,37 +43,34 @@ __all__ = [
     "PondState",
     "Ripple",
     "RippleState",
+    "Refresh",
     "ThrottleState",
-    "Trigger",
     "Window",
     "EngineState",
     "pond_source_f",
     "ripple_source_f",
-    "pond_receive_pull",
-    "pond_set_has_pull",
-    "ripple_set_has_pull",
-    "pond_add_target",
-    "push_sources",
+    "add_demand",
+    "demand_sources",
     "is_throttled",
     "resend_held_demand",
-    "ripple_add_target",
+    "ripple_add_demand",
     "complete_ripple",
     "fail_ripple",
     "fail_pond",
     "required_sinks",
     "derive_blocked",
-    "tap_pond",
-    "pulse_pond",
+    "refresh_now",
     "sleep_pond",
     "wake_pond",
     "force_pond",
-    "refresh_pond",
+    "rebuild_pond",
     "repair_pond",
     "kill_pond",
     "clear_pond",
     "sentinel",
     "tick",
     "next_wake",
+    "refresh_next_due",
     "drain_begin_runs",
 ]
 
@@ -83,7 +81,8 @@ class EngineState:
     pond_states: dict[PondId, PondState] = field(default_factory=dict)
     ripples: dict[RippleId, Ripple] = field(default_factory=dict)
     ripple_states: dict[RippleId, RippleState] = field(default_factory=dict)
-    triggers: dict[PondId, Trigger] = field(default_factory=dict)
+    # Standing Refreshes per Pond: any number scheduled, at most one floating (the Driver enforces it).
+    refreshes: dict[PondId, list[Refresh]] = field(default_factory=dict)
     # Pond Run commands accumulated by start_pond_run; the Catchment drains these to dispatch to
     # Ducks. Ignored by in-process simulations/tests.
     pending_begin_runs: list[BeginRun] = field(default_factory=list)
@@ -97,7 +96,7 @@ class EngineState:
             pond_states={k: v.copy() for k, v in self.pond_states.items()},
             ripples=self.ripples,
             ripple_states={k: v.copy() for k, v in self.ripple_states.items()},
-            triggers=self.triggers,
+            refreshes=self.refreshes,
             pending_begin_runs=list(self.pending_begin_runs),
             pending_passes=list(self.pending_passes),
         )
@@ -223,69 +222,24 @@ def ripple_source_f(s: EngineState, rid: RippleId) -> datetime:
 # ─── Demand reactions (synchronous cascades; mutate the working state) ─────────
 
 
-def pond_receive_pull(s: EngineState, pid: PondId, now: datetime, m: datetime) -> None:
-    """``m`` is the minted demand epoch carried by this pull — the freshness an Inlet it reaches will
-    stamp. A cold-start (idle) receive passes ``m`` through unchanged so the whole cascade shares one
-    epoch; a sustaining re-arm (from a running Pond's start) mints ``m`` at that Pond's start time."""
+def add_demand(s: EngineState, pid: PondId, t: datetime, from_refresh: bool = False,
+               release: bool = False) -> None:
+    """A Pond is asked for data at least as fresh as ``t``: record it (if unsatisfied and new) and send it
+    on to its demand Sources, unless the throttle holds it here (see "Throttle" below). ``from_refresh``
+    marks a Refresh's own request (on this Pond, or a duct's from downstream), which makes this a trigger
+    Pond. ``release`` marks a throttle release, which carries no epoch anyone asked for: an Inlet it reaches
+    mints its freshness when the Run starts instead."""
     ps = s.pond_states[pid]
-    if ps.is_blocked:  # a blocked Pond solicits nothing new; it only drains existing demand
-        ps.has_received_pull = False
+    if ps.is_blocked:  # no new demand enters a blocked Pond (and none propagates upstream from it)
         return
-    if ps.start_f == ps.end_f:  # cold start: wake the whole Pond
-        pond_set_has_pull(s, pid, now, m)
-        for rid in ripples_of(s, pid):
-            ripple_set_has_pull(s, rid, now, m)
-    else:  # running: only sustain the leaves
-        for rid in leaves_of(s, pid):
-            ripple_set_has_pull(s, rid, now, m)
-    ps.has_received_pull = False
-
-
-def pond_set_has_pull(s: EngineState, pid: PondId, now: datetime, m: datetime) -> None:
-    ps = s.pond_states[pid]
-    if m > ps.pull_m:
-        ps.pull_m = m  # the strongest (latest) pull epoch drives an Inlet's stamp
-    if ps.has_pull:
-        return
-    ps.has_pull = True
-    for sp in s.ponds[pid].sources:
-        if s.pond_states[sp].start_f <= ps.start_f:
-            s.pond_states[sp].has_received_pull = True
-            pond_receive_pull(s, sp, now, m)  # cold-start cascade: pass the epoch through unchanged
-
-
-def ripple_set_has_pull(s: EngineState, rid: RippleId, now: datetime, m: datetime) -> None:
-    rs = s.ripple_states[rid]
-    if rs.has_pull:
-        return
-    rs.has_pull = True
-    intra = intra_parents(s, rid)
-    if not intra:
-        pond_set_has_pull(s, s.ripples[rid].pond_id, now, m)
-    else:
-        for p in intra:
-            if s.ripple_states[p].start_f <= rs.start_f:
-                ripple_set_has_pull(s, p, now, m)
-
-
-def pond_add_target(s: EngineState, pid: PondId, t: datetime, from_trigger: bool = False,
-                    release: bool = False) -> None:
-    """A Pond receives push target ``t``: record it (if unsatisfied and new) and propagate it to its push
-    Sources, unless the Pulse throttle holds it here (see "Pulse throttle" below). ``from_trigger`` marks
-    a trigger's own demand (Pulse, Tide, a duct's Pulse), which makes this a trigger Pond. ``release``
-    marks a throttle release, which carries no epoch anyone asked for: an Inlet it reaches mints its
-    freshness when the Run starts instead."""
-    ps = s.pond_states[pid]
-    if ps.is_blocked:  # no new push enters a blocked Pond (and none propagates upstream from it)
-        return
-    if t <= ps.end_f or t in ps.targets:  # already satisfied, or already requested
+    if t <= ps.end_f or t in ps.demand:  # already satisfied, or already requested
         return
     if t <= ps.start_f:  # a Run already in flight at or past t will satisfy it (a repeat request for the
         return           # epoch it is running would otherwise re-run it, or complete it early as a pass)
-    ps.targets.append(t)
+    ps.demand.append(t)
     if release and not s.ponds[pid].sources:  # an Inlet: stamp the next Run's start (start_pond_run)
         _throttle(s, pid).released = True
-    if from_trigger:
+    if from_refresh:
         _throttle(s, pid).trigger = True
     if not ps.repairing:  # the Driver sequences a repair; the throttle neither counts nor holds there
         _count_demand(s, pid)
@@ -295,12 +249,21 @@ def pond_add_target(s: EngineState, pid: PondId, t: datetime, from_trigger: bool
     _forward(s, pid, t, release=release)
 
 
-def push_sources(s: EngineState, pid: PondId) -> list[PondId]:
-    """The Sources push demand propagates to: the required ones (an optional Source is never waited for,
-    so forcing it to a target is pointless), plus, once, an **unbuilt** optional Source (never started a
-    Run and holding no target; a Sink would otherwise read output nobody builds). With no required
-    Sources, all of them: the Pond runs on whichever is fresher, so it needs them asked. Pull is
-    unaffected and still reaches every Source."""
+def _local_demand(s: EngineState, pid: PondId, t: datetime | None) -> None:
+    """Demand ``t`` at this Pond only: recorded, but neither counted by the throttle nor sent upstream. A
+    Wake, a Spout's standing Wake and a missing-asset re-attempt use it: the Pond runs once its Sources
+    reach ``t``, without soliciting them."""
+    ps = s.pond_states[pid]
+    if t is not None and t > ps.start_f and t > ps.end_f and t not in ps.demand:
+        ps.demand.append(t)
+
+
+def demand_sources(s: EngineState, pid: PondId) -> list[PondId]:
+    """The Sources demand propagates to: the required ones (an optional Source is never waited for, so
+    asking it for a freshness is pointless), plus, once, an **unbuilt** optional Source (never started a
+    Run and holding no demand; a Sink would otherwise read output nobody builds). With no required
+    Sources, all of them: the Pond runs on whichever is fresher, so it needs them asked. So an optional
+    Source refreshes only through another path or its own Refresh."""
     pond = s.ponds[pid]
     required = [sp for sp in pond.sources if sp not in pond.optional_sources]
     if not required:
@@ -308,22 +271,22 @@ def push_sources(s: EngineState, pid: PondId) -> list[PondId]:
 
     def unbuilt(sp: PondId) -> bool:
         sps = s.pond_states[sp]
-        return sps.start_f == NEVER and not any(t > NEVER for t in sps.targets)
+        return sps.start_f == NEVER and not any(t > NEVER for t in sps.demand)
 
     return [sp for sp in pond.sources if sp not in pond.optional_sources or unbuilt(sp)]
 
 
 def _forward(s: EngineState, pid: PondId, t: datetime, release: bool = False) -> None:
-    """Send push target ``t`` from this Pond to its push Sources, noting which run each Ripple was in.
+    """Send demand ``t`` from this Pond to its demand Sources, noting which run each Ripple was in.
 
-    Sibling alignment: when some required push Sources are throttled and others aren't, ``t`` goes to the
+    Sibling alignment: when some required demand Sources are throttled and others aren't, ``t`` goes to the
     throttled ones now and is held back from the rest until each throttled one has started a new Run (its
-    turn, when a Wave would re-arm; ``_flush_deferred``), so the Sources read at about the same time and the
+    turn; ``_flush_deferred``), so the Sources read at about the same time and the
     join's freshness isn't dragged down by a fast Source that read early."""
     th = _throttle(s, pid)
     th.held, th.completed = 0, False
     th.sent_at = {rid: s.ripple_states[rid].runs_started for rid in ripples_of(s, pid)}
-    sources = push_sources(s, pid)
+    sources = demand_sources(s, pid)
     lead = _lead_sources(s, pid, sources)
     hold = bool(lead) and len(lead) < len(sources)
     if hold and not th.deferred:
@@ -336,8 +299,8 @@ def _forward(s: EngineState, pid: PondId, t: datetime, release: bool = False) ->
             continue
         held = th.deferred.get(sp)
         if held is not None and held[0] <= t:
-            del th.deferred[sp]  # this target covers what was held back from it
-        pond_add_target(s, sp, t, release=release)
+            del th.deferred[sp]  # this demand covers what was held back from it
+        add_demand(s, sp, t, release=release)
     if not th.deferred:
         th.deferred_at = {}
 
@@ -349,14 +312,14 @@ def _lead_sources(s: EngineState, pid: PondId, sources: list[PondId]) -> list[Po
 
 
 def _flush_deferred(s: EngineState, pid: PondId) -> bool:
-    """Send each held-back target on once every throttled Source has started a new Run since it was held,
-    or once none is throttled any more. A held-back Source that has since become throttled itself gets its
-    target at once; one that is no longer a push Source (an optional Source now built) is dropped. Returns
+    """Send each held-back demand on once every throttled Source has started a new Run since it was held,
+    or once none is throttled any more. A held-back Source that has since become throttled itself gets it
+    at once; one that is no longer a demand Source (an optional Source now built) is dropped. Returns
     whether anything changed."""
     th = s.pond_states[pid].throttle
     if th is None or not th.deferred:
         return False
-    sources = push_sources(s, pid)
+    sources = demand_sources(s, pid)
     lead = _lead_sources(s, pid, sources)
     due = all(s.pond_states[sp].runs_started > th.deferred_at.get(sp, -1) for sp in lead)
     changed = False
@@ -364,16 +327,16 @@ def _flush_deferred(s: EngineState, pid: PondId) -> bool:
         if due or sp in lead or sp not in sources:
             del th.deferred[sp]
             if sp in sources:
-                pond_add_target(s, sp, t, release=release)
+                add_demand(s, sp, t, release=release)
             changed = True
     if not th.deferred:
         th.deferred_at = {}
     return changed
 
 
-# ─── Pulse throttle (plans/pulse-throttle.md) ─────────────────────────────────
+# ─── Throttle (plans/pulse-throttle.md) ───────────────────────────────────────
 #
-# Paces push demand that arrives faster than the pipeline can serve it; sparse demand never triggers it.
+# Paces demand that arrives faster than the pipeline can serve it; sparse demand never triggers it.
 #
 # Detection is per Ripple: a Ripple that sees two demands reach its Pond during one of its runs can't keep
 # up, so it is *slow*, until it goes idle (an idle stage isn't the bottleneck: a stage below the bottleneck
@@ -381,14 +344,14 @@ def _flush_deferred(s: EngineState, pid: PondId) -> bool:
 # slow Ripple, or a throttled required Source, is *throttled*; that flag is all that passes between Ponds
 # (read from Sources, like ``is_blocked``, and never across an optional edge).
 #
-# Two kinds of Pond hold the demand that reaches them, keeping it as their own targets (so they still run
+# Two kinds of Pond hold the demand that reaches them, keeping it as their own demand (so they still run
 # on anything fresher that arrives) but not passing it upstream straight away:
-#   - a throttled trigger Pond (normally the Outlet), released on its completions;
+#   - a throttled trigger Pond (one a Refresh targets, normally the Outlet), released on its completions;
 #   - any other Pond with a slow Ripple (the bottleneck), released on that Ripple's starts.
-# Each sends one Pulse upstream (at ``now``) per turn while it has unmet demand. So demand travels upstream
-# at the bottleneck's pace, timed to its starts (when a Wave would re-arm), and enters at the rate the
-# Outlet is served, which bounds every path into it. A trigger Pond never paces on its own slow Ripple: it
-# takes raw trigger demand, so under a fast trigger its Ripple always looks slow.
+# Each sends one request upstream (at ``now``) per turn while it has unmet demand. So demand travels upstream
+# at the bottleneck's pace, timed to its starts, and enters at the rate the Outlet is served, which bounds
+# every path into it. A trigger Pond never paces on its own slow Ripple: it takes raw Refresh demand, so
+# under a fast Refresh its Ripple always looks slow.
 #
 # At a join whose required Sources are only partly throttled, a request goes to the throttled ones at once and
 # is held back from the others until each throttled one starts a new Run, so the Sources read together and the
@@ -401,12 +364,12 @@ def _flush_deferred(s: EngineState, pid: PondId) -> bool:
 
 
 def resend_held_demand(s: EngineState) -> None:
-    """Re-send each unblocked Pond's newest unmet push target to its push Sources. Held demand is ordinary
-    (persisted) targets, but the throttle state that would release it is soft, so after a reload nothing
+    """Re-send each unblocked Pond's newest unmet demand to its demand Sources. Held demand is ordinary
+    (persisted) demand, but the throttle state that would release it is soft, so after a reload nothing
     else would send it on. Upstream ignores what is already requested or covered (rule 6), so this costs
     at most one extra upstream run per path."""
     for pid, ps in s.pond_states.items():
-        unmet = [t for t in ps.targets if t > NEVER]
+        unmet = [t for t in ps.demand if t > NEVER]
         if unmet and not ps.is_blocked:
             _forward(s, pid, max(unmet))
 
@@ -449,7 +412,7 @@ def _holds(s: EngineState, pid: PondId) -> bool:
     """Does this Pond hold the demand reaching it? A trigger Pond while throttled; any other while it has
     a slow Ripple. A Pond with nowhere to send demand (an Inlet, a Draw) never holds."""
     pond = s.ponds[pid]
-    if pond.is_draw or pond.is_spout or not push_sources(s, pid):
+    if pond.is_draw or pond.is_spout or not demand_sources(s, pid):
         return False
     th = _throttle(s, pid)
     return is_throttled(s, pid) if th.trigger else bool(th.slow)
@@ -458,7 +421,7 @@ def _holds(s: EngineState, pid: PondId) -> bool:
 def _release_due(s: EngineState, pid: PondId) -> bool:
     """Is a holding Pond's turn due? A bottleneck's: every slow Ripple has started a new run since the last
     send. A trigger Pond's (or one whose slow Ripple has since gone idle): it completed a Pond Run since the
-    last send, or it is no longer throttled."""
+    last send (or has never sent), or it is no longer throttled."""
     th = s.pond_states[pid].throttle
     assert th is not None
     if th.slow and not th.trigger:
@@ -468,7 +431,7 @@ def _release_due(s: EngineState, pid: PondId) -> bool:
 
 def _settle_throttle(s: EngineState, now: datetime) -> bool:
     """After the starts: clear slow Ripples that went idle, then let each Pond holding demand send one
-    Pulse upstream if its turn has come. Returns whether anything changed."""
+    request upstream if its turn has come. Returns whether anything changed."""
     changed = False
     for pid, ps in s.pond_states.items():
         th = ps.throttle
@@ -480,21 +443,21 @@ def _settle_throttle(s: EngineState, now: datetime) -> bool:
             changed = True
         if _flush_deferred(s, pid):
             changed = True
-        if not any(t > NEVER for t in ps.targets):
+        if not any(t > NEVER for t in ps.demand):
             th.trigger, th.held = False, 0  # demand drained
             th.deferred, th.deferred_at = {}, {}
             continue
-        if push_sources(s, pid) and _release_due(s, pid):
+        if demand_sources(s, pid) and _release_due(s, pid):
             _forward(s, pid, now, release=True)
             changed = True
     return changed
 
 
-def ripple_add_target(s: EngineState, rid: RippleId, t: datetime) -> None:
+def ripple_add_demand(s: EngineState, rid: RippleId, t: datetime) -> None:
     rs = s.ripple_states[rid]
-    if t <= rs.end_f or t in rs.targets:
+    if t <= rs.end_f or t in rs.demand:
         return
-    rs.targets.append(t)
+    rs.demand.append(t)
 
 
 # ─── Fault tolerance: blocked propagation ─────────────────────────────────────
@@ -510,7 +473,7 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
     changed — propagate to the Sinks so they re-derive. This is the single signal that travels
     downstream; a Pond still reads its blocked state solely from itself and its Sources.
 
-    A Pond that unblocks re-sends its newest unmet target to its push Sources: demand forwarded while a
+    A Pond that unblocks re-sends its newest unmet demand to its demand Sources: demand forwarded while a
     Source was blocked (or dropped there, as a halted Run's is) was refused, and would otherwise strand."""
     ps = s.pond_states[pid]
     pond = s.ponds[pid]
@@ -523,7 +486,7 @@ def derive_blocked(s: EngineState, pid: PondId) -> None:
     )
     if blocked != ps.is_blocked:
         ps.is_blocked = blocked
-        unmet = [t for t in ps.targets if t > NEVER]
+        unmet = [t for t in ps.demand if t > NEVER]
         if not blocked and unmet:
             _forward(s, pid, max(unmet))
         for q in required_sinks(s, pid):
@@ -537,8 +500,8 @@ def block_on_missing_asset(state: EngineState, pid: PondId, reason: str, now: da
     """A Ripple read a Source asset that isn't published (:class:`~duckstring.core.MissingSourceAsset`).
     Park the Pond **blocked-with-a-reason** — *not* failed: no retry-budget burn, no failure alert. Abandon
     the incomplete Run (roll the phantom ``start_f → end_f`` so liveness won't fail it), record the reason,
-    and re-arm a **non-propagating** local pull so the Pond re-attempts when its Source next publishes
-    something fresher (it does not solicit the Source — auto-solicit is deferred). Propagates ``blocked``
+    and keep the Run's freshness as **local** demand (not sent upstream) so the Pond re-attempts when its
+    Source next publishes something fresher (it does not solicit the Source — auto-solicit is deferred). Propagates ``blocked``
     downstream. Recovers via :func:`clear_missing_asset` on the next successful Run. See plans/reset.md."""
     s = state.clone()
     ps = s.pond_states[pid]
@@ -548,16 +511,16 @@ def block_on_missing_asset(state: EngineState, pid: PondId, reason: str, now: da
     # move). Without this the rewound run re-fires at the same freshness every Duck round-trip — a busy-loop
     # that read-misses forever, floods run history, and starves the Catchment. See plans/reset.md.
     ps.missing_asset_f = max((source_visible_f(s, sp, pid) for sp in s.ponds[pid].sources), default=NEVER)
+    abandoned = ps.start_f
     ps.start_f = ps.end_f  # abandon the incomplete run (the read failed; nothing published)
     for rid in ripples_of(s, pid):
         rs = s.ripple_states[rid]
         rs.is_running = False
         rs.started_at = None
         rs.start_f = rs.end_f
-        rs.targets = [t for t in rs.targets if t > rs.end_f]
+        rs.demand = [t for t in rs.demand if t > rs.end_f]
     ps.missing_asset = reason
-    ps.has_pull = True       # retry when the Source is fresher …
-    ps.pull_local = True     # … without soliciting it (deferred auto-solicit)
+    _local_demand(s, pid, abandoned)  # retry when the Source is fresher, without soliciting it
     derive_blocked(s, pid)
     return s
 
@@ -600,10 +563,8 @@ def can_start_pond(s: EngineState, pid: PondId, now: datetime) -> bool:
         if src_f <= ps.missing_asset_f:
             return False
     if not ps.is_failed:  # a blocked-but-not-failed Pond still drains available Source freshness
-        mt = min_target(ps.targets)
+        mt = min_demand(ps.demand)
         if mt is not None and f >= mt:
-            return True
-        if ps.has_pull and f > ps.start_f:
             return True
     # Retry on change: a failed Pond with budget left re-runs when its Sources offer something fresher
     # than its last attempt (bypasses is_blocked — this is how the failure recovers).
@@ -634,8 +595,8 @@ def _pond_sources_changed(s: EngineState, pid: PondId, prior_f: datetime) -> boo
 
 def _pass_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     """Synthesise a **pass**: complete this Pond Run with no Duck (no BeginRun). Advance every Ripple
-    and the Pond to ``start_f`` so the heartbeat (freshness, re-arm, Wave re-tap) climbs as on a real
-    Run, but hold ``changed_f`` — downstream then sees no content change and passes in turn."""
+    and the Pond to ``start_f`` so its freshness climbs as on a real Run, but hold ``changed_f`` —
+    downstream then sees no content change and passes in turn."""
     ps = s.pond_states[pid]
     target_f = ps.start_f
     for rid in ripples_of(s, pid):
@@ -644,7 +605,7 @@ def _pass_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
         rs.end_f = target_f
         rs.is_running = False
         rs.started_at = None
-        rs.targets = [t for t in rs.targets if t > target_f]
+        rs.demand = [t for t in rs.demand if t > target_f]
     _complete_pond_run(s, pid, target_f, now, changed=False)
     s.pending_passes.append((pid, target_f))
 
@@ -655,35 +616,22 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     prior_f = ps.start_f  # the freshness this Run builds on (captured before the reset below)
     f, window_d = pond_source_f(s, pid, now)
     assert f is not None
-    started_as_pull = ps.has_pull
 
-    # Minted freshness: an Inlet stamps the demand epoch — the max minted ``m`` of its outstanding
-    # demand (push ``m`` is the target value; pull ``m`` is ps.pull_m) — not its run-now. So a Pulse/
-    # Tap at T yields freshness T for every Inlet it reaches, whenever each physically runs. Force's
-    # NEVER target is filtered out, so a Force keeps the pond_source_f `now`. Windowed Inlets and
-    # non-Inlets (and Draws) are unaffected — their freshness is window-end / source-derived / remote.
-    # A Pulse throttle release mints at the start: it is pacing, and carries no epoch anyone asked for.
+    # Minted freshness: an Inlet stamps the demand epoch — the newest freshness it was asked for — not its
+    # run-now. So a Refresh at T yields freshness T for every Inlet it reaches, whenever each physically
+    # runs. Force's NEVER demand is filtered out, so a Force keeps the pond_source_f `now`. Windowed Inlets
+    # and non-Inlets (and Draws) are unaffected — their freshness is window-end / source-derived / remote.
+    # A throttle release mints at the start: it is pacing, and carries no epoch anyone asked for.
     if not pond.sources and not pond.windows and not pond.is_draw:
-        ms = [t for t in ps.targets if t > NEVER]
-        if started_as_pull and ps.pull_m > NEVER:
-            ms.append(ps.pull_m)
+        ms = [t for t in ps.demand if t > NEVER]
         if ps.throttle is not None and ps.throttle.released:
             ms.append(now)
             ps.throttle.released = False
         if ms:
             f = max(ms)
 
-    # A blocked Pond drains but never solicits its Sources; a Wake (pull_local) also doesn't propagate.
-    if started_as_pull and not ps.is_blocked and not ps.pull_local:
-        for sp in pond.sources:
-            s.pond_states[sp].has_received_pull = True
-            pond_receive_pull(s, sp, now, now)  # sustain: mint this Pond's start time as the epoch
-
     ps.start_f = f
-    ps.has_pull = False
-    ps.pull_local = False
-    ps.pull_m = NEVER
-    ps.targets = [t for t in ps.targets if t > ps.start_f]
+    ps.demand = [t for t in ps.demand if t > ps.start_f]
 
     if not s.ponds[pid].sources:
         ps.d = window_d
@@ -692,33 +640,33 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
         if ds:
             ps.d = max(ds)
 
-    # Every Ripple must reach this freshness — stamped on ALL Ripples (push to completion). This
+    # Every Ripple must reach this freshness — stamped on ALL Ripples (run to completion). This
     # also initiates the run (roots have source_f == start_f).
     for rid in ripples_of(s, pid):
-        ripple_add_target(s, rid, ps.start_f)
+        ripple_add_demand(s, rid, ps.start_f)
 
     ps.runs_started += 1
     ps.gen_start_times[ps.runs_started] = now
 
     # Pass vs dispatch (plans/no-change-skip.md). A Pond with Sources whose content is all unchanged
     # since ``prior_f`` is completed in-engine as a **pass** (no Duck) — unless it must run regardless:
-    # an Inlet (determines change by content, the engine can't), a Force/Refresh/repair (recompute by
+    # an Inlet (determines change by content, the engine can't), a Force/Rebuild/repair (recompute by
     # intent), an ``always_run`` side-effecting Pond, or a Draw/Spout (run off-Duck by the poller/egress
-    # worker). Otherwise dispatch a BeginRun for the Duck (force = recompute; refresh = cold rebuild).
+    # worker). Otherwise dispatch a BeginRun for the Duck (force = recompute; rebuild = cold rebuild).
     must_run = (
         not pond.sources or pond.always_run or pond.is_draw or pond.is_spout
-        or ps.force_pending or ps.refresh_pending or ps.repairing
+        or ps.force_pending or ps.rebuild_pending or ps.repairing
     )
     sources_changed = _pond_sources_changed(s, pid, prior_f)
     if must_run or sources_changed:
         s.pending_begin_runs.append(BeginRun(
-            pid, ps.start_f, force=ps.force_pending, refresh=ps.refresh_pending,
+            pid, ps.start_f, force=ps.force_pending, rebuild=ps.rebuild_pending,
             sources_changed=sources_changed,
         ))
     else:
         _pass_pond_run(s, pid, now)
     ps.force_pending = False
-    ps.refresh_pending = False
+    ps.rebuild_pending = False
 
 
 def can_start_ripple(s: EngineState, rid: RippleId) -> bool:
@@ -726,10 +674,8 @@ def can_start_ripple(s: EngineState, rid: RippleId) -> bool:
     if rs.is_running:
         return False
     source_f = ripple_source_f(s, rid)
-    mt = min_target(rs.targets)
-    if mt is not None and source_f >= mt:
-        return True
-    return rs.has_pull and source_f > rs.start_f
+    mt = min_demand(rs.demand)
+    return mt is not None and source_f >= mt
 
 
 def start_ripple(s: EngineState, rid: RippleId, now: datetime) -> None:
@@ -739,12 +685,7 @@ def start_ripple(s: EngineState, rid: RippleId, now: datetime) -> None:
     rs.is_running = True
     rs.started_at = now
     rs.runs_started += 1
-
-    if rs.has_pull:
-        for p in intra_parents(s, rid):
-            ripple_set_has_pull(s, p, now, now)  # intra re-arm (same Pond) — epoch is moot here
-        rs.has_pull = False
-    rs.targets = [t for t in rs.targets if t > source_f]
+    rs.demand = [t for t in rs.demand if t > source_f]
 
 
 def _complete_pond_run(s: EngineState, pid: PondId, new_end: datetime, now: datetime, changed: bool) -> None:
@@ -760,10 +701,10 @@ def _complete_pond_run(s: EngineState, pid: PondId, new_end: datetime, now: date
         ps.persisted_f = new_end
     if changed:
         ps.changed_f = new_end
-    # A completed Run satisfies every target up to its freshness — drop them so a target that was added
+    # A completed Run satisfies all demand up to its freshness — drop it so demand that was added
     # *during* the Run (valid then, ``t > end_f``) can't linger past completion and trigger a spurious
     # re-run at the same F. (start_pond_run clears only what existed at start.)
-    ps.targets = [t for t in ps.targets if t > ps.end_f]
+    ps.demand = [t for t in ps.demand if t > ps.end_f]
     ps.runs_completed += 1
     ps.completion_times.append(now)
     ps.gen_start_times.pop(ps.runs_completed, None)
@@ -774,14 +715,11 @@ def _complete_pond_run(s: EngineState, pid: PondId, new_end: datetime, now: date
         ps.failed_f = NEVER
         ps.failures = 0
         derive_blocked(s, pid)
-    trig = s.triggers.get(pid)
-    if trig is not None and trig.kind == "wave":
-        pond_receive_pull(s, pid, now, now)  # Wave re-tap: a new demand epoch at completion
 
 
 def complete_ripple(state: EngineState, rid: RippleId, now: datetime, changed: bool = True) -> EngineState:
     """Event: a Ripple's run finished (in the runtime, reported by the Duck). Adopts its parents'
-    freshness, advances the Pond if it was the last leaf, and re-Taps a Wave on completion. ``changed``
+    freshness and advances the Pond if it was the last leaf. ``changed``
     (carried by the Duck on the Run-completing Ripple event) decides whether the Pond's ``changed_f``
     advances — ``False`` for a Trickle with an empty delta or an explicit ``pond.skip()``."""
     s = state.clone()
@@ -843,25 +781,19 @@ def fail_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
 # ─── Public entry points (operate on a clone, run cascades) ───────────────────
 
 
-def tap_pond(state: EngineState, pid: PondId, now: datetime, m: datetime | None = None) -> EngineState:
-    """One pull. ``m`` is the demand epoch to mint (defaults to ``now``); a duct passes the
-    downstream's epoch so the upstream Inlet stamps the same freshness."""
+def refresh_now(state: EngineState, pid: PondId, now: datetime) -> EngineState:
+    """Refresh a Pond now: ask for its data to be at least as fresh as ``now`` (a duct passes the
+    downstream's epoch instead, so the upstream Inlet stamps the same freshness)."""
     s = state.clone()
-    pond_receive_pull(s, pid, now, m if m is not None else now)
-    return s
-
-
-def pulse_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
-    s = state.clone()
-    pond_add_target(s, pid, now, from_trigger=True)
+    add_demand(s, pid, now, from_refresh=True)
     return s
 
 
 def sleep_pond(state: EngineState, pid: PondId, now: datetime, upstream: bool = False) -> EngineState:
-    """Sleep a Pond: clear its push+pull demand and its Ripples' **pull** demand, but KEEP Ripple push
-    targets so any already-started Pond Run completes. With ``upstream=True`` the sleep propagates to
-    every ancestor (a token following the source edges), clearing each one's demand too. The soft
-    counterpart to Wake — it lets the Pond settle, vs Kill which cancels everything."""
+    """Sleep a Pond: clear its demand, but KEEP its Ripples' demand so any already-started Pond Run
+    completes. With ``upstream=True`` the sleep propagates to every ancestor (a token following the
+    source edges), clearing each one's demand too. The soft counterpart to Wake — it lets the Pond
+    settle, vs Kill which cancels everything."""
     s = state.clone()
     seen: set[PondId] = set()
     queue = [pid]
@@ -871,40 +803,33 @@ def sleep_pond(state: EngineState, pid: PondId, now: datetime, upstream: bool = 
             continue
         seen.add(cur)
         ps = s.pond_states[cur]
-        ps.has_pull = False
-        ps.pull_m = NEVER
-        ps.has_received_pull = False
-        ps.targets = []
+        ps.demand = []  # (its Ripples keep theirs, so started runs complete)
         ps.throttle = None
-        for rid in ripples_of(s, cur):
-            s.ripple_states[rid].has_pull = False  # keep targets (push) so started runs complete
         if upstream:
             for sp in s.ponds[cur].sources:
                 if sp not in seen:
                     queue.append(sp)
     # Demand other Ponds still hold was cleared at the slept Sources they forwarded it to: send each one's
-    # newest unmet target to those Sources again, so another consumer's pending refresh isn't stranded.
+    # newest unmet demand to those Sources again, so another consumer's pending refresh isn't stranded.
     for q, qs in s.pond_states.items():
-        unmet = [t for t in qs.targets if t > NEVER]
+        unmet = [t for t in qs.demand if t > NEVER]
         if q in seen or qs.is_blocked or not unmet:
             continue
         held_back = qs.throttle.deferred if qs.throttle is not None else {}
-        for sp in push_sources(s, q):
+        for sp in demand_sources(s, q):
             if sp in seen and sp not in held_back:
-                pond_add_target(s, sp, max(unmet))
+                add_demand(s, sp, max(unmet))
     return s
 
 
 def wake_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
-    """Wake a Pond: a one-shot, **non-propagating** pull. The Pond runs once when its Sources already
-    offer something fresher than its last Run (``sourceF > startF``); it does NOT solicit its Sources
-    (no upstream propagation — that's a Tap). Also clears any failure/kill, so a parked Pond resumes."""
+    """Wake a Pond: one **local** request at its Sources' current freshness. The Pond runs once if its
+    Sources already offer something fresher than its last Run; it does NOT solicit its Sources (that's a
+    Refresh). An Inlet runs at ``now``. Also clears any failure/kill, so a parked Pond resumes."""
     s = state.clone()
     _clear_halt(s, pid)
-    ps = s.pond_states[pid]
-    ps.has_pull = True
-    ps.pull_local = True
-    ps.pull_m = now  # Wake mints its own epoch (it sets has_pull directly, bypassing the cascade)
+    f, _ = pond_source_f(s, pid, now)
+    _local_demand(s, pid, f)
     return s
 
 
@@ -920,27 +845,27 @@ def force_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
     for rid in ripples_of(s, pid):
         s.ripple_states[rid].end_f = NEVER
     ps.force_pending = True
-    if NEVER not in ps.targets:
-        ps.targets.append(NEVER)
+    if NEVER not in ps.demand:
+        ps.demand.append(NEVER)
     return s
 
 
-def refresh_pond(state: EngineState, pid: PondId, *, clear: bool = False) -> EngineState:
-    """Flag a Pond so its **next** run is a Refresh — a cold wipe-and-rebuild (the Duck drops the
-    registry and reads its Sources in full). Lazy: it does *not* start a run, so the refresh happens at
+def rebuild_pond(state: EngineState, pid: PondId, *, clear: bool = False) -> EngineState:
+    """Flag a Pond so its **next** run is a Rebuild — a cold wipe-and-rebuild (the Duck drops the
+    registry and reads its Sources in full). Lazy: it does *not* start a run, so the rebuild happens at
     the next genuinely-new freshness and propagates honestly (its rebuilt changelog floor rises above
     downstream consumers' watermarks). ``clear`` un-sets the flag. See ``plans/refresh.md``."""
     s = state.clone()
-    s.pond_states[pid].refresh_pending = not clear
+    s.pond_states[pid].rebuild_pending = not clear
     return s
 
 
 def repair_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
-    """A repair step (D3): refresh **and** force this Pond at the current freshness — combine a cold
+    """A repair step (D3): rebuild **and** force this Pond at the current freshness — combine a cold
     rebuild with a one-shot run so the rebuild happens now, not on the next natural epoch. The Driver
     sequences these in topological order over a connected scope (see ``plans/refresh.md``)."""
     s = force_pond(state, pid, now)
-    s.pond_states[pid].refresh_pending = True
+    s.pond_states[pid].rebuild_pending = True
     return s
 
 
@@ -951,18 +876,13 @@ def kill_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
     s = state.clone()
     ps = s.pond_states[pid]
     ps.is_killed = True
-    ps.has_pull = False
-    ps.pull_m = NEVER
-    ps.has_received_pull = False
-    ps.pull_local = False
-    ps.targets = []
+    ps.demand = []
     ps.throttle = None
     for rid in ripples_of(s, pid):
         rs = s.ripple_states[rid]
         rs.is_running = False
         rs.started_at = None
-        rs.has_pull = False
-        rs.targets = []
+        rs.demand = []
     derive_blocked(s, pid)  # killed Pond blocks its Sinks
     return s
 
@@ -998,7 +918,7 @@ def sentinel(now: datetime, state: EngineState) -> tuple[EngineState, list[Rippl
     ``state.pending_begin_runs`` for the Catchment to dispatch."""
     s = state.clone()
     started: list[RippleId] = []
-    # Start to a fixpoint, then settle the Pulse throttle: a release can enable more starts, so repeat
+    # Start to a fixpoint, then settle the throttle: a release can enable more starts, so repeat
     # (bounded). Sends are decided only after the starts, so a slow Ripple that finished and restarted in
     # the same instant reads as one turnover, not as idle (clear, release) and then turned over (release).
     for _ in range(16):
@@ -1019,75 +939,64 @@ def sentinel(now: datetime, state: EngineState) -> tuple[EngineState, list[Rippl
     return s, started
 
 
-def restore_demand(s: EngineState, now: datetime) -> None:
-    """Re-derive **pull** demand from the sinks — a corrective invariant that makes the one-shot pull
-    propagation *eventually consistent*. A Pond still holding a propagating pull it can't yet satisfy
-    implies its behind Sources (the cold-start test ``S.start_f <= D.start_f``) should hold pulls too; if a
-    reset / a crash between propagate-and-persist / a blocked-Source refusal dropped that upstream, this
-    re-solicits it. ``pond_receive_pull`` is idempotent (the ``has_pull`` guard) and **refuses blocked
-    Ponds**, so a path automatically parks under a blocked Source and heals on the first tick after it
-    unblocks. Excludes killed Ponds (parked terminal) and ``pull_local`` Wakes (non-propagating).
-
-    *Push* is deliberately not restored here: a standing Tide re-emits its targets every bound (its own
-    restoration), and the narrow "a one-shot Pulse hit a blocked Source" strand is healed by Mechanism 2's
-    solicitation (a pull), not by blanket per-tick target re-propagation — which churns the Tide throttle
-    (targets encode the cadence). See plans/reset.md."""
-    for pid in list(s.pond_states):
-        ps = s.pond_states[pid]
-        if ps.is_killed or ps.pull_local or ps.is_blocked or not ps.has_pull:
-            continue
-        for sp in s.ponds[pid].sources:
-            if s.pond_states[sp].start_f <= ps.start_f:
-                s.pond_states[sp].has_received_pull = True
-                pond_receive_pull(s, sp, now, ps.pull_m)
-
-
 def tick(now: datetime, state: EngineState) -> EngineState:
-    """Clock-driven processes only: Tide target emission and Wave-on-idle re-Tap, plus the demand-restoration
-    invariant (:func:`restore_demand`). Window availability is read live in :func:`can_start_pond`. The
-    caller runs :func:`sentinel` afterwards."""
+    """Clock-driven processes only: the standing Refreshes and the Spouts' standing Wake. Window
+    availability is read live in :func:`can_start_pond`. The caller runs :func:`sentinel` afterwards."""
     s = state.clone()
-    # Standing Wake (Spouts): whenever idle and armed, re-arm a **non-propagating** pull (a Wake, not a
-    # Wave — `pull_local` stops `start_pond_run` soliciting the Source). It then runs whenever the Source
-    # is fresher (`can_start_pond`), at most once per window (the freshness is the window end), and never
-    # adds upstream demand. Failed/killed Spouts stay parked until cleared.
-    for pid in s.pond_states:
-        ps = s.pond_states[pid]
+    # Standing Wake (Spouts): whenever idle and armed, demand the Source's freshness locally (never sent on).
+    # It then runs whenever the Source is fresher, at most once per window (the freshness is the window end),
+    # and never adds upstream demand. Failed/killed/blocked Spouts stay parked until cleared.
+    for pid, ps in s.pond_states.items():
         if not ps.standing_wake or ps.is_failed or ps.is_killed or ps.is_blocked:
             continue
-        idle = ps.start_f == ps.end_f and not ps.has_pull and not ps.targets and not any_ripple_busy(s, pid)
-        if idle:
-            ps.has_pull = True
-            ps.pull_local = True
-            for rid in ripples_of(s, pid):
-                s.ripple_states[rid].has_pull = True
+        if ps.start_f == ps.end_f and not ps.demand and not any_ripple_busy(s, pid):
+            f, _ = pond_source_f(s, pid, now)
+            _local_demand(s, pid, f)
 
-    for pid, trig in s.triggers.items():
-        ps = s.pond_states[pid]
-        if trig.kind == "wave":
-            idle = ps.start_f == ps.end_f and not ps.has_pull and not ps.targets and not any_ripple_busy(s, pid)
-            if idle:
-                pond_receive_pull(s, pid, now, now)  # Wave-on-idle: a fresh demand epoch
-        elif trig.kind == "tide":
-            bound = trig.bound or ZERO
-            ref = _clock_ref(ps)
-            if now + ps.d - ref >= bound:
-                pond_add_target(s, pid, now, from_trigger=True)
-    restore_demand(s, now)  # re-derive any demand lost upstream (reset / crash / blocked-refusal)
+    # Standing Refreshes. A floating one sends a request at ``now`` once ``every`` has passed since its clock
+    # reference (the later of the newest pending request and the freshness; every 0 is continuous). Requests
+    # pipeline freely and the throttle paces them to the bottleneck. A scheduled one requests its latest
+    # occurrence, which the demand rules make idempotent (already requested, satisfied or in flight), so it
+    # needs no "last fired" state and catches up after downtime with one request.
+    for pid, refs in s.refreshes.items():
+        ps = s.pond_states.get(pid)
+        if ps is None:
+            continue
+        for r in refs:
+            if r.scheduled:
+                c = r.latest(now)
+                if c is not None:
+                    add_demand(s, pid, c, from_refresh=True)
+            elif now + ps.d - _clock_ref(ps) >= r.every:
+                add_demand(s, pid, now, from_refresh=True)
     return s
 
 
 def _clock_ref(ps: PondState) -> datetime:
-    """The floating refresh's reference: the later of its newest pending request and the Pond's freshness. A
+    """A floating Refresh's reference: the later of the Pond's newest pending request and its freshness. A
     request is only dropped once a Run at or past it has started, so this is never earlier than the newest
-    request; and a Run the Tide didn't ask for (a manual refresh, a Force, a Sink's demand) counts too. A strict
-    cadence regardless of freshness is what an anchored refresh is for."""
-    return max(max_target(ps.targets) or NEVER, ps.start_f)
+    request; and a Run the Refresh didn't ask for (a manual refresh, a Force, a Sink's demand) counts too. A
+    strict cadence regardless of freshness is what a scheduled Refresh is for."""
+    return max(max_demand(ps.demand) or NEVER, ps.start_f)
+
+
+def refresh_next_due(state: EngineState, r: Refresh, now: datetime) -> datetime | None:
+    """When a standing Refresh next sends a request: a scheduled one's next occurrence, a floating one's
+    deadline (``every`` after its clock reference, at the earliest ``now``). None for a continuous one
+    (every 0: it asks whenever the Pond can take more) and for a schedule that has ended."""
+    if r.scheduled:
+        return r.next_occurrence(now)
+    if r.every <= ZERO:
+        return None
+    ps = state.pond_states.get(r.pond_id)
+    if ps is None:
+        return None
+    return max(now, _clock_ref(ps) + r.every - ps.d)
 
 
 def next_wake(now: datetime, state: EngineState) -> datetime | None:
     """The earliest future instant the engine needs a :func:`tick`: the next window boundary of a
-    windowed Inlet, or the next Tide deadline. ``None`` if nothing is time-driven."""
+    windowed Inlet or Spout, or a standing Refresh's next request. ``None`` if nothing is time-driven."""
     candidates: list[datetime] = []
     for pond in state.ponds.values():
         # Windowed Inlets (no sources) and windowed Spouts both advance on window boundaries.
@@ -1097,12 +1006,13 @@ def next_wake(now: datetime, state: EngineState) -> datetime | None:
             b = w.next_boundary(now)
             if b is not None:
                 candidates.append(b)
-    for pid, trig in state.triggers.items():
-        if trig.kind != "tide":
-            continue
-        ps = state.pond_states[pid]
-        ref = _clock_ref(ps)
-        deadline = ref + (trig.bound or ZERO) - ps.d
-        candidates.append(deadline if deadline > now else now)
+    for refs in state.refreshes.values():
+        for r in refs:
+            if not r.scheduled and r.every <= ZERO:
+                candidates.append(now)  # continuous: asks on every tick
+                continue
+            due = refresh_next_due(state, r, now)
+            if due is not None:
+                candidates.append(due)
     future = [c for c in candidates if c >= now]
     return min(future) if future else None

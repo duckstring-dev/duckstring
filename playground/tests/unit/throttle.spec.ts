@@ -133,3 +133,19 @@ test('a Pond with only optional Sources is throttled only when all of them are',
   expect(r.runs.A).toBeGreaterThan(50); // B is slow, A isn't, so C isn't throttled and A keeps up
   expect(r.runs.C).toBeGreaterThan(50);
 });
+
+test("a Pond already throttled through another Refresh's Source still sends its first request", () => {
+  // B is paced by its own continuous Refresh, so X (reading A and B) is throttled before it ever runs. X's one
+  // Refresh must still reach A, which nothing else asks: held until X's first completion, it never would.
+  const s = graph([['S', 1, []], ['A', 1, ['S']], ['B', 3, ['S']], ['X', 1, ['A', 'B']]]);
+  s.refreshes = { B: [{ name: 'continuous', everyMs: 0 }] };
+  let st = s;
+  let now = 1_000_000;
+  for (let i = 0; i < 300; i++) {
+    if (i === 100) st = refreshNow(st, 'X', now);
+    now += 100;
+    st = tick(now, st);
+  }
+  expect(st.pondStates.X.runsCompleted).toBe(1);
+  expect(st.pondStates.B.runsCompleted).toBeGreaterThan(5);
+});

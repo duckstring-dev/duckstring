@@ -101,7 +101,7 @@ def test_the_begin_run_job_carries_the_flock_settings(tmp_path, monkeypatch):
     driver = Driver(db, tmp_path, "http://x", NoopLauncher())
     driver.set_duck("p@1", flock_mode="always", flock_engine=ENGINE)
 
-    driver.tap("p@1")
+    driver.refresh_now("p@1")
     job = next(j for j in driver.jobs["p@1"] if j["kind"] == "begin_run")
     assert job["flock"]["DUCKSTRING_FLOCK_MODE"] == "always"
     assert job["flock"]["DUCKSTRING_FLOCK_ENGINE"] == ENGINE

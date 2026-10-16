@@ -315,7 +315,7 @@ def test_a_chain_publishes_and_persists_to_s3(s3_env, tmp_path_factory, monkeypa
         assert r.status_code == 200, r.text
 
         _deploy(url, ("orders", "catalog"))
-        httpx.post(f"{url}/api/ponds/catalog/pulse", timeout=10.0)
+        httpx.post(f"{url}/api/ponds/catalog/refresh", timeout=10.0)
         assert _wait(lambda: (_pond_status(url, "catalog") or {}).get("end_f") is not None, timeout=90.0), \
             "catalog never became fresh against an S3 data plane"
 

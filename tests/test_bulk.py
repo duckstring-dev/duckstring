@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -94,14 +96,14 @@ def test_remove_subsumes_reset(tmp_path):
 
 def test_precedence_order_preserved(tmp_path):
     d = _driver(tmp_path)
-    res = d.batch([("solo", None)], ["refresh", "clear", "wipe", "sleep", "kill"], confirm="testcatch")
-    assert res["operations"] == ["kill", "sleep", "wipe", "clear", "refresh"]
+    res = d.batch([("solo", None)], ["rebuild", "clear", "wipe", "sleep", "kill"], confirm="testcatch")
+    assert res["operations"] == ["kill", "sleep", "wipe", "clear", "rebuild"]
 
 
 def test_remove_is_terminal_per_pond(tmp_path):
     d = _driver(tmp_path)
-    # refresh after remove: the line is gone, so refresh silently skips it (no error).
-    res = d.batch([("solo", None)], ["remove", "refresh"], confirm="testcatch")
+    # rebuild after remove: the line is gone, so rebuild silently skips it (no error).
+    res = d.batch([("solo", None)], ["remove", "rebuild"], confirm="testcatch")
     assert res["removed"] == ["solo@1"]
     assert res["errors"] == []
     assert "solo@1" not in d.state.ponds
@@ -109,11 +111,11 @@ def test_remove_is_terminal_per_pond(tmp_path):
 
 def test_bulk_sleep_clears_demand(tmp_path):
     d = _driver(tmp_path)
-    d.wave("a@1")  # a standing pull
-    assert "a@1" in d.state.triggers
+    d.add_refresh("a@1", timedelta(0))  # a continuous Refresh
+    assert d.state.refreshes.get("a@1")
     res = d.batch([("a", None)], ["sleep"])
     assert res["errors"] == []
-    assert "a@1" not in d.state.triggers
+    assert not d.state.refreshes.get("a@1")
 
 
 # ─── wipe history ──────────────────────────────────────────────────────────────

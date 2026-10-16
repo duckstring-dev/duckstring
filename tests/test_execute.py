@@ -25,94 +25,68 @@ def _deploy_outlet(url: str) -> None:
     )
 
 
-# ── pulse ─────────────────────────────────────────────────────────────────────
+# ── refresh ───────────────────────────────────────────────────────────────────
 
 
-def test_pulse_succeeds(runner, live_catchment):
+def test_refresh_now_succeeds(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "pulse", "outlet", "--silent"])
+    result = runner.invoke(app, ["refresh", "outlet", "--silent"])
     assert result.exit_code == 0, result.output
-    assert "Pulse sent" in result.output
+    assert "Refresh sent" in result.output
 
 
-def test_pulse_explicit_catchment(runner, live_catchment):
+def test_refresh_now_explicit_catchment_and_major(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "pulse", "outlet", "-c", "dev", "--silent"])
+    for extra in (["-c", "dev"], ["--major", "1"]):
+        result = runner.invoke(app, ["refresh", "outlet", *extra, "--silent"])
+        assert result.exit_code == 0, result.output
+
+
+def test_refresh_unknown_catchment_or_no_default_exits(runner):
+    assert runner.invoke(app, ["refresh", "outlet", "-c", "nonexistent"]).exit_code != 0
+    assert runner.invoke(app, ["refresh", "outlet"]).exit_code != 0
+
+
+def test_refresh_add_ls_rm(runner, live_catchment):
+    _deploy_outlet(live_catchment)
+    result = runner.invoke(app, ["refresh", "add", "outlet", "--every", "30m", "--silent"])
     assert result.exit_code == 0, result.output
+    assert "Every 30 min" in result.output
+    result = runner.invoke(app, ["refresh", "add", "outlet", "--every", "1d", "--start", "06:00",
+                                 "--on", "MON,TUE,WED,THU,FRI", "--silent"])
+    assert "Weekdays at 06:00" in result.output, result.output
+    result = runner.invoke(app, ["refresh", "add", "outlet", "--continuous", "--silent"])  # replaces Every 30 min
+    assert "Continuous" in result.output, result.output
 
-
-def test_pulse_with_major(runner, live_catchment):
-    _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "pulse", "outlet", "--major", "1", "--silent"])
+    result = runner.invoke(app, ["refresh", "ls", "outlet"], env={"COLUMNS": "200"})
     assert result.exit_code == 0, result.output
+    assert "Weekdays at 06:00" in result.output and "Continuous" in result.output
+    assert "Every 30 min" not in result.output
 
-
-def test_tap_succeeds(runner, live_catchment):
-    _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "tap", "outlet", "--silent"])
+    result = runner.invoke(app, ["refresh", "rm", "outlet", "Continuous"])
     assert result.exit_code == 0, result.output
-    assert "Tap sent" in result.output
+    assert "Continuous" not in runner.invoke(app, ["refresh", "ls", "outlet"]).output
 
 
-def test_pulse_unknown_catchment_exits(runner):
-    result = runner.invoke(app, ["trigger", "pulse", "outlet", "-c", "nonexistent"])
-    assert result.exit_code != 0
+def test_refresh_add_validates(runner, live_catchment):
+    for args in (["outlet"], ["outlet", "--every", "soon"], ["outlet", "--continuous", "--start", "06:00"],
+                 ["outlet", "--every", "1d", "--on", "MON"], ["outlet", "--every", "1d", "--start", "06:00",
+                                                              "--on", "FUNDAY"]):
+        result = runner.invoke(app, ["refresh", "add", *args, "--silent"])
+        assert result.exit_code != 0, args
 
 
-def test_pulse_no_default_exits(runner):
-    result = runner.invoke(app, ["trigger", "pulse", "outlet"])
-    assert result.exit_code != 0
-
-
-# ── wave ──────────────────────────────────────────────────────────────────────
-
-
-def test_wave_succeeds(runner, live_catchment):
+def test_deprecated_trigger_commands_still_work(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "wave", "outlet", "--silent"])
-    assert result.exit_code == 0, result.output
-    assert "Wave started" in result.output
-
-
-def test_wave_unknown_catchment_exits(runner):
-    result = runner.invoke(app, ["trigger", "wave", "outlet", "-c", "nonexistent"])
-    assert result.exit_code != 0
-
-
-# ── tide ──────────────────────────────────────────────────────────────────────
-
-
-def test_tide_succeeds(runner, live_catchment):
-    _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["trigger", "tide", "outlet", "1h", "--silent"])
-    assert result.exit_code == 0, result.output
-    assert "Tide started" in result.output
-
-
-def test_tide_requires_bound(runner, live_catchment):
-    result = runner.invoke(app, ["trigger", "tide", "outlet"])
-    assert result.exit_code != 0
-
-
-def test_tide_rejects_bad_bound(runner, live_catchment):
-    result = runner.invoke(app, ["trigger", "tide", "outlet", "soon"])
-    assert result.exit_code != 0
-
-
-# ── remove ──────────────────────────────────────────────────────────────────────
-
-
-def test_remove_succeeds(runner, live_catchment):
-    _deploy_outlet(live_catchment)
-    runner.invoke(app, ["trigger", "wave", "outlet", "--silent"])
+    for args in (["pulse", "outlet"], ["tap", "outlet"], ["wave", "outlet"], ["tide", "outlet", "1h"]):
+        result = runner.invoke(app, ["trigger", *args, "--silent"])
+        assert result.exit_code == 0, result.output
+        assert "deprecated" in result.output
+    assert "Hourly" in runner.invoke(app, ["refresh", "ls", "outlet"], env={"COLUMNS": "200"}).output
     result = runner.invoke(app, ["trigger", "remove", "outlet"])
     assert result.exit_code == 0, result.output
-    assert "Trigger removed" in result.output
-
-
-def test_remove_unknown_catchment_exits(runner):
-    result = runner.invoke(app, ["trigger", "remove", "outlet", "-c", "nonexistent"])
-    assert result.exit_code != 0
+    assert "No standing Refreshes" in runner.invoke(app, ["refresh", "ls", "outlet"]).output
+    assert runner.invoke(app, ["trigger", "tide", "outlet", "soon"]).exit_code != 0
 
 
 # ── start / stop ─────────────────────────────────────────────────────────────────
@@ -144,6 +118,6 @@ def test_sleep_unknown_catchment_exits(runner):
     assert result.exit_code != 0
 
 
-def test_tide_unknown_catchment_exits(runner):
-    result = runner.invoke(app, ["trigger", "tide", "outlet", "60s", "-c", "nonexistent"])
+def test_refresh_add_unknown_catchment_exits(runner):
+    result = runner.invoke(app, ["refresh", "add", "outlet", "--every", "60s", "-c", "nonexistent"])
     assert result.exit_code != 0

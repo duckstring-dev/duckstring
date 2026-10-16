@@ -7,7 +7,7 @@ import typer
 _CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted).")
 
 # Precedence order (see plans/selector_ui.md) and the irreversible subset that needs confirmation.
-_OPS = ("kill", "sleep", "reset", "wipe", "remove", "clear", "repair", "refresh")
+_OPS = ("kill", "sleep", "reset", "wipe", "remove", "clear", "repair", "rebuild")
 _IRREVERSIBLE = {"reset", "wipe", "remove"}
 
 
@@ -41,7 +41,7 @@ def do(
     remove: bool = typer.Option(False, "--remove", help="Retire the major line, with its data, Spouts and alerts."),
     clear: bool = typer.Option(False, "--clear", help="Clear a failure and unblock downstream."),
     repair: bool = typer.Option(False, "--repair", help="Rebuild the selection now, in dependency order."),
-    refresh: bool = typer.Option(False, "--refresh", help="Rebuild from scratch on the next run."),
+    rebuild: bool = typer.Option(False, "--rebuild", help="Rebuild from scratch on the next run."),
     confirm: Optional[str] = typer.Option(None, "--confirm", help="The Catchment's name, to confirm --reset, --wipe or "
                                                                   "--remove."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the interactive confirmation prompt."),
@@ -51,7 +51,7 @@ def do(
 
     Name Ponds as name or name@major, and widen the selection with --all, --tree, --between or
     --downstream. Operations run in this order, whatever order they're given in: kill, sleep, reset, wipe,
-    remove, clear, repair, refresh. --repair can't be combined with --remove or --reset.
+    remove, clear, repair, rebuild. --repair can't be combined with --remove or --reset.
 
     --reset, --wipe and --remove can't be undone and need the Catchment's name, from --confirm or a prompt.
     --yes suppresses the prompt, so scripts must pass --confirm.
@@ -61,7 +61,7 @@ def do(
 
     ops = [name for name, on in (
         ("kill", kill), ("sleep", sleep), ("reset", reset), ("wipe", wipe),
-        ("remove", remove), ("clear", clear), ("repair", repair), ("refresh", refresh),
+        ("remove", remove), ("clear", clear), ("repair", repair), ("rebuild", rebuild),
     ) if on]
     if not ops:
         raise typer.BadParameter("select at least one operation (e.g. --sleep, --reset, --repair).")

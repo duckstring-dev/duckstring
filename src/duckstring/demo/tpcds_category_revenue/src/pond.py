@@ -4,8 +4,8 @@ Reads the **clean current state** of ``tpcds_priced.priced_sale`` (a Trickle sou
 are stripped on read), re-aggregates per category, and merges comprehensively: Duckstring diffs the new
 totals against the prior ones so only the categories whose revenue actually moved hit the changelog. An
 aggregate recomputes fully each run (the win is the small delta *out*, not less compute in) — the honest
-scope of Trickle. This is one of two Outlets off ``tpcds_priced``; run it at its own cadence (a Tide/Wave
-independent of ``tpcds_store_revenue``) to demo a single upstream feeding two paths at different rates.
+scope of Trickle. This is one of two Outlets off ``tpcds_priced``; run it at its own cadence (its own Refresh,
+independent of ``tpcds_store_revenue``'s) to demo a single upstream feeding two paths at different rates.
 """
 
 from duckstring import ripple

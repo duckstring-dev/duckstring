@@ -4,7 +4,7 @@ The single-key model is split into a **total-ordered** ladder — ``read ⊂ dem
 authorization check stays one integer comparison:
 
 - **read** — read & query data only (no ducts, no demand).
-- **demand** — read + create demand (tap/wave/pulse/tide) + connect a downstream duct.
+- **demand** — read + create demand (refresh now, standing Refreshes) + connect a downstream duct.
 - **full** — everything: deploy, the control verbs, windows, ducts, key rotation.
 
 Each route declares a *minimum* level via the ready-made dependencies ``read`` / ``demand`` / ``full``

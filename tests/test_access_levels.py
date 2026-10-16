@@ -34,7 +34,7 @@ def test_read_key_reads_but_cannot_demand_or_control(laddered):
     client, keys = laddered
     h = _bearer(keys["read"])
     assert client.get("/api/status", headers=h).status_code == 200          # read: ok
-    assert client.post("/api/ponds/x/tap", headers=h).status_code == 403    # demand: forbidden
+    assert client.post("/api/ponds/x/refresh", headers=h).status_code == 403    # demand: forbidden
     assert client.post("/api/deploy", headers=h).status_code == 403         # full: forbidden
 
 
@@ -43,7 +43,7 @@ def test_demand_key_can_solicit_but_not_control(laddered):
     h = _bearer(keys["demand"])
     assert client.get("/api/status", headers=h).status_code == 200          # read ⊂ demand
     # tap reaches the engine (404: pond 'x' undeployed) — i.e. it passed the demand gate, not 403.
-    assert client.post("/api/ponds/x/tap", headers=h).status_code == 404
+    assert client.post("/api/ponds/x/refresh", headers=h).status_code == 404
     assert client.post("/api/deploy", headers=h).status_code == 403         # full: forbidden
     assert client.post("/api/ponds/x/kill", headers=h).status_code == 403   # control is full
 
@@ -52,7 +52,7 @@ def test_full_key_passes_every_gate(laddered):
     client, keys = laddered
     h = _bearer(keys["full"])
     assert client.get("/api/status", headers=h).status_code == 200
-    assert client.post("/api/ponds/x/tap", headers=h).status_code == 404    # authorized → engine 404
+    assert client.post("/api/ponds/x/refresh", headers=h).status_code == 404    # authorized → engine 404
     assert client.post("/api/ponds/x/kill", headers=h).status_code == 404   # authorized → engine 404
 
 
@@ -180,7 +180,7 @@ def test_rotating_user_keys_leaves_duck_token(laddered):
 def test_open_mode_allows_everything(tmp_path):
     with TestClient(create_app(tmp_path)) as client:
         assert client.get("/api/status").status_code == 200
-        assert client.post("/api/ponds/x/tap").status_code == 404       # reached engine, not gated
+        assert client.post("/api/ponds/x/refresh").status_code == 404       # reached engine, not gated
         assert client.get("/api/duck/x/1/jobs").status_code == 200      # duck channel ungated when open
 
 

@@ -65,12 +65,12 @@ def test_trigger_targets_one_major_only(catchment_client):
     _deploy(catchment_client, "inlet", "2.0.0")
 
     # Explicit major: only that line runs.
-    catchment_client.post("/api/ponds/inlet/pulse", params={"major": 1})
+    catchment_client.post("/api/ponds/inlet/refresh", params={"major": 1})
     assert _pond(catchment_client, "inlet@1")["gen"] == 1
     assert _pond(catchment_client, "inlet@2")["gen"] == 0
 
     # Default: the highest deployed major.
-    catchment_client.post("/api/ponds/inlet/pulse")
+    catchment_client.post("/api/ponds/inlet/refresh")
     assert _pond(catchment_client, "inlet@1")["gen"] == 1
     assert _pond(catchment_client, "inlet@2")["gen"] == 1
 
@@ -79,14 +79,14 @@ def test_version_param_requires_selected_version(catchment_client):
     _deploy(catchment_client, "inlet", "1.0.0")
     _deploy(catchment_client, "inlet", "1.1.0")  # 1.1.0 is now the selected version of major 1
 
-    assert catchment_client.post("/api/ponds/inlet/pulse", params={"version": "1.1.0"}).status_code == 200
-    r = catchment_client.post("/api/ponds/inlet/pulse", params={"version": "1.0.0"})
+    assert catchment_client.post("/api/ponds/inlet/refresh", params={"version": "1.1.0"}).status_code == 200
+    r = catchment_client.post("/api/ponds/inlet/refresh", params={"version": "1.0.0"})
     assert r.status_code == 422
     assert "not the selected version" in r.json()["detail"]
     # Conflicting major + version is rejected; an undeployed major is 404.
-    assert catchment_client.post("/api/ponds/inlet/pulse", params={"major": 2, "version": "1.1.0"}).status_code == 422
-    assert catchment_client.post("/api/ponds/inlet/pulse", params={"major": 3}).status_code == 404
-    assert catchment_client.post("/api/ponds/ghost/pulse").status_code == 404
+    assert catchment_client.post("/api/ponds/inlet/refresh", params={"major": 2, "version": "1.1.0"}).status_code == 422
+    assert catchment_client.post("/api/ponds/inlet/refresh", params={"major": 3}).status_code == 404
+    assert catchment_client.post("/api/ponds/ghost/refresh").status_code == 404
 
 
 def test_sink_wires_to_its_pinned_source_major(catchment_client):
@@ -98,7 +98,7 @@ def test_sink_wires_to_its_pinned_source_major(catchment_client):
     assert driver.state.ponds["snk@1"].sources == ["src@1"]
 
     # A pulse on the sink solicits its pinned source line, not the newer major.
-    catchment_client.post("/api/ponds/snk/pulse")
+    catchment_client.post("/api/ponds/snk/refresh")
     assert _pond(catchment_client, "src@1")["gen"] == 1
     assert _pond(catchment_client, "src@2")["gen"] == 0
 
@@ -106,8 +106,8 @@ def test_sink_wires_to_its_pinned_source_major(catchment_client):
 def test_run_history_filters_by_major(catchment_client):
     _deploy(catchment_client, "inlet", "1.0.0")
     _deploy(catchment_client, "inlet", "2.0.0")
-    catchment_client.post("/api/ponds/inlet/pulse", params={"major": 1})
-    catchment_client.post("/api/ponds/inlet/pulse", params={"major": 2})
+    catchment_client.post("/api/ponds/inlet/refresh", params={"major": 1})
+    catchment_client.post("/api/ponds/inlet/refresh", params={"major": 2})
 
     all_runs = catchment_client.get("/api/runs", params={"pond": "inlet"}).json()["runs"]
     assert {r["id"] for r in all_runs} == {"inlet@2"}  # default resolution: highest major
@@ -166,8 +166,8 @@ def test_two_majors_execute_concurrently_e2e(tmp_path_factory, monkeypatch):
             )
             assert r.status_code == 200, r.text
 
-        httpx.post(f"{url}/api/ponds/inlet/pulse", params={"major": 1}, timeout=5.0)
-        httpx.post(f"{url}/api/ponds/inlet/pulse", params={"major": 2}, timeout=5.0)
+        httpx.post(f"{url}/api/ponds/inlet/refresh", params={"major": 1}, timeout=5.0)
+        httpx.post(f"{url}/api/ponds/inlet/refresh", params={"major": 2}, timeout=5.0)
 
         def fresh(pond_id: str) -> bool:
             ponds = httpx.get(f"{url}/api/status", timeout=5.0).json()["ponds"]

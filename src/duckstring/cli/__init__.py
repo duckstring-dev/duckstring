@@ -10,15 +10,19 @@ from . import duct as duct_cmd
 from . import lineage as lineage_cmd
 from . import pond as pond_cmd
 from . import puddle as puddle_cmd
+from . import refresh as refresh_cmd
 from . import secret as secret_cmd
 from . import serve as serve_cmd
 from . import spout as spout_cmd
+from . import trigger as trigger_cmd
+from . import window as window_cmd
 from .control import (
     clear,
     failure_budget,
     force,
     kill,
-    refresh,
+    rebuild,
+    refresh_alias,
     repair,
     reset,
     reset_contract,
@@ -29,8 +33,6 @@ from .data import delete_object, delete_table, get, get_object, objects, query
 from .deploy import deploy
 from .deploy import remove as remove_pond
 from .status import status
-from .trigger import pulse, remove, tap, tide, wave
-from .window import app as window_app
 
 app = typer.Typer(help="Duckstring CLI", no_args_is_help=True, add_completion=True)
 
@@ -52,23 +54,13 @@ def _main(
 ) -> None:
     pass
 
-trigger_app = typer.Typer(
-    help="Create demand on a Pond: tap, wave, pulse, tide, and windows.",
-    no_args_is_help=True,
-)
-trigger_app.command("tap")(tap)
-trigger_app.command("pulse")(pulse)
-trigger_app.command("wave")(wave)
-trigger_app.command("tide")(tide)
-trigger_app.command("remove")(remove)
-trigger_app.add_typer(window_app, name="window")
-
 control_app = typer.Typer(
-    help="Act directly on a Pond's execution: wake, force, refresh, repair, sleep, kill, clear, reset.",
+    help="Act directly on a Pond's execution: wake, force, rebuild, repair, sleep, kill, clear, reset.",
     no_args_is_help=True,
 )
 control_app.command("force")(force)
-control_app.command("refresh")(refresh)
+control_app.command("rebuild")(rebuild)
+control_app.command("refresh", hidden=True)(refresh_alias)  # the pre-0.7 name, for one release
 control_app.command("repair")(repair)
 control_app.command("reset")(reset)
 control_app.command("wake")(wake)
@@ -85,7 +77,9 @@ catchment_cmd.app.add_typer(duct_cmd.app, name="duct")
 app.add_typer(catchment_cmd.app, name="catchment")
 app.add_typer(pond_cmd.app, name="pond")
 app.add_typer(puddle_cmd.app, name="puddle")
-app.add_typer(trigger_app, name="trigger")
+app.add_typer(refresh_cmd.app, name="refresh")
+app.add_typer(window_cmd.app, name="window")
+app.add_typer(trigger_cmd.app, name="trigger")  # hidden: the pre-0.7 group, for one release
 app.add_typer(control_app, name="control")
 app.add_typer(duck_cmd.app, name="duck")
 app.add_typer(spout_cmd.app, name="spout")

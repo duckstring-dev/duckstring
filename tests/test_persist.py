@@ -252,7 +252,7 @@ def test_driver_persist_event_releases_cross_pool_sink(tmp_path, monkeypatch):
     with driver.lock:
         ss = driver.state.pond_states["sales@1"]
         ss.start_f = ss.end_f = t0
-    driver.tap("rpt@1")
+    driver.refresh_now("rpt@1", at=t0)  # ask for the Source's freshness: it has it
     begin_runs = [j for j in driver.jobs.get("rpt@1", []) if j.get("kind") == "begin_run"]
     assert not begin_runs, "the cross-Pool sink must hold until the source's mirror lands"
 
@@ -297,7 +297,7 @@ def test_begin_run_job_carries_each_sources_published_freshness(tmp_path):
     with driver.lock:
         ss = driver.state.pond_states["sales@1"]
         ss.start_f = ss.end_f = ss.changed_f = ss.persisted_f = t0
-    driver.tap("rpt@1")
+    driver.refresh_now("rpt@1", at=t0)
     job = next(j for j in driver.jobs["rpt@1"] if j["kind"] == "begin_run")
     assert job["source_f"] == {"sales": t0.isoformat()}
     # A pass (end_f advanced, nothing written) must not raise the claim above the content anchor.

@@ -162,19 +162,19 @@ def _deploy_inlet(url: str) -> None:
 @pytest.mark.timeout(30)
 def test_window_cli_roundtrip(runner, live_catchment):
     _deploy_inlet(live_catchment)
-    r = runner.invoke(app, ["trigger", "window", "tx", "add", "-n", "nightly", "-s", "02:00", "-d", "3h", "-e", "1d"])
+    r = runner.invoke(app, ["window", "add", "tx", "-n", "nightly", "-s", "02:00", "-d", "3h", "-e", "1d"])
     assert r.exit_code == 0, r.output
     assert "Window 'nightly' added" in r.output
 
-    r = runner.invoke(app, ["trigger", "window", "tx", "list"])
+    r = runner.invoke(app, ["window", "ls", "tx"])
     assert r.exit_code == 0, r.output
     assert "nightly" in r.output and "3h" in r.output
 
-    r = runner.invoke(app, ["trigger", "window", "tx", "remove", "nightly"])
+    r = runner.invoke(app, ["window", "rm", "tx", "nightly"])
     assert r.exit_code == 0, r.output
     assert "removed" in r.output
 
-    r = runner.invoke(app, ["trigger", "window", "tx", "list"])
+    r = runner.invoke(app, ["window", "ls", "tx"])
     assert "No windows" in r.output
 
 
@@ -182,7 +182,7 @@ def test_window_cli_roundtrip(runner, live_catchment):
 def test_window_cli_defaults(runner, live_catchment):
     # Only --name and --every required: --start defaults to 00:00 today, --duration to --every.
     _deploy_inlet(live_catchment)
-    r = runner.invoke(app, ["trigger", "window", "tx", "add", "-n", "back2back", "-e", "1h"])
+    r = runner.invoke(app, ["window", "add", "tx", "-n", "back2back", "-e", "1h"])
     assert r.exit_code == 0, r.output
 
     windows = httpx.get(f"{live_catchment}/api/ponds/tx/windows").json()["windows"]
@@ -191,3 +191,14 @@ def test_window_cli_defaults(runner, live_catchment):
     assert w["duration_seconds"] == 3600        # defaulted to the --every (1h) interval
     assert w["freq_unit"] == "HOUR" and w["freq_interval"] == 1
     assert w["start_anchor"].endswith("T00:00:00+00:00")  # midnight today UTC
+
+
+@pytest.mark.timeout(30)
+def test_deprecated_trigger_window_shape_still_works(runner, live_catchment):
+    _deploy_inlet(live_catchment)
+    r = runner.invoke(app, ["trigger", "window", "tx", "add", "-n", "old", "-e", "1h"])
+    assert r.exit_code == 0, r.output
+    assert "deprecated" in r.output and "Window 'old' added" in r.output
+    assert "old" in runner.invoke(app, ["trigger", "window", "tx", "list"]).output
+    assert runner.invoke(app, ["trigger", "window", "tx", "remove", "old"]).exit_code == 0
+    assert "No windows" in runner.invoke(app, ["window", "ls", "tx"]).output

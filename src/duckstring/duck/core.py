@@ -1,6 +1,6 @@
 """DuckCore — the transport-free heart of a Duck.
 
-Wires the push-only :class:`~duckstring.engine.worker.WorkerState` to the run ledger and an outgoing
+Wires the :class:`~duckstring.engine.worker.WorkerState` to the run ledger and an outgoing
 event buffer. It is driven by two inputs — ``begin_run(F)`` from the Catchment and ``ripple_completed``
 from the executor — and produces two outputs — the list of Ripple **names to launch** and buffered
 **events** to report. Threads, the executor, and HTTP live in :mod:`.executor` / :mod:`.client` /
@@ -241,9 +241,9 @@ class DuckCore:
         return launched
 
     def idle(self) -> bool:
-        """True when no Ripple is running and no target is outstanding — the Pond has quiesced and the
+        """True when no Ripple is running and no demand is outstanding — the Pond has quiesced and the
         Duck may shut down (once its event buffer has drained)."""
-        return all(not s.is_running and not s.targets for s in self.state.states.values())
+        return all(not s.is_running and not s.demand for s in self.state.states.values())
 
     def flush(self, send) -> None:
         """Try to deliver buffered events in order via ``send(payload) -> bool``, **stopping at the

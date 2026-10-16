@@ -165,15 +165,16 @@ def get_ripple(
 
 
 def _maybe_tap_on_get(request: Request, pond: str, major: Optional[int], version: Optional[str]) -> None:
-    """If the Pond is open with tap-on-get, fire a Tap (the snapshot is served first — we never block
-    on freshness). Best-effort: a data query must never fail because of this."""
+    """If the Pond is open with tap-on-get, send a one-shot Refresh (the snapshot is served first — we never
+    block on freshness). Best-effort: a data query must never fail because of this. Superseded by Taps
+    (plans/taps.md)."""
     driver = getattr(request.app.state, "driver", None)
     if driver is None:
         return
     try:
         key = driver.resolve(pond, major, version)
         if driver.pond_tap_on_get(key):
-            driver.tap(key)
+            driver.refresh_now(key)
     except Exception:
         pass
 
@@ -771,5 +772,5 @@ def _missing_table_hint(con, pond: str, table: str) -> str:
         tables = []
     if not tables:
         return (f"'{pond}' hasn't published any tables yet. Run it first, for example with "
-                f"`duckstring trigger pulse {pond}`.")
+                f"`duckstring refresh {pond}`.")
     return f"'{pond}' has no table '{table}'. Its tables: {', '.join(tables)}."

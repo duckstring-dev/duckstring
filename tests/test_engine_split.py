@@ -1,5 +1,5 @@
-"""Tests for the engine split: the Catchment brain emits the right Pond Run commands, the push-only
-Duck engine completes runs, and the run ledger persists/reconciles. The full composed behaviour stays
+"""Tests for the engine split: the Catchment brain emits the right Pond Run commands, the Duck engine
+completes runs, and the run ledger persists/reconciles. The full composed behaviour stays
 covered by test_engine.py; here we exercise the two halves the runtime actually deploys.
 """
 
@@ -18,9 +18,8 @@ from duckstring.engine import (
     RippleState,
     complete_ripple,
     drain_begin_runs,
-    pulse_pond,
+    refresh_now,
     sentinel,
-    tap_pond,
     worker,
 )
 from duckstring.engine import pond as ledger
@@ -85,29 +84,15 @@ class CatchmentSim:
 
 
 @pytest.mark.timeout(5)
-def test_catchment_emits_begin_run_per_pond_run():
-    # A Tap should make p1 run 3 Pond Runs (its ripple depth) and p2 one — emitted as BeginRuns.
+def test_catchment_refresh_one_begin_run_each():
     sim = CatchmentSim(chain_state(), {r: secs(1) for r in ("r1", "r2", "r3", "s1")})
-    sim.trigger(tap_pond, "p2")
-    sim.run(20)
-    p1_runs = [b for b in sim.begin_runs if b.pond_id == "p1"]
-    p2_runs = [b for b in sim.begin_runs if b.pond_id == "p2"]
-    assert len(p1_runs) == 3
-    assert len(p2_runs) == 1
-    # Each BeginRun freshness matches the pond's recorded run starts.
-    assert sim.state.pond_states["p1"].runs_completed == 3
-
-
-@pytest.mark.timeout(5)
-def test_catchment_pulse_one_begin_run_each():
-    sim = CatchmentSim(chain_state(), {r: secs(1) for r in ("r1", "r2", "r3", "s1")})
-    sim.trigger(pulse_pond, "p2")
+    sim.trigger(refresh_now, "p2")
     sim.run(20)
     assert len([b for b in sim.begin_runs if b.pond_id == "p1"]) == 1
     assert len([b for b in sim.begin_runs if b.pond_id == "p2"]) == 1
 
 
-# ─── Duck push engine ─────────────────────────────────────────────────────────
+# ─── Duck engine ──────────────────────────────────────────────────────────────
 
 
 def sales_parents() -> dict[str, list[str]]:
@@ -146,8 +131,8 @@ def test_worker_pipelines_two_runs():
     s = worker.begin_run(s, T0)
     s = worker.begin_run(s, T0 + secs(1))
     # daily/tiers each have two targets queued (one per run).
-    assert len(s.states["daily"].targets) == 2
-    assert len(s.states["join"].targets) == 2
+    assert len(s.states["daily"].demand) == 2
+    assert len(s.states["join"].demand) == 2
 
 
 def _run_to_join(s: worker.WorkerState) -> worker.WorkerState:
@@ -223,6 +208,6 @@ def test_ledger_roundtrip_and_recovery(tmp_path):
     s = ledger.load_state(con, sales_parents())
     assert s.states["daily"].end_f == f
     s = worker.begin_run(s, f)
-    assert s.states["daily"].targets == []  # already complete for F → not re-run
-    assert s.states["tiers"].targets == []
-    assert s.states["join"].targets == [f]  # incomplete → will re-run
+    assert s.states["daily"].demand == []  # already complete for F → not re-run
+    assert s.states["tiers"].demand == []
+    assert s.states["join"].demand == [f]  # incomplete → will re-run

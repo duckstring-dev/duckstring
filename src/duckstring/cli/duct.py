@@ -1,6 +1,6 @@
 """Cross-Catchment commands under ``duckstring catchment``:
 
-* ``open`` / ``close`` — producer side: expose a Pond to demand from any source (+ tap-on-get).
+* ``open`` / ``close`` — producer side: expose a Pond to demand from any source (+ the deprecated tap-on-get).
 * ``duct create/destroy/sync/ls/add/remove`` — consumer side: open a conduit into an upstream
   Catchment and choose which of its Ponds to draw.
 
@@ -28,8 +28,9 @@ def open_pond(
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
-    tap_on_get: bool = typer.Option(False, "--tap-on-get", help="Also send a Tap on every query of the Pond, after "
-                                                                "serving it."),
+    tap_on_get: bool = typer.Option(False, "--tap-on-get", hidden=True,
+                                    help="Deprecated (superseded by Taps): also refresh the Pond on every query of "
+                                         "it, after serving it."),
 ) -> None:
     """Open a Pond to demand from other Catchments."""
     from . import _http

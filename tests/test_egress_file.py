@@ -438,7 +438,7 @@ def test_egress_e2e_file_snapshot(tmp_path_factory, monkeypatch):
         r = httpx.post(f"{url}/api/ponds/sales/spouts", json={"destination": f"file://{out}"}, timeout=5.0)
         assert r.status_code == 200, r.text
 
-        httpx.post(f"{url}/api/ponds/sales/pulse", timeout=5.0)
+        httpx.post(f"{url}/api/ponds/sales/refresh", timeout=5.0)
 
         landed = out / "revenue.parquet"
         deadline = time.monotonic() + 45

@@ -324,7 +324,7 @@ def test_a_sink_runs_pins_are_recorded_and_bound_its_sources_retention(tmp_path)
     with driver.lock:
         ss = driver.state.pond_states["sales@1"]
         ss.start_f = ss.end_f = ss.changed_f = ss.persisted_f = F1
-    driver.tap("rpt@1")
+    driver.refresh_now("rpt@1", at=F1)  # ask for the Source's freshness: it has it
     job = next(j for j in driver.jobs["rpt@1"] if j["kind"] == "begin_run")
     assert job["source_f"] == {"sales": F1.isoformat()}
     row = driver.db.execute("SELECT f, source_pins FROM pond_run WHERE status = 'running'").fetchone()
@@ -356,7 +356,7 @@ def test_a_stranded_running_row_does_not_hold_versions(tmp_path):
     with driver.lock:
         ss = driver.state.pond_states["sales@1"]
         ss.start_f = ss.end_f = ss.changed_f = ss.persisted_f = F1
-    driver.tap("rpt@1")
+    driver.refresh_now("rpt@1", at=F1)  # ask for the Source's freshness: it has it
     with driver.lock:
         driver.state.pond_states["sales@1"].changed_f = F3
         rs = driver.state.pond_states["rpt@1"]

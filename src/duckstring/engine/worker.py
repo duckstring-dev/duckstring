@@ -1,12 +1,12 @@
-"""The Duck engine: push-only execution of Pond Runs for a single Pond.
+"""The Duck engine: execution of Pond Runs for a single Pond.
 
-Given ``begin_run(F)`` from the Catchment it stamps every Ripple with target ``F`` and drives them to
-completion (push), with no pull, no triggers, and no notion of Sources — those all live in the
-Catchment. Holding several targets at once lets a Pond's roots run ahead of its leaf through the
+Given ``begin_run(F)`` from the Catchment it asks every Ripple for ``F`` and drives them to completion,
+with no Refreshes and no notion of Sources — those live in the Catchment. Holding several demanded
+freshnesses at once lets a Pond's roots run ahead of its leaf through the
 bottleneck (intra-Pond pipelining) with no cap. It is *told* when a Ripple finishes
 (:func:`complete_ripple`); when every leaf reaches a freshness it reports a :class:`RunCompleted`.
 
-This is what gives the Duck autonomy: a started Pond Run finishes to completion from the targets +
+This is what gives the Duck autonomy: a started Pond Run finishes to completion from its demand +
 ledger alone, even if the Catchment is unreachable. Ripples are keyed by **name** (matching the run
 ledger and the deployed code).
 """
@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .core import NEVER, RippleState, min_target
+from .core import NEVER, RippleState, min_demand
 
 
 @dataclass(frozen=True)
@@ -78,10 +78,10 @@ def _leaves(s: WorkerState) -> list[str]:
 
 def source_f(s: WorkerState, name: str) -> datetime:
     """Freshness available to a Ripple. A root's input is the Pond Run freshness it is being asked
-    for (the oldest unsatisfied target); a non-root inherits min(required) / max(optional) parents."""
+    for (the oldest unsatisfied demand); a non-root inherits min(required) / max(optional) parents."""
     parents = s.parents[name]
     if not parents:
-        return min_target(s.states[name].targets) or NEVER  # root: the Pond Run being initiated
+        return min_demand(s.states[name].demand) or NEVER  # root: the Pond Run being initiated
     opt = s.optional.get(name, set())
     req = [p for p in parents if p not in opt]
     if req:
@@ -92,7 +92,7 @@ def source_f(s: WorkerState, name: str) -> datetime:
 def begin_run(
     state: WorkerState, f: datetime, retry_immediately: int | None = None, force: bool = False
 ) -> WorkerState:
-    """Start a Pond Run at freshness ``f``: stamp every Ripple with target ``f`` (push to completion),
+    """Start a Pond Run at freshness ``f``: ask every Ripple for ``f`` (run to completion),
     and give this Run a fresh Ripple-retry budget. ``retry_immediately`` overrides the state default
     (the Catchment passes the live budget per Run, since it is editable while the Duck is warm).
     ``force`` recomputes: it resets every Ripple's ``end_f`` (and the completion watermark) so they
@@ -105,8 +105,8 @@ def begin_run(
         for rs in s.states.values():
             rs.end_f = NEVER
     for rs in s.states.values():
-        if f > rs.end_f and f not in rs.targets:
-            rs.targets.append(f)
+        if f > rs.end_f and f not in rs.demand:
+            rs.demand.append(f)
     return s
 
 
@@ -114,7 +114,7 @@ def _can_start(s: WorkerState, name: str) -> bool:
     rs = s.states[name]
     if rs.is_running:
         return False
-    mt = min_target(rs.targets)
+    mt = min_demand(rs.demand)
     return mt is not None and source_f(s, name) >= mt
 
 
@@ -133,7 +133,7 @@ def sentinel(now: datetime, state: WorkerState) -> tuple[WorkerState, list[str]]
                 rs.is_running = True
                 rs.started_at = now
                 rs.runs_started += 1
-                rs.targets = [t for t in rs.targets if t > sf]
+                rs.demand = [t for t in rs.demand if t > sf]
                 launched.append(name)
                 changed = True
     return s, launched
@@ -173,8 +173,8 @@ def fail_ripple(
     rs.started_at = None
     if retry and s.immediate_left.get(f, 0) > 0:
         s.immediate_left[f] -= 1
-        if f > rs.end_f and f not in rs.targets:
-            rs.targets.append(f)  # retry the same Ripple, same Run
+        if f > rs.end_f and f not in rs.demand:
+            rs.demand.append(f)  # retry the same Ripple, same Run
         return s, None
     s.immediate_left.pop(f, None)
     return s, RunFailed(f, name)

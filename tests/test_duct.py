@@ -93,14 +93,14 @@ def test_draw_transfers_on_demand_and_advances_freshness(tmp_path):
     d = _driver(tmp_path)
     d.create_duct("up", "http://up", None)
     d.add_duct_pond("up", "sales", 1)
-    f = _now()
 
     # No demand yet: a fresh upstream alone does not trigger a transfer.
-    d.observe_remote("sales@1", f)
+    d.observe_remote("sales@1", _now())
     assert d.take_transfers() == []
 
-    # Demand + fresh upstream → a transfer is queued, and the draw ripple shows running.
-    d.tap("sales@1")
+    # Demand + an upstream at least as fresh as asked → a transfer is queued, and the draw ripple shows running.
+    d.refresh_now("sales@1")
+    f = _now()
     d.observe_remote("sales@1", f)
     transfers = d.take_transfers()
     assert [t["key"] for t in transfers] == ["sales@1"]
@@ -134,9 +134,9 @@ def test_draw_freshness_cascades_to_a_local_sink(tmp_path):
 
     assert d.state.ponds["snk@1"].sources == ["sales@1"]
 
-    f = _now()
-    d.tap("snk@1")  # demand cascades up to the draw (solicit)
-    assert any(x["key"] == "sales@1" and (x["pull_m"] or x["target"]) for x in d.draws())
+    d.refresh_now("snk@1")  # demand cascades up to the draw (solicit)
+    assert any(x["key"] == "sales@1" and x["demand"] for x in d.draws())
+    f = _now()  # the upstream reaches at least the requested freshness
 
     d.observe_remote("sales@1", f)
     t = d.take_transfers()[0]
@@ -145,21 +145,20 @@ def test_draw_freshness_cascades_to_a_local_sink(tmp_path):
     assert d.state.pond_states["snk@1"].start_f == f
 
 
-def test_pending_pull_epoch_survives_reload(tmp_path):
-    # A pull-driven Draw waiting on its upstream holds pull_m as its solicitation epoch; it must
-    # survive a Catchment restart (persisted on pond_state), or the draw would stop soliciting.
+def test_pending_draw_demand_survives_reload(tmp_path):
+    # A Draw waiting on its upstream holds its demand epoch; it must survive a Catchment restart (persisted in
+    # pond_demand), or the Draw would stop asking upstream.
     db = connect(tmp_path / "duck.db")
     migrate(db)
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
     d.create_duct("up", "http://up", None)
     d.add_duct_pond("up", "sales", 1)
-    d.tap("sales@1")  # pending pull (upstream not yet fresh) → pull_m minted
-    pull_m = d.state.pond_states["sales@1"].pull_m
-    assert pull_m != NEVER
+    d.refresh_now("sales@1")  # pending (upstream not yet fresh)
+    [epoch] = d.state.pond_states["sales@1"].demand
 
     d.reload()  # simulate a restart: rebuild engine state from the DB
-    assert d.state.pond_states["sales@1"].pull_m == pull_m
-    assert d.draws()[0]["pull_m"] == pull_m.isoformat()  # still solicits with the original epoch
+    assert d.state.pond_states["sales@1"].demand == [epoch]
+    assert d.draws()[0]["demand"] == epoch.isoformat()  # still asks with the original epoch
 
 
 def test_remove_and_destroy_clean_up_draw_rows(tmp_path):
@@ -204,13 +203,13 @@ def test_missing_source_blocks_pond_and_downstream(tmp_path):
     assert d.state.pond_states["reports@1"].is_blocked      # blocked via its required Source sales
 
 
-def test_pulse_does_not_run_a_pond_with_a_missing_source(tmp_path):
+def test_refresh_does_not_run_a_pond_with_a_missing_source(tmp_path):
     d = _demo_minus_products(tmp_path)
-    d.pulse("reports@1")  # the scenario: pulse the set before products is available
-    # Nothing downstream of the gap runs, and the push does not cascade through sales to transactions.
+    d.refresh_now("reports@1")  # the scenario: refresh the set before products is available
+    # Nothing downstream of the gap runs, and the demand does not cascade through sales to transactions.
     assert d.state.pond_states["sales@1"].start_f == NEVER
     assert d.state.pond_states["transactions@1"].start_f == NEVER
-    assert d.state.pond_states["sales@1"].targets == []
+    assert d.state.pond_states["sales@1"].demand == []
 
 
 def test_drawing_the_missing_source_unblocks(tmp_path):
@@ -237,7 +236,7 @@ def test_status_exposes_failure_message(tmp_path):
     migrate(db)
     _register(db, "src", "1.0.0", "inlet", "ponds/src/1.0.0", _cfg(), _RIPPLES)
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
-    d.tap("src@1")  # start a run so there is something in flight to fail
+    d.refresh_now("src@1")  # start a run so there is something in flight to fail
     d.on_event("src@1", {"kind": "pond_failed", "error": "boom: ledger write failed"})
     entry = next(p for p in d.status()["ponds"] if p["id"] == "src@1")
     assert entry["status"] == "failed"
@@ -330,7 +329,7 @@ def test_notify_fires_on_demand_not_on_poller_observe(tmp_path):
     calls: list = []
     d.set_notify(lambda: calls.append(1))
 
-    d.tap("sales@1")          # demand → wake
+    d.refresh_now("sales@1")          # demand → wake
     assert len(calls) >= 1
     n = len(calls)
     d.observe_remote("sales@1", _now())  # poller-driven → must NOT wake
@@ -626,7 +625,7 @@ def _mock_upstream(f_iso: str, *, status="idle", tapped: list | None = None):
             ], "edges": []})
         if path == "/api/draw/sales/1":
             return httpx.Response(200, content=zbuf.getvalue(), headers={"content-type": "application/zip"})
-        if path == "/api/ponds/sales/tap":
+        if path == "/api/ponds/sales/pulse":  # the poller's deprecated route, for one release
             if tapped is not None:
                 tapped.append(request.url.params.get("major"))
             return httpx.Response(200, json={"ok": True})
@@ -639,7 +638,7 @@ def test_poller_mirrors_fetches_and_lands_parquet(tmp_path):
     d = _driver(tmp_path)
     d.create_duct("up", "http://up", None)
     d.add_duct_pond("up", "sales", 1)
-    d.tap("sales@1")  # downstream demand
+    d.refresh_now("sales@1")  # downstream demand
     f = _now()
 
     transport = _mock_upstream(f.isoformat())
@@ -660,7 +659,7 @@ def test_poller_solicits_upstream_when_demand_unmet(tmp_path):
     d = _driver(tmp_path)
     d.create_duct("up", "http://up", None)
     d.add_duct_pond("up", "sales", 1)
-    d.tap("sales@1")  # demand, but the upstream has nothing fresher yet
+    d.refresh_now("sales@1")  # demand, but the upstream has nothing fresher yet
 
     tapped: list = []
     transport = _mock_upstream(datetime.min.replace(tzinfo=timezone.utc).isoformat(), tapped=tapped)
@@ -668,17 +667,17 @@ def test_poller_solicits_upstream_when_demand_unmet(tmp_path):
     asyncio.run(poll_once(d, tmp_path, client))
     asyncio.run(client.aclose())
 
-    assert tapped == ["1"]  # forwarded a Tap upstream for major 1
+    assert tapped == ["1"]  # forwarded the demand upstream for major 1
 
 
 def test_poller_forwards_push_demand_with_its_epoch(tmp_path):
-    # A push target at epoch T on the draw is forwarded upstream as a pulse carrying `at=T`, so the
+    # Demand at epoch T on the draw is forwarded upstream carrying `at=T`, so the
     # upstream Inlet mints the same freshness (minted-freshness across the duct).
     d = _driver(tmp_path)
     d.create_duct("up", "http://up", None)
     d.add_duct_pond("up", "sales", 1)
     T = _now()
-    d.pulse("sales@1", at=T)
+    d.refresh_now("sales@1", at=T)
 
     seen: dict = {}
 
@@ -697,12 +696,12 @@ def test_poller_forwards_push_demand_with_its_epoch(tmp_path):
 
 
 def test_poller_does_not_resend_the_same_demand(tmp_path):
-    # The same push target must be forwarded once, not on every cycle — re-sending it would re-add the
-    # target on a mid-run upstream and cause a duplicate run.
+    # The same demand must be forwarded once, not on every cycle — re-sending it would re-add it on a
+    # mid-run upstream and cause a duplicate run.
     d = _driver(tmp_path)
     d.create_duct("up", "http://up", None)
     d.add_duct_pond("up", "sales", 1)
-    d.pulse("sales@1", at=_now())  # a push target on the draw; upstream not yet fresh
+    d.refresh_now("sales@1", at=_now())  # demand on the draw; upstream not yet fresh
 
     pulses: list = []
 
@@ -731,7 +730,7 @@ def test_pulse_at_makes_an_inlet_stamp_the_forwarded_epoch(tmp_path):
     client = _client(d)
 
     T = _now() - timedelta(seconds=5)  # an earlier demand epoch
-    assert client.post("/api/ponds/transactions/pulse", params={"at": T.isoformat()}).json() == {"ok": True}
+    assert client.post("/api/ponds/transactions/refresh", params={"at": T.isoformat()}).json() == {"ok": True}
     assert d.state.pond_states["transactions@1"].start_f == T
 
 
@@ -756,14 +755,14 @@ def test_duct_pulses_are_paced_by_the_upstream_throttle(tmp_path):
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
     t1, t2, t3, t4 = (_now() - timedelta(seconds=n) for n in (40, 30, 20, 10))
 
-    d.pulse("out@1", at=t1)
+    d.refresh_now("out@1", at=t1)
     _complete_run(d, "inlet@1")  # slow starts at t1
-    d.pulse("out@1", at=t2)  # one demand during slow's run: forwarded, so the Inlet runs at t2
+    d.refresh_now("out@1", at=t2)  # one demand during slow's run: forwarded, so the Inlet runs at t2
     _complete_run(d, "inlet@1")
-    d.pulse("out@1", at=t3)  # the second in the same run: slow is the bottleneck and holds it
-    d.pulse("out@1", at=t4)  # the Outlet is throttled now and holds it
+    d.refresh_now("out@1", at=t3)  # the second in the same run: slow is the bottleneck and holds it
+    d.refresh_now("out@1", at=t4)  # the Outlet is throttled now and holds it
     inlet = d.state.pond_states["inlet@1"]
-    assert inlet.runs_started == 2 and inlet.targets == []
+    assert inlet.runs_started == 2 and inlet.demand == []
     assert d.state.pond_states["slow@1"].throttle.held == 1
     assert d.state.pond_states["out@1"].throttle.held == 1
 

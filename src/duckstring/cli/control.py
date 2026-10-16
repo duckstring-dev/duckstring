@@ -4,7 +4,8 @@ from typing import Optional
 
 import typer
 
-from .trigger import _SILENT_HELP, _WATCH_HELP, _post_trigger
+from .refresh import _SILENT_HELP, _WATCH_HELP
+from .refresh import send_and_watch as _post_trigger
 
 _CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted).")
 _MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest).")
@@ -42,12 +43,12 @@ def force(
     _post_trigger(cfg, pond, major, version, silent, watch, "force", {}, "Forced.", one_shot=True)
 
 
-def refresh(
+def rebuild(
     pond: str = typer.Argument(..., help="Name of the Pond to rebuild on its next run."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
-    clear: bool = typer.Option(False, "--clear", help="Remove a pending refresh instead."),
+    clear: bool = typer.Option(False, "--clear", help="Remove a pending rebuild instead."),
 ) -> None:
     """Rebuild the Pond from scratch on its next run.
 
@@ -58,10 +59,22 @@ def refresh(
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
     _http.post(
-        f"{cfg['url']}/api/ponds/{pond}/refresh", auth=cfg,
+        f"{cfg['url']}/api/ponds/{pond}/rebuild", auth=cfg,
         params={**_http.pond_params(major, version), "clear": clear}, json={},
     )
-    typer.echo(f"Refresh cleared on '{pond}'." if clear else f"'{pond}' will refresh on its next run.")
+    typer.echo(f"Rebuild cleared on '{pond}'." if clear else f"'{pond}' will rebuild on its next run.")
+
+
+def refresh_alias(
+    pond: str = typer.Argument(...),
+    catchment: Optional[str] = _CATCHMENT,
+    major: Optional[int] = _MAJOR,
+    version: Optional[str] = _VERSION,
+    clear: bool = typer.Option(False, "--clear"),
+) -> None:
+    """Deprecated: `duckstring control rebuild`."""
+    typer.echo("`duckstring control refresh` is now `duckstring control rebuild`.", err=True)
+    rebuild(pond, catchment, major, version, clear)
 
 
 def reset(
@@ -116,7 +129,7 @@ def sleep(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Clear the Pond's demand and remove its standing trigger. Runs in progress finish."""
+    """Clear the Pond's demand and remove its standing Refreshes. Runs in progress finish."""
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)
