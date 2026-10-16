@@ -66,6 +66,14 @@ Duckstring paces the requests to the slowest step, so each Pond runs only as oft
 
 A continuous Refresh doesn't always give the freshest data on average. The pacing starts the Ponds before the slowest step as soon as it starts a run, so their output can wait for it to finish, adding up to one run of that step to the data's age. Where that matters, a Refresh every N a little longer than the slowest step can be fresher on average for less compute, depending on how the run times before the slowest step line up with it. The [Playground](https://playground.duckstring.com)'s run charts show the data's age under each.
 
+## Only while it's used
+
+Some data only matters while someone is looking at it, such as a dashboard opened a few times a day. Rather than a standing Refresh, give the app a [Tap](serving_apps_with_taps.md): its queries refresh the Pond when the data is older than you allow, and nothing runs while the app is idle.
+
+```bash
+duckstring tap add reports --name dashboard --fresh-within 1h
+```
+
 ## Batch sources
 
 Many sources update at known times: a warehouse export that lands overnight, a file drop at the end of each hour. Running an Inlet between updates wastes work, since there's nothing new to read. A window declares when the Inlet has new data:

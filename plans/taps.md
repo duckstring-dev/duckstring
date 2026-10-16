@@ -1,7 +1,9 @@
 # Taps: freshness that follows usage
 
-Status: **planned, not built.** Agreed in outline with the author on 2026-10-14, as the second stage after
-`plans/refresh-triggers.md` (which it depends on: Refresh, demand, and the floating refresh's clock).
+Status: **built 2026-10-17** on the `throttle-join-alignment` branch, with the Refresh rework, so the whole
+orchestration change ships at once. Agreed in outline with the author on 2026-10-14, as the second stage after
+`plans/refresh-triggers.md` (which it depends on: Refresh, demand, and the floating refresh's clock). See "As
+built" at the end for where it departs from the plan below and how the open questions were settled.
 
 ## Why
 
@@ -159,3 +161,47 @@ quiet. It needs only the demand-at-now path the playground already has, plus the
 - **Rate limiting** per Tap, or is the throttle enough (it bounds runs, not query load on the serving core)?
 - ~~The policy clock~~: settled 2026-10-14. `--fresh-within` and `--every` share one clock, the later of the
   newest request and the Pond's freshness, so neither refreshes data something else already keeps fresh.
+
+## As built (2026-10-17)
+
+Where it lives: `engine.tap_due`/`tap_wait_target` (the policy, pure), `catchment/taps.py` (`TapsMixin` on the
+Driver: CRUD, the in-memory key-hash index auth reads without the lock, the per-query step, counters,
+`gate_blocking` for the thread-based wires), `auth.TapScope` + `Principal.tap` + `principal_for_key` + the
+`read_or_tap` guard, `serving.build_serving_con(tap=)` (cached per Tap in `ServingCache`), `routes/tap.py`
+(management + the async `tap_gate`), `cli/tap.py`, migration `032_tap.sql`, `frontend/.../TapEditor.tsx`. Tests:
+`tests/test_tap.py`, `test_runtime.test_a_tap_keeps_reports_fresh_while_an_app_queries_it`.
+
+Departures and settled questions:
+
+- **A waiting request covers later queries.** The plan's `fresh_within 0` sent a request on every query. In
+  practice every query in a Run's span then adds its own demand entry (each a distinct `now`), and each send runs
+  the Driver's `_process`, which rewrites `pond_demand` for every Pond: a busy app would serialise on SQLite and grow
+  the demand set without bound. So a query is not due while a request is already waiting for the Pond to start a
+  Run (`max(demand) > start_f`), for any `fresh_within`. A busy app therefore adds at most one request beyond the Run
+  in flight, which is what the throttle would allow through anyway. For `fresh_within` longer than the pipeline's
+  run time this is the same as the plan.
+- **`--wait` waits for "fresh within D"**, not just for the request the query sent: the target is
+  `min(now + Pond.D - D, covering)`, where `covering` is the request it sent, the request already waiting, or the
+  Run in flight, so the target is always one something is working towards. Allowed with any `fresh_within`. No wait
+  on a failed, killed or blocked Pond. The timeout has no default: `--wait` takes a duration.
+- **One Pond per Tap.** An app reading several Ponds holds several keys (one pg connection each). Several Ponds per
+  Tap stays open: it needs a per-Pond clock inside one principal and a multi-schema scoped connection.
+- **`tap_on_get`** was dropped with Refresh (no conversion), per the author's no-compatibility call.
+- **No rate limiting.** The throttle bounds runs; query load on the serving core is unbounded per Tap, as for any key.
+- **A Tap's key outside its routes gets 403** (authenticated, not permitted), where the plan said 401; 401 is kept
+  for a missing, unknown, rotated or removed key.
+- **Routes.** The key works on `POST /api/query` (where `pond` becomes optional), `POST /api/serve/query` and
+  `GET /api/serve`. The web UI's viewer routes (`/api/query/page|count|history`) stay read-level only. Removal and
+  rotation are `POST .../taps/{tap}/remove|rotate`, matching the Spout and Refresh routes, in place of `DELETE`.
+- **Open mode.** A Tap's key is recognised on an open Catchment (it adds a Refresh, not access), but the pg wire
+  never asks an open Catchment's clients for a password, so a pg connection there can't be a Tap's.
+- **Scope.** A Tap reads only exposed tables, and its connection presents them as `{pond}_v{major}.t`, `{pond}.t`
+  and bare `t`. Since nothing is exposed until a table is declared or overridden, `add` warns when a Tap would read
+  nothing (checked on declarations and overrides, so it holds before the first run); the demo `reports` now declares
+  `[serve] tables = ["monthly_summary"]`. Each Tap materialises its tables into its own sandboxed connection, so a
+  Tap costs memory like a second read surface.
+- **Tables** are a JSON column on `pond_tap` rather than a `pond_tap_table` association table, as `valid_days` is a
+  column on `pond_refresh`.
+- **Canvas.** Taps share the Refresh pill (one pill per Pond for its sources of demand, "Daily · 1 Tap" or
+  "Tap: dashboard") rather than a second node.
+- **Not done:** the Playground toggle, a landing-page line.

@@ -3,10 +3,13 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { useLiveStore, THEME_DEMAND, nodeFill } from '@/lib/store';
-import type { RefreshView } from '@/lib/types';
+import type { RefreshView, TapView } from '@/lib/types';
 
-// A Pond's standing Refreshes, as one pill beside it: the most frequent one, and how many more. Clicking it
-// selects the Pond, whose sidebar lists and edits them.
+// A Pond's sources of demand, as one pill beside it: its standing Refreshes (the most frequent one, and how
+// many more) and its Taps (apps whose queries refresh it). Clicking it selects the Pond, whose sidebar lists
+// and edits them.
+
+const NO_TAPS: TapView[] = [];
 
 // The most frequent Refresh: continuous first, then the shortest period.
 function mostFrequent(refreshes: RefreshView[]): RefreshView {
@@ -18,18 +21,21 @@ export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
   // TB (mobile) layout: the pill hangs below its pond, so the edge leaves from the top.
   const vertical = data.vertical as boolean | undefined;
   const refreshes = useLiveStore((s) => s.refreshes[pondId]);
+  const taps = useLiveStore((s) => s.taps[pondId]) ?? NO_TAPS;
   const selected = useLiveStore((s) => s.selectedPondId === pondId && !s.selectedRippleId);
   const selectPond = useLiveStore((s) => s.selectPond);
 
-  if (!refreshes?.length) return null;
+  if (!refreshes?.length && !taps.length) return null;
 
-  const more = refreshes.length - 1;
-  const label = `${mostFrequent(refreshes).name}${more ? ` · +${more}` : ''}`;
+  const tapText = taps.length === 1 ? `Tap: ${taps[0].name}` : `${taps.length} Taps`;
+  const label = refreshes?.length
+    ? `${mostFrequent(refreshes).name}${refreshes.length > 1 ? ` · +${refreshes.length - 1}` : ''}${taps.length ? ` · ${taps.length} Tap${taps.length > 1 ? 's' : ''}` : ''}`
+    : tapText;
   const color = THEME_DEMAND;
 
   return (
     <div
-      title={refreshes.map((r) => r.name).join('\n')}
+      title={[...(refreshes ?? []).map((r) => r.name), ...taps.map((t) => `Tap: ${t.name}`)].join('\n')}
       onClick={(e) => {
         e.stopPropagation();
         selectPond(pondId);

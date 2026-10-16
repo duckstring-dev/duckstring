@@ -9,6 +9,7 @@ import { DbtIcon } from './DbtIcon';
 import { DuckSection } from './DuckSection';
 import { TraceChart } from './TraceChart';
 import { RefreshEditor } from './RefreshEditor';
+import { TapEditor } from './TapEditor';
 import { WindowEditor } from './WindowEditor';
 
 function Btn({
@@ -562,6 +563,13 @@ function PondOptionsModal({ pond, canControl, onClose }: { pond: Pond; canContro
           )}
           {/* Egress Spouts — a Draw can't be a source. */}
           {!pond.isDraw && <SpoutEditor sourceId={pond.id} canControl={canControl} />}
+          {/* Taps: apps' access points (full only, since a Tap is a credential). */}
+          {canControl && !pond.isSpout && (
+            <Section>
+              <Label>Taps · app access</Label>
+              <TapEditor pond={pond} />
+            </Section>
+          )}
           {/* Observed lineage (read-visible) + alert channels scoped to this Pond. */}
           {!pond.isDraw && <LineageSection key={`lin-${pond.id}`} pond={pond} />}
           <AlertEditor key={pond.id} pond={pond} canControl={canControl} />
@@ -692,7 +700,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const canDemand = atLeast(accessLevel, 'demand');
   const canControl = atLeast(accessLevel, 'full');
 
-  // The Options modal (retry budgets, Compute, Spouts, Alerts, Lineage) — opened by the Options bar
+  // The Options modal (retry budgets, Compute, Spouts, Taps, Alerts, Lineage) — opened by the Options bar
   // beneath the always-visible sections.
   const [optionsOpen, setOptionsOpen] = useState(false);
 
@@ -824,7 +832,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
           </Section>
           )}
 
-          {/* Rarely-needed config lives behind Options: retry budgets, Compute, Spouts, Alerts, Lineage. */}
+          {/* Rarely-needed config lives behind Options: retry budgets, Compute, Spouts, Taps, Alerts, Lineage. */}
           <div style={{ borderTop: '1px solid #27272a', marginTop: 14, paddingTop: 14 }}>
             <button
               onClick={() => setOptionsOpen(true)}

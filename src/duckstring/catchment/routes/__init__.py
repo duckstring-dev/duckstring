@@ -11,6 +11,7 @@ from .orchestrate import router as orchestrate_router
 from .pool import router as pool_router
 from .secrets import router as secrets_router
 from .serving import router as serving_router
+from .tap import router as tap_router
 from .view import router as view_router
 
 router = APIRouter()
@@ -26,5 +27,6 @@ router.include_router(view_router)
 router.include_router(secrets_router)
 router.include_router(serving_router)
 router.include_router(alerts_router)
+router.include_router(tap_router)
 
 __all__ = ["router"]

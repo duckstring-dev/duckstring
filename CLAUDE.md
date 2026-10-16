@@ -26,6 +26,7 @@ The landing page (`docs/src/components/Landing/index.tsx`) is the source of trut
 - **Pull, as positioning only.** "Pull orchestration" stays as positioning language (demand starts at the end of the pipeline, the landing page's pillar), and the landing page uses "push orchestration" for conventional start-of-pipeline scheduling. Inside the engine there is only demand (`PondState.demand`, `pond_demand`).
 - **Every.** Lead with "every x", because that is what people search for when they need a daily job. Precisely `--every` is a request period counted from the later of the newest request and the data's freshness (any refresh restarts the count; a strict cadence regardless of freshness is a scheduled Refresh's job), so the data can be up to x plus the pipeline's run time old. The docs should get to that distinction.
 - **Refreshes belong on Outlets.** This is a firm recommendation, not a technical requirement: the routes accept a Refresh on any deployed Pond.
+- **Tap** now means an app's access point (`plans/taps.md`), the second stage of the rework: its own key, and queries through it refresh the Pond by the `--every` clock. Not the old pull trigger.
 - **Catalog.** People arriving from other platforms will look for a catalog. The Catchment is the context that holds everything, so it is effectively the catalog: each `name@major` is a schema (`reports_v2`, with bare `reports` resolving to the highest deployed major), tables sit inside it, and lineage, contracts and querying hang off it. Keep the explanation simple.
 - **Data format.** Data is published as Parquet: plain tables as one file per run (kept while a reader needs it), Trickles as per-run parts. The detail belongs in guides and reference.
 
@@ -62,7 +63,8 @@ There are two models.
 
 **Built-in API keys** (bare self-hosting) form an ordered ladder `read ⊂ demand ⊂ full` (`catchment/auth.py`):
 
-- Each route declares its minimum with `dependencies=[auth.read|demand|full]`. read covers status/runs/data/draw/view; demand adds refresh/refreshes and duct-connect; full adds deploy/control/windows/ducts/rotate.
+- Each route declares its minimum with `dependencies=[auth.read|demand|full]`. read covers status/runs/data/draw/view; demand adds refresh/refreshes and duct-connect; full adds deploy/control/windows/ducts/rotate/taps.
+- A **Tap's key** is a fourth principal outside the ladder (`Principal.tap: TapScope`, `principal_for_key` for the wires), looked up in the Driver's in-memory hash index before open mode, so it works on an open Catchment too. Only `auth.read_or_tap` routes accept it (`/api/query`, `/api/serve/query`, `GET /api/serve`); every other guard gives 403. See Taps.
 - `audit_routes` runs in `create_app` and fails closed: any unclassified `/api` route (other than `/api/health` and the Duck channel) raises at boot.
 - A request's level is the matched key's level. Too low gives 403; missing or invalid gives 401.
 - The three keys are stored as sha256 hashes in `catchment_key` (migration `007`). `auth.generate` mints them and prints them once. `init --generate-key` mints the ladder and stores the full key in the registration; `init --key` or `DUCKSTRING_API_KEY` sets a single full key (legacy); with neither, the Catchment is open and `get_principal` returns full.
@@ -124,6 +126,7 @@ src/duckstring/
     asgi.py                #   env-configured ASGI entry for platform hosting
     auth.py                #   access-level key ladder, route guards, Duck token
     driver.py              #   Driver: engine + Duck coordination + persistence + refresh/window/spout CRUD + restart restore
+    taps.py                #   TapsMixin (on the Driver): Tap CRUD, key-hash index, the per-query policy, counters
     egress_worker.py       #   delivers published output to Spouts
     alert_worker.py        #   drains the alert_delivery outbox → notifier.send
     launcher.py            #   DispatchingLauncher, SubprocessLauncher, NoopLauncher (see Duck launchers)
@@ -137,7 +140,7 @@ src/duckstring/
                            #   pond = schema). Read users get materialised local tables with enable_external_access=false;
                            #   full users get views over all output tables. Wire adapters (pg/Flight) and a Catalog UI are follow-ups.
     schema/001_init.sql    #   database schema (see Catchment database)
-    routes/                #   deploy, orchestrate, secrets, alerts, metrics, duck, data, catchment
+    routes/                #   deploy, orchestrate, secrets, alerts, metrics, duck, data, catchment, serving, tap
     registry.py, dag.py    #   pond DuckDB registry paths; inter-pond cycle check
   local/                   # Local pre-deploy testing (no engine/FastAPI/Ducks). See Puddles.
     project.py             #   load_project: pond.toml + entrypoints + puddles/ dirs
@@ -146,6 +149,7 @@ src/duckstring/
   cli/                     # Typer CLI (`duckstring` / `ds`)
     refresh.py             #   refresh POND (now) and refresh add|ls|rm POND (a custom group resolving a bare Pond)
     window.py              #   window add|ls|rm POND
+    tap.py                 #   tap add|ls|rm|rotate POND (an app's access point; prints the key once)
     control.py             #   wake/sleep/force/rebuild/repair/kill/clear/failure-budget
     pond.py, deploy.py     #   pond init/demo/hydrate/run/deploy
     duck.py                #   duck show/set {pond} [--duck catchment|pool|dedicated] [--flock off|upgrade|always] [--engine] [--oom]
@@ -169,7 +173,7 @@ src/duckstring/
 docs/                      # Docusaurus site → docs.duckstring.com (being rewritten; see Writing docs)
 frontend/                  # The Catchment web UI (Next.js static export served at catchment/static). See Web UI.
   src/lib/                 #   api.ts (HTTP client), store.ts (zustand poll store + colour palette), types.ts
-  src/components/          #   DagCanvas, Pond/Ripple/TriggerNode, Sidebar, RefreshEditor, WindowEditor, RunHistory, TraceChart
+  src/components/          #   DagCanvas, Pond/Ripple/TriggerNode, Sidebar, RefreshEditor, TapEditor, WindowEditor, RunHistory, TraceChart
 playground/                # Standalone in-memory simulation (own repo → playground.duckstring.com)
 packages/trickle/          # The Trickle engine, released separately as `duckstring-trickle` (import `trickle`); a uv workspace
                            # member Duckstring depends on. Imports nothing from duckstring. Host seam: context.Context.
@@ -246,7 +250,7 @@ Routes live at `/api/ponds/{name}/…` and accept any deployed Pond (recommendin
 - **`refresh POND`** (`POST /refresh`, `Driver.refresh_now`, `engine.refresh_now`): one request for data at least as fresh as now (`at=` a duct's epoch). `refresh` is a custom Typer group: anything not `add|ls|rm` is the Pond (`refresh -- add` for a Pond named `add`).
 - **`refresh add POND`** (`POST /refreshes`, `Driver.add_refresh`): a standing `engine.core.Refresh(pond_id, name, every, start, valid_days, until)` in `pond_refresh` (migration `031`). Floating (no `start`): due `every` after `_clock_ref` = `max(max(demand), start_f)`; `every = 0` is continuous. Scheduled (`start`): each tick requests `Refresh.latest(now)`, the latest kept grid occurrence (the grid helpers are shared with `Window`); the demand rules make it idempotent, so there is no "last fired" state and downtime catches up with one request (the Inlet stamps the occurrence). Any number scheduled, one floating per Pond (a new floating one replaces it silently; the same name upserts). Default names (`default_refresh_name`): "Every 30 min", "Daily", "Daily at 06:00", "Weekdays at 06:00", "Continuous" (migration `031` names converted Waves/Tides the same way).
 - **`refresh ls|rm`** (`GET /refreshes`, `POST /refreshes/{name}/remove`); `/api/status` lists each Pond's `refreshes` with `next_due` (`engine.refresh_next_due`, also used by `next_wake`).
-- **No compatibility kept** (the author's call, 2026-10-16): the old routes and commands are gone, as is `pond_open.tap_on_get` (migration `031`; Taps, `plans/taps.md`, replace it). The duct poller sends `/refresh`, but only to an upstream whose `/api/status` lists `refreshes` (`poller._speaks_refresh`): on an older one `/refresh` is the Rebuild flag, so it sends nothing and logs once.
+- **No compatibility kept** (the author's call, 2026-10-16): the old routes and commands are gone, as is `pond_open.tap_on_get` (migration `031`; Taps replace it). The duct poller sends `/refresh`, but only to an upstream whose `/api/status` lists `refreshes` (`poller._speaks_refresh`): on an older one `/refresh` is the Rebuild flag, so it sends nothing and logs once.
 
 **Control** (`cli/control.py`) acts on a Pond's execution and health (see Fault tolerance):
 - **wake** (`engine.wake_pond`): local demand at the Sources' current freshness (an Inlet: `now`), never sent upstream. It runs once if Sources are already fresher. Clears failure/kill.
@@ -266,6 +270,16 @@ Routes live at `/api/ponds/{name}/…` and accept any deployed Pond (recommendin
 - Per-Pond errors are collected and don't abort the batch.
 - The `do` CLI expands a selection client-side (`--all`/`--tree`/`--between`/`--downstream`) and sends an explicit Pond list.
 - The UI Selector is a two-phase canvas banner (pick Ponds, then pick operations) reached from **Options → Pond Actions**. The per-Pond Sidebar keeps Force/Wake/Sleep/Kill and Failures; Repair/Rebuild/Reset/Remove live in the Selector. The top bar is one `TopBar` (`Logo | Name | Status | ☰ Options`); Collapse-all, Secrets, Alerts and the access level sit in the Options menu.
+
+## Taps (`catchment/taps.py`, `routes/tap.py`, `cli/tap.py`, migration `032`; see `plans/taps.md` "As built")
+
+A **Tap** is an app's access point on one Pond line: `pond_tap (pond_id, name)` with `key_hash` (sha256; the key `tap_…` is shown once, `rotate` mints another), `fresh_within_ms` (default 0), `wait_ms` (NULL = answer at once), `tables` (JSON, NULL = all exposed) and observability counters.
+- **Policy** (`engine.tap_due`, per query, in `Driver.tap_query`): not due while a request is waiting for the Pond to start a Run (`max(demand) > start_f`) or the Pond is blocked; otherwise due when `now + d - _clock_ref >= fresh_within` (the floating Refresh's clock). Due → `refresh_now` (trigger demand: throttle, rule 6, minted epochs all apply) + `_process`. The waiting-request rule bounds demand growth and `_process` calls under a busy app.
+- **Wait** (`engine.tap_wait_target`): target `min(now + d - fresh_within, covering)` (covering = the sent request, the waiting one, or the Run in flight); `tap_ready` also ends it on failed/killed/blocked. HTTP polls in `routes/tap.tap_gate` (async); the pg/Flight threads use `taps.gate_blocking`.
+- **Scope**: a Tap reads `serviceable(line) ∩ tables`; `serving.build_serving_con(tap=)` builds a sandboxed connection with only those, as `{pond}_v{major}.t`, `{pond}.t` and bare `t`, cached per Tap in `ServingCache` (keyed `("tap", pond, name)`, dropped on remove). `add` warns (`tap_exposes_anything`, from declarations and overrides, valid before a first run) when it would read nothing.
+- **Surface**: routes `GET/POST /api/ponds/{name}/taps`, `POST .../taps/{tap}/rotate|remove` (full); `/api/query` (`pond` optional with a Tap key), `/api/serve/query`, `GET /api/serve` accept the key; the pg wire takes it as the password (not on an open Catchment, which never asks), Flight as the bearer (`do_get` gates, `get_flight_info` doesn't). The Python `Catchment` client omits `pond` for a `tap_` key.
+- **Counters** (`query_count`, `refresh_count`, `last_query_at`) live in memory and flush from `scheduler_tick` (`_flush_tap_counters`); `/metrics` `duckstring_tap_queries_total`/`_refreshes_total`; `/api/status` per-Pond `taps` (never keys). Removing a line deletes its Taps; Sleep/Kill leave them.
+- **UI**: `TapEditor` under a Pond's Options (full only; the key shown once with Copy); the canvas pill (`TriggerNode`) is the Pond's sources of demand, Refreshes and Taps.
 
 ## Windows (batch availability on Inlets)
 
@@ -610,7 +624,7 @@ Other tables:
 - Live state (on `pond`):
   - `pond_to_pond`: sink `pond_id` → source `pond_name_id` + `source_major`, so a Sink can deploy before its Source.
   - `pond_state`: start_f/end_f/d_ms plus is_failed/is_blocked/failed_f/failures/is_killed/rebuild_pending/repairing/changed_f/persisted_f (the pull columns went in `031`).
-  - `pond_demand` (the demanded freshnesses; `pond_target` before `031`), `pond_retry` (live budgets), `pond_window` (PK `(pond_id, name)`), `pond_refresh` (PK `(pond_id, name)`; every_ms, start_anchor NULL = floating, valid_days, until_time; replaced `pond_trigger` in `031`, converting Waves to continuous and Tides to floating Refreshes).
+  - `pond_demand` (the demanded freshnesses; `pond_target` before `031`), `pond_retry` (live budgets), `pond_window` (PK `(pond_id, name)`), `pond_tap` (PK `(pond_id, name)`, migration `032`; see Taps), `pond_refresh` (PK `(pond_id, name)`; every_ms, start_anchor NULL = floating, valid_days, until_time; replaced `pond_trigger` in `031`, converting Waves to continuous and Tides to floating Refreshes).
   - `pond_duck` (PK `pond_id`): a per-Pond compute override (duck_target/dedicated_*/flock_mode/flock_engine/oom_policy; migrations `018` and `021`). The old s/m/l/xl size and flock boolean were removed in `022`; sizing uses concrete instance types and the Flock envelope comes from the real memory cap. It's layered over the compute declared in `pond.toml` and stored on `pond_version` (duck_pool/flock_mode/flock_engine/oom_policy): effective = override, else declared, else default. See `plans/cloud-config.md`.
   - `pond_spout`: egress bindings (see Egress).
 - Catchment-level:

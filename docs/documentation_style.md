@@ -135,7 +135,7 @@ Again, don't over-apply these. A colon introducing an example is fine. The word 
 
 ## Terminology
 
-- Use Duckstring's terms consistently and capitalise them as the docs do: Pond, Ripple, Trickle, Puddle, Catchment, Inlet, Outlet, Source, Sink, Pond Run, Tap, Wave, Pulse, Tide.
+- Use Duckstring's terms consistently and capitalise them as the docs do: Pond, Ripple, Trickle, Puddle, Catchment, Inlet, Outlet, Source, Sink, Pond Run, Refresh, Tap, Spout.
 - Introduce each term once, clearly, at the point it's first needed. Don't front-load a glossary on concept pages; the intro page has one.
 - On introductory pages, prefer plain descriptions over secondary Duckstring terms where they're equivalent: "the Ponds downstream of it" rather than "its Sinks", "everything upstream" rather than "its lineage". Keep the density of Duckstring vocabulary low enough that the page flows.
 - When an established external term exists for a Duckstring concept (Z-set for weighted change rows), introduce the plain description first, then name the term, since it appears in the API.

@@ -874,6 +874,31 @@ def test_continuous_refresh_then_remove(runtime):
     assert completed_runs() == settled
 
 
+def test_a_tap_keeps_reports_fresh_while_an_app_queries_it(runtime):
+    """An app querying ``reports`` through a Tap (plans/taps.md), with the Python client and the Tap's key:
+    its first query waits for the pipeline to run, and the Tap's later queries ride on that freshness."""
+    from duckstring import Catchment
+
+    url, root = runtime
+    _deploy_demo(url)
+    resp = httpx.post(f"{url}/api/ponds/reports/taps",
+                      json={"name": "dashboard", "fresh_within_ms": 3_600_000, "wait_ms": 40_000}, timeout=5.0)
+    assert resp.status_code == 200, resp.text
+    assert "warning" not in resp.json()  # the demo exposes monthly_summary
+    app = Catchment(url, api_key=resp.json()["key"])
+
+    assert app.tables() == ["monthly_summary"]  # the Tap's tables, with no Pond named
+    rows = app.query("SELECT count(*) AS n FROM monthly_summary").fetchone()[0]
+    assert rows > 0
+    reports = _pond_status(url, "reports")
+    assert reports["end_f"] is not None and reports["taps"][0]["refresh_count"] == 1
+
+    for _ in range(3):  # fresh within the hour: answered from what is published, with no new Run
+        app.get("monthly_summary")
+    time.sleep(0.5)
+    assert _pond_status(url, "reports")["runs_completed"] == reports["runs_completed"]
+
+
 def test_overwrite_versions_are_trimmed_once_the_chain_goes_idle(runtime, monkeypatch):
     """Versioned overwrite tables on real Ducks (plans/versioned-overwrite.md): a continuous Refresh publishes a new
     version per run, each publish prunes to its job's retain_from, and once the chain is idle the reap's

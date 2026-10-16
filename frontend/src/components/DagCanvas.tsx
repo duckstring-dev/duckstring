@@ -76,6 +76,12 @@ export function DagCanvas() {
   const ponds = useLiveStore((s) => s.ponds);
   const ripples = useLiveStore((s) => s.ripples);
   const refreshes = useLiveStore((s) => s.refreshes);
+  const taps = useLiveStore((s) => s.taps);
+  // Ponds with a pill: those with standing Refreshes or Taps (their sources of demand).
+  const demandSources = useMemo(
+    () => Object.fromEntries([...Object.keys(refreshes), ...Object.keys(taps)].map((k) => [k, true])),
+    [refreshes, taps],
+  );
   const pondViews = useLiveStore((s) => s.pondViews);
   const rippleViews = useLiveStore((s) => s.rippleViews);
   const now = useLiveStore((s) => s.now);
@@ -103,9 +109,9 @@ export function DagCanvas() {
       JSON.stringify({
         ponds: Object.values(ponds).map((p) => ({ id: p.id, sources: p.sources, name: p.name })),
         ripples: Object.values(ripples).map((r) => ({ id: r.id, parents: r.parents, pondId: r.pondId, name: r.name })),
-        refreshes: Object.keys(refreshes),
+        refreshes: Object.keys(demandSources).sort(),
       }),
-    [ponds, ripples, refreshes]
+    [ponds, ripples, demandSources]
   );
 
   // Each box's minimum width to fit its live stats line (grows with run counts / longer ages).
@@ -172,7 +178,7 @@ export function DagCanvas() {
 
   const { nodes, edges } = useMemo(() => {
     const collapsed = new Set(collapsedKey ? collapsedKey.split(',') : []);
-    return computeLayout(ponds, ripples, refreshes, floors, isMobile ? 'TB' : 'LR', lineage, selfId, collapsed);
+    return computeLayout(ponds, ripples, demandSources, floors, isMobile ? 'TB' : 'LR', lineage, selfId, collapsed);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layoutKey, widthKey, isMobile, lineageKey, selfId, collapsedKey]);
 

@@ -59,7 +59,7 @@ const sidebars: SidebarsConfig = {
         {
           type: 'category',
           label: 'Getting Data Out',
-          items: ['guides/querying', 'guides/delivering_with_spouts'],
+          items: ['guides/querying', 'guides/serving_apps_with_taps', 'guides/delivering_with_spouts'],
         },
         {
           type: 'category',
@@ -108,6 +108,7 @@ const sidebars: SidebarsConfig = {
             'reference/cli/data',
             'reference/cli/duck',
             'reference/cli/spout',
+            'reference/cli/tap',
             'reference/cli/serve',
             'reference/cli/secret',
             'reference/cli/alert',

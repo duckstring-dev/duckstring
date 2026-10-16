@@ -57,6 +57,7 @@ from ..engine import (
 )
 from ..flock import job_settings as flock_job_settings
 from ..keys import pond_key
+from .taps import TapsMixin
 
 # A Duck is presumed dead if it holds an in-flight Run but hasn't contacted the Catchment within this
 # window (the secondary, transport-level signal; process-liveness is the primary one). Comfortably
@@ -340,7 +341,7 @@ def _draw_version_ok(version: str | None, major: int) -> bool:
         return False
 
 
-class Driver:
+class Driver(TapsMixin):
     def __init__(self, db, root, base_url: str | None, launcher, data_root: str | None = None):
         self.db = db
         self.root = root
@@ -597,6 +598,7 @@ class Driver:
                 ponds=ponds, pond_states=pond_states, ripples=ripples,
                 ripple_states=ripple_states, refreshes=refreshes,
             )
+            self._load_taps(pondid_to_key)
             # Recompute blocked from the freshly-loaded topology: a Source that is absent now (or has
             # since become present, e.g. a duct was added) flips has_missing_source, so the persisted
             # is_blocked may be stale. Re-derive for every Pond (propagates to Sinks).
@@ -1246,7 +1248,7 @@ class Driver:
             self.db.execute("DELETE FROM alert_channel WHERE scope_name = ? AND scope_major = ?", (name, major))
             # 3. Delete the pond(id)-keyed config + the pond selection row. Keep pond_version / ripple /
             #    ripple_run / pond_run / pond_version_schema / pond_name (the retained record).
-            for tbl in ("pond_state", "pond_demand", "pond_open", "pond_refresh", "pond_retry",
+            for tbl in ("pond_state", "pond_demand", "pond_open", "pond_refresh", "pond_tap", "pond_retry",
                         "pond_window", "pond_spout", "pond_duck", "pond_to_pond", "pond_serve_override"):
                 self.db.execute(f"DELETE FROM {tbl} WHERE pond_id = ?", (pond_id,))
             self.db.execute("DELETE FROM pond WHERE id = ?", (pond_id,))
@@ -2881,7 +2883,7 @@ class Driver:
         db.execute("DELETE FROM ripple_run WHERE pond_version_id = ?", (pv_id,))
         db.execute("DELETE FROM pond_run WHERE pond_version_id = ?", (pv_id,))
         db.execute("DELETE FROM ripple_run_lineage WHERE pond_version_id = ?", (pv_id,))
-        for tbl in ("pond_state", "pond_demand", "pond_open", "pond_refresh", "pond_retry", "pond_window"):
+        for tbl in ("pond_state", "pond_demand", "pond_open", "pond_refresh", "pond_tap", "pond_retry", "pond_window"):
             db.execute(f"DELETE FROM {tbl} WHERE pond_id = ?", (pond_id,))
         db.execute("DELETE FROM pond WHERE id = ?", (pond_id,))
         rids = [r[0] for r in db.execute("SELECT id FROM ripple WHERE pond_version_id = ?", (pv_id,))]
@@ -2946,7 +2948,7 @@ class Driver:
         db.execute("DELETE FROM ripple_run WHERE pond_version_id = ?", (pv_id,))
         db.execute("DELETE FROM pond_run WHERE pond_version_id = ?", (pv_id,))
         db.execute("DELETE FROM ripple_run_lineage WHERE pond_version_id = ?", (pv_id,))
-        for tbl in ("pond_state", "pond_demand", "pond_open", "pond_refresh", "pond_retry",
+        for tbl in ("pond_state", "pond_demand", "pond_open", "pond_refresh", "pond_tap", "pond_retry",
                     "pond_window", "pond_spout", "pond_duck", "pond_to_pond"):
             db.execute(f"DELETE FROM {tbl} WHERE pond_id = ?", (pond_id,))
         db.execute("DELETE FROM pond WHERE id = ?", (pond_id,))
@@ -2970,6 +2972,7 @@ class Driver:
             self._check_freshness(now)
             self._check_renotify(now)
             self._check_disk_pressure(now)
+            self._flush_tap_counters()
 
     # Registry eviction under disk pressure (plans/persist.md phase 6). Registries (and, once mirrored,
     # local publishes) are reconstructible caches — under pressure the Catchment Pool sheds idle Ponds'
@@ -3927,6 +3930,7 @@ class Driver:
                     "pool": self.state.ponds[key].pool,
                     "d_ms": int(ps.d.total_seconds() * 1000),
                     "refreshes": refreshes,
+                    "taps": self.taps_status(key),
                     "is_failed": ps.is_failed,
                     "is_blocked": ps.is_blocked,
                     "blocked_reason": (f"waiting for '{ps.missing_asset}'" if ps.missing_asset else None),
@@ -4018,7 +4022,7 @@ class Driver:
                 "SELECT status, COUNT(*) FROM alert_delivery GROUP BY status"
             ).fetchall())
             return {"nodes": nodes, "failures": failures, "alert_deliveries": deliveries,
-                    "runtimes": runtimes}
+                    "runtimes": runtimes, "taps": self.tap_metrics()}
 
     def view_fragment(self, scope: list[str] | None) -> dict:
         """This Catchment's slice of the recursive lineage view (see plans/cross-catchment-visibility.md):

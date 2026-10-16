@@ -6,6 +6,10 @@ type = "outlet"
 [sources]
 sales = "1.0.0"
 
+# The table apps and read-only users can query.
+[serve]
+tables = ["monthly_summary"]
+
 [ripples.monthly_summary]
 sql = "sql/monthly_summary.sql"
 reads = ["sales.sale_line"]

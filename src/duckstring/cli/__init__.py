@@ -14,6 +14,7 @@ from . import refresh as refresh_cmd
 from . import secret as secret_cmd
 from . import serve as serve_cmd
 from . import spout as spout_cmd
+from . import tap as tap_cmd
 from . import window as window_cmd
 from .control import (
     clear,
@@ -79,6 +80,7 @@ app.add_typer(window_cmd.app, name="window")
 app.add_typer(control_app, name="control")
 app.add_typer(duck_cmd.app, name="duck")
 app.add_typer(spout_cmd.app, name="spout")
+app.add_typer(tap_cmd.app, name="tap")
 app.add_typer(secret_cmd.app, name="secret")
 app.add_typer(serve_cmd.app, name="serve")
 app.add_typer(alert_cmd.app, name="alert")

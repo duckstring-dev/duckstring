@@ -6,6 +6,7 @@ import type {
   Ripple,
   NodeView,
   RefreshView,
+  TapView,
   PondInfo,
   ViewPayload,
   PondRun,
@@ -131,6 +132,7 @@ interface StatusSlice {
   rippleViews: Record<RippleId, NodeView>;
   pondInfo: Record<PondId, PondInfo>;
   refreshes: Record<PondId, RefreshView[]>; // standing Refreshes per Pond (only Ponds that have any)
+  taps: Record<PondId, TapView[]>; // Taps per Pond (only Ponds that have any)
 }
 
 function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
@@ -140,6 +142,7 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
   const rippleViews: Record<RippleId, NodeView> = {};
   const pondInfo: Record<PondId, PondInfo> = {};
   const refreshes: Record<PondId, RefreshView[]> = {};
+  const taps: Record<PondId, TapView[]> = {};
 
   // A Pond Draw only earns a node if a local Pond actually sources from it — an unconsumed Draw (e.g.
   // from `duct create --sync` drawing more than this Catchment uses) is noise, so hide it.
@@ -182,6 +185,12 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
         nextDue: isoToMsOrNull(r.next_due),
       }));
     }
+    if (p.taps?.length) {
+      taps[p.id] = p.taps.map((t) => ({
+        name: t.name, freshWithinMs: t.fresh_within_ms, waitMs: t.wait_ms, tables: t.tables,
+        lastQueryAt: isoToMsOrNull(t.last_query_at), queryCount: t.query_count, refreshCount: t.refresh_count,
+      }));
+    }
 
     // A Draw's "draw" ripple and a Spout's "egress" ripple are internal mechanisms — not worth rendering.
     // Skip them; the node shows bare (its running/idle/failed state is pond-level).
@@ -209,7 +218,7 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
     accessLevel: payload.access_level ?? 'full',
     // NOTE: `cloud` is NOT in the ~1 s status payload anymore — it's polled slowly via refreshCloud(). We
     // intentionally omit it here so the existing value is preserved across a status refresh.
-    ponds, ripples, pondViews, rippleViews, pondInfo, refreshes,
+    ponds, ripples, pondViews, rippleViews, pondInfo, refreshes, taps,
   };
 }
 
@@ -363,6 +372,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   rippleViews: {},
   pondInfo: {},
   refreshes: {},
+  taps: {},
   now: Date.now(),
   connected: false,
   error: null,

@@ -35,6 +35,8 @@ Keys come in three levels, each including the ones before it:
 
 A missing or unrecognised key gets `401`; a key below the route's level gets `403`. Tracebacks in run history are only returned to `full` keys; lower levels get the error message alone.
 
+A [Tap](../guides/serving_apps_with_taps.md)'s key is a fourth kind, outside the levels. It is accepted only by `/api/query`, `/api/serve/query` and `/api/serve`, where it reads the Tap's tables and may send its Pond a Refresh, and gets `403` everywhere else. It works on an open Catchment too.
+
 ## Conventions
 
 **Targeting a major line.** Routes that act on one Pond take the Pond name in the path and two optional query parameters:
@@ -131,7 +133,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/query` | read | Run SQL against one Pond's tables. Body: `pond`, `sql`, optional `major`, `version`, `format` (`json`, `csv` or `parquet`). |
+| POST | `/api/query` | read, Tap | Run SQL against one Pond's tables. Body: `pond`, `sql`, optional `major`, `version`, `format` (`json`, `csv` or `parquet`). With a Tap's key, `pond` can be left out. |
 | POST | `/api/query/page`, `/api/query/count`, `/api/query/history` | read | Paged reads used by the web UI's data viewer. |
 | GET | `/api/ponds/{name}/tables` | read | List published tables. |
 | GET | `/api/ponds/{name}/ripples/{table}` | read | Download a table's published files as a zip. |
@@ -144,8 +146,8 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| GET | `/api/serve` | read | Served majors and exposed tables. |
-| POST | `/api/serve/query` | read | Run SQL across the catalog. Read-level keys see only exposed tables. |
+| GET | `/api/serve` | read, Tap | Served majors and exposed tables. A Tap's key sees its own Pond and tables. |
+| POST | `/api/serve/query` | read, Tap | Run SQL across the catalog. Read-level keys see only exposed tables; a Tap's key, only its own. |
 | POST | `/api/ponds/{name}/serve/promote` | full | Change the served major. |
 | POST | `/api/ponds/{name}/serve/expose` | full | Expose or hide a table. |
 
@@ -158,6 +160,15 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | POST | `/api/ponds/{name}/spouts/test` | full | Test a destination without writing data. |
 | POST | `/api/ponds/{name}/spouts/{spout}/remove` | full | Remove a Spout. |
 | POST | `/api/ponds/{name}/spouts/{spout}/{action}` | full | `wake`, `force`, `sleep`, `kill`, `clear` or `resync`. |
+
+### Taps
+
+| Method | Path | Level | Description |
+|---|---|---|---|
+| GET | `/api/ponds/{name}/taps` | full | List Taps, with their counts. Never keys. |
+| POST | `/api/ponds/{name}/taps` | full | Add a Tap. Body: `name`, optional `fresh_within_ms`, `wait_ms`, `tables`. The response holds the key, once. |
+| POST | `/api/ponds/{name}/taps/{tap}/rotate` | full | A new key for a Tap, returned once. |
+| POST | `/api/ponds/{name}/taps/{tap}/remove` | full | Remove a Tap. |
 
 ### Secrets and alerts
 
@@ -206,7 +217,9 @@ The `/api/draw/*` routes that ducts use to transfer data, and the `/api/duck/*` 
 | `duckstring_alert_deliveries_total` | counter | Alert deliveries, by `status`. |
 | `duckstring_flock_dispatched_total` | counter | Computations sent to the Flock, per Pond. |
 | `duckstring_flock_dispatch_failures_total` | counter | Flock dispatches that failed and ran in the Duck instead. The only sign that a Flock is misconfigured. |
+| `duckstring_tap_queries_total` | counter | Queries through each Tap, labelled `pond`, `major` and `tap`. |
+| `duckstring_tap_refreshes_total` | counter | Refreshes sent by each Tap's queries. |
 
 ## Other interfaces
 
-The catalog can also be queried over the Postgres wire protocol and Arrow Flight, each enabled by setting a port (`DUCKSTRING_SERVE_PG_PORT`, `DUCKSTRING_SERVE_FLIGHT_PORT`; see [Environment Variables](environment.md#serving)). Both use an API key as the password and apply the same access levels.
+The catalog can also be queried over the Postgres wire protocol and Arrow Flight, each enabled by setting a port (`DUCKSTRING_SERVE_PG_PORT`, `DUCKSTRING_SERVE_FLIGHT_PORT`; see [Environment Variables](environment.md#serving)). Both use an API key as the password and apply the same access levels. A Tap's key works on both, except that a Catchment without keys never asks a Postgres client for a password, so there a connection can't be recognised as a Tap's.

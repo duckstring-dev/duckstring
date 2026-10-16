@@ -54,6 +54,17 @@ export interface RefreshView {
   nextDue: number | null; // ms epoch; null when continuous or ended
 }
 
+// A Tap: an app's access point on a Pond, whose queries keep it fresh (plans/taps.md).
+export interface TapView {
+  name: string;
+  freshWithinMs: number; // 0 = every query
+  waitMs: number | null; // null = answered at once
+  tables: string[] | null; // null = all exposed tables
+  lastQueryAt: number | null; // ms epoch
+  queryCount: number;
+  refreshCount: number;
+}
+
 export interface PondInfo {
   version: string;
   major: number;

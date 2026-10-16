@@ -61,16 +61,21 @@ def _served_ponds(driver) -> list[tuple[str, int, list[int]]]:
     return out
 
 
-def build_serving_con(driver, *, sandboxed: bool):
+def build_serving_con(driver, *, sandboxed: bool, tap=None):
     """A DuckDB connection presenting the Catchment's serving surface. ``sandboxed`` (read users):
     only serviceable tables, materialised local, external access locked. Not sandboxed (full/ops):
-    every output table, as views, external access open."""
+    every output table, as views, external access open.
+
+    ``tap`` (a :class:`~.auth.TapScope`, always sandboxed) narrows it to one Tap: its Pond line only, and only
+    the Tap's tables, as ``{pond}_v{major}``, ``{pond}`` and bare names (so an app needn't name the schema)."""
     import duckdb
 
     from ..dataplane import get_data_plane
     from ..keys import pond_key
     from .registry import resolve_data_dir
 
+    if tap is not None:
+        sandboxed = True
     con = duckdb.connect()
     # Spill instead of OOM (materialising a large serviceable table over S3) + keep Parquet footers warm.
     # Set before the sandbox freezes configuration below.
@@ -83,11 +88,19 @@ def build_serving_con(driver, *, sandboxed: bool):
     dp = get_data_plane()
     root = Path(driver.root)
 
-    for name, served, majors in _served_ponds(driver):
+    if tap is not None:
+        meta = driver.meta.get(tap.pond) or {}
+        lines = [(meta["name"], meta["major"], [meta["major"]])] if meta else []
+    else:
+        lines = _served_ponds(driver)
+    for name, served, majors in lines:
         for major in majors:
             key = pond_key(name, major)
             pv_id = driver._pond_ids(key)[1]
-            tables = driver.serviceable(key) if sandboxed else driver._output_tables(pv_id)
+            if tap is not None:
+                tables = driver.tap_tables(tap)
+            else:
+                tables = driver.serviceable(key) if sandboxed else driver._output_tables(pv_id)
             if not tables:
                 continue
             data_dir = resolve_data_dir(root, name, major, driver.data_root,
@@ -110,6 +123,8 @@ def build_serving_con(driver, *, sandboxed: bool):
                     if _relation_exists(con, schema, t):
                         con.execute(f"CREATE VIEW {_qi(name)}.{_qi(t)} AS "
                                     f"SELECT * FROM {_qi(schema)}.{_qi(t)}")
+                        if tap is not None:  # one Pond: its tables by bare name too
+                            con.execute(f"CREATE VIEW main.{_qi(t)} AS SELECT * FROM {_qi(schema)}.{_qi(t)}")
 
     if sandboxed:
         con.execute(f"SET memory_limit='{DEFAULT_MEMORY_LIMIT}'")
@@ -125,20 +140,21 @@ def _relation_exists(con, schema: str, table: str) -> bool:
 
 
 class ServingCache:
-    """Warm serving connections, keyed by sandboxed-ness. Rebuilt when the Driver's ``state_version``
+    """Warm serving connections, keyed by sandboxed-ness (or by Tap). Rebuilt when the Driver's ``state_version``
     moves (a deploy / promote / eye-toggle / new run) — so the surface stays fresh (snapshot-consistent)
     without re-materialising the whole catalog on every query. Each query runs on its own ``cursor()``
     over the shared connection (DuckDB cursors are independent; the sandbox settings are instance-global,
     so they hold across cursors)."""
 
     def __init__(self):
-        self._cache: dict[bool, tuple[int, object]] = {}
+        self._cache: dict[object, tuple[int, object]] = {}
 
-    def connection(self, driver, *, sandboxed: bool):
+    def connection(self, driver, *, sandboxed: bool, tap=None):
         # Keyed on data_version (bumps on publish / catalog change), NOT state_version (bumps every engine
         # tick) — so the warm connection isn't rebuilt (read users: re-materialised from S3) on every query.
         version = driver.data_version
-        entry = self._cache.get(sandboxed)
+        slot = ("tap", tap.pond, tap.name) if tap is not None else sandboxed
+        entry = self._cache.get(slot)
         if entry is not None and entry[0] == version:
             return entry[1]
         if entry is not None:
@@ -146,9 +162,18 @@ class ServingCache:
                 entry[1].close()
             except Exception:
                 pass
-        con = build_serving_con(driver, sandboxed=sandboxed)
-        self._cache[sandboxed] = (version, con)
+        con = build_serving_con(driver, sandboxed=sandboxed, tap=tap)
+        self._cache[slot] = (version, con)
         return con
+
+    def drop(self, slot) -> None:
+        """Close and forget one cached connection (a removed Tap's)."""
+        entry = self._cache.pop(slot, None)
+        if entry is not None:
+            try:
+                entry[1].close()
+            except Exception:
+                pass
 
     def close(self):
         for _, con in self._cache.values():
@@ -167,10 +192,10 @@ def _cache(driver) -> ServingCache:
     return cache
 
 
-def serving_query(driver, sql: str, *, sandboxed: bool = True) -> dict:
+def serving_query(driver, sql: str, *, sandboxed: bool = True, tap=None) -> dict:
     """Run a read-only query against the (warm) serving surface. Returns {columns, rows}. Read users get
     the sandboxed connection (serviceable-only, no external access); full users get the ops connection."""
-    cur = _cache(driver).connection(driver, sandboxed=sandboxed).cursor()
+    cur = _cache(driver).connection(driver, sandboxed=sandboxed, tap=tap).cursor()
     cur.execute(sql)
     columns = [d[0] for d in cur.description] if cur.description else []
     rows = cur.fetchall()

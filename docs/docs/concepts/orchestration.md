@@ -123,6 +123,10 @@ A Pond can also take a Source as optional, using whatever that Source has publis
 
 You can try Refreshes in the [Playground](https://playground.duckstring.com), on the demo pipeline or on one you build. A Refresh more frequent than the slowest step shows the pacing.
 
+## Taps
+
+Some data only needs to be fresh while someone is using it, such as a dashboard opened a few times a day. A **Tap** gives an app its own key for reading a Pond, with a limit on how old the data may be. A query through the Tap refreshes the Pond when its data is older than that, so the pipeline keeps up while the app is in use and goes quiet when it isn't, with no schedule to tune. Queries from anywhere else, such as the web UI or a notebook, never cause a run. See [Serving Apps with Taps](../guides/serving_apps_with_taps.md).
+
 ## Windows
 
 Some Inlets read from systems that only update at certain times, such as a warehouse export that lands once a night. Running them more often wastes compute and adds nothing. A **window** declares when an Inlet can produce new data, for example every day from 02:00 for one hour. The Inlet runs at most once per window, and never between windows. Its data is treated as fresh until the end of the window, so downstream demand doesn't ask for more until the next one opens.
@@ -159,10 +163,11 @@ gantt
 | A report ready every morning | a Refresh every `1d` from `06:00` on the report's Outlet |
 | Data at most a day old | a Refresh every `1d` on the Outlet |
 | A dashboard kept as current as possible | a continuous Refresh on the dashboard's Outlet |
+| An app that needs current data while it's in use | a Tap on the app's Outlet |
 | An upstream source that updates nightly | a window on its Inlet, plus any Refresh downstream |
 
 ## See also
 
-- Guides: [Scheduling](../guides/scheduling.md), [Monitoring and Failures](../guides/monitoring_and_failures.md)
-- Reference: [duckstring refresh](../reference/cli/refresh.md), [duckstring window](../reference/cli/window.md), [duckstring control](../reference/cli/control.md)
+- Guides: [Scheduling](../guides/scheduling.md), [Serving Apps with Taps](../guides/serving_apps_with_taps.md), [Monitoring and Failures](../guides/monitoring_and_failures.md)
+- Reference: [duckstring refresh](../reference/cli/refresh.md), [duckstring tap](../reference/cli/tap.md), [duckstring window](../reference/cli/window.md), [duckstring control](../reference/cli/control.md)
 - [Playground](https://playground.duckstring.com): this model simulated in the browser, with a guided tour

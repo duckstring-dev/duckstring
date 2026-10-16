@@ -136,7 +136,7 @@ function buildRippleLayout(
 export function computeLayout(
   ponds: Record<PondId, Pond>,
   ripples: Record<RippleId, Ripple>,
-  refreshes: Record<PondId, unknown>, // Ponds with standing Refreshes get a Refresh pill
+  refreshes: Record<PondId, unknown>, // Ponds with standing Refreshes or Taps get a pill
   floors?: ContentFloors,
   direction: 'LR' | 'TB' = 'LR',
   lineage: ViewPayload | null = null,
@@ -251,7 +251,7 @@ export function computeLayout(
       }
     }
 
-    // Refresh pill — to the right of the pond (LR), or below it (TB, where the right edge is the
+    // Demand pill (Refreshes and Taps) — to the right of the pond (LR), or below it (TB, where the right edge is the
     // narrow phone's margin and an outlet's bottom is free).
     if (refreshes[pond.id]) {
       const triggerId = `trigger-${pond.id}`;

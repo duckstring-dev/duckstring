@@ -30,6 +30,8 @@ Schedules are set on the Ponds whose output is actually used, at the end of the 
 duckstring refresh add reports --every 1d
 ```
 
+Data can also stay fresh just because it's being used: a [Tap](https://docs.duckstring.com/guides/serving_apps_with_taps) gives an app its own key, and its queries refresh the Pond when the data is older than you allow, so nothing runs while the app is idle.
+
 The [Playground](https://playground.duckstring.com) runs the demo pipeline in your browser, with a short guided tour of how it's scheduled.
 
 ## Incremental processing

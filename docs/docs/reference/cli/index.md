@@ -25,6 +25,7 @@ duckstring --install-completion   # enable shell completion
 | [Data and status](data.md) | `status`, `query`, `get`, `objects`, `get-object`, `delete-table`, `delete-object`, `lineage`, `trace`. |
 | [`duck`](duck.md) | Per-Pond compute and Duck pools. |
 | [`spout`](spout.md) | Deliver tables to external systems. |
+| [`tap`](tap.md) | Give apps an access point that keeps a Pond fresh while it's used. |
 | [`serve`](serve.md) | The catalog: query, expose and promote. |
 | [`secret`](secret.md) | The Catchment's write-only secret store. |
 | [`alert`](alert.md) | Failure and freshness notifications. |

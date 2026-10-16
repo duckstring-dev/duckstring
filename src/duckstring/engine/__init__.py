@@ -43,6 +43,8 @@ from .catchment import (
     ripple_source_f,
     sentinel,
     sleep_pond,
+    tap_due,
+    tap_wait_target,
     tick,
     wake_pond,
 )
@@ -93,6 +95,8 @@ __all__ = [
     "refresh_next_due",
     "record_persist",
     "sleep_pond",
+    "tap_due",
+    "tap_wait_target",
     "wake_pond",
     "force_pond",
     "rebuild_pond",

@@ -35,12 +35,30 @@ Upgrading:
   refresh`, `do --refresh`, and `POST /tap`, `/pulse`, `/wave`, `/tide` and `/untrigger`. Scripts need the new ones.
 - **Both ends of a duct need this release.** A Draw sends no requests to an upstream Catchment older than Refresh
   (there, `/refresh` would mark the Pond for a rebuild) and logs that it needs upgrading.
-- **`catchment open --tap-on-get` is removed** (it went with Tap). An open Pond stays open. Taps will provide
-  freshness that follows reads.
+- **`catchment open --tap-on-get` is removed** (it went with Tap, and fired on every reader, including the web
+  UI's data viewer). An open Pond stays open. Taps, below, replace it.
 - `/api/status` lists each Pond's `refreshes` (with `next_due`), `demand_f` and `rebuild_pending`, in place of
   `trigger`, `has_pull`, `target_f` and `refresh_pending`.
 - The Orchestration Theory page was removed from the docs; the Scheduling guide and the `refresh` and `window`
   CLI reference cover what it said that users need.
+
+### Taps: freshness that follows usage
+
+A **Tap** is an access point on a Pond for one app: `duckstring tap add reports --name dashboard --fresh-within 5m
+[--wait 30s] [--tables a,b]`. It has its own key, shown once, which can only query the Tap's tables (its Pond's
+exposed tables, or fewer), over HTTP (`/api/query`, `/api/serve/query`), the Postgres wire or Arrow Flight, and is
+refused everywhere else. A query through it sends the Pond a Refresh when the newest request on the Pond, or the
+data, is at least `--fresh-within` old (the `--every` clock, checked per query; `0`, the default, refreshes on every
+query unless a request is already waiting), so the pipeline keeps up while the app is in use and goes quiet when it
+isn't. `--wait` holds a query until the data is that fresh. Queries with any other key never send demand.
+
+- `tap ls|rm|rotate POND`; the routes `/api/ponds/{name}/taps` (full). The web UI lists and adds Taps under a
+  Pond's Options, and the canvas pill counts them beside the Pond's Refreshes.
+- `/metrics` gains `duckstring_tap_queries_total` and `duckstring_tap_refreshes_total`; `/api/status` lists each
+  Pond's `taps` (never keys).
+- The Python `Catchment` client takes a Tap's key as `api_key`, and then needs no `pond`.
+- The demo `reports` exposes `monthly_summary` (`[serve] tables`), so a Tap on it works out of the box.
+- Migration `032` (`pond_tap`).
 
 ### Orchestration
 

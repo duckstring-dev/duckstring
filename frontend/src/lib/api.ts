@@ -87,6 +87,18 @@ export interface RawRefresh {
   next_due: string | null; // when it next asks; null when continuous or ended
 }
 
+// A Tap (plans/taps.md): an app's access point on a Pond. Its key is never listed, only shown once.
+export interface RawTap {
+  name: string;
+  fresh_within_ms: number; // a query refreshes when the newest request or the data is this old (0 = every query)
+  wait_ms: number | null; // a query waits up to this long for data that fresh; null = answered at once
+  tables: string[] | null; // null = all the Pond's exposed tables
+  created_at: string;
+  last_query_at: string | null;
+  query_count: number;
+  refresh_count: number;
+}
+
 export interface RawPond {
   id: string; // the pond key "name@major" — the runtime identity of one major line
   name: string;
@@ -107,6 +119,7 @@ export interface RawPond {
   end_f: string | null;
   d_ms: number;
   refreshes: RawRefresh[]; // standing Refreshes, scheduled first
+  taps?: RawTap[]; // the Pond's Taps (keys never included)
   is_failed: boolean;
   is_blocked: boolean;
   blocked_reason: string | null; // e.g. waiting for a Source asset a Ripple couldn't read (Mechanism 2)
@@ -656,6 +669,40 @@ export async function addSpout(
   if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `add spout failed (${res.status})`);
   return res.json();
+}
+
+// ─── Taps (full access: a Tap is a credential) ───────────────────────────────
+
+export interface AddTapBody {
+  name: string;
+  fresh_within_ms: number;
+  wait_ms: number | null;
+  tables: string[] | null;
+}
+
+async function postForJSON<T>(path: string, body: unknown, what: string): Promise<T> {
+  const res = await fetch(`${apiBase()}${path}`, {
+    method: 'POST',
+    headers: authHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `${what} failed (${res.status})`);
+  return res.json();
+}
+
+// Add a Tap. The response carries its key, once, and a warning when it would read nothing.
+export function addTap(pond: string, body: AddTapBody): Promise<{ key: string; warning?: string }> {
+  return postForJSON(pondPath(pond, 'taps'), body, 'add tap');
+}
+
+// A new key for a Tap, returned once; the old one stops working.
+export function rotateTap(pond: string, name: string): Promise<{ key: string }> {
+  return postForJSON(pondPath(pond, `taps/${encodeURIComponent(name)}/rotate`), {}, 'rotate');
+}
+
+export function removeTap(pond: string, name: string): Promise<void> {
+  return postJSON(pondPath(pond, `taps/${encodeURIComponent(name)}/remove`));
 }
 
 // ─── Secrets (the catchment-wide write-only store) ───────────────────────────

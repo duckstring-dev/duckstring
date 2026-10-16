@@ -29,10 +29,10 @@ Catchment(url, con=None, default_pond=None, default_table=None, api_key=None, he
 | `con` | `duckdb.DuckDBPyConnection` | a new in-memory connection | Where results are loaded. |
 | `default_pond` | `str` | `None` | Pond used when a method is called without `pond`. |
 | `default_table` | `str` | `None` | Table used when `get` is called without `table`. |
-| `api_key` | `str` | `None` | Sent as `Authorization: Bearer <key>`, unless `headers` already sets `Authorization`. |
+| `api_key` | `str` | `None` | Sent as `Authorization: Bearer <key>`, unless `headers` already sets `Authorization`. With a [Tap](../../guides/serving_apps_with_taps.md)'s key, `pond` can be left out everywhere, since the key implies it. |
 | `headers` | `dict[str, str]` | `None` | Extra headers sent with every request, for a hosting platform that authenticates requests itself. |
 
-Queries always target the Pond's highest deployed major version.
+Queries always target the Pond's highest deployed major version, or with a Tap's key, the Tap's.
 
 Inside a `@puddle` function, [`p.catchment()`](puddle.md#catchment) returns one of these already configured for the Puddle's Source, using the Catchment registered with the CLI.
 
@@ -51,7 +51,7 @@ Runs read-only SQL against one Pond's published tables on the Catchment and retu
 | `sql` | `str` | The query. |
 | `pond` | `str` | The Pond. Defaults to `default_pond`. |
 
-**Raises** `RuntimeError` when the Catchment returns an error, and `ValueError` with no Pond given.
+**Raises** `RuntimeError` when the Catchment returns an error, and `ValueError` with no Pond given (unless the key is a Tap's).
 
 ### `get`
 

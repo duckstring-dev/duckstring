@@ -4,8 +4,10 @@ ticket carries the SQL; ``do_get`` runs it on the sandboxed serving connection a
 result; ``get_flight_info`` returns the schema + a ticket for a client that negotiates first.
 
 Auth: an ``authorization: Bearer <api-key>`` call header → the key's access level (open ⇒ full;
-read/demand ⇒ the sandboxed connection). ``pyarrow.flight`` is an optional import (the ``duckstring[aws]``
-stack pulls pyarrow already; a Catchment without it simply doesn't start the Flight port).
+read/demand ⇒ the sandboxed connection). A Tap's key (plans/taps.md) gets the Tap's own connection, and each
+``do_get`` applies the Tap's policy first (``get_flight_info`` only negotiates, so it doesn't).
+``pyarrow.flight`` is an optional import (the ``duckstring[aws]`` stack pulls pyarrow already; a Catchment
+without it simply doesn't start the Flight port).
 
 Scope: a generic Flight query surface. Full Flight SQL protocol conformance (the standardized command
 protobufs so a generic Flight SQL / JDBC-Arrow driver introspects it) is a follow-up.
@@ -33,8 +35,8 @@ def _token(headers) -> str:
 
 
 class _AuthMiddleware(flight.ServerMiddleware):
-    def __init__(self, level):
-        self.level = level
+    def __init__(self, principal):
+        self.principal = principal
 
 
 class _AuthMiddlewareFactory(flight.ServerMiddlewareFactory):
@@ -42,10 +44,10 @@ class _AuthMiddlewareFactory(flight.ServerMiddlewareFactory):
         self.driver, self.api_key = driver, api_key
 
     def start_call(self, info, headers):
-        level = auth.level_for_key(getattr(self.driver, "db", None), self.api_key, _token(headers))
-        if level is None:
+        principal = auth.principal_for_key(self.driver, self.api_key, _token(headers))
+        if principal is None:
             raise flight.FlightUnauthenticatedError("invalid or missing API key")
-        return _AuthMiddleware(level)
+        return _AuthMiddleware(principal)
 
 
 class FlightSqlServer(flight.FlightServerBase):
@@ -58,25 +60,33 @@ class FlightSqlServer(flight.FlightServerBase):
         self.host = host
         self._thread: threading.Thread | None = None
 
-    def _level(self, context) -> auth.Level:
+    def _principal(self, context) -> auth.Principal:
         mw = context.get_middleware("auth")
-        return mw.level if mw is not None else auth.Level.FULL
+        return mw.principal if mw is not None else auth.Principal(level=auth.Level.FULL, is_duck=False)
 
-    def _arrow(self, level, sql: str):
+    def _arrow(self, principal: auth.Principal, sql: str):
         from .serving import _cache
-        sandboxed = level < auth.Level.FULL
-        cur = _cache(self.driver).connection(self.driver, sandboxed=sandboxed).cursor()
-        return cur.execute(sql).fetch_arrow_table()  # a materialised Table (schema + num_rows)
+        sandboxed = principal.tap is not None or principal.level < auth.Level.FULL
+        cur = _cache(self.driver).connection(self.driver, sandboxed=sandboxed, tap=principal.tap).cursor()
+        return cur.execute(sql).to_arrow_table()  # a materialised Table (schema + num_rows)
 
     def get_flight_info(self, context, descriptor):
         sql = descriptor.command.decode("utf-8")
-        table = self._arrow(self._level(context), sql)
+        table = self._arrow(self._principal(context), sql)
         endpoint = flight.FlightEndpoint(flight.Ticket(sql.encode("utf-8")), [self._location])
         return flight.FlightInfo(table.schema, descriptor, [endpoint], table.num_rows, -1)
 
     def do_get(self, context, ticket):
+        from .taps import gate_blocking
+
         sql = ticket.ticket.decode("utf-8")
-        table = self._arrow(self._level(context), sql)
+        principal = self._principal(context)
+        if principal.tap is not None:
+            try:
+                gate_blocking(self.driver, principal.tap)
+            except KeyError:
+                raise flight.FlightUnauthenticatedError("invalid or missing API key") from None
+        table = self._arrow(principal, sql)
         return flight.RecordBatchStream(table)
 
     # ─── lifecycle (serve() blocks; run it in a thread) ────────────────────────────
