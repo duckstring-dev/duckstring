@@ -1,34 +1,16 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { useLiveStore, THEME_BRAND } from '@/lib/store';
+import { useLiveStore } from '@/lib/store';
 import type { FreqUnit, Pond, Weekday, WindowRow } from '@/lib/types';
+import {
+  ALL_DAYS, AddButton, DaysPicker, OptionsToggle, UNITS, UNIT_SECONDS, numInput, selectInput, titleCase, todayAtISO,
+  toggled,
+} from './recurrence';
 
-// Batch-availability windows on an Inlet Pond — the UI for `duckstring trigger window {pond}
-// add|list|remove`. Required fields (every + name) are always shown; the optionals (start, duration,
+// Batch-availability windows on an Inlet Pond — the UI for `duckstring window add|ls|rm {pond}`. Required fields (every + name) are always shown; the optionals (start, duration,
 // valid days, until) hide behind "Options" with the same CLI defaults (start 00:00 today,
 // duration = every / back-to-back, all days, no expiry).
-
-const UNITS: { value: FreqUnit; label: string }[] = [
-  { value: 'SECOND', label: 'sec' },
-  { value: 'MINUTE', label: 'min' },
-  { value: 'HOUR', label: 'hr' },
-  { value: 'DAY', label: 'day' },
-  { value: 'WEEK', label: 'wk' },
-];
-const ALL_DAYS: Weekday[] = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
-
-const UNIT_SECONDS: Record<FreqUnit, number> = {
-  SECOND: 1,
-  MINUTE: 60,
-  HOUR: 3600,
-  DAY: 86400,
-  WEEK: 604800,
-};
-
-function titleCase(d: Weekday): string {
-  return d[0] + d.slice(1).toLowerCase();
-}
 
 function freqLabel(interval: number, unit: FreqUnit): string {
   if (interval === 1) {
@@ -37,25 +19,6 @@ function freqLabel(interval: number, unit: FreqUnit): string {
   const plural = { SECOND: 'seconds', MINUTE: 'minutes', HOUR: 'hours', DAY: 'days', WEEK: 'weeks' }[unit];
   return `Every ${interval} ${plural}`;
 }
-
-// HH:MM today (local) → ISO 8601. Empty / malformed falls back to 00:00 today.
-function todayAtISO(text: string): string {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(text.trim());
-  const d = new Date();
-  d.setHours(m ? Math.min(23, +m[1]) : 0, m ? Math.min(59, +m[2]) : 0, 0, 0);
-  return d.toISOString();
-}
-
-const numInput: React.CSSProperties = {
-  width: 50,
-  background: '#1a1a1f',
-  border: '1px solid #3f3f46',
-  borderRadius: 4,
-  color: '#e4e4e7',
-  padding: '3px 6px',
-  fontSize: 12,
-};
-const selectInput: React.CSSProperties = { ...numInput, width: 'auto' };
 
 // Stable empty reference: defaulting inside the selector (`?? []`) returns a fresh array each render,
 // which zustand's useSyncExternalStore reads as a changed snapshot → infinite loop.
@@ -95,13 +58,7 @@ export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; 
 
   const effectiveName = nameDirty && name.trim() ? name.trim() : suggested;
 
-  const toggleDay = (d: Weekday) =>
-    setDays((prev) => {
-      const next = new Set(prev);
-      if (next.has(d)) next.delete(d);
-      else next.add(d);
-      return next;
-    });
+  const toggleDay = (d: Weekday) => setDays((prev) => toggled(prev, d));
 
   const add = () => {
     addWindow(pond.id, {
@@ -163,12 +120,7 @@ export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; 
       </div>
 
       <div style={{ marginTop: 8 }}>
-        <button
-          onClick={() => setShowOptions((v) => !v)}
-          style={{ background: 'none', border: 'none', color: THEME_BRAND, cursor: 'pointer', fontSize: 11, padding: 0 }}
-        >
-          {showOptions ? '▾ Options' : '▸ Options'}
-        </button>
+        <OptionsToggle open={showOptions} onClick={() => setShowOptions((v) => !v)} />
       </div>
 
       {showOptions && (
@@ -186,28 +138,7 @@ export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; 
               ))}
             </select>
           </div>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
-            <span style={{ fontSize: 11, color: '#71717a', width: 56, marginTop: 4 }}>Days</span>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
-              {ALL_DAYS.map((d) => (
-                <button
-                  key={d}
-                  onClick={() => toggleDay(d)}
-                  style={{
-                    background: days.has(d) ? THEME_BRAND : '#1e1e26',
-                    border: '1px solid #3f3f46',
-                    borderRadius: 4,
-                    color: days.has(d) ? '#fff' : '#a1a1aa',
-                    padding: '2px 5px',
-                    fontSize: 10,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {titleCase(d)}
-                </button>
-              ))}
-            </div>
-          </div>
+          <DaysPicker days={days} onToggle={toggleDay} />
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <span style={{ fontSize: 11, color: '#71717a', width: 56 }}>Until</span>
             <input type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} style={{ ...numInput, width: 168 }} />
@@ -219,22 +150,7 @@ export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; 
       )}
 
       <div style={{ marginTop: 10 }}>
-        <button
-          onClick={add}
-          style={{
-            background: 'transparent',
-            border: `1px solid ${THEME_BRAND}`,
-            color: THEME_BRAND,
-            borderRadius: 5,
-            padding: '4px 12px',
-            fontSize: 12,
-            cursor: 'pointer',
-            fontWeight: 600,
-            letterSpacing: '0.04em',
-          }}
-        >
-          + Add Window
-        </button>
+        <AddButton onClick={add}>+ Add Window</AddButton>
       </div>
       </>)}
     </>

@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useState } from 'react';
-import { THEME_PULL, THEME_RUNNING } from '@/lib/store';
+import { THEME_AMBER, THEME_RUNNING } from '@/lib/store';
 
 // Run-cadence + run-duration trace. Two lines share one y-axis so the run duration can be
 // read against the cadence (≈ the bottleneck): well below it ⇒ this node isn't the bottleneck;
@@ -15,7 +15,7 @@ import { THEME_PULL, THEME_RUNNING } from '@/lib/store';
 // Symmetrically, `selectedKey` enlarges both markers of the selected run — a run with no marker here
 // (a different Pond, or a no-duration pass) doesn't highlight. Intervals are indexed to the *later* run
 // (the completion that ends the gap), so a run's two markers share its x-position and either selects it.
-const INTERVAL_COLOR = THEME_PULL; // run cadence, tied to Wave/pull (≈ bottleneck under a Wave)
+const INTERVAL_COLOR = THEME_AMBER; // run cadence (≈ the bottleneck under a continuous Refresh)
 const DURATION_COLOR = THEME_RUNNING; // run duration, tied to the running state
 
 export type TracePointView = { key: string; time: number; duration: number };

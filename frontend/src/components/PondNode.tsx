@@ -31,7 +31,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const selecting = useLiveStore((s) => s.selectorMode && s.selectorPhase === 'select');
   const inScope = useLiveStore((s) => s.selectorScope.includes(pondId));
   const toggleSelect = useLiveStore((s) => s.toggleSelect);
-  const refreshPending = useLiveStore((s) => s.pondInfo[pondId]?.refreshPending ?? false);
+  const rebuildPending = useLiveStore((s) => s.pondInfo[pondId]?.rebuildPending ?? false);
   const collapsed = useLiveStore((s) => !!s.collapsedPonds[pondId]);
   const toggleCollapse = useLiveStore((s) => s.toggleCollapse);
   // Only a Pond that owns Ripples can collapse — a Draw has nothing to hide, so it shows no caret.
@@ -68,7 +68,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
         border: `2px ${boundary ? 'dashed' : 'solid'} ${borderColor}`,
         boxShadow: highlighted
           ? `0 0 0 3px ${THEME_BRAND}`
-          : refreshPending
+          : rebuildPending
             ? `0 0 0 2px #ee9333aa`  // pending refresh — an amber hint
             : isSelected ? `0 0 0 3px ${borderColor}40` : undefined,
         borderRadius: 10,
@@ -146,7 +146,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           {info && <span style={{ fontSize: 10, color: '#52525b', whiteSpace: 'nowrap' }}>v{info.version}</span>}
         </span>
         <span style={{ fontSize: 11, color: '#71717a', display: 'flex', alignItems: 'center', gap: 6 }}>
-          <DemandIndicators hasPull={view.hasPull} targetF={view.targetF} now={now} />
+          <DemandIndicators demandF={view.demandF} now={now} />
           <span style={{ color: '#a1a1aa' }}>↑{formatAge(view.startF, now)} ({view.runsStarted})</span>
           <span>✓{formatAge(view.endF, now)} ({view.runsCompleted})</span>
         </span>

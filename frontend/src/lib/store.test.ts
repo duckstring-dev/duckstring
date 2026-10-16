@@ -7,8 +7,7 @@ import {
   THEME_BLOCKED,
   THEME_BRAND,
   THEME_DANGER,
-  THEME_PULL,
-  THEME_PUSH,
+  THEME_DEMAND,
   consumeEdgeColor,
   formatAge,
   formatDuration,
@@ -18,7 +17,7 @@ import {
 import type { NodeView } from './types';
 
 const view = (over: Partial<NodeView>): NodeView => ({
-  status: 'idle', hasPull: false, targetF: null, startF: 0, endF: 0, changedF: 0, dMs: 0,
+  status: 'idle', demandF: null, startF: 0, endF: 0, changedF: 0, dMs: 0,
   ...over,
 } as NodeView);
 
@@ -49,10 +48,9 @@ describe('formatDuration', () => {
 describe('stateColor', () => {
   it('running is always the brand cyan', () =>
     expect(stateColor(view({ status: 'running' }))).toBe(THEME_BRAND));
-  it('queued is coloured by its demand — push wins over pull', () => {
-    expect(stateColor(view({ status: 'queued', targetF: 123, hasPull: true }))).toBe(THEME_PUSH);
-    expect(stateColor(view({ status: 'queued', targetF: null, hasPull: true }))).toBe(THEME_PULL);
-    expect(stateColor(view({ status: 'queued' }))).toBe(STATE_COLORS.queued);
+  it('queued (holding demand) is the demand colour', () => {
+    expect(stateColor(view({ status: 'queued', demandF: 123 }))).toBe(THEME_DEMAND);
+    expect(STATE_COLORS.queued).toBe(THEME_DEMAND);
   });
   it('failed and killed both read red; blocked is the muted red', () => {
     expect(stateColor(view({ status: 'failed' }))).toBe(THEME_DANGER);
@@ -68,10 +66,10 @@ describe('consumeEdgeColor', () => {
     expect(consumeEdgeColor(100, 100, null)).toBe(EDGE_COLORS.idle);
     expect(consumeEdgeColor(50, 100, null)).toBe(EDGE_COLORS.idle);
   });
-  it('push when consuming would meet the child push target, else pull', () => {
-    expect(consumeEdgeColor(200, 100, 150)).toBe(EDGE_COLORS.push);
-    expect(consumeEdgeColor(200, 100, 250)).toBe(EDGE_COLORS.pull);
-    expect(consumeEdgeColor(200, 100, null)).toBe(EDGE_COLORS.pull);
+  it('demand when consuming would meet demand the child holds, else idle', () => {
+    expect(consumeEdgeColor(200, 100, 150)).toBe(EDGE_COLORS.demand);
+    expect(consumeEdgeColor(200, 100, 250)).toBe(EDGE_COLORS.idle);
+    expect(consumeEdgeColor(200, 100, null)).toBe(EDGE_COLORS.idle);
   });
 });
 

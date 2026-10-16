@@ -2,29 +2,37 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore, formatDuration, THEME_PULL, THEME_PUSH, nodeFill } from '@/lib/store';
+import { useLiveStore, THEME_DEMAND, nodeFill } from '@/lib/store';
+import type { RefreshView } from '@/lib/types';
+
+// A Pond's standing Refreshes, as one pill beside it: the most frequent one, and how many more. Clicking it
+// selects the Pond, whose sidebar lists and edits them.
+
+// The most frequent Refresh: continuous first, then the shortest period.
+function mostFrequent(refreshes: RefreshView[]): RefreshView {
+  return [...refreshes].sort((a, b) => (a.continuous ? 0 : a.everyMs || Infinity) - (b.continuous ? 0 : b.everyMs || Infinity))[0];
+}
 
 export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
   // TB (mobile) layout: the pill hangs below its pond, so the edge leaves from the top.
   const vertical = data.vertical as boolean | undefined;
-  const trigger = useLiveStore((s) => s.triggers[pondId]);
-  const selectedTriggerId = useLiveStore((s) => s.selectedTriggerId);
-  const selectTrigger = useLiveStore((s) => s.selectTrigger);
+  const refreshes = useLiveStore((s) => s.refreshes[pondId]);
+  const selected = useLiveStore((s) => s.selectedPondId === pondId && !s.selectedRippleId);
+  const selectPond = useLiveStore((s) => s.selectPond);
 
-  if (!trigger) return null;
+  if (!refreshes?.length) return null;
 
-  const isWave = trigger.kind === 'wave';
-  const color = isWave ? THEME_PULL : THEME_PUSH;
-  const label = isWave ? 'Wave' : `Tide (≤${formatDuration(trigger.boundMs ?? 1000)})`;
-
-  const isSelected = selectedTriggerId === pondId;
+  const more = refreshes.length - 1;
+  const label = `${mostFrequent(refreshes).name}${more ? ` · +${more}` : ''}`;
+  const color = THEME_DEMAND;
 
   return (
     <div
+      title={refreshes.map((r) => r.name).join('\n')}
       onClick={(e) => {
         e.stopPropagation();
-        selectTrigger(pondId);
+        selectPond(pondId);
       }}
       style={{
         // Fill the node wrapper (TRIGGER_W × TRIGGER_H) so the handles — positioned
@@ -33,7 +41,7 @@ export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
         height: '100%',
         boxSizing: 'border-box',
         border: `2px solid ${color}`,
-        boxShadow: isSelected ? `0 0 0 2px ${color}` : undefined,
+        boxShadow: selected ? `0 0 0 2px ${color}` : undefined,
         borderRadius: 20,
         padding: '4px 12px',
         background: nodeFill(color),
@@ -43,11 +51,12 @@ export const TriggerNode = memo(function TriggerNode({ data }: NodeProps) {
         justifyContent: 'center',
         gap: 4,
         whiteSpace: 'nowrap',
+        overflow: 'hidden',
         userSelect: 'none',
       }}
     >
       <Handle type="source" position={vertical ? Position.Top : Position.Left} style={{ background: color }} />
-      <span style={{ fontSize: 12, fontWeight: 600, color }}>{label}</span>
+      <span style={{ fontSize: 12, fontWeight: 600, color, overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
     </div>
   );
 });

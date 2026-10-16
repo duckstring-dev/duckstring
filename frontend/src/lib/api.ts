@@ -70,10 +70,21 @@ export interface RawRipple {
   status: 'running' | 'queued' | 'idle';
   gen: number;
   runs_completed: number;
-  has_pull: boolean;
-  target_f: string | null;
+  demand_f: string | null; // the oldest freshness it has been asked for and not yet met
   start_f: string | null;
   end_f: string | null;
+}
+
+// A standing Refresh: floating (no start; every_ms after the later of the newest request and the freshness,
+// 0 = continuous) or scheduled (a start, on the grid start + k × every, filtered by days, ended by until).
+export interface RawRefresh {
+  name: string;
+  every_ms: number;
+  continuous: boolean;
+  start: string | null;
+  days: string | null; // CSV of MON..SUN; null = every day
+  until: string | null;
+  next_due: string | null; // when it next asks; null when continuous or ended
 }
 
 export interface RawPond {
@@ -91,17 +102,16 @@ export interface RawPond {
   status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
   gen: number;
   runs_completed: number;
-  has_pull: boolean;
-  target_f: string | null;
+  demand_f: string | null;
   start_f: string | null;
   end_f: string | null;
   d_ms: number;
-  trigger: { kind: 'wave' | 'tide'; bound_ms: number | null } | null;
+  refreshes: RawRefresh[]; // standing Refreshes, scheduled first
   is_failed: boolean;
   is_blocked: boolean;
   blocked_reason: string | null; // e.g. waiting for a Source asset a Ripple couldn't read (Mechanism 2)
   is_killed: boolean;
-  refresh_pending: boolean; // next run is a cold wipe-and-rebuild (control refresh)
+  rebuild_pending: boolean; // next run is a cold wipe-and-rebuild (control rebuild)
   repairing: boolean; // in an active repair plan — blocked from normal demand
   failed_f: string | null;
   failures: number;
@@ -321,16 +331,37 @@ export async function fetchRuns(q: RunsQuery = {}): Promise<RawPondRun[]> {
   return data.runs;
 }
 
-// Trigger / demand actions (the CLI `trigger` surface). `pond` is a pond id ("name@major");
-// `endpoint` is the route segment under /api/ponds/{name}/ — tap | pulse | wave | tide | wake |
-// sleep | force | kill | untrigger.
+// Pond actions with no response body. `pond` is a pond id ("name@major"); `endpoint` is the route segment
+// under /api/ponds/{name}/ — wake | sleep | force | kill | reset.
 export function postTrigger(pond: string, endpoint: string, body: unknown = {}): Promise<void> {
   return postJSON(pondPath(pond, endpoint), body);
 }
 
-// Refresh: flag a Pond so its next run is a cold wipe-and-rebuild (or `clear` to un-flag).
-export function refreshPond(pond: string, clear = false): Promise<void> {
-  return postJSON(pondPath(pond, clear ? 'refresh?clear=true' : 'refresh'));
+// Refresh now: ask for the Pond's data at least as fresh as now.
+export function refreshNow(pond: string): Promise<void> {
+  return postJSON(pondPath(pond, 'refresh'));
+}
+
+export interface AddRefreshBody {
+  every_seconds: number; // 0 = continuous
+  start?: string | null; // ISO datetime: a scheduled Refresh
+  days?: string | null; // CSV of MON..SUN (scheduled only)
+  until?: string | null;
+  name?: string | null;
+}
+
+// Add a standing Refresh. A floating one (no start) replaces the Pond's floating one.
+export function addRefresh(pond: string, body: AddRefreshBody): Promise<void> {
+  return postJSON(pondPath(pond, 'refreshes'), body);
+}
+
+export function removeRefresh(pond: string, name: string): Promise<void> {
+  return postJSON(pondPath(pond, `refreshes/${encodeURIComponent(name)}/remove`));
+}
+
+// Rebuild: flag a Pond so its next run is a cold wipe-and-rebuild (or `clear` to un-flag).
+export function rebuildPond(pond: string, clear = false): Promise<void> {
+  return postJSON(pondPath(pond, clear ? 'rebuild?clear=true' : 'rebuild'));
 }
 
 // Repair: force-rebuild a connected set of Ponds now (ids "name@major"). Throws the server's detail
@@ -354,7 +385,7 @@ export async function repairPonds(
 }
 
 // The bulk-operation vocabulary (see plans/selector_ui.md), in application-precedence order.
-export const BATCH_OPS = ['kill', 'sleep', 'reset', 'wipe', 'remove', 'clear', 'repair', 'refresh'] as const;
+export const BATCH_OPS = ['kill', 'sleep', 'reset', 'wipe', 'remove', 'clear', 'repair', 'rebuild'] as const;
 export type BatchOp = (typeof BATCH_OPS)[number];
 
 export interface BatchResult {

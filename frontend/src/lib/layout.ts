@@ -1,6 +1,6 @@
 import dagre from '@dagrejs/dagre';
 import type { Node, Edge } from '@xyflow/react';
-import type { PondId, RippleId, Pond, Ripple, TriggerView, ViewPayload } from './types';
+import type { PondId, RippleId, Pond, Ripple, ViewPayload } from './types';
 import { computeRemote, assembleRemote } from './lineage';
 
 const MIN_RIPPLE_W = 200;
@@ -12,7 +12,7 @@ const RIPPLE_H = 80;
 // `pushAge` is the formatted push-target age, or null for the "≤—" placeholder. `pad` is the node's
 // horizontal padding. Rounded up to a multiple of 8 so small age changes don't jitter the layout.
 export function statsLineWidth(opts: {
-  pushAge: string | null;
+  demandAge: string | null;
   startAge: string;
   startCount: number;
   endAge: string;
@@ -21,10 +21,8 @@ export function statsLineWidth(opts: {
 }): number {
   const CH11 = 6.7; // monospace char px at fontSize 11
   const CH9 = 5.5; // at fontSize 9 (the ≤ box)
-  const dot = 9; // 7px dot + 1px border
-  const boxText = opts.pushAge != null ? `≤${opts.pushAge}` : '≤—';
-  const box = boxText.length * CH9 + 8; // padding 3*2 + border 1*2
-  const demand = dot + 4 /* gap */ + box;
+  const boxText = opts.demandAge != null ? `≤${opts.demandAge}` : '≤—';
+  const demand = boxText.length * CH9 + 8; // padding 3*2 + border 1*2
   const start = `↑${opts.startAge} (${opts.startCount})`.length * CH11;
   const end = `✓${opts.endAge} (${opts.endCount})`.length * CH11;
   const total = demand + 6 /* gap */ + start + 6 /* gap */ + end + opts.pad + 4 /* slack */;
@@ -49,7 +47,7 @@ const POND_PAD_BOTTOM = 24;
 const MIN_POND_W = MIN_RIPPLE_W + POND_PAD_SIDE * 2;
 const MIN_POND_H = 120;
 
-const TRIGGER_W = 120;
+const TRIGGER_W = 176;
 const TRIGGER_H = 36;
 
 interface LayoutResult {
@@ -138,7 +136,7 @@ function buildRippleLayout(
 export function computeLayout(
   ponds: Record<PondId, Pond>,
   ripples: Record<RippleId, Ripple>,
-  triggers: Record<PondId, TriggerView>,
+  refreshes: Record<PondId, unknown>, // Ponds with standing Refreshes get a Refresh pill
   floors?: ContentFloors,
   direction: 'LR' | 'TB' = 'LR',
   lineage: ViewPayload | null = null,
@@ -253,10 +251,9 @@ export function computeLayout(
       }
     }
 
-    // Trigger node — to the right of the pond (LR), or below it (TB, where the right edge is the
+    // Refresh pill — to the right of the pond (LR), or below it (TB, where the right edge is the
     // narrow phone's margin and an outlet's bottom is free).
-    const triggerInfo = triggers[pond.id];
-    if (triggerInfo) {
+    if (refreshes[pond.id]) {
       const triggerId = `trigger-${pond.id}`;
       nodes.push({
         id: triggerId,

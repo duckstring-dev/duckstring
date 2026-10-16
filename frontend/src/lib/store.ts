@@ -5,7 +5,7 @@ import type {
   Pond,
   Ripple,
   NodeView,
-  TriggerView,
+  RefreshView,
   PondInfo,
   ViewPayload,
   PondRun,
@@ -18,7 +18,11 @@ import {
   fetchRuns,
   fetchWindows,
   postTrigger,
-  refreshPond,
+  refreshNow,
+  addRefresh,
+  removeRefresh,
+  rebuildPond,
+  type AddRefreshBody,
   batchPonds,
   BATCH_OPS,
   type BatchOp,
@@ -63,8 +67,7 @@ function nodeView(n: RawPond | RawRipple, dMs: number): NodeView {
     status: n.status,
     startF: isoToMs(n.start_f),
     endF: isoToMs(n.end_f),
-    targetF: isoToMsOrNull(n.target_f),
-    hasPull: n.has_pull,
+    demandF: isoToMsOrNull(n.demand_f),
     runsStarted: n.gen,
     runsCompleted: n.runs_completed,
     dMs,
@@ -127,7 +130,7 @@ interface StatusSlice {
   pondViews: Record<PondId, NodeView>;
   rippleViews: Record<RippleId, NodeView>;
   pondInfo: Record<PondId, PondInfo>;
-  triggers: Record<PondId, TriggerView>;
+  refreshes: Record<PondId, RefreshView[]>; // standing Refreshes per Pond (only Ponds that have any)
 }
 
 function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
@@ -136,7 +139,7 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
   const pondViews: Record<PondId, NodeView> = {};
   const rippleViews: Record<RippleId, NodeView> = {};
   const pondInfo: Record<PondId, PondInfo> = {};
-  const triggers: Record<PondId, TriggerView> = {};
+  const refreshes: Record<PondId, RefreshView[]> = {};
 
   // A Pond Draw only earns a node if a local Pond actually sources from it — an unconsumed Draw (e.g.
   // from `duct create --sync` drawing more than this Catchment uses) is noise, so hide it.
@@ -158,7 +161,7 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
       isBlocked: p.is_blocked,
       blockedReason: p.blocked_reason ?? null,
       isKilled: p.is_killed,
-      refreshPending: p.refresh_pending ?? false,
+      rebuildPending: p.rebuild_pending ?? false,
       repairing: p.repairing ?? false,
       failedF: p.failed_f,
       failures: p.failures,
@@ -173,7 +176,12 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
       spout: p.spout ?? null,
     };
     pondViews[p.id] = nodeView(p, p.d_ms);
-    if (p.trigger) triggers[p.id] = { kind: p.trigger.kind, boundMs: p.trigger.bound_ms };
+    if (p.refreshes?.length) {
+      refreshes[p.id] = p.refreshes.map((r) => ({
+        name: r.name, everyMs: r.every_ms, continuous: r.continuous, start: r.start, days: r.days, until: r.until,
+        nextDue: isoToMsOrNull(r.next_due),
+      }));
+    }
 
     // A Draw's "draw" ripple and a Spout's "egress" ripple are internal mechanisms — not worth rendering.
     // Skip them; the node shows bare (its running/idle/failed state is pond-level).
@@ -201,7 +209,7 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
     accessLevel: payload.access_level ?? 'full',
     // NOTE: `cloud` is NOT in the ~1 s status payload anymore — it's polled slowly via refreshCloud(). We
     // intentionally omit it here so the existing value is preserved across a status refresh.
-    ponds, ripples, pondViews, rippleViews, pondInfo, triggers,
+    ponds, ripples, pondViews, rippleViews, pondInfo, refreshes,
   };
 }
 
@@ -222,7 +230,6 @@ export interface LiveState extends StatusSlice {
 
   selectedPondId: PondId | null;
   selectedRippleId: RippleId | null;
-  selectedTriggerId: PondId | null;
 
   // Collapsed Ponds hide their Ripples/Trickles in the canvas (header-only). Purely client-side view
   // state — keyed by pond id, `true` = collapsed.
@@ -258,20 +265,17 @@ export interface LiveState extends StatusSlice {
 
   selectPond(id: PondId | null): void;
   selectRipple(id: RippleId | null): void;
-  selectTrigger(id: PondId | null): void;
   clearSelection(): void;
 
-  tap(pond: PondId): Promise<void>;
-  pulse(pond: PondId): Promise<void>;
-  wave(pond: PondId): Promise<void>;
-  tide(pond: PondId, boundSeconds: number): Promise<void>;
-  removeTrigger(pond: PondId): Promise<void>;
+  refreshNow(pond: PondId): Promise<void>;
+  addRefresh(pond: PondId, body: AddRefreshBody): Promise<void>;
+  removeRefresh(pond: PondId, name: string): Promise<void>;
 
   wake(pond: PondId): Promise<void>;
   sleep(pond: PondId, upstream?: boolean): Promise<void>;
   force(pond: PondId): Promise<void>;
   kill(pond: PondId): Promise<void>;
-  refreshPond(pond: PondId, clear?: boolean): Promise<void>;
+  rebuildPond(pond: PondId, clear?: boolean): Promise<void>;
   resetPond(pond: PondId): Promise<void>;
 
   // Selector: a canvas selection mode that applies a set of operations to a set of Ponds (Pond Actions).
@@ -358,7 +362,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   pondViews: {},
   rippleViews: {},
   pondInfo: {},
-  triggers: {},
+  refreshes: {},
   now: Date.now(),
   connected: false,
   error: null,
@@ -366,7 +370,6 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
   selectedPondId: null,
   selectedRippleId: null,
-  selectedTriggerId: null,
   collapsedPonds: {},
   catalogOpen: false,
   setCatalogOpen: (open) => set({ catalogOpen: open }),
@@ -422,7 +425,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     // ghost and the canvas re-frames to what's left (see the fit-all fallback in DagCanvas).
     const sel = get().selectedPondId;
     const cleared = sel && !next.ponds[sel]
-      ? { selectedPondId: null, selectedRippleId: null, selectedTriggerId: null }
+      ? { selectedPondId: null, selectedRippleId: null }
       : {};
     set({
       ...next, ...cleared, lineage, statusVersion: payload.version,
@@ -496,21 +499,18 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   },
 
   selectPond(id) {
-    set({ selectedPondId: id, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
+    set({ selectedPondId: id, selectedRippleId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
     // Windows live on Inlets (batch availability) and on Spouts (delivery throttle).
     if (id && (get().ponds[id]?.sources.length === 0 || get().ponds[id]?.isSpout)) get().refreshWindows(id);
     get().refresh();
   },
   selectRipple(id) {
     const pondId = id ? get().ripples[id]?.pondId ?? null : null;
-    set({ selectedRippleId: id, selectedPondId: pondId, selectedTriggerId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
+    set({ selectedRippleId: id, selectedPondId: pondId, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
     get().refresh();
   },
-  selectTrigger(id) {
-    set({ selectedTriggerId: id, selectedPondId: null, selectedRippleId: null });
-  },
   clearSelection() {
-    set({ selectedPondId: null, selectedRippleId: null, selectedTriggerId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
+    set({ selectedPondId: null, selectedRippleId: null, selectedPondRuns: [], runLimit: RUN_PAGE, runsAtEnd: false });
   },
 
   toggleCollapse(id) {
@@ -531,17 +531,15 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     set({ collapsedPonds: next });
   },
 
-  tap: (pond) => act(get, set, () => postTrigger(pond, 'tap')),
-  pulse: (pond) => act(get, set, () => postTrigger(pond, 'pulse')),
-  wave: (pond) => act(get, set, () => postTrigger(pond, 'wave')),
-  tide: (pond, boundSeconds) => act(get, set, () => postTrigger(pond, 'tide', { bound_seconds: boundSeconds })),
-  removeTrigger: (pond) => act(get, set, () => postTrigger(pond, 'untrigger')),
+  refreshNow: (pond) => act(get, set, () => refreshNow(pond)),
+  addRefresh: (pond, body) => act(get, set, () => addRefresh(pond, body)),
+  removeRefresh: (pond, name) => act(get, set, () => removeRefresh(pond, name)),
 
   wake: (pond) => act(get, set, () => postTrigger(pond, 'wake')),
   sleep: (pond, upstream = false) => act(get, set, () => postTrigger(pond, 'sleep', { upstream })),
   force: (pond) => act(get, set, () => postTrigger(pond, 'force')),
   kill: (pond) => act(get, set, () => postTrigger(pond, 'kill')),
-  refreshPond: (pond, clear = false) => act(get, set, () => refreshPond(pond, clear)),
+  rebuildPond: (pond, clear = false) => act(get, set, () => rebuildPond(pond, clear)),
   resetPond: (pond) => act(get, set, () => postTrigger(pond, 'reset')),
 
   selectorMode: false,
@@ -697,8 +695,8 @@ export function formatDuration(ms: number): string {
 // the generic accent.
 export const THEME_BRAND = '#06c4e6'; // a pond on a bright day — full-saturation water cyan
 export const THEME_RUNNING = THEME_BRAND; // active execution + brand accent
-export const THEME_PULL = '#ee9333'; // pull (Tap/Wave) · queued · run interval — warm amber-orange
-export const THEME_PUSH = '#a3e635'; // push (Pulse/Tide) — green-yellow
+export const THEME_DEMAND = '#a3e635'; // demand: a Refresh, a requested freshness, queued — green-yellow
+export const THEME_AMBER = '#ee9333'; // run intervals, retries, warnings — warm amber-orange
 export const THEME_SUCCESS = '#22c55e'; // success · connected · start · clear (green)
 export const THEME_DANGER = '#ef4444'; // stop · failed (red)
 export const THEME_BLOCKED = '#991b1b'; // blocked by an upstream failure — a darker, muted red
@@ -708,7 +706,7 @@ export const THEME_WAKE = '#15803d'; // Wake — a muted/dark green (the soft "g
 // backend's status string, so they map straight through here.
 export const STATE_COLORS: Record<string, string> = {
   running: THEME_RUNNING,
-  queued: THEME_PULL,
+  queued: THEME_DEMAND,
   idle: '#71717a',
   failed: THEME_DANGER,
   killed: THEME_DANGER, // killed reads as red, like failed
@@ -716,32 +714,24 @@ export const STATE_COLORS: Record<string, string> = {
   repairing: THEME_WAKE, // mid-rebuild — a deliberate operator action, the soft "go" green
 };
 
-// Border colour for a node. Running is always the brand cyan and idle is grey; a *queued* node is
-// coloured by its demand — push if it holds any push target, else pull. (Push is the more specific
-// demand, so it wins the colour when a node holds both.)
+// Border colour for a node. Running is always the brand cyan, idle grey, and queued (holding demand) the
+// demand colour.
 export function stateColor(view: NodeView): string {
-  if (view.status === 'queued') {
-    if (view.targetF !== null) return THEME_PUSH;
-    if (view.hasPull) return THEME_PULL;
-  }
   return STATE_COLORS[view.status] ?? STATE_COLORS.idle;
 }
 
-// pull amber; push green-yellow; idle grey.
+// demand green-yellow; idle grey.
 export const EDGE_COLORS: Record<string, string> = {
-  pull: THEME_PULL,
-  push: THEME_PUSH,
+  demand: THEME_DEMAND,
   idle: '#3f3f46',
 };
 
-// Edge colour = whether the child can consume the parent. Coloured when the parent's output is
-// fresher than the child's last run start (parent.endF > child.startF); push if consuming it would
-// also meet a push target the child holds (parent.endF >= child.targetF), else pull. Freshnesses are
-// ms-epoch (0 = never); childTargetF is null when there is no push target.
-export function consumeEdgeColor(parentEndF: number, childStartF: number, childTargetF: number | null): string {
-  if (parentEndF <= childStartF) return EDGE_COLORS.idle;
-  if (childTargetF !== null && parentEndF >= childTargetF) return EDGE_COLORS.push;
-  return EDGE_COLORS.pull;
+// Edge colour = whether the child is about to consume the parent: the parent's output is fresher than the
+// child's last run start (parent.endF > child.startF) and meets demand the child holds (parent.endF >=
+// child.demandF). Freshnesses are ms-epoch (0 = never); childDemandF is null when the child holds none.
+export function consumeEdgeColor(parentEndF: number, childStartF: number, childDemandF: number | null): string {
+  if (parentEndF > childStartF && childDemandF !== null && parentEndF >= childDemandF) return EDGE_COLORS.demand;
+  return EDGE_COLORS.idle;
 }
 
 // Internal fill of a node/pill: its rim colour washed in at low alpha over the dark canvas, so the

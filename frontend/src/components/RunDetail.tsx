@@ -1,6 +1,6 @@
 'use client';
 
-import { useLiveStore, parseTs, THEME_PULL, THEME_DANGER } from '@/lib/store';
+import { useLiveStore, parseTs, THEME_AMBER, THEME_DANGER } from '@/lib/store';
 import type { PondRun, RippleRun } from '@/lib/types';
 import { clock, durationOf, STATUS_COLOR } from './RunHistory';
 
@@ -113,7 +113,7 @@ function RippleLine({ r, isRetry }: { r: RippleRun; isRetry: boolean }) {
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0', paddingLeft: isRetry ? 16 : 0, borderBottom: '1px solid #161619' }}>
       <span style={{ width: 7, height: 7, borderRadius: '50%', background: c, flexShrink: 0 }} />
       <span style={{ flex: 1, minWidth: 0, color: isRetry ? '#a1a1aa' : '#d4d4d8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {isRetry ? <span style={{ color: THEME_PULL }}>{`↻${r.retry} `}</span> : null}{r.ripple}
+        {isRetry ? <span style={{ color: THEME_AMBER }}>{`↻${r.retry} `}</span> : null}{r.ripple}
       </span>
       <span style={{ color: c, fontSize: 11 }}>{r.status}</span>
       <span style={{ color: '#52525b', fontSize: 11, width: 48, textAlign: 'right' }}>{dur || '—'}</span>

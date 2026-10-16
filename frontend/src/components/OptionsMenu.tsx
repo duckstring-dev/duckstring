@@ -12,7 +12,7 @@ import { CloudMenu } from './CloudMenu';
 // green ✓ when the key grants it, a grey – when not. (Moved off the always-on badge into the menu.)
 const ACCESS_CHIPS: { label: string; active: (l: AccessLevel) => boolean; hint: string }[] = [
   { label: 'Manage', active: (l) => l === 'full', hint: 'Deploy, control, and manage secrets.' },
-  { label: 'Demand', active: (l) => l === 'full' || l === 'demand', hint: 'Create demand: tap, wave, pulse, tide.' },
+  { label: 'Demand', active: (l) => l === 'full' || l === 'demand', hint: 'Create demand: refresh now and standing Refreshes.' },
   { label: 'Read', active: () => true, hint: 'Read status and query data.' },
 ];
 
