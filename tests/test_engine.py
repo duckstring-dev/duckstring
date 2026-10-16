@@ -1110,7 +1110,8 @@ class SimRun:
 
 
 def simulate(made: tuple[EngineState, dict[str, timedelta]], outlet: str, seconds: int, *, every: float | None = None,
-             tide: float | None = None, drift: bool = False, tides: dict[str, float] | None = None) -> SimRun:
+             tide: float | None = None, drift: bool = False, tides: dict[str, float] | None = None,
+             schedules: dict[str, tuple[float, float]] | None = None) -> SimRun:
     """Drive sim time as the playground's tests do: a one-off Refresh at ``outlet`` every ``every`` seconds
     (landing on the next step), or a standing floating Refresh every ``tide`` seconds (0 = continuous; the
     name follows the cross-check's scenario format); then per step advance, complete, tick, react."""
@@ -1119,6 +1120,8 @@ def simulate(made: tuple[EngineState, dict[str, timedelta]], outlet: str, second
         s.refreshes = {outlet: [floating(outlet, tide)]}
     for pond, bound in (tides or {}).items():  # further Outlets with their own cadences
         s.refreshes[pond] = [floating(pond, bound)]
+    for pond, (at, period) in (schedules or {}).items():  # scheduled Refreshes, on a grid from the start
+        s.refreshes[pond] = [*s.refreshes.get(pond, []), scheduled(pond, T0 + secs(at), period)]
     d = Driver(s, dur, drift=drift)
     ages: list[float] = []
     last_end, half = NEVER, {}
@@ -1412,11 +1415,13 @@ def _node_runs_typescript() -> bool:
     ("bottleneck inside a Pond", dict(every=1)),
     ("slow sibling Inlet", dict(tide=0)),  # sibling alignment at the join
     ("two Outlets on a shared chain", dict(tide=0, tides={"O2": 10})),  # every 10 s beside a continuous neighbour
+    ("deep chain", dict(schedules={"O": [3, 7]})),  # a scheduled Refresh
 ])
 def test_the_throttle_matches_the_playground_engine(name, opts):
     """Cross-check against the reference: the same scenario through the playground's TypeScript engine and
     this one gives the same Pond Runs at the same times. (They can differ where a user's Refresh reaches a busy
-    Inlet, which stamps the Refresh's minted epoch here and its start time in the playground.)"""
+    Inlet, which stamps the Refresh's minted epoch here and its start time in the playground; a scheduled Refresh
+    beside another one does, since the stamp moves the other's clock.)"""
     spec, outlet, _, _ = THROTTLE_TOPOLOGIES.get(name) or CROSSCHECK_ONLY[name]
     scenario = {"spec": spec, "outlet": outlet, "seconds": 120, **opts}
     out = subprocess.run(

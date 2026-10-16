@@ -4,16 +4,17 @@
 //   node --experimental-strip-types tests/throttle_crosscheck.mts '<scenario JSON>'
 //
 // Scenario: {"spec": [[pond, seconds | [seconds, ...], [sources]], ...], "outlet": pond, "seconds": n,
-// "every"?: s, "tide"?: s, "drift"?: true, "tides"?: {pond: s}}. `every` sends a one-off Refresh to the Outlet
-// that often; `tide` is a standing Refresh every that many seconds (0 = continuous) on it, and `tides` adds
-// them on further Ponds (several Outlets with their own cadences). Prints {"runs": {pond: completed Pond Runs},
+// "every"?: s, "tide"?: s, "drift"?: true, "tides"?: {pond: s}, "schedules"?: {pond: [start s, every s]}}. `every`
+// sends a one-off Refresh to the Outlet that often; `tide` is a standing Refresh every that many seconds (0 =
+// continuous) on it, `tides` adds them on further Ponds (several Outlets with their own cadences), and `schedules`
+// adds scheduled Refreshes (on the grid start + k * every, counted from the simulation's start). Prints {"runs": {pond: completed Pond Runs},
 // "completions": {pond: [ms after the start, ...]}}.
 import { refreshNow, tick, type OrchestrState } from '../playground/src/lib/orchestration.ts';
 
 type Spec = [string, number | number[], string[]][];
 const sc = JSON.parse(process.argv[2]) as {
   spec: Spec; outlet: string; seconds: number; every?: number; tide?: number; drift?: boolean;
-  tides?: Record<string, number>;
+  tides?: Record<string, number>; schedules?: Record<string, [number, number]>;
 };
 
 let s: OrchestrState = { ponds: {}, pondStates: {}, ripples: {}, rippleStates: {}, refreshes: {} };
@@ -34,10 +35,13 @@ for (const [name, secs, sources] of sc.spec) {
 }
 if (sc.tide != null) s.refreshes = { [sc.outlet]: [{ name: 'refresh', everyMs: sc.tide * 1000 }] };
 for (const [pond, secs] of Object.entries(sc.tides ?? {})) s.refreshes[pond] = [{ name: 'refresh', everyMs: secs * 1000 }];
+const start = 1_000_000;
+for (const [pond, [at, every]] of Object.entries(sc.schedules ?? {})) {
+  s.refreshes[pond] = [...(s.refreshes[pond] ?? []), { name: 'scheduled', everyMs: every * 1000, startAnchor: start + at * 1000 }];
+}
 
 let seed = 7;
 const drift = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) % 40) - 10;
-const start = 1_000_000;
 let now = start;
 for (let i = 0; i < sc.seconds * 10; i++) {
   if (sc.every && i % Math.round(sc.every * 10) === 0) s = refreshNow(s, sc.outlet, now);

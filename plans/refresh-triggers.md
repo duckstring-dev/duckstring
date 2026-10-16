@@ -1,8 +1,8 @@
 # One trigger: Refresh
 
-Status: **planned, not built.** Settled with the author on 2026-10-13 and 2026-10-14, after the Pulse
-throttle (`plans/pulse-throttle.md`, merged in #34) made a fast Pulse pace itself to the bottleneck. Taps
-(on-request freshness) are agreed in outline and get their own plan and stage.
+Status: **built 2026-10-16** (steps 2 to 7 below; see "As built"). Settled with the author on 2026-10-13 and
+2026-10-14, after the Pulse throttle (`plans/pulse-throttle.md`, merged in #34) made a fast Pulse pace itself to
+the bottleneck. Taps (on-request freshness) are agreed in outline and get their own plan and stage.
 
 ## Why
 
@@ -363,6 +363,33 @@ topologies, with lognormal run-time noise (sigma 0 to 1), 8 paired seeds, in bot
 7. **Docs** (the table above), CLAUDE.md, the changelog.
 8. A later release: remove the aliases and move the poller to `/refresh`.
 9. **Taps**, from their own plan.
+
+## As built (2026-10-16)
+
+Where the build differs from the plan above, or adds to it:
+
+- **Routes** follow the windows/Spouts convention rather than `DELETE`: `POST /refresh` (one-shot), `POST
+  /refreshes` (add, body `every_seconds`/`continuous`/`start`/`days`/`until`/`name`), `GET /refreshes`, `POST
+  /refreshes/{name}/remove`, `POST /rebuild`. Adding a Refresh with an existing name replaces it.
+- **Names**: scheduled Refreshes are "scheduled" in code and docs (`Refresh.scheduled`, `--start`), not
+  "anchored". Default names as planned, plus "Hourly", "Weekly" and "Every 2.5 s" for fractional periods.
+- **Local demand** (`_local_demand`): Wake, a Spout's standing Wake and the missing-asset re-attempt record
+  demand at the Pond without counting or sending it on. A Wake with nothing fresher upstream now asks for
+  nothing (a pending Wake used to wait for the next Source advance).
+- **Throttle fix found on the way, in both engines**: a trigger Pond with no request outstanding releases at
+  once (`ThrottleState.completed` starts true; the playground's `neverSent`). A Pond already throttled through a
+  Source another Refresh paces used to hold its first request until a completion it was needed for, and
+  deadlocked when its other Sources were driven by nothing else. The old Wave-based test hid it.
+- **Wave yardsticks** were recorded from the pre-change engine into `tests/test_engine.py` (`WAVE`).
+- **Sleep** removes the standing Refreshes of every Pond it reaches (as it cancelled the Wave or Tide).
+- **The Duck job** carries `rebuild` in place of `refresh`; Ducks and Catchments must match versions anyway.
+- **Cross-check**: a scheduled Refresh on its own matches the playground; one beside another Refresh doesn't,
+  because a scheduled request reaching a busy Inlet stamps its occurrence in Python and the start time in the
+  playground, which moves the other Refresh's clock (the known minted-epoch difference).
+- **Playground**: one Refresh per Pond in the UI (the author's call), and a docs video re-recorded under a
+  continuous Refresh. The launch-alignment prototype (`bench/launch_alignment/`) is parked, off.
+- **Docs**: `--tap-on-get` is no longer documented (hidden, deprecated); the querying guide points to sending
+  a Refresh before reading until Taps exist.
 
 ## Open questions
 
