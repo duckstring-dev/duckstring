@@ -60,7 +60,7 @@ control_app = typer.Typer(
 )
 control_app.command("force")(force)
 control_app.command("rebuild")(rebuild)
-control_app.command("refresh", hidden=True)(refresh_alias)  # the pre-0.7 name, for one release
+control_app.command("refresh", hidden=True)(refresh_alias)  # the name from before Rebuild, for one release
 control_app.command("repair")(repair)
 control_app.command("reset")(reset)
 control_app.command("wake")(wake)
@@ -79,7 +79,7 @@ app.add_typer(pond_cmd.app, name="pond")
 app.add_typer(puddle_cmd.app, name="puddle")
 app.add_typer(refresh_cmd.app, name="refresh")
 app.add_typer(window_cmd.app, name="window")
-app.add_typer(trigger_cmd.app, name="trigger")  # hidden: the pre-0.7 group, for one release
+app.add_typer(trigger_cmd.app, name="trigger")  # hidden: the group from before Refresh, for one release
 app.add_typer(control_app, name="control")
 app.add_typer(duck_cmd.app, name="duck")
 app.add_typer(spout_cmd.app, name="spout")

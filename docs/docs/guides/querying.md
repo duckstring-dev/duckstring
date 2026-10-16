@@ -107,4 +107,4 @@ Select a Pond in the UI to browse its tables, page through rows and run SQL agai
 
 ## Refreshing on read
 
-Queries return what has been published, however old. To refresh data when it's read, send a Tap before querying, from the application or with `duckstring trigger tap`. A Tap only runs upstream Ponds that have nothing newer to offer. See [Scheduling](scheduling.md#refresh-on-request).
+Queries return what has been published, however old. To refresh data when it's read, send a Refresh before querying, from the application (`POST /api/ponds/{name}/refresh` with a `demand` key) or with `duckstring refresh`. It runs everything upstream that is older than the moment it was sent, so for data read often, a standing Refresh is usually the better fit. See [Scheduling](scheduling.md#refreshing-now).

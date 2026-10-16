@@ -18,8 +18,9 @@ duckstring --install-completion   # enable shell completion
 | [`catchment`](catchment.md) | Create, register, start and manage Catchments; ducts between them. |
 | [`pond`](pond.md) | Scaffold, test locally, deploy and remove Ponds. |
 | [`puddle`](puddle.md) | Inspect local Puddles and run output. |
-| [`trigger`](trigger.md) | Tap, Wave, Pulse, Tide, and windows. |
-| [`control`](control.md) | Wake, force, refresh, repair, sleep, kill, clear, reset, and retry budgets. |
+| [`refresh`](refresh.md) | Refresh a Pond now, every N, at set times, or continuously. |
+| [`window`](window.md) | When an Inlet can produce new data. |
+| [`control`](control.md) | Wake, force, rebuild, repair, sleep, kill, clear, reset, and retry budgets. |
 | [`do`](do.md) | Apply operations to many Ponds at once. |
 | [Data and status](data.md) | `status`, `query`, `get`, `objects`, `get-object`, `delete-table`, `delete-object`, `lineage`, `trace`. |
 | [`duck`](duck.md) | Per-Pond compute and Duck pools. |
@@ -45,7 +46,7 @@ Commands that act on one Pond take:
 
 ## Live status
 
-`trigger tap`, `trigger pulse`, `control wake` and `control force` open the live status view after sending the request, and close it once the Pond settles (idle, failed, killed or blocked). `trigger wave` and `trigger tide` open it and leave it open until you press `Ctrl+C`; the trigger keeps running after the view closes.
+`refresh`, `control wake` and `control force` open the live status view after sending the request, and close it once the Pond settles (idle, failed, killed or blocked). `refresh add` opens it and leaves it open until you press `Ctrl+C`; the standing Refresh keeps going after the view closes.
 
 | Option | Description |
 |---|---|
@@ -54,4 +55,4 @@ Commands that act on one Pond take:
 
 ## Access levels
 
-Against a Catchment using built-in API keys, each command needs a minimum key level. Read commands (status, queries, lineage) need `read`; triggers need `demand`; everything that changes configuration, runs or data needs `full`. See [HTTP API](../http_api.md#authentication).
+Against a Catchment using built-in API keys, each command needs a minimum key level. Read commands (status, queries, lineage) need `read`; Refreshes need `demand`; everything that changes configuration, runs or data needs `full`. See [HTTP API](../http_api.md#authentication).

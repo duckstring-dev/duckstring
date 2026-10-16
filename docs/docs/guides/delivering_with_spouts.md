@@ -79,13 +79,13 @@ duckstring control failure-budget 'priced#priced_line' --on-change 10
 
 ## Controlling when deliveries happen
 
-A Spout never asks its Pond to run. It delivers whatever the Pond publishes, so the Pond's own trigger decides how fresh the delivered data is.
+A Spout never asks its Pond to run. It delivers whatever the Pond publishes, so the Pond's own Refresh decides how fresh the delivered data is.
 
 To deliver less often than the Pond publishes, give the Spout a [window](scheduling.md#batch-sources). A Spout is addressed as `{pond}#{spout}`, and its name defaults to the table's:
 
 ```bash
 # Deliver monthly_summary at most once a day, between 07:00 and 08:00 UTC
-duckstring trigger window 'reports#monthly_summary' add --name morning --every 1d --start 07:00 --duration 1h
+duckstring window add 'reports#monthly_summary' --name morning --every 1d --start 07:00 --duration 1h
 ```
 
 This suits a destination that should change only at a fixed time, while the Pond itself stays fresh for other consumers.

@@ -4,25 +4,66 @@ Notable changes per release. Versions before 0.5.0 are recorded in the git histo
 
 ## Unreleased
 
+### One trigger: Refresh
+
+Tap, Wave, Pulse and Tide are replaced by a single trigger, **Refresh**, which asks for a Pond's data to be at
+least as fresh as now. A standing Refresh repeats it:
+
+- `duckstring refresh add reports --every 1d`: a day after the later of the last request and the last refresh of
+  the data (the old Tide).
+- `duckstring refresh add reports --every 1d --start 06:00 [--on MON,TUE,WED,THU,FRI] [--until T]`: at set times,
+  on a window's grid, whatever else refreshes the Pond. New. A Catchment that was down asks once, for the latest
+  occurrence, when it returns.
+- `duckstring refresh add reports --continuous` (or `--every 0s`): as fresh as the pipeline allows, paced to its
+  slowest step (the old Wave).
+
+`duckstring refresh reports` refreshes once (the old Pulse). A Pond can have any number of scheduled Refreshes and
+one `--every` or continuous Refresh; `refresh ls` lists them with when each next asks, and `refresh rm` removes
+one. The web UI's trigger buttons became a Refresh section, and its canvas pill shows the Pond's Refreshes.
+
+Upgrading:
+
+- **Existing Waves become continuous Refreshes and Tides become `--every` Refreshes** (migration `031`).
+- **`POST /api/ponds/{name}/refresh` changed meaning.** It used to mark a Pond for a rebuild; it now refreshes the
+  Pond (at `demand` level). The rebuild flag moved to `POST /api/ponds/{name}/rebuild`, and the command to
+  `duckstring control rebuild` (the batch operation and `duckstring do --refresh` to `rebuild` / `--rebuild`).
+  Scripts that called `/refresh` for a rebuild need updating.
+- **Pull is gone from the engine.** A Tap's "anything newer" request no longer exists: a Refresh always asks for
+  data as of now. Wake now runs once if the Sources are fresher at that moment, rather than waiting for them.
+- `duckstring trigger window POND add|list|remove` is now `duckstring window add|ls|rm POND`.
+- For one release, the old commands and routes still work and print or document their replacement: the hidden
+  `duckstring trigger tap|pulse|wave|tide|remove|window` and `control refresh`, and the routes `/tap`, `/pulse`,
+  `/wave`, `/tide` and `/untrigger`. A duct's poller keeps calling `/pulse` for that release, so a newer
+  Catchment can still send demand to an older one. They will be removed in the release after.
+- `catchment open --tap-on-get` is deprecated and hidden (a read now sends a one-shot Refresh); it will be
+  replaced by Taps.
+- `/api/status` lists each Pond's `refreshes` (with `next_due`), `demand_f` and `rebuild_pending`, in place of
+  `trigger`, `has_pull`, `target_f` and `refresh_pending`.
+- The Orchestration Theory page was removed from the docs; the Scheduling guide and the `refresh` and `window`
+  CLI reference cover what it said that users need.
+
 ### Orchestration
 
-- **A Pulse or Tide no longer refreshes an optional Source after its first build.** Push demand now
-  propagates only to a Pond's required Sources, as the orchestration spec describes: a Pond never waits
-  for an optional Source, so asking it to reach the target ran it for nothing. An optional Source that
-  has never run still gets one Pulse, so its Sink has output to read, and a Pond whose Sources are all
-  optional still pushes to every one of them. Tap and Wave are unchanged and still reach every Source.
-  If an optional Source needs a cadence of its own, give it its own Tide.
+- **Requests that arrive faster than the pipeline can serve them are paced to its slowest step** (the throttle),
+  always on, with no setting. A step that receives two requests during one run is held there, and one request goes
+  upstream each time it starts a new run.
+- **A Refresh no longer refreshes an optional Source after its first build.** Demand propagates only to a Pond's
+  required Sources: a Pond never waits for an optional Source, so asking it ran it for nothing. An optional Source
+  that has never run still gets one request, so its Sink has output to read, and a Pond whose Sources are all
+  optional still asks every one of them. If an optional Source needs a cadence of its own, give it its own Refresh.
 - **A repeat request for the freshness a Pond is already running is ignored.** It used to start a second
   Run at the same freshness, which the no-change skip then completed as a pass, ending the Run in flight
-  early. A duct re-sending its downstream's target could cause it.
+  early. A duct re-sending its downstream's request could cause it.
 - **A join's Sources read together under saturation.** When some of a Pond's Sources are throttled and others
   aren't, its requests reach the faster Sources only once the throttled ones start their next run, so a join
   isn't held back by a fast Source that read early.
+- **A Pond already throttled through another Refresh's Source still sends its first request.** It used to hold
+  that request until its own first completion, which the request itself was needed for.
 - **Sleep keeps other Ponds' demand.** Sleeping a Pond (or a path with `--upstream`) clears its own demand, but a
   pending request from another Pond it was serving is now sent to it again; before, that request stranded.
-- **Push demand is no longer lost at a halted Source.** A Pond that stops being blocked (after Clear, a
-  recovery or a redeploy) re-sends its newest unmet push target upstream. Before, a Pulse waiting on a
-  Source whose Run had failed or been killed stranded after Clear until something else demanded the path.
+- **Demand is no longer lost at a halted Source.** A Pond that stops being blocked (after Clear, a recovery or a
+  redeploy) re-sends its newest unmet request upstream. Before, a request waiting on a Source whose Run had failed
+  or been killed stranded after Clear until something else demanded the path.
 
 ## 0.6.1 — 2026-10-08
 

@@ -1,0 +1,69 @@
+---
+title: duckstring refresh
+description: Refresh a Pond now, every N, at set times, or continuously.
+sidebar_label: refresh
+---
+
+# duckstring refresh
+
+Commands that ask for a Pond's data. See [Orchestration](../../concepts/orchestration.md#refreshes) for how a Refresh behaves. Refreshes are meant to be placed on Outlets, though any deployed Pond accepts them.
+
+Every command takes `-c` / `--catchment`, `-m` / `--major` and `-v` / `--version`; see [CLI Overview](index.md#choosing-a-major-version).
+
+## `refresh`
+
+```bash
+duckstring refresh POND [--silent] [--watch]
+```
+
+Asks for data at least as fresh as the moment the command runs. Every Pond upstream that is older runs (an optional Source only if it has never run), and the result flows down to `POND`. Requests that arrive faster than the pipeline can serve them are paced to its slowest step. Opens the live status view until the Pond settles; `--watch` keeps it open, and `--silent` returns once the request is sent.
+
+A Pond named `add`, `ls` or `rm` is refreshed with `duckstring refresh -- add`.
+
+## `refresh add`
+
+```bash
+duckstring refresh add POND --every PERIOD [--start TIME [--on DAYS] [--until TIME]] [--name NAME] [--silent]
+duckstring refresh add POND --continuous [--name NAME] [--silent]
+```
+
+Adds a standing Refresh, which repeats the request:
+
+- **Every** (`--every` alone): asks once `PERIOD` has passed since the later of the last request and the last refresh of the data, so any other refresh restarts the count. `duckstring refresh add reports --every 1d` refreshes `reports` daily, and the data is at most a day plus the pipeline's run time old.
+- **At set times** (`--every` with `--start`): asks at each time on the grid `START + k × PERIOD`, whatever else refreshes the Pond, and the data is labelled with that time. A Catchment that was down through some of them asks once, for the latest, when it returns.
+- **Continuous** (`--continuous`, or `--every 0s`): asks whenever the Pond can take more, paced to the pipeline's slowest step.
+
+A Pond can have any number of scheduled Refreshes and one `--every` or continuous Refresh. Adding another `--every` or continuous Refresh replaces it; adding one with an existing name replaces that one. Opens the live status view (a standing Refresh keeps it open until `Ctrl+C`) unless `--silent`.
+
+| Option | Default | Description |
+|---|---|---|
+| `--every`, `-e` | required unless `--continuous` | The period, a [duration](../formats.md#durations) such as `30s`, `30m`, `12h`, `1d` or `1h30m`. |
+| `--continuous` | | As fresh as the pipeline allows. The same as `--every 0s`. |
+| `--start`, `-s` | none | Pin the Refresh to a schedule from this time: ISO 8601, or `HH:MM` for today in UTC. Needs a period. |
+| `--on`, `-o` | every day | With `--start`: only on these weekdays, such as `MON,TUE,WED,THU,FRI`. |
+| `--until`, `-u` | none | With `--start`: when the schedule ends, in ISO 8601. |
+| `--name`, `-n` | described from the options | A name, unique on this Pond, such as `Daily at 06:00`, `Weekdays at 06:00`, `Every 30 min` or `Continuous`. |
+
+```bash
+duckstring refresh add reports --every 1d --start 06:00 --on MON,TUE,WED,THU,FRI
+```
+
+## `refresh ls`
+
+```bash
+duckstring refresh ls POND
+```
+
+Lists the Pond's standing Refreshes, scheduled first, with when each next asks.
+
+## `refresh rm`
+
+```bash
+duckstring refresh rm POND NAME
+```
+
+Removes a standing Refresh by name. Runs already in progress finish. `duckstring control sleep` removes them all and clears outstanding demand.
+
+## `trigger` (deprecated)
+
+The commands from before Refresh still work for one release and print their replacement: `trigger tap` and `trigger pulse` are `refresh POND`, `trigger wave` is `refresh add POND --continuous`, `trigger tide POND BOUND` is `refresh add POND --every BOUND`, `trigger remove` removes the `--every` or continuous Refresh, and `trigger window POND add|list|remove` is [`duckstring window`](window.md).

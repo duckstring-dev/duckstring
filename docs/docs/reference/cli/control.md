@@ -28,10 +28,10 @@ duckstring control force POND [--silent] [--watch]
 
 Reruns the Pond now at its current freshness, even with no upstream change, for example after deploying a fix. Freshness doesn't change, so Ponds downstream don't rerun because of it. Clears a failed or killed state first.
 
-### `refresh`
+### `rebuild`
 
 ```bash
-duckstring control refresh POND [--clear]
+duckstring control rebuild POND [--clear]
 ```
 
 Marks the Pond so its next run rebuilds from scratch: its working database is dropped and every Source is read in full. Trickles restart their change history, so Ponds downstream also read them in full on their next run. Nothing runs immediately; the rebuild happens whenever the Pond next runs. `--clear` removes a pending mark.
@@ -52,7 +52,7 @@ Rebuilds a set of Ponds now, in dependency order, each reading its parents' rebu
 duckstring control sleep POND [--upstream]
 ```
 
-Clears the Pond's demand and removes its standing trigger. Runs already in progress finish. `--upstream` also sleeps every Pond upstream of it.
+Clears the Pond's demand and removes its standing Refreshes. Runs already in progress finish. `--upstream` also sleeps every Pond upstream of it.
 
 ### `kill`
 

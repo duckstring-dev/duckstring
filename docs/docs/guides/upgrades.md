@@ -29,7 +29,7 @@ Add a `channel` column to `sale_line` in `sales`, bump the version to `1.1.0` in
 duckstring pond deploy
 ```
 
-The new version replaces `1.0.0` on the major version 1 line. Its next run publishes the extra column, and `reports`, which pins `sales = "1.0.0"`, reads it without noticing. Triggers, windows, Spouts and alerts on the line are kept.
+The new version replaces `1.0.0` on the major version 1 line. Its next run publishes the extra column, and `reports`, which pins `sales = "1.0.0"`, reads it without noticing. Refreshes, windows, Spouts and alerts on the line are kept.
 
 ## What happens with a breaking change deployed as compatible
 
@@ -105,16 +105,16 @@ Both are rejected at deploy time with a message naming the conflict.
 
 Rolling back within a major version is otherwise allowed: deploy the older version and it replaces the current one.
 
-## Commands and triggers across majors
+## Commands and Refreshes across majors
 
 Commands that act on a Pond target its highest deployed major by default. Use `--major` to reach another line:
 
 ```bash
 duckstring status sales --major 1
-duckstring trigger tide reports 1d --major 2
+duckstring refresh add reports --every 1d --major 2
 ```
 
-Triggers belong to a major line. When an Outlet itself moves to a new major version, set its trigger on the new line and remove it from the old one.
+Refreshes belong to a major line. When an Outlet itself moves to a new major version, add its Refresh on the new line and remove it from the old one.
 
 ## Queries by name
 

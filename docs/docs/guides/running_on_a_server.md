@@ -33,7 +33,7 @@ Still as the `duckstring` user, create and register the Catchment without starti
 | Key | Give it to |
 |---|---|
 | read | analysts, dashboards and BI tools that only read data |
-| demand | applications that also trigger refreshes |
+| demand | applications that also send Refreshes |
 | full | people and CI jobs that deploy and operate Ponds |
 
 The full key is stored in the Catchment's registration in `~/.duckstring/config.toml`, so the CLI on this machine keeps working. State goes to `~/.duckstring/prod` unless you pass `--root`.

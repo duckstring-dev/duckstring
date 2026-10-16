@@ -11,11 +11,11 @@ A **Catchment** is the environment Ponds are deployed to. It holds the deployed 
 
 A Catchment is a single server process with a directory of state: the deployed Pond code, run history, and each Pond's data. The CLI and web UI both talk to it over HTTP. You can register several Catchments, such as `dev` and `prod`, and choose between them with `--catchment`.
 
-Settings that depend on the environment rather than the code, such as triggers, delivery destinations and secrets, are configured on the Catchment instead of in `pond.toml`, and survive redeploys.
+Settings that depend on the environment rather than the code, such as Refreshes, delivery destinations and secrets, are configured on the Catchment instead of in `pond.toml`, and survive redeploys.
 
 ## Orchestration
 
-The Catchment decides when each Pond runs, based on the triggers set on it (see [Orchestration](orchestration.md)). When a Pond needs to run, the Catchment starts a worker process for it, called a Duck, which runs the Pond's Ripples and reports back. Ducks run on the Catchment's own machine by default, or on separate cloud compute (see [Management and Execution](management_and_execution.md)).
+The Catchment decides when each Pond runs, based on the Refreshes set on it (see [Orchestration](orchestration.md)). When a Pond needs to run, the Catchment starts a worker process for it, called a Duck, which runs the Pond's Ripples and reports back. Ducks run on the Catchment's own machine by default, or on separate cloud compute (see [Management and Execution](management_and_execution.md)).
 
 ## Data
 

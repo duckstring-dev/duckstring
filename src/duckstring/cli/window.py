@@ -6,8 +6,8 @@ Windows describe when an Inlet's source data is available (an RFC-5545-flavoured
     duckstring window ls transactions
     duckstring window rm transactions nightly
 
-The pre-0.7 shape, ``duckstring trigger window {pond} add|list|remove``, remains for one release as a hidden
-alias (``legacy_app``).
+The shape from before Refresh, ``duckstring trigger window {pond} add|list|remove``, remains for one release as a
+hidden alias (``legacy_app``).
 """
 
 from __future__ import annotations
@@ -194,7 +194,7 @@ def rm(
     _rm(pond, window_name, catchment, major, version)
 
 
-# ─── The pre-0.7 shape, `trigger window {pond} add|list|remove` (hidden, one release) ──────────────────────────
+# ─── The shape from before Refresh, `trigger window {pond} add|list|remove` (hidden, one release) ─────────────
 
 legacy_app = typer.Typer(help="Deprecated: use `duckstring window`.", no_args_is_help=True, hidden=True)
 

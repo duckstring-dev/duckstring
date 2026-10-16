@@ -36,7 +36,7 @@ Operations are applied in this order, whatever order they're given in:
 | 5 | `--remove` | Retire the major line: data, configuration and attached Spouts and alerts. Includes `--reset`. |
 | 6 | `--clear` | Clear a failure and unblock downstream. |
 | 7 | `--repair` | Rebuild the selection now, in dependency order. |
-| 8 | `--refresh` | Rebuild from scratch on the next run. |
+| 8 | `--rebuild` | Rebuild from scratch on the next run. |
 
 Each operation behaves like the matching [`control`](control.md) or [`pond remove`](pond.md#remove) command. `--repair` can't be combined with `--remove` or `--reset`. Once a Pond is removed, later operations skip it.
 

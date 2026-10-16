@@ -108,7 +108,7 @@ export function ConsolePanel() {
           style={{ height: 200, overflowY: 'auto', padding: '4px 10px 8px', fontSize: 11, lineHeight: 1.5 }}
         >
           {logs.length === 0 ? (
-            <div style={{ color: '#52525b' }}>No events yet — trigger a Tap, Wave, Pulse…</div>
+            <div style={{ color: '#52525b' }}>No events yet. Refresh a Pond to start.</div>
           ) : (
             logs.map((l, i) => (
               <div key={i} style={{ display: 'flex', gap: 8, whiteSpace: 'pre' }}>

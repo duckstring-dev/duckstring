@@ -9,7 +9,7 @@ This guide covers watching a Catchment, what happens when something fails, how t
 
 ## Watching
 
-`duckstring status` shows every Pond's state, freshness and standing trigger, refreshing every second:
+`duckstring status` shows every Pond's state, freshness and standing Refreshes, updating every second:
 
 ```bash
 duckstring status             # everything
@@ -28,7 +28,7 @@ A Pond is in one of these states, listed in order of precedence:
 | queued | It has demand and is waiting for its Sources. |
 | idle | Nothing to do. |
 
-The web UI, at the Catchment's address, shows the same on the pipeline graph. Select a Pond to see its Ripples, triggers, data and failures. The run history below the graph lists recent runs; selecting one shows the time each Ripple took, any retries, and the error and traceback of anything that failed. Tracebacks are only shown to users with full access, since they can include paths and connection details.
+The web UI, at the Catchment's address, shows the same on the pipeline graph. Select a Pond to see its Ripples, Refreshes, data and failures. The run history below the graph lists recent runs; selecting one shows the time each Ripple took, any retries, and the error and traceback of anything that failed. Tracebacks are only shown to users with full access, since they can include paths and connection details.
 
 ## What failure looks like
 
@@ -88,11 +88,11 @@ duckstring control clear sales
 **Rebuild from scratch**, when a Pond's stored state is wrong, for example after fixing a bug that wrote bad incremental results:
 
 ```bash
-duckstring control refresh sales        # the next run drops and rebuilds everything
+duckstring control rebuild sales        # the next run drops and rebuilds everything
 duckstring control repair sales --downstream   # or: rebuild now, with everything downstream, in order
 ```
 
-`refresh` waits for the next run; `repair` runs immediately and rebuilds each downstream Pond after its parents.
+`rebuild` waits for the next run; `repair` runs immediately and rebuilds each downstream Pond after its parents.
 
 **Stop a runaway run**, one stuck or consuming too much:
 

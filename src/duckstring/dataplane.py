@@ -619,7 +619,7 @@ def _export_parts(con, data_dir, table: str, f) -> None:
     **Pruning is floor-anchored, never absence-inferred** (plans/s3-resident-state.md step 1): a published
     part is dropped only when its freshness fell below the table's **floor** — the explicit, positive
     signal every genuine drop advances (retention ``_apply_retention`` → floor; a warm fold → floor; a
-    checkpoint/refresh re-bootstrap → floor). A part the registry merely *lacks* is KEPT: absence is what a
+    checkpoint/rebuild re-bootstrap → floor). A part the registry merely *lacks* is KEPT: absence is what a
     partially-hydrated registry looks like (a fresh box that pulled only the hot window — the future
     no-hydration path), and inferring a drop from it deletes real history.
 

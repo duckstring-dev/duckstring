@@ -1,4 +1,4 @@
-"""The pre-0.7 `duckstring trigger` group, kept hidden for one release. Each command prints its replacement and does
+"""The `duckstring trigger` group from before Refresh, kept hidden for one release. Each command prints its replacement and does
 the same thing through it: `tap`/`pulse` are `refresh POND`, `wave` is `refresh add POND --continuous`, `tide` is
 `refresh add POND --every BOUND`, `remove` removes the floating Refresh, and `window` is `duckstring window`.
 """

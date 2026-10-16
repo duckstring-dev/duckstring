@@ -5,16 +5,16 @@ description: Pull-style Pond Execution.
 
 # Orchestration
 
-Duckstring doesn't run Ponds on schedules. Instead, you place a trigger on the Pond whose data you need, usually an Outlet, and Duckstring works backwards to decide what upstream has to run. A Pond that nothing downstream is asking for never runs.
+Duckstring doesn't run Ponds on schedules. Instead, you ask for the data you need with a Refresh on the Pond that holds it, usually an Outlet, and Duckstring works backwards to decide what upstream has to run. A Pond that nothing downstream is asking for never runs.
 
-<video autoplay loop muted playsinline style="width: 100%; border-radius: 8px;" aria-label="The demo pipeline in the web UI under a Wave on reports">
+<video autoplay loop muted playsinline style="width: 100%; border-radius: 8px;" aria-label="The demo pipeline in the web UI under a continuous Refresh on reports">
   <source src="/img/ripple.webm" type="video/webm" />
   <source src="/img/ripple.mp4" type="video/mp4" />
 </video>
 
-The demo pipeline in the web UI, kept current by a Wave on `reports`.
+The demo pipeline in the web UI, kept current by a continuous Refresh on `reports`.
 
-The [Playground](https://playground.duckstring.com) runs the same pipeline in your browser, with nothing to install. A short guided tour walks through the main ideas on this page as the pipeline runs, and afterwards you can change step durations, add Ponds and try each trigger yourself.
+The [Playground](https://playground.duckstring.com) runs the same pipeline in your browser, with nothing to install. A short guided tour walks through the main ideas on this page as the pipeline runs, and afterwards you can change step durations, add Ponds and try different Refreshes yourself.
 
 ## Structure
 
@@ -47,7 +47,7 @@ A Pond has new data to offer its downstream Ponds whenever its freshness is late
 
 ### How demand travels
 
-A trigger gives a Pond demand. If the Pond's Sources have newer data, it runs. If they don't, it passes the demand to them, and so on upstream until it reaches Ponds that can run. From an idle pipeline, a Tap on `reports` travels all the way to the Inlets, which run first, and the new data then flows back down:
+A **Refresh** asks a Pond for data at least as fresh as the moment it was sent. The request travels upstream to the Pond's Sources, and on to theirs, until it reaches the Inlets. Every Pond along the way whose data is older than requested runs, the Inlets first, and the new data then flows back down. From an idle pipeline, a Refresh on `reports` reaches both Inlets:
 
 ```mermaid
 flowchart RL
@@ -56,19 +56,21 @@ flowchart RL
     sales -. demand .-> products
 ```
 
-<!-- DIAGRAM: step-by-step version of the above (idle → demand travelling up → Inlets running → sales running → reports running), using the theory doc's queued/running colouring. Possibly better as a short video from the web UI. -->
+<!-- DIAGRAM: step-by-step version of the above (idle → demand travelling up → Inlets running → sales running → reports running). Possibly better as a short video from the web UI. -->
 
-When a Pond starts a run to meet demand, it immediately asks its Sources for their next update. The Sources can then work on the next batch while the Pond processes the current one, so each step stays one run ahead of its consumer, and no further.
+The whole pipeline reaches one freshness: each Inlet stamps its data with the time of the Refresh, so `reports` ends up exactly as fresh as the moment it was asked.
 
 ### Throttling to the bottleneck
 
-That one-run-ahead rule sets the pace of the whole pipeline. Take a chain `A` (1 second) → `B` (3 seconds) → `C` (1 second), with `C` demanded continuously. If every step simply reran whenever its input changed, `A` would run three times for each run of `B`, and two of those results would be thrown away. Under pull, `A` only runs again when `B` starts consuming its last result:
+Requests can arrive faster than the pipeline can serve them, for example from a Refresh that repeats more often than the slowest step can run. Take a chain `A` (1 second) → `B` (3 seconds) → `C` (1 second), with `C` refreshed continuously. If every request went straight upstream, `A` would run three times for each run of `B`, and two of those results would be thrown away.
+
+Duckstring notices when a step can't keep up: it is one that receives a second request during a single run. It then holds requests there and sends one upstream each time that step starts a new run, so the steps before it run once per run of the slowest step:
 
 ```mermaid
 gantt
     dateFormat X
     axisFormat %S
-    section Push: A
+    section Unpaced: A
     run      :0, 1
     run      :1, 2
     wasted   :crit, 2, 3
@@ -76,7 +78,7 @@ gantt
     run      :4, 5
     wasted   :crit, 5, 6
     wasted   :crit, 6, 7
-    section Pull: A
+    section Paced: A
     run      :0, 1
     run      :1, 2
     run      :4, 5
@@ -88,9 +90,9 @@ gantt
     run      :7, 8
 ```
 
-Every step runs once per 3 seconds, the duration of `B`. In the Quickstart demo the slowest step is `join_lines` at 3 seconds, so under a Wave every Pond settles to running about every 3 seconds, with no work produced that nothing uses.
+Every step runs once per 3 seconds, the duration of `B`. In the Quickstart demo the slowest step is `join_lines` at 3 seconds, so under a continuous Refresh every Pond settles to running about every 3 seconds, with no work produced that nothing uses. Occasional Refreshes aren't affected, and nothing needs configuring: the pacing follows the pipeline as it is, and adapts when a step's run time changes.
 
-The [Playground](https://playground.duckstring.com) tour shows this on the same pipeline: under a Wave on `reports`, every Ripple settles to running every 3 seconds, and the pipeline keeps pace when the duration of `join_lines` starts to vary.
+The [Playground](https://playground.duckstring.com) tour shows this on the same pipeline: under a continuous Refresh on `reports`, every Ripple settles to running every 3 seconds, and the pipeline keeps pace when the duration of `join_lines` starts to vary.
 
 ### Skipping unchanged work
 
@@ -100,43 +102,41 @@ Only an Inlet can see whether the outside world has changed, so an Inlet always 
 
 Each table and Object a Pond publishes also records when it last changed, so a Pond that does run can skip just the work that depends on an unchanged input. If `transactions` changed but `products` didn't, `sales` can recompute its daily totals and keep its price tiers as they were.
 
-## Triggers
+## Refreshes
 
-There are four triggers, set with `duckstring trigger` or from the web UI:
+A Refresh can be sent once, or kept standing so it repeats. Refreshes are set with `duckstring refresh` or from the web UI:
 
-| Trigger | Runs | Asks for |
+| Refresh | Command | Asks for |
 |---|---|---|
-| Tap | once | anything fresher than the Pond already has |
-| Wave | continuously | the same, repeated whenever the Pond finishes |
-| Pulse | once | data at least as fresh as the moment it was sent |
-| Tide | continuously | a Pulse at a set interval |
+| Now | `duckstring refresh reports` | data at least as fresh as now, once |
+| Every | `duckstring refresh add reports --every 1d` | a Refresh once a day has passed since the last request or refresh |
+| At set times | `duckstring refresh add reports --every 1d --start 06:00` | a Refresh at 06:00 each day |
+| Continuous | `duckstring refresh add reports --continuous` | data as fresh as the pipeline allows |
 
-A Tap is satisfied by any newer data. If a Pond's Sources have nothing newer, the request passes further upstream until it reaches a Pond that can run. A Pulse is stricter: everything upstream of the target runs until its data is at least as fresh as the time of the Pulse, and the result flows down to the target.
+`--every` is how you run something daily. The day counts from the later of the last request and the last refresh of the data, so any other refresh of `reports` moves it on, and `reports` is never more than a day plus the pipeline's run time old. When the time of day matters, `--start` pins the Refresh to a schedule instead: it asks at 06:00 whatever else has refreshed the Pond, and the data is labelled 06:00. A scheduled Refresh can be limited to certain weekdays and given an end date.
 
-A Tide is how you run something daily. `duckstring trigger tide reports 1d` sends a Pulse every day: a day after `reports` was last requested or refreshed, so it is never more than a day plus the pipeline's run time old.
+A Pond can have any number of scheduled Refreshes and one `--every` or continuous Refresh; adding another of those replaces it. A continuous Refresh is paced to the slowest step as described above, so it keeps the data as fresh as the pipeline can make it without running anything twice.
 
-Pulses can arrive faster than the pipeline can serve them, for example from a Tide with a limit shorter than the slowest step. Duckstring then paces them to that step: the Ponds before it run once per run of the slowest step, as under a Wave, and each request still travels through the pipeline in one pass, so the data is at least as fresh as under a Wave and often fresher. Occasional Pulses aren't affected.
+Refreshes can be placed on any Pond, but we strongly recommend placing them only on Outlets. Demand then always comes from something that genuinely consumes the data, and every Pond upstream runs only as often as its consumers need.
 
-Triggers can be placed on any Pond, but we strongly recommend placing them only on Outlets. Demand then always comes from something that genuinely consumes the data, and every Pond upstream runs only as often as its consumers need.
+A Pond can also take a Source as optional, using whatever that Source has published without waiting for it. A Refresh builds an optional Source once, so there is something to read, but doesn't refresh it after that. If an optional Source needs to stay current, give it a Refresh of its own.
 
-A Pond can also take a Source as optional, using whatever that Source has published without waiting for it. A Pulse or Tide builds an optional Source once, so there is something to read, but doesn't refresh it after that; a Tap or Wave reaches it as usual. If an optional Source needs to stay current under a Pulse or Tide, give it a Tide of its own.
-
-You can try each trigger in the [Playground](https://playground.duckstring.com), on the demo pipeline or on one you build. A Tide shorter than the slowest step shows the pacing.
+You can try Refreshes in the [Playground](https://playground.duckstring.com), on the demo pipeline or on one you build. A Refresh more frequent than the slowest step shows the pacing.
 
 ## Windows
 
 Some Inlets read from systems that only update at certain times, such as a warehouse export that lands once a night. Running them more often wastes compute and adds nothing. A **window** declares when an Inlet can produce new data, for example every day from 02:00 for one hour. The Inlet runs at most once per window, and never between windows. Its data is treated as fresh until the end of the window, so downstream demand doesn't ask for more until the next one opens.
 
-Windows are set on the Catchment with `duckstring trigger window`, not in `pond.toml`, since they describe the environment rather than the code.
+Windows are set on the Catchment with `duckstring window`, not in `pond.toml`, since they describe the environment rather than the code.
 
-Here an Inlet has a window from 02:00 to 03:00 each day, and a Wave on an Outlet downstream asks for data continuously. The Inlet runs once as each window opens, the run flows downstream, and the demand waits in between:
+Here an Inlet has a window from 02:00 to 03:00 each day, and a continuous Refresh on an Outlet downstream asks for data all the time. The Inlet runs once as each window opens, the run flows downstream, and the demand waits in between:
 
 ```mermaid
 gantt
     dateFormat YYYY-MM-DD HH:mm
     axisFormat %a %H:%M
     todayMarker off
-    section Wave
+    section Refresh
     asking continuously :active, 2026-10-05 00:00, 3d
     section Window
     open :2026-10-05 02:00, 1h
@@ -156,13 +156,13 @@ gantt
 
 | Need | Setup |
 |---|---|
-| A report refreshed every morning | a Tide of `1d` on the report's Outlet |
-| A dashboard kept as current as possible | a Wave on the dashboard's Outlet |
-| Data refreshed only when someone looks at it | a Tap each time it is queried |
-| An upstream source that updates nightly | a window on its Inlet, plus any trigger downstream |
+| A report ready every morning | a Refresh every `1d` from `06:00` on the report's Outlet |
+| Data at most a day old | a Refresh every `1d` on the Outlet |
+| A dashboard kept as current as possible | a continuous Refresh on the dashboard's Outlet |
+| An upstream source that updates nightly | a window on its Inlet, plus any Refresh downstream |
 
 ## See also
 
 - Guides: [Scheduling](../guides/scheduling.md), [Monitoring and Failures](../guides/monitoring_and_failures.md)
-- Reference: [Orchestration Theory](../reference/orchestration_theory.md), [duckstring trigger](../reference/cli/trigger.md), [duckstring control](../reference/cli/control.md)
+- Reference: [duckstring refresh](../reference/cli/refresh.md), [duckstring window](../reference/cli/window.md), [duckstring control](../reference/cli/control.md)
 - [Playground](https://playground.duckstring.com): this model simulated in the browser, with a guided tour

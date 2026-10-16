@@ -119,36 +119,36 @@ Deploying a Pond again follows its version number. A new minor or patch version 
 
 ## 5. Run the pipeline
 
-Triggers go at the end of a pipeline, on the Pond whose output you want. Here that's `reports`. Run it once with a *Pulse*:
+You ask for data at the end of a pipeline, on the Pond whose output you want. Here that's `reports`. Run it once with a *Refresh*:
 
 ```bash
-duckstring trigger pulse reports
+duckstring refresh reports
 ```
 
-A Pulse brings `reports` up to date as of now. Duckstring works back through its Sources and runs `transactions` and `products`, then `sales`, then `reports`. The command shows the live status until everything settles, after about 12 seconds.
+A Refresh brings `reports` up to date as of now. Duckstring works back through its Sources and runs `transactions` and `products`, then `sales`, then `reports`. The command shows the live status until everything settles, after about 12 seconds.
 
-To keep `reports` as fresh as the pipeline allows, use a *Wave*:
+To keep `reports` as fresh as the pipeline allows, add a continuous Refresh:
 
 ```bash
-duckstring trigger wave reports
+duckstring refresh add reports --continuous
 ```
 
 No Pond runs more often than the slowest step can use its output, so every Pond settles at a run about every 3 seconds, the time `join_lines` takes. Runs of `sales` overlap: a new one starts while the previous one is still in `join_lines`, because each Ripple waits only for its own inputs.
 
-A Wave keeps going, so press `Ctrl+C` to leave the status view, then remove it:
+A continuous Refresh keeps going, so press `Ctrl+C` to leave the status view, then remove it:
 
 ```bash
-duckstring trigger remove reports
+duckstring refresh rm reports Continuous
 ```
 
-The same triggers are on each Pond's panel in the web UI. There are four in all:
+The same controls are on each Pond's panel in the web UI. A Refresh can be sent once or kept standing:
 
-| Trigger | What it does |
+| Refresh | What it does |
 |---|---|
-| Tap | Asks once for newer data, running upstream Ponds only if nothing newer is already available |
-| Pulse | Brings the Pond up to date as of now, once |
-| Wave | Keeps the Pond as fresh as the pipeline allows |
-| Tide | Brings the Pond up to date at a set interval, such as `1d` for a daily job |
+| `refresh reports` | Brings the Pond up to date as of now, once |
+| `refresh add reports --every 1d` | Brings it up to date once a day has passed since the last refresh |
+| `refresh add reports --every 1d --start 06:00` | Brings it up to date at 06:00 each day |
+| `refresh add reports --continuous` | Keeps it as fresh as the pipeline allows |
 
 See [Scheduling](guides/scheduling.md) for choosing between them.
 

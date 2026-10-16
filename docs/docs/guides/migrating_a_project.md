@@ -75,11 +75,11 @@ Declare the packages your Ripples import (`requests`, `scikit-learn`, a database
 
 ### Replacing the scheduler
 
-Deploy, then replace the cron entry with a trigger on the final table's Pond. A nightly job becomes a Tide:
+Deploy, then replace the cron entry with a Refresh on the final table's Pond. A nightly job becomes a Refresh every day:
 
 ```bash
 duckstring pond deploy
-duckstring trigger tide analytics 1d
+duckstring refresh add analytics --every 1d
 ```
 
 See [Scheduling](scheduling.md) for the other options.
@@ -132,8 +132,8 @@ reads = ["staging.stg_orders", "staging.stg_customers"]
 
 Version 1 of `analytics` keeps running for anything still pinned to it, and version 2 runs alongside. Once nothing depends on version 1, retire it with `duckstring pond remove analytics --major 1`. See [Upgrades and Breaking Changes](upgrades.md) for the details.
 
-Move the trigger to whichever Ponds are now the Outlets. Triggers are set per major version, so set it on version 2:
+Move the Refresh to whichever Ponds are now the Outlets. Refreshes are set per major version, so add it on version 2:
 
 ```bash
-duckstring trigger tide analytics 1d --major 2
+duckstring refresh add analytics --every 1d --major 2
 ```

@@ -78,7 +78,6 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Reference',
       items: [
-        'reference/orchestration_theory',
         {
           type: 'category',
           label: 'Python API',
@@ -102,7 +101,8 @@ const sidebars: SidebarsConfig = {
             'reference/cli/catchment',
             'reference/cli/pond',
             'reference/cli/puddle',
-            'reference/cli/trigger',
+            'reference/cli/refresh',
+            'reference/cli/window',
             'reference/cli/control',
             'reference/cli/do',
             'reference/cli/data',
