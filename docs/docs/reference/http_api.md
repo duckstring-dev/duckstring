@@ -99,7 +99,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameter: `at`, an ISO freshness to ask for instead of now. |
+| POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameter: `at`, an ISO freshness to ask for instead of now. (Before Refresh, this route marked a Pond for a rebuild; that is now `/rebuild`.) |
 | GET | `/api/ponds/{name}/refreshes` | read | List the standing Refreshes, with when each next asks. |
 | POST | `/api/ponds/{name}/refreshes` | demand | Add a standing Refresh. Body: `every_seconds` (0 is continuous), `continuous`, `start`, `days`, `until`, `name`. |
 | POST | `/api/ponds/{name}/refreshes/{refresh_name}/remove` | demand | Remove a standing Refresh. |
@@ -186,20 +186,6 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | POST | `/api/ponds/{name}/close` | full | Close it. |
 
 The `/api/draw/*` routes that ducts use to transfer data, and the `/api/duck/*` and `/api/pool/*` routes that Ducks use to talk to the Catchment, are internal and not covered here.
-
-### Deprecated
-
-These routes from before Refresh still work for one release, so an older Catchment can still send demand across a duct. A duct's poller keeps calling `/pulse` for that release.
-
-| Method | Path | Level | Now |
-|---|---|---|---|
-| POST | `/api/ponds/{name}/tap` | demand | Refresh now (`m` is the freshness to ask for). |
-| POST | `/api/ponds/{name}/pulse` | demand | Refresh now (`at` is the freshness to ask for). |
-| POST | `/api/ponds/{name}/wave` | demand | Add a continuous Refresh. |
-| POST | `/api/ponds/{name}/tide` | demand | Add a Refresh every `bound_seconds`. |
-| POST | `/api/ponds/{name}/untrigger` | demand | Remove the `--every` or continuous Refresh. |
-
-**`/api/ponds/{name}/refresh` changed meaning.** It used to mark a Pond for a rebuild (now `/rebuild`, at `full`); it now refreshes the Pond. Scripts that called it for a rebuild need updating.
 
 ## Metrics
 

@@ -192,13 +192,3 @@ def test_window_cli_defaults(runner, live_catchment):
     assert w["freq_unit"] == "HOUR" and w["freq_interval"] == 1
     assert w["start_anchor"].endswith("T00:00:00+00:00")  # midnight today UTC
 
-
-@pytest.mark.timeout(30)
-def test_deprecated_trigger_window_shape_still_works(runner, live_catchment):
-    _deploy_inlet(live_catchment)
-    r = runner.invoke(app, ["trigger", "window", "tx", "add", "-n", "old", "-e", "1h"])
-    assert r.exit_code == 0, r.output
-    assert "deprecated" in r.output and "Window 'old' added" in r.output
-    assert "old" in runner.invoke(app, ["trigger", "window", "tx", "list"]).output
-    assert runner.invoke(app, ["trigger", "window", "tx", "remove", "old"]).exit_code == 0
-    assert "No windows" in runner.invoke(app, ["window", "ls", "tx"]).output

@@ -94,7 +94,7 @@ def _complete(driver, key):
 def test_restart_resends_demand_the_pulse_throttle_held(tmp_path):
     """Demand the throttle holds is persisted as plain demand, but the soft state that would release
     it is lost on restart. The reload re-sends each Pond's newest unmet target once, so it reaches the Inlet
-    instead of stranding behind the bottleneck (plans/pulse-throttle.md)."""
+    instead of stranding behind the bottleneck (plans/throttle.md)."""
     one = [{"func": "f1", "name": "r1", "parents": []}]
     db = connect(tmp_path / "duck.db")
     migrate(db)

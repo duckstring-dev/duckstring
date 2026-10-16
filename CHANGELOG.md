@@ -31,12 +31,12 @@ Upgrading:
 - **Pull is gone from the engine.** A Tap's "anything newer" request no longer exists: a Refresh always asks for
   data as of now. Wake now runs once if the Sources are fresher at that moment, rather than waiting for them.
 - `duckstring trigger window POND add|list|remove` is now `duckstring window add|ls|rm POND`.
-- For one release, the old commands and routes still work and print or document their replacement: the hidden
-  `duckstring trigger tap|pulse|wave|tide|remove|window` and `control refresh`, and the routes `/tap`, `/pulse`,
-  `/wave`, `/tide` and `/untrigger`. A duct's poller keeps calling `/pulse` for that release, so a newer
-  Catchment can still send demand to an older one. They will be removed in the release after.
-- `catchment open --tap-on-get` is deprecated and hidden (a read now sends a one-shot Refresh); it will be
-  replaced by Taps.
+- **The old commands and routes are removed, with no compatibility period**: `duckstring trigger …`, `control
+  refresh`, `do --refresh`, and `POST /tap`, `/pulse`, `/wave`, `/tide` and `/untrigger`. Scripts need the new ones.
+- **Both ends of a duct need this release.** A Draw sends no requests to an upstream Catchment older than Refresh
+  (there, `/refresh` would mark the Pond for a rebuild) and logs that it needs upgrading.
+- **`catchment open --tap-on-get` is removed** (it went with Tap). An open Pond stays open. Taps will provide
+  freshness that follows reads.
 - `/api/status` lists each Pond's `refreshes` (with `next_due`), `demand_f` and `rebuild_pending`, in place of
   `trigger`, `has_pull`, `target_f` and `refresh_pending`.
 - The Orchestration Theory page was removed from the docs; the Scheduling guide and the `refresh` and `window`

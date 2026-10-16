@@ -72,3 +72,12 @@ SELECT pond_id, start_f, end_f, d_ms, is_failed, is_blocked, failed_f, failures,
 FROM pond_state;
 DROP TABLE pond_state;
 ALTER TABLE pond_state_new RENAME TO pond_state;
+
+-- Tap-on-get (a read on the query route fired a Tap) goes with pull; Taps (plans/taps.md) will replace it. An open
+-- Pond keeps its open mark.
+CREATE TABLE pond_open_new (
+    pond_id INTEGER PRIMARY KEY REFERENCES pond(id)
+);
+INSERT INTO pond_open_new (pond_id) SELECT pond_id FROM pond_open;
+DROP TABLE pond_open;
+ALTER TABLE pond_open_new RENAME TO pond_open;

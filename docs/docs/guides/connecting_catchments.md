@@ -11,7 +11,7 @@ This guide connects an `ingest` Catchment, which runs `transactions` and `produc
 
 ## How it works
 
-A duct is configured on the consuming Catchment. Each upstream Pond it draws appears locally as a **Pond Draw**, with the same name, which local Ponds use as a Source. The Draw copies the upstream Pond's published tables across whenever they change. When local Ponds need newer data, the Draw passes the request upstream, so the upstream Pond runs as though it had been refreshed locally, and its freshness carries through.
+A duct is configured on the consuming Catchment. Each upstream Pond it draws appears locally as a **Pond Draw**, with the same name, which local Ponds use as a Source. The Draw copies the upstream Pond's published tables across whenever they change. When local Ponds need newer data, the Draw passes the request upstream, so the upstream Pond runs as though it had been refreshed locally, and its freshness carries through. Both Catchments need a Duckstring release with Refresh: a Draw sends no requests to an older one, and logs that it needs upgrading.
 
 ```mermaid
 flowchart LR

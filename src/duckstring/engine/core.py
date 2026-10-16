@@ -230,7 +230,7 @@ class BeginRun:
 
 @dataclass
 class ThrottleState:
-    """The throttle's per-Pond bookkeeping (plans/pulse-throttle.md). Soft: in memory only, rebuilt by
+    """The throttle's per-Pond bookkeeping (plans/throttle.md). Soft: in memory only, rebuilt by
     observation; losing it falls back to unpaced demand until two demands land in one run again. Runs are
     identified by a Ripple's ``runs_started`` (a Ripple's runs never overlap), never by durations."""
 

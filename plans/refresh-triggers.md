@@ -1,7 +1,7 @@
 # One trigger: Refresh
 
 Status: **built 2026-10-16** (steps 2 to 7 below; see "As built"). Settled with the author on 2026-10-13 and
-2026-10-14, after the Pulse throttle (`plans/pulse-throttle.md`, merged in #34) made a fast Pulse pace itself to
+2026-10-14, after the Pulse throttle (`plans/throttle.md`, merged in #34) made a fast Pulse pace itself to
 the bottleneck. Taps (on-request freshness) are agreed in outline and get their own plan and stage.
 
 ## Why
@@ -388,8 +388,12 @@ Where the build differs from the plan above, or adds to it:
   playground, which moves the other Refresh's clock (the known minted-epoch difference).
 - **Playground**: one Refresh per Pond in the UI (the author's call), and a docs video re-recorded under a
   continuous Refresh. The launch-alignment prototype (`bench/launch_alignment/`) is parked, off.
-- **Docs**: `--tap-on-get` is no longer documented (hidden, deprecated); the querying guide points to sending
-  a Refresh before reading until Taps exist.
+- **No compatibility period** (the author's call, 2026-10-16, replacing "Compatibility" and ship-order step 8
+  above): the alias routes, the hidden `trigger` group, `control refresh` and `--tap-on-get` (with
+  `pond_open.tap_on_get`, dropped in `031`) are removed. The duct poller sends `/refresh`, only to an upstream whose
+  status lists `refreshes`; an older one is sent nothing (its `/refresh` is the Rebuild flag) and logged once. The
+  querying guide points to sending a Refresh before reading until Taps exist.
+- `plans/pulse-throttle.md` is now `plans/throttle.md`.
 
 ## Open questions
 

@@ -8,6 +8,6 @@ upstream feeding two paths at different rates — e.g. this one hourly, `tpcds_s
 
 ```bash
 duckstring pond deploy
-duckstring trigger tide tpcds_category_revenue 1h
-duckstring trigger tide tpcds_store_revenue 1d
+duckstring refresh add tpcds_category_revenue --every 1h
+duckstring refresh add tpcds_store_revenue --every 1d
 ```

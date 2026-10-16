@@ -42,7 +42,7 @@ def test_demand_key_can_solicit_but_not_control(laddered):
     client, keys = laddered
     h = _bearer(keys["demand"])
     assert client.get("/api/status", headers=h).status_code == 200          # read ⊂ demand
-    # tap reaches the engine (404: pond 'x' undeployed) — i.e. it passed the demand gate, not 403.
+    # refresh reaches the engine (404: pond 'x' undeployed) — i.e. it passed the demand gate, not 403.
     assert client.post("/api/ponds/x/refresh", headers=h).status_code == 404
     assert client.post("/api/deploy", headers=h).status_code == 403         # full: forbidden
     assert client.post("/api/ponds/x/kill", headers=h).status_code == 403   # control is full

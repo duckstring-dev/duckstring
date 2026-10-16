@@ -288,7 +288,7 @@ def test_kill_terminates_duck_and_parks(tmp_path):
     d.kill("src@1")
     assert d.state.pond_states["src@1"].is_killed
     assert terminated == ["src@1"]  # the Duck was terminated
-    # Killed supersedes demand: a Tap does nothing until cleared.
+    # Killed supersedes demand: a Refresh does nothing until cleared.
     started = d.state.pond_states["src@1"].runs_started
     d.refresh_now("src@1")
     assert d.state.pond_states["src@1"].runs_started == started

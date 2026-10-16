@@ -3,8 +3,7 @@
 A downstream Catchment's poller fetches a producing Pond's full exported Parquet over this route and
 lands it in its own landing zone (`ponds/{name}/m{major}/data/`). It streams the **raw** Parquet
 files (a zip), unlike `/api/query` which runs SQL. Reads off the exported snapshot, never the live
-registry, so it never contends with a running Duck. tap-on-get lives on `/api/query`, not here —
-so a Catchment draw never triggers it.
+registry, so it never contends with a running Duck.
 """
 
 from __future__ import annotations

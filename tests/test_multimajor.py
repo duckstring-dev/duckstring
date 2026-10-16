@@ -97,7 +97,7 @@ def test_sink_wires_to_its_pinned_source_major(catchment_client):
     driver = catchment_client.app.state.driver
     assert driver.state.ponds["snk@1"].sources == ["src@1"]
 
-    # A pulse on the sink solicits its pinned source line, not the newer major.
+    # A Refresh on the sink solicits its pinned source line, not the newer major.
     catchment_client.post("/api/ponds/snk/refresh")
     assert _pond(catchment_client, "src@1")["gen"] == 1
     assert _pond(catchment_client, "src@2")["gen"] == 0

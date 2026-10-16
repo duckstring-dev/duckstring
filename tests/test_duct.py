@@ -266,17 +266,20 @@ def _client(driver):
     return TestClient(app)
 
 
-def test_open_close_and_tap_on_get(tmp_path):
+def test_open_and_close(tmp_path):
     db = connect(tmp_path / "duck.db")
     migrate(db)
     _register(db, "sales", "1.0.0", "inlet", "ponds/sales/1.0.0", _cfg(), _RIPPLES)
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
     client = _client(d)
 
-    assert client.post("/api/ponds/sales/open", json={"tap_on_get": True}).json() == {"ok": True}
-    assert d.pond_tap_on_get("sales@1")
+    def is_open() -> bool:
+        return d.db.execute("SELECT COUNT(*) FROM pond_open").fetchone()[0] == 1
+
+    assert client.post("/api/ponds/sales/open").json() == {"ok": True}
+    assert is_open()
     assert client.post("/api/ponds/sales/close").json() == {"ok": True}
-    assert not d.pond_tap_on_get("sales@1")
+    assert not is_open()
 
 
 def test_duct_crud_routes(tmp_path):
@@ -608,8 +611,8 @@ def test_assemble_view_unreachable_upstream_stub(tmp_path):
 # ─── Poller end-to-end (mocked upstream transport) ─────────────────────────────
 
 
-def _mock_upstream(f_iso: str, *, status="idle", tapped: list | None = None):
-    """An httpx transport standing in for the upstream Catchment."""
+def _mock_upstream(f_iso: str, *, status="idle", tapped: list | None = None, refreshes: bool = True):
+    """An httpx transport standing in for the upstream Catchment (one older than Refresh unless ``refreshes``)."""
     from duckstring.trickle_io import SIDECAR
 
     zbuf = io.BytesIO()
@@ -620,12 +623,12 @@ def _mock_upstream(f_iso: str, *, status="idle", tapped: list | None = None):
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/api/status":
-            return httpx.Response(200, json={"ponds": [
-                {"name": "sales", "major": 1, "end_f": f_iso, "status": status}
-            ], "edges": []})
+            pond = {"name": "sales", "major": 1, "end_f": f_iso, "status": status}
+            pond.update({"refreshes": []} if refreshes else {"trigger": None})
+            return httpx.Response(200, json={"ponds": [pond], "edges": []})
         if path == "/api/draw/sales/1":
             return httpx.Response(200, content=zbuf.getvalue(), headers={"content-type": "application/zip"})
-        if path == "/api/ponds/sales/pulse":  # the poller's deprecated route, for one release
+        if path == "/api/ponds/sales/refresh":
             if tapped is not None:
                 tapped.append(request.url.params.get("major"))
             return httpx.Response(200, json={"ok": True})
@@ -670,6 +673,23 @@ def test_poller_solicits_upstream_when_demand_unmet(tmp_path):
     assert tapped == ["1"]  # forwarded the demand upstream for major 1
 
 
+def test_poller_sends_no_demand_to_an_upstream_older_than_refresh(tmp_path):
+    # On a Catchment from before Refresh, POST /refresh is the Rebuild flag: sending demand there would mark the
+    # upstream Pond for a cold rebuild. The poller recognises one by its status (no `refreshes`) and sends nothing.
+    d = _driver(tmp_path)
+    d.create_duct("up", "http://up", None)
+    d.add_duct_pond("up", "sales", 1)
+    d.refresh_now("sales@1")
+
+    tapped: list = []
+    transport = _mock_upstream(datetime.min.replace(tzinfo=timezone.utc).isoformat(), tapped=tapped, refreshes=False)
+    client = httpx.AsyncClient(transport=transport)
+    asyncio.run(poll_once(d, tmp_path, client))
+    asyncio.run(client.aclose())
+
+    assert tapped == []
+
+
 def test_poller_forwards_push_demand_with_its_epoch(tmp_path):
     # Demand at epoch T on the draw is forwarded upstream carrying `at=T`, so the
     # upstream Inlet mints the same freshness (minted-freshness across the duct).
@@ -684,8 +704,9 @@ def test_poller_forwards_push_demand_with_its_epoch(tmp_path):
     def handler(request):
         if request.url.path == "/api/status":  # present upstream, but nothing fresher yet
             return httpx.Response(200, json={
-                "ponds": [{"name": "sales", "major": 1, "end_f": None, "status": "idle"}], "edges": []})
-        if request.url.path == "/api/ponds/sales/pulse":
+                "ponds": [{"name": "sales", "major": 1, "end_f": None, "status": "idle", "refreshes": []}],
+                "edges": []})
+        if request.url.path == "/api/ponds/sales/refresh":
             seen["at"] = request.url.params.get("at")
         return httpx.Response(200, json={"ok": True})
 
@@ -703,14 +724,15 @@ def test_poller_does_not_resend_the_same_demand(tmp_path):
     d.add_duct_pond("up", "sales", 1)
     d.refresh_now("sales@1", at=_now())  # demand on the draw; upstream not yet fresh
 
-    pulses: list = []
+    sent: list = []
 
     def handler(request):
         if request.url.path == "/api/status":
             return httpx.Response(200, json={
-                "ponds": [{"name": "sales", "major": 1, "end_f": None, "status": "idle"}], "edges": []})
-        if request.url.path == "/api/ponds/sales/pulse":
-            pulses.append(request.url.params.get("at"))
+                "ponds": [{"name": "sales", "major": 1, "end_f": None, "status": "idle", "refreshes": []}],
+                "edges": []})
+        if request.url.path == "/api/ponds/sales/refresh":
+            sent.append(request.url.params.get("at"))
         return httpx.Response(200, json={"ok": True})
 
     solicited: dict = {}
@@ -718,11 +740,11 @@ def test_poller_does_not_resend_the_same_demand(tmp_path):
     asyncio.run(poll_once(d, tmp_path, client, solicited))
     asyncio.run(poll_once(d, tmp_path, client, solicited))  # second cycle, same unmet demand
     asyncio.run(client.aclose())
-    assert len(pulses) == 1  # forwarded once across both cycles
+    assert len(sent) == 1  # forwarded once across both cycles
 
 
-def test_pulse_at_makes_an_inlet_stamp_the_forwarded_epoch(tmp_path):
-    # The producer side of the duct: a pulse carrying `at=T` makes the Inlet stamp T, not now.
+def test_refresh_at_makes_an_inlet_stamp_the_forwarded_epoch(tmp_path):
+    # The producer side of the duct: a Refresh carrying `at=T` makes the Inlet stamp T, not now.
     db = connect(tmp_path / "duck.db")
     migrate(db)
     _register(db, "transactions", "1.0.0", "inlet", "ponds/transactions/1.0.0", _cfg(), _RIPPLES)
@@ -741,11 +763,11 @@ def _complete_run(d, key):
     d.on_event(key, {"kind": "run_completed", "f": f})
 
 
-def test_duct_pulses_are_paced_by_the_upstream_throttle(tmp_path):
-    """The producer side of a duct under saturated demand: each downstream Pulse arrives through
-    ``Driver.pulse(at=...)``, so the exported Pond is a trigger Pond here and this Catchment's throttle paces
-    its own graph. Once the slow Pond has seen two demands in one run, further Pulses are held instead of
-    re-running the Inlet, and the slow Pond sends one Pulse upstream per new run (plans/pulse-throttle.md)."""
+def test_duct_refreshes_are_paced_by_the_upstream_throttle(tmp_path):
+    """The producer side of a duct under saturated demand: each downstream request arrives through
+    ``Driver.refresh_now(at=...)``, so the exported Pond is a trigger Pond here and this Catchment's throttle paces
+    its own graph. Once the slow Pond has seen two demands in one run, further requests are held instead of
+    re-running the Inlet, and the slow Pond sends one request upstream per new run (plans/throttle.md)."""
     db = connect(tmp_path / "duck.db")
     migrate(db)
     _register(db, "inlet", "1.0.0", "inlet", "ponds/inlet/1.0.0", _cfg(), _RIPPLES)
@@ -766,7 +788,7 @@ def test_duct_pulses_are_paced_by_the_upstream_throttle(tmp_path):
     assert d.state.pond_states["slow@1"].throttle.held == 1
     assert d.state.pond_states["out@1"].throttle.held == 1
 
-    _complete_run(d, "slow@1")  # slow restarts at t2, its turn: one Pulse upstream
+    _complete_run(d, "slow@1")  # slow restarts at t2, its turn: one request upstream
     assert d.state.pond_states["slow@1"].start_f == t2
     assert d.state.pond_states["inlet@1"].runs_started == 3
 

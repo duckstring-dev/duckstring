@@ -334,7 +334,7 @@ def _flush_deferred(s: EngineState, pid: PondId) -> bool:
     return changed
 
 
-# ─── Throttle (plans/pulse-throttle.md) ───────────────────────────────────────
+# ─── Throttle (plans/throttle.md) ───────────────────────────────────────
 #
 # Paces demand that arrives faster than the pipeline can serve it; sparse demand never triggers it.
 #

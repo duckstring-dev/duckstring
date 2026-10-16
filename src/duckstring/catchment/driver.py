@@ -117,7 +117,7 @@ def _period_name(every: timedelta) -> str:
 
 def default_refresh_name(every: timedelta, start: datetime | None = None, days: str | None = None) -> str:
     """The name a Refresh gets when none is given: "Continuous", "Every 30 min", "Daily", "Daily at 06:00",
-    "Weekdays at 06:00" (times in UTC). Migration 031 names converted Waves and Tides the same way."""
+    "Weekdays at 06:00" (times in UTC). Migration 031 named the standing triggers it converted the same way."""
     if start is None:
         return "Continuous" if every <= timedelta(0) else _period_name(every)
     at = start.astimezone(timezone.utc).strftime("%H:%M")
@@ -620,7 +620,7 @@ class Driver:
                     st.persisted_f = st.end_f
             self._reconcile_lost_publishes()
             # Demand the throttle was holding is persisted as plain demand, but the soft state that would
-            # release it is gone: send each Pond's newest unmet demand on once (plans/pulse-throttle.md).
+            # release it is gone: send each Pond's newest unmet demand on once (plans/throttle.md).
             resend_held_demand(self.state)
             self.jobs = {key: self.jobs.get(key, []) for key in ponds}
             self.state_version += 1  # topology/config (deploy, ducts, windows) changed
@@ -2703,34 +2703,19 @@ class Driver:
                                     finished_at=_iso(now), error=error)
             self._process(now, notify=False)  # poller-driven
 
-    # ─── Producer exposure (open / tap-on-get) ──────────────────────────────────
+    # ─── Producer exposure (open) ───────────────────────────────────────────────
 
-    def set_pond_open(self, pond: str, tap_on_get: bool) -> None:
-        """Mark a Pond open (accepts demand from any source). Under single-level auth this is a no-op
-        gate; its live effect is ``tap_on_get`` (a read on the query route sends a one-shot Refresh)."""
+    def set_pond_open(self, pond: str) -> None:
+        """Mark a Pond open (accepts demand from any source). Under single-level auth this is a no-op gate, a
+        placeholder for per-Pond access."""
         with self.lock:
-            pid = self.meta[pond]["pond_id"]
-            self.db.execute(
-                "INSERT INTO pond_open (pond_id, tap_on_get) VALUES (?, ?) "
-                "ON CONFLICT(pond_id) DO UPDATE SET tap_on_get = excluded.tap_on_get",
-                (pid, int(tap_on_get)),
-            )
+            self.db.execute("INSERT OR IGNORE INTO pond_open (pond_id) VALUES (?)", (self.meta[pond]["pond_id"],))
             self.db.commit()
 
     def unset_pond_open(self, pond: str) -> None:
         with self.lock:
             self.db.execute("DELETE FROM pond_open WHERE pond_id = ?", (self.meta[pond]["pond_id"],))
             self.db.commit()
-
-    def pond_tap_on_get(self, pond: str) -> bool:
-        with self.lock:
-            m = self.meta.get(pond)
-            if m is None:
-                return False
-            row = self.db.execute(
-                "SELECT tap_on_get FROM pond_open WHERE pond_id = ?", (m["pond_id"],)
-            ).fetchone()
-            return bool(row and row[0])
 
     # ─── Ducts (consumer side) ───────────────────────────────────────────────────
 

@@ -114,6 +114,6 @@ export type PondVisualState = 'killed' | 'blocked' | 'running' | 'queued' | 'idl
 // A single logged orchestration event, for the console panel.
 export interface LogEntry {
   t: number; // wall-clock ms of the event
-  kind: string; // short category, e.g. 'tap', 'pond-start', 'ripple-done', 'queue', 'release'
+  kind: string; // short category, e.g. 'refresh', 'pond-start', 'ripple-done', 'queue', 'release'
   msg: string; // human-readable description
 }

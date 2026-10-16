@@ -43,7 +43,7 @@ adds the data age (as a sawtooth) at each completion. Continuous is a Refresh ev
 
 The sidebar's **Examples** load the topologies it was explored on, and a setup can be opened from a
 link: `?example=deep|decreasing|sibling|diamond|diamondlead|long|demo`, and `?every=<seconds>` for a
-Refresh on every Outlet (`0` is continuous; `?tide=` and `?wave=1` still work). For example
+Refresh on every Outlet (`0` is continuous). For example
 `/?tour=0&example=diamond&every=1`.
 
 ## Test

@@ -13,8 +13,7 @@ import { TourSpotlight } from './TourSpotlight';
 export function Playground() {
   const isMobile = useIsMobile();
   // ?example=<key> loads an example graph, and ?every=<seconds> (0 = continuous) puts that Refresh on every
-  // Outlet, so a setup can be opened straight from a link. (?tide=<seconds> and ?wave=1, from before Refresh,
-  // still work.)
+  // Outlet, so a setup can be opened straight from a link.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const store = usePlaygroundStore.getState();
@@ -22,8 +21,7 @@ export function Playground() {
     if (example) store.loadExample(example);
     const ponds = usePlaygroundStore.getState().ponds;
     const outlets = Object.keys(ponds).filter((id) => !Object.values(ponds).some((p) => p.sources.includes(id)));
-    let every = parseFloat(params.get('every') ?? params.get('tide') ?? '');
-    if (isNaN(every) && params.get('wave') === '1') every = 0;
+    const every = parseFloat(params.get('every') ?? '');
     if (!isNaN(every) && every >= 0) for (const id of outlets) store.setRefresh(id, { everyMs: every * 1000 });
   }, []);
   useEffect(() => {

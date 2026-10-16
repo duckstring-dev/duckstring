@@ -65,18 +65,6 @@ def rebuild(
     typer.echo(f"Rebuild cleared on '{pond}'." if clear else f"'{pond}' will rebuild on its next run.")
 
 
-def refresh_alias(
-    pond: str = typer.Argument(...),
-    catchment: Optional[str] = _CATCHMENT,
-    major: Optional[int] = _MAJOR,
-    version: Optional[str] = _VERSION,
-    clear: bool = typer.Option(False, "--clear"),
-) -> None:
-    """Deprecated: `duckstring control rebuild`."""
-    typer.echo("`duckstring control refresh` is now `duckstring control rebuild`.", err=True)
-    rebuild(pond, catchment, major, version, clear)
-
-
 def reset(
     pond: str = typer.Argument(..., help="Name of the Pond to reset."),
     catchment: Optional[str] = _CATCHMENT,

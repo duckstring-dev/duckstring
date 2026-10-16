@@ -577,24 +577,15 @@ def test_rebuild_flags_the_next_run(catchment_client):
     assert outlet["rebuild_pending"] is False
 
 
-def test_deprecated_trigger_routes_map_onto_refreshes(catchment_client):
+def test_the_old_trigger_routes_are_gone(catchment_client):
     _outlet(catchment_client)
-    for route in ("tap", "pulse"):
-        assert catchment_client.post(f"/api/ponds/outlet/{route}").status_code == 200
-    assert _refresh_rows(_db(catchment_client), "outlet") == []
-    catchment_client.post("/api/ponds/outlet/wave")
-    assert _refresh_rows(_db(catchment_client), "outlet") == [("Continuous", 0, None, None)]
-    catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 3600})  # replaces the floating one
-    assert _refresh_rows(_db(catchment_client), "outlet") == [("Hourly", 3_600_000, None, None)]
-    assert catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 0}).status_code == 422
-    catchment_client.post("/api/ponds/outlet/untrigger")
-    assert _refresh_rows(_db(catchment_client), "outlet") == []
-    assert catchment_client.post("/api/ponds/nonexistent/wave").status_code == 404
+    for route in ("tap", "pulse", "wave", "tide", "untrigger"):
+        assert catchment_client.post(f"/api/ponds/outlet/{route}").status_code in (404, 405), route
 
 
 def test_migration_031_converts_waves_and_tides(tmp_path):
     """Standing Waves become continuous Refreshes and Tides floating ones at their bound; push targets carry over
-    as demand; pull columns go and refresh_pending becomes rebuild_pending."""
+    as demand; pull columns and tap-on-get go and refresh_pending becomes rebuild_pending."""
     import sqlite3
 
     from duckstring.catchment import db as dbmod
@@ -615,6 +606,7 @@ def test_migration_031_converts_waves_and_tides(tmp_path):
     con.execute("INSERT INTO pond_trigger (pond_id, kind, bound_ms) VALUES (1, 'wave', NULL), (2, 'tide', 86400000), "
                 "(3, 'tide', 2500)")
     con.execute("INSERT INTO pond_target (pond_id, target_f) VALUES (2, '2026-01-01T00:00:00+00:00')")
+    con.execute("INSERT INTO pond_open (pond_id, tap_on_get) VALUES (2, 1)")
     con.execute("INSERT INTO pond_state (pond_id, start_f, end_f, has_pull, pull_m, refresh_pending) "
                 "VALUES (1, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', 1, '2026-01-01T00:00:00+00:00', 1)")
     con.commit()
@@ -626,6 +618,7 @@ def test_migration_031_converts_waves_and_tides(tmp_path):
     assert "rebuild_pending" in cols and not {"has_pull", "has_received_pull", "pull_local", "pull_m"} & cols
     assert con.execute("SELECT start_f, rebuild_pending FROM pond_state").fetchall() == [
         ("2026-01-01T00:00:00+00:00", 1)]
+    assert con.execute("SELECT * FROM pond_open").fetchall() == [(2,)]  # still open; tap-on-get is gone
 
 
 # ---------------------------------------------------------------------------

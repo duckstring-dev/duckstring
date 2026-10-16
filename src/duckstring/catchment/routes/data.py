@@ -164,21 +164,6 @@ def get_ripple(
     return Response(content=buf.getvalue(), media_type="application/zip")
 
 
-def _maybe_tap_on_get(request: Request, pond: str, major: Optional[int], version: Optional[str]) -> None:
-    """If the Pond is open with tap-on-get, send a one-shot Refresh (the snapshot is served first — we never
-    block on freshness). Best-effort: a data query must never fail because of this. Superseded by Taps
-    (plans/taps.md)."""
-    driver = getattr(request.app.state, "driver", None)
-    if driver is None:
-        return
-    try:
-        key = driver.resolve(pond, major, version)
-        if driver.pond_tap_on_get(key):
-            driver.refresh_now(key)
-    except Exception:
-        pass
-
-
 # ─── Trickle-aware browsing helpers ──────────────────────────────────────────
 
 _F = "_duckstring_f"  # Trickle freshness stamp
@@ -612,7 +597,6 @@ def query_page(body: PageRequest, request: Request,
     ``{pond}`` for the served major, ``{pond}_v{major}`` for a pin; sandboxed to the serviceable surface
     unless full). A per-pond ``table``/``trickle`` browse stays on the Pond's exported snapshot (freshness
     windows, history), serviceable-gated for non-full callers."""
-    _maybe_tap_on_get(request, body.pond, body.major, body.version)
     full = principal.level >= auth.Level.FULL
     limit = max(1, min(body.limit, 5000))
     offset = max(0, body.offset)
@@ -725,7 +709,6 @@ def query_history(body: HistoryRequest, request: Request,
 
 @router.post("/query", dependencies=[auth.read])
 def query(body: QueryRequest, request: Request):
-    _maybe_tap_on_get(request, body.pond, body.major, body.version)
     con = _open_pond(request, body.pond, _resolve_major(request, body.pond, body.major, body.version))
     sql = body.sql
     if not sql:

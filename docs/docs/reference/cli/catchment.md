@@ -213,4 +213,4 @@ duckstring catchment open POND [-c NAME] [-m N | -v VERSION]
 duckstring catchment close POND [-c NAME] [-m N | -v VERSION]
 ```
 
-Run on the upstream Catchment. `open` marks a Pond as accepting demand from other Catchments, and `close` removes the mark. (The `--tap-on-get` option, which refreshed the Pond on every query of it, is deprecated and hidden, and will be replaced by Taps.)
+Run on the upstream Catchment. `open` marks a Pond as accepting demand from other Catchments, and `close` removes the mark.

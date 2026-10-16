@@ -5,9 +5,6 @@ Windows describe when an Inlet's source data is available (an RFC-5545-flavoured
     duckstring window add transactions -n nightly -s 02:00 -d 3h -e 1d
     duckstring window ls transactions
     duckstring window rm transactions nightly
-
-The shape from before Refresh, ``duckstring trigger window {pond} add|list|remove``, remains for one release as a
-hidden alias (``legacy_app``).
 """
 
 from __future__ import annotations
@@ -193,47 +190,3 @@ def rm(
     """Remove a window."""
     _rm(pond, window_name, catchment, major, version)
 
-
-# ─── The shape from before Refresh, `trigger window {pond} add|list|remove` (hidden, one release) ─────────────
-
-legacy_app = typer.Typer(help="Deprecated: use `duckstring window`.", no_args_is_help=True, hidden=True)
-
-
-def _deprecated(new: str) -> None:
-    typer.echo(f"`duckstring trigger window` is deprecated: use `duckstring window {new}`.", err=True)
-
-
-@legacy_app.callback()
-def _legacy(ctx: typer.Context, pond: str = typer.Argument(..., help="The Pond whose windows to manage.")):
-    ctx.obj = {"pond": pond}
-
-
-@legacy_app.command("add")
-def _legacy_add(
-    ctx: typer.Context,
-    name: str = typer.Option(..., "--name", "-n"),
-    every: str = typer.Option(..., "--every", "-e"),
-    start: Optional[str] = typer.Option(None, "--start", "-s"),
-    duration: Optional[str] = typer.Option(None, "--duration", "-d"),
-    on: Optional[str] = typer.Option(None, "--on", "-o"),
-    until: Optional[str] = typer.Option(None, "--until", "-u"),
-    catchment: Optional[str] = _CATCHMENT,
-    major: Optional[int] = _MAJOR,
-    version: Optional[str] = _VERSION,
-) -> None:
-    _deprecated(f"add {ctx.obj['pond']} ...")
-    _add(ctx.obj["pond"], name, every, start, duration, on, until, catchment, major, version)
-
-
-@legacy_app.command("list")
-def _legacy_list(ctx: typer.Context, catchment: Optional[str] = _CATCHMENT, major: Optional[int] = _MAJOR,
-                 version: Optional[str] = _VERSION) -> None:
-    _deprecated(f"ls {ctx.obj['pond']}")
-    _ls(ctx.obj["pond"], catchment, major, version)
-
-
-@legacy_app.command("remove")
-def _legacy_remove(ctx: typer.Context, window_name: str = typer.Argument(...), catchment: Optional[str] = _CATCHMENT,
-                   major: Optional[int] = _MAJOR, version: Optional[str] = _VERSION) -> None:
-    _deprecated(f"rm {ctx.obj['pond']} {window_name}")
-    _rm(ctx.obj["pond"], window_name, catchment, major, version)

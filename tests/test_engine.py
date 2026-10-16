@@ -910,7 +910,7 @@ def test_kill_parks_terminal_and_blocks_downstream():
     assert not cleared.pond_states["p1"].is_killed and not cleared.pond_states["p2"].is_blocked
 
 
-# ─── Demand propagation (plans/pulse-throttle.md rules 6 to 8) ─────────────────
+# ─── Demand propagation (plans/throttle.md rules 6 to 8) ─────────────────
 
 
 @pytest.mark.timeout(1)
@@ -1000,7 +1000,7 @@ def test_demand_lost_at_a_halted_source_is_resent_when_it_unblocks(halted):
     assert d.state.pond_states["O"].end_f == T0
 
 
-# ─── Throttle (plans/pulse-throttle.md) ───────────────────────────────────────
+# ─── Throttle (plans/throttle.md) ───────────────────────────────────────
 # Ported from the playground's playground/tests/unit/throttle.spec.ts, the reference implementation. Under
 # saturated demand the bottleneck runs as often as it did under a Wave, upstream settles at the bottleneck's
 # rate, and the data is at least as fresh as the Wave's. Sparse demand runs every Pond once per Refresh. Until
@@ -1110,15 +1110,15 @@ class SimRun:
 
 
 def simulate(made: tuple[EngineState, dict[str, timedelta]], outlet: str, seconds: int, *, every: float | None = None,
-             tide: float | None = None, drift: bool = False, tides: dict[str, float] | None = None,
+             standing: float | None = None, drift: bool = False, standings: dict[str, float] | None = None,
              schedules: dict[str, tuple[float, float]] | None = None) -> SimRun:
     """Drive sim time as the playground's tests do: a one-off Refresh at ``outlet`` every ``every`` seconds
-    (landing on the next step), or a standing floating Refresh every ``tide`` seconds (0 = continuous; the
-    name follows the cross-check's scenario format); then per step advance, complete, tick, react."""
+    (landing on the next step), or a standing floating Refresh every ``standing`` seconds (0 = continuous); then
+    per step advance, complete, tick, react."""
     s, dur = made
-    if tide is not None:
-        s.refreshes = {outlet: [floating(outlet, tide)]}
-    for pond, bound in (tides or {}).items():  # further Outlets with their own cadences
+    if standing is not None:
+        s.refreshes = {outlet: [floating(outlet, standing)]}
+    for pond, bound in (standings or {}).items():  # further Outlets with their own cadences
         s.refreshes[pond] = [floating(pond, bound)]
     for pond, (at, period) in (schedules or {}).items():  # scheduled Refreshes, on a grid from the start
         s.refreshes[pond] = [*s.refreshes.get(pond, []), scheduled(pond, T0 + secs(at), period)]
@@ -1152,7 +1152,8 @@ def simulate(made: tuple[EngineState, dict[str, timedelta]], outlet: str, second
 def test_saturated_demand_runs_at_the_bottlenecks_pace(name):
     _, outlet, inlet, bottleneck = THROTTLE_TOPOLOGIES[name]
     wave, wave_drift = WAVE[name]["wave"], WAVE[name]["wave_drift"]
-    for opts, (ref_runs, ref_age) in ((dict(every=1), wave), (dict(tide=0), wave), (dict(tide=1, drift=True), wave_drift)):
+    cases = ((dict(every=1), wave), (dict(standing=0), wave), (dict(standing=1, drift=True), wave_drift))
+    for opts, (ref_runs, ref_age) in cases:
         r = simulate(_throttle_graph(name), outlet, 120, **opts)
         assert r.runs[bottleneck] == ref_runs[bottleneck], opts
         assert r.runs[outlet] == ref_runs[outlet], opts
@@ -1410,11 +1411,11 @@ def _node_runs_typescript() -> bool:
 @pytest.mark.skipif(not _node_runs_typescript(), reason="needs Node 22.6+ and the playground source")
 @pytest.mark.parametrize("name,opts", [
     ("deep chain", dict(every=1)),
-    ("diamond", dict(tide=1, drift=True)),
-    ("Outlet is the bottleneck", dict(tide=0)),
+    ("diamond", dict(standing=1, drift=True)),
+    ("Outlet is the bottleneck", dict(standing=0)),
     ("bottleneck inside a Pond", dict(every=1)),
-    ("slow sibling Inlet", dict(tide=0)),  # sibling alignment at the join
-    ("two Outlets on a shared chain", dict(tide=0, tides={"O2": 10})),  # every 10 s beside a continuous neighbour
+    ("slow sibling Inlet", dict(standing=0)),  # sibling alignment at the join
+    ("two Outlets on a shared chain", dict(standing=0, standings={"O2": 10})),  # every 10 s beside a continuous neighbour
     ("deep chain", dict(schedules={"O": [3, 7]})),  # a scheduled Refresh
 ])
 def test_the_throttle_matches_the_playground_engine(name, opts):

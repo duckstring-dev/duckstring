@@ -50,14 +50,14 @@ def _pond_run_changed(d, key, f):
 
 def test_unchanged_source_makes_sink_pass_without_dispatch(tmp_path):
     d = _chain(tmp_path)
-    # Cold start: tap the sink, run the source then the sink (a real bootstrap run for both).
+    # Cold start: refresh the sink, run the source then the sink (a real bootstrap run for both).
     d.refresh_now("snk@1")
     _run_pond(d, "src@1", changed=True)
     f_snk1 = _run_pond(d, "snk@1", changed=True)
     snk = d.state.pond_states["snk@1"]
     assert snk.changed_f.isoformat() == f_snk1  # bootstrap changed its output
 
-    # Second cycle: re-tap, the source runs again but reports NO change.
+    # Second cycle: refresh again, the source runs again but reports NO change.
     d.refresh_now("snk@1")
     d.jobs["snk@1"] = []  # clear any prior queued jobs so we can see whether snk gets dispatched
     f_src2 = _run_pond(d, "src@1", changed=False)

@@ -14,7 +14,6 @@ from . import refresh as refresh_cmd
 from . import secret as secret_cmd
 from . import serve as serve_cmd
 from . import spout as spout_cmd
-from . import trigger as trigger_cmd
 from . import window as window_cmd
 from .control import (
     clear,
@@ -22,7 +21,6 @@ from .control import (
     force,
     kill,
     rebuild,
-    refresh_alias,
     repair,
     reset,
     reset_contract,
@@ -60,7 +58,6 @@ control_app = typer.Typer(
 )
 control_app.command("force")(force)
 control_app.command("rebuild")(rebuild)
-control_app.command("refresh", hidden=True)(refresh_alias)  # the name from before Rebuild, for one release
 control_app.command("repair")(repair)
 control_app.command("reset")(reset)
 control_app.command("wake")(wake)
@@ -79,7 +76,6 @@ app.add_typer(pond_cmd.app, name="pond")
 app.add_typer(puddle_cmd.app, name="puddle")
 app.add_typer(refresh_cmd.app, name="refresh")
 app.add_typer(window_cmd.app, name="window")
-app.add_typer(trigger_cmd.app, name="trigger")  # hidden: the group from before Refresh, for one release
 app.add_typer(control_app, name="control")
 app.add_typer(duck_cmd.app, name="duck")
 app.add_typer(spout_cmd.app, name="spout")

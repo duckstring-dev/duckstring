@@ -1,6 +1,6 @@
 # Sibling alignment, the request clock, and multi-Outlet cadence
 
-Refinements to the Pulse throttle (`plans/pulse-throttle.md`, "Refinements"), measured on 2026-10-14 in
+Refinements to the Pulse throttle (`plans/throttle.md`, "Refinements"), measured on 2026-10-14 in
 the Python engine with the run-time noise model of `bench/continuous_refresh/`. The scripts compared each
 refinement against the throttle without it through switches in the engine that were removed when the
 refinements were adopted; they and their raw results are at commit `52abf511` (`bench/sibling_alignment/`).

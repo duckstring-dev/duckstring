@@ -1,4 +1,7 @@
-# Pulse throttle: pacing saturated push demand by the bottleneck
+# Throttle: pacing saturated demand by the bottleneck
+
+(Built as the "Pulse throttle", before Refresh replaced Tap, Wave, Pulse and Tide (`plans/refresh-triggers.md`). The
+body keeps the names of the time: a Pulse is now a Refresh, a Tide an `--every` Refresh, push targets are demand.)
 
 Status: **D1 to D4 built (engine, reload re-send, docs and CLAUDE.md); D5, the playground tour chapter, pending.** The reference implementation is
 the playground's TypeScript engine on branch `playground-pulse-release` (`playground/src/lib/

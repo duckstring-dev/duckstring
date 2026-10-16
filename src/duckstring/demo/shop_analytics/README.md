@@ -20,5 +20,5 @@ sale (from shop_orders)  ──▶  orders_clean  ──▶  revenue_by_product 
 ```bash
 pip install 'duckstring[dbt]'
 duckstring pond deploy                          # in shop_orders/, then shop_analytics/
-duckstring trigger pulse shop_analytics
+duckstring refresh shop_analytics
 ```

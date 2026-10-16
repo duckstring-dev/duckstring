@@ -64,6 +64,3 @@ duckstring refresh rm POND NAME
 
 Removes a standing Refresh by name. Runs already in progress finish. `duckstring control sleep` removes them all and clears outstanding demand.
 
-## `trigger` (deprecated)
-
-The commands from before Refresh still work for one release and print their replacement: `trigger tap` and `trigger pulse` are `refresh POND`, `trigger wave` is `refresh add POND --continuous`, `trigger tide POND BOUND` is `refresh add POND --every BOUND`, `trigger remove` removes the `--every` or continuous Refresh, and `trigger window POND add|list|remove` is [`duckstring window`](window.md).

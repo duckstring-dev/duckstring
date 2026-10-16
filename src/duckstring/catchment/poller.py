@@ -163,13 +163,19 @@ async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | N
 
     # 3. Send each Draw's unmet downstream demand to its upstream, carrying the demand's epoch so the upstream
     #    Inlet mints the SAME freshness. Each distinct demand is sent exactly once (see `solicited`): re-sending
-    #    the same epoch would re-add it on a mid-run upstream and cause a duplicate run. For one release the
-    #    poller calls the deprecated `/pulse` route: on an older upstream `/refresh` is the Rebuild flag.
+    #    the same epoch would re-add it on a mid-run upstream and cause a duplicate run. An upstream older than
+    #    Refresh is sent nothing: there `/refresh` is the Rebuild flag (`_speaks_refresh`).
     for d in driver.draws():
         key = d["key"]
         origin = _origin_for(targets, d["name"], d["major"])
         duct = url_by_origin.get(origin) if origin else None
         if duct is None:
+            continue
+        if not _speaks_refresh(statuses.get(origin)):
+            if origin not in _warned_old:
+                _warned_old.add(origin)
+                print(f"[poller] upstream {duct['remote_url']} predates Refresh: upgrade it to send it demand",
+                      flush=True)
             continue
         demand = d["demand"]
         if demand is None or solicited.get(key) == demand:
@@ -177,12 +183,22 @@ async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | N
             continue
         try:
             await client.post(
-                f"{duct['remote_url']}/api/ponds/{d['name']}/pulse",
+                f"{duct['remote_url']}/api/ponds/{d['name']}/refresh",
                 params={"major": d["major"], "at": demand}, headers=duct["auth"],
             )
             solicited[key] = demand
         except httpx.HTTPError:
             pass  # don't record → retry next cycle
+
+
+_warned_old: set[str] = set()  # origins already warned about as predating Refresh (once per process)
+
+
+def _speaks_refresh(status: dict | None) -> bool:
+    """Whether an upstream's ``/api/status`` comes from a Catchment with Refresh: its Ponds list ``refreshes``
+    (an older one lists ``trigger``). Unknown (unreachable, or no Ponds) counts as no."""
+    ponds = (status or {}).get("ponds") or []
+    return bool(ponds) and "refreshes" in ponds[0]
 
 
 def _origin_for(targets: list[dict], name: str, major: int) -> str | None:

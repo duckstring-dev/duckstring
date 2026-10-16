@@ -76,17 +76,9 @@ def test_refresh_add_validates(runner, live_catchment):
         assert result.exit_code != 0, args
 
 
-def test_deprecated_trigger_commands_still_work(runner, live_catchment):
-    _deploy_outlet(live_catchment)
-    for args in (["pulse", "outlet"], ["tap", "outlet"], ["wave", "outlet"], ["tide", "outlet", "1h"]):
-        result = runner.invoke(app, ["trigger", *args, "--silent"])
-        assert result.exit_code == 0, result.output
-        assert "deprecated" in result.output
-    assert "Hourly" in runner.invoke(app, ["refresh", "ls", "outlet"], env={"COLUMNS": "200"}).output
-    result = runner.invoke(app, ["trigger", "remove", "outlet"])
-    assert result.exit_code == 0, result.output
-    assert "No standing Refreshes" in runner.invoke(app, ["refresh", "ls", "outlet"]).output
-    assert runner.invoke(app, ["trigger", "tide", "outlet", "soon"]).exit_code != 0
+def test_the_old_trigger_commands_are_gone(runner):
+    for args in (["trigger", "pulse", "outlet"], ["control", "refresh", "outlet"]):
+        assert runner.invoke(app, args).exit_code != 0, args
 
 
 # ── start / stop ─────────────────────────────────────────────────────────────────
