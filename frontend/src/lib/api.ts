@@ -75,7 +75,7 @@ export interface RawRipple {
   end_f: string | null;
 }
 
-// A standing Refresh: floating (no start; every_ms after the later of the newest request and the freshness,
+// A recurring Refresh: floating (no start; every_ms after the later of the newest request and the freshness,
 // 0 = continuous) or scheduled (a start, on the grid start + k × every, filtered by days, ended by until).
 export interface RawRefresh {
   name: string;
@@ -118,7 +118,7 @@ export interface RawPond {
   start_f: string | null;
   end_f: string | null;
   d_ms: number;
-  refreshes: RawRefresh[]; // standing Refreshes, scheduled first
+  refreshes: RawRefresh[]; // recurring Refreshes, scheduled first
   taps?: RawTap[]; // the Pond's Taps (keys never included)
   is_failed: boolean;
   is_blocked: boolean;
@@ -363,7 +363,7 @@ export interface AddRefreshBody {
   name?: string | null;
 }
 
-// Add a standing Refresh. A floating one (no start) replaces the Pond's floating one.
+// Add a recurring Refresh. A floating one (no start) replaces the Pond's floating one.
 export function addRefresh(pond: string, body: AddRefreshBody): Promise<void> {
   return postJSON(pondPath(pond, 'refreshes'), body);
 }
@@ -691,8 +691,8 @@ async function postForJSON<T>(path: string, body: unknown, what: string): Promis
   return res.json();
 }
 
-// Add a Tap. The response carries its key, once, and a warning when it would read nothing.
-export function addTap(pond: string, body: AddTapBody): Promise<{ key: string; warning?: string }> {
+// Add a Tap. The response carries its key, once.
+export function addTap(pond: string, body: AddTapBody): Promise<{ key: string }> {
   return postForJSON(pondPath(pond, 'taps'), body, 'add tap');
 }
 

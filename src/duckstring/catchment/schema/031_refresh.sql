@@ -3,7 +3,7 @@
 --
 -- Table rebuilds rather than DROP/RENAME COLUMN, so the migration runs on SQLite older than 3.35.
 
--- Standing Refreshes: any number per Pond. Floating (start_anchor NULL): due every_ms after the later of the
+-- Recurring Refreshes: any number per Pond. Floating (start_anchor NULL): due every_ms after the later of the
 -- newest request and the freshness (0 = continuous). Scheduled: fires on the grid start_anchor + k * every_ms,
 -- filtered by valid_days (CSV of MON..SUN, NULL = every day) and ended by until_time. UTC ISO-8601 times.
 CREATE TABLE pond_refresh (

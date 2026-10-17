@@ -82,7 +82,7 @@ This starts a local Catchment, with its web UI at http://127.0.0.1:7474. Leave i
 mkdir demo && cd demo
 duckstring pond demo                       # transactions, products → sales → reports
 duckstring pond deploy --all --yes
-duckstring refresh reports                 # run the pipeline once, from the end
+duckstring refresh now reports                 # run the pipeline once, from the end
 duckstring query reports monthly_summary
 ```
 

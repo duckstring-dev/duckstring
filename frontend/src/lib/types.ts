@@ -42,7 +42,7 @@ export interface NodeView {
   dMs: number; // window delay carried by the current freshness (Pond only; 0 for Ripples)
 }
 
-// A standing Refresh: floating (no start: due everyMs after the later of the newest request and the
+// A recurring Refresh: floating (no start: due everyMs after the later of the newest request and the
 // freshness; 0 = continuous) or scheduled (a start, on its grid, filtered by days, ended by until).
 export interface RefreshView {
   name: string;

@@ -1,19 +1,21 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { useLiveStore, THEME_DEMAND } from '@/lib/store';
+import { useLiveStore, atLeast, THEME_DEMAND } from '@/lib/store';
 import type { FreqUnit, Pond, RefreshView, Weekday } from '@/lib/types';
 import {
   ALL_DAYS, AddButton, DaysPicker, OptionsToggle, UNITS, UNIT_SECONDS, numInput, selectInput, titleCase, todayAtISO,
   toggled,
 } from './recurrence';
+import { TapList } from './TapEditor';
 
-// A Pond's Refreshes — the UI for `duckstring refresh POND` and `refresh add|ls|rm POND`. Refresh now asks for
-// data at least as fresh as now. A standing Refresh repeats it: floating (every N, counted from the later of
-// the last request and the last refresh of the data, so any refresh moves it; one per Pond, a new one
-// replaces it), continuous, or scheduled (a start: fires on that grid whatever else refreshes the Pond).
+// A Pond's Refreshes: the UI for `duckstring refresh now|add|ls|rm POND`, and below them its Taps (`refresh tap`).
+// Refresh Now asks for data at least as fresh as now. A recurring Refresh repeats it: floating (every N, counted
+// from the later of the last request and the last refresh of the data, so any refresh moves it; one per Pond, a
+// new one replaces it), continuous, or scheduled (a start: fires on that grid whatever else refreshes the Pond).
+// The list shows names only; a click (or hover) shows what each is and when it next asks.
 
-type Unit = FreqUnit | 'CONTINUOUS';
+type Unit = FreqUnit;
 const NO_REFRESHES: RefreshView[] = [];
 
 function periodName(seconds: number): string {
@@ -37,6 +39,18 @@ function suggestName(seconds: number, continuous: boolean, start: string, days: 
   return `${base} at ${start.trim()}${days.length && days.length < 7 ? ` (${days.map(titleCase).join(', ')})` : ''}`;
 }
 
+// What a recurring Refresh is, for its detail line.
+function describe(r: RefreshView): string {
+  if (r.continuous) return 'Continuous';
+  const period = periodName(Math.round(r.everyMs / 1000));
+  if (!r.start) return period;
+  const d = new Date(r.start);
+  const at = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const days = r.days ? ` (${r.days.split(',').map((x) => titleCase(x as Weekday)).join(', ')})` : '';
+  const until = r.until ? `, until ${new Date(r.until).toLocaleString()}` : '';
+  return `${period} from ${at}${days}${until}`;
+}
+
 function nextText(r: RefreshView, now: number): string {
   if (r.continuous) return 'as often as it can';
   if (r.nextDue == null) return 'ended';
@@ -55,8 +69,10 @@ export function RefreshEditor({ pond, canDemand }: { pond: Pond; canDemand: bool
   const refreshNow = useLiveStore((s) => s.refreshNow);
   const addRefresh = useLiveStore((s) => s.addRefresh);
   const removeRefresh = useLiveStore((s) => s.removeRefresh);
+  const canManage = useLiveStore((s) => atLeast(s.accessLevel, 'full'));
 
   const [adding, setAdding] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null); // the Refresh whose detail line is open
   const [every, setEvery] = useState('30');
   const [unit, setUnit] = useState<Unit>('MINUTE');
   const [name, setName] = useState('');
@@ -66,17 +82,25 @@ export function RefreshEditor({ pond, canDemand }: { pond: Pond; canDemand: bool
   const [days, setDays] = useState<Set<Weekday>>(new Set());
   const [until, setUntil] = useState('');
 
-  const continuous = unit === 'CONTINUOUS';
-  const seconds = continuous ? 0 : Math.max(1, parseFloat(every) || 1) * UNIT_SECONDS[unit as FreqUnit];
+  const seconds = Math.max(1, parseFloat(every) || 1) * UNIT_SECONDS[unit];
   const selectedDays = ALL_DAYS.filter((d) => days.has(d));
   const daysKey = selectedDays.join(',');
   const suggested = useMemo(
-    () => suggestName(seconds, continuous, start, daysKey ? (daysKey.split(',') as Weekday[]) : []),
-    [seconds, continuous, start, daysKey],
+    () => suggestName(seconds, false, start, daysKey ? (daysKey.split(',') as Weekday[]) : []),
+    [seconds, start, daysKey],
   );
   const effectiveName = nameDirty && name.trim() ? name.trim() : suggested;
-  const scheduled = !continuous && start.trim() !== '';
+  const scheduled = start.trim() !== '';
 
+  const done = () => {
+    setNameDirty(false);
+    setName('');
+    setAdding(false);
+  };
+  const addContinuous = () => {
+    addRefresh(pond.id, { every_seconds: 0, start: null, days: null, until: null, name: 'Continuous' });
+    done();
+  };
   const add = () => {
     addRefresh(pond.id, {
       every_seconds: seconds,
@@ -85,57 +109,31 @@ export function RefreshEditor({ pond, canDemand }: { pond: Pond; canDemand: bool
       until: scheduled && until ? new Date(until).toISOString() : null,
       name: effectiveName,
     });
-    setNameDirty(false);
-    setName('');
-    setAdding(false);
+    done();
   };
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
-        <span style={{ fontSize: 10, color: '#52525b', lineHeight: 1.5 }}>
-          Ask for this Pond&apos;s data as of now, or keep asking.
-        </span>
-        {canDemand && <AddButton onClick={() => refreshNow(pond.id)} color={THEME_DEMAND}>Refresh now</AddButton>}
-      </div>
-
-      {refreshes.map((r) => (
-        <div key={r.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginBottom: 4 }}>
-          <span style={{ fontSize: 12, color: '#a1a1aa', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-            <span style={{ fontSize: 10, color: '#71717a' }}>{nextText(r, now)}</span>
-            {canDemand && (
-              <button
-                onClick={() => removeRefresh(pond.id, r.name)}
-                aria-label={`Remove ${r.name}`}
-                style={{ background: 'none', border: 'none', color: '#52525b', cursor: 'pointer', fontSize: 14 }}
-              >
-                ✕
-              </button>
-            )}
-          </span>
-        </div>
-      ))}
-
       {canDemand && (
-        <div style={{ marginTop: 6 }}>
-          <OptionsToggle open={adding} onClick={() => setAdding((v) => !v)} label="Add a Refresh" />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 8 }}>
+          <AddButton block onClick={() => refreshNow(pond.id)} color={THEME_DEMAND}>Refresh Now</AddButton>
+          <AddButton block active={adding} onClick={() => setAdding((v) => !v)}>Recurring Refresh</AddButton>
         </div>
       )}
 
       {canDemand && adding && (
-        <div style={{ marginTop: 8 }}>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <div style={{ marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <AddButton block onClick={addContinuous}>Continuous</AddButton>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 2 }}>
             <span style={{ fontSize: 11, color: '#71717a', width: 40 }}>Every</span>
-            {!continuous && <input type="number" min="1" value={every} onChange={(e) => setEvery(e.target.value)} style={numInput} />}
+            <input type="number" min="1" value={every} onChange={(e) => setEvery(e.target.value)} style={numInput} />
             <select value={unit} onChange={(e) => setUnit(e.target.value as Unit)} style={selectInput}>
               {UNITS.map((u) => (
                 <option key={u.value} value={u.value}>{u.label}</option>
               ))}
-              <option value="CONTINUOUS">continuously</option>
             </select>
           </div>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <span style={{ fontSize: 11, color: '#71717a', width: 40 }}>Name</span>
             <input
               type="text"
@@ -144,14 +142,11 @@ export function RefreshEditor({ pond, canDemand }: { pond: Pond; canDemand: bool
               style={{ ...numInput, width: 168, flex: 1 }}
             />
           </div>
-
-          {!continuous && (
-            <div style={{ marginTop: 8 }}>
-              <OptionsToggle open={showOptions} onClick={() => setShowOptions((v) => !v)} />
-            </div>
-          )}
-          {!continuous && showOptions && (
-            <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div>
+            <OptionsToggle open={showOptions} onClick={() => setShowOptions((v) => !v)} />
+          </div>
+          {showOptions && (
+            <>
               <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                 <span style={{ fontSize: 11, color: '#71717a', width: 56 }}>Start</span>
                 <input type="text" placeholder="HH:MM" value={start} onChange={(e) => setStart(e.target.value)} style={{ ...numInput, width: 64 }} />
@@ -163,18 +158,43 @@ export function RefreshEditor({ pond, canDemand }: { pond: Pond; canDemand: bool
                   <input type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} style={{ ...numInput, width: 168 }} />
                 </div>
               )}
-              <div style={{ fontSize: 10, color: '#52525b', lineHeight: 1.5 }}>
-                No start: counts from the last request or refresh of the data. A start: fires on that schedule,
-                whatever else refreshes the Pond.
-              </div>
-            </div>
+            </>
           )}
-
-          <div style={{ marginTop: 10 }}>
+          <div style={{ marginTop: 4 }}>
             <AddButton onClick={add}>+ Add Refresh</AddButton>
           </div>
         </div>
       )}
+
+      {refreshes.map((r) => {
+        const detail = `${describe(r)} · ${nextText(r, now)}`;
+        return (
+          <div key={r.name} style={{ marginBottom: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+              <span
+                role="button"
+                title={detail}
+                onClick={() => setExpanded((v) => (v === r.name ? null : r.name))}
+                style={{ fontSize: 12, color: '#a1a1aa', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              >
+                {r.name}
+              </span>
+              {canDemand && (
+                <button
+                  onClick={() => removeRefresh(pond.id, r.name)}
+                  aria-label={`Remove ${r.name}`}
+                  style={{ background: 'none', border: 'none', color: '#52525b', cursor: 'pointer', fontSize: 14, flexShrink: 0 }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            {expanded === r.name && <div style={{ fontSize: 10, color: '#71717a', marginTop: 1 }}>{detail}</div>}
+          </div>
+        );
+      })}
+
+      {canManage && <TapList pond={pond} />}
     </>
   );
 }

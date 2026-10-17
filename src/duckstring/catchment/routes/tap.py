@@ -37,14 +37,7 @@ def add_tap(name: str, body: _TapBody, request: Request, major: int | None = Non
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    out = {"pond": key, "tap": tap, "key": secret}
-    driver = _driver(request)
-    if not driver.tap_exposes_anything(auth.TapScope(key, tap["name"])):
-        # A Tap reads exposed tables only, and an app pointed at one that exposes nothing would see nothing.
-        out["warning"] = (f"none of the tables this Tap covers are exposed yet, so its key can't read anything: "
-                          f"expose them in pond.toml [serve] tables, or with `duckstring serve expose "
-                          f"{driver.meta[key]['name']} TABLE --on`")
-    return out
+    return {"pond": key, "tap": tap, "key": secret}
 
 
 @router.get("/ponds/{name}/taps", dependencies=[auth.full])

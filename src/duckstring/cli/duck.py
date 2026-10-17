@@ -13,7 +13,7 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="Where each Pond runs, and the Duck pools it can use.", no_args_is_help=True)
+app = typer.Typer(help="The execution context of a Pond.", no_args_is_help=True)
 pool_app = typer.Typer(help="Named sizes of remote compute.", no_args_is_help=True)
 app.add_typer(pool_app, name="pool")
 

@@ -18,7 +18,7 @@ When several Outlets share upstream Ponds, give each its own Refresh. The shared
 A one-off refresh, for example after fixing bad data upstream:
 
 ```bash
-duckstring refresh reports
+duckstring refresh now reports
 ```
 
 Everything upstream that's older than the moment you sent it runs, then `reports`, and the live status view stays open until it settles. Add `--silent` to send the request and return.
@@ -31,7 +31,7 @@ curl -X POST -H "Authorization: Bearer $DEMAND_KEY" http://catchment.internal:74
 
 ## Every day, or every N
 
-A standing Refresh repeats the request. With a period of a day, the pipeline runs once a day:
+A recurring Refresh repeats the request. With a period of a day, the pipeline runs once a day:
 
 ```bash
 duckstring refresh add reports --every 1d
@@ -68,10 +68,10 @@ A continuous Refresh doesn't always give the freshest data on average. The pacin
 
 ## Only while it's used
 
-Some data only matters while someone is looking at it, such as a dashboard opened a few times a day. Rather than a standing Refresh, give the app a [Tap](serving_apps_with_taps.md): its queries refresh the Pond when the data is older than you allow, and nothing runs while the app is idle.
+Some data only matters while someone is looking at it, such as a dashboard opened a few times a day. Rather than a recurring Refresh, give the app a [Tap](serving_apps_with_taps.md): its queries refresh the Pond when the data is older than you allow, and nothing runs while the app is idle.
 
 ```bash
-duckstring tap add reports --name dashboard --fresh-within 1h
+duckstring refresh tap add reports --name dashboard --fresh-within 1h
 ```
 
 ## Batch sources
@@ -129,9 +129,9 @@ This is the one case where a Refresh belongs on a Pond in the middle of a pipeli
 ## Stopping
 
 ```bash
-duckstring refresh ls reports                 # the standing Refreshes, and when each next asks
+duckstring refresh ls reports                 # the recurring Refreshes, and when each next asks
 duckstring refresh rm reports "Daily at 06:00"  # remove one; runs in progress finish
 duckstring control sleep reports              # remove them all and clear any outstanding demand
 ```
 
-`duckstring status` shows each Pond's standing Refreshes.
+`duckstring status` shows each Pond's recurring Refreshes.

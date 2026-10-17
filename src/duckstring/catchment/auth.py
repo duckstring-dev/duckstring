@@ -4,7 +4,7 @@ The single-key model is split into a **total-ordered** ladder — ``read ⊂ dem
 authorization check stays one integer comparison:
 
 - **read** — read & query data only (no ducts, no demand).
-- **demand** — read + create demand (refresh now, standing Refreshes) + connect a downstream duct.
+- **demand** — read + create demand (refresh now, recurring Refreshes) + connect a downstream duct.
 - **full** — everything: deploy, the control verbs, windows, ducts, key rotation.
 
 Besides the ladder, a **Tap** key (plans/taps.md) is a principal of its own: it names one Tap on one Pond line,

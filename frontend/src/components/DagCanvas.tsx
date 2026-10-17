@@ -16,12 +16,11 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { useLiveStore, consumeEdgeColor, formatAge, THEME_DEMAND } from '@/lib/store';
+import { useLiveStore, consumeEdgeColor, demandLines, formatAge } from '@/lib/store';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
-import { TriggerNode } from './TriggerNode';
 import { CatchmentGroupNode } from './CatchmentGroupNode';
 import { RemotePondNode } from './RemotePondNode';
 import { TopBar } from './OptionsMenu';
@@ -48,18 +47,9 @@ function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   return <BaseEdge id={id} path={edgePath} interactionWidth={0} style={{ stroke: color, strokeWidth: 2 }} />;
 }
 
-function TriggerEdge({ id, sourceX, sourceY, targetX, targetY }: EdgeProps) {
-  const color = THEME_DEMAND;
-  const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
-  return (
-    <BaseEdge id={id} path={edgePath} interactionWidth={0} style={{ stroke: color, strokeWidth: 2, strokeDasharray: '6 3' }} />
-  );
-}
-
 const nodeTypes: NodeTypes = {
   pond: PondNode as NodeTypes[string],
   ripple: RippleNode as NodeTypes[string],
-  trigger: TriggerNode as NodeTypes[string],
   catchmentGroup: CatchmentGroupNode as NodeTypes[string],
   remotePond: RemotePondNode as NodeTypes[string],
 };
@@ -67,7 +57,6 @@ const nodeTypes: NodeTypes = {
 const edgeTypes: EdgeTypes = {
   rippleEdge: RippleEdge as EdgeTypes[string],
   pondEdge: PondEdge as EdgeTypes[string],
-  triggerEdge: TriggerEdge as EdgeTypes[string],
 };
 
 // ─── Main canvas ─────────────────────────────────────────────────────────────
@@ -77,11 +66,12 @@ export function DagCanvas() {
   const ripples = useLiveStore((s) => s.ripples);
   const refreshes = useLiveStore((s) => s.refreshes);
   const taps = useLiveStore((s) => s.taps);
-  // Ponds with a pill: those with standing Refreshes or Taps (their sources of demand).
-  const demandSources = useMemo(
-    () => Object.fromEntries([...Object.keys(refreshes), ...Object.keys(taps)].map((k) => [k, true])),
-    [refreshes, taps],
-  );
+  // Each Pond's demand strip: its recurring Refreshes and Taps (joined to the bottom of its box).
+  const demand = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const id of new Set([...Object.keys(refreshes), ...Object.keys(taps)])) out[id] = demandLines(refreshes[id], taps[id]);
+    return out;
+  }, [refreshes, taps]);
   const pondViews = useLiveStore((s) => s.pondViews);
   const rippleViews = useLiveStore((s) => s.rippleViews);
   const now = useLiveStore((s) => s.now);
@@ -109,9 +99,9 @@ export function DagCanvas() {
       JSON.stringify({
         ponds: Object.values(ponds).map((p) => ({ id: p.id, sources: p.sources, name: p.name })),
         ripples: Object.values(ripples).map((r) => ({ id: r.id, parents: r.parents, pondId: r.pondId, name: r.name })),
-        refreshes: Object.keys(demandSources).sort(),
+        demand,
       }),
-    [ponds, ripples, demandSources]
+    [ponds, ripples, demand]
   );
 
   // Each box's minimum width to fit its live stats line (grows with run counts / longer ages).
@@ -178,7 +168,7 @@ export function DagCanvas() {
 
   const { nodes, edges } = useMemo(() => {
     const collapsed = new Set(collapsedKey ? collapsedKey.split(',') : []);
-    return computeLayout(ponds, ripples, demandSources, floors, isMobile ? 'TB' : 'LR', lineage, selfId, collapsed);
+    return computeLayout(ponds, ripples, demand, floors, isMobile ? 'TB' : 'LR', lineage, selfId, collapsed);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layoutKey, widthKey, isMobile, lineageKey, selfId, collapsedKey]);
 

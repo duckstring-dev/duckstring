@@ -30,7 +30,7 @@ Keys come in three levels, each including the ones before it:
 | Level | Allows |
 |---|---|
 | `read` | Status, run history, lineage, data and catalog queries. |
-| `demand` | Also Refreshes: refreshing now, and adding and removing standing Refreshes. |
+| `demand` | Also Refreshes: refreshing now, and adding and removing recurring Refreshes. |
 | `full` | Everything else: deploying, control actions, windows, Spouts, secrets, alerts, ducts, compute and Catchment settings. |
 
 A missing or unrecognised key gets `401`; a key below the route's level gets `403`. Tracebacks in run history are only returned to `full` keys; lower levels get the error message alone.
@@ -90,7 +90,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| GET | `/api/status` | read | Every Pond's state, freshness, standing Refreshes and failures, the edges between Ponds, and the caller's access level. |
+| GET | `/api/status` | read | Every Pond's state, freshness, recurring Refreshes and failures, the edges between Ponds, and the caller's access level. |
 | GET | `/api/runs` | read | Run history, newest first. Parameters: `pond`, `lineage` (include upstream Ponds), `ripples` (include Ripple Runs), `limit` (up to 1000). |
 | GET | `/api/view` | read | The Pond graph, including Ponds in upstream Catchments reached through ducts. |
 | GET | `/api/lineage` | read | Observed table lineage. Parameters: `pond`, `major`, `table`, `columns`. |
@@ -102,9 +102,9 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | Method | Path | Level | Description |
 |---|---|---|---|
 | POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameter: `at`, an ISO freshness to ask for instead of now. (Before Refresh, this route marked a Pond for a rebuild; that is now `/rebuild`.) |
-| GET | `/api/ponds/{name}/refreshes` | read | List the standing Refreshes, with when each next asks. |
-| POST | `/api/ponds/{name}/refreshes` | demand | Add a standing Refresh. Body: `every_seconds` (0 is continuous), `continuous`, `start`, `days`, `until`, `name`. |
-| POST | `/api/ponds/{name}/refreshes/{refresh_name}/remove` | demand | Remove a standing Refresh. |
+| GET | `/api/ponds/{name}/refreshes` | read | List the recurring Refreshes, with when each next asks. |
+| POST | `/api/ponds/{name}/refreshes` | demand | Add a recurring Refresh. Body: `every_seconds` (0 is continuous), `continuous`, `start`, `days`, `until`, `name`. |
+| POST | `/api/ponds/{name}/refreshes/{refresh_name}/remove` | demand | Remove a recurring Refresh. |
 | GET | `/api/ponds/{name}/windows` | read | List windows. |
 | POST | `/api/ponds/{name}/windows` | full | Add a window. |
 | POST | `/api/ponds/{name}/windows/{window_name}/remove` | full | Remove a window. |

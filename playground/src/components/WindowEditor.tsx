@@ -80,6 +80,7 @@ export function WindowEditor({ pond }: { pond: Pond }) {
   const [name, setName] = useState('');
   const [nameDirty, setNameDirty] = useState(false);
 
+  const [adding, setAdding] = useState(false);
   const [showOptions, setShowOptions] = useState(false);
   const [startStr, setStartStr] = useState('00:00');
   const [durInterval, setDurInterval] = useState(''); // empty ⇒ = every (back-to-back)
@@ -119,6 +120,13 @@ export function WindowEditor({ pond }: { pond: Pond }) {
     setPondWindows(pond.id, [...windows, { ...draft, name: effectiveName }]);
     setNameDirty(false);
     setName('');
+    setAdding(false);
+  };
+
+  const wideBtn: React.CSSProperties = {
+    background: adding ? `${THEME_BRAND}26` : 'transparent', border: `1px solid ${THEME_BRAND}`, color: THEME_BRAND,
+    borderRadius: 5, padding: '4px 12px', fontSize: 12, cursor: 'pointer', fontWeight: 600, letterSpacing: '0.04em',
+    width: '100%', boxSizing: 'border-box',
   };
 
   return (
@@ -139,6 +147,11 @@ export function WindowEditor({ pond }: { pond: Pond }) {
         </div>
       ))}
 
+      <div style={{ marginTop: 8 }}>
+        <button onClick={() => setAdding((v) => !v)} style={wideBtn}>Add Window</button>
+      </div>
+
+      {adding && (<>
       {/* Required: every + name */}
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
         <span style={{ fontSize: 11, color: '#71717a', width: 40 }}>Every</span>
@@ -230,9 +243,10 @@ export function WindowEditor({ pond }: { pond: Pond }) {
             letterSpacing: '0.04em',
           }}
         >
-          + Add Window
+          Add
         </button>
       </div>
+      </>)}
     </>
   );
 }

@@ -1,17 +1,19 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { addTap, removeTap, rotateTap, UnauthorizedError } from '@/lib/api';
-import { useLiveStore, formatAge, THEME_BRAND, THEME_DANGER, THEME_AMBER } from '@/lib/store';
+import { useLiveStore, formatAge, THEME_AMBER, THEME_BRAND, THEME_DANGER } from '@/lib/store';
 import type { FreqUnit, Pond, TapView } from '@/lib/types';
+import { ConfirmDialog, type ConfirmOpts } from './ConfirmDialog';
 import { AddButton, UNITS, UNIT_SECONDS, numInput, selectInput } from './recurrence';
 
-// A Pond's Taps: the UI for `duckstring tap add|ls|rm|rotate POND` (full access: a Tap is a credential). A
-// Tap is an app's access point: its own key, which reads only the Tap's tables, and a policy. A query through
-// it refreshes the Pond when the newest request or the data is at least "fresh within" old (0 = every query),
-// and "wait" holds the query until the data is that fresh. A key is shown once, when added or rotated.
+// A Pond's Taps, at the foot of its Refresh section: the UI for `duckstring refresh tap add|ls|rm|rotate POND`
+// (full access, since a Tap is a credential). A Tap refreshes the Pond when an app queries it through the Tap's
+// own key. The section lists names only; adding one, and a Tap's details (policy, use, Rotate, Delete), open
+// in a modal. A key is shown once, when added or rotated.
 
 const NO_TAPS: TapView[] = [];
+const KEY_NOTE = 'Copy this key now - it will only be shown once.';
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -23,48 +25,69 @@ function duration(ms: number): string {
   return `${s} sec`;
 }
 
-function policyText(t: TapView): string {
-  const fresh = t.freshWithinMs ? `fresh within ${duration(t.freshWithinMs)}` : 'refreshes on every query';
-  return t.waitMs ? `${fresh} · waits up to ${duration(t.waitMs)}` : fresh;
-}
-
-function KeyBox({ label, value, onDone }: { label: string; value: string; onDone: () => void }) {
-  const [copied, setCopied] = useState(false);
+// A themed modal shell: Escape or a click outside closes it.
+function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
   return (
-    <div style={{ border: `1px solid ${THEME_AMBER}`, background: `${THEME_AMBER}14`, borderRadius: 6, padding: '8px 10px', marginTop: 8 }}>
-      <div style={{ fontSize: 11, color: THEME_AMBER, fontWeight: 700, marginBottom: 6 }}>{label}</div>
-      <code style={{ fontSize: 11, color: '#fafafa', wordBreak: 'break-all', display: 'block', marginBottom: 8 }}>{value}</code>
-      <div style={{ display: 'flex', gap: 6 }}>
-        <AddButton
-          onClick={() => {
-            navigator.clipboard?.writeText(value).then(() => setCopied(true), () => setCopied(false));
-          }}
-        >
-          {copied ? 'Copied' : 'Copy'}
-        </AddButton>
-        <AddButton onClick={onDone} color="#71717a">Done</AddButton>
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 1500, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'rgba(9, 9, 11, 0.72)', padding: 16, fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+      }}
+    >
+      <div
+        role="dialog"
+        aria-label={title}
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: '#101014', border: '1px solid #3f3f46', borderRadius: 10, width: 'min(420px, 92vw)',
+          padding: '16px 18px', boxShadow: '0 10px 40px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column', gap: 8,
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 13.5, fontWeight: 700, color: '#e4e4e7' }}>{title}</span>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            style={{ background: 'none', border: '1px solid #3f3f46', borderRadius: 5, color: '#a1a1aa', cursor: 'pointer', padding: '2px 8px' }}
+          >
+            ✕
+          </button>
+        </div>
+        {children}
       </div>
     </div>
   );
 }
 
-export function TapEditor({ pond }: { pond: Pond }) {
-  const taps = useLiveStore((s) => s.taps[pond.id]) ?? NO_TAPS;
-  const now = useLiveStore((s) => s.now);
-  const refresh = useLiveStore((s) => s.refresh);
+function KeyBox({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div style={{ border: `1px solid ${THEME_AMBER}`, background: `${THEME_AMBER}14`, borderRadius: 6, padding: '8px 10px' }}>
+      <div style={{ fontSize: 11, color: THEME_AMBER, fontWeight: 700, marginBottom: 6 }}>{KEY_NOTE}</div>
+      <code style={{ fontSize: 11, color: '#fafafa', wordBreak: 'break-all', display: 'block', marginBottom: 8 }}>{value}</code>
+      <AddButton onClick={() => navigator.clipboard?.writeText(value).then(() => setCopied(true), () => setCopied(false))}>
+        {copied ? 'Copied' : 'Copy'}
+      </AddButton>
+    </div>
+  );
+}
 
-  const [adding, setAdding] = useState(false);
-  const [name, setName] = useState('');
-  const [fresh, setFresh] = useState('0');
-  const [freshUnit, setFreshUnit] = useState<FreqUnit>('MINUTE');
-  const [wait, setWait] = useState('');
-  const [waitUnit, setWaitUnit] = useState<FreqUnit>('SECOND');
-  const [tables, setTables] = useState('');
+const row: React.CSSProperties = { display: 'flex', gap: 6, alignItems: 'center' };
+const lab: React.CSSProperties = { fontSize: 11, color: '#71717a', width: 88, flexShrink: 0 };
+
+// Runs a Tap call: refreshes the store after, and sends a 401 to the key prompt.
+function useRun() {
+  const refresh = useLiveStore((s) => s.refresh);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  // A key just minted (add or rotate), shown once with what it's for; a warning from the add, if any.
-  const [shown, setShown] = useState<{ label: string; key: string; warning?: string } | null>(null);
-
   const run = async (fn: () => Promise<void>) => {
     setErr(null);
     setBusy(true);
@@ -78,80 +101,39 @@ export function TapEditor({ pond }: { pond: Pond }) {
       setBusy(false);
     }
   };
+  return { busy, err, run };
+}
+
+function AddTapModal({ pond, onClose }: { pond: Pond; onClose: () => void }) {
+  const [name, setName] = useState('');
+  const [fresh, setFresh] = useState('0');
+  const [freshUnit, setFreshUnit] = useState<FreqUnit>('MINUTE');
+  const [wait, setWait] = useState('');
+  const [waitUnit, setWaitUnit] = useState<FreqUnit>('SECOND');
+  const [tables, setTables] = useState('');
+  const [key, setKey] = useState<string | null>(null);
+  const { busy, err, run } = useRun();
+  const fld: React.CSSProperties = { ...numInput, width: '100%', boxSizing: 'border-box' };
 
   const add = () =>
     run(async () => {
-      const freshN = Math.max(0, parseInt(fresh, 10) || 0);
       const waitN = parseInt(wait, 10);
       const list = tables.split(',').map((t) => t.trim()).filter(Boolean);
       const resp = await addTap(pond.id, {
         name: name.trim(),
-        fresh_within_ms: freshN * UNIT_SECONDS[freshUnit] * 1000,
+        fresh_within_ms: Math.max(0, parseInt(fresh, 10) || 0) * UNIT_SECONDS[freshUnit] * 1000,
         wait_ms: wait && waitN > 0 ? waitN * UNIT_SECONDS[waitUnit] * 1000 : null,
         tables: list.length ? list : null,
       });
-      setShown({ label: `Key for '${name.trim()}', shown once: store it now`, key: resp.key, warning: resp.warning });
-      setAdding(false);
-      setName('');
-      setTables('');
+      setKey(resp.key);
     });
-
-  const rotate = (t: TapView) => {
-    if (!window.confirm(`Give '${t.name}' a new key? The app's current key stops working at once.`)) return;
-    run(async () => {
-      const resp = await rotateTap(pond.id, t.name);
-      setShown({ label: `New key for '${t.name}', shown once: store it now`, key: resp.key });
-    });
-  };
-
-  const remove = (t: TapView) => {
-    if (!window.confirm(`Remove '${t.name}'? Its key stops working at once.`)) return;
-    run(() => removeTap(pond.id, t.name));
-  };
-
-  const fld: React.CSSProperties = { ...numInput, width: '100%', boxSizing: 'border-box' };
-  const row: React.CSSProperties = { display: 'flex', gap: 6, alignItems: 'center' };
-  const lab: React.CSSProperties = { fontSize: 11, color: '#71717a', width: 72, flexShrink: 0 };
 
   return (
-    <>
-      <div style={{ fontSize: 10, color: '#52525b', marginBottom: 8, lineHeight: 1.5 }}>
-        Access points for apps. A query through one keeps this Pond fresh while the app is in use.
-      </div>
-      {taps.length === 0 && !adding && !shown && <div style={{ fontSize: 12, color: '#52525b', marginBottom: 6 }}>None.</div>}
-      {taps.map((t) => (
-        <div key={t.name} style={{ marginBottom: 8 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, color: '#e4e4e7' }}>{t.name}</span>
-            <span style={{ display: 'flex', gap: 8 }}>
-              <button onClick={() => rotate(t)} disabled={busy} title="New key"
-                style={{ background: 'none', border: 'none', color: THEME_BRAND, cursor: 'pointer', fontSize: 11, padding: 0 }}>
-                Rotate
-              </button>
-              <button onClick={() => remove(t)} disabled={busy} title="Remove"
-                style={{ background: 'none', border: 'none', color: '#52525b', cursor: 'pointer', fontSize: 14, padding: 0 }}>
-                ✕
-              </button>
-            </span>
-          </div>
-          <div style={{ fontSize: 11, color: '#a1a1aa' }}>{policyText(t)}</div>
-          <div style={{ fontSize: 11, color: '#52525b' }}>
-            {t.tables ? t.tables.join(', ') : 'all exposed tables'} ·{' '}
-            {t.lastQueryAt ? `last query ${formatAge(t.lastQueryAt, now)} ago` : 'never queried'} ·{' '}
-            {plural(t.queryCount, 'query', 'queries')} · {plural(t.refreshCount, 'refresh', 'refreshes')}
-          </div>
-        </div>
-      ))}
-
-      {shown && (
+    <Modal title={key ? `Tap '${name.trim()}' added` : 'Add a Tap'} onClose={onClose}>
+      {key ? (
+        <KeyBox value={key} />
+      ) : (
         <>
-          <KeyBox label={shown.label} value={shown.key} onDone={() => setShown(null)} />
-          {shown.warning && <div style={{ fontSize: 11, color: THEME_AMBER, marginTop: 6, lineHeight: 1.5 }}>{shown.warning}</div>}
-        </>
-      )}
-
-      {adding ? (
-        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div style={row}>
             <span style={lab}>Name</span>
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. dashboard" style={fld} />
@@ -174,21 +156,87 @@ export function TapEditor({ pond }: { pond: Pond }) {
             <span style={lab}>Tables</span>
             <input value={tables} onChange={(e) => setTables(e.target.value)} placeholder="blank = all exposed" style={fld} />
           </div>
-          <div style={{ fontSize: 10, color: '#52525b', lineHeight: 1.5 }}>
-            Fresh within 0 refreshes on every query. Without a wait, a query is answered at once from what is published.
-          </div>
           {err && <div style={{ fontSize: 11, color: THEME_DANGER, wordBreak: 'break-word' }}>{err}</div>}
-          <div style={{ display: 'flex', gap: 6 }}>
-            <AddButton onClick={add}>{busy ? 'Adding…' : 'Add'}</AddButton>
-            <AddButton onClick={() => { setAdding(false); setErr(null); }} color="#71717a">Cancel</AddButton>
+          <div>
+            <AddButton onClick={add} disabled={busy || !name.trim()}>{busy ? 'Adding…' : 'Add'}</AddButton>
           </div>
-        </div>
-      ) : (
-        <div style={{ marginTop: 6 }}>
-          {err && <div style={{ fontSize: 11, color: THEME_DANGER, marginBottom: 6, wordBreak: 'break-word' }}>{err}</div>}
-          <AddButton onClick={() => setAdding(true)}>+ Add Tap</AddButton>
-        </div>
+        </>
       )}
-    </>
+    </Modal>
+  );
+}
+
+function TapDetailModal({ pond, tap, onClose }: { pond: Pond; tap: TapView; onClose: () => void }) {
+  const now = useLiveStore((s) => s.now);
+  const [key, setKey] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmOpts | null>(null);
+  const { err, run } = useRun();
+  const line = (label: string, value: string) => (
+    <div style={row}>
+      <span style={lab}>{label}</span>
+      <span style={{ fontSize: 12, color: '#d4d4d8' }}>{value}</span>
+    </div>
+  );
+
+  return (
+    <Modal title={tap.name} onClose={onClose}>
+      {line('Fresh within', tap.freshWithinMs ? duration(tap.freshWithinMs) : 'every query')}
+      {line('Wait', tap.waitMs ? duration(tap.waitMs) : 'no')}
+      {line('Tables', tap.tables ? tap.tables.join(', ') : 'all exposed')}
+      {line('Last query', tap.lastQueryAt ? `${formatAge(tap.lastQueryAt, now)} ago` : 'never')}
+      {line('Use', `${plural(tap.queryCount, 'query', 'queries')}, ${plural(tap.refreshCount, 'refresh', 'refreshes')}`)}
+      {key && <KeyBox value={key} />}
+      {err && <div style={{ fontSize: 11, color: THEME_DANGER, wordBreak: 'break-word' }}>{err}</div>}
+      <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+        <AddButton
+          onClick={() => setConfirm({
+            title: `Replace key for ${tap.name}?`, body: '', confirmLabel: 'Replace',
+            action: () => run(async () => setKey((await rotateTap(pond.id, tap.name)).key)),
+          })}
+        >
+          Rotate
+        </AddButton>
+        <AddButton
+          color={THEME_DANGER}
+          onClick={() => setConfirm({
+            title: `Delete key for ${tap.name}?`, body: '', confirmLabel: 'Delete',
+            action: () => run(async () => {
+              await removeTap(pond.id, tap.name);
+              onClose();
+            }),
+          })}
+        >
+          Delete
+        </AddButton>
+      </div>
+      {confirm && <ConfirmDialog opts={confirm} onClose={() => setConfirm(null)} />}
+    </Modal>
+  );
+}
+
+export function TapList({ pond }: { pond: Pond }) {
+  const taps = useLiveStore((s) => s.taps[pond.id]) ?? NO_TAPS;
+  const [adding, setAdding] = useState(false);
+  const [open, setOpen] = useState<string | null>(null);
+  const openTap = taps.find((t) => t.name === open);
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <AddButton block color={THEME_BRAND} onClick={() => setAdding(true)}>Taps (Refresh on Request)</AddButton>
+      <div style={{ marginTop: 6 }}>
+        {taps.map((t) => (
+          <div
+            key={t.name}
+            role="button"
+            onClick={() => setOpen(t.name)}
+            style={{ fontSize: 12, color: '#a1a1aa', cursor: 'pointer', marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          >
+            {t.name}
+          </div>
+        ))}
+      </div>
+      {adding && <AddTapModal pond={pond} onClose={() => setAdding(false)} />}
+      {openTap && <TapDetailModal pond={pond} tap={openTap} onClose={() => setOpen(null)} />}
+    </div>
   );
 }

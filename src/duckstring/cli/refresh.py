@@ -1,25 +1,23 @@
-"""`duckstring refresh POND` and `duckstring refresh add|ls|rm POND` — ask for fresh data, now or on a cadence.
+"""`duckstring refresh now|add|ls|rm POND` and `duckstring refresh tap …`: ask for fresh data, now, on a
+cadence, or whenever the Pond is queried.
 
 A Refresh asks for a Pond's data to be at least as fresh as now: every older Pond upstream runs and the result
-flows down. A standing Refresh repeats it::
+flows down. A recurring Refresh repeats it::
 
-    duckstring refresh reports                                    # now
+    duckstring refresh now reports
     duckstring refresh add reports --every 30m                    # 30 min after the last request or refresh
     duckstring refresh add reports --every 1d --start 06:00 --on MON,TUE,WED,THU,FRI
     duckstring refresh add reports --continuous                   # as fresh as the pipeline allows
     duckstring refresh ls reports
     duckstring refresh rm reports "Every 30 min"
-
-The bare form takes a Pond: a Pond named ``add``, ``ls`` or ``rm`` is refreshed with ``refresh -- add``.
+    duckstring refresh tap add reports --name dashboard   # refresh when an app queries it (cli/tap.py)
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-import click
 import typer
-from typer.core import TyperGroup
 
 _SILENT_HELP = "Send the request without opening the live status view."
 _WATCH_HELP = "Keep the status view open after the Pond settles."
@@ -28,25 +26,7 @@ _MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (defa
 _VERSION = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3.")
 
 
-class _RefreshGroup(TyperGroup):
-    """`refresh POND` runs the hidden `now` command; `refresh add|ls|rm ...` are subcommands."""
-
-    def resolve_command(self, ctx: click.Context, args: list[str]):
-        if args and args[0] == "--":
-            args = ["now", *args[1:]]
-        elif args and args[0] not in self.commands and not args[0].startswith("-"):
-            args = ["now", *args]
-        return super().resolve_command(ctx, args)
-
-    def format_usage(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
-        formatter.write_usage(ctx.command_path, "POND [OPTIONS] | COMMAND POND [ARGS]...")
-
-
-app = typer.Typer(
-    cls=_RefreshGroup,
-    help="Ask for a Pond's data to be at least as fresh as now: `refresh POND`. Standing Refreshes repeat it.",
-    no_args_is_help=True,
-)
+app = typer.Typer(help="Request for a Pond's data to be refreshed.", no_args_is_help=True)
 
 
 def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
@@ -58,7 +38,7 @@ def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
 def send_and_watch(cfg: dict, pond: str, major: Optional[int], version: Optional[str], silent: bool, watch: bool,
                    endpoint: str, payload: dict, success_msg: str, one_shot: bool) -> None:
     """POST to a Pond route, then (unless ``silent``) open the live status view on it: a one-shot request
-    closes once the Pond settles, a standing one stays open until Ctrl+C."""
+    closes once the Pond settles, a recurring one stays open until Ctrl+C."""
     from . import _http
 
     url = cfg["url"]
@@ -72,7 +52,7 @@ def send_and_watch(cfg: dict, pond: str, major: Optional[int], version: Optional
               watch=stay, until_idle_pond=None if stay else pond)
 
 
-@app.command("now", hidden=True)
+@app.command("now")
 def now(
     pond: str = typer.Argument(..., help="The Pond to refresh, usually an Outlet."),
     catchment: Optional[str] = _CATCHMENT,
@@ -81,7 +61,7 @@ def now(
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
 ) -> None:
-    """Ask for data at least as fresh as now.
+    """Ask for the Pond's data to be at least as fresh as now.
 
     Every older Pond upstream runs (an optional Source only if it has never run), and the result flows down
     to this Pond.
@@ -92,7 +72,7 @@ def now(
 
 def add_payload(every: Optional[str], continuous: bool, start: Optional[str], on: Optional[str],
                 until: Optional[str], name: Optional[str]) -> dict:
-    """The request body for a standing Refresh, validated on the client."""
+    """The request body for a recurring Refresh, validated on the client."""
     from .window import _parse_days, _parse_dt, _parse_duration
 
     if continuous and every and _parse_duration(every) != 0:
@@ -131,7 +111,7 @@ def add(
     version: Optional[str] = _VERSION,
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
 ) -> None:
-    """Keep the Pond fresh: refresh it every period, on a schedule, or continuously.
+    """Add a recurring Refresh on a schedule or a frequency.
 
     Without --start, a Refresh is due EVERY after the later of the last request and the last refresh of the
     data, so the data can be up to EVERY plus the pipeline's run time old. A Pond has one such Refresh: adding
@@ -152,12 +132,12 @@ def add(
 
 @app.command("ls")
 def ls(
-    pond: str = typer.Argument(..., help="The Pond whose standing Refreshes to list."),
+    pond: str = typer.Argument(..., help="The Pond whose recurring Refreshes to list."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """List the Pond's standing Refreshes and when each next asks."""
+    """List the Pond's recurring Refreshes with their details."""
     from rich.console import Console
     from rich.table import Table
 
@@ -168,7 +148,7 @@ def ls(
     refreshes = _http.get(f"{url}/api/ponds/{pond}/refreshes", auth=cfg,
                           params=_http.pond_params(major, version)).json().get("refreshes", [])
     if not refreshes:
-        typer.echo("No standing Refreshes.")
+        typer.echo("No recurring Refreshes.")
         return
     table = Table(show_header=True, header_style="bold dim", box=None, padding=(0, 1))
     for col in ("Name", "Every", "Start (UTC)", "Days", "Until (UTC)", "Next (UTC)"):
@@ -204,10 +184,19 @@ def rm(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Remove a standing Refresh. Runs in progress finish."""
+    """Remove a recurring Refresh (runs in progress still finish)."""
     from . import _http
 
     url, cfg = _resolve(catchment)
     _http.post(f"{url}/api/ponds/{pond}/refreshes/{name}/remove", auth=cfg,
                params=_http.pond_params(major, version), json={})
     typer.echo(f"Refresh '{name}' removed from '{pond}'.")
+
+
+def _register_taps() -> None:
+    from . import tap
+
+    app.add_typer(tap.app, name="tap")
+
+
+_register_taps()

@@ -19,7 +19,7 @@ user cares about: you refresh `reports`, and Duckstring works out what runs.
 
 - **One trigger, Refresh.** It asks for data at least as fresh as now (today's Pulse). Tap, Wave, Pulse and
   Tide leave every user surface (CLI, HTTP API, web UI, docs, Playground).
-- **A standing Refresh repeats it**, with the same recurrence vocabulary windows use:
+- **A recurring Refresh repeats it**, with the same recurrence vocabulary windows use:
   - `refresh add POND --every D`, **floating**: due `D` after the previous request, so any refresh (a manual one, an
     anchored one) resets its phase, and so does any Run that freshens the Pond (it counts from the later of the
     last request and the freshness, as the Tide does). The bound is a period between requests, so data
@@ -54,7 +54,7 @@ user cares about: you refresh `reports`, and Duckstring works out what runs.
 
 | Need | CLI | Engine |
 |---|---|---|
-| Refresh now, or on request | `duckstring refresh reports` | `pond_add_target(now, from_trigger=True)` |
+| Refresh now, or on request | `duckstring refresh now reports` | `pond_add_target(now, from_trigger=True)` |
 | Refresh periodically | `refresh add reports --every 1d` | floating: today's Tide rule, bound = `every` |
 | Refresh at set times | `refresh add reports --every 1d --start 06:00 [--on MON,...] [--until T]` | anchored: the latest occurrence `c <= now` as a target |
 | As fresh as possible | `refresh add reports --continuous` (= `--every 0s`) | floating with bound 0 |
@@ -97,7 +97,7 @@ Source is fresher" signal, and each case is a demand target that isn't forwarded
 | Missing-asset retry (`block_on_missing_asset`) | a local demand gated by `missing_asset_f`, as the pull was |
 | Tap-on-get | the on-request refresh (below) |
 | Duct pull forwarding (poller to upstream `/tap`) | gone; a Draw only ever carries demand |
-| `restore_demand` | gone; demand is restored by reload's `resend_held_demand`, rule 8 and the standing refreshes |
+| `restore_demand` | gone; demand is restored by reload's `resend_held_demand`, rule 8 and the recurring refreshes |
 
 That removes `has_pull`, `has_received_pull`, `pull_m`, `pull_local`, the Ripples' `has_pull`,
 `pond_receive_pull`, `pond_set_has_pull`, `ripple_set_has_pull`, `tap_pond`, `restore_demand`, the Wave
@@ -142,7 +142,7 @@ at 06:00", "Continuous".
 
 - `POST /api/ponds/{name}/refresh` (demand): with no body, a one-shot refresh (optional `at` for a duct's
   epoch, as `/pulse` takes today). With `{every_seconds, start?, days?, until?, continuous?, name?}`, add a
-  standing refresh (a floating one replaces the existing floating one). `every_seconds = 0` is allowed.
+  recurring refresh (a floating one replaces the existing floating one). `every_seconds = 0` is allowed.
 - `GET /api/ponds/{name}/refreshes` (read) and `DELETE /api/ponds/{name}/refreshes/{refresh}` (demand).
 - `POST /api/ponds/{name}/rebuild` (full) takes over today's `/refresh` (the Rebuild flag), with `clear`.
 - `/api/status`: per-Pond `trigger` becomes `refreshes: [{name, every_ms, start, days, until, next_due}]`;
@@ -213,7 +213,7 @@ data out, Taps let apps draw it):
   the app is in use, and does nothing when it isn't. The query is served immediately from the current
   snapshot, as tap-on-get did; `--wait` blocks until the refresh lands, with a timeout. Bursts of queries
   are paced by the throttle.
-- **Surface**: `duckstring tap add|ls|rm POND` (as `spout`), the query route taking the Tap's key (and later
+- **Surface**: `duckstring refresh tap add|ls|rm POND` (as `spout`), the query route taking the Tap's key (and later
   the Flight SQL and Postgres wire adapters, by credential), a Taps section in the web UI next to Spouts,
   and query counts per Tap in `/metrics`.
 
@@ -300,7 +300,7 @@ The concept and guide pages need rewriting, not search and replace: much of thei
 | `reference/cli/control.md` | `refresh` becomes `rebuild`. |
 | `reference/cli/do.md` | The `refresh` operation becomes `rebuild`. |
 | `reference/http_api.md` (5) | Route table: `/refresh` (new meaning), `/refreshes`, `/rebuild`, the deprecated aliases. |
-| `quickstart.md` (10) | "Run it once with a Pulse" becomes `duckstring refresh reports`; the trigger table becomes the refresh forms. |
+| `quickstart.md` (10) | "Run it once with a Pulse" becomes `duckstring refresh now reports`; the trigger table becomes the refresh forms. |
 | `guides/connecting_catchments.md` (4) | Duct demand, `--refresh-on-get`. |
 | `guides/monitoring_and_failures.md` | Rebuild. |
 | `guides/querying.md` | Tap-on-get becomes Taps (on-request freshness); any Rebuild mention. A Taps guide (or a section here) when Taps ship. |
@@ -381,7 +381,7 @@ Where the build differs from the plan above, or adds to it:
   Source another Refresh paces used to hold its first request until a completion it was needed for, and
   deadlocked when its other Sources were driven by nothing else. The old Wave-based test hid it.
 - **Wave yardsticks** were recorded from the pre-change engine into `tests/test_engine.py` (`WAVE`).
-- **Sleep** removes the standing Refreshes of every Pond it reaches (as it cancelled the Wave or Tide).
+- **Sleep** removes the recurring Refreshes of every Pond it reaches (as it cancelled the Wave or Tide).
 - **The Duck job** carries `rebuild` in place of `refresh`; Ducks and Catchments must match versions anyway.
 - **Cross-check**: a scheduled Refresh on its own matches the playground; one beside another Refresh doesn't,
   because a scheduled request reaching a busy Inlet stamps its occurrence in Python and the start time in the

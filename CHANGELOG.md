@@ -7,7 +7,7 @@ Notable changes per release. Versions before 0.5.0 are recorded in the git histo
 ### One trigger: Refresh
 
 Tap, Wave, Pulse and Tide are replaced by a single trigger, **Refresh**, which asks for a Pond's data to be at
-least as fresh as now. A standing Refresh repeats it:
+least as fresh as now. A recurring Refresh repeats it:
 
 - `duckstring refresh add reports --every 1d`: a day after the later of the last request and the last refresh of
   the data (the old Tide).
@@ -17,9 +17,11 @@ least as fresh as now. A standing Refresh repeats it:
 - `duckstring refresh add reports --continuous` (or `--every 0s`): as fresh as the pipeline allows, paced to its
   slowest step (the old Wave).
 
-`duckstring refresh reports` refreshes once (the old Pulse). A Pond can have any number of scheduled Refreshes and
+`duckstring refresh now reports` refreshes once (the old Pulse). A Pond can have any number of scheduled Refreshes and
 one `--every` or continuous Refresh; `refresh ls` lists them with when each next asks, and `refresh rm` removes
-one. The web UI's trigger buttons became a Refresh section, and its canvas pill shows the Pond's Refreshes.
+one. In the web UI, a Pond's trigger buttons became a Refresh section (Refresh Now, and Recurring Refresh for
+Continuous, Every N and schedules), and its recurring Refreshes and Taps are listed in a strip at the bottom of its
+box on the canvas.
 
 Upgrading:
 
@@ -44,7 +46,7 @@ Upgrading:
 
 ### Taps: freshness that follows usage
 
-A **Tap** is an access point on a Pond for one app: `duckstring tap add reports --name dashboard --fresh-within 5m
+A **Tap** is an access point on a Pond for one app: `duckstring refresh tap add reports --name dashboard --fresh-within 5m
 [--wait 30s] [--tables a,b]`. It has its own key, shown once, which can only query the Tap's tables (its Pond's
 exposed tables, or fewer), over HTTP (`/api/query`, `/api/serve/query`), the Postgres wire or Arrow Flight, and is
 refused everywhere else. A query through it sends the Pond a Refresh when the newest request on the Pond, or the
@@ -52,8 +54,8 @@ data, is at least `--fresh-within` old (the `--every` clock, checked per query; 
 query unless a request is already waiting), so the pipeline keeps up while the app is in use and goes quiet when it
 isn't. `--wait` holds a query until the data is that fresh. Queries with any other key never send demand.
 
-- `tap ls|rm|rotate POND`; the routes `/api/ponds/{name}/taps` (full). The web UI lists and adds Taps under a
-  Pond's Options, and the canvas pill counts them beside the Pond's Refreshes.
+- `refresh tap ls|rm|rotate POND`; the routes `/api/ponds/{name}/taps` (full). The web UI lists a Pond's Taps at the
+  foot of its Refresh section, adds them in a modal, and shows a Tap's details, Rotate and Delete when clicked.
 - `/metrics` gains `duckstring_tap_queries_total` and `duckstring_tap_refreshes_total`; `/api/status` lists each
   Pond's `taps` (never keys).
 - The Python `Catchment` client takes a Tap's key as `api_key`, and then needs no `pond`.

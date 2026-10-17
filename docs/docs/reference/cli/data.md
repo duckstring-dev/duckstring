@@ -16,7 +16,7 @@ Every command takes `-c` / `--catchment`, and those acting on one Pond take `-m`
 duckstring status [POND] [-m N | -v VERSION] [--once]
 ```
 
-Shows every Pond's state (running, queued, idle, failed, blocked or killed), freshness and standing Refreshes, updating every second until `Ctrl+C`.
+Shows every Pond's state (running, queued, idle, failed, blocked or killed), freshness and recurring Refreshes, updating every second until `Ctrl+C`.
 
 | Argument / option | Description |
 |---|---|

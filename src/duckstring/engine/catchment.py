@@ -81,7 +81,7 @@ class EngineState:
     pond_states: dict[PondId, PondState] = field(default_factory=dict)
     ripples: dict[RippleId, Ripple] = field(default_factory=dict)
     ripple_states: dict[RippleId, RippleState] = field(default_factory=dict)
-    # Standing Refreshes per Pond: any number scheduled, at most one floating (the Driver enforces it).
+    # Recurring Refreshes per Pond: any number scheduled, at most one floating (the Driver enforces it).
     refreshes: dict[PondId, list[Refresh]] = field(default_factory=dict)
     # Pond Run commands accumulated by start_pond_run; the Catchment drains these to dispatch to
     # Ducks. Ignored by in-process simulations/tests.
@@ -968,7 +968,7 @@ def sentinel(now: datetime, state: EngineState) -> tuple[EngineState, list[Rippl
 
 
 def tick(now: datetime, state: EngineState) -> EngineState:
-    """Clock-driven processes only: the standing Refreshes and the Spouts' standing Wake. Window
+    """Clock-driven processes only: the recurring Refreshes and the Spouts' standing Wake. Window
     availability is read live in :func:`can_start_pond`. The caller runs :func:`sentinel` afterwards."""
     s = state.clone()
     # Standing Wake (Spouts): whenever idle and armed, demand the Source's freshness locally (never sent on).
@@ -981,7 +981,7 @@ def tick(now: datetime, state: EngineState) -> EngineState:
             f, _ = pond_source_f(s, pid, now)
             _local_demand(s, pid, f)
 
-    # Standing Refreshes. A floating one sends a request at ``now`` once ``every`` has passed since its clock
+    # Recurring Refreshes. A floating one sends a request at ``now`` once ``every`` has passed since its clock
     # reference (the later of the newest pending request and the freshness; every 0 is continuous). Requests
     # pipeline freely and the throttle paces them to the bottleneck. A scheduled one requests its latest
     # occurrence, which the demand rules make idempotent (already requested, satisfied or in flight), so it
@@ -1009,7 +1009,7 @@ def _clock_ref(ps: PondState) -> datetime:
 
 
 def refresh_next_due(state: EngineState, r: Refresh, now: datetime) -> datetime | None:
-    """When a standing Refresh next sends a request: a scheduled one's next occurrence, a floating one's
+    """When a recurring Refresh next sends a request: a scheduled one's next occurrence, a floating one's
     deadline (``every`` after its clock reference, at the earliest ``now``). None for a continuous one
     (every 0: it asks whenever the Pond can take more) and for a schedule that has ended."""
     if r.scheduled:
@@ -1024,7 +1024,7 @@ def refresh_next_due(state: EngineState, r: Refresh, now: datetime) -> datetime 
 
 def next_wake(now: datetime, state: EngineState) -> datetime | None:
     """The earliest future instant the engine needs a :func:`tick`: the next window boundary of a
-    windowed Inlet or Spout, or a standing Refresh's next request. ``None`` if nothing is time-driven."""
+    windowed Inlet or Spout, or a recurring Refresh's next request. ``None`` if nothing is time-driven."""
     candidates: list[datetime] = []
     for pond in state.ponds.values():
         # Windowed Inlets (no sources) and windowed Spouts both advance on window boundaries.

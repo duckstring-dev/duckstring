@@ -142,7 +142,7 @@ function SwitchModeChoice({ mode, setMode }: { mode: SwitchMode; setMode: (m: Sw
     }}>{label}</button>
   );
   const blurb = mode === 'empty'
-    ? <>Empties the data plane — every Pond is left with no data and idle (no auto-rebuild). Re-trigger to rebuild, or hand-copy data across first.</>
+    ? <>Empties the data plane — every Pond is left with no data and idle (no auto-rebuild). Refresh to rebuild, or hand-copy data across first.</>
     : mode === 'adopt'
       ? <>Picks up data already in the target (you copied it in, or a plane you&apos;re returning to) and resumes with no rebuild. Use only if the target already holds this Catchment&apos;s data.</>
       : <>Copies the current data to the target (server-side where possible), then resumes with no rebuild. May take a while for large data.</>;

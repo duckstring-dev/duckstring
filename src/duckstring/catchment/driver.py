@@ -3,12 +3,12 @@
 Holds the in-memory :class:`~duckstring.engine.EngineState` (full Ponds and Ripples, demand and
 Refreshes), loaded from SQLite at startup and write-through-persisted per event. It is event-driven:
 
-* Refreshes (``refresh_now``, standing ones via ``add_refresh``) and control calls mutate the engine, then
+* Refreshes (``refresh_now``, recurring ones via ``add_refresh``) and control calls mutate the engine, then
   ``_process`` runs ``sentinel`` and dispatches each emitted ``BeginRun`` to the target Pond's Duck
   (spawning one if needed) as a queued job.
 * Duck events (``on_event``) feed ``complete_ripple``, which advances freshness and starts what that
   enables → more ``BeginRun``s; run history is written to ``pond_run`` / ``ripple_run``.
-* ``scheduler_tick`` (called on a timer) runs ``tick`` for the standing Refreshes and window clocks.
+* ``scheduler_tick`` (called on a timer) runs ``tick`` for the recurring Refreshes and window clocks.
 
 Ponds are keyed by ``"{name}@{major}"`` in the engine — each deployed major line is an independent
 Pond instance — and Ripples by ``"{pond_key}.{ripple}"``. A ``threading.RLock`` guards all state;
@@ -140,7 +140,7 @@ def _row_to_refresh(key: str, row) -> Refresh:
 
 
 def _refresh_dict(r: Refresh, next_due: datetime | None) -> dict:
-    """A standing Refresh for the API: its definition and when it next asks (None when continuous)."""
+    """A recurring Refresh for the API: its definition and when it next asks (None when continuous)."""
     return {
         "name": r.name,
         "every_ms": int(r.every.total_seconds() * 1000),
@@ -780,7 +780,7 @@ class Driver(TapsMixin):
 
     def add_refresh(self, pond: str, every: timedelta, *, start: datetime | None = None,
                     days: str | None = None, until: datetime | None = None, name: str | None = None) -> dict:
-        """Add a standing Refresh to a Pond and return it. A floating one (no ``start``) replaces the Pond's
+        """Add a recurring Refresh to a Pond and return it. A floating one (no ``start``) replaces the Pond's
         floating one, if any; a scheduled one is added beside the others (one of the same name is replaced).
         ``every`` of zero is continuous. Raises ValueError on a schedule without a period, a negative
         period or bad days."""
@@ -814,14 +814,14 @@ class Driver(TapsMixin):
             return next(r for r in self.list_refreshes(pond) if r["name"] == final)
 
     def list_refreshes(self, pond: str) -> list[dict]:
-        """A Pond's standing Refreshes (scheduled first, then the floating one), with when each next asks."""
+        """A Pond's recurring Refreshes (scheduled first, then the floating one), with when each next asks."""
         with self.lock:
             now = _now()
             refs = sorted(self.state.refreshes.get(pond, []), key=lambda r: (not r.scheduled, r.name))
             return [_refresh_dict(r, refresh_next_due(self.state, r, now)) for r in refs]
 
     def remove_refresh(self, pond: str, name: str | None = None) -> bool:
-        """Remove a standing Refresh by name, or (``name`` None) the floating one. In-flight work drains;
+        """Remove a recurring Refresh by name, or (``name`` None) the floating one. In-flight work drains;
         demand already sent stays. Returns whether one was removed."""
         with self.lock:
             refs = self.state.refreshes.get(pond, [])
@@ -835,7 +835,7 @@ class Driver(TapsMixin):
             return bool(gone)
 
     def _load_refreshes(self, pond: str) -> None:
-        """Re-read one Pond's standing Refreshes from the DB into the engine."""
+        """Re-read one Pond's recurring Refreshes from the DB into the engine."""
         rows = self.db.execute(
             "SELECT name, every_ms, start_anchor, valid_days, until_time FROM pond_refresh WHERE pond_id = ? "
             "ORDER BY name", (self.meta[pond]["pond_id"],),
@@ -907,7 +907,7 @@ class Driver(TapsMixin):
     def reset_pond(self, pond: str, clear_history: bool = False) -> None:
         """Reset one Pond to a fresh-deploy state — scrub its registry, published data, and ledger, and
         rewind its freshness/fault to ``NEVER`` — while **keeping** its deployed artifact, operational
-        config, and **demand**. Lazy: it forces nothing; preserved demand + standing Refreshes re-drive the
+        config, and **demand**. Lazy: it forces nothing; preserved demand + recurring Refreshes re-drive the
         rebuild when next eligible (the data dir is empty, so no downstream reads a gap — nobody reads a
         ``NEVER`` Source). Requires the Pond idle. See plans/reset.md."""
         import shutil
@@ -969,7 +969,7 @@ class Driver(TapsMixin):
         """Reset the **whole Catchment** to a fresh-deploy state — the sanctioned replacement for
         ``rm -rf .duckstring``. Stop-the-world: terminate every Duck, scrub every line's registry, ledger,
         and published data, rewind every Pond's freshness/fault to ``NEVER`` — keeping the deployed
-        artifacts, operational config, secrets, and keys. Rebuilds lazily (standing Refreshes + demand from
+        artifacts, operational config, secrets, and keys. Rebuilds lazily (recurring Refreshes + demand from
         the Inlets down). See plans/reset.md. Returns ``{"ponds": n}``."""
         import shutil
         from pathlib import Path
@@ -1025,7 +1025,7 @@ class Driver(TapsMixin):
         readable backup / hand-migration source. Two modes (plans/data-root-switch.md):
 
         - ``"empty"`` (default): leave every Pond **as if its data were deleted** and **dormant** — rewind
-          all freshness to ``NEVER`` (cold rebuild pending) and clear ALL demand (and the standing
+          all freshness to ``NEVER`` (cold rebuild pending) and clear ALL demand (and the recurring
           Refreshes). Nothing auto-runs; the operator drives the rebuild (or hand-copies data in first).
         - ``"adopt"``: **pick up whatever data already sits in the target plane** (a bucket you copied into,
           or one you're returning to) and resume with **no rebuild** — read each Pond's freshness from its
@@ -1069,7 +1069,7 @@ class Driver(TapsMixin):
             else:
                 self.launcher.data_root = new_root
             if mode == "empty":
-                # "Delete the data": rewind freshness + flag a cold rebuild, and clear demand and the standing
+                # "Delete the data": rewind freshness + flag a cold rebuild, and clear demand and the recurring
                 # Refreshes so the pipeline stays idle.
                 self.db.execute(
                     "UPDATE pond_state SET start_f=?, end_f=?, changed_f=?, d_ms=0, is_failed=0, is_blocked=0, "
@@ -1857,7 +1857,7 @@ class Driver(TapsMixin):
     def sleep(self, pond: str, upstream: bool = False) -> None:
         with self.lock:
             self.state = sleep_pond(self.state, pond, _now(), upstream=upstream)
-            # Remove the standing Refreshes on every Pond the sleep reached, so they can't ask again.
+            # Remove the recurring Refreshes on every Pond the sleep reached, so they can't ask again.
             for name in self._stop_set(pond, upstream):
                 if self.state.refreshes.get(name):
                     self.db.execute("DELETE FROM pond_refresh WHERE pond_id = ?", (self.meta[name]["pond_id"],))
@@ -3031,7 +3031,7 @@ class Driver(TapsMixin):
             if ps.start_f > ps.end_f or ps.demand or key in self.jobs and self.jobs[key]:
                 continue  # running or demanded — never evict live work
             if self.launcher.is_running(key):
-                continue  # warm Duck (a standing Refresh keeps it) — reaping is the reaper's job, not ours
+                continue  # warm Duck (a recurring Refresh keeps it) — reaping is the reaper's job, not ours
             meta = self.meta[key]
             reg = pond_registry_path(root, meta["name"], meta["major"])
             if not reg.exists():
@@ -3230,7 +3230,7 @@ class Driver(TapsMixin):
         self.db.commit()
 
     def _reap_idle(self) -> None:
-        # Keep all Ducks warm while any standing Refresh is active (it will run them again shortly) —
+        # Keep all Ducks warm while any recurring Refresh is active (it will run them again shortly) —
         # reaping mid-cycle would thrash on respawns. Only reap once fully quiescent.
         if any(self.state.refreshes.values()):
             self._idle_since.clear()

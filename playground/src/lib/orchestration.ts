@@ -22,7 +22,7 @@ export const NEVER = -Infinity;
 // Ponds and Ripples are first-class state machines. Demand is a set of requested freshnesses (targets): a
 // Refresh asks a Pond for data at least as fresh as a moment, and the request travels to its Sources. Demand
 // changes cascade SYNCHRONOUSLY to a fixpoint at the moment they happen; `tick` only advances time: it
-// completes elapsed runs, sends the standing Refreshes that are due, then starts everything runnable. The
+// completes elapsed runs, sends the recurring Refreshes that are due, then starts everything runnable. The
 // Python engine (engine/catchment.py) is a port of this one.
 //
 // Freshness `F` is a wall-clock timestamp (ms). An Inlet mints `now`, or — with a window —
@@ -33,7 +33,7 @@ export interface OrchestrState {
   pondStates: Record<PondId, PondRunState>;
   ripples: Record<RippleId, Ripple>;
   rippleStates: Record<RippleId, RippleRunState>;
-  refreshes: Record<PondId, Refresh[]>; // standing Refreshes per Pond
+  refreshes: Record<PondId, Refresh[]>; // recurring Refreshes per Pond
 }
 
 const MAX_HISTORY = 500;
@@ -208,22 +208,32 @@ function rippleSourceF(s: OrchestrState, rid: RippleId): number {
 // upstream (see `pushSources`), unless the throttle holds it here. The set keeps every outstanding request, not
 // just the latest. `fromTrigger` marks a Refresh's own request, which makes this a trigger Pond. Returns whether
 // the request was taken.
+// Whether the last request `pondAddTarget` took was held at that Pond (read by `triggerDemand`).
+let lastHeld = false;
+
 function pondAddTarget(s: OrchestrState, pid: PondId, T: number, fromTrigger = false): boolean {
   const ps = s.pondStates[pid];
+  lastHeld = false;
   if (ps.isBlocked) return false; // no new demand enters a blocked Pond (and none propagates upstream from it)
   if (T <= ps.endF || ps.targets.includes(T)) return false; // already satisfied, or already requested
   if (T <= ps.startF) return false; // a Run already in flight at or past T will satisfy it
   ps.targets.push(T);
-  emit('pond-demand', `${pname(s, pid)} asked for data ${ageStr(T, logNow)} old`);
+  // A Refresh's own request is logged only once it goes upstream: one its Pond holds would log every tick under a
+  // continuous Refresh, while the throttle paces it.
+  const logged = () => emit('pond-demand', `${pname(s, pid)} asked for data ${ageStr(T, logNow)} old`);
+  if (!fromTrigger) logged();
   if (fromTrigger) throttleOf(s, pid).trigger = true;
   if (!Number.isFinite(T)) return true; // Force's NEVER is not demand
   countThrottle(s, pid);
   if (holdsDemand(s, pid)) {
     throttleOf(s, pid).held += 1;
-    emit('hold', `${pname(s, pid)} holds the demand (${throttleOf(s, pid).held} held)`);
+    lastHeld = true;
+    if (!fromTrigger) emit('hold', `${pname(s, pid)} holds the demand`);
     return true;
   }
+  if (fromTrigger) logged();
   forwardDemand(s, pid, T);
+  lastHeld = false; // the requests forwardDemand made upstream set it for their own Ponds
   return true;
 }
 
@@ -370,8 +380,9 @@ export function isThrottled(s: OrchestrState, pid: PondId): boolean {
 }
 
 // A Refresh's request at its Pond: marks it a trigger Pond (if taken) until its demand drains.
+// A Refresh's request at its own Pond. True when it was taken and sent on, not held there.
 function triggerDemand(s: OrchestrState, pid: PondId, T: number): boolean {
-  return pondAddTarget(s, pid, T, true);
+  return pondAddTarget(s, pid, T, true) && !lastHeld;
 }
 
 // A floating Refresh's reference: the later of its newest pending request and the Pond's freshness. A request is
@@ -401,7 +412,7 @@ function nextOccurrence(r: Refresh, now: number): number | null {
   return null;
 }
 
-// When a standing Refresh next sends a request: null for a continuous one (every 0 s) or one with no further
+// When a recurring Refresh next sends a request: null for a continuous one (every 0 s) or one with no further
 // occurrence. A floating Refresh is due `everyMs` after its clock reference.
 export function refreshNextDue(s: OrchestrState, pid: PondId, r: Refresh, now: number): number | null {
   if (r.startAnchor != null) return nextOccurrence(r, now);
@@ -491,7 +502,7 @@ function settleThrottle(s: OrchestrState, now: number, completed: Set<PondId>): 
         if (now < th.launchAt) continue;
       }
       th.launchAt = null;
-      emit('release', `${pname(s, pid)} sends one request upstream (${th.held} held)`);
+      emit('release', `${pname(s, pid)} sends one request upstream`);
       completed.delete(pid);
       forwardDemand(s, pid, now);
       changed = true;
@@ -753,7 +764,7 @@ export function tick(now: number, stateIn: OrchestrState): OrchestrState {
     }
   }
 
-  // 2. Standing Refreshes. A floating one (no start) sends a request at `now` once `everyMs` has passed since its
+  // 2. Recurring Refreshes. A floating one (no start) sends a request at `now` once `everyMs` has passed since its
   // clock reference (the later of its newest pending request and the Pond's freshness; every 0 s is continuous).
   // Requests pipeline freely: a period below the lead time means several are outstanding at once, each served in
   // turn, and the throttle paces them to the bottleneck. An anchored one (a start time) requests its latest grid

@@ -194,20 +194,6 @@ class TapsMixin:
             exposed = self.serviceable(scope.pond)
             return exposed if tap.tables is None else exposed & set(tap.tables)
 
-    def tap_exposes_anything(self, scope: TapScope) -> bool:
-        """Whether a Tap can ever read a table: one it covers is declared in ``[serve] tables`` or exposed by an
-        override, and not hidden. Unlike :meth:`tap_tables` this holds before the Pond has first run (when its
-        output tables aren't known yet), so ``add_tap`` can warn about a Tap that would read nothing."""
-        with self.lock:
-            tap = self._tap(scope)
-            pond_id, pv_id = self._pond_ids(scope.pond)[:2]
-            declared = {r[0] for r in self.db.execute(
-                "SELECT table_name FROM pond_version_serve WHERE pond_version_id = ?", (pv_id,))}
-            for table, exposed in self.db.execute(
-                    "SELECT table_name, exposed FROM pond_serve_override WHERE pond_id = ?", (pond_id,)):
-                (declared.add if exposed else declared.discard)(table)
-            return bool(declared if tap.tables is None else declared & set(tap.tables))
-
     # ─── The policy, per query ────────────────────────────────────────────────
 
     def tap_query(self, scope: TapScope) -> datetime | None:

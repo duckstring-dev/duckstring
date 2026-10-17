@@ -91,22 +91,34 @@ export function OptionsToggle({ open, onClick, label = 'Options' }: { open: bool
   );
 }
 
-export function AddButton({ onClick, children, color = THEME_BRAND }: { onClick: () => void; children: React.ReactNode; color?: string }) {
+export function AddButton({ onClick, children, color = THEME_BRAND, block = false, active = false, disabled = false }: {
+  onClick: () => void;
+  children: React.ReactNode;
+  color?: string;
+  block?: boolean; // full width
+  active?: boolean; // filled, for a toggle that's on
+  disabled?: boolean;
+}) {
   return (
     <button
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
       style={{
-        background: 'transparent',
+        background: active ? `${color}26` : 'transparent',
         border: `1px solid ${color}`,
         color,
         borderRadius: 5,
         padding: '4px 12px',
         fontSize: 12,
-        cursor: 'pointer',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.4 : 1,
         fontWeight: 600,
         letterSpacing: '0.04em',
-        whiteSpace: 'nowrap',
+        whiteSpace: block ? 'normal' : 'nowrap',
+        minWidth: 0,
         flexShrink: 0,
+        width: block ? '100%' : undefined,
+        boxSizing: 'border-box',
       }}
     >
       {children}

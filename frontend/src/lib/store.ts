@@ -131,7 +131,7 @@ interface StatusSlice {
   pondViews: Record<PondId, NodeView>;
   rippleViews: Record<RippleId, NodeView>;
   pondInfo: Record<PondId, PondInfo>;
-  refreshes: Record<PondId, RefreshView[]>; // standing Refreshes per Pond (only Ponds that have any)
+  refreshes: Record<PondId, RefreshView[]>; // recurring Refreshes per Pond (only Ponds that have any)
   taps: Record<PondId, TapView[]>; // Taps per Pond (only Ponds that have any)
 }
 
@@ -705,6 +705,11 @@ export function formatDuration(ms: number): string {
 // the generic accent.
 export const THEME_BRAND = '#06c4e6'; // a pond on a bright day — full-saturation water cyan
 export const THEME_RUNNING = THEME_BRAND; // active execution + brand accent
+// The lines of a Pond's demand strip: its recurring Refreshes by name, then its Taps.
+export function demandLines(refreshes: RefreshView[] | undefined, taps: TapView[] | undefined): string[] {
+  return [...(refreshes ?? []).map((r) => r.name), ...(taps ?? []).map((t) => `Tap: ${t.name}`)];
+}
+
 export const THEME_DEMAND = '#a3e635'; // demand: a Refresh, a requested freshness, queued — green-yellow
 export const THEME_AMBER = '#ee9333'; // run intervals, retries, warnings — warm amber-orange
 export const THEME_SUCCESS = '#22c55e'; // success · connected · start · clear (green)

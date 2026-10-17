@@ -1,6 +1,6 @@
 """Refresh, control and status endpoints, backed by the freshness :class:`~duckstring.catchment.driver.Driver`.
 
-A Refresh asks for a Pond's data at least as fresh as now; a standing Refresh repeats it (every N, on a
+A Refresh asks for a Pond's data at least as fresh as now; a recurring Refresh repeats it (every N, on a
 schedule, or continuously). Status reports freshness from the engine, not generations.
 
 Every pond-targeting route takes optional ``major`` / ``version`` query params: ``major`` picks the
@@ -153,7 +153,7 @@ def add_refresh(
     name: str, body: _RefreshBody, request: Request,
     major: int | None = None, version: str | None = None,
 ):
-    """Add a standing Refresh. Without ``start`` it is floating (``every_seconds`` after the later of the
+    """Add a recurring Refresh. Without ``start`` it is floating (``every_seconds`` after the later of the
     newest request and the freshness; 0 or ``continuous`` is continuous) and replaces the Pond's floating
     one. With ``start`` it is scheduled and added beside the others. Returns the Refresh."""
     key = _resolve(request, name, major, version)
@@ -177,7 +177,7 @@ def remove_refresh(
     name: str, refresh_name: str, request: Request,
     major: int | None = None, version: str | None = None,
 ):
-    """Remove a standing Refresh (in-flight work drains)."""
+    """Remove a recurring Refresh (in-flight work drains)."""
     if not _driver(request).remove_refresh(_resolve(request, name, major, version), refresh_name):
         raise HTTPException(status_code=404, detail=f"No Refresh '{refresh_name}' on '{name}'")
     return {"ok": True}
@@ -331,7 +331,7 @@ def sleep(
     name: str, request: Request, body: _SleepBody = _SleepBody(),
     major: int | None = None, version: str | None = None,
 ):
-    """Sleep a Pond — clear its demand and remove its standing Refreshes; started runs complete.
+    """Sleep a Pond — clear its demand and remove its recurring Refreshes; started runs complete.
     ``upstream`` also sleeps every ancestor."""
     _driver(request).sleep(_resolve(request, name, major, version), upstream=body.upstream)
     return {"ok": True}

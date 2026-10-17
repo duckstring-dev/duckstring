@@ -19,13 +19,12 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { usePlaygroundStore, consumeEdgeColor, formatAge, pushTargetF, THEME_DEMAND } from '@/lib/store';
+import { usePlaygroundStore, consumeEdgeColor, formatAge, pushTargetF } from '@/lib/store';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
 import { useTourStore } from '@/lib/tour';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
-import { TriggerNode } from './TriggerNode';
 import { SimControls } from './SimControls';
 
 // ─── Custom edges (colour reflects what the sink can consume) ────────────────
@@ -50,31 +49,16 @@ function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   return <BaseEdge id={id} path={edgePath} interactionWidth={0} style={{ stroke: color, strokeWidth: 2 }} />;
 }
 
-function TriggerEdge({ id, sourceX, sourceY, targetX, targetY }: EdgeProps) {
-  const color = THEME_DEMAND;
-  const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
-  return (
-    <BaseEdge
-      id={id}
-      path={edgePath}
-      interactionWidth={0}
-      style={{ stroke: color, strokeWidth: 2, strokeDasharray: '6 3' }}
-    />
-  );
-}
-
 // ─── Node & edge type maps ───────────────────────────────────────────────────
 
 const nodeTypes: NodeTypes = {
   pond: PondNode as NodeTypes[string],
   ripple: RippleNode as NodeTypes[string],
-  trigger: TriggerNode as NodeTypes[string],
 };
 
 const edgeTypes: EdgeTypes = {
   rippleEdge: RippleEdge as EdgeTypes[string],
   pondEdge: PondEdge as EdgeTypes[string],
-  triggerEdge: TriggerEdge as EdgeTypes[string],
 };
 
 // ─── Tour framing ────────────────────────────────────────────────────────────
@@ -154,7 +138,7 @@ export function DagCanvas() {
         ponds: Object.values(ponds).map((p) => ({ id: p.id, sources: p.sources, name: p.name, major: p.major })),
         // name affects ripple width, so reflow on rename too
         ripples: Object.values(ripples).map((r) => ({ id: r.id, parents: r.parents, pondId: r.pondId, name: r.name })),
-        refreshes: Object.keys(refreshes),
+        refreshes: Object.fromEntries(Object.entries(refreshes).map(([k, v]) => [k, v.map((r) => r.everyMs)])),
       }),
     [ponds, ripples, refreshes]
   );

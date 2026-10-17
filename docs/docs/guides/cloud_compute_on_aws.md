@@ -111,7 +111,7 @@ Then move a Pond onto it, using one of the built-in sizes (`S`, `M`, `L`, `XL`):
 
 ```bash
 duckstring duck set sales --duck M
-duckstring refresh sales
+duckstring refresh now sales
 ```
 
 Or declare it in the Pond's `pond.toml`, so it travels with the code:

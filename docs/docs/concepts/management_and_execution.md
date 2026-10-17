@@ -49,7 +49,7 @@ Beyond Refreshes, a few commands act directly on a Pond's execution. They're ava
 | force | rerun now at the current freshness, even with no upstream change |
 | rebuild | rebuild the Pond's tables from scratch on its next run |
 | repair | rebuild a connected set of Ponds now, in order |
-| sleep | clear the Pond's demand and standing Refreshes, letting runs in progress finish |
+| sleep | clear the Pond's demand and recurring Refreshes, letting runs in progress finish |
 | kill | stop the Pond's Duck immediately and hold the Pond until it's woken, forced or cleared |
 | clear | reset a failed or killed Pond without running it |
 

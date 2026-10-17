@@ -811,5 +811,5 @@ def _missing_table_hint(con, pond: str, table: str) -> str:
         tables = []
     if not tables:
         return (f"'{pond}' hasn't published any tables yet. Run it first, for example with "
-                f"`duckstring refresh {pond}`.")
+                f"`duckstring refresh now {pond}`.")
     return f"'{pond}' has no table '{table}'. Its tables: {', '.join(tables)}."

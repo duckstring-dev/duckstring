@@ -9,7 +9,7 @@ This guide covers watching a Catchment, what happens when something fails, how t
 
 ## Watching
 
-`duckstring status` shows every Pond's state, freshness and standing Refreshes, updating every second:
+`duckstring status` shows every Pond's state, freshness and recurring Refreshes, updating every second:
 
 ```bash
 duckstring status             # everything

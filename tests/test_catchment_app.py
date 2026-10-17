@@ -359,7 +359,7 @@ def test_query_before_a_pond_has_run_says_to_run_it(catchment_client):
     r = catchment_client.post("/api/query", json={"pond": "fresh", "ripple": "summary"})
     assert r.status_code == 400
     assert "hasn't published any tables yet" in r.json()["detail"]
-    assert "duckstring refresh fresh" in r.json()["detail"]
+    assert "duckstring refresh now fresh" in r.json()["detail"]
 
 
 def test_query_custom_sql(catchment_client):

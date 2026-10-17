@@ -47,8 +47,17 @@ const POND_PAD_BOTTOM = 24;
 const MIN_POND_W = MIN_RIPPLE_W + POND_PAD_SIDE * 2;
 const MIN_POND_H = 120;
 
-const TRIGGER_W = 176;
-const TRIGGER_H = 36;
+// The demand strip: a Pond's recurring Refreshes and Taps, one per line, joined to the bottom of its box so
+// the layout makes room for it (the box grows taller, and wider for a long name).
+export const STRIP_LINE_H = 18;
+export const STRIP_PAD = 6; // above and below the lines
+export function demandStripHeight(lines: number): number {
+  return lines > 0 ? lines * STRIP_LINE_H + STRIP_PAD * 2 : 0;
+}
+function demandStripWidth(lines: string[]): number {
+  const CH11 = 6.7; // monospace char px at fontSize 11
+  return Math.ceil(Math.max(0, ...lines.map((l) => l.length * CH11)) + 24 /* padding */);
+}
 
 interface LayoutResult {
   nodes: Node[];
@@ -136,7 +145,7 @@ function buildRippleLayout(
 export function computeLayout(
   ponds: Record<PondId, Pond>,
   ripples: Record<RippleId, Ripple>,
-  refreshes: Record<PondId, unknown>, // Ponds with standing Refreshes or Taps get a pill
+  demand: Record<PondId, string[]>, // each Pond's recurring Refreshes and Taps, shown in its demand strip
   floors?: ContentFloors,
   direction: 'LR' | 'TB' = 'LR',
   lineage: ViewPayload | null = null,
@@ -164,6 +173,11 @@ export function computeLayout(
     const layout = buildRippleLayout(pond.id, ripples, floors?.ripples, direction, collapsed.has(pond.id));
     // Floor the pond width to fit its title line and its (live) stats line.
     layout.width = Math.max(layout.width, pondNameWidth(pond.name), floors?.ponds?.[pond.id] ?? 0);
+    const lines = demand[pond.id] ?? [];
+    if (lines.length) {
+      layout.width = Math.max(layout.width, demandStripWidth(lines));
+      layout.height += demandStripHeight(lines.length);
+    }
     pondLayouts[pond.id] = layout;
   }
 
@@ -214,7 +228,7 @@ export function computeLayout(
       id: pond.id,
       type: 'pond',
       position: { x: pondX, y: pondY },
-      data: { pondId: pond.id, vertical },
+      data: { pondId: pond.id, vertical, demandLines: demand[pond.id] ?? [] },
       style: { width, height },
     });
 
@@ -249,29 +263,6 @@ export function computeLayout(
           });
         }
       }
-    }
-
-    // Demand pill (Refreshes and Taps) — to the right of the pond (LR), or below it (TB, where the right edge is the
-    // narrow phone's margin and an outlet's bottom is free).
-    if (refreshes[pond.id]) {
-      const triggerId = `trigger-${pond.id}`;
-      nodes.push({
-        id: triggerId,
-        type: 'trigger',
-        position: vertical
-          ? { x: pondX + width / 2 - TRIGGER_W / 2, y: pondY + height + 40 }
-          : { x: pondX + width + 40, y: pondY + height / 2 - TRIGGER_H / 2 },
-        data: { pondId: pond.id, vertical },
-        style: { width: TRIGGER_W, height: TRIGGER_H },
-      });
-      edges.push({
-        id: `te-${pond.id}`,
-        source: triggerId,
-        target: pond.id,
-        targetHandle: 'trigger-in',
-        type: 'triggerEdge',
-        data: { pondId: pond.id },
-      });
     }
   }
 

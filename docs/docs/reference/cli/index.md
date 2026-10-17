@@ -18,14 +18,13 @@ duckstring --install-completion   # enable shell completion
 | [`catchment`](catchment.md) | Create, register, start and manage Catchments; ducts between them. |
 | [`pond`](pond.md) | Scaffold, test locally, deploy and remove Ponds. |
 | [`puddle`](puddle.md) | Inspect local Puddles and run output. |
-| [`refresh`](refresh.md) | Refresh a Pond now, every N, at set times, or continuously. |
+| [`refresh`](refresh.md) | Refresh a Pond now, every N, at set times, continuously, or when it's queried (Taps). |
 | [`window`](window.md) | When an Inlet can produce new data. |
 | [`control`](control.md) | Wake, force, rebuild, repair, sleep, kill, clear, reset, and retry budgets. |
 | [`do`](do.md) | Apply operations to many Ponds at once. |
 | [Data and status](data.md) | `status`, `query`, `get`, `objects`, `get-object`, `delete-table`, `delete-object`, `lineage`, `trace`. |
 | [`duck`](duck.md) | Per-Pond compute and Duck pools. |
 | [`spout`](spout.md) | Deliver tables to external systems. |
-| [`tap`](tap.md) | Give apps an access point that keeps a Pond fresh while it's used. |
 | [`serve`](serve.md) | The catalog: query, expose and promote. |
 | [`secret`](secret.md) | The Catchment's write-only secret store. |
 | [`alert`](alert.md) | Failure and freshness notifications. |
@@ -47,7 +46,7 @@ Commands that act on one Pond take:
 
 ## Live status
 
-`refresh`, `control wake` and `control force` open the live status view after sending the request, and close it once the Pond settles (idle, failed, killed or blocked). `refresh add` opens it and leaves it open until you press `Ctrl+C`; the standing Refresh keeps going after the view closes.
+`refresh now`, `control wake` and `control force` open the live status view after sending the request, and close it once the Pond settles (idle, failed, killed or blocked). `refresh add` opens it and leaves it open until you press `Ctrl+C`; the recurring Refresh keeps going after the view closes.
 
 | Option | Description |
 |---|---|

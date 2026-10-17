@@ -36,6 +36,7 @@ export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; 
   const [name, setName] = useState('');
   const [nameDirty, setNameDirty] = useState(false);
 
+  const [adding, setAdding] = useState(false);
   const [showOptions, setShowOptions] = useState(false);
   const [startStr, setStartStr] = useState('00:00');
   const [durInterval, setDurInterval] = useState(''); // empty ⇒ = every (back-to-back)
@@ -72,6 +73,7 @@ export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; 
     });
     setNameDirty(false);
     setName('');
+    setAdding(false);
   };
 
   return (
@@ -98,7 +100,13 @@ export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; 
         <div style={{ fontSize: 12, color: '#52525b' }}>No windows — this source is live.</div>
       )}
 
-      {!readOnly && (<>
+      {!readOnly && (
+        <div style={{ marginTop: 8 }}>
+          <AddButton block active={adding} onClick={() => setAdding((v) => !v)}>Add Window</AddButton>
+        </div>
+      )}
+
+      {!readOnly && adding && (<>
       {/* Required: every + name */}
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
         <span style={{ fontSize: 11, color: '#71717a', width: 40 }}>Every</span>
@@ -150,7 +158,7 @@ export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; 
       )}
 
       <div style={{ marginTop: 10 }}>
-        <AddButton onClick={add}>+ Add Window</AddButton>
+        <AddButton onClick={add}>Add</AddButton>
       </div>
       </>)}
     </>

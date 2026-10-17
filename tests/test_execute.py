@@ -30,7 +30,7 @@ def _deploy_outlet(url: str) -> None:
 
 def test_refresh_now_succeeds(runner, live_catchment):
     _deploy_outlet(live_catchment)
-    result = runner.invoke(app, ["refresh", "outlet", "--silent"])
+    result = runner.invoke(app, ["refresh", "now", "outlet", "--silent"])
     assert result.exit_code == 0, result.output
     assert "Refresh sent" in result.output
 
@@ -38,13 +38,13 @@ def test_refresh_now_succeeds(runner, live_catchment):
 def test_refresh_now_explicit_catchment_and_major(runner, live_catchment):
     _deploy_outlet(live_catchment)
     for extra in (["-c", "dev"], ["--major", "1"]):
-        result = runner.invoke(app, ["refresh", "outlet", *extra, "--silent"])
+        result = runner.invoke(app, ["refresh", "now", "outlet", *extra, "--silent"])
         assert result.exit_code == 0, result.output
 
 
 def test_refresh_unknown_catchment_or_no_default_exits(runner):
-    assert runner.invoke(app, ["refresh", "outlet", "-c", "nonexistent"]).exit_code != 0
-    assert runner.invoke(app, ["refresh", "outlet"]).exit_code != 0
+    assert runner.invoke(app, ["refresh", "now", "outlet", "-c", "nonexistent"]).exit_code != 0
+    assert runner.invoke(app, ["refresh", "now", "outlet"]).exit_code != 0
 
 
 def test_refresh_add_ls_rm(runner, live_catchment):

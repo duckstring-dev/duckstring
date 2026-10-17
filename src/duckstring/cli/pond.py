@@ -243,7 +243,7 @@ def demo(
     for name, role, *_ in ponds:
         console.print(f"  [bold]{name + '/':<{width}}[/bold]  {role}")
     outlets = _DEMO_OUTLETS[ponds]
-    run = " or ".join(f"[bold]duckstring refresh {o}[/bold]" for o in outlets)
+    run = " or ".join(f"[bold]duckstring refresh now {o}[/bold]" for o in outlets)
     console.print(f"\nNext: [bold]duckstring pond deploy --all --yes[/bold], then {run}.")
 
 

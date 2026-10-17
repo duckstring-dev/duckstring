@@ -884,7 +884,6 @@ def test_a_tap_keeps_reports_fresh_while_an_app_queries_it(runtime):
     resp = httpx.post(f"{url}/api/ponds/reports/taps",
                       json={"name": "dashboard", "fresh_within_ms": 3_600_000, "wait_ms": 40_000}, timeout=5.0)
     assert resp.status_code == 200, resp.text
-    assert "warning" not in resp.json()  # the demo exposes monthly_summary
     app = Catchment(url, api_key=resp.json()["key"])
 
     assert app.tables() == ["monthly_summary"]  # the Tap's tables, with no Pond named

@@ -1,13 +1,13 @@
-"""`duckstring tap add|ls|rm|rotate POND`: manage a Pond's Taps.
+"""`duckstring refresh tap add|ls|rm|rotate POND`: manage a Pond's Taps.
 
 A Tap is an access point for an app: its own key, which reads only the Tap's tables, and a freshness policy.
 A query through it sends the Pond a Refresh when the newest request, or the data, is older than
 ``--fresh-within``, so the data keeps up while the app is in use and the pipeline goes quiet when it isn't::
 
-    duckstring tap add reports --name dashboard --fresh-within 5m
-    duckstring tap ls reports
-    duckstring tap rotate reports dashboard
-    duckstring tap rm reports dashboard
+    duckstring refresh tap add reports --name dashboard --fresh-within 5m
+    duckstring refresh tap ls reports
+    duckstring refresh tap rotate reports dashboard
+    duckstring refresh tap rm reports dashboard
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="Give apps an access point that keeps a Pond fresh while it's used.", no_args_is_help=True)
+app = typer.Typer(help="Execute a Refresh every time the Pond is queried.", no_args_is_help=True)
 
 _CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted).")
 _MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest).")
@@ -36,7 +36,7 @@ def _seconds(text: str) -> int:
 
 
 def _print_key(key: str, pond: str, name: str) -> None:
-    typer.echo(f"Key for Tap '{name}' on '{pond}' (shown once, so store it now):")
+    typer.echo(f"Key for Tap '{name}' on '{pond}'. Copy this key now - it will only be shown once.")
     typer.echo(f"  {key}")
 
 
@@ -59,7 +59,10 @@ def add(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Add a Tap and print its key. The key is shown once; only a hash of it is kept."""
+    """Add a Tap (Refresh upon query).
+
+    Prints the Tap's key, once: only a hash of it is kept.
+    """
     from . import _http
 
     body = {
@@ -75,8 +78,6 @@ def add(
                       json=body).json()
     typer.echo(f"Tap '{name}' added on '{resp['pond']}'.")
     _print_key(resp["key"], resp["pond"], name)
-    if resp.get("warning"):
-        typer.secho(f"Warning: {resp['warning']}", fg=typer.colors.YELLOW)
 
 
 @app.command("ls")
@@ -86,7 +87,7 @@ def ls(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """List the Pond's Taps with their tables, policy, last query, and counts of queries and Refreshes."""
+    """List the Pond's Taps with their details."""
     from rich.console import Console
     from rich.table import Table
 
@@ -118,12 +119,12 @@ def ls(
 @app.command("rm")
 def rm(
     pond: str = typer.Argument(..., help="The Pond the Tap is on."),
-    name: str = typer.Argument(..., help="The Tap's name (see `tap ls`)."),
+    name: str = typer.Argument(..., help="The Tap's name (see `refresh tap ls`)."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Remove the Tap. Its key stops working at once, and runs it already caused finish."""
+    """Remove a Tap (runs in progress still finish)."""
     from . import _http
 
     url, cfg = _resolve(catchment)
@@ -135,12 +136,12 @@ def rm(
 @app.command("rotate")
 def rotate(
     pond: str = typer.Argument(..., help="The Pond the Tap is on."),
-    name: str = typer.Argument(..., help="The Tap's name (see `tap ls`)."),
+    name: str = typer.Argument(..., help="The Tap's name (see `refresh tap ls`)."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Print a new key for the Tap. The old key stops working at once."""
+    """Change to a new key for the Tap."""
     from . import _http
 
     url, cfg = _resolve(catchment)

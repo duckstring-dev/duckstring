@@ -484,7 +484,7 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'v2-reports',
     chapter: 4,
     title: 'V2 reports',
-    body: "It's not running yet as there are no consumers. Now we can upgrade sales, move its Refresh, and remove the previous version. The `forecast` path can keep running until it can be upgraded on its own timeframe.",
+    body: "It's not running yet as there are no consumers. Now we can upgrade reports, move its Refresh, and remove the previous version. The `forecast` path can keep running until it can be upgraded on its own timeframe.",
     target: { pond: 'sales@2' },
     frame: 'all',
     action: { label: 'Upgrade reports', stages: upgradeStages('reports', false), done: (s) => upgraded(s, 'reports') },

@@ -122,7 +122,7 @@ Deploying a Pond again follows its version number. A new minor or patch version 
 You ask for data at the end of a pipeline, on the Pond whose output you want. Here that's `reports`. Run it once with a *Refresh*:
 
 ```bash
-duckstring refresh reports
+duckstring refresh now reports
 ```
 
 A Refresh brings `reports` up to date as of now. Duckstring works back through its Sources and runs `transactions` and `products`, then `sales`, then `reports`. The command shows the live status until everything settles, after about 12 seconds.
@@ -141,7 +141,7 @@ A continuous Refresh keeps going, so press `Ctrl+C` to leave the status view, th
 duckstring refresh rm reports Continuous
 ```
 
-The same controls are on each Pond's panel in the web UI. A Refresh can be sent once or kept standing:
+The same controls are on each Pond's panel in the web UI. A Refresh can be sent once or set to recur:
 
 | Refresh | What it does |
 |---|---|

@@ -52,7 +52,7 @@ Rebuilds a set of Ponds now, in dependency order, each reading its parents' rebu
 duckstring control sleep POND [--upstream]
 ```
 
-Clears the Pond's demand and removes its standing Refreshes. Runs already in progress finish. `--upstream` also sleeps every Pond upstream of it.
+Clears the Pond's demand and removes its recurring Refreshes. Runs already in progress finish. `--upstream` also sleeps every Pond upstream of it.
 
 ### `kill`
 

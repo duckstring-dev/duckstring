@@ -58,8 +58,8 @@ on a query through a Tap with fresh_within D:
   a run is in flight the throttle paces the rest to the pipeline's bottleneck, as for any fast refresh.
 - `--fresh-within 1d` behaves like `refresh add POND --every 1d` while the app is in use, and does nothing
   while it isn't.
-- Any other demand on the Pond (a manual refresh, a standing refresh) counts as recent demand, as it does for
-  `--every`, so a Tap never adds runs a standing refresh already covers.
+- Any other demand on the Pond (a manual refresh, a recurring refresh) counts as recent demand, as it does for
+  `--every`, so a Tap never adds runs a recurring refresh already covers.
 - The data a query sees is at most `D` plus the pipeline's run time old while queries keep coming
   (`--wait` makes the query itself see the result of its own refresh).
 
@@ -94,7 +94,7 @@ the Catchment's SQLite lock; they are observability only.
 
 ## Surface
 
-- **CLI** (`group verb POND`, as `spout`): `duckstring tap add POND --name NAME [--tables a,b]
+- **CLI** (`group verb POND`, as `spout`): `duckstring refresh tap add POND --name NAME [--tables a,b]
   [--fresh-within D] [--wait [TIMEOUT]]` prints the key once; `tap ls POND` (name, scope, policy, last query,
   query count); `tap rm POND NAME`; `tap rotate POND NAME` mints a new key.
 - **HTTP** (full, since a Tap is a credential): `GET/POST /api/ponds/{name}/taps`, `DELETE
@@ -205,3 +205,8 @@ Departures and settled questions:
 - **Canvas.** Taps share the Refresh pill (one pill per Pond for its sources of demand, "Daily · 1 Tap" or
   "Tap: dashboard") rather than a second node.
 - **Not done:** the Playground toggle, a landing-page line.
+
+Revised 2026-10-17 after review: the CLI moved under `refresh` (`duckstring refresh tap add|ls|rm|rotate`, and
+`refresh now POND` became explicit); `add` no longer warns when a Tap would read nothing (a Tap is a Refresh policy,
+not egress); the web UI moved Taps from a Pond's Options into its Refresh section (names only, details in a modal);
+and the canvas shows a Pond's Refreshes and Taps as a strip joined to its box instead of a pill.

@@ -176,7 +176,7 @@ def test_rotate_and_remove_end_the_old_key(tmp_path):
     full = _bearer(ladder["full"])
     resp = client.post("/api/ponds/sales/taps", json={"name": "app", "tables": ["revenue"]}, headers=full).json()
     old = resp["key"]
-    assert old.startswith("tap_") and "warning" not in resp
+    assert old.startswith("tap_")
     assert client.post("/api/query", json={"sql": "SELECT 1"}, headers=_bearer(old)).status_code == 200
 
     new = client.post("/api/ponds/sales/taps/app/rotate", headers=full).json()["key"]
@@ -199,14 +199,12 @@ def test_a_tap_key_works_on_an_open_catchment(tmp_path):
     assert driver.list_taps(KEY)[0]["query_count"] == 1
 
 
-def test_add_validates_and_warns_when_nothing_is_exposed(tmp_path):
+def test_add_validates(tmp_path):
     client, driver, _ = _setup(tmp_path)
     assert client.post("/api/ponds/sales/taps", json={"name": "bad name"}).status_code == 422
     assert client.post("/api/ponds/sales/taps", json={"name": "a", "wait_ms": 0}).status_code == 422
     assert client.post("/api/ponds/sales/taps", json={"name": "a"}).status_code == 200
     assert client.post("/api/ponds/sales/taps", json={"name": "a"}).status_code == 422  # duplicate
-    resp = client.post("/api/ponds/sales/taps", json={"name": "b", "tables": ["secret_internal"]}).json()
-    assert "exposed" in resp["warning"]
 
 
 # ─── waiting ─────────────────────────────────────────────────────────────────
@@ -335,19 +333,18 @@ def test_cli_tap_roundtrip(runner, live_catchment):
 
     _deploy_outlet(live_catchment)  # registers 'dev' as the default catchment
 
-    res = runner.invoke(cli_app, ["tap", "add", "sales", "--name", "app", "--fresh-within", "5m", "--wait", "30s"])
+    res = runner.invoke(cli_app, ["refresh", "tap", "add", "sales", "--name", "app", "--fresh-within", "5m", "--wait", "30s"])
     assert res.exit_code == 0, res.output
     key = re.search(r"tap_\S+", res.output).group(0)
-    assert "Warning" in res.output  # the outlet declares no [serve] tables
 
-    res = runner.invoke(cli_app, ["tap", "ls", "sales"])
+    res = runner.invoke(cli_app, ["refresh", "tap", "ls", "sales"])
     assert res.exit_code == 0, res.output
     assert "app" in res.output and "5m" in res.output and "30s" in res.output and "never" in res.output
 
-    res = runner.invoke(cli_app, ["tap", "rotate", "sales", "app"])
+    res = runner.invoke(cli_app, ["refresh", "tap", "rotate", "sales", "app"])
     assert res.exit_code == 0, res.output
     assert key not in res.output and re.search(r"tap_\S+", res.output)
 
-    res = runner.invoke(cli_app, ["tap", "rm", "sales", "app"])
+    res = runner.invoke(cli_app, ["refresh", "tap", "rm", "sales", "app"])
     assert res.exit_code == 0, res.output
-    assert "No Taps" in runner.invoke(cli_app, ["tap", "ls", "sales"]).output
+    assert "No Taps" in runner.invoke(cli_app, ["refresh", "tap", "ls", "sales"]).output

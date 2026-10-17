@@ -95,7 +95,7 @@ export interface ThrottleState {
   launchAt?: number | null;
 }
 
-// A standing Refresh on a Pond. Floating (no `startAnchor`): a request once `everyMs` has passed since the later of
+// A recurring Refresh on a Pond. Floating (no `startAnchor`): a request once `everyMs` has passed since the later of
 // the Pond's newest request and its freshness (0 = continuous). Anchored: a request at each occurrence of the grid
 // `startAnchor + k·everyMs`, filtered by `validDays` and ended by `until`, as a window's grid is. A Pond holds any
 // number of anchored Refreshes and at most one floating one.

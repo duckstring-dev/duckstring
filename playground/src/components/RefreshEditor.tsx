@@ -1,12 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-import { usePlaygroundStore, THEME_BRAND, THEME_DANGER, THEME_DEMAND } from '@/lib/store';
-import { useTourMark } from '@/lib/tour';
+import { usePlaygroundStore, refreshLabel, THEME_BRAND, THEME_DEMAND } from '@/lib/store';
+import { useTourMark, useTourStore } from '@/lib/tour';
 import type { FreqUnit, Pond, Refresh } from '@/lib/types';
 
-// A Pond's Refresh: refresh now, and its one standing Refresh. The Every box shows the standing Refresh; an edit is
-// a draft until Set (or Enter) applies it. Continuous sets a Refresh every 0 s, and Remove drops the Refresh.
+// A Pond's Refresh, laid out like the Catchment's: Refresh Now, and Recurring Refresh opening Continuous and an
+// Every box (a draft until Set or Enter applies it). The Pond's one recurring Refresh is listed by name, with ✕ to
+// remove it. The playground runs in seconds, so it has no schedules.
 
 const UNITS: { value: FreqUnit; label: string }[] = [
   { value: 'SECOND', label: 'sec' },
@@ -43,6 +44,7 @@ function Button({
   mark,
   active,
   disabled,
+  block,
 }: {
   onClick: () => void;
   children: React.ReactNode;
@@ -50,6 +52,7 @@ function Button({
   mark?: object;
   active?: boolean;
   disabled?: boolean;
+  block?: boolean;
 }) {
   return (
     <button
@@ -68,7 +71,10 @@ function Button({
         cursor: disabled ? 'default' : 'pointer',
         fontWeight: 600,
         letterSpacing: '0.04em',
-        whiteSpace: 'nowrap',
+        whiteSpace: block ? 'normal' : 'nowrap',
+        minWidth: 0,
+        width: block ? '100%' : undefined,
+        boxSizing: 'border-box',
       }}
     >
       {children}
@@ -84,10 +90,10 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
   const markEvery = useTourMark('refresh-every');
   const markContinuous = useTourMark('refresh-continuous');
 
-  const continuous = current != null && current.startAnchor == null && current.everyMs <= 0;
+  const continuous = current != null && current.everyMs <= 0;
   const shown = current && current.everyMs > 0 ? splitPeriod(current.everyMs) : null;
 
-  // The Every box shows the standing Refresh until the visitor edits it; Set (or Enter) applies the draft.
+  // The Every box shows the recurring Refresh until the visitor edits it; Set (or Enter) applies the draft.
   const [draft, setDraft] = useState<string | null>(null);
   const [draftUnit, setDraftUnit] = useState<FreqUnit | null>(null);
   const value = draft ?? shown?.value ?? '';
@@ -97,7 +103,7 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
 
   const n = parseFloat(value);
   const draftMs = value.trim() !== '' && !isNaN(n) && n >= 0 ? n * UNIT_MS[unit] : null;
-  const canSet = draftMs != null && !(current && current.startAnchor == null && current.everyMs === draftMs);
+  const canSet = draftMs != null && !(current && current.everyMs === draftMs);
 
   const clearDraft = () => {
     setDraft(null);
@@ -113,60 +119,77 @@ export function RefreshEditor({ pond }: { pond: Pond }) {
     setRefresh(pond.id, null);
   };
 
+  // The tour points at the Every box and the Continuous button, so it opens the panel while it does.
+  const tourWants = useTourStore(
+    (t) => t.phase !== 'off' && (t.outline === 'refresh-every' || t.outline === 'refresh-continuous'),
+  );
+  const [opened, setOpened] = useState(false);
+  const open = opened || tourWants;
+
   return (
     <>
-      <div style={{ fontSize: 10, color: '#52525b', lineHeight: 1.5, marginBottom: 6 }}>
-        Ask for this Pond&apos;s data as of now, or keep asking.
-      </div>
-      <div style={{ marginBottom: 10 }}>
-        <Button onClick={() => refreshNow(pond.id)} color={THEME_DEMAND} mark={markNow}>
-          Refresh now
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+        <Button onClick={() => refreshNow(pond.id)} color={THEME_DEMAND} mark={markNow} block>
+          Refresh Now
+        </Button>
+        <Button onClick={() => setOpened((v) => !v)} color={THEME_BRAND} active={open} block>
+          Recurring Refresh
         </Button>
       </div>
 
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span {...markEvery} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <span style={{ fontSize: 11, color: '#71717a' }}>Every</span>
-          <input
-            type="number"
-            min="0"
-            inputMode="decimal"
-            aria-label="Refresh every"
-            placeholder={continuous ? '–' : ''}
-            value={value}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commit();
-              if (e.key === 'Escape') clearDraft();
-            }}
-            style={numInput}
-          />
-          <select
-            value={unit}
-            aria-label="Unit"
-            onChange={(e) => {
-              setDraft(value);
-              setDraftUnit(e.target.value as FreqUnit);
-            }}
-            style={selectInput}
-          >
-            {UNITS.map((u) => (
-              <option key={u.value} value={u.value}>{u.label}</option>
-            ))}
-          </select>
-          <Button onClick={commit} color={THEME_BRAND} disabled={!canSet}>
-            Set
+      {open && (
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <Button onClick={() => apply(0)} color={THEME_BRAND} mark={markContinuous} active={continuous} block>
+            Continuous
           </Button>
-        </span>
-      </div>
-      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-        <Button onClick={() => apply(0)} color={THEME_BRAND} mark={markContinuous} active={continuous}>
-          Continuous
-        </Button>
-        <Button onClick={remove} color={THEME_DANGER} disabled={!current}>
-          Remove
-        </Button>
-      </div>
+          <span {...markEvery} style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11, color: '#71717a' }}>Every</span>
+            <input
+              type="number"
+              min="0"
+              inputMode="decimal"
+              aria-label="Refresh every"
+              placeholder={continuous ? '–' : ''}
+              value={value}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commit();
+                if (e.key === 'Escape') clearDraft();
+              }}
+              style={numInput}
+            />
+            <select
+              value={unit}
+              aria-label="Unit"
+              onChange={(e) => {
+                setDraft(value);
+                setDraftUnit(e.target.value as FreqUnit);
+              }}
+              style={selectInput}
+            >
+              {UNITS.map((u) => (
+                <option key={u.value} value={u.value}>{u.label}</option>
+              ))}
+            </select>
+            <Button onClick={commit} color={THEME_BRAND} disabled={!canSet}>
+              Set
+            </Button>
+          </span>
+        </div>
+      )}
+
+      {current && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
+          <span style={{ fontSize: 12, color: '#a1a1aa' }}>{refreshLabel(current)}</span>
+          <button
+            onClick={remove}
+            aria-label={`Remove ${refreshLabel(current)}`}
+            style={{ background: 'none', border: 'none', color: '#52525b', cursor: 'pointer', fontSize: 14 }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
     </>
   );
 }

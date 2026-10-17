@@ -144,15 +144,12 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const markVariability = useTourMark('ripple-variability');
   const markChart = useTourMark('run-chart');
   const [showAddSourcePond, setShowAddSourcePond] = useState(false);
+  const [showNewMajor, setShowNewMajor] = useState(false);
   const [showAddParentRipple, setShowAddParentRipple] = useState(false);
   const [allVar, setAllVar] = useState('0');
 
   const selectedPond = selectedPondId ? ponds[selectedPondId] : null;
   const selectedRipple = selectedRippleId ? ripples[selectedRippleId] : null;
-
-  const isOutlet = selectedPondId
-    ? !Object.values(ponds).some((p) => p.sources.includes(selectedPondId))
-    : false;
 
   const availableSourcePonds = selectedPondId
     ? Object.values(ponds).filter(
@@ -203,9 +200,22 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               <Btn onClick={() => addRipple(selectedPond.id)} color={THEME_BRAND}>+ Add Ripple</Btn>
-              <Btn onClick={() => addMajorVersion(selectedPond.id)} color={THEME_BRAND} mark={markNewMajor}>+ New Major Version</Btn>
+              <Btn onClick={() => setShowNewMajor((v) => !v)} color={THEME_BRAND} mark={markNewMajor}>+ New Major Version</Btn>
               <Btn onClick={() => deletePond(selectedPond.id)} color={THEME_DANGER}>Delete Pond</Btn>
             </div>
+            {/* A new major version starts with one parent Pond, or none. */}
+            {showNewMajor && (
+              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <span style={{ fontSize: 11, color: '#71717a', marginBottom: 2 }}>Parent Pond</span>
+                {[null, ...Object.values(ponds).filter((p) => p.id !== selectedPond.id)].map((p) => (
+                  <button key={p?.id ?? 'none'}
+                    onClick={() => { addMajorVersion(selectedPond.id, p ? [p.id] : []); setShowNewMajor(false); }}
+                    style={{ background: '#1e1e26', border: '1px solid #3f3f46', borderRadius: 4, color: p ? '#a1a1aa' : '#71717a', padding: '3px 8px', fontSize: 12, cursor: 'pointer', textAlign: 'left' }}>
+                    {p ? pondLabel(ponds, p.id) : 'None'}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {selectedPond.sources.length > 0 && (
               <div style={{ marginTop: 12 }}>
@@ -245,14 +255,10 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             </Section>
           )}
 
-          {/* Refresh: refresh now, the standing Refreshes, and adding one (Outlets only) */}
+          {/* Refresh: refresh now, and the Pond's recurring Refresh */}
           <Section>
             <Label>Refresh</Label>
-            {isOutlet ? (
-              <RefreshEditor pond={selectedPond} key={`rf-${selectedPond.id}-${formEpoch}`} />
-            ) : (
-              <div style={{ fontSize: 11, color: '#52525b' }}>Not an outlet: Refreshes live on outlet ponds.</div>
-            )}
+            <RefreshEditor pond={selectedPond} key={`rf-${selectedPond.id}-${formEpoch}`} />
           </Section>
 
           <Section mark={markChart}>

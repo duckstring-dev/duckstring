@@ -108,7 +108,6 @@ const sidebars: SidebarsConfig = {
             'reference/cli/data',
             'reference/cli/duck',
             'reference/cli/spout',
-            'reference/cli/tap',
             'reference/cli/serve',
             'reference/cli/secret',
             'reference/cli/alert',

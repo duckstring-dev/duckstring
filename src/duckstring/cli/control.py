@@ -117,7 +117,7 @@ def sleep(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Clear the Pond's demand and remove its standing Refreshes. Runs in progress finish."""
+    """Clear the Pond's demand and remove its recurring Refreshes. Runs in progress finish."""
     from . import _http
     from .config import resolve_catchment
     _, cfg = resolve_catchment(catchment)

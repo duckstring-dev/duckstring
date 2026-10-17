@@ -5,13 +5,15 @@ import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { isThrottled } from '@/lib/orchestration';
 import { usePlaygroundStore, getPondVisualState, formatAge, pushTargetF, stateColor, nodeFill, pondLabel, THEME_DEMAND, THEME_AMBER } from '@/lib/store';
 import { useTourRing } from '@/lib/tour';
+import { STRIP_LINE_H, STRIP_PAD, demandStripHeight } from '@/lib/layout';
 import { DemandIndicators } from './DemandIndicators';
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
-  // TB (mobile) layout: flow enters at the top and leaves at the bottom; the Refresh pill
-  // hangs below the outlet, so its edge also lands on the bottom.
+  // TB (mobile) layout: flow enters at the top and leaves at the bottom.
   const vertical = data.vertical as boolean | undefined;
+  // The Pond's recurring Refresh, drawn as a strip joined to the bottom of its box (the layout has made room).
+  const demandLines = (data.demandLines as string[] | undefined) ?? [];
   const pond = usePlaygroundStore((s) => s.ponds[pondId]);
   const label = usePlaygroundStore((s) => pondLabel(s.ponds, pondId));
   const ps = usePlaygroundStore((s) => s.pondStates[pondId]);
@@ -60,12 +62,6 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
       }}
     >
       <Handle id="in" type="target" position={vertical ? Position.Top : Position.Left} style={{ background: '#52525b' }} />
-      <Handle
-        id="trigger-in"
-        type="target"
-        position={vertical ? Position.Bottom : Position.Right}
-        style={{ background: '#52525b', opacity: 0 }}
-      />
 
       <div
         style={{
@@ -130,6 +126,36 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           }}
         >
           {throttleTag}
+        </div>
+      )}
+
+      {demandLines.length > 0 && (
+        <div
+          data-testid="refresh-strip"
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: demandStripHeight(demandLines.length),
+            boxSizing: 'border-box',
+            padding: `${STRIP_PAD}px 12px`,
+            borderTop: `1px dashed ${THEME_DEMAND}80`,
+            borderRadius: '0 0 8px 8px',
+            background: `${THEME_DEMAND}12`,
+          }}
+        >
+          {demandLines.map((line) => (
+            <div
+              key={line}
+              style={{
+                height: STRIP_LINE_H, lineHeight: `${STRIP_LINE_H}px`, fontSize: 11, fontWeight: 600, color: THEME_DEMAND,
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}
+            >
+              {line}
+            </div>
+          ))}
         </div>
       )}
 

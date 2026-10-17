@@ -175,7 +175,7 @@ class Ripple:
 
 @dataclass(frozen=True)
 class Refresh:
-    """A standing Refresh on a Pond: a request for data at least as fresh as the moment it is sent, repeated.
+    """A recurring Refresh on a Pond: a request for data at least as fresh as the moment it is sent, repeated.
 
     - **Floating** (no ``start``): due ``every`` after the later of the Pond's newest pending request and its
       freshness, so any refresh (a manual one, a scheduled one, a Sink's demand) resets its phase. ``every``

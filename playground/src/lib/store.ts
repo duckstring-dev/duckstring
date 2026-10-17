@@ -11,7 +11,7 @@ import type {
   Refresh,
 } from './types';
 import type { Window, LogEntry } from './types';
-import { hasCyclePond, hasCycleRipple, isPondDownstreamOf } from './graph';
+import { hasCyclePond, hasCycleRipple } from './graph';
 import { tick as orchTick, refreshNow as orchRefreshNow, drainLog, type OrchestrState } from './orchestration';
 
 const MAX_LOGS = 2000;
@@ -276,10 +276,11 @@ export interface PlaygroundState {
 
   // Refresh now: one request for data as fresh as the current moment.
   refreshNow(pondId: PondId): void;
-  // Set the Pond's standing Refresh (Outlets only), replacing any it had; null removes it. The engine takes a list
-  // per Pond (the Catchment allows several); the playground keeps one.
-  setRefresh(pondId: PondId, refresh: Omit<Refresh, 'name'> | null): void;
-  // Move the standing Refresh from one Pond to another (an upgrade moving its Refresh to the new major).
+  // Set the Pond's recurring Refresh, replacing any it had; null removes it. Every N, or 0 for continuous: the
+  // playground runs in seconds, so it has no schedules. The engine takes a list per Pond (the Catchment allows
+  // several); the playground keeps one.
+  setRefresh(pondId: PondId, refresh: { everyMs: number } | null): void;
+  // Move the recurring Refresh from one Pond to another (an upgrade moving its Refresh to the new major).
   moveRefresh(fromPondId: PondId, toPondId: PondId): void;
 
   clearLogs(): void;
@@ -320,10 +321,6 @@ function applyOrch(prev: PlaygroundState, orch: OrchestrState): Partial<Playgrou
   };
 }
 
-function isOutlet(ponds: Record<PondId, Pond>, pondId: PondId): boolean {
-  return !Object.values(ponds).some((p) => isPondDownstreamOf(ponds, p.id, pondId) && p.id !== pondId);
-}
-
 // A Pond's display name: its name, plus its major version when it isn't the only major of that name (or isn't 1).
 export function pondLabel(ponds: Record<PondId, Pond>, pondId: PondId): string {
   const p = ponds[pondId];
@@ -333,16 +330,10 @@ export function pondLabel(ponds: Record<PondId, Pond>, pondId: PondId): string {
   return siblings || major !== 1 ? `${p.name} v${major}` : p.name;
 }
 
-// A short label for a standing Refresh: "Continuous", "Every 4 s", "Every 1 d from 06:00".
-export function refreshLabel(r: Omit<Refresh, 'name'>): string {
-  if (r.startAnchor == null && r.everyMs <= 0) return 'Continuous';
-  const every = `Every ${formatDuration(r.everyMs).replace(/([a-z]+)$/, ' $1')}`;
-  if (r.startAnchor == null) return every;
-  const d = new Date(r.startAnchor);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  const ss = d.getSeconds() ? `:${String(d.getSeconds()).padStart(2, '0')}` : '';
-  return `${every} from ${hh}:${mm}${ss}`;
+// A short label for a recurring Refresh: "Continuous", "Every 4 s", "Every 1 d from 06:00".
+export function refreshLabel(r: { everyMs: number }): string {
+  if (r.everyMs <= 0) return 'Continuous';
+  return `Every ${formatDuration(r.everyMs).replace(/([a-z]+)$/, ' $1')}`;
 }
 
 export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
@@ -553,11 +544,6 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
         [sinkPondId]: { ...s.ponds[sinkPondId], sources: [...s.ponds[sinkPondId].sources, sourcePondId] },
       },
     }));
-    // Refreshes live only on outlets. Linking can demote a pond to non-outlet: drop its Refreshes (requests already
-    // made are served; nothing new is asked for).
-    const ponds = get().ponds;
-    const kept = Object.fromEntries(Object.entries(get().refreshes).filter(([pid]) => isOutlet(ponds, pid)));
-    set({ refreshes: kept });
     return true;
   },
 
@@ -632,11 +618,9 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   },
 
   setRefresh(pondId, refresh) {
-    if (refresh && !isOutlet(get().ponds, pondId)) return;
-    if (refresh && refresh.startAnchor != null && refresh.everyMs <= 0) return; // a schedule needs a period
     set((s) => {
       const refreshes = { ...s.refreshes };
-      if (refresh) refreshes[pondId] = [{ ...refresh, name: refreshLabel(refresh) }];
+      if (refresh) refreshes[pondId] = [{ everyMs: Math.max(0, refresh.everyMs), name: refreshLabel(refresh) }];
       else delete refreshes[pondId];
       return { refreshes };
     });

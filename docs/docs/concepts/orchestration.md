@@ -104,11 +104,11 @@ Each table and Object a Pond publishes also records when it last changed, so a P
 
 ## Refreshes
 
-A Refresh can be sent once, or kept standing so it repeats. Refreshes are set with `duckstring refresh` or from the web UI:
+A Refresh can be sent once, or set to recur. Refreshes are set with `duckstring refresh` or from the web UI:
 
 | Refresh | Command | Asks for |
 |---|---|---|
-| Now | `duckstring refresh reports` | data at least as fresh as now, once |
+| Now | `duckstring refresh now reports` | data at least as fresh as now, once |
 | Every | `duckstring refresh add reports --every 1d` | a Refresh once a day has passed since the last request or refresh |
 | At set times | `duckstring refresh add reports --every 1d --start 06:00` | a Refresh at 06:00 each day |
 | Continuous | `duckstring refresh add reports --continuous` | data as fresh as the pipeline allows |
@@ -169,5 +169,5 @@ gantt
 ## See also
 
 - Guides: [Scheduling](../guides/scheduling.md), [Serving Apps with Taps](../guides/serving_apps_with_taps.md), [Monitoring and Failures](../guides/monitoring_and_failures.md)
-- Reference: [duckstring refresh](../reference/cli/refresh.md), [duckstring tap](../reference/cli/tap.md), [duckstring window](../reference/cli/window.md), [duckstring control](../reference/cli/control.md)
+- Reference: [duckstring refresh](../reference/cli/refresh.md), [duckstring window](../reference/cli/window.md), [duckstring control](../reference/cli/control.md)
 - [Playground](https://playground.duckstring.com): this model simulated in the browser, with a guided tour

@@ -10,9 +10,9 @@ import { CloudMenu } from './CloudMenu';
 
 // The caller's API access level as three capabilities — Manage | Demand | Read — each prefixed with a
 // green ✓ when the key grants it, a grey – when not. (Moved off the always-on badge into the menu.)
-const ACCESS_CHIPS: { label: string; active: (l: AccessLevel) => boolean; hint: string }[] = [
+const ACCESS_CHIPS: { label: string; active: (l: AccessLevel) => boolean; hint?: string }[] = [
   { label: 'Manage', active: (l) => l === 'full', hint: 'Deploy, control, and manage secrets.' },
-  { label: 'Demand', active: (l) => l === 'full' || l === 'demand', hint: 'Create demand: refresh now and standing Refreshes.' },
+  { label: 'Demand', active: (l) => l === 'full' || l === 'demand' },
   { label: 'Read', active: () => true, hint: 'Read status and query data.' },
 ];
 
