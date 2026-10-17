@@ -1384,7 +1384,7 @@ class Driver(TapsMixin):
         self, ponds: list[tuple[str, int | None]], operations: list[str], confirm: str | None = None,
     ) -> dict:
         """Apply a set of operations to a set of Ponds in precedence order (``BATCH_OPS``) — the engine
-        behind the UI Selector and ``duckstring do``. Validates the op-set (unknown op, or Repair combined
+        behind the UI Selector and ``duckstring control wipe``. Validates the op-set (unknown op, or Repair combined
         with Remove/Reset → ValueError → 422) and, when any irreversible op (reset/wipe/remove) is present,
         requires ``confirm`` to equal this Catchment's name. Remove implies (and subsumes) Reset, and is
         **terminal per Pond** — later ops skip an already-removed line. Repair runs once over the live

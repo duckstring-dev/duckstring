@@ -1,12 +1,12 @@
 ---
 title: duckstring pond
-description: Scaffold, run locally, deploy and remove Ponds.
+description: Scaffold, test locally, deploy, promote and remove Ponds.
 sidebar_label: pond
 ---
 
 # duckstring pond
 
-Commands for Pond projects. Except `demo` and `remove`, they act on the Pond project in the current directory.
+Commands for Pond projects. `init`, `hydrate`, `run`, `deploy` and `pond puddle` act on the Pond project in the current directory; `remove` and `promote` act on a deployed Pond.
 
 ## `init`
 
@@ -56,7 +56,7 @@ Like `run`, `hydrate` runs in the Pond's own environment when it has one.
 duckstring pond run [--ripple NAME] [--fresh]
 ```
 
-Runs the Pond once on this machine against its hydrated Puddles, with no Catchment or Duck. Ripples run one at a time in dependency order, and output is written to `puddles/out/`. Inspect it with [`duckstring puddle`](puddle.md).
+Runs the Pond once on this machine against its hydrated Puddles, with no Catchment or Duck. Ripples run one at a time in dependency order, and output is written to `puddles/out/`. Inspect it with [`duckstring pond puddle`](#puddle).
 
 A full run starts from an empty `puddles/out/`. If `puddles/ponds/{this pond}/` exists (a Puddle of the Pond's own output), it is copied in first as the starting state, so incremental Ripples behave as they would on a later run.
 
@@ -121,3 +121,50 @@ The line must be idle with no demand; run [`control sleep`](control.md#sleep) fi
 | `--major`, `-m` | The major line to remove. Defaults to the highest deployed. |
 | `--wipe` | Also delete the deployment record, run history and deployed code, as if it had never been deployed. A redeploy starts from scratch. |
 | `--yes`, `-y` | Skip the confirmation. |
+
+## `promote`
+
+```bash
+duckstring pond promote POND --major N [-c NAME]
+```
+
+Makes major version `N` the one the Pond's bare name refers to in catalog SQL, switching every consumer of the bare name at once. Refused if that major doesn't publish every table currently served. See [Upgrades and Breaking Changes](../../guides/upgrades.md#queries-by-name).
+
+## `puddle`
+
+Commands for inspecting a Pond project's local data: the Puddles written by [`pond hydrate`](#hydrate) and the output of [`pond run`](#run). They run against the `puddles/` directory of the current project, in an in-memory DuckDB connection, and need no Catchment.
+
+Tables are available as `"{pond}"."{table}"`, or by bare name when unambiguous. Where the run output has a table with the same name as one in the Pond's own Puddle, the output is used.
+
+### `puddle ls`
+
+```bash
+duckstring pond puddle ls
+```
+
+Lists hydrated Puddles and run output tables, with row counts, sizes and ages.
+
+### `puddle show`
+
+```bash
+duckstring pond puddle show REF [--limit N]
+```
+
+Prints the first rows of a table.
+
+| Argument / option | Default | Description |
+|---|---|---|
+| `REF` | | `{pond}.{table}`, or a bare table name. |
+| `--limit`, `-n` | `10` | Rows to show. |
+
+### `puddle query`
+
+```bash
+duckstring pond puddle query SQL
+```
+
+Runs SQL over every Puddle and output table and prints the result.
+
+```bash
+duckstring pond puddle query 'SELECT category, SUM(revenue) FROM "sales"."sale_line" GROUP BY 1'
+```

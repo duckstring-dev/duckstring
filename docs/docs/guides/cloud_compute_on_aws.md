@@ -228,7 +228,7 @@ A Pond running on the Catchment's own machine publishes locally first, then copi
 Stopping the Catchment doesn't wait for background copies to finish. Nothing is lost, since the Catchment reconciles and re-runs the gap on restart, but recent work may be repeated. To avoid that, drain first:
 
 ```bash
-duckstring do --all --sleep
+duckstring control sleep --all
 ```
 
 ## Debugging a Duck

@@ -297,7 +297,7 @@ class _BatchBody(BaseModel):
 @router.post("/ponds/batch", dependencies=[auth.full])
 def batch(request: Request, body: _BatchBody):
     """Apply a set of operations to a set of Ponds, in precedence order — the primitive behind the UI
-    Selector and ``duckstring do``. ``operations`` ⊆ kill/sleep/reset/wipe/remove/clear/repair/refresh;
+    Selector and ``duckstring control wipe``. ``operations`` ⊆ kill/sleep/reset/wipe/remove/clear/repair/rebuild;
     Repair is exclusive with Remove/Reset, Remove implies (and subsumes) Reset. Any of reset/wipe/remove
     require ``confirm`` to equal the Catchment name. 422 on a bad op-set or a missing/wrong confirm; a
     per-Pond execution error is collected in the response, not fatal. See plans/selector_ui.md."""

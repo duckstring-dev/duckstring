@@ -206,11 +206,11 @@ duckstring catchment duct destroy UPSTREAM [-c NAME]
 
 Removes a duct and every Pond Draw it created.
 
-### `open` and `close`
+### `duct open` and `duct close`
 
 ```bash
-duckstring catchment open POND [-c NAME] [-m N | -v VERSION]
-duckstring catchment close POND [-c NAME] [-m N | -v VERSION]
+duckstring catchment duct open POND [-c NAME] [-m N | -v VERSION]
+duckstring catchment duct close POND [-c NAME] [-m N | -v VERSION]
 ```
 
 Run on the upstream Catchment. `open` marks a Pond as accepting demand from other Catchments, and `close` removes the mark.

@@ -95,7 +95,7 @@ def test_sleep_succeeds(runner, live_catchment):
     _deploy_outlet(live_catchment)
     result = runner.invoke(app, ["control", "sleep", "outlet"])
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "Asleep."
+    assert result.output.strip() == "Asleep: outlet."
 
 
 def test_sleep_upstream(runner, live_catchment):

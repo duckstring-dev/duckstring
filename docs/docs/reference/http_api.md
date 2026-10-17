@@ -123,7 +123,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | POST | `/api/ponds/{name}/reset` | full | Reset to the freshly deployed state. |
 | POST | `/api/ponds/{name}/reset-contract` | full | Forget the recorded output schema. |
 | POST | `/api/ponds/{name}/wipe-history` | full | Delete run history. |
-| POST | `/api/ponds/batch` | full | Apply operations to many Ponds, as `duckstring do`. |
+| POST | `/api/ponds/batch` | full | Apply operations to many Ponds, as the web UI's Pond Actions do. |
 | GET | `/api/ponds/{name}/budget` | read | Retry budgets. |
 | POST | `/api/ponds/{name}/budget` | full | Set retry budgets. |
 | GET | `/api/ponds/{name}/duck` | read | Effective compute settings. |

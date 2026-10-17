@@ -83,7 +83,7 @@ mkdir demo && cd demo
 duckstring pond demo                       # transactions, products → sales → reports
 duckstring pond deploy --all --yes
 duckstring refresh now reports                 # run the pipeline once, from the end
-duckstring query reports monthly_summary
+duckstring query reports.monthly_summary
 ```
 
 The [Quickstart](https://docs.duckstring.com/quickstart) goes through the same steps with explanations.

@@ -121,7 +121,7 @@ Refreshes belong to a major line. When an Outlet itself moves to a new major ver
 Catalog SQL can name a major version explicitly (`sales_v2.sale_line`) or use the bare Pond name (`sales.sale_line`), which refers to the Pond's served major. The served major stays on the first major version deployed until you promote another, so a dashboard reading `sales.sale_line` isn't switched to v2 by the deployment alone:
 
 ```bash
-duckstring serve promote sales --major 2
+duckstring pond promote sales --major 2
 ```
 
 Promotion is refused if v2 doesn't publish every table currently served. Consumers that name the version explicitly are unaffected either way.

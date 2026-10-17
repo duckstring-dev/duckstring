@@ -12,7 +12,7 @@ The loop is:
 ```bash
 duckstring pond hydrate     # build the Puddles
 duckstring pond run         # run the Pond against them
-duckstring puddle ls        # look at what came out
+duckstring pond puddle ls        # look at what came out
 ```
 
 ## Defining Puddles
@@ -103,9 +103,9 @@ duckstring pond run --ripple join_lines
 ## Inspecting results
 
 ```bash
-duckstring puddle ls
-duckstring puddle show sales.sale_line --limit 20
-duckstring puddle query 'SELECT category, SUM(revenue) FROM "sales"."sale_line" GROUP BY 1'
+duckstring pond puddle ls
+duckstring pond puddle show sales.sale_line --limit 20
+duckstring pond puddle query 'SELECT category, SUM(revenue) FROM "sales"."sale_line" GROUP BY 1'
 ```
 
 Every Puddle and output table is available as `"{pond}"."{table}"`, or by bare name. This is also a quick way to check a Source's shape while writing SQL against it.

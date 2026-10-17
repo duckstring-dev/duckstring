@@ -157,7 +157,7 @@ See [Scheduling](guides/scheduling.md) for choosing between them.
 The Catchment keeps a catalog of every Pond's tables, with each Pond as a schema. Query one:
 
 ```bash
-duckstring query reports monthly_summary
+duckstring query reports.monthly_summary
 ```
 
 This runs `SELECT * FROM reports.monthly_summary LIMIT 10`. Use `--sql` to run any query, and `--csv`, `--json` or `--parquet` to export the result. See [Querying](guides/querying.md).

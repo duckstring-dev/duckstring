@@ -248,7 +248,7 @@ def _run_live(
 
 def status(
     pond: Optional[str] = typer.Argument(None, help="Only show this Pond and the Ponds upstream of it."),
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to query (uses default if omitted)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to query (default if omitted)."),
     major: Optional[int] = typer.Option(
         None, "--major", "-m", help="Major version of the selected Pond (requires pond argument)."
     ),

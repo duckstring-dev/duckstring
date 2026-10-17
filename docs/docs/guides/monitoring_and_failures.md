@@ -149,16 +149,16 @@ See [Metrics](../reference/http_api.md#metrics) for the full list. Pond names ap
 
 ## Tracing bad data
 
-When a number looks wrong, find where it came from. `trace` names the run that produced some rows, and the window of Source data it read:
+When a number looks wrong, find where it came from. `data trace` names the run that produced some rows, and the window of Source data it read:
 
 ```bash
-duckstring trace reports.monthly_summary --where "year = 2026 AND month = 9"
+duckstring data trace reports.monthly_summary --where "year = 2026 AND month = 9"
 ```
 
-`lineage` shows which tables each Ripple actually read and wrote, and with `--columns`, which Source columns each output column came from:
+`data lineage` shows which tables each Ripple actually read and wrote, and with `--columns`, which Source columns each output column came from:
 
 ```bash
-duckstring lineage reports --columns
+duckstring data lineage reports --columns
 ```
 
 From there, check the Source's run history at that time, or query its data with `duckstring query`.

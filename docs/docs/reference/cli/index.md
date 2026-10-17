@@ -13,21 +13,23 @@ duckstring --version              # print the installed version
 duckstring --install-completion   # enable shell completion
 ```
 
-| Group | Purpose |
+| Command | Purpose |
 |---|---|
-| [`catchment`](catchment.md) | Create, register, start and manage Catchments; ducts between them. |
-| [`pond`](pond.md) | Scaffold, test locally, deploy and remove Ponds. |
-| [`puddle`](puddle.md) | Inspect local Puddles and run output. |
+| [`status`](data.md#status) | Every Pond's state, freshness and recurring Refreshes. |
+| [`query`](data.md#query) | Read-only SQL across the catalog, or a table's first rows. |
+| [`get`](data.md#get) | Download a table's files or an Object. |
 | [`refresh`](refresh.md) | Refresh a Pond now, every N, at set times, continuously, or when it's queried (Taps). |
 | [`window`](window.md) | When an Inlet can produce new data. |
-| [`control`](control.md) | Wake, force, rebuild, repair, sleep, kill, clear, reset, and retry budgets. |
-| [`do`](do.md) | Apply operations to many Ponds at once. |
-| [Data and status](data.md) | `status`, `query`, `get`, `objects`, `get-object`, `delete-table`, `delete-object`, `lineage`, `trace`. |
+| [`control`](control.md) | Wake, force, rebuild, repair, sleep, kill, clear, reset, wipe and retry budgets, for one Pond or many. |
+| [`data`](data.md#data) | List, expose and delete tables and Objects, and their lineage. |
+| [`pond`](pond.md) | Scaffold, test locally, deploy, promote and remove Ponds. |
+| [`catchment`](catchment.md) | Create, register, start and manage Catchments; ducts between them. |
 | [`duck`](duck.md) | Per-Pond compute and Duck pools. |
 | [`spout`](spout.md) | Deliver tables to external systems. |
-| [`serve`](serve.md) | The catalog: query, expose and promote. |
 | [`secret`](secret.md) | The Catchment's write-only secret store. |
 | [`alert`](alert.md) | Failure and freshness notifications. |
+
+Tables and Objects are named `POND.NAME`, as in the Python API, for example `reports.monthly_summary`.
 
 ## Choosing a Catchment
 
@@ -42,7 +44,7 @@ Commands that act on one Pond take:
 | `--major`, `-m` | The major version line to act on. Defaults to the highest deployed major. |
 | `--version`, `-v` | A full version such as `1.2.0`. Selects its major line, and must be that line's currently deployed version, otherwise the command fails. |
 
-[`do`](do.md) also accepts a Pond as `name@major`.
+[`control`](control.md#choosing-ponds) also accepts several Ponds, each as `name` or `name@major`.
 
 ## Live status
 

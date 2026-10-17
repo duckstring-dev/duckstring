@@ -28,7 +28,7 @@ Upgrading:
 - **Existing Waves become continuous Refreshes and Tides become `--every` Refreshes** (migration `031`).
 - **`POST /api/ponds/{name}/refresh` changed meaning.** It used to mark a Pond for a rebuild; it now refreshes the
   Pond (at `demand` level). The rebuild flag moved to `POST /api/ponds/{name}/rebuild`, and the command to
-  `duckstring control rebuild` (the batch operation and `duckstring do --refresh` to `rebuild` / `--rebuild`).
+  `duckstring control rebuild` (and the batch operation `refresh` to `rebuild`).
   Scripts that called `/refresh` for a rebuild need updating.
 - **Pull is gone from the engine.** A Tap's "anything newer" request no longer exists: a Refresh always asks for
   data as of now. Wake now runs once if the Sources are fresher at that moment, rather than waiting for them.
@@ -65,6 +65,28 @@ isn't. A query is always answered at once from what is published. Queries with a
 - The Python `Catchment` client takes a Tap's key as `api_key`, and then needs no `pond`.
 - The demo `reports` exposes `monthly_summary` (`[serve] tables`), so a Tap on it works out of the box.
 - Migration `032` (`pond_tap`).
+
+### The CLI, regrouped
+
+The top level goes from 21 commands to 13: `status`, `query`, `get`, `refresh`, `window`, `control`, `data`, `pond`,
+`catchment`, `duck`, `spout`, `secret` and `alert`. Tables and Objects are named `POND.NAME` everywhere, as in the
+Python API. No old forms are kept:
+
+| Before | Now |
+|---|---|
+| `query POND [TABLE] [--sql SQL]` | `query POND.TABLE`, or `query SQL [--pond POND]` |
+| `serve query SQL` | `query SQL` (with `--csv`, `--json` and `--parquet` too) |
+| `get POND TABLE [--path]`, `get-object POND NAME [--out]` | `get POND.NAME [--out]` |
+| `objects POND`, `serve status` | `data ls [POND]` (with each table's exposure and last change) |
+| `delete-table POND TABLE`, `delete-object POND NAME` | `data delete POND.NAME` |
+| `serve expose POND TABLE` | `data expose POND.TABLE` |
+| `lineage [POND] [--table T]`, `trace POND.TABLE` | `data lineage [POND[.TABLE]]`, `data trace POND.TABLE` |
+| `serve promote POND` | `pond promote POND` |
+| `puddle ls\|show\|query` | `pond puddle ls\|show\|query` |
+| `catchment open\|close` | `catchment duct open\|close` |
+| `do PONDS --kill …` | `control kill PONDS …`: every `control` verb takes several Ponds and `--all`, `--tree`, `--between`, `--downstream`; `--wipe` is `control wipe`, `--remove` is `pond remove` |
+
+`POST /api/serve/query` takes a `format` (`csv`, `json` or `parquet`) to return a file.
 
 ### Orchestration
 

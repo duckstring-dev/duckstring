@@ -12,9 +12,9 @@ Value formats shared by `pond.toml`, the CLI, the Python API and the HTTP API.
 | Form | Used in | Meaning |
 |---|---|---|
 | `table` | Python API | One of the current Pond's own tables. |
-| `source.table` | Python API, `trace`, `puddle show` | A table published by the Pond `source`. |
+| `source.table` | Python API, `query`, `get`, `data`, `pond puddle show` | A table (or Object) published by the Pond `source`. |
 | ``source.`name.with.dots` `` | Python API, `@puddle` targets | Backticks take a part literally, for a table or Object name containing dots. Either part can be quoted. |
-| `name@major` | `do`, `/api/status` ids | One major version line of a Pond. |
+| `name@major` | `control`, `/api/status` ids | One major version line of a Pond. |
 | `{pond}_v{major}.table` | catalog SQL | A table in a specific major line. |
 | `{pond}.table` | catalog SQL | A table in the Pond's served major. |
 | `{pond}#{spout}` | `window` | A Spout, which is managed as its own node. |

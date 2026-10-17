@@ -141,4 +141,4 @@ Environments are stored under the Catchment's state directory in `envs/`, one pe
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `tables` | list of strings | `[]` | Tables exposed to users with read-only access when querying the catalog. Users with full access see every table. Can be overridden on the Catchment with [`duckstring serve expose`](cli/serve.md#expose). |
+| `tables` | list of strings | `[]` | Tables exposed to users with read-only access when querying the catalog. Users with full access see every table. Can be overridden on the Catchment with [`duckstring data expose`](cli/data.md#data-expose). |

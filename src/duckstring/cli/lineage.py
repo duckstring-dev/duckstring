@@ -1,11 +1,12 @@
-"""`duckstring lineage [pond] [--table T]` — the observed table-level lineage (plans/lineage.md).
+"""`duckstring data lineage [POND[.TABLE]]` and `duckstring data trace POND.TABLE`: the observed table-level
+lineage (plans/lineage.md), and the run that produced some rows.
 
 Prints the tables each Ripple actually read and wrote on its latest recorded run — recorded by the Pond
 handle at the moment of the call, so it is exact (never inferred) and per-run rather than static::
 
-    duckstring lineage                 # every pond with recorded lineage
-    duckstring lineage sales           # one pond's ripples (reads → writes)
-    duckstring lineage sales -t order  # only the ripples touching table 'order'
+    duckstring data lineage                     # every pond with recorded lineage
+    duckstring data lineage sales               # one pond's ripples (reads → writes)
+    duckstring data lineage sales.sale_line     # only the ripples touching that table
 """
 
 from __future__ import annotations
@@ -16,20 +17,29 @@ import typer
 
 
 def show(
-    pond: Optional[str] = typer.Argument(None, help="Pond name (default: every pond with recorded lineage)."),
-    table: Optional[str] = typer.Option(None, "--table", "-t", help="Only Ripples that read or wrote this table."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major line (default: highest deployed)."),
+    ref: Optional[str] = typer.Argument(None, metavar="[POND[.TABLE]]", help="A Pond, or one of its tables (default: "
+                                                                            "every Pond with recorded lineage)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     columns: bool = typer.Option(False, "--columns", help="Also show which source columns each output "
                                                           "column is derived from."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
-    """Show the tables each Ripple actually read and wrote."""
+    """Show the tables each Ripple actually read and wrote. With a table, only the Ripples that read or wrote it."""
     from rich.console import Console
     from rich.tree import Tree
+
+    from duckstring.core import parse_ref
 
     from . import _http
     from .config import resolve_catchment
 
+    pond = table = None
+    if ref:
+        try:
+            first, rest = parse_ref(ref)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from None
+        pond, table = (rest, None) if first is None else (first, rest)
     _, cfg = resolve_catchment(catchment)
     params = [("pond", pond), ("major", major), ("table", table), ("columns", "true" if columns else None)]
     query = "&".join(f"{k}={v}" for k, v in params if v is not None)
@@ -68,10 +78,10 @@ def show(
 
 
 def trace(
-    ref: str = typer.Argument(..., help="The row's table as {pond}.{table}."),
+    ref: str = typer.Argument(..., metavar="POND.TABLE", help="The table the rows are in."),
     where: Optional[str] = typer.Option(None, "--where", "-w", help="SQL condition selecting the rows, "
                                                                     "e.g. \"order_id = 42\". Omit for the whole table."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major line (default: highest deployed)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
     """Find the run that produced some published rows.
@@ -79,17 +89,15 @@ def trace(
     Shows the newest run among the matching rows, with its version, timings and status, and the window of
     Source data it read::
 
-        duckstring trace revenue.revenue_by_product --where "product_id = 7"
+        duckstring data trace revenue.revenue_by_product --where "product_id = 7"
     """
     from urllib.parse import quote
 
     from . import _http
     from .config import resolve_catchment
+    from .data import split_ref
 
-    if "." not in ref:
-        typer.echo("trace needs a {pond}.{table} reference", err=True)
-        raise typer.Exit(1)
-    pond, table = ref.split(".", 1)
+    pond, table = split_ref(ref, "a table")
     _, cfg = resolve_catchment(catchment)
     query = f"table={quote(table)}"
     if where:

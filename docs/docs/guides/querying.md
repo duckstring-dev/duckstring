@@ -12,31 +12,29 @@ Everything a Pond publishes can be queried through its Catchment, which acts as 
 Look at a table:
 
 ```bash
-duckstring query reports monthly_summary
+duckstring query reports.monthly_summary
 ```
 
-This prints the first 10 rows. Run any SQL against one Pond's tables with `--sql`, or keep it in a file:
+This prints the first 10 rows. Any other argument is SQL, run across the catalog, where each Pond is a schema:
 
 ```bash
-duckstring query sales --sql "SELECT category, SUM(revenue) FROM sale_line GROUP BY 1 ORDER BY 2 DESC"
-duckstring query sales --sql @queries/top_categories.sql
-```
-
-Save the result instead of printing it with `--csv`, `--json` or `--parquet` and a file name. Files go under `./ponds/{pond}/` unless you give `--path`.
-
-## Across Ponds: the catalog
-
-`duckstring query` works within one Pond. To join across Ponds, query the catalog, where each Pond is a schema:
-
-```bash
-duckstring serve query "
+duckstring query "
   SELECT r.year, r.month, r.category, r.total_revenue, s.units
   FROM reports_v1.monthly_summary r
   JOIN (SELECT category, SUM(total_quantity) AS units FROM sales_v1.sale_line GROUP BY 1) s USING (category)
 "
 ```
 
-`{pond}_v{major}` names a specific major version. The bare `{pond}` refers to the Pond's served major, which stays on the first major version deployed until you run `duckstring serve promote`. Name the version in anything long-lived, such as a dashboard, so a new major version never changes what it reads; see [Upgrades and Breaking Changes](upgrades.md#queries-by-name).
+`{pond}_v{major}` names a specific major version. The bare `{pond}` refers to the Pond's served major, which stays on the first major version deployed until you run `duckstring pond promote`. Name the version in anything long-lived, such as a dashboard, so a new major version never changes what it reads; see [Upgrades and Breaking Changes](upgrades.md#queries-by-name).
+
+To work within one Pond, `--pond` lets the SQL name its tables without the schema. Keep long queries in a file:
+
+```bash
+duckstring query "SELECT category, SUM(revenue) FROM sale_line GROUP BY 1 ORDER BY 2 DESC" --pond sales
+duckstring query @queries/top_categories.sql
+```
+
+Save the result instead of printing it with `--csv`, `--json` or `--parquet` and a file name, and download a table's Parquet files, or an Object, with `duckstring get reports.monthly_summary`.
 
 ### What read-only users see
 
@@ -50,8 +48,8 @@ tables = ["monthly_summary"]
 Operators can override this per table without redeploying:
 
 ```bash
-duckstring serve expose reports monthly_summary --on
-duckstring serve status        # what's exposed, per Pond
+duckstring data expose reports.monthly_summary --on
+duckstring data ls reports        # its tables, what's exposed, and when each last changed
 ```
 
 Keep intermediate tables unexposed, so consumers depend only on the tables a Pond intends to support.
@@ -103,7 +101,7 @@ table = client.do_get(flight.Ticket(b"SELECT * FROM reports_v1.monthly_summary")
 
 ## From the web UI
 
-Select a Pond in the UI to browse its tables, page through rows and run SQL against them. Objects, such as models and files, are listed there too, and can be downloaded with `duckstring get-object`.
+Select a Pond in the UI to browse its tables, page through rows and run SQL against them. Objects, such as models and files, are listed there too, and can be downloaded with `duckstring get`.
 
 ## Refreshing on read
 

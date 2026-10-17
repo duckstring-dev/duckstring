@@ -148,17 +148,21 @@ src/duckstring/
     runner.py              #   run_pond: one local Pond Run in topological order → puddles/out/
   cli/                     # Typer CLI (`duckstring` / `ds`)
     refresh.py             #   refresh now|add|ls|rm POND, and refresh tap … (cli/tap.py, mounted under refresh)
+    data.py                #   top-level query (catalog SQL, POND.TABLE, or --pond) and get (table or Object), and the data
+                           #   group: ls, delete, expose, lineage/trace (cli/lineage.py). Assets are POND.NAME (core.parse_ref)
     window.py              #   window add|ls|rm POND
     tap.py                 #   refresh tap add|ls|rm|rotate POND (an app's access point; prints the key once)
-    control.py             #   wake/sleep/force/rebuild/repair/kill/clear/failure-budget
-    pond.py, deploy.py     #   pond init/demo/hydrate/run/deploy
+    control.py             #   wake/force/rebuild/repair/reset/wipe/sleep/kill/clear on any number of Ponds (control.select:
+                           #   name or name@major, --all/--tree/--between/--downstream), plus reset-contract/failure-budget
+    pond.py, deploy.py     #   pond init/demo/hydrate/run/deploy/remove/promote, and pond puddle … (cli/puddle.py)
     duck.py                #   duck show/set {pond} [--duck catchment|pool|dedicated] [--flock off|upgrade|always] [--engine] [--oom]
                            #   [--instance-type] [--auto-stop] [--clear], and duck pool ls|add|rm. Sizing is by instance type.
-    puddle.py              #   puddle ls/show/query (inspect ./puddles via in-memory DuckDB views)
+    puddle.py              #   pond puddle ls/show/query (inspect ./puddles via in-memory DuckDB views)
     spout.py               #   spout add/ls/rm {pond}
     secret.py              #   secret set/ls/rm (value prompted, never in argv)
     alert.py               #   alert add/ls/rm/test/log
-    status.py, data.py, catchment.py, config.py, window.py, _http.py
+    status.py, catchment.py, duct.py (catchment duct …, incl. open/close), config.py, _http.py
+                           #   Top level (13): status query get refresh window control data pond catchment duck spout secret alert
   alerts/                  # Failure and freshness notifications
     event.py               #   AlertEvent (rendered and sanitised; never a traceback) + KNOWN_EVENTS/normalise_events
     base.py                #   Notifier protocol + get_notifier(uri) scheme registry + destination validation
@@ -263,12 +267,12 @@ Routes live at `/api/ponds/{name}/…` and accept any deployed Pond (recommendin
 - **failure-budget**: show or set the live retry budgets (`--immediate`, `--on-change`).
 - One-shot commands (refresh/wake/force) open the live status view until the target settles (idle/failed/killed/blocked). `refresh add` leaves it open.
 
-**Bulk operations** (`Driver.batch`, `POST /api/ponds/batch`, `duckstring do`, the UI Selector; see `plans/selector_ui.md`) apply a set of operations to a set of Ponds in precedence order `kill > sleep > reset > wipe > remove > clear > repair > rebuild`.
+**Bulk operations** (`Driver.batch`, `POST /api/ponds/batch`, the UI Selector, `duckstring control wipe`; see `plans/selector_ui.md`) apply a set of operations to a set of Ponds in precedence order `kill > sleep > reset > wipe > remove > clear > repair > rebuild`.
 - Repair can't be combined with Remove or Reset. Remove implies Reset and is terminal per Pond (later operations skip a removed line). Reset and Wipe are separate: `wipe`/`wipe_history` clears `pond_run`/`ripple_run` only, without touching data.
 - reset, wipe and remove require `confirm` to equal the catchment name (422 otherwise).
 - Repair runs once over the live scope; its connectivity check only rejects a gappy manual selection, not disjoint components.
 - Per-Pond errors are collected and don't abort the batch.
-- The `do` CLI expands a selection client-side (`--all`/`--tree`/`--between`/`--downstream`) and sends an explicit Pond list.
+- The CLI has no batch command (`do` was dropped 2026-10-17): every `control` verb takes several Ponds and expands the selection client-side (`control.select`: `--all`/`--tree`/`--between`/`--downstream`), then calls the per-Pond route for each (`wipe` uses the batch route; `repair` the repair route).
 - The UI Selector is a two-phase canvas banner (pick Ponds, then pick operations) reached from **Options → Pond Actions**. The per-Pond Sidebar keeps Force/Wake/Sleep/Kill and Failures; Repair/Rebuild/Reset/Remove live in the Selector. The top bar is one `TopBar` (`Logo | Name | Status | ☰ Options`); Collapse-all, Secrets, Alerts and the access level sit in the Options menu.
 
 ## Taps (`catchment/taps.py`, `routes/tap.py`, `cli/tap.py`, migration `032`; see `plans/taps.md` "As built")
@@ -291,7 +295,7 @@ A **Puddle** is a snapshot of a Source table defined in code, used to test a Pon
 
 - `duckstring pond hydrate` imports the definitions (registration is a decorator side effect, as with `@ripple`) and materialises `puddles/ponds/{source}/data/{table}.parquet`. That is the catchment-root layout, so `Pond.read_table`'s foreign-read branch works unchanged with `root=puddles/`. Missing definitions are skipped with a warning; `--from-catchment` fills them from the Catchment.
 - `duckstring pond run [--ripple X] [--fresh]` is one local Pond Run (sequential topological order; no engine, freshness or Ducks). A full run resets `puddles/out/` (registry and exported parquet). A self-puddle (`puddles/ponds/{this_pond}/`) is copied in first as the seed, which makes incremental reruns idempotent.
-- `duckstring puddle ls|show|query` inspects `./puddles` through in-memory DuckDB views (`"{pond}"."{table}"`; output overrides a self-puddle of the same name).
+- `duckstring pond puddle ls|show|query` inspects `./puddles` through in-memory DuckDB views (`"{pond}"."{table}"`; output overrides a self-puddle of the same name).
 - Entrypoints can be declared in `pond.toml` (`[pond] ripples`/`puddles`, defaulting to `src/pond.py`/`src/puddles.py`); deploy and the Duck executor honour them via `core.import_pond_module`.
 
 Tests: `tests/test_puddle.py`. The `sales` demo includes a worked `src/puddles.py`.
@@ -371,9 +375,9 @@ Tests: `tests/test_secrets.py`.
 Lineage is recorded, never inferred: a lineage fact is either exact or absent. It is observability only. It holds no engine state, and a failure to write or emit lineage never fails a run. There are four levels.
 
 - **Pond level**: the declared graph (`pond_to_pond`, `/api/status` edges, the recursive `/api/view`).
-- **Table level (observed per run)**: the Pond handle records every read and write it brokers (`Pond._record_read`/`record_lineage_write`/`take_lineage`). Builder terminals report through an optional `record_lineage_write` hook on the Context, keeping `trickle/` dependency-free; the dbt executor reports materialised sources and manifest parents. The executor drains lineage per Ripple Run (`on_done(..., lineage)`), the Duck sends it on the `ripple` event, and `Driver._record_lineage` stores it in `ripple_run_lineage` (migration `019`). It uses `''` instead of NULL for own/source-less rows so replays can't duplicate, and it's purged wherever run history is. Served by `GET /api/lineage?pond=&major=&table=` (read), `duckstring lineage`, and the Sidebar's "Lineage · observed" section.
+- **Table level (observed per run)**: the Pond handle records every read and write it brokers (`Pond._record_read`/`record_lineage_write`/`take_lineage`). Builder terminals report through an optional `record_lineage_write` hook on the Context, keeping `trickle/` dependency-free; the dbt executor reports materialised sources and manifest parents. The executor drains lineage per Ripple Run (`on_done(..., lineage)`), the Duck sends it on the `ripple` event, and `Driver._record_lineage` stores it in `ripple_run_lineage` (migration `019`). It uses `''` instead of NULL for own/source-less rows so replays can't duplicate, and it's purged wherever run history is. Served by `GET /api/lineage?pond=&major=&table=` (read), `duckstring data lineage [POND[.TABLE]]`, and the Sidebar's "Lineage · observed" section.
 - **Column level (static per version)**: `trickle.lineage.column_lineage(body)` walks a captured plan. Equi-join keys unify provenance across both sides (left side only for semi/anti), pipeline operations apply in call order (filters add no edges), agg/acc metrics map to their input columns (plus the `.along` axis), and chained references to the Pond's own outputs resolve transitively. A constant gives an empty set; anything unprovable gives None (opaque). Explicit `alias.col` references don't need source schemas; only enumeration (star or bare names) does. Captured at deploy by `discover.capture_lineage_rows` in the discovery subprocess (best effort per Ripple, never fails a deploy; schemas from `pond_version_schema`, passed in) and stored by `routes/deploy._store_column_lineage` into `pond_version_column_lineage` (migration `020`, recomputed on each deploy). Exposed with `?columns=true` / `--columns`. `kind: sql` outputs are resolved with sqlglot (the `duckstring[lineage]` extra, present in dev and CI) by parsing and qualifying against the composed input's schema; if it's missing or fails, the output is opaque. This also provides the observed-use half of the pinned-minor contract question (impact analysis = column lineage × the contract).
-- **Row level (temporal provenance)**: `GET /api/ponds/{name}/trace?table=&where=` (`duckstring trace pond.table --where …`) finds the newest `_duckstring_f` among matching published rows, then `Driver.trace_run` returns the producing run (version, timings, status), its input window `(previous_f, f]`, and the declared Sources. The predicate runs at the `/api/query` trust level over the exported snapshot.
+- **Row level (temporal provenance)**: `GET /api/ponds/{name}/trace?table=&where=` (`duckstring data trace pond.table --where …`) finds the newest `_duckstring_f` among matching published rows, then `Driver.trace_run` returns the producing run (version, timings, status), its input window `(previous_f, f]`, and the declared Sources. The predicate runs at the `/api/query` trust level over the exported snapshot.
 
 **OpenLineage emission**: on `run_completed`, `Driver._emit_openlineage` builds a standard RunEvent (deterministic `uuid5(catchment_id:pond:f)` runId; inputs are the observed reads at that `f`; outputs and schema facets come from the captured contract) and enqueues it through `_emit_alert("openlineage", …)`. The alert outbox handles delivery, retries and auditing, and its per-`f` dedup absorbs replays. `WebhookNotifier` posts the RunEvent as is, without the Slack `text` wrapper. The `openlineage` kind is in `alerts/event.EXPLICIT_EVENTS`: it can be subscribed to explicitly but isn't included in `all`, so ops channels never receive raw catalog events, and it costs nothing without a subscriber.
 

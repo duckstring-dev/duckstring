@@ -56,4 +56,4 @@ flowchart LR
 ## See also
 
 - Guides: [Running on a Server](../guides/running_on_a_server.md), [Hosting on a Platform](../guides/hosting_on_a_platform.md), [Querying](../guides/querying.md), [Delivering with Spouts](../guides/delivering_with_spouts.md), [Connecting Catchments](../guides/connecting_catchments.md)
-- Reference: [duckstring catchment](../reference/cli/catchment.md), [duckstring serve](../reference/cli/serve.md), [duckstring spout](../reference/cli/spout.md), [HTTP API](../reference/http_api.md), [Formats](../reference/formats.md)
+- Reference: [duckstring catchment](../reference/cli/catchment.md), [duckstring query and data](../reference/cli/data.md), [duckstring spout](../reference/cli/spout.md), [HTTP API](../reference/http_api.md), [Formats](../reference/formats.md)

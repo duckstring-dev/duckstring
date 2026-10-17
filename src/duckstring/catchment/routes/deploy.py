@@ -283,7 +283,7 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
             db.execute("INSERT INTO pond_version_serve (pond_version_id, table_name) VALUES (?, ?)",
                        (pv_id, tbl))
         # Seed the served-major pointer on first deploy of this name (the first-deployed = lowest major
-        # in the usual v1-before-v2 flow); it moves thereafter only via `serve promote`.
+        # in the usual v1-before-v2 flow); it moves thereafter only via `pond promote`.
         db.execute("INSERT OR IGNORE INTO pond_serve (pond_name_id, served_major) VALUES (?, ?)",
                    (pn_id, major))
 

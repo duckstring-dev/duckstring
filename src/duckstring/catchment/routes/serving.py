@@ -7,6 +7,7 @@ tables; full users get the ops core (all output tables) and the exposure/promote
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -72,7 +73,8 @@ def _connect(request: Request) -> dict:
 
 class _QueryBody(BaseModel):
     sql: str
-    limit: int | None = 1000  # capped page for the JSON surface (the wires stream unbounded)
+    limit: int | None = 1000  # capped page for the JSON surface (the wires stream unbounded); 0 = no cap
+    format: str | None = None  # csv | json | parquet: the result as a file instead of rows
 
 
 @router.post("/serve/query", dependencies=[auth.read_or_tap])
@@ -90,11 +92,38 @@ async def query(body: _QueryBody, request: Request,
     sql = body.sql.strip().rstrip(";")
     if body.limit and body.limit > 0:
         sql = f"SELECT * FROM ({sql}) AS _q LIMIT {int(body.limit)}"
+    if body.format:
+        fmt = body.format.lower()
+        if fmt not in ("csv", "json", "parquet"):
+            raise HTTPException(status_code=422, detail="format is csv, json or parquet")
+        try:
+            data = await run_in_threadpool(_query_file, driver, sql, fmt, sandboxed, principal.tap)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        media = {"csv": "text/csv", "json": "application/json"}.get(fmt, "application/octet-stream")
+        return Response(content=data, media_type=media)
     try:
         res = await run_in_threadpool(serving_query, driver, sql, sandboxed=sandboxed, tap=principal.tap)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return {"columns": res["columns"], "rows": [list(r) for r in res["rows"]]}
+
+
+def _query_file(driver, sql: str, fmt: str, sandboxed: bool, tap) -> bytes:
+    """A catalog query's result as a file. The serving connection can't write files (the sandbox), so the
+    Arrow result is written from a separate in-memory connection."""
+    import duckdb
+
+    from ..serving import _cache
+    from .data import _copy_bytes
+
+    result = _cache(driver).connection(driver, sandboxed=sandboxed, tap=tap).cursor().execute(sql).to_arrow_table()
+    out = duckdb.connect()
+    try:
+        out.register("_ds_result", result)
+        return _copy_bytes(out, "SELECT * FROM _ds_result", fmt)
+    finally:
+        out.close()
 
 
 class _PromoteBody(BaseModel):
