@@ -7,6 +7,8 @@ description: Incremental Ripples.
 
 A Ripple normally rewrites its tables in full on every run, and every Ripple downstream reads them in full. When a large table changes by a few rows between runs, most of that work is repeated for nothing. A **Trickle** is a table that keeps a record of its changes, so that downstream Ripples can process only what changed since they last ran.
 
+The Playground works through the ideas on this page with a small pipeline you can run in the browser: https://playground.duckstring.com/trickle
+
 ## Structure
 
 Any Ripple can write a Trickle; it's a choice made per table when writing it. Each change is stored as a row with a weight: `+1` for a row added and `-1` for a row removed. An update is a removal of the old row plus an addition of the new one. When the price of product 42 in `catalog` moves from 10.00 to 12.00, the change is recorded as:
