@@ -47,7 +47,7 @@ def close_pond(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Close a Pond to demand from other Catchments, and stop tapping it on reads."""
+    """Close a Pond to demand from other Catchments."""
     from . import _http
     from .config import resolve_catchment
 
