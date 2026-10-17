@@ -44,7 +44,6 @@ from .catchment import (
     sentinel,
     sleep_pond,
     tap_due,
-    tap_wait_target,
     tick,
     wake_pond,
 )
@@ -96,7 +95,6 @@ __all__ = [
     "record_persist",
     "sleep_pond",
     "tap_due",
-    "tap_wait_target",
     "wake_pond",
     "force_pond",
     "rebuild_pond",

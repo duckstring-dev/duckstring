@@ -803,20 +803,6 @@ def tap_due(state: EngineState, pid: PondId, now: datetime, fresh_within: timede
     return now + ps.d - _clock_ref(ps) >= fresh_within
 
 
-def tap_wait_target(state: EngineState, pid: PondId, now: datetime, fresh_within: timedelta,
-                    sent: bool) -> datetime | None:
-    """The freshness a waiting Tap query waits for: data fresh within ``fresh_within``, capped at what the
-    request covering the query will deliver (the one it sent, one already waiting, or the Run in flight).
-    None when the data is already that fresh."""
-    ps = state.pond_states.get(pid)
-    if ps is None:
-        return None
-    pending = max_demand(ps.demand)
-    covering = now if sent else (pending if pending is not None and pending > ps.start_f else ps.start_f)
-    target = min(now + ps.d - fresh_within, covering)
-    return target if target > ps.end_f else None
-
-
 def sleep_pond(state: EngineState, pid: PondId, now: datetime, upstream: bool = False) -> EngineState:
     """Sleep a Pond: clear its demand, but KEEP its Ripples' demand so any already-started Pond Run
     completes. With ``upstream=True`` the sleep propagates to every ancestor (a token following the

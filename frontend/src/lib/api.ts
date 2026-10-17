@@ -91,8 +91,6 @@ export interface RawRefresh {
 export interface RawTap {
   name: string;
   fresh_within_ms: number; // a query refreshes when the newest request or the data is this old (0 = every query)
-  wait_ms: number | null; // a query waits up to this long for data that fresh; null = answered at once
-  tables: string[] | null; // null = all the Pond's exposed tables
   created_at: string;
   last_query_at: string | null;
   query_count: number;
@@ -676,8 +674,6 @@ export async function addSpout(
 export interface AddTapBody {
   name: string;
   fresh_within_ms: number;
-  wait_ms: number | null;
-  tables: string[] | null;
 }
 
 async function postForJSON<T>(path: string, body: unknown, what: string): Promise<T> {
@@ -985,9 +981,9 @@ export async function deleteObject(pond: string, name: string): Promise<void> {
 // The distinct run freshnesses (newest-first) of a Trickle table — the window selector's options.
 export async function fetchFreshness(pond: string, table: string): Promise<{ freshness: string[]; floor: string | null }> {
   const { name, major } = splitPond(pond);
-  const params = new URLSearchParams({ table });
+  const params = new URLSearchParams();
   if (major !== undefined) params.set('major', String(major));
-  return getJSON(`/ponds/${encodeURIComponent(name)}/freshness?${params}`);
+  return getJSON(`/ponds/${encodeURIComponent(name)}/tables/${encodeURIComponent(table)}/runs?${params}`);
 }
 
 // The full changelog history of one record (merge Trickle), for the per-row history view.

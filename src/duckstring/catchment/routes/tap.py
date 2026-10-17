@@ -1,12 +1,10 @@
 """Tap management (plans/taps.md): add, list, rotate and remove a Pond line's Taps. All full access, since a
 Tap is a credential. The query routes that accept a Tap's key live with the rest of querying (``data.py``,
-``serving.py``); :func:`tap_gate` is the step they share: run the Tap's policy, then wait if it says so."""
+``serving.py``); :func:`tap_gate` is the step they share: run the Tap's policy."""
 
 from __future__ import annotations
 
-import asyncio
 from datetime import timedelta
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -16,14 +14,10 @@ from .orchestrate import _driver, _resolve
 
 router = APIRouter()
 
-_WAIT_TICK = 0.1  # how often a waiting Tap query re-checks the Pond's freshness
-
 
 class _TapBody(BaseModel):
     name: str
     fresh_within_ms: int = 0
-    wait_ms: Optional[int] = None
-    tables: Optional[list[str]] = None
 
 
 @router.post("/ponds/{name}/taps", dependencies=[auth.full])
@@ -31,10 +25,7 @@ def add_tap(name: str, body: _TapBody, request: Request, major: int | None = Non
     """Add a Tap. The response carries its key, once: only a hash of it is kept."""
     key = _resolve(request, name, major, version)
     try:
-        tap, secret = _driver(request).add_tap(
-            key, body.name, fresh_within=timedelta(milliseconds=body.fresh_within_ms),
-            wait=timedelta(milliseconds=body.wait_ms) if body.wait_ms is not None else None, tables=body.tables,
-        )
+        tap, secret = _driver(request).add_tap(key, body.name, fresh_within=timedelta(milliseconds=body.fresh_within_ms))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"pond": key, "tap": tap, "key": secret}
@@ -64,16 +55,10 @@ def remove_tap(name: str, tap_name: str, request: Request, major: int | None = N
     return {"pond": key, "removed": tap_name}
 
 
-async def tap_gate(request: Request, tap: auth.TapScope) -> None:
-    """A query arrived with a Tap's key: apply the Tap's policy (which may send its Pond a Refresh), then, if
-    the Tap waits, hold the request until the data is fresh enough or the Tap's timeout passes."""
-    driver = _driver(request)
+def tap_gate(request: Request, tap: auth.TapScope) -> None:
+    """A query arrived with a Tap's key: apply the Tap's policy, which may send its Pond a Refresh. The query is
+    answered at once either way."""
     try:
-        target = driver.tap_query(tap)
-        if target is None:
-            return
-        deadline = asyncio.get_running_loop().time() + driver.tap_wait_timeout(tap)
+        _driver(request).tap_query(tap)
     except KeyError as exc:  # removed or rotated since the key was checked
         raise HTTPException(status_code=401, detail="Invalid or missing API key") from exc
-    while not driver.tap_ready(tap, target) and asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(_WAIT_TICK)

@@ -187,7 +187,7 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
     }
     if (p.taps?.length) {
       taps[p.id] = p.taps.map((t) => ({
-        name: t.name, freshWithinMs: t.fresh_within_ms, waitMs: t.wait_ms, tables: t.tables,
+        name: t.name, freshWithinMs: t.fresh_within_ms,
         lastQueryAt: isoToMsOrNull(t.last_query_at), queryCount: t.query_count, refreshCount: t.refresh_count,
       }));
     }

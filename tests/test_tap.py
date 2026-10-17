@@ -1,12 +1,10 @@
 """Taps (plans/taps.md): an app's access point on a Pond. Its own key reads only its tables, and its queries
 send the Pond a Refresh by the floating Refresh's clock. Covers the policy, the key (scope, rotation, removal,
-open mode), waiting, the three front doors (HTTP, Postgres wire, Flight), the counters and persistence, and
+open mode), the freshness route, the three front doors (HTTP, Postgres wire, Flight), the counters and persistence, and
 the regression for the old tap-on-get: no other reader ever sends demand."""
 
 from __future__ import annotations
 
-import threading
-import time
 from datetime import timedelta
 
 import duckdb
@@ -120,16 +118,16 @@ def test_a_blocked_pond_is_served_but_not_refreshed(tmp_path):
     driver.add_tap(KEY, "app")
     with driver.lock:
         driver.state.pond_states[KEY].is_blocked = True
-    assert driver.tap_query(auth.TapScope(KEY, "app")) is None
+    assert driver.tap_query(auth.TapScope(KEY, "app")) is False
     assert driver.list_taps(KEY)[0]["refresh_count"] == 0
 
 
 # ─── the key ─────────────────────────────────────────────────────────────────
 
 
-def test_a_tap_key_reads_only_its_tables_and_nothing_else(tmp_path):
+def test_a_tap_key_reads_its_ponds_exposed_tables_and_nothing_else(tmp_path):
     client, driver, ladder = _setup(tmp_path, keys=True)
-    _, key = driver.add_tap(KEY, "app", tables=["revenue"])
+    _, key = driver.add_tap(KEY, "app")
     h = _bearer(key)
 
     # Its tables by bare name, by the Pond's schema and by the major's, with no Pond named.
@@ -137,8 +135,9 @@ def test_a_tap_key_reads_only_its_tables_and_nothing_else(tmp_path):
     assert r.status_code == 200 and r.json() == [{"n": 7}]
     assert client.post("/api/serve/query", json={"sql": "SELECT count(*) AS n FROM sales_v1.revenue"},
                        headers=h).json()["rows"] == [[7]]
-    # Not an exposed table outside its list, not a hidden one, not the files underneath.
-    for sql in ("SELECT * FROM daily", "SELECT * FROM sales.secret_internal",
+    assert client.post("/api/query", json={"sql": "SELECT count(*) AS n FROM daily"}, headers=h).json() == [{"n": 2}]
+    # Not a hidden table, nor the files underneath.
+    for sql in ("SELECT * FROM sales.secret_internal",
                 f"SELECT * FROM read_parquet('{tmp_path}/ponds/sales/m1/data/secret_internal.parquet')"):
         assert client.post("/api/query", json={"sql": sql}, headers=h).status_code == 400
     # Another Pond named is refused; so is every route but the query ones.
@@ -149,7 +148,7 @@ def test_a_tap_key_reads_only_its_tables_and_nothing_else(tmp_path):
     # The catalog lists its own Pond and tables only.
     cat = client.get("/api/serve", headers=h).json()
     assert [p["name"] for p in cat["ponds"]] == ["sales"]
-    assert [t["table"] for t in cat["ponds"][0]["tables"]] == ["revenue"]
+    assert sorted(t["table"] for t in cat["ponds"][0]["tables"]) == ["daily", "revenue"]
     # Managing Taps takes a full key.
     assert client.get("/api/ponds/sales/taps", headers=_bearer(ladder["read"])).status_code == 403
     assert client.get("/api/ponds/sales/taps", headers=_bearer(ladder["full"])).status_code == 200
@@ -202,35 +201,36 @@ def test_a_tap_key_works_on_an_open_catchment(tmp_path):
 def test_add_validates(tmp_path):
     client, driver, _ = _setup(tmp_path)
     assert client.post("/api/ponds/sales/taps", json={"name": "bad name"}).status_code == 422
-    assert client.post("/api/ponds/sales/taps", json={"name": "a", "wait_ms": 0}).status_code == 422
     assert client.post("/api/ponds/sales/taps", json={"name": "a"}).status_code == 200
     assert client.post("/api/ponds/sales/taps", json={"name": "a"}).status_code == 422  # duplicate
 
 
-# ─── waiting ─────────────────────────────────────────────────────────────────
+# ─── freshness ───────────────────────────────────────────────────────────────
 
 
-def test_a_waiting_query_is_served_once_its_refresh_lands(tmp_path):
-    client, driver, _ = _setup(tmp_path)
-    _, key = driver.add_tap(KEY, "app", wait=timedelta(seconds=5))
-    threading.Timer(0.5, _finish_run, args=(driver,)).start()
-    t0 = time.monotonic()
-    assert client.post("/api/query", json={"sql": "SELECT 1 AS x"}, headers=_bearer(key)).status_code == 200
-    assert 0.4 < time.monotonic() - t0 < 4
-    # Fresh now (fresh_within 0 and the Run landed at the query's instant or later): no wait, but a new Run.
-    t0 = time.monotonic()
-    with driver.lock:
-        driver.state.pond_states[KEY].is_failed = True  # can't get fresher: served at once
-    client.post("/api/query", json={"sql": "SELECT 1 AS x"}, headers=_bearer(key))
-    assert time.monotonic() - t0 < 1
+def test_the_freshness_route_tells_an_app_how_current_its_data_is(tmp_path):
+    from datetime import datetime, timezone
 
+    client, driver, ladder = _setup(tmp_path, keys=True)
+    _, key = driver.add_tap(KEY, "app")
+    sidecar = tmp_path / "ponds" / "sales" / "m1" / "data" / "_trickle.json"
+    sidecar.write_text('{"revenue": {"mode": "overwrite", "f": "2026-10-17T06:00:00+00:00"}, '
+                       '"secret_internal": {"mode": "overwrite", "f": "2026-10-17T06:00:00+00:00"}}')
 
-def test_a_waiting_query_times_out_and_serves_what_there_is(tmp_path):
-    client, driver, _ = _setup(tmp_path)
-    _, key = driver.add_tap(KEY, "app", wait=timedelta(seconds=1))
-    t0 = time.monotonic()
-    r = client.post("/api/query", json={"sql": "SELECT count(*) AS n FROM revenue"}, headers=_bearer(key))
-    assert r.json() == [{"n": 7}] and 0.9 < time.monotonic() - t0 < 4
+    fr = client.get("/api/ponds/sales/freshness", headers=_bearer(key)).json()  # never run
+    assert (fr["freshness"], fr["changed"], fr["refreshing"]) == (None, None, False)
+    client.post("/api/query", json={"sql": "SELECT 1"}, headers=_bearer(key))  # the Tap's query starts a Run
+    assert client.get("/api/ponds/sales/freshness", headers=_bearer(key)).json()["refreshing"] is True
+    _finish_run(driver)
+    fr = client.get("/api/ponds/sales/freshness", headers=_bearer(key)).json()
+    assert fr["refreshing"] is False and datetime.fromisoformat(fr["freshness"]) <= datetime.now(timezone.utc)
+    assert fr["freshness"] == fr["changed"]
+    # A Tap's key sees its Pond's exposed tables, and no Objects; it can't ask about another Pond.
+    assert fr["tables"] == {"revenue": "2026-10-17T06:00:00+00:00"} and "objects" not in fr
+    assert client.get("/api/ponds/other/freshness", headers=_bearer(key)).status_code == 403
+    # A full key sees every table, and the Objects.
+    fr = client.get("/api/ponds/sales/freshness", headers=_bearer(ladder["full"])).json()
+    assert set(fr["tables"]) == {"revenue", "secret_internal"} and fr["objects"] == {}
 
 
 # ─── the wires ───────────────────────────────────────────────────────────────
@@ -241,7 +241,7 @@ def test_the_pg_wire_takes_a_tap_key_as_the_password(tmp_path):
     from duckstring.catchment.pg_wire import PgWireServer
 
     _, driver, ladder = _setup(tmp_path, keys=True)
-    _, key = driver.add_tap(KEY, "app", tables=["revenue"])
+    _, key = driver.add_tap(KEY, "app")
     server = PgWireServer(driver, host="127.0.0.1", port=0)
     port = server.start()
     try:
@@ -249,7 +249,7 @@ def test_the_pg_wire_takes_a_tap_key_as_the_password(tmp_path):
         assert conn.run("SELECT count(*) FROM revenue") == [[7]]
         from pg8000.native import DatabaseError
         with pytest.raises(DatabaseError):
-            conn.run("SELECT * FROM daily")
+            conn.run("SELECT * FROM secret_internal")
         conn.close()
         # Two queries: one started a Run, the other queued a request behind it.
         assert driver.list_taps(KEY)[0]["refresh_count"] == 2
@@ -267,7 +267,7 @@ def test_flight_takes_a_tap_key_as_the_bearer(tmp_path):
     from duckstring.catchment.flight_sql import FlightSqlServer
 
     _, driver, _ = _setup(tmp_path, keys=True)
-    _, key = driver.add_tap(KEY, "app", tables=["revenue"])
+    _, key = driver.add_tap(KEY, "app")
     server = FlightSqlServer(driver, host="127.0.0.1", port=0)
     server.start()
     try:
@@ -285,7 +285,7 @@ def test_flight_takes_a_tap_key_as_the_bearer(tmp_path):
 
 def test_counters_are_flushed_and_taps_survive_a_reload(tmp_path):
     _, driver, _ = _setup(tmp_path)
-    _, key = driver.add_tap(KEY, "app", fresh_within=timedelta(minutes=5), tables=["revenue"])
+    _, key = driver.add_tap(KEY, "app", fresh_within=timedelta(minutes=5))
     driver.tap_query(auth.TapScope(KEY, "app"))
     row = driver.db.execute("SELECT query_count FROM pond_tap").fetchone()
     assert row == (0,)  # not written per query
@@ -295,7 +295,7 @@ def test_counters_are_flushed_and_taps_survive_a_reload(tmp_path):
     fresh = Driver(driver.db, tmp_path, "http://x", NoopLauncher())
     assert fresh.tap_for_hash(auth.hash_key(key)) == auth.TapScope(KEY, "app")
     (tap,) = fresh.list_taps(KEY)
-    assert (tap["fresh_within_ms"], tap["tables"], tap["query_count"]) == (300000, ["revenue"], 1)
+    assert (tap["fresh_within_ms"], tap["query_count"]) == (300000, 1)
 
 
 def test_status_and_metrics_show_taps_but_never_keys(tmp_path):
@@ -333,13 +333,13 @@ def test_cli_tap_roundtrip(runner, live_catchment):
 
     _deploy_outlet(live_catchment)  # registers 'dev' as the default catchment
 
-    res = runner.invoke(cli_app, ["refresh", "tap", "add", "sales", "--name", "app", "--fresh-within", "5m", "--wait", "30s"])
+    res = runner.invoke(cli_app, ["refresh", "tap", "add", "sales", "--name", "app", "--fresh-within", "5m"])
     assert res.exit_code == 0, res.output
     key = re.search(r"tap_\S+", res.output).group(0)
 
     res = runner.invoke(cli_app, ["refresh", "tap", "ls", "sales"])
     assert res.exit_code == 0, res.output
-    assert "app" in res.output and "5m" in res.output and "30s" in res.output and "never" in res.output
+    assert "app" in res.output and "5m" in res.output and "never" in res.output
 
     res = runner.invoke(cli_app, ["refresh", "tap", "rotate", "sales", "app"])
     assert res.exit_code == 0, res.output

@@ -58,8 +58,6 @@ export interface RefreshView {
 export interface TapView {
   name: string;
   freshWithinMs: number; // 0 = every query
-  waitMs: number | null; // null = answered at once
-  tables: string[] | null; // null = all exposed tables
   lastQueryAt: number | null; // ms epoch
   queryCount: number;
   refreshCount: number;

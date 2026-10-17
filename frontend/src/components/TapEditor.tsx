@@ -108,22 +108,15 @@ function AddTapModal({ pond, onClose }: { pond: Pond; onClose: () => void }) {
   const [name, setName] = useState('');
   const [fresh, setFresh] = useState('0');
   const [freshUnit, setFreshUnit] = useState<FreqUnit>('MINUTE');
-  const [wait, setWait] = useState('');
-  const [waitUnit, setWaitUnit] = useState<FreqUnit>('SECOND');
-  const [tables, setTables] = useState('');
   const [key, setKey] = useState<string | null>(null);
   const { busy, err, run } = useRun();
   const fld: React.CSSProperties = { ...numInput, width: '100%', boxSizing: 'border-box' };
 
   const add = () =>
     run(async () => {
-      const waitN = parseInt(wait, 10);
-      const list = tables.split(',').map((t) => t.trim()).filter(Boolean);
       const resp = await addTap(pond.id, {
         name: name.trim(),
         fresh_within_ms: Math.max(0, parseInt(fresh, 10) || 0) * UNIT_SECONDS[freshUnit] * 1000,
-        wait_ms: wait && waitN > 0 ? waitN * UNIT_SECONDS[waitUnit] * 1000 : null,
-        tables: list.length ? list : null,
       });
       setKey(resp.key);
     });
@@ -144,17 +137,6 @@ function AddTapModal({ pond, onClose }: { pond: Pond; onClose: () => void }) {
             <select value={freshUnit} onChange={(e) => setFreshUnit(e.target.value as FreqUnit)} style={selectInput}>
               {UNITS.map((u) => <option key={u.value} value={u.value}>{u.label}</option>)}
             </select>
-          </div>
-          <div style={row}>
-            <span style={lab}>Wait</span>
-            <input type="number" min="0" value={wait} onChange={(e) => setWait(e.target.value)} placeholder="no" style={numInput} />
-            <select value={waitUnit} onChange={(e) => setWaitUnit(e.target.value as FreqUnit)} style={selectInput}>
-              {UNITS.map((u) => <option key={u.value} value={u.value}>{u.label}</option>)}
-            </select>
-          </div>
-          <div style={row}>
-            <span style={lab}>Tables</span>
-            <input value={tables} onChange={(e) => setTables(e.target.value)} placeholder="blank = all exposed" style={fld} />
           </div>
           {err && <div style={{ fontSize: 11, color: THEME_DANGER, wordBreak: 'break-word' }}>{err}</div>}
           <div>
@@ -181,8 +163,6 @@ function TapDetailModal({ pond, tap, onClose }: { pond: Pond; tap: TapView; onCl
   return (
     <Modal title={tap.name} onClose={onClose}>
       {line('Fresh within', tap.freshWithinMs ? duration(tap.freshWithinMs) : 'every query')}
-      {line('Wait', tap.waitMs ? duration(tap.waitMs) : 'no')}
-      {line('Tables', tap.tables ? tap.tables.join(', ') : 'all exposed')}
       {line('Last query', tap.lastQueryAt ? `${formatAge(tap.lastQueryAt, now)} ago` : 'never')}
       {line('Use', `${plural(tap.queryCount, 'query', 'queries')}, ${plural(tap.refreshCount, 'refresh', 'refreshes')}`)}
       {key && <KeyBox value={key} />}

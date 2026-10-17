@@ -46,18 +46,22 @@ Upgrading:
 
 ### Taps: freshness that follows usage
 
-A **Tap** is an access point on a Pond for one app: `duckstring refresh tap add reports --name dashboard --fresh-within 5m
-[--wait 30s] [--tables a,b]`. It has its own key, shown once, which can only query the Tap's tables (its Pond's
-exposed tables, or fewer), over HTTP (`/api/query`, `/api/serve/query`), the Postgres wire or Arrow Flight, and is
-refused everywhere else. A query through it sends the Pond a Refresh when the newest request on the Pond, or the
+A **Tap** is an access point on a Pond for one app: `duckstring refresh tap add reports --name dashboard --fresh-within
+5m`. It has its own key, shown once, which reads the Pond's exposed tables (as a read-level key does) over HTTP
+(`/api/query`, `/api/serve/query`), the Postgres wire or Arrow Flight, and is refused everywhere else. A query through it sends the Pond a Refresh when the newest request on the Pond, or the
 data, is at least `--fresh-within` old (the `--every` clock, checked per query; `0`, the default, refreshes on every
 query unless a request is already waiting), so the pipeline keeps up while the app is in use and goes quiet when it
-isn't. `--wait` holds a query until the data is that fresh. Queries with any other key never send demand.
+isn't. A query is always answered at once from what is published. Queries with any other key never send demand.
 
 - `refresh tap ls|rm|rotate POND`; the routes `/api/ponds/{name}/taps` (full). The web UI lists a Pond's Taps at the
   foot of its Refresh section, adds them in a modal, and shows a Tap's details, Rotate and Delete when clicked.
 - `/metrics` gains `duckstring_tap_queries_total` and `duckstring_tap_refreshes_total`; `/api/status` lists each
   Pond's `taps` (never keys).
+- **`GET /api/ponds/{name}/freshness`** says how fresh a Pond's data is: `freshness` (the point in time it
+  reflects), `changed` (when its output last changed), `refreshing`, and when each table and Object last changed. A
+  Tap's key can call it for its own Pond, and `Catchment.freshness()` wraps it. It replaces a route of the same name
+  that the HTTP reference described as the Pond's freshness but that listed a Trickle table's run freshnesses for
+  the data viewer; that list moved to `/api/ponds/{name}/tables/{table}/runs`.
 - The Python `Catchment` client takes a Tap's key as `api_key`, and then needs no `pond`.
 - The demo `reports` exposes `monthly_summary` (`[serve] tables`), so a Tap on it works out of the box.
 - Migration `032` (`pond_tap`).

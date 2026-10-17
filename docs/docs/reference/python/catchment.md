@@ -63,6 +63,16 @@ Fetches a whole table. Equivalent to `query('SELECT * FROM "table"')`.
 
 **Raises** `ValueError` with no table given.
 
+### `freshness`
+
+```python
+c.freshness(pond=None) -> dict
+```
+
+How fresh a Pond's data is, from `GET /api/ponds/{name}/freshness`: `freshness` (the point in time its data reflects, ISO 8601), `changed` (when its output last changed), `refreshing` (whether a refresh is under way) and `tables` (when each table last changed). `pond` defaults to `default_pond`, or with a Tap's key, the Tap's Pond. Asking doesn't send a Refresh.
+
+**Raises** `RuntimeError` when the Catchment returns an error.
+
 ### `tables`
 
 ```python

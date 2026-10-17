@@ -448,6 +448,28 @@ class Catchment:
             raise ValueError("no table given — pass table=... or define the puddle on a 'source.table' target")
         return self.query(f'SELECT * FROM "{target_table}"', pond=pond)
 
+    def freshness(self, pond: str | None = None) -> dict:
+        """How fresh a Pond's data is: ``freshness`` (the point in time its data reflects, ISO 8601), ``changed``
+        (when its output last changed), ``refreshing`` (whether a refresh is under way), and ``tables`` (when each
+        table last changed). ``pond`` defaults to ``default_pond``, or with a Tap's key, the Tap's Pond. Raises
+        ``RuntimeError`` when the Catchment returns an error."""
+        target = self._pond(pond)
+        if target is None:  # a Tap's key: the catalog it can see names its one Pond
+            target = self._get("/api/serve")["ponds"][0]["name"]
+        return self._get(f"/api/ponds/{target}/freshness")
+
+    def _get(self, path: str) -> dict:
+        import httpx
+
+        resp = httpx.get(f"{self.url}{path}", headers=self.headers, timeout=httpx.Timeout(30.0, connect=5.0))
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text[:300]
+            raise RuntimeError(f"Catchment request failed ({resp.status_code}): {detail}")
+        return resp.json()
+
     def tables(self, pond: str | None = None) -> list[str]:
         """The names of a Pond's published tables."""
         rows = self._post_query({"pond": self._pond(pond), "sql": "SHOW TABLES"}).json()

@@ -203,10 +203,10 @@ class PgWireServer:
     def _run(self, principal: auth.Principal, sql: str, params=None, *, gate: bool = False):
         """Run one statement. ``gate`` (an executed query, not a Describe) applies a Tap's policy first."""
         from .serving import _cache
-        from .taps import gate_blocking
+        from .taps import apply_tap
 
         if gate and principal.tap is not None:
-            gate_blocking(self.driver, principal.tap)
+            apply_tap(self.driver, principal.tap)
         sandboxed = principal.tap is not None or principal.level < auth.Level.FULL
         cur = _cache(self.driver).connection(self.driver, sandboxed=sandboxed, tap=principal.tap).cursor()
         cur.execute(sql, params or [])

@@ -77,13 +77,13 @@ class FlightSqlServer(flight.FlightServerBase):
         return flight.FlightInfo(table.schema, descriptor, [endpoint], table.num_rows, -1)
 
     def do_get(self, context, ticket):
-        from .taps import gate_blocking
+        from .taps import apply_tap
 
         sql = ticket.ticket.decode("utf-8")
         principal = self._principal(context)
         if principal.tap is not None:
             try:
-                gate_blocking(self.driver, principal.tap)
+                apply_tap(self.driver, principal.tap)
             except KeyError:
                 raise flight.FlightUnauthenticatedError("invalid or missing API key") from None
         table = self._arrow(principal, sql)

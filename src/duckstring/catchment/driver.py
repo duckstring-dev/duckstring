@@ -3660,6 +3660,21 @@ class Driver(TapsMixin):
                 bounds.append(datetime.fromisoformat(pin) if pin else run_f)
         return _iso(min(bounds)) if bounds else None
 
+    def pond_freshness(self, key: str) -> dict:
+        """A Pond line's freshness for ``GET /api/ponds/{name}/freshness``: the point in time its data reflects
+        (``end_f``), when its output last changed (``changed_f``; a no-change pass advances only ``end_f``), and
+        whether a refresh is under way (a Run in flight, or a request not yet met). Raises KeyError."""
+        from ..engine import min_demand
+
+        with self.lock:
+            ps = self.state.pond_states[key]
+            pending = min_demand(ps.demand)
+            return {
+                "freshness": _iso(ps.end_f) if ps.end_f != NEVER else None,
+                "changed": _iso(ps.changed_f) if ps.changed_f != NEVER else None,
+                "refreshing": ps.start_f > ps.end_f or (pending is not None and pending > ps.end_f),
+            }
+
     def published_f(self, name: str, major: int) -> str | None:
         """The freshness this Catchment believes ``name@major`` has PUBLISHED — its ``changed_f`` (the
         content anchor: a pass advances end_f without writing anything). Passed to ``resolve_data_dir``

@@ -3,8 +3,10 @@
 A Tap has its own key, so a query is classified by the credential it arrives with: the Tap's key means the
 Tap's app, and every other key (the web UI's, the CLI's, a notebook's) never sends demand. A query through a
 Tap may send the Pond a Refresh, by the floating Refresh's clock evaluated per query (``engine.tap_due``): due
-once the newest request, or with none pending the freshness, is ``fresh_within`` old. With ``wait`` set, the
-query waits (up to that long) for data that fresh before it is served.
+once the newest request, or with none pending the freshness, is ``fresh_within`` old. The query itself is
+answered at once from what is published; an app reads the freshness it got from ``/api/ponds/{name}/freshness``.
+A Tap's key reads the Pond line's exposed tables: what it may read is the serving core's business, and a Tap only
+decides when the Pond refreshes.
 
 The Driver mixes this in. Taps live in memory (``self._taps``, plus a key-hash index read without the lock by
 auth on every request) and in ``pond_tap``; the per-Tap counters are observability only and are written in
@@ -13,14 +15,12 @@ batches from the scheduler tick, so a busy app doesn't serialise on the Catchmen
 
 from __future__ import annotations
 
-import json
 import re
 import secrets
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from ..engine import refresh_now, tap_due, tap_wait_target
+from ..engine import refresh_now, tap_due
 from .auth import TapScope, hash_key
 
 TAP_KEY_PREFIX = "tap_"
@@ -42,8 +42,6 @@ class Tap:
     name: str
     key_hash: str
     fresh_within: timedelta
-    wait: timedelta | None
-    tables: list[str] | None     # None = every exposed table of the Pond
     created_at: str
     last_query_at: datetime | None = None
     query_count: int = 0
@@ -58,8 +56,6 @@ class Tap:
         return {
             "name": self.name,
             "fresh_within_ms": int(self.fresh_within.total_seconds() * 1000),
-            "wait_ms": int(self.wait.total_seconds() * 1000) if self.wait is not None else None,
-            "tables": list(self.tables) if self.tables is not None else None,
             "created_at": self.created_at,
             "last_query_at": self.last_query_at.isoformat() if self.last_query_at else None,
             "query_count": self.query_count,
@@ -77,8 +73,8 @@ class TapsMixin:
         not yet flushed survive a reload."""
         old = getattr(self, "_taps", {})
         taps: dict[tuple[str, str], Tap] = {}
-        for (pond_id, name, key_hash, fresh_ms, wait_ms, tables, created, last_q, n_q, n_r) in self.db.execute(
-            "SELECT pond_id, name, key_hash, fresh_within_ms, wait_ms, tables, created_at, last_query_at, "
+        for (pond_id, name, key_hash, fresh_ms, created, last_q, n_q, n_r) in self.db.execute(
+            "SELECT pond_id, name, key_hash, fresh_within_ms, created_at, last_query_at, "
             "query_count, refresh_count FROM pond_tap ORDER BY pond_id, name"
         ):
             key = pondid_to_key.get(pond_id)
@@ -86,8 +82,7 @@ class TapsMixin:
                 continue
             tap = Tap(
                 pond=key, name=name, key_hash=key_hash, fresh_within=timedelta(milliseconds=fresh_ms),
-                wait=timedelta(milliseconds=wait_ms) if wait_ms is not None else None,
-                tables=json.loads(tables) if tables else None, created_at=created,
+                created_at=created,
                 last_query_at=datetime.fromisoformat(last_q) if last_q else None,
                 query_count=n_q or 0, refresh_count=n_r or 0,
             )
@@ -113,22 +108,15 @@ class TapsMixin:
 
     # ─── CRUD ─────────────────────────────────────────────────────────────────
 
-    def add_tap(self, pond: str, name: str, *, fresh_within: timedelta = timedelta(0),
-                wait: timedelta | None = None, tables: list[str] | None = None) -> tuple[dict, str]:
+    def add_tap(self, pond: str, name: str, *, fresh_within: timedelta = timedelta(0)) -> tuple[dict, str]:
         """Add a Tap to a Pond line and return it with its key (shown once; only its hash is kept). Raises
-        ValueError on a bad name, a duplicate, a negative period, a Spout, or an empty table list."""
+        ValueError on a bad name, a duplicate, a negative period or a Spout."""
         name = (name or "").strip()
         if not _NAME_RE.match(name):
             raise ValueError("a Tap's name is letters, digits, '.', '_' or '-' (up to 64), starting with a letter "
                              "or digit")
         if fresh_within < timedelta(0):
             raise ValueError("--fresh-within can't be negative")
-        if wait is not None and wait <= timedelta(0):
-            raise ValueError("--wait needs a positive timeout")
-        if tables is not None:
-            tables = sorted({t.strip() for t in tables if t and t.strip()})
-            if not tables:
-                raise ValueError("--tables needs at least one table name")
         with self.lock:
             meta = self.meta[pond]
             if meta.get("is_spout"):
@@ -138,11 +126,8 @@ class TapsMixin:
             key = mint_tap_key()
             created = _now().isoformat()
             self.db.execute(
-                "INSERT INTO pond_tap (pond_id, name, key_hash, fresh_within_ms, wait_ms, tables, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (meta["pond_id"], name, hash_key(key), int(fresh_within.total_seconds() * 1000),
-                 int(wait.total_seconds() * 1000) if wait is not None else None,
-                 json.dumps(tables) if tables is not None else None, created),
+                "INSERT INTO pond_tap (pond_id, name, key_hash, fresh_within_ms, created_at) VALUES (?, ?, ?, ?, ?)",
+                (meta["pond_id"], name, hash_key(key), int(fresh_within.total_seconds() * 1000), created),
             )
             self.db.commit()
             self._reload_taps()
@@ -187,19 +172,17 @@ class TapsMixin:
     # ─── Scope ────────────────────────────────────────────────────────────────
 
     def tap_tables(self, scope: TapScope) -> set[str]:
-        """The tables a Tap may read: the Pond line's exposed tables, limited to the Tap's list. A Tap never
-        widens what the serving core exposes."""
+        """The tables a Tap's key may read: its Pond line's exposed tables, as for any read-level key."""
         with self.lock:
-            tap = self._tap(scope)
-            exposed = self.serviceable(scope.pond)
-            return exposed if tap.tables is None else exposed & set(tap.tables)
+            self._tap(scope)
+            return self.serviceable(scope.pond)
 
     # ─── The policy, per query ────────────────────────────────────────────────
 
-    def tap_query(self, scope: TapScope) -> datetime | None:
-        """A query arrived through a Tap: count it, send the Pond a Refresh if its clock says so, and return the
-        freshness the query should wait for (None to serve at once: no ``wait``, or the data is already fresh
-        enough). Raises KeyError when the Tap has gone (removed or rotated mid-request)."""
+    def tap_query(self, scope: TapScope) -> bool:
+        """A query arrived through a Tap: count it, and send the Pond a Refresh if its clock says so (returned).
+        The query is answered at once either way. Raises KeyError when the Tap has gone (removed or rotated
+        mid-request)."""
         with self.lock:
             tap = self._tap(scope)
             now = _now()
@@ -207,29 +190,13 @@ class TapsMixin:
             tap.last_query_at = now
             tap.dirty = True
             if scope.pond not in self.state.pond_states:
-                return None
+                return False
             sent = tap_due(self.state, scope.pond, now, tap.fresh_within)
             if sent:
                 tap.refresh_count += 1
                 self.state = refresh_now(self.state, scope.pond, now)
                 self._process(now)
-            if tap.wait is None:
-                return None
-            return tap_wait_target(self.state, scope.pond, now, tap.fresh_within, sent)
-
-    def tap_wait_timeout(self, scope: TapScope) -> float:
-        with self.lock:
-            tap = self._tap(scope)
-            return tap.wait.total_seconds() if tap.wait is not None else 0.0
-
-    def tap_ready(self, scope: TapScope, target: datetime) -> bool:
-        """Whether a waiting Tap query can be served: the data reached ``target``, or the Pond can't get there
-        (failed, killed or blocked), or the Tap has gone."""
-        with self.lock:
-            ps = self.state.pond_states.get(scope.pond)
-            if ps is None or (scope.pond, scope.name) not in self._taps:
-                return True
-            return ps.end_f >= target or ps.is_failed or ps.is_killed or ps.is_blocked
+            return sent
 
     # ─── Counters ─────────────────────────────────────────────────────────────
 
@@ -260,18 +227,10 @@ class TapsMixin:
                     for t in self._taps.values() if t.pond in self.meta]
 
 
-_WAIT_TICK = 0.1  # how often a waiting Tap query re-checks the Pond's freshness
+def apply_tap(driver, scope: TapScope) -> None:
+    """The Tap step every front door runs before answering a query through a Tap (HTTP, the pg and Flight wires).
+    Raises KeyError for a Tap that has gone."""
+    driver.tap_query(scope)
 
 
-def gate_blocking(driver, scope: TapScope) -> None:
-    """The Tap step for a thread-based front door (the pg and Flight wires): apply the Tap's policy, then wait
-    if it says so. The HTTP routes use the async ``routes.tap.tap_gate``. Raises KeyError for a gone Tap."""
-    target = driver.tap_query(scope)
-    if target is None:
-        return
-    deadline = time.monotonic() + driver.tap_wait_timeout(scope)
-    while not driver.tap_ready(scope, target) and time.monotonic() < deadline:
-        time.sleep(_WAIT_TICK)
-
-
-__all__ = ["TAP_KEY_PREFIX", "Tap", "TapsMixin", "gate_blocking", "mint_tap_key"]
+__all__ = ["TAP_KEY_PREFIX", "Tap", "TapsMixin", "apply_tap", "mint_tap_key"]

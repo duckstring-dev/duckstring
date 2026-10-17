@@ -875,22 +875,28 @@ def test_continuous_refresh_then_remove(runtime):
 
 
 def test_a_tap_keeps_reports_fresh_while_an_app_queries_it(runtime):
-    """An app querying ``reports`` through a Tap (plans/taps.md), with the Python client and the Tap's key:
-    its first query waits for the pipeline to run, and the Tap's later queries ride on that freshness."""
+    """An app querying ``reports`` through a Tap (plans/taps.md), with the Python client and the Tap's key: its
+    first query sends the pipeline a Refresh, the app watches the freshness route until the data lands, and the
+    Tap's later queries ride on that freshness."""
     from duckstring import Catchment
 
     url, root = runtime
     _deploy_demo(url)
-    resp = httpx.post(f"{url}/api/ponds/reports/taps",
-                      json={"name": "dashboard", "fresh_within_ms": 3_600_000, "wait_ms": 40_000}, timeout=5.0)
+    resp = httpx.post(f"{url}/api/ponds/reports/taps", json={"name": "dashboard", "fresh_within_ms": 3_600_000},
+                      timeout=5.0)
     assert resp.status_code == 200, resp.text
     app = Catchment(url, api_key=resp.json()["key"])
 
-    assert app.tables() == ["monthly_summary"]  # the Tap's tables, with no Pond named
-    rows = app.query("SELECT count(*) AS n FROM monthly_summary").fetchone()[0]
-    assert rows > 0
+    assert app.freshness()["freshness"] is None  # asking how fresh the data is sends nothing
+    assert app.query("SELECT 1 AS x").fetchone() == (1,)  # answered at once; the pipeline starts
+    assert _wait(lambda: (lambda f: f["freshness"] is not None and not f["refreshing"])(app.freshness())), \
+        "reports never became fresh"
+    fr = app.freshness()
+    assert list(fr["tables"]) == ["monthly_summary"] and fr["changed"] == fr["freshness"]
+    assert app.tables() == ["monthly_summary"]
+    assert app.query("SELECT count(*) AS n FROM monthly_summary").fetchone()[0] > 0
     reports = _pond_status(url, "reports")
-    assert reports["end_f"] is not None and reports["taps"][0]["refresh_count"] == 1
+    assert reports["taps"][0]["refresh_count"] == 1
 
     for _ in range(3):  # fresh within the hour: answered from what is published, with no new Run
         app.get("monthly_summary")

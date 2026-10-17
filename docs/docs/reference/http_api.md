@@ -35,7 +35,7 @@ Keys come in three levels, each including the ones before it:
 
 A missing or unrecognised key gets `401`; a key below the route's level gets `403`. Tracebacks in run history are only returned to `full` keys; lower levels get the error message alone.
 
-A [Tap](../guides/serving_apps_with_taps.md)'s key is a fourth kind, outside the levels. It is accepted only by `/api/query`, `/api/serve/query` and `/api/serve`, where it reads the Tap's tables and may send its Pond a Refresh, and gets `403` everywhere else. It works on an open Catchment too.
+A [Tap](../guides/serving_apps_with_taps.md)'s key is a fourth kind, outside the levels. It is accepted only by `/api/query`, `/api/serve/query`, `/api/serve` and its own Pond's `/freshness`, where it reads the Pond's exposed tables (as a read-level key does) and its queries may send the Pond a Refresh, and gets `403` everywhere else. It works on an open Catchment too.
 
 ## Conventions
 
@@ -95,7 +95,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | GET | `/api/view` | read | The Pond graph, including Ponds in upstream Catchments reached through ducts. |
 | GET | `/api/lineage` | read | Observed table lineage. Parameters: `pond`, `major`, `table`, `columns`. |
 | GET | `/api/ponds/{name}/trace` | read | The run that produced some rows. Parameters: `table`, `where`. |
-| GET | `/api/ponds/{name}/freshness` | read | The Pond's current freshness. |
+| GET | `/api/ponds/{name}/freshness` | read, Tap | How fresh the Pond's data is: `freshness` (the point in time it reflects), `changed` (when its output last changed), `refreshing`, and when each table and Object last changed. Read-level keys see exposed tables only; a Tap's key, its own Pond's, without Objects. |
 
 ### Refreshes and windows
 
@@ -135,6 +135,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 |---|---|---|---|
 | POST | `/api/query` | read, Tap | Run SQL against one Pond's tables. Body: `pond`, `sql`, optional `major`, `version`, `format` (`json`, `csv` or `parquet`). With a Tap's key, `pond` can be left out. |
 | POST | `/api/query/page`, `/api/query/count`, `/api/query/history` | read | Paged reads used by the web UI's data viewer. |
+| GET | `/api/ponds/{name}/tables/{table}/runs` | read | The run freshnesses of a Trickle table, used by the data viewer's window selector. |
 | GET | `/api/ponds/{name}/tables` | read | List published tables. |
 | GET | `/api/ponds/{name}/ripples/{table}` | read | Download a table's published files as a zip. |
 | DELETE | `/api/ponds/{name}/tables/{table}` | full | Delete a table. |
@@ -146,8 +147,8 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| GET | `/api/serve` | read, Tap | Served majors and exposed tables. A Tap's key sees its own Pond and tables. |
-| POST | `/api/serve/query` | read, Tap | Run SQL across the catalog. Read-level keys see only exposed tables; a Tap's key, only its own. |
+| GET | `/api/serve` | read, Tap | Served majors and exposed tables. A Tap's key sees its own Pond. |
+| POST | `/api/serve/query` | read, Tap | Run SQL across the catalog. Read-level keys see only exposed tables; a Tap's key, only its own Pond's. |
 | POST | `/api/ponds/{name}/serve/promote` | full | Change the served major. |
 | POST | `/api/ponds/{name}/serve/expose` | full | Expose or hide a table. |
 
@@ -166,7 +167,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | Method | Path | Level | Description |
 |---|---|---|---|
 | GET | `/api/ponds/{name}/taps` | full | List Taps, with their counts. Never keys. |
-| POST | `/api/ponds/{name}/taps` | full | Add a Tap. Body: `name`, optional `fresh_within_ms`, `wait_ms`, `tables`. The response holds the key, once. |
+| POST | `/api/ponds/{name}/taps` | full | Add a Tap. Body: `name`, optional `fresh_within_ms`. The response holds the key, once. |
 | POST | `/api/ponds/{name}/taps/{tap}/rotate` | full | A new key for a Tap, returned once. |
 | POST | `/api/ponds/{name}/taps/{tap}/remove` | full | Remove a Tap. |
 

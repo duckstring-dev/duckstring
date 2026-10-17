@@ -407,7 +407,7 @@ def test_tables_flags_trickle_mode_and_pk(catchment_client, tmp_path, monkeypatc
 
 def test_freshness_lists_incremental_runs(catchment_client, tmp_path, monkeypatch):
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
-    fr = catchment_client.get("/api/ponds/p/freshness?table=priced").json()
+    fr = catchment_client.get("/api/ponds/p/tables/priced/runs").json()
     # The main is log-structured, so the bootstrap (f1) writes the changelog too — both runs show
     # (newest first); floor anchors at f1.
     assert len(fr["freshness"]) == 2
@@ -478,7 +478,7 @@ def test_merge_order_by_freshness(catchment_client, tmp_path, monkeypatch):
 
 def test_merge_window_shows_only_changed_records(catchment_client, tmp_path, monkeypatch):
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
-    f2 = catchment_client.get("/api/ponds/p/freshness?table=priced").json()["freshness"][0]
+    f2 = catchment_client.get("/api/ponds/p/tables/priced/runs").json()["freshness"][0]
     page = catchment_client.post(
         "/api/query/page",
         json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"], "f_lo": f2, "f_hi": f2, "limit": 100},
@@ -565,7 +565,7 @@ def test_append_window_filters_by_freshness(catchment_client, tmp_path, monkeypa
     by = {t["name"]: t for t in catchment_client.get("/api/ponds/p/tables").json()["tables"]}
     assert by["orders"]["trickle"] == "append"
     # Append history records every run's freshness (no bootstrap exclusion).
-    fr = catchment_client.get("/api/ponds/p/freshness?table=orders").json()["freshness"]
+    fr = catchment_client.get("/api/ponds/p/tables/orders/runs").json()["freshness"]
     assert len(fr) == 2
     # Full history = 3 rows; windowed to the latest run = 1 row.
     full = catchment_client.post(

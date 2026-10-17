@@ -86,7 +86,7 @@ async def query(body: _QueryBody, request: Request,
     driver = _driver(request)
     sandboxed = not _is_full(principal)
     if principal.tap is not None:
-        await tap_gate(request, principal.tap)
+        tap_gate(request, principal.tap)
     sql = body.sql.strip().rstrip(";")
     if body.limit and body.limit > 0:
         sql = f"SELECT * FROM ({sql}) AS _q LIMIT {int(body.limit)}"

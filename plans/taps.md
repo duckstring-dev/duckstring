@@ -210,3 +210,9 @@ Revised 2026-10-17 after review: the CLI moved under `refresh` (`duckstring refr
 `refresh now POND` became explicit); `add` no longer warns when a Tap would read nothing (a Tap is a Refresh policy,
 not egress); the web UI moved Taps from a Pond's Options into its Refresh section (names only, details in a modal);
 and the canvas shows a Pond's Refreshes and Taps as a strip joined to its box instead of a pill.
+
+Revised again 2026-10-17: **Wait and per-Tap tables were removed.** A Tap decides only when its Pond refreshes:
+its key reads the Pond's exposed tables as any read-level key does (access control is a separate problem), and a
+query is always answered at once. To see whether data is current, an app calls the new
+`GET /api/ponds/{name}/freshness` (also open to a Tap's key for its own Pond; `Catchment.freshness()`), which
+replaced a route of that name that only served the data viewer's run list (now `/tables/{table}/runs`).

@@ -428,9 +428,50 @@ def delete_pond_object(
     return {"ok": True}
 
 
-@router.get("/ponds/{name}/freshness", dependencies=[auth.read])
+@router.get("/ponds/{name}/freshness", dependencies=[auth.read_or_tap])
 def pond_freshness(
-    name: str, request: Request, table: str,
+    name: str, request: Request, major: Optional[int] = None, version: Optional[str] = None,
+    principal: auth.Principal = Depends(auth.get_principal),
+):
+    """How fresh a Pond's data is: ``freshness``, the point in time its data reflects; ``changed``, when its
+    output last changed; ``refreshing``, whether a refresh is under way; and when each published table and Object
+    last changed. A read-level key sees the exposed tables only; a Tap's key may ask about its own Pond only (and
+    its tables), so an app can tell how current the data it reads is."""
+    from ...objects import list_objects
+
+    driver = request.app.state.driver
+    tap = principal.tap
+    if tap is not None:
+        meta = driver.meta.get(tap.pond) or {}
+        if meta.get("name") != name or (major is not None and major != meta.get("major")):
+            raise HTTPException(status_code=403, detail=f"this key belongs to a Tap on '{meta.get('name')}'")
+        key, m = tap.pond, meta["major"]
+    else:
+        from .orchestrate import _resolve
+
+        key = _resolve(request, name, major, version)
+        m = driver.meta[key]["major"]
+    out = {"pond": name, "major": m, **driver.pond_freshness(key)}
+    full = principal.level is not None and principal.level >= auth.Level.FULL
+    allowed = None if full else (driver.tap_tables(tap) if tap is not None else driver.serviceable(key))
+    from ...trickle.io import sidecar_tables
+
+    try:
+        tables = {t: e.get("f") for t, e in sidecar_tables(_sidecar(request, name, m)).items()}
+    except Exception:
+        tables = {}
+    out["tables"] = {t: f for t, f in sorted(tables.items()) if allowed is None or t in allowed}
+    if tap is None:
+        try:
+            out["objects"] = {n: e.get("f") for n, e in sorted(list_objects(_data_dir(request, name, m)).items())}
+        except Exception:
+            out["objects"] = {}
+    return out
+
+
+@router.get("/ponds/{name}/tables/{table}/runs", dependencies=[auth.read])
+def table_runs(
+    name: str, table: str, request: Request,
     major: Optional[int] = None, version: Optional[str] = None,
     principal: auth.Principal = Depends(auth.get_principal),
 ):
@@ -721,7 +762,7 @@ async def query(body: QueryRequest, request: Request, principal: auth.Principal 
         name = request.app.state.driver.meta.get(tap.pond, {}).get("name")
         if body.pond and body.pond != name:
             raise HTTPException(status_code=403, detail=f"this key belongs to a Tap on '{name}'")
-        await tap_gate(request, tap)
+        tap_gate(request, tap)
         return await run_in_threadpool(_tap_query, request, tap, body)
     if not body.pond:
         raise HTTPException(status_code=422, detail="name the Pond to query")
