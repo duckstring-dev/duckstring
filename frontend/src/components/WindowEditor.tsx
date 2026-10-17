@@ -26,7 +26,7 @@ const NO_WINDOWS: WindowRow[] = [];
 
 // `readOnly` (below full access) shows the window list but no add/remove controls — viewing an Inlet's
 // batch schedule is `read`-gated server-side; editing it is full only.
-export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; readOnly?: boolean; caption?: string }) {
+export function WindowEditor({ pond, readOnly = false }: { pond: Pond; readOnly?: boolean }) {
   const windows = useLiveStore((s) => s.windowsByPond[pond.id]) ?? NO_WINDOWS;
   const addWindow = useLiveStore((s) => s.addWindow);
   const removeWindow = useLiveStore((s) => s.removeWindow);
@@ -78,10 +78,6 @@ export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; 
 
   return (
     <>
-      <div style={{ fontSize: 10, color: '#52525b', marginBottom: 8, lineHeight: 1.5 }}>
-        {caption ?? 'When this batch source is available. None ⇒ live (always fresh).'}
-      </div>
-
       {windows.map((w) => (
         <div key={w.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
           <span style={{ fontSize: 12, color: '#a1a1aa' }}>{w.name}</span>
@@ -97,7 +93,7 @@ export function WindowEditor({ pond, readOnly = false, caption }: { pond: Pond; 
       ))}
 
       {readOnly && windows.length === 0 && (
-        <div style={{ fontSize: 12, color: '#52525b' }}>No windows — this source is live.</div>
+        <div style={{ fontSize: 12, color: '#52525b' }}>None.</div>
       )}
 
       {!readOnly && (

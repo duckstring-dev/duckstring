@@ -131,10 +131,6 @@ export function WindowEditor({ pond }: { pond: Pond }) {
 
   return (
     <>
-      <div style={{ fontSize: 10, color: '#52525b', marginBottom: 8, lineHeight: 1.5 }}>
-        When this batch source is available. Empty ⇒ live (always fresh).
-      </div>
-
       {windows.map((w, i) => (
         <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
           <span style={{ fontSize: 12, color: '#a1a1aa' }}>{w.name}</span>

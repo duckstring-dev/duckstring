@@ -250,7 +250,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
           {/* Windows (Inlet ponds only) */}
           {selectedPond.sources.length === 0 && (
             <Section>
-              <Label>Windows (batch source)</Label>
+              <Label>Windows</Label>
               <WindowEditor pond={selectedPond} />
             </Section>
           )}

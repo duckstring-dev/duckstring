@@ -169,8 +169,8 @@ function SpoutPanel({ pond, canControl }: { pond: Pond; canControl: boolean }) {
         </Section>
       )}
       <Section>
-        <Label>Windows · throttle</Label>
-        <WindowEditor pond={pond} readOnly={!canControl} caption="Throttle delivery to a window cadence. None ⇒ deliver on every source advance." />
+        <Label>Windows</Label>
+        <WindowEditor pond={pond} readOnly={!canControl} />
       </Section>
     </>
   );
@@ -784,7 +784,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
           {/* Windows (Inlet ponds only) */}
           {isInlet && (
             <Section>
-              <Label>Windows (batch source)</Label>
+              <Label>Windows</Label>
               <WindowEditor pond={selectedPond} readOnly={!canControl} />
             </Section>
           )}
