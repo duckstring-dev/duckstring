@@ -23,6 +23,18 @@ Key for Tap 'dashboard' on 'reports@1'. Copy this key now - it will only be show
   tap_3vQ0mJp...
 ```
 
+In the web UI, select the Pond and choose **Taps (Refresh on Request)** at the foot of its Refresh section:
+
+<figure class="ds-figure">
+  <img src="/img/docs/tap-add.webp" alt="The add-Tap dialog with the name dashboard and Fresh within 5 minutes" width="460" height="208" />
+  <figcaption>Adding a Tap in the web UI.</figcaption>
+</figure>
+
+<figure class="ds-figure">
+  <img src="/img/docs/tap-key.webp" alt="The new Tap's key, shown once with a Copy button" width="460" height="206" />
+  <figcaption>The key is shown once.</figcaption>
+</figure>
+
 The Catchment keeps only a hash of the key. Store it where the app keeps its other credentials. If it's lost or leaks, `duckstring refresh tap rotate reports dashboard` prints a new key and the old one stops working at once.
 
 The key reads the tables its Pond exposes to read-only users, like a read-level key (see [What read-only users see](querying.md#what-read-only-users-see)). The demo's `reports` exposes `monthly_summary` in its `pond.toml`.
@@ -102,7 +114,12 @@ duckstring refresh tap ls reports
  dashboard  1h            2m ago      214      9
 ```
 
-The Queries and Refreshes columns show how often the app reads and how often it actually caused a run. The same counts are on `/metrics` as `duckstring_tap_queries_total` and `duckstring_tap_refreshes_total`, and the web UI lists a Pond's Taps at the foot of its Refresh section, where clicking one shows these details.
+The Queries and Refreshes columns show how often the app reads and how often it actually caused a run. The same counts are on `/metrics` as `duckstring_tap_queries_total` and `duckstring_tap_refreshes_total`, and the web UI lists a Pond's Taps at the foot of its Refresh section, where clicking one shows these details:
+
+<figure class="ds-figure">
+  <img src="/img/docs/tap-detail.webp" alt="The dashboard Tap's details: fresh within 5 minutes, its last query, 14 queries and 0 refreshes, with Rotate and Delete" width="460" height="222" />
+  <figcaption>A Tap's details in the web UI. Here a continuous Refresh keeps the Pond fresh, so the app's queries haven't needed to refresh it.</figcaption>
+</figure>
 
 Remove a Tap when the app no longer needs it:
 

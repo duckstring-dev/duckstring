@@ -34,6 +34,18 @@ The web UI, at the Catchment's address, shows the same on the pipeline graph. Se
 
 A run fails when a Ripple raises an exception and has no retries left, when its Duck crashes or stops responding for a minute, or when its output breaks the major version's schema contract. Nothing from a failed run is published. Downstream Ponds keep reading the last good output and are shown as blocked, rather than failed, so the failure only appears once, at its cause.
 
+<figure class="ds-figure">
+  <img src="/img/docs/failure-canvas.webp" alt="The demo pipeline with sales failed in red and reports blocked downstream" width="1022" height="380" />
+  <figcaption><code>sales</code> has failed, and <code>reports</code>, downstream of it, is blocked.</figcaption>
+</figure>
+
+Selecting the failed run in the run history shows which Ripple failed and the error:
+
+<figure class="ds-figure">
+  <img src="/img/docs/failure-run-detail.webp" alt="Run detail for the failed sales run: price_tiers and daily_sales succeeded, join_lines failed with a Binder Error" width="560" height="340" />
+  <figcaption>A failed run in the web UI. Users with full access also see the traceback below the error.</figcaption>
+</figure>
+
 A blocked Pond doesn't request new data, but still processes anything its Sources had already produced.
 
 A Ripple that reads a Source table that hasn't been published, because the Source hasn't produced it yet, isn't treated as failing. The Pond waits and runs again once the Source publishes.
@@ -56,6 +68,13 @@ Immediate retries suit transient errors, such as a flaky network call. Source re
 duckstring control failure-budget sales                       # show
 duckstring control failure-budget sales --immediate 2 --on-change 3
 ```
+
+In the web UI, the budgets are in the Pond's **Options**:
+
+<figure class="ds-figure">
+  <img src="/img/docs/pond-options-failures.webp" alt="The Pond Options dialog with the retry budgets section outlined" width="492" height="518" />
+  <figcaption>Retry budgets in a Pond's Options.</figcaption>
+</figure>
 
 Retried and replayed Ripples run with the same `pond.f`, so write them to be safe to repeat. Duckstring's own write methods already are.
 
@@ -126,6 +145,13 @@ duckstring alert add --name reports-sla --to mailto:data-team@example.com \
 Email needs an SMTP server, given in the destination (`?smtp=host:587`) or as `DUCKSTRING_SMTP_HOST` on the Catchment. See [Notification URIs](../reference/formats.md#notification-uris).
 
 By default each problem is sent once. `--renotify 6h` repeats it every six hours while it lasts. `duckstring alert log` shows recent deliveries, including ones that failed to send.
+
+A Pond's **Options** in the web UI also add alert channels for that Pond:
+
+<figure class="ds-figure">
+  <img src="/img/docs/alert-add.webp" alt="The Alerts section of a Pond's Options, adding a channel to a Slack webhook held in a secret" width="492" height="690" />
+  <figcaption>Adding an alert channel for <code>reports</code>, with the event kinds to send.</figcaption>
+</figure>
 
 ## Metrics
 

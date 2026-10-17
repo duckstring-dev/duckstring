@@ -181,6 +181,46 @@
   text-decoration: none;
 }
 
+/* The Playground's call to action: the hero's second button, outlined so the Quickstart stays the primary one. */
+.ctaSecondary {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 7px;
+  padding: 10px 22px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  border: 1px solid var(--ifm-color-primary);
+  color: var(--ifm-color-primary);
+  transition: background 0.15s ease;
+}
+
+.ctaSecondary:hover {
+  background: rgba(6, 196, 230, 0.1);
+  color: var(--ifm-color-primary);
+  text-decoration: none;
+}
+
+.ctaRow {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+
+/* The Playground recording links to the Playground itself. */
+.demoLink {
+  display: block;
+  color: inherit;
+}
+
+.demoLink:hover {
+  text-decoration: none;
+}
+
+.demoLink:hover .demoFrame {
+  border-color: var(--ifm-color-primary);
+}
+
 /* ── Route cards ──────────────────────────────────────────────────────────── */
 
 .routes {

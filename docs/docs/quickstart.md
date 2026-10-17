@@ -133,7 +133,15 @@ To keep `reports` as fresh as the pipeline allows, add a continuous Refresh:
 duckstring refresh add reports --continuous
 ```
 
-No Pond runs more often than the slowest step can use its output, so every Pond settles at a run about every 3 seconds, the time `join_lines` takes. Runs of `sales` overlap: a new one starts while the previous one is still in `join_lines`, because each Ripple waits only for its own inputs.
+No Pond runs more often than the slowest step can use its output, so every Pond settles at a run about every 3 seconds, the time `join_lines` takes. Runs of `sales` overlap: a new one starts while the previous one is still in `join_lines`, because each Ripple waits only for its own inputs. Open http://127.0.0.1:7474 to watch it:
+
+<figure class="ds-figure">
+  <video autoplay loop muted playsinline poster="/img/docs/ripple.poster.webp" aria-label="The demo pipeline in the web UI under a continuous Refresh on reports">
+    <source src="/img/docs/ripple.webm" type="video/webm" />
+    <source src="/img/docs/ripple.mp4" type="video/mp4" />
+  </video>
+  <figcaption>The demo pipeline in the web UI under the continuous Refresh. Running Ripples are outlined in cyan.</figcaption>
+</figure>
 
 A continuous Refresh keeps going, so press `Ctrl+C` to leave the status view, then remove it:
 
@@ -145,7 +153,7 @@ The same controls are on each Pond's panel in the web UI. A Refresh can be sent 
 
 | Refresh | What it does |
 |---|---|
-| `refresh reports` | Brings the Pond up to date as of now, once |
+| `refresh now reports` | Brings the Pond up to date as of now, once |
 | `refresh add reports --every 1d` | Brings it up to date once a day has passed since the last refresh |
 | `refresh add reports --every 1d --start 06:00` | Brings it up to date at 06:00 each day |
 | `refresh add reports --continuous` | Keeps it as fresh as the pipeline allows |
@@ -160,7 +168,7 @@ The Catchment keeps a catalog of every Pond's tables, with each Pond as a schema
 duckstring query reports.monthly_summary
 ```
 
-This runs `SELECT * FROM reports.monthly_summary LIMIT 10`. Use `--sql` to run any query, and `--csv`, `--json` or `--parquet` to export the result. See [Querying](guides/querying.md).
+This shows its first 10 rows. Pass SQL instead to run any query, such as `duckstring query "SELECT category, SUM(total_revenue) FROM reports.monthly_summary GROUP BY 1"`, and add `--csv`, `--json` or `--parquet` to export the result. See [Querying](guides/querying.md).
 
 ## Next steps
 

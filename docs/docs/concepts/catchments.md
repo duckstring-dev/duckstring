@@ -32,7 +32,10 @@ Lineage can also be sent to other catalogs as OpenLineage events.
 
 You can run read-only SQL over the catalog from the CLI (`duckstring query`), from the web UI's data viewer, or from Python. Access is controlled by API keys, and a Pond can choose which of its tables are exposed to users with read-only access.
 
-<!-- IMAGE: the web UI data viewer showing reports.monthly_summary. -->
+<figure class="ds-figure">
+  <img src="/img/docs/data-viewer.webp" alt="The web UI's data viewer showing the monthly_summary table of reports" width="1440" height="900" />
+  <figcaption>The data viewer in the web UI, open on <code>reports.monthly_summary</code>.</figcaption>
+</figure>
 
 ## Ingress and Egress
 

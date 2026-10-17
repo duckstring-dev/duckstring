@@ -13,7 +13,10 @@ Everything you can do with a Catchment is available from the `duckstring` CLI, a
 
 Each Catchment serves a web UI at its own address. It shows the graph of Ponds and Ripples as they run, the history of every run, and the published data. You can set Refreshes and control runs from the UI, but the graph itself only changes when you deploy code.
 
-<!-- IMAGE: the web UI with the demo pipeline under a continuous Refresh, the sidebar open on a Pond, and run history below. -->
+<figure class="ds-figure">
+  <img src="/img/docs/ui-overview.webp" alt="The web UI: the demo pipeline running, the sidebar open on reports, and run history below" width="1440" height="900" />
+  <figcaption>The web UI on the demo pipeline under a continuous Refresh. The sidebar shows the selected Pond, <code>reports</code>, and the panels below list recent runs and the detail of one.</figcaption>
+</figure>
 
 ## Local Execution
 

@@ -27,11 +27,10 @@ def join_lines(pond):
     ...
 ```
 
-```mermaid
-flowchart LR
-    daily_sales --> join_lines
-    price_tiers --> join_lines
-```
+<figure class="ds-figure">
+  <img src="/img/docs/ripples-in-a-pond.webp" alt="The sales Pond in the web UI, with its Ripples price_tiers and daily_sales both feeding join_lines" width="438" height="270" />
+  <figcaption>The <code>sales</code> Pond in the web UI, with its three Ripples.</figcaption>
+</figure>
 
 As with Ponds, the order is implied by the declared dependencies. `daily_sales` and `price_tiers` run in parallel, and `join_lines` runs once both have finished. Dependencies on other Ponds are declared in `pond.toml`, not on Ripples.
 

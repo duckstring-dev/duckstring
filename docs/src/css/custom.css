@@ -99,3 +99,30 @@
   font-size: 0.875rem;
   color: var(--ifm-color-emphasis-700);
 }
+
+/* Figures in the docs: a screenshot or a recording from the web UI or the Playground, then a short caption. Written
+   as HTML (`<figure class="ds-figure">`), so an image can be given its natural width: the shots are taken at 2x, so
+   `width` is half the file's pixel width, and a narrow crop of a sidebar stays the size it is on screen. */
+.markdown figure.ds-figure {
+  margin: 1.5rem 0;
+}
+
+.markdown figure.ds-figure img,
+.markdown figure.ds-figure video {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+.markdown figure.ds-figure video {
+  width: 100%;
+}
+
+.markdown figure.ds-figure figcaption {
+  margin-top: 0.5rem;
+  text-align: center;
+  font-size: 0.875rem;
+  color: var(--ifm-color-emphasis-700);
+}

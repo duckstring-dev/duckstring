@@ -128,6 +128,14 @@ interface ExampleSpec {
 }
 
 export const EXAMPLES: Record<string, ExampleSpec> = {
+  chain: {
+    label: 'Chain (1s → 3s → 1s)',
+    ponds: [
+      { name: 'a', ripples: [['r1', 1]] },
+      { name: 'b', sources: ['a'], ripples: [['r1', 3]] },
+      { name: 'c', sources: ['b'], ripples: [['r1', 1]] },
+    ],
+  },
   deep: {
     label: 'Deep chain (fast stages, then a 5s bottleneck)',
     ponds: [

@@ -63,6 +63,8 @@ function Section({
   );
 }
 
+const PLAYGROUND = 'https://playground.duckstring.com';
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 function Hero(): ReactNode {
@@ -84,6 +86,9 @@ function Hero(): ReactNode {
         </div>
         <Link className={styles.ctaPrimary} to="/quickstart">
           Quickstart →
+        </Link>
+        <Link className={styles.ctaSecondary} href={PLAYGROUND}>
+          Try it in your browser →
         </Link>
       </div>
     </header>
@@ -122,6 +127,7 @@ function WhatIsThis(): ReactNode {
           </a>{' '}
           Orchestration is set from the perspective of the pipeline <b>end</b>. 
           Nothing will execute unless something is actually consuming it.
+          Try it in the <Link href={PLAYGROUND}>Playground</Link>.
         </li>
         <li>
           <a className={styles.payoffLink} href="#incremental">
@@ -151,6 +157,29 @@ function WhatIsThis(): ReactNode {
   );
 }
 
+// The Playground: pull orchestration, simulated in the browser
+function Playground(): ReactNode {
+  return (
+    <Section id="playground" title="Watch it run in your browser.">
+      <p className={styles.prose}>
+        The Playground runs the demo pipeline as a simulation, with a short guided tour of pull orchestration:
+        a Refresh at the end of the pipeline drives everything upstream, and every step paces itself to the slowest
+        one. Change step durations, add Ponds and set your own Refreshes. There's nothing to install.
+      </p>
+
+      <a className={styles.demoLink} href={PLAYGROUND} aria-label="Open the Playground">
+        <DemoSlot src="/img/docs/playground-tour" aspectRatio="1600/964" poster="/img/docs/playground-tour.poster.webp" />
+      </a>
+
+      <div className={styles.ctaRow}>
+        <Link className={styles.ctaPrimary} href={PLAYGROUND}>
+          Open the Playground →
+        </Link>
+      </div>
+    </Section>
+  );
+}
+
 // Modular Transformations
 function ModularTransformations(): ReactNode {
   return (
@@ -161,7 +190,7 @@ function ModularTransformations(): ReactNode {
         The headache of choreographing complex changes is avoided using the same techniques that allowed open source to flourish.
       </p>
 
-      <DemoSlot src="/img/upgrade" aspectRatio="28/10"/>
+      <DemoSlot src="/img/docs/upgrade-pin" aspectRatio="2000/1118" poster="/img/docs/upgrade-pin.poster.webp" />
 
       <p className={styles.proseMuted}>
         Upgrading a complex sequence of transformations can paralyze development. 
@@ -186,13 +215,13 @@ function PullOrchestration(): ReactNode {
         that only paths with consumers are kept fresh.
       </p>
 
-      <DemoSlot src="/img/ripple" aspectRatio="28/10"/>
+      <DemoSlot src="/img/docs/ripple" aspectRatio="2000/754" poster="/img/docs/ripple.poster.webp" />
 
       <p className={styles.proseMuted}>
         No sophisticated prediction of run times is required. Duckstring uses the same scheduling system that keeps
         modern manufacturing processes humming. See{' '}
-        <Link to="/concepts/orchestration">Orchestration</Link>, or watch it run in the{' '}
-        <Link href="https://playground.duckstring.com">Playground</Link>.
+        <Link to="/concepts/orchestration">Orchestration</Link>, or try it in the{' '}
+        <Link href={PLAYGROUND}>Playground</Link>.
       </p>
     </Section>
   );
@@ -270,7 +299,7 @@ const ROUTES: {title: string; body: string; to?: string; href?: string}[] = [
   {
     title: 'Orchestration Playground',
     body: 'A guided tour of pull orchestration, running in your browser with nothing to install.',
-    href: 'https://playground.duckstring.com',
+    href: PLAYGROUND,
   },
   {
     title: 'Documentation',
@@ -317,6 +346,7 @@ export default function Landing(): ReactNode {
     <div className={styles.canvas}>
       <Hero />
       <WhatIsThis />
+      <Playground />
       <ModularTransformations />
       <PullOrchestration />
       <ModernIncrementality />

@@ -218,9 +218,6 @@ export function WindowEditor({ pond }: { pond: Pond }) {
             <span style={{ fontSize: 11, color: '#71717a', width: 56 }}>Until</span>
             <input type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} style={{ ...numInput, width: 168 }} />
           </div>
-          <div style={{ fontSize: 10, color: '#52525b', lineHeight: 1.5 }}>
-            Defaults: start 00:00 today · duration = every (back-to-back) · all days · no expiry.
-          </div>
         </div>
       )}
 

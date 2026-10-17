@@ -160,6 +160,11 @@ Each run of `catalog` adds its changes to the log, stamped with the run's freshn
 
 The main table holds the current state, one row per primary key for a merge. It's what `read_table` returns and what the data viewer shows.
 
+<figure class="ds-figure">
+  <img src="/img/docs/trickle-viewer.webp" alt="The data viewer on catalog.product, a merge Trickle, with the Freshness bounds outlined and freshness and updates columns" width="1368" height="520" />
+  <figcaption>The data viewer on <code>catalog.product</code>. Each row shows the freshness of the run that last changed it and how many times it has changed, and the Freshness bounds narrow the view to rows changed between two runs.</figcaption>
+</figure>
+
 ### Merge Change Logs
 
 Each merge run appends its changes, as weighted rows, to a change log published with the table. A downstream Ripple reads the part of the log that falls in its window.

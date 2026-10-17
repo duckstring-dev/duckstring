@@ -103,6 +103,11 @@ table = client.do_get(flight.Ticket(b"SELECT * FROM reports_v1.monthly_summary")
 
 Select a Pond in the UI to browse its tables, page through rows and run SQL against them. Objects, such as models and files, are listed there too, and can be downloaded with `duckstring get`.
 
+<figure class="ds-figure">
+  <img src="/img/docs/data-viewer.webp" alt="The data viewer showing reports.monthly_summary with a SQL box and its rows" width="1440" height="900" />
+  <figcaption>The data viewer, opened from the table icon at the top right of a Pond's box.</figcaption>
+</figure>
+
 ## Refreshing on read
 
 Queries return what has been published, however old. For an app that should see current data while it's in use, give it a [Tap](serving_apps_with_taps.md): its own key, whose queries refresh the Pond when the data is older than you allow. Queries with any other key never refresh anything. For data that should stay fresh whether or not anyone is reading it, use a recurring Refresh (see [Scheduling](scheduling.md)).

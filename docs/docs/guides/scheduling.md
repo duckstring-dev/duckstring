@@ -23,6 +23,13 @@ duckstring refresh now reports
 
 Everything upstream that's older than the moment you sent it runs, then `reports`, and the live status view stays open until it settles. Add `--silent` to send the request and return.
 
+In the web UI, select the Pond and choose **Refresh Now**:
+
+<figure class="ds-figure">
+  <img src="/img/docs/refresh-now.webp" alt="The web UI with reports selected and the Refresh Now button outlined" width="1440" height="900" />
+  <figcaption>The Refresh section of the sidebar, with <code>reports</code> selected.</figcaption>
+</figure>
+
 To refresh from another system, send the same request over the HTTP API with a key at the demand level or higher:
 
 ```bash
@@ -41,6 +48,13 @@ The day counts from the later of the last request and the last refresh of the da
 
 Periods combine units, such as `30m`, `12h` or `1h30m`.
 
+In the web UI, **Recurring Refresh** opens the same choices:
+
+<figure class="ds-figure">
+  <img src="/img/docs/refresh-every.webp" alt="The Recurring Refresh form with Every set to 1 day" width="320" height="330" />
+  <figcaption>A Refresh every day. The name is filled in for you.</figcaption>
+</figure>
+
 ## At set times
 
 When the time of day matters, for example because people read the report at 08:00, pin the Refresh to a schedule with `--start`:
@@ -51,6 +65,11 @@ duckstring refresh add reports --every 1d --start 06:00 --on MON,TUE,WED,THU,FRI
 ```
 
 A scheduled Refresh asks at each time on its grid, here 06:00 every day (or every weekday), whatever else has refreshed the Pond, and the data is labelled with that time. `--start` takes `HH:MM` in UTC or an ISO 8601 time, `--on` limits it to some weekdays, and `--until` ends it. If the Catchment is down at 06:00, it asks once when it comes back.
+
+<figure class="ds-figure">
+  <img src="/img/docs/refresh-scheduled.webp" alt="The Recurring Refresh form's options, with Start 06:00 and Monday to Friday selected" width="320" height="420" />
+  <figcaption>In the web UI, the form's options set the start time and the weekdays.</figcaption>
+</figure>
 
 A Pond can have several scheduled Refreshes, for example one at 06:00 and one at 13:00, beside one `--every` or continuous Refresh. Adding another `--every` or continuous Refresh replaces the one it has. Give a Refresh a name with `--name`, or let Duckstring name it ("Daily at 06:00").
 
@@ -64,6 +83,18 @@ duckstring refresh add reports --continuous
 
 Duckstring paces the requests to the slowest step, so each Pond runs only as often as that step can use its output, and a Pond whose inputs haven't changed skips its run. A continuous Refresh over a pipeline whose data rarely changes is cheap: only the Inlets keep checking for new data. `--every 0s` is the same thing.
 
+In the web UI it's the first choice under **Recurring Refresh**. The canvas then lists the Refresh at the foot of the Pond's box:
+
+<figure class="ds-figure">
+  <img src="/img/docs/refresh-continuous.webp" alt="The Continuous button under Recurring Refresh, outlined" width="320" height="260" />
+  <figcaption>Continuous, under Recurring Refresh.</figcaption>
+</figure>
+
+<figure class="ds-figure">
+  <img src="/img/docs/refresh-strip.webp" alt="The reports Pond on the canvas, with Continuous listed at the foot of its box" width="243" height="208" />
+  <figcaption>A Pond's recurring Refreshes and Taps are listed at the foot of its box.</figcaption>
+</figure>
+
 A continuous Refresh doesn't always give the freshest data on average. The pacing starts the Ponds before the slowest step as soon as it starts a run, so their output can wait for it to finish, adding up to one run of that step to the data's age. Where that matters, a Refresh every N a little longer than the slowest step can be fresher on average for less compute, depending on how the run times before the slowest step line up with it. The [Playground](https://playground.duckstring.com)'s run charts show the data's age under each.
 
 ## Only while it's used
@@ -73,6 +104,11 @@ Some data only matters while someone is looking at it, such as a dashboard opene
 ```bash
 duckstring refresh tap add reports --name dashboard --fresh-within 1h
 ```
+
+<figure class="ds-figure">
+  <img src="/img/docs/tap-list.webp" alt="The Refresh section with the Taps button and the Tap dashboard outlined" width="320" height="330" />
+  <figcaption>In the web UI, a Pond's Taps are listed below its Refreshes.</figcaption>
+</figure>
 
 ## Batch sources
 
@@ -84,6 +120,11 @@ duckstring window add transactions --name nightly --every 1d --start 02:00 --dur
 ```
 
 The Inlet then runs at most once per window, and not at all between windows. Its data is treated as fresh until the window closes, so downstream demand doesn't ask for more until the next one.
+
+<figure class="ds-figure">
+  <img src="/img/docs/window-add.webp" alt="The Add Window form for transactions, with Start 02:00 and Duration 1 hour outlined" width="320" height="470" />
+  <figcaption>The same window in the web UI: select the Inlet, then Add Window.</figcaption>
+</figure>
 
 Combined with a continuous Refresh downstream, this runs the whole pipeline once a day, as soon as the new data is available:
 
