@@ -44,24 +44,79 @@ def test_builder_dimension_change_incremental(db):
     assert rows(db, "priced", "order_id, total") == [(10, 100), (11, 9)]
 
 
-def test_builder_key_prefilter_restricts_spine_on_dim_change(db):
-    """The affected-key recompute pre-filters both join inputs to the changed join keys (``IN (SELECT k0 …)``)
-    before the join, so a small dimension change never drives a full spine scan. Guards the pushdown by
-    inspecting the generated SQL."""
-    ol, pr = star(db)
-    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
-    pr([("p1", 5), ("p2", 9)], ts(1))
-    _priced(db, ts(1), NEVER)
+def _outer_subtree(db, f, pf, *, key_filter=True, seen=None):
+    """``(fact ⟕ prod) ⋈ store``: the store join's key lives in ``fact``, under a left join."""
+    t = at(db, f, pf)
+    b = (t.source("fact", p=1.0).alias("f")
+          .join(t.source("prod", p=1.0).alias("p"), on="product_id", how="left")
+          .join(t.source("store", p=1.0).alias("s"), on="store_id")
+          .select("f.order_id, p.price, s.region"))
+    if seen is not None:
+        orig = b._view
+        b._view = lambda sql: seen.append(sql) or orig(sql)  # capture the raw generated SQL
+    b.merge("m", pk="order_id", key_filter=key_filter)
 
-    pr([("p1", 50), ("p2", 9)], ts(2))  # only the dimension changes this run
-    t = at(db, ts(2), ts(1))
-    b = (t.source("order_line").join(t.source("product", p=1.0), on="product_id").select("s0.order_id, s1.price"))
+
+def _outer_sources(db, f, *, stores):
+    merge(db, "fact", [(10, "p1", "sA"), (11, "pX", "sB")], "order_id, product_id, store_id", f, "order_id")
+    merge(db, "prod", [("p1", 5)], "product_id, price", f, "product_id")
+    merge(db, "store", stores, "store_id, region", f, "store_id", types="VARCHAR, VARCHAR")
+
+
+def test_builder_pushes_changed_keys_into_an_outer_subtree(db):
+    """A delta term joins a small side to a current state. When that state is a join DuckDB can't reorder (a
+    left join), the changed keys are pushed down to the leaf that owns the join key; ``key_filter=False`` turns
+    that off. Guards the pushdown by inspecting the generated SQL."""
+    _outer_sources(db, ts(1), stores=[("sA", "north"), ("sB", "south")])
+    _outer_subtree(db, ts(1), NEVER)
+    _outer_sources(db, ts(2), stores=[("sA", "NORTH"), ("sB", "south")])  # only the store changes
     seen: list[str] = []
-    orig_view = b._view
-    b._view = lambda sql: seen.append(sql) or orig_view(sql)  # capture the raw generated SQL
-    kind, _rel = b._compute(("order_id",), "priced")
-    assert kind == "incremental"
-    assert any('"s0.product_id") IN (SELECT k0' in s for s in seen)  # the spine filtered to the changed keys
+    _outer_subtree(db, ts(2), ts(1), seen=seen)
+    assert any('"f.store_id" IN (SELECT k0' in s for s in seen)  # fact filtered to the changed store
+    assert rows(db, "m", "order_id, price, region") == [(10, 5, "NORTH"), (11, None, "south")]
+
+    _outer_sources(db, ts(3), stores=[("sA", "NORTH"), ("sB", "SOUTH")])
+    seen = []
+    _outer_subtree(db, ts(3), ts(2), key_filter=False, seen=seen)
+    assert not any("IN (SELECT k0" in s for s in seen)
+    assert rows(db, "m", "order_id, price, region") == [(10, 5, "NORTH"), (11, None, "SOUTH")]
+
+
+@pytest.mark.parametrize("how", ["left", "full"])
+def test_builder_pushes_keys_through_a_null_supplying_side(db, how):
+    """A key owned by the NULL-padded side of an outer join is still pushed down. Filtering ``prod`` would pad
+    every order it removed; those rows have a NULL key, which the join to the change never matches, so the join
+    is tightened to drop them instead: ``left`` becomes ``inner``, ``full`` becomes ``right``."""
+    def run(f, pf, seen):
+        t = at(db, f, pf)
+        b = (t.source("fact", p=1.0).alias("f")
+              .join(t.source("prod", p=1.0).alias("p"), on="product_id", how=how)
+              .join(t.source("cat", p=1.0).alias("c"), on={"p.cat_id": "cat_id"})
+              .select("coalesce(f.order_id, -1) AS oid, p.product_id, c.tax"))
+        orig = b._view
+        b._view = lambda sql: seen.append(sql) or orig(sql)
+        b.merge("m", pk=["oid", "product_id"])
+
+    def sources(f, cats, prods):
+        merge(db, "fact", [(10, "p1"), (11, "p2"), (12, "pX")], "order_id, product_id", f, "order_id")
+        merge(db, "prod", prods, "product_id, cat_id", f, "product_id")
+        merge(db, "cat", cats, "cat_id, tax", f, "cat_id")
+
+    def truth():
+        return sorted(db.sql(f"SELECT coalesce(f.order_id, -1), p.product_id, c.tax FROM fact f {how.upper()} JOIN prod p "
+                             "USING (product_id) JOIN cat c ON p.cat_id = c.cat_id").fetchall())
+
+    prods = [("p1", "books"), ("p2", "food"), ("p3", "books")]  # p3 has no order (a full join's right-only row)
+    sources(ts(1), [("books", 10), ("food", 5)], prods)
+    run(ts(1), NEVER, [])
+    sources(ts(2), [("books", 12), ("food", 5)], prods)  # only the category changes
+    seen: list[str] = []
+    run(ts(2), ts(1), seen)
+    assert any('"p.cat_id" IN (SELECT k0' in s for s in seen)  # prod filtered to the changed category
+    tightened = "JOIN" if how == "left" else "RIGHT JOIN"
+    assert any(f'L {tightened} ' in s and '"p.cat_id" IN' not in s for s in seen)
+    assert rows(db, "m", "oid, product_id, tax") == truth() == [(-1, "p3", 12), (10, "p1", 12), (11, "p2", 5)][
+        (0 if how == "full" else 1):]
 
 
 def test_builder_propagates_spine_delete(db):
@@ -299,29 +354,6 @@ def test_builder_ivm_false_forces_comprehensive(db, monkeypatch):
     build(ts(2), ts(1), ivm=False)
     assert paths == ["comprehensive"]
     assert rows(db, "priced", "order_id, total") == [(10, 100), (11, 9), (12, 21)]
-
-
-def test_builder_key_filter_false_skips_in_filter(db):
-    """``key_filter=False`` keeps the delta composition but drops the ``IN (SELECT k0 …)`` pre-filter."""
-    ol, pr = star(db)
-    ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
-    pr([("p1", 5), ("p2", 9)], ts(1))
-
-    def build(f, pf, *, key_filter=True, capture=None):
-        t = at(db, f, pf)
-        b = (t.source("order_line").join(t.source("product", p=1.0), on="product_id")
-              .select("s0.order_id, s0.qty * s1.price AS total"))
-        if capture is not None:
-            orig = b._view
-            b._view = lambda sql: capture.append(sql) or orig(sql)
-        b.merge("priced", pk="order_id", key_filter=key_filter)
-
-    build(ts(1), NEVER)
-    pr([("p1", 50), ("p2", 9)], ts(2))
-    seen: list[str] = []
-    build(ts(2), ts(1), key_filter=False, capture=seen)
-    assert not any("IN (SELECT k0" in s for s in seen)
-    assert rows(db, "priced", "order_id, total") == [(10, 100), (11, 9)]
 
 
 # ─── build-time errors ───────────────────────────────────────────────────────────

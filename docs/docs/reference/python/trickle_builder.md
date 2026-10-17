@@ -285,7 +285,7 @@ Computes the result and writes its changes to the merge Trickle `name`.
 | `name` | `str` | | Output table. |
 | `pk` | `str` or list of `str` | required | The output's primary key, which must be unique. Defaults to the `by` columns after `.aggregate()`. |
 | `ivm` | `bool` | `True` | `False` ignores source changes and recomputes the whole output each run, recording the difference. |
-| `key_filter` | `bool` | `True` | `False` keeps incremental computation but skips filtering each join to the changed keys. Can help when changes are large. No effect with `ivm=False`. |
+| `key_filter` | `bool` | `True` | `False` stops changed keys being passed down into an operand that is itself a join. No effect with `ivm=False`. |
 | `retain_t`, `retain_n` | | `None` | Change-log retention, as for [`merge_table`](trickle_io.md#merge_table). |
 | `cluster_by`, `interleave`, `cluster_bits` | | | How the output's compacted base is ordered, as for [`merge_table`](trickle_io.md#merge_table). |
 

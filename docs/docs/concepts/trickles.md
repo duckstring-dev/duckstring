@@ -110,9 +110,9 @@ Every remaining term involves at least one set of changes, which is small next t
 
 ### Changed Key Set
 
-The terms above still join each set of changes against the whole of the other table. Duckstring narrows this further using the join key. Only keys that appear in $\Delta A$ or $\Delta B$ can produce a change in the output, so both tables are filtered to those keys before joining. When `priced` joins order lines to the catalog and 100 products change price, only the order lines for those 100 products take part. Duckstring recomputes the join for those keys before and after the change, and the difference equals the three terms above.
+Each remaining term joins a set of changes to a table, and a row of the table can only take part if its key appears in those changes. So $A \bowtie \Delta B$ only involves the rows of $A$ whose keys appear in $\Delta B$: when `priced` joins order lines to the catalog and 100 products change price, only the order lines for those 100 products take part. Duckstring evaluates the terms against the tables as they are after the run, so it never has to rebuild an earlier version of a table.
 
-Because each join is handled the same way, this also works through chains of joins, and for every join type.
+Semi, anti and outer joins also depend on whether a key has any match at all. Only a key in the changes can gain its first match or lose its last, so Duckstring counts matches for those keys and adjusts just the rows that hold them. When one side of a join is itself a join, the changed keys are passed down to the table that holds them, so that join doesn't run over its whole input first.
 
 If a large fraction of a source changes (by default, more than 30% of its rows), filtering by key stops being worthwhile, and Duckstring recomputes that part of the result in full. It still records only the difference, so downstream Ponds still receive just the changes.
 

@@ -62,6 +62,10 @@ trace and gives none of the "apply only the delta to last run's intermediate" wi
 
 ## Join semantics — all types incremental, in scope for v2
 
+> **Superseded 2026-10-18** by `plans/trickle-join-delta.md`: the affected-key recompute below was replaced by
+> per-term deltas and existence flips. The gate below measured deltas of about 20 keys, where the union key set
+> stays small; a fact batch touching many keys made it 4 to 6 times slower than the per-term form.
+
 Every join type is maintained by **one rule**: the *affected-key recompute* (equivalently, match-count
 incomparable maintenance). This is the v2 generalisation that **drops the current `right`/`full` "solo +
 comprehensive" restriction** — in the DAG each binary join node maintains its own output incrementally,

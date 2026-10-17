@@ -178,4 +178,4 @@ Any published table can be a source. A plain table written with `write_table` th
 
 A plain table also counts as changed whenever its Pond rewrites it, even with the same content. If the Pond writes it with `write_table(..., if_changed=True)`, a run that produces the same content keeps the published table, and the builder treats it as unchanged. This suits a small dimension that an Inlet reloads in full on every run but that rarely changes.
 
-The builder also switches to a full recompute for a run when a source's changes touch more than 30% of its rows, since filtering by changed keys no longer saves work. Change the threshold per source with `pond.trickle("orders.order_line", p=0.5)`.
+The builder also switches to a full recompute for a run when a source's changes touch more than 30% of its rows, since working from the changes no longer saves work. Change the threshold per source with `pond.trickle("orders.order_line", p=0.5)`.
