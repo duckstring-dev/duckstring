@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
-import { TricklePage } from '@/components/trickle/TricklePage';
+import { TrickleApp } from '@/components/trickle/TrickleApp';
 
-const description = 'How a Duckstring Trickle updates a table from its changes: Z-sets, join deltas and a pipeline run by run.';
+const description = 'How a Duckstring Trickle updates a table from its changes, with a pipeline running in your browser and a guided tour.';
 
 export const metadata: Metadata = {
   title: 'Trickle | Duckstring Playground',
@@ -11,5 +11,5 @@ export const metadata: Metadata = {
 };
 
 export default function Page() {
-  return <TricklePage />;
+  return <TrickleApp />;
 }

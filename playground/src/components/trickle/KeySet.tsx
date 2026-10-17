@@ -1,9 +1,7 @@
 'use client';
 
-import { useState } from 'react';
 import { CellGrid } from './CellGrid';
-import { pill } from './ZSetFigure';
-import { BORDER, FAINT, MONO, MUTED, PANEL, TEXT, type CellMark } from './theme';
+import { FAINT, MONO, MUTED, TEXT, type CellMark } from './theme';
 
 // The two strips of the join, narrowed by key. A join only pairs rows with equal keys, so A′ ⋈ ΔB needs only
 // the order lines for the products in ΔB, and ΔA ⋈ B′ only the products the new order lines name.
@@ -23,8 +21,7 @@ function data() {
 
 const DATA = data();
 
-export function KeySet() {
-  const [narrow, setNarrow] = useState(false);
+export function KeySet({ narrow }: { narrow: boolean }) {
   const { product, named } = DATA;
   const repriced = new Set(REPRICED);
 
@@ -34,18 +31,12 @@ export function KeySet() {
   const productsIn = productMarks.filter((m) => m === 'read').length;
 
   return (
-    <div style={{ background: PANEL, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 14 }}>
-      <div role="tablist" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
-        <button role="tab" aria-selected={!narrow} onClick={() => setNarrow(false)} style={pill(!narrow)}>Whole tables</button>
-        <button role="tab" aria-selected={narrow} data-testid="keys-narrow" onClick={() => setNarrow(true)} style={pill(narrow)}>
-          Matching keys only
-        </button>
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-[3fr_2fr]" style={{ gap: 18 }}>
+    <div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div>
           <div style={label}>A′ ⋈ ΔB</div>
           <div style={sub}>order lines, joined to {REPRICED.length} repriced products</div>
-          <CellGrid marks={orderMarks} label={`${ordersIn} of ${product.length} order lines take part`} cell={6} gap={2} />
+          <CellGrid marks={orderMarks} label={`${ordersIn} of ${product.length} order lines take part`} cell={5} gap={2} />
           <div data-testid="keys-orders" style={count}>
             {ordersIn} of {product.length} order lines take part
           </div>
@@ -53,7 +44,7 @@ export function KeySet() {
         <div>
           <div style={label}>ΔA ⋈ B′</div>
           <div style={sub}>products, joined to {NEW_ORDERS} new order lines</div>
-          <CellGrid marks={productMarks} label={`${productsIn} of ${PRODUCTS} products take part`} cell={6} gap={2} />
+          <CellGrid marks={productMarks} label={`${productsIn} of ${PRODUCTS} products take part`} cell={5} gap={2} />
           <div style={count}>
             {productsIn} of {PRODUCTS} products take part
           </div>

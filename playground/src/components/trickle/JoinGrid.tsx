@@ -1,47 +1,33 @@
 'use client';
 
-import { useState } from 'react';
 import { THEME_BRAND, THEME_SUCCESS } from '@/lib/store';
-import { pill } from './ZSetFigure';
-import { BORDER, FAINT, MONO, MUTED, PANEL, TEXT } from './theme';
+import { BORDER, FAINT, MONO, MUTED, TEXT } from './theme';
 
 // A join after one run, as an area: the order lines (A′ = A + ΔA) across, the catalog (B′ = B + ΔB) down.
-// Stepping through adds the engine's terms one at a time.
+// Each step adds one of the engine's terms.
 
-const STEPS = [
-  {
-    eq: 'Δ(A ⋈ B) = ?',
-    text: "Last run's output, A ⋈ B, is already stored. None of it is computed again.",
-  },
-  {
-    eq: 'Δ(A ⋈ B) = ΔA ⋈ B′',
-    text: 'Join the new order lines, ΔA, to the whole catalog as it is now, B′.',
-  },
-  {
-    eq: 'Δ(A ⋈ B) = ΔA ⋈ B′ + A′ ⋈ ΔB',
-    text: 'Join all the order lines as they are now, A′, to the catalog changes, ΔB. The corner, ΔA ⋈ ΔB, is now counted twice.',
-  },
-  {
-    eq: 'Δ(A ⋈ B) = ΔA ⋈ B′ + A′ ⋈ ΔB − ΔA ⋈ ΔB',
-    text: "Subtract the corner once. What's left is exactly the change to the output, worked out from the tables as they are now.",
-  },
+// The equation at each step; the tour supplies the words.
+export const JOIN_EQS = [
+  'Δ(A ⋈ B) = ?',
+  'Δ(A ⋈ B) = ΔA ⋈ B′',
+  'Δ(A ⋈ B) = ΔA ⋈ B′ + A′ ⋈ ΔB',
+  'Δ(A ⋈ B) = ΔA ⋈ B′ + A′ ⋈ ΔB − ΔA ⋈ ΔB',
 ];
 
 // Geometry (viewBox units). Changes are drawn far larger than they would be.
 const X0 = 64, Y0 = 46, AW = 190, DAW = 52, BH = 150, DBH = 46;
 const W = X0 + AW + DAW + 8, H = Y0 + BH + DBH + 10;
 
-export function JoinGrid() {
-  const [step, setStep] = useState(0);
-  const s = STEPS[step];
+export function JoinGrid({ step }: { step: number }) {
+  const eq = JOIN_EQS[step];
   const xA = X0 + AW, yB = Y0 + BH;
   return (
-    <div style={{ background: PANEL, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 14 }}>
-      <div data-testid="join-eq" style={{ fontFamily: MONO, fontSize: 13, color: TEXT, minHeight: 20, marginBottom: 10, overflowWrap: 'anywhere' }}>
-        {s.eq}
+    <div>
+      <div data-testid="join-eq" style={{ fontFamily: MONO, fontSize: 12, color: TEXT, minHeight: 18, marginBottom: 8, overflowWrap: 'anywhere' }}>
+        {eq}
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', maxWidth: 440, display: 'block', margin: '0 auto' }} role="img"
-        aria-label={`The join as a grid, step ${step + 1} of ${STEPS.length}: ${s.eq}`}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', maxWidth: 380, maxHeight: '34dvh', display: 'block', margin: '0 auto' }} role="img"
+        aria-label={`The join as a grid: ${eq}`}>
         <defs>
           <pattern id="twice" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
             <rect width="6" height="6" fill={THEME_SUCCESS} fillOpacity={0.35} />
@@ -86,19 +72,6 @@ export function JoinGrid() {
           </g>
         )}
       </svg>
-      <p style={{ margin: '10px 0 12px', color: MUTED, fontSize: 14, minHeight: 42 }}>{s.text}</p>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <button onClick={() => setStep((n) => Math.max(0, n - 1))} disabled={step === 0} style={{ ...pill(false), opacity: step === 0 ? 0.4 : 1 }}>
-          Back
-        </button>
-        <button data-testid="join-next" onClick={() => setStep((n) => Math.min(STEPS.length - 1, n + 1))} disabled={step === STEPS.length - 1}
-          style={{ ...pill(true), opacity: step === STEPS.length - 1 ? 0.4 : 1 }}>
-          Next
-        </button>
-        <span style={{ marginLeft: 'auto', fontFamily: MONO, fontSize: 11, color: FAINT }}>
-          {step + 1} / {STEPS.length}
-        </span>
-      </div>
     </div>
   );
 }

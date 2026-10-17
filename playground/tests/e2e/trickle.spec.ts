@@ -1,56 +1,66 @@
 import { test, expect, type Page } from '@playwright/test';
+import { TRICKLE_STEPS } from '../../src/lib/trickle/tour';
 
-// The /trickle page at every viewport: no sideways scroll, each figure responds, and the pipeline runs. A
-// full-page screenshot per stage lands in test-results/ for review.
+// /trickle at every viewport: the tour runs end to end (its second chapter runs the pipeline to each moment
+// and pauses there), the card stays on screen, and after the tour the pipeline keeps running. A screenshot
+// per step lands in test-results/ for review.
 
-async function noSideScroll(page: Page) {
-  const [scroll, client] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
-  expect(scroll).toBeLessThanOrEqual(client);
+async function onScreen(page: Page, selector: string) {
+  const box = await page.locator(selector).boundingBox();
+  const vp = page.viewportSize()!;
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(vp.width + 0.5);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(vp.height + 0.5);
 }
 
-test('the Trickle page works through all four figures', async ({ page }, info) => {
-  await page.goto('/trickle');
-  await expect(page.getByRole('heading', { level: 1, name: 'Trickle' })).toBeVisible();
-  await noSideScroll(page);
-  await page.screenshot({ path: info.outputPath('01-top.png'), fullPage: true });
+test('the Trickle tour runs end to end', async ({ page }, info) => {
+  await page.goto('/trickle?tour=1');
+  const card = page.getByTestId('trickle-tour');
+  const phase = page.getByTestId('trickle-phase');
+  // Where chapter 2's steps pause the pipeline.
+  const stops: Record<string, string> = {
+    pipeline: 'run 1 · done · paused',
+    arrive: 'run 2 · sources change · paused',
+    join: 'run 2 · priced joins the changes · paused',
+    aggregate: 'run 2 · done · paused',
+    fold: 'run 3 · sources change · paused',
+  };
+  for (let i = 0; i < TRICKLE_STEPS.length; i++) {
+    const step = TRICKLE_STEPS[i];
+    await expect(card).toHaveAttribute('data-step', step.id);
+    await onScreen(page, '[data-testid="trickle-tour"]');
+    if (stops[step.id]) await expect(phase).toHaveText(stops[step.id], { timeout: 30_000 });
+    if (step.id === 'join') await expect(card).toContainText(/took part: \d+ rows, \d+% of the 1,050/);
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: info.outputPath(`${String(i + 1).padStart(2, '0')}-${step.id}.png`) });
+    await expect(page.getByTestId('trickle-tour-next')).toBeInViewport({ ratio: 1 });
+    await page.getByTestId('trickle-tour-next').click();
+  }
+  await expect(card).toHaveCount(0);
+  // After the tour the pipeline runs on by itself.
+  await expect(phase).toHaveText(/run 4/, { timeout: 30_000 });
+  const [scroll, client] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
+  expect(scroll).toBeLessThanOrEqual(client);
+});
 
-  // The join grid builds up its three terms.
-  const eq = page.getByTestId('join-eq');
-  await expect(eq).toHaveText('Δ(A ⋈ B) = ?');
-  for (let i = 0; i < 3; i++) await page.getByTestId('join-next').click();
-  await expect(eq).toHaveText('Δ(A ⋈ B) = ΔA ⋈ B′ + A′ ⋈ ΔB − ΔA ⋈ ΔB');
-
-  // Narrowing by key leaves a small part of each table.
-  const orders = page.getByTestId('keys-orders');
-  await expect(orders).toHaveText(/^492 of 492/);
-  await page.getByTestId('keys-narrow').click();
-  const narrowed = Number((await orders.textContent())!.split(' ')[0]);
-  expect(narrowed).toBeGreaterThan(0);
-  expect(narrowed).toBeLessThan(100);
-
-  // The pipeline: a first run computes everything, later runs a small part.
-  const run = page.getByTestId('trickle-run');
-  await run.scrollIntoViewIfNeeded();
-  await run.click();
-  await expect(page.getByTestId('trickle-run-label')).toHaveText('after run 1');
-  await expect(page.getByTestId('pond-orders-counts')).toHaveText('2,000 rows, all new');
-  await page.screenshot({ path: info.outputPath('02-run-1.png'), fullPage: true });
-  await run.click();
-  await expect(page.getByTestId('trickle-run-label')).toHaveText('after run 2');
-  await expect(page.getByTestId('pond-orders-counts')).toContainText('40 added');
-  await expect(page.getByTestId('trickle-summary')).toContainText('took part');
-  await page.screenshot({ path: info.outputPath('03-run-2.png'), fullPage: true });
+test('without the tour the pipeline runs, and a removal reaches priced', async ({ page }, info) => {
+  await page.goto('/trickle?tour=0');
+  await expect(page.getByTestId('trickle-tour')).toHaveCount(0);
+  await page.getByText('1/2').waitFor();
+  await page.getByRole('button', { name: '2x' }).click();
+  await expect(page.getByTestId('trickle-phase')).toHaveText(/run 2/, { timeout: 30_000 });
+  // The toggles are in the bottom sheet on a phone.
+  if (!(await page.getByRole('switch', { name: 'Remove a product' }).isVisible())) await page.getByText('TRICKLE').click();
   await page.getByRole('switch', { name: 'Remove a product' }).click();
-  await run.click();
-  await expect(page.getByTestId('trickle-run-label')).toHaveText('after run 3');
-  await expect(page.getByTestId('pond-priced-counts')).toContainText('removed');
-  await noSideScroll(page);
-  await page.screenshot({ path: info.outputPath('04-run-3.png'), fullPage: true });
+  await expect(page.getByTestId('node-priced-status')).toContainText('−', { timeout: 30_000 });
+  await page.screenshot({ path: info.outputPath('removal.png') });
 });
 
 test('the Playground links to the Trickle page', async ({ page }) => {
   await page.goto('/?tour=0');
   await page.getByTestId('trickle-link').first().click();
   await expect(page).toHaveURL(/\/trickle$/);
-  await expect(page.getByRole('heading', { level: 1, name: 'Trickle' })).toBeVisible();
+  await expect(page.getByTestId('node-priced')).toBeVisible();
 });
