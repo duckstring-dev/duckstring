@@ -201,6 +201,28 @@ def test_contract_violation_fails_source_and_blocks_sink(tmp_path):
     assert snk["is_blocked"] and "src@1" in snk["blocked_by"]
 
 
+def test_a_contract_failure_naming_its_ripple_fails_the_run_it_ends(tmp_path):
+    """What a Duck sends: ``contract_failed`` naming the Run's last Ripple, whose success it withheld. Before
+    the Duck withheld it, the Catchment heard the success first, counted the Run done, and then found nothing
+    in flight to fail: the Pond never showed failed and downstream ran on data that was never published."""
+    def add_sink(db):
+        cfg = {"sources": {"src": "1.0.0"}, "immediate_retries": 0, "source_retries": 0, "kind": "pond"}
+        _register(db, "snk", "1.0.0", "pond", "ponds/snk/1.0.0", cfg, _EVENT)
+
+    d = _driver(tmp_path, extra=add_sink)
+    d.refresh_now("snk@1")
+    f = d.state.pond_states["src@1"].start_f.isoformat()
+    d.on_event("src@1", {"kind": "contract_failed", "ripple": "event", "f": f,
+                         "error": "contract: column 'event.val' was dropped"})
+
+    src = next(p for p in d.status()["ponds"] if p["name"] == "src")
+    snk = next(p for p in d.status()["ponds"] if p["name"] == "snk")
+    assert src["is_failed"] and src["end_f"] is None  # the Run didn't complete
+    assert snk["is_blocked"] and snk["start_f"] is None  # and nothing downstream ran on it
+    assert d.db.execute("SELECT status FROM pond_run").fetchall() == [("failed",)]
+    assert d.db.execute("SELECT status FROM ripple_run").fetchall() == [("failed",)]
+
+
 # ── the real publish gate (live DuckDB registry) ────────────────────────────────
 
 

@@ -15,10 +15,12 @@ import httpx
 
 
 class CatchmentClient:
-    def __init__(self, base_url: str, pond_name: str, major: int, token: str, poll_timeout: float = 25.0):
+    def __init__(self, base_url: str, pond_name: str, major: int, token: str, poll_timeout: float = 25.0,
+                 version: str | None = None):
         self.base = base_url.rstrip("/")
         self.pond = pond_name
         self.major = major
+        self.version = version  # the code this Duck runs, sent on each poll so a redeploy can replace it
         self.token = token
         self.poll_timeout = poll_timeout
         self._client = httpx.Client(timeout=poll_timeout + 5.0, headers={"X-Duck-Token": token})
@@ -30,9 +32,10 @@ class CatchmentClient:
         """Long-poll for commands. Returns a list of ``{"kind": "begin_run", "f": ...}`` /
         ``{"kind": "shutdown"}`` dicts; empty on timeout. Returns ``[]`` on any transport error."""
         try:
-            r = self._client.get(
-                f"{self.base}/api/duck/{self.pond}/{self.major}/jobs", params={"wait": self.poll_timeout}
-            )
+            params: dict = {"wait": self.poll_timeout}
+            if self.version:
+                params["version"] = self.version
+            r = self._client.get(f"{self.base}/api/duck/{self.pond}/{self.major}/jobs", params=params)
             r.raise_for_status()
             self.last_contact = time.monotonic()
             return r.json().get("jobs", [])

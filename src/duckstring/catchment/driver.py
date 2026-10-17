@@ -359,6 +359,7 @@ class Driver(TapsMixin):
         # Ponds whose Duck was spawned but has never spoken — they get the provider's (longer) startup
         # grace rather than the steady-state silence window. Cleared on first contact.
         self._awaiting_first_contact: set[str] = set()
+        self._outdated_ducks: set[str] = set()  # Ponds whose Duck runs a version a redeploy replaced
         # key -> cumulative Flock dispatch counters ({dispatched, failed, last_error}), accumulated from
         # the per-Ripple-Run deltas Ducks report (see _record_flock). Observability only (in-memory; a
         # restart just waits for the next report).
@@ -1478,12 +1479,11 @@ class Driver(TapsMixin):
     def _abandon_pond_run(self, pond: str, f: str, now: datetime) -> None:
         """Close a specific still-``running`` row an operator action abandoned. Never creates a row and
         never overwrites a finished one — a Run the Duck already reported keeps its own outcome."""
-        meta = self.meta[pond]
         cur = self.db.execute(
             "UPDATE pond_run SET finished_at = ?, status = 'failed', "
             "error = COALESCE(error, 'abandoned by an operator clear before the Run completed') "
             "WHERE pond_version_id = ? AND f = ? AND status = 'running'",
-            (_iso(now), meta["version_id"], f),
+            (_iso(now), self._run_version_id(pond, f), f),
         )
         if cur.rowcount:
             self.db.commit()
@@ -2486,27 +2486,7 @@ class Driver(TapsMixin):
                     self._process(now)
             elif kind == "failed":
                 # The Pond Run gave up at this Ripple's freshness: fail the Pond (and block downstream).
-                rname = payload["ripple"]
-                eid = f"{pond}.{rname}"
-                if eid in self.state.ripple_states:
-                    if f:
-                        self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
-                    self.state = fail_ripple(self.state, eid, now)
-                    err, tb = payload.get("error"), payload.get("traceback")
-                    self._fail_pond_run(pond, f, now, err, tb)  # upsert the pond_run row first (ripple_run FK)
-                    self._record_ripple_run(
-                        pond, rname, f, "failed",
-                        started_at=payload.get("started_at"),
-                        finished_at=payload.get("finished_at") or _iso(now),
-                        retry=payload.get("retry", 0),
-                        error=err, traceback=tb,
-                    )
-                    self._process(now)  # settle the cascade first, so the blast radius is accurate
-                    name = self.meta.get(pond, {}).get("name", pond)
-                    self._alert_failure(pond, "failure", scope_pond=name,
-                                        scope_major=self.meta.get(pond, {}).get("major"), f=f,
-                                        title=f"Pond '{name}' failed",
-                                        message=f"Ripple '{rname}' failed: {err or 'unknown error'}")
+                self._fail_at_ripple(pond, payload, now)
             elif kind == "missing_source":
                 # A Ripple read a Source asset that isn't published (deleted, or not produced yet). Park the
                 # Pond blocked-with-a-reason — NOT failed: no retry-budget burn, no failure alert. It
@@ -2534,7 +2514,7 @@ class Driver(TapsMixin):
                 # Freeze the published output schema as the version's contract (the substrate the
                 # additive gate and min_version enforcement build on).
                 if payload.get("schema"):
-                    self._capture_schema(pond, payload["schema"])
+                    self._capture_schema(pond, payload["schema"], f)
                 self._emit_openlineage(pond, f, payload.get("schema"))  # catalog emission (opt-in channels)
                 self._process(now)
                 self._advance_repair(pond, now)  # if this Pond was a repair step, release its children
@@ -2549,11 +2529,44 @@ class Driver(TapsMixin):
             elif kind == "contract_failed":
                 # The Duck refused to publish: the output broke the major line's additive contract.
                 # Fail the Pond at this Run (keeping last-good data) and block downstream, like any failure.
-                self._fail_whole_pond(pond, now, payload.get("error"), None, alert_kind="contract")
+                # The Duck names the Run's last Ripple, whose success it withheld; an older Duck doesn't.
+                if payload.get("ripple"):
+                    self._fail_at_ripple(pond, payload, now, alert_kind="contract")
+                else:
+                    self._fail_whole_pond(pond, now, payload.get("error"), None, alert_kind="contract")
             elif kind == "pond_failed":
                 # A Duck-level error (e.g. a failed ledger write): fail the whole Pond at its most
                 # recently started Run. The Duck exits after reporting; liveness will not double-fail.
                 self._fail_whole_pond(pond, now, payload.get("error"), payload.get("traceback"))
+
+    def _fail_at_ripple(self, pond: str, payload: dict, now: datetime, alert_kind: str = "failure") -> None:
+        """A Pond Run gave up at one Ripple (``payload``: a ``failed`` or ``contract_failed`` event): fail
+        the Pond at that Run, record the attempt, block downstream and alert."""
+        rname = payload["ripple"]
+        f = payload.get("f")
+        eid = f"{pond}.{rname}"
+        if eid not in self.state.ripple_states:
+            return
+        if f:
+            self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
+        self.state = fail_ripple(self.state, eid, now)
+        err, tb = payload.get("error"), payload.get("traceback")
+        self._fail_pond_run(pond, f, now, err, tb)  # upsert the pond_run row first (ripple_run FK)
+        self._record_ripple_run(
+            pond, rname, f, "failed",
+            started_at=payload.get("started_at"),
+            finished_at=payload.get("finished_at") or _iso(now),
+            retry=payload.get("retry", 0),
+            error=err, traceback=tb,
+        )
+        self._process(now)  # settle the cascade first, so the blast radius is accurate
+        name = self.meta.get(pond, {}).get("name", pond)
+        if alert_kind == "contract":
+            title, message = f"Pond '{name}' broke its version contract", f"Pond '{name}' broke its version contract: {err}"
+        else:
+            title, message = f"Pond '{name}' failed", f"Ripple '{rname}' failed: {err or 'unknown error'}"
+        self._alert_failure(pond, alert_kind, scope_pond=name, scope_major=self.meta.get(pond, {}).get("major"),
+                            f=f, title=title, message=message)
 
     def resume_incomplete(self) -> None:
         """Re-dispatch Pond Runs that were in flight when the Catchment stopped, and service any
@@ -2566,10 +2579,20 @@ class Driver(TapsMixin):
             self._incomplete = []
             self._process(now)
 
-    def take_jobs(self, pond: str) -> list[dict]:
+    def take_jobs(self, pond: str, version: str | None = None) -> list[dict]:
+        """The Duck's queued jobs. ``version`` is the code the polling Duck runs: a Duck still on a version a
+        redeploy replaced is told only to shut down, so it finishes the Runs it holds and exits, and the
+        queued work waits for a Duck on the selected version (``_replace_outdated_ducks``). Before this a
+        warm Duck kept running the old code for as long as a recurring Refresh kept it busy."""
         with self.lock:
             self.last_seen[pond] = _now()  # the Duck is alive — it just polled
             self._awaiting_first_contact.discard(pond)
+            selected = self.meta.get(pond, {}).get("version")
+            if version is not None and selected is not None and version != selected:
+                self._outdated_ducks.add(pond)
+                if hasattr(self.launcher, "release"):
+                    self.launcher.release(pond)
+                return [{"kind": "shutdown"}]
             jobs = self.jobs.get(pond, [])
             self.jobs[pond] = []
             if any(j.get("kind") == "shutdown" for j in jobs) and hasattr(self.launcher, "release"):
@@ -2967,6 +2990,7 @@ class Driver(TapsMixin):
     def scheduler_tick(self) -> None:
         with self.lock:
             now = _now()
+            self._replace_outdated_ducks(now)  # before liveness, so a handed-off Pond isn't judged Duck-less
             self._check_liveness(now)
             self._tick_process(now)
             self._check_freshness(now)
@@ -3086,6 +3110,22 @@ class Driver(TapsMixin):
         except Exception:
             pass
         return max(_STARTUP_GRACE.get(provider, _DUCK_DEAD_AFTER), _DUCK_DEAD_AFTER)
+
+    def _replace_outdated_ducks(self, now: datetime) -> None:
+        """Spawn a Duck on the selected version for each Pond whose outdated Duck has exited, if work is
+        queued for it (otherwise the next dispatch spawns one as usual)."""
+        for pond in list(self._outdated_ducks):
+            if pond not in self.meta:
+                self._outdated_ducks.discard(pond)
+                continue
+            if self.launcher.is_running(pond):
+                continue
+            self._outdated_ducks.discard(pond)
+            if any(j.get("kind") == "begin_run" for j in self.jobs.get(pond, [])):
+                meta = self.meta[pond]
+                self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=self.duck_config(pond))
+                self.last_seen[pond] = now
+                self._awaiting_first_contact.add(pond)
 
     def _check_liveness(self, now: datetime) -> None:
         """Fail any Pond whose Duck has died (process gone) or fallen silent (no contact) while a Run
@@ -3258,12 +3298,34 @@ class Driver(TapsMixin):
 
     # ─── History + persistence ────────────────────────────────────────────────
 
+    def _run_version_id(self, pond: str, f: str | None) -> int:
+        """The ``pond_version`` the Run at ``f`` belongs to: the one its ``pond_run`` row was started under,
+        else the selected version. A redeploy re-points the line at the new version while a Duck may still be
+        finishing a Run of the old one. Recording that Run's events against the new version broke
+        ``ripple_run``'s foreign key to ``pond_run``; the Duck then replayed the rejected event forever, and
+        everything it reported after it queued behind, so the Pond showed as running for good."""
+        meta = self.meta[pond]
+        if f is None:
+            return meta["version_id"]
+        row = self.db.execute(
+            "SELECT pr.pond_version_id FROM pond_run pr JOIN pond_version pv ON pv.id = pr.pond_version_id "
+            "JOIN pond p ON p.pond_name_id = pv.pond_name_id AND p.major = pv.major "
+            "WHERE p.id = ? AND pr.f = ? ORDER BY pr.pond_version_id = ? DESC, pr.pond_version_id DESC LIMIT 1",
+            (meta["pond_id"], f, meta["version_id"]),
+        ).fetchone()
+        return row[0] if row else meta["version_id"]
+
     def _record_ripple_run(
         self, pond: str, rname: str, f: str, status: str, started_at: str | None, finished_at: str,
         retry: int = 0, error: str | None = None, traceback: str | None = None,
     ) -> None:
         meta = self.meta[pond]
-        rid = meta["ripple_ids"].get(rname)
+        vid = self._run_version_id(pond, f)
+        if vid == meta["version_id"]:
+            rid = meta["ripple_ids"].get(rname)
+        else:
+            row = self.db.execute("SELECT id FROM ripple WHERE pond_version_id = ? AND name = ?", (vid, rname)).fetchone()
+            rid = row[0] if row else None
         if rid is None:
             return
         # Keyed on (pond_version, f, ripple, retry): each attempt is its own row — the retry trace.
@@ -3271,16 +3333,15 @@ class Driver(TapsMixin):
             "INSERT OR REPLACE INTO ripple_run "
             "(pond_version_id, f, ripple_id, retry, started_at, finished_at, status, error, traceback) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (meta["version_id"], f, rid, retry, started_at, finished_at, status, error, traceback),
+            (vid, f, rid, retry, started_at, finished_at, status, error, traceback),
         )
         self.db.commit()
 
     def _finish_pond_run(self, pond: str, f: str, now: datetime, changed: bool = True) -> None:
-        meta = self.meta[pond]
         self.db.execute(
             "UPDATE pond_run SET finished_at = ?, status = 'success', changed = ? "
             "WHERE pond_version_id = ? AND f = ?",
-            (_iso(now), int(changed), meta["version_id"], f),
+            (_iso(now), int(changed), self._run_version_id(pond, f), f),
         )
         self.db.commit()
         self._close_abandoned_runs(pond, f, now)
@@ -3297,12 +3358,14 @@ class Driver(TapsMixin):
 
         Deliberately reconciliation rather than a fix at each call site: it holds for paths not yet
         enumerated, which is the useful property when the exact sequence has resisted reproduction."""
-        meta = self.meta[pond]
+        # Every version of the line: a Run a redeploy overtook is still this Pond's Run.
         cur = self.db.execute(
             "UPDATE pond_run SET finished_at = ?, status = 'failed', "
             "error = COALESCE(error, 'abandoned — the Pond advanced past this Run without completing it') "
-            "WHERE pond_version_id = ? AND status = 'running' AND f < ?",
-            (_iso(now), meta["version_id"], through_f),
+            "WHERE status = 'running' AND f < ? AND pond_version_id IN ("
+            "SELECT pv.id FROM pond_version pv JOIN pond p ON p.pond_name_id = pv.pond_name_id "
+            "AND p.major = pv.major WHERE p.id = ?)",
+            (_iso(now), through_f, self.meta[pond]["pond_id"]),
         )
         if cur.rowcount:
             self.db.commit()
@@ -3385,7 +3448,7 @@ class Driver(TapsMixin):
         replay (INSERT OR IGNORE over the full row key); wrapped so a lineage write can never fail a run
         — lineage is observability, not orchestration."""
         try:
-            vid = self.meta[pond]["version_id"]
+            vid = self._run_version_id(pond, f)
             rows = [(vid, ripple, f, retry, "read", s or "", t) for s, t in lineage.get("reads", [])]
             rows += [(vid, ripple, f, retry, "write", "", t) for t in lineage.get("writes", [])]
             self.db.executemany(
@@ -3517,7 +3580,7 @@ class Driver(TapsMixin):
             namespace = f"duckstring://{cid}"
             rows = self.db.execute(
                 "SELECT DISTINCT direction, source_name, table_name FROM ripple_run_lineage "
-                "WHERE pond_version_id = ? AND f = ?", (m["version_id"], f),
+                "WHERE pond_version_id = ? AND f = ?", (self._run_version_id(pond, f), f),
             ).fetchall()
             inputs = [{"namespace": namespace, "name": f"{src}.{t}"}
                       for d, src, t in sorted(rows) if d == "read" and src]
@@ -3558,10 +3621,11 @@ class Driver(TapsMixin):
         row = self.db.execute("SELECT value FROM catchment_meta WHERE key = 'id'").fetchone()
         return row[0] if row and row[0] else None
 
-    def _capture_schema(self, pond: str, schema: dict) -> None:
+    def _capture_schema(self, pond: str, schema: dict, f: str | None = None) -> None:
         """Freeze a Pond version's published output schema as its contract (idempotent upsert, keyed on
-        ``pond_version``). Only reached for accepted runs — the Duck publishes only what passed the gate."""
-        vid = self.meta[pond]["version_id"]
+        ``pond_version``: the version that ran ``f``). Only reached for accepted runs — the Duck publishes
+        only what passed the gate."""
+        vid = self._run_version_id(pond, f)
         self.db.execute("DELETE FROM pond_version_schema WHERE pond_version_id = ?", (vid,))
         for table, columns in schema.items():
             for column, type_ in columns.items():
@@ -3614,7 +3678,7 @@ class Driver(TapsMixin):
         """The Source pins recorded for this Pond's Run at ``f`` (``None`` if the Run has no row yet)."""
         row = self.db.execute(
             "SELECT source_pins FROM pond_run WHERE pond_version_id = ? AND f = ?",
-            (self.meta[pond]["version_id"], f),
+            (self._run_version_id(pond, f), f),
         ).fetchone()
         if row is None or row[0] is None:
             return None
@@ -3723,23 +3787,21 @@ class Driver(TapsMixin):
     def _fail_pond_run(
         self, pond: str, f: str, now: datetime, error: str | None = None, tb: str | None = None
     ) -> None:
-        meta = self.meta[pond]
         self.db.execute(
             "INSERT INTO pond_run (pond_version_id, f, started_at, finished_at, status, error, traceback) "
             "VALUES (?, ?, ?, ?, 'failed', ?, ?) ON CONFLICT(pond_version_id, f) DO UPDATE SET "
             "finished_at = excluded.finished_at, status = 'failed', error = excluded.error, "
             "traceback = excluded.traceback",
-            (meta["version_id"], f, _iso(now), _iso(now), error, tb),
+            (self._run_version_id(pond, f), f, _iso(now), _iso(now), error, tb),
         )
         self.db.commit()
 
     def _kill_pond_run(self, pond: str, f: str, now: datetime) -> None:
-        meta = self.meta[pond]
         self.db.execute(
             "INSERT INTO pond_run (pond_version_id, f, started_at, finished_at, status, error) "
             "VALUES (?, ?, ?, ?, 'killed', 'Killed by operator') ON CONFLICT(pond_version_id, f) DO UPDATE SET "
             "finished_at = excluded.finished_at, status = 'killed', error = excluded.error",
-            (meta["version_id"], f, _iso(now), _iso(now)),
+            (self._run_version_id(pond, f), f, _iso(now), _iso(now)),
         )
         self.db.commit()
 

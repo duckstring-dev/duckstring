@@ -111,6 +111,26 @@ Python API. No old forms are kept:
   redeploy) re-sends its newest unmet request upstream. Before, a request waiting on a Source whose Run had failed
   or been killed stranded after Clear until something else demanded the path.
 
+### Redeploys and contract failures
+
+- **A redeploy takes effect while a recurring Refresh keeps the Pond busy.** A warm Duck used to keep running the
+  code it started with until it went idle, which a continuous Refresh never let it do, so a fix redeploy changed
+  nothing. A Duck now says which version it runs when it asks for work; a Duck on a replaced version finishes the
+  Runs it holds and exits, and a Duck on the new version picks up the next Run.
+- **A Run in flight across a redeploy is recorded against the version that started it.** Its events were recorded
+  against the new version, which the database refused, and the Duck retried the refused event forever: the Pond
+  showed as running for good, and nothing it did afterwards was recorded.
+- **A contract violation fails the Pond.** The Duck reported the Run's last Ripple as a success before it found the
+  output broke the version's contract, so the Catchment counted the Run done and dropped the failure that followed:
+  the Pond never showed as failed, and its Sinks ran on output that was never published. A Duck from before this
+  release still reports the old way, so redeploy Ducks with the Catchment.
+
+### Documentation and Playground
+
+The Concepts and Guides have screenshots and recordings of the web UI and the Playground, and the landing page
+leads with the Playground. The Playground has a `chain` example (`?example=chain`), the 1 s → 3 s → 1 s chain the
+Orchestration page uses.
+
 ## 0.6.1 — 2026-10-08
 
 ### Performance

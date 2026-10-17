@@ -100,8 +100,11 @@ def test_duck_contract_violation_aborts_publish(tmp_path):
 
     core.ripple_completed("event", T0, export=bad_export)
 
-    assert any(e.kind == "contract_failed" and e.f == T0 and "val" in (e.error or "") for e in core.events)
+    assert any(e.kind == "contract_failed" and e.f == T0 and e.ripple == "event" and "val" in (e.error or "")
+               for e in core.events)
     assert not any(e.kind == "run_completed" for e in core.events)
+    # Nor does it report the Ripple a success: the Catchment would count the Run done and drop the failure.
+    assert not any(e.kind == "ripple" for e in core.events)
     assert con.execute("SELECT status FROM pond_run WHERE f = ?", (T0.isoformat(),)).fetchone()[0] == "failed"
 
 

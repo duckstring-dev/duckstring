@@ -322,7 +322,7 @@ def main() -> None:
     data_root = args.data_root or None
     persist_root = args.persist_root or None
     source_dir = root / args.source_path
-    client = CatchmentClient(args.catchment, args.pond, args.major, args.token)
+    client = CatchmentClient(args.catchment, args.pond, args.major, args.token, version=args.version)
     if not source_dir.is_dir():
         # Remote-Duck boot (prereqs D6): this host doesn't share the Catchment's disk — fetch the
         # deployed source bundle over the duck channel and unpack it where the executor expects it.

@@ -180,7 +180,15 @@ class DuckCore:
                     self._previous_f.pop(rc.f, None)
                     self.changes.drop(rc.f)
                     ledger.record_pond_run_finish(self.con, rc.f, now, status="failed")  # don't re-run on restart
-                    self.events.append(Event(kind="contract_failed", f=rc.f, status="failed", error=str(exc)))
+                    # The Run didn't complete, so the Catchment must not hear that its last Ripple succeeded:
+                    # it would count the Run done (and wake downstream for data never published), and the
+                    # contract failure that followed would find nothing in flight to fail. Report the Ripple
+                    # as the one the Run failed at instead.
+                    self.events.remove(ripple_event)
+                    self.events.append(Event(
+                        kind="contract_failed", ripple=name, f=rc.f, status="failed", error=str(exc),
+                        retry=ripple_event.retry, started_at=started_at, finished_at=finished_at,
+                    ))
                     return self._advance(now)
             ledger.record_pond_run_finish(self.con, rc.f, now)
             self._previous_f.pop(rc.f, None)  # the Run is done; drop its carried previous_f
