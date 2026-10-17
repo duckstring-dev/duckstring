@@ -98,6 +98,8 @@ function WaitProgress() {
   );
 }
 
+let firstLoadDone = false;
+
 export function TourCard() {
   const isMobile = useIsMobile();
   const flat = useIsShort() && !isMobile;
@@ -110,8 +112,11 @@ export function TourCard() {
   const tour = useTourStore.getState;
   const cardRef = useRef<HTMLDivElement>(null);
 
-  // First load: start (?tour=1), offer (first visit) or stay quiet.
+  // First load: start (?tour=1), offer (first visit) or stay quiet. Once per page load: switching back from
+  // Trickle mode remounts this card.
   useEffect(() => {
+    if (firstLoadDone) return;
+    firstLoadDone = true;
     const mode = initialTourMode(window.location.search);
     if (mode === 'start') tour().start();
     else if (mode === 'prompt') tour().offer();

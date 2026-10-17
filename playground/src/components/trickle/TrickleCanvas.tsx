@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import {
   ReactFlow,
   Background,
@@ -128,14 +128,29 @@ export function TrickleCanvas() {
   // Frame the graph in the canvas the tour card leaves free, and again when the orientation flips (the
   // fitView prop only applies at the first render). The top keeps clear of the play controls and phase label.
   const inset = useTrickleTour((t) => t.inset);
+  const wrap = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const padding = { top: `${inset.top + 96}px`, bottom: `${inset.bottom + 16}px`, left: '5%', right: '5%' } as const;
-    const t = setTimeout(() => fitView({ padding, duration: 300 }), 80);
-    return () => clearTimeout(t);
+    let t = setTimeout(() => fitView({ padding, duration: 300 }), 80);
+    // And when the canvas itself changes size: the phone's bottom sheet opening, a rotation.
+    let size = '';
+    const ro = new ResizeObserver(([e]) => {
+      const next = `${Math.round(e.contentRect.width)}x${Math.round(e.contentRect.height)}`;
+      if (size && next !== size) {
+        clearTimeout(t);
+        t = setTimeout(() => fitView({ padding, duration: 200 }), 120);
+      }
+      size = next;
+    });
+    if (wrap.current) ro.observe(wrap.current);
+    return () => {
+      clearTimeout(t);
+      ro.disconnect();
+    };
   }, [isMobile, fitView, inset.top, inset.bottom]);
 
   return (
-    <div id="trickle-canvas" style={{ width: '100%', height: '100%', background: '#0f0f14' }}>
+    <div id="trickle-canvas" ref={wrap} style={{ width: '100%', height: '100%', background: '#0f0f14' }}>
       <ReactFlow
         nodes={nodes}
         edges={EDGES}

@@ -1,9 +1,9 @@
 'use client';
 
-import Link from 'next/link';
 import { useState } from 'react';
 import { usePlaygroundStore, formatAge, pondLabel, EXAMPLES, THEME_BRAND, THEME_DANGER } from '@/lib/store';
 import { useTourStore, useTourMark } from '@/lib/tour';
+import { ModeSwitch } from './ModeSwitch';
 import { TraceChart } from './TraceChart';
 import { WindowEditor } from './WindowEditor';
 import { RefreshEditor } from './RefreshEditor';
@@ -87,30 +87,6 @@ function TourButton() {
     >
       Tour
     </button>
-  );
-}
-
-// Opens /trickle, the incremental-computation page.
-function TrickleLink() {
-  return (
-    <Link
-      href="/trickle"
-      onClick={(e) => e.stopPropagation()}
-      data-testid="trickle-link"
-      style={{
-        color: '#a1a1aa',
-        border: '1px solid #3f3f46',
-        borderRadius: 5,
-        padding: '2px 10px',
-        fontSize: 11,
-        fontWeight: 600,
-        letterSpacing: '0.06em',
-        textDecoration: 'none',
-        fontFamily: 'inherit',
-      }}
-    >
-      Trickle
-    </Link>
   );
 }
 
@@ -430,10 +406,10 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
           style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', cursor: 'pointer', userSelect: 'none', flexShrink: 0 }}
         >
           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, fontWeight: 700, color: '#a1a1aa', letterSpacing: '0.08em' }}>
-            {collapsed ? '▸' : '▾'} PLAYGROUND
+            {collapsed ? '▸' : '▾'}
             {headerContext && <span style={{ color: '#52525b', fontWeight: 400, marginLeft: 8 }}>{headerContext}</span>}
           </span>
-          <TrickleLink />
+          <ModeSwitch current="orchestration" />
           <TourButton />
         </div>
         {!collapsed && <div style={{ overflowY: 'auto', padding: '0 14px 14px' }}>{content}</div>}
@@ -458,13 +434,8 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-        <span style={{ fontSize: 11, fontWeight: 700, color: '#52525b', letterSpacing: '0.12em', textTransform: 'uppercase' }}>
-          Playground
-        </span>
-        <span style={{ display: 'flex', gap: 6 }}>
-          <TrickleLink />
-          <TourButton />
-        </span>
+        <ModeSwitch current="orchestration" />
+        <TourButton />
       </div>
       {content}
     </div>

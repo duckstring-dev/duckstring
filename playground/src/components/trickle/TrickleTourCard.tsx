@@ -71,6 +71,8 @@ function Button({ onClick, children, primary, quiet, testId }: {
   );
 }
 
+let autoStarted = false; // the first-visit logic runs once per page load
+
 export function TrickleTourCard() {
   const isMobile = useIsMobile();
   const open = useTrickleTour((t) => t.open);
@@ -107,6 +109,11 @@ export function TrickleTourCard() {
 
   // First visit: open the tour (?tour=0 opts out, ?tour=1 forces it). Otherwise the pipeline just runs.
   useEffect(() => {
+    if (autoStarted) {
+      if (!tour().open) useTrickleStore.getState().play(); // back from orchestration mode
+      return;
+    }
+    autoStarted = true;
     const param = new URLSearchParams(window.location.search).get('tour');
     if (param === '1' || (param !== '0' && !tourWasDone())) tour().start();
     else useTrickleStore.getState().play();

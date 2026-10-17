@@ -128,6 +128,16 @@ interface ExampleSpec {
 }
 
 export const EXAMPLES: Record<string, ExampleSpec> = {
+  // The pipeline Trickle mode runs, with the Ripple names of the Trickle demo in the Duckstring package.
+  trickle: {
+    label: 'Trickle demo (orders, catalog → priced → revenue)',
+    ponds: [
+      { name: 'orders', ripples: [['ingest', 1]] },
+      { name: 'catalog', ripples: [['ingest', 1]] },
+      { name: 'priced', sources: ['orders', 'catalog'], ripples: [['priced_line', 2]] },
+      { name: 'revenue', sources: ['priced'], ripples: [['by_product', 1]] },
+    ],
+  },
   chain: {
     label: 'Chain (1s → 3s → 1s)',
     ponds: [

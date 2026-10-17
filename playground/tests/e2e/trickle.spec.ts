@@ -52,15 +52,26 @@ test('without the tour the pipeline runs, and a removal reaches priced', async (
   await page.getByRole('button', { name: '2x' }).click();
   await expect(page.getByTestId('trickle-phase')).toHaveText(/run 2/, { timeout: 30_000 });
   // The toggles are in the bottom sheet on a phone.
-  if (!(await page.getByRole('switch', { name: 'Remove a product' }).isVisible())) await page.getByText('TRICKLE').click();
+  if (!(await page.getByRole('switch', { name: 'Remove a product' }).isVisible())) await page.getByTestId('trickle-sheet').click();
   await page.getByRole('switch', { name: 'Remove a product' }).click();
   await expect(page.getByTestId('node-priced-status')).toContainText('−', { timeout: 30_000 });
   await page.screenshot({ path: info.outputPath('removal.png') });
 });
 
-test('the Playground links to the Trickle page', async ({ page }) => {
+test('one page switches between orchestration and Trickle, and each keeps its state', async ({ page }) => {
   await page.goto('/?tour=0');
-  await page.getByTestId('trickle-link').first().click();
+  await page.getByTestId('mode-trickle').first().click();
   await expect(page).toHaveURL(/\/trickle$/);
   await expect(page.getByTestId('node-priced')).toBeVisible();
+  // First visit to Trickle mode opens its tour; skip it and let the pipeline run to its second run.
+  await page.getByTestId('trickle-tour-skip').click();
+  await page.getByRole('button', { name: '2x' }).click();
+  await expect(page.getByTestId('trickle-phase')).toHaveText(/run [2-9]/, { timeout: 30_000 });
+  await page.getByTestId('mode-orchestration').first().click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.locator('#ds-canvas')).toBeVisible();
+  await page.getByTestId('mode-trickle').first().click();
+  // Back in Trickle mode the pipeline carries on from where it was, without the tour.
+  await expect(page.getByTestId('trickle-tour')).toHaveCount(0);
+  await expect(page.getByTestId('trickle-phase')).toHaveText(/run [2-9]/);
 });

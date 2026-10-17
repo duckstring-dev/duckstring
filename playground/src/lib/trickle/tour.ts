@@ -163,7 +163,7 @@ export const TRICKLE_STEPS: TrickleStep[] = [
     chapter: 2,
     title: 'Your turn',
     body:
-      'Turn on **Remove a product** to see a deletion flow through: its order lines leave `priced` and its total leaves `revenue`, in red. Pause and speed are at the top left.',
+      'Turn on **Remove a product** to see a deletion flow through: its order lines leave `priced` and its total leaves `revenue`, in red. Pause and speed are at the top left, and **Orchestration** at the top of the sidebar shows when Ponds run.',
     ring: ['events'],
     enter: (s) => {
       s.play();
@@ -171,7 +171,6 @@ export const TRICKLE_STEPS: TrickleStep[] = [
     },
     links: [
       { label: 'Trickles in the docs', href: 'https://docs.duckstring.com/concepts/trickles' },
-      { label: 'Orchestration Playground', href: '/' },
     ],
   },
 ];

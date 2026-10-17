@@ -1,10 +1,10 @@
 'use client';
 
-import Link from 'next/link';
 import { THEME_BRAND } from '@/lib/store';
 import type { RunEvents } from '@/lib/trickle/pipeline';
 import { useTrickleStore } from '@/lib/trickle/store';
 import { useTrickleTour } from '@/lib/trickle/tour';
+import { ModeSwitch } from '../ModeSwitch';
 import { chip } from './Figures';
 import { Legend, MONO } from './theme';
 
@@ -104,10 +104,7 @@ function Header() {
   const start = useTrickleTour((t) => t.start);
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <Link href="/" onClick={(e) => e.stopPropagation()} style={{ fontSize: 11, color: '#71717a', textDecoration: 'none' }}>
-        ← Playground
-      </Link>
-      <span style={{ fontSize: 11, fontWeight: 700, color: '#a1a1aa', letterSpacing: '0.12em' }}>TRICKLE</span>
+      <ModeSwitch current="trickle" />
       <span style={{ flex: 1 }} />
       <button
         data-testid="trickle-tour-button"
@@ -130,7 +127,7 @@ export function TrickleSidebar({ mobile }: { mobile: boolean }) {
   if (mobile) {
     return (
       <div style={{ ...shell, borderTop: '1px solid #3f3f46', flexShrink: 0, maxHeight: open ? '48dvh' : undefined, display: 'flex', flexDirection: 'column' }}>
-        <div onClick={() => setOpen((o) => !o)} style={{ padding: '8px 14px', cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div data-testid="trickle-sheet" onClick={() => setOpen((o) => !o)} style={{ padding: '8px 14px', cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 11, color: '#71717a' }}>{open ? '▾' : '▸'}</span>
           <div style={{ flex: 1 }}>
             <Header />
