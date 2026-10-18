@@ -12,7 +12,7 @@ export type Figure =
   | { kind: 'weights' }
   | { kind: 'log' }
   | { kind: 'consolidate' }
-  | { kind: 'join-log' }
+  | { kind: 'join' }
   | { kind: 'rules' }
   | { kind: 'grid'; step: number }
   | { kind: 'keys'; narrow: boolean };
@@ -53,7 +53,7 @@ export const TRICKLE_STEPS: TrickleStep[] = [
     chapter: 1,
     title: 'Each change has a freshness',
     body:
-      'Changes are appended, never applied in place, and each is stamped with the freshness of its run: a timestamp that works as an epoch. Here product 42 is added at 09:00, repriced at 10:00 and removed at 11:00. A run reads the changes since its previous run’s freshness.',
+      'Changes are appended, never applied in place, and each is stamped with the freshness of its run: a timestamp that works as an epoch. Here product 42 is added at 09:00, repriced at 10:00 and removed at 11:00, after two rows already there (grey). This unconsolidated table is the example from here on. A run reads the rows newer than its previous run’s freshness.',
     figure: { kind: 'log' },
   },
   {
@@ -61,53 +61,54 @@ export const TRICKLE_STEPS: TrickleStep[] = [
     chapter: 1,
     title: 'Consolidation',
     body:
-      'Summing the weights of identical rows gives the table as of any freshness. A row whose weights sum to zero is gone: up to 10:00 the 10.00 rows cancel, and by 11:00 everything for product 42 does.',
+      'Consolidating sums the weights of identical rows and drops the rows that sum to zero. Product 42’s two 10.00 rows cancel, and so do its two 12.00 rows, so it is gone. The grey rows are untouched.',
     figure: { kind: 'consolidate' },
   },
   {
-    id: 'join-log',
+    id: 'join-pairs',
     chapter: 1,
-    title: 'Joining changes',
+    title: 'Joining Z-sets',
     body:
-      'Join an order line for product 42 to those same changes. Each joined row weighs the product of its two weights, so `priced` gets the matching changes: the 10.00 line added at 09:00, swapped for 12.00 at 10:00, and removed at 11:00.',
-    figure: { kind: 'join-log' },
+      'A join pairs rows whose keys match, as usual, and a pair weighs the product of its two weights. An order line (`+1`) paired with a removed catalog row (`-1`) gives `-1`: that priced row is removed.',
+    figure: { kind: 'join' },
   },
   {
     id: 'rules',
     chapter: 1,
-    title: 'Addition and multiplication',
+    title: 'Why it works',
     body:
-      'So combining Z-sets adds weights, and joining them multiplies weights, for inserts, updates and deletes alike. That is what lets a join’s result be updated from its changes alone.',
+      'Joining then consolidating gives the same result as consolidating then joining, because a join distributes over a sum of Z-sets. Z-sets behave like numbers here: combining them is addition, joining them is multiplication. That is what lets a join be updated from its changes, for inserts, updates and deletes alike.',
     figure: { kind: 'rules' },
   },
   {
     id: 'grid-0',
     chapter: 1,
-    title: 'A join, one run later',
-    body:
-      'After a run each table is its previous state plus its changes: `A′ = A + ΔA`. Here `A` is the order lines and `B` the catalog. The part made only of previous states, `A ⋈ B`, is last run’s output, which is already stored.',
+    title: 'A join, recomputed',
+    body: 'Recomputing a join evaluates every pair of rows: the whole square, `A′ ⋈ B′`, where `A′` is the order lines as they are after this run and `B′` the catalog.',
     figure: { kind: 'grid', step: 0 },
   },
   {
     id: 'grid-1',
     chapter: 1,
-    title: 'The new order lines',
-    body: 'Join the new order lines, `ΔA`, to the whole catalog as it is now, `B′`.',
+    title: 'Cut it by what changed',
+    body:
+      'Each table is its previous state plus its changes, `A′ = A + ΔA`, and the join distributes over that sum, so the square splits into four quadrants. That holds for updates and deletes too, because the changes are Z-sets: a removal is just a row weighing `-1`.',
     figure: { kind: 'grid', step: 1 },
   },
   {
     id: 'grid-2',
     chapter: 1,
-    title: 'The catalog changes',
-    body: 'Join all the order lines as they are now, `A′`, to the catalog changes, `ΔB`. The corner, `ΔA ⋈ ΔB`, is now counted twice.',
+    title: 'Skip A ⋈ B',
+    body:
+      '`A ⋈ B` is last run’s output, already stored, and by far the biggest part. The change to the result is the other three quadrants, and each one involves a set of changes.',
     figure: { kind: 'grid', step: 2 },
   },
   {
     id: 'grid-3',
     chapter: 1,
-    title: 'Subtract the corner',
+    title: 'How Duckstring evaluates it',
     body:
-      'Take the corner away once, and what is left is exactly the change to the output. Every term uses the tables as they are now, so no earlier version of a table has to be rebuilt.',
+      'Duckstring computes the two strips, `ΔA ⋈ B′` and `A′ ⋈ ΔB`, against the tables as they are now, so no earlier version of a table has to be rebuilt. The corner is in both strips, so it is subtracted once.',
     figure: { kind: 'grid', step: 3 },
   },
   {

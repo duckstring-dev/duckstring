@@ -5,7 +5,7 @@ import { THEME_BRAND } from '@/lib/store';
 import { useTrickleStore } from '@/lib/trickle/store';
 import { CHAPTERS, TRICKLE_STEPS, tourWasDone, useTrickleTour, type Figure } from '@/lib/trickle/tour';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
-import { ChangeLog, Consolidation, JoinLog, Rules, WeightedRows } from './Figures';
+import { ChangeLog, Consolidation, JoinPairs, Rules, WeightedRows } from './Figures';
 import { JoinGrid } from './JoinGrid';
 import { KeySet } from './KeySet';
 import { MONO } from './theme';
@@ -38,8 +38,8 @@ function FigureView({ figure }: { figure: Figure }) {
       return <ChangeLog />;
     case 'consolidate':
       return <Consolidation />;
-    case 'join-log':
-      return <JoinLog />;
+    case 'join':
+      return <JoinPairs />;
     case 'rules':
       return <Rules />;
     case 'grid':
@@ -150,9 +150,9 @@ export function TrickleTourCard() {
   const flat = short && !isMobile && !centred;
 
   const place: React.CSSProperties = isMobile
-    ? { position: 'fixed', left: 8, right: 8, ...(atTop ? { top: 8 } : { bottom: 'calc(8px + env(safe-area-inset-bottom))' }), maxHeight: centred ? '82dvh' : '42dvh' }
+    ? { position: 'fixed', left: 8, right: 8, ...(atTop ? { top: 8 } : { bottom: 'calc(8px + env(safe-area-inset-bottom))' }), maxHeight: centred ? '90dvh' : '42dvh' }
     : centred
-      ? { position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%, -50%)', width: 440, maxHeight: '86%' }
+      ? { position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%, -50%)', width: 440, maxHeight: '94%' }
       : flat
         ? { position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '48%', borderRadius: '10px 10px 0 0' }
         : { position: 'absolute', left: 16, bottom: 16, width: 360 };

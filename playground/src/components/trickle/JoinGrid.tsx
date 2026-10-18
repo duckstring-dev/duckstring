@@ -1,75 +1,100 @@
 'use client';
 
 import { THEME_BRAND, THEME_SUCCESS } from '@/lib/store';
-import { BORDER, FAINT, MONO, MUTED, TEXT } from './theme';
+import { FAINT, MONO, MUTED, TEXT } from './theme';
 
-// A join after one run, as an area: the order lines (A′ = A + ΔA) across, the catalog (B′ = B + ΔB) down.
-// Each step adds one of the engine's terms.
+// A join after one run, as an area: the order lines across (A′ = A + ΔA), the catalog down (B′ = B + ΔB).
+// Step 0 is the whole join, 1 cuts it by what changed into four quadrants, 2 skips the stored A ⋈ B, and 3 is
+// how the engine evaluates the rest: two strips over the current tables, minus their shared corner.
 
-// The equation at each step; the tour supplies the words.
 export const JOIN_EQS = [
-  'Δ(A ⋈ B) = ?',
-  'Δ(A ⋈ B) = ΔA ⋈ B′',
-  'Δ(A ⋈ B) = ΔA ⋈ B′ + A′ ⋈ ΔB',
+  'A′ ⋈ B′',
+  'A ⋈ B  +  ΔA ⋈ B  +  A ⋈ ΔB  +  ΔA ⋈ ΔB',
+  'Δ(A ⋈ B) = ΔA ⋈ B + A ⋈ ΔB + ΔA ⋈ ΔB',
   'Δ(A ⋈ B) = ΔA ⋈ B′ + A′ ⋈ ΔB − ΔA ⋈ ΔB',
 ];
 
 // Geometry (viewBox units). Changes are drawn far larger than they would be.
 const X0 = 64, Y0 = 46, AW = 190, DAW = 52, BH = 150, DBH = 46;
 const W = X0 + AW + DAW + 8, H = Y0 + BH + DBH + 10;
+const T = 'all 450ms ease';
 
 export function JoinGrid({ step }: { step: number }) {
   const eq = JOIN_EQS[step];
   const xA = X0 + AW, yB = Y0 + BH;
+  const cut = step >= 1;
+  const skip = step >= 2;
+  const strips = step >= 3;
+  // Each quadrant's fill: the whole join in brand cyan, then the three change quadrants green once A ⋈ B is
+  // skipped. With the strips, the corner is the overlap.
+  const whole = { fill: THEME_BRAND, fillOpacity: 0.28 };
+  const change = { fill: THEME_SUCCESS, fillOpacity: 0.32 };
+  const stored = { fill: '#3f3f46', fillOpacity: 1 };
+  const quad = (q: 'AB' | 'dAB' | 'AdB' | 'dAdB') => (q === 'AB' ? (skip ? stored : whole) : skip ? change : whole);
   return (
     <div>
-      <div data-testid="join-eq" style={{ fontFamily: MONO, fontSize: 12, color: TEXT, minHeight: 18, marginBottom: 8, overflowWrap: 'anywhere' }}>
+      <div data-testid="join-eq" style={{ fontFamily: MONO, fontSize: 12, color: TEXT, minHeight: 18, marginBottom: 8, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
         {eq}
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', maxWidth: 380, maxHeight: '34dvh', display: 'block', margin: '0 auto' }} role="img"
         aria-label={`The join as a grid: ${eq}`}>
         <defs>
           <pattern id="twice" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-            <rect width="6" height="6" fill={THEME_SUCCESS} fillOpacity={0.35} />
-            <line x1="0" y1="0" x2="0" y2="6" stroke={THEME_BRAND} strokeWidth="3" />
+            <rect width="6" height="6" fill={THEME_SUCCESS} fillOpacity={0.45} />
+            <line x1="0" y1="0" x2="0" y2="6" stroke="#ffffff" strokeOpacity={0.6} strokeWidth="2" />
           </pattern>
         </defs>
-        {/* axes */}
-        <Brace x1={X0} x2={xA} y={Y0 - 8} label="A" sub="order lines" />
-        <Brace x1={xA} x2={xA + DAW} y={Y0 - 8} label="ΔA" sub="new" />
-        <VBrace y1={Y0} y2={yB} x={X0 - 8} label="B" sub="catalog" />
-        <VBrace y1={yB} y2={yB + DBH} x={X0 - 8} label="ΔB" sub="changed" />
+        {/* axes: one span each until the cut, then previous state and change */}
+        {cut ? (
+          <>
+            <Brace x1={X0} x2={xA} y={Y0 - 8} label="A" sub="order lines" />
+            <Brace x1={xA} x2={xA + DAW} y={Y0 - 8} label="ΔA" sub="changes" />
+            <VBrace y1={Y0} y2={yB} x={X0 - 8} label="B" sub="catalog" />
+            <VBrace y1={yB} y2={yB + DBH} x={X0 - 8} label="ΔB" sub="changes" />
+          </>
+        ) : (
+          <>
+            <Brace x1={X0} x2={xA + DAW} y={Y0 - 8} label="A′" sub="order lines" />
+            <VBrace y1={Y0} y2={yB + DBH} x={X0 - 8} label="B′" sub="catalog" />
+          </>
+        )}
 
-        {/* last run's output */}
-        <rect x={X0} y={Y0} width={AW} height={BH} fill="#3f3f46" />
-        <text x={X0 + AW / 2} y={Y0 + BH / 2 - 4} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={13}>A ⋈ B</text>
-        <text x={X0 + AW / 2} y={Y0 + BH / 2 + 14} textAnchor="middle" fill={MUTED} fontFamily={MONO} fontSize={10}>stored from last run</text>
+        <rect x={X0} y={Y0} width={AW} height={BH} shapeRendering="crispEdges" style={{ transition: T }} {...quad('AB')} />
+        <rect x={xA} y={Y0} width={DAW} height={BH} shapeRendering="crispEdges" style={{ transition: T }} {...quad('dAB')} />
+        <rect x={X0} y={yB} width={AW} height={DBH} shapeRendering="crispEdges" style={{ transition: T }} {...quad('AdB')} />
+        <rect x={xA} y={yB} width={DAW} height={DBH} shapeRendering="crispEdges" style={{ transition: T }} {...(strips ? { fill: 'url(#twice)', fillOpacity: 1 } : quad('dAdB'))} />
 
-        {/* the outline of what a run adds */}
-        <rect x={xA} y={Y0} width={DAW} height={BH + DBH} fill="none" stroke={BORDER} strokeDasharray="3 3" />
-        <rect x={X0} y={yB} width={AW + DAW} height={DBH} fill="none" stroke={BORDER} strokeDasharray="3 3" />
+        {/* the cut lines */}
+        <line x1={xA} y1={Y0} x2={xA} y2={yB + DBH} stroke="#ffffff" strokeWidth={1.5} strokeDasharray="4 3" style={{ transition: T, opacity: cut ? 0.8 : 0 }} />
+        <line x1={X0} y1={yB} x2={xA + DAW} y2={yB} stroke="#ffffff" strokeWidth={1.5} strokeDasharray="4 3" style={{ transition: T, opacity: cut ? 0.8 : 0 }} />
 
-        {step >= 1 && (
-          <g>
-            <rect x={xA} y={Y0} width={DAW} height={BH + DBH} fill={THEME_SUCCESS} fillOpacity={0.35} stroke={THEME_SUCCESS} />
+        {/* the strips the engine evaluates */}
+        <rect x={xA} y={Y0} width={DAW} height={BH + DBH} fill="none" stroke={THEME_BRAND} strokeWidth={2} style={{ transition: T, opacity: strips ? 1 : 0 }} />
+        <rect x={X0} y={yB} width={AW + DAW} height={DBH} fill="none" stroke={THEME_BRAND} strokeWidth={2} style={{ transition: T, opacity: strips ? 1 : 0 }} />
+
+        {/* labels */}
+        {!cut && (
+          <>
+            <text x={X0 + (AW + DAW) / 2} y={Y0 + (BH + DBH) / 2 - 4} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={13}>A′ ⋈ B′</text>
+            <text x={X0 + (AW + DAW) / 2} y={Y0 + (BH + DBH) / 2 + 14} textAnchor="middle" fill={MUTED} fontFamily={MONO} fontSize={10}>every pair, recomputed</text>
+          </>
+        )}
+        {cut && (
+          <>
+            <text x={X0 + AW / 2} y={Y0 + BH / 2 - 4} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={13}>A ⋈ B</text>
+            <text x={X0 + AW / 2} y={Y0 + BH / 2 + 14} textAnchor="middle" fill={MUTED} fontFamily={MONO} fontSize={10}>
+              {skip ? 'last run’s output: skipped' : 'the previous states'}
+            </text>
             <text transform={`translate(${xA + DAW / 2 + 4}, ${Y0 + BH / 2}) rotate(-90)`} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={11}>
-              ΔA ⋈ B′
+              {strips ? 'ΔA ⋈ B′' : 'ΔA ⋈ B'}
             </text>
-          </g>
-        )}
-        {step >= 2 && (
-          <g>
-            <rect x={X0} y={yB} width={AW + DAW} height={DBH} fill={THEME_BRAND} fillOpacity={0.35} stroke={THEME_BRAND} />
-            <text x={X0 + AW / 2} y={yB + DBH / 2 + 4} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={11}>A′ ⋈ ΔB</text>
-          </g>
-        )}
-        {step >= 2 && (
-          <g>
-            <rect x={xA} y={yB} width={DAW} height={DBH} fill={step === 2 ? 'url(#twice)' : '#2f6f63'} stroke={step === 2 ? '#ffffff' : 'none'} strokeWidth={1.5} />
-            <text x={xA + DAW / 2} y={yB + DBH / 2 + 4} textAnchor="middle" fill="#ffffff" fontFamily={MONO} fontSize={12} fontWeight={700}>
-              {step === 2 ? '×2' : '×1'}
+            <text x={X0 + AW / 2} y={yB + DBH / 2 + 4} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={11}>
+              {strips ? 'A′ ⋈ ΔB' : 'A ⋈ ΔB'}
             </text>
-          </g>
+            <text x={xA + DAW / 2} y={yB + DBH / 2 + 4} textAnchor="middle" fill="#ffffff" fontFamily={MONO} fontSize={strips ? 12 : 9} fontWeight={strips ? 700 : 400}>
+              {strips ? '×2 −1' : 'ΔA⋈ΔB'}
+            </text>
+          </>
         )}
       </svg>
     </div>
