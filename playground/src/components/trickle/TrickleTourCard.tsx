@@ -163,7 +163,6 @@ export function TrickleTourCard() {
   const inChapter = TRICKLE_STEPS.filter((s) => s.chapter === step.chapter);
   const position = inChapter.indexOf(step) + 1;
   const isLast = index === TRICKLE_STEPS.length - 1;
-  const chapterEnd = !isLast && TRICKLE_STEPS[index + 1].chapter !== step.chapter;
   const body = typeof step.body === 'function' ? step.body(useTrickleStore.getState()) : step.body;
   const atTop = atTop0;
   // A short screen (a phone in landscape): a chapter 2 card is a flat bar along the bottom.
@@ -218,9 +217,11 @@ export function TrickleTourCard() {
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
           <div aria-live="polite">
             <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>{step.title}</div>
-            <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
-              <Copy text={body} />
-            </div>
+            {body && (
+              <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
+                <Copy text={body} />
+              </div>
+            )}
           </div>
           {step.figure && (
             <div style={{ marginTop: 12, background: '#111115', border: '1px solid #2c2c33', borderRadius: 8, padding: 10 }}>
@@ -248,7 +249,7 @@ export function TrickleTourCard() {
           )}
           {!flat && <span style={{ flex: 1 }} />}
           <Button primary onClick={() => tour().next()} testId="trickle-tour-next">
-            {isLast ? 'Close' : chapterEnd ? 'Simulate' : 'Next'}
+            {isLast ? 'Close' : 'Next'}
           </Button>
         </div>
         </div>
