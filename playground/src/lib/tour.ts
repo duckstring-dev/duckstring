@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { track } from '@vercel/analytics';
+import { revealSoon } from './reveal';
 import { usePlaygroundStore } from './store';
 import { writeTourMemory } from './tourStorage';
 import { TOUR_STEPS, pondByName, rippleByName, type TourControl, type TourStep, type TourTarget } from './tourSteps';
@@ -153,12 +154,7 @@ export const useTourStore = create<TourState>((set, get) => {
       outline: keepFocus ? (w.show ?? null) : null,
       frame: keepFocus ? t.frame : { ids: null, seq: t.frame.seq + 1 },
     }));
-    if (keepFocus && w.show) {
-      later(250, () => {
-        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        document.querySelector(`[data-tour="${w.show}"]`)?.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
-      });
-    }
+    if (keepFocus && w.show) revealSoon(`[data-tour="${w.show}"]`, later); // clear of the waiting pill
     let resolved = false;
     const done = (how: 'until' | 'fallback' | 'hurry') => {
       if (resolved) return;

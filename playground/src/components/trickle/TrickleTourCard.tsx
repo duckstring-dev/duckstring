@@ -3,6 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { THEME_BRAND } from '@/lib/store';
 import { useModeStore } from '@/lib/mode';
+import { revealSoon } from '@/lib/reveal';
 import { useTrickleStore } from '@/lib/trickle/store';
 import { CHAPTERS, TRICKLE_STEPS, tourWasDone, useTrickleTour, type Figure } from '@/lib/trickle/tour';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
@@ -144,6 +145,14 @@ export function TrickleTourCard() {
     else useTrickleStore.getState().play();
   }, [tour]);
 
+  // A step pointing at the sidebar's toggles scrolls them clear of the card.
+  useEffect(() => {
+    if (!open || !(TRICKLE_STEPS[index].ring ?? []).includes('events')) return;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    revealSoon('[data-tour="events"]', (ms, fn) => void timers.push(setTimeout(fn, ms)));
+    return () => timers.forEach(clearTimeout);
+  }, [open, index]);
+
   useEffect(() => {
     if (!open) return;
     ref.current?.focus({ preventScroll: true });
@@ -183,6 +192,7 @@ export function TrickleTourCard() {
       <div
         ref={ref}
         tabIndex={-1}
+        id="ds-tour-card"
         role="dialog"
         aria-label="Trickle tour"
         data-testid="trickle-tour"

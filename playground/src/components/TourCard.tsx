@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'react';
 import { usePlaygroundStore, THEME_BRAND } from '@/lib/store';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
 import { useModeStore } from '@/lib/mode';
+import { revealSoon } from '@/lib/reveal';
 import { useTourStore } from '@/lib/tour';
 import { TOUR_STEPS, CHAPTER_TITLES } from '@/lib/tourSteps';
 import { initialTourMode } from '@/lib/tourStorage';
@@ -130,13 +131,9 @@ export function TourCard() {
     if (phase !== 'step' && phase !== 'prompt' && phase !== 'confirm') return;
     cardRef.current?.focus({ preventScroll: true });
     if (phase !== 'step' || !step.target?.control) return;
-    const t = setTimeout(() => {
-      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      document
-        .querySelector(`[data-tour="${step.target!.control}"]`)
-        ?.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
-    }, 200);
-    return () => clearTimeout(t);
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    revealSoon(`[data-tour="${step.target.control}"]`, (ms, fn) => void timers.push(setTimeout(fn, ms)));
+    return () => timers.forEach(clearTimeout);
   }, [phase, index, step]);
 
   // Escape skips; the arrow keys move. Typing in the sidebar's inputs is left alone.
@@ -163,8 +160,8 @@ export function TourCard() {
   }, [phase, tour]);
 
   // On a phone, while the card (or the waiting pill) sits at the bottom of the screen, publish how much of it
-  // it covers as --ds-tour-inset: the bottom sheet adds that much scroll space under its content, and outlined
-  // controls keep that much clearance when scrolled into view, so the card never hides the run chart.
+  // it covers as --ds-tour-inset: the bottom sheet adds that much scroll space under its content, so a control the
+  // tour points at can be scrolled clear of the card (revealSoon does that when a step or wait opens).
   const inset = useRef('0px');
   useEffect(() => {
     const card = document.getElementById('ds-tour-card');

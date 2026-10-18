@@ -44,6 +44,13 @@ test('the tour runs end to end', async ({ page }, info) => {
     else await page.getByTestId('tour-next').click();
     if (step.advance !== 'next') {
       // While the tour waits on the simulation, its progress bar moves.
+      // The control the wait keeps in view isn't under the pill.
+      if (step.advance.show) {
+        await page.waitForTimeout(900);
+        const [c, k] = [await page.locator(`[data-tour="${step.advance.show}"]`).first().boundingBox(), await page.getByTestId('tour-pill').boundingBox()];
+        const overlap = c!.y < k!.y + k!.height && c!.y + c!.height > k!.y && c!.x < k!.x + k!.width && c!.x + c!.width > k!.x;
+        expect(overlap, `${step.id}: the pill covers ${step.advance.show}`).toBe(false);
+      }
       const bar = page.getByTestId('tour-progress');
       await expect.poll(async () => (await bar.boundingBox())?.width ?? 0).toBeGreaterThan(5);
       // A wait that speeds up part way says so on the pill.
