@@ -387,9 +387,9 @@ export const TOUR_STEPS: TourStep[] = [
       label: 'Running fast for a few cycles',
       focus: { pond: 'sales' },
       show: 'run-chart',
-      expectedMs: 2900,
-      until: (s, since) => rippleRunsSince(s, since, 'transactions.ingest') >= 8,
-      fallbackMs: 10000,
+      expectedMs: 8700,
+      until: (s, since) => rippleRunsSince(s, since, 'transactions.ingest') >= 24,
+      fallbackMs: 30000,
     },
   },
   {
