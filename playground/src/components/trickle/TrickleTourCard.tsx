@@ -5,7 +5,7 @@ import { THEME_BRAND } from '@/lib/store';
 import { useTrickleStore } from '@/lib/trickle/store';
 import { CHAPTERS, TRICKLE_STEPS, tourWasDone, useTrickleTour, type Figure } from '@/lib/trickle/tour';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
-import { CombineRule, JoinRule, WeightedRows } from './Figures';
+import { ChangeLog, Consolidation, JoinLog, Rules, WeightedRows } from './Figures';
 import { JoinGrid } from './JoinGrid';
 import { KeySet } from './KeySet';
 import { MONO } from './theme';
@@ -34,10 +34,14 @@ function FigureView({ figure }: { figure: Figure }) {
   switch (figure.kind) {
     case 'weights':
       return <WeightedRows />;
-    case 'combine':
-      return <CombineRule />;
-    case 'multiply':
-      return <JoinRule />;
+    case 'log':
+      return <ChangeLog />;
+    case 'consolidate':
+      return <Consolidation />;
+    case 'join-log':
+      return <JoinLog />;
+    case 'rules':
+      return <Rules />;
     case 'grid':
       return <JoinGrid step={figure.step} />;
     case 'keys':

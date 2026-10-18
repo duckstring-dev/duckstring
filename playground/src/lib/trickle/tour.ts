@@ -10,8 +10,10 @@ import { useTrickleStore, type TrickleState } from './store';
 
 export type Figure =
   | { kind: 'weights' }
-  | { kind: 'combine' }
-  | { kind: 'multiply' }
+  | { kind: 'log' }
+  | { kind: 'consolidate' }
+  | { kind: 'join-log' }
+  | { kind: 'rules' }
   | { kind: 'grid'; step: number }
   | { kind: 'keys'; narrow: boolean };
 
@@ -36,30 +38,47 @@ export const TRICKLE_STEPS: TrickleStep[] = [
     chapter: 1,
     title: 'Trickle',
     body:
-      'A step in a pipeline normally rewrites its tables in full on every run, even when only a few rows changed. A **Trickle** is a table that keeps a record of its changes, so the tables built from it can be updated from just those changes. A few ideas first, then a pipeline to watch.',
+      'Incremental processing updates a result from what changed, instead of recomputing it. A **Trickle** is how Duckstring does it: changes are stored as **Z-sets**, and each is stamped with the **freshness** of the run that made it. A few cards on how that works, then a pipeline to watch.',
   },
   {
     id: 'weights',
     chapter: 1,
-    title: 'Changes are rows with a weight',
+    title: 'A Z-set: rows with a weight',
     body:
-      'Each change is the whole row with a weight: `+1` for a row added, `-1` for a row removed. An update is both. A set of rows with weights is called a **Z-set**.',
+      'Each change is the whole row with a weight: `+1` for a row added, `-1` for a row removed. An update is both, the old row removed and the new one added. Grey rows are already in `catalog`.',
     figure: { kind: 'weights' },
   },
   {
-    id: 'combine',
+    id: 'log',
     chapter: 1,
-    title: 'Combining changes is addition',
-    body: 'The weights of identical rows add up, and a row whose weights sum to zero no longer exists.',
-    figure: { kind: 'combine' },
+    title: 'Each change has a freshness',
+    body:
+      'Changes are appended, never applied in place, and each is stamped with the freshness of its run: a timestamp that works as an epoch. Here product 42 is added at 09:00, repriced at 10:00 and removed at 11:00. A run reads the changes since its previous run’s freshness.',
+    figure: { kind: 'log' },
   },
   {
-    id: 'multiply',
+    id: 'consolidate',
     chapter: 1,
-    title: 'Joining is multiplication',
+    title: 'Consolidation',
     body:
-      'A joined row weighs the product of the weights it came from. `+1 × -1` gives `-1`, so the old priced line is removed and the new one added, with no special handling for updates or deletes.',
-    figure: { kind: 'multiply' },
+      'Summing the weights of identical rows gives the table as of any freshness. A row whose weights sum to zero is gone: up to 10:00 the 10.00 rows cancel, and by 11:00 everything for product 42 does.',
+    figure: { kind: 'consolidate' },
+  },
+  {
+    id: 'join-log',
+    chapter: 1,
+    title: 'Joining changes',
+    body:
+      'Join an order line for product 42 to those same changes. Each joined row weighs the product of its two weights, so `priced` gets the matching changes: the 10.00 line added at 09:00, swapped for 12.00 at 10:00, and removed at 11:00.',
+    figure: { kind: 'join-log' },
+  },
+  {
+    id: 'rules',
+    chapter: 1,
+    title: 'Addition and multiplication',
+    body:
+      'So combining Z-sets adds weights, and joining them multiplies weights, for inserts, updates and deletes alike. That is what lets a join’s result be updated from its changes alone.',
+    figure: { kind: 'rules' },
   },
   {
     id: 'grid-0',
