@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { THEME_BRAND, THEME_DANGER, THEME_SUCCESS } from '@/lib/store';
-import { BORDER, FAINT, MONO, MUTED, TEXT } from './theme';
+import { BORDER, FAINT, MARK_COLOURS, MONO, MUTED, TEXT } from './theme';
 
 // The small figures in the tour's first chapter. They follow product 42 through three runs: added at 09:00,
 // repriced at 10:00, removed at 11:00. Rows already in a table are grey; a change is in colour.
@@ -69,9 +69,9 @@ export function ZTable({ cols, rows, caption, empty = 'no rows', selected = [], 
 const PRODUCT = ['product_id', 'unit_price', 'weight'];
 
 const EXAMPLES: { label: string; rows: Row[] }[] = [
-  { label: 'Add', rows: [{ cells: [41, '7.00', 1], existing: true }, [42, '10.00', 1]] },
+  { label: 'Create', rows: [{ cells: [41, '7.00', 1], existing: true }, [42, '10.00', 1]] },
   { label: 'Update', rows: [{ cells: [41, '7.00', 1], existing: true }, { cells: [42, '10.00', 1], existing: true }, [42, '10.00', -1], [42, '12.00', 1]] },
-  { label: 'Remove', rows: [{ cells: [41, '7.00', 1], existing: true }, { cells: [42, '12.00', 1], existing: true }, [42, '12.00', -1]] },
+  { label: 'Delete', rows: [{ cells: [41, '7.00', 1], existing: true }, { cells: [42, '12.00', 1], existing: true }, [42, '12.00', -1]] },
 ];
 
 export function WeightedRows() {
@@ -85,7 +85,7 @@ export function WeightedRows() {
           </button>
         ))}
       </div>
-      <ZTable cols={PRODUCT} rows={EXAMPLES[i].rows} caption="catalog (grey), then the change" />
+      <ZTable cols={PRODUCT} rows={EXAMPLES[i].rows} caption="Existing and changed records" />
     </div>
   );
 }
@@ -105,7 +105,7 @@ const unconsolidated = (withF: boolean): Row[] =>
   UNCONSOLIDATED.map((r) => ({ cells: withF ? [r.product, r.price, r.w, r.f] : [r.product, r.price, r.w], existing: r.held }));
 
 export function ChangeLog() {
-  return <ZTable cols={['product_id', 'unit_price', 'weight', 'freshness']} rows={unconsolidated(true)} caption="catalog, unconsolidated" />;
+  return <ZTable cols={['product_id', 'unit_price', 'weight', 'freshness']} rows={unconsolidated(true)} caption="Freshness-tagged changes" />;
 }
 
 // The weights of identical rows and their total, e.g. `+1 -1 = 0`.
@@ -125,7 +125,7 @@ function Sum({ terms }: { terms: number[] }) {
 export function Consolidation() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <ZTable cols={PRODUCT} rows={unconsolidated(false)} caption="1. catalog, unconsolidated" />
+      <ZTable cols={PRODUCT} rows={unconsolidated(false)} caption="1. Unconsolidated changes" />
       <ZTable
         cols={PRODUCT}
         rows={[
@@ -134,9 +134,9 @@ export function Consolidation() {
           [42, '10.00', <Sum key="a" terms={[1, -1]} />],
           [42, '12.00', <Sum key="b" terms={[1, -1]} />],
         ]}
-        caption="2. sum the weights of identical rows"
+        caption="2. Sum duplicated rows"
       />
-      <ZTable cols={PRODUCT} rows={[{ cells: [41, '7.00', 1], existing: true }, { cells: [43, '9.50', 1], existing: true }]} caption="3. drop rows that sum to 0" />
+      <ZTable cols={PRODUCT} rows={[{ cells: [41, '7.00', 1], existing: true }, { cells: [43, '9.50', 1], existing: true }]} caption="3. Drop rows that sum to 0" />
     </div>
   );
 }
@@ -170,7 +170,7 @@ export function JoinPairs() {
         onSelect={setSel}
       />
       <div style={{ fontSize: 11, color: MUTED, lineHeight: 1.5 }}>
-        Consolidated, order 7 cancels out: the same as joining the consolidated tables.
+        When consolidated, order 7 cancels out, just as it would if joining the consolidated tables.
       </div>
     </div>
   );
@@ -181,25 +181,41 @@ export function Rules() {
   const label: React.CSSProperties = { color: FAINT, fontSize: 10.5, marginBottom: 2 };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ color: FAINT, fontSize: 10.5 }}>Z-sets are distributive even with updates and deletes</div>
       <div style={box}>
-        <div style={label}>consolidating adds weights</div>
+        <div style={label}>union sums weights</div>
         <Weight w={1} /> + <Weight w={-1} /> = 0
       </div>
       <div style={box}>
-        <div style={label}>joining multiplies weights</div>
+        <div style={label}>join multiplies weights</div>
         <Weight w={1} /> × <Weight w={-1} /> = <Weight w={-1} />
       </div>
       <div style={box}>
-        <div style={label}>so a join distributes over a sum</div>
+        <div style={label}>so a join distributes over a union</div>
         (A + ΔA) ⋈ B = A ⋈ B + ΔA ⋈ B
       </div>
-      <div style={box}>
-        <div style={label}>a pair removed from both sides: new minus old</div>
-        (<Weight w={1} /> <Weight w={-1} />) × (<Weight w={1} /> <Weight w={-1} />) − <Weight w={1} /> × <Weight w={1} /> = 0 − 1 = <Weight w={-1} />
-        <div style={{ color: MUTED, fontSize: 11, marginTop: 2 }}>
-          removed, even though <Weight w={-1} /> × <Weight w={-1} /> = <Weight w={1} /> on its own: that term corrects a double count
+    </div>
+  );
+}
+
+// What the squares in the pipeline mean.
+export function LegendFigure() {
+  const rows: [string, string][] = [
+    [MARK_COLOURS.base, 'not touched'],
+    [MARK_COLOURS.read, 'took part: read because its key matched a change'],
+    [MARK_COLOURS.added, 'added'],
+    [MARK_COLOURS.updated, 'changed: old row out, new row in'],
+    [MARK_COLOURS.removed, 'removed'],
+  ];
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontFamily: MONO, fontSize: 11.5, color: MUTED }}>
+      <div style={{ color: FAINT, fontSize: 10.5, marginBottom: 2 }}>every square is a row</div>
+      {rows.map(([c, t]) => (
+        <div key={t} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ width: 10, height: 10, background: c, flexShrink: 0 }} />
+          {t}
         </div>
-      </div>
+      ))}
     </div>
   );
 }

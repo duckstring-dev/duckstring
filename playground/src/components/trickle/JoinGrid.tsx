@@ -8,8 +8,8 @@ import { FAINT, MONO, MUTED, TEXT } from './theme';
 // how the engine evaluates the rest: two strips over the current tables, minus their shared corner.
 
 export const JOIN_EQS = [
-  'A′ ⋈ B′',
-  'A ⋈ B  +  ΔA ⋈ B  +  A ⋈ ΔB  +  ΔA ⋈ ΔB',
+  'Join of A′ ⋈ B′',
+  '', // the card's text gives this equation
   'Δ(A ⋈ B) = ΔA ⋈ B + A ⋈ ΔB + ΔA ⋈ ΔB',
   'Δ(A ⋈ B) = ΔA ⋈ B′ + A′ ⋈ ΔB − ΔA ⋈ ΔB',
 ];
@@ -75,15 +75,14 @@ export function JoinGrid({ step }: { step: number }) {
         {/* labels */}
         {!cut && (
           <>
-            <text x={X0 + (AW + DAW) / 2} y={Y0 + (BH + DBH) / 2 - 4} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={13}>A′ ⋈ B′</text>
-            <text x={X0 + (AW + DAW) / 2} y={Y0 + (BH + DBH) / 2 + 14} textAnchor="middle" fill={MUTED} fontFamily={MONO} fontSize={10}>every pair, recomputed</text>
+            <text x={X0 + (AW + DAW) / 2} y={Y0 + (BH + DBH) / 2 + 4} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={13}>A′ ⋈ B′</text>
           </>
         )}
         {cut && (
           <>
             <text x={X0 + AW / 2} y={Y0 + BH / 2 - 4} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={13}>A ⋈ B</text>
             <text x={X0 + AW / 2} y={Y0 + BH / 2 + 14} textAnchor="middle" fill={MUTED} fontFamily={MONO} fontSize={10}>
-              {skip ? 'last run’s output: skipped' : 'the previous states'}
+              Previous result
             </text>
             <text transform={`translate(${xA + DAW / 2 + 4}, ${Y0 + BH / 2}) rotate(-90)`} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={11}>
               {strips ? 'ΔA ⋈ B′' : 'ΔA ⋈ B'}

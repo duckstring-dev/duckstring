@@ -32,7 +32,7 @@ test('the Trickle tour runs end to end', async ({ page }, info) => {
     await expect(card).toHaveAttribute('data-step', step.id);
     await onScreen(page, '[data-testid="trickle-tour"]');
     if (stops[step.id]) await expect(phase).toHaveText(stops[step.id], { timeout: 30_000 });
-    if (step.id === 'join') await expect(card).toContainText(/took part: \d+ rows, \d+% of the 1,050/);
+    if (step.id === 'join') await expect(card).toContainText(/took part when producing priced: \d+ rows, \d+% of the 1,050/);
     await page.waitForTimeout(300);
     await page.screenshot({ path: info.outputPath(`${String(i + 1).padStart(2, '0')}-${step.id}.png`) });
     await expect(page.getByTestId('trickle-tour-next')).toBeInViewport({ ratio: 1 });

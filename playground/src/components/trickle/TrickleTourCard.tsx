@@ -5,27 +5,45 @@ import { THEME_BRAND } from '@/lib/store';
 import { useTrickleStore } from '@/lib/trickle/store';
 import { CHAPTERS, TRICKLE_STEPS, tourWasDone, useTrickleTour, type Figure } from '@/lib/trickle/tour';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
-import { ChangeLog, Consolidation, JoinPairs, Rules, WeightedRows } from './Figures';
+import { ChangeLog, Consolidation, JoinPairs, LegendFigure, Rules, WeightedRows } from './Figures';
 import { JoinGrid } from './JoinGrid';
-import { KeySet } from './KeySet';
 import { MONO } from './theme';
 
 // The tour's card. Chapter 1 cards sit in the middle of the canvas with a figure, over a dimmed pipeline.
 // Chapter 2 cards float at the bottom left (the bottom on a phone, or the top when pointing at the sidebar)
 // so the pipeline stays in view.
 
-function Copy({ text }: { text: string }) {
+// `backticks` → code, **double asterisks** → bold, *single* → italics, a blank line → a new paragraph.
+function Inline({ text }: { text: string }) {
   return (
     <>
       {text.split('`').map((part, i) =>
         i % 2 ? (
-          <code key={i} style={{ color: '#e4e4e7', background: '#27272a', borderRadius: 3, padding: '0 4px', whiteSpace: 'nowrap' }}>
+          <code key={i} style={{ color: '#e4e4e7', background: '#27272a', borderRadius: 3, padding: '0 4px' }}>
             {part}
           </code>
         ) : (
-          part.split('**').map((bit, j) => (j % 2 ? <strong key={`${i}-${j}`} style={{ color: '#e4e4e7' }}>{bit}</strong> : bit))
-        )
+          part.split('**').map((bit, j) =>
+            j % 2 ? (
+              <strong key={`${i}-${j}`} style={{ color: '#e4e4e7' }}>{bit}</strong>
+            ) : (
+              bit.split('*').map((it, k) => (k % 2 ? <em key={`${i}-${j}-${k}`}>{it}</em> : it))
+            ),
+          )
+        ),
       )}
+    </>
+  );
+}
+
+function Copy({ text }: { text: string }) {
+  return (
+    <>
+      {text.split('\n\n').map((para, i) => (
+        <p key={i} style={{ margin: i ? '8px 0 0' : 0 }}>
+          <Inline text={para} />
+        </p>
+      ))}
     </>
   );
 }
@@ -44,8 +62,8 @@ function FigureView({ figure }: { figure: Figure }) {
       return <Rules />;
     case 'grid':
       return <JoinGrid step={figure.step} />;
-    case 'keys':
-      return <KeySet narrow={figure.narrow} />;
+    case 'legend':
+      return <LegendFigure />;
   }
 }
 
