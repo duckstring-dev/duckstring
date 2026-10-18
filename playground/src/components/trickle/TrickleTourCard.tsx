@@ -246,7 +246,7 @@ export function TrickleTourCard() {
           )}
           {!flat && <span style={{ flex: 1 }} />}
           <Button primary onClick={() => tour().next()} testId="trickle-tour-next">
-            {isLast ? 'Close' : chapterEnd ? 'Watch it run' : 'Next'}
+            {isLast ? 'Close' : chapterEnd ? 'Simulate' : 'Next'}
           </Button>
         </div>
         </div>
