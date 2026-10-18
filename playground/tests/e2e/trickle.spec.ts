@@ -75,3 +75,13 @@ test('one page switches between orchestration and Trickle, and each keeps its st
   await expect(page.getByTestId('trickle-tour')).toHaveCount(0);
   await expect(page.getByTestId('trickle-phase')).toHaveText(/run [2-9]/);
 });
+
+test('the Trickle tour hands over to the orchestration tour', async ({ page }) => {
+  await page.goto('/trickle?tour=1');
+  for (let i = 0; i < TRICKLE_STEPS.length - 1; i++) await page.getByTestId('trickle-tour-next').click();
+  await expect(page.getByTestId('trickle-tour')).toHaveAttribute('data-step', 'try');
+  await page.getByTestId('trickle-tour-mode-orchestration').click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.locator('#ds-canvas')).toBeVisible();
+  await expect(page.getByTestId('tour-prompt')).toBeVisible(); // a first visit to orchestration offers its tour
+});

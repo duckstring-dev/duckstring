@@ -39,7 +39,9 @@ test('the tour runs end to end', async ({ page }, info) => {
     await page.screenshot({ path: info.outputPath(`${String(i + 1).padStart(2, '0')}-${step.id}.png`) });
     // The buttons are reachable without scrolling the card.
     await expect(page.getByTestId('tour-next')).toBeInViewport({ ratio: 1 });
-    await page.getByTestId('tour-next').click();
+    // The last card hands over to Trickle mode, which opens its own tour.
+    if (i === TOUR_STEPS.length - 1) await page.getByTestId('tour-mode-trickle').click();
+    else await page.getByTestId('tour-next').click();
     if (step.advance !== 'next') {
       // While the tour waits on the simulation, its progress bar moves.
       const bar = page.getByTestId('tour-progress');
@@ -57,6 +59,8 @@ test('the tour runs end to end', async ({ page }, info) => {
   await expect(card).toHaveCount(0);
   await expect(page.getByTestId('tour-pill')).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('ds-playground-tour'))).toBe('done');
+  await expect(page).toHaveURL(/\/trickle$/);
+  await expect(page.getByTestId('trickle-tour')).toBeVisible();
 });
 
 test('a first visit is offered the tour once', async ({ page }) => {

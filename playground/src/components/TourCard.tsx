@@ -3,6 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { usePlaygroundStore, THEME_BRAND } from '@/lib/store';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
+import { useModeStore } from '@/lib/mode';
 import { useTourStore } from '@/lib/tour';
 import { TOUR_STEPS, CHAPTER_TITLES } from '@/lib/tourSteps';
 import { initialTourMode } from '@/lib/tourStorage';
@@ -160,6 +161,22 @@ export function TourCard() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [phase, tour]);
+
+  // On a phone, while the card (or the waiting pill) sits at the bottom of the screen, publish how much of it
+  // it covers as --ds-tour-inset: the bottom sheet adds that much scroll space under its content, and outlined
+  // controls keep that much clearance when scrolled into view, so the card never hides the run chart.
+  const inset = useRef('0px');
+  useEffect(() => {
+    const card = document.getElementById('ds-tour-card');
+    const r = card?.getBoundingClientRect();
+    const atBottom = !!r && isMobile && r.bottom > window.innerHeight / 2;
+    const next = atBottom ? `${Math.ceil(window.innerHeight - r!.top + 8)}px` : '0px';
+    if (next !== inset.current) {
+      inset.current = next;
+      document.documentElement.style.setProperty('--ds-tour-inset', next);
+    }
+  });
+  useEffect(() => () => document.documentElement.style.setProperty('--ds-tour-inset', '0px'), []);
 
   // The action buttons re-render with the store, so a done action shows as Next.
   const actionDone = usePlaygroundStore((s) => (step.action ? step.action.done(s) : true));
@@ -365,12 +382,26 @@ export function TourCard() {
             )}
           </div>
           {step.links && (
-            <div style={{ display: 'flex', gap: 14, marginTop: 10, fontSize: 13 }}>
-              {step.links.map((l) => (
-                <a key={l.href} href={l.href} target="_blank" rel="noopener noreferrer" style={{ color: THEME_BRAND, textDecoration: 'underline' }}>
-                  {l.label}
-                </a>
-              ))}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10, fontSize: 13 }}>
+              {step.links.map((l) =>
+                l.mode ? (
+                  <button
+                    key={l.label}
+                    data-testid={`tour-mode-${l.mode}`}
+                    onClick={() => {
+                      tour().finish();
+                      useModeStore.getState().setMode(l.mode!);
+                    }}
+                    style={{ color: THEME_BRAND, textDecoration: 'underline', background: 'none', border: 'none', padding: 0, font: 'inherit', cursor: 'pointer' }}
+                  >
+                    {l.label}
+                  </button>
+                ) : (
+                  <a key={l.label} href={l.href} target="_blank" rel="noopener noreferrer" style={{ color: THEME_BRAND, textDecoration: 'underline' }}>
+                    {l.label}
+                  </a>
+                ),
+              )}
             </div>
           )}
         </div>

@@ -1,6 +1,7 @@
 'use client';
 
 import { create } from 'zustand';
+import type { Mode } from '../mode';
 import { useTrickleStore, type TrickleState } from './store';
 
 // The /trickle tour. Chapter 1 explains the ideas in cards over the canvas, each with a small figure.
@@ -27,7 +28,8 @@ export interface TrickleStep {
   figure?: Figure;
   ring?: string[]; // node keys, or 'events' for the sidebar's toggles
   enter?: (s: TrickleState) => void; // runs when the step opens
-  links?: { label: string; href: string }[];
+  // A link opens `href`, or with `mode` closes the tour and switches the Playground's mode.
+  links?: { label: string; href?: string; mode?: Mode }[];
 }
 
 export const CHAPTERS: Record<1 | 2, string> = { 1: 'Theory', 2: 'Demonstration' };
@@ -187,7 +189,10 @@ export const TRICKLE_STEPS: TrickleStep[] = [
       s.play();
       s.setSheetOpen(true);
     },
-    links: [{ label: 'Read the docs for Trickle', href: 'https://docs.duckstring.com/concepts/trickles' }],
+    links: [
+      { label: 'Read the docs for Trickle', href: 'https://docs.duckstring.com/concepts/trickles' },
+      { label: 'Orchestration tour →', mode: 'orchestration' },
+    ],
   },
 ];
 

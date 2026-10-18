@@ -1,3 +1,4 @@
+import type { Mode } from './mode';
 import type { PondId, RippleId } from './types';
 import type { PlaygroundState } from './store';
 
@@ -57,7 +58,8 @@ export interface TourStep {
   action?: { label: string; run?: (s: PlaygroundState) => void; stages?: TourStage[]; done: (s: PlaygroundState) => boolean };
   suggestions?: string[]; // a bulleted list after the body
   footer?: string; // a closing line after the suggestions
-  links?: { label: string; href: string }[];
+  // A link opens `href` in a new tab, or with `mode` finishes the tour and switches the Playground's mode.
+  links?: { label: string; href?: string; mode?: Mode }[];
 }
 
 export const CHAPTER_TITLES: Record<TourStep['chapter'], string> = {
@@ -533,13 +535,14 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'done',
     chapter: 4,
     title: "That's most of it",
-    body: 'See the docs for more detail:',
+    body: 'See the docs for more detail, or carry on to Trickle, how Duckstring processes only what changed:',
     frame: 'all',
     setup: ({ store }) => store.clearSelection(),
     advance: 'next',
     links: [
       { label: 'Docs', href: 'https://docs.duckstring.com/' },
       { label: 'Quickstart', href: 'https://docs.duckstring.com/quickstart' },
+      { label: 'Trickle tour →', mode: 'trickle' },
     ],
   },
 ];

@@ -88,3 +88,9 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .react-flow__edge-path { animation: none !important; }
 }
+
+/* A control the tour points at scrolls into view clear of the tour card when that sits at the bottom of a
+   phone screen (--ds-tour-inset, set by TourCard). */
+[data-tour] {
+  scroll-margin-bottom: var(--ds-tour-inset, 0px);
+}

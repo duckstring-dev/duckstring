@@ -412,7 +412,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
           <ModeSwitch current="orchestration" />
           <TourButton />
         </div>
-        {!collapsed && <div style={{ overflowY: 'auto', padding: '0 14px 14px' }}>{content}</div>}
+        {!collapsed && <div style={{ overflowY: 'auto', padding: '0 14px 14px', paddingBottom: 'calc(14px + var(--ds-tour-inset, 0px))' }}>{content}</div>}
       </div>
     );
   }

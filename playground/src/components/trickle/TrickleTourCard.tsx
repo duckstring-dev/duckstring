@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { THEME_BRAND } from '@/lib/store';
+import { useModeStore } from '@/lib/mode';
 import { useTrickleStore } from '@/lib/trickle/store';
 import { CHAPTERS, TRICKLE_STEPS, tourWasDone, useTrickleTour, type Figure } from '@/lib/trickle/tour';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
@@ -230,12 +231,25 @@ export function TrickleTourCard() {
           )}
           {step.links && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10, fontSize: 13 }}>
-              {step.links.map((l) => (
-                <a key={l.href} href={l.href} target={l.href.startsWith('http') ? '_blank' : undefined}
-                  rel="noopener noreferrer" style={{ color: THEME_BRAND, textDecoration: 'underline' }}>
-                  {l.label}
-                </a>
-              ))}
+              {step.links.map((l) =>
+                l.mode ? (
+                  <button
+                    key={l.label}
+                    data-testid={`trickle-tour-mode-${l.mode}`}
+                    onClick={() => {
+                      tour().close();
+                      useModeStore.getState().setMode(l.mode!);
+                    }}
+                    style={{ color: THEME_BRAND, textDecoration: 'underline', background: 'none', border: 'none', padding: 0, font: 'inherit', cursor: 'pointer' }}
+                  >
+                    {l.label}
+                  </button>
+                ) : (
+                  <a key={l.label} href={l.href} target="_blank" rel="noopener noreferrer" style={{ color: THEME_BRAND, textDecoration: 'underline' }}>
+                    {l.label}
+                  </a>
+                ),
+              )}
             </div>
           )}
         </div>
