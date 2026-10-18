@@ -146,6 +146,7 @@ export function Consolidation() {
 const ORDERS = [
   { order: 7, product: 42 },
   { order: 8, product: 41 },
+  { order: 9, product: 43 },
 ];
 const PAIRS = ORDERS.flatMap((o, oi) =>
   UNCONSOLIDATED.map((c, ci) => ({ oi, ci, o, c })).filter((p) => p.c.product === o.product),
@@ -169,8 +170,7 @@ export function JoinPairs() {
         onSelect={setSel}
       />
       <div style={{ fontSize: 11, color: MUTED, lineHeight: 1.5 }}>
-        Product 43 has no order line, so it pairs with nothing. Consolidated, order 7 cancels out: the same as joining
-        the consolidated tables.
+        Consolidated, order 7 cancels out: the same as joining the consolidated tables.
       </div>
     </div>
   );
@@ -182,12 +182,16 @@ export function Rules() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div style={box}>
-        <div style={label}>a join distributes over a sum</div>
-        (A + ΔA) ⋈ B = A ⋈ B + ΔA ⋈ B
+        <div style={label}>consolidating adds weights</div>
+        <Weight w={1} /> + <Weight w={-1} /> = 0
       </div>
       <div style={box}>
-        <div style={label}>so, like numbers</div>
-        combining is addition, joining is multiplication
+        <div style={label}>joining multiplies weights</div>
+        <Weight w={1} /> × <Weight w={-1} /> = <Weight w={-1} />
+      </div>
+      <div style={box}>
+        <div style={label}>so a join distributes over a sum</div>
+        (A + ΔA) ⋈ B = A ⋈ B + ΔA ⋈ B
       </div>
       <div style={box}>
         <div style={label}>a pair removed from both sides: new minus old</div>

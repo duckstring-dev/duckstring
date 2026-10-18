@@ -100,6 +100,7 @@ function layout(rows: Record<PondKey, number>, vertical: boolean): Node[] {
         catalog: { x: 0, y: 0 },
         orders: { x: 0, y: h('catalog') + 40 },
         priced: { x: NODE_WIDTH + 110, y: (h('catalog') + 40) / 2 },
+        // Level with priced: the side handles sit at a fixed height, so the edge between them is straight.
         revenue: { x: 2 * (NODE_WIDTH + 110), y: (h('catalog') + 40) / 2 },
       };
   return (Object.keys(pos) as PondKey[]).map((k) => ({

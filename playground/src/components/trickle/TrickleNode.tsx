@@ -25,6 +25,10 @@ export function nodeHeight(rows: number): number {
   return 46 + Math.max(1, Math.ceil(rows / cols)) * (CELL + GAP) + 44;
 }
 
+// Side handles sit level with the node's title, whatever its height, so edges between nodes with level tops
+// run straight.
+const handleAt = (vertical: boolean): React.CSSProperties => (vertical ? {} : { top: 20 });
+
 // Which phase each node works in, for its highlight.
 const WORKING: Record<PondKey, string[]> = {
   orders: ['sources'],
@@ -76,7 +80,7 @@ export const TrickleNode = memo(function TrickleNode({ data }: NodeProps) {
       }}
     >
       {pond !== 'orders' && pond !== 'catalog' && (
-        <Handle type="target" position={vertical ? Position.Top : Position.Left} style={{ background: '#52525b' }} />
+        <Handle type="target" position={vertical ? Position.Top : Position.Left} style={{ background: '#52525b', ...handleAt(vertical) }} />
       )}
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
         <span style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: TEXT }}>{pond}</span>
@@ -94,7 +98,7 @@ export const TrickleNode = memo(function TrickleNode({ data }: NodeProps) {
         {status}
       </div>
       {pond !== 'revenue' && (
-        <Handle type="source" position={vertical ? Position.Bottom : Position.Right} style={{ background: '#52525b' }} />
+        <Handle type="source" position={vertical ? Position.Bottom : Position.Right} style={{ background: '#52525b', ...handleAt(vertical) }} />
       )}
     </div>
   );

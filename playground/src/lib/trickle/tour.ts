@@ -77,7 +77,7 @@ export const TRICKLE_STEPS: TrickleStep[] = [
     chapter: 1,
     title: 'Why it works',
     body:
-      'Joining then consolidating gives the same result as consolidating then joining, because a join distributes over a sum of Z-sets. Z-sets behave like numbers here: combining them is addition, joining them is multiplication. That is what lets a join be updated from its changes, for inserts, updates and deletes alike, even a pair removed from both sides at once.',
+      'Consolidating is literally addition of weights, and joining is literally multiplication of them. So the usual laws of arithmetic hold, and the one that matters is that a join distributes over a sum. That is why joining then consolidating gave the same result as consolidating then joining, and it holds for inserts, updates and deletes alike, even a pair removed from both sides at once.',
     figure: { kind: 'rules' },
   },
   {
