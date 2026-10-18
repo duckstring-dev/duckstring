@@ -189,6 +189,13 @@ export function Rules() {
         <div style={label}>so, like numbers</div>
         combining is addition, joining is multiplication
       </div>
+      <div style={box}>
+        <div style={label}>a pair removed from both sides: new minus old</div>
+        (<Weight w={1} /> <Weight w={-1} />) × (<Weight w={1} /> <Weight w={-1} />) − <Weight w={1} /> × <Weight w={1} /> = 0 − 1 = <Weight w={-1} />
+        <div style={{ color: MUTED, fontSize: 11, marginTop: 2 }}>
+          removed, even though <Weight w={-1} /> × <Weight w={-1} /> = <Weight w={1} /> on its own: that term corrects a double count
+        </div>
+      </div>
     </div>
   );
 }

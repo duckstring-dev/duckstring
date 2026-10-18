@@ -77,7 +77,7 @@ export const TRICKLE_STEPS: TrickleStep[] = [
     chapter: 1,
     title: 'Why it works',
     body:
-      'Joining then consolidating gives the same result as consolidating then joining, because a join distributes over a sum of Z-sets. Z-sets behave like numbers here: combining them is addition, joining them is multiplication. That is what lets a join be updated from its changes, for inserts, updates and deletes alike.',
+      'Joining then consolidating gives the same result as consolidating then joining, because a join distributes over a sum of Z-sets. Z-sets behave like numbers here: combining them is addition, joining them is multiplication. That is what lets a join be updated from its changes, for inserts, updates and deletes alike, even a pair removed from both sides at once.',
     figure: { kind: 'rules' },
   },
   {
@@ -108,7 +108,7 @@ export const TRICKLE_STEPS: TrickleStep[] = [
     chapter: 1,
     title: 'How Duckstring evaluates it',
     body:
-      'Duckstring computes the two strips, `ΔA ⋈ B′` and `A′ ⋈ ΔB`, against the tables as they are now, so no earlier version of a table has to be rebuilt. The corner is in both strips, so it is subtracted once.',
+      'Duckstring computes the two strips, `ΔA ⋈ B′` and `A′ ⋈ ΔB`, against the tables as they are now, so no earlier version of a table has to be rebuilt. The corner is in both strips, so it is subtracted once. If an order line and its product are both removed, neither strip finds them (`0 + 0`) and the corner gives `−(-1 × -1)`: the pair is removed, `-1`.',
     figure: { kind: 'grid', step: 3 },
   },
   {

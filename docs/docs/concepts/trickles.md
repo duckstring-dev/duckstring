@@ -110,9 +110,20 @@ $$
 
 Every remaining term involves at least one set of changes, which is small next to the tables themselves. Because weights multiply, a deletion or update on either side produces the right removals in the output, so the rule holds for every kind of change. Similar rules cover filters, computed columns and aggregations. Together they let Duckstring maintain results incrementally with confidence, instead of relying on hand-written logic that has to anticipate every way the inputs might change.
 
+The last term matters when both tables change at the same key. Suppose an order line and the product it refers to are both deleted in one run. Their joined row was in the previous output and should be removed once:
+
+| Term | Weights | Result |
+|---|---|---|
+| $\Delta A \bowtie B$ | $-1 \times +1$ | $-1$ |
+| $A \bowtie \Delta B$ | $+1 \times -1$ | $-1$ |
+| $\Delta A \bowtie \Delta B$ | $-1 \times -1$ | $+1$ |
+| Total | | $-1$ |
+
+Each deletion, joined with the other table's previous state, removes the joined row, so together they remove it twice, and the last term adds one back. This is the same arithmetic as $(1 - 1) \times (1 - 1) - 1 \times 1 = -1$: the new output has no such row, and the previous one had one. Duckstring evaluates the same change against the tables as they are after the run, $A' = A + \Delta A$ and $B' = B + \Delta B$, as $\Delta A \bowtie B' + A' \bowtie \Delta B - \Delta A \bowtie \Delta B$, so it never has to rebuild an earlier version of a table. There the arithmetic is $0 + 0 - (+1)$: neither deleted row is left in a table to pair with, and the overlap of the two changes is subtracted.
+
 ### Changed Key Set
 
-Each remaining term joins a set of changes to a table, and a row of the table can only take part if its key appears in those changes. So $A \bowtie \Delta B$ only involves the rows of $A$ whose keys appear in $\Delta B$: when `priced` joins order lines to the catalog and 100 products change price, only the order lines for those 100 products take part. Duckstring evaluates the terms against the tables as they are after the run, so it never has to rebuild an earlier version of a table.
+Each remaining term joins a set of changes to a table, and a row of the table can only take part if its key appears in those changes. So $A \bowtie \Delta B$ only involves the rows of $A$ whose keys appear in $\Delta B$: when `priced` joins order lines to the catalog and 100 products change price, only the order lines for those 100 products take part.
 
 Semi, anti and outer joins also depend on whether a key has any match at all. Only a key in the changes can gain its first match or lose its last, so Duckstring counts matches for those keys and adjusts just the rows that hold them. When one side of a join is itself a join, the changed keys are passed down to the table that holds them, so that join doesn't run over its whole input first.
 
