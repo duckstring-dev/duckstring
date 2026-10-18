@@ -535,7 +535,7 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'done',
     chapter: 4,
     title: "That's most of it",
-    body: 'See the docs for more detail, or carry on to Trickle, how Duckstring processes only what changed:',
+    body: 'See the docs for more detail, or carry on to Trickle (incremental processing):',
     frame: 'all',
     setup: ({ store }) => store.clearSelection(),
     advance: 'next',
