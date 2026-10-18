@@ -47,8 +47,8 @@ export interface TourStep {
   title: string;
   body: string; // one or two sentences ('' on a chapter's opening card)
   target?: TourTarget;
-  // Default: the target's node if it has one, else the whole graph. 'keep' leaves the view, selection and
-  // highlights as the previous step left them (a chapter's opening card, so its last chart stays in view).
+  // Default: the target's node if it has one, else the whole graph. 'keep' leaves the view and selection as the
+  // previous step left them, with its highlights cleared (a chapter's opening card, so its last chart stays in view).
   frame?: 'all' | 'target' | 'keep';
   setup?: (ctx: TourContext) => void; // runs when the step opens, after `target` is applied
   // 'next' moves straight on; a wait hides the tour and runs the simulation fast until `until` holds.
@@ -444,9 +444,9 @@ export const TOUR_STEPS: TourStep[] = [
       label: 'Running fast for a few cycles',
       keepFocus: true,
       show: 'run-chart',
-      expectedMs: 4000,
-      until: (s, since) => pondRunsSince(s, since, NEW_POND) >= 7,
-      fallbackMs: 15000,
+      expectedMs: 8000,
+      until: (s, since) => pondRunsSince(s, since, NEW_POND) >= 14,
+      fallbackMs: 30000,
     },
   },
 

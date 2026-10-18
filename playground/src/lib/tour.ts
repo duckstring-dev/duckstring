@@ -80,7 +80,8 @@ export const useTourStore = create<TourState>((set, get) => {
     clearPending();
     const step = TOUR_STEPS[index];
     if (step.frame === 'keep') {
-      set({ phase: 'step', index, waitLabel: null, wait: null, collapsed: false });
+      // The view and selection stay (a chapter's opening card keeps the last chart in view); the highlights go.
+      set({ phase: 'step', index, waitLabel: null, wait: null, ring: null, outline: null, collapsed: false });
     } else {
       set({ phase: 'step', index, waitLabel: null, wait: null, ring: null, outline: null, collapsed: false });
       focus(step.target ?? {}, step.frame);
