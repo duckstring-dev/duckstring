@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { THEME_BRAND, THEME_DANGER, THEME_SUCCESS } from '@/lib/store';
+import { JoinGrid } from './JoinGrid';
 import { BORDER, FAINT, MARK_COLOURS, MONO, MUTED, TEXT } from './theme';
 
 // The small figures in the tour's first chapter. They follow product 42 through three runs: added at 09:00,
@@ -194,6 +195,25 @@ export function Rules() {
         <div style={label}>so a join distributes over a union</div>
         (A + ΔA) ⋈ B = A ⋈ B + ΔA ⋈ B
       </div>
+    </div>
+  );
+}
+
+// A pair deleted on both sides: the square with each term's value, and the terms as a table.
+export function BothDeleted() {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <JoinGrid step={4} />
+      <ZTable
+        cols={['term', 'pair', 'weight']}
+        rows={[
+          ['ΔA ⋈ B′', '-1 × no row', 0],
+          ['A′ ⋈ ΔB', 'no row × -1', 0],
+          ['− ΔA ⋈ ΔB', '−(-1 × -1)', -1],
+          [<b key="s">sum</b>, '', -1],
+        ]}
+        caption="an order line and its product, both deleted"
+      />
     </div>
   );
 }

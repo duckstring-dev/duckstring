@@ -1,17 +1,19 @@
 'use client';
 
-import { THEME_BRAND, THEME_SUCCESS } from '@/lib/store';
+import { THEME_BRAND, THEME_DANGER, THEME_SUCCESS } from '@/lib/store';
 import { FAINT, MONO, MUTED, TEXT } from './theme';
 
 // A join after one run, as an area: the order lines across (A′ = A + ΔA), the catalog down (B′ = B + ΔB).
 // Step 0 is the whole join, 1 cuts it by what changed into four quadrants, 2 skips the stored A ⋈ B, and 3 is
-// how the engine evaluates the rest: two strips over the current tables, minus their shared corner.
+// how the engine evaluates the rest: two strips over the current tables, minus their shared corner. Step 4 is
+// that for a pair deleted from both sides: the strips find nothing, and the corner alone removes it.
 
 export const JOIN_EQS = [
   'Join of A′ ⋈ B′',
   '', // the card's text gives this equation
   'Δ(A ⋈ B) = ΔA ⋈ B + A ⋈ ΔB + ΔA ⋈ ΔB',
   'Δ(A ⋈ B) = ΔA ⋈ B′ + A′ ⋈ ΔB − ΔA ⋈ ΔB',
+  'ΔA ⋈ B′ + A′ ⋈ ΔB − ΔA ⋈ ΔB = 0 + 0 − (-1 × -1) = -1',
 ];
 
 // Geometry (viewBox units). Changes are drawn far larger than they would be.
@@ -25,12 +27,15 @@ export function JoinGrid({ step }: { step: number }) {
   const cut = step >= 1;
   const skip = step >= 2;
   const strips = step >= 3;
+  const both = step === 4; // a pair deleted on both sides
   // Each quadrant's fill: the whole join in brand cyan, then the three change quadrants green once A ⋈ B is
   // skipped. With the strips, the corner is the overlap.
   const whole = { fill: THEME_BRAND, fillOpacity: 0.28 };
   const change = { fill: THEME_SUCCESS, fillOpacity: 0.32 };
   const stored = { fill: '#3f3f46', fillOpacity: 1 };
-  const quad = (q: 'AB' | 'dAB' | 'AdB' | 'dAdB') => (q === 'AB' ? (skip ? stored : whole) : skip ? change : whole);
+  const empty = { fill: THEME_SUCCESS, fillOpacity: 0.08 };
+  const quad = (q: 'AB' | 'dAB' | 'AdB' | 'dAdB') =>
+    q === 'AB' ? (skip ? stored : whole) : both ? empty : skip ? change : whole;
   return (
     <div>
       <div data-testid="join-eq" style={{ fontFamily: MONO, fontSize: 12, color: TEXT, minHeight: 18, marginBottom: 8, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
@@ -62,7 +67,7 @@ export function JoinGrid({ step }: { step: number }) {
         <rect x={X0} y={Y0} width={AW} height={BH} shapeRendering="crispEdges" style={{ transition: T }} {...quad('AB')} />
         <rect x={xA} y={Y0} width={DAW} height={BH} shapeRendering="crispEdges" style={{ transition: T }} {...quad('dAB')} />
         <rect x={X0} y={yB} width={AW} height={DBH} shapeRendering="crispEdges" style={{ transition: T }} {...quad('AdB')} />
-        <rect x={xA} y={yB} width={DAW} height={DBH} shapeRendering="crispEdges" style={{ transition: T }} {...(strips ? { fill: 'url(#twice)', fillOpacity: 1 } : quad('dAdB'))} />
+        <rect x={xA} y={yB} width={DAW} height={DBH} shapeRendering="crispEdges" style={{ transition: T }} {...(both ? { fill: THEME_DANGER, fillOpacity: 0.55 } : strips ? { fill: 'url(#twice)', fillOpacity: 1 } : quad('dAdB'))} />
 
         {/* the cut lines */}
         <line x1={xA} y1={Y0} x2={xA} y2={yB + DBH} stroke="#ffffff" strokeWidth={1.5} strokeDasharray="4 3" style={{ transition: T, opacity: cut ? 0.8 : 0 }} />
@@ -85,13 +90,13 @@ export function JoinGrid({ step }: { step: number }) {
               Previous result
             </text>
             <text transform={`translate(${xA + DAW / 2 + 4}, ${Y0 + BH / 2}) rotate(-90)`} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={11}>
-              {strips ? 'ΔA ⋈ B′' : 'ΔA ⋈ B'}
+              {both ? 'ΔA ⋈ B′ = 0' : strips ? 'ΔA ⋈ B′' : 'ΔA ⋈ B'}
             </text>
             <text x={X0 + AW / 2} y={yB + DBH / 2 + 4} textAnchor="middle" fill={TEXT} fontFamily={MONO} fontSize={11}>
-              {strips ? 'A′ ⋈ ΔB' : 'A ⋈ ΔB'}
+              {both ? 'A′ ⋈ ΔB = 0' : strips ? 'A′ ⋈ ΔB' : 'A ⋈ ΔB'}
             </text>
             <text x={xA + DAW / 2} y={yB + DBH / 2 + 4} textAnchor="middle" fill="#ffffff" fontFamily={MONO} fontSize={strips ? 12 : 9} fontWeight={strips ? 700 : 400}>
-              {strips ? '×2 −1' : 'ΔA⋈ΔB'}
+              {both ? '−1' : strips ? '×2 −1' : 'ΔA⋈ΔB'}
             </text>
           </>
         )}

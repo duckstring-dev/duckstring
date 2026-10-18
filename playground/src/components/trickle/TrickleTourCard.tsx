@@ -5,7 +5,7 @@ import { THEME_BRAND } from '@/lib/store';
 import { useTrickleStore } from '@/lib/trickle/store';
 import { CHAPTERS, TRICKLE_STEPS, tourWasDone, useTrickleTour, type Figure } from '@/lib/trickle/tour';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
-import { ChangeLog, Consolidation, JoinPairs, LegendFigure, Rules, WeightedRows } from './Figures';
+import { BothDeleted, ChangeLog, Consolidation, JoinPairs, LegendFigure, Rules, WeightedRows } from './Figures';
 import { JoinGrid } from './JoinGrid';
 import { MONO } from './theme';
 
@@ -62,6 +62,8 @@ function FigureView({ figure }: { figure: Figure }) {
       return <Rules />;
     case 'grid':
       return <JoinGrid step={figure.step} />;
+    case 'both-deleted':
+      return <BothDeleted />;
     case 'legend':
       return <LegendFigure />;
   }

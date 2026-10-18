@@ -15,6 +15,7 @@ export type Figure =
   | { kind: 'join' }
   | { kind: 'rules' }
   | { kind: 'grid'; step: number }
+  | { kind: 'both-deleted' }
   | { kind: 'legend' };
 
 export interface TrickleStep {
@@ -109,8 +110,16 @@ export const TRICKLE_STEPS: TrickleStep[] = [
     chapter: 1,
     title: 'Consider changes only',
     body:
-      'First consolidate `A′` and `B′`, and separately `ΔA` and `ΔB`. Then compute and union the two strips `ΔA ⋈ B′` and `A′ ⋈ ΔB`. The corner is counted twice, so also compute `ΔA ⋈ ΔB` and subtract it.\n\nConsider a special case where a delete (`-1`) is in both `ΔA` and `ΔB` for a given key. In `A′` and `B′` this consolidates to 0, so neither `ΔA ⋈ B′` nor `A′ ⋈ ΔB` contains the record (or equivalently, each evaluates to 0). The sum is still `-1`, and the joined record is removed as expected:\n\n`ΔA ⋈ B′ + A′ ⋈ ΔB − ΔA ⋈ ΔB = 0 + 0 − (-1 × -1) = -1`',
+      'First consolidate `A′` and `B′`, and separately `ΔA` and `ΔB`. Then compute and union the two strips `ΔA ⋈ B′` and `A′ ⋈ ΔB`. The corner is counted twice, so also compute `ΔA ⋈ ΔB` and subtract it.',
     figure: { kind: 'grid', step: 3 },
+  },
+  {
+    id: 'both-deleted',
+    chapter: 1,
+    title: 'Deleted on both sides',
+    body:
+      'Consider a special case where a delete (`-1`) is in both `ΔA` and `ΔB` for a given key. In `A′` and `B′` this consolidates to 0, so neither strip contains the record (or equivalently, each evaluates to 0). The sum is still `-1`, and the joined record is removed as expected.',
+    figure: { kind: 'both-deleted' },
   },
   {
     id: 'pipeline',
