@@ -60,6 +60,8 @@ export interface TourStep {
   footer?: string; // a closing line after the suggestions
   // A link opens `href` in a new tab, or with `mode` finishes the tour and switches the Playground's mode.
   links?: { label: string; href?: string; mode?: Mode }[];
+  // On the last step: the main button, finishing the tour and switching mode (Close becomes the secondary one).
+  next?: { label: string; mode: Mode };
 }
 
 export const CHAPTER_TITLES: Record<TourStep['chapter'], string> = {
@@ -368,6 +370,15 @@ export const TOUR_STEPS: TourStep[] = [
     target: { pond: 'reports', control: 'run-chart' },
     advance: 'next',
   },
+  {
+    id: 'taps',
+    chapter: 2,
+    title: 'Refresh on Request',
+    body:
+      "Given the pipeline can handle any Refresh rate, this opens up the potential to link query demand to execution. By allowing a 'Refresh on Request' (a **Tap**), update frequency can be tied to query frequency.",
+    frame: 'keep',
+    advance: 'next',
+  },
 
   {
     id: 'noise',
@@ -542,7 +553,7 @@ export const TOUR_STEPS: TourStep[] = [
     links: [
       { label: 'Docs', href: 'https://docs.duckstring.com/' },
       { label: 'Quickstart', href: 'https://docs.duckstring.com/quickstart' },
-      { label: 'Trickle tour →', mode: 'trickle' },
     ],
+    next: { label: 'Trickle tour →', mode: 'trickle' },
   },
 ];

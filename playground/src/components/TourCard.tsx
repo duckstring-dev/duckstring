@@ -303,6 +303,12 @@ export function TourCard() {
       </div>
     );
   }
+  const goNext = step.next
+    ? () => {
+        tour().finish();
+        useModeStore.getState().setMode(step.next!.mode);
+      }
+    : null;
   const primaryLabel = isLast ? 'Close' : step.action && !actionDone ? step.action.label : chapterEnd ? 'Continue' : 'Next';
 
   return (
@@ -405,8 +411,13 @@ export function TourCard() {
         {flat ? (
           // A narrow column: the main button, with Finish under it at a chapter's end. Back is in
           // the top line, so the text keeps nearly the whole width.
-          <div style={{ flexShrink: 0, width: 120, alignSelf: 'flex-end', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Button primary block onClick={() => tour().primary()} testId="tour-next">
+          <div style={{ flexShrink: 0, width: goNext ? 160 : 120, alignSelf: 'flex-end', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {goNext && (
+              <Button primary block onClick={goNext} testId={`tour-mode-${step.next!.mode}`}>
+                {step.next!.label}
+              </Button>
+            )}
+            <Button primary={!goNext} block onClick={() => tour().primary()} testId="tour-next">
               {primaryLabel}
             </Button>
             {chapterEnd && (
@@ -414,6 +425,20 @@ export function TourCard() {
                 Finish
               </Button>
             )}
+          </div>
+        ) : goNext ? (
+          // The last step hands over to the other mode: that's the main button, Close the secondary one.
+          <div style={{ flexShrink: 0, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 12 }}>
+            <Button onClick={() => tour().back()} testId="tour-back">
+              Back
+            </Button>
+            <span style={{ flex: 1 }} />
+            <Button onClick={() => tour().primary()} testId="tour-next">
+              Close
+            </Button>
+            <Button primary onClick={goNext} testId={`tour-mode-${step.next!.mode}`}>
+              {step.next!.label}
+            </Button>
           </div>
         ) : (
           <div style={{ flexShrink: 0, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 12 }}>
