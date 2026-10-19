@@ -125,6 +125,13 @@ export const TRICKLE_STEPS: TrickleStep[] = [
       'Consider a special case where a delete (`-1`) is in both `ΔA` and `ΔB` for a given key. In `A′` and `B′` this consolidates to 0, so neither strip contains the record (or equivalently, each evaluates to 0). The sum is still `-1`, and the joined record is removed as expected.',
     figure: { kind: 'both-deleted' },
   },
+  {
+    id: 'deeper',
+    chapter: 1,
+    title: 'Deeper joins',
+    body:
+      'With a third table the expansion grows, and one term is a problem:\n\n`((A + ΔA) ⋈ (B + ΔB)) ⋈ (C + ΔC) = A ⋈ B ⋈ C + (A ⋈ B) ⋈ ΔC + …`\n\n`A ⋈ B ⋈ C` is the old result, skipped as before. But `(A ⋈ B) ⋈ ΔC` needs `A ⋈ B` in full, a recompute of the intermediate join, just to match a few changed rows of `C`. The other terms are partial mixtures of changes.\n\nSo Duckstring keeps the set of distinct join keys in each change set, and uses it to pre-filter the rows coming into the join. That bounds the computation to only what could have changed, however deep the joins go.',
+  },
   { id: 'intro-2', chapter: 2, intro: true, title: CHAPTERS[2], body: '' },
   {
     id: 'pipeline',
