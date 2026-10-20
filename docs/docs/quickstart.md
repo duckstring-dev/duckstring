@@ -8,7 +8,7 @@ description: Run a demo pipeline on your own machine.
 This guide runs Duckstring on your own machine: it starts a Catchment, deploys a small demo pipeline, runs it, and queries the result. It takes about five minutes.
 
 :::tip
-To see how the demo pipeline is scheduled before installing anything, the [Playground](https://playground.duckstring.com) runs it in your browser, with a short guided tour.
+If you want to jump straight in, try the [Playground](https://playground.duckstring.com) to run a short guided tour of the key concepts.
 :::
 
 ## 1. Install
@@ -119,46 +119,26 @@ Deploying a Pond again follows its version number. A new minor or patch version 
 
 ## 5. Run the pipeline
 
-You ask for data at the end of a pipeline, on the Pond whose output you want. Here that's `reports`. Run it once with a *Refresh*:
+Unlike many orchestrators, Duckstring runs the pipeline from the **end** - you request a Refresh for a given Pond and it travels upstream.
 
 ```bash
 duckstring refresh now reports
 ```
 
-A Refresh brings `reports` up to date as of now. Duckstring works back through its Sources and runs `transactions` and `products`, then `sales`, then `reports`. The command shows the live status until everything settles, after about 12 seconds.
-
-To keep `reports` as fresh as the pipeline allows, add a continuous Refresh:
+You can run it back-to-back with a continuous Refresh:
 
 ```bash
 duckstring refresh add reports --continuous
 ```
 
-No Pond runs more often than the slowest step can use its output, so every Pond settles at a run about every 3 seconds, the time `join_lines` takes. Runs of `sales` overlap: a new one starts while the previous one is still in `join_lines`, because each Ripple waits only for its own inputs. Open http://127.0.0.1:7474 to watch it:
-
-<figure class="ds-figure">
-  <video autoplay loop muted playsinline poster="/img/docs/ripple.poster.webp" aria-label="The demo pipeline in the web UI under a continuous Refresh on reports">
-    <source src="/img/docs/ripple.webm" type="video/webm" />
-    <source src="/img/docs/ripple.mp4" type="video/mp4" />
-  </video>
-  <figcaption>The demo pipeline in the web UI under the continuous Refresh. Running Ripples are outlined in cyan.</figcaption>
-</figure>
-
+This throttles every Pond to run only as frequently as the bottleneck Ripple, both upstream and downstream.
 A continuous Refresh keeps going, so press `Ctrl+C` to leave the status view, then remove it:
 
 ```bash
 duckstring refresh rm reports Continuous
 ```
 
-The same controls are on each Pond's panel in the web UI. A Refresh can be sent once or set to recur:
-
-| Refresh | What it does |
-|---|---|
-| `refresh now reports` | Brings the Pond up to date as of now, once |
-| `refresh add reports --every 1d` | Brings it up to date once a day has passed since the last refresh |
-| `refresh add reports --every 1d --start 06:00` | Brings it up to date at 06:00 each day |
-| `refresh add reports --continuous` | Keeps it as fresh as the pipeline allows |
-
-See [Scheduling](guides/scheduling.md) for choosing between them.
+The UI is especially recommended for running pipelines like this.
 
 ## 6. Query the results
 

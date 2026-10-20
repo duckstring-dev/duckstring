@@ -88,7 +88,7 @@ function Hero(): ReactNode {
           Quickstart →
         </Link>
         <Link className={styles.ctaSecondary} href={PLAYGROUND}>
-          Try it in your browser →
+          In-Browser Demo →
         </Link>
       </div>
     </header>
@@ -153,29 +153,6 @@ function WhatIsThis(): ReactNode {
         </a>{' '}
         Ponds are generic Python, with all the flexibility that provides.
       </p>
-    </Section>
-  );
-}
-
-// The Playground: pull orchestration, simulated in the browser
-function Playground(): ReactNode {
-  return (
-    <Section id="playground" title="Watch it run in your browser.">
-      <p className={styles.prose}>
-        The Playground runs the demo pipeline as a simulation, with a short guided tour of pull orchestration:
-        a Refresh at the end of the pipeline drives everything upstream, and every step paces itself to the slowest
-        one. Change step durations, add Ponds and set your own Refreshes. There's nothing to install.
-      </p>
-
-      <a className={styles.demoLink} href={PLAYGROUND} aria-label="Open the Playground">
-        <DemoSlot src="/img/docs/playground-tour" aspectRatio="1600/964" poster="/img/docs/playground-tour.poster.webp" />
-      </a>
-
-      <div className={styles.ctaRow}>
-        <Link className={styles.ctaPrimary} href={PLAYGROUND}>
-          Open the Playground →
-        </Link>
-      </div>
     </Section>
   );
 }
@@ -346,7 +323,6 @@ export default function Landing(): ReactNode {
     <div className={styles.canvas}>
       <Hero />
       <WhatIsThis />
-      <Playground />
       <ModularTransformations />
       <PullOrchestration />
       <ModernIncrementality />
