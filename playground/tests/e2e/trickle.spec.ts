@@ -35,6 +35,15 @@ test('the Trickle tour runs end to end', async ({ page }, info) => {
     if (step.id === 'join') await expect(card).toContainText(/took part when producing priced: \d+ rows, \d+% of the 1,050/);
     await page.waitForTimeout(300);
     await page.screenshot({ path: info.outputPath(`${String(i + 1).padStart(2, '0')}-${step.id}.png`) });
+    if (step.choices) {
+      // The last card: every way on is in view, and staying closes the tour.
+      for (const c of step.choices) {
+        const id = c.mode ? `trickle-tour-mode-${c.mode}` : `trickle-next-${c.id}`;
+        await expect(page.getByTestId(id)).toBeInViewport({ ratio: 1 });
+      }
+      await page.getByTestId('trickle-next-stay').click();
+      continue;
+    }
     await expect(page.getByTestId('trickle-tour-next')).toBeInViewport({ ratio: 1 });
     await page.getByTestId('trickle-tour-next').click();
   }
@@ -79,7 +88,7 @@ test('one page switches between orchestration and Trickle, and each keeps its st
 test('the Trickle tour hands over to the orchestration tour', async ({ page }) => {
   await page.goto('/trickle?tour=1');
   for (let i = 0; i < TRICKLE_STEPS.length - 1; i++) await page.getByTestId('trickle-tour-next').click();
-  await expect(page.getByTestId('trickle-tour')).toHaveAttribute('data-step', 'try');
+  await expect(page.getByTestId('trickle-tour')).toHaveAttribute('data-step', 'next');
   await page.getByTestId('trickle-tour-mode-orchestration').click();
   await expect(page).toHaveURL(/\/$/);
   await expect(page.locator('#ds-canvas')).toBeVisible();

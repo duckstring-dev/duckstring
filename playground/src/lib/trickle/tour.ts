@@ -30,6 +30,19 @@ export interface TrickleStep {
   enter?: (s: TrickleState) => void; // runs when the step opens
   // A link opens `href`, or with `mode` closes the tour and switches the Playground's mode.
   links?: { label: string; href?: string; mode?: Mode }[];
+  centred?: boolean; // a chapter 2 card in the middle of the canvas, like chapter 1's
+  choices?: Choice[]; // buttons in place of Next: the tour's last card
+}
+
+// A way on from the tour: a page (`href`, in a new tab), the other mode, or staying in the Playground.
+export interface Choice {
+  id: string;
+  label: string;
+  detail?: string;
+  href?: string;
+  mode?: Mode;
+  stay?: boolean;
+  primary?: boolean;
 }
 
 export const CHAPTERS: Record<1 | 2, string> = { 1: 'Theory', 2: 'Demonstration' };
@@ -186,19 +199,24 @@ export const TRICKLE_STEPS: TrickleStep[] = [
     enter: (s) => s.runTo(3, 'sources'),
   },
   {
-    id: 'try',
+    id: 'next',
     chapter: 2,
-    title: 'Try it',
-    body:
-      'You can play with this model yourself by adjusting what happens in each run. You can change the speed at the top left.',
-    ring: ['events'],
-    enter: (s) => {
-      s.play();
-      s.setSheetOpen(true);
-    },
-    links: [
-      { label: 'Read the docs for Trickle', href: 'https://docs.duckstring.com/concepts/trickles' },
-      { label: 'Orchestration tour →', mode: 'orchestration' },
+    title: 'Next steps',
+    body: 'Run a demo pipeline on your own machine with the Quickstart, or keep exploring.',
+    centred: true,
+    enter: (s) => s.play(),
+    choices: [
+      {
+        id: 'quickstart',
+        label: 'Run it yourself: Quickstart',
+        detail: 'Start a Catchment and run a demo pipeline, in about five minutes',
+        href: 'https://docs.duckstring.com/quickstart',
+        primary: true,
+      },
+      { id: 'github', label: 'Duckstring on GitHub', href: 'https://github.com/duckstring-dev/duckstring' },
+      { id: 'landing', label: 'Read about Duckstring', href: 'https://duckstring.com' },
+      { id: 'orchestration', label: 'Orchestration tour', mode: 'orchestration' },
+      { id: 'stay', label: 'Stay in the Playground', detail: 'Change what each run brings in the sidebar', stay: true },
     ],
   },
 ];

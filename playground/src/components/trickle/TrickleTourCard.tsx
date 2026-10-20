@@ -1,11 +1,12 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
+import { track } from '@vercel/analytics';
 import { THEME_BRAND } from '@/lib/store';
 import { useModeStore } from '@/lib/mode';
 import { revealSoon } from '@/lib/reveal';
 import { useTrickleStore } from '@/lib/trickle/store';
-import { CHAPTERS, TRICKLE_STEPS, tourWasDone, useTrickleTour, type Figure } from '@/lib/trickle/tour';
+import { CHAPTERS, TRICKLE_STEPS, tourWasDone, useTrickleTour, type Choice, type Figure } from '@/lib/trickle/tour';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
 import { BothDeleted, ChangeLog, Consolidation, JoinPairs, LegendFigure, Rules, WeightedRows } from './Figures';
 import { JoinGrid } from './JoinGrid';
@@ -99,6 +100,53 @@ function Button({ onClick, children, primary, quiet, testId }: {
 
 let autoStarted = false; // the first-visit logic runs once per page load
 
+// One way on from the tour's last card. Every choice is counted (Vercel Analytics), since this is where most
+// visitors leave the Playground.
+function ChoiceButton({ choice }: { choice: Choice }) {
+  const tour = useTrickleTour.getState;
+  const go = () => {
+    track('trickle_next', { choice: choice.id });
+    if (choice.href) return;
+    tour().close();
+    if (choice.mode) useModeStore.getState().setMode(choice.mode);
+  };
+  const style: React.CSSProperties = {
+    display: 'block',
+    width: '100%',
+    boxSizing: 'border-box',
+    textAlign: 'left',
+    padding: '9px 14px',
+    borderRadius: 8,
+    cursor: 'pointer',
+    textDecoration: 'none',
+    fontFamily: 'inherit',
+    background: choice.primary ? THEME_BRAND : 'transparent',
+    color: choice.primary ? '#0f0f14' : '#e4e4e7',
+    border: choice.primary ? `1px solid ${THEME_BRAND}` : '1px solid #3f3f46',
+  };
+  const body = (
+    <>
+      <div style={{ fontSize: 13.5, fontWeight: 700 }}>
+        {choice.label}
+        {choice.href ? ' ↗' : choice.mode ? ' →' : ''}
+      </div>
+      {choice.detail && (
+        <div style={{ fontSize: 11.5, marginTop: 2, color: choice.primary ? '#0f0f14cc' : '#a1a1aa', fontWeight: 400 }}>{choice.detail}</div>
+      )}
+    </>
+  );
+  const testId = choice.mode ? `trickle-tour-mode-${choice.mode}` : `trickle-next-${choice.id}`;
+  return choice.href ? (
+    <a href={choice.href} target="_blank" rel="noopener noreferrer" onClick={go} style={style} data-testid={testId}>
+      {body}
+    </a>
+  ) : (
+    <button onClick={go} style={style} data-testid={testId}>
+      {body}
+    </button>
+  );
+}
+
 export function TrickleTourCard() {
   const isMobile = useIsMobile();
   const open = useTrickleTour((t) => t.open);
@@ -169,7 +217,7 @@ export function TrickleTourCard() {
 
   if (!open) return null;
   const step = TRICKLE_STEPS[index];
-  const centred = step.chapter === 1;
+  const centred = step.chapter === 1 || !!step.centred;
   const inChapter = TRICKLE_STEPS.filter((s) => s.chapter === step.chapter);
   const position = inChapter.indexOf(step) + 1;
   const isLast = index === TRICKLE_STEPS.length - 1;
@@ -263,19 +311,32 @@ export function TrickleTourCard() {
             </div>
           )}
         </div>
-        <div style={flat
-          ? { flexShrink: 0, width: 110, alignSelf: 'flex-end', display: 'flex', flexDirection: 'column-reverse', gap: 6 }
-          : { flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8, marginTop: 12 }}>
-          {index > 0 && (
-            <Button onClick={() => tour().back()} testId="trickle-tour-back">
-              Back
+        {step.choices ? (
+          <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
+            {step.choices.map((c) => (
+              <ChoiceButton key={c.id} choice={c} />
+            ))}
+            <div style={{ display: 'flex' }}>
+              <Button quiet onClick={() => tour().back()} testId="trickle-tour-back">
+                ‹ Back
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div style={flat
+            ? { flexShrink: 0, width: 110, alignSelf: 'flex-end', display: 'flex', flexDirection: 'column-reverse', gap: 6 }
+            : { flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8, marginTop: 12 }}>
+            {index > 0 && (
+              <Button onClick={() => tour().back()} testId="trickle-tour-back">
+                Back
+              </Button>
+            )}
+            {!flat && <span style={{ flex: 1 }} />}
+            <Button primary onClick={() => tour().next()} testId="trickle-tour-next">
+              {isLast ? 'Close' : 'Next'}
             </Button>
-          )}
-          {!flat && <span style={{ flex: 1 }} />}
-          <Button primary onClick={() => tour().next()} testId="trickle-tour-next">
-            {isLast ? 'Close' : 'Next'}
-          </Button>
-        </div>
+          </div>
+        )}
         </div>
       </div>
     </>
