@@ -130,7 +130,7 @@ export const TRICKLE_STEPS: TrickleStep[] = [
     chapter: 1,
     title: 'Deeper joins',
     body:
-      'With a third table the algebra gets a lot more complex:\n\n`((A + ΔA) ⋈ (B + ΔB)) ⋈ (C + ΔC) = A ⋈ B ⋈ C + (A ⋈ B) ⋈ ΔC + …`\n\n`A ⋈ B ⋈ C` is the old result, skipped as before. But `(A ⋈ B) ⋈ ΔC` needs `A ⋈ B` in full, a recompute of the intermediate join, just to match a few changed rows of `C`. The other terms are partial mixtures of changes.\n\nFor each join, we can keep track of which keys appear in a change set, and pre-filter the other side of the join for just those keys, down to whichever source holds them. That bounds the computation to only what could have changed, however deep the joins go.',
+      'With a third table the algebra gets a lot more complex:\n\n`((A + ΔA) ⋈ (B + ΔB)) ⋈ (C + ΔC) = A ⋈ B ⋈ C + (A ⋈ B) ⋈ ΔC + …`\n\n`A ⋈ B ⋈ C` is the old result, skipped as before. But `(A ⋈ B) ⋈ ΔC` needs `A ⋈ B` in full, a recompute of the intermediate join, just to match a few changed rows of `C`. The other terms are partial mixtures of changes.\n\nFor each join with a change set (e.g. `ΔC`), we filter the other side for the keys that were in that change set, and carry them back through to whichever source holds them (`A` or `B`). Only rows matching a changed key ever enter the join, which bounds the computation to only what could have changed, however deep the joins go (bushy joins included).',
   },
   { id: 'intro-2', chapter: 2, intro: true, title: CHAPTERS[2], body: '' },
   {
