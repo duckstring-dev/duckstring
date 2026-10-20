@@ -1,3 +1,4 @@
+import type { Choice } from '@/components/NextChoices';
 import type { Mode } from './mode';
 import type { PondId, RippleId } from './types';
 import type { PlaygroundState } from './store';
@@ -60,8 +61,8 @@ export interface TourStep {
   footer?: string; // a closing line after the suggestions
   // A link opens `href` in a new tab, or with `mode` finishes the tour and switches the Playground's mode.
   links?: { label: string; href?: string; mode?: Mode }[];
-  // On the last step: the main button, finishing the tour and switching mode (Close becomes the secondary one).
-  next?: { label: string; mode: Mode };
+  // On the last step: the ways on, in place of the buttons (see NextChoices).
+  choices?: Choice[];
 }
 
 export const CHAPTER_TITLES: Record<TourStep['chapter'], string> = {
@@ -550,10 +551,12 @@ export const TOUR_STEPS: TourStep[] = [
     frame: 'all',
     setup: ({ store }) => store.clearSelection(),
     advance: 'next',
-    links: [
-      { label: 'Docs', href: 'https://docs.duckstring.com/' },
-      { label: 'Quickstart', href: 'https://docs.duckstring.com/quickstart' },
+    choices: [
+      { id: 'trickle', label: 'Trickle tour', detail: 'Incremental processing: each run touches only what changed', mode: 'trickle', tone: 'primary' },
+      { id: 'quickstart', label: 'Quickstart', href: 'https://docs.duckstring.com/quickstart', tone: 'muted' },
+      { id: 'docs', label: 'Docs', href: 'https://docs.duckstring.com/', tone: 'muted' },
+      { id: 'github', label: 'GitHub', href: 'https://github.com/duckstring-dev/duckstring', tone: 'muted' },
+      { id: 'close', label: 'Close tour', close: true, tone: 'quiet' },
     ],
-    next: { label: 'Trickle tour →', mode: 'trickle' },
   },
 ];

@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'react';
 import { usePlaygroundStore, THEME_BRAND } from '@/lib/store';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
 import { useModeStore } from '@/lib/mode';
+import { NextChoices } from './NextChoices';
 import { revealSoon } from '@/lib/reveal';
 import { useTourStore } from '@/lib/tour';
 import { TOUR_STEPS, CHAPTER_TITLES } from '@/lib/tourSteps';
@@ -104,7 +105,7 @@ let firstLoadDone = false;
 
 export function TourCard() {
   const isMobile = useIsMobile();
-  const flat = useIsShort() && !isMobile;
+  const short = useIsShort() && !isMobile;
   const phase = useTourStore((t) => t.phase);
   const index = useTourStore((t) => t.index);
   const waitLabel = useTourStore((t) => t.waitLabel);
@@ -125,6 +126,8 @@ export function TourCard() {
   }, [tour]);
 
   const step = TOUR_STEPS[index];
+  // The flat bar on a short screen, except for the last card: its choices need the full layout.
+  const flat = short && !step.choices;
 
   // Move focus to the card when it opens, and bring the outlined control into view.
   useEffect(() => {
@@ -193,7 +196,10 @@ export function TourCard() {
       }
     : flat
       ? { position: 'absolute', left: 0, right: 0, bottom: 0 }
-      : { position: 'absolute', left: 56, bottom: 16, width: 320 };
+      : short
+        ? // The last card on a short screen: wide, and no taller than the canvas (it scrolls if it must).
+          { position: 'absolute', left: 56, right: 16, bottom: 8, maxWidth: 560, maxHeight: 'calc(100% - 16px)', overflowY: 'auto' }
+        : { position: 'absolute', left: 56, bottom: 16, width: 320 };
   const panel: React.CSSProperties = {
     ...anchor,
     zIndex: 50,
@@ -303,12 +309,6 @@ export function TourCard() {
       </div>
     );
   }
-  const goNext = step.next
-    ? () => {
-        tour().finish();
-        useModeStore.getState().setMode(step.next!.mode);
-      }
-    : null;
   const primaryLabel = isLast ? 'Close' : step.action && !actionDone ? step.action.label : chapterEnd ? 'Continue' : 'Next';
 
   return (
@@ -330,7 +330,7 @@ export function TourCard() {
         padding: flat ? '8px 14px 8px' : '10px 14px 12px',
         display: 'flex',
         flexDirection: 'column',
-        maxHeight: isMobile ? '60dvh' : flat ? '55dvh' : undefined,
+        maxHeight: isMobile ? '60dvh' : flat ? '55dvh' : panel.maxHeight,
       }}
     >
       {flat ? (
@@ -411,13 +411,8 @@ export function TourCard() {
         {flat ? (
           // A narrow column: the main button, with Finish under it at a chapter's end. Back is in
           // the top line, so the text keeps nearly the whole width.
-          <div style={{ flexShrink: 0, width: goNext ? 160 : 120, alignSelf: 'flex-end', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {goNext && (
-              <Button primary block onClick={goNext} testId={`tour-mode-${step.next!.mode}`}>
-                {step.next!.label}
-              </Button>
-            )}
-            <Button primary={!goNext} block onClick={() => tour().primary()} testId="tour-next">
+          <div style={{ flexShrink: 0, width: 120, alignSelf: 'flex-end', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <Button primary block onClick={() => tour().primary()} testId="tour-next">
               {primaryLabel}
             </Button>
             {chapterEnd && (
@@ -426,19 +421,20 @@ export function TourCard() {
               </Button>
             )}
           </div>
-        ) : goNext ? (
-          // The last step hands over to the other mode: that's the main button, Close the secondary one.
-          <div style={{ flexShrink: 0, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 12 }}>
-            <Button onClick={() => tour().back()} testId="tour-back">
-              Back
-            </Button>
-            <span style={{ flex: 1 }} />
-            <Button onClick={() => tour().primary()} testId="tour-next">
-              Close
-            </Button>
-            <Button primary onClick={goNext} testId={`tour-mode-${step.next!.mode}`}>
-              {step.next!.label}
-            </Button>
+        ) : step.choices ? (
+          // The last step: the ways on, in place of the buttons.
+          <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 4, marginTop: 12 }}>
+            <NextChoices
+              choices={step.choices}
+              event="tour_next"
+              onClose={() => tour().finish()}
+              testId={(c) => (c.mode ? `tour-mode-${c.mode}` : c.close ? 'tour-next' : `tour-next-${c.id}`)}
+            />
+            <div style={{ display: 'flex' }}>
+              <Button quiet onClick={() => tour().back()} testId="tour-back">
+                ‹ Back
+              </Button>
+            </div>
           </div>
         ) : (
           <div style={{ flexShrink: 0, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 12 }}>

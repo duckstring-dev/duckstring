@@ -1,6 +1,7 @@
 'use client';
 
 import { create } from 'zustand';
+import type { Choice } from '@/components/NextChoices';
 import type { Mode } from '../mode';
 import { useTrickleStore, type TrickleState } from './store';
 
@@ -34,16 +35,6 @@ export interface TrickleStep {
   choices?: Choice[]; // buttons in place of Next: the tour's last card
 }
 
-// A way on from the tour: a page (`href`, in a new tab), the other mode, or staying in the Playground.
-export interface Choice {
-  id: string;
-  label: string;
-  detail?: string;
-  href?: string;
-  mode?: Mode;
-  stay?: boolean;
-  primary?: boolean;
-}
 
 export const CHAPTERS: Record<1 | 2, string> = { 1: 'Theory', 2: 'Demonstration' };
 
@@ -211,12 +202,12 @@ export const TRICKLE_STEPS: TrickleStep[] = [
         label: 'Run it yourself: Quickstart',
         detail: 'Start a Catchment and run a demo pipeline, in about five minutes',
         href: 'https://docs.duckstring.com/quickstart',
-        primary: true,
+        tone: 'primary',
       },
       { id: 'github', label: 'Duckstring on GitHub', href: 'https://github.com/duckstring-dev/duckstring' },
       { id: 'landing', label: 'Read about Duckstring', href: 'https://duckstring.com' },
       { id: 'orchestration', label: 'Orchestration tour', mode: 'orchestration' },
-      { id: 'stay', label: 'Stay in the Playground', detail: 'Change what each run brings in the sidebar', stay: true },
+      { id: 'stay', label: 'Stay in the Playground', detail: 'Change what each run brings in the sidebar', close: true },
     ],
   },
 ];
