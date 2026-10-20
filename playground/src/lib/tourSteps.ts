@@ -277,11 +277,11 @@ export const TOUR_STEPS: TourStep[] = [
         return !!id && (s.pondStates[id]?.targets.length > 0 || (s.pondStates[id]?.runsCompleted ?? 0) > 0);
       },
     },
-    // The visitor's first look at the pipeline running, so at real speed: once through takes about 6.5 s.
+    // The visitor's first look at the pipeline running, so at real speed: once through takes about 7.5 s.
     advance: {
       label: 'Watching the pipeline run once',
       speed: 1,
-      expectedMs: 6800,
+      expectedMs: 7800,
       until: (s, since) => pondRunsSince(s, since, 'reports') >= 1,
       fallbackMs: 20000,
     },
@@ -300,7 +300,7 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'refresh-every',
     chapter: 2,
     title: 'Refresh Every',
-    body: 'That took about 6.5 s. A Refresh can be set to send every 6 s, for example, slightly faster than back to back. More specifically, a Refresh is sent any time the data is less fresh than 6 s, or 6 s after the previous Refresh was requested.',
+    body: 'That took about 7.5 s. A Refresh can be set to send every 6 s, for example, faster than back to back. More specifically, a Refresh is sent any time the data is less fresh than 6 s, or 6 s after the previous Refresh was requested.',
     target: { pond: 'reports', control: 'refresh-every' },
     action: {
       label: 'Refresh every 6 s',
