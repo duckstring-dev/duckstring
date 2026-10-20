@@ -129,17 +129,29 @@ export function TrickleCanvas() {
   // Frame the graph in the canvas the tour card leaves free, and again when the orientation flips (the
   // fitView prop only applies at the first render). The top keeps clear of the play controls and phase label.
   const inset = useTrickleTour((t) => t.inset);
+  const touring = useTrickleTour((t) => t.open);
+  const fitSizes = touring ? sizes : ''; // re-frame as the tables grow, only while the tour drives the view
   const wrap = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const padding = { top: `${inset.top + 96}px`, bottom: `${inset.bottom + 16}px`, left: '5%', right: '5%' } as const;
-    let t = setTimeout(() => fitView({ padding, duration: 300 }), 80);
+    // The padding leaves room for the play controls at the top and the tour card, but never more than 60% of the
+    // canvas: if the card covers more than that (a short phone screen, the sheet open), it overlaps the graph a
+    // little rather than leaving fitView no room, which zooms right out and loses the graph.
+    const fit = (duration: number) => {
+      const h = wrap.current?.clientHeight ?? 0;
+      if (h < 50) return; // not laid out yet
+      const top = inset.top + 96;
+      const room = h * 0.6;
+      const bottom = Math.max(16, Math.min(inset.bottom + 16, room - top));
+      fitView({ padding: { top: `${Math.min(top, room)}px`, bottom: `${bottom}px`, left: '5%', right: '5%' }, duration });
+    };
+    let t = setTimeout(() => fit(300), 80);
     // And when the canvas itself changes size: the phone's bottom sheet opening, a rotation.
     let size = '';
     const ro = new ResizeObserver(([e]) => {
       const next = `${Math.round(e.contentRect.width)}x${Math.round(e.contentRect.height)}`;
       if (size && next !== size) {
         clearTimeout(t);
-        t = setTimeout(() => fitView({ padding, duration: 200 }), 120);
+        t = setTimeout(() => fit(200), 120);
       }
       size = next;
     });
@@ -148,7 +160,9 @@ export function TrickleCanvas() {
       clearTimeout(t);
       ro.disconnect();
     };
-  }, [isMobile, fitView, inset.top, inset.bottom]);
+    // While the tour runs, the tables' sizes too: a run grows them, which moves the lower nodes down. Otherwise the
+    // viewer's own panning is left alone.
+  }, [isMobile, fitView, inset.top, inset.bottom, fitSizes]);
 
   return (
     <div id="trickle-canvas" ref={wrap} style={{ width: '100%', height: '100%', background: '#0f0f14' }}>
