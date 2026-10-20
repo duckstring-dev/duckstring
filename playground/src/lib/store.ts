@@ -100,9 +100,12 @@ function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'pondStates' | 'rippl
       [reportsId]: initialPondState(),
     },
     ripples: {
-      // 1.5 s, not shorter: at the tour's 10x a shorter run starts and ends between two frames and never lights up.
-      [txIngestId]: { id: txIngestId, pondId: txId, name: 'ingest', parents: [], durationMs: 1500, variability: 0 },
-      [prodIngestId]: { id: prodIngestId, pondId: prodId, name: 'ingest', parents: [], durationMs: 1500, variability: 0 },
+      // 1 s: at the tour's 10x a shorter run starts and ends between two frames and never lights up. And with
+      // daily_sales (2 s) that makes the lead to join_lines exactly one of its 3 s runs, so under a continuous
+      // Refresh the data arrives just as join_lines frees up. A longer lead (1.5 s: 3.5 s) waits most of a run
+      // there, and continuous ends up staler than every 6 s (bench/launch_alignment).
+      [txIngestId]: { id: txIngestId, pondId: txId, name: 'ingest', parents: [], durationMs: 1000, variability: 0 },
+      [prodIngestId]: { id: prodIngestId, pondId: prodId, name: 'ingest', parents: [], durationMs: 1000, variability: 0 },
       [dailySalesId]: { id: dailySalesId, pondId: salesId, name: 'daily_sales', parents: [], durationMs: 2000, variability: 0 },
       [priceTiersId]: { id: priceTiersId, pondId: salesId, name: 'price_tiers', parents: [], durationMs: 1000, variability: 0 },
       [joinLinesId]: { id: joinLinesId, pondId: salesId, name: 'join_lines', parents: [dailySalesId, priceTiersId], durationMs: 3000, variability: 0 },
