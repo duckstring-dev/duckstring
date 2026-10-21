@@ -100,6 +100,9 @@ function Button({ onClick, children, primary, quiet, testId }: {
 
 let autoStarted = false; // the first-visit logic runs once per page load
 
+
+// The card's edge, given per side (see the panel style).
+const EDGE = '1px solid #3f3f46';
 export function TrickleTourCard() {
   const isMobile = useIsMobile();
   const open = useTrickleTour((t) => t.open);
@@ -204,9 +207,12 @@ export function TrickleTourCard() {
           display: 'flex',
           flexDirection: 'column',
           background: '#18181d',
-          border: '1px solid #3f3f46',
+          borderTop: EDGE,
+          borderLeft: EDGE,
+          borderRight: EDGE,
+          borderBottom: flat ? 'none' : EDGE,
           borderRadius: 10,
-          ...(flat ? { borderRadius: '10px 10px 0 0', borderBottom: 'none' } : {}),
+          ...(flat ? { borderRadius: '10px 10px 0 0' } : {}),
           boxShadow: '0 12px 32px rgba(0, 0, 0, 0.55)',
           color: '#e4e4e7',
           fontFamily: MONO,

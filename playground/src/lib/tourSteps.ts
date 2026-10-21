@@ -1,7 +1,7 @@
 import type { Choice } from '@/components/NextChoices';
 import type { Mode } from './mode';
 import type { PondId, RippleId } from './types';
-import type { PlaygroundState } from './store';
+import { usePlaygroundStore, type PlaygroundState } from './store';
 
 // The guided tour's steps, as data. Copy lives here so it can be reviewed without touching
 // components. Names in `backticks` render as code. Targets name Ponds and Ripples by their names in
@@ -143,6 +143,28 @@ function setRefreshEvery(s: PlaygroundState, ref: string, everyMs: number): void
   if (id) s.setRefresh(id, { everyMs });
 }
 
+// Switching `reports` from every 6 s to continuous between about 1.2 s and 1.9 s after its last run completed
+// locks the pipeline into a rhythm about 2 s staler than any other moment gives (10.5 s against 8.5 s): the
+// throttle's release timing, see bench/launch_alignment. So the tour waits out that window (with a margin) before
+// switching; it holds the click for at most about a second.
+const STALE_LOCK = [900, 2200];
+function setContinuousClear(ref: string): void {
+  const sinceLast = () => {
+    const st = usePlaygroundStore.getState();
+    const id = pondByName(st, ref);
+    const done = id ? st.pondStates[id]?.completionTimes ?? [] : [];
+    return done.length ? st.now - done[done.length - 1] : Infinity;
+  };
+  const inLock = () => sinceLast() >= STALE_LOCK[0] && sinceLast() < STALE_LOCK[1];
+  const apply = () => setRefreshEvery(usePlaygroundStore.getState(), ref, 0);
+  if (!inLock()) return apply();
+  const timer = setInterval(() => {
+    if (inLock()) return;
+    clearInterval(timer);
+    apply();
+  }, 50);
+}
+
 function setJoinVariability(s: PlaygroundState, v: number): void {
   const id = rippleByName(s, 'sales.join_lines');
   if (!id || s.ripples[id].variability === v) return;
@@ -277,11 +299,11 @@ export const TOUR_STEPS: TourStep[] = [
         return !!id && (s.pondStates[id]?.targets.length > 0 || (s.pondStates[id]?.runsCompleted ?? 0) > 0);
       },
     },
-    // The visitor's first look at the pipeline running, so at real speed: once through takes about 7 s.
+    // The visitor's first look at the pipeline running, so at real speed: once through takes about 6.5 s.
     advance: {
       label: 'Watching the pipeline run once',
       speed: 1,
-      expectedMs: 7300,
+      expectedMs: 6800,
       until: (s, since) => pondRunsSince(s, since, 'reports') >= 1,
       fallbackMs: 20000,
     },
@@ -300,7 +322,7 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'refresh-every',
     chapter: 2,
     title: 'Refresh Every',
-    body: 'That took about 7 s. A Refresh can be set to send every 6 s, for example, faster than back to back. More specifically, a Refresh is sent any time the data is less fresh than 6 s, or 6 s after the previous Refresh was requested.',
+    body: 'That took about 6.5 s. A Refresh can be set to send every 6 s, for example, slightly faster than back to back. More specifically, a Refresh is sent any time the data is less fresh than 6 s, or 6 s after the previous Refresh was requested.',
     target: { pond: 'reports', control: 'refresh-every' },
     action: {
       label: 'Refresh every 6 s',
@@ -344,7 +366,7 @@ export const TOUR_STEPS: TourStep[] = [
     target: { pond: 'reports', control: 'refresh-continuous' },
     action: {
       label: 'Refresh continuously',
-      run: (s) => setRefreshEvery(s, 'reports', 0),
+      run: () => setContinuousClear('reports'),
       done: (s) => hasRefresh(s, 'reports', 0),
     },
     // Real speed for 6 s (two cycles), then faster for a dozen more runs, so the chart shows a steady state and its
@@ -367,7 +389,7 @@ export const TOUR_STEPS: TourStep[] = [
     id: 'throttled',
     chapter: 2,
     title: 'Throttled',
-    body: "Throttling the Refreshes that can't be delivered in time, at steady state, every Ripple, upstream and downstream, runs every 3 s. `sales` takes 5.5 s from start to finish, so two of its runs are in flight at once.",
+    body: "Throttling the Refreshes that can't be delivered in time, at steady state, every Ripple, upstream and downstream, runs every 3 s. `sales` takes 5 s from start to finish, so two of its runs are in flight at once.",
     target: { pond: 'reports', control: 'run-chart' },
     advance: 'next',
   },

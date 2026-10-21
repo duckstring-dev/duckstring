@@ -103,6 +103,9 @@ function WaitProgress() {
 
 let firstLoadDone = false;
 
+
+// The card's edge, given per side (see the panel style).
+const EDGE = '1px solid #3f3f46';
 export function TourCard() {
   const isMobile = useIsMobile();
   const short = useIsShort() && !isMobile;
@@ -204,8 +207,13 @@ export function TourCard() {
     ...anchor,
     zIndex: 50,
     background: '#18181d',
-    border: '1px solid #3f3f46',
-    ...(flat ? { borderBottom: 'none', borderRadius: '10px 10px 0 0' } : { borderRadius: 10 }),
+    // Each side separately (no `border` shorthand): the flat bar drops its bottom edge, and React warns when a
+    // longhand is removed while the shorthand stays.
+    borderTop: EDGE,
+    borderLeft: EDGE,
+    borderRight: EDGE,
+    borderBottom: flat ? 'none' : EDGE,
+    borderRadius: flat ? '10px 10px 0 0' : 10,
     boxShadow: flat ? '0 -8px 24px rgba(0, 0, 0, 0.5)' : '0 12px 32px rgba(0, 0, 0, 0.55)',
     color: '#e4e4e7',
     fontFamily: 'ui-monospace, SFMono-Regular, monospace',
