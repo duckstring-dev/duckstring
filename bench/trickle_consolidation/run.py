@@ -44,6 +44,9 @@ def build(con, runs):
         f"SELECT i AS product_id, (i % 2000) * 0.5 AS price{EXTRA}, 1::BIGINT AS _duckstring_d FROM range({PRODUCTS}) t(i)"),
         f(0), ("product_id",))
     if runs:
+        extra = (EXTRA.replace(' i ', ' product_id ').replace('i %', 'product_id %').replace("|| i", "|| product_id")
+                 .replace("(i ", "(product_id ").replace("i::", "product_id::"))
+        at = f"TIMESTAMPTZ '{f(0).isoformat()}' + r * INTERVAL 1 HOUR"
         # Each run reprices products with hash(p, r) % 1000 = 0; v = how many times p was repriced before.
         con.execute(f"""
             CREATE TEMP TABLE ev AS
@@ -51,11 +54,11 @@ def build(con, runs):
             FROM range({PRODUCTS}) a(p), range(1, {runs + 1}) b(r) WHERE hash(p * 7919 + r) % 1000 = 0""")
         con.execute(f"""
             INSERT INTO catalog__changelog BY NAME
-            SELECT product_id, (product_id % 2000) * 0.5 + (v - 1) AS price{EXTRA.replace(' i ', ' product_id ').replace('i %', 'product_id %').replace("|| i", "|| product_id").replace("(i ", "(product_id ").replace("i::", "product_id::")},
-              -1 AS _duckstring_d, TIMESTAMPTZ '{f(0).isoformat()}' + r * INTERVAL 1 HOUR AS _duckstring_f FROM ev
+            SELECT product_id, (product_id % 2000) * 0.5 + (v - 1) AS price{extra},
+              -1 AS _duckstring_d, {at} AS _duckstring_f FROM ev
             UNION ALL BY NAME
-            SELECT product_id, (product_id % 2000) * 0.5 + v AS price{EXTRA.replace(' i ', ' product_id ').replace('i %', 'product_id %').replace("|| i", "|| product_id").replace("(i ", "(product_id ").replace("i::", "product_id::")},
-              1 AS _duckstring_d, TIMESTAMPTZ '{f(0).isoformat()}' + r * INTERVAL 1 HOUR AS _duckstring_f FROM ev""")
+            SELECT product_id, (product_id % 2000) * 0.5 + v AS price{extra},
+              1 AS _duckstring_d, {at} AS _duckstring_f FROM ev""")
     T.refresh_current_view(con, "catalog")
 
 
@@ -69,7 +72,8 @@ def timed(con, sql, n=5):
 
 
 def main():
-    print(f"{'history':>16}  {'base':>4}  {'clog rows':>10}  {'read state':>10}  {'B′ consol.':>10}  {'base+consol.':>12}  {'base+raw':>8}")
+    print(f"{'history':>16}  {'base':>4}  {'clog rows':>10}  {'read state':>10}  {'B′ consol.':>10}  "
+          f"{'base+consol.':>12}  {'base+raw':>8}")
     for runs in (0, 50, 250):
         for with_base in (False, True):
             con = duckdb.connect()
@@ -78,12 +82,13 @@ def main():
                 T.checkpoint(con, "catalog", f(runs - 1))  # fold all but the last run into a base
             elif with_base:
                 continue
-            last = f(runs)
             # 10k new order lines, keys spread over every product.
-            con.execute(f"CREATE TEMP TABLE da AS SELECT i AS order_id, (hash(i) % {PRODUCTS})::INT AS product_id, 1::BIGINT AS d FROM range(10000) t(i)")
+            con.execute(f"CREATE TEMP TABLE da AS SELECT i AS order_id, (hash(i) % {PRODUCTS})::INT AS product_id, "
+                        "1::BIGINT AS d FROM range(10000) t(i)")
             recon = T._reconstruct_sql_for(con, "catalog")
             fb = T._f_base(con, "catalog")
-            base = (f"SELECT product_id, price, {COLS}1::BIGINT AS w FROM catalog__base" if T._table_exists(con, "catalog__base")
+            has_base = T._table_exists(con, "catalog__base")
+            base = (f"SELECT product_id, price, {COLS}1::BIGINT AS w FROM catalog__base" if has_base
                     else f"SELECT product_id, price, {COLS}1::BIGINT AS w FROM catalog__changelog WHERE false")
             above = f"_duckstring_f > TIMESTAMPTZ '{fb.isoformat()}'" if fb else "true"
             clog = f"SELECT product_id, price, {COLS}_duckstring_d AS w FROM catalog__changelog WHERE {above}"
@@ -99,17 +104,23 @@ def main():
             base_consol = timed(con, term(f"{base} UNION ALL BY NAME {clog_consol}"))
             base_raw = timed(con, term(f"{base} UNION ALL BY NAME {clog}"))
             label = f"bootstrap+{runs}"
-            print(f"{label:>16}  {'yes' if with_base else 'no':>4}  {n_clog:>10,}  {read_state:>8.0f}ms  {consol:>8.0f}ms  {base_consol:>10.0f}ms  {base_raw:>6.0f}ms")
+            print(f"{label:>16}  {'yes' if with_base else 'no':>4}  {n_clog:>10,}  {read_state:>8.0f}ms  {consol:>8.0f}ms  "
+                  f"{base_consol:>10.0f}ms  {base_raw:>6.0f}ms")
             # sanity: all three give the same consolidated result
             res = [con.execute(term(b)).fetchone()[0] for b in (
-                f"SELECT * EXCLUDE (_duckstring_f), 1::BIGINT AS w FROM ({recon})", f"{base} UNION ALL BY NAME {clog_consol}", f"{base} UNION ALL BY NAME {clog}")]
+                f"SELECT * EXCLUDE (_duckstring_f), 1::BIGINT AS w FROM ({recon})",
+                f"{base} UNION ALL BY NAME {clog_consol}",
+                f"{base} UNION ALL BY NAME {clog}",
+            )]
             assert len(set(res)) == 1, res
             if runs == 250 and not with_base:
                 for win in (1, 50):
+                    since = f"_duckstring_f > TIMESTAMPTZ '{f(runs - win).isoformat()}'"
                     w_sql = (f"SELECT * EXCLUDE (_duckstring_d, _duckstring_f), sum(_duckstring_d) FROM catalog__changelog "
-                             f"WHERE _duckstring_f > TIMESTAMPTZ '{f(runs - win).isoformat()}' GROUP BY ALL HAVING sum(_duckstring_d) <> 0")
-                    rows = con.execute(f"SELECT count(*) FROM catalog__changelog WHERE _duckstring_f > TIMESTAMPTZ '{f(runs - win).isoformat()}'").fetchone()[0]
-                    print(f"{'':>16}  change window of {win} run(s): {rows:,} rows, consolidated in {timed(con, f'SELECT count(*) FROM ({w_sql})'):.1f}ms")
+                             f"WHERE {since} GROUP BY ALL HAVING sum(_duckstring_d) <> 0")
+                    rows = con.execute(f"SELECT count(*) FROM catalog__changelog WHERE {since}").fetchone()[0]
+                    ms = timed(con, f"SELECT count(*) FROM ({w_sql})")
+                    print(f"{'':>16}  change window of {win} run(s): {rows:,} rows, consolidated in {ms:.1f}ms")
 
 
 if __name__ == "__main__":
