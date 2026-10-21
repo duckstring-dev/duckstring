@@ -2,6 +2,7 @@ import type {ReactNode} from 'react';
 import Link from '@docusaurus/Link';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 
+import Story from './Story';
 import styles from './styles.module.css';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -322,6 +323,7 @@ export default function Landing(): ReactNode {
   return (
     <div className={styles.canvas}>
       <Hero />
+      <Story />
       <WhatIsThis />
       <ModularTransformations />
       <PullOrchestration />

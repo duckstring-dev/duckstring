@@ -21,8 +21,9 @@ const X0 = 64, Y0 = 46, AW = 190, DAW = 52, BH = 150, DBH = 46;
 const W = X0 + AW + DAW + 8, H = Y0 + BH + DBH + 10;
 const T = 'all 450ms ease';
 
-export function JoinGrid({ step }: { step: number }) {
-  const eq = JOIN_EQS[step];
+// `eq` replaces the step's equation (the story shows one on every step, where the tour's card text carries step 1's).
+export function JoinGrid({ step, eq: eqOverride }: { step: number; eq?: string }) {
+  const eq = eqOverride ?? JOIN_EQS[step];
   const xA = X0 + AW, yB = Y0 + BH;
   const cut = step >= 1;
   const skip = step >= 2;

@@ -25,6 +25,14 @@ const config: Config = {
 
   onBrokenLinks: 'throw',
 
+  // The Playground the landing page embeds (its story, /story). Under `docusaurus start` it's the Playground's own
+  // dev server instead, on its reserved port (3001, playground/package.json; the docs keep 3000), at whatever host
+  // the docs were opened on, so a phone on the LAN gets it too. DUCKSTRING_PLAYGROUND_URL overrides both.
+  customFields: {
+    playgroundUrl: process.env.DUCKSTRING_PLAYGROUND_URL ?? 'https://playground.duckstring.com',
+    playgroundDevPort: process.env.DUCKSTRING_PLAYGROUND_URL || process.env.NODE_ENV !== 'development' ? null : 3001,
+  },
+
   i18n: {
     defaultLocale: 'en',
     locales: ['en'],

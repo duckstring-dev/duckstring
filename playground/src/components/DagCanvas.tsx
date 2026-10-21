@@ -100,7 +100,9 @@ function TourFramer() {
 
 // ─── Main canvas ─────────────────────────────────────────────────────────────
 
-export function DagCanvas() {
+// `bare` is the canvas alone, for the story: no speed or zoom controls, and no zooming to a selection. `direction`
+// fixes the layout's orientation instead of following the screen width (the story picks it from its own shape).
+export function DagCanvas({ bare = false, direction }: { bare?: boolean; direction?: 'LR' | 'TB' } = {}) {
   const ponds = usePlaygroundStore((s) => s.ponds);
   const ripples = usePlaygroundStore((s) => s.ripples);
   const refreshes = usePlaygroundStore((s) => s.refreshes);
@@ -124,12 +126,12 @@ export function DagCanvas() {
   // On a short screen the tour card is a bar along the canvas's bottom edge, over the zoom controls.
   const hideControls = useIsShort() && !isMobile && touring;
   useEffect(() => {
-    if (!isMobile || touring) return;
+    if (!isMobile || touring || bare) return;
     const id = selectedRippleId ?? selectedPondId;
     if (!id) return;
     const t = setTimeout(() => fitView({ nodes: [{ id }], duration: 350, padding: 0.15, maxZoom: 1.1 }), 120);
     return () => clearTimeout(t);
-  }, [isMobile, touring, selectedPondId, selectedRippleId, fitView]);
+  }, [isMobile, touring, bare, selectedPondId, selectedRippleId, fitView]);
 
   // Recompute layout whenever graph structure changes (not on every sim tick)
   const layoutKey = useMemo(
@@ -186,10 +188,11 @@ export function DagCanvas() {
     return `${enc(floors.ripples ?? {})}|${enc(floors.ponds ?? {})}`;
   }, [floors]);
 
+  const rankdir = direction ?? (isMobile ? 'TB' : 'LR');
   const { nodes, edges } = useMemo(
-    () => computeLayout(ponds, ripples, refreshes, floors, isMobile ? 'TB' : 'LR'),
+    () => computeLayout(ponds, ripples, refreshes, floors, rankdir),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [layoutKey, widthKey, isMobile]
+    [layoutKey, widthKey, rankdir]
   );
 
   // Handle positions move between the LR and TB layouts; nudge React Flow to re-measure them
@@ -200,7 +203,7 @@ export function DagCanvas() {
     const t = setTimeout(() => fitView({ padding: 0.15 }), 100);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMobile]);
+  }, [rankdir]);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -242,12 +245,14 @@ export function DagCanvas() {
       >
         <Background color="#2a2a35" gap={24} size={1} />
         <TourFramer />
-        <Panel position="top-left">
-          <SimControls />
-        </Panel>
+        {!bare && (
+          <Panel position="top-left">
+            <SimControls />
+          </Panel>
+        )}
         <Controls
           style={{
-            display: hideControls ? 'none' : undefined,
+            display: hideControls || bare ? 'none' : undefined,
             background: '#1a1a1f',
             border: '1px solid #3f3f46',
             borderRadius: 6,
