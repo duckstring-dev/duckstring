@@ -20,7 +20,7 @@ def ingest(pond):
     # SCD (multiple versions per store_id); the surrogate key s_store_sk is unique per row, so it is the
     # merge key directly.
     try:
-        (n,) = pond.con.execute("SELECT count(*) FROM store_base").fetchone()
+        (n,) = pond.con.execute("SELECT count(*) FROM store_base").fetchall()[0]
     except Exception:
         n = 0
 

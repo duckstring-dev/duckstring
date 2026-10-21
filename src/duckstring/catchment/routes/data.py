@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from ...trickle_io import first_row
 from .. import auth
 from ..db import locked
 
@@ -52,10 +53,10 @@ def _resolve_major(request: Request, pond_name: str, major: Optional[int], versi
         return int(version.split(".")[0])
     db = request.app.state.db
     with locked(db):
-        row = db.execute(
+        row = first_row(db.execute(
             "SELECT MAX(p.major) FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id WHERE pn.name = ?",
             (pond_name,),
-        ).fetchone()
+        ))
     if row is not None and row[0] is not None:
         return row[0]
     on_disk = sorted(
@@ -121,14 +122,14 @@ def _open_pond(request: Request, pond_name: str, major: int):
 def get_pond_version(name: str, version: str, request: Request):
     db = request.app.state.db
     with locked(db):
-        row = db.execute(
+        row = first_row(db.execute(
             """SELECT pv.id FROM pond_version pv
                JOIN pond_name pn ON pn.id = pv.pond_name_id
                WHERE pn.name = ? AND pv.version = ?""",
             (name, version),
-        ).fetchone()
+        ))
         # "active" = this version is the one the pond pointer currently selects.
-        selected = row and db.execute("SELECT 1 FROM pond WHERE pond_version_id = ?", (row[0],)).fetchone()
+        selected = row and first_row(db.execute("SELECT 1 FROM pond WHERE pond_version_id = ?", (row[0],)))
     if row is None:
         raise HTTPException(status_code=404, detail=f"No version {version} of pond '{name}'")
     return {"name": name, "version": version, "is_active": bool(selected)}
@@ -329,12 +330,12 @@ def trace_row(
         try:
             cols = con.sql(f"SELECT * FROM ({sel}) LIMIT 0").columns
             if "_duckstring_f" in cols:
-                row = con.execute(
+                row = first_row(con.execute(
                     f'SELECT max("_duckstring_f"), count(*) FROM ({sel}) WHERE {pred}'
-                ).fetchone()
+                ))
                 row_f, matched = (row[0].isoformat() if row[0] else None), row[1]
             else:  # a plain overwrite table — the whole publish is one run
-                matched = con.execute(f"SELECT count(*) FROM ({sel}) WHERE {pred}").fetchone()[0]
+                matched = first_row(con.execute(f"SELECT count(*) FROM ({sel}) WHERE {pred}"))[0]
                 row_f = (_sidecar(request, name, m).get(table) or {}).get("f")
         except HTTPException:
             raise
@@ -590,11 +591,11 @@ def query_count(body: CountRequest, request: Request,
 
             meta = _sidecar(request, body.pond, m).get(body.table) or {}
             active_sql = get_data_plane().consolidated_count_select(_data_dir(request, body.pond, m), body.table, meta)
-            active = con.execute(active_sql).fetchone()[0]
-            deleted = con.execute(_merge_deleted_count_sql(body.pond, body.table, body.pk, meta.get("f_base"))).fetchone()[0]
+            active = first_row(con.execute(active_sql))[0]
+            deleted = first_row(con.execute(_merge_deleted_count_sql(body.pond, body.table, body.pk, meta.get("f_base"))))[0]
             return {"count": int(active) + int(deleted)}
         base = _base_sql(body, f_base=_merge_f_base(request, body, m))
-        (count,) = con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count").fetchone()
+        (count,) = first_row(con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count"))
         return {"count": count}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

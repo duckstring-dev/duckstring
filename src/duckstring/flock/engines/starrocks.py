@@ -85,7 +85,8 @@ def _dialect():
     - ``var_samp``/``stddev`` are DuckDB's sample statistics, but MySQL's ``VARIANCE``/``STDDEV`` (which sqlglot
       emits) are the population ones: spelled ``VAR_SAMP``/``STDDEV_SAMP``.
     - ``arg_min``/``arg_max`` are StarRocks' ``MIN_BY``/``MAX_BY``.
-    - DuckDB's integer ``//`` truncates toward zero and gives NULL on zero, as StarRocks' ``DIV`` does.
+    - DuckDB's integer ``//`` truncates toward zero, as StarRocks' ``DIV`` does (a zero divisor: see
+      :func:`_rewrite`).
     """
     from sqlglot import exp, transforms
     from sqlglot.dialects.dialect import rename_func
@@ -110,6 +111,15 @@ def _dialect():
     return DuckstringStarrocks
 
 
+def _zero_divisor_raises() -> bool:
+    import duckdb
+
+    return int(duckdb.__version__.split(".")[0]) >= 2
+
+
+# DuckDB 2.0 raises on an integer or DECIMAL `//` or `%` by zero, where 1.x gave NULL. The translation runs in
+# the Duck, so this is the version whose answer the dispatched job has to match.
+_ZERO_DIVISOR_RAISES = _zero_divisor_raises()
 _INF = "(1e308 * 10)"  # StarRocks has no infinity literal; an overflowing product is +inf
 _EXACT = "4503599627370496"  # 2^52: every DOUBLE this large is already a whole number
 
@@ -126,6 +136,9 @@ def _rewrite(tree, exp):
       gives ±inf in DuckDB (NULL in StarRocks): reproduced for an integer or DECIMAL divisor. NaN (``0/0``)
       can't be represented on StarRocks, and a DOUBLE zero divisor may be -0.0, so a row with either raises
       on StarRocks, which fails the dispatch and runs the job locally rather than publish a different value.
+    - ``a // b`` and ``a % b`` with a zero divisor give NULL on StarRocks. DuckDB 1.x agrees; DuckDB 2.0 raises
+      (except ``%`` on a DOUBLE, NaN on both versions, measured as before), so on 2.0 such a row raises on
+      StarRocks too and the job runs locally, where it fails as DuckDB says it should.
     - ``CAST(x AS <integer>)`` rounds in DuckDB (DECIMAL half away from zero, DOUBLE half to even) where
       StarRocks truncates: round first, spelling out half-to-even for DOUBLE.
     - ``round``/``floor``/``ceil`` of a DOUBLE return BIGINT on StarRocks, clamping large values: kept DOUBLE.
@@ -159,6 +172,11 @@ def _rewrite(tree, exp):
                 f"'duckstring: a division by zero StarRocks cannot reproduce'), "
                 f"CASE WHEN {b} = 0 THEN CASE WHEN {a} > 0 THEN {_INF} WHEN {a} < 0 THEN -{_INF} END "
                 f"ELSE {a} / {b} END, NULL)")
+        if isinstance(node, (exp.IntDiv, exp.Mod)) and _ZERO_DIVISOR_RAISES and _type(node) not in ("FLOAT", "DOUBLE"):
+            a, b = node.this.sql("duckdb"), node.expression.sql("duckdb")
+            return parse(
+                f"IF(assert_true(coalesce(NOT (({b}) = 0 AND ({a}) IS NOT NULL), true), "
+                f"'duckstring: a division by zero DuckDB raises on'), {node.sql('duckdb')}, NULL)")
         if isinstance(node, exp.Cast):
             to = node.to.this.name if isinstance(node.to, exp.DataType) else ""
             src = _type(node.this)

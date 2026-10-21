@@ -8,6 +8,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from trickle.io import first_row
 
 from duckstring.dataplane import ParquetDataPlane
 from duckstring.local import hydrate, load_project, run_pond
@@ -194,7 +195,7 @@ def test_read_object_from_source(tmp_path):
     assert [r.status for r in result.ripples] == ["ok"], result.ripples
     import duckdb
 
-    (n,) = duckdb.sql(f"SELECT n FROM read_parquet('{ParquetDataPlane().table_path(project.out_dir, 'out')}')").fetchone()
+    (n,) = first_row(duckdb.sql(f"SELECT n FROM read_parquet('{ParquetDataPlane().table_path(project.out_dir, 'out')}')"))
     assert n == len(b"source-object-bytes")
 
 

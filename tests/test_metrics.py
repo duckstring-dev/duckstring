@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from trickle.io import first_row
 
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver, _now
@@ -114,8 +115,8 @@ def test_cost_families_target_flock_runtime(tmp_path):
     d.add_pool("heavy", instance_type="m6i.large")
     d.set_duck(key, duck_target="heavy", flock_mode="upgrade", flock_engine="athena")
     # A completed Ripple Run gives a runtime span to sum.
-    (pv_id,) = d.db.execute("SELECT id FROM pond_version LIMIT 1").fetchone()
-    (rip_id,) = d.db.execute("SELECT id FROM ripple WHERE pond_version_id = ?", (pv_id,)).fetchone()
+    (pv_id,) = first_row(d.db.execute("SELECT id FROM pond_version LIMIT 1"))
+    (rip_id,) = first_row(d.db.execute("SELECT id FROM ripple WHERE pond_version_id = ?", (pv_id,)))
     d.db.execute("INSERT INTO pond_run (pond_version_id, f, status) "
                  "VALUES (?, '2026-01-01T00:00:00+00:00', 'success')", (pv_id,))
     d.db.execute(

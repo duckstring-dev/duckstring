@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ...keys import version_key as _version_key
+from ...trickle_io import first_row
 from .. import auth
 from ..db import locked
 
@@ -37,13 +38,13 @@ def _parse_version(s: str) -> tuple[int, str, bool]:
 def _selected_version(db, source_name: str, major: int) -> str | None:
     """The version currently *selected* for ``source_name@major`` (the ``pond`` pointer), or None when
     that major line isn't deployed yet."""
-    row = db.execute(
+    row = first_row(db.execute(
         "SELECT pv.version FROM pond p "
         "JOIN pond_version pv ON pv.id = p.pond_version_id "
         "JOIN pond_name pn ON pn.id = p.pond_name_id "
         "WHERE pn.name = ? AND p.major = ?",
         (source_name, major),
-    ).fetchone()
+    ))
     return row[0] if row else None
 
 
@@ -186,10 +187,10 @@ def _store_column_lineage(db, name: str, version: str, rows: list[list[str]]) ->
     """Store the static column lineage discovery captured (plans/lineage.md Phase 2), replacing the
     version's previous rows: lineage is a property of the version. Never fails a deploy."""
     try:
-        (pv_id,) = db.execute(
+        (pv_id,) = first_row(db.execute(
             "SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
             "WHERE pn.name = ? AND pv.version = ?", (name, version),
-        ).fetchone()
+        ))
         with db:
             db.execute("DELETE FROM pond_version_column_lineage WHERE pond_version_id = ?", (pv_id,))
             db.executemany(
@@ -216,11 +217,11 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
     with db:
         db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, ?)", (name, kind))
         db.execute("UPDATE pond_name SET kind = ? WHERE name = ?", (kind, name))
-        (pn_id,) = db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)).fetchone()
+        (pn_id,) = first_row(db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)))
 
-        existing = db.execute(
+        existing = first_row(db.execute(
             "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
-        ).fetchone()
+        ))
         if existing:
             pv_id = existing[0]
             # Redeploying an already-known version (e.g. re-activating a removed/retired line, or a plain
@@ -256,9 +257,9 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
                  deployed_at, cfg.get("duck_pool"), cfg.get("flock_mode"), cfg.get("flock_engine"),
                  cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project")))),
             )
-            (pv_id,) = db.execute(
+            (pv_id,) = first_row(db.execute(
                 "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
-            ).fetchone()
+            ))
 
         # Select this version for (pond_name, major) — the `pond` pointer.
         db.execute(
@@ -266,9 +267,9 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
             "ON CONFLICT(pond_name_id, major) DO UPDATE SET pond_version_id = excluded.pond_version_id",
             (pn_id, major, pv_id),
         )
-        (pond_id,) = db.execute(
+        (pond_id,) = first_row(db.execute(
             "SELECT id FROM pond WHERE pond_name_id = ? AND major = ?", (pn_id, major)
-        ).fetchone()
+        ))
 
         # Seed the live retry budgets from the pond.toml defaults, but only on first creation —
         # operator edits via `duckstring control failure-budget` then survive redeploys.
@@ -293,9 +294,9 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
                 "INSERT OR IGNORE INTO ripple (pond_version_id, name, always_run) VALUES (?, ?, ?)",
                 (pv_id, r["name"], int(r.get("always_run", False))),
             )
-            (rid,) = db.execute(
+            (rid,) = first_row(db.execute(
                 "SELECT id FROM ripple WHERE pond_version_id = ? AND name = ?", (pv_id, r["name"])
-            ).fetchone()
+            ))
             name_to_id[r["name"]] = rid
         func_to_name = {r["func"]: r["name"] for r in ripples}
         for r in ripples:
@@ -312,7 +313,7 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
         for src_name, ver_str in cfg["sources"].items():
             src_major, src_min, src_required = _parse_version(ver_str)
             db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, 'pond')", (src_name,))
-            (src_pn_id,) = db.execute("SELECT id FROM pond_name WHERE name = ?", (src_name,)).fetchone()
+            (src_pn_id,) = first_row(db.execute("SELECT id FROM pond_name WHERE name = ?", (src_name,)))
             db.execute(
                 "INSERT OR REPLACE INTO pond_to_pond "
                 "(pond_id, source_pond_name_id, source_major, required, min_version) VALUES (?, ?, ?, ?, ?)",

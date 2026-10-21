@@ -44,7 +44,7 @@ def ingest(pond):
     # The cursor (next hour to read) persists in the registry. First run → backfill from the start hour;
     # steady state → the single next hour.
     try:
-        (cursor,) = pond.con.execute("SELECT next_hour FROM gh_cursor").fetchone()
+        (cursor,) = pond.con.execute("SELECT next_hour FROM gh_cursor").fetchall()[0]
         hours = [cursor]
     except Exception:
         start = _parse_hour(_START)

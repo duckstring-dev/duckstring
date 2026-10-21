@@ -21,6 +21,7 @@ from pathlib import Path
 import httpx
 import pytest
 import uvicorn
+from trickle.io import first_row
 
 pytestmark = pytest.mark.timeout(60)
 
@@ -258,7 +259,7 @@ def test_trickle_chain_runs_end_to_end(runtime):
         assert list((data_dir / f"{table}__changelog").glob("*.parquet")), f"{name}: no changelog parts"
         assert json.loads((data_dir / "_trickle.json").read_text())[table]["mode"] == "merge"
         # The reconstructed main is readable (non-empty current state) even without a checkpointed base.
-        n = rcon.sql(f"SELECT count(*) FROM ({ParquetDataPlane().read_select(data_dir, table)})").fetchone()[0]
+        n = first_row(rcon.sql(f"SELECT count(*) FROM ({ParquetDataPlane().read_select(data_dir, table)})"))[0]
         assert n > 0, f"{name}: empty reconstructed main"
 
 
@@ -306,7 +307,7 @@ def test_local_first_publish_persists_to_data_root(runtime, tmp_path_factory):
     import sqlite3
     db = sqlite3.connect(root / "duck.db")
     try:
-        n = db.execute("SELECT count(*) FROM pond_persist WHERE status = 'success'").fetchone()[0]
+        n = first_row(db.execute("SELECT count(*) FROM pond_persist WHERE status = 'success'"))[0]
         assert n >= len(_TRICKLE_PONDS), f"expected a persist row per line, got {n}"
     finally:
         db.close()
@@ -454,9 +455,9 @@ def test_gharchive_demo_chain_runs_end_to_end(runtime, monkeypatch):
                         ("gh_repo_activity", "repo_activity"),
                         ("gh_stars", "star"), ("gh_trending", "trending")):
         data_dir = root / "ponds" / name / "m1" / "data"
-        n = rcon.sql(
+        n = first_row(rcon.sql(
             f"SELECT count(*) FROM ({ParquetDataPlane().read_select(data_dir, table)})"
-        ).fetchone()[0]
+        ))[0]
         assert n > 0, f"{name}: empty output"
 
     # Second refresh round: the next hour isn't published, so the Inlet holds on the gap — the chain runs to
@@ -504,7 +505,7 @@ def test_dbt_mode_pond_chain_runs_end_to_end(runtime, monkeypatch):
     rcon = duckdb.connect()
     for table in ("orders_clean", "revenue_by_product", "top_products"):
         data_dir = root / "ponds" / "shop_analytics" / "m1" / "data"
-        n = rcon.sql(f"SELECT count(*) FROM ({ParquetDataPlane().read_select(data_dir, table)})").fetchone()[0]
+        n = first_row(rcon.sql(f"SELECT count(*) FROM ({ParquetDataPlane().read_select(data_dir, table)})"))[0]
         assert n > 0, f"dbt model {table}: empty output"
 
     # A second refresh re-runs the models against the refreshed source without failing.
@@ -537,7 +538,7 @@ def test_delete_table_removes_now_and_rebuilds_on_next_run(runtime):
         con = duckdb.connect()
         try:
             sql = ParquetDataPlane().read_select(data_dir, "priced_line")
-            return con.sql(f"SELECT count(*) FROM ({sql})").fetchone()[0]
+            return first_row(con.sql(f"SELECT count(*) FROM ({sql})"))[0]
         except Exception:
             return None  # not published (removed)
         finally:
@@ -701,9 +702,9 @@ def test_remove_pond_retires_line(runtime):
     def catalog_runs():
         db = sqlite3.connect(root / "duck.db")
         try:
-            return db.execute(
+            return first_row(db.execute(
                 "SELECT count(*) FROM pond_run pr JOIN pond_version pv ON pv.id = pr.pond_version_id "
-                "JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'catalog'").fetchone()[0]
+                "JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'catalog'"))[0]
         finally:
             db.close()
 
@@ -744,13 +745,13 @@ def test_remove_pond_wipe_purges_history(runtime):
     def counts():
         db = sqlite3.connect(root / "duck.db")
         try:
-            runs = db.execute(
+            runs = first_row(db.execute(
                 "SELECT count(*) FROM pond_run pr JOIN pond_version pv ON pv.id = pr.pond_version_id "
-                "JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'revenue'").fetchone()[0]
-            versions = db.execute(
+                "JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'revenue'"))[0]
+            versions = first_row(db.execute(
                 "SELECT count(*) FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
-                "WHERE pn.name = 'revenue'").fetchone()[0]
-            names = db.execute("SELECT count(*) FROM pond_name WHERE name = 'revenue'").fetchone()[0]
+                "WHERE pn.name = 'revenue'"))[0]
+            names = first_row(db.execute("SELECT count(*) FROM pond_name WHERE name = 'revenue'"))[0]
             return runs, versions, names
         finally:
             db.close()
@@ -827,7 +828,7 @@ def test_repair_chain_rebuilds_downstream_in_order(runtime):
     def changelog_rows(name, table):
         import duckdb
         pq = root / "ponds" / name / "m1" / "data" / f"{table}__changelog.parquet"
-        return duckdb.connect().execute(f"SELECT count(*) FROM read_parquet('{pq}')").fetchone()[0]
+        return first_row(duckdb.connect().execute(f"SELECT count(*) FROM read_parquet('{pq}')"))[0]
 
     catalog_floor_before = floor("catalog", "product")
 
@@ -860,7 +861,7 @@ def test_continuous_refresh_then_remove(runtime):
         if not rep_db.exists():
             return 0
         con = ledger.connect(rep_db)
-        n = con.execute("SELECT COUNT(*) FROM pond_run WHERE status = 'success'").fetchone()[0]
+        n = first_row(con.execute("SELECT COUNT(*) FROM pond_run WHERE status = 'success'"))[0]
         con.close()
         return n
 
@@ -888,13 +889,13 @@ def test_a_tap_keeps_reports_fresh_while_an_app_queries_it(runtime):
     app = Catchment(url, api_key=resp.json()["key"])
 
     assert app.freshness()["freshness"] is None  # asking how fresh the data is sends nothing
-    assert app.query("SELECT 1 AS x").fetchone() == (1,)  # answered at once; the pipeline starts
+    assert first_row(app.query("SELECT 1 AS x")) == (1,)  # answered at once; the pipeline starts
     assert _wait(lambda: (lambda f: f["freshness"] is not None and not f["refreshing"])(app.freshness())), \
         "reports never became fresh"
     fr = app.freshness()
     assert list(fr["tables"]) == ["monthly_summary"] and fr["changed"] == fr["freshness"]
     assert app.tables() == ["monthly_summary"]
-    assert app.query("SELECT count(*) AS n FROM monthly_summary").fetchone()[0] > 0
+    assert first_row(app.query("SELECT count(*) AS n FROM monthly_summary"))[0] > 0
     reports = _pond_status(url, "reports")
     assert reports["taps"][0]["refresh_count"] == 1
 
@@ -921,7 +922,7 @@ def test_overwrite_versions_are_trimmed_once_the_chain_goes_idle(runtime, monkey
         if not rep_db.exists():
             return 0
         con = ledger.connect(rep_db)
-        n = con.execute("SELECT COUNT(*) FROM pond_run WHERE status = 'success'").fetchone()[0]
+        n = first_row(con.execute("SELECT COUNT(*) FROM pond_run WHERE status = 'success'"))[0]
         con.close()
         return n
 
@@ -1049,7 +1050,7 @@ def test_per_object_change_skips_work_and_downstream_ponds(runtime, tmp_path):
         if not db.exists():
             return 0
         con = ledger.connect(db)
-        n = con.execute("SELECT COUNT(*) FROM pond_run WHERE status = 'success'").fetchone()[0]
+        n = first_row(con.execute("SELECT COUNT(*) FROM pond_run WHERE status = 'success'"))[0]
         con.close()
         return n
 
@@ -1175,7 +1176,7 @@ def test_a_pond_runs_in_its_own_environment(runtime, tmp_path):
     import duckdb
 
     data = next((root / "ponds" / "envp" / "m1" / "data" / "answer__v").glob("*.parquet"))
-    assert duckdb.sql(f"SELECT n FROM '{data}'").fetchone() == (42,)
+    assert first_row(duckdb.sql(f"SELECT n FROM '{data}'")) == (42,)
 
 
 @pytest.mark.timeout(300)
@@ -1215,4 +1216,4 @@ def test_a_pool_duck_builds_its_ponds_environment(runtime, tmp_path, tmp_path_fa
     envs = [p for p in (agent_root / "envs").iterdir() if (p / ".complete").exists()]
     assert envs, "the Pool agent's machine built no environment"
     data = next((agent_root / "ponds" / "envp" / "m1" / "data" / "answer__v").glob("*.parquet"))
-    assert duckdb.sql(f"SELECT n FROM '{data}'").fetchone() == (42,)
+    assert first_row(duckdb.sql(f"SELECT n FROM '{data}'")) == (42,)

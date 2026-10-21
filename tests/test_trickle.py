@@ -14,6 +14,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from trickle.io import first_row
 
 from duckstring import trickle_io as T
 from duckstring.core import Pond
@@ -100,7 +101,7 @@ def test_merge_main_carries_freshness_stripped_for_consumers(reg, tmp_path):
     assert set(full.columns) == {"id", "v", "_duckstring_f"}
     # A consumer strips the system column (read_table does this), seeing pure user columns + the right state.
     assert set(T._strip_system(full).columns) == {"id", "v"}
-    assert full.filter("id = 1").fetchone()[2] == ts(1)  # _duckstring_f = the run that wrote it
+    assert first_row(full.filter("id = 1"))[2] == ts(1)  # _duckstring_f = the run that wrote it
 
 
 def test_merge_main_checkpoint_folds_into_base(reg, tmp_path, monkeypatch):
@@ -151,8 +152,8 @@ def test_base_hydrates_as_a_view_not_a_copy(reg, tmp_path, monkeypatch):
     try:
         hydrate_registry(fresh, snk_dir)
         # The cold base "dim__base" is a VIEW over the chunks, not a materialised table.
-        assert fresh.execute("SELECT count(*) FROM duckdb_views() WHERE view_name = 'dim__base'").fetchone()[0] == 1
-        assert fresh.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'dim__base'").fetchone()[0] == 0
+        assert first_row(fresh.execute("SELECT count(*) FROM duckdb_views() WHERE view_name = 'dim__base'"))[0] == 1
+        assert first_row(fresh.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'dim__base'"))[0] == 0
         # Reconstruction over the view is correct (current state after the update/insert/delete).
         rel = T.reconstruct_current(fresh, "dim")
         assert sorted(fresh.sql(f"SELECT id, v FROM ({rel.sql_query()})").fetchall()) == [(1, "A"), (3, "c")]
@@ -1313,9 +1314,9 @@ def test_merge_ripple_via_local_runner(tmp_path):
     con = duckdb.connect()
     assert rows(con, out, "loud", "id, v") == [(1, "A"), (2, "B")]
     # The main is log-structured: the bootstrap state is the changelog (no base yet, no checkpoint).
-    assert con.sql(
+    assert first_row(con.sql(
         f"SELECT count(*) FROM ({ParquetDataPlane().read_select(out, 'loud__changelog')})"
-    ).fetchone()[0] == 2  # the two initial rows, as +1 changelog entries
+    ))[0] == 2  # the two initial rows, as +1 changelog entries
 
 
 # ─── incremental draw (cross-Catchment transfer window) ──────────────────────────

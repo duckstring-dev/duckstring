@@ -61,6 +61,8 @@ import re
 import uuid
 from typing import Protocol
 
+from ..trickle_io import first_row
+
 log = logging.getLogger("duckstring.flock")
 
 FLOCK_MODES = (None, "always", "upgrade", "off")
@@ -373,7 +375,7 @@ def leaf_rows(job) -> int:
     total = 0
     for leaf in job.leaves():
         total += int(counter(leaf.ref)) if counter is not None else (
-            ctx.read_table(leaf.ref).aggregate("count(*)").fetchone()[0])
+            first_row(ctx.read_table(leaf.ref).aggregate("count(*)"))[0])
     return total
 
 

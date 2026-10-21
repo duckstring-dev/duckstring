@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from .trickle_io import first_row
+
 _RIPPLES: list[dict] = []
 _PUDDLES: list[dict] = []
 
@@ -912,8 +914,8 @@ class Pond:
                     [str(t) for t in current.types] != [str(t) for t in relation.types]:
                 return False
             v = "_duckstring_detect_new"
-            (diff,) = relation.query(v, f'SELECT count(*) FROM ((SELECT * FROM {v} EXCEPT ALL SELECT * FROM "{q}") '
-                                        f'UNION ALL (SELECT * FROM "{q}" EXCEPT ALL SELECT * FROM {v}))').fetchone()
+            (diff,) = first_row(relation.query(v, f'SELECT count(*) FROM ((SELECT * FROM {v} EXCEPT ALL SELECT * FROM "{q}") '
+                                        f'UNION ALL (SELECT * FROM "{q}" EXCEPT ALL SELECT * FROM {v}))'))
         except Exception:  # not comparable here (a relation on another connection): treat as changed
             return False
         return diff == 0
@@ -1246,9 +1248,9 @@ class Pond:
             dp = get_data_plane()
             data_dir.duckdb_setup(self.con)
             meta = trickle.load_sidecar(data_dir).get(table, {})
-            (n,) = self.con.execute(
+            (n,) = first_row(self.con.execute(
                 dp.consolidated_count_select(data_dir, table, meta, as_of=self.f, pin=self._pin(source_pond))
-            ).fetchone()
+            ))
             return int(n)
         self._check_own_read(table)
         return trickle.count_current(self.con, table)

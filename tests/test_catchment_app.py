@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from trickle.io import first_row
 
 from duckstring.catchment.db import connect, migrate
 
@@ -154,7 +155,7 @@ def _selected_version(db, name):
 def test_deploy_local_registers_pond(catchment_client):
     r = _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet", toml_text=INLET_TOML)
     assert r.status_code == 200
-    row = _db(catchment_client).execute("SELECT name, kind FROM pond_name WHERE name = 'inlet'").fetchone()
+    row = first_row(_db(catchment_client).execute("SELECT name, kind FROM pond_name WHERE name = 'inlet'"))
     assert row == ("inlet", "inlet")
 
 
@@ -162,7 +163,7 @@ def test_deploy_local_registers_version(catchment_client):
     r = _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet", toml_text=INLET_TOML)
     assert r.status_code == 200
     db = _db(catchment_client)
-    row = db.execute("SELECT version, major, source_path FROM pond_version WHERE version = '1.0.0'").fetchone()
+    row = first_row(db.execute("SELECT version, major, source_path FROM pond_version WHERE version = '1.0.0'"))
     assert row == ("1.0.0", 1, "ponds/inlet/1.0.0")
     assert _selected_version(db, "inlet") == {"1.0.0"}  # the pond pointer selects it
 
@@ -173,9 +174,9 @@ def test_deploy_local_registers_sources(catchment_client):
     assert r.status_code == 200
 
     db = _db(catchment_client)
-    (pond_id,) = db.execute(
+    (pond_id,) = first_row(db.execute(
         "SELECT p.id FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id WHERE pn.name = 'mypond'"
-    ).fetchone()
+    ))
     edges = db.execute(
         "SELECT src.name, e.source_major, e.min_version, e.required "
         "FROM pond_to_pond e JOIN pond_name src ON src.id = e.source_pond_name_id WHERE e.pond_id = ?",
@@ -189,9 +190,9 @@ def test_deploy_local_required_and_optional_sources(catchment_client):
     assert r.status_code == 200
 
     db = _db(catchment_client)
-    (pond_id,) = db.execute(
+    (pond_id,) = first_row(db.execute(
         "SELECT p.id FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id WHERE pn.name = 'outlet'"
-    ).fetchone()
+    ))
     edges = {
         row[0]: row[1]
         for row in db.execute(
@@ -213,9 +214,9 @@ def test_deploy_local_registers_ripples(catchment_client):
     assert r.status_code == 200
 
     db = _db(catchment_client)
-    (version_id,) = db.execute(
+    (version_id,) = first_row(db.execute(
         "SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'inlet'"
-    ).fetchone()
+    ))
     ripples = {r[0] for r in db.execute("SELECT name FROM ripple WHERE pond_version_id = ?", (version_id,)).fetchall()}
     assert ripples == {"load", "clean"}
 
@@ -229,9 +230,9 @@ def test_deploy_local_registers_ripple_edges(catchment_client):
     assert r.status_code == 200
 
     db = _db(catchment_client)
-    (version_id,) = db.execute(
+    (version_id,) = first_row(db.execute(
         "SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'inlet'"
-    ).fetchone()
+    ))
     edges = db.execute(
         """SELECT sink.name, src.name FROM ripple_to_ripple e
            JOIN ripple sink ON sink.id = e.sink_id
@@ -258,10 +259,10 @@ def test_redeploy_same_version_keeps_run_history(catchment_client):
     _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet",
             toml_text=INLET_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
     db = _db(catchment_client)
-    (pv_id,) = db.execute(
+    (pv_id,) = first_row(db.execute(
         "SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'inlet'"
-    ).fetchone()
-    (load_id,) = db.execute("SELECT id FROM ripple WHERE pond_version_id = ? AND name = 'load'", (pv_id,)).fetchone()
+    ))
+    (load_id,) = first_row(db.execute("SELECT id FROM ripple WHERE pond_version_id = ? AND name = 'load'", (pv_id,)))
     with db:
         db.execute("INSERT INTO pond_run (pond_version_id, f, started_at, status) VALUES (?, ?, ?, 'success')",
                    (pv_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"))
@@ -271,8 +272,8 @@ def test_redeploy_same_version_keeps_run_history(catchment_client):
     # Redeploy the identical artifact — history survives and the pond_version id is unchanged.
     _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet",
             toml_text=INLET_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
-    assert db.execute("SELECT count(*) FROM pond_run WHERE pond_version_id = ?", (pv_id,)).fetchone()[0] == 1
-    assert db.execute("SELECT count(*) FROM ripple_run WHERE pond_version_id = ?", (pv_id,)).fetchone()[0] == 1
+    assert first_row(db.execute("SELECT count(*) FROM pond_run WHERE pond_version_id = ?", (pv_id,)))[0] == 1
+    assert first_row(db.execute("SELECT count(*) FROM ripple_run WHERE pond_version_id = ?", (pv_id,)))[0] == 1
 
 
 def test_redeploy_changed_topology_keeps_pond_runs(catchment_client):
@@ -281,9 +282,9 @@ def test_redeploy_changed_topology_keeps_pond_runs(catchment_client):
     _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet",
             toml_text=INLET_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
     db = _db(catchment_client)
-    (pv_id,) = db.execute(
+    (pv_id,) = first_row(db.execute(
         "SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'inlet'"
-    ).fetchone()
+    ))
     with db:
         db.execute("INSERT INTO pond_run (pond_version_id, f, started_at, status) VALUES (?, ?, ?, 'success')",
                    (pv_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"))
@@ -293,7 +294,7 @@ def test_redeploy_changed_topology_keeps_pond_runs(catchment_client):
     _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet",
             toml_text=INLET_TOML, pond_py_text=one_ripple)
     assert {r[0] for r in db.execute("SELECT name FROM ripple WHERE pond_version_id = ?", (pv_id,))} == {"load"}
-    assert db.execute("SELECT count(*) FROM pond_run WHERE pond_version_id = ?", (pv_id,)).fetchone()[0] == 1
+    assert first_row(db.execute("SELECT count(*) FROM pond_run WHERE pond_version_id = ?", (pv_id,)))[0] == 1
 
 
 def test_deploy_two_majors_both_selected(catchment_client):
@@ -327,9 +328,9 @@ def test_deploy_cycle_returns_422(catchment_client):
 
     # b's version must not have been registered (transaction rolled back)
     db = _db(catchment_client)
-    assert db.execute(
+    assert first_row(db.execute(
         "SELECT COUNT(*) FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = 'b'"
-    ).fetchone()[0] == 0
+    ))[0] == 0
 
 
 # ---------------------------------------------------------------------------

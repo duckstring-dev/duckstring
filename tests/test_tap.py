@@ -11,6 +11,7 @@ import duckdb
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from trickle.io import first_row
 
 from duckstring.catchment import auth
 from duckstring.catchment.db import connect, migrate
@@ -36,7 +37,7 @@ def _setup(tmp_path, *, keys: bool = False):
     cfg = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": "outlet",
            "serve_tables": ["revenue", "daily"]}
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", cfg, _RIPPLES)
-    pv = db.execute("SELECT id FROM pond_version WHERE version = '1.0.0'").fetchone()[0]
+    pv = first_row(db.execute("SELECT id FROM pond_version WHERE version = '1.0.0'"))[0]
     for t in ("revenue", "daily", "secret_internal"):
         db.execute('INSERT OR IGNORE INTO pond_version_schema (pond_version_id, "table", "column", type) '
                    "VALUES (?, ?, 'id', 'INTEGER')", (pv, t))
@@ -287,10 +288,10 @@ def test_counters_are_flushed_and_taps_survive_a_reload(tmp_path):
     _, driver, _ = _setup(tmp_path)
     _, key = driver.add_tap(KEY, "app", fresh_within=timedelta(minutes=5))
     driver.tap_query(auth.TapScope(KEY, "app"))
-    row = driver.db.execute("SELECT query_count FROM pond_tap").fetchone()
+    row = first_row(driver.db.execute("SELECT query_count FROM pond_tap"))
     assert row == (0,)  # not written per query
     driver.scheduler_tick()
-    assert driver.db.execute("SELECT query_count, refresh_count FROM pond_tap").fetchone() == (1, 1)
+    assert first_row(driver.db.execute("SELECT query_count, refresh_count FROM pond_tap")) == (1, 1)
 
     fresh = Driver(driver.db, tmp_path, "http://x", NoopLauncher())
     assert fresh.tap_for_hash(auth.hash_key(key)) == auth.TapScope(KEY, "app")
@@ -316,7 +317,7 @@ def test_removing_the_line_removes_its_taps(tmp_path):
     _, driver, _ = _setup(tmp_path)
     _, key = driver.add_tap(KEY, "app")
     driver.remove_pond("sales", 1)
-    assert driver.db.execute("SELECT count(*) FROM pond_tap").fetchone() == (0,)
+    assert first_row(driver.db.execute("SELECT count(*) FROM pond_tap")) == (0,)
     assert driver.tap_for_hash(auth.hash_key(key)) is None
 
 

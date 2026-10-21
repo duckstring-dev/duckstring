@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from trickle.io import first_row
+
 from duckstring.cli import app
 
 
@@ -202,8 +204,8 @@ def test_merge_browse_limit_pushes_down_through_the_base(tmp_path, monkeypatch):
     base = _trickle_base_sql("p", "dim", "merge", ["id"], None, None, f_base="2026-06-16T01:00:00+00:00")
 
     # Correct current state: N rows, the update applied.
-    assert con.execute(f"SELECT count(*) FROM ({base})").fetchone()[0] == n
-    assert con.execute(f"SELECT v FROM ({base}) WHERE id = 5").fetchone()[0] == "X"
+    assert first_row(con.execute(f"SELECT count(*) FROM ({base})"))[0] == n
+    assert first_row(con.execute(f"SELECT v FROM ({base}) WHERE id = 5"))[0] == "X"
 
     # Pushdown: no operator in the analysed plan touches anywhere near the whole base.
     plan = con.execute(f"EXPLAIN ANALYZE SELECT * FROM ({base}) AS _p LIMIT 5").fetchall()[0][1]
@@ -236,8 +238,8 @@ def _serve_pond(client, name: str, tables: list[str]) -> None:
     _register(db, name, "1.0.0", "outlet", f"ponds/{name}/1.0.0",
               {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": "outlet", "serve_tables": tables},
               [{"func": "f", "name": "r", "parents": []}])
-    pv = db.execute("SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
-                    "WHERE pn.name = ? AND pv.version = '1.0.0'", (name,)).fetchone()[0]
+    pv = first_row(db.execute("SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
+                    "WHERE pn.name = ? AND pv.version = '1.0.0'", (name,)))[0]
     for t in tables:
         db.execute('INSERT OR IGNORE INTO pond_version_schema (pond_version_id, "table", "column", type) '
                    "VALUES (?, ?, 'id', 'INTEGER')", (pv, t))

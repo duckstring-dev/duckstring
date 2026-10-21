@@ -15,6 +15,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 
+from ..trickle_io import first_row
 from .core import NEVER, RippleState
 from .worker import WorkerState, new_state
 
@@ -110,7 +111,7 @@ def load_state(con: sqlite3.Connection, parents: dict[str, list[str]], optional=
 
 def read_pond_end_f(con: sqlite3.Connection) -> datetime | None:
     """The freshness of the newest successfully completed Pond Run (Catchment fallback)."""
-    row = con.execute("SELECT MAX(f) FROM pond_run WHERE status = 'success'").fetchone()
+    row = first_row(con.execute("SELECT MAX(f) FROM pond_run WHERE status = 'success'"))
     return _parse(row[0]) if row and row[0] else None
 
 

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 import duckdb
 import pytest
+from trickle.io import first_row
 
 from duckstring import trickle_io as T
 from duckstring.dataplane import ParquetDataPlane, _auto_cluster_bits, _bits_per_column, rank_hilbert_sql
@@ -86,8 +87,8 @@ def test_an_interleaved_base_prunes_on_every_clustered_column(tmp_path, monkeypa
     assert touched["hilbert"]["a"] < 0.25 and touched["hilbert"]["b"] < 0.25  # rank-Hilbert: both
     con = _con()
     read = ParquetDataPlane().read_select(hilbert, "m")
-    assert con.execute(f"SELECT count(*), sum(a), sum(b) FROM ({read})").fetchone() == \
-        con.execute(f"SELECT count(*), sum(a), sum(b) FROM ({_ROWS})").fetchone()
+    assert first_row(con.execute(f"SELECT count(*), sum(a), sum(b) FROM ({read})")) == \
+        first_row(con.execute(f"SELECT count(*), sum(a), sum(b) FROM ({_ROWS})"))
 
 
 @pytest.mark.timeout(120)
@@ -253,8 +254,8 @@ def test_a_plain_table_is_ordered_as_it_is_written(tmp_path):
     both = _published_groups(con, tmp_path / "out", "both")
     for col in ("a", "b"):
         assert _fraction_touched(both, col, values) < _fraction_touched(plain, col, values)
-    assert con.execute('SELECT count(*), sum(a) FROM "both"').fetchone() == \
-        con.execute(f"SELECT count(*), sum(a) FROM ({_ROWS})").fetchone()
+    assert first_row(con.execute('SELECT count(*), sum(a) FROM "both"')) == \
+        first_row(con.execute(f"SELECT count(*), sum(a) FROM ({_ROWS})"))
 
 
 def test_write_table_refuses_an_unknown_cluster_column(tmp_path):

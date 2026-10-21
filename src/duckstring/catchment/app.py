@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from ..trickle_io import first_row
 from . import auth
 from .db import connect, ensure_identity, migrate
 from .driver import Driver
@@ -205,7 +206,7 @@ def create_app(
         from ..storage import get_storage
         from .data_lease import acquire_lease
 
-        cid = con.execute("SELECT value FROM catchment_meta WHERE key = 'id'").fetchone()
+        cid = first_row(con.execute("SELECT value FROM catchment_meta WHERE key = 'id'"))
         owner_id = cid[0] if cid else "unknown"
         lease_store = get_storage(data_root)
         acquire_lease(lease_store, owner_id)  # raises LeaseConflict → the server does not start

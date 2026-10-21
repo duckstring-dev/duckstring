@@ -14,6 +14,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from trickle.io import first_row
 
 from duckstring.catchment.db import connect, ensure_identity, migrate
 from duckstring.catchment.driver import Driver
@@ -50,9 +51,9 @@ def test_identity_minted_once_and_name_refreshes(tmp_path):
     db = connect(tmp_path / "duck.db")
     migrate(db)
     ensure_identity(db, "main")
-    id1 = db.execute("SELECT value FROM catchment_meta WHERE key = 'id'").fetchone()[0]
+    id1 = first_row(db.execute("SELECT value FROM catchment_meta WHERE key = 'id'"))[0]
     ensure_identity(db, "renamed")  # id is stable; name updates
-    id2 = db.execute("SELECT value FROM catchment_meta WHERE key = 'id'").fetchone()[0]
+    id2 = first_row(db.execute("SELECT value FROM catchment_meta WHERE key = 'id'"))[0]
     assert id1 and id1 == id2
 
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
@@ -68,7 +69,7 @@ def test_identity_route_and_upstream_id_recorded(tmp_path):
     assert _client(d).get("/api/catchment/identity").json()["name"] == "consumer"
 
     d.create_duct("up", "http://up", None, upstream_id="upstream-uuid")
-    assert db.execute("SELECT upstream_id FROM duct WHERE origin_catchment = 'up'").fetchone()[0] == "upstream-uuid"
+    assert first_row(db.execute("SELECT upstream_id FROM duct WHERE origin_catchment = 'up'"))[0] == "upstream-uuid"
 
 
 # ─── Draw materialisation + lifecycle (driver level) ───────────────────────────
@@ -274,7 +275,7 @@ def test_open_and_close(tmp_path):
     client = _client(d)
 
     def is_open() -> bool:
-        return d.db.execute("SELECT COUNT(*) FROM pond_open").fetchone()[0] == 1
+        return first_row(d.db.execute("SELECT COUNT(*) FROM pond_open"))[0] == 1
 
     assert client.post("/api/ponds/sales/open").json() == {"ok": True}
     assert is_open()

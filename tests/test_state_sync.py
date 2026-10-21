@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from trickle.io import first_row
+
 from duckstring.catchment.state_sync import (
     checkpoint_full,
     checkpoint_tier1,
@@ -59,7 +61,7 @@ def test_tier1_checkpoint_and_restore(tmp_path):
     fresh = tmp_path / "fresh"
     assert restore_state_if_empty(fresh, backup) is True
     con = sqlite3.connect(str(fresh / "duck.db"))
-    assert con.execute("SELECT id FROM t").fetchone() == (42,)
+    assert first_row(con.execute("SELECT id FROM t")) == (42,)
     con.close()
 
 
@@ -77,7 +79,7 @@ def test_full_checkpoint_bundles_ledgers_and_registries(tmp_path):
     # the warm bundle brings back the registries + ledgers
     assert (fresh / "ponds" / "p" / "m1" / "registry.duckdb").read_bytes() == b"REGISTRY-BYTES"
     assert (fresh / "ponds" / "p" / "m1" / "pond.db").exists()
-    assert sqlite3.connect(str(fresh / "duck.db")).execute("SELECT id FROM t").fetchone() == (42,)
+    assert first_row(sqlite3.connect(str(fresh / "duck.db")).execute("SELECT id FROM t")) == (42,)
     # the write-only secret store never travels in a bundle
     assert not (fresh / "secrets.json").exists()
 
@@ -93,4 +95,4 @@ def test_restore_if_empty_skips_when_state_present(tmp_path):
     con.commit()
     con.close()
     assert restore_state_if_empty(root, backup) is False  # never clobbers a live root
-    assert sqlite3.connect(str(root / "duck.db")).execute("SELECT id FROM t").fetchone() == (99,)
+    assert first_row(sqlite3.connect(str(root / "duck.db")).execute("SELECT id FROM t")) == (99,)

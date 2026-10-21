@@ -188,6 +188,8 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
   const [open, setOpen] = useState(false);
   const [scheme, setScheme] = useState('s3');
   const [path, setPath] = useState('');
+  // A DuckLake's data path (where a new lake keeps its files; an existing lake remembers its own).
+  const [dataPath, setDataPath] = useState('');
   const [table, setTable] = useState('');
   const [keyVar, setKeyVar] = useState('');
   const [secretVar, setSecretVar] = useState('');
@@ -217,8 +219,10 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
     if (scheme === 'file') return `file://${path}`;
     if (scheme === 'postgres') return `postgres://${path}`;
     const q: string[] = [];
+    if (scheme === 'ducklake' && dataPath.trim()) q.push(`data_path=${dataPath.trim()}`);
     if (keyVar.trim()) q.push(`key_id=${ref(keyVar)}`);
     if (secretVar.trim()) q.push(`secret=${ref(secretVar)}`);
+    if (scheme === 'ducklake') return `ducklake:${path}${q.length ? '?' + q.join('&') : ''}`;
     return `${scheme}://${path}${q.length ? '?' + q.join('&') : ''}`;
   };
 
@@ -243,6 +247,7 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
       await addSpout(sourceId, { destination: buildDestination(), table: table.trim() || null, mode });
       setOpen(false);
       setPath('');
+      setDataPath('');
       setTable('');
       setKeyVar('');
       setSecretVar('');
@@ -281,15 +286,29 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
               <option value="gs">gs://</option>
               <option value="file">file://</option>
               <option value="postgres">postgres://</option>
+              <option value="ducklake">ducklake:</option>
             </select>
             <input
               value={path}
               onChange={(e) => setPath(e.target.value)}
-              placeholder={scheme === 'file' ? '/abs/path' : scheme === 'postgres' ? 'user:${env:PW}@host/db' : 'bucket/prefix'}
+              placeholder={
+                scheme === 'file' ? '/abs/path'
+                  : scheme === 'postgres' ? 'user:${env:PW}@host/db'
+                  : scheme === 'ducklake' ? 'sqlite:/srv/lake/meta.sqlite'
+                  : 'bucket/prefix'
+              }
               style={{ ...fld, flex: 1 }}
             />
           </div>
-          {(scheme === 's3' || scheme === 'gs') && (
+          {scheme === 'ducklake' && (
+            <input
+              value={dataPath}
+              onChange={(e) => setDataPath(e.target.value)}
+              placeholder="data path, for a new lake (e.g. s3://bucket/lake/)"
+              style={fld}
+            />
+          )}
+          {(scheme === 's3' || scheme === 'gs' || (scheme === 'ducklake' && /^(s3|gs):\/\//.test(dataPath.trim()))) && (
             <>
               <select value={credKind} onChange={(e) => setCredKind(e.target.value as 'env' | 'secret')} style={selectInput}>
                 <option value="env">env var</option>

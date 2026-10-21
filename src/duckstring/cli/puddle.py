@@ -4,6 +4,8 @@ from pathlib import Path
 
 import typer
 
+from ..trickle_io import first_row
+
 app = typer.Typer(
     help="Inspect this Pond's local Puddles and run output.",
     add_completion=False,
@@ -101,7 +103,7 @@ def ls() -> None:
         table.add_column(col)
     for item in items:
         path_sql = str(item["path"]).replace("'", "''")
-        (rows,) = con.execute(f"SELECT count(*) FROM read_parquet('{path_sql}')").fetchone()
+        (rows,) = first_row(con.execute(f"SELECT count(*) FROM read_parquet('{path_sql}')"))
         size_kb = item["path"].stat().st_size / 1024
         size = f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb:.1f} KB"
         table.add_row(f"{item['pond']}.{item['table']}", item["kind"], str(rows), size, _age(item["path"]))

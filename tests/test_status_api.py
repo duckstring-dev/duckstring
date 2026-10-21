@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from trickle.io import first_row
 
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
@@ -230,7 +231,7 @@ def test_silent_duck_clears_launcher_record_and_carries_diagnosis(tmp_path):
     d._check_liveness(_now())
     assert d.state.pond_states["src@1"].is_failed
     assert "src@1" in terminated, "the silent Duck's record must be cleared so a retry re-spawns"
-    (error,) = d.db.execute("SELECT error FROM pond_run WHERE status = 'failed'").fetchone()
+    (error,) = first_row(d.db.execute("SELECT error FROM pond_run WHERE status = 'failed'"))
     assert "Lost contact" in error and "TaskFailedToStart" in error  # the provider's reason travels
 
 
@@ -355,8 +356,8 @@ def test_run_history_range_anchoring_and_order(tmp_path):
     # The window anchors on the bound: "from" → the first `limit` runs ascending from it; "to"-only (and
     # the default) → the most-recent `limit`, descending.
     d = _driver(tmp_path)
-    pv = d.db.execute("SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
-                      "WHERE pn.name = 'src'").fetchone()[0]
+    pv = first_row(d.db.execute("SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
+                      "WHERE pn.name = 'src'"))[0]
     for h in (10, 11, 12):
         ts = f"2026-07-22T{h:02d}:00:00+00:00"
         d.db.execute("INSERT INTO pond_run (pond_version_id, f, started_at, finished_at, status) "
@@ -442,14 +443,14 @@ def test_abandoning_a_run_records_why_and_spares_finished_ones(tmp_path):
     f = d.state.pond_states["src@1"].start_f.isoformat()
 
     d._abandon_pond_run("src@1", f, _now())
-    status, err = d.db.execute("SELECT status, error FROM pond_run WHERE f = ?", (f,)).fetchone()
+    status, err = first_row(d.db.execute("SELECT status, error FROM pond_run WHERE f = ?", (f,)))
     assert status == "failed" and "abandoned by an operator clear" in err
 
     # Re-running it must not touch the now-finished row (nor invent one for an unknown f).
     d._abandon_pond_run("src@1", f, _now())
     d._abandon_pond_run("src@1", "2099-01-01T00:00:00+00:00", _now())
-    assert d.db.execute("SELECT count(*) FROM pond_run").fetchone()[0] == 1
-    (err2,) = d.db.execute("SELECT error FROM pond_run WHERE f = ?", (f,)).fetchone()
+    assert first_row(d.db.execute("SELECT count(*) FROM pond_run"))[0] == 1
+    (err2,) = first_row(d.db.execute("SELECT error FROM pond_run WHERE f = ?", (f,)))
     assert err2 == err
 
 
@@ -489,7 +490,7 @@ def test_closing_abandoned_runs_never_rewrites_a_reported_outcome(tmp_path):
 
     rows = dict(d.db.execute("SELECT f, status FROM pond_run").fetchall())
     assert rows[first.isoformat()] == "failed"
-    (err,) = d.db.execute("SELECT error FROM pond_run WHERE f = ?", (first.isoformat(),)).fetchone()
+    (err,) = first_row(d.db.execute("SELECT error FROM pond_run WHERE f = ?", (first.isoformat(),)))
     assert err == "boom", "the Duck's own failure message was overwritten"
 
 

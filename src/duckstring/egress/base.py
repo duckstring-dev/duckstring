@@ -33,12 +33,16 @@ class Capabilities:
       changelog/band/base tiers + sidecar) to the destination, syncing only the new/changed artifacts —
       the incremental object-store path a Spout opts into with ``mode=append``. Parts are immutable and
       idempotent by name, so the file-set diff *is* the watermark.
+    - ``requires_pk`` — a transactional destination that needs the source's primary key for every table
+      (Postgres). A lake takes any source: an overwrite table replaced whole, an append Trickle inserted,
+      a merge Trickle applied by its key.
     """
 
     supports_delta: bool
     supports_delete: bool
     transactional: bool
     mirrors_layout: bool = False
+    requires_pk: bool = True
 
 
 @runtime_checkable
@@ -90,10 +94,11 @@ def get_egress(destination: str) -> EgressDriver:
 
 # Register the bundled drivers. Imported here (not at package import) to keep the dependency one-way.
 def _register_builtins() -> None:
+    from .ducklake import DuckLakeEgressDriver
     from .object_store import ObjectStoreEgressDriver
     from .postgres import PostgresEgressDriver
 
-    for driver in (ObjectStoreEgressDriver, PostgresEgressDriver):
+    for driver in (ObjectStoreEgressDriver, PostgresEgressDriver, DuckLakeEgressDriver):
         for scheme in driver.SCHEMES:
             register(scheme, driver)
 

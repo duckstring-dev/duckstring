@@ -120,6 +120,24 @@ postgres://loader:${secret:PG_PASSWORD}@db.internal:5432/analytics?schema=duckst
 
 A standard libpq connection URI (`postgresql://` also works). Tables are created in the `schema` query parameter (default `public`), and delivery progress is recorded in a `_duckstring_egress` table there. The table being delivered needs a primary key.
 
+### `ducklake:`
+
+```text
+ducklake:sqlite:/srv/lake/meta.sqlite?data_path=s3://lakehouse/files/&schema=sales
+ducklake:postgres:dbname=lake host=pg.internal user=loader password=${secret:LAKE_PG}?data_path=s3://lakehouse/files/
+ducklake:/srv/lake/meta.ducklake
+```
+
+The string DuckDB's `ATTACH` takes for a [DuckLake](https://ducklake.select), followed by Duckstring's parameters. Any other query parameter stays on the attach string, such as `sslmode` for a Postgres catalog written as a URI.
+
+| Parameter | Description |
+|---|---|
+| `data_path` | Where a new lake keeps its data files. An existing lake uses the path it was created with. |
+| `schema` | The schema tables are delivered to (default `main`). Delivery progress is recorded in a `_duckstring_egress` table there. |
+| `key_id`, `secret`, `session_token`, `region`, `endpoint`, `url_style`, `use_ssl` | Credentials for an `s3://` or `gs://` data path, as for [`s3://` and `gs://`](#s3-and-gs). |
+
+Any table can be delivered: a merge Trickle by its primary key, an append Trickle's new rows, and a plain table replaced whole. Each delivery is one transaction, so it adds one snapshot to the lake, with author `duckstring` and the Pond as `{name}@{major}` in the commit message. The catalog is never migrated. A lake created under DuckDB 2.0 uses DuckLake 1.1, which DuckDB 1.5 can't read. It needs DuckDB's `ducklake` extension, downloaded on first use.
+
 ## Notification URIs
 
 Where an [alert channel](cli/alert.md) sends.

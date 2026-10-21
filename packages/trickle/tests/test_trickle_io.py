@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from trickle.io import first_row
 from trickle_support import NEVER, T, at, merge, rows, ts
 
 
@@ -23,11 +24,21 @@ def test_append_accumulates_history_stamped_with_f(db):
     assert sorted(db.sql(f"SELECT id, v, {T.F_COL} FROM event").fetchall()) == [(1, "a", ts(1)), (2, "b", ts(2))]
 
 
+def test_an_all_null_column_takes_values_on_a_later_write(db):
+    # DuckDB 2.0 types a bare NULL as the NULL type; stored, it would refuse the next run's values.
+    T.append_table(db, "event", db.sql("SELECT 1 AS id, NULL AS v"), ts(1), ("id",))
+    T.append_table(db, "event", db.sql("SELECT 2 AS id, 7 AS v"), ts(2), ("id",))
+    assert sorted(db.sql("SELECT id, v FROM event").fetchall()) == [(1, None), (2, 7)]
+    merge(db, "dim", [(1, None)], "id, v", ts(1), "id")
+    merge(db, "dim", [(1, 5)], "id, v", ts(2), "id")
+    assert rows(db, "dim") == [(1, 5)]
+
+
 def test_append_idempotent_replay_at_same_f(db):
     rel = db.sql("SELECT 1 AS id, 'a' AS v")
     T.append_table(db, "event", rel, ts(1), ("id",))
     T.append_table(db, "event", rel, ts(1), ("id",))  # replay at the same epoch
-    assert db.sql("SELECT count(*) FROM event").fetchone()[0] == 1
+    assert first_row(db.sql("SELECT count(*) FROM event"))[0] == 1
 
 
 def test_append_fail_on_conflict_catches_duplicates(db):
@@ -43,11 +54,11 @@ def test_append_fail_on_conflict_catches_duplicates(db):
 
     # A replay at the same f re-appends its own rows without tripping the check.
     T.append_table(db, "event", db.sql("SELECT 1 AS id"), ts(1), ("id",))
-    assert db.sql("SELECT count(*) FROM event").fetchone()[0] == 1
+    assert first_row(db.sql("SELECT count(*) FROM event"))[0] == 1
 
     # fail_on_conflict=False is the trust-the-writer fast path: a colliding pk is appended without a check.
     T.append_table(db, "event", db.sql("SELECT 1 AS id"), ts(3), ("id",), fail_on_conflict=False)
-    assert db.sql("SELECT count(*) FROM event").fetchone()[0] == 2
+    assert first_row(db.sql("SELECT count(*) FROM event"))[0] == 2
 
 
 def test_append_delta_window_is_plus_one(db):
@@ -82,9 +93,9 @@ def test_merge_changelog_is_full_image_zset(db):
 def test_merge_idempotent_replay(db):
     _dim(db, [(1, "a"), (2, "b")], ts(1))
     _dim(db, [(1, "a"), (2, "B")], ts(2))
-    before = db.sql("SELECT count(*) FROM dim__changelog").fetchone()[0]
+    before = first_row(db.sql("SELECT count(*) FROM dim__changelog"))[0]
     _dim(db, [(1, "a"), (2, "B")], ts(2))  # replay: diffed against the state before ts(2), so identical
-    assert db.sql("SELECT count(*) FROM dim__changelog").fetchone()[0] == before
+    assert first_row(db.sql("SELECT count(*) FROM dim__changelog"))[0] == before
     assert rows(db, "dim", "id, v") == [(1, "a"), (2, "B")]
 
 
@@ -148,7 +159,7 @@ def test_merge_apply_changelog_write_is_atomic(db):
         T.merge_table(_CrashOn(db, 'INSERT INTO "dim__changelog"'),
                       "dim", db.sql("SELECT * FROM (VALUES (1, 'Z'), (2, 'b')) v(id, v)"), ts(3), ("id",))
 
-    assert db.execute(f"SELECT count(*) FROM dim__changelog WHERE {T.F_COL} = {T._ts(ts(3))}").fetchone()[0] == 0
+    assert first_row(db.execute(f"SELECT count(*) FROM dim__changelog WHERE {T.F_COL} = {T._ts(ts(3))}"))[0] == 0
     assert sorted(T.reconstruct_current(db, "dim").fetchall()) == [(1, "A", ts(2)), (2, "b", ts(1))]
 
     _dim(db, [(1, "Z"), (2, "b")], ts(3))  # a clean replay recovers fully

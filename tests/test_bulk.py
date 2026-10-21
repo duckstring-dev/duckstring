@@ -8,6 +8,7 @@ from datetime import timedelta
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from trickle.io import first_row
 
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
@@ -133,7 +134,7 @@ def test_wipe_history_clears_runs_without_touching_state(tmp_path):
     ps.d = ps.d  # touch nothing; snapshot start_f
     before = ps.start_f
     d.wipe_history("a@1")
-    rows = d.db.execute("SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ?", (vid,)).fetchone()[0]
+    rows = first_row(d.db.execute("SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ?", (vid,)))[0]
     assert rows == 0
     assert d.state.pond_states["a@1"].start_f == before  # freshness untouched
 
@@ -148,7 +149,7 @@ def test_batch_wipe_history(tmp_path):
     d.db.commit()
     res = d.batch([("b", None)], ["wipe"], confirm="testcatch")
     assert res["errors"] == []
-    rows = d.db.execute("SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ?", (vid,)).fetchone()[0]
+    rows = first_row(d.db.execute("SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ?", (vid,)))[0]
     assert rows == 0
 
 
@@ -186,4 +187,4 @@ def test_wipe_history_route(tmp_path):
     d.db.commit()
     r = _client(d).post("/api/ponds/a/wipe-history")
     assert r.status_code == 200
-    assert d.db.execute("SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ?", (vid,)).fetchone()[0] == 0
+    assert first_row(d.db.execute("SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ?", (vid,)))[0] == 0

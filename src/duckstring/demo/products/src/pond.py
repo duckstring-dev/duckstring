@@ -41,7 +41,7 @@ def ingest(pond):
         existing = pond.con.sql('SELECT * FROM "product"')
         current_max = pond.con.execute(
             'SELECT MAX(id) FROM "product"'
-        ).fetchone()[0]
+        ).fetchall()[0][0]
     except Exception:
         existing = None
         current_max = 0

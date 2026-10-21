@@ -6,6 +6,7 @@ in-engine as a pass — no Duck dispatched. See plans/no-change-skip.md.
 from __future__ import annotations
 
 import pytest
+from trickle.io import first_row
 
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
@@ -42,9 +43,9 @@ def _run_pond(d, key, changed=True):
 
 def _pond_run_changed(d, key, f):
     meta = d.meta[key]
-    row = d.db.execute(
+    row = first_row(d.db.execute(
         "SELECT changed FROM pond_run WHERE pond_version_id = ? AND f = ?", (meta["version_id"], f)
-    ).fetchone()
+    ))
     return None if row is None else row[0]
 
 

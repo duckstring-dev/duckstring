@@ -103,10 +103,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      # MinIO for a DuckLake Spout's data files, with its catalog in the Postgres above (the same image and
+      # credentials as the object-store job).
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=duckstringtest -e MINIO_ROOT_PASSWORD=duckstringtest \
+            chainguard/minio:latest server /tmp/minio
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9000/minio/health/live && exit 0
+            sleep 2
+          done
+          docker logs minio
+          exit 1
       - run: pip install -e packages/trickle -e .[dev]
-      - run: pytest tests/test_egress_postgres.py tests/test_egress_file.py tests/test_spout.py
+      - run: pytest tests/test_egress_postgres.py tests/test_egress_file.py tests/test_spout.py tests/test_egress_ducklake.py
         env:
           DUCKSTRING_TEST_PG: postgres://ds:ds@127.0.0.1:5432/ds
+          DUCKSTRING_TEST_S3: http://127.0.0.1:9000
+          DUCKSTRING_TEST_S3_KEY: duckstringtest
+          DUCKSTRING_TEST_S3_SECRET: duckstringtest
 
   # The object-store data plane against a REAL S3 (MinIO — unlike moto it REJECTS unsigned requests, so
   # this catches the credential class of bug, not just the code paths). Everything S3 was previously

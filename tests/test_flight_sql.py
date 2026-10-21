@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import duckdb
 import pytest
+from trickle.io import first_row
 
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
@@ -27,7 +28,7 @@ def _server(tmp_path, monkeypatch):
     cfg = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": "outlet",
            "serve_tables": ["revenue"]}
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", cfg, _RIPPLES)
-    pv = db.execute("SELECT id FROM pond_version LIMIT 1").fetchone()[0]
+    pv = first_row(db.execute("SELECT id FROM pond_version LIMIT 1"))[0]
     db.execute('INSERT INTO pond_version_schema (pond_version_id, "table", "column", type) '
                "VALUES (?, 'revenue', 'id', 'INTEGER')", (pv,))
     db.commit()

@@ -42,6 +42,7 @@ from datetime import datetime, timedelta, timezone
 from . import io
 from .builder import TrickleBuilder
 from .context import NEVER
+from .io import first_row
 
 # The run state: per pipeline, the last committed epoch and the epoch of a run that didn't finish.
 RUN_TABLE = "_duckstring_trickle_run"
@@ -171,14 +172,14 @@ def _begin(con, pipeline: str, now):
                 f"pending_f TIMESTAMPTZ)")
     con.execute("BEGIN TRANSACTION")
     try:
-        row = con.execute(f"SELECT last_f, pending_f FROM {q} WHERE pipeline = ?", [pipeline]).fetchone()
+        row = first_row(con.execute(f"SELECT last_f, pending_f FROM {q} WHERE pipeline = ?", [pipeline]))
         last, pending = (_utc(row[0]), _utc(row[1])) if row else (None, None)
         previous = last if last is not None else NEVER
         if pending is not None:
             con.execute("COMMIT")
             return pending, previous, True
-        (latest,) = con.execute(f"SELECT max(e) FROM (SELECT last_f AS e FROM {q} UNION ALL "
-                                f"SELECT pending_f FROM {q})").fetchone()
+        (latest,) = first_row(con.execute(f"SELECT max(e) FROM (SELECT last_f AS e FROM {q} UNION ALL "
+                                f"SELECT pending_f FROM {q})"))
         f = _utc(now) if now is not None else datetime.now(timezone.utc)
         if latest is not None and f <= _utc(latest):
             f = _utc(latest) + _TICK

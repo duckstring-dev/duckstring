@@ -5,6 +5,8 @@ from typing import Optional
 
 import typer
 
+from ..trickle_io import first_row
+
 app = typer.Typer(help="Create, register, start and manage Catchments.", add_completion=False, no_args_is_help=True)
 
 
@@ -39,9 +41,9 @@ def _has_key_ladder(root: Path) -> bool:
         return False
     con = connect(db)
     try:
-        row = con.execute(
+        row = first_row(con.execute(
             "SELECT 1 FROM catchment_key LIMIT 1"
-        ).fetchone()
+        ))
     except Exception:  # table not migrated yet
         row = None
     finally:

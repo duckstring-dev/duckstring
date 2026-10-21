@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 
+from trickle.io import first_row
+
 from duckstring.dataplane import persist_tree
 from duckstring.storage import LocalStorage
 
@@ -357,8 +359,8 @@ def test_pool_loss_regresses_to_the_persisted_floor(tmp_path):
         "the lost window must regress to the persisted floor"
     assert driver.state.ripple_states["sales@1.agg"].end_f <= want
     # Persisted to the DB too (a second reload is a no-op, not a second regression).
-    row = db.execute("SELECT end_f FROM pond_state WHERE pond_id=?",
-                     (driver.meta["sales@1"]["pond_id"],)).fetchone()
+    row = first_row(db.execute("SELECT end_f FROM pond_state WHERE pond_id=?",
+                     (driver.meta["sales@1"]["pond_id"],)))
     assert row[0] == f_old
 
 

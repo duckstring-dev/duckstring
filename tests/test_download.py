@@ -9,6 +9,7 @@ import tarfile
 
 import duckdb
 import pytest
+from trickle.io import first_row
 
 from duckstring.cli import app
 
@@ -46,7 +47,7 @@ def test_archive_roundtrip_with_consistent_sqlite(catchment_client, tmp_path):
 
     # The snapshot is a coherent database (WAL content checkpointed in by the backup API).
     con = sqlite3.connect(tmp_path / "duck.db")
-    assert con.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] >= 1
+    assert first_row(con.execute("SELECT COUNT(*) FROM schema_migrations"))[0] >= 1
     con.close()
     rows = duckdb.sql(f"SELECT * FROM read_parquet('{tmp_path / 'ponds/outlet/m1/data/daily.parquet'}')").fetchall()
     assert rows == [(1, "a")]

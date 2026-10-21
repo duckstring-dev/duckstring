@@ -161,7 +161,7 @@ def notify(pond):
         pond.skip()                          # tell downstream nothing changed
         return
     pond.read_table("sales.sale_line")
-    post_summary(pond.con.sql("SELECT SUM(revenue) FROM sale_line").fetchone()[0])
+    post_summary(pond.con.sql("SELECT SUM(revenue) FROM sale_line").fetchall()[0][0])
 ```
 
 `pond.skip()` marks the run as producing no change, so Ponds downstream can skip their own runs too. A call from any Ripple marks the whole run, so only call it once you know nothing the Pond publishes changed. For a Pond with several Ripples, the simplest way is a Ripple that runs after the others and asks whether any of them changed anything:
@@ -191,6 +191,18 @@ This writes `pyproject.toml` and `uv.lock` and creates the environment in `.venv
 On deploy, the Catchment builds the environment from `uv.lock`, installs its own version of Duckstring into it, and runs the Pond's Ducks there. That install keeps DuckDB within the range Duckstring supports, so a DuckDB version in the lock outside that range is replaced. A Duck on a pool or in the cloud builds the same environment on its own machine the first time it needs it. Environments are cached by the lock's contents, so redeploying with an unchanged lock is quick, and Ponds with identical locks share one. A deploy is refused if `uv.lock` is missing or out of date with `pyproject.toml`; run `uv lock` and deploy again. To pin a Python version, add a `.python-version` file (`uv python pin 3.12`). Otherwise the Pond uses the Catchment's Python.
 
 A Pond without a `pyproject.toml` runs in the Catchment's own environment.
+
+### DuckDB versions
+
+Duckstring supports DuckDB 1.5 and 2.x. A Pond without its own environment runs on the Catchment's DuckDB, and a Pond with one runs on the version in its lock, so different Ponds can be on different versions. The tables they publish stay readable across both, except a 2.0 `VARIANT` column, which DuckDB 1.5 can't read. DuckDB 2.0 needs Python 3.11 or newer; on Python 3.10, DuckDB stays at 1.5.
+
+DuckDB 2.0 changed how Python reads query results. A query run with `pond.con.execute()` now holds the connection until its rows are read to the end, so `execute(...).fetchone()` followed by another statement fails, and relations from `pond.con.sql()` no longer have `fetchone()`. Read with `fetchall()` instead:
+
+```python
+(next_id,) = pond.con.execute("SELECT coalesce(max(order_id), -1) + 1 FROM order_line").fetchall()[0]
+```
+
+To move a Pond's code over at its own pace, keep DuckDB 1.5 in its lock (`uv add 'duckdb>=1.5,<2'`) until it's ready.
 
 ## Deploying
 

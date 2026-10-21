@@ -10,13 +10,13 @@ authors = [
 ]
 
 dependencies = [
-  # The tested range: CI runs the suite on the floor and the latest release, and against the pre-release
-  # in an allowed-to-fail job. Raise the ceiling once the suite passes on the next major's release
-  # (plans/duckdb-2-ready.md). A Pond environment gets this Duckstring, so these bounds hold there too.
-  "duckdb>=1.5,<2",
+  # The tested range: CI runs the suite on the floor (1.5, an LTS) and the latest release, and against the
+  # pre-release in an allowed-to-fail job. Raise the ceiling once the suite passes on the next major's release
+  # (plans/duckdb-2.md). A Pond environment gets this Duckstring, so these bounds hold there too.
+  "duckdb>=1.5,<3",
   # The incremental engine (packages/trickle), released separately. A compatible range: while it's 0.x a
   # minor release can change its API or storage format, so Duckstring moves to one deliberately.
-  "duckstring-trickle>=0.2,<0.3",
+  "duckstring-trickle>=0.2.1,<0.3",
   "rich>=13.7",
   "typer>=0.12",
   "fastapi>=0.111",

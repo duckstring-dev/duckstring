@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 import duckdb
 import pytest
+from trickle.io import first_row
 
 import duckstring.trickle_io as T
 from duckstring.catchment.db import connect, migrate
@@ -116,7 +117,7 @@ def test_driver_persists_and_serves_lineage(tmp_path):
 
     # replaying the same event (Duck reconnect) does not duplicate rows
     d.on_event("src@1", {"kind": "ripple", "f": f, "ripple": "load", "status": "success", "lineage": LIN})
-    rows = d.db.execute("SELECT count(*) FROM ripple_run_lineage").fetchone()[0]
+    rows = first_row(d.db.execute("SELECT count(*) FROM ripple_run_lineage"))[0]
     assert rows == 4  # 2 reads + 2 writes, once
 
     # the graph reports the LATEST run per ripple
@@ -266,7 +267,7 @@ def test_openlineage_emission_is_optin_and_verbatim(tmp_path):
     # deterministic runId: a replayed emission carries the same id (and the dedup fence eats the row)
     d.on_event("src@1", {"kind": "run_completed", "f": f, "status": "success",
                          "schema": {"clean": {"id": "INTEGER"}}})
-    again = d.db.execute("SELECT count(*) FROM alert_delivery WHERE event_kind = 'openlineage'").fetchone()[0]
+    again = first_row(d.db.execute("SELECT count(*) FROM alert_delivery WHERE event_kind = 'openlineage'"))[0]
     assert again == 1
 
     # the webhook notifier posts the RunEvent body verbatim (no Slack text wrapper)
@@ -299,4 +300,4 @@ def test_openlineage_without_subscriber_builds_nothing(tmp_path):
     d = _driver(tmp_path)
     f = _run_with_lineage(d)
     assert d.state.pond_states["src@1"].end_f.isoformat() == f
-    assert d.db.execute("SELECT count(*) FROM alert_delivery").fetchone()[0] == 0
+    assert first_row(d.db.execute("SELECT count(*) FROM alert_delivery"))[0] == 0

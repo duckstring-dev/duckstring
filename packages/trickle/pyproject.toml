@@ -15,7 +15,7 @@ authors = [
 keywords = ["duckdb", "incremental", "ivm", "dbsp", "z-sets", "materialized views", "cdc"]
 dependencies = [
   # The range Duckstring tests; CI runs the floor and the latest release.
-  "duckdb>=1.5,<2",
+  "duckdb>=1.5,<3",
   # DuckDB needs pytz to fetch TIMESTAMPTZ values (every epoch stamp) as Python datetimes.
   "pytz",
 ]

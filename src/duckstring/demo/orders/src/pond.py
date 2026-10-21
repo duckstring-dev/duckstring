@@ -28,7 +28,7 @@ def ingest(pond):
     # Continue the id sequence across runs — the history table persists in the registry. The first run
     # (no table yet) lays down the big bootstrap; every run after it appends a small batch.
     try:
-        (next_id,) = pond.con.execute("SELECT COALESCE(MAX(order_id), -1) + 1 FROM order_line").fetchone()
+        (next_id,) = pond.con.execute("SELECT COALESCE(MAX(order_id), -1) + 1 FROM order_line").fetchall()[0]
     except Exception:
         next_id = 0
 

@@ -5,13 +5,15 @@ from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..trickle_io import first_row
+
 _SCHEMA_DIR = Path(__file__).parent / "schema"
 
 
 def ensure_identity(con: sqlite3.Connection, name: str | None = None) -> None:
     """Mint this Catchment's stable id on first start (never changes), and set/refresh its optional
     display name. Call after migrate()."""
-    row = con.execute("SELECT value FROM catchment_meta WHERE key = 'id'").fetchone()
+    row = first_row(con.execute("SELECT value FROM catchment_meta WHERE key = 'id'"))
     if row is None:
         con.execute("INSERT INTO catchment_meta (key, value) VALUES ('id', ?)", (str(uuid.uuid4()),))
     if name:

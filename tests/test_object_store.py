@@ -25,6 +25,7 @@ import time
 
 import httpx
 import pytest
+from trickle.io import first_row
 
 pytestmark = pytest.mark.timeout(120)
 
@@ -120,7 +121,7 @@ def test_duckdb_reads_parquet_from_a_real_s3(s3_env, tmp_path):
     con = duckdb.connect()
     store.duckdb_setup(con)
     con.execute(f"COPY (SELECT 1 AS id, 'x' AS name) TO '{store.uri('t.parquet')}' (FORMAT PARQUET)")
-    assert con.sql(f"SELECT id, name FROM read_parquet('{store.uri('t.parquet')}')").fetchone() == (1, "x")
+    assert first_row(con.sql(f"SELECT id, name FROM read_parquet('{store.uri('t.parquet')}')")) == (1, "x")
 
 
 def test_versioned_overwrite_on_a_real_s3(s3_env, tmp_path):
@@ -223,7 +224,7 @@ def test_warm_bands_are_read_from_a_real_s3(s3_env, monkeypatch):
     fresh = duckdb.connect()
     fresh.execute("SET TimeZone='UTC'")
     hydrate_registry(fresh, store)
-    sql = fresh.execute("SELECT sql FROM duckdb_views() WHERE view_name = 'm__band'").fetchone()[0]
+    sql = first_row(fresh.execute("SELECT sql FROM duckdb_views() WHERE view_name = 'm__band'"))[0]
     assert "s3://" in sql
     assert sorted(fresh.sql('SELECT id, v FROM "m"').fetchall()) == [(1, "A"), (2, "b"), (3, "c")]
 

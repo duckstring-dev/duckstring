@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 import duckdb
 import pytest
+from trickle.io import first_row
 
 from duckstring import flock
 from duckstring.core import Pond
@@ -186,9 +187,9 @@ def test_always_mode_dispatches_via_injected_engine(tmp_path, monkeypatch):
     # projection would (correctly) stay local — see test_flock_conformance.
     pond.trickle("src").select("s0.id, s0.v").merge("out", pk="id")
     assert engine.dispatched
-    net = pond.con.execute(
+    net = first_row(pond.con.execute(
         "SELECT count(*) FROM out__changelog WHERE _duckstring_d = 1"
-    ).fetchone()[0]
+    ))[0]
     assert net == 1000
 
 

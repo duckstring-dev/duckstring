@@ -9,6 +9,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from trickle.io import first_row
 
 from duckstring.core import RippleDeclarationError, load_ripples
 from duckstring.dataplane import ParquetDataPlane
@@ -100,7 +101,7 @@ def test_merge_and_append_writes(tmp_path):
     meta = T.read_meta(con)
     assert meta["m"]["mode"] == "merge" and list(meta["m"]["pk"]) == ["id"]
     assert meta["a"]["mode"] == "append"
-    assert con.execute("SELECT count(*) FROM m").fetchone()[0] == 3
+    assert first_row(con.execute("SELECT count(*) FROM m"))[0] == 3
 
 
 def test_python_and_sql_ripples_mix_in_both_directions(tmp_path):

@@ -7,6 +7,7 @@ import duckdb
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from trickle.io import first_row
 
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
@@ -26,8 +27,8 @@ def _cfg(serve_tables=None):
 
 
 def _pv(db, name, version):
-    return db.execute("SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
-                      "WHERE pn.name = ? AND pv.version = ?", (name, version)).fetchone()[0]
+    return first_row(db.execute("SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
+                      "WHERE pn.name = ? AND pv.version = ?", (name, version)))[0]
 
 
 def _schema(db, pv_id, tables):

@@ -9,6 +9,7 @@ from pathlib import Path
 import duckdb
 import httpx
 import pytest
+from trickle.io import first_row
 
 from duckstring.cli import app
 from duckstring.local import hydrate, load_project, run_pond
@@ -75,7 +76,7 @@ def test_hydrate_synthetic_materialises_snapshot(tmp_path):
     assert warnings == []
     pq = tmp_path / "puddles" / "ponds" / "tx" / "data" / "event.parquet"
     assert pq.exists()
-    (count,) = duckdb.sql(f"SELECT count(*) FROM read_parquet('{pq}')").fetchone()
+    (count,) = first_row(duckdb.sql(f"SELECT count(*) FROM read_parquet('{pq}')"))
     assert count == 5
 
 
@@ -193,7 +194,7 @@ def test_run_previous_f_never_then_prior_run(tmp_path):
 
     run_pond(project)  # first run: no prior → NEVER
     out = _out(out_dir, "meta")
-    prev1, cur1 = duckdb.sql(f"SELECT prev, cur FROM read_parquet('{out}')").fetchone()
+    prev1, cur1 = first_row(duckdb.sql(f"SELECT prev, cur FROM read_parquet('{out}')"))
     assert prev1.startswith("0001-01-01")  # NEVER
 
     # Seed a self-puddle so the next run is an incremental rerun (seeded=True).
@@ -203,11 +204,11 @@ def test_run_previous_f_never_then_prior_run(tmp_path):
 
     run_pond(project)  # second run: seeded → previous_f is the prior run's f
     out = _out(out_dir, "meta")
-    prev2, _ = duckdb.sql(f"SELECT prev, cur FROM read_parquet('{out}')").fetchone()
+    prev2, _ = first_row(duckdb.sql(f"SELECT prev, cur FROM read_parquet('{out}')"))
     assert prev2 == cur1
 
     run_pond(project, fresh=True)  # --fresh: not seeded → back to NEVER
-    prev3, _ = duckdb.sql(f"SELECT prev, cur FROM read_parquet('{_out(out_dir, 'meta')}')").fetchone()
+    prev3, _ = first_row(duckdb.sql(f"SELECT prev, cur FROM read_parquet('{_out(out_dir, 'meta')}')"))
     assert prev3.startswith("0001-01-01")
 
 
@@ -355,7 +356,7 @@ def test_demo_sales_hydrates_and_runs(tmp_path):
     result = run_pond(project)
     assert result.ok, [r.error for r in result.ripples]
     out = _out(tmp_path / "sales" / "puddles" / "out", "sale_line")
-    (count,) = duckdb.sql(f"SELECT count(*) FROM read_parquet('{out}')").fetchone()
+    (count,) = first_row(duckdb.sql(f"SELECT count(*) FROM read_parquet('{out}')"))
     assert count > 0
 
 
