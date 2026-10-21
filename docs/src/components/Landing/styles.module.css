@@ -128,10 +128,18 @@
   gap: 12px;
   flex-wrap: wrap;
   justify-content: center;
-  margin-bottom: 42px;
+  margin-bottom: 22px;
 }
 
-.installRow .ctaPrimary {
+.heroLinks {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin: 18px 0 40px;
+}
+
+.heroLinks .ctaPrimary {
   display: inline-flex;
   align-items: center;
 }
@@ -446,13 +454,14 @@
 
 /* ── Story: the Playground's two-minute story, loaded on Play ──────────────── */
 
-/* Always dark, like the Playground it frames. Wide screens get a landscape frame; phones a portrait one, which the
-   story lays out top to bottom. */
+/* Always dark, like the Playground it frames. Wide screens get a landscape frame. On a phone Play opens the story
+   full screen, so inline the frame only has to show the poster: it takes the height left on a first load (svh, so
+   with Safari's toolbars showing), between a readable minimum and a portrait frame. */
 .story {
   width: 100%;
   max-width: 860px;
   aspect-ratio: 43 / 20;
-  margin: 8px 0 40px;
+  margin: 0;
   border: 1px solid var(--l-border);
   border-radius: 12px;
   overflow: hidden;
@@ -461,8 +470,8 @@
 
 @media (max-width: 768px) {
   .story {
-    aspect-ratio: 4 / 5;
-    max-height: 78vh;
+    aspect-ratio: auto;
+    height: clamp(230px, calc(100svh - 400px), 448px);
   }
 }
 

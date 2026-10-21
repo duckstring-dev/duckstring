@@ -85,14 +85,22 @@ function Hero(): ReactNode {
           </span>
           <code className={styles.installCmd}>pip install duckstring</code>
         </div>
-        <Link className={styles.ctaPrimary} to="/quickstart">
-          Quickstart →
-        </Link>
-        <Link className={styles.ctaSecondary} href={PLAYGROUND}>
-          In-Browser Demo →
-        </Link>
       </div>
     </header>
+  );
+}
+
+// The ways in, under the story (which sits between them and the hero so it shows whole on first load).
+function HeroLinks(): ReactNode {
+  return (
+    <div className={styles.heroLinks}>
+      <Link className={styles.ctaPrimary} to="/quickstart">
+        Quickstart →
+      </Link>
+      <Link className={styles.ctaSecondary} href={PLAYGROUND}>
+        In-Browser Demo →
+      </Link>
+    </div>
   );
 }
 
@@ -324,6 +332,7 @@ export default function Landing(): ReactNode {
     <div className={styles.canvas}>
       <Hero />
       <Story />
+      <HeroLinks />
       <WhatIsThis />
       <ModularTransformations />
       <PullOrchestration />
