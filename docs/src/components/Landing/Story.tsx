@@ -13,9 +13,11 @@ export default function Story(): ReactNode {
   };
   const [src, setSrc] = useState<string | null>(null);
   const play = () => {
-    const base = playgroundDevPort
-      ? `${window.location.protocol}//${window.location.hostname}:${playgroundDevPort}`
-      : playgroundUrl;
+    // NODE_ENV is fixed when the bundle is compiled, so a dev server always takes the Playground dev server.
+    const base =
+      process.env.NODE_ENV === 'development' && playgroundDevPort
+        ? `${window.location.protocol}//${window.location.hostname}:${playgroundDevPort}`
+        : playgroundUrl;
     setSrc(`${base}/story?autoplay=1`);
   };
   return (
