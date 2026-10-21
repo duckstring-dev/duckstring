@@ -1,6 +1,6 @@
 """DuckCore — the transport-free heart of a Duck.
 
-Wires the push-only :class:`~duckstring.engine.worker.WorkerState` to the run ledger and an outgoing
+Wires the :class:`~duckstring.engine.worker.WorkerState` to the run ledger and an outgoing
 event buffer. It is driven by two inputs — ``begin_run(F)`` from the Catchment and ``ripple_completed``
 from the executor — and produces two outputs — the list of Ripple **names to launch** and buffered
 **events** to report. Threads, the executor, and HTTP live in :mod:`.executor` / :mod:`.client` /
@@ -180,7 +180,15 @@ class DuckCore:
                     self._previous_f.pop(rc.f, None)
                     self.changes.drop(rc.f)
                     ledger.record_pond_run_finish(self.con, rc.f, now, status="failed")  # don't re-run on restart
-                    self.events.append(Event(kind="contract_failed", f=rc.f, status="failed", error=str(exc)))
+                    # The Run didn't complete, so the Catchment must not hear that its last Ripple succeeded:
+                    # it would count the Run done (and wake downstream for data never published), and the
+                    # contract failure that followed would find nothing in flight to fail. Report the Ripple
+                    # as the one the Run failed at instead.
+                    self.events.remove(ripple_event)
+                    self.events.append(Event(
+                        kind="contract_failed", ripple=name, f=rc.f, status="failed", error=str(exc),
+                        retry=ripple_event.retry, started_at=started_at, finished_at=finished_at,
+                    ))
                     return self._advance(now)
             ledger.record_pond_run_finish(self.con, rc.f, now)
             self._previous_f.pop(rc.f, None)  # the Run is done; drop its carried previous_f
@@ -241,9 +249,9 @@ class DuckCore:
         return launched
 
     def idle(self) -> bool:
-        """True when no Ripple is running and no target is outstanding — the Pond has quiesced and the
+        """True when no Ripple is running and no demand is outstanding — the Pond has quiesced and the
         Duck may shut down (once its event buffer has drained)."""
-        return all(not s.is_running and not s.targets for s in self.state.states.values())
+        return all(not s.is_running and not s.demand for s in self.state.states.values())
 
     def flush(self, send) -> None:
         """Try to deliver buffered events in order via ``send(payload) -> bool``, **stopping at the

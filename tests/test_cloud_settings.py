@@ -4,6 +4,8 @@ cloud-enable gate. The ``catchment_setting`` key/value store, the set-once guard
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -160,24 +162,25 @@ def test_switch_data_root_empties_and_stays_dormant(tmp_path):
     client, db = _client(tmp_path)
     driver = client.app.state.driver
     key = next(iter(driver.meta))
-    # Give the line a non-cold freshness + a standing Wave, and drop a file under the (local) old plane.
+    # Give the line a non-cold freshness, demand + a standing Refresh, and drop a file under the (local) old plane.
     old_file = tmp_path / "ponds" / "src" / "backup.parquet"
     old_file.parent.mkdir(parents=True, exist_ok=True)
     old_file.write_text("published")
-    db.execute("UPDATE pond_state SET start_f='2026-01-01T00:00:00+00:00', end_f='2026-01-01T00:00:00+00:00', has_pull=1")
+    db.execute("UPDATE pond_state SET start_f='2026-01-01T00:00:00+00:00', end_f='2026-01-01T00:00:00+00:00'")
+    db.execute("INSERT INTO pond_demand (pond_id, demand_f) SELECT pond_id, '2030-01-01T00:00:00+00:00' FROM pond_state")
     db.commit()
     driver.reload()
-    driver.wave(key)  # a standing pull that must NOT survive the switch
-    assert db.execute("SELECT COUNT(*) FROM pond_trigger").fetchone()[0] == 1
+    driver.add_refresh(key, timedelta(0))  # a standing Refresh that must NOT survive the switch
+    assert db.execute("SELECT COUNT(*) FROM pond_refresh").fetchone()[0] == 1
 
     driver.switch_data_root(str(tmp_path / "plane2"))
 
     assert driver.data_root == str(tmp_path / "plane2")   # re-pointed
-    start_f, end_f, has_pull = db.execute("SELECT start_f, end_f, has_pull FROM pond_state").fetchone()
+    start_f, end_f = db.execute("SELECT start_f, end_f FROM pond_state").fetchone()
     assert start_f in (None, _iso(NEVER)) and end_f in (None, _iso(NEVER))  # emptied (as if data deleted)
-    assert has_pull == 0                                                    # pull demand cleared
-    assert db.execute("SELECT COUNT(*) FROM pond_trigger").fetchone()[0] == 0  # standing trigger cleared
-    assert key not in driver.state.triggers                                # → dormant, no auto-run
+    assert db.execute("SELECT COUNT(*) FROM pond_demand").fetchone()[0] == 0   # demand cleared
+    assert db.execute("SELECT COUNT(*) FROM pond_refresh").fetchone()[0] == 0  # standing Refresh cleared
+    assert not driver.state.refreshes.get(key)                             # → dormant, no auto-run
     assert old_file.exists()                                               # old location kept as a backup
 
 
@@ -202,7 +205,7 @@ def test_switch_data_root_adopt_restores_freshness_from_plane(tmp_path):
     m = driver.meta[key]
     name, major, pond_id = m["name"], m["major"], m["pond_id"]
 
-    driver.wave(key)  # a standing Wave that must SURVIVE adopt (unlike the empty switch)
+    driver.add_refresh(key, timedelta(0))  # a standing Refresh that must SURVIVE adopt (unlike the empty switch)
     # Stale local hot state from the old plane — adopt must drop it so the next run re-hydrates.
     major_dir = pond_major_dir(tmp_path, name, major)
     major_dir.mkdir(parents=True, exist_ok=True)
@@ -219,7 +222,7 @@ def test_switch_data_root_adopt_restores_freshness_from_plane(tmp_path):
     assert start_f == F and end_f == F                          # freshness adopted from the plane
     assert not (major_dir / "registry.duckdb").exists()         # hot state dropped → re-hydrate from target
     assert not (major_dir / "pond.db").exists()
-    assert db.execute("SELECT COUNT(*) FROM pond_trigger").fetchone()[0] == 1  # demand kept → resumes
+    assert db.execute("SELECT COUNT(*) FROM pond_refresh").fetchone()[0] == 1  # demand kept → resumes
 
 
 def test_switch_data_root_adopt_empty_target_is_cold(tmp_path):
@@ -230,7 +233,7 @@ def test_switch_data_root_adopt_empty_target_is_cold(tmp_path):
     driver = client.app.state.driver
     key = next(iter(driver.meta))
     pond_id = driver.meta[key]["pond_id"]
-    driver.wave(key)  # materialise a pond_state row
+    driver.add_refresh(key, timedelta(0))  # materialise a pond_state row
     db.execute("UPDATE pond_state SET end_f='2026-01-01T00:00:00+00:00' WHERE pond_id=?", (pond_id,))
     db.commit()
     driver.reload()
@@ -251,7 +254,7 @@ def test_switch_data_root_migrate_copies_and_preserves_freshness(tmp_path):
     key = next(iter(driver.meta))
     m = driver.meta[key]
     name, major, pond_id = m["name"], m["major"], m["pond_id"]
-    driver.wave(key)  # demand that must survive the migrate
+    driver.add_refresh(key, timedelta(0))  # demand that must survive the migrate
     # Populate plane A FIRST (bytes precede claims — the reload below reconciles freshness against the
     # plane, and a claim no plane backs would be regressed as lost content; plans/persist.md phase 4):
     # the published files, which are carried verbatim.
@@ -276,7 +279,7 @@ def test_switch_data_root_migrate_copies_and_preserves_freshness(tmp_path):
     assert driver.data_root == str(tmp_path / "planeB")         # re-pointed
     start_f, end_f = db.execute("SELECT start_f, end_f FROM pond_state WHERE pond_id=?", (pond_id,)).fetchone()
     assert start_f == F and end_f == F                          # freshness PRESERVED (no reset)
-    assert db.execute("SELECT COUNT(*) FROM pond_trigger").fetchone()[0] == 1  # demand kept → resumes
+    assert db.execute("SELECT COUNT(*) FROM pond_refresh").fetchone()[0] == 1  # demand kept → resumes
     mig = driver.migration_status()
     assert mig["status"] == "done" and mig["copied_files"] == mig["total_files"] and mig["total_files"] >= 1
 

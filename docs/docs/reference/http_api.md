@@ -30,10 +30,12 @@ Keys come in three levels, each including the ones before it:
 | Level | Allows |
 |---|---|
 | `read` | Status, run history, lineage, data and catalog queries. |
-| `demand` | Also triggers: tap, wave, pulse, tide and removing a trigger. |
+| `demand` | Also Refreshes: refreshing now, and adding and removing recurring Refreshes. |
 | `full` | Everything else: deploying, control actions, windows, Spouts, secrets, alerts, ducts, compute and Catchment settings. |
 
 A missing or unrecognised key gets `401`; a key below the route's level gets `403`. Tracebacks in run history are only returned to `full` keys; lower levels get the error message alone.
+
+A [Tap](../guides/serving_apps_with_taps.md)'s key is a fourth kind, outside the levels. It is accepted only by `/api/query`, `/api/serve/query`, `/api/serve` and its own Pond's `/freshness`, where it reads the Pond's exposed tables (as a read-level key does) and its queries may send the Pond a Refresh, and gets `403` everywhere else. It works on an open Catchment too.
 
 ## Conventions
 
@@ -88,22 +90,21 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| GET | `/api/status` | read | Every Pond's state, freshness, triggers and failures, the edges between Ponds, and the caller's access level. |
+| GET | `/api/status` | read | Every Pond's state, freshness, recurring Refreshes and failures, the edges between Ponds, and the caller's access level. |
 | GET | `/api/runs` | read | Run history, newest first. Parameters: `pond`, `lineage` (include upstream Ponds), `ripples` (include Ripple Runs), `limit` (up to 1000). |
 | GET | `/api/view` | read | The Pond graph, including Ponds in upstream Catchments reached through ducts. |
 | GET | `/api/lineage` | read | Observed table lineage. Parameters: `pond`, `major`, `table`, `columns`. |
 | GET | `/api/ponds/{name}/trace` | read | The run that produced some rows. Parameters: `table`, `where`. |
-| GET | `/api/ponds/{name}/freshness` | read | The Pond's current freshness. |
+| GET | `/api/ponds/{name}/freshness` | read, Tap | How fresh the Pond's data is: `freshness` (the point in time it reflects), `changed` (when its output last changed), `refreshing`, and when each table and Object last changed. Read-level keys see exposed tables only; a Tap's key, its own Pond's, without Objects. |
 
-### Triggers and windows
+### Refreshes and windows
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/ponds/{name}/tap` | demand | Tap. |
-| POST | `/api/ponds/{name}/pulse` | demand | Pulse. |
-| POST | `/api/ponds/{name}/wave` | demand | Set a Wave. |
-| POST | `/api/ponds/{name}/tide` | demand | Set a Tide. Body: `bound_seconds`. |
-| POST | `/api/ponds/{name}/untrigger` | demand | Remove the standing trigger. |
+| POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameter: `at`, an ISO freshness to ask for instead of now. (Before Refresh, this route marked a Pond for a rebuild; that is now `/rebuild`.) |
+| GET | `/api/ponds/{name}/refreshes` | read | List the recurring Refreshes, with when each next asks. |
+| POST | `/api/ponds/{name}/refreshes` | demand | Add a recurring Refresh. Body: `every_seconds` (0 is continuous), `continuous`, `start`, `days`, `until`, `name`. |
+| POST | `/api/ponds/{name}/refreshes/{refresh_name}/remove` | demand | Remove a recurring Refresh. |
 | GET | `/api/ponds/{name}/windows` | read | List windows. |
 | POST | `/api/ponds/{name}/windows` | full | Add a window. |
 | POST | `/api/ponds/{name}/windows/{window_name}/remove` | full | Remove a window. |
@@ -114,7 +115,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 |---|---|---|---|
 | POST | `/api/ponds/{name}/wake` | full | Wake. |
 | POST | `/api/ponds/{name}/force` | full | Force. |
-| POST | `/api/ponds/{name}/refresh` | full | Mark for a rebuild on the next run. |
+| POST | `/api/ponds/{name}/rebuild` | full | Mark for a rebuild on the next run. Parameter: `clear`. |
 | POST | `/api/repair` | full | Repair a connected set of Ponds. |
 | POST | `/api/ponds/{name}/sleep` | full | Sleep. |
 | POST | `/api/ponds/{name}/kill` | full | Kill. |
@@ -122,7 +123,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | POST | `/api/ponds/{name}/reset` | full | Reset to the freshly deployed state. |
 | POST | `/api/ponds/{name}/reset-contract` | full | Forget the recorded output schema. |
 | POST | `/api/ponds/{name}/wipe-history` | full | Delete run history. |
-| POST | `/api/ponds/batch` | full | Apply operations to many Ponds, as `duckstring do`. |
+| POST | `/api/ponds/batch` | full | Apply operations to many Ponds, as the web UI's Pond Actions do. |
 | GET | `/api/ponds/{name}/budget` | read | Retry budgets. |
 | POST | `/api/ponds/{name}/budget` | full | Set retry budgets. |
 | GET | `/api/ponds/{name}/duck` | read | Effective compute settings. |
@@ -132,8 +133,9 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/query` | read | Run SQL against one Pond's tables. Body: `pond`, `sql`, optional `major`, `version`, `format` (`json`, `csv` or `parquet`). |
+| POST | `/api/query` | read, Tap | Run SQL against one Pond's tables. Body: `pond`, `sql`, optional `major`, `version`, `format` (`json`, `csv` or `parquet`). With a Tap's key, `pond` can be left out. |
 | POST | `/api/query/page`, `/api/query/count`, `/api/query/history` | read | Paged reads used by the web UI's data viewer. |
+| GET | `/api/ponds/{name}/tables/{table}/runs` | read | The run freshnesses of a Trickle table, used by the data viewer's window selector. |
 | GET | `/api/ponds/{name}/tables` | read | List published tables. |
 | GET | `/api/ponds/{name}/ripples/{table}` | read | Download a table's published files as a zip. |
 | DELETE | `/api/ponds/{name}/tables/{table}` | full | Delete a table. |
@@ -145,8 +147,8 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| GET | `/api/serve` | read | Served majors and exposed tables. |
-| POST | `/api/serve/query` | read | Run SQL across the catalog. Read-level keys see only exposed tables. |
+| GET | `/api/serve` | read, Tap | Served majors and exposed tables. A Tap's key sees its own Pond. |
+| POST | `/api/serve/query` | read, Tap | Run SQL across the catalog. Read-level keys see only exposed tables; a Tap's key, only its own Pond's. |
 | POST | `/api/ponds/{name}/serve/promote` | full | Change the served major. |
 | POST | `/api/ponds/{name}/serve/expose` | full | Expose or hide a table. |
 
@@ -159,6 +161,15 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | POST | `/api/ponds/{name}/spouts/test` | full | Test a destination without writing data. |
 | POST | `/api/ponds/{name}/spouts/{spout}/remove` | full | Remove a Spout. |
 | POST | `/api/ponds/{name}/spouts/{spout}/{action}` | full | `wake`, `force`, `sleep`, `kill`, `clear` or `resync`. |
+
+### Taps
+
+| Method | Path | Level | Description |
+|---|---|---|---|
+| GET | `/api/ponds/{name}/taps` | full | List Taps, with their counts. Never keys. |
+| POST | `/api/ponds/{name}/taps` | full | Add a Tap. Body: `name`, optional `fresh_within_ms`. The response holds the key, once. |
+| POST | `/api/ponds/{name}/taps/{tap}/rotate` | full | A new key for a Tap, returned once. |
+| POST | `/api/ponds/{name}/taps/{tap}/remove` | full | Remove a Tap. |
 
 ### Secrets and alerts
 
@@ -207,7 +218,9 @@ The `/api/draw/*` routes that ducts use to transfer data, and the `/api/duck/*` 
 | `duckstring_alert_deliveries_total` | counter | Alert deliveries, by `status`. |
 | `duckstring_flock_dispatched_total` | counter | Computations sent to the Flock, per Pond. |
 | `duckstring_flock_dispatch_failures_total` | counter | Flock dispatches that failed and ran in the Duck instead. The only sign that a Flock is misconfigured. |
+| `duckstring_tap_queries_total` | counter | Queries through each Tap, labelled `pond`, `major` and `tap`. |
+| `duckstring_tap_refreshes_total` | counter | Refreshes sent by each Tap's queries. |
 
 ## Other interfaces
 
-The catalog can also be queried over the Postgres wire protocol and Arrow Flight, each enabled by setting a port (`DUCKSTRING_SERVE_PG_PORT`, `DUCKSTRING_SERVE_FLIGHT_PORT`; see [Environment Variables](environment.md#serving)). Both use an API key as the password and apply the same access levels.
+The catalog can also be queried over the Postgres wire protocol and Arrow Flight, each enabled by setting a port (`DUCKSTRING_SERVE_PG_PORT`, `DUCKSTRING_SERVE_FLIGHT_PORT`; see [Environment Variables](environment.md#serving)). Both use an API key as the password and apply the same access levels. A Tap's key works on both, except that a Catchment without keys never asks a Postgres client for a password, so there a connection can't be recognised as a Tap's.

@@ -127,7 +127,7 @@ def announce_large_orders(pond):
 
 `delta.zset` holds the changed rows with a `_duckstring_d` weight: `+1` for a row added and `-1` for a row removed, with an update appearing as both. `delta.upserts` is the rows present after the change, and `delta.deletes` the keys removed.
 
-Always handle `is_full`. It's `True` on the Pond's first run, after a [refresh](../reference/cli/control.md#refresh), when the Pond has fallen behind the Source's retained history, and whenever the Source is a plain table that was republished. In those cases the delta is the whole current table, and treating it as a batch of new rows would double-count.
+Always handle `is_full`. It's `True` on the Pond's first run, after a [rebuild](../reference/cli/control.md#rebuild), when the Pond has fallen behind the Source's retained history, and whenever the Source is a plain table that was republished. In those cases the delta is the whole current table, and treating it as a batch of new rows would double-count.
 
 ## Skipping downstream work
 

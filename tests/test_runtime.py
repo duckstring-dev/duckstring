@@ -122,11 +122,11 @@ def _wait(predicate, timeout=45.0, interval=0.25):
     return False
 
 
-def test_pulse_runs_chain_end_to_end(runtime):
+def test_refresh_runs_chain_end_to_end(runtime):
     url, root = runtime
     _deploy_demo(url)
 
-    httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/reports/refresh", timeout=5.0)
 
     # The whole chain runs and reports reaches a freshness (end_f).
     assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None), \
@@ -141,7 +141,7 @@ def test_pulse_runs_chain_end_to_end(runtime):
         assert ledger.read_pond_end_f(con) is not None, f"{name} recorded no completed run"
         con.close()
 
-    # Coherent: under a Pulse the outlet and its source both reach a freshness.
+    # Coherent: under a Refresh the outlet and its source both reach a freshness.
     reports = _pond_status(url, "reports")
     sales = _pond_status(url, "sales")
     assert reports["end_f"] is not None and sales["end_f"] is not None
@@ -212,7 +212,7 @@ def test_flock_dispatch_is_reported_not_silent(runtime, monkeypatch, failing):
     assert httpx.post(f"{url}/api/ponds/flockable/duck", json={"flock_mode": "always"},
                       timeout=10.0).status_code == 200
 
-    httpx.post(f"{url}/api/ponds/flockable/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/flockable/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "flockable") or {}).get("end_f") is not None, timeout=90.0), \
         "the Pond never became fresh — a Flock dispatch (even a failing one) must still complete the run"
 
@@ -229,13 +229,13 @@ def test_flock_dispatch_is_reported_not_silent(runtime, monkeypatch, failing):
 
 
 def test_trickle_chain_runs_end_to_end(runtime):
-    """The incremental-Trickle demo on real Duck subprocesses: a pulse on the revenue Outlet cascades
+    """The incremental-Trickle demo on real Duck subprocesses: a refresh on the revenue Outlet cascades
     up through the builder Pond to the append + merge inlets, every Pond runs, and the published layout
     carries the Trickle sidecar + a changelog for the merge lines."""
     url, root = runtime
     _deploy(url, _TRICKLE_PONDS)
 
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None), \
         "revenue never became fresh"
 
@@ -279,7 +279,7 @@ def test_local_first_publish_persists_to_data_root(runtime, tmp_path_factory):
     assert r.status_code == 200, r.text
 
     _deploy(url, _TRICKLE_PONDS)
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None), \
         "revenue never became fresh"
 
@@ -352,7 +352,7 @@ def test_named_pool_runs_co_resident_ducks(runtime, tmp_path_factory):
     for p in httpx.get(f"{url}/api/status", timeout=5.0).json()["ponds"]:
         assert p["pool"] == "pool:devpool", f"{p['name']} not on the shared Pool: {p['pool']}"
 
-    httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/reports/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None, timeout=90.0), \
         "the chain never completed on the Pool"
 
@@ -386,7 +386,7 @@ _GHARCHIVE_FIXTURES = Path(__file__).parent / "fixtures" / "gharchive"
 def test_tpcds_demo_chain_runs_end_to_end(runtime, monkeypatch):
     """The TPC-DS real-data demo on real Duck subprocesses: two independent Outlets off one builder, over a
     dsdgen-generated (offline, deterministic) fact + dimensions, shrunk to a tiny scale factor. A second
-    pulse exercises the emulated-stream batch-append + price-drift path (not just bootstrap)."""
+    refresh exercises the emulated-stream batch-append + price-drift path (not just bootstrap)."""
     url, root = runtime
     monkeypatch.setenv("DUCKSTRING_TPCDS_SF", "0.01")  # inherited by the Duck subprocesses
     monkeypatch.setenv("DUCKSTRING_TPCDS_BATCH", "1000")
@@ -394,7 +394,7 @@ def test_tpcds_demo_chain_runs_end_to_end(runtime, monkeypatch):
     _deploy(url, _TPCDS_PONDS)
 
     for outlet in ("tpcds_category_revenue", "tpcds_store_revenue"):
-        httpx.post(f"{url}/api/ponds/{outlet}/pulse", timeout=5.0)
+        httpx.post(f"{url}/api/ponds/{outlet}/refresh", timeout=5.0)
     assert _wait(lambda: all((_pond_status(url, o) or {}).get("end_f") is not None
                              for o in ("tpcds_category_revenue", "tpcds_store_revenue"))), \
         "TPC-DS Outlets never became fresh"
@@ -411,10 +411,10 @@ def test_tpcds_demo_chain_runs_end_to_end(runtime, monkeypatch):
         data_dir = root / "ponds" / name / "m1" / "data"
         assert json.loads((data_dir / "_trickle.json").read_text())[table]["mode"] == "merge"
 
-    # Second pulse: the emulated stream appends a new batch and re-prices; the chain advances, not fails.
+    # Second refresh: the emulated stream appends a new batch and re-prices; the chain advances, not fails.
     prev = _pond_status(url, "tpcds_category_revenue")["end_f"]
     time.sleep(1.0)
-    httpx.post(f"{url}/api/ponds/tpcds_category_revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/tpcds_category_revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "tpcds_category_revenue") or {}).get("end_f") not in (None, prev)), \
         "TPC-DS second run never advanced"
     assert not (_pond_status(url, "tpcds_sales") or {}).get("is_failed"), "TPC-DS batch append failed"
@@ -424,7 +424,7 @@ def test_tpcds_demo_chain_runs_end_to_end(runtime, monkeypatch):
 def test_gharchive_demo_chain_runs_end_to_end(runtime, monkeypatch):
     """The GHArchive real-data demo on real Duck subprocesses, over committed fixture hours (no network):
     one Inlet feeding two entirely separate paths (pushes⋈actors→repo_activity, stars→trending). BACKFILL
-    loads both fixture hours; a second pulse round exercises the hold-on-gap ingest (the next hour isn't
+    loads both fixture hours; a second refresh round exercises the hold-on-gap ingest (the next hour isn't
     published, so the Inlet holds and the chain passes — it must not fail)."""
     url, root = runtime
     monkeypatch.setenv("DUCKSTRING_GHARCHIVE_BASE", str(_GHARCHIVE_FIXTURES))  # offline fixtures
@@ -434,7 +434,7 @@ def test_gharchive_demo_chain_runs_end_to_end(runtime, monkeypatch):
 
     outlets = ("gh_repo_activity", "gh_trending")
     for outlet in outlets:
-        httpx.post(f"{url}/api/ponds/{outlet}/pulse", timeout=5.0)
+        httpx.post(f"{url}/api/ponds/{outlet}/refresh", timeout=5.0)
     assert _wait(lambda: all((_pond_status(url, o) or {}).get("end_f") is not None for o in outlets)), \
         "GHArchive Outlets never became fresh"
     assert not any((_pond_status(url, n) or {}).get("is_failed") for n in _GHARCHIVE_PONDS), \
@@ -459,12 +459,12 @@ def test_gharchive_demo_chain_runs_end_to_end(runtime, monkeypatch):
         ).fetchone()[0]
         assert n > 0, f"{name}: empty output"
 
-    # Second pulse round: the next hour isn't published, so the Inlet holds on the gap — the chain runs to
+    # Second refresh round: the next hour isn't published, so the Inlet holds on the gap — the chain runs to
     # freshness as a pass (no new data), and crucially nothing fails.
     prev = _pond_status(url, "gh_repo_activity")["end_f"]
     time.sleep(1.0)
     for outlet in outlets:
-        httpx.post(f"{url}/api/ponds/{outlet}/pulse", timeout=5.0)
+        httpx.post(f"{url}/api/ponds/{outlet}/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "gh_repo_activity") or {}).get("end_f") not in (None, prev)), \
         "GHArchive second run never advanced"
     assert not any((_pond_status(url, n) or {}).get("is_failed") for n in _GHARCHIVE_PONDS), \
@@ -491,7 +491,7 @@ def test_dbt_mode_pond_chain_runs_end_to_end(runtime, monkeypatch):
     assert ["orders_clean", "revenue_by_product"] in sa["ripple_edges"]
     assert ["revenue_by_product", "top_products"] in sa["ripple_edges"]
 
-    httpx.post(f"{url}/api/ponds/shop_analytics/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/shop_analytics/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "shop_analytics") or {}).get("end_f") is not None), \
         "shop_analytics never became fresh"
     assert not any((_pond_status(url, n) or {}).get("is_failed") for n in _DBT_PONDS), "a dbt-mode Pond failed"
@@ -507,10 +507,10 @@ def test_dbt_mode_pond_chain_runs_end_to_end(runtime, monkeypatch):
         n = rcon.sql(f"SELECT count(*) FROM ({ParquetDataPlane().read_select(data_dir, table)})").fetchone()[0]
         assert n > 0, f"dbt model {table}: empty output"
 
-    # A second pulse re-runs the models against the refreshed source without failing.
+    # A second refresh re-runs the models against the refreshed source without failing.
     prev = _pond_status(url, "shop_analytics")["end_f"]
     time.sleep(1.0)
-    httpx.post(f"{url}/api/ponds/shop_analytics/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/shop_analytics/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "shop_analytics") or {}).get("end_f") not in (None, prev)), \
         "dbt-mode second run never advanced"
     assert not any((_pond_status(url, n) or {}).get("is_failed") for n in _DBT_PONDS), \
@@ -527,7 +527,7 @@ def test_delete_table_removes_now_and_rebuilds_on_next_run(runtime):
 
     url, root = runtime
     _deploy(url, _TRICKLE_PONDS)
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
     time.sleep(1.0)  # let the chain settle to idle
 
@@ -560,9 +560,9 @@ def test_delete_table_removes_now_and_rebuilds_on_next_run(runtime):
     assert (_pond_status(url, "priced") or {}).get("end_f") == end_f_before, "freshness advanced on a delete"
     assert run_count() == runs_before, "a Pond Run was logged for a delete"
 
-    # A genuine new run (fresh pulse) rebuilds it whole via the absence trigger. The source has grown a
+    # A genuine new run (fresh refresh) rebuilds it whole via the absence trigger. The source has grown a
     # batch since, so it comes back at the *current* full state (≥ the old count), not just a delta.
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (state_count() or 0) >= n_before, timeout=45.0), \
         f"priced_line did not rebuild on the next run (count now {state_count()}, was {n_before})"
     time.sleep(1.0)
@@ -581,7 +581,7 @@ def test_missing_source_asset_blocks_downstream_with_reason(runtime):
     retry-budget burn (plans/reset.md Mechanism 2) — and recovers when the Source republishes."""
     url, root = runtime
     _deploy(url, _TRICKLE_PONDS)
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
     time.sleep(1.0)
 
@@ -601,7 +601,7 @@ def test_missing_source_asset_blocks_downstream_with_reason(runtime):
     assert st["failures"] == 0, "a missing Source asset must not burn the retry budget"
 
     # Recover: rebuild catalog.product at a fresh freshness → priced re-reads clean → unblocks.
-    httpx.post(f"{url}/api/ponds/catalog/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/catalog/refresh", timeout=5.0)
     assert _wait(lambda: not priced().get("is_blocked") and not priced().get("blocked_reason"), timeout=30.0), \
         f"priced never recovered (status={priced()})"
 
@@ -612,7 +612,7 @@ def test_reset_pond_scrubs_and_rebuilds(runtime):
     Lazy: nothing runs until re-triggered; the Pond survives (identity/config intact)."""
     url, root = runtime
     _deploy(url, _TRICKLE_PONDS)
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
     time.sleep(1.0)
 
@@ -629,9 +629,9 @@ def test_reset_pond_scrubs_and_rebuilds(runtime):
     assert st.get("version"), "the Pond (identity/config) must survive a reset"
 
     # Lazy: it rebuilds from scratch on the next genuine demand.
-    httpx.post(f"{url}/api/ponds/catalog/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/catalog/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "catalog") or {}).get("has_tables") is True, timeout=30.0), \
-        "catalog did not rebuild after reset + pulse"
+        "catalog did not rebuild after reset + refresh"
 
 
 def test_reset_catchment_scrubs_all_keeps_artifacts(runtime):
@@ -639,7 +639,7 @@ def test_reset_catchment_scrubs_all_keeps_artifacts(runtime):
     deployed artifacts + config — and the whole chain rebuilds from the Inlets down (plans/reset.md)."""
     url, root = runtime
     _deploy(url, _TRICKLE_PONDS)
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
     time.sleep(1.0)
     assert all((root / "ponds" / p / "m1" / "registry.duckdb").exists() for p in _TRICKLE_PONDS)
@@ -655,7 +655,7 @@ def test_reset_catchment_scrubs_all_keeps_artifacts(runtime):
         assert (_pond_status(url, p) or {}).get("has_tables") is False
 
     # The whole chain rebuilds from scratch on the next demand.
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None
                  and (_pond_status(url, "priced") or {}).get("has_tables") is True, timeout=45.0), \
         "chain did not rebuild after catchment reset"
@@ -665,8 +665,8 @@ def test_reset_pond_rejects_while_running(runtime):
     """A reset requires the Pond idle (409 while a Run is in flight)."""
     url, _ = runtime
     _deploy(url, _TRICKLE_PONDS)
-    httpx.post(f"{url}/api/ponds/orders/wave", timeout=5.0)  # a standing pull keeps it busy
-    # Catch it mid-run; if we miss the window the wave will re-run it, so retry a few times.
+    httpx.post(f"{url}/api/ponds/orders/refreshes", json={"continuous": True}, timeout=5.0)  # keeps it busy
+    # Catch it mid-run; if we miss the window the Refresh will re-run it, so retry a few times.
     saw_409 = False
     for _ in range(40):
         r = httpx.post(f"{url}/api/ponds/orders/reset", timeout=5.0)
@@ -674,7 +674,7 @@ def test_reset_pond_rejects_while_running(runtime):
             saw_409 = True
             break
         time.sleep(0.05)
-    httpx.post(f"{url}/api/ponds/orders/remove", timeout=5.0)  # drop the wave
+    httpx.post(f"{url}/api/ponds/orders/refreshes/Continuous/remove", timeout=5.0)  # drop the Refresh
     assert saw_409, "reset was allowed mid-run (should 409)"
 
 
@@ -686,9 +686,9 @@ def test_remove_pond_retires_line(runtime):
 
     url, root = runtime
     _deploy(url, _TRICKLE_PONDS)
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
-    time.sleep(1.0)  # settle to idle (a pulse is one-shot → no standing demand)
+    time.sleep(1.0)  # settle to idle (a refresh is one-shot → no standing demand)
 
     # Attach a Spout + a scoped alert + a catchment-wide alert to catalog.
     sp = httpx.post(f"{url}/api/ponds/catalog/spouts", json={
@@ -737,7 +737,7 @@ def test_remove_pond_wipe_purges_history(runtime):
 
     url, root = runtime
     _deploy(url, _TRICKLE_PONDS)
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
     time.sleep(1.0)  # settle to idle
 
@@ -770,11 +770,11 @@ def test_remove_pond_wipe_purges_history(runtime):
 
 
 def test_remove_pond_rejects_with_demand(runtime):
-    """Remove requires the line idle + demand-free — a standing Wave is demand, so remove 409s until it's
+    """Remove requires the line idle + demand-free — a standing Refresh is demand, so remove 409s until it's
     cleared (sleep)."""
     url, _ = runtime
     _deploy(url, _TRICKLE_PONDS)
-    httpx.post(f"{url}/api/ponds/catalog/wave", timeout=5.0)  # a standing pull = demand
+    httpx.post(f"{url}/api/ponds/catalog/refreshes", json={"continuous": True}, timeout=5.0)  # demand
     time.sleep(0.5)
     r = httpx.request("DELETE", f"{url}/api/ponds/catalog", params={"major": 1}, timeout=5.0)
     assert r.status_code == 409, r.text
@@ -785,29 +785,29 @@ def test_remove_pond_rejects_with_demand(runtime):
 
 
 def test_refresh_flag_rebuilds_and_bumps_floor(runtime):
-    """`control refresh` is lazy: it flags the Pond (refresh_pending) but runs nothing. The next run is a
+    """`control rebuild` is lazy: it flags the Pond (rebuild_pending) but runs nothing. The next run is a
     cold wipe-and-rebuild that raises the published changelog floor, so downstream coverage-misses."""
     import json
 
     url, root = runtime
     _deploy(url, _TRICKLE_PONDS)
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
 
     sidecar = root / "ponds" / "catalog" / "m1" / "data" / "_trickle.json"
     floor1 = json.loads(sidecar.read_text())["product"]["floor"]
 
     # Flag catalog for refresh — lazy: it shows pending, but nothing runs.
-    httpx.post(f"{url}/api/ponds/catalog/refresh", timeout=5.0)
-    assert (_pond_status(url, "catalog") or {}).get("refresh_pending") is True
+    httpx.post(f"{url}/api/ponds/catalog/rebuild", timeout=5.0)
+    assert (_pond_status(url, "catalog") or {}).get("rebuild_pending") is True
     assert json.loads(sidecar.read_text())["product"]["floor"] == floor1  # unchanged — no run yet
 
-    # A new pulse runs the chain at a fresh epoch → catalog refreshes (wipe + rebuild), floor bumps,
+    # A new refresh runs the chain at a fresh epoch → catalog refreshes (wipe + rebuild), floor bumps,
     # and the pending flag is consumed.
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: json.loads(sidecar.read_text())["product"]["floor"] > floor1), \
         "catalog's floor never advanced after the refresh run"
-    assert (_pond_status(url, "catalog") or {}).get("refresh_pending") is False
+    assert (_pond_status(url, "catalog") or {}).get("rebuild_pending") is False
 
 
 @pytest.mark.skip(reason="flaky under load (real-Duck repair timing, ~1-in-3) — revisit; unrelated to trickle")
@@ -818,7 +818,7 @@ def test_repair_chain_rebuilds_downstream_in_order(runtime):
 
     url, root = runtime
     _deploy(url, _TRICKLE_PONDS)
-    httpx.post(f"{url}/api/ponds/revenue/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/revenue/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "revenue") or {}).get("end_f") is not None)
 
     def floor(name, table):
@@ -846,13 +846,13 @@ def test_repair_chain_rebuilds_downstream_in_order(runtime):
         assert changelog_rows(n, t) == 0, f"{n} was not rebuilt cold (changelog not empty)"
 
 
-def test_wave_then_remove(runtime):
+def test_continuous_refresh_then_remove(runtime):
     url, root = runtime
     _deploy_demo(url)
 
-    httpx.post(f"{url}/api/ponds/reports/wave", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/reports/refreshes", json={"continuous": True}, timeout=5.0)
 
-    # A Wave keeps producing runs: reports completes several times.
+    # A continuous Refresh keeps producing runs: reports completes several times.
     rep_db = root / "ponds" / "reports" / "m1" / "pond.db"
     from duckstring.engine import pond as ledger
 
@@ -864,18 +864,48 @@ def test_wave_then_remove(runtime):
         con.close()
         return n
 
-    assert _wait(lambda: completed_runs() >= 2), "wave did not produce repeated runs"
+    assert _wait(lambda: completed_runs() >= 2), "the Refresh did not produce repeated runs"
 
-    # Removing the standing trigger halts the Wave; in-flight runs drain, then it stabilises.
-    httpx.post(f"{url}/api/ponds/reports/untrigger", timeout=5.0)
+    # Removing the standing Refresh halts it; in-flight runs drain, then it stabilises.
+    httpx.post(f"{url}/api/ponds/reports/refreshes/Continuous/remove", timeout=5.0)
     time.sleep(2.0)
     settled = completed_runs()
     time.sleep(2.0)
     assert completed_runs() == settled
 
 
+def test_a_tap_keeps_reports_fresh_while_an_app_queries_it(runtime):
+    """An app querying ``reports`` through a Tap (plans/taps.md), with the Python client and the Tap's key: its
+    first query sends the pipeline a Refresh, the app watches the freshness route until the data lands, and the
+    Tap's later queries ride on that freshness."""
+    from duckstring import Catchment
+
+    url, root = runtime
+    _deploy_demo(url)
+    resp = httpx.post(f"{url}/api/ponds/reports/taps", json={"name": "dashboard", "fresh_within_ms": 3_600_000},
+                      timeout=5.0)
+    assert resp.status_code == 200, resp.text
+    app = Catchment(url, api_key=resp.json()["key"])
+
+    assert app.freshness()["freshness"] is None  # asking how fresh the data is sends nothing
+    assert app.query("SELECT 1 AS x").fetchone() == (1,)  # answered at once; the pipeline starts
+    assert _wait(lambda: (lambda f: f["freshness"] is not None and not f["refreshing"])(app.freshness())), \
+        "reports never became fresh"
+    fr = app.freshness()
+    assert list(fr["tables"]) == ["monthly_summary"] and fr["changed"] == fr["freshness"]
+    assert app.tables() == ["monthly_summary"]
+    assert app.query("SELECT count(*) AS n FROM monthly_summary").fetchone()[0] > 0
+    reports = _pond_status(url, "reports")
+    assert reports["taps"][0]["refresh_count"] == 1
+
+    for _ in range(3):  # fresh within the hour: answered from what is published, with no new Run
+        app.get("monthly_summary")
+    time.sleep(0.5)
+    assert _pond_status(url, "reports")["runs_completed"] == reports["runs_completed"]
+
+
 def test_overwrite_versions_are_trimmed_once_the_chain_goes_idle(runtime, monkeypatch):
-    """Versioned overwrite tables on real Ducks (plans/versioned-overwrite.md): a Wave publishes a new
+    """Versioned overwrite tables on real Ducks (plans/versioned-overwrite.md): a continuous Refresh publishes a new
     version per run, each publish prunes to its job's retain_from, and once the chain is idle the reap's
     shutdown job trims every table down to its newest version."""
     from duckstring.catchment import driver as driver_mod
@@ -883,7 +913,7 @@ def test_overwrite_versions_are_trimmed_once_the_chain_goes_idle(runtime, monkey
     url, root = runtime
     monkeypatch.setattr(driver_mod, "_REAP_GRACE", timedelta(seconds=1))
     _deploy_demo(url)
-    httpx.post(f"{url}/api/ponds/reports/wave", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/reports/refreshes", json={"continuous": True}, timeout=5.0)
     rep_db = root / "ponds" / "reports" / "m1" / "pond.db"
     from duckstring.engine import pond as ledger
 
@@ -895,8 +925,8 @@ def test_overwrite_versions_are_trimmed_once_the_chain_goes_idle(runtime, monkey
         con.close()
         return n
 
-    assert _wait(lambda: completed_runs() >= 3), "wave did not produce repeated runs"
-    httpx.post(f"{url}/api/ponds/reports/untrigger", timeout=5.0)
+    assert _wait(lambda: completed_runs() >= 3), "the Refresh did not produce repeated runs"
+    httpx.post(f"{url}/api/ponds/reports/refreshes/Continuous/remove", timeout=5.0)
 
     def version_counts() -> dict[str, int]:
         return {str(d.relative_to(root)): len(list(d.glob("*.parquet")))
@@ -912,7 +942,7 @@ def test_sql_demo_chain_runs_end_to_end(runtime):
     SQL-written output."""
     url, root = runtime
     _deploy(url, ["transactions", "products", "sql_sales", "sql_reports"])
-    httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/reports/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None), \
         f"reports never became fresh: {_pond_status(url, 'sales')}"
     rows = httpx.post(f"{url}/api/query", json={"pond": "sales", "sql":
@@ -1029,19 +1059,19 @@ def test_per_object_change_skips_work_and_downstream_ponds(runtime, tmp_path):
     def rows(name, table):
         return duckdb.sql(ParquetDataPlane().read_select(data(name), table)).fetchall()
 
-    def pulse_and_settle():
+    def refresh_and_settle():
         before = (_pond_status(url, "out") or {}).get("end_f")
-        httpx.post(f"{url}/api/ponds/out/pulse", timeout=5.0)
+        httpx.post(f"{url}/api/ponds/out/refresh", timeout=5.0)
         assert _wait(lambda: (_pond_status(url, "out") or {}).get("end_f") not in (None, before), timeout=45.0)
         assert _wait(lambda: all((_pond_status(url, n) or {}).get("status") == "idle" for n in _CHANGE_PONDS))
 
-    pulse_and_settle()
+    refresh_and_settle()
     assert [runs(n) for n in _CHANGE_PONDS] == [1, 1, 1]
     f1 = load_sidecar(data("feed"))["a"]["f"]
     a_at = rows("mid", "a_copy")[0][1]
 
     control.write_text(json.dumps({"a": 1, "b": 2}))  # only b changes
-    pulse_and_settle()
+    refresh_and_settle()
     assert [runs(n) for n in _CHANGE_PONDS] == [2, 2, 2]
     sidecar = load_sidecar(data("feed"))
     assert sidecar["a"]["f"] == f1 and sidecar["b"]["f"] != f1  # a held, b republished
@@ -1049,7 +1079,7 @@ def test_per_object_change_skips_work_and_downstream_ponds(runtime, tmp_path):
     assert rows("mid", "b_copy")[0][0] == 2                        # use_b recomputed
     assert rows("out", "report")[0][0] == 2
 
-    pulse_and_settle()  # nothing changes: feed runs (an Inlet always does) and skips
+    refresh_and_settle()  # nothing changes: feed runs (an Inlet always does) and skips
     assert [runs(n) for n in _CHANGE_PONDS] == [3, 2, 2]
 
 
@@ -1060,11 +1090,11 @@ def test_restart_restores_state_e2e(tmp_path_factory, monkeypatch):
     monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)
     monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
 
-    # First Catchment: deploy + pulse the chain to completion.
+    # First Catchment: deploy + refresh the chain to completion.
     server, thread = _serve(root, port)
     try:
         _deploy_demo(url)
-        httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
+        httpx.post(f"{url}/api/ponds/reports/refresh", timeout=5.0)
         assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None)
         before = _pond_status(url, "reports")
         assert before["gen"] >= 1
@@ -1090,13 +1120,13 @@ def test_status_and_runs_feed_live(runtime):
     url, root = runtime
     _deploy_demo(url)
 
-    httpx.post(f"{url}/api/ponds/reports/pulse", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/reports/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "reports") or {}).get("end_f") is not None)
 
     # Enriched status: every Pond carries d_ms + a ripple list; sales has intra-Pond edges
     # (join_lines depends on daily_sales + price_tiers).
     reports = _pond_status(url, "reports")
-    assert isinstance(reports["d_ms"], int) and reports["trigger"] is None
+    assert isinstance(reports["d_ms"], int) and reports["refreshes"] == []
     assert {r["name"] for r in reports["ripples"]}  # non-empty
     sales = _pond_status(url, "sales")
     assert ["daily_sales", "join_lines"] in sales["ripple_edges"]
@@ -1138,7 +1168,7 @@ def test_a_pond_runs_in_its_own_environment(runtime, tmp_path):
         pytest.skip("uv can't reach the package index")
     assert r.status_code == 200, r.text
 
-    httpx.post(f"{url}/api/ponds/envp/tap", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/envp/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "envp") or {}).get("end_f") is not None), \
         f"envp never became fresh: {_pond_status(url, 'envp')}"
 
@@ -1175,7 +1205,7 @@ def test_a_pool_duck_builds_its_ponds_environment(runtime, tmp_path, tmp_path_fa
     r = httpx.post(f"{url}/api/ponds/envp/duck", json={"duck_target": "envpool"}, timeout=10.0)
     assert r.status_code == 200, r.text
 
-    httpx.post(f"{url}/api/ponds/envp/tap", timeout=5.0)
+    httpx.post(f"{url}/api/ponds/envp/refresh", timeout=5.0)
     assert _wait(lambda: (_pond_status(url, "envp") or {}).get("end_f") is not None, timeout=240.0), \
         f"envp never became fresh on the Pool: {_pond_status(url, 'envp')}"
 

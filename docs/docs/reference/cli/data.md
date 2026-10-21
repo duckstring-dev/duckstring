@@ -1,12 +1,14 @@
 ---
-title: Data and status
-description: status, query, get, objects, lineage, trace and deletes.
-sidebar_label: Data and status
+title: status, query, get and data
+description: Watch Ponds, query and download what they publish, and manage their tables and Objects.
+sidebar_label: status, query, get, data
 ---
 
-# Data and status
+# status, query, get and data
 
-Top-level commands for watching a Catchment and reading, tracing and deleting its data.
+Commands for watching a Catchment and for reading, exposing, tracing and deleting what its Ponds publish.
+
+Tables and Objects are named `POND.NAME`, as in the Python API, for example `reports.monthly_summary`. A part that contains dots goes in backticks: ``forecasting.`model.pkl` ``. When a Pond has a table and an Object with the same name, add `--table` or `--object`.
 
 Every command takes `-c` / `--catchment`, and those acting on one Pond take `-m` / `--major` and usually `-v` / `--version`; see [CLI Overview](index.md#choosing-a-major-version).
 
@@ -16,63 +18,84 @@ Every command takes `-c` / `--catchment`, and those acting on one Pond take `-m`
 duckstring status [POND] [-m N | -v VERSION] [--once]
 ```
 
-Shows every Pond's state (running, queued, idle, failed, blocked or killed), freshness and standing trigger, refreshing every second until `Ctrl+C`.
+Shows every Pond's state (running, queued, idle, failed, blocked or killed), freshness and recurring Refreshes, updating every second until `Ctrl+C`.
 
 | Argument / option | Description |
 |---|---|
 | `POND` | Only show this Pond and the Ponds upstream of it. |
 | `--once` | Print one snapshot and exit. |
 
-## Reading data
-
-### `query`
+## `query`
 
 ```bash
-duckstring query POND [TABLE] [--sql SQL] [--csv FILE | --json FILE | --parquet FILE] [--path DIR]
+duckstring query SQL [--pond POND] [--limit N] [--csv FILE | --json FILE | --parquet FILE] [--path DIR]
+duckstring query POND.TABLE
 ```
 
-Runs read-only SQL against one Pond's published tables and prints the result. With only `TABLE`, runs `SELECT * FROM {pond}.{table} LIMIT 10`.
+Runs read-only SQL and prints the result, or saves it to a file. Given a table instead of SQL, it shows the table's first 10 rows.
+
+SQL runs across the catalog, where each Pond is a schema: `reports` refers to the Pond's served major, and `reports_v2` to a specific one. Users with a read-level key see only exposed tables. With `--pond`, the SQL runs against that Pond's tables, which can then be named without the schema.
+
+```bash
+duckstring query reports.monthly_summary
+duckstring query "SELECT r.month, r.total_revenue FROM reports_v1.monthly_summary r ORDER BY 1"
+duckstring query "SELECT category, SUM(revenue) FROM sale_line GROUP BY 1" --pond sales
+duckstring query @queries/top_categories.sql --csv top.csv
+```
 
 | Argument / option | Description |
 |---|---|
-| `POND` | The Pond. |
-| `TABLE` | A table, for the default query. |
-| `--sql` | The query, or `@path/to/file.sql` to read it from a file. Tables can be referred to by bare name or as `{pond}.{table}`. |
+| `SQL` | The query, or `@path/to/file.sql` to read it from a file. |
+| `POND.TABLE` | A table, to show its first rows. |
+| `--pond`, `-p` | Run the SQL against this Pond's tables, by bare name. |
+| `--limit`, `-n` | The most rows to print (default `1000`). Files are written in full. |
 | `--csv`, `--json`, `--parquet` | Write the result to a file of this name instead of printing it. |
-| `--path` | Directory for the output file. Defaults to `./ponds/{pond}/{table}/`, or `./ponds/{pond}/` without a table. |
+| `--path` | Directory for the file. Defaults to `./ponds/{pond}/{table}/` for a table, `./ponds/{pond}/` with `--pond`, and the current directory otherwise. |
 
-To query across several Ponds, use [`serve query`](serve.md#query).
-
-### `get`
+## `get`
 
 ```bash
-duckstring get POND TABLE [--path DIR]
+duckstring get POND.NAME [--out PATH] [--table | --object]
 ```
 
-Downloads a table's published files. A plain table is a single Parquet file; an append Trickle is a directory of files, one per run. `--path` defaults to `./ponds/{pond}/{table}/`.
+Downloads a table's published files, or an Object. A plain table is a single Parquet file, and an append Trickle a directory of files, one per run. A directory Object is unpacked into a folder. `--out` defaults to `./ponds/{pond}/{table}/` for a table and `./{name}` for an Object.
 
-### `objects`
+## `data`
+
+### `data ls`
 
 ```bash
-duckstring objects POND
+duckstring data ls [POND] [-m N]
 ```
 
-Lists the Pond's published Objects: name, whether each is a file or directory, size, and the freshness of the run that wrote it.
+Lists each Pond's published tables and Objects: whether each table is exposed to read-level users (and whether that comes from `pond.toml` or an override), and when each last changed. Without `POND`, lists every Pond. `-m` picks a major version; the default is the served major.
 
-### `get-object`
+### `data expose`
 
 ```bash
-duckstring get-object POND NAME [--out PATH]
+duckstring data expose POND.TABLE (--on | --off | --default) [-m N]
 ```
 
-Downloads an Object. A directory Object is unpacked into a folder. `--out` defaults to `./{name}`.
+Shows or hides a table from read-level users, overriding the Pond's [`[serve] tables`](../pond_toml.md#serve).
 
-## Lineage
+| Option | Description |
+|---|---|
+| `--on` | Expose the table. |
+| `--off` | Hide the table. |
+| `--default` | Remove the override and follow `pond.toml`. |
 
-### `lineage`
+### `data delete`
 
 ```bash
-duckstring lineage [POND] [--table TABLE] [-m N] [--columns]
+duckstring data delete POND.NAME [--yes] [--table | --object]
+```
+
+Deletes a table's published data and its state in the Pond's working database, or an Object. Either reappears only if the Pond's code writes it again on a later run. Deleting a table needs the Pond idle. Naming part of a Trickle table, such as its `__changelog`, deletes the whole table.
+
+### `data lineage`
+
+```bash
+duckstring data lineage [POND | POND.TABLE] [-m N] [--columns]
 ```
 
 Shows the tables each Ripple actually read and wrote on its recent runs.
@@ -80,13 +103,13 @@ Shows the tables each Ripple actually read and wrote on its recent runs.
 | Argument / option | Description |
 |---|---|
 | `POND` | Only this Pond. Defaults to every Pond with recorded lineage. |
-| `--table`, `-t` | Only Ripples that read or wrote this table. |
+| `POND.TABLE` | Only the Ripples that read or wrote this table. |
 | `--columns` | Also show which source columns each output column is derived from, recorded at deploy. Columns whose source can't be determined exactly are shown as opaque. |
 
-### `trace`
+### `data trace`
 
 ```bash
-duckstring trace POND.TABLE [--where PREDICATE] [-m N]
+duckstring data trace POND.TABLE [--where PREDICATE] [-m N]
 ```
 
 Finds which run produced some published rows: the newest run among the matching rows, with its version, timings, status, and the window of Source data it read.
@@ -97,23 +120,5 @@ Finds which run produced some published rows: the newest run among the matching 
 | `--where`, `-w` | A SQL condition selecting the rows, such as `"product_id = 7"`. Omit for the whole table. |
 
 ```bash
-duckstring trace revenue.revenue_by_product --where "product_id = 7"
+duckstring data trace revenue.revenue_by_product --where "product_id = 7"
 ```
-
-## Deleting
-
-### `delete-table`
-
-```bash
-duckstring delete-table POND TABLE [--yes]
-```
-
-Deletes a table's published data and its state in the Pond's working database. It reappears only if the Pond's code still writes it on a later run. The Pond must be idle.
-
-### `delete-object`
-
-```bash
-duckstring delete-object POND NAME [--yes]
-```
-
-Deletes a published Object. It reappears only if a Ripple writes it again.

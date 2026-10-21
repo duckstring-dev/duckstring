@@ -12,12 +12,12 @@ Value formats shared by `pond.toml`, the CLI, the Python API and the HTTP API.
 | Form | Used in | Meaning |
 |---|---|---|
 | `table` | Python API | One of the current Pond's own tables. |
-| `source.table` | Python API, `trace`, `puddle show` | A table published by the Pond `source`. |
+| `source.table` | Python API, `query`, `get`, `data`, `pond puddle show` | A table (or Object) published by the Pond `source`. |
 | ``source.`name.with.dots` `` | Python API, `@puddle` targets | Backticks take a part literally, for a table or Object name containing dots. Either part can be quoted. |
-| `name@major` | `do`, `/api/status` ids | One major version line of a Pond. |
+| `name@major` | `control`, `/api/status` ids | One major version line of a Pond. |
 | `{pond}_v{major}.table` | catalog SQL | A table in a specific major line. |
 | `{pond}.table` | catalog SQL | A table in the Pond's served major. |
-| `{pond}#{spout}` | `trigger window` | A Spout, which is managed as its own node. |
+| `{pond}#{spout}` | `window` | A Spout, which is managed as its own node. |
 
 An unquoted reference is split at its first dot, so `sales.daily.v2` is the table `daily.v2` of `sales`, while `daily.v2` alone is a table of the Source `daily`. Names and columns beginning with `_duckstring_` are reserved for Duckstring.
 
@@ -27,7 +27,7 @@ Pond versions are semantic versions, `MAJOR.MINOR.PATCH`. In `[sources]`, a vers
 
 ## Durations
 
-Used by `trigger tide`, window `--duration`, `alert --stale` and `--renotify`, and `catchment init --checkpoint-every`.
+Used by `refresh add --every`, window `--duration`, `alert --stale` and `--renotify`, and `catchment init --checkpoint-every`.
 
 A duration is one or more number-and-unit pairs with no spaces: `30s`, `45m`, `12h`, `1d`, `2w`, `1h30m`.
 

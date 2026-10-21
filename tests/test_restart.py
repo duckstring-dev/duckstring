@@ -45,7 +45,7 @@ def _complete_run(driver):
 
 def test_restart_restores_changed_f(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("p@1")
+    d.refresh_now("p@1")
     _complete_run(d)
     st = _pond(d)
     assert st["changed_f"] == st["end_f"]  # a real run advanced content freshness to its freshness
@@ -56,7 +56,7 @@ def test_restart_restores_changed_f(tmp_path):
 
 def test_restart_restores_gen_and_freshness(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("p@1")
+    d.refresh_now("p@1")
     f = _complete_run(d)
     assert _pond(d)["gen"] == 1
     assert _pond(d)["end_f"] is not None
@@ -72,7 +72,7 @@ def test_restart_restores_gen_and_freshness(tmp_path):
 
 def test_restart_resumes_incomplete_run(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("p@1")
+    d.refresh_now("p@1")
     # Only r1 completes; r2 left in flight (Catchment "crashes" mid-run).
     f = d.state.pond_states["p@1"].start_f.isoformat()
     d.on_event("p@1", {"kind": "ripple", "f": f, "ripple": "r1", "status": "success"})
@@ -92,9 +92,9 @@ def _complete(driver, key):
 
 
 def test_restart_resends_demand_the_pulse_throttle_held(tmp_path):
-    """Demand the Pulse throttle holds is persisted as plain targets, but the soft state that would release
+    """Demand the throttle holds is persisted as plain demand, but the soft state that would release
     it is lost on restart. The reload re-sends each Pond's newest unmet target once, so it reaches the Inlet
-    instead of stranding behind the bottleneck (plans/pulse-throttle.md)."""
+    instead of stranding behind the bottleneck (plans/throttle.md)."""
     one = [{"func": "f1", "name": "r1", "parents": []}]
     db = connect(tmp_path / "duck.db")
     migrate(db)
@@ -106,13 +106,13 @@ def test_restart_resends_demand_the_pulse_throttle_held(tmp_path):
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
     now = datetime.now(timezone.utc)
     t1, t2, t3, t4 = (now - timedelta(seconds=n) for n in (40, 30, 20, 10))
-    d.pulse("out@1", at=t1)
+    d.refresh_now("out@1", at=t1)
     _complete(d, "inlet@1")  # slow starts at t1
-    d.pulse("out@1", at=t2)
+    d.refresh_now("out@1", at=t2)
     _complete(d, "inlet@1")
-    d.pulse("out@1", at=t3)  # two demands in slow's run: it holds this one
-    d.pulse("out@1", at=t4)  # and the throttled Outlet holds this one
-    assert d.state.pond_states["inlet@1"].targets == []
+    d.refresh_now("out@1", at=t3)  # two demands in slow's run: it holds this one
+    d.refresh_now("out@1", at=t4)  # and the throttled Outlet holds this one
+    assert d.state.pond_states["inlet@1"].demand == []
     assert d.state.pond_states["out@1"].throttle.held == 1
 
     runs = d.state.pond_states["inlet@1"].runs_started
@@ -122,9 +122,9 @@ def test_restart_resends_demand_the_pulse_throttle_held(tmp_path):
     d2._process(datetime.now(timezone.utc))
     inlet = d2.state.pond_states["inlet@1"]
     assert inlet.runs_started == runs + 1 and inlet.start_f == t4  # one Run serves the newest held demand
-    assert inlet.targets == []
+    assert inlet.demand == []
     d2.reload()  # a later reload adds nothing: the Run in flight covers it
-    assert d2.state.pond_states["inlet@1"].targets == []
+    assert d2.state.pond_states["inlet@1"].demand == []
 
 
 # ─── start / stop demand controls ───────────────────────────────────────────────
@@ -139,14 +139,11 @@ def test_wake_injects_run(tmp_path):
     assert d.state.pond_states["p@1"].runs_started == 1
 
 
-def test_sleep_clears_demand_keeps_ripple_push(tmp_path):
+def test_sleep_clears_demand_keeps_ripple_demand(tmp_path):
     d = _driver(tmp_path)
     far = datetime(2030, 1, 1, tzinfo=timezone.utc)
-    d.state.pond_states["p@1"].has_pull = True
-    d.state.ripple_states["p@1.r2"].has_pull = True
-    d.state.ripple_states["p@1.r2"].targets = [far]  # in-flight push
+    d.state.pond_states["p@1"].demand = [far]
+    d.state.ripple_states["p@1.r2"].demand = [far]  # an in-flight run
     d.sleep("p@1")
-    ps = d.state.pond_states["p@1"]
-    assert not ps.has_pull and not ps.targets
-    assert not d.state.ripple_states["p@1.r2"].has_pull       # pull cleared
-    assert d.state.ripple_states["p@1.r2"].targets == [far]   # push kept so the run completes
+    assert not d.state.pond_states["p@1"].demand
+    assert d.state.ripple_states["p@1.r2"].demand == [far]   # kept so the run completes

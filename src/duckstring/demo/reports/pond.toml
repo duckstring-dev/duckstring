@@ -5,3 +5,7 @@ type = "outlet"
 
 [sources]
 sales = "1.0.0"
+
+# The table apps and read-only users can query.
+[serve]
+tables = ["monthly_summary"]

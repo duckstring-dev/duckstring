@@ -11,11 +11,11 @@ A **Catchment** is the environment Ponds are deployed to. It holds the deployed 
 
 A Catchment is a single server process with a directory of state: the deployed Pond code, run history, and each Pond's data. The CLI and web UI both talk to it over HTTP. You can register several Catchments, such as `dev` and `prod`, and choose between them with `--catchment`.
 
-Settings that depend on the environment rather than the code, such as triggers, delivery destinations and secrets, are configured on the Catchment instead of in `pond.toml`, and survive redeploys.
+Settings that depend on the environment rather than the code, such as Refreshes, delivery destinations and secrets, are configured on the Catchment instead of in `pond.toml`, and survive redeploys.
 
 ## Orchestration
 
-The Catchment decides when each Pond runs, based on the triggers set on it (see [Orchestration](orchestration.md)). When a Pond needs to run, the Catchment starts a worker process for it, called a Duck, which runs the Pond's Ripples and reports back. Ducks run on the Catchment's own machine by default, or on separate cloud compute (see [Management and Execution](management_and_execution.md)).
+The Catchment decides when each Pond runs, based on the Refreshes set on it (see [Orchestration](orchestration.md)). When a Pond needs to run, the Catchment starts a worker process for it, called a Duck, which runs the Pond's Ripples and reports back. Ducks run on the Catchment's own machine by default, or on separate cloud compute (see [Management and Execution](management_and_execution.md)).
 
 ## Data
 
@@ -32,7 +32,10 @@ Lineage can also be sent to other catalogs as OpenLineage events.
 
 You can run read-only SQL over the catalog from the CLI (`duckstring query`), from the web UI's data viewer, or from Python. Access is controlled by API keys, and a Pond can choose which of its tables are exposed to users with read-only access.
 
-<!-- IMAGE: the web UI data viewer showing reports.monthly_summary. -->
+<figure class="ds-figure">
+  <img src="/img/docs/data-viewer.webp" alt="The web UI's data viewer showing the monthly_summary table of reports" width="1440" height="900" />
+  <figcaption>The data viewer in the web UI, open on <code>reports.monthly_summary</code>.</figcaption>
+</figure>
 
 ## Ingress and Egress
 
@@ -56,4 +59,4 @@ flowchart LR
 ## See also
 
 - Guides: [Running on a Server](../guides/running_on_a_server.md), [Hosting on a Platform](../guides/hosting_on_a_platform.md), [Querying](../guides/querying.md), [Delivering with Spouts](../guides/delivering_with_spouts.md), [Connecting Catchments](../guides/connecting_catchments.md)
-- Reference: [duckstring catchment](../reference/cli/catchment.md), [duckstring serve](../reference/cli/serve.md), [duckstring spout](../reference/cli/spout.md), [HTTP API](../reference/http_api.md), [Formats](../reference/formats.md)
+- Reference: [duckstring catchment](../reference/cli/catchment.md), [duckstring query and data](../reference/cli/data.md), [duckstring spout](../reference/cli/spout.md), [HTTP API](../reference/http_api.md), [Formats](../reference/formats.md)

@@ -115,7 +115,7 @@ def test_dialback_learned_from_request_e2e(tmp_path_factory, monkeypatch):
         )
         assert r.status_code == 200, r.text
 
-        httpx.post(f"{url}/api/ponds/inlet/pulse", timeout=5.0)
+        httpx.post(f"{url}/api/ponds/inlet/refresh", timeout=5.0)
 
         def fresh() -> bool:
             ponds = httpx.get(f"{url}/api/status", timeout=5.0).json()["ponds"]

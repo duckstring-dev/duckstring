@@ -19,7 +19,7 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 
 async def _scheduler(driver: Driver) -> None:
-    """Drive clock processes (Tide deadlines, window boundaries, Wave-on-idle) at next_wake."""
+    """Drive clock processes (recurring Refreshes, window boundaries) at next_wake."""
     while True:
         nw = driver.next_wake()
         now = datetime.now(timezone.utc)

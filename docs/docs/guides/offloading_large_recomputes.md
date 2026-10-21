@@ -5,7 +5,7 @@ description: Send a recompute that won't fit in a Duck to MotherDuck, StarRocks 
 
 # Offloading Large Recomputes
 
-A Trickle usually updates from a small change, but some runs recompute the whole output: the first run, a refresh, a source whose changes have aged out of reach, or a change touching most of a source. A `.sql()` step is recomputed in full on every run. When that recompute is larger than the Duck's memory, the Pond fails or its Duck has to be sized for its worst run rather than its usual one.
+A Trickle usually updates from a small change, but some runs recompute the whole output: the first run, a rebuild, a source whose changes have aged out of reach, or a change touching most of a source. A `.sql()` step is recomputed in full on every run. When that recompute is larger than the Duck's memory, the Pond fails or its Duck has to be sized for its worst run rather than its usual one.
 
 The **Flock** sends such a recompute to a larger engine. The Duck keeps everything else: it works out what changed, writes the change log and publishes. So a Pond can run on a small Duck and still handle the occasional run that needs a much bigger machine.
 

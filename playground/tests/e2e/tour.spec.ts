@@ -39,17 +39,35 @@ test('the tour runs end to end', async ({ page }, info) => {
     await page.screenshot({ path: info.outputPath(`${String(i + 1).padStart(2, '0')}-${step.id}.png`) });
     // The buttons are reachable without scrolling the card.
     await expect(page.getByTestId('tour-next')).toBeInViewport({ ratio: 1 });
-    await page.getByTestId('tour-next').click();
+    // The last card hands over to Trickle mode, which opens its own tour.
+    if (i === TOUR_STEPS.length - 1) await page.getByTestId('tour-mode-trickle').click();
+    else await page.getByTestId('tour-next').click();
     if (step.advance !== 'next') {
       // While the tour waits on the simulation, its progress bar moves.
+      // The control the wait keeps in view isn't under the pill.
+      if (step.advance.show) {
+        await page.waitForTimeout(900);
+        const [c, k] = [await page.locator(`[data-tour="${step.advance.show}"]`).first().boundingBox(), await page.getByTestId('tour-pill').boundingBox()];
+        const overlap = c!.y < k!.y + k!.height && c!.y + c!.height > k!.y && c!.x < k!.x + k!.width && c!.x + c!.width > k!.x;
+        expect(overlap, `${step.id}: the pill covers ${step.advance.show}`).toBe(false);
+      }
       const bar = page.getByTestId('tour-progress');
       await expect.poll(async () => (await bar.boundingBox())?.width ?? 0).toBeGreaterThan(5);
+      // A wait that speeds up part way says so on the pill.
+      if (step.advance.speedAfter) {
+        await expect(page.getByTestId('tour-speed')).toHaveText('real time');
+        await expect(page.getByTestId('tour-speed')).toHaveText(`${step.advance.speedAfter.speed}× speed`, { timeout: 15_000 });
+        await onScreen(page, '[data-testid="tour-pill"]');
+        await page.screenshot({ path: info.outputPath(`${String(i + 1).padStart(2, '0')}-${step.id}-faster.png`) });
+      }
     }
   }
 
   await expect(card).toHaveCount(0);
   await expect(page.getByTestId('tour-pill')).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('ds-playground-tour'))).toBe('done');
+  await expect(page).toHaveURL(/\/trickle$/);
+  await expect(page.getByTestId('trickle-tour')).toBeVisible();
 });
 
 test('a first visit is offered the tour once', async ({ page }) => {
@@ -62,7 +80,7 @@ test('a first visit is offered the tour once', async ({ page }) => {
   await expect(page.getByTestId('tour-prompt')).toHaveCount(0);
   // The Tour button restarts it at any time.
   await page.getByTestId('tour-button').click();
-  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', 'pipeline');
+  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', TOUR_STEPS[0].id);
 });
 
 test('?tour=0 suppresses the prompt', async ({ page }) => {
@@ -81,7 +99,7 @@ test('blocked storage still offers and runs the tour', async ({ page }) => {
   });
   await page.goto('/');
   await page.getByTestId('tour-start').click();
-  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', 'pipeline');
+  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', TOUR_STEPS[0].id);
   await page.getByTestId('tour-skip').click();
   await expect(page.getByTestId('tour-card')).toHaveCount(0);
 });
@@ -93,5 +111,24 @@ test('starting the tour over a changed graph asks first', async ({ page }) => {
   await page.getByTestId('tour-button').click();
   await expect(page.getByTestId('tour-confirm')).toBeVisible();
   await page.getByTestId('tour-start').click();
-  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', 'pipeline');
+  await expect(page.getByTestId('tour-card')).toHaveAttribute('data-step', TOUR_STEPS[0].id);
+});
+
+test('a phone can fold the card away and back', async ({ page, isMobile }, info) => {
+  test.skip(!isMobile && info.project.name !== 'phone-landscape', 'phones only');
+  await page.goto('/?tour=1');
+  const card = page.getByTestId('tour-card');
+  await expect(card).toHaveAttribute('data-step', TOUR_STEPS[0].id);
+  const open = (await card.boundingBox())!.height;
+  await page.getByTestId('tour-hide').click();
+  await expect(card).toHaveAttribute('data-collapsed', 'true');
+  expect((await card.boundingBox())!.height).toBeLessThan(open);
+  await page.getByTestId('tour-show').click();
+  await expect(page.getByTestId('tour-next')).toBeVisible();
+  // Each step opens unfolded.
+  await page.getByTestId('tour-hide').click();
+  await page.getByTestId('tour-show').click();
+  await page.getByTestId('tour-next').click();
+  await expect(card).toHaveAttribute('data-step', TOUR_STEPS[1].id);
+  await expect(card).not.toHaveAttribute('data-collapsed', 'true');
 });

@@ -1,46 +1,24 @@
 'use client';
 
-import { formatAge, THEME_PULL, THEME_PUSH } from '@/lib/store';
+import { formatAge, THEME_DEMAND } from '@/lib/store';
 
-// Demand indicators shown to the left of a node's freshness readouts:
-//   • green dot  — holds pull demand
-//   • [≤ Ns] box — push demand (target freshness as an age), or "≤ —" when no push target
-export function DemandIndicators({
-  hasPull,
-  targetF,
-  now,
-}: {
-  hasPull: boolean;
-  targetF: number | null;
-  now: number;
-}) {
+// The demand indicator shown to the left of a node's freshness readouts: a [≤ Ns] box with the requested
+// freshness as an age, or "≤ ---" when the node holds no request.
+export function DemandIndicators({ targetF, now }: { targetF: number | null; now: number }) {
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-      <span
-        title={hasPull ? 'pull demand' : 'no pull demand'}
-        style={{
-          width: 7,
-          height: 7,
-          borderRadius: '50%',
-          background: hasPull ? THEME_PULL : 'transparent',
-          border: `1px solid ${hasPull ? THEME_PULL : '#3f3f46'}`,
-          flexShrink: 0,
-        }}
-      />
-      <span
-        title={targetF !== null ? 'push target (max staleness)' : 'no push demand'}
-        style={{
-          fontSize: 9,
-          lineHeight: 1,
-          padding: '1px 3px',
-          borderRadius: 3,
-          border: `1px solid ${targetF !== null ? THEME_PUSH : '#3f3f46'}`,
-          color: targetF !== null ? THEME_PUSH : '#52525b',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        ≤{targetF !== null ? formatAge(targetF, now) : '---'}
-      </span>
+    <span
+      title={targetF !== null ? 'requested freshness' : 'no demand'}
+      style={{
+        fontSize: 9,
+        lineHeight: 1,
+        padding: '1px 3px',
+        borderRadius: 3,
+        border: `1px solid ${targetF !== null ? THEME_DEMAND : '#3f3f46'}`,
+        color: targetF !== null ? THEME_DEMAND : '#52525b',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      ≤{targetF !== null ? formatAge(targetF, now) : '---'}
     </span>
   );
 }

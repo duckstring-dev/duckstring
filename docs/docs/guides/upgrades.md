@@ -29,7 +29,7 @@ Add a `channel` column to `sale_line` in `sales`, bump the version to `1.1.0` in
 duckstring pond deploy
 ```
 
-The new version replaces `1.0.0` on the major version 1 line. Its next run publishes the extra column, and `reports`, which pins `sales = "1.0.0"`, reads it without noticing. Triggers, windows, Spouts and alerts on the line are kept.
+The new version replaces `1.0.0` on the major version 1 line. Its next run publishes the extra column, and `reports`, which pins `sales = "1.0.0"`, reads it without noticing. Refreshes, windows, Spouts and alerts on the line are kept.
 
 ## What happens with a breaking change deployed as compatible
 
@@ -38,6 +38,11 @@ Suppose `sales` 1.2.0 renames `revenue` to `gross_revenue`. Every successful run
 - `reports` keeps reading the last good output of `sales`, and is shown as blocked until `sales` recovers.
 - The failure's message says it's a contract violation, and the UI shows "Failed · Contract violation".
 - Alert channels subscribed to `contract` are notified.
+
+<figure class="ds-figure">
+  <img src="/img/docs/contract-sidebar.webp" alt="The reports sidebar showing Failed, Contract violation, with the message that column monthly_summary.tx_count was dropped" width="320" height="390" />
+  <figcaption>A contract violation in the web UI, naming the dropped column.</figcaption>
+</figure>
 
 To recover, either deploy a fixed 1.x version, which clears the failure automatically, or deploy the change as a new major version, as below.
 
@@ -59,15 +64,6 @@ duckstring pond deploy
 
 `sales` now has two major lines, each an independent Pond with its own runs and data. Version 2 is deployed, but nothing depends on it yet, so it doesn't run. `reports` still pins major version 1, which keeps running as before.
 
-```mermaid
-flowchart LR
-    t[transactions] --> s1["sales v1"]
-    p[products] --> s1
-    t --> s2["sales v2"]
-    p --> s2
-    s1 --> r[reports]
-```
-
 When the owner of `reports` is ready, they update its SQL for the new column name, point its pin at the new major version and release:
 
 ```toml
@@ -84,6 +80,14 @@ duckstring pond deploy
 ```
 
 `reports` now reads `sales` v2, and demand flows to it instead of v1. Its own output didn't change shape, so `reports` only needed a minor release.
+
+<figure class="ds-figure">
+  <video autoplay loop muted playsinline poster="/img/docs/upgrade-pin.poster.webp" aria-label="sales v2 deployed and idle beside v1; reports is redeployed pinning v2, which starts running while v1 goes quiet">
+    <source src="/img/docs/upgrade-pin.webm" type="video/webm" />
+    <source src="/img/docs/upgrade-pin.mp4" type="video/mp4" />
+  </video>
+  <figcaption><code>sales</code> v2 sits idle beside v1 until the new <code>reports</code>, pinning <code>sales = "2.0.0"</code>, is deployed. Then v2 runs and v1 goes quiet.</figcaption>
+</figure>
 
 With nothing reading it, `sales` v1 stops running. Retire it once you're sure no one needs it:
 
@@ -105,23 +109,23 @@ Both are rejected at deploy time with a message naming the conflict.
 
 Rolling back within a major version is otherwise allowed: deploy the older version and it replaces the current one.
 
-## Commands and triggers across majors
+## Commands and Refreshes across majors
 
 Commands that act on a Pond target its highest deployed major by default. Use `--major` to reach another line:
 
 ```bash
 duckstring status sales --major 1
-duckstring trigger tide reports 1d --major 2
+duckstring refresh add reports --every 1d --major 2
 ```
 
-Triggers belong to a major line. When an Outlet itself moves to a new major version, set its trigger on the new line and remove it from the old one.
+Refreshes belong to a major line. When an Outlet itself moves to a new major version, add its Refresh on the new line and remove it from the old one.
 
 ## Queries by name
 
 Catalog SQL can name a major version explicitly (`sales_v2.sale_line`) or use the bare Pond name (`sales.sale_line`), which refers to the Pond's served major. The served major stays on the first major version deployed until you promote another, so a dashboard reading `sales.sale_line` isn't switched to v2 by the deployment alone:
 
 ```bash
-duckstring serve promote sales --major 2
+duckstring pond promote sales --major 2
 ```
 
 Promotion is refused if v2 doesn't publish every table currently served. Consumers that name the version explicitly are unaffected either way.

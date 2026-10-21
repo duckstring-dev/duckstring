@@ -135,7 +135,7 @@ def get_pond_version(name: str, version: str, request: Request):
 
 
 class QueryRequest(BaseModel):
-    pond: str
+    pond: Optional[str] = None  # required, except with a Tap's key (which implies the Pond)
     major: Optional[int] = None
     version: Optional[str] = None
     ripple: Optional[str] = None
@@ -162,20 +162,6 @@ def get_ripple(
         for storage_parts, arcname in entries:
             zf.writestr(arcname, data_dir.read_bytes(*storage_parts))
     return Response(content=buf.getvalue(), media_type="application/zip")
-
-
-def _maybe_tap_on_get(request: Request, pond: str, major: Optional[int], version: Optional[str]) -> None:
-    """If the Pond is open with tap-on-get, fire a Tap (the snapshot is served first — we never block
-    on freshness). Best-effort: a data query must never fail because of this."""
-    driver = getattr(request.app.state, "driver", None)
-    if driver is None:
-        return
-    try:
-        key = driver.resolve(pond, major, version)
-        if driver.pond_tap_on_get(key):
-            driver.tap(key)
-    except Exception:
-        pass
 
 
 # ─── Trickle-aware browsing helpers ──────────────────────────────────────────
@@ -442,9 +428,50 @@ def delete_pond_object(
     return {"ok": True}
 
 
-@router.get("/ponds/{name}/freshness", dependencies=[auth.read])
+@router.get("/ponds/{name}/freshness", dependencies=[auth.read_or_tap])
 def pond_freshness(
-    name: str, request: Request, table: str,
+    name: str, request: Request, major: Optional[int] = None, version: Optional[str] = None,
+    principal: auth.Principal = Depends(auth.get_principal),
+):
+    """How fresh a Pond's data is: ``freshness``, the point in time its data reflects; ``changed``, when its
+    output last changed; ``refreshing``, whether a refresh is under way; and when each published table and Object
+    last changed. A read-level key sees the exposed tables only; a Tap's key may ask about its own Pond only (and
+    its tables), so an app can tell how current the data it reads is."""
+    from ...objects import list_objects
+
+    driver = request.app.state.driver
+    tap = principal.tap
+    if tap is not None:
+        meta = driver.meta.get(tap.pond) or {}
+        if meta.get("name") != name or (major is not None and major != meta.get("major")):
+            raise HTTPException(status_code=403, detail=f"this key belongs to a Tap on '{meta.get('name')}'")
+        key, m = tap.pond, meta["major"]
+    else:
+        from .orchestrate import _resolve
+
+        key = _resolve(request, name, major, version)
+        m = driver.meta[key]["major"]
+    out = {"pond": name, "major": m, **driver.pond_freshness(key)}
+    full = principal.level is not None and principal.level >= auth.Level.FULL
+    allowed = None if full else (driver.tap_tables(tap) if tap is not None else driver.serviceable(key))
+    from ...trickle.io import sidecar_tables
+
+    try:
+        tables = {t: e.get("f") for t, e in sidecar_tables(_sidecar(request, name, m)).items()}
+    except Exception:
+        tables = {}
+    out["tables"] = {t: f for t, f in sorted(tables.items()) if allowed is None or t in allowed}
+    if tap is None:
+        try:
+            out["objects"] = {n: e.get("f") for n, e in sorted(list_objects(_data_dir(request, name, m)).items())}
+        except Exception:
+            out["objects"] = {}
+    return out
+
+
+@router.get("/ponds/{name}/tables/{table}/runs", dependencies=[auth.read])
+def table_runs(
+    name: str, table: str, request: Request,
     major: Optional[int] = None, version: Optional[str] = None,
     principal: auth.Principal = Depends(auth.get_principal),
 ):
@@ -611,7 +638,6 @@ def query_page(body: PageRequest, request: Request,
     ``{pond}`` for the served major, ``{pond}_v{major}`` for a pin; sandboxed to the serviceable surface
     unless full). A per-pond ``table``/``trickle`` browse stays on the Pond's exported snapshot (freshness
     windows, history), serviceable-gated for non-full callers."""
-    _maybe_tap_on_get(request, body.pond, body.major, body.version)
     full = principal.level >= auth.Level.FULL
     limit = max(1, min(body.limit, 5000))
     offset = max(0, body.offset)
@@ -722,9 +748,77 @@ def query_history(body: HistoryRequest, request: Request,
         con.close()
 
 
-@router.post("/query", dependencies=[auth.read])
-def query(body: QueryRequest, request: Request):
-    _maybe_tap_on_get(request, body.pond, body.major, body.version)
+@router.post("/query", dependencies=[auth.read_or_tap])
+async def query(body: QueryRequest, request: Request, principal: auth.Principal = Depends(auth.get_principal)):
+    """Run SQL against one Pond's tables (or show a table's first rows). With a Tap's key the query runs on the
+    Tap's own sandboxed connection, after the Tap's policy has had its say (plans/taps.md); ``pond`` may then
+    be left out, since the key implies it."""
+    from starlette.concurrency import run_in_threadpool
+
+    from .tap import tap_gate
+
+    if principal.tap is not None:
+        tap = principal.tap
+        name = request.app.state.driver.meta.get(tap.pond, {}).get("name")
+        if body.pond and body.pond != name:
+            raise HTTPException(status_code=403, detail=f"this key belongs to a Tap on '{name}'")
+        tap_gate(request, tap)
+        return await run_in_threadpool(_tap_query, request, tap, body)
+    if not body.pond:
+        raise HTTPException(status_code=422, detail="name the Pond to query")
+    return await run_in_threadpool(_pond_query, request, body)
+
+
+_FORMATS = {"csv": ("text/csv", ".csv"), "json": ("application/json", ".json"),
+            "parquet": ("application/octet-stream", ".parquet")}
+
+
+def _rows(rel) -> list[dict]:
+    if rel.description is None:
+        return []
+    cols = [d[0] for d in rel.description]
+    return [dict(zip(cols, row, strict=False)) for row in rel.fetchall()]
+
+
+def _tap_query(request: Request, tap, body: QueryRequest):
+    """A query through a Tap, on its sandboxed connection (no file access, so a file format is written from
+    the Arrow result on a separate in-memory connection)."""
+    from ..serving import _cache
+
+    sql = body.sql or (f"SELECT * FROM {_qi(body.ripple)} LIMIT 10" if body.ripple else None)
+    if not sql:
+        raise HTTPException(status_code=422, detail="give SQL, or a table to show")
+    driver = request.app.state.driver
+    fmt = (body.format or "").lower()
+    try:
+        cur = _cache(driver).connection(driver, sandboxed=True, tap=tap).cursor()
+        if not fmt:
+            return _rows(cur.execute(sql))
+        result = cur.execute(sql).to_arrow_table()
+        out = duckdb.connect()
+        try:
+            out.register("_ds_result", result)
+            return Response(content=_copy_bytes(out, "SELECT * FROM _ds_result", fmt),
+                            media_type=_FORMATS.get(fmt, ("application/octet-stream",))[0])
+        finally:
+            out.close()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _copy_bytes(con, sql: str, fmt: str) -> bytes:
+    with tempfile.NamedTemporaryFile(suffix=_FORMATS.get(fmt, ("", ".bin"))[1], delete=False) as f:
+        tmp_path = f.name
+    try:
+        con.execute(f"COPY ({sql}) TO '{tmp_path}' (FORMAT {fmt.upper()})")
+        return Path(tmp_path).read_bytes()
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _pond_query(request: Request, body: QueryRequest):
     con = _open_pond(request, body.pond, _resolve_major(request, body.pond, body.major, body.version))
     sql = body.sql
     if not sql:
@@ -736,22 +830,9 @@ def query(body: QueryRequest, request: Request):
     fmt = (body.format or "").lower()
     try:
         if fmt:
-            suffix_map = {"csv": ".csv", "json": ".json", "parquet": ".parquet"}
-            media_map = {"csv": "text/csv", "json": "application/json", "parquet": "application/octet-stream"}
-            with tempfile.NamedTemporaryFile(suffix=suffix_map.get(fmt, ".bin"), delete=False) as f:
-                tmp_path = f.name
-            try:
-                con.execute(f"COPY ({sql}) TO '{tmp_path}' (FORMAT {fmt.upper()})")
-                data = Path(tmp_path).read_bytes()
-            finally:
-                Path(tmp_path).unlink(missing_ok=True)
-            return Response(content=data, media_type=media_map.get(fmt, "application/octet-stream"))
-
-        rel = con.execute(sql)
-        if rel.description is None:
-            return []
-        cols = [d[0] for d in rel.description]
-        return [dict(zip(cols, row, strict=False)) for row in rel.fetchall()]
+            return Response(content=_copy_bytes(con, sql, fmt),
+                            media_type=_FORMATS.get(fmt, ("application/octet-stream",))[0])
+        return _rows(con.execute(sql))
     except Exception as exc:
         if not body.sql and body.ripple and isinstance(exc, duckdb.CatalogException):
             raise HTTPException(status_code=400, detail=_missing_table_hint(con, body.pond, body.ripple)) from exc
@@ -771,5 +852,5 @@ def _missing_table_hint(con, pond: str, table: str) -> str:
         tables = []
     if not tables:
         return (f"'{pond}' hasn't published any tables yet. Run it first, for example with "
-                f"`duckstring trigger pulse {pond}`.")
+                f"`duckstring refresh now {pond}`.")
     return f"'{pond}' has no table '{table}'. Its tables: {', '.join(tables)}."

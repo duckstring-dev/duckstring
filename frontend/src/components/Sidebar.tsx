@@ -2,18 +2,19 @@
 
 import { useEffect, useState } from 'react';
 import { fetchAlerts, fetchLineage, fetchRuns, fetchSecrets, testSpout, type RawAlertChannel, type RawLineageRipple } from '@/lib/api';
-import { useLiveStore, atLeast, formatAge, formatDuration, mapRun, parseTs, runKey, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE, THEME_BRAND } from '@/lib/store';
-import type { FreqUnit, Pond, PondInfo, PondRun } from '@/lib/types';
+import { useLiveStore, atLeast, formatAge, mapRun, parseTs, runKey, THEME_AMBER, THEME_DEMAND, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE, THEME_BRAND } from '@/lib/store';
+import type { Pond, PondInfo, PondRun } from '@/lib/types';
 import { AlertChannelForm, ChannelRow } from './AlertsMenu';
 import { DbtIcon } from './DbtIcon';
 import { DuckSection } from './DuckSection';
 import { TraceChart } from './TraceChart';
+import { RefreshEditor } from './RefreshEditor';
 import { WindowEditor } from './WindowEditor';
 
 function Btn({
   onClick,
   children,
-  color = THEME_PUSH,
+  color = THEME_DEMAND,
   small = false,
   disabled = false,
   block = false,
@@ -64,8 +65,8 @@ function Section({ children }: { children: React.ReactNode }) {
   return <div style={{ borderTop: '1px solid #27272a', paddingTop: 14, marginTop: 14 }}>{children}</div>;
 }
 
-// A bordered, tinted callout for a Pond's failed/blocked state — shown in the Triggers section in
-// place of the trigger buttons (triggers have no effect while halted), so its presence is the signal.
+// A bordered, tinted callout for a Pond's failed/blocked state — shown in the Refresh section in place of
+// its controls (a Refresh has no effect while halted), so its presence is the signal.
 function StatusCard({ color, title, children }: { color: string; title: string; children?: React.ReactNode }) {
   return (
     <div style={{ border: `1px solid ${color}`, background: `${color}14`, borderRadius: 6, padding: '10px 12px' }}>
@@ -160,7 +161,7 @@ function SpoutPanel({ pond, canControl }: { pond: Pond; canControl: boolean }) {
               {cfg.armed ? 'Sleep' : 'Wake'}
             </Btn>
             <Btn block onClick={() => spoutControl(pond.id, 'kill')} color={THEME_DANGER}>Kill</Btn>
-            <Btn block onClick={() => spoutControl(pond.id, 'clear')} color={THEME_PULL}>Clear</Btn>
+            <Btn block onClick={() => spoutControl(pond.id, 'clear')} color={THEME_AMBER}>Clear</Btn>
           </div>
           <div style={{ marginTop: 6 }}>
             <Btn onClick={() => removeSpout(pond.id)} color={THEME_DANGER}>Remove Spout</Btn>
@@ -168,8 +169,8 @@ function SpoutPanel({ pond, canControl }: { pond: Pond; canControl: boolean }) {
         </Section>
       )}
       <Section>
-        <Label>Windows · throttle</Label>
-        <WindowEditor pond={pond} readOnly={!canControl} caption="Throttle delivery to a window cadence. None ⇒ deliver on every source advance." />
+        <Label>Windows</Label>
+        <WindowEditor pond={pond} readOnly={!canControl} />
       </Section>
     </>
   );
@@ -335,7 +336,7 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
             </div>
           )}
           <div style={{ display: 'flex', gap: 6 }}>
-            <Btn small onClick={test} color={THEME_PULL} disabled={testing || busy || !path.trim()}>
+            <Btn small onClick={test} color={THEME_AMBER} disabled={testing || busy || !path.trim()}>
               {testing ? 'Testing…' : 'Test'}
             </Btn>
             <Btn small onClick={submit} color={THEME_SUCCESS} disabled={busy || testing || !path.trim()}>Add</Btn>
@@ -430,14 +431,6 @@ const numInput: React.CSSProperties = {
 };
 
 const selectInput: React.CSSProperties = { ...numInput, width: 'auto' };
-
-const TIDE_UNITS: { value: FreqUnit; label: string; secs: number }[] = [
-  { value: 'SECOND', label: 'sec', secs: 1 },
-  { value: 'MINUTE', label: 'min', secs: 60 },
-  { value: 'HOUR', label: 'hr', secs: 3600 },
-  { value: 'DAY', label: 'day', secs: 86400 },
-  { value: 'WEEK', label: 'wk', secs: 604800 },
-];
 
 const ms = (iso: string | null): number => parseTs(iso);
 
@@ -681,51 +674,40 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   const pondViews = useLiveStore((s) => s.pondViews);
   const rippleViews = useLiveStore((s) => s.rippleViews);
   const pondInfo = useLiveStore((s) => s.pondInfo);
-  const triggers = useLiveStore((s) => s.triggers);
   const now = useLiveStore((s) => s.now);
   const selectedPondRuns = useLiveStore((s) => s.selectedPondRuns);
 
   const selectedPondId = useLiveStore((s) => s.selectedPondId);
   const selectedRippleId = useLiveStore((s) => s.selectedRippleId);
-  const selectedTriggerId = useLiveStore((s) => s.selectedTriggerId);
 
-  const tap = useLiveStore((s) => s.tap);
-  const pulse = useLiveStore((s) => s.pulse);
-  const wave = useLiveStore((s) => s.wave);
-  const tide = useLiveStore((s) => s.tide);
   const wake = useLiveStore((s) => s.wake);
   const sleep = useLiveStore((s) => s.sleep);
   const force = useLiveStore((s) => s.force);
   const kill = useLiveStore((s) => s.kill);
-  const removeTrigger = useLiveStore((s) => s.removeTrigger);
   const clearFailure = useLiveStore((s) => s.clearFailure);
 
   // Access level gates the action surface (the backend enforces it too — this just avoids dead buttons).
-  // read: status/history/data only · demand: + the Triggers menu · full: + Control/Windows/Failures.
+  // read: status/history/data only · demand: + Refreshes · full: + Control/Windows/Failures.
   const accessLevel = useLiveStore((s) => s.accessLevel);
   const canDemand = atLeast(accessLevel, 'demand');
   const canControl = atLeast(accessLevel, 'full');
 
-  const [tideBound, setTideBound] = useState('2');
-  const [tideUnit, setTideUnit] = useState<FreqUnit>('SECOND');
-  const [showTideInput, setShowTideInput] = useState(false);
   // The Options modal (retry budgets, Compute, Spouts, Alerts, Lineage) — opened by the Options bar
   // beneath the always-visible sections.
   const [optionsOpen, setOptionsOpen] = useState(false);
 
   const selectedPond = selectedPondId ? ponds[selectedPondId] : null;
   const selectedRipple = selectedRippleId ? ripples[selectedRippleId] : null;
-  const trigger = selectedPondId ? triggers[selectedPondId] : undefined;
   const isInlet = selectedPond ? selectedPond.sources.length === 0 : false;
   const selectedInfo = selectedPondId ? pondInfo[selectedPondId] : undefined;
-  // Failed/killed/blocked all no-op triggers (only Control/Clear recover them), so the Triggers
-  // section shows the reason in place of the buttons.
+  // Failed/killed/blocked all refuse demand (only Control/Clear recover them), so the Refresh section shows
+  // the reason in place of its controls.
   const halted = !!selectedInfo && (selectedInfo.isFailed || selectedInfo.isKilled || selectedInfo.isBlocked);
 
   // Mobile: the sidebar is a collapsible bottom sheet; selecting a node opens it
   // (state adjusted during render, like the budget inputs above).
   const [collapsed, setCollapsed] = useState(true);
-  const selectionKey = selectedRippleId ?? selectedTriggerId ?? selectedPondId;
+  const selectionKey = selectedRippleId ?? selectedPondId;
   const [prevSelectionKey, setPrevSelectionKey] = useState(selectionKey);
   if (selectionKey !== prevSelectionKey) {
     setPrevSelectionKey(selectionKey);
@@ -733,16 +715,14 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
     if (mobile && selectionKey) setCollapsed(false);
   }
 
-  const headerContext = selectedTriggerId
-    ? `${ponds[selectedTriggerId]?.name ?? selectedTriggerId} trigger`
-    : selectedRipple
-      ? `${ponds[selectedRipple.pondId]?.name ?? ''} / ${selectedRipple.name}`
-      : selectedPond?.name ?? null;
+  const headerContext = selectedRipple
+    ? `${ponds[selectedRipple.pondId]?.name ?? ''} / ${selectedRipple.name}`
+    : selectedPond?.name ?? null;
 
 
   const content = (
     <>
-      {!selectedPond && !selectedRipple && !selectedTriggerId && (
+      {!selectedPond && !selectedRipple && (
         <>
           <div style={{ fontSize: 12, color: '#71717a', lineHeight: 1.6 }}>
             Select a Pond or Ripple
@@ -751,23 +731,6 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
             (deployed from CLI)
           </div>
         </>
-      )}
-
-      {/* Trigger node selected */}
-      {selectedTriggerId && triggers[selectedTriggerId] && (
-        <Section>
-          <Label>Trigger · {selectedTriggerId}</Label>
-          {triggers[selectedTriggerId].kind === 'wave' ? (
-            <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 10 }}>Wave — standing pull.</div>
-          ) : (
-            <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 10 }}>
-              Tide — max staleness ≤ {formatDuration(triggers[selectedTriggerId].boundMs ?? 1000)}.
-            </div>
-          )}
-          {canDemand && (
-            <Btn onClick={() => removeTrigger(selectedTriggerId)} color={THEME_DANGER}>Remove Trigger</Btn>
-          )}
-        </Section>
       )}
 
       {/* Pond selected */}
@@ -812,7 +775,7 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
           </Section>
 
           {/* A Spout is a real node but its surface is its own (egress destination + the standing-Wake
-              control), so it replaces the Pond's Triggers/Control/Windows sections. */}
+              control), so it replaces the Pond's Refresh/Control/Windows sections. */}
           {selectedPond.isSpout ? (
             <SpoutPanel pond={selectedPond} canControl={canControl} />
           ) : (
@@ -821,78 +784,39 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
           {/* Windows (Inlet ponds only) */}
           {isInlet && (
             <Section>
-              <Label>Windows (batch source)</Label>
+              <Label>Windows</Label>
               <WindowEditor pond={selectedPond} readOnly={!canControl} />
             </Section>
           )}
 
-          {/* Triggers — or, while halted, the reason (triggers have no effect). The failure reason is
-              read-level (shown to all); the trigger buttons are demand+. A read user on a healthy Pond
-              sees no Triggers section at all. */}
-          {(halted || canDemand) && (
+          {/* Refresh — or, while halted, the reason (a Refresh has no effect). The failure reason is read-level
+              (shown to all); refreshing is demand+. A read user on a healthy Pond sees the recurring Refreshes. */}
           <Section>
-            <Label>Triggers</Label>
+            <Label>Refresh</Label>
             {halted ? (
               <StatusBox info={selectedInfo!} ponds={ponds} canControl={canControl} />
             ) : (
-              <>
-                <div style={quadRow}>
-                  <Btn block onClick={() => tap(selectedPond.id)} color={THEME_PULL}>Tap</Btn>
-                  <Btn block onClick={() => wave(selectedPond.id)} color={THEME_PULL}>Wave</Btn>
-                  <Btn block onClick={() => pulse(selectedPond.id)} color={THEME_PUSH}>Pulse</Btn>
-                  <Btn block onClick={() => setShowTideInput((v) => !v)} color={THEME_PUSH}>Tide</Btn>
-                </div>
-                {showTideInput && (
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 8 }}>
-                    <span style={{ fontSize: 11, color: '#71717a' }} title="keep no more stale than">≤</span>
-                    <input type="number" min="1" step="1" value={tideBound} onChange={(e) => setTideBound(e.target.value)} style={{ ...numInput, width: 56 }} />
-                    <select value={tideUnit} onChange={(e) => setTideUnit(e.target.value as FreqUnit)} style={selectInput}>
-                      {TIDE_UNITS.map((u) => (
-                        <option key={u.value} value={u.value}>{u.label}</option>
-                      ))}
-                    </select>
-                    <Btn
-                      small
-                      onClick={() => {
-                        const secs = TIDE_UNITS.find((u) => u.value === tideUnit)!.secs;
-                        tide(selectedPond.id, Math.max(0.1, parseFloat(tideBound) * secs));
-                        setShowTideInput(false);
-                      }}
-                      color={THEME_PUSH}
-                    >
-                      Set
-                    </Btn>
-                  </div>
-                )}
-                {trigger && (
-                  <div style={{ marginTop: 8 }}>
-                    <Btn small onClick={() => removeTrigger(selectedPond.id)} color={THEME_DANGER}>
-                      Remove {trigger.kind === 'wave' ? 'Wave' : 'Tide'} Trigger
-                    </Btn>
-                  </div>
-                )}
-              </>
+              <RefreshEditor pond={selectedPond} canDemand={canDemand} />
             )}
           </Section>
-          )}
 
           {/* Control: Force/Wake (go) and Sleep/Kill (stop) lifecycle on the Duck. Full only. */}
           {canControl && (
           <Section>
             <Label>Control</Label>
             <div style={quadRow}>
-              {/* Two colours paired like Triggers: the go-pair (Force/Wake) green, the stop-pair (Sleep/Kill) red. */}
+              {/* Two colours paired: the go-pair (Force/Wake) green, the stop-pair (Sleep/Kill) red. */}
               <Btn block onClick={() => force(selectedPond.id)} color={THEME_SUCCESS}>Force</Btn>
               <Btn block onClick={() => wake(selectedPond.id)} color={THEME_SUCCESS}>Wake</Btn>
               <Btn block onClick={() => sleep(selectedPond.id)} color={THEME_DANGER}>Sleep</Btn>
               <Btn block onClick={() => kill(selectedPond.id)} color={THEME_DANGER}>Kill</Btn>
             </div>
-            {/* Refresh / Reset / Remove are collection-oriented — do them via Options → Pond Actions. */}
+            {/* Rebuild / Reset / Remove are collection-oriented — do them via Options → Pond Actions. */}
           </Section>
           )}
 
           {/* Failure clearing stays visible (the remediation). The retry *budgets* moved to Options; the
-              failure reason is shown above (Triggers StatusBox) and in Run Detail for every level. */}
+              failure reason is shown above (Refresh StatusBox) and in Run Detail for every level. */}
           {canControl && selectedInfo?.isFailed && (
           <Section>
             <Label>Failure</Label>

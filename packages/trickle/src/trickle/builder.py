@@ -2,17 +2,22 @@
 
 A fluent builder that records an **operator DAG** (sources + binary equi-joins of any ``how``, plus an
 ordered ``filter``/``mutate``/``select`` output pipeline) and maintains its output incrementally. Each join
-node is maintained by the single
-**affected-key recompute** rule (``plans/trickle-dag.md``): for ``O = A ⋈ₖ B`` with deltas ``δA``, ``δB``,
+node's delta is a sum of terms over the current states ``A'``, ``B'`` and the deltas ``δA``, ``δB``
+(``plans/trickle-join-delta.md``), never a prior state:
 
-    K = πₖ(δA) ∪ πₖ(δB)                 -- the join-key values that changed on either side
-    δO = (O_new restricted to K)(+1) ⊎ (O_old restricted to K)(−1), consolidated
+    δ(A ⋈ B) = δA ⋈ B'  +  A' ⋈ δB  −  δA ⋈ δB          -- inner: a row's weight is its operands' product
 
-Restricting **both** inputs to ``key ∈ K`` before the join is sound for every join type (it is the semijoin
-the join already performs) and is the key pre-filter — a small change never drives a full scan of the other
-side. Re-evaluating each affected key's full output old-vs-new *is* the match-count logic for the outer
-incomparables (a NULL-padded preserved row), so ``left``/``right``/``full``/``semi``/``anti`` are maintained
-the same way as ``inner`` — no privileged spine, so a bushy ``(A⋈B)⋈(C⋈D)`` and outer joins compose freely.
+The existence joins and the outer joins' NULL-padded rows depend on whether *any* ``B`` row has a key, which
+only changes for the **flip set** ``F`` (keys of ``δB`` whose match count crossed zero, sign ``s``):
+
+    δ(A ⋉ B) = δA ⋉ B'  +  s·A'|F  −  s·δA|F                 δ(A ▷ B) = δA ▷ B'  −  s·A'|F  +  s·δA|F
+
+``left`` is the inner terms plus the padded ``δ(A ▷ B)``, ``right`` its mirror, ``full`` both. Each term joins
+a small side (a delta or ``F``) to a current state, so the join itself restricts the large side; for a
+current state that is itself a join, the small side's keys are also pushed down to the leaf that owns them,
+tightening any outer join on the way that would pad that leaf's side (``key_filter``). The root's delta is
+consolidated once, before the output pipeline. No privileged spine, so a bushy ``(A⋈B)⋈(C⋈D)`` and outer joins
+compose freely.
 
 Because deletions are full-row ``−1`` tuples (not key tombstones), a join may be on **any** key. The DAG
 composes to **inline SQL** (the planner's gate, ``plans/trickle-dag.md``: per-node materialisation loses to
@@ -42,8 +47,6 @@ from .io import (
     read_registry_delta,
     unique_name,
 )
-
-_W = "_duckstring_w"  # scratch weight column for prior-state reconstruction (distinct from the Z-set D_COL)
 
 
 class BuildError(ValueError):
@@ -87,6 +90,20 @@ _JOIN_SQL = {"inner": "JOIN", "left": "LEFT JOIN", "right": "RIGHT JOIN", "full"
              "semi": "SEMI JOIN", "anti": "ANTI JOIN"}
 # Join types whose output is the left side only (existence filters) — no right-side columns in the output.
 _LEFT_ONLY = {"semi", "anti"}
+# Join types whose output includes the matched (inner) rows.
+_MATCHED = {"inner", "left", "right", "full"}
+# A join a keys filter passes down through (``_pushed``). Whatever uses the filtered subtree joins it on the key
+# by equality, so a row whose key side is NULL-padded never contributes. Filtering a padded side would turn rows
+# it removes into such padded rows (harmless, but as many as the other side has rows), so the join is tightened
+# to drop them instead: ``_TIGHTEN[(how, side)]`` is the join without padding on ``side``. The right side of a
+# semi or anti join never reaches the output, so a key there can't be pushed.
+_TIGHTEN = {
+    ("inner", "left"): "inner", ("inner", "right"): "inner",
+    ("left", "left"): "left", ("left", "right"): "inner",
+    ("right", "left"): "inner", ("right", "right"): "right",
+    ("full", "left"): "left", ("full", "right"): "right",
+    ("semi", "left"): "semi", ("anti", "left"): "anti",
+}
 
 
 def _cols(on) -> tuple[str, ...]:
@@ -209,15 +226,14 @@ class _Join:
 
 class _NodeState:
     """The compiled SQL handles for one DAG node over this run: ``cols`` (qualified output columns),
-    ``current``/``old`` (view names for the new and prior full states), ``delta`` (view name for the
-    consolidated Z-set ΔO, or ``None``), ``changed`` and ``is_full``."""
+    ``current`` (view name for the full current state), ``delta`` (view name for the Z-set ΔO, unconsolidated
+    for a join, or ``None``), ``changed`` and ``is_full``."""
 
-    __slots__ = ("cols", "current", "old", "delta", "changed", "is_full")
+    __slots__ = ("cols", "current", "delta", "changed", "is_full")
 
-    def __init__(self, cols, current, old, delta, changed, is_full) -> None:
+    def __init__(self, cols, current, delta, changed, is_full) -> None:
         self.cols = cols
         self.current = current
-        self.old = old
         self.delta = delta
         self.changed = changed
         self.is_full = is_full
@@ -256,9 +272,11 @@ class TrickleBuilder:
         self._along: str | None = None  # the monotonic order axis for .accumulate() (set by .along())
         self._acc = None  # {"by": (...), "metrics": {out: acc.AccMetric}} after .accumulate()
         self._key_filter = True  # set per-terminal from the .merge()/.append() key_filter flag
-        # compile-scoped caches (rebuilt per terminal): leaf → alias, leaf → bare cols
+        # compile-scoped caches (rebuilt per terminal): leaf → alias, leaf → bare cols, node → compiled state
         self._alias_of: dict[int, str] = {}
         self._cols_cache: dict[int, list[str]] = {}
+        self._states: dict[int, _NodeState] = {}
+        self._scratch: list[str] = []  # temp tables a compile made (materialised join deltas), dropped by _chain
         # While emitting a comprehensive recompute as one query (:meth:`_query_sql`), every view the compile
         # creates is also logged here as ``(name, sql, leaf)``; ``leaf`` is set for a source's base read.
         self._view_log: list | None = None
@@ -512,7 +530,8 @@ class TrickleBuilder:
             pk: The output's primary key, which must be unique. Defaults to the ``by`` columns after
                 :meth:`aggregate`; otherwise required.
             ivm: ``False`` ignores source changes and recomputes the whole output each run.
-            key_filter: ``False`` skips filtering each join to the changed keys. No effect with ``ivm=False``.
+            key_filter: ``False`` stops changed keys being passed down into an operand that is itself a join.
+                No effect with ``ivm=False``.
             retain_t, retain_n: Change-log retention, as for ``pond.merge_table``.
             cluster_by, interleave, cluster_bits: How the table's compacted base is ordered, as for
                 ``pond.merge_table``.
@@ -769,10 +788,11 @@ class TrickleBuilder:
           recomputes the whole output with plain full-table joins, diffed against the stored main (the
           comprehensive path) — the escape for when the delta logic is counterproductive, short of dropping
           to raw ``.sql()``.
-        - **``key_filter``** — *bound the per-join recompute to the changed keys*. ``True`` pre-filters both
-          join inputs to ``key ∈ K`` (the affected keys). ``False`` keeps the delta composition but skips the
-          ``IN (…)`` restriction (joins the full new/old states and diffs) — useful when the change is large
-          enough to trip ``p`` anyway, so the filter buys nothing. (No effect when ``ivm=False``.)"""
+        - **``key_filter``** — *push changed keys into composed operands*. A delta term joins a small side (a
+          delta or a flip set) to a current state; when that state is itself a join, ``True`` filters the leaf
+          owning the join key to the small side's keys first, tightening outer joins on the way (DuckDB can't
+          move a join below an outer join itself). ``False`` leaves the subtree whole; the join
+          still restricts it, just later. (No effect when ``ivm=False``.)"""
         # Absent output (dropped by a delete, or a genuine bootstrap) ⇒ recompute whole: the incremental
         # path only *appends* ΔO to the changelog and never reads the sink, so composing a partial delta
         # onto a nonexistent log would persist just that delta as a false bootstrap. `name not in read_meta`
@@ -787,6 +807,8 @@ class TrickleBuilder:
             return self._comprehensive(out_pk, offer, state)
         if not state.changed:
             return "empty", None
+        if isinstance(self._root, _Join):  # one consolidation, at the root, before the output pipeline
+            state.delta = self._consolidate(state.delta, state.cols)
         delta_rel = self._project_delta(state)
         self._require_pk(out_pk, [c for c in delta_rel.columns if c != D_COL])
         return "incremental", delta_rel
@@ -886,6 +908,7 @@ class TrickleBuilder:
         and validate uniqueness. Called at the start of every compile."""
         leaves = self._leaves()
         self._alias_of = {}
+        self._states = {}
         seen = set()
         for i, leaf in enumerate(leaves):
             a = leaf.alias or f"s{i}"
@@ -946,9 +969,10 @@ class TrickleBuilder:
         cols, cur = self._join_view(node, lcols, lcur, rcols, rcur)
         return cols, cur
 
-    def _join_view(self, node, lcols, lcur, rcols, rcur, *, weight=None):
+    def _join_view(self, node, lcols, lcur, rcols, rcur, *, weight=None, how=None):
         """Emit one join view over the two child views. ``weight`` (``+1``/``−1``) appends a ``_duckstring_d``
-        column (for delta terms); ``None`` is a plain state join. Returns ``(out_cols, view_name)``."""
+        column (for delta terms); ``None`` is a plain state join. ``how`` overrides the node's join type (a
+        tightened outer join, :meth:`_pushed`). Returns ``(out_cols, view_name)``."""
         out_cols = lcols if node.how in _LEFT_ONLY else lcols + rcols
         pairs = self._resolve_pairs(node)
         cond = " AND ".join(f'L.{_q(lq)} = R.{_q(rq)}' for lq, rq in pairs)
@@ -957,15 +981,15 @@ class TrickleBuilder:
             sel += ", " + ", ".join(f'R.{_q(c)} AS {_q(c)}' for c in rcols)
         if weight is not None:
             sel += f", {int(weight)} AS {_q(D_COL)}"
-        sql = f"SELECT {sel} FROM {_q(lcur)} L {_JOIN_SQL[node.how]} {_q(rcur)} R ON {cond}"
+        sql = f"SELECT {sel} FROM {_q(lcur)} L {_JOIN_SQL[how or node.how]} {_q(rcur)} R ON {cond}"
         return out_cols, self._view(sql)
 
-    # ─── compile: full (current + old + delta) ───────────────────────────────────
+    # ─── compile: full (current + delta) ─────────────────────────────────────────
 
     def _compile(self, node) -> _NodeState:
-        if isinstance(node, _Source):
-            return self._compile_source(node)
-        return self._compile_join(node)
+        state = self._compile_source(node) if isinstance(node, _Source) else self._compile_join(node)
+        self._states[id(node)] = state  # the delta terms read their operands' subtrees back from here
+        return state
 
     def _compile_source(self, node: _Source) -> _NodeState:
         a = self._alias_for(node)
@@ -979,22 +1003,16 @@ class TrickleBuilder:
         current = self._view(f"SELECT {sel} FROM {_q(base)}")
 
         delta = node.threaded_delta if node.threaded_delta is not None else self.ctx.read_delta(node.ref)
-        is_full = delta.is_full
-        changed = is_full
-        delta_view = None
-        old = current
-        if not is_full:
-            if delta.is_empty():
-                return _NodeState(cols, current, current, None, False, False)
-            changed = True
-            if self._over_threshold(node.ref, delta, node.p):
-                return _NodeState(cols, current, current, None, True, True)
-            dbase = unique_name("dsrc")
-            delta.zset.create_view(dbase, replace=True)
-            dsel = ", ".join(f'{_q(c)} AS {_q(f"{a}.{c}")}' for c in bare) + f", {_q(D_COL)} AS {_q(D_COL)}"
-            delta_view = self._view(f"SELECT {dsel} FROM {_q(dbase)}")
-            old = self._reconstruct_old(cols, current, delta_view)
-        return _NodeState(cols, current, old, delta_view, changed, is_full)
+        if delta.is_full:
+            return _NodeState(cols, current, None, True, True)
+        if delta.is_empty():
+            return _NodeState(cols, current, None, False, False)
+        if self._over_threshold(node.ref, delta, node.p):
+            return _NodeState(cols, current, None, True, True)
+        dbase = unique_name("dsrc")
+        delta.zset.create_view(dbase, replace=True)
+        dsel = ", ".join(f'{_q(c)} AS {_q(f"{a}.{c}")}' for c in bare) + f", {_q(D_COL)} AS {_q(D_COL)}"
+        return _NodeState(cols, current, self._view(f"SELECT {dsel} FROM {_q(dbase)}"), True, False)
 
     def _compile_join(self, node: _Join) -> _NodeState:
         ls = self._compile(node.left)
@@ -1004,62 +1022,185 @@ class TrickleBuilder:
         changed = ls.changed or rs.changed
         _, current = self._join_view(node, ls.cols, ls.current, rs.cols, rs.current)
         if is_full or not changed:
-            return _NodeState(out_cols, current, current, None, changed, is_full)
-        _, old = self._join_view(node, ls.cols, ls.old, rs.cols, rs.old)
-        delta = self._join_delta(node, ls, rs, out_cols)
-        return _NodeState(out_cols, current, old, delta, True, False)
+            return _NodeState(out_cols, current, None, changed, is_full)
+        # A child join's delta is an inline view, re-evaluated at every reference. When this join reads it more
+        # than once, down a chain the bottom delta would run 2^depth times; a delta is small, so compute it once.
+        for child, own, sibling, other in ((node.left, ls, node.right, rs), (node.right, rs, node.left, ls)):
+            if isinstance(child, _Join) and own.delta is not None and self._reads_twice(node, sibling, other):
+                own.delta = self._scratch_table(own.delta)
+        return _NodeState(out_cols, current, self._join_delta(node, ls, rs), True, False)
 
-    def _join_delta(self, node: _Join, ls: _NodeState, rs: _NodeState, out_cols) -> str:
-        """δ(L ⋈ R) by the affected-key recompute: K = the changed sides' join-key values; recompute the
-        join restricted to ``key ∈ K`` over the new states (+1) and the old states (−1), and consolidate.
-        With ``key_filter=False`` the ``K`` restriction is skipped — the same diff over the *full* new/old
-        states (correct, just unpruned)."""
+    def _reads_twice(self, node: _Join, sibling, other: _NodeState) -> bool:
+        """Whether ``node``'s delta terms read one side's delta more than once: always for the existence terms
+        (semi, anti and the outer joins' padded rows), else when the other side (``sibling``, compiled to
+        ``other``) changed too (``δL ⋈ δR``) or is a join the delta's keys are pushed into."""
+        return (node.how != "inner" or other.delta is not None
+                or (self._key_filter and isinstance(sibling, _Join)))
+
+    # ─── the join delta (plans/trickle-join-delta.md) ────────────────────────────
+
+    def _join_delta(self, node: _Join, ls: _NodeState, rs: _NodeState) -> str:
+        """δ(L ⋈ R) as a sum of terms over the current states and the deltas, unconsolidated (the root
+        consolidates once). Inner: ``δL ⋈ R' + L' ⋈ δR − δL ⋈ δR``. The existence parts (``semi``/``anti``,
+        and the NULL-padded rows of the outer joins) are :meth:`_exists_delta`. An unchanged side has no delta,
+        so its terms aren't generated."""
         pairs = self._resolve_pairs(node)
-        k = self._affected_keys(ls, rs, pairs) if self._key_filter else None
-        new = self._restricted_join(node, ls.cols, ls.current, rs.cols, rs.current, pairs, k, 1)
-        old = self._restricted_join(node, ls.cols, ls.old, rs.cols, rs.old, pairs, k, -1)
-        cols_sql = ", ".join(_q(c) for c in out_cols)
+        lk, rk = [lq for lq, _ in pairs], [rq for _, rq in pairs]
+        terms = []
+        if node.how in _MATCHED:
+            terms += self._matched_terms(node, ls, rs, lk, rk)
+        if node.how in ("left", "full"):
+            unmatched = self._exists_delta(node.left, ls, lk, node.right, rs, rk, semi=False)
+            terms.append(self._pad(unmatched, ls.cols, rs, right=True))
+        if node.how in ("right", "full"):
+            unmatched = self._exists_delta(node.right, rs, rk, node.left, ls, lk, semi=False)
+            terms.append(self._pad(unmatched, rs.cols, ls, right=False))
+        if node.how in _LEFT_ONLY:
+            terms.append(self._exists_delta(node.left, ls, lk, node.right, rs, rk, semi=node.how == "semi"))
+        return self._view(" UNION ALL BY NAME ".join(f"SELECT * FROM {_q(t)}" for t in terms))
+
+    def _matched_terms(self, node: _Join, ls: _NodeState, rs: _NodeState, lk, rk) -> list[str]:
+        """The inner join's delta terms. A row's weight is the product of its operands' weights (a current
+        state row weighs 1), so ``δL ⋈ δR`` enters negated: it is counted in both of the other terms."""
+        d = _q(D_COL)
+        cond = " AND ".join(f"L.{_q(a)} = R.{_q(b)}" for a, b in zip(lk, rk, strict=True))
+        sel = ", ".join(f"L.{_q(c)} AS {_q(c)}" for c in ls.cols) + ", "
+        sel += ", ".join(f"R.{_q(c)} AS {_q(c)}" for c in rs.cols)
+
+        def term(lview, rview, weight):
+            return self._view(f"SELECT {sel}, {weight} AS {d} FROM {_q(lview)} L JOIN {_q(rview)} R ON {cond}")
+
+        out = []
+        if ls.delta is not None:
+            out.append(term(ls.delta, self._pushed(node.right, rs, rk, ls.delta, lk), f"L.{d}"))
+        if rs.delta is not None:
+            out.append(term(self._pushed(node.left, ls, lk, rs.delta, rk), rs.delta, f"R.{d}"))
+        if ls.delta is not None and rs.delta is not None:
+            out.append(term(ls.delta, rs.delta, f"-(L.{d} * R.{d})"))
+        return out
+
+    def _exists_delta(self, pnode, ps: _NodeState, pk, qnode, qs: _NodeState, qk, *, semi: bool) -> str:
+        """The delta of ``P ⋉ Q`` (``semi``) or ``P ▷ Q`` (otherwise) over P's columns. With ``s = E' − E`` on
+        the flip set ``F`` (the keys whose existence in Q changed):
+        ``δ(P ⋉ Q) = δP ⋉ Q' + s·P'|F − s·δP|F`` and ``δ(P ▷ Q) = δP ▷ Q' − s·P'|F + s·δP|F``."""
+        d = _q(D_COL)
+        sel = ", ".join(f"P.{_q(c)} AS {_q(c)}" for c in ps.cols)
+        parts = []
+        if ps.delta is not None:
+            cond = " AND ".join(f"P.{_q(a)} = Q.{_q(b)}" for a, b in zip(pk, qk, strict=True))
+            qcur = self._pushed(qnode, qs, qk, ps.delta, pk)
+            how = "SEMI JOIN" if semi else "ANTI JOIN"
+            parts.append(f"SELECT {sel}, P.{d} AS {d} FROM {_q(ps.delta)} P {how} {_q(qcur)} Q ON {cond}")
+        if qs.delta is not None:
+            flips = self._flips(qnode, qs, qk)
+            knames = [f"k{i}" for i in range(len(pk))]
+            cond = " AND ".join(f"P.{_q(a)} = F.{k}" for a, k in zip(pk, knames, strict=True))
+            pcur = self._pushed(pnode, ps, pk, flips, knames)
+            sign = "" if semi else "-"
+            parts.append(f"SELECT {sel}, {sign}F.s AS {d} FROM {_q(pcur)} P JOIN {_q(flips)} F ON {cond}")
+            if ps.delta is not None:
+                sign = "-" if semi else ""
+                parts.append(f"SELECT {sel}, {sign}F.s * P.{d} AS {d} FROM {_q(ps.delta)} P JOIN {_q(flips)} F ON {cond}")
+        return self._view(" UNION ALL ".join(parts))
+
+    def _flips(self, qnode, qs: _NodeState, qk) -> str:
+        """The keys of ``δQ`` whose existence in Q changed, as ``k0…, s`` with ``s = +1`` for a key that gained
+        its first match and ``−1`` for one that lost its last. From counts, not a prior state: ``n'`` counts Q'
+        at the key and the prior count is ``n' − Σ δQ``. A key with a NULL part never matches, so it's left out."""
+        d = _q(D_COL)
+        knames = [f"k{i}" for i in range(len(qk))]
+        ksel = ", ".join(f"{_q(c)} AS {k}" for c, k in zip(qk, knames, strict=True))
+        notnull = " AND ".join(f"{_q(c)} IS NOT NULL" for c in qk)
+        dsum = self._view(f"SELECT {ksel}, SUM({d}) AS ds FROM {_q(qs.delta)} WHERE {notnull} GROUP BY ALL")
+        qcur = self._pushed(qnode, qs, qk, dsum, knames)
+        on_q = " AND ".join(f"Q.{_q(c)} = D.{k}" for c, k in zip(qk, knames, strict=True))
+        dk = ", ".join(f"D.{k}" for k in knames)
+        count = f"SELECT {dk}, count(*) AS n FROM {_q(qcur)} Q JOIN {_q(dsum)} D ON {on_q} GROUP BY ALL"
+        on_c = " AND ".join(f"D.{k} = C.{k}" for k in knames)
+        n = "coalesce(C.n, 0)"
         return self._view(
-            f"SELECT {cols_sql}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} "
-            f"FROM (SELECT * FROM {_q(new)} UNION ALL BY NAME SELECT * FROM {_q(old)}) "
-            f"GROUP BY {cols_sql} HAVING SUM({_q(D_COL)}) <> 0"
+            f"SELECT {dk}, CASE WHEN {n} > 0 THEN 1 ELSE -1 END AS s FROM {_q(dsum)} D LEFT JOIN ({count}) C "
+            f"ON {on_c} WHERE ({n} > 0) <> ({n} - D.ds > 0)"
         )
 
-    def _affected_keys(self, ls: _NodeState, rs: _NodeState, pairs) -> str:
-        """A view of the changed join-key values: the left-side key columns of ``δL`` ∪ the right-side key
-        columns of ``δR`` (aliased to a common ``k0,k1,…``)."""
-        knames = [f"k{i}" for i in range(len(pairs))]
-        ksel = ", ".join(knames)
-        parts = []
-        if ls.changed and ls.delta is not None:
-            sel = ", ".join(f'{_q(lq)} AS {kn}' for (lq, _rq), kn in zip(pairs, knames, strict=True))
-            parts.append(f"SELECT {sel} FROM {_q(ls.delta)}")
-        if rs.changed and rs.delta is not None:
-            sel = ", ".join(f'{_q(rq)} AS {kn}' for (_lq, rq), kn in zip(pairs, knames, strict=True))
-            parts.append(f"SELECT {sel} FROM {_q(rs.delta)}")
-        return self._view(f"SELECT DISTINCT {ksel} FROM ({' UNION ALL '.join(parts)})")
+    def _pad(self, view: str, cols, other: _NodeState, *, right: bool) -> str:
+        """``view``'s rows (``cols`` + weight) with the other side's columns as typed NULLs, in output order
+        (left columns first)."""
+        rel = self.ctx.con.sql(f"SELECT * FROM {_q(other.current)}")
+        types = dict(zip(rel.columns, (str(t) for t in rel.types), strict=True))
+        nulls = ", ".join(f"CAST(NULL AS {types[c]}) AS {_q(c)}" for c in other.cols)
+        have = ", ".join(_q(c) for c in cols)
+        return self._view(f"SELECT {have + ', ' + nulls if right else nulls + ', ' + have}, {_q(D_COL)} FROM {_q(view)}")
 
-    def _restricted_join(self, node, lcols, lview, rcols, rview, pairs, kview, weight) -> str:
-        """A join view of two states weighted ``weight`` — the affected-key recompute term. ``kview`` (the
-        affected keys) pre-filters **both** inputs to ``key ∈ K``; ``None`` (``key_filter=False``) joins the
-        full states unrestricted."""
-        if kview is not None:
-            lkey = ", ".join(_q(lq) for lq, _rq in pairs)
-            rkey = ", ".join(_q(rq) for _lq, rq in pairs)
-            ksel = ", ".join(f"k{i}" for i in range(len(pairs)))
-            lview = self._view(f"SELECT * FROM {_q(lview)} WHERE ({lkey}) IN (SELECT {ksel} FROM {_q(kview)})")
-            rview = self._view(f"SELECT * FROM {_q(rview)} WHERE ({rkey}) IN (SELECT {ksel} FROM {_q(kview)})")
-        _, view = self._join_view(node, lcols, lview, rcols, rview, weight=weight)
+    def _pushed(self, node, state: _NodeState, cols, src: str, src_cols) -> str:
+        """``state.current`` for a term that joins it on ``cols`` to the small view ``src`` (keys in
+        ``src_cols``), restricted to the rows that join can use. A leaf is returned as is: the join probes it
+        once anyway. A subtree gets each key column's leaf filtered to ``src``'s keys first (DuckDB reorders inner
+        joins itself but can't move one below an outer join). Every caller joins the result on ``cols`` by
+        equality, so a row with a NULL-padded key column never contributes, and the outer joins on the way down
+        are tightened to drop those rows (``_TIGHTEN``). Off with ``key_filter=False``."""
+        if not self._key_filter or isinstance(node, _Source):
+            return state.current
+        filters: dict[int, list[tuple[str, int]]] = {}
+        present: dict[int, set[str]] = {}  # join node id → the sides that must be present (not NULL-padded)
+        for i, col in enumerate(cols):
+            path = self._push_path(node, col)
+            if path is None:
+                continue
+            leaf, sides = path
+            filters.setdefault(id(leaf), []).append((col, i))
+            for jid, side in sides:
+                present.setdefault(jid, set()).add(side)
+        if not filters:
+            return state.current
+        ksel = ", ".join(f"{_q(c)} AS k{i}" for i, c in enumerate(src_cols))
+        keys = self._view(f"SELECT DISTINCT {ksel} FROM {_q(src)}")
+        return self._filtered_current(node, filters, keys, present)
+
+    def _push_path(self, node, col: str):
+        """``(leaf, [(join id, side)])`` for the qualified column ``col``: the leaf that owns it and, for each
+        join on the way down, which side holds it. ``None`` when it sits on the right of a semi or anti join."""
+        alias = col.split(".", 1)[0]
+        sides = []
+        while isinstance(node, _Join):
+            side = "left" if any(self._alias_for(leaf) == alias for leaf in node.left.leaves()) else "right"
+            if (node.how, side) not in _TIGHTEN:
+                return None
+            sides.append((id(node), side))
+            node = node.left if side == "left" else node.right
+        return (node, sides) if self._alias_for(node) == alias else None
+
+    def _filtered_current(self, node, filters, keys: str, present) -> str:
+        """``node``'s current state rebuilt with ``filters`` (leaf id → ``[(col, i)]``: keep rows whose ``col``
+        is among ``keys``' ``k{i}``) applied at the leaves, each join on the way tightened for the sides that
+        must be present (``present``); an unfiltered subtree reuses its compiled view."""
+        state = self._states[id(node)]
+        if not any(id(leaf) in filters for leaf in node.leaves()):
+            return state.current
+        if isinstance(node, _Source):
+            where = " AND ".join(f"{_q(c)} IN (SELECT k{i} FROM {_q(keys)})" for c, i in filters[id(node)])
+            return self._view(f"SELECT * FROM {_q(state.current)} WHERE {where}")
+        how = node.how
+        for side in sorted(present.get(id(node), ())):
+            how = _TIGHTEN[(how, side)]
+        ls, rs = self._states[id(node.left)], self._states[id(node.right)]
+        _, view = self._join_view(node, ls.cols, self._filtered_current(node.left, filters, keys, present),
+                                  rs.cols, self._filtered_current(node.right, filters, keys, present), how=how)
         return view
 
-    def _reconstruct_old(self, cols, current, delta_view) -> str:
-        """``prior = consolidate(current(+1) ⊎ −delta)`` — the source's state before this run's change."""
+    def _scratch_table(self, view: str) -> str:
+        """``view`` computed once into a temp table, dropped after the terminal's write (:meth:`_chain`)."""
+        name = unique_name("dagd")
+        self.ctx.con.execute(f"CREATE TEMP TABLE {_q(name)} AS SELECT * FROM {_q(view)}")
+        self._scratch.append(name)
+        return name
+
+    def _consolidate(self, view: str, cols) -> str:
+        """``view`` consolidated by full row: one row per distinct image with its net weight, zeros dropped."""
         sel = ", ".join(_q(c) for c in cols)
         return self._view(
-            f"SELECT {sel} FROM ("
-            f"SELECT {sel}, 1 AS {_q(_W)} FROM {_q(current)} "
-            f"UNION ALL BY NAME SELECT {sel}, -{_q(D_COL)} AS {_q(_W)} FROM {_q(delta_view)}"
-            f") GROUP BY {sel} HAVING SUM({_q(_W)}) > 0"
+            f"SELECT {sel}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} FROM {_q(view)} "
+            f"GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0"
         )
 
     # ─── join-key resolution ──────────────────────────────────────────────────────
@@ -1230,6 +1371,9 @@ class TrickleBuilder:
         """Thread the just-materialised output forward as a chainable in-run operand — its delta read back
         from the registry (same coverage rule as the published read_delta). ``changed`` records whether the
         write actually changed the output, surfaced on the returned handle via :meth:`was_changed`."""
+        for t in self._scratch:  # the write is done, so nothing reads the materialised deltas any more
+            self.ctx.con.execute(f"DROP TABLE IF EXISTS {_q(t)}")
+        self._scratch = []
         # Observed-lineage hook (optional host capability, like ``count_table``): a terminal just wrote
         # ``name`` straight to the registry, so tell the host — trickle/ stays dependency-free.
         hook = getattr(self.ctx, "record_lineage_write", None)

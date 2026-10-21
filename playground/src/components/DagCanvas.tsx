@@ -19,13 +19,12 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { usePlaygroundStore, consumeEdgeColor, formatAge, pushTargetF, THEME_PULL, THEME_PUSH } from '@/lib/store';
+import { usePlaygroundStore, consumeEdgeColor, formatAge, pushTargetF } from '@/lib/store';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
 import { useTourStore } from '@/lib/tour';
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { PondNode } from './PondNode';
 import { RippleNode } from './RippleNode';
-import { TriggerNode } from './TriggerNode';
 import { SimControls } from './SimControls';
 
 // ─── Custom edges (colour reflects what the sink can consume) ────────────────
@@ -50,33 +49,16 @@ function PondEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   return <BaseEdge id={id} path={edgePath} interactionWidth={0} style={{ stroke: color, strokeWidth: 2 }} />;
 }
 
-function TriggerEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
-  const pondId = (data as { pondId: string }).pondId;
-  const trigger = usePlaygroundStore((s) => s.triggers[pondId]);
-  const color = trigger?.kind === 'wave' ? THEME_PULL : THEME_PUSH;
-  const [edgePath] = getStraightPath({ sourceX, sourceY, targetX, targetY });
-  return (
-    <BaseEdge
-      id={id}
-      path={edgePath}
-      interactionWidth={0}
-      style={{ stroke: color, strokeWidth: 2, strokeDasharray: '6 3' }}
-    />
-  );
-}
-
 // ─── Node & edge type maps ───────────────────────────────────────────────────
 
 const nodeTypes: NodeTypes = {
   pond: PondNode as NodeTypes[string],
   ripple: RippleNode as NodeTypes[string],
-  trigger: TriggerNode as NodeTypes[string],
 };
 
 const edgeTypes: EdgeTypes = {
   rippleEdge: RippleEdge as EdgeTypes[string],
   pondEdge: PondEdge as EdgeTypes[string],
-  triggerEdge: TriggerEdge as EdgeTypes[string],
 };
 
 // ─── Tour framing ────────────────────────────────────────────────────────────
@@ -118,10 +100,12 @@ function TourFramer() {
 
 // ─── Main canvas ─────────────────────────────────────────────────────────────
 
-export function DagCanvas() {
+// `bare` is the canvas alone, for the story: no speed or zoom controls, and no zooming to a selection. `direction`
+// fixes the layout's orientation instead of following the screen width (the story picks it from its own shape).
+export function DagCanvas({ bare = false, direction }: { bare?: boolean; direction?: 'LR' | 'TB' } = {}) {
   const ponds = usePlaygroundStore((s) => s.ponds);
   const ripples = usePlaygroundStore((s) => s.ripples);
-  const triggers = usePlaygroundStore((s) => s.triggers);
+  const refreshes = usePlaygroundStore((s) => s.refreshes);
   const pondStates = usePlaygroundStore((s) => s.pondStates);
   const rippleStates = usePlaygroundStore((s) => s.rippleStates);
   const now = usePlaygroundStore((s) => s.now);
@@ -130,7 +114,6 @@ export function DagCanvas() {
   const clearSelection = usePlaygroundStore((s) => s.clearSelection);
   const selectedPondId = usePlaygroundStore((s) => s.selectedPondId);
   const selectedRippleId = usePlaygroundStore((s) => s.selectedRippleId);
-  const selectedTriggerId = usePlaygroundStore((s) => s.selectedTriggerId);
 
   // On mobile, tapping a node zooms to it — the clear "this is selected" signal, and the
   // only way the node text gets readable. The delay lets the bottom sheet open (the canvas
@@ -143,23 +126,23 @@ export function DagCanvas() {
   // On a short screen the tour card is a bar along the canvas's bottom edge, over the zoom controls.
   const hideControls = useIsShort() && !isMobile && touring;
   useEffect(() => {
-    if (!isMobile || touring) return;
-    const id = selectedRippleId ?? (selectedTriggerId ? `trigger-${selectedTriggerId}` : selectedPondId);
+    if (!isMobile || touring || bare) return;
+    const id = selectedRippleId ?? selectedPondId;
     if (!id) return;
     const t = setTimeout(() => fitView({ nodes: [{ id }], duration: 350, padding: 0.15, maxZoom: 1.1 }), 120);
     return () => clearTimeout(t);
-  }, [isMobile, touring, selectedPondId, selectedRippleId, selectedTriggerId, fitView]);
+  }, [isMobile, touring, bare, selectedPondId, selectedRippleId, fitView]);
 
   // Recompute layout whenever graph structure changes (not on every sim tick)
   const layoutKey = useMemo(
     () =>
       JSON.stringify({
-        ponds: Object.values(ponds).map((p) => ({ id: p.id, sources: p.sources, name: p.name })),
+        ponds: Object.values(ponds).map((p) => ({ id: p.id, sources: p.sources, name: p.name, major: p.major })),
         // name affects ripple width, so reflow on rename too
         ripples: Object.values(ripples).map((r) => ({ id: r.id, parents: r.parents, pondId: r.pondId, name: r.name })),
-        triggers: Object.keys(triggers),
+        refreshes: Object.fromEntries(Object.entries(refreshes).map(([k, v]) => [k, v.map((r) => r.everyMs)])),
       }),
-    [ponds, ripples, triggers]
+    [ponds, ripples, refreshes]
   );
 
   // Each box's minimum width to fit its live stats line (grows with run counts / longer ages).
@@ -205,10 +188,11 @@ export function DagCanvas() {
     return `${enc(floors.ripples ?? {})}|${enc(floors.ponds ?? {})}`;
   }, [floors]);
 
+  const rankdir = direction ?? (isMobile ? 'TB' : 'LR');
   const { nodes, edges } = useMemo(
-    () => computeLayout(ponds, ripples, triggers, floors, isMobile ? 'TB' : 'LR'),
+    () => computeLayout(ponds, ripples, refreshes, floors, rankdir),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [layoutKey, widthKey, isMobile]
+    [layoutKey, widthKey, rankdir]
   );
 
   // Handle positions move between the LR and TB layouts; nudge React Flow to re-measure them
@@ -219,7 +203,7 @@ export function DagCanvas() {
     const t = setTimeout(() => fitView({ padding: 0.15 }), 100);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMobile]);
+  }, [rankdir]);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -261,12 +245,14 @@ export function DagCanvas() {
       >
         <Background color="#2a2a35" gap={24} size={1} />
         <TourFramer />
-        <Panel position="top-left">
-          <SimControls />
-        </Panel>
+        {!bare && (
+          <Panel position="top-left">
+            <SimControls />
+          </Panel>
+        )}
         <Controls
           style={{
-            display: hideControls ? 'none' : undefined,
+            display: hideControls || bare ? 'none' : undefined,
             background: '#1a1a1f',
             border: '1px solid #3f3f46',
             borderRadius: 6,

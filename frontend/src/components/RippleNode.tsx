@@ -50,7 +50,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
         {ripple.name}
       </span>
       <span style={{ fontSize: 11, color: '#71717a', display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
-        <DemandIndicators hasPull={view.hasPull} targetF={view.targetF} now={now} />
+        <DemandIndicators demandF={view.demandF} now={now} />
         <span style={{ color: '#a1a1aa' }}>↑{formatAge(startedF, now)} ({view.runsStarted})</span>
         <span>✓{formatAge(view.endF, now)} ({view.runsCompleted})</span>
       </span>

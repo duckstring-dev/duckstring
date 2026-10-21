@@ -3,6 +3,9 @@
 import { useEffect, useRef } from 'react';
 import { usePlaygroundStore, THEME_BRAND } from '@/lib/store';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
+import { useModeStore } from '@/lib/mode';
+import { NextChoices } from './NextChoices';
+import { revealSoon } from '@/lib/reveal';
 import { useTourStore } from '@/lib/tour';
 import { TOUR_STEPS, CHAPTER_TITLES } from '@/lib/tourSteps';
 import { initialTourMode } from '@/lib/tourStorage';
@@ -12,7 +15,7 @@ import { initialTourMode } from '@/lib/tourStorage';
 // control, at the bottom otherwise. On a short screen (a phone in landscape) it's a flat bar along the
 // bottom of the canvas, so the graph keeps most of the height.
 
-// `backticks` → code.
+// `backticks` → code, **double asterisks** → bold.
 function Copy({ text }: { text: string }) {
   return (
     <>
@@ -22,7 +25,7 @@ function Copy({ text }: { text: string }) {
             {part}
           </code>
         ) : (
-          part
+          part.split('**').map((bit, j) => (j % 2 ? <strong key={`${i}-${j}`} style={{ color: '#e4e4e7' }}>{bit}</strong> : bit))
         )
       )}
     </>
@@ -98,37 +101,45 @@ function WaitProgress() {
   );
 }
 
+let firstLoadDone = false;
+
+
+// The card's edge, given per side (see the panel style).
+const EDGE = '1px solid #3f3f46';
 export function TourCard() {
   const isMobile = useIsMobile();
-  const flat = useIsShort() && !isMobile;
+  const short = useIsShort() && !isMobile;
   const phase = useTourStore((t) => t.phase);
   const index = useTourStore((t) => t.index);
   const waitLabel = useTourStore((t) => t.waitLabel);
+  const speed = usePlaygroundStore((s) => s.speed);
   const lastAdvance = useTourStore((t) => t.lastAdvance);
+  const collapsed = useTourStore((t) => t.collapsed);
   const tour = useTourStore.getState;
   const cardRef = useRef<HTMLDivElement>(null);
 
-  // First load: start (?tour=1), offer (first visit) or stay quiet.
+  // First load: start (?tour=1), offer (first visit) or stay quiet. Once per page load: switching back from
+  // Trickle mode remounts this card.
   useEffect(() => {
+    if (firstLoadDone) return;
+    firstLoadDone = true;
     const mode = initialTourMode(window.location.search);
     if (mode === 'start') tour().start();
     else if (mode === 'prompt') tour().offer();
   }, [tour]);
 
   const step = TOUR_STEPS[index];
+  // The flat bar on a short screen, except for the last card: its choices need the full layout.
+  const flat = short && !step.choices;
 
   // Move focus to the card when it opens, and bring the outlined control into view.
   useEffect(() => {
     if (phase !== 'step' && phase !== 'prompt' && phase !== 'confirm') return;
     cardRef.current?.focus({ preventScroll: true });
     if (phase !== 'step' || !step.target?.control) return;
-    const t = setTimeout(() => {
-      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      document
-        .querySelector(`[data-tour="${step.target!.control}"]`)
-        ?.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
-    }, 200);
-    return () => clearTimeout(t);
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    revealSoon(`[data-tour="${step.target.control}"]`, (ms, fn) => void timers.push(setTimeout(fn, ms)));
+    return () => timers.forEach(clearTimeout);
   }, [phase, index, step]);
 
   // Escape skips; the arrow keys move. Typing in the sidebar's inputs is left alone.
@@ -154,6 +165,22 @@ export function TourCard() {
     return () => window.removeEventListener('keydown', onKey);
   }, [phase, tour]);
 
+  // On a phone, while the card (or the waiting pill) sits at the bottom of the screen, publish how much of it
+  // it covers as --ds-tour-inset: the bottom sheet adds that much scroll space under its content, so a control the
+  // tour points at can be scrolled clear of the card (revealSoon does that when a step or wait opens).
+  const inset = useRef('0px');
+  useEffect(() => {
+    const card = document.getElementById('ds-tour-card');
+    const r = card?.getBoundingClientRect();
+    const atBottom = !!r && isMobile && r.bottom > window.innerHeight / 2;
+    const next = atBottom ? `${Math.ceil(window.innerHeight - r!.top + 8)}px` : '0px';
+    if (next !== inset.current) {
+      inset.current = next;
+      document.documentElement.style.setProperty('--ds-tour-inset', next);
+    }
+  });
+  useEffect(() => () => document.documentElement.style.setProperty('--ds-tour-inset', '0px'), []);
+
   // The action buttons re-render with the store, so a done action shows as Next.
   const actionDone = usePlaygroundStore((s) => (step.action ? step.action.done(s) : true));
 
@@ -172,13 +199,21 @@ export function TourCard() {
       }
     : flat
       ? { position: 'absolute', left: 0, right: 0, bottom: 0 }
-      : { position: 'absolute', left: 56, bottom: 16, width: 320 };
+      : short
+        ? // The last card on a short screen: wide, and no taller than the canvas (it scrolls if it must).
+          { position: 'absolute', left: 56, right: 16, bottom: 8, maxWidth: 560, maxHeight: 'calc(100% - 16px)', overflowY: 'auto' }
+        : { position: 'absolute', left: 56, bottom: 16, width: 320 };
   const panel: React.CSSProperties = {
     ...anchor,
     zIndex: 50,
     background: '#18181d',
-    border: '1px solid #3f3f46',
-    ...(flat ? { borderBottom: 'none', borderRadius: '10px 10px 0 0' } : { borderRadius: 10 }),
+    // Each side separately (no `border` shorthand): the flat bar drops its bottom edge, and React warns when a
+    // longhand is removed while the shorthand stays.
+    borderTop: EDGE,
+    borderLeft: EDGE,
+    borderRight: EDGE,
+    borderBottom: flat ? 'none' : EDGE,
+    borderRadius: flat ? '10px 10px 0 0' : 10,
     boxShadow: flat ? '0 -8px 24px rgba(0, 0, 0, 0.5)' : '0 12px 32px rgba(0, 0, 0, 0.55)',
     color: '#e4e4e7',
     fontFamily: 'ui-monospace, SFMono-Regular, monospace',
@@ -190,6 +225,9 @@ export function TourCard() {
       <div id="ds-tour-card" data-testid="tour-pill" role="status" style={{ ...panel, padding: '4px 4px 4px 14px', overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ flex: 1, fontSize: 12, color: '#a1a1aa' }}>{`${waitLabel ?? 'Running'}…`}</span>
+          <span data-testid="tour-speed" style={{ fontSize: 11, color: speed > 1 ? THEME_BRAND : '#71717a', whiteSpace: 'nowrap' }}>
+            {speed > 1 ? `${speed}× speed` : 'real time'}
+          </span>
           <Button onClick={() => tour().hurry()} testId="tour-hurry">
             Skip ahead
           </Button>
@@ -216,7 +254,7 @@ export function TourCard() {
         </div>
         <div style={{ fontSize: 12, color: '#a1a1aa', lineHeight: 1.5, marginBottom: 12 }}>
           {isPrompt
-            ? 'A short guided run through the example pipeline, in three chapters.'
+            ? 'A short guided run through the example pipeline, in four chapters.'
             : 'The tour resets the Playground to the example pipeline, so your changes will be lost.'}
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
@@ -250,6 +288,35 @@ export function TourCard() {
       Skip tour
     </Button>
   );
+  // Phones and short screens can fold the card to a bar to see more of the graph.
+  const canCollapse = isMobile || flat;
+  const hide = canCollapse && (
+    <Button quiet onClick={() => tour().setCollapsed(true)} testId="tour-hide">
+      Hide ▾
+    </Button>
+  );
+  if (canCollapse && collapsed) {
+    return (
+      <div
+        id="ds-tour-card"
+        role="dialog"
+        aria-label="Playground tour"
+        data-testid="tour-card"
+        data-step={step.id}
+        data-collapsed="true"
+        style={{ ...panel, padding: '4px 4px 4px 14px' }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: '#a1a1aa', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {step.title}
+          </span>
+          <Button onClick={() => tour().setCollapsed(false)} testId="tour-show">
+            Show ▴
+          </Button>
+        </div>
+      </div>
+    );
+  }
   const primaryLabel = isLast ? 'Close' : step.action && !actionDone ? step.action.label : chapterEnd ? 'Continue' : 'Next';
 
   return (
@@ -271,7 +338,7 @@ export function TourCard() {
         padding: flat ? '8px 14px 8px' : '10px 14px 12px',
         display: 'flex',
         flexDirection: 'column',
-        maxHeight: isMobile ? '60dvh' : flat ? '55dvh' : undefined,
+        maxHeight: isMobile ? '60dvh' : flat ? '55dvh' : panel.maxHeight,
       }}
     >
       {flat ? (
@@ -279,31 +346,37 @@ export function TourCard() {
         // without adding to the bar's height.
         <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10, height: 20, marginBottom: 2 }}>
           {chapterLabel}
-          {position === 1 && (
+          {position === 1 && !step.intro && (
             <span style={{ minWidth: 0, fontSize: 11, color: THEME_BRAND, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {CHAPTER_TITLES[step.chapter]}
             </span>
           )}
           <span style={{ flex: 1 }} />
           {backQuiet}
+          {hide}
           {skip}
         </div>
       ) : (
         <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 44, marginTop: -6 }}>
           {chapterLabel}
-          {skip}
+          <span style={{ display: 'flex', alignItems: 'center' }}>
+            {hide}
+            {skip}
+          </span>
         </div>
       )}
       <div style={flat ? { flex: 1, minHeight: 0, display: 'flex', alignItems: 'stretch', gap: 16 } : { display: 'contents' }}>
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto' }}>
-          {!flat && position === 1 && (
+          {!flat && position === 1 && !step.intro && (
             <div style={{ fontSize: 11, color: THEME_BRAND, marginBottom: 4 }}>{CHAPTER_TITLES[step.chapter]}</div>
           )}
           <div aria-live="polite">
             <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>{step.title}</div>
-            <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
-              <Copy text={step.body} />
-            </div>
+            {step.body && (
+              <div style={{ fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
+                <Copy text={step.body} />
+              </div>
+            )}
             {step.suggestions && (
               <ul style={{ margin: '6px 0 0', paddingLeft: 18, listStyle: 'disc', fontSize: 12.5, color: '#c4c4cc', lineHeight: 1.55 }}>
                 {step.suggestions.map((t) => (
@@ -320,12 +393,26 @@ export function TourCard() {
             )}
           </div>
           {step.links && (
-            <div style={{ display: 'flex', gap: 14, marginTop: 10, fontSize: 13 }}>
-              {step.links.map((l) => (
-                <a key={l.href} href={l.href} target="_blank" rel="noopener noreferrer" style={{ color: THEME_BRAND, textDecoration: 'underline' }}>
-                  {l.label}
-                </a>
-              ))}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10, fontSize: 13 }}>
+              {step.links.map((l) =>
+                l.mode ? (
+                  <button
+                    key={l.label}
+                    data-testid={`tour-mode-${l.mode}`}
+                    onClick={() => {
+                      tour().finish();
+                      useModeStore.getState().setMode(l.mode!);
+                    }}
+                    style={{ color: THEME_BRAND, textDecoration: 'underline', background: 'none', border: 'none', padding: 0, font: 'inherit', cursor: 'pointer' }}
+                  >
+                    {l.label}
+                  </button>
+                ) : (
+                  <a key={l.label} href={l.href} target="_blank" rel="noopener noreferrer" style={{ color: THEME_BRAND, textDecoration: 'underline' }}>
+                    {l.label}
+                  </a>
+                ),
+              )}
             </div>
           )}
         </div>
@@ -341,6 +428,21 @@ export function TourCard() {
                 Finish
               </Button>
             )}
+          </div>
+        ) : step.choices ? (
+          // The last step: the ways on, in place of the buttons.
+          <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 4, marginTop: 12 }}>
+            <NextChoices
+              choices={step.choices}
+              event="tour_next"
+              onClose={() => tour().finish()}
+              testId={(c) => (c.mode ? `tour-mode-${c.mode}` : c.close ? 'tour-next' : `tour-next-${c.id}`)}
+            />
+            <div style={{ display: 'flex' }}>
+              <Button quiet onClick={() => tour().back()} testId="tour-back">
+                ‹ Back
+              </Button>
+            </div>
           </div>
         ) : (
           <div style={{ flexShrink: 0, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 12 }}>

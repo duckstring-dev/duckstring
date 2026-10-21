@@ -29,7 +29,7 @@ def keyed_client(tmp_path):
 
 def test_requests_without_key_rejected(keyed_client):
     assert keyed_client.get("/api/status").status_code == 401
-    assert keyed_client.post("/api/ponds/x/pulse").status_code == 401
+    assert keyed_client.post("/api/ponds/x/refresh").status_code == 401
     assert keyed_client.post("/api/deploy").status_code == 401
 
 
@@ -161,7 +161,7 @@ def test_duck_authenticates_e2e(tmp_path_factory, monkeypatch):
         )
         assert r.status_code == 200, r.text
 
-        httpx.post(f"{url}/api/ponds/inlet/pulse", headers=headers, timeout=5.0)
+        httpx.post(f"{url}/api/ponds/inlet/refresh", headers=headers, timeout=5.0)
 
         def fresh() -> bool:
             ponds = httpx.get(f"{url}/api/status", headers=headers, timeout=5.0).json()["ponds"]

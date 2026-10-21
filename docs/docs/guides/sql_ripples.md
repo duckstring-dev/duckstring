@@ -159,7 +159,7 @@ Python Ripples get the same protection at run time for the reads that go through
 
 ## Column lineage
 
-When a Pond is deployed, each SQL Ripple's output columns are traced to the Source columns they come from, through its parents' queries, and `duckstring lineage --columns` shows the result (see [Monitoring and Failures](monitoring_and_failures.md#tracing-bad-data)). This needs the `duckstring[lineage]` extra on the Catchment.
+When a Pond is deployed, each SQL Ripple's output columns are traced to the Source columns they come from, through its parents' queries, and `duckstring data lineage --columns` shows the result (see [Monitoring and Failures](monitoring_and_failures.md#tracing-bad-data)). This needs the `duckstring[lineage]` extra on the Catchment.
 
 A column qualified with its table (`p.unit_price`) is traced even at the first deployment. An unqualified column in a query over several tables needs the Sources' columns, which are known once the Sources have published; redeploy to trace those. A column that can't be traced exactly, such as one read from a Python Ripple's table, is shown as opaque.
 

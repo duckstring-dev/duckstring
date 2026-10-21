@@ -2,7 +2,8 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore, formatAge, stateColor, nodeFill, THEME_BRAND } from '@/lib/store';
+import { useLiveStore, formatAge, stateColor, nodeFill, THEME_BRAND, THEME_DEMAND } from '@/lib/store';
+import { STRIP_LINE_H, STRIP_PAD, demandStripHeight } from '@/lib/layout';
 import { DemandIndicators } from './DemandIndicators';
 import { DbtIcon } from './DbtIcon';
 
@@ -19,9 +20,11 @@ function TableIcon() {
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
-  // TB (mobile) layout: flow enters at the top and leaves at the bottom; the trigger pill
-  // hangs below the outlet, so its edge also lands on the bottom.
+  // TB (mobile) layout: flow enters at the top and leaves at the bottom.
   const vertical = data.vertical as boolean | undefined;
+  // The Pond's recurring Refreshes and Taps, drawn as a strip joined to the bottom of its box (the layout
+  // has already made the box tall and wide enough for them).
+  const demandLines = (data.demandLines as string[] | undefined) ?? [];
   const pond = useLiveStore((s) => s.ponds[pondId]);
   const view = useLiveStore((s) => s.pondViews[pondId]);
   const info = useLiveStore((s) => s.pondInfo[pondId]);
@@ -31,7 +34,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const selecting = useLiveStore((s) => s.selectorMode && s.selectorPhase === 'select');
   const inScope = useLiveStore((s) => s.selectorScope.includes(pondId));
   const toggleSelect = useLiveStore((s) => s.toggleSelect);
-  const refreshPending = useLiveStore((s) => s.pondInfo[pondId]?.refreshPending ?? false);
+  const rebuildPending = useLiveStore((s) => s.pondInfo[pondId]?.rebuildPending ?? false);
   const collapsed = useLiveStore((s) => !!s.collapsedPonds[pondId]);
   const toggleCollapse = useLiveStore((s) => s.toggleCollapse);
   // Only a Pond that owns Ripples can collapse — a Draw has nothing to hide, so it shows no caret.
@@ -68,7 +71,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
         border: `2px ${boundary ? 'dashed' : 'solid'} ${borderColor}`,
         boxShadow: highlighted
           ? `0 0 0 3px ${THEME_BRAND}`
-          : refreshPending
+          : rebuildPending
             ? `0 0 0 2px #ee9333aa`  // pending refresh — an amber hint
             : isSelected ? `0 0 0 3px ${borderColor}40` : undefined,
         borderRadius: 10,
@@ -80,12 +83,6 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
       }}
     >
       <Handle id="in" type="target" position={vertical ? Position.Top : Position.Left} style={{ background: '#52525b' }} />
-      <Handle
-        id="trigger-in"
-        type="target"
-        position={vertical ? Position.Bottom : Position.Right}
-        style={{ background: '#52525b', opacity: 0 }}
-      />
 
       {(hasTables || hasObjects) && (
         <span
@@ -146,11 +143,41 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           {info && <span style={{ fontSize: 10, color: '#52525b', whiteSpace: 'nowrap' }}>v{info.version}</span>}
         </span>
         <span style={{ fontSize: 11, color: '#71717a', display: 'flex', alignItems: 'center', gap: 6 }}>
-          <DemandIndicators hasPull={view.hasPull} targetF={view.targetF} now={now} />
+          <DemandIndicators demandF={view.demandF} now={now} />
           <span style={{ color: '#a1a1aa' }}>↑{formatAge(view.startF, now)} ({view.runsStarted})</span>
           <span>✓{formatAge(view.endF, now)} ({view.runsCompleted})</span>
         </span>
       </div>
+
+      {demandLines.length > 0 && (
+        <div
+          title={demandLines.join('\n')}
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: demandStripHeight(demandLines.length),
+            boxSizing: 'border-box',
+            padding: `${STRIP_PAD}px 12px`,
+            borderTop: `1px dashed ${THEME_DEMAND}80`,
+            borderRadius: '0 0 8px 8px',
+            background: `${THEME_DEMAND}12`,
+          }}
+        >
+          {demandLines.map((line) => (
+            <div
+              key={line}
+              style={{
+                height: STRIP_LINE_H, lineHeight: `${STRIP_LINE_H}px`, fontSize: 11, fontWeight: 600, color: THEME_DEMAND,
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}
+            >
+              {line}
+            </div>
+          ))}
+        </div>
+      )}
 
       <Handle id="out" type="source" position={vertical ? Position.Bottom : Position.Right} style={{ background: '#52525b' }} />
     </div>

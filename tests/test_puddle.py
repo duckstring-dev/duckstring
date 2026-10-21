@@ -317,23 +317,23 @@ def test_puddle_ls_show_query(runner, tmp_path, monkeypatch):
     hydrate(project)
     run_pond(project)
 
-    result = runner.invoke(app, ["puddle", "ls"])
+    result = runner.invoke(app, ["pond", "puddle", "ls"])
     assert result.exit_code == 0, result.output
     assert "tx.event" in result.output
     assert "salesish.total" in result.output
 
-    result = runner.invoke(app, ["puddle", "show", "tx.event"])
+    result = runner.invoke(app, ["pond", "puddle", "show", "tx.event"])
     assert result.exit_code == 0, result.output
     assert "value" in result.output
 
-    result = runner.invoke(app, ["puddle", "query", 'SELECT grand FROM "salesish"."total"'])
+    result = runner.invoke(app, ["pond", "puddle", "query", 'SELECT grand FROM "salesish"."total"'])
     assert result.exit_code == 0, result.output
     assert "200" in result.output
 
 
 def test_puddle_ls_empty(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(_make_pond(tmp_path))
-    result = runner.invoke(app, ["puddle", "ls"])
+    result = runner.invoke(app, ["pond", "puddle", "ls"])
     assert result.exit_code == 0, result.output
     assert "hydrate" in result.output
 

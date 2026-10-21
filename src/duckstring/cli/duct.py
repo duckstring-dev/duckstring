@@ -1,8 +1,8 @@
-"""Cross-Catchment commands under ``duckstring catchment``:
+"""Cross-Catchment commands, ``duckstring catchment duct …``:
 
-* ``open`` / ``close`` — producer side: expose a Pond to demand from any source (+ tap-on-get).
-* ``duct create/destroy/sync/ls/add/remove`` — consumer side: open a conduit into an upstream
-  Catchment and choose which of its Ponds to draw.
+* ``open`` / ``close``: producer side, run on the upstream Catchment: open a Pond to demand from others.
+* ``create/destroy/sync/ls/add/remove``: consumer side: open a conduit into an upstream Catchment and choose
+  which of its Ponds to draw.
 
 A duct lives on the *consuming* Catchment (``-c`` / default). ``duct create {upstream}`` forwards the
 upstream's registration (URL + auth headers) so the consumer can dial it. See
@@ -15,7 +15,8 @@ from typing import Optional
 
 import typer
 
-_CATCHMENT = typer.Option(None, "--catchment", "-c", help="Consuming Catchment (uses default if omitted).")
+_CATCHMENT = typer.Option(None, "--catchment", "-c", help="The consuming Catchment (default if omitted).")
+_UPSTREAM = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted).")
 _MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest).")
 _VERSION = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3.")
 
@@ -25,11 +26,9 @@ _VERSION = typer.Option(None, "--version", "-v", help="Specific semver to target
 
 def open_pond(
     pond: str = typer.Argument(..., help="Pond to open to demand from other Catchments."),
-    catchment: Optional[str] = _CATCHMENT,
+    catchment: Optional[str] = _UPSTREAM,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
-    tap_on_get: bool = typer.Option(False, "--tap-on-get", help="Also send a Tap on every query of the Pond, after "
-                                                                "serving it."),
 ) -> None:
     """Open a Pond to demand from other Catchments."""
     from . import _http
@@ -38,18 +37,18 @@ def open_pond(
     _, cfg = resolve_catchment(catchment)
     _http.post(
         f"{cfg['url']}/api/ponds/{pond}/open", auth=cfg,
-        params=_http.pond_params(major, version), json={"tap_on_get": tap_on_get},
+        params=_http.pond_params(major, version), json={},
     )
-    typer.echo(f"Opened '{pond}'{' (tap-on-get)' if tap_on_get else ''}.")
+    typer.echo(f"Opened '{pond}'.")
 
 
 def close_pond(
     pond: str = typer.Argument(..., help="Pond to close."),
-    catchment: Optional[str] = _CATCHMENT,
+    catchment: Optional[str] = _UPSTREAM,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
 ) -> None:
-    """Close a Pond to demand from other Catchments, and stop tapping it on reads."""
+    """Close a Pond to demand from other Catchments."""
     from . import _http
     from .config import resolve_catchment
 
@@ -60,7 +59,7 @@ def close_pond(
 
 # ─── Consumer side: ducts ─────────────────────────────────────────────────────
 
-app = typer.Typer(help="Consume Ponds from other Catchments.", no_args_is_help=True)
+app = typer.Typer(help="Draw Ponds from other Catchments, or open yours to them.", no_args_is_help=True)
 
 
 def _resolve_pair(upstream: str, consumer: Optional[str]):
@@ -189,3 +188,7 @@ def remove(
     _, cfg = resolve_catchment(catchment)
     _http.delete(f"{cfg['url']}/api/duct/{upstream}/ponds/{pond}", auth=cfg, params={"major": major})
     typer.echo(f"Stopped drawing '{pond}@{major}' from '{upstream}'.")
+
+
+app.command("open")(open_pond)
+app.command("close")(close_pond)

@@ -8,7 +8,7 @@ description: Run a demo pipeline on your own machine.
 This guide runs Duckstring on your own machine: it starts a Catchment, deploys a small demo pipeline, runs it, and queries the result. It takes about five minutes.
 
 :::tip
-To see how the demo pipeline is scheduled before installing anything, the [Playground](https://playground.duckstring.com) runs it in your browser, with a short guided tour.
+If you want to jump straight in, try the [Playground](https://playground.duckstring.com) to run a short guided tour of the key concepts.
 :::
 
 ## 1. Install
@@ -119,48 +119,36 @@ Deploying a Pond again follows its version number. A new minor or patch version 
 
 ## 5. Run the pipeline
 
-Triggers go at the end of a pipeline, on the Pond whose output you want. Here that's `reports`. Run it once with a *Pulse*:
+Unlike many orchestrators, Duckstring runs the pipeline from the **end** - you request a Refresh for a given Pond and it travels upstream.
 
 ```bash
-duckstring trigger pulse reports
+duckstring refresh now reports
 ```
 
-A Pulse brings `reports` up to date as of now. Duckstring works back through its Sources and runs `transactions` and `products`, then `sales`, then `reports`. The command shows the live status until everything settles, after about 12 seconds.
-
-To keep `reports` as fresh as the pipeline allows, use a *Wave*:
+You can run it back-to-back with a continuous Refresh:
 
 ```bash
-duckstring trigger wave reports
+duckstring refresh add reports --continuous
 ```
 
-No Pond runs more often than the slowest step can use its output, so every Pond settles at a run about every 3 seconds, the time `join_lines` takes. Runs of `sales` overlap: a new one starts while the previous one is still in `join_lines`, because each Ripple waits only for its own inputs.
-
-A Wave keeps going, so press `Ctrl+C` to leave the status view, then remove it:
+This throttles every Pond to run only as frequently as the bottleneck Ripple, both upstream and downstream.
+A continuous Refresh keeps going, so press `Ctrl+C` to leave the status view, then remove it:
 
 ```bash
-duckstring trigger remove reports
+duckstring refresh rm reports Continuous
 ```
 
-The same triggers are on each Pond's panel in the web UI. There are four in all:
-
-| Trigger | What it does |
-|---|---|
-| Tap | Asks once for newer data, running upstream Ponds only if nothing newer is already available |
-| Pulse | Brings the Pond up to date as of now, once |
-| Wave | Keeps the Pond as fresh as the pipeline allows |
-| Tide | Keeps the Pond no older than a limit, such as `1d` for a daily job |
-
-See [Scheduling](guides/scheduling.md) for choosing between them.
+The UI is especially recommended for running pipelines like this.
 
 ## 6. Query the results
 
 The Catchment keeps a catalog of every Pond's tables, with each Pond as a schema. Query one:
 
 ```bash
-duckstring query reports monthly_summary
+duckstring query reports.monthly_summary
 ```
 
-This runs `SELECT * FROM reports.monthly_summary LIMIT 10`. Use `--sql` to run any query, and `--csv`, `--json` or `--parquet` to export the result. See [Querying](guides/querying.md).
+This shows its first 10 rows. Pass SQL instead to run any query, such as `duckstring query "SELECT category, SUM(total_revenue) FROM reports.monthly_summary GROUP BY 1"`, and add `--csv`, `--json` or `--parquet` to export the result. See [Querying](guides/querying.md).
 
 ## Next steps
 

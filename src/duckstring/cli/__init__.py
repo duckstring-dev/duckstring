@@ -3,34 +3,32 @@ from __future__ import annotations
 import typer
 
 from . import alert as alert_cmd
-from . import bulk as bulk_cmd
 from . import catchment as catchment_cmd
+from . import data as data_cmd
 from . import duck as duck_cmd
 from . import duct as duct_cmd
-from . import lineage as lineage_cmd
 from . import pond as pond_cmd
 from . import puddle as puddle_cmd
+from . import refresh as refresh_cmd
 from . import secret as secret_cmd
-from . import serve as serve_cmd
 from . import spout as spout_cmd
+from . import window as window_cmd
 from .control import (
     clear,
     failure_budget,
     force,
     kill,
-    refresh,
+    rebuild,
     repair,
     reset,
     reset_contract,
     sleep,
     wake,
+    wipe,
 )
-from .data import delete_object, delete_table, get, get_object, objects, query
-from .deploy import deploy
+from .deploy import deploy, promote
 from .deploy import remove as remove_pond
 from .status import status
-from .trigger import pulse, remove, tap, tide, wave
-from .window import app as window_app
 
 app = typer.Typer(help="Duckstring CLI", no_args_is_help=True, add_completion=True)
 
@@ -52,59 +50,42 @@ def _main(
 ) -> None:
     pass
 
-trigger_app = typer.Typer(
-    help="Create demand on a Pond: tap, wave, pulse, tide, and windows.",
-    no_args_is_help=True,
-)
-trigger_app.command("tap")(tap)
-trigger_app.command("pulse")(pulse)
-trigger_app.command("wave")(wave)
-trigger_app.command("tide")(tide)
-trigger_app.command("remove")(remove)
-trigger_app.add_typer(window_app, name="window")
-
 control_app = typer.Typer(
-    help="Act directly on a Pond's execution: wake, force, refresh, repair, sleep, kill, clear, reset.",
+    help="Directly control a Pond's execution.",
     no_args_is_help=True,
 )
 control_app.command("force")(force)
-control_app.command("refresh")(refresh)
+control_app.command("rebuild")(rebuild)
 control_app.command("repair")(repair)
 control_app.command("reset")(reset)
 control_app.command("wake")(wake)
 control_app.command("sleep")(sleep)
 control_app.command("kill")(kill)
 control_app.command("clear")(clear)
+control_app.command("wipe")(wipe)
 control_app.command("reset-contract")(reset_contract)
 control_app.command("failure-budget")(failure_budget)
 
-catchment_cmd.app.command("open")(duct_cmd.open_pond)
-catchment_cmd.app.command("close")(duct_cmd.close_pond)
 catchment_cmd.app.add_typer(duct_cmd.app, name="duct")
-
-app.add_typer(catchment_cmd.app, name="catchment")
-app.add_typer(pond_cmd.app, name="pond")
-app.add_typer(puddle_cmd.app, name="puddle")
-app.add_typer(trigger_app, name="trigger")
-app.add_typer(control_app, name="control")
-app.add_typer(duck_cmd.app, name="duck")
-app.add_typer(spout_cmd.app, name="spout")
-app.add_typer(secret_cmd.app, name="secret")
-app.add_typer(serve_cmd.app, name="serve")
-app.add_typer(alert_cmd.app, name="alert")
 
 pond_cmd.app.command("deploy")(deploy)
 pond_cmd.app.command("remove")(remove_pond)
-app.command("do")(bulk_cmd.do)
+pond_cmd.app.command("promote")(promote)
+pond_cmd.app.add_typer(puddle_cmd.app, name="puddle")
+
 app.command("status")(status)
-app.command("lineage")(lineage_cmd.show)
-app.command("trace")(lineage_cmd.trace)
-app.command("get")(get)
-app.command("query")(query)
-app.command("objects")(objects)
-app.command("get-object")(get_object)
-app.command("delete-table")(delete_table)
-app.command("delete-object")(delete_object)
+app.command("query")(data_cmd.query)
+app.command("get")(data_cmd.get)
+app.add_typer(refresh_cmd.app, name="refresh")
+app.add_typer(window_cmd.app, name="window")
+app.add_typer(control_app, name="control")
+app.add_typer(data_cmd.app, name="data")
+app.add_typer(pond_cmd.app, name="pond")
+app.add_typer(catchment_cmd.app, name="catchment")
+app.add_typer(duck_cmd.app, name="duck")
+app.add_typer(spout_cmd.app, name="spout")
+app.add_typer(secret_cmd.app, name="secret")
+app.add_typer(alert_cmd.app, name="alert")
 
 
 def main() -> None:

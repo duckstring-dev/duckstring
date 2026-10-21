@@ -4,8 +4,13 @@ The single-key model is split into a **total-ordered** ladder — ``read ⊂ dem
 authorization check stays one integer comparison:
 
 - **read** — read & query data only (no ducts, no demand).
-- **demand** — read + create demand (tap/wave/pulse/tide) + connect a downstream duct.
+- **demand** — read + create demand (refresh now, recurring Refreshes) + connect a downstream duct.
 - **full** — everything: deploy, the control verbs, windows, ducts, key rotation.
+
+Besides the ladder, a **Tap** key (plans/taps.md) is a principal of its own: it names one Tap on one Pond line,
+can query only that Tap's tables, and its queries may send that Pond a Refresh. It is accepted only on the
+routes guarded by ``read_or_tap`` (the query routes) and refused (403) everywhere else. Tap keys are recognised
+in open mode too, since what they add is the Refresh, not access.
 
 Each route declares a *minimum* level via the ready-made dependencies ``read`` / ``demand`` / ``full``
 (or ``duck`` for the internal worker channel). A request's level is the matched key's level. Routes are
@@ -128,10 +133,26 @@ def auth_configured(con: sqlite3.Connection | None, api_key: str | None) -> bool
 # ─── Request-time resolution ─────────────────────────────────────────────────
 
 
+@dataclass(frozen=True)
+class TapScope:
+    """The Tap a key belongs to: its Pond line (a pond key) and its name."""
+    pond: str
+    name: str
+
+
 @dataclass
 class Principal:
     level: Level | None  # the access level of a user credential (None = unauthenticated)
     is_duck: bool        # the internal worker token (only valid on the duck channel)
+    tap: TapScope | None = None  # a Tap's key: queries only that Tap's tables (level is None)
+
+
+def tap_for_key(driver, supplied: str) -> TapScope | None:
+    """The Tap a raw key belongs to, if any (the Driver holds the Taps' key hashes in memory)."""
+    if not supplied or driver is None:
+        return None
+    lookup = getattr(driver, "tap_for_hash", None)
+    return lookup(hash_key(supplied)) if lookup is not None else None
 
 
 def _extract_token(request: Request) -> str:
@@ -152,6 +173,10 @@ def get_principal(request: Request) -> Principal:
     if duck_token and supplied and secrets.compare_digest(supplied, duck_token):
         return Principal(level=None, is_duck=True)
 
+    tap = tap_for_key(getattr(state, "driver", None), supplied)
+    if tap is not None:
+        return Principal(level=None, is_duck=False, tap=tap)
+
     if not auth_configured(con, api_key):
         return Principal(level=Level.FULL, is_duck=False)  # open mode — no credential required
 
@@ -165,6 +190,16 @@ def get_principal(request: Request) -> Principal:
             return Principal(level=Level.FULL, is_duck=False)
 
     return Principal(level=None, is_duck=False)
+
+
+def principal_for_key(driver, api_key: str | None, supplied: str) -> Principal | None:
+    """The principal for a raw key on a non-HTTP front door (the pg / Flight wires): a Tap, else the key's
+    access level (open mode → FULL). None for a bad or absent key."""
+    tap = tap_for_key(driver, supplied)
+    if tap is not None:
+        return Principal(level=None, is_duck=False, tap=tap)
+    level = level_for_key(getattr(driver, "db", None), api_key, supplied)
+    return Principal(level=level, is_duck=False) if level is not None else None
 
 
 def level_for_key(con: sqlite3.Connection | None, api_key: str | None, supplied: str) -> Level | None:
@@ -187,10 +222,14 @@ def level_for_key(con: sqlite3.Connection | None, api_key: str | None, supplied:
 # ─── Route guards (declared on each route as `dependencies=[...]`) ────────────
 
 
-def _level_guard(required: Level):
+def _level_guard(required: Level, allow_tap: bool = False):
     def dep(principal: Principal = Depends(get_principal)) -> Principal:
         if principal.is_duck:  # the worker token is for the duck channel only
             raise HTTPException(status_code=403, detail="endpoint not available to the worker token")
+        if principal.tap is not None:
+            if allow_tap:
+                return principal
+            raise HTTPException(status_code=403, detail="a Tap's key can only query its Tap")
         if principal.level is None:
             raise HTTPException(status_code=401, detail="Invalid or missing API key")
         if principal.level < required:
@@ -219,6 +258,7 @@ def _duck_guard():
 read = _level_guard(Level.READ)
 demand = _level_guard(Level.DEMAND)
 full = _level_guard(Level.FULL)
+read_or_tap = _level_guard(Level.READ, allow_tap=True)  # the query routes: a read key or a Tap's key
 duck = _duck_guard()
 
 

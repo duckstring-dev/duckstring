@@ -1,7 +1,7 @@
-"""Trigger + status endpoints, backed by the freshness :class:`~duckstring.catchment.driver.Driver`.
+"""Refresh, control and status endpoints, backed by the freshness :class:`~duckstring.catchment.driver.Driver`.
 
-Tap/Pulse are one-shot; Wave/Tide are standing. Tide carries a staleness **bound** (seconds), not a
-cron. Status reports freshness/staleness from the engine, not generations.
+A Refresh asks for a Pond's data at least as fresh as now; a recurring Refresh repeats it (every N, on a
+schedule, or continuously). Status reports freshness from the engine, not generations.
 
 Every pond-targeting route takes optional ``major`` / ``version`` query params: ``major`` picks the
 major line (default: the highest deployed), ``version`` additionally requires that exact version to
@@ -128,42 +128,58 @@ def runs(
     return {"runs": history}
 
 
-@router.post("/ponds/{name}/tap", dependencies=[auth.demand])
-def tap(
-    name: str, request: Request, major: int | None = None, version: str | None = None,
-    m: str | None = None,
-):
-    """``m`` (optional ISO freshness) is the demand epoch to mint — a duct forwards the downstream's."""
-    _driver(request).tap(_resolve(request, name, major, version), _parse_f(m))
-    return {"ok": True}
-
-
-@router.post("/ponds/{name}/pulse", dependencies=[auth.demand])
-def pulse(
+@router.post("/ponds/{name}/refresh", dependencies=[auth.demand])
+def refresh(
     name: str, request: Request, major: int | None = None, version: str | None = None,
     at: str | None = None,
 ):
-    """``at`` (optional ISO freshness) is the push target — a duct forwards the downstream's target."""
-    _driver(request).pulse(_resolve(request, name, major, version), _parse_f(at))
+    """Refresh a Pond now: ask for its data at least as fresh as now. ``at`` (optional ISO freshness) is the
+    demand epoch instead — a duct forwards the downstream's, so the upstream Inlet stamps the same one."""
+    _driver(request).refresh_now(_resolve(request, name, major, version), _parse_f(at))
     return {"ok": True}
 
 
-@router.post("/ponds/{name}/wave", dependencies=[auth.demand])
-def wave(name: str, request: Request, major: int | None = None, version: str | None = None):
-    _driver(request).wave(_resolve(request, name, major, version))
-    return {"ok": True}
+class _RefreshBody(BaseModel):
+    every_seconds: float = 0  # 0 = continuous
+    start: str | None = None  # ISO datetime: a scheduled Refresh, on the grid start + k * every
+    days: str | None = None  # CSV of MON..SUN (scheduled only)
+    until: str | None = None  # ISO datetime: ends the schedule
+    name: str | None = None
+    continuous: bool = False
 
 
-class _TideBody(BaseModel):
-    bound_seconds: float
-
-
-@router.post("/ponds/{name}/tide", dependencies=[auth.demand])
-def tide(name: str, body: _TideBody, request: Request, major: int | None = None, version: str | None = None):
+@router.post("/ponds/{name}/refreshes", dependencies=[auth.demand])
+def add_refresh(
+    name: str, body: _RefreshBody, request: Request,
+    major: int | None = None, version: str | None = None,
+):
+    """Add a recurring Refresh. Without ``start`` it is floating (``every_seconds`` after the later of the
+    newest request and the freshness; 0 or ``continuous`` is continuous) and replaces the Pond's floating
+    one. With ``start`` it is scheduled and added beside the others. Returns the Refresh."""
     key = _resolve(request, name, major, version)
-    if body.bound_seconds <= 0:
-        raise HTTPException(status_code=422, detail="bound_seconds must be positive")
-    _driver(request).tide(key, timedelta(seconds=body.bound_seconds))
+    every = timedelta(0) if body.continuous else timedelta(seconds=body.every_seconds)
+    try:
+        refresh = _driver(request).add_refresh(
+            key, every, start=_parse_f(body.start), days=body.days, until=_parse_f(body.until), name=body.name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"refresh": refresh}
+
+
+@router.get("/ponds/{name}/refreshes", dependencies=[auth.read])
+def list_refreshes(name: str, request: Request, major: int | None = None, version: str | None = None):
+    return {"refreshes": _driver(request).list_refreshes(_resolve(request, name, major, version))}
+
+
+@router.post("/ponds/{name}/refreshes/{refresh_name}/remove", dependencies=[auth.demand])
+def remove_refresh(
+    name: str, refresh_name: str, request: Request,
+    major: int | None = None, version: str | None = None,
+):
+    """Remove a recurring Refresh (in-flight work drains)."""
+    if not _driver(request).remove_refresh(_resolve(request, name, major, version), refresh_name):
+        raise HTTPException(status_code=404, detail=f"No Refresh '{refresh_name}' on '{name}'")
     return {"ok": True}
 
 
@@ -172,7 +188,7 @@ def tide(name: str, body: _TideBody, request: Request, major: int | None = None,
 
 @router.post("/ponds/{name}/wake", dependencies=[auth.full])
 def wake(name: str, request: Request, major: int | None = None, version: str | None = None):
-    """Wake a Pond — a one-shot non-propagating pull: run once on fresh input, no upstream solicit."""
+    """Wake a Pond — run once on input already fresher, without asking upstream; clears failure/kill."""
     _driver(request).wake(_resolve(request, name, major, version))
     return {"ok": True}
 
@@ -184,14 +200,14 @@ def force(name: str, request: Request, major: int | None = None, version: str | 
     return {"ok": True}
 
 
-@router.post("/ponds/{name}/refresh", dependencies=[auth.full])
-def refresh(
+@router.post("/ponds/{name}/rebuild", dependencies=[auth.full])
+def rebuild(
     name: str, request: Request, clear: bool = False,
     major: int | None = None, version: str | None = None,
 ):
-    """Refresh a Pond — flag its next run to be a cold wipe-and-rebuild (lazy; runs nothing now).
-    ``clear=true`` un-sets a pending refresh."""
-    _driver(request).refresh(_resolve(request, name, major, version), clear=clear)
+    """Rebuild a Pond — flag its next run to be a cold wipe-and-rebuild (lazy; runs nothing now).
+    ``clear=true`` un-sets a pending rebuild."""
+    _driver(request).rebuild(_resolve(request, name, major, version), clear=clear)
     return {"ok": True}
 
 
@@ -281,7 +297,7 @@ class _BatchBody(BaseModel):
 @router.post("/ponds/batch", dependencies=[auth.full])
 def batch(request: Request, body: _BatchBody):
     """Apply a set of operations to a set of Ponds, in precedence order — the primitive behind the UI
-    Selector and ``duckstring do``. ``operations`` ⊆ kill/sleep/reset/wipe/remove/clear/repair/refresh;
+    Selector and ``duckstring control wipe``. ``operations`` ⊆ kill/sleep/reset/wipe/remove/clear/repair/rebuild;
     Repair is exclusive with Remove/Reset, Remove implies (and subsumes) Reset. Any of reset/wipe/remove
     require ``confirm`` to equal the Catchment name. 422 on a bad op-set or a missing/wrong confirm; a
     per-Pond execution error is collected in the response, not fatal. See plans/selector_ui.md."""
@@ -315,16 +331,9 @@ def sleep(
     name: str, request: Request, body: _SleepBody = _SleepBody(),
     major: int | None = None, version: str | None = None,
 ):
-    """Sleep a Pond — clear its demand (push+pull) + its Ripples' pull; keep started runs completing.
+    """Sleep a Pond — clear its demand and remove its recurring Refreshes; started runs complete.
     ``upstream`` also sleeps every ancestor."""
     _driver(request).sleep(_resolve(request, name, major, version), upstream=body.upstream)
-    return {"ok": True}
-
-
-@router.post("/ponds/{name}/untrigger", dependencies=[auth.demand])
-def untrigger(name: str, request: Request, major: int | None = None, version: str | None = None):
-    """Remove the standing Wave/Tide trigger from a Pond (existing work drains)."""
-    _driver(request).remove_trigger(_resolve(request, name, major, version))
     return {"ok": True}
 
 
@@ -406,27 +415,19 @@ def get_duck(name: str, request: Request, major: int | None = None, version: str
     return _driver(request).duck_config(_resolve(request, name, major, version))
 
 
-# ─── Cross-Catchment exposure (open / tap-on-get) ────────────────────────────
-
-
-class _OpenBody(BaseModel):
-    tap_on_get: bool = False
+# ─── Cross-Catchment exposure (open) ─────────────────────────────────────────
 
 
 @router.post("/ponds/{name}/open", dependencies=[auth.full])
-def open_pond(
-    name: str, request: Request, body: _OpenBody = _OpenBody(),
-    major: int | None = None, version: str | None = None,
-):
-    """Mark a Pond open — it accepts demand from any source (e.g. a downstream Catchment over a duct).
-    With ``tap_on_get`` a read on the query route also fires a Tap (the snapshot is served first)."""
-    _driver(request).set_pond_open(_resolve(request, name, major, version), body.tap_on_get)
+def open_pond(name: str, request: Request, major: int | None = None, version: str | None = None):
+    """Mark a Pond open — it accepts demand from any source (e.g. a downstream Catchment over a duct)."""
+    _driver(request).set_pond_open(_resolve(request, name, major, version))
     return {"ok": True}
 
 
 @router.post("/ponds/{name}/close", dependencies=[auth.full])
 def close_pond(name: str, request: Request, major: int | None = None, version: str | None = None):
-    """Close a Pond — remove its open flag (and tap-on-get)."""
+    """Close a Pond — remove its open flag."""
     _driver(request).unset_pond_open(_resolve(request, name, major, version))
     return {"ok": True}
 
@@ -558,7 +559,7 @@ def remove_spout(
     return {"ok": True}
 
 
-# A Spout's Control set (its standing Wake) + resync. Demand verbs (tap/wave/pulse/tide) don't apply.
+# A Spout's Control set (its standing Wake) + resync. Refreshes don't apply.
 _SPOUT_ACTIONS = {
     "wake": "spout_wake", "force": "spout_force", "sleep": "spout_sleep",
     "kill": "spout_kill", "clear": "spout_clear", "resync": "resync_spout",

@@ -8,7 +8,6 @@ export type RippleId = string; // `${pondId}.${ripple}`
 export type DemandStatus = 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
 export type FreqUnit = 'SECOND' | 'MINUTE' | 'HOUR' | 'DAY' | 'WEEK';
 export type Weekday = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI' | 'SAT' | 'SUN';
-export type TriggerKind = 'wave' | 'tide';
 
 // ─── Topology (drives layout) ────────────────────────────────────────────────
 
@@ -31,22 +30,37 @@ export interface Ripple {
 
 // ─── Live per-node state ─────────────────────────────────────────────────────
 
-// Freshness is a ms-epoch (0 = NEVER, so formatAge renders "—"); targetF is null when there is no
-// outstanding push target (vs. 0, which would be a real timestamp).
+// Freshness is a ms-epoch (0 = NEVER, so formatAge renders "—"); demandF is null when the node has not been
+// asked for anything it hasn't met (vs. 0, which would be a real timestamp).
 export interface NodeView {
   status: DemandStatus;
   startF: number;
   endF: number;
-  targetF: number | null;
-  hasPull: boolean;
+  demandF: number | null;
   runsStarted: number;
   runsCompleted: number;
   dMs: number; // window delay carried by the current freshness (Pond only; 0 for Ripples)
 }
 
-export interface TriggerView {
-  kind: TriggerKind;
-  boundMs: number | null; // Tide only: the staleness bound
+// A recurring Refresh: floating (no start: due everyMs after the later of the newest request and the
+// freshness; 0 = continuous) or scheduled (a start, on its grid, filtered by days, ended by until).
+export interface RefreshView {
+  name: string;
+  everyMs: number;
+  continuous: boolean;
+  start: string | null; // ISO
+  days: string | null; // CSV of MON..SUN; null = every day
+  until: string | null; // ISO
+  nextDue: number | null; // ms epoch; null when continuous or ended
+}
+
+// A Tap: an app's access point on a Pond, whose queries keep it fresh (plans/taps.md).
+export interface TapView {
+  name: string;
+  freshWithinMs: number; // 0 = every query
+  lastQueryAt: number | null; // ms epoch
+  queryCount: number;
+  refreshCount: number;
 }
 
 export interface PondInfo {
@@ -60,7 +74,7 @@ export interface PondInfo {
   isBlocked: boolean;
   blockedReason: string | null;
   isKilled: boolean;
-  refreshPending: boolean; // next run is a cold wipe-and-rebuild (control refresh)
+  rebuildPending: boolean; // next run is a cold wipe-and-rebuild (control rebuild)
   repairing: boolean; // in an active repair plan
   failedF: string | null; // freshness the failed Run was reaching
   failures: number; // failed Runs this episode (vs sourceRetries)

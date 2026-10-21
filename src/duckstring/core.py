@@ -366,14 +366,16 @@ def resolve_catchment_auth(name: str | None = None) -> tuple[str, dict[str, str]
 class Catchment:
     """A client for reading a Pond's published tables from a running Catchment.
 
-    Results are DuckDB relations loaded on ``con``. Queries target the Pond's highest deployed major.
+    Results are DuckDB relations loaded on ``con``. Queries target the Pond's highest deployed major, or with a
+    Tap's key, the Tap's.
 
     Args:
         url: The Catchment's address.
         con: DuckDB connection for results. Defaults to a new in-memory connection.
         default_pond: Pond used when a method is called without ``pond``.
         default_table: Table used when :meth:`get` is called without ``table``.
-        api_key: Sent as ``Authorization: Bearer <key>`` unless ``headers`` sets ``Authorization``.
+        api_key: Sent as ``Authorization: Bearer <key>`` unless ``headers`` sets ``Authorization``. With a
+            Tap's key, ``pond`` can be left out everywhere, since the key implies it.
         headers: Extra headers sent with every request.
 
     Inside a ``@puddle`` function, ``p.catchment()`` returns one configured for the Puddle's Source.
@@ -394,6 +396,7 @@ class Catchment:
         self._con = con
         self._default_pond = default_pond
         self._default_table = default_table
+        self._tap = bool(api_key and api_key.startswith("tap_"))  # a Tap's key implies its Pond
 
     @property
     def con(self):
@@ -403,9 +406,9 @@ class Catchment:
             self._con = duckdb.connect()
         return self._con
 
-    def _pond(self, pond: str | None) -> str:
+    def _pond(self, pond: str | None) -> str | None:
         target = pond or self._default_pond
-        if not target:
+        if not target and not self._tap:
             raise ValueError("no Pond given — pass pond=... or use this client from a puddle definition")
         return target
 
@@ -427,7 +430,8 @@ class Catchment:
         """Run read-only SQL against one Pond's published tables and return the result as a relation.
 
         Tables are referred to by bare name. ``pond`` defaults to ``default_pond``. Raises ``RuntimeError``
-        when the Catchment returns an error, and ``ValueError`` when no Pond is given.
+        when the Catchment returns an error, and ``ValueError`` when no Pond is given (unless the key is a
+        Tap's).
         """
         import tempfile
 
@@ -443,6 +447,28 @@ class Catchment:
         if not target_table:
             raise ValueError("no table given — pass table=... or define the puddle on a 'source.table' target")
         return self.query(f'SELECT * FROM "{target_table}"', pond=pond)
+
+    def freshness(self, pond: str | None = None) -> dict:
+        """How fresh a Pond's data is: ``freshness`` (the point in time its data reflects, ISO 8601), ``changed``
+        (when its output last changed), ``refreshing`` (whether a refresh is under way), and ``tables`` (when each
+        table last changed). ``pond`` defaults to ``default_pond``, or with a Tap's key, the Tap's Pond. Raises
+        ``RuntimeError`` when the Catchment returns an error."""
+        target = self._pond(pond)
+        if target is None:  # a Tap's key: the catalog it can see names its one Pond
+            target = self._get("/api/serve")["ponds"][0]["name"]
+        return self._get(f"/api/ponds/{target}/freshness")
+
+    def _get(self, path: str) -> dict:
+        import httpx
+
+        resp = httpx.get(f"{self.url}{path}", headers=self.headers, timeout=httpx.Timeout(30.0, connect=5.0))
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text[:300]
+            raise RuntimeError(f"Catchment request failed ({resp.status_code}): {detail}")
+        return resp.json()
 
     def tables(self, pond: str | None = None) -> list[str]:
         """The names of a Pond's published tables."""

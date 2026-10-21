@@ -22,21 +22,21 @@ def _seed(root, pond: str, table: str):
 def test_get_calls_correct_endpoint(runner, tmp_path, monkeypatch, catchment_root, live_catchment):
     _seed(catchment_root, "outlet", "daily")
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["get", "outlet", "daily"])
+    result = runner.invoke(app, ["get", "outlet.daily"])
     assert result.exit_code == 0, result.output
 
 
 def test_get_explicit_catchment(runner, tmp_path, monkeypatch, catchment_root, live_catchment):
     _seed(catchment_root, "outlet", "daily")
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["get", "outlet", "daily", "-c", "dev"])
+    result = runner.invoke(app, ["get", "outlet.daily", "-c", "dev"])
     assert result.exit_code == 0, result.output
 
 
 def test_get_writes_to_default_path(runner, tmp_path, monkeypatch, catchment_root, live_catchment):
     _seed(catchment_root, "outlet", "daily")
     monkeypatch.chdir(tmp_path)
-    runner.invoke(app, ["get", "outlet", "daily"])
+    runner.invoke(app, ["get", "outlet.daily"])
     out = tmp_path / "ponds" / "outlet" / "daily"
     assert out.exists()
     assert (out / "daily.parquet").exists()
@@ -46,19 +46,19 @@ def test_get_writes_to_custom_path(runner, tmp_path, monkeypatch, catchment_root
     _seed(catchment_root, "outlet", "daily")
     monkeypatch.chdir(tmp_path)
     custom = tmp_path / "my_output"
-    result = runner.invoke(app, ["get", "outlet", "daily", "--path", str(custom)])
+    result = runner.invoke(app, ["get", "outlet.daily", "--out", str(custom)])
     assert result.exit_code == 0, result.output
     assert (custom / "daily.parquet").exists()
 
 
 def test_get_unknown_catchment_exits(runner):
-    result = runner.invoke(app, ["get", "outlet", "daily", "-c", "nonexistent"])
+    result = runner.invoke(app, ["get", "outlet.daily", "-c", "nonexistent"])
     assert result.exit_code != 0
 
 
 def test_get_missing_ripple_exits(runner, tmp_path, monkeypatch, live_catchment):
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["get", "ghost", "nothing"])
+    result = runner.invoke(app, ["get", "ghost.nothing"])
     assert result.exit_code != 0
 
 
@@ -67,20 +67,20 @@ def test_get_missing_ripple_exits(runner, tmp_path, monkeypatch, live_catchment)
 
 def test_query_with_ripple_returns_rows(runner, catchment_root, live_catchment):
     _seed(catchment_root, "outlet", "daily")
-    result = runner.invoke(app, ["query", "outlet", "daily"])
+    result = runner.invoke(app, ["query", "outlet.daily"])
     assert result.exit_code == 0, result.output
     assert "id" in result.output
 
 
 def test_query_explicit_catchment(runner, catchment_root, live_catchment):
     _seed(catchment_root, "outlet", "daily")
-    result = runner.invoke(app, ["query", "outlet", "daily", "-c", "dev"])
+    result = runner.invoke(app, ["query", "outlet.daily", "-c", "dev"])
     assert result.exit_code == 0, result.output
 
 
 def test_query_custom_sql(runner, catchment_root, live_catchment):
     _seed(catchment_root, "outlet", "daily")
-    result = runner.invoke(app, ["query", "outlet", "--sql", "SELECT 42 AS answer"])
+    result = runner.invoke(app, ["query", "SELECT 42 AS answer", "--pond", "outlet"])
     assert result.exit_code == 0, result.output
     assert "42" in result.output
 
@@ -90,20 +90,20 @@ def test_query_sql_from_file(runner, tmp_path, monkeypatch, catchment_root, live
     monkeypatch.chdir(tmp_path)
     sql_file = tmp_path / "query.sql"
     sql_file.write_text('SELECT * FROM "outlet"."daily" LIMIT 1')
-    result = runner.invoke(app, ["query", "outlet", "--sql", "@query.sql"])
+    result = runner.invoke(app, ["query", "@query.sql", "--pond", "outlet"])
     assert result.exit_code == 0, result.output
     assert "id" in result.output
 
 
 def test_query_missing_sql_file_exits(runner, tmp_path, monkeypatch, live_catchment):
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["query", "outlet", "--sql", "@nonexistent.sql"])
+    result = runner.invoke(app, ["query", "@nonexistent.sql", "--pond", "outlet"])
     assert result.exit_code != 0
 
 
 def test_query_prints_table(runner, catchment_root, live_catchment):
     _seed(catchment_root, "outlet", "daily")
-    result = runner.invoke(app, ["query", "outlet", "daily"])
+    result = runner.invoke(app, ["query", "outlet.daily"])
     assert result.exit_code == 0, result.output
     assert "a" in result.output
     assert "b" in result.output
@@ -111,7 +111,7 @@ def test_query_prints_table(runner, catchment_root, live_catchment):
 
 def test_query_empty_result(runner, catchment_root, live_catchment):
     _seed(catchment_root, "outlet", "daily")
-    result = runner.invoke(app, ["query", "outlet", "--sql", 'SELECT * FROM "outlet"."daily" WHERE 1=0'])
+    result = runner.invoke(app, ["query", 'SELECT * FROM "outlet"."daily" WHERE 1=0', "--pond", "outlet"])
     assert result.exit_code == 0
     assert "No results" in result.output
 
@@ -119,7 +119,7 @@ def test_query_empty_result(runner, catchment_root, live_catchment):
 def test_query_csv_writes_file(runner, tmp_path, monkeypatch, catchment_root, live_catchment):
     _seed(catchment_root, "outlet", "daily")
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["query", "outlet", "daily", "--csv", "out.csv"])
+    result = runner.invoke(app, ["query", "outlet.daily", "--csv", "out.csv"])
     assert result.exit_code == 0, result.output
     out = tmp_path / "ponds" / "outlet" / "daily" / "out.csv"
     assert out.exists()
@@ -129,7 +129,7 @@ def test_query_csv_writes_file(runner, tmp_path, monkeypatch, catchment_root, li
 def test_query_csv_custom_path(runner, tmp_path, monkeypatch, catchment_root, live_catchment):
     _seed(catchment_root, "outlet", "daily")
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["query", "outlet", "daily", "--csv", "out.csv", "--path", "."])
+    result = runner.invoke(app, ["query", "outlet.daily", "--csv", "out.csv", "--path", "."])
     assert result.exit_code == 0, result.output
     assert (tmp_path / "out.csv").exists()
 
@@ -137,14 +137,14 @@ def test_query_csv_custom_path(runner, tmp_path, monkeypatch, catchment_root, li
 def test_query_json_format(runner, tmp_path, monkeypatch, catchment_root, live_catchment):
     _seed(catchment_root, "outlet", "daily")
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["query", "outlet", "daily", "--json", "out.json"])
+    result = runner.invoke(app, ["query", "outlet.daily", "--json", "out.json"])
     assert result.exit_code == 0, result.output
     out = tmp_path / "ponds" / "outlet" / "daily" / "out.json"
     assert out.exists()
 
 
 def test_query_unknown_catchment_exits(runner):
-    result = runner.invoke(app, ["query", "outlet", "-c", "nonexistent"])
+    result = runner.invoke(app, ["query", "outlet.daily", "-c", "nonexistent"])
     assert result.exit_code != 0
 
 
@@ -407,7 +407,7 @@ def test_tables_flags_trickle_mode_and_pk(catchment_client, tmp_path, monkeypatc
 
 def test_freshness_lists_incremental_runs(catchment_client, tmp_path, monkeypatch):
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
-    fr = catchment_client.get("/api/ponds/p/freshness?table=priced").json()
+    fr = catchment_client.get("/api/ponds/p/tables/priced/runs").json()
     # The main is log-structured, so the bootstrap (f1) writes the changelog too — both runs show
     # (newest first); floor anchors at f1.
     assert len(fr["freshness"]) == 2
@@ -478,7 +478,7 @@ def test_merge_order_by_freshness(catchment_client, tmp_path, monkeypatch):
 
 def test_merge_window_shows_only_changed_records(catchment_client, tmp_path, monkeypatch):
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
-    f2 = catchment_client.get("/api/ponds/p/freshness?table=priced").json()["freshness"][0]
+    f2 = catchment_client.get("/api/ponds/p/tables/priced/runs").json()["freshness"][0]
     page = catchment_client.post(
         "/api/query/page",
         json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"], "f_lo": f2, "f_hi": f2, "limit": 100},
@@ -565,7 +565,7 @@ def test_append_window_filters_by_freshness(catchment_client, tmp_path, monkeypa
     by = {t["name"]: t for t in catchment_client.get("/api/ponds/p/tables").json()["tables"]}
     assert by["orders"]["trickle"] == "append"
     # Append history records every run's freshness (no bootstrap exclusion).
-    fr = catchment_client.get("/api/ponds/p/freshness?table=orders").json()["freshness"]
+    fr = catchment_client.get("/api/ponds/p/tables/orders/runs").json()["freshness"]
     assert len(fr) == 2
     # Full history = 3 rows; windowed to the latest run = 1 row.
     full = catchment_client.post(

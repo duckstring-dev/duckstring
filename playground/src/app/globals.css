@@ -80,3 +80,11 @@ body {
     box-shadow: 0 0 16px 2px rgba(255, 255, 255, 0.35);
   }
 }
+
+/* /trickle: a change flowing along an edge. */
+@keyframes ds-flow {
+  to { stroke-dashoffset: -12; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__edge-path { animation: none !important; }
+}

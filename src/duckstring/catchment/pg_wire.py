@@ -5,7 +5,9 @@ result back; **DuckDB itself answers the `pg_catalog`/`information_schema` intro
 issue (over the serving connection's schemas), so we don't hand-fake the catalog.
 
 Auth: the pg password is a Duckstring API key → its access level (open mode → full). Read/demand →
-the sandboxed connection (serviceable-only, no external access); full → the ops connection.
+the sandboxed connection (serviceable-only, no external access); full → the ops connection. A Tap's key
+(plans/taps.md) gets the Tap's own connection, and each query it runs applies the Tap's policy. An open
+Catchment never asks for a password, so there a connection can't be told apart as a Tap's.
 
 Results are sent in **text format** with a best-effort type OID per column — the widely-compatible
 approach for a read surface. Both the simple ('Q') and extended (Parse/Bind/Describe/Execute) query
@@ -165,7 +167,7 @@ class PgWireServer:
             buf += chunk
         return buf
 
-    def _startup(self, conn) -> auth.Level | None:
+    def _startup(self, conn) -> auth.Principal | None:
         # First a length-prefixed message with no tag: could be SSLRequest (len 8, code 80877103) → 'N'.
         while True:
             length = struct.unpack("!I", self._recv_exact(conn, 4))[0]
@@ -186,22 +188,27 @@ class PgWireServer:
         con = getattr(self.driver, "db", None)
         if not auth.auth_configured(con, self.api_key):
             conn.sendall(_auth_ok())          # open mode → no password
-            return auth.Level.FULL
+            return auth.Principal(level=auth.Level.FULL, is_duck=False)
         conn.sendall(_auth_cleartext())        # ask for the API key as the password
         tag = self._recv_exact(conn, 1)
         if tag != b"p":
             return None
         plen = struct.unpack("!I", self._recv_exact(conn, 4))[0]
         pw = self._recv_exact(conn, plen - 4).rstrip(b"\x00").decode(errors="replace")
-        level = auth.level_for_key(con, self.api_key, pw)
-        if level is not None:
+        principal = auth.principal_for_key(self.driver, self.api_key, pw)
+        if principal is not None:
             conn.sendall(_auth_ok())          # password accepted
-        return level
+        return principal
 
-    def _run(self, level: auth.Level, sql: str, params=None):
+    def _run(self, principal: auth.Principal, sql: str, params=None, *, gate: bool = False):
+        """Run one statement. ``gate`` (an executed query, not a Describe) applies a Tap's policy first."""
         from .serving import _cache
-        sandboxed = level < auth.Level.FULL
-        cur = _cache(self.driver).connection(self.driver, sandboxed=sandboxed).cursor()
+        from .taps import apply_tap
+
+        if gate and principal.tap is not None:
+            apply_tap(self.driver, principal.tap)
+        sandboxed = principal.tap is not None or principal.level < auth.Level.FULL
+        cur = _cache(self.driver).connection(self.driver, sandboxed=sandboxed, tap=principal.tap).cursor()
         cur.execute(sql, params or [])
         return cur
 
@@ -217,8 +224,8 @@ class PgWireServer:
 
     def _handle(self, conn) -> None:
         try:
-            level = self._startup(conn)
-            if level is None:
+            principal = self._startup(conn)
+            if principal is None:
                 conn.sendall(_error("authentication failed", "28000"))
                 conn.close()
                 return
@@ -245,7 +252,7 @@ class PgWireServer:
                     sql = body.split(b"\x00", 1)[0].decode("utf-8", "replace")
                     for stmt in [s for s in _split(sql) if s.strip()] or [""]:
                         try:
-                            self._send_result(conn, self._run(level, stmt), stmt)
+                            self._send_result(conn, self._run(principal, stmt, gate=True), stmt)
                         except Exception as exc:
                             conn.sendall(_error(str(exc)))
                             break
@@ -267,7 +274,7 @@ class PgWireServer:
                     else:
                         sql, params = portals.get(name, ("", []))
                     try:                                          # execute for the shape (rows fetched at E)
-                        cur = self._run(level, sql, params)
+                        cur = self._run(principal, sql, params)
                         if kind == b"S":
                             conn.sendall(_msg(b"t", struct.pack("!H", len(params))))  # ParameterDescription
                         conn.sendall(_row_description(cur.description) if cur.description else _msg(b"n", b""))
@@ -278,7 +285,7 @@ class PgWireServer:
                     portal = body.split(b"\x00", 1)[0].decode()
                     sql, params = portals.get(portal, ("", []))
                     try:
-                        self._send_result(conn, self._run(level, sql, params), sql)
+                        self._send_result(conn, self._run(principal, sql, params, gate=True), sql)
                     except Exception as exc:
                         conn.sendall(_error(str(exc)))
                         err = True

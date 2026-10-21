@@ -67,7 +67,7 @@ def test_reset_contract_unwedges_a_narrowed_line(tmp_path):
     # A narrowing still fails the gate — the rule did not go soft.
     assert contract_violations({"out": {"amount": "DECIMAL(24,2)"}}, d._contract_for(key))
 
-    d.pulse(key)
+    d.refresh_now(key)
     f = d.state.pond_states[key].start_f.isoformat()
     d.on_event(key, {"kind": "contract_failed", "f": f, "status": "failed", "error": "narrowed"})
     assert d.state.pond_states[key].is_failed
@@ -136,7 +136,7 @@ def _driver(tmp_path, extra=None):
 
 def _run_with_schema(driver, key, ripple, schema):
     """Drive a Pond Run to completion via simulated Duck events, publishing ``schema``."""
-    driver.pulse(key)
+    driver.refresh_now(key)
     f = driver.state.pond_states[key].start_f.isoformat()
     driver.on_event(key, {"kind": "ripple", "f": f, "ripple": ripple, "status": "success"})
     driver.on_event(key, {"kind": "run_completed", "f": f, "schema": schema})
@@ -165,7 +165,7 @@ def test_forward_version_carries_the_high_water_contract(tmp_path):
     d.reload()
     assert d._contract_for("src@1") == {"event": {"id": "INTEGER", "val": "VARCHAR"}}
     # And it rides the begin_run job (the latest — NoopLauncher never drains the queue).
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     job = [j for j in d.jobs["src@1"] if j["kind"] == "begin_run"][-1]
     assert job["contract"] == {"event": {"id": "INTEGER", "val": "VARCHAR"}}
 
@@ -191,7 +191,7 @@ def test_contract_violation_fails_source_and_blocks_sink(tmp_path):
 
     d = _driver(tmp_path, extra=add_sink)
     # The Duck refused to publish (output broke the contract) and reported contract_failed.
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     f = d.state.pond_states["src@1"].start_f.isoformat()
     d.on_event("src@1", {"kind": "contract_failed", "f": f, "error": "column 'event.val' was dropped"})
 
@@ -199,6 +199,28 @@ def test_contract_violation_fails_source_and_blocks_sink(tmp_path):
     snk = next(p for p in d.status()["ponds"] if p["name"] == "snk")
     assert src["is_failed"] and "val" in (src["error"] or "")
     assert snk["is_blocked"] and "src@1" in snk["blocked_by"]
+
+
+def test_a_contract_failure_naming_its_ripple_fails_the_run_it_ends(tmp_path):
+    """What a Duck sends: ``contract_failed`` naming the Run's last Ripple, whose success it withheld. Before
+    the Duck withheld it, the Catchment heard the success first, counted the Run done, and then found nothing
+    in flight to fail: the Pond never showed failed and downstream ran on data that was never published."""
+    def add_sink(db):
+        cfg = {"sources": {"src": "1.0.0"}, "immediate_retries": 0, "source_retries": 0, "kind": "pond"}
+        _register(db, "snk", "1.0.0", "pond", "ponds/snk/1.0.0", cfg, _EVENT)
+
+    d = _driver(tmp_path, extra=add_sink)
+    d.refresh_now("snk@1")
+    f = d.state.pond_states["src@1"].start_f.isoformat()
+    d.on_event("src@1", {"kind": "contract_failed", "ripple": "event", "f": f,
+                         "error": "contract: column 'event.val' was dropped"})
+
+    src = next(p for p in d.status()["ponds"] if p["name"] == "src")
+    snk = next(p for p in d.status()["ponds"] if p["name"] == "snk")
+    assert src["is_failed"] and src["end_f"] is None  # the Run didn't complete
+    assert snk["is_blocked"] and snk["start_f"] is None  # and nothing downstream ran on it
+    assert d.db.execute("SELECT status FROM pond_run").fetchall() == [("failed",)]
+    assert d.db.execute("SELECT status FROM ripple_run").fetchall() == [("failed",)]
 
 
 # ── the real publish gate (live DuckDB registry) ────────────────────────────────
@@ -234,7 +256,7 @@ def test_contract_failure_kind_surfaces_in_status(tmp_path):
     from duckstring.schema_contract import CONTRACT_PREFIX
 
     d = _driver(tmp_path)
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     f = d.state.pond_states["src@1"].start_f.isoformat()
     d.on_event("src@1", {"kind": "contract_failed", "f": f,
                          "error": f"{CONTRACT_PREFIX}column 'event.val' was dropped"})
@@ -249,7 +271,7 @@ def test_contract_failure_kind_surfaces_in_status(tmp_path):
 
 def test_plain_failure_kind_is_error(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     f = d.state.pond_states["src@1"].start_f.isoformat()
     d.on_event("src@1", {"kind": "pond_failed", "f": f, "error": "boom"})
     src = next(p for p in d.status()["ponds"] if p["name"] == "src")

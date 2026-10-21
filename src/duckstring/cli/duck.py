@@ -13,11 +13,11 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="Where each Pond runs, and the Duck pools it can use.", no_args_is_help=True)
+app = typer.Typer(help="The execution context of a Pond.", no_args_is_help=True)
 pool_app = typer.Typer(help="Named sizes of remote compute.", no_args_is_help=True)
 app.add_typer(pool_app, name="pool")
 
-_CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted).")
+_CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted).")
 _MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest).")
 
 _MODES = ("off", "upgrade", "always")

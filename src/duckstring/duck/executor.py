@@ -238,7 +238,7 @@ class RippleExecutor(RunInputs):
         # DuckDB can't read it (a newer storage version, corruption; set aside by open_registry), but
         # published state survives → rebuild the registry from it (tiers + meta + the Extension-1 agg/acc
         # snapshots), so the next run resumes *incrementally* instead of re-bootstrapping. Deliberately
-        # keyed on the file, NOT on an empty registry: a Refresh `wipe()` empties the file in place, and
+        # keyed on the file, NOT on an empty registry: a Rebuild's `wipe()` empties the file in place, and
         # re-hydrating behind a wipe would defeat the cold rebuild.
         # ONE registry instance for the Duck's life: ripples (and the export) each run on a `.cursor()`
         # off it. Separate `connect()`s to the same file in one process raise a "file handle conflict"
@@ -365,7 +365,7 @@ class RippleExecutor(RunInputs):
         return persist_tree(self.own_data_dir, self.persist_dir)
 
     def wipe(self) -> None:
-        """Drop every table in the Pond's registry — a Refresh's cold reset. The next run then reads its
+        """Drop every table in the Pond's registry — a Rebuild's cold reset. The next run then reads its
         Sources in full (``previous_f = NEVER``) and rebuilds from scratch: a Trickle re-bootstraps (clean
         main + empty changelog + floor at this run's freshness), so downstream coverage-misses and reloads.
         The published snapshot is untouched until the rebuild re-exports."""

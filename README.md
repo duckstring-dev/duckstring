@@ -27,8 +27,10 @@ The pipeline follows from those declarations, so it never has to be drawn by han
 Schedules are set on the Ponds whose output is actually used, at the end of the pipeline. Duckstring works back from there, running each upstream Pond only as often as something downstream needs it, so a path nobody consumes never runs. A daily job is one command:
 
 ```bash
-duckstring trigger tide reports 1d
+duckstring refresh add reports --every 1d
 ```
+
+Data can also stay fresh just because it's being used: a [Tap](https://docs.duckstring.com/guides/serving_apps_with_taps) gives an app its own key, and its queries refresh the Pond when the data is older than you allow, so nothing runs while the app is idle.
 
 The [Playground](https://playground.duckstring.com) runs the demo pipeline in your browser, with a short guided tour of how it's scheduled.
 
@@ -80,8 +82,8 @@ This starts a local Catchment, with its web UI at http://127.0.0.1:7474. Leave i
 mkdir demo && cd demo
 duckstring pond demo                       # transactions, products → sales → reports
 duckstring pond deploy --all --yes
-duckstring trigger pulse reports           # run the pipeline once, from the end
-duckstring query reports monthly_summary
+duckstring refresh now reports                 # run the pipeline once, from the end
+duckstring query reports.monthly_summary
 ```
 
 The [Quickstart](https://docs.duckstring.com/quickstart) goes through the same steps with explanations.

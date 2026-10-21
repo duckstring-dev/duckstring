@@ -8,21 +8,11 @@ import type {
   RippleRunState,
   PondVisualState,
   RippleVisualState,
-  ActiveTrigger,
+  Refresh,
 } from './types';
 import type { Window, LogEntry } from './types';
-import { hasCyclePond, hasCycleRipple, isPondDownstreamOf } from './graph';
-import {
-  tick as orchTick,
-  tapPond,
-  pulsePond,
-  sleepPond as orchSleepPond,
-  wakePond as orchWakePond,
-  forcePond as orchForcePond,
-  killPond as orchKillPond,
-  drainLog,
-  type OrchestrState,
-} from './orchestration';
+import { hasCyclePond, hasCycleRipple } from './graph';
+import { tick as orchTick, refreshNow as orchRefreshNow, drainLog, type OrchestrState } from './orchestration';
 
 const MAX_LOGS = 2000;
 
@@ -51,9 +41,6 @@ function initialPondState(): PondRunState {
     startF: 0,
     endF: 0,
     D: 0,
-    hasReceivedPull: false,
-    hasPull: false,
-    pullLocal: false,
     targets: [],
     isKilled: false,
     isBlocked: false,
@@ -69,7 +56,6 @@ function initialRippleState(): RippleRunState {
   return {
     startF: 0,
     endF: 0,
-    hasPull: false,
     targets: [],
     isRunning: false,
     runStartedAt: null,
@@ -114,9 +100,13 @@ function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'pondStates' | 'rippl
       [reportsId]: initialPondState(),
     },
     ripples: {
+      // 1 s: at the tour's 10x a shorter run starts and ends between two frames and never lights up. With
+      // daily_sales (1.5 s) the lead to join_lines is 2.5 s, clearly under one of its 3 s runs, so under a
+      // continuous Refresh the data waits only 0.5 s there. A lead at or just over a run (3 s, 3.5 s) waits most
+      // of a run, and continuous ends up no fresher than every 6 s (bench/launch_alignment).
       [txIngestId]: { id: txIngestId, pondId: txId, name: 'ingest', parents: [], durationMs: 1000, variability: 0 },
-      [prodIngestId]: { id: prodIngestId, pondId: prodId, name: 'ingest', parents: [], durationMs: 2000, variability: 0 },
-      [dailySalesId]: { id: dailySalesId, pondId: salesId, name: 'daily_sales', parents: [], durationMs: 2000, variability: 0 },
+      [prodIngestId]: { id: prodIngestId, pondId: prodId, name: 'ingest', parents: [], durationMs: 1000, variability: 0 },
+      [dailySalesId]: { id: dailySalesId, pondId: salesId, name: 'daily_sales', parents: [], durationMs: 1500, variability: 0 },
       [priceTiersId]: { id: priceTiersId, pondId: salesId, name: 'price_tiers', parents: [], durationMs: 1000, variability: 0 },
       [joinLinesId]: { id: joinLinesId, pondId: salesId, name: 'join_lines', parents: [dailySalesId, priceTiersId], durationMs: 3000, variability: 0 },
       [monthlySummaryId]: { id: monthlySummaryId, pondId: reportsId, name: 'monthly_summary', parents: [], durationMs: 1000, variability: 0 },
@@ -133,7 +123,7 @@ function buildDemoState(): Pick<PlaygroundState, 'ponds' | 'pondStates' | 'rippl
 }
 
 // ─── Example graphs ──────────────────────────────────────────────────────────
-// Topologies for exploring how Pulses are paced, matching the ones it was simulated on. Each Pond lists its
+// Topologies for exploring how Refreshes are paced, matching the ones it was simulated on. Each Pond lists its
 // Sources by name and its Ripples as [name, seconds] (a single Ripple unless noted).
 
 interface ExampleSpec {
@@ -142,6 +132,24 @@ interface ExampleSpec {
 }
 
 export const EXAMPLES: Record<string, ExampleSpec> = {
+  // The pipeline Trickle mode runs, with the Ripple names of the Trickle demo in the Duckstring package.
+  trickle: {
+    label: 'Trickle demo (orders, catalog → priced → revenue)',
+    ponds: [
+      { name: 'orders', ripples: [['ingest', 1]] },
+      { name: 'catalog', ripples: [['ingest', 1]] },
+      { name: 'priced', sources: ['orders', 'catalog'], ripples: [['priced_line', 2]] },
+      { name: 'revenue', sources: ['priced'], ripples: [['by_product', 1]] },
+    ],
+  },
+  chain: {
+    label: 'Chain (1s → 3s → 1s)',
+    ponds: [
+      { name: 'a', ripples: [['r1', 1]] },
+      { name: 'b', sources: ['a'], ripples: [['r1', 3]] },
+      { name: 'c', sources: ['b'], ripples: [['r1', 1]] },
+    ],
+  },
   deep: {
     label: 'Deep chain (fast stages, then a 5s bottleneck)',
     ponds: [
@@ -235,7 +243,7 @@ export function graphSignature(s: Pick<PlaygroundState, 'ponds' | 'ripples'>): s
   const pn = (id: PondId) => s.ponds[id]?.name ?? id;
   const rn = (id: RippleId) => s.ripples[id]?.name ?? id;
   const ponds = Object.values(s.ponds)
-    .map((p) => `${p.name}<${p.sources.map(pn).sort().join(',')}>${JSON.stringify(p.windows ?? [])}`)
+    .map((p) => `${p.name}@${p.major ?? 1}<${p.sources.map(pn).sort().join(',')}>${JSON.stringify(p.windows ?? [])}`)
     .sort();
   const ripples = Object.values(s.ripples)
     .map((r) => `${pn(r.pondId)}.${r.name}<${r.parents.map(rn).sort().join(',')}>${r.durationMs}~${r.variability}`)
@@ -256,13 +264,11 @@ export interface PlaygroundState {
   logs: LogEntry[];
   selectedPondId: PondId | null;
   selectedRippleId: RippleId | null;
-  selectedTriggerId: PondId | null;
-  triggers: Record<PondId, ActiveTrigger>;
-  pulseTags: Record<PondId, number>;
+  refreshes: Record<PondId, Refresh[]>;
+  // A one-shot Refresh's tag on its Pond, until the Pond completes the Run that serves it.
+  refreshTags: Record<PondId, number>;
   // Mobile bottom sheet: open/closed. Selecting a node opens it; the tour also sets it directly.
   sheetOpen: boolean;
-  // The Tide staleness input (seconds) under the Triggers row; null while hidden.
-  tideDraft: string | null;
   // Bumped when something other than the inputs themselves changes a value they show (the tour, a
   // reset), so the uncontrolled sidebar inputs remount with the new value.
   formEpoch: number;
@@ -270,6 +276,8 @@ export interface PlaygroundState {
   // Adds a Pond with one 1 s Ripple and selects it. With no options it links as a Sink of the
   // selected Pond (the sidebar's behaviour); `source` names the Source explicitly. Returns its id.
   addPond(opts?: { name?: string; rippleName?: string; source?: PondId }): PondId;
+  // A new major version of a Pond: a copy of its Ripples with the same Sources and nobody reading it. Returns its id.
+  addMajorVersion(pondId: PondId, sources?: PondId[]): PondId; // sources default to the copied Pond's
   addRipple(pondId: PondId, parentId?: RippleId): void;
   renamePond(pondId: PondId, name: string): void;
   setPondWindows(pondId: PondId, windows: Window[]): void;
@@ -286,20 +294,16 @@ export interface PlaygroundState {
 
   selectPond(pondId: PondId | null): void;
   selectRipple(rippleId: RippleId | null): void;
-  selectTrigger(pondId: PondId | null): void;
   clearSelection(): void;
 
-  triggerTap(pondId: PondId): void;
-  triggerPulse(pondId: PondId): void;
-  triggerWave(pondId: PondId): void;
-  triggerTide(pondId: PondId, stalenessMs: number): void;
-  removeTrigger(pondId: PondId): void;
-
-  // Control verbs (a Pond's execution lifecycle, mirroring the Catchment's force/wake/sleep/kill).
-  force(pondId: PondId): void;
-  wake(pondId: PondId): void;
-  sleep(pondId: PondId, upstream?: boolean): void;
-  kill(pondId: PondId): void;
+  // Refresh now: one request for data as fresh as the current moment.
+  refreshNow(pondId: PondId): void;
+  // Set the Pond's recurring Refresh, replacing any it had; null removes it. Every N, or 0 for continuous: the
+  // playground runs in seconds, so it has no schedules. The engine takes a list per Pond (the Catchment allows
+  // several); the playground keeps one.
+  setRefresh(pondId: PondId, refresh: { everyMs: number } | null): void;
+  // Move the recurring Refresh from one Pond to another (an upgrade moving its Refresh to the new major).
+  moveRefresh(fromPondId: PondId, toPondId: PondId): void;
 
   clearLogs(): void;
 
@@ -310,7 +314,6 @@ export interface PlaygroundState {
   // Whether the graph still matches the example (ignoring run state and triggers).
   isDemoGraph(): boolean;
   setSheetOpen(open: boolean): void;
-  setTideDraft(draft: string | null): void;
   bumpFormEpoch(): void;
 
   setSpeed(speed: number): void;
@@ -324,7 +327,7 @@ function toOrchestrState(state: PlaygroundState): OrchestrState {
     pondStates: state.pondStates,
     ripples: state.ripples,
     rippleStates: state.rippleStates,
-    triggers: state.triggers,
+    refreshes: state.refreshes,
   };
 }
 
@@ -336,13 +339,23 @@ function applyOrch(prev: PlaygroundState, orch: OrchestrState): Partial<Playgrou
   return {
     pondStates: orch.pondStates,
     rippleStates: orch.rippleStates,
-    triggers: orch.triggers,
     logs,
   };
 }
 
-function isOutlet(ponds: Record<PondId, Pond>, pondId: PondId): boolean {
-  return !Object.values(ponds).some((p) => isPondDownstreamOf(ponds, p.id, pondId) && p.id !== pondId);
+// A Pond's display name: its name, plus its major version when it isn't the only major of that name (or isn't 1).
+export function pondLabel(ponds: Record<PondId, Pond>, pondId: PondId): string {
+  const p = ponds[pondId];
+  if (!p) return pondId;
+  const major = p.major ?? 1;
+  const siblings = Object.values(ponds).some((q) => q.id !== pondId && q.name === p.name);
+  return siblings || major !== 1 ? `${p.name} v${major}` : p.name;
+}
+
+// A short label for a recurring Refresh: "Continuous", "Every 4 s", "Every 1 d from 06:00".
+export function refreshLabel(r: { everyMs: number }): string {
+  if (r.everyMs <= 0) return 'Continuous';
+  return `Every ${formatDuration(r.everyMs).replace(/([a-z]+)$/, ' $1')}`;
 }
 
 export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
@@ -356,11 +369,9 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   logs: [],
   selectedPondId: null,
   selectedRippleId: null,
-  selectedTriggerId: null,
-  triggers: {},
-  pulseTags: {},
+  refreshes: {},
+  refreshTags: {},
   sheetOpen: false,
-  tideDraft: null,
   formEpoch: 0,
 
   addPond(opts) {
@@ -386,11 +397,45 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
       rippleStates: { ...s.rippleStates, [rippleId]: initialRippleState() },
       selectedPondId: id,
       selectedRippleId: null,
-      selectedTriggerId: null,
     }));
     if (sourcePondId && get().ponds[sourcePondId]) {
       get().linkPonds(sourcePondId, id);
     }
+    return id;
+  },
+
+  addMajorVersion(pondId, sources) {
+    const s = get();
+    const orig = s.ponds[pondId];
+    const id = newPondId();
+    const major = Math.max(...Object.values(s.ponds).filter((p) => p.name === orig.name).map((p) => p.major ?? 1)) + 1;
+    const own = Object.values(s.ripples).filter((r) => r.pondId === pondId);
+    const ids: Record<RippleId, RippleId> = Object.fromEntries(own.map((r) => [r.id, newRippleId()]));
+    const ripples: Record<RippleId, Ripple> = {};
+    const rippleStates: Record<RippleId, RippleRunState> = {};
+    for (const r of own) {
+      ripples[ids[r.id]] = { ...r, id: ids[r.id], pondId: id, parents: r.parents.map((p) => ids[p] ?? p) };
+      rippleStates[ids[r.id]] = initialRippleState();
+    }
+    rippleCounters[id] = rippleCounters[pondId] ?? own.length;
+    set((st) => ({
+      ponds: {
+        ...st.ponds,
+        [id]: {
+          id,
+          name: orig.name,
+          major,
+          sources: [...(sources ?? orig.sources)],
+          optionalSources: orig.optionalSources?.filter((o) => (sources ?? orig.sources).includes(o)),
+          windows: orig.windows,
+        },
+      },
+      pondStates: { ...st.pondStates, [id]: initialPondState() },
+      ripples: { ...st.ripples, ...ripples },
+      rippleStates: { ...st.rippleStates, ...rippleStates },
+      selectedPondId: id,
+      selectedRippleId: null,
+    }));
     return id;
   },
 
@@ -452,7 +497,11 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
   },
 
   deletePond(pondId) {
-    get().removeTrigger(pondId);
+    set((s) => {
+      const refreshes = { ...s.refreshes };
+      delete refreshes[pondId];
+      return { refreshes };
+    });
     const pondRippleIds = new Set(
       Object.values(get().ripples).filter((r) => r.pondId === pondId).map((r) => r.id)
     );
@@ -481,7 +530,6 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
         rippleStates: newRippleStates,
         selectedPondId: s.selectedPondId === pondId ? null : s.selectedPondId,
         selectedRippleId: pondRippleIds.has(s.selectedRippleId ?? '') ? null : s.selectedRippleId,
-        selectedTriggerId: s.selectedTriggerId === pondId ? null : s.selectedTriggerId,
       };
     });
   },
@@ -518,12 +566,6 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
         [sinkPondId]: { ...s.ponds[sinkPondId], sources: [...s.ponds[sinkPondId].sources, sourcePondId] },
       },
     }));
-    // Triggers live only on outlets. Linking can demote a pond to non-outlet;
-    // drop its trigger so its wave peters out naturally (no stop signal sent).
-    const ponds = get().ponds;
-    for (const pid of Object.keys(get().triggers)) {
-      if (!isOutlet(ponds, pid)) get().removeTrigger(pid);
-    }
     return true;
   },
 
@@ -573,7 +615,6 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     set((s) => ({
       selectedPondId: pondId,
       selectedRippleId: null,
-      selectedTriggerId: null,
       sheetOpen: pondId ? true : s.sheetOpen,
     }));
   },
@@ -583,74 +624,37 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     set((s) => ({
       selectedRippleId: rippleId,
       selectedPondId: ripple?.pondId ?? null,
-      selectedTriggerId: null,
       sheetOpen: rippleId ? true : s.sheetOpen,
     }));
   },
 
-  selectTrigger(pondId) {
-    set((s) => ({
-      selectedTriggerId: pondId,
-      selectedRippleId: null,
-      selectedPondId: null,
-      sheetOpen: pondId ? true : s.sheetOpen,
-    }));
-  },
-
   clearSelection() {
-    set({ selectedPondId: null, selectedRippleId: null, selectedTriggerId: null });
+    set({ selectedPondId: null, selectedRippleId: null });
   },
 
-  // Tap: one-shot resupply (pull). Cascades synchronously. Stamped from the sim clock.
-  triggerTap(pondId) {
-    set((s) => applyOrch(s, tapPond(toOrchestrState(s), pondId, s.now)));
-  },
-
-  // Pulse: one-shot priority freshness target (push to sim-now). Cascades synchronously.
-  triggerPulse(pondId) {
+  refreshNow(pondId) {
     set((s) => ({
-      ...applyOrch(s, pulsePond(toOrchestrState(s), pondId, s.now)),
-      pulseTags: { ...s.pulseTags, [pondId]: s.pondStates[pondId]?.runsCompleted ?? 0 },
+      ...applyOrch(s, orchRefreshNow(toOrchestrState(s), pondId, s.now)),
+      refreshTags: { ...s.refreshTags, [pondId]: s.pondStates[pondId]?.runsCompleted ?? 0 },
     }));
   },
 
-  // Wave: a standing pull, re-asserted by orchestration.tick on each Pond completion.
-  triggerWave(pondId) {
-    if (!isOutlet(get().ponds, pondId)) return;
-    set((s) => ({ triggers: { ...s.triggers, [pondId]: { pondId, kind: 'wave' } } }));
-  },
-
-  // Tide: maintain a maximum staleness, evaluated by orchestration.tick.
-  triggerTide(pondId, stalenessMs) {
-    set((s) => ({ triggers: { ...s.triggers, [pondId]: { pondId, kind: 'tide', stalenessMs } } }));
-  },
-
-  // Force: a recompute at the current freshness (resets endF so everything re-runs), no upstream.
-  force(pondId) {
-    set((s) => applyOrch(s, orchForcePond(toOrchestrState(s), pondId, s.now)));
-  },
-
-  // Wake: a one-shot non-propagating pull (runs once if Sources are already fresher); clears a kill.
-  wake(pondId) {
-    set((s) => applyOrch(s, orchWakePond(toOrchestrState(s), pondId, s.now)));
-  },
-
-  // Sleep: clear demand so the Pond settles; cancels the standing trigger (like the Catchment).
-  sleep(pondId, upstream = false) {
-    get().removeTrigger(pondId);
-    set((s) => applyOrch(s, orchSleepPond(toOrchestrState(s), pondId, s.now, upstream)));
-  },
-
-  // Kill: cancel the in-flight run and park the Pond killed (terminal) until a Wake/Force.
-  kill(pondId) {
-    set((s) => applyOrch(s, orchKillPond(toOrchestrState(s), pondId, s.now)));
-  },
-
-  removeTrigger(pondId) {
+  setRefresh(pondId, refresh) {
     set((s) => {
-      const newTriggers = { ...s.triggers };
-      delete newTriggers[pondId];
-      return { triggers: newTriggers };
+      const refreshes = { ...s.refreshes };
+      if (refresh) refreshes[pondId] = [{ everyMs: Math.max(0, refresh.everyMs), name: refreshLabel(refresh) }];
+      else delete refreshes[pondId];
+      return { refreshes };
+    });
+  },
+
+  moveRefresh(fromPondId, toPondId) {
+    set((s) => {
+      const moving = s.refreshes[fromPondId];
+      const refreshes = { ...s.refreshes };
+      delete refreshes[fromPondId];
+      if (moving?.length) refreshes[toPondId] = moving;
+      return { refreshes };
     });
   },
 
@@ -663,13 +667,11 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     drainLog();
     set((s) => ({
       ...buildDemoState(),
-      triggers: {},
-      pulseTags: {},
+      refreshes: {},
+      refreshTags: {},
       logs: [],
       selectedPondId: null,
       selectedRippleId: null,
-      selectedTriggerId: null,
-      tideDraft: null,
       formEpoch: s.formEpoch + 1,
     }));
   },
@@ -682,13 +684,11 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
     drainLog();
     set((s) => ({
       ...buildExampleState(EXAMPLES[key]),
-      triggers: {},
-      pulseTags: {},
+      refreshes: {},
+      refreshTags: {},
       logs: [],
       selectedPondId: null,
       selectedRippleId: null,
-      selectedTriggerId: null,
-      tideDraft: null,
       formEpoch: s.formEpoch + 1,
     }));
   },
@@ -699,10 +699,6 @@ export const usePlaygroundStore = create<PlaygroundState>((set, get) => ({
 
   setSheetOpen(open) {
     set({ sheetOpen: open });
-  },
-
-  setTideDraft(draft) {
-    set({ tideDraft: draft });
   },
 
   bumpFormEpoch() {
@@ -761,8 +757,8 @@ export function formatAge(F: number, now: number): string {
   return '>1y';
 }
 
-// A staleness bound (ms) as a compact duration in its largest whole unit: 86_400_000 → "1d",
-// 5_400_000 → "1.5h", 2_000 → "2s".
+// A duration (ms) as a compact value in its largest whole unit: 86_400_000 → "1d", 5_400_000 → "1.5h",
+// 2_000 → "2s".
 export function formatDuration(ms: number): string {
   const s = ms / 1000;
   for (const [label, unit] of [['w', 604800], ['d', 86400], ['h', 3600], ['m', 60], ['s', 1]] as const) {
@@ -774,7 +770,7 @@ export function formatDuration(ms: number): string {
   return `${s}s`;
 }
 
-// The freshest pending push target (for the ≤ box / edge colour), or null if none are outstanding.
+// The freshest pending requested freshness (for the ≤ box / edge colour), or null if none are outstanding.
 // NEVER (-Inf) targets from a Force are non-finite and excluded — they carry no displayable age.
 export function pushTargetF(targets: number[]): number | null {
   const finite = targets.filter((t) => Number.isFinite(t));
@@ -783,76 +779,62 @@ export function pushTargetF(targets: number[]): number | null {
 
 export function getRippleVisualState(rs: RippleRunState): RippleVisualState {
   if (rs.isRunning) return 'running';
-  if (rs.hasPull || rs.targets.length > 0) return 'queued';
+  if (rs.targets.length > 0) return 'queued';
   return 'idle';
 }
 
 // Killed/blocked take precedence over demand state, matching the Catchment status string
-// (failed → killed → blocked → running → queued → idle, minus failures — out of the sim's scope).
+// (failed, killed, blocked, running, queued, idle; failures are out of the sim's scope).
 // `busy` is whether any of the Pond's Ripples is running (the backend's notion of a running Pond).
 export function getPondVisualState(ps: PondRunState, busy: boolean): PondVisualState {
   if (ps.isKilled) return 'killed';
   if (ps.isBlocked) return 'blocked';
   if (busy) return 'running';
-  if (ps.hasPull || ps.hasReceivedPull || ps.targets.length > 0) return 'queued';
+  if (ps.targets.length > 0) return 'queued';
   return 'idle';
 }
 
 // ─── Semantic palette (kept in lockstep with frontend/src/lib/store.ts) ──────
-// Named by role, not hue, so the values can move without the names lying. pull / push / running form
-// a roughly-even triad (they are routinely co-visible and must mutually contrast); success/danger are
-// the fixed green/red conventions. THEME_BRAND (the Duckstring colour) IS the running colour and also
-// the generic accent.
-export const THEME_BRAND = '#06c4e6'; // a pond on a bright day — full-saturation water cyan
+// Named by role, not hue, so the values can move without the names lying. THEME_BRAND (the Duckstring colour)
+// is the running colour and the generic accent; success/danger are the fixed green/red conventions.
+export const THEME_BRAND = '#06c4e6'; // a pond on a bright day: full-saturation water cyan
 export const THEME_RUNNING = THEME_BRAND; // active execution + brand accent
-export const THEME_PULL = '#ee9333'; // pull (Tap/Wave) · queued · run interval — warm amber-orange
-export const THEME_PUSH = '#a3e635'; // push (Pulse/Tide) — green-yellow
-export const THEME_SUCCESS = '#22c55e'; // success · force · clear (green)
-export const THEME_DANGER = '#ef4444'; // kill · failed (red)
-export const THEME_BLOCKED = '#991b1b'; // blocked by an upstream kill — a darker, muted red
-export const THEME_WAKE = '#15803d'; // Wake — a muted/dark green (the soft "go", vs Force's bright green)
+export const THEME_DEMAND = '#a3e635'; // demand: a Refresh, a requested freshness (green-yellow)
+export const THEME_AMBER = '#ee9333'; // the throttle and run intervals (warm amber-orange)
+export const THEME_SUCCESS = '#22c55e'; // success (green)
+export const THEME_DANGER = '#ef4444'; // remove · failed (red)
+export const THEME_BLOCKED = '#991b1b'; // blocked by an upstream kill: a darker, muted red
 
-// Node/Ripple demand state → border colour. Killed/blocked (Ponds) take precedence in the visual
-// state, so they map straight through here.
+// Node/Ripple state → border colour. Killed/blocked (Ponds) take precedence in the visual state.
 export const STATE_COLORS: Record<string, string> = {
   running: THEME_RUNNING,
-  queued: THEME_PULL,
+  queued: THEME_DEMAND,
   idle: '#71717a',
   killed: THEME_DANGER, // killed reads as red, like failed
   blocked: THEME_BLOCKED,
 };
 
-// Border colour for a node. Running is always the brand cyan and idle is grey; a *queued* node is
-// coloured by its demand — push if it holds any push target, else pull. (Push is the more specific
-// demand, so it wins the colour when a node holds both.)
-export function stateColor(status: string, hasPull: boolean, targetF: number | null): string {
-  if (status === 'queued') {
-    if (targetF !== null) return THEME_PUSH;
-    if (hasPull) return THEME_PULL;
-  }
+// Border colour for a node: running is the brand cyan, idle grey, queued (holding demand) the demand colour.
+export function stateColor(status: string): string {
   return STATE_COLORS[status] ?? STATE_COLORS.idle;
 }
 
-// pull amber; push green-yellow; idle grey.
 export const EDGE_COLORS: Record<string, string> = {
-  pull: THEME_PULL,
-  push: THEME_PUSH,
+  demand: THEME_DEMAND,
   idle: '#3f3f46',
 };
 
-// Edge colour = whether the child can consume the parent. Coloured when the parent's output is
-// fresher than the child's last run start (parent.endF > child.startF); push if consuming it would
-// also meet a push target the child holds (parent.endF >= child.targetF), else pull. Freshnesses are
-// ms-epoch (0 = never); childTargetF is null when there is no push target.
+// Edge colour: the demand colour when the child holds a request that the parent's newer output would meet
+// (parent.endF > child.startF and parent.endF >= the child's requested freshness), else idle. Freshnesses are
+// ms-epoch (0 = never); childTargetF is null when the child holds no request.
 export function consumeEdgeColor(parentEndF: number, childStartF: number, childTargetF: number | null): string {
-  if (parentEndF <= childStartF) return EDGE_COLORS.idle;
-  if (childTargetF !== null && parentEndF >= childTargetF) return EDGE_COLORS.push;
-  return EDGE_COLORS.pull;
+  if (parentEndF > childStartF && childTargetF !== null && parentEndF >= childTargetF) return EDGE_COLORS.demand;
+  return EDGE_COLORS.idle;
 }
 
 // Internal fill of a node/pill: its rim colour washed in at low alpha over the dark canvas, so the
-// interior is a dark shade of the rim. Shared by Ponds, Ripples, and the trigger pills so they match.
-const FILL_ALPHA = '17'; // ~9% — tune to taste
+// interior is a dark shade of the rim. Shared by Ponds, Ripples, and the Refresh pills so they match.
+const FILL_ALPHA = '17'; // ~9%
 export function nodeFill(rim: string): string {
   return `${rim}${FILL_ALPHA}`;
 }

@@ -20,7 +20,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
   if (!ripple || !rs) return null;
 
   const visualState = getRippleVisualState(rs);
-  const borderColor = stateColor(visualState, rs.hasPull, pushTargetF(rs.targets));
+  const borderColor = stateColor(visualState);
   const isSelected = selectedRippleId === rippleId;
   // Started-run freshness: in-flight start while running, else last completed freshness.
   const startedF = rs.isRunning ? rs.startF : rs.endF;
@@ -54,7 +54,7 @@ export const RippleNode = memo(function RippleNode({ data }: NodeProps) {
         {ripple.name}
       </span>
       <span style={{ fontSize: 11, color: '#71717a', display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
-        <DemandIndicators hasPull={rs.hasPull} targetF={pushTargetF(rs.targets)} now={now} />
+        <DemandIndicators targetF={pushTargetF(rs.targets)} now={now} />
         <span style={{ color: '#a1a1aa' }}>↑{formatAge(startedF, now)} ({rs.runsStarted})</span>
         <span>✓{formatAge(rs.endF, now)} ({rs.runsCompleted})</span>
       </span>

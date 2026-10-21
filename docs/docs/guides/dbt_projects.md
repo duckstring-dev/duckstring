@@ -102,7 +102,7 @@ A dbt Pond can't also contain `@ripple` functions. Put Python steps in a separat
 ```bash
 cd shop_orders && duckstring pond deploy && cd ..
 cd shop_analytics && duckstring pond deploy && cd ..
-duckstring trigger pulse shop_analytics
+duckstring refresh now shop_analytics
 ```
 
 Deployment parses the dbt project to find its models. A parse error, or a missing `dbt_project.yml`, rejects the deployment with dbt's message.

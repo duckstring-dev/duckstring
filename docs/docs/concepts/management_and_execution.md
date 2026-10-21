@@ -7,21 +7,24 @@ description: Working With Duckstring.
 
 ## CLI
 
-Everything you can do with a Catchment is available from the `duckstring` CLI, also installed as `ds`. That includes deploying Ponds, setting triggers, controlling runs and querying data. The CLI works through the Catchment's HTTP API, so scripts, CI jobs and agents can do anything a person can.
+Everything you can do with a Catchment is available from the `duckstring` CLI, also installed as `ds`. That includes deploying Ponds, setting Refreshes, controlling runs and querying data. The CLI works through the Catchment's HTTP API, so scripts, CI jobs and agents can do anything a person can.
 
 ## UI
 
-Each Catchment serves a web UI at its own address. It shows the graph of Ponds and Ripples as they run, the history of every run, and the published data. You can set triggers and control runs from the UI, but the graph itself only changes when you deploy code.
+Each Catchment serves a web UI at its own address. It shows the graph of Ponds and Ripples as they run, the history of every run, and the published data. You can set Refreshes and control runs from the UI, but the graph itself only changes when you deploy code.
 
-<!-- IMAGE: the web UI with the demo pipeline under a Wave, the sidebar open on a Pond, and run history below. -->
+<figure class="ds-figure">
+  <img src="/img/docs/ui-overview.webp" alt="The web UI: the demo pipeline running, the sidebar open on reports, and run history below" width="1440" height="900" />
+  <figcaption>The web UI on the demo pipeline under a continuous Refresh. The sidebar shows the selected Pond, <code>reports</code>, and the panels below list recent runs and the detail of one.</figcaption>
+</figure>
 
 ## Local Execution
 
-A Catchment runs the same way on a laptop as on a server. You can deploy Ponds to a local Catchment, trigger them and inspect their data, knowing they will behave the same once deployed elsewhere. Moving to a shared Catchment later takes very few changes. A small pipeline could even stay on a laptop for good.
+A Catchment runs the same way on a laptop as on a server. You can deploy Ponds to a local Catchment, refresh them and inspect their data, knowing they will behave the same once deployed elsewhere. Moving to a shared Catchment later takes very few changes. A small pipeline could even stay on a laptop for good.
 
 ## Hosting
 
-For a shared Catchment that is always on, run the same server on a dedicated machine. Nothing else changes. Access can be controlled with API keys at three levels: read, demand (read plus triggers) and full.
+For a shared Catchment that is always on, run the same server on a dedicated machine. Nothing else changes. Access can be controlled with API keys at three levels: read, demand (read plus Refreshes) and full.
 
 ## Cloud Compute
 
@@ -41,15 +44,15 @@ Nothing from a failed run is published, so downstream Ponds keep reading the las
 
 ## Control
 
-Beyond triggers, a few commands act directly on a Pond's execution. They're available from `duckstring control` and the UI.
+Beyond Refreshes, a few commands act directly on a Pond's execution. They're available from `duckstring control` and the UI.
 
 | Command | Effect |
 |---|---|
 | wake | run once if the Sources already have newer data, without asking them to run |
 | force | rerun now at the current freshness, even with no upstream change |
-| refresh | rebuild the Pond's tables from scratch on its next run |
+| rebuild | rebuild the Pond's tables from scratch on its next run |
 | repair | rebuild a connected set of Ponds now, in order |
-| sleep | clear the Pond's demand and standing trigger, letting runs in progress finish |
+| sleep | clear the Pond's demand and recurring Refreshes, letting runs in progress finish |
 | kill | stop the Pond's Duck immediately and hold the Pond until it's woken, forced or cleared |
 | clear | reset a failed or killed Pond without running it |
 

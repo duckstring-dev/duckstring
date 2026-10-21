@@ -8,7 +8,7 @@ One async task. Each cycle, per duct:
 2. Perform any pending transfers (``Driver.take_transfers``): fetch the upstream's exported Parquet
    over ``/api/draw`` and land it in the local landing zone, then report completion. Data lands
    **before** the Draw's freshness advances, so a Sink never reads stale/absent Parquet.
-3. Solicit the upstream (forward a Tap) for any Draw with unmet downstream demand.
+3. Send the upstream any Draw's unmet downstream demand, carrying its epoch.
 
 Demand flows up; data flows down. The poller is the Draw's "Duck" — Draws are never run by a
 subprocess. See plans/cross-catchment-ducts.md.
@@ -118,7 +118,7 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
 
 async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | None = None) -> None:
     # `solicited` (persisted across cycles by run_poller) is the last demand forwarded per Draw, so we
-    # never re-send the same push/pull. Re-sending the SAME target would re-add it on the upstream
+    # never re-send the same demand. Re-sending the SAME epoch would re-add it on the upstream
     # mid-run and trigger a spurious second run at the same freshness.
     if solicited is None:
         solicited = {}
@@ -161,34 +161,44 @@ async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | N
         except Exception as exc:  # noqa: BLE001 — any failure fails the transfer (blocks downstream)
             driver.fail_draw_transfer(t["key"], t["f"], f"transfer failed: {exc}")
 
-    # 3. Solicit upstreams for Draws with unmet downstream demand — forwarding the demand's epoch so
-    #    the upstream Inlet mints the SAME freshness (push target → pulse-at-T; pull → tap-with-m).
-    #    Each distinct demand is forwarded exactly once (see `solicited`): re-sending the same epoch
-    #    would re-add the target on a mid-run upstream and cause a duplicate run.
+    # 3. Send each Draw's unmet downstream demand to its upstream, carrying the demand's epoch so the upstream
+    #    Inlet mints the SAME freshness. Each distinct demand is sent exactly once (see `solicited`): re-sending
+    #    the same epoch would re-add it on a mid-run upstream and cause a duplicate run. An upstream older than
+    #    Refresh is sent nothing: there `/refresh` is the Rebuild flag (`_speaks_refresh`).
     for d in driver.draws():
         key = d["key"]
         origin = _origin_for(targets, d["name"], d["major"])
         duct = url_by_origin.get(origin) if origin else None
         if duct is None:
             continue
-        demand = (d["target"], d["pull_m"])
-        if demand == (None, None) or solicited.get(key) == demand:
+        if not _speaks_refresh(statuses.get(origin)):
+            if origin not in _warned_old:
+                _warned_old.add(origin)
+                print(f"[poller] upstream {duct['remote_url']} predates Refresh: upgrade it to send it demand",
+                      flush=True)
+            continue
+        demand = d["demand"]
+        if demand is None or solicited.get(key) == demand:
             solicited[key] = demand  # nothing to send, or already sent this exact demand
             continue
         try:
-            if d["target"] is not None:
-                await client.post(
-                    f"{duct['remote_url']}/api/ponds/{d['name']}/pulse",
-                    params={"major": d["major"], "at": d["target"]}, headers=duct["auth"],
-                )
-            if d["pull_m"] is not None:
-                await client.post(
-                    f"{duct['remote_url']}/api/ponds/{d['name']}/tap",
-                    params={"major": d["major"], "m": d["pull_m"]}, headers=duct["auth"],
-                )
+            await client.post(
+                f"{duct['remote_url']}/api/ponds/{d['name']}/refresh",
+                params={"major": d["major"], "at": demand}, headers=duct["auth"],
+            )
             solicited[key] = demand
         except httpx.HTTPError:
             pass  # don't record → retry next cycle
+
+
+_warned_old: set[str] = set()  # origins already warned about as predating Refresh (once per process)
+
+
+def _speaks_refresh(status: dict | None) -> bool:
+    """Whether an upstream's ``/api/status`` comes from a Catchment with Refresh: its Ponds list ``refreshes``
+    (an older one lists ``trigger``). Unknown (unreachable, or no Ponds) counts as no."""
+    ponds = (status or {}).get("ponds") or []
+    return bool(ponds) and "refreshes" in ponds[0]
 
 
 def _origin_for(targets: list[dict], name: str, major: int) -> str | None:

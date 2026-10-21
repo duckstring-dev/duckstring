@@ -145,7 +145,7 @@ Restores state from a `--state-backup` location into a local directory, to seed 
 duckstring catchment reset [-c NAME] [--clear-history] [--yes]
 ```
 
-Returns every Pond to its freshly deployed state: deletes all published data and working databases and resets freshness. Keeps deployed code, triggers, windows, Spouts, alerts, secrets and keys. Every Duck restarts.
+Returns every Pond to its freshly deployed state: deletes all published data and working databases and resets freshness. Keeps deployed code, Refreshes, windows, Spouts, alerts, secrets and keys. Every Duck restarts.
 
 | Option | Description |
 |---|---|
@@ -206,11 +206,11 @@ duckstring catchment duct destroy UPSTREAM [-c NAME]
 
 Removes a duct and every Pond Draw it created.
 
-### `open` and `close`
+### `duct open` and `duct close`
 
 ```bash
-duckstring catchment open POND [-c NAME] [-m N | -v VERSION] [--tap-on-get]
-duckstring catchment close POND [-c NAME] [-m N | -v VERSION]
+duckstring catchment duct open POND [-c NAME] [-m N | -v VERSION]
+duckstring catchment duct close POND [-c NAME] [-m N | -v VERSION]
 ```
 
-Run on the upstream Catchment. `open` marks a Pond as accepting demand from other Catchments. With `--tap-on-get`, every query of the Pond through the query API (such as `duckstring query` or the data viewer) also sends it a Tap, after serving the current data. Duct transfers don't. `close` removes both.
+Run on the upstream Catchment. `open` marks a Pond as accepting demand from other Catchments, and `close` removes the mark.

@@ -170,7 +170,7 @@ def test_launcher_receives_effective_config_on_dispatch(tmp_path, monkeypatch):
 
     d = _driver(tmp_path, launcher=SpyLauncher())
     d.set_duck("src@1", flock_mode="upgrade")
-    d.tap("src@1")
+    d.refresh_now("src@1")
     assert seen["src@1"]["duck_target"] == "catchment" and seen["src@1"]["flock_mode"] == "upgrade"
 
 

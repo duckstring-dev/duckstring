@@ -74,6 +74,14 @@ The purpose of this is to allow seamless upgrades for non-breaking changes, and 
 for breaking changes. Following these rules, you can confidently upload changes and upgrade downstream Ponds when possible - no need for strong
 governance on simultaneous upgrades.
 
+<figure class="ds-figure">
+  <video autoplay loop muted playsinline poster="/img/docs/upgrade.poster.webp" aria-label="reports v2 deployed beside v1 in the web UI; the Refresh moves to v2, which starts running while v1 goes quiet">
+    <source src="/img/docs/upgrade.webm" type="video/webm" />
+    <source src="/img/docs/upgrade.mp4" type="video/mp4" />
+  </video>
+  <figcaption>Major version 2 of <code>reports</code>, deployed beside version 1. When the Refresh moves to v2, v2 starts running and v1 goes quiet.</figcaption>
+</figure>
+
 Each entry under `[sources]` pins both a major version and a minimum version: `transactions = "1.2.0"` means major version 1, at least 1.2.0.
 A deployment that would break a pin is refused. A Sink can't be deployed against a Source older than its minimum, and a Source can't be rolled
 back below a version that a deployed Sink requires.
@@ -98,7 +106,7 @@ defines the *Schema* for its objects. A table `monthly_summary` in the `reports`
 SELECT * FROM reports_v2.monthly_summary
 ```
 
-Each Pond also has a *served* major version, which can be queried without the suffix. This is the first major version deployed, until you promote another one (`duckstring serve promote`), so consumers can be moved to a new major version in a single step:
+Each Pond also has a *served* major version, which can be queried without the suffix. This is the first major version deployed, until you promote another one (`duckstring pond promote`), so consumers can be moved to a new major version in a single step:
 
 ```
 SELECT * FROM reports.monthly_summary

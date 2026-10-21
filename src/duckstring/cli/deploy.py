@@ -162,7 +162,7 @@ def _deploy_one(
 
 def deploy(
     catchment: Optional[str] = typer.Option(
-        None, "--catchment", "-c", help="Catchment to deploy to (uses default if omitted)."
+        None, "--catchment", "-c", help="Catchment to deploy to (default if omitted)."
     ),
     git: Optional[str] = typer.Option(None, "--git", help="Deploy from a git ref (branch, commit, or tag)."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts."),
@@ -210,7 +210,7 @@ def deploy(
 
 def remove(
     name: str = typer.Argument(..., help="Pond name to remove."),
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (uses default if omitted)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="Major line to remove (default: highest deployed)."),
     wipe: bool = typer.Option(False, "--wipe", help="Also delete the deployment record, run history and "
                               "deployed code, as if never deployed."),
@@ -238,3 +238,20 @@ def remove(
         typer.echo(f"  Spouts removed with it: {', '.join(resp['spouts_removed'])}")
     if resp.get("now_blocked"):
         typer.echo(f"  Now blocked (missing source): {', '.join(resp['now_blocked'])}")
+
+
+def promote(
+    pond: str = typer.Argument(..., help="The Pond whose served major to change."),
+    major: int = typer.Option(..., "--major", "-m", help="Major version to serve under the Pond's bare name."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+) -> None:
+    """Make a major version the one the Pond's bare name refers to in catalog SQL.
+
+    Refused if that major doesn't publish every table currently served.
+    """
+    from . import _http
+    from .config import resolve_catchment
+
+    _, cfg = resolve_catchment(catchment)
+    _http.post(f"{cfg['url']}/api/ponds/{pond}/serve/promote", auth=cfg, json={"major": major})
+    typer.echo(f"Promoted {pond}: its bare name now refers to v{major}.")

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { track } from '@vercel/analytics';
+import { revealSoon } from './reveal';
 import { usePlaygroundStore } from './store';
 import { writeTourMemory } from './tourStorage';
 import { TOUR_STEPS, pondByName, rippleByName, type TourControl, type TourStep, type TourTarget } from './tourSteps';
@@ -23,6 +24,7 @@ interface TourState {
   wait: { startedAt: number; expectedMs: number } | null; // the current wait, for its progress bar
   // How the last wait ended (the end-to-end test checks that conditions fire before their fallback).
   lastAdvance: 'until' | 'fallback' | 'hurry' | null;
+  collapsed: boolean; // the card folded to a bar so a phone can see the graph; each step opens unfolded
 
   offer(): void;
   requestStart(): void;
@@ -33,6 +35,7 @@ interface TourState {
   skip(): void;
   decline(): void;
   hurry(): void;
+  setCollapsed(collapsed: boolean): void;
 }
 
 // ─── Runner internals (module scope: timers and subscriptions aren't state) ──
@@ -76,10 +79,13 @@ export const useTourStore = create<TourState>((set, get) => {
   function open(index: number): void {
     clearPending();
     const step = TOUR_STEPS[index];
-    set({ phase: 'step', index, waitLabel: null, wait: null, ring: null, outline: null });
-    const s = play();
-    s.setTideDraft(null);
-    focus(step.target ?? {}, step.frame);
+    if (step.frame === 'keep') {
+      // The view and selection stay (a chapter's opening card keeps the last chart in view); the highlights go.
+      set({ phase: 'step', index, waitLabel: null, wait: null, ring: null, outline: null, collapsed: false });
+    } else {
+      set({ phase: 'step', index, waitLabel: null, wait: null, ring: null, outline: null, collapsed: false });
+      focus(step.target ?? {}, step.frame);
+    }
     step.setup?.({ store: play(), focus });
     watchAction(step);
   }
@@ -97,6 +103,27 @@ export const useTourStore = create<TourState>((set, get) => {
     });
   }
 
+  // An animated action: its stages run one after another at real speed, with the card hidden and each stage
+  // free to point the canvas at what it changes. Then the step moves on as usual.
+  function animate(index: number, step: TourStep): void {
+    const stages = step.action!.stages!;
+    clearPending();
+    const s = play();
+    if (s.paused) s.togglePause();
+    s.setSpeed(1);
+    const total = stages.reduce((sum, st) => sum + st.ms, 0);
+    set({ phase: 'waiting', waitLabel: step.action!.label, wait: { startedAt: performance.now(), expectedMs: total }, outline: null });
+    let at = 0;
+    for (const st of stages) {
+      at += st.ms;
+      later(at, () => st.run({ store: play(), focus }));
+    }
+    later(at + 50, () => {
+      if (step.advance !== 'next') wait(index, step);
+      else open(index + 1);
+    });
+  }
+
   function wait(index: number, step: TourStep): void {
     const w = step.advance;
     if (w === 'next') return;
@@ -104,18 +131,31 @@ export const useTourStore = create<TourState>((set, get) => {
     const since = play();
     if (since.paused) since.togglePause();
     since.setSpeed(w.speed ?? WAIT_SPEED);
+    if (w.speedAfter) {
+      const after = w.speedAfter;
+      later(after.ms, () => {
+        play().setSpeed(after.speed);
+        if (after.label) set({ waitLabel: after.label });
+      });
+    }
     // The pipeline gets the whole screen while it runs: nothing selected or highlighted, and the
-    // mobile bottom sheet closed. The next step selects what it needs.
-    since.clearSelection();
-    since.setSheetOpen(false);
+    // mobile bottom sheet closed (unless the step keeps its target, or another, in view). The next step selects
+    // what it needs.
+    const keepFocus = w.keepFocus || !!w.focus;
+    if (w.focus) focus(w.focus, 'all');
+    if (!keepFocus) {
+      since.clearSelection();
+      since.setSheetOpen(false);
+    }
     set((t) => ({
       phase: 'waiting',
       waitLabel: w.label,
       wait: { startedAt: performance.now(), expectedMs: w.expectedMs },
-      ring: null,
-      outline: null,
-      frame: { ids: null, seq: t.frame.seq + 1 },
+      ring: keepFocus ? t.ring : null,
+      outline: keepFocus ? (w.show ?? null) : null,
+      frame: keepFocus ? t.frame : { ids: null, seq: t.frame.seq + 1 },
     }));
+    if (keepFocus && w.show) revealSoon(`[data-tour="${w.show}"]`, later); // clear of the waiting pill
     let resolved = false;
     const done = (how: 'until' | 'fallback' | 'hurry') => {
       if (resolved) return;
@@ -137,7 +177,6 @@ export const useTourStore = create<TourState>((set, get) => {
     clearPending();
     if (visitorSpeed !== null) play().setSpeed(visitorSpeed);
     visitorSpeed = null;
-    play().setTideDraft(null);
     set({ phase: 'off', ring: null, outline: null, waitLabel: null, wait: null });
     writeTourMemory(reason);
     const step = phase === 'prompt' || phase === 'confirm' ? 0 : index + 1;
@@ -153,6 +192,7 @@ export const useTourStore = create<TourState>((set, get) => {
     waitLabel: null,
     wait: null,
     lastAdvance: null,
+    collapsed: false,
 
     offer() {
       set({ phase: 'prompt' });
@@ -181,7 +221,8 @@ export const useTourStore = create<TourState>((set, get) => {
       if (phase !== 'step') return;
       clearPending(); // drop the action watcher before the action itself would trigger it
       const step = TOUR_STEPS[index];
-      if (step.action && !step.action.done(play())) step.action.run(play());
+      if (step.action?.stages && !step.action.done(play())) return animate(index, step);
+      if (step.action && !step.action.done(play())) step.action.run?.(play());
       if (index === TOUR_STEPS.length - 1) return end('done');
       if (step.advance !== 'next') return wait(index, step);
       open(index + 1);
@@ -208,6 +249,10 @@ export const useTourStore = create<TourState>((set, get) => {
 
     hurry() {
       hurryNow?.();
+    },
+
+    setCollapsed(collapsed) {
+      set({ collapsed });
     },
   };
 });

@@ -1,30 +1,23 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { usePlaygroundStore, THEME_BRAND, THEME_PULL, THEME_PUSH, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE } from '@/lib/store';
+import { usePlaygroundStore, THEME_BRAND, THEME_AMBER, THEME_DEMAND, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED } from '@/lib/store';
 
-// Colour per event kind, for quick scanning. Triggers and demand follow the pull/push palette;
-// the control verbs reuse their Sidebar button colours.
+// Colour per event kind, for quick scanning: demand in the demand colour, the throttle in amber.
 const KIND_COLOR: Record<string, string> = {
-  tap: THEME_PULL,
-  pulse: THEME_PUSH,
+  refresh: THEME_DEMAND,
   force: THEME_SUCCESS,
-  wake: THEME_WAKE,
   sleep: THEME_BLOCKED,
   kill: THEME_DANGER,
-  'pond-pull': THEME_PULL,
-  'ripple-pull': THEME_PULL,
-  'pond-push': THEME_PUSH,
+  'pond-demand': THEME_DEMAND,
   'pond-start': '#a1a1aa',
   'ripple-start': '#a1a1aa',
   'ripple-done': '#71717a',
   'pond-done': '#e4e4e7',
-  throttled: THEME_PULL,
+  throttled: THEME_AMBER,
   unthrottled: '#71717a',
-  queue: THEME_PULL,
-  hold: THEME_PULL,
-  emit: THEME_PUSH,
-  release: THEME_PUSH,
+  hold: THEME_AMBER,
+  release: THEME_DEMAND,
 };
 
 function fmtClock(t: number): string {
@@ -115,7 +108,7 @@ export function ConsolePanel() {
           style={{ height: 200, overflowY: 'auto', padding: '4px 10px 8px', fontSize: 11, lineHeight: 1.5 }}
         >
           {logs.length === 0 ? (
-            <div style={{ color: '#52525b' }}>No events yet — trigger a Tap, Wave, Pulse…</div>
+            <div style={{ color: '#52525b' }}>No events yet. Refresh a Pond to start.</div>
           ) : (
             logs.map((l, i) => (
               <div key={i} style={{ display: 'flex', gap: 8, whiteSpace: 'pre' }}>

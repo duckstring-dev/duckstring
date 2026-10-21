@@ -24,7 +24,8 @@ def test_migrate_creates_tables(tmp_path):
     migrate(con)
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"pond_name", "pond", "pond_version", "ripple", "ripple_to_ripple", "pond_to_pond",
-            "pond_state", "pond_target", "pond_window", "pond_trigger", "pond_run", "ripple_run"} <= tables
+            "pond_state", "pond_demand", "pond_window", "pond_refresh", "pond_run", "ripple_run"} <= tables
+    assert not {"pond_target", "pond_trigger"} & tables  # replaced by migration 031
 
 
 def test_migrate_is_idempotent(tmp_path):
@@ -358,7 +359,7 @@ def test_query_before_a_pond_has_run_says_to_run_it(catchment_client):
     r = catchment_client.post("/api/query", json={"pond": "fresh", "ripple": "summary"})
     assert r.status_code == 400
     assert "hasn't published any tables yet" in r.json()["detail"]
-    assert "duckstring trigger pulse fresh" in r.json()["detail"]
+    assert "duckstring refresh now fresh" in r.json()["detail"]
 
 
 def test_query_custom_sql(catchment_client):
@@ -496,39 +497,7 @@ def test_deploy_demo_ponds(catchment_client):
 
 
 # ---------------------------------------------------------------------------
-# Wave tests
-# ---------------------------------------------------------------------------
-
-def test_wave_unknown_outlet_404(catchment_client):
-    r = catchment_client.post("/api/ponds/nonexistent/wave")
-    assert r.status_code == 404
-
-
-def _trigger_row(db, name):
-    return db.execute(
-        "SELECT pt.kind, pt.bound_ms, pt.status FROM pond_trigger pt "
-        "JOIN pond_name pn ON pn.id = (SELECT pond_name_id FROM pond WHERE id = pt.pond_id) "
-        "WHERE pn.name = ?", (name,)
-    ).fetchall()
-
-
-def test_wave_registers_trigger(catchment_client):
-    _deploy(catchment_client, name="outlet", version="1.0.0", kind="outlet", toml_text=OUTLET_TOML.split("[sources]")[0])
-    r = catchment_client.post("/api/ponds/outlet/wave")
-    assert r.status_code == 200
-    rows = _trigger_row(_db(catchment_client), "outlet")
-    assert rows == [("wave", None, "active")]
-
-
-def test_wave_idempotent(catchment_client):
-    _deploy(catchment_client, name="outlet", version="1.0.0", kind="outlet", toml_text=OUTLET_TOML.split("[sources]")[0])
-    catchment_client.post("/api/ponds/outlet/wave")
-    catchment_client.post("/api/ponds/outlet/wave")
-    assert len(_trigger_row(_db(catchment_client), "outlet")) == 1  # single upserted trigger
-
-
-# ---------------------------------------------------------------------------
-# Tide tests (staleness bound, not cron)
+# Refreshes
 # ---------------------------------------------------------------------------
 
 OUTLET_ONLY_TOML = """\
@@ -539,52 +508,117 @@ type = "outlet"
 """
 
 
-def test_tide_unknown_outlet_404(catchment_client):
-    r = catchment_client.post("/api/ponds/nonexistent/tide", json={"bound_seconds": 60})
-    assert r.status_code == 404
+def _refresh_rows(db, name):
+    return db.execute(
+        "SELECT pr.name, pr.every_ms, pr.start_anchor, pr.valid_days FROM pond_refresh pr "
+        "JOIN pond_name pn ON pn.id = (SELECT pond_name_id FROM pond WHERE id = pr.pond_id) "
+        "WHERE pn.name = ? ORDER BY pr.name", (name,)
+    ).fetchall()
 
 
-def test_tide_invalid_bound_422(catchment_client):
+def _outlet(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    r = catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 0})
-    assert r.status_code == 422
 
 
-def test_tide_registers_bound(catchment_client):
-    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    r = catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 3600})
+def test_refresh_unknown_pond_404(catchment_client):
+    assert catchment_client.post("/api/ponds/nonexistent/refresh").status_code == 404
+    assert catchment_client.post("/api/ponds/nonexistent/refreshes", json={"every_seconds": 60}).status_code == 404
+    assert catchment_client.get("/api/ponds/nonexistent/refreshes").status_code == 404
+
+
+def test_refresh_now(catchment_client):
+    _outlet(catchment_client)
+    assert catchment_client.post("/api/ponds/outlet/refresh").status_code == 200
+    assert _refresh_rows(_db(catchment_client), "outlet") == []  # one-shot: nothing standing
+
+
+def test_add_list_and_remove_refreshes(catchment_client):
+    _outlet(catchment_client)
+    r = catchment_client.post("/api/ponds/outlet/refreshes", json={"every_seconds": 1800})
+    assert r.status_code == 200 and r.json()["refresh"]["name"] == "Every 30 min"
+    r = catchment_client.post("/api/ponds/outlet/refreshes", json={
+        "every_seconds": 86400, "start": "2026-01-05T06:00:00+00:00", "days": "MON,TUE,WED,THU,FRI"})
+    assert r.json()["refresh"]["name"] == "Weekdays at 06:00"
+    listed = catchment_client.get("/api/ponds/outlet/refreshes").json()["refreshes"]
+    assert [x["name"] for x in listed] == ["Weekdays at 06:00", "Every 30 min"]
+
+    # A floating Refresh replaces the floating one; scheduled ones stay.
+    catchment_client.post("/api/ponds/outlet/refreshes", json={"continuous": True})
+    assert [n for n, *_ in _refresh_rows(_db(catchment_client), "outlet")] == ["Continuous", "Weekdays at 06:00"]
+
+    r = catchment_client.post("/api/ponds/outlet/refreshes/Weekdays at 06:00/remove")
     assert r.status_code == 200
-    assert _trigger_row(_db(catchment_client), "outlet") == [("tide", 3_600_000, "active")]
+    assert catchment_client.post("/api/ponds/outlet/refreshes/nope/remove").status_code == 404
+    assert _refresh_rows(_db(catchment_client), "outlet") == [("Continuous", 0, None, None)]
 
 
-def test_tide_updates_existing_bound(catchment_client):
-    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 3600})
-    catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 30})
-    assert _trigger_row(_db(catchment_client), "outlet") == [("tide", 30_000, "active")]
+def test_refresh_validation_422(catchment_client):
+    _outlet(catchment_client)
+    bad = [{"every_seconds": -1}, {"every_seconds": 0, "start": "2026-01-01T06:00:00+00:00"},
+           {"every_seconds": 60, "start": "2026-01-01T06:00:00+00:00", "days": "MON,FUNDAY"}]
+    for body in bad:
+        assert catchment_client.post("/api/ponds/outlet/refreshes", json=body).status_code == 422, body
 
 
-def test_stop_cancels_standing_trigger(catchment_client):
-    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    catchment_client.post("/api/ponds/outlet/wave")
-    assert _trigger_row(_db(catchment_client), "outlet") == [("wave", None, "active")]
-    r = catchment_client.post("/api/ponds/outlet/sleep")
-    assert r.status_code == 200
-    assert _trigger_row(_db(catchment_client), "outlet") == []
+def test_sleep_removes_standing_refreshes(catchment_client):
+    _outlet(catchment_client)
+    catchment_client.post("/api/ponds/outlet/refreshes", json={"continuous": True})
+    assert catchment_client.post("/api/ponds/outlet/sleep").status_code == 200
+    assert _refresh_rows(_db(catchment_client), "outlet") == []
 
 
-def test_untrigger_removes_standing_trigger(catchment_client):
-    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    catchment_client.post("/api/ponds/outlet/tide", json={"bound_seconds": 3600})
-    assert _trigger_row(_db(catchment_client), "outlet") == [("tide", 3_600_000, "active")]
-    r = catchment_client.post("/api/ponds/outlet/untrigger")
-    assert r.status_code == 200
-    assert _trigger_row(_db(catchment_client), "outlet") == []
+def test_rebuild_flags_the_next_run(catchment_client):
+    _outlet(catchment_client)
+    assert catchment_client.post("/api/ponds/outlet/rebuild").status_code == 200
+    outlet = next(p for p in catchment_client.get("/api/status").json()["ponds"] if p["name"] == "outlet")
+    assert outlet["rebuild_pending"] is True
+    catchment_client.post("/api/ponds/outlet/rebuild", params={"clear": "true"})
+    outlet = next(p for p in catchment_client.get("/api/status").json()["ponds"] if p["name"] == "outlet")
+    assert outlet["rebuild_pending"] is False
 
 
-def test_untrigger_unknown_outlet_404(catchment_client):
-    r = catchment_client.post("/api/ponds/nonexistent/untrigger")
-    assert r.status_code == 404
+def test_the_old_trigger_routes_are_gone(catchment_client):
+    _outlet(catchment_client)
+    for route in ("tap", "pulse", "wave", "tide", "untrigger"):
+        assert catchment_client.post(f"/api/ponds/outlet/{route}").status_code in (404, 405), route
+
+
+def test_migration_031_converts_waves_and_tides(tmp_path):
+    """Standing Waves become continuous Refreshes and Tides floating ones at their bound; push targets carry over
+    as demand; pull columns and tap-on-get go and refresh_pending becomes rebuild_pending."""
+    import sqlite3
+
+    from duckstring.catchment import db as dbmod
+
+    con = sqlite3.connect(tmp_path / "duck.db")
+    con.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    con.commit()
+    files = sorted(dbmod._SCHEMA_DIR.glob("*.sql"))
+    for f in files:
+        if int(f.stem.split("_")[0]) >= 31:
+            break
+        con.executescript(f.read_text())
+        con.execute("INSERT INTO schema_migrations VALUES (?, 'x')", (int(f.stem.split("_")[0]),))
+    con.execute("INSERT INTO pond_name (id, name, kind) VALUES (1, 'a', 'outlet'), (2, 'b', 'outlet'), (3, 'c', 'outlet')")
+    con.execute("INSERT INTO pond_version (id, pond_name_id, version, major, source_path) VALUES "
+                "(1, 1, '1.0.0', 1, 'x'), (2, 2, '1.0.0', 1, 'x'), (3, 3, '1.0.0', 1, 'x')")
+    con.execute("INSERT INTO pond (id, pond_name_id, major, pond_version_id) VALUES (1, 1, 1, 1), (2, 2, 1, 2), (3, 3, 1, 3)")
+    con.execute("INSERT INTO pond_trigger (pond_id, kind, bound_ms) VALUES (1, 'wave', NULL), (2, 'tide', 86400000), "
+                "(3, 'tide', 2500)")
+    con.execute("INSERT INTO pond_target (pond_id, target_f) VALUES (2, '2026-01-01T00:00:00+00:00')")
+    con.execute("INSERT INTO pond_open (pond_id, tap_on_get) VALUES (2, 1)")
+    con.execute("INSERT INTO pond_state (pond_id, start_f, end_f, has_pull, pull_m, refresh_pending) "
+                "VALUES (1, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', 1, '2026-01-01T00:00:00+00:00', 1)")
+    con.commit()
+    dbmod.migrate(con)
+    assert con.execute("SELECT pond_id, name, every_ms FROM pond_refresh ORDER BY pond_id").fetchall() == [
+        (1, "Continuous", 0), (2, "Daily", 86_400_000), (3, "Every 2.5 s", 2500)]
+    assert con.execute("SELECT pond_id, demand_f FROM pond_demand").fetchall() == [(2, "2026-01-01T00:00:00+00:00")]
+    cols = {r[1] for r in con.execute("PRAGMA table_info(pond_state)")}
+    assert "rebuild_pending" in cols and not {"has_pull", "has_received_pull", "pull_local", "pull_m"} & cols
+    assert con.execute("SELECT start_f, rebuild_pending FROM pond_state").fetchall() == [
+        ("2026-01-01T00:00:00+00:00", 1)]
+    assert con.execute("SELECT * FROM pond_open").fetchall() == [(2,)]  # still open; tap-on-get is gone
 
 
 # ---------------------------------------------------------------------------

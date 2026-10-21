@@ -1,6 +1,7 @@
 import dagre from '@dagrejs/dagre';
 import type { Node, Edge } from '@xyflow/react';
-import type { PondId, RippleId, Pond, Ripple, ActiveTrigger } from './types';
+import type { PondId, RippleId, Pond, Ripple, Refresh } from './types';
+import { pondLabel, refreshLabel } from './store';
 
 const MIN_RIPPLE_W = 200;
 const RIPPLE_H = 80;
@@ -46,8 +47,17 @@ const POND_PAD_BOTTOM = 24;
 const MIN_POND_W = 160;
 const MIN_POND_H = 120;
 
-const TRIGGER_W = 120;
-const TRIGGER_H = 36;
+// The demand strip: a Pond's recurring Refresh, joined to the bottom of its box so the layout makes room for it
+// (the box grows taller, and wider for a long name). Mirrors the Catchment UI's strip.
+export const STRIP_LINE_H = 18;
+export const STRIP_PAD = 6; // above and below the lines
+export function demandStripHeight(lines: number): number {
+  return lines > 0 ? lines * STRIP_LINE_H + STRIP_PAD * 2 : 0;
+}
+function demandStripWidth(lines: string[]): number {
+  const CH11 = 6.7; // monospace char px at fontSize 11
+  return Math.ceil(Math.max(0, ...lines.map((l) => l.length * CH11)) + 24 /* padding */);
+}
 
 interface LayoutResult {
   nodes: Node[];
@@ -132,7 +142,7 @@ function buildRippleLayout(
 export function computeLayout(
   ponds: Record<PondId, Pond>,
   ripples: Record<RippleId, Ripple>,
-  triggers: Record<PondId, ActiveTrigger>,
+  refreshes: Record<PondId, Refresh[]>,
   floors?: ContentFloors,
   direction: 'LR' | 'TB' = 'LR'
 ): LayoutResult {
@@ -152,7 +162,12 @@ export function computeLayout(
   for (const pond of pondList) {
     const layout = buildRippleLayout(pond.id, ripples, floors?.ripples, direction);
     // Floor the pond width to fit its title line and its (live) stats line.
-    layout.width = Math.max(layout.width, pondNameWidth(pond.name), floors?.ponds?.[pond.id] ?? 0);
+    layout.width = Math.max(layout.width, pondNameWidth(pondLabel(ponds, pond.id)), floors?.ponds?.[pond.id] ?? 0);
+    const lines = (refreshes[pond.id] ?? []).map(refreshLabel);
+    if (lines.length) {
+      layout.width = Math.max(layout.width, demandStripWidth(lines));
+      layout.height += demandStripHeight(lines.length);
+    }
     pondLayouts[pond.id] = layout;
   }
 
@@ -189,7 +204,7 @@ export function computeLayout(
       id: pond.id,
       type: 'pond',
       position: { x: pondX, y: pondY },
-      data: { pondId: pond.id, vertical },
+      data: { pondId: pond.id, vertical, demandLines: (refreshes[pond.id] ?? []).map(refreshLabel) },
       style: { width, height },
     });
 
@@ -223,30 +238,6 @@ export function computeLayout(
           });
         }
       }
-    }
-
-    // Trigger node — to the right of the pond (LR), or below it (TB, where the right edge is the
-    // narrow phone's margin and an outlet's bottom is free).
-    const triggerInfo = triggers[pond.id];
-    if (triggerInfo) {
-      const triggerId = `trigger-${pond.id}`;
-      nodes.push({
-        id: triggerId,
-        type: 'trigger',
-        position: vertical
-          ? { x: pondX + width / 2 - TRIGGER_W / 2, y: pondY + height + 40 }
-          : { x: pondX + width + 40, y: pondY + height / 2 - TRIGGER_H / 2 },
-        data: { pondId: pond.id, vertical },
-        style: { width: TRIGGER_W, height: TRIGGER_H },
-      });
-      edges.push({
-        id: `te-${pond.id}`,
-        source: triggerId,
-        target: pond.id,
-        targetHandle: 'trigger-in',
-        type: 'triggerEdge',
-        data: { pondId: pond.id },
-      });
     }
   }
 

@@ -5,7 +5,7 @@ optionally filtered to a Pond + its upstream lineage, with nested Ripple Runs).
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI
@@ -59,7 +59,7 @@ def test_status_exposes_ripples_and_intra_pond_edges(tmp_path):
     for r in snk["ripples"]:
         assert set(r) == {
             "name", "status", "gen", "runs_completed",
-            "has_pull", "target_f", "start_f", "end_f",
+            "demand_f", "start_f", "end_f",
         }
         assert r["status"] == "idle"
     assert snk["has_tables"] is False  # nothing exported yet
@@ -99,20 +99,28 @@ def test_status_flags_dbt_mode_pond(tmp_path):
     assert st["py@1"]["dbt"] is False
 
 
-def test_status_exposes_d_ms_and_null_trigger_by_default(tmp_path):
+def test_status_exposes_d_ms_and_no_refreshes_by_default(tmp_path):
     d = _driver(tmp_path)
     snk = _pond(d.status(), "snk")
     assert snk["d_ms"] == 0
-    assert snk["trigger"] is None
+    assert snk["refreshes"] == []
 
 
-def test_status_reports_standing_wave_and_tide_triggers(tmp_path):
+def test_status_reports_standing_refreshes(tmp_path):
     d = _driver(tmp_path)
-    d.wave("snk@1")
-    assert _pond(d.status(), "snk")["trigger"] == {"kind": "wave", "bound_ms": None}
+    d.add_refresh("snk@1", timedelta(0))
+    [r] = _pond(d.status(), "snk")["refreshes"]
+    assert r["name"] == "Continuous" and r["continuous"] and r["every_ms"] == 0 and r["next_due"] is None
 
-    d.tide("snk@1", timedelta(seconds=2.5))
-    assert _pond(d.status(), "snk")["trigger"] == {"kind": "tide", "bound_ms": 2500}
+    d.add_refresh("snk@1", timedelta(seconds=2.5))  # a floating Refresh replaces the floating one
+    [r] = _pond(d.status(), "snk")["refreshes"]
+    assert r["every_ms"] == 2500 and not r["continuous"] and r["next_due"] is not None
+
+    start = datetime(2026, 1, 5, 6, 0, tzinfo=timezone.utc)
+    d.add_refresh("snk@1", timedelta(days=1), start=start, days="mon,tue,wed,thu,fri")
+    refs = _pond(d.status(), "snk")["refreshes"]
+    assert [r["name"] for r in refs] == ["Weekdays at 06:00", "Every 2.5 s"]  # scheduled first
+    assert refs[0]["days"] == "MON,TUE,WED,THU,FRI" and refs[0]["start"] == start.isoformat()
 
 
 def test_status_running_ripple_propagates_to_pond(tmp_path):
@@ -149,7 +157,7 @@ def test_check_liveness_fails_dead_duck(tmp_path):
     from duckstring.catchment.driver import _now
 
     d = _inlet_driver(tmp_path, "duck.db", _DeadLauncher())
-    d.pulse("src@1")  # a Pond Run is now in flight (start_f > end_f), nothing completes it
+    d.refresh_now("src@1")  # a Pond Run is now in flight (start_f > end_f), nothing completes it
     assert d.state.pond_states["src@1"].start_f > d.state.pond_states["src@1"].end_f
     d._check_liveness(_now())
     src = d.state.pond_states["src@1"]
@@ -160,7 +168,7 @@ def test_check_liveness_skipped_without_process_launcher(tmp_path):
     from duckstring.catchment.driver import _now
 
     d = _inlet_driver(tmp_path, "duck2.db", NoopLauncher())  # manages_processes = False
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     d._check_liveness(_now())
     assert not d.state.pond_states["src@1"].is_failed  # nothing to watch → never failed on liveness
 
@@ -170,7 +178,7 @@ def test_check_liveness_skipped_without_process_launcher(tmp_path):
 
 def test_force_dispatches_force_flag(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     _complete_run(d, "src@1")  # src is now current (start_f == end_f)
     d.jobs["src@1"] = []  # drop the prior dispatch
     d.force("src@1")
@@ -181,7 +189,7 @@ def test_clear_failed_pond_is_not_refailed_by_liveness(tmp_path):
     from duckstring.catchment.driver import _now
 
     d = _inlet_driver(tmp_path, "clr.db", _DeadLauncher())  # manages_processes, but reports Ducks dead
-    d.pulse("src@1")  # a Run in flight (start_f > end_f)
+    d.refresh_now("src@1")  # a Run in flight (start_f > end_f)
     f = d.state.pond_states["src@1"].start_f.isoformat()
     d.on_event("src@1", {"kind": "failed", "ripple": "r1", "f": f, "status": "failed", "error": "boom"})
     assert d.state.pond_states["src@1"].is_failed
@@ -216,7 +224,7 @@ def test_silent_duck_clears_launcher_record_and_carries_diagnosis(tmp_path):
     from duckstring.catchment.driver import _now
 
     d = _inlet_driver(tmp_path, "silent.db", _SilentLauncher())
-    d.pulse("src@1")  # a Run in flight
+    d.refresh_now("src@1")  # a Run in flight
     d.take_jobs("src@1")  # it spoke once, so the steady-state silence window applies (not spawn grace)
     d.last_seen["src@1"] = _now() - timedelta(seconds=120)  # contact aged past the heartbeat
     d._check_liveness(_now())
@@ -260,7 +268,7 @@ def test_dead_duck_clears_launcher_record(tmp_path):
             terminated.append(pond_name)
 
     d = _inlet_driver(tmp_path, "deadrec.db", _DeadRecordingLauncher())
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     d._check_liveness(_now())
     assert d.state.pond_states["src@1"].is_failed
     assert "src@1" in terminated
@@ -276,13 +284,13 @@ def test_kill_terminates_duck_and_parks(tmp_path):
             terminated.append(pond_name)
 
     d = _inlet_driver(tmp_path, "kill.db", _RecordingLauncher())
-    d.pulse("src@1")  # a Run in flight
+    d.refresh_now("src@1")  # a Run in flight
     d.kill("src@1")
     assert d.state.pond_states["src@1"].is_killed
     assert terminated == ["src@1"]  # the Duck was terminated
-    # Killed supersedes demand: a Tap does nothing until cleared.
+    # Killed supersedes demand: a Refresh does nothing until cleared.
     started = d.state.pond_states["src@1"].runs_started
-    d.tap("src@1")
+    d.refresh_now("src@1")
     assert d.state.pond_states["src@1"].runs_started == started
 
 
@@ -291,7 +299,7 @@ def test_kill_terminates_duck_and_parks(tmp_path):
 
 def test_run_history_newest_first_and_records_freshness(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     f = _complete_run(d, "src@1")
     runs = d.run_history(None, lineage=True, ripples=False, limit=100)
     assert len(runs) == 1
@@ -302,7 +310,7 @@ def test_run_history_newest_first_and_records_freshness(tmp_path):
 
 def test_run_history_lineage_filter(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     _complete_run(d, "src@1")
 
     # snk's lineage includes its upstream source src.
@@ -316,7 +324,7 @@ def test_run_history_lineage_filter(tmp_path):
 
 def test_run_history_nests_ripple_runs_when_requested(tmp_path):
     d = _driver(tmp_path)
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     _complete_run(d, "src@1")
     runs = d.run_history("src@1", lineage=False, ripples=True, limit=100)
     assert len(runs) == 1
@@ -328,7 +336,7 @@ def test_run_history_date_range_filters_started_at(tmp_path):
     # The plot's range navigation bounds a run's started_at at second granularity. Stored values are
     # Python isoformat (UTC, +00:00); the bounds arrive as the frontend sends them (JS toISOString → Z).
     d = _driver(tmp_path)
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     f = _complete_run(d, "src@1")
     d.db.execute("UPDATE pond_run SET started_at = '2026-07-22T14:35:40.500000+00:00' WHERE f = ?", (f,))
     d.db.commit()
@@ -377,7 +385,7 @@ def test_status_version_bumps_and_long_poll_returns_on_change(tmp_path):
     d = _driver(tmp_path)
     client = _client(d)
     v0 = client.get("/api/status").json()["version"]  # no `since` → immediate
-    d.tap("src@1")  # a state change bumps the version
+    d.refresh_now("src@1")  # a state change bumps the version
     # `since` the pre-change version → the version has already moved, so the long-poll returns at once.
     body = client.get("/api/status", params={"since": v0}).json()
     assert body["version"] > v0
@@ -417,7 +425,7 @@ def test_clear_closes_the_run_it_abandons(tmp_path):
     from duckstring.catchment.driver import _now
 
     d = _inlet_driver(tmp_path, "clearrun.db", _DeadLauncher())
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     assert _run_rows(d) == ["running"]
 
     d.clear("src@1")                # abandons the in-flight Run by design
@@ -430,7 +438,7 @@ def test_abandoning_a_run_records_why_and_spares_finished_ones(tmp_path):
     from duckstring.catchment.driver import _now
 
     d = _inlet_driver(tmp_path, "abandon.db", _DeadLauncher())
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     f = d.state.pond_states["src@1"].start_f.isoformat()
 
     d._abandon_pond_run("src@1", f, _now())
@@ -451,7 +459,7 @@ def test_a_pond_that_moves_on_closes_runs_left_behind(tmp_path):
     replaced spawn — strands one. Reconciliation covers the paths not yet enumerated, which matters
     because the live sighting resisted reproduction."""
     d = _inlet_driver(tmp_path, "moved.db", _DeadLauncher())
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     stale_f = d.state.pond_states["src@1"].start_f.isoformat()
     assert _run_rows(d) == ["running"]
 
@@ -470,7 +478,7 @@ def test_closing_abandoned_runs_never_rewrites_a_reported_outcome(tmp_path):
     """A Run the Duck already reported keeps its own outcome — reconciliation only touches rows still
     sitting at 'running'."""
     d = _inlet_driver(tmp_path, "keep.db", _DeadLauncher())
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     first = d.state.pond_states["src@1"].start_f
     d.on_event("src@1", {"kind": "failed", "ripple": "r1", "f": first.isoformat(),
                          "status": "failed", "error": "boom"})
@@ -511,7 +519,7 @@ def test_a_reaped_remote_duck_is_replaced_on_the_next_run(tmp_path):
 
     lch = _RecordLauncher()
     d = _inlet_driver(tmp_path, "reap.db", lch)
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     d.take_jobs("src@1")
     _complete_run(d, "src@1")
     assert lch.launches == 1
@@ -522,5 +530,5 @@ def test_a_reaped_remote_duck_is_replaced_on_the_next_run(tmp_path):
     assert [j["kind"] for j in d.take_jobs("src@1")] == ["shutdown"]
     assert not lch.is_running("src@1")
 
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     assert lch.launches == 2

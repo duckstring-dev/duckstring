@@ -1,14 +1,14 @@
 """The Catchment driver: the freshness brain + Duck coordinator.
 
-Holds the in-memory :class:`~duckstring.engine.EngineState` (full Ponds + Ripples, pull + push),
-loaded from SQLite at startup and write-through-persisted per event. It is event-driven:
+Holds the in-memory :class:`~duckstring.engine.EngineState` (full Ponds and Ripples, demand and
+Refreshes), loaded from SQLite at startup and write-through-persisted per event. It is event-driven:
 
-* trigger calls (``tap``/``pulse``/``wave``/``tide``/``stop``) mutate the engine, then ``_process``
-  runs ``sentinel`` and dispatches each emitted ``BeginRun`` to the target Pond's Duck (spawning one
-  if needed) as a queued job.
-* Duck events (``on_event``) feed ``complete_ripple``, which drives the ripple pull cascade →
-  more ``BeginRun``s; run history is written to ``pond_run`` / ``ripple_run``.
-* ``scheduler_tick`` (called on a timer) runs ``tick`` for Tide/window clocks.
+* Refreshes (``refresh_now``, recurring ones via ``add_refresh``) and control calls mutate the engine, then
+  ``_process`` runs ``sentinel`` and dispatches each emitted ``BeginRun`` to the target Pond's Duck
+  (spawning one if needed) as a queued job.
+* Duck events (``on_event``) feed ``complete_ripple``, which advances freshness and starts what that
+  enables → more ``BeginRun``s; run history is written to ``pond_run`` / ``ripple_run``.
+* ``scheduler_tick`` (called on a timer) runs ``tick`` for the recurring Refreshes and window clocks.
 
 Ponds are keyed by ``"{name}@{major}"`` in the engine — each deployed major line is an independent
 Pond instance — and Ripples by ``"{pond_key}.{ripple}"``. A ``threading.RLock`` guards all state;
@@ -28,9 +28,9 @@ from ..engine import (
     EngineState,
     Pond,
     PondState,
+    Refresh,
     Ripple,
     RippleState,
-    Trigger,
     Window,
     block_on_missing_asset,
     clear_missing_asset,
@@ -44,19 +44,20 @@ from ..engine import (
     force_pond,
     kill_pond,
     next_wake,
-    pulse_pond,
+    rebuild_pond,
     record_persist,
-    refresh_pond,
+    refresh_next_due,
+    refresh_now,
     repair_pond,
     resend_held_demand,
     sentinel,
     sleep_pond,
-    tap_pond,
     tick,
     wake_pond,
 )
 from ..flock import job_settings as flock_job_settings
 from ..keys import pond_key
+from .taps import TapsMixin
 
 # A Duck is presumed dead if it holds an in-flight Run but hasn't contacted the Catchment within this
 # window (the secondary, transport-level signal; process-liveness is the primary one). Comfortably
@@ -85,6 +86,70 @@ def _now() -> datetime:
 
 def _iso(dt: datetime) -> str:
     return dt.isoformat()
+
+
+_DAY_NAMES = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+
+
+def _normalise_days(days: str | None) -> str | None:
+    """A day filter as CSV of MON..SUN in week order; None for no filter (empty, or all seven days). Raises
+    ValueError on an unknown day."""
+    if not days or not days.strip():
+        return None
+    picked = {d.strip().upper()[:3] for d in days.split(",") if d.strip()}
+    unknown = picked - set(_DAY_NAMES)
+    if unknown:
+        raise ValueError(f"unknown day(s) {', '.join(sorted(unknown))}: use MON,TUE,WED,THU,FRI,SAT,SUN")
+    if len(picked) == 7:
+        return None
+    return ",".join(d for d in _DAY_NAMES if d in picked)
+
+
+def _period_name(every: timedelta) -> str:
+    """A period as a Refresh name: Hourly, Daily, Weekly, or Every n s/min/h/days/weeks."""
+    ms = int(every.total_seconds() * 1000)
+    for unit_ms, one, many in ((604800000, "Weekly", "weeks"), (86400000, "Daily", "days"),
+                               (3600000, "Hourly", "h"), (60000, None, "min"), (1000, None, "s")):
+        if ms % unit_ms == 0:
+            n = ms // unit_ms
+            return one if n == 1 and one else f"Every {n} {many}"
+    return f"Every {ms / 1000:g} s"
+
+
+def default_refresh_name(every: timedelta, start: datetime | None = None, days: str | None = None) -> str:
+    """The name a Refresh gets when none is given: "Continuous", "Every 30 min", "Daily", "Daily at 06:00",
+    "Weekdays at 06:00" (times in UTC). Migration 031 named the standing triggers it converted the same way."""
+    if start is None:
+        return "Continuous" if every <= timedelta(0) else _period_name(every)
+    at = start.astimezone(timezone.utc).strftime("%H:%M")
+    base = _period_name(every)
+    if days == "MON,TUE,WED,THU,FRI" and base == "Daily":
+        return f"Weekdays at {at}"
+    return f"{base} at {at}" + (f" on {days}" if days else "")
+
+
+def _row_to_refresh(key: str, row) -> Refresh:
+    """A ``pond_refresh`` row (name, every_ms, start_anchor, valid_days, until_time) as an engine Refresh."""
+    name, every_ms, start, days, until = row
+    return Refresh(
+        pond_id=key, name=name, every=timedelta(milliseconds=every_ms),
+        start=datetime.fromisoformat(start) if start else None,
+        valid_days=frozenset(days.split(",")) if days else None,
+        until=datetime.fromisoformat(until) if until else None,
+    )
+
+
+def _refresh_dict(r: Refresh, next_due: datetime | None) -> dict:
+    """A recurring Refresh for the API: its definition and when it next asks (None when continuous)."""
+    return {
+        "name": r.name,
+        "every_ms": int(r.every.total_seconds() * 1000),
+        "continuous": not r.scheduled and r.every <= timedelta(0),
+        "start": _iso(r.start) if r.start else None,
+        "days": ",".join(d for d in _DAY_NAMES if d in r.valid_days) if r.valid_days else None,
+        "until": _iso(r.until) if r.until else None,
+        "next_due": _iso(next_due) if next_due else None,
+    }
 
 
 def _plane_freshness(sidecar: dict) -> str | None:
@@ -187,9 +252,9 @@ def _topo_order(scope: set[str], parents: dict[str, set[str]]) -> list[str]:
 
 # The bulk-operation vocabulary (see plans/selector_ui.md), in application-precedence order: quiesce
 # (kill/sleep), destroy state (reset), trim history (wipe), retire (remove), then recover (clear/repair/
-# refresh). Reset and Wipe are independent steps (Wipe-only — clear history without a data scrub — is a
+# rebuild). Reset and Wipe are independent steps (Wipe-only — clear history without a data scrub — is a
 # valid case). Repair is a set-op (the connected-set rebuild); every other op is applied per Pond.
-BATCH_OPS = ("kill", "sleep", "reset", "wipe", "remove", "clear", "repair", "refresh")
+BATCH_OPS = ("kill", "sleep", "reset", "wipe", "remove", "clear", "repair", "rebuild")
 IRREVERSIBLE_OPS = frozenset({"reset", "wipe", "remove"})
 
 # The Duck preset-size vocabulary (prereqs D5). Presets only — never raw instance shapes; what a
@@ -276,7 +341,7 @@ def _draw_version_ok(version: str | None, major: int) -> bool:
         return False
 
 
-class Driver:
+class Driver(TapsMixin):
     def __init__(self, db, root, base_url: str | None, launcher, data_root: str | None = None):
         self.db = db
         self.root = root
@@ -294,6 +359,7 @@ class Driver:
         # Ponds whose Duck was spawned but has never spoken — they get the provider's (longer) startup
         # grace rather than the steady-state silence window. Cleared on first contact.
         self._awaiting_first_contact: set[str] = set()
+        self._outdated_ducks: set[str] = set()  # Ponds whose Duck runs a version a redeploy replaced
         # key -> cumulative Flock dispatch counters ({dispatched, failed, last_error}), accumulated from
         # the per-Ripple-Run deltas Ducks report (see _record_flock). Observability only (in-memory; a
         # restart just waits for the next report).
@@ -310,7 +376,7 @@ class Driver:
         # walks it imperatively in topological order, releasing each node once its in-scope parents finish.
         self._repair: dict | None = None
         # Set by the app to a thread-safe callback that wakes the duct poller. Called from _process on
-        # demand-bearing operations (tap/pulse/wave/…/Duck events) so a Draw solicits its upstream
+        # demand-bearing operations (Refreshes, Duck events, …) so a Draw solicits its upstream
         # immediately, not on the next poll. NOT called from the poller's own observe/transfer paths.
         self._notify_cb = None
         # Wakes the egress worker (a Pond Run published → its Spouts may have work). Same cross-thread
@@ -384,7 +450,7 @@ class Driver:
             pond_states: dict[str, PondState] = {}
             ripples: dict[str, Ripple] = {}
             ripple_states: dict[str, RippleState] = {}
-            triggers: dict[str, Trigger] = {}
+            refreshes: dict[str, list[Refresh]] = {}
             self.meta = {}
             self._incomplete: list[tuple[str, datetime]] = []  # (pond, F) runs to resume
 
@@ -521,18 +587,19 @@ class Driver:
                 ):
                     self._incomplete.append((key, datetime.fromisoformat(incf)))
 
-            for pond_id, kind, bound_ms in db.execute(
-                "SELECT pond_id, kind, bound_ms FROM pond_trigger WHERE status = 'active'"
+            for row in db.execute(
+                "SELECT pond_id, name, every_ms, start_anchor, valid_days, until_time FROM pond_refresh "
+                "ORDER BY pond_id, name"
             ):
-                key = pondid_to_key.get(pond_id)
+                key = pondid_to_key.get(row[0])
                 if key:
-                    bound = timedelta(milliseconds=bound_ms) if bound_ms is not None else None
-                    triggers[key] = Trigger(pond_id=key, kind=kind, bound=bound)
+                    refreshes.setdefault(key, []).append(_row_to_refresh(key, row[1:]))
 
             self.state = EngineState(
                 ponds=ponds, pond_states=pond_states, ripples=ripples,
-                ripple_states=ripple_states, triggers=triggers,
+                ripple_states=ripple_states, refreshes=refreshes,
             )
+            self._load_taps(pondid_to_key)
             # Recompute blocked from the freshly-loaded topology: a Source that is absent now (or has
             # since become present, e.g. a duct was added) flips has_missing_source, so the persisted
             # is_blocked may be stale. Re-derive for every Pond (propagates to Sinks).
@@ -555,8 +622,8 @@ class Driver:
                 else:
                     st.persisted_f = st.end_f
             self._reconcile_lost_publishes()
-            # Demand the Pulse throttle was holding is persisted as plain targets, but the soft state that
-            # would release it is gone: send each Pond's newest unmet target on once (plans/pulse-throttle.md).
+            # Demand the throttle was holding is persisted as plain demand, but the soft state that would
+            # release it is gone: send each Pond's newest unmet demand on once (plans/throttle.md).
             resend_held_demand(self.state)
             self.jobs = {key: self.jobs.get(key, []) for key in ponds}
             self.state_version += 1  # topology/config (deploy, ducts, windows) changed
@@ -625,12 +692,12 @@ class Driver:
                 ps.is_failed = False
                 ps.failed_f = NEVER
                 ps.failures = 0
-            ps.targets = [t for t in ps.targets if t > floor]
+            ps.demand = [t for t in ps.demand if t > floor]
             for rid in (r for r, rip in self.state.ripples.items() if rip.pond_id == key):
                 rs = self.state.ripple_states[rid]
                 rs.end_f = min(rs.end_f, floor)
                 rs.start_f = min(rs.start_f, floor)
-                rs.targets = [t for t in rs.targets if t > floor]
+                rs.demand = [t for t in rs.demand if t > floor]
             self.db.execute(
                 "UPDATE pond_state SET start_f=?, end_f=?, changed_f=?, is_failed=?, failed_f=?, "
                 "failures=? WHERE pond_id=?",
@@ -643,34 +710,29 @@ class Driver:
 
     def _load_pond_state(self, pond_id: int) -> PondState:
         row = self.db.execute(
-            "SELECT start_f, end_f, d_ms, has_pull, has_received_pull, is_failed, is_blocked, failed_f, "
-            "failures, is_killed, pull_local, pull_m, refresh_pending, repairing, changed_f "
-            "FROM pond_state WHERE pond_id = ?",
+            "SELECT start_f, end_f, d_ms, is_failed, is_blocked, failed_f, failures, is_killed, rebuild_pending, "
+            "repairing, changed_f FROM pond_state WHERE pond_id = ?",
             (pond_id,),
         ).fetchone()
         ps = PondState()
         if row:
-            (sf, ef, d_ms, hp, hrp, is_failed, is_blocked, failed_f, failures, is_killed, pull_local,
-             pull_m, refresh_pending, repairing, changed_f) = row
+            (sf, ef, d_ms, is_failed, is_blocked, failed_f, failures, is_killed, rebuild_pending,
+             repairing, changed_f) = row
             ps.is_killed = bool(is_killed)
-            ps.pull_local = bool(pull_local)
-            ps.refresh_pending = bool(refresh_pending)
+            ps.rebuild_pending = bool(rebuild_pending)
             ps.repairing = bool(repairing)
-            ps.pull_m = datetime.fromisoformat(pull_m) if pull_m else NEVER
             ps.start_f = datetime.fromisoformat(sf) if sf else NEVER
             ps.end_f = datetime.fromisoformat(ef) if ef else NEVER
             # changed_f defaults to end_f (the migration backfill) for rows predating the column.
             ps.changed_f = datetime.fromisoformat(changed_f) if changed_f else ps.end_f
             ps.d = timedelta(milliseconds=d_ms or 0)
-            ps.has_pull = bool(hp)
-            ps.has_received_pull = bool(hrp)
             ps.is_failed = bool(is_failed)
             ps.is_blocked = bool(is_blocked)
             ps.failed_f = datetime.fromisoformat(failed_f) if failed_f else NEVER
             ps.failures = failures or 0
-            ps.targets = [
+            ps.demand = [
                 datetime.fromisoformat(r[0])
-                for r in self.db.execute("SELECT target_f FROM pond_target WHERE pond_id = ?", (pond_id,))
+                for r in self.db.execute("SELECT demand_f FROM pond_demand WHERE pond_id = ?", (pond_id,))
             ]
         return ps
 
@@ -708,36 +770,87 @@ class Driver:
                 return key
             return majors[max(majors)]
 
-    # ─── Triggers ─────────────────────────────────────────────────────────────
+    # ─── Refreshes ────────────────────────────────────────────────────────────
 
-    def tap(self, pond: str, m: datetime | None = None) -> None:
-        """One pull. ``m`` (a duct forwarding the downstream's demand epoch) is the freshness an Inlet
-        it reaches will mint; defaults to now."""
+    def refresh_now(self, pond: str, at: datetime | None = None) -> None:
+        """Refresh now: ask for the Pond's data at least as fresh as ``at`` (a duct forwarding the
+        downstream's epoch, so the upstream Inlet stamps the same freshness); defaults to now."""
         with self.lock:
-            self.state = tap_pond(self.state, pond, _now(), m)
+            self.state = refresh_now(self.state, pond, at or _now())
             self._process(_now())
 
-    def pulse(self, pond: str, at: datetime | None = None) -> None:
-        """Push a target freshness. ``at`` (a duct forwarding the downstream's target) is the demand
-        epoch; defaults to now."""
+    def add_refresh(self, pond: str, every: timedelta, *, start: datetime | None = None,
+                    days: str | None = None, until: datetime | None = None, name: str | None = None) -> dict:
+        """Add a recurring Refresh to a Pond and return it. A floating one (no ``start``) replaces the Pond's
+        floating one, if any; a scheduled one is added beside the others (one of the same name is replaced).
+        ``every`` of zero is continuous. Raises ValueError on a schedule without a period, a negative
+        period or bad days."""
+        if every < timedelta(0):
+            raise ValueError("a Refresh's period can't be negative")
+        if start is not None and every <= timedelta(0):
+            raise ValueError("a scheduled Refresh (--start) needs a period (--every)")
+        days = _normalise_days(days)
+        if start is not None and start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if until is not None and until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
         with self.lock:
-            self.state = pulse_pond(self.state, pond, at or _now())
+            pond_id = self.meta[pond]["pond_id"]
+            final = (name or "").strip() or default_refresh_name(every, start, days)
+            if start is None:  # one floating Refresh per Pond: a new one replaces it silently
+                for r in self.state.refreshes.get(pond, []):
+                    if not r.scheduled:
+                        self.db.execute("DELETE FROM pond_refresh WHERE pond_id = ? AND name = ?", (pond_id, r.name))
+            self.db.execute(
+                "INSERT INTO pond_refresh (pond_id, name, every_ms, start_anchor, valid_days, until_time) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id, name) DO UPDATE SET every_ms = excluded.every_ms, "
+                "start_anchor = excluded.start_anchor, valid_days = excluded.valid_days, "
+                "until_time = excluded.until_time",
+                (pond_id, final, int(every.total_seconds() * 1000), _iso(start) if start else None, days,
+                 _iso(until) if until else None),
+            )
+            self.db.commit()
+            self._load_refreshes(pond)
+            self._tick_process(_now())
+            return next(r for r in self.list_refreshes(pond) if r["name"] == final)
+
+    def list_refreshes(self, pond: str) -> list[dict]:
+        """A Pond's recurring Refreshes (scheduled first, then the floating one), with when each next asks."""
+        with self.lock:
+            now = _now()
+            refs = sorted(self.state.refreshes.get(pond, []), key=lambda r: (not r.scheduled, r.name))
+            return [_refresh_dict(r, refresh_next_due(self.state, r, now)) for r in refs]
+
+    def remove_refresh(self, pond: str, name: str | None = None) -> bool:
+        """Remove a recurring Refresh by name, or (``name`` None) the floating one. In-flight work drains;
+        demand already sent stays. Returns whether one was removed."""
+        with self.lock:
+            refs = self.state.refreshes.get(pond, [])
+            gone = [r for r in refs if (r.name == name if name is not None else not r.scheduled)]
+            for r in gone:
+                self.db.execute("DELETE FROM pond_refresh WHERE pond_id = ? AND name = ?",
+                                (self.meta[pond]["pond_id"], r.name))
+            self.db.commit()
+            self._load_refreshes(pond)
             self._process(_now())
+            return bool(gone)
 
-    def wave(self, pond: str) -> None:
-        with self.lock:
-            self.state.triggers[pond] = Trigger(pond_id=pond, kind="wave")
-            self._persist_trigger(pond, "wave", None)
-            self._tick_process(_now())
-
-    def tide(self, pond: str, bound: timedelta) -> None:
-        with self.lock:
-            self.state.triggers[pond] = Trigger(pond_id=pond, kind="tide", bound=bound)
-            self._persist_trigger(pond, "tide", int(bound.total_seconds() * 1000))
-            self._tick_process(_now())
+    def _load_refreshes(self, pond: str) -> None:
+        """Re-read one Pond's recurring Refreshes from the DB into the engine."""
+        rows = self.db.execute(
+            "SELECT name, every_ms, start_anchor, valid_days, until_time FROM pond_refresh WHERE pond_id = ? "
+            "ORDER BY name", (self.meta[pond]["pond_id"],),
+        ).fetchall()
+        refreshes = dict(self.state.refreshes)
+        if rows:
+            refreshes[pond] = [_row_to_refresh(pond, row) for row in rows]
+        else:
+            refreshes.pop(pond, None)
+        self.state.refreshes = refreshes
+        self.state_version += 1
 
     def wake(self, pond: str) -> None:
-        """Wake — a one-shot non-propagating pull (run on fresh input; clears failure/kill)."""
+        """Wake — run once on input already fresher, without asking upstream (clears failure/kill)."""
         with self.lock:
             self.state = wake_pond(self.state, pond, _now())
             self._process(_now())
@@ -748,11 +861,11 @@ class Driver:
             self.state = force_pond(self.state, pond, _now())
             self._process(_now())
 
-    def refresh(self, pond: str, clear: bool = False) -> None:
-        """Refresh — flag the Pond so its next run is a cold wipe-and-rebuild. Lazy: persists the flag
+    def rebuild(self, pond: str, clear: bool = False) -> None:
+        """Rebuild — flag the Pond so its next run is a cold wipe-and-rebuild. Lazy: persists the flag
         but starts nothing; the rebuild happens on the next natural run. ``clear`` un-sets it."""
         with self.lock:
-            self.state = refresh_pond(self.state, pond, clear=clear)
+            self.state = rebuild_pond(self.state, pond, clear=clear)
             self._persist_state()
             self.state_version += 1
 
@@ -795,7 +908,7 @@ class Driver:
     def reset_pond(self, pond: str, clear_history: bool = False) -> None:
         """Reset one Pond to a fresh-deploy state — scrub its registry, published data, and ledger, and
         rewind its freshness/fault to ``NEVER`` — while **keeping** its deployed artifact, operational
-        config, and **demand**. Lazy: it forces nothing; preserved demand + standing triggers re-drive the
+        config, and **demand**. Lazy: it forces nothing; preserved demand + recurring Refreshes re-drive the
         rebuild when next eligible (the data dir is empty, so no downstream reads a gap — nobody reads a
         ``NEVER`` Source). Requires the Pond idle. See plans/reset.md."""
         import shutil
@@ -820,7 +933,7 @@ class Driver:
             #    Sinks read a gap (plans/persist.md).
             self.db.execute(
                 "UPDATE pond_state SET start_f=?, end_f=?, changed_f=?, d_ms=0, is_failed=0, is_blocked=0, "
-                "failed_f=?, failures=0, is_killed=0, refresh_pending=0, persisted_f=NULL WHERE pond_id=?",
+                "failed_f=?, failures=0, is_killed=0, rebuild_pending=0, persisted_f=NULL WHERE pond_id=?",
                 (_iso(NEVER), _iso(NEVER), _iso(NEVER), _iso(NEVER), meta["pond_id"]),
             )
             if clear_history:
@@ -828,7 +941,7 @@ class Driver:
                 self.db.execute("DELETE FROM pond_run WHERE pond_version_id=?", (meta["version_id"],))
                 self.db.execute("DELETE FROM ripple_run_lineage WHERE pond_version_id=?", (meta["version_id"],))
             self.db.commit()
-            # 3. Rewind the in-memory engine state (keep demand: has_pull/pull_m/targets/standing_wake).
+            # 3. Rewind the in-memory engine state (keep demand and standing_wake).
             if ps is not None:
                 ps.start_f = ps.end_f = ps.changed_f = NEVER
                 ps.persisted_f = NEVER
@@ -838,7 +951,7 @@ class Driver:
                 ps.failures = 0
                 ps.missing_asset = None
                 ps.missing_asset_f = NEVER
-                ps.refresh_pending = ps.repairing = False
+                ps.rebuild_pending = ps.repairing = False
                 ps.runs_started = ps.runs_completed = 0
                 for rid, rip in self.state.ripples.items():
                     if rip.pond_id == pond:
@@ -857,7 +970,7 @@ class Driver:
         """Reset the **whole Catchment** to a fresh-deploy state — the sanctioned replacement for
         ``rm -rf .duckstring``. Stop-the-world: terminate every Duck, scrub every line's registry, ledger,
         and published data, rewind every Pond's freshness/fault to ``NEVER`` — keeping the deployed
-        artifacts, operational config, secrets, and keys. Rebuilds lazily (standing triggers + demand from
+        artifacts, operational config, secrets, and keys. Rebuilds lazily (recurring Refreshes + demand from
         the Inlets down). See plans/reset.md. Returns ``{"ponds": n}``."""
         import shutil
         from pathlib import Path
@@ -892,7 +1005,7 @@ class Driver:
             #    persisted_f rewinds with the rest — the mirror was scrubbed with the data.
             self.db.execute(
                 "UPDATE pond_state SET start_f=?, end_f=?, changed_f=?, d_ms=0, is_failed=0, is_blocked=0, "
-                "failed_f=?, failures=0, is_killed=0, refresh_pending=0, persisted_f=NULL",
+                "failed_f=?, failures=0, is_killed=0, rebuild_pending=0, persisted_f=NULL",
                 (_iso(NEVER), _iso(NEVER), _iso(NEVER), _iso(NEVER)),
             )
             self.db.execute("DELETE FROM alert_delivery")  # the notification outbox is runtime, not config
@@ -901,7 +1014,7 @@ class Driver:
                 self.db.execute("DELETE FROM pond_run")
                 self.db.execute("DELETE FROM ripple_run_lineage")
             self.db.commit()
-            # 4. Rebuild the engine from the scrubbed DB — a fresh-deploy engine (spouts/triggers re-armed).
+            # 4. Rebuild the engine from the scrubbed DB — a fresh-deploy engine (Spouts and Refreshes re-armed).
             self.reload()
             self.state_version += 1
             self._process(_now())
@@ -913,12 +1026,12 @@ class Driver:
         readable backup / hand-migration source. Two modes (plans/data-root-switch.md):
 
         - ``"empty"`` (default): leave every Pond **as if its data were deleted** and **dormant** — rewind
-          all freshness to ``NEVER`` (cold refresh pending) and clear ALL demand (pull, push, standing
-          Wave/Tide). Nothing auto-runs; the operator drives the rebuild (or hand-copies data in first).
+          all freshness to ``NEVER`` (cold rebuild pending) and clear ALL demand (and the recurring
+          Refreshes). Nothing auto-runs; the operator drives the rebuild (or hand-copies data in first).
         - ``"adopt"``: **pick up whatever data already sits in the target plane** (a bucket you copied into,
           or one you're returning to) and resume with **no rebuild** — read each Pond's freshness from its
           ``_trickle.json`` sidecar in the target, set the ledger to match, drop the local hot state
-          (registry + ledger) so the next run re-hydrates from the target, and **keep** demand + triggers.
+          (registry + ledger) so the next run re-hydrates from the target, and **keep** demand + Refreshes.
 
         (The **copy+adopt** move is :meth:`migrate`, which reports progress and runs the copy off-lock.)
         Returns ``{"ponds": n}``."""
@@ -957,16 +1070,16 @@ class Driver:
             else:
                 self.launcher.data_root = new_root
             if mode == "empty":
-                # "Delete the data": rewind freshness + flag a cold refresh, and clear every form of demand
-                # so the pipeline stays idle — pull tokens, push targets, and standing Wave/Tide triggers.
+                # "Delete the data": rewind freshness + flag a cold rebuild, and clear demand and the recurring
+                # Refreshes so the pipeline stays idle.
                 self.db.execute(
                     "UPDATE pond_state SET start_f=?, end_f=?, changed_f=?, d_ms=0, is_failed=0, is_blocked=0, "
-                    "failed_f=?, failures=0, is_killed=0, refresh_pending=1, has_pull=0, has_received_pull=0, "
+                    "failed_f=?, failures=0, is_killed=0, rebuild_pending=1, "
                     "persisted_f=NULL",  # the watermark belonged to the OLD plane — the new one starts empty
                     (_iso(NEVER), _iso(NEVER), _iso(NEVER), _iso(NEVER)),
                 )
-                self.db.execute("DELETE FROM pond_target")   # push demand
-                self.db.execute("DELETE FROM pond_trigger")  # standing Wave/Tide
+                self.db.execute("DELETE FROM pond_demand")
+                self.db.execute("DELETE FROM pond_refresh")
             else:
                 self._adopt_plane(lines, new_root)
             self.db.commit()
@@ -1055,7 +1168,7 @@ class Driver:
 
     def _adopt_plane(self, lines, new_root: str | None) -> None:
         """Set each line's freshness to what the *target* plane actually holds (read from its sidecar) and
-        drop its local hot state so the next run re-hydrates from that plane. Demand/triggers are kept, so
+        drop its local hot state so the next run re-hydrates from that plane. Demand and Refreshes are kept, so
         the pipeline resumes incrementally instead of rebuilding. Empty target → NEVER (a cold start)."""
         from pathlib import Path
 
@@ -1071,7 +1184,7 @@ class Driver:
             f_iso = _plane_freshness(sidecar) or _iso(NEVER)
             self.db.execute(
                 "UPDATE pond_state SET start_f=?, end_f=?, changed_f=?, d_ms=0, is_failed=0, is_blocked=0, "
-                "failed_f=?, failures=0, is_killed=0, refresh_pending=0 WHERE pond_id=?",
+                "failed_f=?, failures=0, is_killed=0, rebuild_pending=0 WHERE pond_id=?",
                 (f_iso, f_iso, f_iso, _iso(NEVER), pond_id),
             )
             # Drop the (old-plane) hot state → the executor re-hydrates the registry from the target plane
@@ -1110,7 +1223,7 @@ class Driver:
             if ps is not None:  # guard: idle + demand-free (the whole op is atomic under the lock)
                 if ps.start_f > ps.end_f:
                     raise ValueError("the Pond is running — sleep it first, then remove")
-                if ps.has_pull or ps.targets or ps.standing_wake or key in self.state.triggers:
+                if ps.demand or ps.standing_wake or self.state.refreshes.get(key):
                     raise ValueError("the Pond has demand — clear it first (duckstring control sleep)")
             pond_id = meta["pond_id"]
             (pn_id,) = self.db.execute("SELECT pond_name_id FROM pond WHERE id = ?", (pond_id,)).fetchone()
@@ -1136,7 +1249,7 @@ class Driver:
             self.db.execute("DELETE FROM alert_channel WHERE scope_name = ? AND scope_major = ?", (name, major))
             # 3. Delete the pond(id)-keyed config + the pond selection row. Keep pond_version / ripple /
             #    ripple_run / pond_run / pond_version_schema / pond_name (the retained record).
-            for tbl in ("pond_state", "pond_target", "pond_open", "pond_trigger", "pond_retry",
+            for tbl in ("pond_state", "pond_demand", "pond_open", "pond_refresh", "pond_tap", "pond_retry",
                         "pond_window", "pond_spout", "pond_duck", "pond_to_pond", "pond_serve_override"):
                 self.db.execute(f"DELETE FROM {tbl} WHERE pond_id = ?", (pond_id,))
             self.db.execute("DELETE FROM pond WHERE id = ?", (pond_id,))
@@ -1193,7 +1306,7 @@ class Driver:
 
     def repair(self, ponds: list[tuple[str, int | None]], downstream: bool = False) -> dict:
         """Repair — force-rebuild a **connected** set of Ponds now, in topological order (steps out of
-        the demand model; see ``plans/refresh.md``). Each node is wiped and rebuilt (refresh + force) once
+        the demand model; see ``plans/refresh.md``). Each node is wiped and rebuilt (rebuild + force) once
         its in-scope parents finish, so it reads their freshly-rebuilt output. The scope is marked
         ``repairing`` (blocked from normal demand) until each node's turn. Rejects a disconnected set."""
         with self.lock:
@@ -1230,7 +1343,7 @@ class Driver:
             return {"scope": order, "downstream": downstream}
 
     def _release_repair(self, key: str, now: datetime) -> None:
-        self.state = repair_pond(self.state, key, now)  # force + refresh: a cold rebuild at current f
+        self.state = repair_pond(self.state, key, now)  # force + rebuild: a cold rebuild at current f
         self._repair["released"].add(key)
 
     def _advance_repair(self, pond: str, now: datetime) -> None:
@@ -1272,7 +1385,7 @@ class Driver:
         self, ponds: list[tuple[str, int | None]], operations: list[str], confirm: str | None = None,
     ) -> dict:
         """Apply a set of operations to a set of Ponds in precedence order (``BATCH_OPS``) — the engine
-        behind the UI Selector and ``duckstring do``. Validates the op-set (unknown op, or Repair combined
+        behind the UI Selector and ``duckstring control wipe``. Validates the op-set (unknown op, or Repair combined
         with Remove/Reset → ValueError → 422) and, when any irreversible op (reset/wipe/remove) is present,
         requires ``confirm`` to equal this Catchment's name. Remove implies (and subsumes) Reset, and is
         **terminal per Pond** — later ops skip an already-removed line. Repair runs once over the live
@@ -1325,8 +1438,8 @@ class Driver:
                         _run(op, key, lambda k=key: self.wipe_history(k))
                     elif op == "clear":
                         _run(op, key, lambda k=key: self.clear(k))
-                    elif op == "refresh":
-                        _run(op, key, lambda k=key: self.refresh(k))
+                    elif op == "rebuild":
+                        _run(op, key, lambda k=key: self.rebuild(k))
                     elif op == "remove":
                         n, _, mj = key.rpartition("@")
 
@@ -1366,12 +1479,11 @@ class Driver:
     def _abandon_pond_run(self, pond: str, f: str, now: datetime) -> None:
         """Close a specific still-``running`` row an operator action abandoned. Never creates a row and
         never overwrites a finished one — a Run the Duck already reported keeps its own outcome."""
-        meta = self.meta[pond]
         cur = self.db.execute(
             "UPDATE pond_run SET finished_at = ?, status = 'failed', "
             "error = COALESCE(error, 'abandoned by an operator clear before the Run completed') "
             "WHERE pond_version_id = ? AND f = ? AND status = 'running'",
-            (_iso(now), meta["version_id"], f),
+            (_iso(now), self._run_version_id(pond, f), f),
         )
         if cur.rowcount:
             self.db.commit()
@@ -1745,10 +1857,11 @@ class Driver:
     def sleep(self, pond: str, upstream: bool = False) -> None:
         with self.lock:
             self.state = sleep_pond(self.state, pond, _now(), upstream=upstream)
-            # Cancel any standing Wave/Tide trigger on every Pond the sleep reached, so it can't re-tap.
+            # Remove the recurring Refreshes on every Pond the sleep reached, so they can't ask again.
             for name in self._stop_set(pond, upstream):
-                if self.state.triggers.pop(name, None) is not None:
-                    self.db.execute("DELETE FROM pond_trigger WHERE pond_id = ?", (self.meta[name]["pond_id"],))
+                if self.state.refreshes.get(name):
+                    self.db.execute("DELETE FROM pond_refresh WHERE pond_id = ?", (self.meta[name]["pond_id"],))
+                    self._load_refreshes(name)
             self.db.commit()
             self._process(_now())
 
@@ -1764,17 +1877,6 @@ class Driver:
             if upstream:
                 queue.extend(sp for sp in self.state.ponds[cur].sources if sp not in seen)
         return seen
-
-    def remove_trigger(self, pond: str) -> None:
-        """Remove the standing Wave/Tide trigger from a Pond. Unlike stop, this leaves existing demand
-        to drain naturally — it just stops new runs from being re-tapped/clocked."""
-        with self.lock:
-            self.state.triggers.pop(pond, None)
-            self.db.execute(
-                "DELETE FROM pond_trigger WHERE pond_id = ?", (self.meta[pond]["pond_id"],)
-            )
-            self.db.commit()
-            self._process(_now())
 
     # ─── Windows (batch-availability on Inlets) ─────────────────────────────────
 
@@ -1955,7 +2057,7 @@ class Driver:
             self.reload()
         return True
 
-    # The Control set on a Spout's standing Wake. Demand verbs (tap/wave/pulse/tide) do NOT apply — a
+    # The Control set on a Spout's standing Wake. Refreshes do NOT apply — a
     # Spout never solicits and never takes demand. The Spout is a real node, so these mutate its engine
     # state (and persist the armed flag); failure/history flow through the normal pond_run path.
     def _spout_ctl(self, pond: str, name: str, fn) -> bool:
@@ -2384,27 +2486,7 @@ class Driver:
                     self._process(now)
             elif kind == "failed":
                 # The Pond Run gave up at this Ripple's freshness: fail the Pond (and block downstream).
-                rname = payload["ripple"]
-                eid = f"{pond}.{rname}"
-                if eid in self.state.ripple_states:
-                    if f:
-                        self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
-                    self.state = fail_ripple(self.state, eid, now)
-                    err, tb = payload.get("error"), payload.get("traceback")
-                    self._fail_pond_run(pond, f, now, err, tb)  # upsert the pond_run row first (ripple_run FK)
-                    self._record_ripple_run(
-                        pond, rname, f, "failed",
-                        started_at=payload.get("started_at"),
-                        finished_at=payload.get("finished_at") or _iso(now),
-                        retry=payload.get("retry", 0),
-                        error=err, traceback=tb,
-                    )
-                    self._process(now)  # settle the cascade first, so the blast radius is accurate
-                    name = self.meta.get(pond, {}).get("name", pond)
-                    self._alert_failure(pond, "failure", scope_pond=name,
-                                        scope_major=self.meta.get(pond, {}).get("major"), f=f,
-                                        title=f"Pond '{name}' failed",
-                                        message=f"Ripple '{rname}' failed: {err or 'unknown error'}")
+                self._fail_at_ripple(pond, payload, now)
             elif kind == "missing_source":
                 # A Ripple read a Source asset that isn't published (deleted, or not produced yet). Park the
                 # Pond blocked-with-a-reason — NOT failed: no retry-budget burn, no failure alert. It
@@ -2432,7 +2514,7 @@ class Driver:
                 # Freeze the published output schema as the version's contract (the substrate the
                 # additive gate and min_version enforcement build on).
                 if payload.get("schema"):
-                    self._capture_schema(pond, payload["schema"])
+                    self._capture_schema(pond, payload["schema"], f)
                 self._emit_openlineage(pond, f, payload.get("schema"))  # catalog emission (opt-in channels)
                 self._process(now)
                 self._advance_repair(pond, now)  # if this Pond was a repair step, release its children
@@ -2447,11 +2529,44 @@ class Driver:
             elif kind == "contract_failed":
                 # The Duck refused to publish: the output broke the major line's additive contract.
                 # Fail the Pond at this Run (keeping last-good data) and block downstream, like any failure.
-                self._fail_whole_pond(pond, now, payload.get("error"), None, alert_kind="contract")
+                # The Duck names the Run's last Ripple, whose success it withheld; an older Duck doesn't.
+                if payload.get("ripple"):
+                    self._fail_at_ripple(pond, payload, now, alert_kind="contract")
+                else:
+                    self._fail_whole_pond(pond, now, payload.get("error"), None, alert_kind="contract")
             elif kind == "pond_failed":
                 # A Duck-level error (e.g. a failed ledger write): fail the whole Pond at its most
                 # recently started Run. The Duck exits after reporting; liveness will not double-fail.
                 self._fail_whole_pond(pond, now, payload.get("error"), payload.get("traceback"))
+
+    def _fail_at_ripple(self, pond: str, payload: dict, now: datetime, alert_kind: str = "failure") -> None:
+        """A Pond Run gave up at one Ripple (``payload``: a ``failed`` or ``contract_failed`` event): fail
+        the Pond at that Run, record the attempt, block downstream and alert."""
+        rname = payload["ripple"]
+        f = payload.get("f")
+        eid = f"{pond}.{rname}"
+        if eid not in self.state.ripple_states:
+            return
+        if f:
+            self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
+        self.state = fail_ripple(self.state, eid, now)
+        err, tb = payload.get("error"), payload.get("traceback")
+        self._fail_pond_run(pond, f, now, err, tb)  # upsert the pond_run row first (ripple_run FK)
+        self._record_ripple_run(
+            pond, rname, f, "failed",
+            started_at=payload.get("started_at"),
+            finished_at=payload.get("finished_at") or _iso(now),
+            retry=payload.get("retry", 0),
+            error=err, traceback=tb,
+        )
+        self._process(now)  # settle the cascade first, so the blast radius is accurate
+        name = self.meta.get(pond, {}).get("name", pond)
+        if alert_kind == "contract":
+            title, message = f"Pond '{name}' broke its version contract", f"Pond '{name}' broke its version contract: {err}"
+        else:
+            title, message = f"Pond '{name}' failed", f"Ripple '{rname}' failed: {err or 'unknown error'}"
+        self._alert_failure(pond, alert_kind, scope_pond=name, scope_major=self.meta.get(pond, {}).get("major"),
+                            f=f, title=title, message=message)
 
     def resume_incomplete(self) -> None:
         """Re-dispatch Pond Runs that were in flight when the Catchment stopped, and service any
@@ -2464,10 +2579,20 @@ class Driver:
             self._incomplete = []
             self._process(now)
 
-    def take_jobs(self, pond: str) -> list[dict]:
+    def take_jobs(self, pond: str, version: str | None = None) -> list[dict]:
+        """The Duck's queued jobs. ``version`` is the code the polling Duck runs: a Duck still on a version a
+        redeploy replaced is told only to shut down, so it finishes the Runs it holds and exits, and the
+        queued work waits for a Duck on the selected version (``_replace_outdated_ducks``). Before this a
+        warm Duck kept running the old code for as long as a recurring Refresh kept it busy."""
         with self.lock:
             self.last_seen[pond] = _now()  # the Duck is alive — it just polled
             self._awaiting_first_contact.discard(pond)
+            selected = self.meta.get(pond, {}).get("version")
+            if version is not None and selected is not None and version != selected:
+                self._outdated_ducks.add(pond)
+                if hasattr(self.launcher, "release"):
+                    self.launcher.release(pond)
+                return [{"kind": "shutdown"}]
             jobs = self.jobs.get(pond, [])
             self.jobs[pond] = []
             if any(j.get("kind") == "shutdown" for j in jobs) and hasattr(self.launcher, "release"):
@@ -2479,26 +2604,19 @@ class Driver:
     # ─── Pond Draws (cross-Catchment) ───────────────────────────────────────────
 
     def draws(self) -> list[dict]:
-        """Every Pond Draw, for the poller: its key/name/major and whether downstream demand wants
-        the upstream solicited (a pull/push is pending but the upstream hasn't offered it yet)."""
+        """Every Pond Draw, for the poller: its key/name/major and the newest downstream demand to send to
+        the upstream (None when there is none, or the upstream is down)."""
         with self.lock:
             out = []
             for key, m in self.meta.items():
                 if not m.get("is_draw"):
                     continue
                 ps = self.state.pond_states[key]
-                real_targets = [t for t in ps.targets if t > NEVER]
-                if ps.remote_down:
-                    target = pull_m = None  # blocked upstream: solicit nothing
-                else:
-                    # Forward the draw's outstanding demand upstream carrying its epoch, so the upstream
-                    # Inlet mints the SAME freshness: the max push target, and the pull epoch.
-                    target = _iso(max(real_targets)) if real_targets else None
-                    pull_m = _iso(ps.pull_m) if (ps.has_pull and ps.pull_m > NEVER) else None
-                out.append({
-                    "key": key, "name": m["name"], "major": m["major"],
-                    "target": target, "pull_m": pull_m,
-                })
+                demand = [t for t in ps.demand if t > NEVER]
+                # Forward the Draw's newest demand upstream carrying its epoch, so the upstream Inlet mints
+                # the SAME freshness. A blocked upstream is asked for nothing.
+                at = _iso(max(demand)) if demand and not ps.remote_down else None
+                out.append({"key": key, "name": m["name"], "major": m["major"], "demand": at})
             return out
 
     def observe_remote(
@@ -2610,34 +2728,19 @@ class Driver:
                                     finished_at=_iso(now), error=error)
             self._process(now, notify=False)  # poller-driven
 
-    # ─── Producer exposure (open / tap-on-get) ──────────────────────────────────
+    # ─── Producer exposure (open) ───────────────────────────────────────────────
 
-    def set_pond_open(self, pond: str, tap_on_get: bool) -> None:
-        """Mark a Pond open (accepts demand from any source). Under single-level auth this is a no-op
-        gate; its live effect is ``tap_on_get`` (a read on the query route fires a Tap)."""
+    def set_pond_open(self, pond: str) -> None:
+        """Mark a Pond open (accepts demand from any source). Under single-level auth this is a no-op gate, a
+        placeholder for per-Pond access."""
         with self.lock:
-            pid = self.meta[pond]["pond_id"]
-            self.db.execute(
-                "INSERT INTO pond_open (pond_id, tap_on_get) VALUES (?, ?) "
-                "ON CONFLICT(pond_id) DO UPDATE SET tap_on_get = excluded.tap_on_get",
-                (pid, int(tap_on_get)),
-            )
+            self.db.execute("INSERT OR IGNORE INTO pond_open (pond_id) VALUES (?)", (self.meta[pond]["pond_id"],))
             self.db.commit()
 
     def unset_pond_open(self, pond: str) -> None:
         with self.lock:
             self.db.execute("DELETE FROM pond_open WHERE pond_id = ?", (self.meta[pond]["pond_id"],))
             self.db.commit()
-
-    def pond_tap_on_get(self, pond: str) -> bool:
-        with self.lock:
-            m = self.meta.get(pond)
-            if m is None:
-                return False
-            row = self.db.execute(
-                "SELECT tap_on_get FROM pond_open WHERE pond_id = ?", (m["pond_id"],)
-            ).fetchone()
-            return bool(row and row[0])
 
     # ─── Ducts (consumer side) ───────────────────────────────────────────────────
 
@@ -2803,7 +2906,7 @@ class Driver:
         db.execute("DELETE FROM ripple_run WHERE pond_version_id = ?", (pv_id,))
         db.execute("DELETE FROM pond_run WHERE pond_version_id = ?", (pv_id,))
         db.execute("DELETE FROM ripple_run_lineage WHERE pond_version_id = ?", (pv_id,))
-        for tbl in ("pond_state", "pond_target", "pond_open", "pond_trigger", "pond_retry", "pond_window"):
+        for tbl in ("pond_state", "pond_demand", "pond_open", "pond_refresh", "pond_tap", "pond_retry", "pond_window"):
             db.execute(f"DELETE FROM {tbl} WHERE pond_id = ?", (pond_id,))
         db.execute("DELETE FROM pond WHERE id = ?", (pond_id,))
         rids = [r[0] for r in db.execute("SELECT id FROM ripple WHERE pond_version_id = ?", (pv_id,))]
@@ -2868,7 +2971,7 @@ class Driver:
         db.execute("DELETE FROM ripple_run WHERE pond_version_id = ?", (pv_id,))
         db.execute("DELETE FROM pond_run WHERE pond_version_id = ?", (pv_id,))
         db.execute("DELETE FROM ripple_run_lineage WHERE pond_version_id = ?", (pv_id,))
-        for tbl in ("pond_state", "pond_target", "pond_open", "pond_trigger", "pond_retry",
+        for tbl in ("pond_state", "pond_demand", "pond_open", "pond_refresh", "pond_tap", "pond_retry",
                     "pond_window", "pond_spout", "pond_duck", "pond_to_pond"):
             db.execute(f"DELETE FROM {tbl} WHERE pond_id = ?", (pond_id,))
         db.execute("DELETE FROM pond WHERE id = ?", (pond_id,))
@@ -2887,11 +2990,13 @@ class Driver:
     def scheduler_tick(self) -> None:
         with self.lock:
             now = _now()
+            self._replace_outdated_ducks(now)  # before liveness, so a handed-off Pond isn't judged Duck-less
             self._check_liveness(now)
             self._tick_process(now)
             self._check_freshness(now)
             self._check_renotify(now)
             self._check_disk_pressure(now)
+            self._flush_tap_counters()
 
     # Registry eviction under disk pressure (plans/persist.md phase 6). Registries (and, once mirrored,
     # local publishes) are reconstructible caches — under pressure the Catchment Pool sheds idle Ponds'
@@ -2947,10 +3052,10 @@ class Driver:
             if pond.is_draw or pond.is_spout:
                 continue
             ps = self.state.pond_states[key]
-            if ps.start_f > ps.end_f or ps.has_pull or ps.targets or key in self.jobs and self.jobs[key]:
+            if ps.start_f > ps.end_f or ps.demand or key in self.jobs and self.jobs[key]:
                 continue  # running or demanded — never evict live work
             if self.launcher.is_running(key):
-                continue  # warm Duck (standing trigger keeps it) — reaping is the reaper's job, not ours
+                continue  # warm Duck (a recurring Refresh keeps it) — reaping is the reaper's job, not ours
             meta = self.meta[key]
             reg = pond_registry_path(root, meta["name"], meta["major"])
             if not reg.exists():
@@ -3006,6 +3111,22 @@ class Driver:
             pass
         return max(_STARTUP_GRACE.get(provider, _DUCK_DEAD_AFTER), _DUCK_DEAD_AFTER)
 
+    def _replace_outdated_ducks(self, now: datetime) -> None:
+        """Spawn a Duck on the selected version for each Pond whose outdated Duck has exited, if work is
+        queued for it (otherwise the next dispatch spawns one as usual)."""
+        for pond in list(self._outdated_ducks):
+            if pond not in self.meta:
+                self._outdated_ducks.discard(pond)
+                continue
+            if self.launcher.is_running(pond):
+                continue
+            self._outdated_ducks.discard(pond)
+            if any(j.get("kind") == "begin_run" for j in self.jobs.get(pond, [])):
+                meta = self.meta[pond]
+                self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=self.duck_config(pond))
+                self.last_seen[pond] = now
+                self._awaiting_first_contact.add(pond)
+
     def _check_liveness(self, now: datetime) -> None:
         """Fail any Pond whose Duck has died (process gone) or fallen silent (no contact) while a Run
         is in flight, attributing it to that Run (``start_f``). Only for launchers that own real Duck
@@ -3056,7 +3177,7 @@ class Driver:
             return
         self.state, _started = sentinel(now, self.state)
         for cmd in drain_begin_runs(self.state):
-            self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force, refresh=cmd.refresh,
+            self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force, rebuild=cmd.rebuild,
                                      sources_changed=cmd.sources_changed)
         for pid, f in drain_passes(self.state):
             self._record_pass(pid, f, now)
@@ -3070,7 +3191,7 @@ class Driver:
             self._notify_cb()
 
     def _dispatch_begin_run(
-        self, pond: str, f: datetime, now: datetime, force: bool = False, refresh: bool = False,
+        self, pond: str, f: datetime, now: datetime, force: bool = False, rebuild: bool = False,
         sources_changed: bool = True,
     ) -> None:
         meta = self.meta[pond]
@@ -3114,12 +3235,12 @@ class Driver:
         if pins is None:
             pins = self._source_published_f(pond)
         self._enqueue_job(pond, {
-            "kind": "begin_run", "f": _iso(f), "force": force, "refresh": refresh,
+            "kind": "begin_run", "f": _iso(f), "force": force, "rebuild": rebuild,
             "sources_changed": sources_changed,  # backs pond.sources_changed() (for always_run gating)
             "immediate_retries": self.state.ponds[pond].retry_immediately,  # live budget, per Run
             # The prior completed run's freshness (the pond's end_f *before* this run advances it),
-            # carried to the Ripples as pond.previous_f. A Refresh reads its Sources in full, so NEVER.
-            "previous_f": _iso(NEVER) if refresh else _iso(self.state.pond_states[pond].end_f),
+            # carried to the Ripples as pond.previous_f. A Rebuild reads its Sources in full, so NEVER.
+            "previous_f": _iso(NEVER) if rebuild else _iso(self.state.pond_states[pond].end_f),
             # The major line's additive schema contract this Run must keep (vetted by the Duck before
             # publishing); None for a first run or a deliberate rollback (governed by min_version).
             "contract": self._contract_for(pond),
@@ -3149,9 +3270,9 @@ class Driver:
         self.db.commit()
 
     def _reap_idle(self) -> None:
-        # Keep all Ducks warm while any standing trigger is active (a Wave/Tide will run them again
-        # shortly) — reaping mid-cycle would thrash on respawns. Only reap once fully quiescent.
-        if self.state.triggers:
+        # Keep all Ducks warm while any recurring Refresh is active (it will run them again shortly) —
+        # reaping mid-cycle would thrash on respawns. Only reap once fully quiescent.
+        if any(self.state.refreshes.values()):
             self._idle_since.clear()
             return
         now = _now()
@@ -3162,7 +3283,7 @@ class Driver:
                 for rid in self.state.ripples
                 if self.state.ripples[rid].pond_id == name
             )
-            idle = (not busy and not ps.targets and not ps.has_pull and not self.jobs.get(name)
+            idle = (not busy and not ps.demand and not self.jobs.get(name)
                     and self.launcher.is_running(name))
             if not idle:
                 self._idle_since.pop(name, None)
@@ -3177,12 +3298,34 @@ class Driver:
 
     # ─── History + persistence ────────────────────────────────────────────────
 
+    def _run_version_id(self, pond: str, f: str | None) -> int:
+        """The ``pond_version`` the Run at ``f`` belongs to: the one its ``pond_run`` row was started under,
+        else the selected version. A redeploy re-points the line at the new version while a Duck may still be
+        finishing a Run of the old one. Recording that Run's events against the new version broke
+        ``ripple_run``'s foreign key to ``pond_run``; the Duck then replayed the rejected event forever, and
+        everything it reported after it queued behind, so the Pond showed as running for good."""
+        meta = self.meta[pond]
+        if f is None:
+            return meta["version_id"]
+        row = self.db.execute(
+            "SELECT pr.pond_version_id FROM pond_run pr JOIN pond_version pv ON pv.id = pr.pond_version_id "
+            "JOIN pond p ON p.pond_name_id = pv.pond_name_id AND p.major = pv.major "
+            "WHERE p.id = ? AND pr.f = ? ORDER BY pr.pond_version_id = ? DESC, pr.pond_version_id DESC LIMIT 1",
+            (meta["pond_id"], f, meta["version_id"]),
+        ).fetchone()
+        return row[0] if row else meta["version_id"]
+
     def _record_ripple_run(
         self, pond: str, rname: str, f: str, status: str, started_at: str | None, finished_at: str,
         retry: int = 0, error: str | None = None, traceback: str | None = None,
     ) -> None:
         meta = self.meta[pond]
-        rid = meta["ripple_ids"].get(rname)
+        vid = self._run_version_id(pond, f)
+        if vid == meta["version_id"]:
+            rid = meta["ripple_ids"].get(rname)
+        else:
+            row = self.db.execute("SELECT id FROM ripple WHERE pond_version_id = ? AND name = ?", (vid, rname)).fetchone()
+            rid = row[0] if row else None
         if rid is None:
             return
         # Keyed on (pond_version, f, ripple, retry): each attempt is its own row — the retry trace.
@@ -3190,16 +3333,15 @@ class Driver:
             "INSERT OR REPLACE INTO ripple_run "
             "(pond_version_id, f, ripple_id, retry, started_at, finished_at, status, error, traceback) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (meta["version_id"], f, rid, retry, started_at, finished_at, status, error, traceback),
+            (vid, f, rid, retry, started_at, finished_at, status, error, traceback),
         )
         self.db.commit()
 
     def _finish_pond_run(self, pond: str, f: str, now: datetime, changed: bool = True) -> None:
-        meta = self.meta[pond]
         self.db.execute(
             "UPDATE pond_run SET finished_at = ?, status = 'success', changed = ? "
             "WHERE pond_version_id = ? AND f = ?",
-            (_iso(now), int(changed), meta["version_id"], f),
+            (_iso(now), int(changed), self._run_version_id(pond, f), f),
         )
         self.db.commit()
         self._close_abandoned_runs(pond, f, now)
@@ -3216,12 +3358,14 @@ class Driver:
 
         Deliberately reconciliation rather than a fix at each call site: it holds for paths not yet
         enumerated, which is the useful property when the exact sequence has resisted reproduction."""
-        meta = self.meta[pond]
+        # Every version of the line: a Run a redeploy overtook is still this Pond's Run.
         cur = self.db.execute(
             "UPDATE pond_run SET finished_at = ?, status = 'failed', "
             "error = COALESCE(error, 'abandoned — the Pond advanced past this Run without completing it') "
-            "WHERE pond_version_id = ? AND status = 'running' AND f < ?",
-            (_iso(now), meta["version_id"], through_f),
+            "WHERE status = 'running' AND f < ? AND pond_version_id IN ("
+            "SELECT pv.id FROM pond_version pv JOIN pond p ON p.pond_name_id = pv.pond_name_id "
+            "AND p.major = pv.major WHERE p.id = ?)",
+            (_iso(now), through_f, self.meta[pond]["pond_id"]),
         )
         if cur.rowcount:
             self.db.commit()
@@ -3304,7 +3448,7 @@ class Driver:
         replay (INSERT OR IGNORE over the full row key); wrapped so a lineage write can never fail a run
         — lineage is observability, not orchestration."""
         try:
-            vid = self.meta[pond]["version_id"]
+            vid = self._run_version_id(pond, f)
             rows = [(vid, ripple, f, retry, "read", s or "", t) for s, t in lineage.get("reads", [])]
             rows += [(vid, ripple, f, retry, "write", "", t) for t in lineage.get("writes", [])]
             self.db.executemany(
@@ -3436,7 +3580,7 @@ class Driver:
             namespace = f"duckstring://{cid}"
             rows = self.db.execute(
                 "SELECT DISTINCT direction, source_name, table_name FROM ripple_run_lineage "
-                "WHERE pond_version_id = ? AND f = ?", (m["version_id"], f),
+                "WHERE pond_version_id = ? AND f = ?", (self._run_version_id(pond, f), f),
             ).fetchall()
             inputs = [{"namespace": namespace, "name": f"{src}.{t}"}
                       for d, src, t in sorted(rows) if d == "read" and src]
@@ -3477,10 +3621,11 @@ class Driver:
         row = self.db.execute("SELECT value FROM catchment_meta WHERE key = 'id'").fetchone()
         return row[0] if row and row[0] else None
 
-    def _capture_schema(self, pond: str, schema: dict) -> None:
+    def _capture_schema(self, pond: str, schema: dict, f: str | None = None) -> None:
         """Freeze a Pond version's published output schema as its contract (idempotent upsert, keyed on
-        ``pond_version``). Only reached for accepted runs — the Duck publishes only what passed the gate."""
-        vid = self.meta[pond]["version_id"]
+        ``pond_version``: the version that ran ``f``). Only reached for accepted runs — the Duck publishes
+        only what passed the gate."""
+        vid = self._run_version_id(pond, f)
         self.db.execute("DELETE FROM pond_version_schema WHERE pond_version_id = ?", (vid,))
         for table, columns in schema.items():
             for column, type_ in columns.items():
@@ -3533,7 +3678,7 @@ class Driver:
         """The Source pins recorded for this Pond's Run at ``f`` (``None`` if the Run has no row yet)."""
         row = self.db.execute(
             "SELECT source_pins FROM pond_run WHERE pond_version_id = ? AND f = ?",
-            (self.meta[pond]["version_id"], f),
+            (self._run_version_id(pond, f), f),
         ).fetchone()
         if row is None or row[0] is None:
             return None
@@ -3578,6 +3723,21 @@ class Driver:
                 pin = pins.get(meta["name"])
                 bounds.append(datetime.fromisoformat(pin) if pin else run_f)
         return _iso(min(bounds)) if bounds else None
+
+    def pond_freshness(self, key: str) -> dict:
+        """A Pond line's freshness for ``GET /api/ponds/{name}/freshness``: the point in time its data reflects
+        (``end_f``), when its output last changed (``changed_f``; a no-change pass advances only ``end_f``), and
+        whether a refresh is under way (a Run in flight, or a request not yet met). Raises KeyError."""
+        from ..engine import min_demand
+
+        with self.lock:
+            ps = self.state.pond_states[key]
+            pending = min_demand(ps.demand)
+            return {
+                "freshness": _iso(ps.end_f) if ps.end_f != NEVER else None,
+                "changed": _iso(ps.changed_f) if ps.changed_f != NEVER else None,
+                "refreshing": ps.start_f > ps.end_f or (pending is not None and pending > ps.end_f),
+            }
 
     def published_f(self, name: str, major: int) -> str | None:
         """The freshness this Catchment believes ``name@major`` has PUBLISHED — its ``changed_f`` (the
@@ -3627,31 +3787,21 @@ class Driver:
     def _fail_pond_run(
         self, pond: str, f: str, now: datetime, error: str | None = None, tb: str | None = None
     ) -> None:
-        meta = self.meta[pond]
         self.db.execute(
             "INSERT INTO pond_run (pond_version_id, f, started_at, finished_at, status, error, traceback) "
             "VALUES (?, ?, ?, ?, 'failed', ?, ?) ON CONFLICT(pond_version_id, f) DO UPDATE SET "
             "finished_at = excluded.finished_at, status = 'failed', error = excluded.error, "
             "traceback = excluded.traceback",
-            (meta["version_id"], f, _iso(now), _iso(now), error, tb),
+            (self._run_version_id(pond, f), f, _iso(now), _iso(now), error, tb),
         )
         self.db.commit()
 
     def _kill_pond_run(self, pond: str, f: str, now: datetime) -> None:
-        meta = self.meta[pond]
         self.db.execute(
             "INSERT INTO pond_run (pond_version_id, f, started_at, finished_at, status, error) "
             "VALUES (?, ?, ?, ?, 'killed', 'Killed by operator') ON CONFLICT(pond_version_id, f) DO UPDATE SET "
             "finished_at = excluded.finished_at, status = 'killed', error = excluded.error",
-            (meta["version_id"], f, _iso(now), _iso(now)),
-        )
-        self.db.commit()
-
-    def _persist_trigger(self, pond: str, kind: str, bound_ms: int | None) -> None:
-        self.db.execute(
-            "INSERT INTO pond_trigger (pond_id, kind, bound_ms) VALUES (?, ?, ?) "
-            "ON CONFLICT(pond_id) DO UPDATE SET kind = excluded.kind, bound_ms = excluded.bound_ms, status = 'active'",
-            (self.meta[pond]["pond_id"], kind, bound_ms),
+            (self._run_version_id(pond, f), f, _iso(now), _iso(now)),
         )
         self.db.commit()
 
@@ -3659,40 +3809,33 @@ class Driver:
         for name, ps in self.state.pond_states.items():
             pond_id = self.meta[name]["pond_id"]
             self.db.execute(
-                "INSERT INTO pond_state (pond_id, start_f, end_f, d_ms, has_pull, has_received_pull, "
-                "is_failed, is_blocked, failed_f, failures, is_killed, pull_local, pull_m, "
-                "refresh_pending, repairing, changed_f) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
+                "INSERT INTO pond_state (pond_id, start_f, end_f, d_ms, is_failed, is_blocked, failed_f, failures, "
+                "is_killed, rebuild_pending, repairing, changed_f) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pond_id) DO UPDATE SET "
                 "start_f = excluded.start_f, end_f = excluded.end_f, d_ms = excluded.d_ms, "
-                "has_pull = excluded.has_pull, has_received_pull = excluded.has_received_pull, "
                 "is_failed = excluded.is_failed, is_blocked = excluded.is_blocked, "
-                "failed_f = excluded.failed_f, failures = excluded.failures, "
-                "is_killed = excluded.is_killed, pull_local = excluded.pull_local, pull_m = excluded.pull_m, "
-                "refresh_pending = excluded.refresh_pending, repairing = excluded.repairing, "
+                "failed_f = excluded.failed_f, failures = excluded.failures, is_killed = excluded.is_killed, "
+                "rebuild_pending = excluded.rebuild_pending, repairing = excluded.repairing, "
                 "changed_f = excluded.changed_f",
                 (
                     pond_id,
                     _iso(ps.start_f) if ps.start_f != NEVER else None,
                     _iso(ps.end_f) if ps.end_f != NEVER else None,
                     int(ps.d.total_seconds() * 1000),
-                    int(ps.has_pull),
-                    int(ps.has_received_pull),
                     int(ps.is_failed),
                     int(ps.is_blocked),
                     _iso(ps.failed_f) if ps.failed_f != NEVER else None,
                     ps.failures,
                     int(ps.is_killed),
-                    int(ps.pull_local),
-                    _iso(ps.pull_m) if ps.pull_m != NEVER else None,
-                    int(ps.refresh_pending),
+                    int(ps.rebuild_pending),
                     int(ps.repairing),
                     _iso(ps.changed_f) if ps.changed_f != NEVER else None,
                 ),
             )
-            self.db.execute("DELETE FROM pond_target WHERE pond_id = ?", (pond_id,))
-            for t in ps.targets:
+            self.db.execute("DELETE FROM pond_demand WHERE pond_id = ?", (pond_id,))
+            for t in ps.demand:
                 self.db.execute(
-                    "INSERT OR IGNORE INTO pond_target (pond_id, target_f) VALUES (?, ?)", (pond_id, _iso(t))
+                    "INSERT OR IGNORE INTO pond_demand (pond_id, demand_f) VALUES (?, ?)", (pond_id, _iso(t))
                 )
         self.db.commit()
 
@@ -3752,13 +3895,13 @@ class Driver:
 
     def status(self) -> dict:
         with self.lock:
-            from ..engine import NEVER, min_target
+            from ..engine import NEVER, min_demand
             ts = lambda dt: _iso(dt) if dt is not None and dt != NEVER else None  # noqa: E731
 
             def _demand_status(rs, running: bool) -> str:
                 if running:
                     return "running"
-                if rs.has_pull or rs.targets:
+                if rs.demand:
                     return "queued"
                 return "idle"
 
@@ -3780,8 +3923,7 @@ class Driver:
                         "status": _demand_status(rs, rs.is_running),
                         "gen": rs.runs_started,
                         "runs_completed": rs.runs_completed,
-                        "has_pull": rs.has_pull,
-                        "target_f": ts(min_target(rs.targets)),
+                        "demand_f": ts(min_demand(rs.demand)),
                         "start_f": ts(rs.start_f),
                         "end_f": ts(rs.end_f),
                     })
@@ -3827,13 +3969,11 @@ class Driver:
                     error = row[0] if row else None
                     failure_kind = "contract" if (error or "").startswith(CONTRACT_PREFIX) else "error"
 
-                trig = self.state.triggers.get(key)
-                trigger = None
-                if trig is not None:
-                    trigger = {
-                        "kind": trig.kind,
-                        "bound_ms": int(trig.bound.total_seconds() * 1000) if trig.bound is not None else None,
-                    }
+                now = _now()
+                refreshes = [
+                    _refresh_dict(r, refresh_next_due(self.state, r, now))
+                    for r in sorted(self.state.refreshes.get(key, []), key=lambda r: (not r.scheduled, r.name))
+                ]
 
                 ponds.append({
                     "id": key,
@@ -3854,8 +3994,7 @@ class Driver:
                     "status": st,
                     "gen": ps.runs_started,
                     "runs_completed": ps.runs_completed,
-                    "has_pull": ps.has_pull,
-                    "target_f": ts(min_target(ps.targets)),
+                    "demand_f": ts(min_demand(ps.demand)),
                     "start_f": ts(ps.start_f),
                     "end_f": ts(ps.end_f),
                     "changed_f": ts(ps.changed_f),  # content freshness: held across a pass (no-change run)
@@ -3867,12 +4006,13 @@ class Driver:
                     # (a shared named Pool), or "duck:{key}" (an isolated preset/dedicated machine).
                     "pool": self.state.ponds[key].pool,
                     "d_ms": int(ps.d.total_seconds() * 1000),
-                    "trigger": trigger,
+                    "refreshes": refreshes,
+                    "taps": self.taps_status(key),
                     "is_failed": ps.is_failed,
                     "is_blocked": ps.is_blocked,
                     "blocked_reason": (f"waiting for '{ps.missing_asset}'" if ps.missing_asset else None),
                     "is_killed": ps.is_killed,
-                    "refresh_pending": ps.refresh_pending,
+                    "rebuild_pending": ps.rebuild_pending,
                     "repairing": ps.repairing,
                     "failed_f": ts(ps.failed_f),
                     "failures": ps.failures,
@@ -3959,7 +4099,7 @@ class Driver:
                 "SELECT status, COUNT(*) FROM alert_delivery GROUP BY status"
             ).fetchall())
             return {"nodes": nodes, "failures": failures, "alert_deliveries": deliveries,
-                    "runtimes": runtimes}
+                    "runtimes": runtimes, "taps": self.tap_metrics()}
 
     def view_fragment(self, scope: list[str] | None) -> dict:
         """This Catchment's slice of the recursive lineage view (see plans/cross-catchment-visibility.md):

@@ -59,7 +59,7 @@ const sidebars: SidebarsConfig = {
         {
           type: 'category',
           label: 'Getting Data Out',
-          items: ['guides/querying', 'guides/delivering_with_spouts'],
+          items: ['guides/querying', 'guides/serving_apps_with_taps', 'guides/delivering_with_spouts'],
         },
         {
           type: 'category',
@@ -78,7 +78,6 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Reference',
       items: [
-        'reference/orchestration_theory',
         {
           type: 'category',
           label: 'Python API',
@@ -99,16 +98,14 @@ const sidebars: SidebarsConfig = {
           label: 'CLI',
           items: [
             'reference/cli/index',
-            'reference/cli/catchment',
-            'reference/cli/pond',
-            'reference/cli/puddle',
-            'reference/cli/trigger',
-            'reference/cli/control',
-            'reference/cli/do',
             'reference/cli/data',
+            'reference/cli/refresh',
+            'reference/cli/window',
+            'reference/cli/control',
+            'reference/cli/pond',
+            'reference/cli/catchment',
             'reference/cli/duck',
             'reference/cli/spout',
-            'reference/cli/serve',
             'reference/cli/secret',
             'reference/cli/alert',
           ],

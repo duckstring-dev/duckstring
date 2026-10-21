@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useLiveStore, THEME_BRAND, THEME_PULL } from '@/lib/store';
+import { useLiveStore, THEME_BRAND, THEME_AMBER } from '@/lib/store';
 import {
   fetchComputeDefaults, fetchDuckPools, setDuck as apiSetDuck,
   type ComputeDefaults, type DuckConfig, type DuckPool,
@@ -87,14 +87,14 @@ export function DuckSection({ pondId, duck, flockError }: {
 
       {/* Its declared target is a Fargate preset, but Fargate isn't enabled — it won't launch until it is. */}
       {onUnavailablePreset && (
-        <div style={{ fontSize: 10, color: THEME_PULL, marginBottom: 6, lineHeight: 1.4 }}>
+        <div style={{ fontSize: 10, color: THEME_AMBER, marginBottom: 6, lineHeight: 1.4 }}>
           This Pond targets the <b>{target}</b> Fargate preset, but Fargate isn&apos;t enabled — add the
           Fargate deployment config in Options → Cloud, or pick another target.
         </div>
       )}
       {/* A remote target is valid config anywhere, but only runs remotely once cloud is enabled. */}
       {remoteSelected && !cloudEnabled && (
-        <div style={{ fontSize: 10, color: THEME_PULL, marginBottom: 6, lineHeight: 1.4 }}>
+        <div style={{ fontSize: 10, color: THEME_AMBER, marginBottom: 6, lineHeight: 1.4 }}>
           Runs locally until cloud is enabled (attach an S3 data root + AWS creds in Options → Cloud).
         </div>
       )}
@@ -121,7 +121,7 @@ export function DuckSection({ pondId, duck, flockError }: {
       {/* A failed Flock dispatch still completes the run locally, so this warning is the only visible
           tell that the Flock is degrading (quietly paying full local compute). */}
       {duck.flock_mode !== 'off' && flockError && (
-        <div style={{ ...row, color: THEME_PULL, fontSize: 11 }} title={flockError}>
+        <div style={{ ...row, color: THEME_AMBER, fontSize: 11 }} title={flockError}>
           ⚠ Flock degraded to local: {flockError.length > 90 ? `${flockError.slice(0, 90)}…` : flockError}
         </div>
       )}
@@ -152,7 +152,7 @@ export function DuckSection({ pondId, duck, flockError }: {
       )}
 
       {hasOverride && (
-        <button style={{ ...chip(false), color: THEME_PULL, borderColor: THEME_PULL }} onClick={() => setDuck(pondId, { clear: true })}>
+        <button style={{ ...chip(false), color: THEME_AMBER, borderColor: THEME_AMBER }} onClick={() => setDuck(pondId, { clear: true })}>
           Reset to declared
         </button>
       )}

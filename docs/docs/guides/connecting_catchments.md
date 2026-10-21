@@ -11,7 +11,7 @@ This guide connects an `ingest` Catchment, which runs `transactions` and `produc
 
 ## How it works
 
-A duct is configured on the consuming Catchment. Each upstream Pond it draws appears locally as a **Pond Draw**, with the same name, which local Ponds use as a Source. The Draw copies the upstream Pond's published tables across whenever they change. When local Ponds need newer data, the Draw passes the request upstream as a Tap or Pulse, so the upstream Pond runs as though it had been triggered locally, and its freshness carries through.
+A duct is configured on the consuming Catchment. Each upstream Pond it draws appears locally as a **Pond Draw**, with the same name, which local Ponds use as a Source. The Draw copies the upstream Pond's published tables across whenever they change. When local Ponds need newer data, the Draw passes the request upstream, so the upstream Pond runs as though it had been refreshed locally, and its freshness carries through. Both Catchments need a Duckstring release with Refresh: a Draw sends no requests to an older one, and logs that it needs upgrading.
 
 ```mermaid
 flowchart LR
@@ -76,23 +76,13 @@ A Draw carries the version currently deployed upstream, kept up to date on every
 
 Read the tables as usual, with `pond.read_table("transactions.transaction")`. Trickles keep working across the duct: only new changes are copied on each transfer, so downstream Ponds still read changes rather than whole tables.
 
-Triggers go on the local Outlets as usual:
+Refreshes go on the local Outlets as usual:
 
 ```bash
-duckstring trigger tide reports 1d -c analytics
+duckstring refresh add reports --every 1d -c analytics
 ```
 
 The demand travels to `sales`, then to the Draws, and across the duct to `transactions` and `products` in `ingest`.
-
-## Refreshing on read
-
-An upstream Pond can be set to refresh itself whenever it's queried, which suits a consumer that reads occasionally and wants current data when it does:
-
-```bash
-duckstring catchment open transactions -c ingest --tap-on-get
-```
-
-Each query of `transactions` through the Catchment's query API, such as `duckstring query`, the Python client or the web UI's data viewer, then also sends it a Tap, after returning the data it already has. Transfers over a duct don't trigger it; a Draw requests new data through its own demand. `duckstring catchment close transactions -c ingest` turns this off.
 
 ## Watching and removing
 

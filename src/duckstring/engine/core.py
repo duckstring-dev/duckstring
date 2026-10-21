@@ -1,11 +1,11 @@
 """Shared primitives for the orchestration engines.
 
-The freshness/push-token model is split across two deployable engines: the
-:mod:`~duckstring.engine.catchment` brain (full ponds + ripples, pull + push) that the Catchment
-runs, and the push-only :mod:`~duckstring.engine.worker` that each Duck runs. Both build on the
-dataclasses and helpers here so the rules are single-sourced.
+The freshness/demand model is split across two deployable engines: the
+:mod:`~duckstring.engine.catchment` brain (full Ponds and Ripples, demand and Refreshes) that the Catchment
+runs, and the :mod:`~duckstring.engine.worker` that each Duck runs. Both build on the dataclasses and
+helpers here so the rules are single-sourced.
 
-Freshness ``F`` is a timezone-aware UTC ``datetime``; the window delay ``D`` and Tide bounds are
+Freshness ``F`` is a timezone-aware UTC ``datetime``; the window delay ``D`` and a Refresh's period are
 ``timedelta``. The "never run" freshness is :data:`NEVER` (``datetime.min``), which orders below every
 real timestamp.
 """
@@ -30,6 +30,35 @@ _DAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 _UNIT_SECONDS = {"SECOND": 1, "MINUTE": 60, "HOUR": 3600, "DAY": 86400, "WEEK": 604800}
 
 
+def _kept(t: datetime, valid_days: frozenset[str] | None, until: datetime | None) -> bool:
+    """Whether a grid occurrence ``t`` is kept by a recurrence's day filter and end."""
+    if until is not None and t > until:
+        return False
+    return valid_days is None or _DAYS[t.weekday()] in valid_days
+
+
+def _latest(anchor: datetime, delta: timedelta, now: datetime) -> datetime | None:
+    """The grid point ``anchor + k·delta`` (k ≥ 0) at or before ``now``; None before the anchor."""
+    if now < anchor or delta.total_seconds() <= 0:
+        return None
+    return anchor + ((now - anchor) // delta) * delta
+
+
+def _next_kept(anchor: datetime, delta: timedelta, now: datetime, valid_days: frozenset[str] | None,
+               until: datetime | None, cap: int = 10000) -> datetime | None:
+    """The next kept grid point strictly after ``now`` (bounded scan for a day filter)."""
+    if delta.total_seconds() <= 0:
+        return None
+    k = 0 if now < anchor else (now - anchor) // delta + 1
+    for i in range(cap):
+        t = anchor + (k + i) * delta
+        if until is not None and t > until:
+            return None
+        if valid_days is None or _DAYS[t.weekday()] in valid_days:
+            return t
+    return None
+
+
 @dataclass(frozen=True)
 class Window:
     """A recurring batch-availability window on an Inlet (RFC-5545-flavoured): the first window opens
@@ -48,36 +77,18 @@ class Window:
     def _delta(self) -> timedelta:
         return timedelta(seconds=_UNIT_SECONDS[self.freq_unit] * self.freq_interval)
 
-    def _kept(self, t: datetime) -> bool:
-        if self.until is not None and t > self.until:
-            return False
-        return self.valid_days is None or _DAYS[t.weekday()] in self.valid_days
-
     def active_end(self, now: datetime) -> datetime | None:
         """If ``now`` falls inside an occurrence, return that window's end ("fresh until"); else None.
         O(1): the most-recent grid point at/before ``now`` (windows are assumed non-overlapping)."""
-        delta = self._delta()
-        if now < self.start_anchor or delta.total_seconds() <= 0:
-            return None
-        c = self.start_anchor + ((now - self.start_anchor) // delta) * delta
-        if not self._kept(c):
+        c = _latest(self.start_anchor, self._delta(), now)
+        if c is None or not _kept(c, self.valid_days, self.until):
             return None
         end = c + self.duration
         return end if now < end else None
 
     def next_open(self, now: datetime, cap: int = 10000) -> datetime | None:
         """The next occurrence start strictly after ``now`` (bounded scan for ``valid_days``)."""
-        delta = self._delta()
-        if delta.total_seconds() <= 0:
-            return None
-        k = 0 if now < self.start_anchor else (now - self.start_anchor) // delta + 1
-        for i in range(cap):
-            t = self.start_anchor + (k + i) * delta
-            if self.until is not None and t > self.until:
-                return None
-            if self.valid_days is None or _DAYS[t.weekday()] in self.valid_days:
-                return t
-        return None
+        return _next_kept(self.start_anchor, self._delta(), now, self.valid_days, self.until, cap)
 
     def next_boundary(self, now: datetime) -> datetime | None:
         """The soonest future instant the window's active-state changes (its close if active, or the
@@ -106,7 +117,7 @@ class Window:
             t = self.start_anchor + (k + i) * delta
             if t >= hend or (self.until is not None and t > self.until):
                 break
-            if (self.valid_days is None or _DAYS[t.weekday()] in self.valid_days):
+            if _kept(t, self.valid_days, None):
                 te = t + self.duration
                 if te > hstart:
                     out.append((t, te))
@@ -162,26 +173,54 @@ class Ripple:
     optional_parents: set[RippleId] = field(default_factory=set)
 
 
-@dataclass
-class Trigger:
-    """A standing trigger on a Pond. ``wave`` re-Taps on completion/idle; ``tide`` is a clock that
-    emits a push target ``now`` when the last requested freshness ages past ``bound``."""
+@dataclass(frozen=True)
+class Refresh:
+    """A recurring Refresh on a Pond: a request for data at least as fresh as the moment it is sent, repeated.
+
+    - **Floating** (no ``start``): due ``every`` after the later of the Pond's newest pending request and its
+      freshness, so any refresh (a manual one, a scheduled one, a Sink's demand) resets its phase. ``every``
+      of zero is continuous: as fresh as the pipeline allows, paced by the throttle.
+    - **Scheduled** (a ``start``): requests each occurrence of the grid ``start + k·every`` (k ≥ 0), filtered
+      by ``valid_days`` and ended by ``until`` as a window's grid is, whatever else refreshes the Pond.
+
+    A Pond holds any number of scheduled Refreshes and at most one floating one (the Driver enforces it)."""
 
     pond_id: PondId
-    kind: str  # "wave" | "tide"
-    bound: timedelta | None = None  # Tide only: the staleness bound.
+    name: str
+    every: timedelta = ZERO
+    start: datetime | None = None
+    valid_days: frozenset[str] | None = None
+    until: datetime | None = None
+
+    @property
+    def scheduled(self) -> bool:
+        return self.start is not None
+
+    def latest(self, now: datetime) -> datetime | None:
+        """A scheduled Refresh's latest kept occurrence at or before ``now`` (None before its start, when that
+        grid point is filtered out, or for a floating Refresh)."""
+        if self.start is None:
+            return None
+        c = _latest(self.start, self.every, now)
+        return c if c is not None and _kept(c, self.valid_days, self.until) else None
+
+    def next_occurrence(self, now: datetime) -> datetime | None:
+        """A scheduled Refresh's next kept occurrence strictly after ``now`` (None if it has ended)."""
+        if self.start is None:
+            return None
+        return _next_kept(self.start, self.every, now, self.valid_days, self.until)
 
 
 @dataclass(frozen=True)
 class BeginRun:
-    """A command from the Catchment to a Duck: start a Pond Run at freshness ``f`` (push every Ripple
-    to ``f``). Emitted by the Catchment's ``start_pond_run``; identified/idempotent by ``(pond_id, f)``.
+    """A command from the Catchment to a Duck: start a Pond Run at freshness ``f`` (ask every Ripple
+    for ``f``). Emitted by the Catchment's ``start_pond_run``; identified/idempotent by ``(pond_id, f)``.
     ``force`` re-runs every Ripple even if already fresh to ``f`` (a Force/recompute)."""
 
     pond_id: PondId
     f: datetime
     force: bool = False
-    refresh: bool = False  # a Refresh: the Duck wipes the registry first → a cold full rebuild
+    rebuild: bool = False  # a Rebuild: the Duck wipes the registry first → a cold full rebuild
     sources_changed: bool = True  # the engine's no-change verdict, exposed to Ripples as
                                   # pond.sources_changed() (an always_run Pond runs even when False)
 
@@ -191,20 +230,28 @@ class BeginRun:
 
 @dataclass
 class ThrottleState:
-    """The Pulse throttle's per-Pond bookkeeping (plans/pulse-throttle.md). Soft: in memory only, rebuilt
-    by observation; losing it falls back to plain Pulse until two demands land in one run again. Runs are
+    """The throttle's per-Pond bookkeeping (plans/throttle.md). Soft: in memory only, rebuilt by
+    observation; losing it falls back to unpaced demand until two demands land in one run again. Runs are
     identified by a Ripple's ``runs_started`` (a Ripple's runs never overlap), never by durations."""
 
     counts: dict[RippleId, tuple[int, int]] = field(default_factory=dict)  # ripple -> (run, demands seen in it)
     slow: set[RippleId] = field(default_factory=set)  # Ripples that saw two demands in one run, until idle
-    held: int = 0  # demands held at this Pond since it last sent a Pulse upstream
+    held: int = 0  # demands held at this Pond since it last sent a request upstream
     sent_at: dict[RippleId, int] = field(default_factory=dict)  # each Ripple's runs_started at the last send
-    trigger: bool = False  # a trigger targets this Pond (cleared when its demand drains)
-    completed: bool = False  # completed a Pond Run since the last send
+    trigger: bool = False  # a Refresh targets this Pond (cleared when its demand drains)
+    # Completed a Pond Run since the last send, or never sent: a trigger Pond with no request outstanding has
+    # nothing to wait for (else one already throttled through a Source another Refresh paces would hold its
+    # first request until a completion that request is needed for).
+    completed: bool = True
     released: bool = False  # Inlets: a release reached it, so its next Run stamps its start
+    # Sibling alignment: demand held back from the Sources that aren't throttled until the throttled ones
+    # start a new Run (Source -> (newest demand held back, whether a release)), and their runs_started then.
+    deferred: dict[PondId, tuple[datetime, bool]] = field(default_factory=dict)
+    deferred_at: dict[PondId, int] = field(default_factory=dict)
 
     def copy(self) -> ThrottleState:
-        return replace(self, counts=dict(self.counts), slow=set(self.slow), sent_at=dict(self.sent_at))
+        return replace(self, counts=dict(self.counts), slow=set(self.slow), sent_at=dict(self.sent_at),
+                       deferred=dict(self.deferred), deferred_at=dict(self.deferred_at))
 
 
 @dataclass
@@ -224,11 +271,7 @@ class PondState:
                                 # (transient — repopulated on each poll, not persisted)
     remote_down: bool = False  # Pond Draws only: upstream is failed/killed/blocked/unreachable →
                                # the Draw is blocked (drains landed data, solicits nothing)
-    has_received_pull: bool = False  # inbox: a Sink/trigger asked for resupply
-    has_pull: bool = False  # a Pond Run is wanted in pull
-    pull_m: datetime = NEVER  # minted epoch of the active pull (the freshness an Inlet stamps; the
-                              # pull counterpart of a push target's value). NEVER when no pull.
-    targets: list[datetime] = field(default_factory=list)  # unsatisfied push target freshnesses
+    demand: list[datetime] = field(default_factory=list)  # unsatisfied requested freshnesses
     # Fault tolerance (see docs/guide/theory.md "Fault Tolerance").
     is_failed: bool = False  # a Pond Run gave up and has not been superseded by a fresher success
     is_blocked: bool = False  # this Pond is failed, or a required Source is failed/blocked/killed
@@ -243,23 +286,22 @@ class PondState:
     failures: int = 0  # failed Pond Runs since the last success (counted against retry_on_change)
     # Control (Wake/Force/Kill — see docs).
     is_killed: bool = False  # operator Kill: terminal, supersedes retries, until Wake/Force/Clear
-    pull_local: bool = False  # the pending pull is a Wake — run on fresh input but do NOT solicit Sources
-    standing_wake: bool = False  # a Spout: a *standing* non-propagating pull — re-arm a Wake whenever idle,
-                                 # so it runs on every Source advance without ever soliciting the Source.
+    standing_wake: bool = False  # a Spout: whenever idle, demand its Source's freshness locally (never
+                                 # forwarded), so it runs on every Source advance without soliciting it.
                                  # Sleep/Kill disarm it; Wake/Force re-arm it.
     force_pending: bool = False  # next Run is a Force (recompute) — re-run Ripples even if unchanged
-    refresh_pending: bool = False  # next Run is a Refresh — the Duck wipes state first for a cold rebuild
+    rebuild_pending: bool = False  # next Run is a Rebuild — the Duck wipes state first for a cold rebuild
     repairing: bool = False  # in an active repair plan: blocked from normal demand until its turn (D3)
     runs_started: int = 0
     runs_completed: int = 0
     gen_start_times: dict[int, datetime] = field(default_factory=dict)
     completion_times: list[datetime] = field(default_factory=list)
-    throttle: ThrottleState | None = None  # the Pulse throttle's soft state, created on first use
+    throttle: ThrottleState | None = None  # the throttle's soft state, created on first use
 
     def copy(self) -> PondState:
         return replace(
             self,
-            targets=list(self.targets),
+            demand=list(self.demand),
             gen_start_times=dict(self.gen_start_times),
             completion_times=list(self.completion_times),
             throttle=self.throttle.copy() if self.throttle is not None else None,
@@ -270,8 +312,7 @@ class PondState:
 class RippleState:
     start_f: datetime = NEVER
     end_f: datetime = NEVER
-    has_pull: bool = False
-    targets: list[datetime] = field(default_factory=list)
+    demand: list[datetime] = field(default_factory=list)
     is_running: bool = False  # an in-flight run the engine is awaiting completion of
     started_at: datetime | None = None  # telemetry: when the in-flight run started
     runs_started: int = 0
@@ -279,15 +320,15 @@ class RippleState:
     completion_times: list[datetime] = field(default_factory=list)
 
     def copy(self) -> RippleState:
-        return replace(self, targets=list(self.targets), completion_times=list(self.completion_times))
+        return replace(self, demand=list(self.demand), completion_times=list(self.completion_times))
 
 
-# ─── Push target sets ─────────────────────────────────────────────────────────
+# ─── Demand sets ──────────────────────────────────────────────────────────────
 
 
-def min_target(targets: list[datetime]) -> datetime | None:
-    return min(targets) if targets else None
+def min_demand(demand: list[datetime]) -> datetime | None:
+    return min(demand) if demand else None
 
 
-def max_target(targets: list[datetime]) -> datetime | None:
-    return max(targets) if targets else None
+def max_demand(demand: list[datetime]) -> datetime | None:
+    return max(demand) if demand else None

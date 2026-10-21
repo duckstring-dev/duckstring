@@ -34,9 +34,9 @@ router = APIRouter()
 
 
 @router.get("/duck/{name}/{major}/jobs", dependencies=[auth.duck])
-def jobs(name: str, major: int, request: Request):
+def jobs(name: str, major: int, request: Request, version: str | None = None):
     driver = request.app.state.driver
-    return {"jobs": driver.take_jobs(pond_key(name, major))}
+    return {"jobs": driver.take_jobs(pond_key(name, major), version=version)}
 
 
 @router.post("/duck/{name}/{major}/events", dependencies=[auth.duck])

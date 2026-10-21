@@ -1,11 +1,10 @@
-"""`duckstring trigger window {pond} add|list|remove` — manage batch-availability windows on a Pond.
+"""`duckstring window add|ls|rm {pond}` — manage batch-availability windows on a Pond.
 
-Windows describe when an Inlet's source data is available (an RFC-5545-flavoured recurrence). The
-``pond`` argument comes right after ``window`` (a group callback), e.g.::
+Windows describe when an Inlet's source data is available (an RFC-5545-flavoured recurrence)::
 
-    duckstring trigger window transactions add -n nightly -s 02:00 -d 3h -e 1d
-    duckstring trigger window transactions list
-    duckstring trigger window transactions remove nightly
+    duckstring window add transactions -n nightly -s 02:00 -d 3h -e 1d
+    duckstring window ls transactions
+    duckstring window rm transactions nightly
 """
 
 from __future__ import annotations
@@ -82,27 +81,16 @@ def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
     return cfg["url"], cfg
 
 
-@app.callback()
-def _main(ctx: typer.Context, pond: str = typer.Argument(..., help="The Pond whose windows to manage.")):
-    ctx.obj = {"pond": pond}
+_POND_ADD = typer.Argument(..., help="The Pond to add a window to, usually an Inlet.")
+_POND_LS = typer.Argument(..., help="The Pond whose windows to list.")
+_POND_RM = typer.Argument(..., help="The Pond whose window to remove.")
+_CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted).")
+_MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest).")
+_VERSION = typer.Option(None, "--version", "-v", help="Specific semver to target.")
 
 
-@app.command("add")
-def add(
-    ctx: typer.Context,
-    name: str = typer.Option(..., "--name", "-n", help="A name for the window, unique on this Pond."),
-    every: str = typer.Option(..., "--every", "-e", help="How often windows open, as one unit, e.g. 1d, 12h or 10s."),
-    start: Optional[str] = typer.Option(None, "--start", "-s", help="When the first window opens: ISO 8601, "
-                                                                "or HH:MM (UTC). Default 00:00 today."),
-    duration: Optional[str] = typer.Option(None, "--duration", "-d", help="How long each window stays open. "
-                                                                      "Defaults to --every."),
-    on: Optional[str] = typer.Option(None, "--on", "-o", help="Only open on these weekdays, e.g. MON,WED,FRI."),
-    until: Optional[str] = typer.Option(None, "--until", "-u", help="When the windows stop (ISO 8601)."),
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
-    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
-) -> None:
-    """Add a window: the Pond runs at most once per window, never between windows."""
+def _add(pond: str, name: str, every: str, start: Optional[str], duration: Optional[str], on: Optional[str],
+         until: Optional[str], catchment: Optional[str], major: Optional[int], version: Optional[str]) -> None:
     from . import _http
 
     unit, interval = _parse_every(every)
@@ -116,21 +104,11 @@ def add(
         "until_time": _parse_dt(until, allow_hhmm=False) if until else None,
     }
     url, cfg = _resolve(catchment)
-    _http.post(
-        f"{url}/api/ponds/{ctx.obj['pond']}/windows", auth=cfg,
-        params=_http.pond_params(major, version), json=payload,
-    )
+    _http.post(f"{url}/api/ponds/{pond}/windows", auth=cfg, params=_http.pond_params(major, version), json=payload)
     typer.echo(f"Window '{name}' added.")
 
 
-@app.command("list")
-def list_(
-    ctx: typer.Context,
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
-    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
-) -> None:
-    """List the Pond's windows."""
+def _ls(pond: str, catchment: Optional[str], major: Optional[int], version: Optional[str]) -> None:
     from rich.console import Console
     from rich.table import Table
 
@@ -138,8 +116,7 @@ def list_(
 
     url, cfg = _resolve(catchment)
     windows = _http.get(
-        f"{url}/api/ponds/{ctx.obj['pond']}/windows", auth=cfg,
-        params=_http.pond_params(major, version),
+        f"{url}/api/ponds/{pond}/windows", auth=cfg, params=_http.pond_params(major, version),
     ).json().get("windows", [])
     if not windows:
         typer.echo("No windows.")
@@ -161,20 +138,55 @@ def list_(
     Console().print(table)
 
 
-@app.command("remove")
-def remove(
-    ctx: typer.Context,
-    window_name: str = typer.Argument(..., help="Name of the window to remove."),
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
-    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
-    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
-) -> None:
-    """Remove a window."""
+def _rm(pond: str, window_name: str, catchment: Optional[str], major: Optional[int], version: Optional[str]) -> None:
     from . import _http
 
     url, cfg = _resolve(catchment)
     _http.post(
-        f"{url}/api/ponds/{ctx.obj['pond']}/windows/{window_name}/remove", auth=cfg,
+        f"{url}/api/ponds/{pond}/windows/{window_name}/remove", auth=cfg,
         params=_http.pond_params(major, version), json={},
     )
     typer.echo(f"Window '{window_name}' removed.")
+
+
+@app.command("add")
+def add(
+    pond: str = _POND_ADD,
+    name: str = typer.Option(..., "--name", "-n", help="A name for the window, unique on this Pond."),
+    every: str = typer.Option(..., "--every", "-e", help="How often windows open, as one unit, e.g. 1d, 12h or 10s."),
+    start: Optional[str] = typer.Option(None, "--start", "-s", help="When the first window opens: ISO 8601, "
+                                                                "or HH:MM (UTC). Default 00:00 today."),
+    duration: Optional[str] = typer.Option(None, "--duration", "-d", help="How long each window stays open. "
+                                                                      "Defaults to --every."),
+    on: Optional[str] = typer.Option(None, "--on", "-o", help="Only open on these weekdays, e.g. MON,WED,FRI."),
+    until: Optional[str] = typer.Option(None, "--until", "-u", help="When the windows stop (ISO 8601)."),
+    catchment: Optional[str] = _CATCHMENT,
+    major: Optional[int] = _MAJOR,
+    version: Optional[str] = _VERSION,
+) -> None:
+    """Add a window: the Pond runs at most once per window, never between windows."""
+    _add(pond, name, every, start, duration, on, until, catchment, major, version)
+
+
+@app.command("ls")
+def ls(
+    pond: str = _POND_LS,
+    catchment: Optional[str] = _CATCHMENT,
+    major: Optional[int] = _MAJOR,
+    version: Optional[str] = _VERSION,
+) -> None:
+    """List the Pond's windows."""
+    _ls(pond, catchment, major, version)
+
+
+@app.command("rm")
+def rm(
+    pond: str = _POND_RM,
+    window_name: str = typer.Argument(..., help="Name of the window to remove."),
+    catchment: Optional[str] = _CATCHMENT,
+    major: Optional[int] = _MAJOR,
+    version: Optional[str] = _VERSION,
+) -> None:
+    """Remove a window."""
+    _rm(pond, window_name, catchment, major, version)
+

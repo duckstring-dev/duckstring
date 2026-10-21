@@ -111,7 +111,7 @@ Then move a Pond onto it, using one of the built-in sizes (`S`, `M`, `L`, `XL`):
 
 ```bash
 duckstring duck set sales --duck M
-duckstring trigger pulse sales
+duckstring refresh now sales
 ```
 
 Or declare it in the Pond's `pond.toml`, so it travels with the code:
@@ -228,7 +228,7 @@ A Pond running on the Catchment's own machine publishes locally first, then copi
 Stopping the Catchment doesn't wait for background copies to finish. Nothing is lost, since the Catchment reconciles and re-runs the gap on restart, but recent work may be repeated. To avoid that, drain first:
 
 ```bash
-duckstring do --all --sleep
+duckstring control sleep --all
 ```
 
 ## Debugging a Duck

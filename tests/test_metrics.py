@@ -142,7 +142,7 @@ def test_flock_dispatch_counters_accumulate_from_ripple_deltas(tmp_path):
     text = render_metrics(d.metrics_snapshot())
     assert "flock_dispatched_total{" not in text  # nothing reported yet → no samples
 
-    d.pulse(key)
+    d.refresh_now(key)
     f = d.state.pond_states[key].start_f.isoformat()
     # First Duck: two dispatches, one of which failed. It then dies without completing the Pond Run.
     d.on_event(key, {"kind": "ripple", "ripple": "agg", "f": f, "status": "success",
@@ -166,7 +166,7 @@ def test_malformed_flock_report_is_ignored(tmp_path):
     """Observability must never reach into a Run: a garbage report is dropped, not raised."""
     d = _driver(tmp_path)
     key = pond_key("sales", 1)
-    d.pulse(key)
+    d.refresh_now(key)
     f = d.state.pond_states[key].start_f.isoformat()
     d.on_event(key, {"kind": "ripple", "ripple": "agg", "f": f, "status": "success",
                      "flock": {"dispatched": "lots", "failed": None}})

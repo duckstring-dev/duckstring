@@ -1,5 +1,5 @@
-import { Playground } from '@/components/Playground';
+import { Shell } from '@/components/Shell';
 
 export default function Home() {
-  return <Playground />;
+  return <Shell initial="orchestration" />;
 }

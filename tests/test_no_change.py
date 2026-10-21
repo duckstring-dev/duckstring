@@ -50,15 +50,15 @@ def _pond_run_changed(d, key, f):
 
 def test_unchanged_source_makes_sink_pass_without_dispatch(tmp_path):
     d = _chain(tmp_path)
-    # Cold start: tap the sink, run the source then the sink (a real bootstrap run for both).
-    d.tap("snk@1")
+    # Cold start: refresh the sink, run the source then the sink (a real bootstrap run for both).
+    d.refresh_now("snk@1")
     _run_pond(d, "src@1", changed=True)
     f_snk1 = _run_pond(d, "snk@1", changed=True)
     snk = d.state.pond_states["snk@1"]
     assert snk.changed_f.isoformat() == f_snk1  # bootstrap changed its output
 
-    # Second cycle: re-tap, the source runs again but reports NO change.
-    d.tap("snk@1")
+    # Second cycle: refresh again, the source runs again but reports NO change.
+    d.refresh_now("snk@1")
     d.jobs["snk@1"] = []  # clear any prior queued jobs so we can see whether snk gets dispatched
     f_src2 = _run_pond(d, "src@1", changed=False)
 
@@ -75,11 +75,11 @@ def test_unchanged_source_makes_sink_pass_without_dispatch(tmp_path):
 
 def test_changed_source_dispatches_sink(tmp_path):
     d = _chain(tmp_path)
-    d.tap("snk@1")
+    d.refresh_now("snk@1")
     _run_pond(d, "src@1", changed=True)
     _run_pond(d, "snk@1", changed=True)
 
-    d.tap("snk@1")
+    d.refresh_now("snk@1")
     d.jobs["snk@1"] = []
     _run_pond(d, "src@1", changed=True)  # source changed this time
     # The sink is dispatched (a real run), not passed.
@@ -89,13 +89,13 @@ def test_changed_source_dispatches_sink(tmp_path):
 def test_always_run_sink_dispatches_with_sources_changed_false(tmp_path):
     d = _chain(tmp_path, snk_always_run=True)
     assert d.state.ponds["snk@1"].always_run  # ORed up from the ripple
-    d.tap("snk@1")
+    d.refresh_now("snk@1")
     _run_pond(d, "src@1", changed=True)
     _run_pond(d, "snk@1", changed=True)
 
     # Source republishes unchanged: an always_run sink still runs, and the job tells it sources_changed=False
     # so the ripple can skip its data work (pond.sources_changed() -> pond.skip()).
-    d.tap("snk@1")
+    d.refresh_now("snk@1")
     d.jobs["snk@1"] = []
     _run_pond(d, "src@1", changed=False)
     jobs = [j for j in d.jobs.get("snk@1", []) if j.get("kind") == "begin_run"]

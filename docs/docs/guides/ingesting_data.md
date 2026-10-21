@@ -200,12 +200,12 @@ Objects are compared by a SHA-256 of their content, so there's no fingerprint to
 
 ## When it runs
 
-An Inlet runs when demand from downstream reaches it. Put [triggers](scheduling.md) on the Outlets that consume the data, and the Inlets run as often as those consumers need. The [Playground](https://playground.duckstring.com) shows this on the demo pipeline in the browser.
+An Inlet runs when demand from downstream reaches it. Put [Refreshes](scheduling.md) on the Outlets that consume the data, and the Inlets run as often as those consumers need. The [Playground](https://playground.duckstring.com) shows this on the demo pipeline in the browser.
 
 A source that only updates at known times, such as an export that lands nightly, should have a window on its Inlet, so it runs at most once per update:
 
 ```bash
-duckstring trigger window products add --name nightly --every 1d --start 02:00 --duration 1h
+duckstring window add products --name nightly --every 1d --start 02:00 --duration 1h
 ```
 
 See [Batch sources](scheduling.md#batch-sources).

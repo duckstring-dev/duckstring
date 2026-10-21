@@ -12,7 +12,7 @@ The loop is:
 ```bash
 duckstring pond hydrate     # build the Puddles
 duckstring pond run         # run the Pond against them
-duckstring puddle ls        # look at what came out
+duckstring pond puddle ls        # look at what came out
 ```
 
 ## Defining Puddles
@@ -103,9 +103,9 @@ duckstring pond run --ripple join_lines
 ## Inspecting results
 
 ```bash
-duckstring puddle ls
-duckstring puddle show sales.sale_line --limit 20
-duckstring puddle query 'SELECT category, SUM(revenue) FROM "sales"."sale_line" GROUP BY 1'
+duckstring pond puddle ls
+duckstring pond puddle show sales.sale_line --limit 20
+duckstring pond puddle query 'SELECT category, SUM(revenue) FROM "sales"."sale_line" GROUP BY 1'
 ```
 
 Every Puddle and output table is available as `"{pond}"."{table}"`, or by bare name. This is also a quick way to check a Source's shape while writing SQL against it.
@@ -128,7 +128,7 @@ A Source that is itself a Trickle needs its change history, not just a table, fo
 
 ## What a local run doesn't do
 
-A local run is a single Pond Run of one Pond. It doesn't involve freshness, triggers, retries or other Ponds. `pond.sources_changed()` always returns `True` and `pond.skip()` does nothing.
+A local run is a single Pond Run of one Pond. It doesn't involve freshness, Refreshes, retries or other Ponds. `pond.sources_changed()` always returns `True` and `pond.skip()` does nothing.
 
 `pond.changed()` works on the Pond's own tables and Objects as it does in a deployed run, so you can check that a Ripple asking it before `pond.skip()` sees what you expect. Asked about a Source, it reports `True` on a first run (every full `pond run` without a Puddle of the Pond's own output). A full run starts from an empty `puddles/out/`, so `pond.detect_change` and `if_changed=True` have nothing published to compare with, and always write. For the full behaviour, deploy to a Catchment on your own machine; see [Local Execution](../concepts/management_and_execution.md#local-execution).
 

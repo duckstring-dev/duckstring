@@ -122,7 +122,7 @@ const OP_META: Record<BatchOp, { label: string; blurb: string; warn?: boolean; i
   remove: { label: 'Remove', blurb: 'Retire The Pond', warn: true, irreversible: true },
   clear: { label: 'Clear', blurb: 'Clear Failures' },
   repair: { label: 'Repair', blurb: 'Rebuild Now' },
-  refresh: { label: 'Refresh', blurb: 'Rebuild Next Run' },
+  rebuild: { label: 'Rebuild', blurb: 'Rebuild Next Run' },
 };
 
 const bannerBtn = (bg: string, disabled = false): React.CSSProperties => ({

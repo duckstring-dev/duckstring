@@ -87,7 +87,7 @@ def test_the_poll_answers_at_once_and_delivers_queued_work(channel):
     assert r.status_code == 200 and r.json()["jobs"] == []
     assert time.monotonic() - started < 2.0, "the poll held the connection — see the module docstring"
 
-    app.state.driver.pulse("src@1")
+    app.state.driver.refresh_now("src@1")
     jobs = httpx.get(f"{url}/api/duck/src/1/jobs", params={"wait": 20.0}, timeout=10.0).json()["jobs"]
     assert jobs and jobs[0]["kind"] == "begin_run"
 
@@ -96,7 +96,7 @@ def test_jobs_are_delivered_once(channel):
     """Delivery is destructive by design — the second reader gets nothing. This is precisely why a held
     connection is unsafe without knowing which Duck owns the queue."""
     url, app = channel
-    app.state.driver.pulse("src@1")
+    app.state.driver.refresh_now("src@1")
     first = httpx.get(f"{url}/api/duck/src/1/jobs", timeout=10.0).json()["jobs"]
     second = httpx.get(f"{url}/api/duck/src/1/jobs", timeout=10.0).json()["jobs"]
     assert first and not second
@@ -187,6 +187,6 @@ def test_the_catchment_sends_its_orphan_limit_with_each_run(tmp_path, monkeypatc
     _register(db, "src", "1.0.0", "inlet", "ponds/src/1.0.0", _CFG, _RIPPLES)
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
     monkeypatch.setenv("DUCKSTRING_DUCK_ORPHAN_MINUTES", "15")
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     (job,) = [j for j in d.take_jobs("src@1") if j["kind"] == "begin_run"]
     assert job["orphan_minutes"] == "15"

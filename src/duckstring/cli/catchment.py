@@ -342,7 +342,7 @@ def start(
 
 @app.command(name="rotate-keys")
 def rotate_keys(
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to rotate (uses default if omitted)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to rotate (default if omitted)."),
     level: Optional[list[str]] = typer.Option(
         None, "--level", help="Level to replace: read, demand or full. Repeatable. Default: all three."
     ),
@@ -372,7 +372,7 @@ def rotate_keys(
 
 @app.command()
 def settings(
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment (uses default if omitted)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
     data_root: Optional[str] = typer.Option(
         None, "--data-root", help="Set where published tables are stored: s3://, gs:// or a shared path."),
 ) -> None:
@@ -400,13 +400,13 @@ def settings(
 
 @app.command()
 def reset(
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to reset (uses default if omitted)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to reset (default if omitted)."),
     clear_history: bool = typer.Option(False, "--clear-history", help="Also delete all run history."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
 ) -> None:
     """Return every Pond to its freshly deployed state.
 
-    Deletes all published data and working databases and resets freshness. Keeps deployed code, triggers,
+    Deletes all published data and working databases and resets freshness. Keeps deployed code, Refreshes,
     windows, Spouts, alerts, secrets and keys. Every Duck restarts.
     """
     from . import _http
@@ -522,7 +522,7 @@ def _fmt_bytes(n: int) -> str:
 
 @app.command()
 def download(
-    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to download (uses default if omitted)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to download (default if omitted)."),
     path: Path = typer.Option(
         Path(".duckstring"), "--path",
         help="Where to write the state. The default, ./.duckstring, is where a platform-hosted "

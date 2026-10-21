@@ -8,33 +8,52 @@ sidebar_label: control
 
 Commands that act directly on a Pond's execution, outside the demand model. See [Failures](../../concepts/management_and_execution.md#failures) and [Control](../../concepts/management_and_execution.md#control) for the concepts.
 
-Every command takes `-c` / `--catchment`, and those acting on one Pond take `-m` / `--major` and `-v` / `--version`; see [CLI Overview](index.md#choosing-a-major-version).
+Every command takes `-c` / `--catchment`; see [CLI Overview](index.md#choosing-a-catchment).
+
+## Choosing Ponds
+
+Every command except `failure-budget` and `reset-contract` acts on any number of Ponds, which is the command-line equivalent of **Options → Pond Actions** in the web UI. Name each Pond as `name` (its highest deployed major) or `name@major`, and widen the selection with:
+
+| Option | Adds |
+|---|---|
+| `--all` | Every Pond in the Catchment. |
+| `--tree` | Every Pond connected to the ones named, upstream or downstream. |
+| `--between` | Every Pond on a path between the ones named. |
+| `--downstream` | Everything downstream of the ones named. |
+
+With a single Pond, `-m` / `--major` and `-v` / `--version` pick its major line, as elsewhere.
+
+```bash
+duckstring control kill reports
+duckstring control rebuild --all
+duckstring control sleep transactions products
+```
 
 ## Running
 
 ### `wake`
 
 ```bash
-duckstring control wake POND [--silent] [--watch]
+duckstring control wake POND... [--silent] [--watch]
 ```
 
-Runs the Pond once if its Sources already have newer data, without asking them to run. Clears a failed or killed state first. Opens the live status view until the Pond settles.
+Runs each Pond once if its Sources already have newer data, without asking them to run. Clears a failed or killed state first. With one Pond, it opens the live status view until the Pond settles.
 
 ### `force`
 
 ```bash
-duckstring control force POND [--silent] [--watch]
+duckstring control force POND... [--silent] [--watch]
 ```
 
-Reruns the Pond now at its current freshness, even with no upstream change, for example after deploying a fix. Freshness doesn't change, so Ponds downstream don't rerun because of it. Clears a failed or killed state first.
+Reruns each Pond now at its current freshness, even with no upstream change, for example after deploying a fix. Freshness doesn't change, so Ponds downstream don't rerun because of it. Clears a failed or killed state first.
 
-### `refresh`
+### `rebuild`
 
 ```bash
-duckstring control refresh POND [--clear]
+duckstring control rebuild POND... [--clear]
 ```
 
-Marks the Pond so its next run rebuilds from scratch: its working database is dropped and every Source is read in full. Trickles restart their change history, so Ponds downstream also read them in full on their next run. Nothing runs immediately; the rebuild happens whenever the Pond next runs. `--clear` removes a pending mark.
+Marks each Pond so its next run rebuilds from scratch: its working database is dropped and every Source is read in full. Trickles restart their change history, so Ponds downstream also read them in full on their next run. Nothing runs immediately; the rebuild happens whenever the Pond next runs. `--clear` removes a pending mark.
 
 ### `repair`
 
@@ -42,35 +61,35 @@ Marks the Pond so its next run rebuilds from scratch: its working database is dr
 duckstring control repair POND... [--downstream]
 ```
 
-Rebuilds a set of Ponds now, in dependency order, each reading its parents' rebuilt output. The set must be connected: if two selected Ponds are linked through a third, the third must be selected too. `--downstream` adds everything downstream of the selection. While repairing, the Ponds don't respond to other demand.
+Rebuilds a set of Ponds now, in dependency order, each reading its parents' rebuilt output. The set must be connected: if two selected Ponds are linked through a third, the third must be selected too (`--between` adds it). `--downstream` adds everything downstream of the selection. While repairing, the Ponds don't respond to other demand.
 
 ## Stopping
 
 ### `sleep`
 
 ```bash
-duckstring control sleep POND [--upstream]
+duckstring control sleep POND... [--upstream]
 ```
 
-Clears the Pond's demand and removes its standing trigger. Runs already in progress finish. `--upstream` also sleeps every Pond upstream of it.
+Clears each Pond's demand and removes its recurring Refreshes. Runs already in progress finish. `--upstream` also sleeps every Pond upstream of each.
 
 ### `kill`
 
 ```bash
-duckstring control kill POND
+duckstring control kill POND...
 ```
 
-Stops the Pond's Duck immediately, abandoning its current run, and holds the Pond in a killed state. A killed Pond doesn't run or retry until it's woken, forced or cleared.
+Stops each Pond's Duck immediately, abandoning its current run, and holds the Pond in a killed state. A killed Pond doesn't run or retry until it's woken, forced or cleared.
 
 ## Failures
 
 ### `clear`
 
 ```bash
-duckstring control clear POND
+duckstring control clear POND...
 ```
 
-Resets a failed or killed Pond without running it, and unblocks the Ponds downstream of it.
+Resets each failed or killed Pond without running it, and unblocks the Ponds downstream of it.
 
 ### `failure-budget`
 
@@ -100,12 +119,20 @@ Forgets the output schema recorded for the Pond's major line, so the next succes
 ### `reset`
 
 ```bash
-duckstring control reset POND [--clear-history] [--yes]
+duckstring control reset POND... [--clear-history] [--yes]
 ```
 
-Returns the Pond to its freshly deployed state: deletes its published data, working database and run ledger, and resets its freshness. Keeps its code, configuration and demand, so it rebuilds from scratch the next time it runs. The Pond must be idle.
+Returns each Pond to its freshly deployed state: deletes its published data, working database and run ledger, and resets its freshness. Keeps its code, configuration and demand, so it rebuilds from scratch the next time it runs. The Ponds must be idle.
 
 | Option | Description |
 |---|---|
 | `--clear-history` | Also delete the Pond's run history. |
 | `--yes`, `-y` | Skip the confirmation. |
+
+### `wipe`
+
+```bash
+duckstring control wipe POND... [--confirm NAME]
+```
+
+Deletes each Pond's run history, leaving its data alone. It can't be undone, so it asks for the Catchment's name, or takes it from `--confirm` in scripts.

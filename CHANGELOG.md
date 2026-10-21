@@ -4,20 +4,132 @@ Notable changes per release. Versions before 0.5.0 are recorded in the git histo
 
 ## Unreleased
 
+### One trigger: Refresh
+
+Tap, Wave, Pulse and Tide are replaced by a single trigger, **Refresh**, which asks for a Pond's data to be at
+least as fresh as now. A recurring Refresh repeats it:
+
+- `duckstring refresh add reports --every 1d`: a day after the later of the last request and the last refresh of
+  the data (the old Tide).
+- `duckstring refresh add reports --every 1d --start 06:00 [--on MON,TUE,WED,THU,FRI] [--until T]`: at set times,
+  on a window's grid, whatever else refreshes the Pond. New. A Catchment that was down asks once, for the latest
+  occurrence, when it returns.
+- `duckstring refresh add reports --continuous` (or `--every 0s`): as fresh as the pipeline allows, paced to its
+  slowest step (the old Wave).
+
+`duckstring refresh now reports` refreshes once (the old Pulse). A Pond can have any number of scheduled Refreshes and
+one `--every` or continuous Refresh; `refresh ls` lists them with when each next asks, and `refresh rm` removes
+one. In the web UI, a Pond's trigger buttons became a Refresh section (Refresh Now, and Recurring Refresh for
+Continuous, Every N and schedules), and its recurring Refreshes and Taps are listed in a strip at the bottom of its
+box on the canvas.
+
+Upgrading:
+
+- **Existing Waves become continuous Refreshes and Tides become `--every` Refreshes** (migration `031`).
+- **`POST /api/ponds/{name}/refresh` changed meaning.** It used to mark a Pond for a rebuild; it now refreshes the
+  Pond (at `demand` level). The rebuild flag moved to `POST /api/ponds/{name}/rebuild`, and the command to
+  `duckstring control rebuild` (and the batch operation `refresh` to `rebuild`).
+  Scripts that called `/refresh` for a rebuild need updating.
+- **Pull is gone from the engine.** A Tap's "anything newer" request no longer exists: a Refresh always asks for
+  data as of now. Wake now runs once if the Sources are fresher at that moment, rather than waiting for them.
+- `duckstring trigger window POND add|list|remove` is now `duckstring window add|ls|rm POND`.
+- **The old commands and routes are removed, with no compatibility period**: `duckstring trigger …`, `control
+  refresh`, `do --refresh`, and `POST /tap`, `/pulse`, `/wave`, `/tide` and `/untrigger`. Scripts need the new ones.
+- **Both ends of a duct need this release.** A Draw sends no requests to an upstream Catchment older than Refresh
+  (there, `/refresh` would mark the Pond for a rebuild) and logs that it needs upgrading.
+- **`catchment open --tap-on-get` is removed** (it went with Tap, and fired on every reader, including the web
+  UI's data viewer). An open Pond stays open. Taps, below, replace it.
+- `/api/status` lists each Pond's `refreshes` (with `next_due`), `demand_f` and `rebuild_pending`, in place of
+  `trigger`, `has_pull`, `target_f` and `refresh_pending`.
+- The Orchestration Theory page was removed from the docs; the Scheduling guide and the `refresh` and `window`
+  CLI reference cover what it said that users need.
+
+### Taps: freshness that follows usage
+
+A **Tap** is an access point on a Pond for one app: `duckstring refresh tap add reports --name dashboard --fresh-within
+5m`. It has its own key, shown once, which reads the Pond's exposed tables (as a read-level key does) over HTTP
+(`/api/query`, `/api/serve/query`), the Postgres wire or Arrow Flight, and is refused everywhere else. A query through it sends the Pond a Refresh when the newest request on the Pond, or the
+data, is at least `--fresh-within` old (the `--every` clock, checked per query; `0`, the default, refreshes on every
+query unless a request is already waiting), so the pipeline keeps up while the app is in use and goes quiet when it
+isn't. A query is always answered at once from what is published. Queries with any other key never send demand.
+
+- `refresh tap ls|rm|rotate POND`; the routes `/api/ponds/{name}/taps` (full). The web UI lists a Pond's Taps at the
+  foot of its Refresh section, adds them in a modal, and shows a Tap's details, Rotate and Delete when clicked.
+- `/metrics` gains `duckstring_tap_queries_total` and `duckstring_tap_refreshes_total`; `/api/status` lists each
+  Pond's `taps` (never keys).
+- **`GET /api/ponds/{name}/freshness`** says how fresh a Pond's data is: `freshness` (the point in time it
+  reflects), `changed` (when its output last changed), `refreshing`, and when each table and Object last changed. A
+  Tap's key can call it for its own Pond, and `Catchment.freshness()` wraps it. It replaces a route of the same name
+  that the HTTP reference described as the Pond's freshness but that listed a Trickle table's run freshnesses for
+  the data viewer; that list moved to `/api/ponds/{name}/tables/{table}/runs`.
+- The Python `Catchment` client takes a Tap's key as `api_key`, and then needs no `pond`.
+- The demo `reports` exposes `monthly_summary` (`[serve] tables`), so a Tap on it works out of the box.
+- Migration `032` (`pond_tap`).
+
+### The CLI, regrouped
+
+The top level goes from 21 commands to 13: `status`, `query`, `get`, `refresh`, `window`, `control`, `data`, `pond`,
+`catchment`, `duck`, `spout`, `secret` and `alert`. Tables and Objects are named `POND.NAME` everywhere, as in the
+Python API. No old forms are kept:
+
+| Before | Now |
+|---|---|
+| `query POND [TABLE] [--sql SQL]` | `query POND.TABLE`, or `query SQL [--pond POND]` |
+| `serve query SQL` | `query SQL` (with `--csv`, `--json` and `--parquet` too) |
+| `get POND TABLE [--path]`, `get-object POND NAME [--out]` | `get POND.NAME [--out]` |
+| `objects POND`, `serve status` | `data ls [POND]` (with each table's exposure and last change) |
+| `delete-table POND TABLE`, `delete-object POND NAME` | `data delete POND.NAME` |
+| `serve expose POND TABLE` | `data expose POND.TABLE` |
+| `lineage [POND] [--table T]`, `trace POND.TABLE` | `data lineage [POND[.TABLE]]`, `data trace POND.TABLE` |
+| `serve promote POND` | `pond promote POND` |
+| `puddle ls\|show\|query` | `pond puddle ls\|show\|query` |
+| `catchment open\|close` | `catchment duct open\|close` |
+| `do PONDS --kill …` | `control kill PONDS …`: every `control` verb takes several Ponds and `--all`, `--tree`, `--between`, `--downstream`; `--wipe` is `control wipe`, `--remove` is `pond remove` |
+
+`POST /api/serve/query` takes a `format` (`csv`, `json` or `parquet`) to return a file.
+
 ### Orchestration
 
-- **A Pulse or Tide no longer refreshes an optional Source after its first build.** Push demand now
-  propagates only to a Pond's required Sources, as the orchestration spec describes: a Pond never waits
-  for an optional Source, so asking it to reach the target ran it for nothing. An optional Source that
-  has never run still gets one Pulse, so its Sink has output to read, and a Pond whose Sources are all
-  optional still pushes to every one of them. Tap and Wave are unchanged and still reach every Source.
-  If an optional Source needs a cadence of its own, give it its own Tide.
+- **Requests that arrive faster than the pipeline can serve them are paced to its slowest step** (the throttle),
+  always on, with no setting. A step that receives two requests during one run is held there, and one request goes
+  upstream each time it starts a new run.
+- **A Refresh no longer refreshes an optional Source after its first build.** Demand propagates only to a Pond's
+  required Sources: a Pond never waits for an optional Source, so asking it ran it for nothing. An optional Source
+  that has never run still gets one request, so its Sink has output to read, and a Pond whose Sources are all
+  optional still asks every one of them. If an optional Source needs a cadence of its own, give it its own Refresh.
 - **A repeat request for the freshness a Pond is already running is ignored.** It used to start a second
   Run at the same freshness, which the no-change skip then completed as a pass, ending the Run in flight
-  early. A duct re-sending its downstream's target could cause it.
-- **Push demand is no longer lost at a halted Source.** A Pond that stops being blocked (after Clear, a
-  recovery or a redeploy) re-sends its newest unmet push target upstream. Before, a Pulse waiting on a
-  Source whose Run had failed or been killed stranded after Clear until something else demanded the path.
+  early. A duct re-sending its downstream's request could cause it.
+- **A join's Sources read together under saturation.** When some of a Pond's Sources are throttled and others
+  aren't, its requests reach the faster Sources only once the throttled ones start their next run, so a join
+  isn't held back by a fast Source that read early.
+- **A Pond already throttled through another Refresh's Source still sends its first request.** It used to hold
+  that request until its own first completion, which the request itself was needed for.
+- **Sleep keeps other Ponds' demand.** Sleeping a Pond (or a path with `--upstream`) clears its own demand, but a
+  pending request from another Pond it was serving is now sent to it again; before, that request stranded.
+- **Demand is no longer lost at a halted Source.** A Pond that stops being blocked (after Clear, a recovery or a
+  redeploy) re-sends its newest unmet request upstream. Before, a request waiting on a Source whose Run had failed
+  or been killed stranded after Clear until something else demanded the path.
+
+### Redeploys and contract failures
+
+- **A redeploy takes effect while a recurring Refresh keeps the Pond busy.** A warm Duck used to keep running the
+  code it started with until it went idle, which a continuous Refresh never let it do, so a fix redeploy changed
+  nothing. A Duck now says which version it runs when it asks for work; a Duck on a replaced version finishes the
+  Runs it holds and exits, and a Duck on the new version picks up the next Run.
+- **A Run in flight across a redeploy is recorded against the version that started it.** Its events were recorded
+  against the new version, which the database refused, and the Duck retried the refused event forever: the Pond
+  showed as running for good, and nothing it did afterwards was recorded.
+- **A contract violation fails the Pond.** The Duck reported the Run's last Ripple as a success before it found the
+  output broke the version's contract, so the Catchment counted the Run done and dropped the failure that followed:
+  the Pond never showed as failed, and its Sinks ran on output that was never published. A Duck from before this
+  release still reports the old way, so redeploy Ducks with the Catchment.
+
+### Documentation and Playground
+
+The Concepts and Guides have screenshots and recordings of the web UI and the Playground, and the landing page
+leads with the Playground. The Playground has a `chain` example (`?example=chain`), the 1 s → 3 s → 1 s chain the
+Orchestration page uses.
 
 ## 0.6.1 — 2026-10-08
 

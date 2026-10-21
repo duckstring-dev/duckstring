@@ -22,6 +22,7 @@ export interface Window {
 export interface Pond {
   id: PondId;
   name: string;
+  major?: number; // major version (default 1); each major line is its own Pond with the same name
   sources: PondId[];
   // Source ponds that are optional (don't gate / don't define freshness). Default: all required.
   optionalSources?: PondId[];
@@ -42,12 +43,11 @@ export interface Ripple {
   variability: number;
 }
 
-// First-class Ripple state, named exactly as in theory.md.
+// A Ripple's run state.
 export interface RippleRunState {
   startF: number; // freshness of the most recently started run (0 = never)
   endF: number; // freshness of the most recently completed run (0 = never)
-  hasPull: boolean; // pull token
-  targets: number[]; // set of unsatisfied push target freshnesses (empty = none)
+  targets: number[]; // set of unsatisfied requested freshnesses (empty = none)
   // Run bookkeeping (the simulation of an actual run taking time):
   isRunning: boolean;
   runStartedAt: number | null;
@@ -60,16 +60,13 @@ export interface RippleRunState {
   durations: number[];
 }
 
-// First-class Pond state, named exactly as in theory.md.
+// A Pond's run state.
 export interface PondRunState {
   startF: number; // freshness of the most recently started Pond Run
   endF: number; // freshness of the most recently completed Pond Run
   D: number; // window delay carried by the current freshness (0 unless fed by a window)
-  hasReceivedPull: boolean; // inbox: a Sink/trigger has asked for resupply
-  hasPull: boolean; // a Pond Run is wanted in pull
-  pullLocal: boolean; // the pull is a Wake: one-shot, does NOT solicit Sources on run start
-  targets: number[]; // set of unsatisfied push target freshnesses (empty = none)
-  isKilled: boolean; // operator Kill: terminal until a Wake/Force
+  targets: number[]; // set of unsatisfied requested freshnesses: the Pond's demand (empty = none)
+  isKilled: boolean; // Kill: terminal until a Force
   isBlocked: boolean; // derived: this Pond or a required Source is killed/blocked
   // Trace data for the sidebar charts:
   runsStarted: number;
@@ -78,27 +75,36 @@ export interface PondRunState {
   completionTimes: number[];
   durations: number[];
   ages?: number[]; // data age (now - endF) at each completion
-  // Pulse throttle bookkeeping (only used while the throttle mode is on).
+  // Throttle bookkeeping.
   throttle?: ThrottleState;
 }
 
-// Pulse throttle, per Pond (see orchestration.ts "Pulse throttle").
+// The throttle, per Pond (see orchestration.ts "Throttle").
 export interface ThrottleState {
   counts: Record<string, { run: number; n: number }>; // demands that reached this Pond during each of its Ripples' current runs
   slow: string[]; // own Ripples that saw two demands in one run, until idle with no demand waiting
-  held: number; // demands held at this Pond since it last sent a Pulse upstream
-  trigger?: boolean; // a trigger (Pulse, Tide) targets this Pond: when throttled it paces on its completions
-  forwardedIn: Record<string, number>; // each Ripple's runsStarted when this Pond last sent a Pulse upstream
+  held: number; // demands held at this Pond since it last sent a request upstream
+  trigger?: boolean; // a Refresh targets this Pond: when throttled it paces on its completions
+  forwardedIn: Record<string, number>; // each Ripple's runsStarted when this Pond last sent a request upstream
+  deferred: Record<string, number>; // sibling alignment: newest target held back from each unthrottled Source
+  deferredAt: Record<string, number>; // the throttled Sources' runsStarted when targets were first held back
+  // Launch alignment (EXPERIMENT): each Ripple's recent leads (from the freshness of an input to when it was ready),
+  // the input freshness last seen, and when a bottleneck's due release goes out.
+  leads?: Record<string, number[]>;
+  seenF?: Record<string, number>;
+  launchAt?: number | null;
 }
 
-// Persistent triggers only (Tap and Pulse are one-shot, no entity).
-export type TriggerKind = 'wave' | 'tide';
-
-export interface ActiveTrigger {
-  pondId: PondId;
-  kind: TriggerKind;
-  // Tide only: maximum staleness in ms. A push to `now` fires whenever staleness exceeds this.
-  stalenessMs?: number;
+// A recurring Refresh on a Pond. Floating (no `startAnchor`): a request once `everyMs` has passed since the later of
+// the Pond's newest request and its freshness (0 = continuous). Anchored: a request at each occurrence of the grid
+// `startAnchor + k·everyMs`, filtered by `validDays` and ended by `until`, as a window's grid is. A Pond holds any
+// number of anchored Refreshes and at most one floating one.
+export interface Refresh {
+  name: string;
+  everyMs: number;
+  startAnchor?: number; // ms epoch; set = anchored
+  validDays?: Weekday[]; // undefined / empty = every day
+  until?: number; // ms epoch: end of recurrence (undefined = forever)
 }
 
 export type RippleVisualState = 'running' | 'queued' | 'idle';
@@ -108,6 +114,6 @@ export type PondVisualState = 'killed' | 'blocked' | 'running' | 'queued' | 'idl
 // A single logged orchestration event, for the console panel.
 export interface LogEntry {
   t: number; // wall-clock ms of the event
-  kind: string; // short category, e.g. 'tap', 'pond-start', 'ripple-done', 'queue', 'release'
+  kind: string; // short category, e.g. 'refresh', 'pond-start', 'ripple-done', 'queue', 'release'
   msg: string; // human-readable description
 }

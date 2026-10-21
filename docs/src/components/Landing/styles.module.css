@@ -128,10 +128,18 @@
   gap: 12px;
   flex-wrap: wrap;
   justify-content: center;
-  margin-bottom: 42px;
+  margin-bottom: 22px;
 }
 
-.installRow .ctaPrimary {
+.heroLinks {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin: 18px 0 40px;
+}
+
+.heroLinks .ctaPrimary {
   display: inline-flex;
   align-items: center;
 }
@@ -179,6 +187,46 @@
   filter: brightness(1.12);
   color: var(--l-on-primary);
   text-decoration: none;
+}
+
+/* The Playground's call to action: the hero's second button, outlined so the Quickstart stays the primary one. */
+.ctaSecondary {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 7px;
+  padding: 10px 22px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  border: 1px solid var(--ifm-color-primary);
+  color: var(--ifm-color-primary);
+  transition: background 0.15s ease;
+}
+
+.ctaSecondary:hover {
+  background: rgba(6, 196, 230, 0.1);
+  color: var(--ifm-color-primary);
+  text-decoration: none;
+}
+
+.ctaRow {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+
+/* The Playground recording links to the Playground itself. */
+.demoLink {
+  display: block;
+  color: inherit;
+}
+
+.demoLink:hover {
+  text-decoration: none;
+}
+
+.demoLink:hover .demoFrame {
+  border-color: var(--ifm-color-primary);
 }
 
 /* ── Route cards ──────────────────────────────────────────────────────────── */
@@ -403,3 +451,96 @@
   padding-left: 4px;
 }
 
+
+/* ── Story: the Playground's two-minute story, loaded on Play ──────────────── */
+
+/* Always dark, like the Playground it frames. Wide screens get a landscape frame. On a phone Play opens the story
+   full screen, so inline the frame only has to show the poster: it takes the height left on a first load (svh, so
+   with Safari's toolbars showing), between a readable minimum and a portrait frame. */
+.story {
+  width: 100%;
+  max-width: 860px;
+  aspect-ratio: 43 / 20;
+  margin: 0;
+  border: 1px solid var(--l-border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0f0f14;
+}
+
+@media (max-width: 768px) {
+  .story {
+    aspect-ratio: auto;
+    height: clamp(230px, calc(100svh - 400px), 448px);
+  }
+}
+
+/* Expanded: real fullscreen, or (iPhone Safari) the frame filling the window over the page. */
+.story:fullscreen,
+.storyFilled {
+  max-width: none;
+  max-height: none;
+  aspect-ratio: auto;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.storyFilled {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  width: 100%;
+  height: 100dvh;
+}
+
+.storyFrame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.storyPoster {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+  padding: 24px;
+  border: 0;
+  cursor: pointer;
+  color: #f4f4f5;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  background-color: #0f0f14;
+  background-image: radial-gradient(#2a2a35 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.storyQuestion {
+  max-width: 640px;
+  font-size: clamp(17px, 2.6vw, 26px);
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.storyPlay {
+  border-radius: 8px;
+  padding: 11px 20px;
+  font-size: 15px;
+  font-weight: 700;
+  background: #06c4e6;
+  color: #0f0f14;
+  transition: filter 0.15s ease;
+}
+
+.storyPoster:hover .storyPlay {
+  filter: brightness(1.12);
+}
+
+.storyLength {
+  font-weight: 400;
+  opacity: 0.75;
+}

@@ -475,7 +475,7 @@ def _set_f_warm(con, table: str, f) -> None:
 
 def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
     """Maintain a Trickle table's coverage **floor** — the earliest freshness a windowed read can rely on
-    (below it, a consumer full-reads the clean state). A bootstrap/refresh **sets** it to that run's ``f``;
+    (below it, a consumer full-reads the clean state). A bootstrap/rebuild **sets** it to that run's ``f``;
     retention **raises** it to its cutoff. A normal incremental run touches neither."""
     from datetime import datetime, timezone
 

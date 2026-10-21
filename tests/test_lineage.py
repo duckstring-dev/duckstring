@@ -93,7 +93,7 @@ LIN = {"reads": [["sales", "order_line"], [None, "clean"]], "writes": ["clean", 
 
 
 def _run_with_lineage(d, f=None):
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     f = f or d.state.pond_states["src@1"].start_f.isoformat()
     d.on_event("src@1", {"kind": "ripple", "f": f, "ripple": "load", "status": "success", "lineage": LIN})
     d.on_event("src@1", {"kind": "run_completed", "f": f, "status": "success"})
@@ -209,7 +209,7 @@ def test_trace_route_end_to_end(tmp_path, monkeypatch):
         data_dir = tmp_path / "ponds" / "src" / "m1" / "data"
         for _k, rows_sql in ((1, "SELECT * FROM (VALUES (1,'a'),(2,'b')) t(id,v)"),
                             (2, "SELECT * FROM (VALUES (1,'a'),(2,'B'),(3,'c')) t(id,v)")):
-            d.pulse("src@1")
+            d.refresh_now("src@1")
             f = d.state.pond_states["src@1"].start_f
             T.merge_table(con, "fact", con.sql(rows_sql), f, ("id",))
             ParquetDataPlane().export(con, data_dir, f=f)
@@ -241,7 +241,7 @@ def test_openlineage_emission_is_optin_and_verbatim(tmp_path):
     d.add_channel("catalog", "https://marquez/api/v1/lineage", scope=None, events="openlineage")
     d.add_channel("ops", "https://slack/hook", scope=None, events="all")
 
-    d.pulse("src@1")
+    d.refresh_now("src@1")
     f = d.state.pond_states["src@1"].start_f.isoformat()
     d.on_event("src@1", {"kind": "ripple", "f": f, "ripple": "load", "status": "success", "lineage": LIN})
     d.on_event("src@1", {"kind": "run_completed", "f": f, "status": "success",

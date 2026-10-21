@@ -20,6 +20,8 @@ Metric families (all `duckstring_*`):
   spout_delivery_lag_seconds    — now − delivered_f, per Spout
   spout_failed                  — 0/1 per Spout
   alert_deliveries_total        — queued notifications by status (sent/pending/failed)
+  tap_queries_total             — queries through each Tap (plans/taps.md)
+  tap_refreshes_total           — Refreshes each Tap's queries sent
 """
 
 from __future__ import annotations
@@ -122,6 +124,14 @@ def render_metrics(snap: dict) -> str:
     family("alert_deliveries_total", "counter", "Queued alert notifications by status.")
     for status in ("sent", "pending", "failed"):
         line("alert_deliveries_total", snap["alert_deliveries"].get(status, 0), status=status)
+
+    family("tap_queries_total", "counter", "Queries through a Tap.")
+    for t in snap.get("taps", []):
+        line("tap_queries_total", t["queries"], pond=t["name"], major=t["major"], tap=t["tap"])
+
+    family("tap_refreshes_total", "counter", "Refreshes sent by queries through a Tap.")
+    for t in snap.get("taps", []):
+        line("tap_refreshes_total", t["refreshes"], pond=t["name"], major=t["major"], tap=t["tap"])
 
     return "\n".join(out) + "\n"
 

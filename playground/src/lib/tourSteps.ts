@@ -1,16 +1,18 @@
+import type { Choice } from '@/components/NextChoices';
+import type { Mode } from './mode';
 import type { PondId, RippleId } from './types';
-import type { PlaygroundState } from './store';
+import { usePlaygroundStore, type PlaygroundState } from './store';
 
 // The guided tour's steps, as data. Copy lives here so it can be reviewed without touching
 // components. Names in `backticks` render as code. Targets name Ponds and Ripples by their names in
 // the example graph and are resolved to ids when a step opens.
 
 // Sidebar controls the tour can outline. Each matches a `data-tour` attribute in the Sidebar.
-export type TourControl = 'wave' | 'tide' | 'ripple-duration' | 'ripple-variability' | 'run-chart';
+export type TourControl = 'refresh-now' | 'refresh-every' | 'refresh-continuous' | 'new-major' | 'ripple-duration' | 'ripple-variability' | 'run-chart';
 
 export interface TourTarget {
-  pond?: string; // a Pond name
-  ripple?: string; // "pond.ripple"
+  pond?: string; // a Pond name, or "name@major" (a bare name is major 1)
+  ripple?: string; // "pond.ripple", the pond part as above
   control?: TourControl;
 }
 
@@ -26,41 +28,64 @@ export interface TourWait {
   fallbackMs: number; // real time, so the tour can't hang
   label: string; // shown while the tour is hidden
   speed?: number; // simulation speed while waiting (default WAIT_SPEED)
+  speedAfter?: { ms: number; speed: number; label?: string }; // change the speed (and label) this long (real time) into the wait
+  keepFocus?: boolean; // keep the step's target selected and in view while waiting
+  focus?: TourTarget; // select and ring this instead while waiting (implies keepFocus)
+  show?: TourControl; // with keepFocus: outline this sidebar control and scroll it into view while waiting
   expectedMs: number; // typical real time it takes, measured in the browser: paces the progress bar
+}
+
+// One stage of an animated action: it runs `ms` (real time) after the previous one.
+export interface TourStage {
+  ms: number;
+  run: (ctx: TourContext) => void;
 }
 
 export interface TourStep {
   id: string;
-  chapter: 1 | 2 | 3;
+  chapter: 1 | 2 | 3 | 4;
+  intro?: boolean; // a chapter's opening card: its title is the chapter's
   title: string;
-  body: string; // one or two sentences
+  body: string; // one or two sentences ('' on a chapter's opening card)
   target?: TourTarget;
-  frame?: 'all' | 'target'; // default: the target's node if it has one, else the whole graph
+  // Default: the target's node if it has one, else the whole graph. 'keep' leaves the view and selection as the
+  // previous step left them, with its highlights cleared (a chapter's opening card, so its last chart stays in view).
+  frame?: 'all' | 'target' | 'keep';
   setup?: (ctx: TourContext) => void; // runs when the step opens, after `target` is applied
   // 'next' moves straight on; a wait hides the tour and runs the simulation fast until `until` holds.
   advance: 'next' | TourWait;
-  // "Do it for me": the primary button runs this. If the visitor does it themselves, the tour moves on.
-  action?: { label: string; run: (s: PlaygroundState) => void; done: (s: PlaygroundState) => boolean };
+  // "Do it for me": the primary button runs this (or plays its stages). If the visitor does it themselves, the
+  // tour moves on.
+  action?: { label: string; run?: (s: PlaygroundState) => void; stages?: TourStage[]; done: (s: PlaygroundState) => boolean };
   suggestions?: string[]; // a bulleted list after the body
   footer?: string; // a closing line after the suggestions
-  links?: { label: string; href: string }[];
+  // A link opens `href` in a new tab, or with `mode` finishes the tour and switches the Playground's mode.
+  links?: { label: string; href?: string; mode?: Mode }[];
+  // On the last step: the ways on, in place of the buttons (see NextChoices).
+  choices?: Choice[];
 }
 
 export const CHAPTER_TITLES: Record<TourStep['chapter'], string> = {
-  1: "Running at the bottleneck's pace",
-  2: 'Noise',
-  3: 'Fixed frequencies and several outputs',
+  1: 'Running Pipelines',
+  2: 'Repeated Refresh',
+  3: 'Multiple Triggers',
+  4: 'Upgrades',
 };
 
 // ─── Name resolution ─────────────────────────────────────────────────────────
 
-export function pondByName(s: PlaygroundState, name: string): PondId | null {
-  return Object.values(s.ponds).find((p) => p.name === name)?.id ?? null;
+// "name" is major 1 (or the only Pond of that name); "name@major" names a major line.
+export function pondByName(s: PlaygroundState, ref: string): PondId | null {
+  const [name, major] = ref.split('@');
+  const named = Object.values(s.ponds).filter((p) => p.name === name);
+  if (major != null) return named.find((p) => (p.major ?? 1) === Number(major))?.id ?? null;
+  return (named.find((p) => (p.major ?? 1) === 1) ?? (named.length === 1 ? named[0] : undefined))?.id ?? null;
 }
 
 export function rippleByName(s: PlaygroundState, ref: string): RippleId | null {
-  const [pond, ripple] = ref.split('.');
-  const pid = pondByName(s, pond);
+  const dot = ref.lastIndexOf('.');
+  const pid = pondByName(s, ref.slice(0, dot));
+  const ripple = ref.slice(dot + 1);
   return Object.values(s.ripples).find((r) => r.pondId === pid && r.name === ripple)?.id ?? null;
 }
 
@@ -83,11 +108,16 @@ function rippleSettled(s: PlaygroundState, since: PlaygroundState, ref: string):
   return settled(s.rippleStates[id]?.completionTimes, rippleRunsSince(s, since, ref));
 }
 
-function pondSettled(s: PlaygroundState, since: PlaygroundState, name: string): boolean {
-  const id = pondByName(s, name);
+function pondRunsSince(s: PlaygroundState, since: PlaygroundState, ref: string): number {
+  const id = pondByName(s, ref);
+  if (!id) return Infinity;
+  return (s.pondStates[id]?.runsCompleted ?? 0) - (since.pondStates[id]?.runsCompleted ?? 0);
+}
+
+function pondSettled(s: PlaygroundState, since: PlaygroundState, ref: string): boolean {
+  const id = pondByName(s, ref);
   if (!id) return true;
-  const newRuns = (s.pondStates[id]?.runsCompleted ?? 0) - (since.pondStates[id]?.runsCompleted ?? 0);
-  return settled(s.pondStates[id]?.completionTimes, newRuns);
+  return settled(s.pondStates[id]?.completionTimes, pondRunsSince(s, since, ref));
 }
 
 function rippleRunsSince(s: PlaygroundState, since: PlaygroundState, ref: string): number {
@@ -98,20 +128,41 @@ function rippleRunsSince(s: PlaygroundState, since: PlaygroundState, ref: string
 
 // ─── Actions ─────────────────────────────────────────────────────────────────
 
-const TIDE_SECONDS = 5;
 const NOISE = 0.2;
 const NEW_POND = 'forecast';
+const STAGE_MS = 1200;
 
-function hasTrigger(s: PlaygroundState, pond: string, kind: 'wave' | 'tide'): boolean {
-  const id = pondByName(s, pond);
-  return !!id && s.triggers[id]?.kind === kind;
+function hasRefresh(s: PlaygroundState, ref: string, everyMs?: number): boolean {
+  const id = pondByName(s, ref);
+  const refs = id ? s.refreshes[id] ?? [] : [];
+  return everyMs == null ? refs.length > 0 : refs.some((r) => r.startAnchor == null && r.everyMs === everyMs);
 }
 
-function setTide(s: PlaygroundState, pond: string): void {
-  const id = pondByName(s, pond);
-  if (!id) return;
-  s.triggerTide(id, TIDE_SECONDS * 1000);
-  s.setTideDraft(null);
+function setRefreshEvery(s: PlaygroundState, ref: string, everyMs: number): void {
+  const id = pondByName(s, ref);
+  if (id) s.setRefresh(id, { everyMs });
+}
+
+// Switching `reports` from every 6 s to continuous between about 1.2 s and 1.9 s after its last run completed
+// locks the pipeline into a rhythm about 2 s staler than any other moment gives (10.5 s against 8.5 s): the
+// throttle's release timing, see bench/launch_alignment. So the tour waits out that window (with a margin) before
+// switching; it holds the click for at most about a second.
+const STALE_LOCK = [900, 2200];
+function setContinuousClear(ref: string): void {
+  const sinceLast = () => {
+    const st = usePlaygroundStore.getState();
+    const id = pondByName(st, ref);
+    const done = id ? st.pondStates[id]?.completionTimes ?? [] : [];
+    return done.length ? st.now - done[done.length - 1] : Infinity;
+  };
+  const inLock = () => sinceLast() >= STALE_LOCK[0] && sinceLast() < STALE_LOCK[1];
+  const apply = () => setRefreshEvery(usePlaygroundStore.getState(), ref, 0);
+  if (!inLock()) return apply();
+  const timer = setInterval(() => {
+    if (inLock()) return;
+    clearInterval(timer);
+    apply();
+  }, 50);
 }
 
 function setJoinVariability(s: PlaygroundState, v: number): void {
@@ -121,10 +172,84 @@ function setJoinVariability(s: PlaygroundState, v: number): void {
   s.bumpFormEpoch();
 }
 
+// Ring and frame a Pond during an animation without opening the sidebar on it.
+function point(ctx: TourContext, ref: string, frame: 'all' | 'target' = 'all'): void {
+  ctx.focus({ pond: ref }, frame);
+  ctx.store.clearSelection();
+  ctx.store.setSheetOpen(false);
+}
+
+function readsFrom(s: PlaygroundState, sink: string, source: string): boolean {
+  const k = pondByName(s, sink);
+  const src = pondByName(s, source);
+  return !!k && !!src && s.ponds[k].sources.includes(src);
+}
+
+// An upgrade animated stage by stage: a new major of `pond` reading `sales` v2 in place of v1, its Refresh moved
+// across, the old major removed (and, last, `sales` v1 when nothing reads it any more).
+function upgradeStages(pond: string, removeOldSales: boolean): TourStage[] {
+  const stages: TourStage[] = [
+    {
+      ms: 400,
+      run: (ctx) => {
+        const s = ctx.store;
+        const id = pondByName(s, pond);
+        const salesV1 = pondByName(s, 'sales');
+        const salesV2 = pondByName(s, 'sales@2');
+        if (id && salesV2 && !pondByName(s, `${pond}@2`)) {
+          s.addMajorVersion(id, s.ponds[id].sources.map((src) => (src === salesV1 ? salesV2 : src)));
+        }
+        point(ctx, `${pond}@2`);
+      },
+    },
+    {
+      ms: STAGE_MS,
+      run: (ctx) => {
+        const from = pondByName(ctx.store, pond);
+        const to = pondByName(ctx.store, `${pond}@2`);
+        if (from && to) ctx.store.moveRefresh(from, to);
+        point(ctx, `${pond}@2`);
+      },
+    },
+    {
+      ms: STAGE_MS,
+      run: (ctx) => {
+        const old = pondByName(ctx.store, pond);
+        if (old) ctx.store.deletePond(old);
+        point(ctx, `${pond}@2`);
+      },
+    },
+  ];
+  if (removeOldSales) {
+    stages.push({
+      ms: STAGE_MS,
+      run: (ctx) => {
+        const old = pondByName(ctx.store, 'sales');
+        if (old) ctx.store.deletePond(old);
+        point(ctx, 'sales@2');
+      },
+    });
+  }
+  return stages;
+}
+
+function upgraded(s: PlaygroundState, pond: string): boolean {
+  return !pondByName(s, pond) && readsFrom(s, `${pond}@2`, 'sales@2') && hasRefresh(s, `${pond}@2`);
+}
+
 // ─── Steps ───────────────────────────────────────────────────────────────────
 
 export const TOUR_STEPS: TourStep[] = [
-  // Chapter 1: running at the bottleneck's pace
+  // Chapter 1: running pipelines
+  {
+    id: 'intro-1',
+    chapter: 1,
+    intro: true,
+    title: CHAPTER_TITLES[1],
+    body: '',
+    frame: 'all',
+    advance: 'next',
+  },
   {
     id: 'pipeline',
     chapter: 1,
@@ -158,48 +283,126 @@ export const TOUR_STEPS: TourStep[] = [
     advance: 'next',
   },
   {
-    id: 'wave',
+    id: 'refresh',
     chapter: 1,
-    title: 'A Wave',
-    body: 'A Wave trigger sends demand every time its Pond finishes, so the pipeline runs as often as it can.',
-    target: { pond: 'reports', control: 'wave' },
+    title: 'Refresh',
+    body: 'A Refresh triggers this Pond to signal upstream to run from start to finish, bringing the data up to the **freshness** of now. This works like a Kanban process, sending demand to each parent until reaching a root (Inlet).',
+    target: { pond: 'reports', control: 'refresh-now' },
     action: {
-      label: 'Start a Wave',
+      label: 'Refresh now',
       run: (s) => {
         const id = pondByName(s, 'reports');
-        if (id) s.triggerWave(id);
+        if (id) s.refreshNow(id);
       },
-      done: (s) => hasTrigger(s, 'reports', 'wave'),
+      done: (s) => {
+        const id = pondByName(s, 'reports');
+        return !!id && (s.pondStates[id]?.targets.length > 0 || (s.pondStates[id]?.runsCompleted ?? 0) > 0);
+      },
     },
-    // The visitor's first look at the pipeline running, so at real speed: it settles in about 20 s.
+    // The visitor's first look at the pipeline running, so at real speed: once through takes about 6.5 s.
     advance: {
-      label: 'Watching the pipeline start up',
+      label: 'Watching the pipeline run once',
       speed: 1,
-      expectedMs: 17500,
-      until: (s, since) =>
-        rippleSettled(s, since, 'reports.monthly_summary') && rippleSettled(s, since, 'transactions.ingest'),
-      fallbackMs: 40000,
+      expectedMs: 6800,
+      until: (s, since) => pondRunsSince(s, since, 'reports') >= 1,
+      fallbackMs: 20000,
+    },
+  },
+  // Chapter 2: repeated refresh
+  {
+    id: 'intro-2',
+    chapter: 2,
+    intro: true,
+    title: CHAPTER_TITLES[2],
+    body: '',
+    frame: 'keep',
+    advance: 'next',
+  },
+  {
+    id: 'refresh-every',
+    chapter: 2,
+    title: 'Refresh Every',
+    body: 'That took about 6.5 s. A Refresh can be set to send every 6 s, for example, slightly faster than back to back. More specifically, a Refresh is sent any time the data is less fresh than 6 s, or 6 s after the previous Refresh was requested.',
+    target: { pond: 'reports', control: 'refresh-every' },
+    action: {
+      label: 'Refresh every 6 s',
+      run: (s) => setRefreshEvery(s, 'reports', 6000),
+      done: (s) => hasRefresh(s, 'reports', 6000),
+    },
+    // Real speed for 8 s (two Refreshes, one run end to end), then faster for enough runs that the run chart's
+    // averages (the last six) rest on the steady state.
+    advance: {
+      label: 'Running a few rounds',
+      speed: 1,
+      speedAfter: { ms: 8000, speed: 10, label: 'Speeding up to steady state' },
+      expectedMs: 11500,
+      until: (s, since) => pondRunsSince(s, since, 'reports') >= 8 && pondSettled(s, since, 'reports'),
+      fallbackMs: 25000,
     },
   },
   {
     id: 'steady',
-    chapter: 1,
+    chapter: 2,
     title: 'Steady state',
-    body: 'At steady state, every Ripple, upstream and downstream, runs every 3 s. `sales` takes 5 s from start to finish, so two of its runs are in flight at once.',
+    body: 'At steady state, every Ripple, upstream and downstream, runs every 6 s.',
     target: { pond: 'sales' },
     frame: 'all',
     advance: 'next',
   },
   {
     id: 'run-chart',
-    chapter: 1,
+    chapter: 2,
     title: 'The run chart',
-    body: "Each Ripple's run chart shows its run time and the time between its runs. Every one shows 3 s between runs.",
-    target: { ripple: 'transactions.ingest', control: 'run-chart' },
+    body: "Each Ripple's run chart shows its run time and the time between its runs. Every one shows 6 s between runs. Try looking at the others too.",
+    target: { pond: 'reports', control: 'run-chart' },
+    frame: 'all',
+    advance: 'next',
+  },
+  {
+    id: 'continuous',
+    chapter: 2,
+    title: 'Continuous Refresh',
+    body: 'What if the Refresh rate is faster than the pipeline can deliver? Or in the extreme, every 0 s?',
+    target: { pond: 'reports', control: 'refresh-continuous' },
+    action: {
+      label: 'Refresh continuously',
+      run: () => setContinuousClear('reports'),
+      done: (s) => hasRefresh(s, 'reports', 0),
+    },
+    // Real speed for 6 s (two cycles), then faster for a dozen more runs, so the chart shows a steady state and its
+    // averages rest on it. `reports`' run chart stays in view.
+    advance: {
+      label: 'Watching the pipeline settle',
+      speed: 1,
+      speedAfter: { ms: 6000, speed: 10, label: 'Speeding up until it settles' },
+      keepFocus: true,
+      show: 'run-chart',
+      expectedMs: 9800,
+      until: (s, since) =>
+        pondRunsSince(s, since, 'reports') >= 14 &&
+        rippleSettled(s, since, 'reports.monthly_summary') &&
+        rippleSettled(s, since, 'transactions.ingest'),
+      fallbackMs: 30000,
+    },
+  },
+  {
+    id: 'throttled',
+    chapter: 2,
+    title: 'Throttled',
+    body: "Throttling the Refreshes that can't be delivered in time, at steady state, every Ripple, upstream and downstream, runs every 3 s. `sales` takes 5 s from start to finish, so two of its runs are in flight at once.",
+    target: { pond: 'reports', control: 'run-chart' },
+    advance: 'next',
+  },
+  {
+    id: 'taps',
+    chapter: 2,
+    title: 'Refresh on Request',
+    body:
+      "Given the pipeline can handle any Refresh rate, this opens up the potential to link query demand to execution. By allowing a 'Refresh on Request' (a **Tap**), update frequency can be tied to query frequency.",
+    frame: 'keep',
     advance: 'next',
   },
 
-  // Chapter 2: noise
   {
     id: 'noise',
     chapter: 2,
@@ -216,9 +419,11 @@ export const TOUR_STEPS: TourStep[] = [
     },
     advance: {
       label: 'Running fast for a few cycles',
-      expectedMs: 2900,
-      until: (s, since) => rippleRunsSince(s, since, 'transactions.ingest') >= 8,
-      fallbackMs: 10000,
+      focus: { pond: 'sales' },
+      show: 'run-chart',
+      expectedMs: 8700,
+      until: (s, since) => rippleRunsSince(s, since, 'transactions.ingest') >= 24,
+      fallbackMs: 30000,
     },
   },
   {
@@ -230,36 +435,15 @@ export const TOUR_STEPS: TourStep[] = [
     advance: 'next',
   },
 
-  // Chapter 3: fixed frequencies and several outputs
+  // Chapter 3: multiple triggers
   {
-    id: 'tide',
+    id: 'intro-3',
     chapter: 3,
-    title: 'A Tide',
-    body: `Sometimes you don't need data as fresh as possible, just at a set frequency, such as daily. That's what a Tide is for. With the noise turned off again, let's set one for every ${TIDE_SECONDS} s.`,
-    target: { pond: 'reports', control: 'tide' },
-    setup: ({ store }) => {
-      setJoinVariability(store, 0);
-      store.setTideDraft(String(TIDE_SECONDS));
-    },
-    action: {
-      label: `Set a ${TIDE_SECONDS} s Tide`,
-      run: (s) => setTide(s, 'reports'),
-      done: (s) => hasTrigger(s, 'reports', 'tide'),
-    },
-    advance: {
-      label: 'Running fast until the Tide settles',
-      expectedMs: 3700,
-      until: (s, since) => pondSettled(s, since, 'reports'),
-      fallbackMs: 15000,
-    },
-  },
-  {
-    id: 'tide-explained',
-    chapter: 3,
-    title: `Every ${TIDE_SECONDS} s`,
-    body: `Every ${TIDE_SECONDS} s, the Tide asks for data newer than it last asked for, and the request flows from the beginning of the pipeline to \`reports\`. Its runs now land every ${TIDE_SECONDS} s.`,
-    target: { pond: 'reports', control: 'run-chart' },
-    frame: 'all',
+    intro: true,
+    title: CHAPTER_TITLES[3],
+    body: '',
+    frame: 'keep',
+    setup: ({ store }) => setJoinVariability(store, 0), // the cadences in this chapter are without noise
     advance: 'next',
   },
   {
@@ -269,6 +453,7 @@ export const TOUR_STEPS: TourStep[] = [
     body: `We've added a new output Pond, \`${NEW_POND}\`, reading from \`sales\`. It doesn't run, because nothing has a trigger on it. That's a key advantage of scheduling from the end: nothing runs unless something needs it.`,
     setup: (ctx) => {
       const s = ctx.store;
+      setJoinVariability(s, 0); // the cadences in this chapter are without noise
       if (!pondByName(s, NEW_POND)) {
         const sales = pondByName(s, 'sales');
         s.addPond({ name: NEW_POND, rippleName: 'trend', source: sales ?? undefined });
@@ -278,21 +463,122 @@ export const TOUR_STEPS: TourStep[] = [
     advance: 'next',
   },
   {
-    id: 'done',
+    id: 'multiple-refreshes',
     chapter: 3,
-    title: "That's most of it",
-    body: 'Some things to try from here:',
+    title: 'Multiple Refreshes',
+    body: 'Adding another Refresh every 5 s, the continuous Refresh should approach 3 s and this one 5 s. They share the 3 s bottleneck, so the 5 s Refresh is met on average by cycling between 3 s and 6 s between runs.',
+    target: { pond: NEW_POND, control: 'run-chart' },
+    action: {
+      label: 'Refresh every 5 s',
+      run: (s) => setRefreshEvery(s, NEW_POND, 5000),
+      done: (s) => hasRefresh(s, NEW_POND, 5000),
+    },
+    // Keeps `forecast` selected, so its run chart fills while the pipeline runs.
+    advance: {
+      label: 'Running fast for a few cycles',
+      keepFocus: true,
+      show: 'run-chart',
+      expectedMs: 8000,
+      until: (s, since) => pondRunsSince(s, since, NEW_POND) >= 14,
+      fallbackMs: 30000,
+    },
+  },
+
+  // Chapter 4: upgrades
+  {
+    id: 'intro-4',
+    chapter: 4,
+    intro: true,
+    title: CHAPTER_TITLES[4],
+    body: '',
+    frame: 'keep',
+    advance: 'next',
+  },
+  {
+    id: 'upgrades',
+    chapter: 4,
+    title: 'A breaking change',
+    body: 'If a breaking change (e.g. column delete) is introduced to `sales`, both `reports` and `forecast` would need to also update, which can be difficult to co-ordinate. Instead, we keep the old versions running and add a "v2" for `sales`',
+    target: { pond: 'sales', control: 'new-major' },
+    action: {
+      label: 'Add sales v2',
+      stages: [
+        {
+          ms: 400,
+          run: (ctx) => {
+            const sales = pondByName(ctx.store, 'sales');
+            if (sales && !pondByName(ctx.store, 'sales@2')) ctx.store.addMajorVersion(sales);
+            point(ctx, 'sales@2');
+          },
+        },
+      ],
+      done: (s) => !!pondByName(s, 'sales@2'),
+    },
+    advance: 'next',
+  },
+  {
+    id: 'v2-reports',
+    chapter: 4,
+    title: 'V2 reports',
+    body: "It's not running yet as there are no consumers. Now we can upgrade reports, move its Refresh, and remove the previous version. The `forecast` path can keep running until it can be upgraded on its own timeframe.",
+    target: { pond: 'sales@2' },
+    frame: 'all',
+    action: { label: 'Upgrade reports', stages: upgradeStages('reports', false), done: (s) => upgraded(s, 'reports') },
+    advance: {
+      label: 'Running the upgraded path',
+      expectedMs: 1600,
+      until: (s, since) => pondRunsSince(s, since, 'reports@2') >= 2,
+      fallbackMs: 15000,
+    },
+  },
+  {
+    id: 'v2-forecast',
+    chapter: 4,
+    title: 'V2 forecast',
+    body: "Now say `forecast` v2 is ready. We can add it, move its Refresh, remove its version **and** the old `sales` version, now that there are no consumers. Note removal isn't strictly necessary, as nothing is consuming and it won't run - it's just to keep things tidy.",
+    target: { pond: NEW_POND },
+    frame: 'all',
+    action: {
+      label: 'Upgrade forecast',
+      stages: upgradeStages(NEW_POND, true),
+      done: (s) => upgraded(s, NEW_POND) && !pondByName(s, 'sales'),
+    },
+    advance: {
+      label: 'Running the upgraded path',
+      expectedMs: 1600,
+      until: (s, since) => pondRunsSince(s, since, `${NEW_POND}@2`) >= 2,
+      fallbackMs: 15000,
+    },
+  },
+  {
+    id: 'versioning',
+    chapter: 4,
+    title: 'Versioning',
+    body: 'Duckstring uses strict SemVer:',
     suggestions: [
-      `Put a trigger on \`${NEW_POND}\`.`,
-      'Add a few more Ponds to see how more complex dependencies interact. A new Pond reads from whichever Pond is selected.',
+      'Major covers breaking changes, where upgrading would break downstream',
+      'Minor covers extension of scope, where upgrading is fine, but downgrading could break downstream',
+      'Patch covers any change that would not break upon either upgrade or downgrade',
     ],
-    footer: 'The docs cover the rest, from Windows and failures to versioning and incremental processing.',
+    footer: 'Both data and execution are against each **major** Pond version.',
     frame: 'all',
     setup: ({ store }) => store.clearSelection(),
     advance: 'next',
-    links: [
-      { label: 'Docs', href: 'https://docs.duckstring.com/' },
-      { label: 'Quickstart', href: 'https://docs.duckstring.com/quickstart' },
+  },
+  {
+    id: 'done',
+    chapter: 4,
+    title: "That's most of it",
+    body: 'See the docs for more detail, or carry on to Trickle (incremental processing):',
+    frame: 'all',
+    setup: ({ store }) => store.clearSelection(),
+    advance: 'next',
+    choices: [
+      { id: 'trickle', label: 'Trickle tour', detail: 'Incremental processing: each run touches only what changed', mode: 'trickle', tone: 'primary' },
+      { id: 'quickstart', label: 'Quickstart', href: 'https://docs.duckstring.com/quickstart', tone: 'muted' },
+      { id: 'docs', label: 'Docs', href: 'https://docs.duckstring.com/', tone: 'muted' },
+      { id: 'github', label: 'GitHub', href: 'https://github.com/duckstring-dev/duckstring', tone: 'muted' },
+      { id: 'close', label: 'Close tour', close: true, tone: 'quiet' },
     ],
   },
 ];

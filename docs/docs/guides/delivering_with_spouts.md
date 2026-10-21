@@ -17,6 +17,11 @@ duckstring spout add reports --to file:///srv/exports/reports
 
 Each table is written to `{directory}/{table}.parquet` and replaced whenever `reports` publishes. Deliver one table rather than all of them with `--table monthly_summary`.
 
+<figure class="ds-figure">
+  <img src="/img/docs/spout-canvas.webp" alt="The reports Pond on the canvas with a dashed Spout node, exports, after it" width="421" height="182" />
+  <figcaption>A Spout is drawn as a dashed node after its Pond.</figcaption>
+</figure>
+
 ### To object storage
 
 The same works for S3 and Google Cloud Storage:
@@ -63,7 +68,14 @@ Deliver an append Trickle or a plain table by merging it upstream. A small Rippl
 
 ## Checking a destination
 
-The UI's Spout form has a **Test** button, which checks the destination can be reached and the credentials work without writing any data. From the CLI, add the Spout and watch its first delivery:
+The UI's Spout form, in a Pond's **Options**, has a **Test** button, which checks the destination can be reached and the credentials work without writing any data:
+
+<figure class="ds-figure">
+  <img src="/img/docs/spout-add.webp" alt="The add-Spout form in a Pond's Options: scheme, bucket and prefix, credentials by name, table and mode, with Test and Add" width="492" height="706" />
+  <figcaption>Credentials are entered as the names of environment variables or secrets, never as values.</figcaption>
+</figure>
+
+From the CLI, add the Spout and watch its first delivery:
 
 ```bash
 duckstring spout ls reports
@@ -79,13 +91,13 @@ duckstring control failure-budget 'priced#priced_line' --on-change 10
 
 ## Controlling when deliveries happen
 
-A Spout never asks its Pond to run. It delivers whatever the Pond publishes, so the Pond's own trigger decides how fresh the delivered data is.
+A Spout never asks its Pond to run. It delivers whatever the Pond publishes, so the Pond's own Refresh decides how fresh the delivered data is.
 
 To deliver less often than the Pond publishes, give the Spout a [window](scheduling.md#batch-sources). A Spout is addressed as `{pond}#{spout}`, and its name defaults to the table's:
 
 ```bash
 # Deliver monthly_summary at most once a day, between 07:00 and 08:00 UTC
-duckstring trigger window 'reports#monthly_summary' add --name morning --every 1d --start 07:00 --duration 1h
+duckstring window add 'reports#monthly_summary' --name morning --every 1d --start 07:00 --duration 1h
 ```
 
 This suits a destination that should change only at a fixed time, while the Pond itself stays fresh for other consumers.
@@ -100,3 +112,8 @@ duckstring spout resync reports monthly_summary    # deliver everything again in
 ```
 
 Use `resync` after the destination was changed by hand or restored from a backup.
+
+<figure class="ds-figure">
+  <img src="/img/docs/spout-panel.webp" alt="A selected Spout in the web UI: its destination, table, mode and last delivery, control buttons and windows" width="320" height="490" />
+  <figcaption>Selecting a Spout in the web UI shows its last delivery, the same controls and its windows.</figcaption>
+</figure>

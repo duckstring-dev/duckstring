@@ -5,7 +5,7 @@ revenue. Re-aggregates each run, but only the products whose totals moved reach 
 
 Sources: `priced`
 
-Deploy fourth, then: `duckstring trigger pulse revenue`
+Deploy fourth, then: `duckstring refresh now revenue`
 
 ```bash
 duckstring pond deploy

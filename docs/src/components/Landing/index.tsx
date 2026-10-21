@@ -2,6 +2,7 @@ import type {ReactNode} from 'react';
 import Link from '@docusaurus/Link';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 
+import Story from './Story';
 import styles from './styles.module.css';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,6 +64,8 @@ function Section({
   );
 }
 
+const PLAYGROUND = 'https://playground.duckstring.com';
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 function Hero(): ReactNode {
@@ -82,11 +85,22 @@ function Hero(): ReactNode {
           </span>
           <code className={styles.installCmd}>pip install duckstring</code>
         </div>
-        <Link className={styles.ctaPrimary} to="/quickstart">
-          Quickstart →
-        </Link>
       </div>
     </header>
+  );
+}
+
+// The ways in, under the story (which sits between them and the hero so it shows whole on first load).
+function HeroLinks(): ReactNode {
+  return (
+    <div className={styles.heroLinks}>
+      <Link className={styles.ctaPrimary} to="/quickstart">
+        Quickstart →
+      </Link>
+      <Link className={styles.ctaSecondary} href={PLAYGROUND}>
+        In-Browser Demo →
+      </Link>
+    </div>
   );
 }
 
@@ -122,6 +136,7 @@ function WhatIsThis(): ReactNode {
           </a>{' '}
           Orchestration is set from the perspective of the pipeline <b>end</b>. 
           Nothing will execute unless something is actually consuming it.
+          Try it in the <Link href={PLAYGROUND}>Playground</Link>.
         </li>
         <li>
           <a className={styles.payoffLink} href="#incremental">
@@ -161,7 +176,7 @@ function ModularTransformations(): ReactNode {
         The headache of choreographing complex changes is avoided using the same techniques that allowed open source to flourish.
       </p>
 
-      <DemoSlot src="/img/upgrade" aspectRatio="28/10"/>
+      <DemoSlot src="/img/docs/upgrade-pin" aspectRatio="2000/1118" poster="/img/docs/upgrade-pin.poster.webp" />
 
       <p className={styles.proseMuted}>
         Upgrading a complex sequence of transformations can paralyze development. 
@@ -186,13 +201,13 @@ function PullOrchestration(): ReactNode {
         that only paths with consumers are kept fresh.
       </p>
 
-      <DemoSlot src="/img/ripple" aspectRatio="28/10"/>
+      <DemoSlot src="/img/docs/ripple" aspectRatio="2000/754" poster="/img/docs/ripple.poster.webp" />
 
       <p className={styles.proseMuted}>
         No sophisticated prediction of run times is required. Duckstring uses the same scheduling system that keeps
         modern manufacturing processes humming. See{' '}
-        <Link to="/concepts/orchestration">Orchestration</Link>, or watch it run in the{' '}
-        <Link href="https://playground.duckstring.com">Playground</Link>.
+        <Link to="/concepts/orchestration">Orchestration</Link>, or try it in the{' '}
+        <Link href={PLAYGROUND}>Playground</Link>.
       </p>
     </Section>
   );
@@ -270,7 +285,7 @@ const ROUTES: {title: string; body: string; to?: string; href?: string}[] = [
   {
     title: 'Orchestration Playground',
     body: 'A guided tour of pull orchestration, running in your browser with nothing to install.',
-    href: 'https://playground.duckstring.com',
+    href: PLAYGROUND,
   },
   {
     title: 'Documentation',
@@ -316,6 +331,8 @@ export default function Landing(): ReactNode {
   return (
     <div className={styles.canvas}>
       <Hero />
+      <Story />
+      <HeroLinks />
       <WhatIsThis />
       <ModularTransformations />
       <PullOrchestration />
