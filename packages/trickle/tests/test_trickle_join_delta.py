@@ -9,6 +9,10 @@ import random
 import pytest
 from trickle_support import NEVER, T, at, merge, rows, spy_paths, ts
 
+# Each random case runs several epochs of joins and recomputes (about 1 s locally, several times that on a CI
+# runner), so this file keeps the Trickle package's own 30 s budget when Duckstring's suite (5 s) collects it.
+pytestmark = pytest.mark.timeout(30)
+
 HOWS = ["inner", "left", "right", "full", "semi", "anti"]
 KEYS = [0, 1, 2, 3, None]
 
