@@ -31,7 +31,7 @@ def ingest(pond):
         (next_id, max_item, max_store, max_cust) = pond.con.execute(
             "SELECT COALESCE(MAX(sale_id), -1) + 1, MAX(ss_item_sk), MAX(ss_store_sk), MAX(ss_customer_sk) "
             "FROM store_sale"
-        ).fetchone()
+        ).fetchall()[0]
     except Exception:
         next_id, max_item, max_store, max_cust = 0, None, None, None
 

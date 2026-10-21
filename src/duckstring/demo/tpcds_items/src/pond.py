@@ -27,7 +27,7 @@ def ingest(pond):
     # Bootstrap the deterministic base once from dsdgen, then drop the raw TPC-DS tables. i_item_sk is
     # unique per row, so it is the merge key directly (no SCD dedup needed).
     try:
-        (n_items,) = pond.con.execute("SELECT count(*) FROM item_base").fetchone()
+        (n_items,) = pond.con.execute("SELECT count(*) FROM item_base").fetchall()[0]
     except Exception:
         n_items = 0
 
@@ -53,7 +53,7 @@ def ingest(pond):
                   "store_returns", "store_sales", "time_dim", "warehouse", "web_page", "web_returns",
                   "web_sales", "web_site"):
             pond.con.execute(f"DROP TABLE IF EXISTS {t}")
-        (n_items,) = pond.con.execute("SELECT count(*) FROM item_base").fetchone()
+        (n_items,) = pond.con.execute("SELECT count(*) FROM item_base").fetchall()[0]
 
     # Perturb a small random subset of prices; everything else re-emits at its deterministic base price
     # (identical row → no changelog churn). An item that drifted last run but not this one reverts to base

@@ -229,6 +229,19 @@ def test_starrocks_rewrites_division_and_integer_casts(pond):
     assert "ASSERT_TRUE" in sql.upper() and "/ CAST(" in sql and "ROUND(" in sql.upper()
 
 
+@pytest.mark.parametrize("raises", [True, False])
+def test_integer_division_by_zero_raises_on_starrocks_only_where_duckdb_does(pond, monkeypatch, raises):
+    from trickle.builder import ComprehensiveJob
+
+    from duckstring.flock.engines import starrocks
+
+    monkeypatch.setattr(starrocks, "_ZERO_DIVISOR_RAISES", raises)  # DuckDB 2.0 raises; 1.x gives NULL
+    job = ComprehensiveJob(_o(pond).select("s0.order_id, s0.qty // s0.qty AS q, s0.qty % s0.qty AS r"),
+                           ("order_id",))
+    sql = translate.translate(job, STARROCKS, ()).sql.upper()
+    assert ("ASSERT_TRUE" in sql) is raises and " DIV " in sql
+
+
 def test_time_zone_dependent_functions_need_a_utc_duck(pond):
     pond.con.execute("SET TimeZone = 'Australia/Melbourne'")
     assert "time zone" in _reason(pond, lambda p: _o(p).select("s0.order_id, extract(hour FROM s0.placed) AS h"))

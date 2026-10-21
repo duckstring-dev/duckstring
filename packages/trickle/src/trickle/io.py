@@ -44,6 +44,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import re
 from pathlib import Path
 
 _uid = itertools.count()
@@ -54,6 +55,40 @@ def unique_name(prefix: str) -> str:
     Used where a *materialised* result must outlive any shared-name view it was built from (a returned
     relation that would otherwise re-bind when the next call re-creates that view)."""
     return f"_duckstring_ds_{prefix}_{next(_uid)}"
+
+
+def first_row(result) -> tuple | None:
+    """The first row of an executed query or a relation, or None when it has none, reading it to the end.
+
+    DuckDB 2.0 keeps an ``execute()`` result open until it is read out, and the next statement on that
+    connection raises; relations no longer have ``fetchone()``. ``fetchall()`` closes both, on 1.5 too, so
+    use this on queries that return one row (or add ``LIMIT 1``)."""
+    rows = result.fetchall()
+    return rows[0] if rows else None
+
+
+# DuckDB 2.0 types a bare NULL as the NULL type (an all-NULL VALUES column, ``SELECT NULL AS x``); 1.x typed
+# it INTEGER. A stored NULL-typed column then refuses every later value, and a Parquet part holding one stops
+# DuckDB reading the parts written after it. So nothing NULL-typed is stored: it becomes INTEGER, as on 1.x.
+_NULL_TYPE = re.compile(r'"NULL"(?=$|[\[\],)])')
+
+
+def concrete_type(dtype: str) -> str:
+    """``dtype`` (a DuckDB type string) with the NULL type replaced by INTEGER, also inside a LIST or STRUCT."""
+    return _NULL_TYPE.sub("INTEGER", dtype)
+
+
+def concrete(relation):
+    """``relation`` with every NULL-typed column (see :func:`concrete_type`) cast to INTEGER; unchanged when
+    there is none, which is always the case before DuckDB 2.0."""
+    types = [str(t) for t in relation.types]
+    fixed = [concrete_type(t) for t in types]
+    if fixed == types:
+        return relation
+    return relation.project(", ".join(
+        f"CAST({_q(c)} AS {new}) AS {_q(c)}" if new != old else _q(c)
+        for c, old, new in zip(relation.columns, types, fixed, strict=True)
+    ))
 
 
 # System columns — the reserved namespace this engine owns (see :data:`.context.SYSTEM_PREFIX`).
@@ -239,17 +274,17 @@ def _table_exists(con, name: str) -> bool:
     plans/s3-resident-state.md), and every existence check here ("does this base/changelog/main exist yet")
     means the relation, not specifically a physical table. Nothing but the base is ever a view today, so this
     is behaviour-neutral for the table-only relations."""
-    return con.execute(
+    return first_row(con.execute(
         "SELECT 1 FROM duckdb_tables() WHERE table_name = ? "
         "UNION ALL SELECT 1 FROM duckdb_views() WHERE view_name = ? LIMIT 1", [name, name]
-    ).fetchone() is not None
+    )) is not None
 
 
 def _drop_relation(con, name: str) -> None:
     """Drop a registry relation named ``name`` whether it is a table or a view (``DROP TABLE IF EXISTS`` errors
     on a view and vice-versa, so dispatch on the catalog). Used when replacing a base VIEW with a freshly
     checkpointed base TABLE."""
-    if con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ?", [name]).fetchone():
+    if first_row(con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ?", [name])):
         con.execute(f"DROP VIEW {_q(name)}")
     else:
         con.execute(f"DROP TABLE IF EXISTS {_q(name)}")
@@ -261,7 +296,7 @@ CURRENT_VIEW_COMMENT = "duckstring:merge-current-state"
 
 
 def _is_current_view(con, name: str) -> bool:
-    row = con.execute("SELECT comment FROM duckdb_views() WHERE view_name = ?", [name]).fetchone()
+    row = first_row(con.execute("SELECT comment FROM duckdb_views() WHERE view_name = ?", [name]))
     return row is not None and row[0] == CURRENT_VIEW_COMMENT
 
 
@@ -271,9 +306,9 @@ def _migrate_base(con, name: str) -> None:
     cold = cold_base_name(name)
     if _table_exists(con, cold) or _is_current_view(con, name):
         return
-    if con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ?", [name]).fetchone():
+    if first_row(con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ?", [name])):
         con.execute(f"ALTER VIEW {_q(name)} RENAME TO {_q(cold)}")
-    elif con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ?", [name]).fetchone():
+    elif first_row(con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ?", [name])):
         con.execute(f"ALTER TABLE {_q(name)} RENAME TO {_q(cold)}")
 
 
@@ -311,10 +346,10 @@ def _retention_cutoff(con, table: str, f, retain_t, retain_n):
     ``None`` when neither applies."""
     cutoff = f - retain_t if retain_t is not None else None
     if retain_n is not None and retain_n >= 1:
-        kept_min = con.execute(
+        kept_min = first_row(con.execute(
             f'SELECT min(g) FROM (SELECT DISTINCT {_q(F_COL)} AS g FROM {_q(table)} '
             f'ORDER BY g DESC LIMIT {int(retain_n)})'
-        ).fetchone()[0]
+        ))[0]
         if kept_min is not None:
             cutoff = kept_min if cutoff is None else max(cutoff, kept_min)
     return cutoff
@@ -329,7 +364,7 @@ def _retain_merge(con, name: str, f, retain_t, retain_n) -> None:
     cutoff = _retention_cutoff(con, clog, f, retain_t, retain_n)
     if cutoff is None:
         return
-    (target,) = con.execute(f'SELECT max({_q(F_COL)}) FROM {_q(clog)} WHERE {_q(F_COL)} < {_ts(cutoff)}').fetchone()
+    (target,) = first_row(con.execute(f'SELECT max({_q(F_COL)}) FROM {_q(clog)} WHERE {_q(F_COL)} < {_ts(cutoff)}'))
     if target is not None:
         fold_warm(con, name, target)
 
@@ -349,10 +384,10 @@ def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
         cutoff = f - retain_t
         con.execute(f'DELETE FROM {_q(table)} WHERE {_q(F_COL)} < {_ts(cutoff)}')
     if retain_n is not None and retain_n >= 1:
-        kept_min = con.execute(
+        kept_min = first_row(con.execute(
             f'SELECT min(g) FROM (SELECT DISTINCT {_q(F_COL)} AS g FROM {_q(table)} '
             f'ORDER BY g DESC LIMIT {int(retain_n)})'
-        ).fetchone()[0]
+        ))[0]
         if kept_min is not None:
             con.execute(f'DELETE FROM {_q(table)} WHERE {_q(F_COL)} < {_ts(kept_min)}')
             cutoff = kept_min if cutoff is None else max(cutoff, kept_min)
@@ -385,7 +420,7 @@ def _ensure_meta(con) -> None:
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
     _ensure_meta(con)
-    row = con.execute(f'SELECT format_version FROM {_q(META_TABLE)} WHERE table_name = ?', [table]).fetchone()
+    row = first_row(con.execute(f'SELECT format_version FROM {_q(META_TABLE)} WHERE table_name = ?', [table]))
     if row is not None:
         check_format_version(row[0], table)  # never overwrite a newer format's table as if it were ours
     # Preserve any existing floor / f_base (a normal incremental run must not reset them).
@@ -440,7 +475,7 @@ def _f_base(con, table: str):
 
     if not _table_exists(con, META_TABLE):
         return None
-    row = con.execute(f'SELECT f_base FROM {_q(META_TABLE)} WHERE table_name = ?', [table]).fetchone()
+    row = first_row(con.execute(f'SELECT f_base FROM {_q(META_TABLE)} WHERE table_name = ?', [table]))
     return datetime.fromisoformat(row[0]) if (row and row[0]) else None
 
 
@@ -461,7 +496,7 @@ def _f_warm(con, table: str):
 
     if not _table_exists(con, META_TABLE):
         return None
-    row = con.execute(f'SELECT f_warm FROM {_q(META_TABLE)} WHERE table_name = ?', [table]).fetchone()
+    row = first_row(con.execute(f'SELECT f_warm FROM {_q(META_TABLE)} WHERE table_name = ?', [table]))
     return datetime.fromisoformat(row[0]) if (row and row[0]) else None
 
 
@@ -479,7 +514,7 @@ def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
     retention **raises** it to its cutoff. A normal incremental run touches neither."""
     from datetime import datetime, timezone
 
-    cur = con.execute(f'SELECT floor FROM {_q(META_TABLE)} WHERE table_name = ?', [table]).fetchone()
+    cur = first_row(con.execute(f'SELECT floor FROM {_q(META_TABLE)} WHERE table_name = ?', [table]))
     floor = datetime.fromisoformat(cur[0]) if (cur and cur[0]) else None
     if bootstrap_f is not None:
         floor = bootstrap_f
@@ -701,6 +736,7 @@ def append_table(
 
     Returns whether rows were actually appended (an empty relation, or a pure same-``f`` replay, is no
     change) — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
+    relation = concrete(relation)  # DuckDB 2.0: never store the NULL type
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     src = "_duckstring_ds_append_src"
@@ -710,26 +746,26 @@ def append_table(
     first = not _table_exists(con, name)  # the floor anchors at the first append's freshness
     # A pure replay (rows already stamped this f) re-writes identical rows → no net change. Detect it
     # before the idempotent DELETE below so the returned "changed" flag reflects new content, not a re-run.
-    replay = (not first) and con.execute(
+    replay = (not first) and first_row(con.execute(
         f'SELECT 1 FROM {_q(name)} WHERE {_q(F_COL)} = {_ts(f)} LIMIT 1'
-    ).fetchone() is not None
-    n_src = con.execute(f'SELECT count(*) FROM {_q(src)}').fetchone()[0]
+    )) is not None
+    n_src = first_row(con.execute(f'SELECT count(*) FROM {_q(src)}'))[0]
     if fail_on_conflict and pk:
         missing = [c for c in pk if c not in cols]
         if missing:
             raise DeltaError(f"append_table('{name}'): primary key column(s) {missing} not in the relation")
         pk_list = ", ".join(_q(c) for c in pk)
-        dup = con.execute(
+        dup = first_row(con.execute(
             f'SELECT 1 FROM {_q(src)} GROUP BY {pk_list} HAVING count(*) > 1 LIMIT 1'
-        ).fetchone()
+        ))
         if dup:
             raise DeltaError(f"append_table('{name}'): duplicate primary key {pk} among the appended rows")
         if not first:
             # Collide only against rows from *other* runs — a replay re-appends this f's identical rows.
-            coll = con.execute(
+            coll = first_row(con.execute(
                 f'SELECT 1 FROM {_q(src)} s JOIN {_q(name)} t USING ({pk_list}) '
                 f'WHERE t.{_q(F_COL)} IS DISTINCT FROM {_ts(f)} LIMIT 1'
-            ).fetchone()
+            ))
             if coll:
                 raise DeltaError(f"append_table('{name}'): primary key {pk} already present in history")
     if first:
@@ -773,6 +809,7 @@ def append_zset(
 
     Returns whether any genuinely new rows were appended (benign idempotent skips and dropped conflicts
     don't count) — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
+    zset = concrete(zset)  # DuckDB 2.0: never store the NULL type
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     src = unique_name("appz")
@@ -796,7 +833,7 @@ def append_zset(
     if not first:
         con.execute(f'DELETE FROM {_q(name)} WHERE {_q(F_COL)} = {_ts(f)}')
 
-    retractions = con.execute(f'SELECT count(*) FROM {_q(consol)} WHERE {_q(D_COL)} < 0').fetchone()[0]
+    retractions = first_row(con.execute(f'SELECT count(*) FROM {_q(consol)} WHERE {_q(D_COL)} < 0'))[0]
     pk_dup = 0
     hist_conflict = 0
     if pk:
@@ -804,10 +841,10 @@ def append_zset(
         if missing:
             raise DeltaError(f"append_zset('{name}', ...): primary key column(s) {missing} not in the relation")
         pk_list = ", ".join(_q(c) for c in pk)
-        pk_dup = con.execute(
+        pk_dup = first_row(con.execute(
             f'SELECT count(*) FROM (SELECT 1 FROM {_q(consol)} WHERE {_q(D_COL)} > 0 '
             f'GROUP BY {pk_list} HAVING count(*) > 1)'
-        ).fetchone()[0]
+        ))[0]
         if pk_dup:
             # Two distinct images for one key in one run — no recency to disambiguate; always fatal.
             raise DeltaError(
@@ -816,10 +853,10 @@ def append_zset(
             )
         if not first:
             eq = " AND ".join(f'p.{_q(c)} IS NOT DISTINCT FROM h.{_q(c)}' for c in user)
-            hist_conflict = con.execute(
+            hist_conflict = first_row(con.execute(
                 f'SELECT count(*) FROM {_q(consol)} p JOIN {_q(name)} h USING ({pk_list}) '
                 f'WHERE p.{_q(D_COL)} > 0 AND NOT ({eq})'
-            ).fetchone()[0]
+            ))[0]
 
     if fail_on_conflict and (retractions or hist_conflict):
         raise DeltaError(
@@ -845,7 +882,7 @@ def append_zset(
         )
     new_view = unique_name("appn")
     new_rows.create_view(new_view, replace=True)
-    n_new = con.execute(f'SELECT count(*) FROM {_q(new_view)}').fetchone()[0]
+    n_new = first_row(con.execute(f'SELECT count(*) FROM {_q(new_view)}'))[0]
     con.execute(f'INSERT INTO {_q(name)} ({sel}, {_q(F_COL)}) SELECT {sel}, {_ts(f)} FROM {_q(new_view)}')
 
     if log_drops and not fail_on_conflict and (retractions or hist_conflict):
@@ -993,17 +1030,17 @@ def count_current(con, name: str) -> int:
     if read_meta(con).get(name, {}).get("mode") == "merge":
         _migrate_base(con, name)
         cold = cold_base_name(name)
-        base = con.execute(f'SELECT count(*) FROM {_q(cold)}').fetchone()[0] if _table_exists(con, cold) else 0
+        base = first_row(con.execute(f'SELECT count(*) FROM {_q(cold)}'))[0] if _table_exists(con, cold) else 0
         clog_sql = _clog_union_sql(con, name)
         if clog_sql is None:
             return int(base)
         f_base = _f_base(con, name)
         lo = f' WHERE {_q(F_COL)} > {_ts(f_base)}' if f_base is not None else ''
-        (delta,) = con.execute(f'SELECT coalesce(sum({_q(D_COL)}), 0) FROM ({clog_sql}){lo}').fetchone()
+        (delta,) = first_row(con.execute(f'SELECT coalesce(sum({_q(D_COL)}), 0) FROM ({clog_sql}){lo}'))
         return int(base) + int(delta)
     if not _table_exists(con, name):
         return 0
-    return int(con.execute(f'SELECT count(*) FROM {_q(name)}').fetchone()[0])
+    return int(first_row(con.execute(f'SELECT count(*) FROM {_q(name)}'))[0])
 
 
 def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
@@ -1020,6 +1057,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
 
     Returns whether the change was non-empty (something was actually inserted/updated/deleted) — the
     signal a Ripple can use to ``pond.skip()`` a no-change run (see plans/no-change-skip.md)."""
+    zset = concrete(zset)  # DuckDB 2.0: never store the NULL type
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     if not pk:
@@ -1046,7 +1084,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
         f'SELECT {sel_user}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} FROM {_q(src)} '
         f'GROUP BY {sel_user} HAVING SUM({_q(D_COL)}) <> 0'
     )
-    nonempty = con.execute(f'SELECT count(*) FROM {_q(consol)}').fetchone()[0] > 0
+    nonempty = first_row(con.execute(f'SELECT count(*) FROM {_q(consol)}'))[0] > 0
     _ensure_changelog(con, clog, consol)  # borrows schema from the delta; works before any base exists
     if nonempty:
         con.execute("BEGIN TRANSACTION")
@@ -1075,6 +1113,7 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
     reconstructed prior state (base ⊎ changelog) as a full-row Z-set (``new(+1) ⊎ prior(-1)``, consolidated)
     and append the diff to the changelog. Returns whether the diff was non-empty (the state actually
     changed) — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
+    relation = concrete(relation)  # DuckDB 2.0: never store the NULL type
     if not pk:
         raise DeltaError(f"merge_table('{name}', ...) needs a primary key — pass pk=...")
     cols = list(relation.columns)
@@ -1125,7 +1164,7 @@ def fold_warm(con, name: str, target_f) -> None:
         f'SELECT {user}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)}, MAX({_q(F_COL)}) AS {_q(F_COL)} '
         f'FROM {_q(clog)} WHERE {locond}{_q(F_COL)} <= {_ts(target_f)} GROUP BY {user} HAVING SUM({_q(D_COL)}) <> 0'
     )
-    if con.execute(f'SELECT count(*) FROM {_q(band)}').fetchone()[0] == 0:
+    if first_row(con.execute(f'SELECT count(*) FROM {_q(band)}'))[0] == 0:
         con.execute(f'DROP TABLE IF EXISTS {_q(band)}')
         # Still advance the watermark/floor: an empty net change over the slice is fully folded (nothing to keep).
     else:
@@ -1368,7 +1407,7 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
         raise DeltaError(f".accumulate('{name}'): the .along('{along}') column is not in the scan input")
 
     if kind == "incremental":
-        neg = con.execute(f"SELECT count(*) FROM {_q(src)} WHERE {_q(D_COL)} < 0").fetchone()[0]
+        neg = first_row(con.execute(f"SELECT count(*) FROM {_q(src)} WHERE {_q(D_COL)} < 0"))[0]
         if neg:
             raise DeltaError(
                 f".accumulate('{name}'): {neg} retracted row(s) reached an order-dependent scan — its input "
@@ -1693,9 +1732,9 @@ def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols
     skip = f" WHERE ss.{_q(F_COL)} IS DISTINCT FROM {_ts(f)}" if seeded else ""   # replay: skip groups at this f
 
     if seeded:
-        bad = con.execute(
+        bad = first_row(con.execute(
             f"SELECT count(*) FROM {_q(b)} bb JOIN {_q(state)} ss USING ({by_list}) WHERE bb.{alq} < ss._k_along"
-        ).fetchone()[0]
+        ))[0]
         if bad:
             raise DeltaError(
                 f".accumulate('{name}'): {bad} row(s) arrived below their group's .along('{along}') high-water "
@@ -1726,7 +1765,7 @@ def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols
     outt = unique_name("accout")
     con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(outt)} AS "
                 f"SELECT {_q(b)}.*, {', '.join(out_exprs)} FROM {_q(b)}{join}{skip} WINDOW w AS ({win})")
-    if con.execute(f"SELECT count(*) FROM {_q(outt)}").fetchone()[0] == 0:
+    if first_row(con.execute(f"SELECT count(*) FROM {_q(outt)}"))[0] == 0:
         return
     append_zset(con, name, _as_zset(con.sql(f"SELECT * FROM {_q(outt)}"), 1), f, normalize_pk(pk),
                 fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
@@ -2461,11 +2500,11 @@ class Delta:
 
     def is_empty(self) -> bool:
         """Whether there are no changes."""
-        return self.zset.aggregate("count(*) AS n").fetchone()[0] == 0
+        return first_row(self.zset.aggregate("count(*) AS n"))[0] == 0
 
     def keys_count(self) -> int:
         """The number of changed rows."""
-        return self.zset.aggregate("count(*) AS n").fetchone()[0]
+        return first_row(self.zset.aggregate("count(*) AS n"))[0]
 
     @property
     def upserts(self):
@@ -2559,7 +2598,7 @@ def window_changed(con, data_dir, table: str, previous_f, f) -> bool:
     if not window:
         return False
     files = ", ".join(f"'{u}'" for u in window)
-    (rows,) = con.execute(f"SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata([{files}])").fetchone()
+    (rows,) = first_row(con.execute(f"SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata([{files}])"))
     return rows > 0
 
 
@@ -2597,7 +2636,7 @@ def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor) -> De
     """The append-delta core over a single history SELECT — shared by the published read and the in-run
     registry read. Append rows are all present (``+1``); never retracted."""
     rel = con.sql(hist_sql)  # includes _duckstring_f
-    oldest = con.sql(f"SELECT min({_q(F_COL)}) FROM ({hist_sql})").fetchone()[0]
+    oldest = first_row(con.sql(f"SELECT min({_q(F_COL)}) FROM ({hist_sql})"))[0]
     full = not _covered(previous_f, NEVER, floor, oldest)
     upper = f"{_q(F_COL)} <= {_ts(f)}"
     cond = upper if full else f"{_q(F_COL)} > {_ts(previous_f)} AND {upper}"
@@ -2621,7 +2660,7 @@ def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, flo
     Z-set; otherwise a full read at ``+1``."""
     oldest = None
     if clog_sql is not None:
-        oldest = con.sql(f"SELECT min({_q(F_COL)}) FROM ({clog_sql})").fetchone()[0]
+        oldest = first_row(con.sql(f"SELECT min({_q(F_COL)}) FROM ({clog_sql})"))[0]
     full = clog_sql is None or not _covered(previous_f, NEVER, floor, oldest)
     if full:
         main = _strip_system(con.sql(main_sql))

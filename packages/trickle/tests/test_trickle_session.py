@@ -11,6 +11,7 @@ import duckdb
 import pytest
 import trickle
 from trickle import NEVER, agg
+from trickle.io import first_row
 from trickle.session import RUN_TABLE, Run
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -84,7 +85,7 @@ def test_a_first_run_bootstraps_and_commits_its_epoch(con):
         assert (t.f, t.previous_f, t.replay) == (T0, NEVER, False)
         _pipeline(t, con)
     assert _out(con) == _scratch(con)
-    assert con.execute(f"SELECT last_f, pending_f FROM {RUN_TABLE}").fetchone() == (T0, None)
+    assert first_row(con.execute(f"SELECT last_f, pending_f FROM {RUN_TABLE}")) == (T0, None)
     with trickle.run(con, pipeline="nightly", now=T0 + timedelta(hours=1)) as t:
         assert t.previous_f == T0 and t.f == T0 + timedelta(hours=1)
 
@@ -174,7 +175,7 @@ def test_a_failed_run_is_replayed_at_the_same_epoch(con):
         failed_f = t.f
         _pipeline(t, con)
         raise RuntimeError("the run fails after writing")
-    assert con.execute(f"SELECT pending_f FROM {RUN_TABLE}").fetchone() == (failed_f,)
+    assert first_row(con.execute(f"SELECT pending_f FROM {RUN_TABLE}")) == (failed_f,)
 
     # The input changes again before the retry; the replay must still give the right answer.
     con.execute("UPDATE raw_orders SET quantity = 9 WHERE order_id = 1")

@@ -9,6 +9,7 @@ from datetime import timedelta
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from trickle.io import first_row
 
 from duckstring.catchment import cloud
 from duckstring.catchment.db import connect, migrate
@@ -171,15 +172,15 @@ def test_switch_data_root_empties_and_stays_dormant(tmp_path):
     db.commit()
     driver.reload()
     driver.add_refresh(key, timedelta(0))  # a standing Refresh that must NOT survive the switch
-    assert db.execute("SELECT COUNT(*) FROM pond_refresh").fetchone()[0] == 1
+    assert first_row(db.execute("SELECT COUNT(*) FROM pond_refresh"))[0] == 1
 
     driver.switch_data_root(str(tmp_path / "plane2"))
 
     assert driver.data_root == str(tmp_path / "plane2")   # re-pointed
-    start_f, end_f = db.execute("SELECT start_f, end_f FROM pond_state").fetchone()
+    start_f, end_f = first_row(db.execute("SELECT start_f, end_f FROM pond_state"))
     assert start_f in (None, _iso(NEVER)) and end_f in (None, _iso(NEVER))  # emptied (as if data deleted)
-    assert db.execute("SELECT COUNT(*) FROM pond_demand").fetchone()[0] == 0   # demand cleared
-    assert db.execute("SELECT COUNT(*) FROM pond_refresh").fetchone()[0] == 0  # standing Refresh cleared
+    assert first_row(db.execute("SELECT COUNT(*) FROM pond_demand"))[0] == 0   # demand cleared
+    assert first_row(db.execute("SELECT COUNT(*) FROM pond_refresh"))[0] == 0  # standing Refresh cleared
     assert not driver.state.refreshes.get(key)                             # → dormant, no auto-run
     assert old_file.exists()                                               # old location kept as a backup
 
@@ -218,11 +219,11 @@ def test_switch_data_root_adopt_restores_freshness_from_plane(tmp_path):
 
     driver.switch_data_root(str(tmp_path / "planeB"), mode="adopt")
 
-    start_f, end_f = db.execute("SELECT start_f, end_f FROM pond_state WHERE pond_id=?", (pond_id,)).fetchone()
+    start_f, end_f = first_row(db.execute("SELECT start_f, end_f FROM pond_state WHERE pond_id=?", (pond_id,)))
     assert start_f == F and end_f == F                          # freshness adopted from the plane
     assert not (major_dir / "registry.duckdb").exists()         # hot state dropped → re-hydrate from target
     assert not (major_dir / "pond.db").exists()
-    assert db.execute("SELECT COUNT(*) FROM pond_refresh").fetchone()[0] == 1  # demand kept → resumes
+    assert first_row(db.execute("SELECT COUNT(*) FROM pond_refresh"))[0] == 1  # demand kept → resumes
 
 
 def test_switch_data_root_adopt_empty_target_is_cold(tmp_path):
@@ -240,7 +241,7 @@ def test_switch_data_root_adopt_empty_target_is_cold(tmp_path):
 
     driver.switch_data_root(str(tmp_path / "empty_plane"), mode="adopt")  # no sidecar there
 
-    (end_f,) = db.execute("SELECT end_f FROM pond_state WHERE pond_id=?", (pond_id,)).fetchone()
+    (end_f,) = first_row(db.execute("SELECT end_f FROM pond_state WHERE pond_id=?", (pond_id,)))
     assert end_f in (None, _iso(NEVER))  # empty target → cold (nothing to adopt)
 
 
@@ -277,9 +278,9 @@ def test_switch_data_root_migrate_copies_and_preserves_freshness(tmp_path):
     assert b.child("orders__v").read_bytes("2026-06-06T00_00_00+00_00.parquet") == b"version-bytes"
     assert a.read_bytes("orders.parquet") == b"parquet-bytes"   # old location left intact (backup)
     assert driver.data_root == str(tmp_path / "planeB")         # re-pointed
-    start_f, end_f = db.execute("SELECT start_f, end_f FROM pond_state WHERE pond_id=?", (pond_id,)).fetchone()
+    start_f, end_f = first_row(db.execute("SELECT start_f, end_f FROM pond_state WHERE pond_id=?", (pond_id,)))
     assert start_f == F and end_f == F                          # freshness PRESERVED (no reset)
-    assert db.execute("SELECT COUNT(*) FROM pond_refresh").fetchone()[0] == 1  # demand kept → resumes
+    assert first_row(db.execute("SELECT COUNT(*) FROM pond_refresh"))[0] == 1  # demand kept → resumes
     mig = driver.migration_status()
     assert mig["status"] == "done" and mig["copied_files"] == mig["total_files"] and mig["total_files"] >= 1
 

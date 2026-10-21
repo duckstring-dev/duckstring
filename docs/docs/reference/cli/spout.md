@@ -6,7 +6,7 @@ sidebar_label: spout
 
 # duckstring spout
 
-A Spout delivers a Pond's published tables to an external destination, such as an object store or a Postgres database, whenever the Pond publishes new output. Spouts are Catchment configuration and survive redeploys.
+A Spout delivers a Pond's published tables to an external destination, such as an object store, a Postgres database or a DuckLake, whenever the Pond publishes new output. Spouts are Catchment configuration and survive redeploys.
 
 A Spout never asks its Pond to run; it delivers whatever the Pond publishes. Keep the Pond fresh with a [Refresh](refresh.md), and limit how often a Spout delivers with a [window](window.md) on `{pond}#{spout}`. Each Spout has its own run history and failure state, visible in `status` and the UI. A failed delivery is retried on the Pond's next 3 publishes; change the number with [`control failure-budget`](control.md#failure-budget) on `{pond}#{spout}`.
 
@@ -20,13 +20,15 @@ duckstring spout add POND --to URI [--table TABLE | --all] [--mode MODE] [--name
 
 | Option | Default | Description |
 |---|---|---|
-| `--to`, `-t` | required | The destination URI. Its scheme picks how data is written: `file://`, `s3://`, `gs://` or `postgres://`. Credentials are written as `${env:NAME}` or `${secret:NAME}` references and resolved only at delivery, and a single reference can be the whole destination. See [Destination URIs](../formats.md#destination-uris). |
+| `--to`, `-t` | required | The destination URI. Its scheme picks how data is written: `file://`, `s3://`, `gs://`, `postgres://` or `ducklake:`. Credentials are written as `${env:NAME}` or `${secret:NAME}` references and resolved only at delivery, and a single reference can be the whole destination. See [Destination URIs](../formats.md#destination-uris). |
 | `--table`, `-T` | all tables | Deliver only this table. |
 | `--all` | | Deliver every table (the default, stated explicitly). |
 | `--mode` | `auto` | `auto`: send only changes where the destination supports it, otherwise the whole table. `full`: always write the whole table. `append`: for an object store, copy each run's new files, keeping the destination in Duckstring's file layout. |
 | `--name`, `-n` | the table name, or the scheme for all tables | The Spout's name. A suffix such as `-2` is added if it's taken. |
 
 Postgres delivery is incremental and exactly-once: each run deletes and re-inserts the changed rows in one transaction, and records its progress in a `_duckstring_egress` table in the destination. It needs a table with a primary key, which means a merge Trickle.
+
+DuckLake delivery works the same way for a merge Trickle, and also takes an append Trickle (its new rows are inserted) or a plain table (replaced whole). Each delivery adds one snapshot to the lake.
 
 The destination is validated when the Spout is added, but credentials aren't checked until the first delivery. Use the UI's **Test** button to check them beforehand.
 

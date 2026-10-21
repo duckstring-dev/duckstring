@@ -125,6 +125,44 @@ Python API. No old forms are kept:
   the Pond never showed as failed, and its Sinks ran on output that was never published. A Duck from before this
   release still reports the old way, so redeploy Ducks with the Catchment.
 
+### DuckDB 2.0
+
+Duckstring and Trickle support DuckDB 2.0 as well as 1.5 (`duckdb>=1.5,<3`). DuckDB 2.0 needs Python 3.11 or
+newer, so on Python 3.10 DuckDB stays at 1.5.
+
+Upgrading:
+
+- **Ripple code may need a change.** In DuckDB 2.0 a query run with `execute()` holds its connection until its rows
+  are read to the end, so `pond.con.execute(...).fetchone()` followed by another statement fails, and relations
+  no longer have `fetchone()`. Read with `fetchall()`. A Pond whose lock keeps DuckDB 1.5 stays on 1.5 while the
+  Catchment runs 2.0, so Ponds can move over one at a time.
+- A column that is NULL in every row and has no other type (`SELECT NULL AS note`) is published as `INTEGER`, as
+  DuckDB 1.5 typed it. DuckDB 2.0 would give it its own NULL type, which refuses later values.
+- Tables written with `if_changed=True` republish once after the upgrade, since change fingerprints are tied to
+  the DuckDB version.
+- A Pond database written by DuckDB 2.0 can't be opened by 1.5. A Pond moved back to 1.5 rebuilds its database
+  from what it published, as it would after losing it.
+- On DuckDB 2.0 an integer `//` or `%` by zero raises. A Flock job on StarRocks now fails in the same place and
+  runs locally, rather than publishing NULL.
+- Trickle 0.2.1 is required.
+
+### DuckLake Spouts
+
+A Spout can deliver to a [DuckLake](https://ducklake.select):
+`duckstring spout add reports --to 'ducklake:sqlite:/srv/lake/meta.sqlite?data_path=s3://lakehouse/files/'`. The
+destination is DuckDB's own attach string for the lake (SQLite, Postgres or DuckDB catalogs), with `data_path`,
+`schema` and the data path's credentials as options. Any table can be delivered: a merge Trickle by its primary
+key, an append Trickle's new rows, a plain table replaced whole. A run's tables go in one transaction, so the
+lake gains one snapshot per delivery, authored `duckstring`. Delivery is exactly-once. Duckstring never
+migrates a lake's catalog, and leaves compaction and snapshot expiry to the lake's owner.
+
+Also for Spouts:
+
+- `spout resync` now re-delivers in full to Postgres too. Before, a destination that keeps its own record of
+  what it has received (Postgres) treated a resync as already delivered.
+- A Postgres table first filled by a full load no longer gains a `_duckstring_f` column that later deliveries
+  left empty, and a column a table gains is added to the destination table.
+
 ### Documentation and Playground
 
 The Concepts and Guides have screenshots and recordings of the web UI and the Playground, and the landing page

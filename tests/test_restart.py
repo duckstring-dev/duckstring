@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from trickle.io import first_row
 
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
@@ -76,7 +77,7 @@ def test_restart_resumes_incomplete_run(tmp_path):
     # Only r1 completes; r2 left in flight (Catchment "crashes" mid-run).
     f = d.state.pond_states["p@1"].start_f.isoformat()
     d.on_event("p@1", {"kind": "ripple", "f": f, "ripple": "r1", "status": "success"})
-    assert d.db.execute("SELECT status FROM pond_run").fetchone()[0] == "running"
+    assert first_row(d.db.execute("SELECT status FROM pond_run"))[0] == "running"
 
     d2 = Driver(d.db, tmp_path, "http://x", NoopLauncher())
     d2.resume_incomplete()
@@ -135,7 +136,7 @@ def test_wake_injects_run(tmp_path):
     d.wake("p@1")
     # One direct Pond Run is dispatched, with no upstream propagation (p is an Inlet anyway).
     assert any(j["kind"] == "begin_run" for j in d.jobs.get("p@1", []))
-    assert d.db.execute("SELECT COUNT(*) FROM pond_run").fetchone()[0] == 1
+    assert first_row(d.db.execute("SELECT COUNT(*) FROM pond_run"))[0] == 1
     assert d.state.pond_states["p@1"].runs_started == 1
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from trickle.io import first_row
 
 from duckstring.duck.core import DuckCore
 from duckstring.engine import pond as ledger
@@ -105,7 +106,7 @@ def test_duck_contract_violation_aborts_publish(tmp_path):
     assert not any(e.kind == "run_completed" for e in core.events)
     # Nor does it report the Ripple a success: the Catchment would count the Run done and drop the failure.
     assert not any(e.kind == "ripple" for e in core.events)
-    assert con.execute("SELECT status FROM pond_run WHERE f = ?", (T0.isoformat(),)).fetchone()[0] == "failed"
+    assert first_row(con.execute("SELECT status FROM pond_run WHERE f = ?", (T0.isoformat(),)))[0] == "failed"
 
 
 @pytest.mark.timeout(5)

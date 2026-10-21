@@ -36,6 +36,7 @@ from enum import IntEnum
 
 from fastapi import Depends, HTTPException, Request
 
+from ..trickle_io import first_row
 from .db import locked
 
 # Routes that need no credential at all (parity with the old open `/api/health`).
@@ -84,7 +85,7 @@ def generate(con: sqlite3.Connection, levels: list[str] | None = None) -> dict[s
 def ensure_duck_token(con: sqlite3.Connection) -> str:
     """Mint the internal Duck dial-back token once (persisted in ``catchment_meta``), then return it.
     Stable across restarts so a Duck that outlived the Catchment keeps authenticating."""
-    row = con.execute("SELECT value FROM catchment_meta WHERE key = 'duck_token'").fetchone()
+    row = first_row(con.execute("SELECT value FROM catchment_meta WHERE key = 'duck_token'"))
     if row is not None:
         return row[0]
     token = secrets.token_urlsafe(32)

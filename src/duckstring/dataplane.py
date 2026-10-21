@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .storage import LocalStorage, Storage, get_storage
+from .trickle_io import first_row
 
 
 def _as_storage(data_dir) -> Storage:
@@ -458,7 +459,7 @@ def fingerprint(relation) -> str:
     import hashlib
     import json
 
-    count, total = relation.aggregate("count(*), sum(hash(*COLUMNS(*))::HUGEINT)").fetchone()
+    count, total = first_row(relation.aggregate("count(*), sum(hash(*COLUMNS(*))::HUGEINT)"))
     schema = [[c, str(t)] for c, t in zip(relation.columns, relation.types, strict=True)]
     tag = _fp_tag()
     digest = hashlib.sha256(json.dumps([tag, schema, int(count), str(total or 0)]).encode()).hexdigest()
@@ -555,7 +556,7 @@ class ParquetDataPlane(DataPlane):
                     vstore = data_dir.child(trickle.version_dir_name(table))
                     vstore.mkdir()
                     with vstore.copy_to(trickle.part_name(version_f)) as uri:
-                        con.execute(f'COPY "{table}" TO \'{uri}\' (FORMAT PARQUET)')
+                        con.execute(f"COPY ({_concrete_select(con, table)}) TO '{uri}' (FORMAT PARQUET)")
             for main in merge_mains:
                 _publish_tiered_main(con, data_dir, main, f)
             if merge_mains:  # a checkpoint may have advanced f_base → refresh the sidecar
@@ -691,7 +692,7 @@ def _export_companions(con, data_dir, f) -> None:
             reg = f"{prefix}{base}"
             if not trickle._table_exists(con, reg):
                 continue
-            if con.execute(f'SELECT count(*) FROM "{reg}"').fetchone()[0] == 0:
+            if first_row(con.execute(f'SELECT count(*) FROM "{reg}"'))[0] == 0:
                 continue
             store = data_dir.child("state", kind, base)
             store.mkdir()
@@ -709,6 +710,20 @@ def _export_companions(con, data_dir, f) -> None:
         for old in store.parquet_names():
             if old != keep:
                 store.remove(old)
+
+
+def _concrete_select(con, table: str) -> str:
+    """``SELECT`` over a Ripple's ``table`` with any NULL-typed column published as INTEGER, as DuckDB 1.x typed
+    it (2.0 types a bare NULL as the NULL type; see :func:`trickle.io.concrete_type`)."""
+    from . import trickle_io as trickle
+
+    cols = con.execute(f'DESCRIBE "{table}"').fetchall()
+    sel = ", ".join(
+        f"CAST({trickle._q(c)} AS {trickle.concrete_type(t)}) AS {trickle._q(c)}" if trickle.concrete_type(t) != t
+        else trickle._q(c)
+        for c, t, *_ in cols
+    )
+    return f'SELECT {sel} FROM "{table}"'
 
 
 def _utc():
@@ -742,13 +757,13 @@ def _delta_rows_last(con, table: str, mode: str, f) -> int:
     from . import trickle_io as trickle
 
     if mode == "overwrite":
-        return int(con.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0])
+        return int(first_row(con.execute(f'SELECT count(*) FROM "{table}"'))[0])
     delta_table = trickle.changelog_name(table) if mode == "merge" else table
     if f is None or not trickle._table_exists(con, delta_table):
         return 0
-    return int(con.execute(
+    return int(first_row(con.execute(
         f'SELECT count(*) FROM "{delta_table}" WHERE "{trickle.F_COL}" = {trickle._ts(f)}'
-    ).fetchone()[0])
+    ))[0])
 
 
 def _entry_schema(con, table: str) -> dict | None:
@@ -787,7 +802,7 @@ def _enrich_sidecar(con, data_dir, f) -> None:
                 rows = delta  # the whole rewrite is the current state
             else:
                 rows = trickle.count_current(con, table) if mode == "merge" else int(
-                    con.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0])
+                    first_row(con.execute(f'SELECT count(*) FROM "{table}"'))[0])
             entry["stats"] = {"rows": rows, "bytes": _published_bytes(data_dir, table), "delta_rows_last": delta}
             schema = _entry_schema(con, table)
             if schema is not None:
@@ -1208,8 +1223,8 @@ def _export_bands(con, data_dir: Path, main: str) -> None:
     last_hi = max(published) if published else None
     above = f"{fb} > {trickle._ts(last_hi)}" if last_hi is not None else "1=1"
 
-    legacy = con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND schema_name = 'main'",
-                         [warm]).fetchone() is not None
+    legacy = first_row(con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND schema_name = 'main'",
+                         [warm])) is not None
     if legacy:
         if trickle._table_exists(con, pending):
             con.execute(f'INSERT INTO {q(pending)} SELECT * FROM {q(warm)} WHERE {above}')
@@ -1222,7 +1237,7 @@ def _export_bands(con, data_dir: Path, main: str) -> None:
     f_warm = trickle._f_warm(con, main)
     if staged and f_warm is not None:
         dest = trickle.part_name(f_warm)
-        rows = con.execute(f'SELECT count(*) FROM {q(pending)} WHERE {above}').fetchone()[0]
+        rows = first_row(con.execute(f'SELECT count(*) FROM {q(pending)} WHERE {above}'))[0]
         if rows and not band_store.exists(dest):
             band_store.mkdir()
             with band_store.copy_to(dest) as uri:
@@ -1239,9 +1254,9 @@ def _export_bands(con, data_dir: Path, main: str) -> None:
         raise
 
 
-# The smallest chunk the cold base is split into. DuckDB 2.0's COPY rollover never terminates when
-# FILE_SIZE_BYTES is a few bytes (it opens empty files without end, filling the disk; 1.5 writes one file),
-# and a threshold that small is only ever set to make compaction eager, not to get byte-sized chunks.
+# The smallest chunk the cold base is split into. The DuckDB 2.0 alphas' COPY rollover never terminated when
+# FILE_SIZE_BYTES was a few bytes (empty files without end; fixed in 2.0.0), and a threshold that small is only
+# ever set to make compaction eager, not to get byte-sized chunks.
 _MIN_CHUNK_BYTES = 64 * 1024
 
 
@@ -1363,8 +1378,8 @@ def cluster_order_select(con, source: str, spec: dict) -> str:
     cols = spec["by"]
     if not spec["interleave"]:
         return f"SELECT * FROM {source} ORDER BY {', '.join(q(c) for c in cols)}"
-    counts = con.execute(f"SELECT count(*), {', '.join(f'count(*) FILTER (WHERE {q(c)} IS NULL)' for c in cols)} "
-                         f"FROM {source}").fetchone()
+    counts = first_row(con.execute(f"SELECT count(*), {', '.join(f'count(*) FILTER (WHERE {q(c)} IS NULL)' for c in cols)} "
+                         f"FROM {source}"))
     types = dict(con.execute(f"SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM {source})").fetchall())
     large = counts[0] > _EXACT_QUANTILE_ROWS
     approx = [large and types[c].upper().startswith(_APPROX_QUANTILE_TYPES) for c in cols]

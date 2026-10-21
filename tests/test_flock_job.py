@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 
 import duckdb
+from trickle.io import first_row
 
 from duckstring import flock
 from duckstring.core import Pond
@@ -129,7 +130,7 @@ def _run(tmp_path, job_flock, f):
                 flock=env.get("DUCKSTRING_FLOCK_MODE"), flock_env=env)
     pond.merge_table("src", con.sql("SELECT range AS id, range % 7 AS v FROM range(100)"), pk="id")
     pond.trickle("src").select("s0.id, s0.v").merge("out", pk="id")
-    return con.execute("SELECT count(*) FROM out").fetchone()[0]
+    return first_row(con.execute("SELECT count(*) FROM out"))[0]
 
 
 def test_a_duck_with_no_flock_environment_dispatches_on_the_jobs_settings(tmp_path, monkeypatch):

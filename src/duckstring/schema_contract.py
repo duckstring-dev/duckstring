@@ -105,11 +105,11 @@ def extract_schema(con) -> Schema:
     — so a changelog is taken as evidence of its merge main and described from it. Without this, an
     un-compacted merge main is invisible to the contract, the catalog, and column lineage."""
     from .dataplane import RESERVED_PREFIX, registry_tables
-    from .trickle_io import BASE_SUFFIX, CHANGELOG_SUFFIX, DROPLOG_SUFFIX, WARM_SUFFIX, base_table_name
+    from .trickle_io import BASE_SUFFIX, CHANGELOG_SUFFIX, DROPLOG_SUFFIX, WARM_SUFFIX, base_table_name, concrete_type
 
     def _cols(table: str) -> dict[str, str]:
         return {
-            row[0]: row[1]
+            row[0]: concrete_type(row[1])  # a NULL-typed column is published as INTEGER (dataplane._concrete_select)
             for row in con.execute(f'DESCRIBE "{table}"').fetchall()
             if not str(row[0]).startswith(RESERVED_PREFIX)
         }

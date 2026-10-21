@@ -1,11 +1,12 @@
 """`duckstring spout add|ls|rm {pond}` — manage a Pond's egress Spouts.
 
 A Spout pours a Pond's published output to an external destination (object store, a transactional
-database). It is operational config (persisted, survives redeploys), not declared in pond.toml.
+database, a DuckLake). It is operational config (persisted, survives redeploys), not declared in pond.toml.
 Credentials go in the destination URI as ``${env:NAME}`` references, resolved only at egress time::
 
     duckstring spout add sales --to 's3://bucket/sales?key=${env:AWS_KEY}'
     duckstring spout add sales --to 'postgres://app:${env:PGPASS}@db/analytics' --table revenue
+    duckstring spout add sales --to 'ducklake:sqlite:/srv/lake/meta.sqlite?data_path=s3://lake/files/'
     duckstring spout ls sales
     duckstring spout rm sales s3
 """
@@ -28,8 +29,9 @@ def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
 @app.command("add")
 def add(
     pond: str = typer.Argument(..., help="The Pond whose tables to deliver."),
-    to: str = typer.Option(..., "--to", "-t", help="Destination URI: file://, s3://, gs:// or "
-                                                   "postgres://. Credentials as ${env:NAME} or ${secret:NAME}."),
+    to: str = typer.Option(..., "--to", "-t", help="Destination URI: file://, s3://, gs://, "
+                                                   "postgres:// or ducklake:. Credentials as ${env:NAME} or "
+                                                   "${secret:NAME}."),
     table: Optional[str] = typer.Option(None, "--table", "-T", help="Deliver only this table (default: all tables)."),
     all_tables: bool = typer.Option(False, "--all", help="Deliver every table (the default)."),
     mode: str = typer.Option("auto", "--mode", help="auto (only changes where supported), full, or append."),

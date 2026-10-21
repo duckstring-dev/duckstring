@@ -23,6 +23,7 @@ import os
 
 import duckdb
 import pytest
+from trickle.io import first_row
 
 pytestmark = pytest.mark.timeout(600)
 
@@ -97,7 +98,7 @@ def _duckdb_values(exprs: list[str]) -> tuple[list[str], list[str]]:
     con = duckdb.connect()
     types = [str(con.sql(f"SELECT ({e}) AS v").types[0]) for e in exprs]
     select = ", ".join(f"CAST(({e}) AS VARCHAR) AS c{i}" for i, e in enumerate(exprs))
-    values = [None if v is None else str(v) for v in con.sql(f"SELECT {select}").fetchone()]
+    values = [None if v is None else str(v) for v in first_row(con.sql(f"SELECT {select}"))]
     return values, types
 
 

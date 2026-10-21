@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import duckdb
 import pytest
+from trickle.io import first_row
 
 from duckstring import trickle_io as T
 from duckstring.dataplane import ParquetDataPlane, hydrate_registry, persist_tree, restore_tree
@@ -42,7 +43,7 @@ def _current(con):
 
 
 def _is_view(con, name):
-    return con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ?", [name]).fetchone() is not None
+    return first_row(con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ?", [name])) is not None
 
 
 def _publish(con, out, h):
@@ -103,7 +104,7 @@ def test_bands_at_or_below_the_base_are_ignored(tmp_path):
     T.write_sidecar(out, sidecar)
     fresh = _con()
     hydrate_registry(fresh, out)
-    sql = fresh.execute("SELECT sql FROM duckdb_views() WHERE view_name = 'm__band'").fetchone()[0]
+    sql = first_row(fresh.execute("SELECT sql FROM duckdb_views() WHERE view_name = 'm__band'"))[0]
     assert T.part_name(ts(0)) not in sql and T.part_name(ts(2)) in sql
 
 
@@ -128,7 +129,7 @@ def test_a_lost_local_publish_is_restored_before_hydrating(tmp_path):
     assert T.base_chunks(local, "m") == T.base_chunks(durable, "m") and _bands(local) == _bands(durable)
     fresh = _con()
     hydrate_registry(fresh, local)
-    sql = fresh.execute("SELECT sql FROM duckdb_views() WHERE view_name = 'm__band'").fetchone()[0]
+    sql = first_row(fresh.execute("SELECT sql FROM duckdb_views() WHERE view_name = 'm__band'"))[0]
     assert str(local) in sql and str(durable) not in sql
     assert _current(fresh) == [(1, "A"), (2, "b"), (3, "c")]
 

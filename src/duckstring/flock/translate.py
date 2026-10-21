@@ -23,6 +23,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from ..trickle_io import first_row
+
 # Query structure: the shapes the builder and ordinary SQL are made of. Their meaning is the same on every
 # SQL engine; only the expressions inside them can differ.
 STRUCTURAL = frozenset({
@@ -154,7 +156,7 @@ def _utc(con) -> bool:
     """Whether DuckDB on the Duck works in UTC: functions over a TIMESTAMPTZ (``date_trunc``, ``hour``) follow
     the session time zone, and a SQL engine works on sources staged as UTC."""
     try:
-        tz = con.execute("SELECT current_setting('TimeZone')").fetchone()[0]
+        tz = first_row(con.execute("SELECT current_setting('TimeZone')"))[0]
     except Exception:  # noqa: BLE001 - no ICU: no time zones, so UTC
         return True
     return str(tz).upper() in ("UTC", "ETC/UTC", "GMT", "ETC/GMT", "Z")

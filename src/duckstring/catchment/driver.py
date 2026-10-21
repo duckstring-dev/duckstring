@@ -57,6 +57,7 @@ from ..engine import (
 )
 from ..flock import job_settings as flock_job_settings
 from ..keys import pond_key
+from ..trickle_io import first_row
 from .taps import TapsMixin
 
 # A Duck is presumed dead if it holds an in-flight Run but hasn't contacted the Catchment within this
@@ -385,6 +386,9 @@ class Driver(TapsMixin):
         # Spout runs the engine dispatched (instead of to a Duck), awaiting the egress worker — mirrors
         # _pending_transfers for Draws. (spout_key, f). In-memory: a crash re-dispatches on restart.
         self._pending_egress: list[tuple[str, datetime]] = []
+        # Spouts asked to resync: their next job reads from the beginning, past the destination's own
+        # watermark (in memory: a restart before the delivery makes it an ordinary Force).
+        self._resync_spouts: set[str] = set()
         # Alerts (see plans/alerts.md): a thread-safe callback that wakes the alert worker when a delivery
         # is enqueued (None = no worker, e.g. NoopLauncher tests). _alerted_failures tracks keys we've fired
         # a failure/contract/spout alert for → their recovery is emitted centrally in _process when they
@@ -495,33 +499,33 @@ class Driver(TapsMixin):
                     "SELECT start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time "
                     "FROM pond_window WHERE pond_id = ?", (pond_id,)
                 )]
-                retry = db.execute(
+                retry = first_row(db.execute(
                     "SELECT immediate_retries, source_retries FROM pond_retry WHERE pond_id = ?", (pond_id,)
-                ).fetchone()
+                ))
                 # A Spout with no budget set retries a failed delivery on its Pond's next few publishes
                 # (delivery failures are often transient); a Pond defaults to no retries.
                 imm, onc = retry if retry else (0, SPOUT_SOURCE_RETRIES if is_spout else 0)
-                duck_row = db.execute(
+                duck_row = first_row(db.execute(
                     "SELECT duck_target, dedicated_instance_type, dedicated_auto_stop, "
                     "flock_mode, flock_engine, oom_policy, deploy_config, flock_accept FROM pond_duck "
                     "WHERE pond_id = ?",
                     (pond_id,)
-                ).fetchone()
+                ))
                 self.duck_overrides[key] = _duck_override_row(duck_row)
-                declared = db.execute(
+                declared = first_row(db.execute(
                     "SELECT duck_pool, flock_mode, flock_engine, oom_policy, flock_accept FROM pond_version "
                     "WHERE id = ?",
                     (pv_id,),
-                ).fetchone()
+                ))
                 self.duck_declared[key] = {
                     "duck_target": declared[0], "flock_mode": declared[1],
                     "flock_engine": declared[2], "oom_policy": declared[3], "flock_accept": declared[4],
                 } if declared else {}
                 # always_run is a Pond property ORed up from its Ripples: any always_run Ripple means
                 # the Pond runs every time (never engine-passed). See plans/no-change-skip.md.
-                always_run = bool(db.execute(
+                always_run = bool(first_row(db.execute(
                     "SELECT MAX(always_run) FROM ripple WHERE pond_version_id = ?", (pv_id,)
-                ).fetchone()[0])
+                ))[0])
                 # Pool identity + persist mode (plans/persist.md): where this Pond's Duck actually runs
                 # decides whose Sinks see end_f (same Pool) vs persisted_f (cross-Pool), and whether its
                 # own publish is async-mirrored. Draws/Spouts run in the Catchment process → Catchment Pool.
@@ -540,10 +544,10 @@ class Driver(TapsMixin):
                 pond_states[key] = self._load_pond_state(pond_id)
                 if is_spout:
                     # The egress config + the standing-Wake armed state (Sleep persists as armed=0).
-                    cfg = db.execute(
+                    cfg = first_row(db.execute(
                         "SELECT table_name, destination, mode, armed FROM pond_spout WHERE pond_id = ?",
                         (pond_id,),
-                    ).fetchone()
+                    ))
                     if cfg:
                         self.meta[key]["spout"] = {"table": cfg[0], "destination": cfg[1], "mode": cfg[2]}
                         self.meta[key]["source_key"] = sources[0] if sources else None
@@ -567,17 +571,17 @@ class Driver(TapsMixin):
                 # Restore execution state from run history: gen (run counts), per-Ripple freshness, and
                 # any Pond Run that was still 'running' when the Catchment stopped (resumed below).
                 ps = pond_states[key]
-                ps.runs_started = db.execute(
+                ps.runs_started = first_row(db.execute(
                     "SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ?", (pv_id,)
-                ).fetchone()[0]
-                ps.runs_completed = db.execute(
+                ))[0]
+                ps.runs_completed = first_row(db.execute(
                     "SELECT COUNT(*) FROM pond_run WHERE pond_version_id = ? AND status = 'success'", (pv_id,)
-                ).fetchone()[0]
+                ))[0]
                 for rid, rname in rip_rows:
-                    row = db.execute(
+                    row = first_row(db.execute(
                         "SELECT MAX(f) FROM ripple_run WHERE pond_version_id = ? AND ripple_id = ? "
                         "AND status = 'success'", (pv_id, rid),
-                    ).fetchone()
+                    ))
                     if row and row[0]:
                         ef = datetime.fromisoformat(row[0])
                         ripple_states[f"{key}.{rname}"].start_f = ef
@@ -709,11 +713,11 @@ class Driver(TapsMixin):
             derive_blocked(self.state, pid)
 
     def _load_pond_state(self, pond_id: int) -> PondState:
-        row = self.db.execute(
+        row = first_row(self.db.execute(
             "SELECT start_f, end_f, d_ms, is_failed, is_blocked, failed_f, failures, is_killed, rebuild_pending, "
             "repairing, changed_f FROM pond_state WHERE pond_id = ?",
             (pond_id,),
-        ).fetchone()
+        ))
         ps = PondState()
         if row:
             (sf, ef, d_ms, is_failed, is_blocked, failed_f, failures, is_killed, rebuild_pending,
@@ -1226,7 +1230,7 @@ class Driver(TapsMixin):
                 if ps.demand or ps.standing_wake or self.state.refreshes.get(key):
                     raise ValueError("the Pond has demand — clear it first (duckstring control sleep)")
             pond_id = meta["pond_id"]
-            (pn_id,) = self.db.execute("SELECT pond_name_id FROM pond WHERE id = ?", (pond_id,)).fetchone()
+            (pn_id,) = first_row(self.db.execute("SELECT pond_name_id FROM pond WHERE id = ?", (pond_id,)))
             # Blast radius: sinks that pin this line (they'll block on the missing Source) + its own Spouts.
             now_blocked = sorted({r[0] for r in self.db.execute(
                 "SELECT pn.name FROM pond_to_pond ptp JOIN pond p ON p.id = ptp.pond_id "
@@ -1769,10 +1773,10 @@ class Driver(TapsMixin):
     def _pond_ids(self, pond_key: str) -> tuple[int, int, int, str, int]:
         """(pond_id, pond_version_id, pond_name_id, name, major) for a pond key."""
         m = self.meta[pond_key]
-        row = self.db.execute(
+        row = first_row(self.db.execute(
             "SELECT p.id, p.pond_version_id, p.pond_name_id, p.major FROM pond p WHERE p.id = ?",
             (m["pond_id"],),
-        ).fetchone()
+        ))
         return (row[0], row[1], row[2], m["name"], row[3])
 
     def _output_tables(self, pond_version_id: int) -> set[str]:
@@ -1820,9 +1824,9 @@ class Driver(TapsMixin):
             self.state_version += 1
 
     def served_major(self, name: str) -> int | None:
-        row = self.db.execute(
+        row = first_row(self.db.execute(
             "SELECT ps.served_major FROM pond_serve ps JOIN pond_name pn ON pn.id = ps.pond_name_id "
-            "WHERE pn.name = ?", (name,)).fetchone()
+            "WHERE pn.name = ?", (name,)))
         return row[0] if row else None
 
     def deployed_majors(self, name: str) -> list[int]:
@@ -1846,7 +1850,7 @@ class Driver(TapsMixin):
                 raise ValueError(
                     f"'{name}@{major}' doesn't publish currently-served table(s): {', '.join(sorted(missing))}")
         with self.lock:
-            (pn_id,) = self.db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)).fetchone()
+            (pn_id,) = first_row(self.db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)))
             self.db.execute(
                 "INSERT INTO pond_serve (pond_name_id, served_major) VALUES (?, ?) "
                 "ON CONFLICT(pond_name_id) DO UPDATE SET served_major = excluded.served_major",
@@ -1898,9 +1902,9 @@ class Driver(TapsMixin):
         an existing window (windows on a Pond must form a non-overlapping supply timeline)."""
         with self.lock:
             pond_id = self.meta[pond]["pond_id"]
-            if self.db.execute(
+            if first_row(self.db.execute(
                 "SELECT 1 FROM pond_window WHERE pond_id = ? AND name = ?", (pond_id, name)
-            ).fetchone():
+            )):
                 raise ValueError(f"A window named '{name}' already exists on '{pond}'")
             new_w = self._row_to_window(
                 (start_anchor, duration_seconds, freq_unit, freq_interval, valid_days, until_time)
@@ -2032,10 +2036,10 @@ class Driver(TapsMixin):
                 cfg = sm.get("spout", {})
                 err = None
                 if ps.is_failed:
-                    row = self.db.execute(
+                    row = first_row(self.db.execute(
                         "SELECT error FROM pond_run WHERE pond_version_id = ? AND status = 'failed' "
                         "ORDER BY f DESC LIMIT 1", (sm["version_id"],),
-                    ).fetchone()
+                    ))
                     err = row[0] if row else None
                 out.append({
                     "name": sm["name"].split("#", 1)[1], "table": cfg.get("table"),
@@ -2108,7 +2112,12 @@ class Driver(TapsMixin):
             self, "state", clear_pond(self.state, skey, _now())))
 
     def resync_spout(self, pond: str, name: str) -> bool:
-        """Force a full re-egress of the current state."""
+        """Force a full re-egress of the current state, also to a destination that keeps its own watermark
+        (Postgres, DuckLake), which a Force alone would find already delivered."""
+        with self.lock:
+            skey = self._resolve_spout(pond, name)
+            if skey is not None:
+                self._resync_spouts.add(skey)
         return self.spout_force(pond, name)
 
     # ─── Egress worker support (node dispatch) ──────────────────────────────────
@@ -2142,7 +2151,9 @@ class Driver(TapsMixin):
                     "pond_name": src["name"], "major": src["major"],
                     "table": cfg.get("table"), "tables": tables,
                     "destination": cfg.get("destination"), "mode": cfg.get("mode"),
+                    "resync": skey in self._resync_spouts,
                 })
+                self._resync_spouts.discard(skey)
             self._pending_egress = []
             return jobs
 
@@ -2205,15 +2216,15 @@ class Driver(TapsMixin):
         events = ",".join(normalise_events(events)) if events else "all"
         scope_name, scope_major = _split_scope(scope)
         if scope_name is not None and scope_major is None:  # bare name → its highest deployed major
-            row = self.db.execute(
+            row = first_row(self.db.execute(
                 "SELECT MAX(p.major) FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id WHERE pn.name = ?",
                 (scope_name,),
-            ).fetchone()
+            ))
             if row is None or row[0] is None:
                 raise ValueError(f"Pond '{scope_name}' is not deployed — give a major, e.g. '{scope_name}@1'")
             scope_major = row[0]
         with self.lock:
-            existing = self.db.execute("SELECT 1 FROM alert_channel WHERE name = ?", (name,)).fetchone()
+            existing = first_row(self.db.execute("SELECT 1 FROM alert_channel WHERE name = ?", (name,)))
             if existing:
                 raise ValueError(f"An alert channel named '{name}' already exists")
             self.db.execute(
@@ -2243,7 +2254,7 @@ class Driver(TapsMixin):
 
     def channel_destination(self, name: str) -> str | None:
         with self.lock:
-            row = self.db.execute("SELECT destination FROM alert_channel WHERE name = ?", (name,)).fetchone()
+            row = first_row(self.db.execute("SELECT destination FROM alert_channel WHERE name = ?", (name,)))
             return row[0] if row else None
 
     def deliveries(self, limit: int = 100) -> list[dict]:
@@ -2283,7 +2294,7 @@ class Driver(TapsMixin):
         """Record a failed send: bump attempts, park 'failed' at the cap (stop retrying a dead channel,
         but keep the row auditable), else leave 'pending' for the next worker tick."""
         with self.lock:
-            row = self.db.execute("SELECT attempts FROM alert_delivery WHERE id = ?", (delivery_id,)).fetchone()
+            row = first_row(self.db.execute("SELECT attempts FROM alert_delivery WHERE id = ?", (delivery_id,)))
             if row is None:
                 return
             attempts = row[0] + 1
@@ -2295,7 +2306,7 @@ class Driver(TapsMixin):
             self.db.commit()
 
     def _catchment_display(self) -> str | None:
-        name = self.db.execute("SELECT value FROM catchment_meta WHERE key = 'name'").fetchone()
+        name = first_row(self.db.execute("SELECT value FROM catchment_meta WHERE key = 'name'"))
         return name[0] if name and name[0] else None
 
     def _emit_alert(self, kind: str, *, scope_pond: str | None, scope_major: int | None = None,
@@ -2429,9 +2440,9 @@ class Driver(TapsMixin):
                     )
 
     def _any_renotify(self) -> bool:
-        return self.db.execute(
+        return first_row(self.db.execute(
             "SELECT 1 FROM alert_channel WHERE enabled = 1 AND renotify_ms IS NOT NULL LIMIT 1"
-        ).fetchone() is not None
+        )) is not None
 
     def _check_renotify(self, now: datetime) -> None:
         """The tick-driven re-notify sweep (alongside _check_freshness): while a **failure episode
@@ -2762,7 +2773,7 @@ class Driver(TapsMixin):
 
     def destroy_duct(self, origin: str) -> bool:
         with self.lock:
-            row = self.db.execute("SELECT id FROM duct WHERE origin_catchment = ?", (origin,)).fetchone()
+            row = first_row(self.db.execute("SELECT id FROM duct WHERE origin_catchment = ?", (origin,)))
             if row is None:
                 return False
             duct_id = row[0]
@@ -2782,7 +2793,7 @@ class Driver(TapsMixin):
         version when the caller knows it, so ``[sources]`` pins are checked against it from the start; the
         poller keeps it current either way (:meth:`observe_remote`)."""
         with self.lock:
-            row = self.db.execute("SELECT id FROM duct WHERE origin_catchment = ?", (origin,)).fetchone()
+            row = first_row(self.db.execute("SELECT id FROM duct WHERE origin_catchment = ?", (origin,)))
             if row is None:
                 raise KeyError(f"No duct from '{origin}' — create it first")
             self._create_draw(pond_name, major, version)  # raises ValueError on a local-Pond collision
@@ -2796,7 +2807,7 @@ class Driver(TapsMixin):
 
     def remove_duct_pond(self, origin: str, pond_name: str, major: int) -> bool:
         with self.lock:
-            row = self.db.execute("SELECT id FROM duct WHERE origin_catchment = ?", (origin,)).fetchone()
+            row = first_row(self.db.execute("SELECT id FROM duct WHERE origin_catchment = ?", (origin,)))
             if row is None:
                 return False
             cur = self.db.execute(
@@ -2856,18 +2867,18 @@ class Driver(TapsMixin):
         db = self.db
         db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, 'inlet')", (name,))
         db.execute("UPDATE pond_name SET kind = 'inlet' WHERE name = ?", (name,))
-        (pn_id,) = db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)).fetchone()
+        (pn_id,) = first_row(db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)))
 
-        existing = db.execute(
+        existing = first_row(db.execute(
             "SELECT is_draw FROM pond WHERE pond_name_id = ? AND major = ?", (pn_id, major)
-        ).fetchone()
+        ))
         if existing is not None and not existing[0]:
             raise ValueError(f"A local Pond '{name}@{major}' already exists — cannot draw it over a duct")
 
-        existing_pv = db.execute(
+        existing_pv = first_row(db.execute(
             "SELECT pv.version FROM pond p JOIN pond_version pv ON pv.id = p.pond_version_id "
             "WHERE p.pond_name_id = ? AND p.major = ?", (pn_id, major),
-        ).fetchone()
+        ))
         if existing_pv is not None:  # re-drawing an existing Draw: keep its version row (and history)
             version = existing_pv[0]
         elif not _draw_version_ok(version, major):
@@ -2877,9 +2888,9 @@ class Driver(TapsMixin):
             "VALUES (?, ?, ?, ?)",
             (pn_id, version, major, f"draw://{name}@{major}"),
         )
-        (pv_id,) = db.execute(
+        (pv_id,) = first_row(db.execute(
             "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
-        ).fetchone()
+        ))
         db.execute("INSERT OR IGNORE INTO ripple (pond_version_id, name) VALUES (?, 'draw')", (pv_id,))
         db.execute(
             "INSERT INTO pond (pond_name_id, major, pond_version_id, is_draw) VALUES (?, ?, ?, 1) "
@@ -2892,14 +2903,14 @@ class Driver(TapsMixin):
         """Remove a Pond Draw's identity + state rows (caller holds the lock and reloads). Leaves the
         ``pond_name`` placeholder so a Sink that still references it keeps its source row."""
         db = self.db
-        row = db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)).fetchone()
+        row = first_row(db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)))
         if row is None:
             return
         pn_id = row[0]
-        prow = db.execute(
+        prow = first_row(db.execute(
             "SELECT id, pond_version_id, is_draw FROM pond WHERE pond_name_id = ? AND major = ?",
             (pn_id, major),
-        ).fetchone()
+        ))
         if prow is None or not prow[2]:
             return  # not a Draw — never remove a real local Pond here
         pond_id, pv_id = prow[0], prow[1]
@@ -2927,17 +2938,17 @@ class Driver(TapsMixin):
         db = self.db
         sname = f"{source_name}#{spout}"
         db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, 'outlet')", (sname,))
-        (pn_id,) = db.execute("SELECT id FROM pond_name WHERE name = ?", (sname,)).fetchone()
-        (src_pn_id,) = db.execute("SELECT id FROM pond_name WHERE name = ?", (source_name,)).fetchone()
+        (pn_id,) = first_row(db.execute("SELECT id FROM pond_name WHERE name = ?", (sname,)))
+        (src_pn_id,) = first_row(db.execute("SELECT id FROM pond_name WHERE name = ?", (source_name,)))
 
         version = f"{source_major}.0.0"
         db.execute(
             "INSERT OR IGNORE INTO pond_version (pond_name_id, version, major, source_path) VALUES (?, ?, ?, ?)",
             (pn_id, version, source_major, f"spout://{sname}@{source_major}"),
         )
-        (pv_id,) = db.execute(
+        (pv_id,) = first_row(db.execute(
             "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
-        ).fetchone()
+        ))
         db.execute("INSERT OR IGNORE INTO ripple (pond_version_id, name) VALUES (?, 'egress')", (pv_id,))
         db.execute(
             "INSERT INTO pond (pond_name_id, major, pond_version_id, is_spout) VALUES (?, ?, ?, 1) "
@@ -2945,9 +2956,9 @@ class Driver(TapsMixin):
             "is_spout = 1",
             (pn_id, source_major, pv_id),
         )
-        (spout_pid,) = db.execute(
+        (spout_pid,) = first_row(db.execute(
             "SELECT id FROM pond WHERE pond_name_id = ? AND major = ?", (pn_id, source_major)
-        ).fetchone()
+        ))
         db.execute(
             "INSERT OR IGNORE INTO pond_to_pond (pond_id, source_pond_name_id, source_major, required) "
             "VALUES (?, ?, ?, 1)", (spout_pid, src_pn_id, source_major),
@@ -2967,7 +2978,7 @@ class Driver(TapsMixin):
         if meta is None or not meta.get("is_spout"):
             return False
         pond_id, pv_id = meta["pond_id"], meta["version_id"]
-        (pn_id,) = db.execute("SELECT pond_name_id FROM pond WHERE id = ?", (pond_id,)).fetchone()
+        (pn_id,) = first_row(db.execute("SELECT pond_name_id FROM pond WHERE id = ?", (pond_id,)))
         db.execute("DELETE FROM ripple_run WHERE pond_version_id = ?", (pv_id,))
         db.execute("DELETE FROM pond_run WHERE pond_version_id = ?", (pv_id,))
         db.execute("DELETE FROM ripple_run_lineage WHERE pond_version_id = ?", (pv_id,))
@@ -3307,12 +3318,12 @@ class Driver(TapsMixin):
         meta = self.meta[pond]
         if f is None:
             return meta["version_id"]
-        row = self.db.execute(
+        row = first_row(self.db.execute(
             "SELECT pr.pond_version_id FROM pond_run pr JOIN pond_version pv ON pv.id = pr.pond_version_id "
             "JOIN pond p ON p.pond_name_id = pv.pond_name_id AND p.major = pv.major "
             "WHERE p.id = ? AND pr.f = ? ORDER BY pr.pond_version_id = ? DESC, pr.pond_version_id DESC LIMIT 1",
             (meta["pond_id"], f, meta["version_id"]),
-        ).fetchone()
+        ))
         return row[0] if row else meta["version_id"]
 
     def _record_ripple_run(
@@ -3324,7 +3335,7 @@ class Driver(TapsMixin):
         if vid == meta["version_id"]:
             rid = meta["ripple_ids"].get(rname)
         else:
-            row = self.db.execute("SELECT id FROM ripple WHERE pond_version_id = ? AND name = ?", (vid, rname)).fetchone()
+            row = first_row(self.db.execute("SELECT id FROM ripple WHERE pond_version_id = ? AND name = ?", (vid, rname)))
             rid = row[0] if row else None
         if rid is None:
             return
@@ -3534,19 +3545,19 @@ class Driver(TapsMixin):
         (version, timings, status), its input window ``(previous_f, f]`` (the bracket every Source was
         read over — ``previous_f`` is the prior *successful* run), and the declared Sources."""
         with self.lock:
-            row = self.db.execute(
+            row = first_row(self.db.execute(
                 "SELECT pr.f, pv.version, pr.started_at, pr.finished_at, pr.status "
                 "FROM pond_run pr JOIN pond_version pv ON pv.id = pr.pond_version_id "
                 "JOIN pond_name pn ON pn.id = pv.pond_name_id "
                 "WHERE pn.name = ? AND pv.major = ? AND pr.f = ? "
                 "ORDER BY pr.finished_at DESC LIMIT 1", (pond_name, major, row_f),
-            ).fetchone()
-            prev = self.db.execute(
+            ))
+            prev = first_row(self.db.execute(
                 "SELECT MAX(pr.f) FROM pond_run pr JOIN pond_version pv ON pv.id = pr.pond_version_id "
                 "JOIN pond_name pn ON pn.id = pv.pond_name_id "
                 "WHERE pn.name = ? AND pv.major = ? AND pr.f < ? AND pr.status = 'success'",
                 (pond_name, major, row_f),
-            ).fetchone()
+            ))
             key = f"{pond_name}@{major}"
             sources = sorted(
                 self.meta[sk]["name"] for sk in
@@ -3613,12 +3624,12 @@ class Driver(TapsMixin):
             print(f"[catchment] openlineage emit failed ({pond}): {exc}", flush=True)
 
     def _openlineage_channels(self) -> bool:
-        return self.db.execute(
+        return first_row(self.db.execute(
             "SELECT 1 FROM alert_channel WHERE enabled = 1 AND events LIKE '%openlineage%' LIMIT 1"
-        ).fetchone() is not None
+        )) is not None
 
     def _catchment_uuid(self) -> str | None:
-        row = self.db.execute("SELECT value FROM catchment_meta WHERE key = 'id'").fetchone()
+        row = first_row(self.db.execute("SELECT value FROM catchment_meta WHERE key = 'id'"))
         return row[0] if row and row[0] else None
 
     def _capture_schema(self, pond: str, schema: dict, f: str | None = None) -> None:
@@ -3676,10 +3687,10 @@ class Driver(TapsMixin):
 
     def _run_pins(self, pond: str, f: str) -> dict[str, str] | None:
         """The Source pins recorded for this Pond's Run at ``f`` (``None`` if the Run has no row yet)."""
-        row = self.db.execute(
+        row = first_row(self.db.execute(
             "SELECT source_pins FROM pond_run WHERE pond_version_id = ? AND f = ?",
             (self._run_version_id(pond, f), f),
-        ).fetchone()
+        ))
         if row is None or row[0] is None:
             return None
         try:
@@ -3962,10 +3973,10 @@ class Driver(TapsMixin):
                 if ps.is_failed:
                     from ..schema_contract import CONTRACT_PREFIX
 
-                    row = self.db.execute(
+                    row = first_row(self.db.execute(
                         "SELECT error FROM pond_run WHERE pond_version_id = ? AND status = 'failed' "
                         "ORDER BY f DESC LIMIT 1", (self.meta[key]["version_id"],),
-                    ).fetchone()
+                    ))
                     error = row[0] if row else None
                     failure_kind = "contract" if (error or "").startswith(CONTRACT_PREFIX) else "error"
 

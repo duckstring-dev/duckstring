@@ -4,6 +4,8 @@ served by the Catchment, and never able to fail a deploy. The lineage walk itsel
 
 from __future__ import annotations
 
+from trickle.io import first_row
+
 
 def test_deploy_capture_stores_and_serves_column_lineage(tmp_path):
     from duckstring.catchment.db import connect, migrate
@@ -40,7 +42,7 @@ def test_deploy_capture_stores_and_serves_column_lineage(tmp_path):
 
     # recomputed wholesale on redeploy (no stale rows)
     _store_column_lineage(db, "sales", "1.0.0", capture_lineage_rows(ripples[:1], {}))
-    n = db.execute("SELECT count(DISTINCT \"table\") FROM pond_version_column_lineage").fetchone()[0]
+    n = first_row(db.execute("SELECT count(DISTINCT \"table\") FROM pond_version_column_lineage"))[0]
     assert n == 1
 
 
@@ -58,7 +60,7 @@ def test_deploy_capture_never_fails_the_deploy(tmp_path):
     ripples = [{"func": explodes, "name": "boom", "parents": []}]
     _register(db, "src", "1.0.0", "inlet", "ponds/src/1.0.0", cfg, ripples)
     _store_column_lineage(db, "src", "1.0.0", capture_lineage_rows(ripples, {}))  # must not raise
-    assert db.execute("SELECT count(*) FROM pond_version_column_lineage").fetchone()[0] == 0
+    assert first_row(db.execute("SELECT count(*) FROM pond_version_column_lineage"))[0] == 0
 
 
 # ── Phase 3: kind:sql column lineage via sqlglot (the duckstring[lineage] extra) ──

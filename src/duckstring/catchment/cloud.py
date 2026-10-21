@@ -13,6 +13,8 @@ import functools
 import os
 import sqlite3
 
+from ..trickle_io import first_row
+
 DATA_ROOT_KEY = "data_root"
 _REMOTE_SCHEMES = ("s3", "gs")
 
@@ -20,7 +22,7 @@ _REMOTE_SCHEMES = ("s3", "gs")
 # ─── the generic key/value setting store ─────────────────────────────────────────
 
 def get_setting(con: sqlite3.Connection, key: str) -> str | None:
-    row = con.execute("SELECT value FROM catchment_setting WHERE key = ?", (key,)).fetchone()
+    row = first_row(con.execute("SELECT value FROM catchment_setting WHERE key = ?", (key,)))
     return row[0] if row else None
 
 
@@ -44,7 +46,7 @@ def has_published_data(con: sqlite3.Connection) -> bool:
     """Whether the Catchment has ever published output — a successful Pond Run. The set-once guard
     keys off this: while it is False the data root is freely settable; once True, switching it would
     strand the published data, so the setter refuses."""
-    row = con.execute("SELECT 1 FROM pond_run WHERE status = 'success' LIMIT 1").fetchone()
+    row = first_row(con.execute("SELECT 1 FROM pond_run WHERE status = 'success' LIMIT 1"))
     return row is not None
 
 

@@ -11,11 +11,12 @@ import math
 import pytest
 from trickle import acc, agg
 from trickle.builder import BuildError
+from trickle.io import first_row
 from trickle_support import NEVER, T, at, merge, rows, star, ts
 
 
 def _one(db, sql):
-    return db.sql(sql).fetchone()
+    return first_row(db.sql(sql))
 
 
 # ─── distributive and algebraic ──────────────────────────────────────────────────

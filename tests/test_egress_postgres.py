@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 import duckdb
 import pytest
+from trickle.io import first_row
 
 from duckstring.egress import get_egress
 from duckstring.egress.postgres import PostgresEgressDriver
@@ -298,9 +299,9 @@ def test_postgres_real_e2e(tmp_path):
     ver.execute(f"ATTACH '{pg_uri}' AS verify (TYPE postgres)")
     rows = ver.execute('SELECT id, v FROM verify.public."fact" ORDER BY id').fetchall()
     assert rows == [(2, "B"), (3, "c")]  # 1 deleted, 2 updated, 3 inserted
-    wm = ver.execute(
+    wm = first_row(ver.execute(
         "SELECT f FROM verify.public._duckstring_egress WHERE table_name = 'fact'"
-    ).fetchone()[0]
+    ))[0]
     assert str(wm).startswith(F2.isoformat()[:19])  # exactly-once cursor advanced to the delivered epoch
 
     # Re-delivery at the same epoch is a no-op (the watermark already covers it → empty delta).

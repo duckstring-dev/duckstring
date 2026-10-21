@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import duckdb
+from trickle.io import first_row
 
 from duckstring.dataplane import (
     ParquetDataPlane,
@@ -327,7 +328,7 @@ def test_a_sink_runs_pins_are_recorded_and_bound_its_sources_retention(tmp_path)
     driver.refresh_now("rpt@1", at=F1)  # ask for the Source's freshness: it has it
     job = next(j for j in driver.jobs["rpt@1"] if j["kind"] == "begin_run")
     assert job["source_f"] == {"sales": F1.isoformat()}
-    row = driver.db.execute("SELECT f, source_pins FROM pond_run WHERE status = 'running'").fetchone()
+    row = first_row(driver.db.execute("SELECT f, source_pins FROM pond_run WHERE status = 'running'"))
     assert json.loads(row[1]) == {"sales": F1.isoformat()}
 
     # The Source publishes F2 while the Sink runs: its versions must reach back to the Sink's pin.

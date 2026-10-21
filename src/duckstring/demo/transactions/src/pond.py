@@ -16,7 +16,7 @@ def ingest(pond):
     try:
         (next_id,) = pond.con.execute(
             'SELECT COALESCE(MAX(id), -1) + 1 FROM "transaction"'
-        ).fetchone()
+        ).fetchall()[0]
         existing = pond.con.sql('SELECT * FROM "transaction"')
     except Exception:
         next_id = 0

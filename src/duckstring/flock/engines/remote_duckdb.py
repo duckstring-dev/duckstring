@@ -27,6 +27,8 @@ import logging
 import time
 import uuid
 
+from ...trickle_io import first_row
+
 log = logging.getLogger("duckstring.flock.remote")
 
 _BATCH_ROWS = 1_000_000
@@ -56,7 +58,7 @@ def _walk(node, visit) -> None:
 def query_tables(con, query: str) -> list[tuple[str, str, str]]:
     """The base tables ``query`` reads, as ``(catalog, schema, table)``, leaving out its own CTEs. Parsed by
     DuckDB (``json_serialize_sql``); raises ``ValueError`` on SQL DuckDB can't parse."""
-    tree = json.loads(con.execute("SELECT json_serialize_sql(?)", [query]).fetchone()[0])
+    tree = json.loads(first_row(con.execute("SELECT json_serialize_sql(?)", [query]))[0])
     if tree.get("error"):
         raise ValueError(tree.get("error_message", "unparseable SQL"))
     ctes: set[str] = set()

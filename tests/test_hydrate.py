@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import duckdb
+from trickle.io import first_row
 
 from duckstring import agg
 from duckstring import trickle_io as T
@@ -52,7 +53,7 @@ def test_hydrate_round_trip_merge_append_overwrite(tmp_path):
 
     # current state reproduced (merge reconstructs base ⊎ changelog; append is its history)
     assert sorted(T.current_state(fresh, "m").fetchall()) == [(1, "a"), (2, "B"), (3, "c")]
-    assert fresh.execute('SELECT count(*) FROM "a"').fetchone()[0] == 3
+    assert first_row(fresh.execute('SELECT count(*) FROM "a"'))[0] == 3
     assert fresh.execute("SELECT * FROM o").fetchall() == [(1, "x")]
 
     # the changelog window still answers a delta read (registry rows match the source registry's)
@@ -104,7 +105,7 @@ def test_hydrate_resumes_incremental_aggregate(tmp_path):
     revived = _con()
     hydrate_registry(revived, rec / "ponds" / "o" / "m1" / "data")
     # the Extension-1 snapshot restored the raw accumulators
-    assert revived.execute('SELECT count(*) FROM "_duckstring_agg_by_k"').fetchone()[0] == 2
+    assert first_row(revived.execute('SELECT count(*) FROM "_duckstring_agg_by_k"'))[0] == 2
     publish_fact(fact, rec, e2, ts(2))
     sink_run(revived, rec, ts(2), ts(1))  # incremental (previous_f=ts(1), fully covered)
     assert read_out(rec) == want == [("A", 1, 10), ("B", 2, 1)]

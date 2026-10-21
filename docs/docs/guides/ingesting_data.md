@@ -108,10 +108,10 @@ When a source can be asked for only the records after some point, an Inlet can r
 @ripple
 def ingest(pond):
     since = None
-    if pond.con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'event'").fetchone()[0]:
+    if pond.con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'event'").fetchall()[0][0]:
         since = pond.con.execute(
             "SELECT max(created_at) FROM event WHERE _duckstring_f < ?", [pond.f]
-        ).fetchone()[0]
+        ).fetchall()[0][0]
     new = pond.con.sql("SELECT * FROM read_parquet('s3://acme-events/*.parquet')")
     if since is not None:
         new = new.filter(f"created_at > '{since}'")
@@ -139,8 +139,8 @@ def ingest(pond):
     with urllib.request.urlopen(urllib.request.Request(URL, method="HEAD")) as resp:
         etag = resp.headers["ETag"]
     pond.con.execute("CREATE TABLE IF NOT EXISTS _duckstring_seen (url VARCHAR, etag VARCHAR)")
-    seen = pond.con.execute("SELECT etag FROM _duckstring_seen WHERE url = ?", [URL]).fetchone()
-    if seen and seen[0] == etag:
+    seen = pond.con.execute("SELECT etag FROM _duckstring_seen WHERE url = ?", [URL]).fetchall()
+    if seen and seen[0][0] == etag:
         pond.skip()
         return
     pond.write_table("product", pond.con.sql(f"SELECT * FROM read_csv('{URL}')"))

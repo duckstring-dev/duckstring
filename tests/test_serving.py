@@ -8,6 +8,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from trickle.io import first_row
 
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
@@ -30,9 +31,9 @@ def _cfg(serve_tables=None, **extra):
 
 
 def _pv_id(db, name, version):
-    return db.execute(
+    return first_row(db.execute(
         "SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
-        "WHERE pn.name = ? AND pv.version = ?", (name, version)).fetchone()[0]
+        "WHERE pn.name = ? AND pv.version = ?", (name, version)))[0]
 
 
 def _add_output_tables(db, pv_id, tables):

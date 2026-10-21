@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import traceback
+from contextlib import nullcontext
 from pathlib import Path
 
 from fastapi.concurrency import run_in_threadpool
@@ -29,7 +30,8 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
 
     A **transactional, delta-capable** destination (Postgres) syncs *incrementally*: read the changelog
     delta over ``(destination watermark, f]`` and ``apply_delta`` (upserts + deletes), falling back to a
-    full reload on a full read (bootstrap / coverage-miss / a changed overwrite source). Others snapshot."""
+    full reload on a full read (bootstrap / coverage-miss / a changed overwrite source). A lake (DuckLake) does
+    the same for any source, inside one batch per run. Others snapshot."""
     from datetime import datetime
 
     import duckdb
@@ -66,33 +68,39 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
         else:
             tables = dp.list_tables(data_dir)
         mode = (job.get("mode") or "auto").lower()
-        for table in tables:
-            pk = sidecar.get(table, {}).get("pk") or None
-            if mode == "append" and getattr(caps, "mirrors_layout", False):
-                # The incremental object-store path (opt-in — `mode=append`): mirror the table's
-                # published collection to the destination, syncing only new/changed artifacts. The
-                # destination stays a readable Duckstring layout (parts + tiers + sidecar).
-                entry = sidecar.get(table)
-                if entry is None:
-                    raise ValueError(
-                        f"mode=append mirrors a published Duckstring collection, but table {table!r} "
-                        f"has no sidecar entry at the source — use mode=full for a plain snapshot"
-                    )
-                driver.mirror(data_dir, table, entry, f=f)
-            elif caps.supports_delta and caps.transactional:
-                if not pk:  # the transactional-PK requirement, enforced at egress for a not-yet-checked source
-                    raise ValueError(
-                        f"egress to a transactional destination needs a primary key — table {table!r} is "
-                        "not a merge Trickle with a declared pk (put a .merge(pk=…) before this Spout)"
-                    )
-                previous_f = driver.watermark(con, table) or NEVER  # the in-destination cursor (exactly-once)
-                delta = read_delta(con, data_dir, table, previous_f, f, dp=dp, pin=pin)
-                if delta.is_full:  # bootstrap / coverage-miss / changed overwrite source → reload
-                    driver.write_full(con, con.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk, f=f)
+        # A driver that can deliver a run's tables together (a lake: one snapshot per run) does so.
+        batch = getattr(driver, "batch", None)
+        with batch(con, pond=job["pond_name"], major=job["major"], f=f) if batch else nullcontext():
+            for table in tables:
+                pk = sidecar.get(table, {}).get("pk") or None
+                if mode == "append" and getattr(caps, "mirrors_layout", False):
+                    # The incremental object-store path (opt-in — `mode=append`): mirror the table's
+                    # published collection to the destination, syncing only new/changed artifacts. The
+                    # destination stays a readable Duckstring layout (parts + tiers + sidecar).
+                    entry = sidecar.get(table)
+                    if entry is None:
+                        raise ValueError(
+                            f"mode=append mirrors a published Duckstring collection, but table {table!r} "
+                            f"has no sidecar entry at the source — use mode=full for a plain snapshot"
+                        )
+                    driver.mirror(data_dir, table, entry, f=f)
+                elif caps.supports_delta and caps.transactional:
+                    if not pk and caps.requires_pk:  # enforced at egress for a source not checked when added
+                        raise ValueError(
+                            f"egress to a transactional destination needs a primary key — table {table!r} is "
+                            "not a merge Trickle with a declared pk (put a .merge(pk=…) before this Spout)"
+                        )
+                    # The in-destination cursor (exactly-once); a resync reads from the beginning instead.
+                    previous_f = NEVER if job.get("resync") else driver.watermark(con, table) or NEVER
+                    if previous_f >= f:
+                        continue  # already delivered (a replay): nothing to write, not even the watermark
+                    delta = read_delta(con, data_dir, table, previous_f, f, dp=dp, pin=pin)
+                    if delta.is_full:  # bootstrap / coverage-miss / changed overwrite source → reload
+                        driver.write_full(con, con.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk, f=f)
+                    else:
+                        driver.apply_delta(con, delta, table=table, pk=pk, f=f)
                 else:
-                    driver.apply_delta(con, delta, table=table, pk=pk, f=f)
-            else:
-                driver.write_full(con, con.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk, f=f)
+                    driver.write_full(con, con.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk, f=f)
     finally:
         con.close()
 

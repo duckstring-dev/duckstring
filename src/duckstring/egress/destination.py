@@ -1,7 +1,7 @@
 """Destination parsing/validation for a Spout (see plans/egress.md).
 
 A destination is a URI whose **scheme** selects the egress driver (`file://`, `s3://`, `gs://`,
-`postgres://`). Credentials travel inside it as ``${env:NAME}`` references, resolved only at egress time
+`postgres://`, `ducklake:`). Credentials travel inside it as ``${env:NAME}`` references, resolved only at egress time
 (:mod:`duckstring.egress.credentials`) — :func:`parse_destination` validates the *syntax* (known scheme,
 well-formed references) without resolving anything, so a Spout can be created before its secrets are
 present in the environment.
@@ -17,8 +17,9 @@ from . import credentials
 # Schemes a Spout may target. The concrete drivers are added with the egress worker; the construct
 # accepts the destination ahead of that, so the config can be in place when execution lands.
 OBJECT_STORE_SCHEMES = {"file", "s3", "gs"}
-TRANSACTIONAL_SCHEMES = {"postgres", "postgresql"}
-KNOWN_SCHEMES = OBJECT_STORE_SCHEMES | TRANSACTIONAL_SCHEMES
+TRANSACTIONAL_SCHEMES = {"postgres", "postgresql"}  # these need a primary key on every source table
+LAKE_SCHEMES = {"ducklake"}  # transactional too, but take any source (see Capabilities.requires_pk)
+KNOWN_SCHEMES = OBJECT_STORE_SCHEMES | TRANSACTIONAL_SCHEMES | LAKE_SCHEMES
 
 VALID_MODES = {"auto", "full", "append"}
 

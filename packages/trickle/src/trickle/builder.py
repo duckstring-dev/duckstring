@@ -42,6 +42,7 @@ from .io import (
     _q,
     _table_exists,
     _ts,
+    first_row,
     normalize_pk,
     read_meta,
     read_registry_delta,
@@ -695,16 +696,16 @@ class TrickleBuilder:
             counter = getattr(self.ctx, "count_table", None)  # external source → host's fast path if any
             if counter is not None:
                 return int(counter(ref))
-            return int(self.ctx.read_table(ref).aggregate("count(*)").fetchone()[0])  # correct fallback
+            return int(first_row(self.ctx.read_table(ref).aggregate("count(*)"))[0])  # correct fallback
         view = trickle.unique_name("count")
         if self._agg is not None:
             # group count: distinct groups in the current composed state — never runs the metric aggregations.
             by = ", ".join(_q(c) for c in self._agg["by"])
             self._full_join().create_view(view, replace=True)
-            return int(con.execute(f'SELECT count(*) FROM (SELECT DISTINCT {by} FROM {_q(view)})').fetchone()[0])
+            return int(first_row(con.execute(f'SELECT count(*) FROM (SELECT DISTINCT {by} FROM {_q(view)})'))[0])
         rel = self._materialise() if self._is_sql else self._full_join()
         rel.create_view(view, replace=True)
-        return int(con.execute(f'SELECT count(*) FROM {_q(view)}').fetchone()[0])
+        return int(first_row(con.execute(f'SELECT count(*) FROM {_q(view)}'))[0])
 
     # ─── the append spine-PK fast path (output keyed by the spine's own identity) ──
 
@@ -1402,7 +1403,7 @@ class TrickleBuilder:
         trips and skips the count; ``p <= 0`` trips on any change)."""
         if p >= 1.0 or delta.is_full:
             return False
-        total = self.ctx.read_table(ref).aggregate("count(*) AS n").fetchone()[0] or 0
+        total = first_row(self.ctx.read_table(ref).aggregate("count(*) AS n"))[0] or 0
         if total == 0:
             return False
         return delta.keys_count() > p * total

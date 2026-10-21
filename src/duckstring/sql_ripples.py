@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .core import RippleDeclarationError, parse_ref
+from .trickle_io import first_row
 
 WRITE_MODES = ("overwrite", "merge", "append")
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -170,7 +171,7 @@ def parse(ripple: SqlRipple, con=None) -> None:
 
     con = con or duckdb.connect()
     where = f"[ripples.{ripple.name}] ({ripple.path})"
-    raw = con.execute("SELECT json_serialize_sql(?)", [ripple.text]).fetchone()[0]
+    raw = first_row(con.execute("SELECT json_serialize_sql(?)", [ripple.text]))[0]
     tree = json.loads(raw)
     if tree.get("error"):
         raise _err(where, f"the file must hold one SELECT: {tree.get('error_message', 'unparseable')}")
@@ -270,7 +271,7 @@ def make_callable(ripple: SqlRipple):
         if ripple.reads:
             views = {(s.lower(), t.lower()): pond.source_view(s, t) for s, t in ripple.reads}
             tree = _rewrite(ripple.tree, views)
-            sql = con.execute("SELECT json_deserialize_sql(?)", [json.dumps(tree)]).fetchone()[0]
+            sql = first_row(con.execute("SELECT json_deserialize_sql(?)", [json.dumps(tree)]))[0]
         rel = con.sql(sql)
         if ripple.write == "merge":
             c = ripple.cluster or {}

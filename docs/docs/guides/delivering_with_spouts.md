@@ -1,6 +1,6 @@
 ---
 title: Delivering with Spouts
-description: Deliver a Pond's tables to object storage or Postgres.
+description: Deliver a Pond's tables to object storage, Postgres or a DuckLake.
 ---
 
 # Delivering with Spouts
@@ -65,6 +65,27 @@ The table must be a merge Trickle with a primary key, written with `merge_table`
 Delivery is exactly-once. The last delivered freshness is stored in a `_duckstring_egress` table in the same schema, updated in the same transaction as the data, so a delivery interrupted by a crash is rolled back and redone without duplicating anything.
 
 Deliver an append Trickle or a plain table by merging it upstream. A small Ripple that reads it and writes it with `merge_table` gives it the primary key Postgres needs.
+
+## Delivering to a DuckLake
+
+A [DuckLake](https://ducklake.select) keeps its tables as Parquet files with their metadata in a SQL database, so DuckDB, Spark and Trino can all read them. A DuckLake Spout delivers a Pond's tables into one:
+
+```bash
+duckstring spout add reports \
+  --to 'ducklake:sqlite:/srv/lake/meta.sqlite?data_path=s3://lakehouse/files/&schema=reports'
+```
+
+The destination is the string DuckDB's `ATTACH` takes for the lake, followed by Duckstring's options: `data_path` says where a new lake keeps its files (an existing lake already knows), and `schema` defaults to `main`. Files in S3 or Google Cloud Storage take the same credential parameters as an object-store Spout. For a lake catalogued in Postgres, keep the password in the secret store:
+
+```bash
+duckstring secret set LAKE_PG
+duckstring spout add reports \
+  --to 'ducklake:postgres:dbname=lake host=pg.internal user=loader password=${secret:LAKE_PG}?data_path=s3://lakehouse/files/'
+```
+
+Any table can go to a lake. A merge Trickle is applied by its primary key, as for Postgres, an append Trickle's new rows are inserted, and a plain table is replaced whole when its Pond publishes a new version of it. When a Spout delivers several tables, a run's tables go in one transaction, so readers of the lake see one snapshot per delivery, with `duckstring` as its author and the Pond (`reports@1`) as its commit message. Delivery is exactly-once, through a `_duckstring_egress` table in the same schema.
+
+Duckstring doesn't compact the lake or expire its snapshots, since those are decisions for whoever owns it (DuckLake's `ducklake_merge_adjacent_files` and `ducklake_expire_snapshots` do both). It never migrates the lake's catalog either. A lake the Spout creates under DuckDB 2.0 uses DuckLake 1.1, which readers on DuckDB 1.5 can't open.
 
 ## Checking a destination
 

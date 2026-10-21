@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..trickle_io import first_row
+
 DEFAULT_MEMORY_LIMIT = "1GB"
 DEFAULT_STATEMENT_TIMEOUT_S = 30.0
 
@@ -134,9 +136,9 @@ def build_serving_con(driver, *, sandboxed: bool, tap=None):
 
 
 def _relation_exists(con, schema: str, table: str) -> bool:
-    return con.execute(
+    return first_row(con.execute(
         "SELECT 1 FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
-        [schema, table]).fetchone() is not None
+        [schema, table])) is not None
 
 
 class ServingCache:
@@ -213,7 +215,7 @@ def serving_count(driver, sql: str, *, sandboxed: bool = True) -> int:
     """Total rows of a cross-pond serving query — sizes the data viewer's virtual scroll."""
     inner = sql.strip().rstrip(";")
     cur = _cache(driver).connection(driver, sandboxed=sandboxed).cursor()
-    (n,) = cur.execute(f"SELECT count(*) FROM ({inner}) AS _ds_count").fetchone()
+    (n,) = first_row(cur.execute(f"SELECT count(*) FROM ({inner}) AS _ds_count"))
     return int(n)
 
 
