@@ -17,6 +17,7 @@ import { JoinGrid } from '../trickle/JoinGrid';
 //
 // ?autoplay=1 starts at once (the landing page loads it on a click); otherwise a Play button waits. ?rate=N runs the
 // whole story N times faster (the tests). It pauses itself while scrolled out of view or in a hidden tab.
+// It can fill the screen (useExpand): a button, or on a touch screen the first tap while it plays.
 
 const MONO = 'ui-monospace, SFMono-Regular, monospace';
 const BG = '#0f0f14';
@@ -48,6 +49,42 @@ function dims(w: number, h: number) {
 
 function param(name: string): string | null {
   return typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get(name);
+}
+
+// Expanding the story to fill the screen. Embedded, the landing page owns it (real fullscreen where the browser
+// allows it, else the frame fills the window: iPhone Safari only takes videos fullscreen), asked and told by
+// postMessage. On its own, the page's own fullscreen. On a touch screen the first tap while it plays expands it.
+function useExpand() {
+  const [expanded, setExpanded] = useState(false);
+  const [canExpand, setCanExpand] = useState(false);
+  const [touch, setTouch] = useState(false);
+  useEffect(() => {
+    const embedded = window.parent !== window;
+    const t = window.setTimeout(() => {
+      setCanExpand(embedded || typeof document.documentElement.requestFullscreen === 'function');
+      setTouch(window.matchMedia('(pointer: coarse)').matches);
+    }, 0);
+    const onMessage = (e: MessageEvent) => {
+      if (e.source === window.parent && e.data?.type === 'ds-story-expanded') setExpanded(!!e.data.expanded);
+    };
+    const onFullscreen = () => {
+      if (!embedded) setExpanded(!!document.fullscreenElement);
+    };
+    window.addEventListener('message', onMessage);
+    document.addEventListener('fullscreenchange', onFullscreen);
+    if (embedded) window.parent.postMessage({ type: 'ds-story-hello' }, '*');
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener('message', onMessage);
+      document.removeEventListener('fullscreenchange', onFullscreen);
+    };
+  }, []);
+  const toggle = useCallback((expand: boolean) => {
+    if (window.parent !== window) window.parent.postMessage({ type: 'ds-story-expand', expand }, '*');
+    else if (expand) document.documentElement.requestFullscreen?.().catch(() => {});
+    else if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  }, []);
+  return { expanded, canExpand, touch, toggle };
 }
 
 export function Story() {
@@ -90,6 +127,8 @@ function StoryInner() {
   const caption = useRef<Caption>('hidden');
 
   const running = phase === 'playing' && !userPaused && !hidden;
+  const expand = useExpand();
+  const tapExpands = expand.touch && expand.canExpand && !expand.expanded;
 
   const syncSim = useCallback(() => {
     const st = usePlaygroundStore.getState();
@@ -326,6 +365,10 @@ function StoryInner() {
       ref={rootRef}
       data-testid="story"
       data-phase={phase}
+      data-expanded={expand.expanded}
+      onClick={() => {
+        if (phase === 'playing' && tapExpands) expand.toggle(true);
+      }}
       style={{ position: 'fixed', inset: 0, overflow: 'hidden', background: BG, fontFamily: MONO, color: '#e4e4e7' }}
     >
       <style>{'.ds-story-grid svg { max-height: none !important; max-width: none !important; }'}</style>
@@ -361,7 +404,11 @@ function StoryInner() {
       <div
         ref={dimRef}
         data-testid="story-dim"
-        onClick={() => (skip.current = true)}
+        onClick={(e) => {
+          if (tapExpands) return; // the root expands it; skipping waits for the next tap
+          e.stopPropagation();
+          skip.current = true;
+        }}
         style={{ position: 'absolute', inset: 0, background: 'rgba(9,9,12,0.8)', opacity: 0, transition: 'opacity 550ms ease', pointerEvents: 'none' }}
       />
       <div
@@ -402,21 +449,34 @@ function StoryInner() {
         2× speed
       </div>
 
-      {phase === 'playing' && (
+      {phase !== 'ready' && (
         <div style={{ position: 'absolute', right: 10, top: 8, display: 'flex', gap: 6 }}>
-          <IconButton label={userPaused ? 'Play' : 'Pause'} testId="story-pause" onClick={() => setUserPaused((p) => !p)}>
-            {userPaused ? '▶' : '❚❚'}
-          </IconButton>
-          <IconButton
-            label="Start again"
-            testId="story-restart"
-            onClick={() => {
-              track('Story', { event: 'restart' });
-              start();
-            }}
-          >
-            ↺
-          </IconButton>
+          {phase === 'playing' && (
+            <>
+              <IconButton label={userPaused ? 'Play' : 'Pause'} testId="story-pause" onClick={() => setUserPaused((p) => !p)}>
+                {userPaused ? '▶' : '❚❚'}
+              </IconButton>
+              <IconButton
+                label="Start again"
+                testId="story-restart"
+                onClick={() => {
+                  track('Story', { event: 'restart' });
+                  start();
+                }}
+              >
+                ↺
+              </IconButton>
+            </>
+          )}
+          {expand.canExpand && (
+            <IconButton
+              label={expand.expanded ? 'Close full screen' : 'Full screen'}
+              testId="story-expand"
+              onClick={() => expand.toggle(!expand.expanded)}
+            >
+              {expand.expanded ? '✕' : '⤢'}
+            </IconButton>
+          )}
         </div>
       )}
 
@@ -485,7 +545,10 @@ function IconButton({ label, testId, onClick, children }: { label: string; testI
       aria-label={label}
       title={label}
       data-testid={testId}
-      onClick={onClick}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
       style={{
         width: 32,
         height: 30,
