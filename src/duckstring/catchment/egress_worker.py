@@ -39,7 +39,7 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
     from ..dataplane import get_data_plane
     from ..egress.base import get_egress
     from ..trickle.context import NEVER
-    from ..trickle_io import load_sidecar, read_delta
+    from ..trickle_io import base_table_name, load_sidecar, read_delta
     from .registry import resolve_data_dir
 
     driver = get_egress(job["destination"])  # resolves the scheme's driver (+ validates the URI)
@@ -67,6 +67,9 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
             tables = [t for t in job["tables"] if t in set(dp.list_tables(data_dir))]
         else:
             tables = dp.list_tables(data_dir)
+        # A Trickle's companions (its changelog parts, bands) are how it publishes, not tables of their own:
+        # the main carries their rows, and the mirror (mode=append) copies them with it.
+        tables = [t for t in tables if t == job["table"] or base_table_name(t) == t]
         mode = (job.get("mode") or "auto").lower()
         # A driver that can deliver a run's tables together (a lake: one snapshot per run) does so.
         batch = getattr(driver, "batch", None)

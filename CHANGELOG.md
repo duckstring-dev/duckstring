@@ -162,6 +162,15 @@ Also for Spouts:
   what it has received (Postgres) treated a resync as already delivered.
 - A Postgres table first filled by a full load no longer gains a `_duckstring_f` column that later deliveries
   left empty, and a column a table gains is added to the destination table.
+- A Spout delivering all of a Pond's tables no longer delivers a merge Trickle's changelog as a table of its own.
+
+### Contract checks on remote Ducks
+
+A merge or append Trickle with an integer `SUM` column failed its version contract on the first run of a fresh
+Duck (every run on Fargate, EC2 or a pool, after its idle shutdown). `SUM` of an integer is `HUGEINT`, which
+Parquet stores as `DOUBLE`, so a Duck that rebuilt its database from what it had published held `DOUBLE` where the
+contract had recorded `HUGEINT`. The check now compares types as published. Before this release, contract
+failures found at that point were dropped without a trace, which hid it.
 
 ### Documentation and Playground
 

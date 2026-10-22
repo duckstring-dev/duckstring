@@ -18,6 +18,8 @@ old line keeps running for the Sinks that haven't.
 
 from __future__ import annotations
 
+import re
+
 # A schema is ``{table: {column: type}}`` — the DuckDB type string. A change is judged by whether the new
 # type can hold everything the old one could (see ``is_widening``), not by string equality.
 Schema = dict[str, dict[str, str]]
@@ -91,6 +93,21 @@ class ContractViolation(Exception):
 CONTRACT_PREFIX = "version contract violation: "
 
 
+_HUGE = re.compile(r"\bU?HUGEINT\b")
+
+
+def published_type(dtype: str) -> str:
+    """The type a column of DuckDB type ``dtype`` has once published, which is what a Sink reads. Parquet has no
+    128-bit integer, so DuckDB writes ``HUGEINT`` (an integer ``SUM``'s type) as ``DOUBLE``, and a Pond database
+    rebuilt from what it published holds ``DOUBLE`` there too; a NULL-typed column is published as ``INTEGER``
+    (``dataplane._concrete_select``). The contract compares these, so a Duck that rebuilt its database (any
+    fresh remote Duck) doesn't break it. Contracts recorded before this held ``HUGEINT``; both sides go through
+    here, so they still compare equal."""
+    from .trickle_io import concrete_type
+
+    return _HUGE.sub("DOUBLE", concrete_type(dtype))
+
+
 def extract_schema(con) -> Schema:
     """The output schema of every published table in a Pond's registry connection
     (``{table: {column: type}}``).
@@ -105,11 +122,11 @@ def extract_schema(con) -> Schema:
     — so a changelog is taken as evidence of its merge main and described from it. Without this, an
     un-compacted merge main is invisible to the contract, the catalog, and column lineage."""
     from .dataplane import RESERVED_PREFIX, registry_tables
-    from .trickle_io import BASE_SUFFIX, CHANGELOG_SUFFIX, DROPLOG_SUFFIX, WARM_SUFFIX, base_table_name, concrete_type
+    from .trickle_io import BASE_SUFFIX, CHANGELOG_SUFFIX, DROPLOG_SUFFIX, WARM_SUFFIX, base_table_name
 
     def _cols(table: str) -> dict[str, str]:
         return {
-            row[0]: concrete_type(row[1])  # a NULL-typed column is published as INTEGER (dataplane._concrete_select)
+            row[0]: published_type(row[1])
             for row in con.execute(f'DESCRIBE "{table}"').fetchall()
             if not str(row[0]).startswith(RESERVED_PREFIX)
         }
@@ -143,6 +160,6 @@ def contract_violations(output: Schema, contract: Schema | None) -> list[str]:
         for column, type_ in columns.items():
             if column not in have:
                 out.append(f"column '{table}.{column}' was dropped")
-            elif not is_widening(type_, have[column]):
+            elif not is_widening(published_type(type_), published_type(have[column])):
                 out.append(f"column '{table}.{column}' changed type {type_} → {have[column]}")
     return out
