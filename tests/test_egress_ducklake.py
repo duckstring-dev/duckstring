@@ -107,6 +107,11 @@ def test_every_source_lands_as_one_snapshot_per_run(tmp_path):
     src.run(F2, orders="(2, 'B'), (3, 'c')", events="('y', 2)", totals="('all', 20)")
     _deliver(tmp_path, F2)
 
+    con = _con()
+    con.execute(f"ATTACH 'ducklake:sqlite:{tmp_path / 'meta.sqlite'}' AS r (READ_ONLY)")
+    assert {t for (t,) in con.execute("SELECT table_name FROM duckdb_tables() WHERE database_name = 'r'").fetchall()} == {
+        "orders", "events", "totals", "_duckstring_egress"}  # no Trickle companions (orders__changelog)
+    con.close()
     tables, snaps, marks = _read(tmp_path)
     assert tables == {
         "orders": [(2, "B"), (3, "c")],  # 1 removed, 2 updated, 3 added: applied by key

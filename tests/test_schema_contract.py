@@ -23,6 +23,35 @@ def test_no_contract_never_fails():
     assert contract_violations({}, {}) == []
 
 
+def test_a_sum_survives_a_database_rebuilt_from_what_was_published(tmp_path):
+    # An integer SUM is HUGEINT, which Parquet stores as DOUBLE: a Duck that rebuilt its database from what it
+    # published (any fresh remote Duck) held DOUBLE where the first run recorded HUGEINT, and the contract failed.
+    from datetime import datetime, timezone
+
+    import duckdb
+
+    import duckstring.trickle_io as T
+    from duckstring.dataplane import ParquetDataPlane, hydrate_registry
+    from duckstring.schema_contract import extract_schema
+
+    def run(con, f, qty):
+        totals = con.sql(f"SELECT 1 AS product_id, sum(q) AS units_sold FROM (SELECT {qty}::INTEGER AS q)")
+        T.merge_table(con, "revenue", totals, f, ("product_id",))
+
+    f1, f2 = datetime(2026, 6, 1, tzinfo=timezone.utc), datetime(2026, 6, 2, tzinfo=timezone.utc)
+    first = duckdb.connect()
+    run(first, f1, 5)
+    contract = extract_schema(first)
+    ParquetDataPlane().export(first, tmp_path, f=f1)
+
+    rebuilt = duckdb.connect()
+    hydrate_registry(rebuilt, tmp_path)
+    run(rebuilt, f2, 7)
+    assert contract == {"revenue": {"product_id": "INTEGER", "units_sold": "DOUBLE"}}  # as a Sink reads it
+    assert contract_violations(extract_schema(rebuilt), contract) == []
+    assert contract_violations(extract_schema(rebuilt), {"revenue": {"units_sold": "HUGEINT"}}) == []  # recorded earlier
+
+
 def test_additive_changes_are_compatible():
     contract = {"event": {"id": "INTEGER"}}
     output = {"event": {"id": "INTEGER", "extra": "VARCHAR"}, "new_table": {"x": "DOUBLE"}}
