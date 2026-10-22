@@ -2,7 +2,11 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
-## Unreleased
+## 0.7.0 — 2026-10-22
+
+A single trigger, Refresh, replaces Tap, Wave, Pulse and Tide, and a Tap is now an app's access point to a
+Pond. Also DuckDB 2.0 support and Spouts that deliver to a DuckLake. The old trigger commands and routes are
+removed with no compatibility period, so read each section's Upgrading notes. Needs `duckstring-trickle` 0.2.1.
 
 ### One trigger: Refresh
 
