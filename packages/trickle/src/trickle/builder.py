@@ -278,6 +278,7 @@ class TrickleBuilder:
         self._cols_cache: dict[int, list[str]] = {}
         self._states: dict[int, _NodeState] = {}
         self._scratch: list[str] = []  # temp tables a compile made (materialised join deltas), dropped by _chain
+        self._pushed_memo: dict = {}  # _pushed's views by (node, key columns, keys view): reused, then materialised
         # While emitting a comprehensive recompute as one query (:meth:`_query_sql`), every view the compile
         # creates is also logged here as ``(name, sql, leaf)``; ``leaf`` is set for a source's base read.
         self._view_log: list | None = None
@@ -1090,7 +1091,9 @@ class TrickleBuilder:
             flips = self._flips(qnode, qs, qk)
             knames = [f"k{i}" for i in range(len(pk))]
             cond = " AND ".join(f"P.{_q(a)} = F.{k}" for a, k in zip(pk, knames, strict=True))
-            pcur = self._pushed(pnode, ps, pk, flips, knames)
+            # Restricted to δQ's keys rather than the flip set's (a superset, and the join with F narrows it), so
+            # an outer join's matched term, which pushes the same keys into P, reads the same view (_pushed).
+            pcur = self._pushed(pnode, ps, pk, qs.delta, qk)
             sign = "" if semi else "-"
             parts.append(f"SELECT {sel}, {sign}F.s AS {d} FROM {_q(pcur)} P JOIN {_q(flips)} F ON {cond}")
             if ps.delta is not None:
@@ -1148,9 +1151,23 @@ class TrickleBuilder:
                 present.setdefault(jid, set()).add(side)
         if not filters:
             return state.current
+        # Two terms can push the same keys into the same subtree (an outer join's matched rows and its padded
+        # rows both read L' at δR's keys): each would re-read the subtree, for a large fact a full pass, so the
+        # view is computed once when it's asked for a second time. Not while the views are being logged for a
+        # comprehensive job, which wants them as SQL.
+        memo = (id(node), tuple(cols), src, tuple(src_cols))
+        if memo in self._pushed_memo:
+            view, reused = self._pushed_memo[memo]
+            if not reused and self._view_log is None:
+                name = self._scratch_table(view)
+                self.ctx.con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(view)} AS SELECT * FROM {_q(name)}")
+            self._pushed_memo[memo] = (view, True)
+            return view
         ksel = ", ".join(f"{_q(c)} AS k{i}" for i, c in enumerate(src_cols))
         keys = self._view(f"SELECT DISTINCT {ksel} FROM {_q(src)}")
-        return self._filtered_current(node, filters, keys, present)
+        view = self._filtered_current(node, filters, keys, present)
+        self._pushed_memo[memo] = (view, False)
+        return view
 
     def _push_path(self, node, col: str):
         """``(leaf, [(join id, side)])`` for the qualified column ``col``: the leaf that owns it and, for each
@@ -1369,6 +1386,7 @@ class TrickleBuilder:
         for t in self._scratch:  # the write is done, so nothing reads the materialised deltas any more
             self.ctx.con.execute(f"DROP TABLE IF EXISTS {_q(t)}")
         self._scratch = []
+        self._pushed_memo = {}
         # Observed-lineage hook (optional host capability, like ``count_table``): a terminal just wrote
         # ``name`` straight to the registry, so tell the host — trickle/ stays dependency-free.
         hook = getattr(self.ctx, "record_lineage_write", None)
