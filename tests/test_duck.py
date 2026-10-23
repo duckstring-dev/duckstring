@@ -86,6 +86,30 @@ def test_duck_carries_previous_f_then_drops_it(tmp_path):
 
 
 @pytest.mark.timeout(5)
+def test_pipelined_runs_read_disjoint_windows(tmp_path):
+    """Two Pond Runs dispatched before the first completes are both sent the Pond's end_f as previous_f.
+    The Ripple runs them in order, so the second must read from the first's freshness: otherwise both
+    read the same Source changes and a Ripple applying them (the Trickle builder) applies them twice. A
+    Rebuild still reads everything."""
+    from duckstring.engine import NEVER
+
+    con = ledger.connect(tmp_path / "pond.db")
+    core = DuckCore("src", con, {"event": []})
+    f0, f1, f2, f3 = (T0 + timedelta(seconds=s) for s in (0, 1, 2, 3))
+
+    assert core.begin_run(f1, f1, previous_f=f0) == ["event"]
+    assert core.previous_f_for(f1, "event") == f0
+    assert core.begin_run(f2, f2, previous_f=f0) == []  # pipelined: waits for the Ripple's f1 run
+    assert core.ripple_completed("event", f2) == ["event"]  # f1 done, f2 launches
+    assert core.previous_f_for(f2, "event") == f1
+    assert core.previous_f_for(f2) == f0  # the Pond-level value, as sent
+
+    core.ripple_completed("event", f3)
+    assert core.begin_run(f3, f3, previous_f=NEVER, rebuild=True) == ["event"]
+    assert core.previous_f_for(f3, "event") == NEVER
+
+
+@pytest.mark.timeout(5)
 def test_duck_contract_violation_aborts_publish(tmp_path):
     """When the output breaks the contract, the Duck's publish (export) raises ContractViolation: the
     Run is NOT completed (last-good stays published), a contract_failed event is buffered for the

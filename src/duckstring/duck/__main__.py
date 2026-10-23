@@ -130,7 +130,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
             executor.submit(
                 name,
                 start_f,
-                core.previous_f_for(start_f),  # the prior run's freshness, exposed as pond.previous_f
+                core.previous_f_for(start_f, name),  # the prior run's freshness, exposed as pond.previous_f
                 on_done=lambda n, started, finished, lineage=None: q.put(("done", (n, started, finished, lineage))),
                 on_error=lambda n, exc, started, finished: q.put(("error", (n, exc, started, finished))),
                 sources_changed=core.sources_changed_for(start_f),  # backs pond.sources_changed()
@@ -179,6 +179,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                             previous_f=datetime.fromisoformat(prev) if prev else NEVER,
                             contract=data.get("contract"),
                             sources_changed=data.get("sources_changed", True),
+                            rebuild=bool(data.get("rebuild")),
                         ))
                 elif kind == "done":
                     inflight -= 1

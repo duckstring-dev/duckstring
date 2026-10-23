@@ -264,6 +264,13 @@ def _q(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
+def _key_match(left: str, right: str, cols) -> str:
+    """A NULL-safe match of ``cols`` between two relations (already-quoted names or aliases). A key column
+    can be NULL (a group key, like SQL's ``GROUP BY``), and ``=``, ``USING`` and row ``IN`` never match NULL,
+    while row ``NOT IN`` drops a row whose comparison with any key is unknown."""
+    return " AND ".join(f"{left}.{_q(c)} IS NOT DISTINCT FROM {right}.{_q(c)}" for c in cols)
+
+
 def _ts(dt) -> str:
     return f"TIMESTAMPTZ '{dt.isoformat()}'"
 
@@ -763,7 +770,7 @@ def append_table(
         if not first:
             # Collide only against rows from *other* runs — a replay re-appends this f's identical rows.
             coll = first_row(con.execute(
-                f'SELECT 1 FROM {_q(src)} s JOIN {_q(name)} t USING ({pk_list}) '
+                f'SELECT 1 FROM {_q(src)} s JOIN {_q(name)} t ON {_key_match("s", "t", pk)} '
                 f'WHERE t.{_q(F_COL)} IS DISTINCT FROM {_ts(f)} LIMIT 1'
             ))
             if coll:
@@ -854,7 +861,7 @@ def append_zset(
         if not first:
             eq = " AND ".join(f'p.{_q(c)} IS NOT DISTINCT FROM h.{_q(c)}' for c in user)
             hist_conflict = first_row(con.execute(
-                f'SELECT count(*) FROM {_q(consol)} p JOIN {_q(name)} h USING ({pk_list}) '
+                f'SELECT count(*) FROM {_q(consol)} p JOIN {_q(name)} h ON {_key_match("p", "h", pk)} '
                 f'WHERE p.{_q(D_COL)} > 0 AND NOT ({eq})'
             ))[0]
 
@@ -869,8 +876,8 @@ def append_zset(
     if pk and not first:
         pk_list = ", ".join(_q(c) for c in pk)
         new_rows = con.sql(
-            f'SELECT {sel} FROM {_q(consol)} WHERE {_q(D_COL)} > 0 '
-            f'AND ({pk_list}) NOT IN (SELECT {pk_list} FROM {_q(name)})'
+            f'SELECT {sel} FROM {_q(consol)} AS _c WHERE {_q(D_COL)} > 0 '
+            f'AND NOT EXISTS (SELECT 1 FROM {_q(name)} AS _h WHERE {_key_match("_c", "_h", pk)})'
         )
     else:
         new_rows = con.sql(f'SELECT {sel} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
@@ -902,12 +909,11 @@ def _log_drops(con, name, consol, user, pk, f, first_output) -> None:
     drops = f"{name}{DROPLOG_SUFFIX}"
     sel = ", ".join(_q(c) for c in user)
     if pk:
-        pk_list = ", ".join(_q(c) for c in pk)
         eq = " AND ".join(f'c.{_q(col)} IS NOT DISTINCT FROM h.{_q(col)}' for col in user)
         # Present rows that collided with a *different* image in history (benign identical-image skips excluded).
         conflicts = (
             f'SELECT {", ".join(f"c.{_q(col)}" for col in user)}, c.{_q(D_COL)} FROM {_q(consol)} c '
-            f'JOIN {_q(name)} h USING ({pk_list}) WHERE c.{_q(D_COL)} > 0 AND NOT ({eq})'
+            f'JOIN {_q(name)} h ON {_key_match("c", "h", pk)} WHERE c.{_q(D_COL)} > 0 AND NOT ({eq})'
         )
     else:
         conflicts = f'SELECT {sel}, {_q(D_COL)} FROM {_q(consol)} WHERE 1=0'
@@ -947,7 +953,6 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
     a net retraction drops the PK; an unchanged base PK keeps its base row and base freshness. Column-agnostic
     (``* EXCLUDE`` + ``GROUP BY ALL``) — needs only the PK, so it composes over any base/changelog SELECT
     without inspecting schemas (the data plane builds it straight from the sidecar)."""
-    pksel = ", ".join(_q(c) for c in pk)
     lo = f"{_q(F_COL)} > {_ts(f_base)}" if f_base is not None else "1=1"
     hi = f" AND {_q(F_COL)} <= {_ts(upper)}" if upper is not None else ""
     if before is not None:  # exclusive upper — the state strictly *before* a freshness (the merge prior)
@@ -965,7 +970,8 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
         return f"WITH {_RECON_CTE} AS ({consol}) {upserts}"
     return (
         f"WITH {_RECON_CTE} AS ({consol}) "
-        f"SELECT * FROM ({base_sql}) WHERE ({pksel}) NOT IN (SELECT {pksel} FROM {_RECON_CTE}) "
+        f"SELECT * FROM ({base_sql}) AS _b "
+        f"WHERE NOT EXISTS (SELECT 1 FROM {_RECON_CTE} AS _r WHERE {_key_match('_b', '_r', pk)}) "
         f"UNION ALL BY NAME {upserts}"
     )
 
@@ -1290,17 +1296,20 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     dacc = unique_name("dacc")
     mom_exprs = _agg_part_moment_exprs(add_cols, pm) + _co_part_moment_exprs(co_pairs, pm)
     if mom_exprs:
+        dkeys = ", ".join(f"{_q(delta)}.{_q(b)}" for b in by)
+        dby = ", ".join(f"{_q(delta)}.{_q(b)} AS {_q(b)}" for b in by)
         # Second pass: the partition central (co-)moments Σ d·(x − x̄)(…) about each partition mean from `pm` —
         # the numerically stable form (deviations are O(spread), not O(value)). Joined back onto `pm` → `dacc`.
         dev = unique_name("aggdev")
         con.execute(
             f"CREATE OR REPLACE TEMP TABLE {_q(dev)} AS "
-            f"SELECT {by_list}, {', '.join(mom_exprs)} "
-            f"FROM {_q(delta)} JOIN {_q(pm)} USING ({by_list}) GROUP BY {by_list}"
+            f"SELECT {dby}, {', '.join(mom_exprs)} "
+            f"FROM {_q(delta)} JOIN {_q(pm)} ON {_key_match(_q(delta), _q(pm), by)} GROUP BY {dkeys}"
         )
         con.execute(
             f"CREATE OR REPLACE TEMP TABLE {_q(dacc)} AS "
-            f"SELECT * FROM {_q(pm)} JOIN {_q(dev)} USING ({by_list})"
+            f"SELECT {_q(pm)}.*, {_q(dev)}.* EXCLUDE ({by_list}) "
+            f"FROM {_q(pm)} JOIN {_q(dev)} ON {_key_match(_q(pm), _q(dev), by)}"
         )
     else:
         con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(dacc)} AS SELECT * FROM {_q(pm)}")
@@ -1318,7 +1327,8 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         con.execute(
             f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS "
             f"SELECT {by_list}, {', '.join(rexprs)} FROM {_q(cur)} "
-            f"WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(dacc)} WHERE _a_ret) GROUP BY {by_list}"
+            f"WHERE EXISTS (SELECT 1 FROM {_q(dacc)} AS _k WHERE _k._a_ret AND {_key_match(_q(cur), '_k', by)}) "
+            f"GROUP BY {by_list}"
         )
 
     # Merge the delta into the state — additive for the distributive accumulators; for extremes, extend in
@@ -1338,17 +1348,18 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     macc += _prod_merge_exprs(len(prod_cols))
     macc += _arg_merge_exprs(arg_specs)
     macc += _sg_merge_exprs(sg_specs)
-    rescan_join = f" LEFT JOIN {_q(rescan)} r USING ({by_list})" if rescan is not None else ""
+    rescan_join = f" LEFT JOIN {_q(rescan)} r ON {_key_match('d', 'r', by)}" if rescan is not None else ""
     merged = unique_name("magg")
     con.execute(
         f"CREATE OR REPLACE TEMP TABLE {_q(merged)} AS "
         f"SELECT {', '.join(f'd.{_q(b)} AS {_q(b)}' for b in by)}, {', '.join(macc)} "
-        f"FROM {_q(dacc)} d LEFT JOIN {_q(state)} a USING ({by_list}){rescan_join} "
+        f"FROM {_q(dacc)} d LEFT JOIN {_q(state)} a ON {_key_match('d', 'a', by)}{rescan_join} "
         f"WHERE a.{_q(F_COL)} IS DISTINCT FROM {_ts(f)}"
     )
     con.execute("BEGIN TRANSACTION")
     try:
-        con.execute(f"DELETE FROM {_q(state)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(merged)})")
+        con.execute(f"DELETE FROM {_q(state)} "
+                    f"WHERE EXISTS (SELECT 1 FROM {_q(merged)} AS _k WHERE {_key_match(_q(state), '_k', by)})")
         con.execute(
             f"INSERT INTO {_q(state)} ({by_list}, {', '.join(acc_order)}, {_q(F_COL)}) "
             f"SELECT {by_list}, {', '.join(acc_order)}, {_ts(f)} FROM {_q(merged)}"
@@ -1357,17 +1368,18 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     except Exception:
         con.execute("ROLLBACK")
         raise
-    con.execute(f"DELETE FROM {_q(state)} WHERE _a_cnt <= 0 AND ({by_list}) IN (SELECT {by_list} FROM {_q(dacc)})")
+    con.execute(f"DELETE FROM {_q(state)} WHERE _a_cnt <= 0 "
+                f"AND EXISTS (SELECT 1 FROM {_q(dacc)} AS _k WHERE {_key_match(_q(state), '_k', by)})")
 
     # Emit the output delta for the affected groups: new (derived from the updated state) +1, old (the prior
     # published main) −1 — unchanged groups cancel; emptied groups (gone from state) are retracted.
-    affected = f"({by_list}) IN (SELECT {by_list} FROM {_q(dacc)})"
+    affected = f"EXISTS (SELECT 1 FROM {_q(dacc)} AS _k WHERE {_key_match('_o', '_k', by)})"
     out_cols = list(by) + list(metrics.keys())
     out_sel = ", ".join(_q(c) for c in out_cols)
-    new_out = f"SELECT {by_list}, {_agg_derive(metrics, idx)} FROM {_q(state)} WHERE {affected} AND _a_cnt > 0"
+    new_out = f"SELECT {by_list}, {_agg_derive(metrics, idx)} FROM {_q(state)} AS _o WHERE {affected} AND _a_cnt > 0"
     # The prior published main is the reconstructed current state (the agg output is a log-structured merge).
     recon = _reconstruct_sql_for(con, name)
-    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE {affected}" if recon \
+    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o WHERE {affected}" if recon \
         else f"SELECT {out_sel} FROM {_q(state)} WHERE 1=0"
     delta_out = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM ({new_out}) "
@@ -1503,7 +1515,7 @@ def _fold(rows, idx, by, along, metric_list, init_states) -> tuple:
 
 
 def _keys_table(con, by, type_of, keys) -> str:
-    """A temp table holding a set of group keys (for an ``(by) IN (...)`` filter)."""
+    """A temp table holding a set of group keys (for a NULL-safe ``EXISTS`` filter, :func:`_key_match`)."""
     t = unique_name("amk")
     con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(t)} ({', '.join(f'{_q(b)} {type_of[b]}' for b in by)})")
     if keys:
@@ -1555,7 +1567,6 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
         return
     by = tuple(by)
     pk = normalize_pk(pk)
-    by_list = ", ".join(_q(b) for b in by)
     metric_list = list(metrics.items())
     state = f"{ACC_STATE_PREFIX}{name}"
     cur = unique_name("amcur")
@@ -1590,7 +1601,7 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
         tk = _keys_table(con, by, type_of, tail_keys)
         trows = con.execute(
             f"SELECT {ucols_sql} FROM {_q(delta)} WHERE {_q(D_COL)} > 0 "
-            f"AND ({by_list}) IN (SELECT {by_list} FROM {_q(tk)}) ORDER BY {order_by}"
+            f"AND EXISTS (SELECT 1 FROM {_q(tk)} AS _k WHERE {_key_match(_q(delta), '_k', by)}) ORDER BY {order_by}"
         ).fetchall()
         t_out, t_group, _ = _fold(trows, idx, by, along, metric_list,
                                   {gk: carried[gk] for gk in tail_keys if gk in carried})
@@ -1599,7 +1610,8 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     if past_keys:   # full re-fold of the current membership
         pkt = _keys_table(con, by, type_of, past_keys)
         prows = con.execute(
-            f"SELECT {ucols_sql} FROM {_q(cur)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(pkt)}) "
+            f"SELECT {ucols_sql} FROM {_q(cur)} "
+            f"WHERE EXISTS (SELECT 1 FROM {_q(pkt)} AS _k WHERE {_key_match(_q(cur), '_k', by)}) "
             f"ORDER BY {order_by}"
         ).fetchall()
         p_out, p_group, _ = _fold(prows, idx, by, along, metric_list, {})
@@ -1609,7 +1621,8 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     tmp = _acc_out_table(con, out_rows, usercols, metric_list, type_of)
     recon = _reconstruct_sql_for(con, name)
     # only the past-changed groups have prior output rows that may change (tail groups only add new rows).
-    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(pkt)})" \
+    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o " \
+        f"WHERE EXISTS (SELECT 1 FROM {_q(pkt)} AS _k WHERE {_key_match('_o', '_k', by)})" \
         if (past_keys and recon) else f"SELECT {out_sel} FROM {_q(tmp)} WHERE 1=0"
     zset = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM (SELECT {out_sel} FROM {_q(tmp)}) "
@@ -1631,7 +1644,6 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     if kind == "empty":
         return
     by = tuple(by)
-    by_list = ", ".join(_q(b) for b in by)
     metric_list = list(metrics.items())
     state = f"{ACC_STATE_PREFIX}{name}"
     cur = unique_name("orcur")
@@ -1677,7 +1689,7 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
         tk = _keys_table(con, by, type_of, tail_keys)
         trows = con.execute(
             f"SELECT {ucols_sql} FROM {_q(delta)} WHERE {_q(D_COL)} > 0 "
-            f"AND ({by_list}) IN (SELECT {by_list} FROM {_q(tk)}) ORDER BY {order_by}"
+            f"AND EXISTS (SELECT 1 FROM {_q(tk)} AS _k WHERE {_key_match(_q(delta), '_k', by)}) ORDER BY {order_by}"
         ).fetchall()
         _o, t_group, t_finals = _fold(trows, idx, by, along, metric_list,
                                       {gk: carried[gk] for gk in tail_keys if gk in carried})
@@ -1686,7 +1698,8 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     if past_keys:
         pkt = _keys_table(con, by, type_of, past_keys)
         prows = con.execute(
-            f"SELECT {ucols_sql} FROM {_q(cur)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(pkt)}) "
+            f"SELECT {ucols_sql} FROM {_q(cur)} "
+            f"WHERE EXISTS (SELECT 1 FROM {_q(pkt)} AS _k WHERE {_key_match(_q(cur), '_k', by)}) "
             f"ORDER BY {order_by}"
         ).fetchall()
         _o, p_group, p_finals = _fold(prows, idx, by, along, metric_list, {})
@@ -1696,7 +1709,8 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     akt = _keys_table(con, by, type_of, tail_keys + past_keys)   # a reduction value changes for any affected group
     recon = _reconstruct_sql_for(con, name)
     t = _build(finals)
-    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(akt)})" \
+    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o " \
+        f"WHERE EXISTS (SELECT 1 FROM {_q(akt)} AS _k WHERE {_key_match('_o', '_k', by)})" \
         if recon else f"SELECT {out_sel} FROM {_q(t)} WHERE 1=0"
     zset = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM (SELECT {out_sel} FROM {_q(t)}) "
@@ -1718,22 +1732,23 @@ def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols
     seed is the running value at the end of the previous run; the new per-group seed is the old value combined
     with this run's batch aggregate. ``f``-stamped replay + the non-decreasing-``along`` check are kept."""
     state = f"{ACC_STATE_PREFIX}{name}"
-    by_list = ", ".join(_q(b) for b in by)
     alq = _q(along)
-    win = f"PARTITION BY {by_list} ORDER BY {alq} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
     b = unique_name("accb")
+    bby = ", ".join(f"{_q(b)}.{_q(c)}" for c in by)  # qualified: the seed's join carries the keys twice
+    win = f"PARTITION BY {bby} ORDER BY {_q(b)}.{alq} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
     con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(b)} AS "
                 f"SELECT {', '.join(_q(c) for c in usercols)} FROM {_q(src)}{where}")
 
     if kind == "comprehensive":
         con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
     seeded = _table_exists(con, state)
-    join = f" LEFT JOIN {_q(state)} ss USING ({by_list})" if seeded else ""
+    join = f" LEFT JOIN {_q(state)} ss ON {_key_match(_q(b), 'ss', by)}" if seeded else ""
     skip = f" WHERE ss.{_q(F_COL)} IS DISTINCT FROM {_ts(f)}" if seeded else ""   # replay: skip groups at this f
 
     if seeded:
         bad = first_row(con.execute(
-            f"SELECT count(*) FROM {_q(b)} bb JOIN {_q(state)} ss USING ({by_list}) WHERE bb.{alq} < ss._k_along"
+            f"SELECT count(*) FROM {_q(b)} bb JOIN {_q(state)} ss ON {_key_match('bb', 'ss', by)} "
+            f"WHERE bb.{alq} < ss._k_along"
         ))[0]
         if bad:
             raise DeltaError(
@@ -1774,14 +1789,16 @@ def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols
     seedt = unique_name("accseed")
     con.execute(
         f"CREATE OR REPLACE TEMP TABLE {_q(seedt)} AS "
-        f"SELECT {by_list}, {', '.join(seed_exprs)}, {hw} AS _k_along, {_ts(f)} AS {_q(F_COL)} "
-        f"FROM {_q(b)}{join}{skip} GROUP BY {by_list}"
+        f"SELECT {', '.join(f'{_q(b)}.{_q(c)} AS {_q(c)}' for c in by)}, {', '.join(seed_exprs)}, "
+        f"{hw} AS _k_along, {_ts(f)} AS {_q(F_COL)} "
+        f"FROM {_q(b)}{join}{skip} GROUP BY {bby}"
     )
     if not _table_exists(con, state):
         con.execute(f"CREATE TABLE {_q(state)} AS SELECT * FROM {_q(seedt)} WHERE false")
     con.execute("BEGIN TRANSACTION")
     try:
-        con.execute(f"DELETE FROM {_q(state)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(seedt)})")
+        con.execute(f"DELETE FROM {_q(state)} "
+                    f"WHERE EXISTS (SELECT 1 FROM {_q(seedt)} AS _k WHERE {_key_match(_q(state), '_k', by)})")
         con.execute(f"INSERT INTO {_q(state)} SELECT * FROM {_q(seedt)}")
         con.execute("COMMIT")
     except Exception:
