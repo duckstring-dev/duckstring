@@ -690,13 +690,7 @@ class TrickleBuilder:
         bare = (isinstance(self._root, _Source) and not self._ops
                 and not self._is_sql and self._agg is None)
         if bare:
-            ref = self._root.ref
-            if (trickle.read_meta(con).get(ref) or {}).get("mode") in ("merge", "append"):
-                return trickle.count_current(con, ref)  # local registry Trickle → metadata-fast
-            counter = getattr(self.ctx, "count_table", None)  # external source → host's fast path if any
-            if counter is not None:
-                return int(counter(ref))
-            return int(first_row(self.ctx.read_table(ref).aggregate("count(*)"))[0])  # correct fallback
+            return self._source_rows(self._root.ref)
         view = trickle.unique_name("count")
         if self._agg is not None:
             # group count: distinct groups in the current composed state — never runs the metric aggregations.
@@ -1398,12 +1392,26 @@ class TrickleBuilder:
         """
         return self._was_changed
 
+    def _source_rows(self, ref: str) -> int:
+        """A source's current row count, from metadata where possible: a Trickle in this registry counts
+        itself, and an external source uses the host's ``count_table`` if it has one. Only otherwise is the
+        source read and counted, which for a large merge Trickle reconstructs its whole state."""
+        from . import io as trickle
+
+        con = self.ctx.con
+        if (trickle.read_meta(con).get(ref) or {}).get("mode") in ("merge", "append"):
+            return trickle.count_current(con, ref)
+        counter = getattr(self.ctx, "count_table", None)
+        if counter is not None:
+            return int(counter(ref))
+        return int(first_row(self.ctx.read_table(ref).aggregate("count(*)"))[0])
+
     def _over_threshold(self, ref: str, delta, p: float) -> bool:
         """Whether ``delta`` touches more than fraction ``p`` of ``ref``'s current rows (``p >= 1`` never
         trips and skips the count; ``p <= 0`` trips on any change)."""
         if p >= 1.0 or delta.is_full:
             return False
-        total = first_row(self.ctx.read_table(ref).aggregate("count(*) AS n"))[0] or 0
+        total = self._source_rows(ref) or 0
         if total == 0:
             return False
         return delta.keys_count() > p * total
