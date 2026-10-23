@@ -105,6 +105,54 @@ def test_reconstruct_keeps_rows_beside_a_null_key(db):
     assert _sorted(db, "m", cols) == [(1, "a", 10), (1, None, 21), (2, None, 30)]
 
 
+def test_extremes_after_random_changes_match_a_recompute(db):
+    """Extremes rescan a group only when a retraction may have taken its stored min, max or arg row: the
+    result after rounds of random inserts, deletes and updates, retracting values inside the range and at
+    its edges, matches a recompute every time."""
+    import random
+
+    rng = random.Random(7)
+    values = rng.sample(range(10_000), 2_000)  # distinct, so argmin/argmax have no ties
+    state = {i: (rng.randrange(20), values[i], rng.random() < 0.05) for i in range(300)}  # few TRUEs per group
+    next_id = 300
+
+    def write(f):
+        rows = [(i, g, x, b) for i, (g, x, b) in state.items()]
+        merge(db, "fact", rows, "id, g, x, b", f, "id", types="INTEGER, INTEGER, INTEGER, BOOLEAN")
+
+    def run(f, pf):
+        # Separate outputs, so each family's rescan condition is tested on its own (an argmin over x would
+        # rescan a group whose min of x was retracted anyway).
+        t = at(db, f, pf)
+        t.source("fact", p=1.0).aggregate(by="g", lo=agg.min("x"), hi=agg.max("x"), n=agg.count()).merge("ext")
+        (t.source("fact", p=1.0).aggregate(by="g", first=agg.argmin("id", "x"), last=agg.argmax("id", "x"))
+         .merge("args"))
+        t.source("fact", p=1.0).aggregate(by="g", any_b=agg.bool_or("b")).merge("flags")
+
+    checks = {
+        "ext": ("g, lo, hi, n", "SELECT g, min(x), max(x), count(*) FROM fact GROUP BY g ORDER BY g"),
+        "args": ("g, first, last", "SELECT g, arg_min(id, x), arg_max(id, x) FROM fact GROUP BY g ORDER BY g"),
+        "flags": ("g, any_b", "SELECT g, bool_or(b) FROM fact GROUP BY g ORDER BY g"),
+    }
+    write(ts(1))
+    run(ts(1), NEVER)
+    for r in range(2, 10):
+        for i in rng.sample(sorted(state), 25):
+            del state[i]  # deletes, including groups' extremes
+        for i in rng.sample(sorted(state), 25):
+            g, _x, _b = state[i]
+            state[i] = (g, values[next_id], rng.random() < 0.05)  # updates move a row's value and flag
+            next_id += 1
+        for _ in range(25):
+            state[next_id] = (rng.randrange(20), values[next_id], rng.random() < 0.05)
+            next_id += 1
+        write(ts(r))
+        run(ts(r), ts(r - 1))
+        for table, (cols, expected) in checks.items():
+            got = T.current_state(db, table).query("t", f"SELECT {cols} FROM t ORDER BY g").fetchall()
+            assert got == db.sql(expected).fetchall(), f"{table}, round {r}"
+
+
 def test_builder_aggregate_group_emptied(db):
     ol, pr = star(db)
 

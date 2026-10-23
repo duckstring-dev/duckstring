@@ -1415,6 +1415,10 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     for j, c in enumerate(ext_cols):
         pexprs.append(f"MIN({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_minp_{j}")
         pexprs.append(f"MAX({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_maxp_{j}")
+        # The retracted rows' extremes: a retraction strictly inside the stored range can't move it.
+        pexprs.append(f"MIN({_q(c)}) FILTER (WHERE {_q(D_COL)} < 0) AS _a_minr_{j}")
+        pexprs.append(f"MAX({_q(c)}) FILTER (WHERE {_q(D_COL)} < 0) AS _a_maxr_{j}")
+    pexprs += _arg_retracted_exprs(arg_specs)
     if needs_rescan:
         pexprs.append(f"BOOL_OR({_q(D_COL)} < 0) AS _a_ret")
     pm = unique_name("aggpm")
@@ -1443,8 +1447,12 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     else:
         con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(dacc)} AS SELECT * FROM {_q(pm)}")
 
-    # Rescan the *current* membership for the extreme columns of groups that saw a retraction (the supporting
-    # min/max may be gone). Bounded by those groups; append-only groups never rescan.
+    # Rescan the *current* membership of the groups whose stored extreme a retraction may have taken away: a
+    # retracted value at or beyond the stored min/max (or argmin/argmax key), or any retraction for a
+    # bool/bit reduction. Every other group extends its extremes from the inserts, which is exact, since what
+    # it retracted lay strictly inside them. A group that empties is dropped, so it never rescans, and
+    # append-only groups never do. Before, any retraction rescanned its group: at TPC-DS SF100 a 3.5 s pass
+    # over a 269M-row Source, though few of those groups had lost an extreme.
     rescan = None
     if needs_rescan and current is not None:
         cur = unique_name("aggcur")
@@ -1452,12 +1460,27 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         rexprs = [f"MIN({_q(c)}) AS _a_min_{j}, MAX({_q(c)}) AS _a_max_{j}" for j, c in enumerate(ext_cols)]
         rexprs += _arg_rescan_exprs(arg_specs)
         rexprs += _sg_rescan_exprs(sg_specs)
+        lost = []
+        for j in range(len(ext_cols)):
+            lost.append(f"(d._a_minr_{j} IS NOT NULL AND (a._a_min_{j} IS NULL OR d._a_minr_{j} <= a._a_min_{j}))")
+            lost.append(f"(d._a_maxr_{j} IS NOT NULL AND (a._a_max_{j} IS NULL OR d._a_maxr_{j} >= a._a_max_{j}))")
+        lost += _arg_lost_exprs(arg_specs)
+        if sg_specs:
+            lost.append("TRUE")
+        keys = unique_name("aggrk")
+        con.execute(
+            f"CREATE OR REPLACE TEMP TABLE {_q(keys)} AS "
+            f"SELECT {', '.join(f'd.{_q(b)} AS {_q(b)}' for b in by)} "
+            f"FROM {_q(dacc)} d LEFT JOIN {_q(state)} a ON {_key_match('d', 'a', by)} "
+            f"WHERE d._a_ret AND COALESCE(a._a_cnt, 0) + d._a_cnt > 0 AND ({' OR '.join(lost)})"
+        )
         rescan = unique_name("aggrs")
+        any_lost = first_row(con.execute(f"SELECT count(*) FROM {_q(keys)}"))[0] > 0
         con.execute(
             f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS "
-            f"SELECT {by_list}, {', '.join(rexprs)} FROM {_q(cur)} "
-            f"SEMI JOIN (SELECT * FROM {_q(dacc)} WHERE _a_ret) AS _k ON {_key_match(_q(cur), '_k', by)} "
-            f"GROUP BY {by_list}"
+            f"SELECT {by_list}, {', '.join(rexprs)}, TRUE AS _a_rs FROM {_q(cur)} "
+            + (f"SEMI JOIN {_q(keys)} AS _k ON {_key_match(_q(cur), '_k', by)} " if any_lost else "WHERE false ")
+            + f"GROUP BY {by_list}"
         )
 
     # Merge the delta into the state — additive for the distributive accumulators; for extremes, extend in
@@ -1469,8 +1492,8 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         macc.append(f"CAST(COALESCE(a._a_cnt_{i}, 0) + d._a_cnt_{i} AS BIGINT) AS _a_cnt_{i}")
         macc.append(f"{_m2_merge_expr(i)} AS _a_m2_{i}")
     for j in range(len(ext_cols)):
-        macc.append(f"(CASE WHEN d._a_ret THEN r._a_min_{j} ELSE least(a._a_min_{j}, d._a_minp_{j}) END) AS _a_min_{j}")
-        macc.append(f"(CASE WHEN d._a_ret THEN r._a_max_{j} ELSE greatest(a._a_max_{j}, d._a_maxp_{j}) END) AS _a_max_{j}")
+        macc.append(f"(CASE WHEN r._a_rs THEN r._a_min_{j} ELSE least(a._a_min_{j}, d._a_minp_{j}) END) AS _a_min_{j}")
+        macc.append(f"(CASE WHEN r._a_rs THEN r._a_max_{j} ELSE greatest(a._a_max_{j}, d._a_maxp_{j}) END) AS _a_max_{j}")
     for k in range(len(co_pairs)):
         macc += _co_merge_exprs(k)
     macc += _wgt_merge_exprs(len(wgt_units))
@@ -2469,6 +2492,23 @@ def _sg_part_exprs(sg_specs) -> list[str]:
             for g, (kind, col) in enumerate(sg_specs)]
 
 
+def _arg_retracted_exprs(arg_specs) -> list[str]:
+    """The retracted rows' extreme key per argmin/argmax: one strictly worse than the stored key can't have
+    been its row."""
+    d = _q(D_COL)
+    return [f"{_arg_extreme(kind)[0]}({_q(key)}) FILTER (WHERE {d} < 0) AS _g_keyr_{a}"
+            for a, (kind, _arg, key) in enumerate(arg_specs)]
+
+
+def _arg_lost_exprs(arg_specs) -> list[str]:
+    """Per argmin/argmax, whether a retraction may have taken the stored row (``d`` the delta, ``a`` the state)."""
+    out = []
+    for a, (kind, _arg, _key) in enumerate(arg_specs):
+        cmp = "<=" if kind == "argmin" else ">="
+        out.append(f"(d._g_keyr_{a} IS NOT NULL AND (a._g_key_{a} IS NULL OR d._g_keyr_{a} {cmp} a._g_key_{a}))")
+    return out
+
+
 def _arg_rescan_exprs(arg_specs) -> list[str]:
     out: list[str] = []
     for a, (kind, arg, key) in enumerate(arg_specs):
@@ -2489,10 +2529,10 @@ def _arg_merge_exprs(arg_specs) -> list[str]:
     for a, (kind, _arg, _key) in enumerate(arg_specs):
         better = "<" if kind == "argmin" else ">"
         ext = "least" if kind == "argmin" else "greatest"
-        out.append(f"(CASE WHEN d._a_ret THEN r._g_key_{a} ELSE {ext}(a._g_key_{a}, d._g_keyp_{a}) END) "
+        out.append(f"(CASE WHEN r._a_rs THEN r._g_key_{a} ELSE {ext}(a._g_key_{a}, d._g_keyp_{a}) END) "
                    f"AS _g_key_{a}")
         out.append(
-            f"(CASE WHEN d._a_ret THEN r._g_arg_{a} "
+            f"(CASE WHEN r._a_rs THEN r._g_arg_{a} "
             f"WHEN a._g_key_{a} IS NULL OR d._g_keyp_{a} {better} a._g_key_{a} THEN d._g_argp_{a} "
             f"ELSE a._g_arg_{a} END) AS _g_arg_{a}"
         )
@@ -2504,7 +2544,7 @@ def _sg_merge_exprs(sg_specs) -> list[str]:
     for g, (kind, _col) in enumerate(sg_specs):
         combine = _SG[kind][1].format(a=f"a._s_val_{g}", i=f"d._s_valp_{g}")
         out.append(
-            f"(CASE WHEN d._a_ret THEN r._s_val_{g} "
+            f"(CASE WHEN r._a_rs THEN r._s_val_{g} "
             f"WHEN a._s_val_{g} IS NULL THEN d._s_valp_{g} "
             f"WHEN d._s_valp_{g} IS NULL THEN a._s_val_{g} "
             f"ELSE ({combine}) END) AS _s_val_{g}"
