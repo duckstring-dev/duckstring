@@ -113,6 +113,9 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
             jobs = client.poll_jobs()
             for job in jobs:
                 q.put(("job", job))
+            if getattr(client, "woken", False):
+                idle_rounds = 0        # the Catchment held the poll: a job was queued, or the hold ended
+                continue
             if jobs or inflight:
                 idle_rounds = 0        # work arrived or is running — stay responsive
                 if not jobs:

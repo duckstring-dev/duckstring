@@ -7,25 +7,30 @@ remote Duck that can't read the Catchment's disk (prereqs D6). The Catchment sta
 authority — no object-store coupling here.
 
 A Duck serves one major line of a Pond, so all routes address the pond key ``name@major``. All are
-Duck-initiated, so the same shape works for a local subprocess or a remote Duck. Job delivery is a
-short poll (the Duck re-polls on a backing-off interval); events are idempotent on freshness.
+Duck-initiated, so the same shape works for a local subprocess or a remote Duck. Events are idempotent on
+freshness.
 
-**Why this is not a long poll.** ``take_jobs`` DRAINS the queue, so holding the connection opens a window
-where a Duck that was killed mid-poll wakes on the next job and swallows work meant for its replacement,
-which then waits forever for a job that no longer exists. Verified: holding the connection broke reset
-and missing-source recovery, and ASGI gives no reliable disconnect signal for an idle GET to close the
-window with. Doing this properly needs a spawn token so the server can tell WHICH Duck owns the queue —
-worth doing, but it is a protocol change, not a tweak. Until then the Duck backs off when idle, which
-removes most of the traffic with none of the delivery risk.
+**Job delivery is a poll with a held wake-up.** A poll returns whatever is queued at once. With nothing
+queued, a poll asking to ``wait`` is held for up to ``JOB_HOLD_S`` and returns *empty* the moment a job is
+queued for its Pond (``{"wake": true}``), or when the hold ends (``{"held": true}``); either way the Duck
+polls again at once, and that poll collects the job. A held poll never takes a job itself. ``take_jobs``
+drains the queue, and a Duck killed mid-poll leaves its request open (ASGI gives no reliable disconnect
+signal for an idle GET), so a held poll that drained would hand the next job to a dead Duck and its
+replacement would wait forever: that broke reset and missing-source recovery when it was tried. As a
+wake-up, a dead Duck's request takes nothing, and a job reaches a live Duck one round trip after it is
+queued, instead of after the Duck's next backed-off poll (up to 2 s, once per stage of a pipeline). The
+hold is short so a held request never delays a server's shutdown for long.
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import tarfile
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 from ...keys import pond_key
 from .. import auth
@@ -33,10 +38,40 @@ from .. import auth
 router = APIRouter()
 
 
+# The longest a job poll with nothing queued is held (see the module docstring).
+JOB_HOLD_S = 2.0
+
+
+def wake_job_polls(app, key: str) -> None:
+    """Release every poll held for ``key``'s Duck (called on the event loop when a job is queued)."""
+    for event in app.state.job_polls.get(key, ()):
+        event.set()
+
+
 @router.get("/duck/{name}/{major}/jobs", dependencies=[auth.duck])
-def jobs(name: str, major: int, request: Request, version: str | None = None):
+async def jobs(name: str, major: int, request: Request, version: str | None = None, wait: float = 0.0):
     driver = request.app.state.driver
-    return {"jobs": driver.take_jobs(pond_key(name, major), version=version)}
+    key = pond_key(name, major)
+    hold = min(max(wait, 0.0), JOB_HOLD_S)
+    polls = request.app.state.job_polls  # pond key -> the events of its held polls
+    event = asyncio.Event()
+    if hold:
+        polls.setdefault(key, set()).add(event)  # before taking, so a job queued meanwhile still wakes it
+    try:
+        queued = await run_in_threadpool(driver.take_jobs, key, version)
+        if queued or not hold:
+            return {"jobs": queued}
+        try:
+            await asyncio.wait_for(event.wait(), hold)
+            return {"jobs": [], "wake": True}
+        except asyncio.TimeoutError:
+            return {"jobs": [], "held": True}
+    finally:
+        waiting = polls.get(key)
+        if waiting is not None:
+            waiting.discard(event)
+            if not waiting:
+                polls.pop(key, None)
 
 
 @router.post("/duck/{name}/{major}/events", dependencies=[auth.duck])

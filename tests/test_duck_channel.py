@@ -1,11 +1,12 @@
 """The duck channel's job delivery, and how hard a Duck asks for work.
 
-Delivery is a poll, not a push: ``take_jobs`` DRAINS the queue, so holding the connection would let a
-Duck killed mid-poll swallow work meant for its replacement (verified — it broke reset and
-missing-source recovery, and ASGI offers no reliable disconnect signal for an idle GET to close that
-window). Making it a true long poll needs a spawn token so the server knows which Duck owns the queue.
+Delivery is a poll with a held wake-up (routes/duck.py): a poll returns what is queued at once; an empty
+one is held briefly and released, empty, when a job is queued, so the Duck polls again and collects it.
+A held poll never takes a job: ``take_jobs`` DRAINS the queue, and a Duck killed mid-poll leaves its
+request open, so a held poll that drained would hand the job to a dead Duck (verified when it was tried:
+it broke reset and missing-source recovery).
 
-Until then the cost is controlled at the client: an idle Duck backs off instead of asking ten times a
+Without a hold, the cost is controlled at the client: an idle Duck backs off instead of asking ten times a
 second, which was invisible beside a local Catchment but meant continuous round-trips per REMOTE Duck —
 and a log so noisy it hindered debugging a live pool agent.
 """
@@ -79,16 +80,44 @@ def channel(tmp_path, monkeypatch):
     thread.join(timeout=5)
 
 
-def test_the_poll_answers_at_once_and_delivers_queued_work(channel):
-    """It must NOT hold: a held connection is what let a dead Duck drain another's queue."""
+def test_a_poll_with_work_queued_answers_at_once(channel):
     url, app = channel
-    started = time.monotonic()
-    r = httpx.get(f"{url}/api/duck/src/1/jobs", params={"wait": 20.0}, timeout=10.0)
-    assert r.status_code == 200 and r.json()["jobs"] == []
-    assert time.monotonic() - started < 2.0, "the poll held the connection — see the module docstring"
-
     app.state.driver.refresh_now("src@1")
+    started = time.monotonic()
     jobs = httpx.get(f"{url}/api/duck/src/1/jobs", params={"wait": 20.0}, timeout=10.0).json()["jobs"]
+    assert jobs and jobs[0]["kind"] == "begin_run"
+    assert time.monotonic() - started < 1.0
+
+
+def test_an_empty_poll_is_held_until_its_hold_ends(channel):
+    from duckstring.catchment.routes.duck import JOB_HOLD_S
+
+    url, _app = channel
+    started = time.monotonic()
+    body = httpx.get(f"{url}/api/duck/src/1/jobs", params={"wait": 20.0}, timeout=10.0).json()
+    assert body == {"jobs": [], "held": True}
+    assert JOB_HOLD_S * 0.9 <= time.monotonic() - started < JOB_HOLD_S + 1.0  # capped, whatever was asked
+
+
+def test_a_held_poll_is_released_by_a_job_and_never_takes_it(channel):
+    """The dead-Duck case: a poll held when the job is queued (here, one nobody reads further, as a killed
+    Duck's would be) returns at once, empty. The job stays queued for the next poll."""
+    url, app = channel
+    held = {}
+
+    def poll():
+        started = time.monotonic()
+        held["body"] = httpx.get(f"{url}/api/duck/src/1/jobs", params={"wait": 20.0}, timeout=10.0).json()
+        held["seconds"] = time.monotonic() - started
+
+    t = threading.Thread(target=poll)
+    t.start()
+    time.sleep(0.5)  # the poll is now held
+    app.state.driver.refresh_now("src@1")
+    t.join(timeout=5)
+    assert held["body"] == {"jobs": [], "wake": True}
+    assert held["seconds"] < 1.5, "a queued job must release the held poll, not wait out the hold"
+    jobs = httpx.get(f"{url}/api/duck/src/1/jobs", timeout=10.0).json()["jobs"]
     assert jobs and jobs[0]["kind"] == "begin_run"
 
 

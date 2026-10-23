@@ -383,6 +383,7 @@ class Driver(TapsMixin):
         # Wakes the egress worker (a Pond Run published → its Spouts may have work). Same cross-thread
         # shape as _notify_cb; None when no worker is attached (NoopLauncher tests).
         self._egress_cb = None
+        self._jobs_cb = None  # called with a pond key when a job is queued for its Duck (routes/duck.py)
         # Spout runs the engine dispatched (instead of to a Duck), awaiting the egress worker — mirrors
         # _pending_transfers for Draws. (spout_key, f). In-memory: a crash re-dispatches on restart.
         self._pending_egress: list[tuple[str, datetime]] = []
@@ -425,10 +426,15 @@ class Driver(TapsMixin):
         if self._egress_cb is not None:
             self._egress_cb()
 
+    def set_jobs_notify(self, cb) -> None:
+        self._jobs_cb = cb
+
     def _enqueue_job(self, pond: str, job: dict) -> None:
-        """Queue a job for a Duck. It collects on its next poll (routes/duck.py explains why delivery is
-        a poll rather than a push)."""
+        """Queue a job for a Duck. It collects on its next poll, and a poll being held for it returns at
+        once so the Duck polls again (routes/duck.py explains why delivery is still a poll)."""
         self.jobs.setdefault(pond, []).append(job)
+        if self._jobs_cb is not None:
+            self._jobs_cb(pond)
 
     def set_alert_notify(self, cb) -> None:
         self._alert_cb = cb

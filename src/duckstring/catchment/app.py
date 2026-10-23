@@ -125,6 +125,11 @@ async def _lifespan(app: FastAPI):
     alert_wake = asyncio.Event()
     driver.set_alert_notify(lambda: loop.call_soon_threadsafe(alert_wake.set))
 
+    # A Duck's held job poll returns as soon as a job is queued for it (routes/duck.py).
+    from .routes.duck import wake_job_polls
+
+    driver.set_jobs_notify(lambda key: loop.call_soon_threadsafe(wake_job_polls, app, key))
+
     from .state_sync import checkpoint_full, run_checkpoint_worker
 
     scheduler = asyncio.create_task(_scheduler(driver))
@@ -214,6 +219,7 @@ def create_app(
 
     app = FastAPI(title="Duckstring Catchment", lifespan=_lifespan)
     app.state.root = root
+    app.state.job_polls = {}  # pond key -> the events of the Duck job polls held for it (routes/duck.py)
     app.state.data_lease = data_lease
     app.state.data_root = data_root
     app.state.state_backup = state_backup
