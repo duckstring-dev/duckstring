@@ -618,8 +618,8 @@ def cluster_spec(cluster_by=None, interleave: bool = True, cluster_bits=None) ->
 
 def _set_cluster(con, table: str, spec: dict | None) -> None:
     """Record merge main ``table``'s cold-base ordering (:func:`cluster_spec`); ``None`` clears it, so the
-    base goes back to primary-key order. Applied at the next compaction. Raises :class:`DeltaError` for a
-    ``cluster_by`` column the table doesn't have."""
+    base goes back to primary-key order. Applied when the base is next written (the first load, or a
+    compaction). Raises :class:`DeltaError` for a ``cluster_by`` column the table doesn't have."""
     if spec is not None:
         src = changelog_name(table) if _table_exists(con, changelog_name(table)) else cold_base_name(table)
         if _table_exists(con, src):
