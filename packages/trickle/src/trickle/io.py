@@ -1475,11 +1475,20 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
             f"WHERE d._a_ret AND COALESCE(a._a_cnt, 0) + d._a_cnt > 0 AND ({' OR '.join(lost)})"
         )
         rescan = unique_name("aggrs")
-        any_lost = first_row(con.execute(f"SELECT count(*) FROM {_q(keys)}"))[0] > 0
+        counts = first_row(con.execute(
+            f"SELECT count(*), {', '.join(f'count({_q(b)})' for b in by)} FROM {_q(keys)}"))
+        any_lost = counts[0] > 0
+        # The NULL-safe match is a hash join DuckDB can't push into the current state's scan, so a key column
+        # with no NULL among the lost groups is matched with `=` first, which it can (the rescan read the whole
+        # Source otherwise: 269M rows at TPC-DS SF100, for a few thousand groups).
+        exact = next((b for b, n in zip(by, counts[1:], strict=True) if n == counts[0]), None)
+        narrow = (f"SEMI JOIN (SELECT DISTINCT {_q(exact)} FROM {_q(keys)}) AS _e "
+                  f"ON {_q(cur)}.{_q(exact)} = _e.{_q(exact)} " if exact is not None else "")
         con.execute(
             f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS "
             f"SELECT {by_list}, {', '.join(rexprs)}, TRUE AS _a_rs FROM {_q(cur)} "
-            + (f"SEMI JOIN {_q(keys)} AS _k ON {_key_match(_q(cur), '_k', by)} " if any_lost else "WHERE false ")
+            + (f"{narrow}SEMI JOIN {_q(keys)} AS _k ON {_key_match(_q(cur), '_k', by)} " if any_lost
+               else "WHERE false ")
             + f"GROUP BY {by_list}"
         )
 
