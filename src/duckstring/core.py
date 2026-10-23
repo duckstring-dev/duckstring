@@ -1331,6 +1331,7 @@ class Pond:
             self.con, name, relation, self.f, self._resolve_pk(pk),
             retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
             cluster_by=cluster_by, interleave=interleave, cluster_bits=cluster_bits,
+            stage_base=self._stage_base,
         )
         self._changes.record_write(name, changed)
         return changed
@@ -1354,9 +1355,23 @@ class Pond:
             self.con, name, zset, self.f, self._resolve_pk(pk),
             retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
             cluster_by=cluster_by, interleave=interleave, cluster_bits=cluster_bits,
+            stage_base=self._stage_base,
         )
         self._changes.record_write(name, changed)
         return changed
+
+    def _stage_base(self, con, name: str, rows_sql: str, f):
+        """Stage a merge table's first load as Parquet beside this Pond's published data, for the publish to
+        move into place (``dataplane.stage_boot_base``). Declines (``None``: the base is a registry table)
+        without a local data directory."""
+        from .storage import LocalStorage
+
+        store = self._own_store() if self._own_data_dir is not None else None
+        if not isinstance(store, LocalStorage):
+            return None
+        from .dataplane import stage_boot_base
+
+        return stage_boot_base(con, store, name, rows_sql)
 
     def read_delta(self, ref: str):
         """The changes to a Source table (``"source.table"``) over this run's window ``(previous_f, f]``.

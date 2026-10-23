@@ -1087,7 +1087,8 @@ def count_current(con, name: str) -> int:
 
 
 def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
-               compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
+               compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None,
+               stage_base=None) -> bool:
     """Append a Z-set ``zset`` (user columns + ``_duckstring_d``) to the merge main's append-only
     ``__changelog``. The main is **log-structured**: the changelog is the source of truth and the clean
     current state is reconstructed on read (:func:`reconstruct_current`) from a base table (written only by
@@ -1134,7 +1135,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
         # The bootstrap is the base (see _bootstrapping): its present rows, stamped with f, and the changelog
         # stays empty. A net retraction has nothing to retract, so it is dropped, as reconstruction would.
         _write_boot_base(con, name, pk, f'SELECT {sel_user}, {_ts(f)} AS {_q(F_COL)} '
-                                        f'FROM {_q(consol)} WHERE {_q(D_COL)} > 0', f)
+                                        f'FROM {_q(consol)} WHERE {_q(D_COL)} > 0', f, stage_base)
     elif nonempty:
         con.execute("BEGIN TRANSACTION")
         try:
@@ -1156,18 +1157,27 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     return nonempty
 
 
-def _write_boot_base(con, name: str, pk: tuple[str, ...], rows_sql: str, f) -> None:
+def _write_boot_base(con, name: str, pk: tuple[str, ...], rows_sql: str, f, stage_base=None) -> None:
     """Write merge main ``name``'s bootstrap at ``f`` as its cold base: ``rows_sql`` (its user columns and
-    ``_duckstring_f``) replaces the base, and the watermarks move to ``f`` (see :func:`_bootstrapping`)."""
+    ``_duckstring_f``) replaces the base, and the watermarks move to ``f`` (see :func:`_bootstrapping`).
+
+    ``stage_base(con, name, rows_sql, f)`` is a host's way to keep a large first load out of the database:
+    it writes the rows to files and returns a ``SELECT`` over them (or ``None`` to decline), and the base
+    becomes a view over that ``SELECT``. Duckstring stages them as Parquet beside its published data and
+    moves them into place at publish, so a first load is written once. Without it the base is a table."""
     from datetime import timezone
 
     _record_meta(con, name, "merge", pk)
     cold = cold_base_name(name)
     iso = f.astimezone(timezone.utc).isoformat()
+    staged = stage_base(con, name, rows_sql, f) if stage_base is not None else None
     con.execute("BEGIN TRANSACTION")
     try:
         _drop_relation(con, cold)
-        con.execute(f'CREATE TABLE {_q(cold)} AS {rows_sql}')
+        if staged is not None:
+            con.execute(f'CREATE VIEW {_q(cold)} AS {staged}')
+        else:
+            con.execute(f'CREATE TABLE {_q(cold)} AS {rows_sql}')
         con.execute(f'UPDATE {_q(META_TABLE)} SET f_base = ?, f_warm = ?, f_boot = ? WHERE table_name = ?',
                     [iso, iso, iso, name])
         con.execute("COMMIT")
@@ -1177,7 +1187,8 @@ def _write_boot_base(con, name: str, pk: tuple[str, ...], rows_sql: str, f) -> N
 
 
 def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
-                compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
+                compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None,
+                stage_base=None) -> bool:
     """Comprehensive merge: ``relation`` is the **complete current state**. Diff it against the
     reconstructed prior state (base ⊎ changelog) as a full-row Z-set (``new(+1) ⊎ prior(-1)``, consolidated)
     and append the diff to the changelog. Returns whether the diff was non-empty (the state actually
@@ -1201,7 +1212,8 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
         if not _table_exists(con, clog):
             con.execute(f'CREATE TABLE {_q(clog)} AS SELECT {sel}, CAST(0 AS BIGINT) AS {_q(D_COL)}, '
                         f'CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(state)} LIMIT 0')
-        _write_boot_base(con, name, pk, f'SELECT {sel}, {_ts(f)} AS {_q(F_COL)} FROM {_q(state)}', f)
+        _write_boot_base(con, name, pk, f'SELECT {sel}, {_ts(f)} AS {_q(F_COL)} FROM {_q(state)}', f,
+                         stage_base)
         _set_compact_threshold(con, name, compact_threshold)
         _set_cluster(con, name, cluster)
         _advance_floor(con, name, bootstrap_f=f)
@@ -1223,7 +1235,7 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
         zset = con.sql(f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)}')
     return apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n,
                       compact_threshold=compact_threshold, cluster_by=cluster_by, interleave=interleave,
-                      cluster_bits=cluster_bits)
+                      cluster_bits=cluster_bits, stage_base=stage_base)
 
 
 def fold_warm(con, name: str, target_f) -> None:

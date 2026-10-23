@@ -1167,22 +1167,66 @@ def _publish_tiered_main(con, data_dir: Path, main: str, f) -> None:
             _export_parts(con, data_dir, clog, f)  # drop the folded hot parts (now in the warm band)
 
 
+# Where a merge table's first load is staged under its Pond's data directory until the publish moves it into
+# place (stage_boot_base). Not a table: nothing lists a directory holding no Parquet of its own.
+BOOT_STAGING = ".boot"
+
+
+def stage_boot_base(con, data_dir, main: str, rows_sql: str) -> str | None:
+    """Write a merge main's first load (``rows_sql``) as size-bounded Parquet chunks under the local
+    ``data_dir``'s :data:`BOOT_STAGING`, in the order the rows arrive, and return a ``SELECT`` over them for
+    the registry's base to be a view of. :func:`_publish_local_base` moves them into ``{main}__base/`` at
+    publish. The base is written once, where before it was written into the registry, read back, sorted and
+    written again: 30 s and 153 s for a 269M-row table on a laptop (TPC-DS SF100), against 19 s for this. A
+    declared ``cluster_by`` is still applied at publish, by rewriting the chunks in that order; the default
+    primary-key order waits for the first compaction. ``None`` (the base stays a registry table) for an
+    empty first load, which writes no file."""
+    data_dir = _as_storage(data_dir)
+    size = max(_MIN_CHUNK_BYTES, int(_compact_threshold(con, main)))
+    with data_dir.copy_dir_to(BOOT_STAGING, main) as uri:  # clears an earlier attempt's chunks
+        con.execute(f"COPY ({rows_sql}) TO '{uri}' "
+                    f"(FORMAT PARQUET, FILE_SIZE_BYTES {size}, ROW_GROUP_SIZE {_ROW_GROUP_ROWS})")
+    names = data_dir.parquet_names(BOOT_STAGING, main)
+    if not names:
+        return None
+    files = ", ".join(f"'{data_dir.uri(BOOT_STAGING, main, n)}'" for n in names)
+    return f"SELECT * FROM read_parquet([{files}])"
+
+
 def _publish_local_base(con, data_dir: Path, main: str) -> None:
-    """Publish a merge main's cold base if it is a local registry table, then drop it from the registry in
-    favour of a view over the published chunks (:func:`_review_base`). A base is local only between being
-    written (a bootstrap, or a checkpoint whose publish didn't finish) and its publish; once published it is
-    a view, and this is a no-op."""
+    """Publish a merge main's cold base if it isn't published yet, then point the registry at the published
+    chunks (:func:`_review_base`). A base is unpublished only between being written (a bootstrap, or a
+    checkpoint whose publish didn't finish) and its publish: a registry table, or a first load staged by
+    :func:`stage_boot_base`, which is moved into place (or, with a declared ``cluster_by``, rewritten in that
+    order). Once published the base is a view over the chunks, and this is a no-op."""
     from . import trickle_io as trickle
 
+    data_dir = _as_storage(data_dir)
     cold = trickle.cold_base_name(main)
-    if first_row(con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND schema_name = 'main'",
-                             [cold])) is None:
-        return
     f_base = trickle._f_base(con, main)
-    if f_base is None:
+    staged = data_dir.parquet_names(BOOT_STAGING, main) if data_dir.is_dir(BOOT_STAGING, main) else []
+    local = first_row(con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND schema_name = 'main'",
+                                  [cold])) is not None
+    if f_base is None or not (staged or local):
         return
-    _publish_base_chunks(con, data_dir, main, f_base, _compact_threshold(con, main))
+    if staged and not local and not (trickle.read_meta(con).get(main) or {}).get("cluster"):
+        base_store = data_dir.child(trickle.base_dir_name(main))
+        base_store.mkdir()
+        token = trickle.part_name(f_base)[: -len(".parquet")]
+        stage = data_dir.child(BOOT_STAGING, main)
+        written = []
+        for i, name in enumerate(staged):
+            stage.move_into(base_store, name, f"{token}__{i}.parquet")
+            written.append(f"{token}__{i}.parquet")
+        for old in base_store.parquet_names():  # an earlier base (a rebuild): a different token
+            if old not in written:
+                base_store.remove(old)
+        data_dir.remove(f"{main}.parquet")  # supersede a legacy single-file base (no-op if absent)
+    else:
+        _publish_base_chunks(con, data_dir, main, f_base, _compact_threshold(con, main))
     _review_base(con, data_dir, main)
+    if data_dir.is_dir(BOOT_STAGING, main):
+        data_dir.rmtree(BOOT_STAGING, main)
 
 
 def _review_base(con, data_dir: Path, main: str) -> None:
