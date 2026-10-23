@@ -710,17 +710,20 @@ def part_name(f) -> str:
 
 
 def part_f(name: str):
-    """Recover the freshness ``f`` a part file was stamped with from its :func:`part_name`."""
+    """Recover the freshness ``f`` a part file was stamped with from its :func:`part_name`, or from a chunk of
+    a part written as several files (``{part}__{i}.parquet``, an append history's large run)."""
     from datetime import datetime
 
     stem = name[: -len(".parquet")] if name.endswith(".parquet") else name
+    stem = re.sub(r"__\d+$", "", stem)
     return datetime.fromisoformat(stem.replace("_", ":"))
 
 
 def table_parts(data_dir, table: str) -> list[str]:
     """The per-run part **names** of an append-only ``table`` (its directory), sorted oldest-first (the
-    part names are canonical-UTC ISO, so a lexical sort is freshness order); ``[]`` if it is not a parts
-    directory (e.g. a wholesale single-file table, or absent)."""
+    part names are canonical-UTC ISO, so a lexical sort is freshness order; a run written as several chunks
+    has several names, each with its :func:`part_f`); ``[]`` if it is not a parts directory (e.g. a wholesale
+    single-file table, or absent)."""
     return _store(data_dir).parquet_names(table)
 
 
