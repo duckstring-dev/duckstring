@@ -1003,9 +1003,14 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
     )
     upserts = f"SELECT * EXCLUDE ({_q(D_COL)}) FROM {_RECON_CTE} WHERE {_q(D_COL)} > 0"
     if base_sql is None:
-        return f"WITH {_RECON_CTE} AS ({consol}) {upserts}"
+        return f"WITH {_RECON_CTE} AS NOT MATERIALIZED ({consol}) {upserts}"
+    # NOT MATERIALIZED: the consolidation is referenced twice, so DuckDB would otherwise materialise it, and a
+    # materialised CTE inside a consumer's query stops a join's key filter reaching the base scan. A Sink that
+    # needs only the rows of the keys that changed then read the whole base (TPC-DS SF100: 269M rows scanned
+    # for 0.15M wanted, 1.6 s against 0.8 s), and a full read was slower too (1.5 s against 0.7 s): the
+    # changelog's consolidation is small next to the base, so recomputing it is cheaper than materialising it.
     return (
-        f"WITH {_RECON_CTE} AS ({consol}) "
+        f"WITH {_RECON_CTE} AS NOT MATERIALIZED ({consol}) "
         f"SELECT _b.* FROM ({base_sql}) AS _b ANTI JOIN {_RECON_CTE} AS _r ON {_key_match('_b', '_r', pk)} "
         f"UNION ALL BY NAME {upserts}"
     )
