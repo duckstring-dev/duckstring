@@ -2723,12 +2723,13 @@ class Delta:
         )
 
 
-def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None) -> Delta:
+def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None, materialise=False) -> Delta:
     """Resolve ``table``'s mode in ``data_dir`` and read its Z-set change over ``(previous_f, f]``.
 
     ``pin`` is the Source's published freshness when this run started: an overwrite Source is read at the
     version it names (``dp.read_select(..., pin=)``). A Trickle Source is bounded by ``f`` regardless, since
-    its delta windows must tile."""
+    its delta windows must tile. ``materialise`` computes a windowed delta once into a temporary table
+    (:func:`_materialise`), for a caller that will read it more than once."""
     from datetime import datetime
 
     from .context import NEVER
@@ -2740,9 +2741,9 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None) 
     floor = datetime.fromisoformat(meta["floor"]) if meta.get("floor") else None
 
     if mode == "append":
-        return _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
+        return _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise)
     if mode == "merge":
-        return _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
+        return _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise)
 
     # overwrite source (a plain Ripple): no history. If the version this run reads was published at or
     # before the consumer's previous_f, it is unchanged → an empty delta (stable history operand).
@@ -2817,13 +2818,14 @@ def _covered(previous_f, NEVER, floor, oldest) -> bool:
     return bound is None or previous_f >= bound
 
 
-def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor) -> Delta:
+def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise=False) -> Delta:
     # As-of pin to `f`: read the one Source snapshot at this run's freshness (the data plane pins it; the
     # coverage probe shares the same SELECT so a mid-run republish can't make them see different snapshots).
-    return _append_delta_from_sql(con, dp.read_select(data_dir, table, as_of=f), previous_f, f, pk, NEVER, floor)
+    return _append_delta_from_sql(con, dp.read_select(data_dir, table, as_of=f), previous_f, f, pk, NEVER, floor,
+                                  materialise)
 
 
-def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor) -> Delta:
+def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor, materialise=False) -> Delta:
     """The append-delta core over a single history SELECT — shared by the published read and the in-run
     registry read. Append rows are all present (``+1``); never retracted."""
     rel = con.sql(hist_sql)  # includes _duckstring_f
@@ -2831,20 +2833,21 @@ def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor) -> De
     full = not _covered(previous_f, NEVER, floor, oldest)
     upper = f"{_q(F_COL)} <= {_ts(f)}"
     cond = upper if full else f"{_q(F_COL)} > {_ts(previous_f)} AND {upper}"
-    return Delta(con, pk, _as_zset(_strip_system(rel.filter(cond)), 1), is_full=full)
+    zset = _as_zset(_strip_system(rel.filter(cond)), 1)
+    return Delta(con, pk, _materialise(con, zset) if materialise and not full else zset, is_full=full)
 
 
-def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor) -> Delta:
+def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise=False) -> Delta:
     clog = changelog_name(table)
     try:
         clog_sql = dp.read_select(data_dir, clog, as_of=f)  # as-of pin to this run's freshness
     except FileNotFoundError:
         clog_sql = None
     main_sql = dp.read_select(data_dir, table, as_of=f)
-    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, floor)
+    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, floor, materialise)
 
 
-def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, floor) -> Delta:
+def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, floor, materialise=False) -> Delta:
     """The merge-delta core over two source SELECTs — a clean *main* and its *changelog* (``None`` if the
     changelog is unavailable). Shared by the published read (``_read_merge_delta``, over the data plane) and
     the in-run registry read (:func:`read_registry_delta`). ``previous_f`` covered by the floor → a windowed
@@ -2867,7 +2870,22 @@ def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, flo
         f"  WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)}"
         f") GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0"
     )
-    return Delta(con, pk, zset, is_full=False)
+    return Delta(con, pk, _materialise(con, zset) if materialise else zset, is_full=False)
+
+
+def _materialise(con, rel):
+    """``rel`` computed once into a uniquely named temporary table, as a relation over it. A windowed delta is
+    the size of the change, and a run reads it many times (whether it's empty, how many keys it touches, an
+    aggregate's two passes, every join term): left as a query, each reference re-read the Source's changelog
+    and re-consolidated it. At TPC-DS SF100 an incremental aggregate read its Source's 1.3M-row delta eight
+    times. The table lives as long as the connection, which is the run's. Opt-in (``materialise=``): a caller
+    reading inside a transaction that writes another attached database (the DuckLake Spout) can't create
+    one."""
+    name = unique_name("delta")
+    rel.create_view(name + "_q", replace=True)
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(name)} AS SELECT * FROM {_q(name + '_q')}")
+    con.execute(f"DROP VIEW {_q(name + '_q')}")
+    return con.table(name)
 
 
 def read_registry_delta(con, table, previous_f, f, pk=None) -> Delta:
@@ -2890,12 +2908,12 @@ def read_registry_delta(con, table, previous_f, f, pk=None) -> Delta:
     floor = datetime.fromisoformat(m["floor"]) if m.get("floor") else None
     out_pk = normalize_pk(pk if pk is not None else m.get("pk", ()))
     if m.get("mode") == "append":
-        return _append_delta_from_sql(con, f'SELECT * FROM {_q(table)}', previous_f, f, out_pk, NEVER, floor)
+        return _append_delta_from_sql(con, f'SELECT * FROM {_q(table)}', previous_f, f, out_pk, NEVER, floor, True)
     clog = changelog_name(table)
     clog_sql = f'SELECT * FROM {_q(clog)}' if _table_exists(con, clog) else None
     # The full-read main is the *reconstructed* current state (base ⊎ changelog), not the bare base table.
     main_sql = _reconstruct_sql_for(con, table) or f'SELECT * FROM {_q(table)}'
-    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, out_pk, NEVER, floor)
+    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, out_pk, NEVER, floor, True)
 
 
 def _strip_system(rel):

@@ -1403,8 +1403,9 @@ class Pond:
         dp = get_data_plane()
         data_dir.duckdb_setup(self.con)
         try:
+            # Materialised: a Ripple reads its delta many times (see trickle.io._materialise).
             return trickle.read_delta(self.con, data_dir, table, self.previous_f, self.f, dp=dp,
-                                      pin=self._pin(source_pond))
+                                      pin=self._pin(source_pond), materialise=True)
         except FileNotFoundError as exc:
             raise MissingSourceAsset(source_pond, table) from exc
 
