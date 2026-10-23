@@ -92,6 +92,23 @@ def test_merge_changelog_is_full_image_zset(db):
     assert meta["floor"] == meta["f_base"] == ts(1).isoformat()
 
 
+def test_a_bootstrap_is_the_base_and_a_replay_replaces_it(db):
+    """A merge main's first write is its base, with an empty changelog. A replay at the same f replaces the
+    base (as a replay replaces any run's changelog window), through merge_table and apply_zset alike; the
+    next run's changes go to the changelog as usual."""
+    _dim(db, [(1, "a"), (2, "b")], ts(1))
+    _dim(db, [(1, "a"), (3, "c")], ts(1))  # a replay of the bootstrap with different data
+    assert rows(db, "dim", "id, v") == [(1, "a"), (3, "c")]
+    assert first_row(db.sql("SELECT count(*) FROM dim__changelog"))[0] == 0
+    zset = db.sql("SELECT * FROM (VALUES (1, 'x', 1), (9, 'z', -1)) t(id, v, _duckstring_d)")
+    T.apply_zset(db, "dim", zset, ts(1), ("id",))  # a retraction with nothing to retract is dropped
+    assert rows(db, "dim", "id, v") == [(1, "x")]
+    _dim(db, [(1, "x"), (2, "b")], ts(2))
+    assert rows(db, "dim", "id, v") == [(1, "x"), (2, "b")]
+    assert first_row(db.sql("SELECT count(*) FROM dim__changelog"))[0] == 1
+    assert T.read_meta(db)["dim"]["f_base"] == ts(1).isoformat()
+
+
 def test_merge_idempotent_replay(db):
     _dim(db, [(1, "a"), (2, "b")], ts(1))
     _dim(db, [(1, "a"), (2, "B")], ts(2))

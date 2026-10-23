@@ -1133,24 +1133,8 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     if boot:
         # The bootstrap is the base (see _bootstrapping): its present rows, stamped with f, and the changelog
         # stays empty. A net retraction has nothing to retract, so it is dropped, as reconstruction would.
-        _record_meta(con, name, "merge", pk)
-        cold = cold_base_name(name)
-        con.execute("BEGIN TRANSACTION")
-        try:
-            _drop_relation(con, cold)
-            con.execute(
-                f'CREATE TABLE {_q(cold)} AS SELECT {sel_user}, {_ts(f)} AS {_q(F_COL)} '
-                f'FROM {_q(consol)} WHERE {_q(D_COL)} > 0'
-            )
-            from datetime import timezone
-
-            iso = f.astimezone(timezone.utc).isoformat()
-            con.execute(f'UPDATE {_q(META_TABLE)} SET f_base = ?, f_warm = ?, f_boot = ? WHERE table_name = ?',
-                        [iso, iso, iso, name])
-            con.execute("COMMIT")
-        except Exception:
-            con.execute("ROLLBACK")
-            raise
+        _write_boot_base(con, name, pk, f'SELECT {sel_user}, {_ts(f)} AS {_q(F_COL)} '
+                                        f'FROM {_q(consol)} WHERE {_q(D_COL)} > 0', f)
     elif nonempty:
         con.execute("BEGIN TRANSACTION")
         try:
@@ -1172,6 +1156,26 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     return nonempty
 
 
+def _write_boot_base(con, name: str, pk: tuple[str, ...], rows_sql: str, f) -> None:
+    """Write merge main ``name``'s bootstrap at ``f`` as its cold base: ``rows_sql`` (its user columns and
+    ``_duckstring_f``) replaces the base, and the watermarks move to ``f`` (see :func:`_bootstrapping`)."""
+    from datetime import timezone
+
+    _record_meta(con, name, "merge", pk)
+    cold = cold_base_name(name)
+    iso = f.astimezone(timezone.utc).isoformat()
+    con.execute("BEGIN TRANSACTION")
+    try:
+        _drop_relation(con, cold)
+        con.execute(f'CREATE TABLE {_q(cold)} AS {rows_sql}')
+        con.execute(f'UPDATE {_q(META_TABLE)} SET f_base = ?, f_warm = ?, f_boot = ? WHERE table_name = ?',
+                    [iso, iso, iso, name])
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
+
 def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
                 compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
     """Comprehensive merge: ``relation`` is the **complete current state**. Diff it against the
@@ -1188,6 +1192,22 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
     sel = ", ".join(_q(c) for c in cols)
     state = unique_name("state")
     relation.create_view(state, replace=True)
+    if f is not None and _bootstrapping(con, name, f):
+        # The state is the whole of the bootstrap: it goes straight to the base, without the consolidation a
+        # Z-set needs (every row is a +1, and the primary key is unique by this function's contract). For a
+        # large first load that pass is as costly as writing the base itself.
+        cluster = cluster_spec(cluster_by, interleave, cluster_bits)
+        clog = changelog_name(name)
+        if not _table_exists(con, clog):
+            con.execute(f'CREATE TABLE {_q(clog)} AS SELECT {sel}, CAST(0 AS BIGINT) AS {_q(D_COL)}, '
+                        f'CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(state)} LIMIT 0')
+        _write_boot_base(con, name, pk, f'SELECT {sel}, {_ts(f)} AS {_q(F_COL)} FROM {_q(state)}', f)
+        _set_compact_threshold(con, name, compact_threshold)
+        _set_cluster(con, name, cluster)
+        _advance_floor(con, name, bootstrap_f=f)
+        _retain_merge(con, name, f, retain_t, retain_n)
+        refresh_current_view(con, name)
+        return first_row(con.execute(f'SELECT count(*) FROM {_q(cold_base_name(name))}'))[0] > 0
     # The prior is the state *strictly before* this run's f — so a second merge at the same f (or a replay)
     # diffs against the pre-f state and replaces this f's changelog window with the full net change, rather
     # than diffing against its own earlier write at the same f and losing it.
