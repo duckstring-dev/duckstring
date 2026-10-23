@@ -214,11 +214,12 @@ def test_warm_bands_are_read_from_a_real_s3(s3_env, monkeypatch):
     f0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
     con = duckdb.connect()
     con.execute("SET TimeZone='UTC'")
-    for h, rows in ((1, "(1, 'a'), (2, 'b')"), (2, "(1, 'A'), (2, 'b'), (3, 'c')")):
+    runs = ((1, "(1, 'a'), (2, 'b')"), (2, "(1, 'A'), (2, 'b'), (3, 'c')"), (3, "(1, 'A'), (2, 'b'), (3, 'c'), (4, 'd')"))
+    for h, rows in runs:
         T.merge_table(con, "m", con.sql(f"SELECT * FROM (VALUES {rows}) t(id, v)"), f0 + timedelta(hours=h), ("id",))
         ParquetDataPlane().export(con, store, f=f0 + timedelta(hours=h))
-    T.fold_warm(con, "m", f0 + timedelta(hours=1))
-    ParquetDataPlane().export(con, store, f=f0 + timedelta(hours=2))
+    T.fold_warm(con, "m", f0 + timedelta(hours=2))  # the first run is the base; fold the second's changes
+    ParquetDataPlane().export(con, store, f=f0 + timedelta(hours=3))
     assert [k for k in _keys(client, "warm/m__band/") if k.endswith(".parquet")]
 
     fresh = duckdb.connect()
@@ -226,7 +227,7 @@ def test_warm_bands_are_read_from_a_real_s3(s3_env, monkeypatch):
     hydrate_registry(fresh, store)
     sql = first_row(fresh.execute("SELECT sql FROM duckdb_views() WHERE view_name = 'm__band'"))[0]
     assert "s3://" in sql
-    assert sorted(fresh.sql('SELECT id, v FROM "m"').fetchall()) == [(1, "A"), (2, "b"), (3, "c")]
+    assert sorted(fresh.sql('SELECT id, v FROM "m"').fetchall()) == [(1, "A"), (2, "b"), (3, "c"), (4, "d")]
 
 
 def test_a_spout_delivers_to_a_real_s3(s3_env, tmp_path):

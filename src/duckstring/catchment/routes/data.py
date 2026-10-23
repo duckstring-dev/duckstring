@@ -219,6 +219,9 @@ def _trickle_base_sql(
     main re-scans its whole **retained** changelog history (still on disk inside the retention window) for the
     update count / delete detection, when only the post-base slice matters — so the counts and delete tombstones
     are *since the last checkpoint*. ``None`` (not-yet-checkpointed) reads the changelog in full (it is the main).
+    With a base, a record it holds (no changelog event since, or one whose first event retracts it) counts the
+    base image as one write, and a row whose last write falls in the window counts as changed in it: a
+    bootstrap is written straight to the base, so its creates are in no changelog.
     """
     from ...trickle_io import changelog_name
 
@@ -242,21 +245,34 @@ def _trickle_base_sql(
     clw_where = (" WHERE " + " AND ".join(clw_conds)) if clw_conds else ""
     pkq = [_qi(c) for c in pk]
     part = ", ".join(pkq)
-    join = "JOIN" if windowed else "LEFT JOIN"  # windowed → only records changed in the window
     on_ma = " AND ".join(f"_m.{c} IS NOT DISTINCT FROM _a.{c}" for c in pkq)
     on_da = " AND ".join(f"_dl.{c} IS NOT DISTINCT FROM _a.{c}" for c in pkq)
+    # The base image is one write, when the base's write is in the window (a record the base held: no
+    # changelog event since, or a first event that retracts it).
+    def _at(iso):
+        from datetime import datetime
+
+        return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+    in_window = bool(f_base) and (not f_lo or _at(f_base) >= _at(f_lo)) and (not f_hi or _at(f_base) <= _at(f_hi))
+    held = "(_a._ds_fmin IS NULL OR _a._ds_fneg = _a._ds_fmin)"
+    base_write = f"(CASE WHEN {held} THEN 1 ELSE 0 END)" if in_window else "0"
+    # Windowed → only records changed in the window: a changelog event in it, or a last write in it.
+    last_in = " AND ".join(c.replace(fcol, f"_m.{fcol}") for c in conds)
+    window_filter = f" WHERE _a.{pkq[0]} IS NOT NULL OR ({last_in})" if windowed and pkq else ""
     return (
         f"WITH _clw AS (SELECT * FROM {clog}{clw_where}), "
-        f"_a AS (SELECT {part}, max({fcol}) AS _ds_fmax, "
+        f"_a AS (SELECT {part}, max({fcol}) AS _ds_fmax, min({fcol}) AS _ds_fmin, "
+        f"min({fcol}) FILTER (WHERE {dcol} < 0) AS _ds_fneg, "
         f"sum(CASE WHEN {dcol} > 0 THEN 1 ELSE 0 END) AS _ds_upd FROM _clw GROUP BY {part}), "
         f"_dl AS (SELECT *, row_number() OVER (PARTITION BY {part} "
         f"ORDER BY {fcol} DESC, {dcol} DESC) AS _ds_rn FROM _clw), "
         # The main carries _duckstring_f; the changelog join only supplies the update count now.
         f"_active AS (SELECT _m.*, 1 AS \"_duckstring_active\", "
-        f"coalesce(_a._ds_upd, 0) AS \"_duckstring_updates\" "
-        f"FROM {main} _m {join} _a ON {on_ma}), "
+        f"coalesce(_a._ds_upd, 0) + {base_write} AS \"_duckstring_updates\" "
+        f"FROM {main} _m LEFT JOIN _a ON {on_ma}{window_filter}), "
         f"_deleted AS (SELECT _dl.* EXCLUDE ({dcol}, {fcol}, _ds_rn), _a._ds_fmax AS {fcol}, "
-        f"-1 AS \"_duckstring_active\", _a._ds_upd AS \"_duckstring_updates\" "
+        f"-1 AS \"_duckstring_active\", _a._ds_upd + {base_write} AS \"_duckstring_updates\" "
         f"FROM _dl JOIN _a ON {on_da} WHERE _dl._ds_rn = 1 AND _dl.{dcol} < 0) "
         f"SELECT * FROM _active UNION ALL BY NAME SELECT * FROM _deleted"
     )
@@ -477,8 +493,9 @@ def table_runs(
     principal: auth.Principal = Depends(auth.get_principal),
 ):
     """The distinct run freshnesses (newest first, ≤100) of a Trickle table — the window selector's
-    options. Read from the append history or, for a merge, its changelog. ``floor`` is the coverage
-    watermark below which history isn't retained."""
+    options. Read from the append history or, for a merge, its changelog plus the run that wrote its base
+    (``f_base``: a bootstrap is written straight to the base). ``floor`` is the coverage watermark below which
+    history isn't retained."""
     from ...trickle_io import changelog_name
 
     m = _resolve_major(request, name, major, version)
@@ -496,6 +513,11 @@ def table_runs(
             f"WHERE {fcol} IS NOT NULL ORDER BY f DESC LIMIT 100"
         ).fetchall()
         fr = [r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0]) for r in rows]
+        if mode == "merge" and meta.get("f_base"):
+            from datetime import datetime
+
+            fs = {datetime.fromisoformat(x) for x in fr} | {datetime.fromisoformat(meta["f_base"])}
+            fr = [x.isoformat() for x in sorted(fs, reverse=True)[:100]]
         return {"freshness": fr, "floor": meta.get("floor")}
     except Exception:
         return {"freshness": [], "floor": meta.get("floor")}
@@ -699,9 +721,10 @@ def query_history(body: HistoryRequest, request: Request,
     ``-1`` of the old image and a ``+1`` of the new in the same run), or ``delete`` (a ``-1`` only). The
     representative image is the surviving ``+1`` (create/update) or the retracted ``-1`` (delete).
 
-    When the oldest recorded run is an *update*, its ``-1`` holds the **original** (pre-changelog /
-    bootstrap) image — otherwise unseen — so it's surfaced as a synthetic ``create`` at the ``floor``
-    freshness, sorted to the bottom. (A create-first or delete-only record already shows its original.)
+    When the oldest recorded run retracts the record (an *update* or a *delete*), its ``-1`` holds the
+    **original** image, which the base holds rather than the changelog (a bootstrap is written straight to
+    the base), so it's surfaced as a synthetic ``create`` at the ``floor`` freshness, sorted to the bottom.
+    A record with no changelog event at all is shown from the base as a ``create`` at its own freshness.
     PK values are bound as parameters (never interpolated)."""
     from ...trickle_io import changelog_name
 
@@ -731,15 +754,19 @@ def query_history(body: HistoryRequest, request: Request,
         # The original image: the retraction at the oldest run, but only when that run is an update
         # (it also has a +1) — re-stamped as a create at the floor freshness.
         f"_orig AS (SELECT _h.* EXCLUDE ({dcol}, {fcol}), {floor_lit} AS {fcol}, 'create' AS \"_duckstring_event\" "
-        f"FROM _ds_hist _h WHERE _h.{fcol} = (SELECT min({fcol}) FROM _ds_hist) AND _h.{dcol} < 0 "
-        f"AND EXISTS (SELECT 1 FROM _ds_hist _p WHERE _p.{fcol} = (SELECT min({fcol}) FROM _ds_hist) "
-        f"AND _p.{dcol} > 0) LIMIT 1) "
+        f"FROM _ds_hist _h WHERE _h.{fcol} = (SELECT min({fcol}) FROM _ds_hist) AND _h.{dcol} < 0 LIMIT 1) "
         f"SELECT * FROM (SELECT * FROM _events UNION ALL BY NAME SELECT * FROM _orig) "
         f"ORDER BY {fcol} DESC NULLS LAST LIMIT 2000"
     )
     try:
         con.execute(f"CREATE OR REPLACE TEMP TABLE _ds_hist AS SELECT * FROM {clog}{where}", params)
-        rel = con.execute(analytic)
+        if first_row(con.execute("SELECT count(*) FROM _ds_hist"))[0] == 0:
+            # No changelog event: the record, if it exists, is as the base holds it.
+            rel = con.execute(
+                f"SELECT *, 'create' AS \"_duckstring_event\" FROM {_qi(body.pond)}.{_qi(body.table)}{where} "
+                f"LIMIT 1", params)
+        else:
+            rel = con.execute(analytic)
         cols = [d[0] for d in rel.description] if rel.description else []
         rows = [[_json_safe(c) for c in row] for row in rel.fetchall()]
         return {"columns": cols, "rows": rows}

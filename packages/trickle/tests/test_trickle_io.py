@@ -82,12 +82,14 @@ def test_merge_changelog_is_full_image_zset(db):
         f"SELECT id, v, {T.D_COL}, {T.F_COL} FROM dim__changelog ORDER BY {T.F_COL}, id, {T.D_COL}"
     ).fetchall()
     assert clog == [
-        # The main is log-structured: the bootstrap writes the initial state to the changelog as +1s.
-        (1, "a", 1, ts(1)), (2, "b", 1, ts(1)),                       # run 1: initial inserts
         (2, "b", -1, ts(2)), (2, "B", 1, ts(2)), (3, "c", 1, ts(2)),  # run 2: update 2 = -old +new; insert 3
         (1, "a", -1, ts(3)), (3, "c", -1, ts(3)),                      # run 3: delete 1 and 3 (retractions)
     ]
-    assert T.read_meta(db)["dim"]["floor"] == ts(1).isoformat()
+    # The bootstrap is the base, not a changelog window: no consumer reads it as a delta (the floor is at it).
+    base = db.sql(f"SELECT id, v, {T.F_COL} FROM dim__base ORDER BY id").fetchall()
+    assert base == [(1, "a", ts(1)), (2, "b", ts(1))]
+    meta = T.read_meta(db)["dim"]
+    assert meta["floor"] == meta["f_base"] == ts(1).isoformat()
 
 
 def test_merge_idempotent_replay(db):
@@ -193,9 +195,10 @@ def test_plain_sql_reads_current_state_after_compaction(db):
 def test_plain_sql_includes_the_warm_tier(db):
     _dim(db, [(1, "a")], ts(1))
     _dim(db, [(1, "a"), (2, "b")], ts(2))
-    T.fold_warm(db, "dim", ts(1))  # moves the first run's changes into a warm band, staged until published
+    _dim(db, [(1, "a"), (2, "b"), (3, "c")], ts(3))
+    T.fold_warm(db, "dim", ts(2))  # moves the second run's changes into a warm band, staged until published
     assert T._table_exists(db, T.warm_pending_name("dim"))
-    assert sorted(db.sql("SELECT * FROM dim").fetchall()) == rows(db, "dim") == [(1, "a"), (2, "b")]
+    assert sorted(db.sql("SELECT * FROM dim").fetchall()) == rows(db, "dim") == [(1, "a"), (2, "b"), (3, "c")]
 
 
 @pytest.mark.parametrize("legacy_form", ["table", "view"])

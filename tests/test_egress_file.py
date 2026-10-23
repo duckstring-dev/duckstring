@@ -508,18 +508,19 @@ def test_mode_append_mirrors_collection_incrementally(tmp_path):
     _publish_trickle(tmp_path, "sales", 1, "SELECT * FROM (VALUES (1,'a'),(2,'b')) t(id,v)", f1)
     _egress_spout(tmp_path, job)
     assert _mirror_read(out, "fact") == [(1, "a"), (2, "b")]
-    assert (out / "fact__changelog" / T.part_name(f1)).exists()
+    base = sorted((out / "fact__base").glob("*.parquet"))  # the bootstrap is the base
+    assert base
     assert T.load_sidecar(out)["fact"]["mode"] == "merge"
 
     # epoch 2: only the new part ships; the delivered state advances
     _publish_trickle(tmp_path, "sales", 1, "SELECT * FROM (VALUES (1,'a'),(2,'B'),(3,'c')) t(id,v)", f2)
-    p1_mtime = (out / "fact__changelog" / T.part_name(f1)).stat().st_mtime_ns
+    base_mtimes = [b.stat().st_mtime_ns for b in base]
     job2 = dict(job, f=f2.isoformat())
     _egress_spout(tmp_path, job2)
     assert _mirror_read(out, "fact") == [(1, "a"), (2, "B"), (3, "c")]
     assert (out / "fact__changelog" / T.part_name(f2)).exists()
-    # the f1 part was not rewritten (idempotent by name — the incremental property)
-    assert (out / "fact__changelog" / T.part_name(f1)).stat().st_mtime_ns == p1_mtime
+    # the base was not rewritten (idempotent by name — the incremental property)
+    assert [b.stat().st_mtime_ns for b in base] == base_mtimes
 
 
 def test_mode_append_reconciles_folds(tmp_path, monkeypatch):

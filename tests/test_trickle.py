@@ -82,12 +82,11 @@ def test_merge_changelog_is_full_image_zset(reg, tmp_path):
         f"SELECT id, v, {T.D_COL}, {T.F_COL} FROM dim__changelog ORDER BY {T.F_COL}, id, {T.D_COL}"
     ).fetchall()
     assert clog == [
-        # The main is log-structured: run 1 (bootstrap) writes the initial state to the changelog as +1s
-        # (it IS the main until a checkpoint folds it into a base).
-        (1, "a", 1, ts(1)), (2, "b", 1, ts(1)),                       # run 1: initial inserts
+        # Run 1 (the bootstrap) is the base, not a changelog window (see trickle.io._bootstrapping).
         (2, "b", -1, ts(2)), (2, "B", 1, ts(2)), (3, "c", 1, ts(2)),  # run 2: update 2 = -old +new; insert 3
         (1, "a", -1, ts(3)), (3, "c", -1, ts(3)),                      # run 3: delete 1 and 3 (retractions)
     ]
+    assert sorted(reg.sql("SELECT id, v FROM dim__base").fetchall()) == [(1, "a"), (2, "b")]
     assert T.load_sidecar(data_dir)["dim"]["floor"] == ts(1).isoformat()
 
 
@@ -168,19 +167,22 @@ def test_base_hydrates_as_a_view_not_a_copy(reg, tmp_path, monkeypatch):
 
 def test_per_table_compact_threshold_overrides_catchment_default(reg, tmp_path, monkeypatch):
     """A per-table ``compact_threshold`` (recorded at the merge write) overrides the catchment env default
-    for that main's checkpoint trigger: a huge env default would never checkpoint these tiny tables, but a
-    tiny per-table override folds the base on the first publish."""
+    for that main's fold and checkpoint triggers: a huge env default never folds these tiny tables' changelogs,
+    but a tiny per-table override does."""
     monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", str(1 << 40))  # 1 TiB env → never fires by size
     snk_dir = tmp_path / "data"
-    # No override → the env default holds, so no base is folded (the changelog is still the whole main).
-    T.merge_table(reg, "plain", _state(reg, [(1, "a")]), ts(1), ("id",))
-    publish(reg, snk_dir, f=ts(1))
-    assert T.load_sidecar(snk_dir)["plain"]["f_base"] is None
-    # A tiny per-table override → checkpoint fires and folds the base.
-    T.merge_table(reg, "over", _state(reg, [(1, "a")]), ts(1), ("id",), compact_threshold=1)
-    publish(reg, snk_dir, f=ts(1))
-    assert T.read_meta(reg)["over"]["compact_threshold"] == 1
-    assert T.load_sidecar(snk_dir)["over"]["f_base"] == ts(1).isoformat()
+    # The bootstrap is each table's base; later writes are changelog, which the threshold governs folding.
+    for h in range(1, 6):
+        for name, kw in (("plain", {}), ("over", {"compact_threshold": 1})):
+            T.merge_table(reg, name, _state(reg, [(1, "a"), (h + 1, f"v{h}")]), ts(h), ("id",), **kw)
+        publish(reg, snk_dir, f=ts(h))
+    meta = T.read_meta(reg)
+    # No override → the env default holds, so the changelog is never folded.
+    assert meta["plain"]["f_warm"] == meta["plain"]["f_base"] == ts(1).isoformat()
+    # A tiny per-table override → the changelog is folded (warm, then into a new base).
+    assert max(meta["over"]["f_warm"], meta["over"]["f_base"]) > ts(1).isoformat()
+    assert meta["over"]["compact_threshold"] == 1
+    assert T.load_sidecar(snk_dir)["over"]["f_base"] == meta["over"]["f_base"]
     assert T.base_chunks(snk_dir, "over")
 
 
@@ -1313,10 +1315,11 @@ def test_merge_ripple_via_local_runner(tmp_path):
     assert _sc["mode"] == "merge" and _sc["pk"] == ["id"] and _sc["floor"] is not None
     con = duckdb.connect()
     assert rows(con, out, "loud", "id, v") == [(1, "A"), (2, "B")]
-    # The main is log-structured: the bootstrap state is the changelog (no base yet, no checkpoint).
+    # The bootstrap is the base, published once; the changelog holds only the empty marker part.
+    assert T.base_chunks(out, "loud") and _sc["f_base"] is not None
     assert first_row(con.sql(
         f"SELECT count(*) FROM ({ParquetDataPlane().read_select(out, 'loud__changelog')})"
-    ))[0] == 2  # the two initial rows, as +1 changelog entries
+    ))[0] == 0
 
 
 # ─── incremental draw (cross-Catchment transfer window) ──────────────────────────

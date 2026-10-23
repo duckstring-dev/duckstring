@@ -532,6 +532,11 @@ class ParquetDataPlane(DataPlane):
         data_dir.mkdir()
 
         kept = held_tables(data_dir, held)  # unchanged overwrite tables: no new version, entry carried
+        # A merge main's bootstrap is written straight to its cold base (trickle.io._bootstrapping): publish
+        # it before the sidecar advertises its f_base, so a reader never sees a base that isn't there yet.
+        for main, m in trickle.read_meta(con).items():
+            if m.get("mode") == "merge":
+                retry_on_lock(lambda main=main: _publish_local_base(con, data_dir, main))
         tables = publish_plan(con, data_dir, f, held=kept)
         meta = trickle.read_meta(con)
         incremental = trickle.incremental_tables(meta) if f is not None else set()
@@ -1160,6 +1165,24 @@ def _publish_tiered_main(con, data_dir: Path, main: str, f) -> None:
             trickle.fold_warm(con, main, warm_target)
             _export_bands(con, data_dir, main)
             _export_parts(con, data_dir, clog, f)  # drop the folded hot parts (now in the warm band)
+
+
+def _publish_local_base(con, data_dir: Path, main: str) -> None:
+    """Publish a merge main's cold base if it is a local registry table, then drop it from the registry in
+    favour of a view over the published chunks (:func:`_review_base`). A base is local only between being
+    written (a bootstrap, or a checkpoint whose publish didn't finish) and its publish; once published it is
+    a view, and this is a no-op."""
+    from . import trickle_io as trickle
+
+    cold = trickle.cold_base_name(main)
+    if first_row(con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND schema_name = 'main'",
+                             [cold])) is None:
+        return
+    f_base = trickle._f_base(con, main)
+    if f_base is None:
+        return
+    _publish_base_chunks(con, data_dir, main, f_base, _compact_threshold(con, main))
+    _review_base(con, data_dir, main)
 
 
 def _review_base(con, data_dir: Path, main: str) -> None:

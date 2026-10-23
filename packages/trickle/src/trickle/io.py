@@ -267,7 +267,9 @@ def _q(name: str) -> str:
 def _key_match(left: str, right: str, cols) -> str:
     """A NULL-safe match of ``cols`` between two relations (already-quoted names or aliases). A key column
     can be NULL (a group key, like SQL's ``GROUP BY``), and ``=``, ``USING`` and row ``IN`` never match NULL,
-    while row ``NOT IN`` drops a row whose comparison with any key is unknown."""
+    while row ``NOT IN`` drops a row whose comparison with any key is unknown. Filter with an explicit
+    ``SEMI JOIN``/``ANTI JOIN`` on it: DuckDB plans a correlated ``[NOT] EXISTS`` as a mark join, which scans
+    the whole left side (about 7x slower over a large base, and a ``LIMIT`` no longer reaches the scan)."""
     return " AND ".join(f"{left}.{_q(c)} IS NOT DISTINCT FROM {right}.{_q(c)}" for c in cols)
 
 
@@ -408,7 +410,7 @@ def _ensure_meta(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
         f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR, "
-        f"compact_threshold VARCHAR, f_warm VARCHAR, cluster VARCHAR, format_version INTEGER)"
+        f"compact_threshold VARCHAR, f_warm VARCHAR, cluster VARCHAR, format_version INTEGER, f_boot VARCHAR)"
     )
     # Migrate an older meta table that predates a column: f_base (the cold-base fold watermark),
     # compact_threshold (the per-table checkpoint-size override), f_warm (the warm-tier fold watermark).
@@ -423,6 +425,8 @@ def _ensure_meta(con) -> None:
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN cluster VARCHAR')
     if "format_version" not in cols:  # FORMAT_VERSION; NULL (a row from before it was recorded) means 1
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN format_version INTEGER')
+    if "f_boot" not in cols:  # the freshness whose write became the base directly (see _bootstrapping)
+        con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN f_boot VARCHAR')
 
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
@@ -513,6 +517,38 @@ def _set_f_warm(con, table: str, f) -> None:
     _ensure_meta(con)
     val = f.astimezone(timezone.utc).isoformat() if f is not None else None
     con.execute(f'UPDATE {_q(META_TABLE)} SET f_warm = ? WHERE table_name = ?', [val, table])
+
+
+def _f_boot(con, table: str):
+    """The freshness of the write that became merge main ``table``'s base directly (its first write, see
+    :func:`_bootstrapping`), or ``None``."""
+    from datetime import datetime
+
+    if not _table_exists(con, META_TABLE):
+        return None
+    _ensure_meta(con)  # a meta table from before f_boot was recorded
+    row = first_row(con.execute(f'SELECT f_boot FROM {_q(META_TABLE)} WHERE table_name = ?', [table]))
+    return datetime.fromisoformat(row[0]) if (row and row[0]) else None
+
+
+def _has_rows(con, name: str) -> bool:
+    return _table_exists(con, name) and first_row(con.execute(f'SELECT 1 FROM {_q(name)} LIMIT 1')) is not None
+
+
+def _bootstrapping(con, name: str, f) -> bool:
+    """Whether a write at ``f`` to merge main ``name`` is its **bootstrap**: nothing has been written yet, or
+    only the bootstrap at this same ``f`` (a replay, which replaces it, as a replay replaces any run's
+    changelog window). A bootstrap goes straight to the cold base instead of the changelog: its window is
+    never read as a delta (the floor is set to ``f``, and a window starts after the floor), so writing it
+    to the changelog only for a checkpoint to fold it into a base costs a second full copy and a full-row
+    ``GROUP BY`` on every read until then."""
+    if any(_has_rows(con, t) for t in (changelog_name(name), warm_name(name), warm_pending_name(name))):
+        return False
+    _migrate_base(con, name)
+    if not _table_exists(con, cold_base_name(name)):
+        return True
+    boot = _f_boot(con, name)
+    return boot is not None and boot == f
 
 
 def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
@@ -876,8 +912,8 @@ def append_zset(
     if pk and not first:
         pk_list = ", ".join(_q(c) for c in pk)
         new_rows = con.sql(
-            f'SELECT {sel} FROM {_q(consol)} AS _c WHERE {_q(D_COL)} > 0 '
-            f'AND NOT EXISTS (SELECT 1 FROM {_q(name)} AS _h WHERE {_key_match("_c", "_h", pk)})'
+            f'SELECT {sel} FROM {_q(consol)} AS _c ANTI JOIN {_q(name)} AS _h ON {_key_match("_c", "_h", pk)} '
+            f'WHERE {_q(D_COL)} > 0'
         )
     else:
         new_rows = con.sql(f'SELECT {sel} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
@@ -970,8 +1006,7 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
         return f"WITH {_RECON_CTE} AS ({consol}) {upserts}"
     return (
         f"WITH {_RECON_CTE} AS ({consol}) "
-        f"SELECT * FROM ({base_sql}) AS _b "
-        f"WHERE NOT EXISTS (SELECT 1 FROM {_RECON_CTE} AS _r WHERE {_key_match('_b', '_r', pk)}) "
+        f"SELECT _b.* FROM ({base_sql}) AS _b ANTI JOIN {_RECON_CTE} AS _r ON {_key_match('_b', '_r', pk)} "
         f"UNION ALL BY NAME {upserts}"
     )
 
@@ -995,6 +1030,8 @@ def _reconstruct_sql_for(con, name: str, *, upper=None, before=None) -> str | No
     ``name`` overlaid by the warm tier ⊎ hot ``__changelog`` (:func:`_clog_union_sql`). ``None`` if nothing
     has been written yet (no base, no warm, no changelog)."""
     _migrate_base(con, name)
+    if before is not None and _bootstrapping(con, name, before) and _f_boot(con, name) == before:
+        return None  # the base is the bootstrap at `before`: nothing came before it
     cold = cold_base_name(name)
     base_sql = f'SELECT * FROM {_q(cold)}' if _table_exists(con, cold) else None
     clog_sql = _clog_union_sql(con, name)
@@ -1081,6 +1118,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     sel_user = ", ".join(_q(c) for c in user)
     clog = changelog_name(name)
     clog_existed = _table_exists(con, clog)
+    boot = _bootstrapping(con, name, f)
 
     # Consolidate by full row (the Z-set `distinct` operator). The weight stays BIGINT (SUM would widen it to
     # HUGEINT), so the changelog's column type is stable across runs and parts.
@@ -1092,7 +1130,28 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     )
     nonempty = first_row(con.execute(f'SELECT count(*) FROM {_q(consol)}'))[0] > 0
     _ensure_changelog(con, clog, consol)  # borrows schema from the delta; works before any base exists
-    if nonempty:
+    if boot:
+        # The bootstrap is the base (see _bootstrapping): its present rows, stamped with f, and the changelog
+        # stays empty. A net retraction has nothing to retract, so it is dropped, as reconstruction would.
+        _record_meta(con, name, "merge", pk)
+        cold = cold_base_name(name)
+        con.execute("BEGIN TRANSACTION")
+        try:
+            _drop_relation(con, cold)
+            con.execute(
+                f'CREATE TABLE {_q(cold)} AS SELECT {sel_user}, {_ts(f)} AS {_q(F_COL)} '
+                f'FROM {_q(consol)} WHERE {_q(D_COL)} > 0'
+            )
+            from datetime import timezone
+
+            iso = f.astimezone(timezone.utc).isoformat()
+            con.execute(f'UPDATE {_q(META_TABLE)} SET f_base = ?, f_warm = ?, f_boot = ? WHERE table_name = ?',
+                        [iso, iso, iso, name])
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+    elif nonempty:
         con.execute("BEGIN TRANSACTION")
         try:
             con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')  # idempotent replay
@@ -1107,7 +1166,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     _record_meta(con, name, "merge", pk)
     _set_compact_threshold(con, name, compact_threshold)
     _set_cluster(con, name, cluster)
-    _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None))
+    _advance_floor(con, name, bootstrap_f=(f if boot or not clog_existed else None))
     _retain_merge(con, name, f, retain_t, retain_n)
     refresh_current_view(con, name)
     return nonempty
@@ -1327,7 +1386,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         con.execute(
             f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS "
             f"SELECT {by_list}, {', '.join(rexprs)} FROM {_q(cur)} "
-            f"WHERE EXISTS (SELECT 1 FROM {_q(dacc)} AS _k WHERE _k._a_ret AND {_key_match(_q(cur), '_k', by)}) "
+            f"SEMI JOIN (SELECT * FROM {_q(dacc)} WHERE _a_ret) AS _k ON {_key_match(_q(cur), '_k', by)} "
             f"GROUP BY {by_list}"
         )
 
@@ -1373,13 +1432,13 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
 
     # Emit the output delta for the affected groups: new (derived from the updated state) +1, old (the prior
     # published main) −1 — unchanged groups cancel; emptied groups (gone from state) are retracted.
-    affected = f"EXISTS (SELECT 1 FROM {_q(dacc)} AS _k WHERE {_key_match('_o', '_k', by)})"
+    affected = f"SEMI JOIN {_q(dacc)} AS _k ON {_key_match('_o', '_k', by)}"
     out_cols = list(by) + list(metrics.keys())
     out_sel = ", ".join(_q(c) for c in out_cols)
-    new_out = f"SELECT {by_list}, {_agg_derive(metrics, idx)} FROM {_q(state)} AS _o WHERE {affected} AND _a_cnt > 0"
+    new_out = f"SELECT {by_list}, {_agg_derive(metrics, idx)} FROM {_q(state)} AS _o {affected} WHERE _a_cnt > 0"
     # The prior published main is the reconstructed current state (the agg output is a log-structured merge).
     recon = _reconstruct_sql_for(con, name)
-    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o WHERE {affected}" if recon \
+    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o {affected}" if recon \
         else f"SELECT {out_sel} FROM {_q(state)} WHERE 1=0"
     delta_out = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM ({new_out}) "
@@ -1515,7 +1574,7 @@ def _fold(rows, idx, by, along, metric_list, init_states) -> tuple:
 
 
 def _keys_table(con, by, type_of, keys) -> str:
-    """A temp table holding a set of group keys (for a NULL-safe ``EXISTS`` filter, :func:`_key_match`)."""
+    """A temp table holding a set of group keys (for a NULL-safe ``SEMI JOIN``, :func:`_key_match`)."""
     t = unique_name("amk")
     con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(t)} ({', '.join(f'{_q(b)} {type_of[b]}' for b in by)})")
     if keys:
@@ -1600,8 +1659,8 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     if tail_keys:   # resume from carried state, fold only this run's new (d>0) rows
         tk = _keys_table(con, by, type_of, tail_keys)
         trows = con.execute(
-            f"SELECT {ucols_sql} FROM {_q(delta)} WHERE {_q(D_COL)} > 0 "
-            f"AND EXISTS (SELECT 1 FROM {_q(tk)} AS _k WHERE {_key_match(_q(delta), '_k', by)}) ORDER BY {order_by}"
+            f"SELECT {ucols_sql} FROM {_q(delta)} SEMI JOIN {_q(tk)} AS _k ON {_key_match(_q(delta), '_k', by)} "
+            f"WHERE {_q(D_COL)} > 0 ORDER BY {order_by}"
         ).fetchall()
         t_out, t_group, _ = _fold(trows, idx, by, along, metric_list,
                                   {gk: carried[gk] for gk in tail_keys if gk in carried})
@@ -1610,8 +1669,7 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     if past_keys:   # full re-fold of the current membership
         pkt = _keys_table(con, by, type_of, past_keys)
         prows = con.execute(
-            f"SELECT {ucols_sql} FROM {_q(cur)} "
-            f"WHERE EXISTS (SELECT 1 FROM {_q(pkt)} AS _k WHERE {_key_match(_q(cur), '_k', by)}) "
+            f"SELECT {ucols_sql} FROM {_q(cur)} SEMI JOIN {_q(pkt)} AS _k ON {_key_match(_q(cur), '_k', by)} "
             f"ORDER BY {order_by}"
         ).fetchall()
         p_out, p_group, _ = _fold(prows, idx, by, along, metric_list, {})
@@ -1621,8 +1679,7 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     tmp = _acc_out_table(con, out_rows, usercols, metric_list, type_of)
     recon = _reconstruct_sql_for(con, name)
     # only the past-changed groups have prior output rows that may change (tail groups only add new rows).
-    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o " \
-        f"WHERE EXISTS (SELECT 1 FROM {_q(pkt)} AS _k WHERE {_key_match('_o', '_k', by)})" \
+    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o SEMI JOIN {_q(pkt)} AS _k ON {_key_match('_o', '_k', by)}" \
         if (past_keys and recon) else f"SELECT {out_sel} FROM {_q(tmp)} WHERE 1=0"
     zset = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM (SELECT {out_sel} FROM {_q(tmp)}) "
@@ -1688,8 +1745,8 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     if tail_keys:
         tk = _keys_table(con, by, type_of, tail_keys)
         trows = con.execute(
-            f"SELECT {ucols_sql} FROM {_q(delta)} WHERE {_q(D_COL)} > 0 "
-            f"AND EXISTS (SELECT 1 FROM {_q(tk)} AS _k WHERE {_key_match(_q(delta), '_k', by)}) ORDER BY {order_by}"
+            f"SELECT {ucols_sql} FROM {_q(delta)} SEMI JOIN {_q(tk)} AS _k ON {_key_match(_q(delta), '_k', by)} "
+            f"WHERE {_q(D_COL)} > 0 ORDER BY {order_by}"
         ).fetchall()
         _o, t_group, t_finals = _fold(trows, idx, by, along, metric_list,
                                       {gk: carried[gk] for gk in tail_keys if gk in carried})
@@ -1698,8 +1755,7 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     if past_keys:
         pkt = _keys_table(con, by, type_of, past_keys)
         prows = con.execute(
-            f"SELECT {ucols_sql} FROM {_q(cur)} "
-            f"WHERE EXISTS (SELECT 1 FROM {_q(pkt)} AS _k WHERE {_key_match(_q(cur), '_k', by)}) "
+            f"SELECT {ucols_sql} FROM {_q(cur)} SEMI JOIN {_q(pkt)} AS _k ON {_key_match(_q(cur), '_k', by)} "
             f"ORDER BY {order_by}"
         ).fetchall()
         _o, p_group, p_finals = _fold(prows, idx, by, along, metric_list, {})
@@ -1709,8 +1765,7 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     akt = _keys_table(con, by, type_of, tail_keys + past_keys)   # a reduction value changes for any affected group
     recon = _reconstruct_sql_for(con, name)
     t = _build(finals)
-    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o " \
-        f"WHERE EXISTS (SELECT 1 FROM {_q(akt)} AS _k WHERE {_key_match('_o', '_k', by)})" \
+    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o SEMI JOIN {_q(akt)} AS _k ON {_key_match('_o', '_k', by)}" \
         if recon else f"SELECT {out_sel} FROM {_q(t)} WHERE 1=0"
     zset = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM (SELECT {out_sel} FROM {_q(t)}) "
