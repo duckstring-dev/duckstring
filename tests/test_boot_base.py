@@ -99,3 +99,29 @@ def test_a_declared_cluster_by_is_applied_at_the_first_publish(tmp_path):
     vs = [r[0] for r in duckdb.connect().sql(f"SELECT v FROM read_parquet('{chunk}')").fetchall()]
     assert vs == sorted(vs)  # rewritten in v order, not the order the rows arrived in
     assert not p.staged()
+
+
+def test_a_join_on_changed_keys_reaches_a_sources_base_scan(tmp_path):
+    """A Sink's join of a Source merge table with a few keys reads only the rows of those keys, not the whole
+    base: the Source's changelog consolidation is a temporary table, so nothing stops the join's key filter
+    (a CTE DuckDB materialises did, and every incremental join term scanned the whole fact)."""
+    import json
+
+    p = Producer(tmp_path)
+    p.merge(F1, "SELECT range AS id, range % 1000 AS grp, 'v' || range AS v FROM range(500000)")
+    p.publish(F1)
+    p.merge(F2, "SELECT range AS id, range % 1000 AS grp, CASE WHEN range = 7 THEN 'x' ELSE 'v' || range END AS v "
+                "FROM range(500000)")
+    p.publish(F2)
+    con = duckdb.connect()
+    sink = Pond("snk", "1.0.0", con, tmp_path, source_majors={"src": 1}, f=F2, previous_f=F1,
+                source_f={"src": F2.isoformat()})
+    sink.read_table("src.m").create_view("src_m")
+    con.execute("CREATE TABLE keys AS SELECT * FROM (VALUES (3), (500)) t(g)")
+    out = tmp_path / "profile.json"
+    con.execute("SET enable_profiling = 'json'")
+    con.execute(f"SET profiling_output = '{out}'")
+    rows = con.execute("SELECT count(*) FROM src_m SEMI JOIN keys ON src_m.grp = keys.g").fetchall()[0][0]
+    con.execute("SET enable_profiling = 'no_output'")
+    assert rows == 1000
+    assert json.loads(out.read_text())["query"]["total_rows_scanned"] < 100_000  # of 500,000

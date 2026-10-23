@@ -1176,7 +1176,9 @@ class Pond:
         dp = get_data_plane()
         data_dir.duckdb_setup(self.con)  # object store → httpfs + credentials (no-op for local)
         try:
-            select = dp.read_select(data_dir, table, as_of=self.f, pin=self._pin(source_pond))
+            # On this connection: a merge Trickle's changelog consolidation becomes a temporary table, so a
+            # join's key filter can reach the Source's base scan (trickle.io.materialise_reconstruct).
+            select = dp.read_select(data_dir, table, as_of=self.f, pin=self._pin(source_pond), con=self.con)
         except FileNotFoundError as exc:
             raise MissingSourceAsset(source_pond, table) from exc
         return _strip_system(self.con.sql(select))

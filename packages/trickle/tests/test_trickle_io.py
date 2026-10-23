@@ -109,6 +109,20 @@ def test_a_bootstrap_is_the_base_and_a_replay_replaces_it(db):
     assert T.read_meta(db)["dim"]["f_base"] == ts(1).isoformat()
 
 
+def test_a_materialised_reconstruction_matches_the_cte_one(db):
+    """materialise_reconstruct (the consolidation in a temporary table, for a read that will be joined) gives
+    the same rows as reconstruct_sql, and with no change since the base it is the base itself."""
+    _dim(db, [(1, "a"), (2, "b"), (3, "c")], ts(1))
+    base = 'SELECT * FROM "dim__base"'
+    clog = 'SELECT * FROM "dim__changelog"'
+    assert T.materialise_reconstruct(db, base, clog, ts(1), ("id",)) == base  # nothing changed yet
+    _dim(db, [(1, "a"), (2, "B"), (4, "d")], ts(2))  # an update, a delete and an insert
+    via_cte = sorted(db.sql(f"SELECT id, v FROM ({T.reconstruct_sql(base, clog, ts(1), ('id',))})").fetchall())
+    via_table = sorted(db.sql(f"SELECT id, v FROM ({T.materialise_reconstruct(db, base, clog, ts(1), ('id',))})")
+                       .fetchall())
+    assert via_cte == via_table == [(1, "a"), (2, "B"), (4, "d")]
+
+
 def test_merge_idempotent_replay(db):
     _dim(db, [(1, "a"), (2, "b")], ts(1))
     _dim(db, [(1, "a"), (2, "B")], ts(2))

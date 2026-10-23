@@ -988,32 +988,65 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
     lagging consumer's window read). An update a→b→c collapses to the surviving image with its latest ``f``;
     a net retraction drops the PK; an unchanged base PK keeps its base row and base freshness. Column-agnostic
     (``* EXCLUDE`` + ``GROUP BY ALL``) — needs only the PK, so it composes over any base/changelog SELECT
-    without inspecting schemas (the data plane builds it straight from the sidecar)."""
+    without inspecting schemas (the data plane builds it straight from the sidecar). A read that a query
+    will join should use :func:`materialise_reconstruct`."""
+    consol = consolidate_sql(clog_sql, f_base, upper=upper, before=before)
+    upserts = f"SELECT * EXCLUDE ({_q(D_COL)}) FROM {_RECON_CTE} WHERE {_q(D_COL)} > 0"
+    if base_sql is None:
+        return f"WITH {_RECON_CTE} AS ({consol}) {upserts}"
+    return f"WITH {_RECON_CTE} AS ({consol}) {reconstruct_from(base_sql, _RECON_CTE, pk)}"
+
+
+def consolidate_sql(clog_sql, f_base, *, upper=None, before=None) -> str:
+    """The changelog window ``(f_base, upper]`` (or ``< before``) consolidated by full row: one row per image
+    with its net weight and latest freshness, dropping the images that net to zero."""
     lo = f"{_q(F_COL)} > {_ts(f_base)}" if f_base is not None else "1=1"
     hi = f" AND {_q(F_COL)} <= {_ts(upper)}" if upper is not None else ""
     if before is not None:  # exclusive upper — the state strictly *before* a freshness (the merge prior)
         hi += f" AND {_q(F_COL)} < {_ts(before)}"
-    # The consolidated weight is only sign-tested (``> 0`` in ``upserts``, below) and then dropped — it never
-    # reaches the output — so leave it as DuckDB's native SUM (HUGEINT) rather than ``CAST(... AS BIGINT)``: a
+    # The consolidated weight is only sign-tested (``> 0`` in the upserts) and then dropped — it never reaches
+    # the output — so leave it as DuckDB's native SUM (HUGEINT) rather than ``CAST(... AS BIGINT)``: a
     # discarded value must not be able to overflow and crash a read.
-    consol = (
+    return (
         f"SELECT * EXCLUDE ({_q(D_COL)}, {_q(F_COL)}), MAX({_q(F_COL)}) AS {_q(F_COL)}, "
         f"SUM({_q(D_COL)}) AS {_q(D_COL)} "
         f"FROM (SELECT * FROM ({clog_sql}) WHERE {lo}{hi}) GROUP BY ALL HAVING SUM({_q(D_COL)}) <> 0"
     )
-    upserts = f"SELECT * EXCLUDE ({_q(D_COL)}) FROM {_RECON_CTE} WHERE {_q(D_COL)} > 0"
+
+
+def reconstruct_from(base_sql, consol_ref: str, pk) -> str:
+    """The current state from the ``base`` and a relation of consolidated changelog rows (``consol_ref``, a
+    CTE name or a table): the base anti-joined by the changed keys, then the surviving images."""
+    upserts = f"SELECT * EXCLUDE ({_q(D_COL)}) FROM {consol_ref} WHERE {_q(D_COL)} > 0"
     if base_sql is None:
-        return f"WITH {_RECON_CTE} AS NOT MATERIALIZED ({consol}) {upserts}"
-    # NOT MATERIALIZED: the consolidation is referenced twice, so DuckDB would otherwise materialise it, and a
-    # materialised CTE inside a consumer's query stops a join's key filter reaching the base scan. A Sink that
-    # needs only the rows of the keys that changed then read the whole base (TPC-DS SF100: 269M rows scanned
-    # for 0.15M wanted, 1.6 s against 0.8 s), and a full read was slower too (1.5 s against 0.7 s): the
-    # changelog's consolidation is small next to the base, so recomputing it is cheaper than materialising it.
-    return (
-        f"WITH {_RECON_CTE} AS NOT MATERIALIZED ({consol}) "
-        f"SELECT _b.* FROM ({base_sql}) AS _b ANTI JOIN {_RECON_CTE} AS _r ON {_key_match('_b', '_r', pk)} "
-        f"UNION ALL BY NAME {upserts}"
-    )
+        return upserts
+    return (f"SELECT _b.* FROM ({base_sql}) AS _b ANTI JOIN {consol_ref} AS _r ON {_key_match('_b', '_r', pk)} "
+            f"UNION ALL BY NAME {upserts}")
+
+
+def materialise_reconstruct(con, base_sql, clog_sql, f_base, pk, *, upper=None) -> str:
+    """:func:`reconstruct_sql` for a read on ``con`` that will be joined, with the changelog's consolidation
+    written to a connection-local temporary table first, so the query has no CTE.
+
+    DuckDB materialises a CTE referenced twice (the reconstruction's anti-join and its upserts), and a hash
+    join's key filter doesn't reach a scan below a materialised CTE nested in the consumer's query. A Trickle
+    term that wants only the rows of the keys that changed then read the whole base: at TPC-DS SF100, 269M
+    rows scanned for 0.15M wanted. Marking the CTE ``NOT MATERIALIZED`` lets the filter through but leaves the
+    planner estimating it, and a six-way join over such reads took 109 s instead of 32 s. A temporary table
+    gives the planner the consolidation's real size and nothing to stop the filter.
+
+    With no change since the base (every first load, and any Source that didn't change), the state is the
+    base itself, and the anti-join is left out: DuckDB estimates an anti-join against an empty table at no
+    rows, and a first load's six-way join, its fact estimated at 0.4M rows instead of 269M, built a hash table
+    on the fact and took 117 s instead of 20 s."""
+    if clog_sql is None:
+        return base_sql
+    name = unique_name("consol")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(name)} AS {consolidate_sql(clog_sql, f_base, upper=upper)}")
+    if base_sql is not None and first_row(con.execute(f"SELECT count(*) FROM {_q(name)}"))[0] == 0:
+        con.execute(f"DROP TABLE {_q(name)}")
+        return base_sql
+    return reconstruct_from(base_sql, _q(name), pk)
 
 
 def _clog_union_sql(con, name: str) -> str | None:

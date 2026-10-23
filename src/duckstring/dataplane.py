@@ -64,7 +64,7 @@ class DataPlane:
         reserved (``_duckstring_*``) column."""
         raise NotImplementedError
 
-    def read_select(self, data_dir: Path, table: str, *, as_of=None, pin=None) -> str:
+    def read_select(self, data_dir: Path, table: str, *, as_of=None, pin=None, con=None) -> str:
         """A DuckDB ``SELECT`` over a published Source ``table``, for registering as a view or relation.
         ``as_of`` (a freshness) is the **as-of read seam**: the Source snapshot whose ``f <= as_of``;
         ``None`` reads the latest. ``pin`` overrides ``as_of`` for an **overwrite** table: it is the Source's
@@ -74,7 +74,9 @@ class DataPlane:
 
         A **merge Trickle main** is log-structured (a base + the ``__changelog``), so it is *reconstructed*
         here (latest-per-PK over the base ⊎ the changelog newer than the fold watermark ``f_base``); every
-        other table is a direct physical read (:meth:`_raw_read_select`)."""
+        other table is a direct physical read (:meth:`_raw_read_select`). Given ``con``, the connection that
+        will run the query, the changelog's consolidation is written to a temporary table on it first, which
+        is what a read that will be joined wants (:func:`~duckstring.trickle.io.materialise_reconstruct`)."""
         from .trickle.io import check_format_version, load_sidecar
 
         data_dir = _as_storage(data_dir)
@@ -82,7 +84,7 @@ class DataPlane:
         check_format_version(meta.get("format_version"), table)
         mode = meta.get("mode")
         if mode == "merge":
-            return self._reconstruct_select(data_dir, table, meta, as_of)
+            return self._reconstruct_select(data_dir, table, meta, as_of, con=con)
         if mode == "append":
             return self._flat_read_select(data_dir, table, as_of=as_of)  # never versioned: skip that probe
         return self._raw_read_select(data_dir, table, as_of=pin if pin is not None else as_of)
@@ -98,7 +100,7 @@ class DataPlane:
         a listing per operand, which is a round trip on an object store."""
         return self._raw_read_select(data_dir, table, as_of=as_of)
 
-    def _reconstruct_select(self, data_dir: Path, table: str, meta: dict, as_of=None) -> str:
+    def _reconstruct_select(self, data_dir: Path, table: str, meta: dict, as_of=None, con=None) -> str:
         """Reconstruct a merge main's current state from its cold base + the warm tier (``__band``) ⊎ hot
         ``__changelog`` (all read flat via :meth:`_flat_read_select`), per
         :func:`duckstring.trickle.io.reconstruct_sql`. The warm + hot freshness ranges are disjoint, so their
@@ -109,7 +111,7 @@ class DataPlane:
         skips a guaranteed-miss base probe, saving its round-trips over an object store."""
         from datetime import datetime
 
-        from .trickle.io import changelog_name, reconstruct_sql, warm_name
+        from .trickle.io import changelog_name, materialise_reconstruct, reconstruct_sql, warm_name
 
         clogs = []
         for companion in (changelog_name(table), warm_name(table)):
@@ -131,6 +133,8 @@ class DataPlane:
             return base_sql
         clog_sql = " UNION ALL BY NAME ".join(f"({c})" for c in clogs)
         f_base = datetime.fromisoformat(meta["f_base"]) if meta.get("f_base") else None
+        if con is not None:
+            return materialise_reconstruct(con, base_sql, clog_sql, f_base, tuple(meta.get("pk", ())), upper=as_of)
         return reconstruct_sql(base_sql, clog_sql, f_base, tuple(meta.get("pk", ())), upper=as_of)
 
     def consolidated_count_select(self, data_dir: Path, table: str, meta: dict, as_of=None, pin=None) -> str:
