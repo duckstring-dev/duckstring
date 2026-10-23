@@ -1308,8 +1308,9 @@ class Pond:
             compact_threshold: Bytes the change log must reach before it is folded into the table's base.
                 Defaults to ``DUCKSTRING_COMPACT_THRESHOLD`` (256 MiB).
             cluster_by: A column or columns to order the table's compacted base by, so reads filtering on
-                them skip most of it. Defaults to ordering by ``pk``. Takes effect when the base is next
-                written (the first load, or a compaction).
+                them skip most of it. Defaults to ordering by ``pk`` from the first compaction (a first load keeps
+                the order its rows arrive in). A declared order takes effect when the base is next written
+                (the first load, or a compaction).
             interleave: With two or more ``cluster_by`` columns, interleave them (a rank-Hilbert order, so
                 each column is clustered about equally) rather than sort by them in order. Default ``True``.
             cluster_bits: The interleaved order's precision: it splits the data into ``2**cluster_bits``

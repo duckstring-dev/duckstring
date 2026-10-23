@@ -75,7 +75,7 @@ The computation isn't incremental, but its output is: anything downstream receiv
 
 A merge table's older rows are kept in a compacted base, stored as Parquet. Every row group in it records the smallest and largest value of each column, and DuckDB skips the row groups whose range rules out a filter. So a read that filters on a column (a query, a downstream Pond reading only the keys that changed, a lookup) touches little of the base when similar values are stored together, and nearly all of it when they're scattered.
 
-By default the base is ordered by the primary key, so filters on the key skip almost everything. To order it for other columns, declare them on the write:
+By default the base is ordered by the primary key, so filters on the key skip almost everything. A table's first load is the exception: it's stored in the order its rows arrive, so that a large one is written only once, and it takes primary-key order at its first compaction. To order it for other columns, declare them on the write:
 
 ```python
 pond.merge_table("customer", state, pk="customer_id", cluster_by=["region", "signup_day"])
