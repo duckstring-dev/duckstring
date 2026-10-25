@@ -2720,19 +2720,22 @@ class Driver(TapsMixin):
             self._process(now, notify=False)  # poller-driven
 
     def _prune_draw_versions(self, pond: str) -> None:
-        """A Draw has no Duck, so its landed overwrite versions are trimmed here, once the landing has
-        advanced its freshness: Sinks dispatched from now on pin the version just landed, and in-flight
-        ones are covered by ``_retain_from``. Housekeeping: a failure never fails the transfer."""
+        """A Draw has no Duck, so its landed overwrite versions and superseded Trickle tiers are trimmed
+        here, once the landing has advanced its freshness: Sinks dispatched from now on read what just
+        landed, and in-flight ones are covered by ``_retain_from``. Housekeeping: a failure never fails the
+        transfer."""
         from pathlib import Path
 
-        from ..dataplane import prune_versions
+        from ..dataplane import gc_tiers, prune_versions
         from .registry import pond_data_dir
 
         meta = self.meta[pond]
         try:
             raw = self._retain_from(pond)
-            prune_versions(pond_data_dir(Path(self.root), meta["name"], meta["major"], self.data_root),
-                           datetime.fromisoformat(raw) if raw else None)
+            bound = datetime.fromisoformat(raw) if raw else None
+            data_dir = pond_data_dir(Path(self.root), meta["name"], meta["major"], self.data_root)
+            prune_versions(data_dir, bound)
+            gc_tiers(data_dir, bound)  # superseded Trickle tiers, as a Duck's publish collects its own
         except Exception as exc:  # noqa: BLE001
             print(f"[catchment] version prune for draw {pond} skipped: {exc}", flush=True)
 

@@ -200,11 +200,12 @@ class RunInputs:
         return rec["retain_from"] if rec is not None else KEEP_ALL
 
     def prune(self, retain_from) -> int:
-        """Trim superseded overwrite versions now (the Catchment's ``shutdown`` job, sent when the Pond goes
-        idle). See :func:`duckstring.dataplane.prune_versions`."""
-        from ..dataplane import prune_versions
+        """Trim superseded overwrite versions and Trickle tiers now (the Catchment's ``shutdown`` job, sent when
+        the Pond goes idle). See :func:`duckstring.dataplane.prune_versions` and :func:`~duckstring.dataplane.gc_tiers`."""
+        from ..dataplane import gc_tiers, prune_versions
 
-        return prune_versions(self.own_data_dir, retain_from)
+        removed = prune_versions(self.own_data_dir, retain_from)
+        return removed + gc_tiers(self.own_data_dir, retain_from)
 
 
 class RippleExecutor(RunInputs):

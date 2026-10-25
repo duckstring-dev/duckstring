@@ -1354,6 +1354,7 @@ def test_incremental_draw_window_roundtrip(tmp_path):
     assert [T.part_f(n) for n in shipped] == [ts(3)]
     for n in shipped:
         shutil.copy(prod / "dim__changelog" / n, cons / "dim__changelog" / n)
+    shutil.copy(prod / T.SIDECAR, cons / T.SIDECAR)  # the sidecar always travels (it commits what's landed)
 
     rcon = duckdb.connect()
     rcon.execute("SET TimeZone='UTC'")

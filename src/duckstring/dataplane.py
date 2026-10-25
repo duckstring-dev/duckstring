@@ -80,94 +80,68 @@ class DataPlane:
         from .trickle.io import check_format_version, load_sidecar
 
         data_dir = _as_storage(data_dir)
-        meta = load_sidecar(data_dir).get(table, {})
+        sidecar = load_sidecar(data_dir)
+        meta = sidecar.get(table, {})
         check_format_version(meta.get("format_version"), table)
         mode = meta.get("mode")
         if mode == "merge":
-            return self._reconstruct_select(data_dir, table, meta, as_of, con=con)
-        if mode == "append":
-            return self._flat_read_select(data_dir, table, as_of=as_of)  # never versioned: skip that probe
-        return self._raw_read_select(data_dir, table, as_of=pin if pin is not None else as_of)
+            return self._reconstruct_select(data_dir, table, meta, as_of, con=con, sidecar=sidecar)
+        if mode == "append":  # never versioned: skip that probe
+            return self._flat_read_select(data_dir, table, as_of=as_of, sidecar=sidecar)
+        return self._raw_read_select(data_dir, table, as_of=pin if pin is not None else as_of, sidecar=sidecar)
 
-    def _raw_read_select(self, data_dir: Path, table: str, *, as_of=None) -> str:
+    def _raw_read_select(self, data_dir: Path, table: str, *, as_of=None, sidecar=None) -> str:
         """A direct physical ``SELECT`` over a published table (no reconstruction): an overwrite table's
         version, else :meth:`_flat_read_select`."""
         raise NotImplementedError
 
-    def _flat_read_select(self, data_dir: Path, table: str, *, as_of=None) -> str:
+    def _flat_read_select(self, data_dir: Path, table: str, *, as_of=None, sidecar=None) -> str:
         """A physical read of an operand that is never versioned: a merge main's cold base and its
         ``__changelog`` / ``__band`` companions, and an append-only table. Skipping the versions probe saves
         a listing per operand, which is a round trip on an object store."""
-        return self._raw_read_select(data_dir, table, as_of=as_of)
+        return self._raw_read_select(data_dir, table, as_of=as_of, sidecar=sidecar)
 
-    def _reconstruct_select(self, data_dir: Path, table: str, meta: dict, as_of=None, con=None) -> str:
-        """Reconstruct a merge main's current state from its cold base + the warm tier (``__band``) ⊎ hot
-        ``__changelog`` (all read flat via :meth:`_flat_read_select`), per
-        :func:`duckstring.trickle.io.reconstruct_sql`. The warm + hot freshness ranges are disjoint, so their
-        union is the changelog above the cold-base watermark with no double-count.
+    def _reconstruct_select(self, data_dir: Path, table: str, meta: dict, as_of=None, con=None,
+                            sidecar=None) -> str:
+        """Reconstruct a merge main's current state as of ``as_of`` from its read snapshot
+        (:func:`merge_snapshot`): the cold base it picks, its warm bands and its hot change log parts, per
+        :func:`duckstring.trickle.io.reconstruct_sql`. The bands and the hot parts are disjoint in freshness,
+        so their union is the change log above the base's watermark with no double-count."""
+        from .trickle.io import load_sidecar, materialise_reconstruct, reconstruct_sql
 
-        S3-frugal: the cold **base** is read only when the sidecar says one exists (``f_base`` set = the main has
-        been checkpointed). An un-checkpointed main (the whole changelog is the state — the common case) then
-        skips a guaranteed-miss base probe, saving its round-trips over an object store."""
-        from datetime import datetime
-
-        from .trickle.io import changelog_name, materialise_reconstruct, reconstruct_sql, warm_name
-
-        clogs = []
-        for companion in (changelog_name(table), warm_name(table)):
-            try:
-                clogs.append(self._flat_read_select(data_dir, companion, as_of=as_of))
-            except FileNotFoundError:
-                pass
-        # Attempt the base regardless of f_base: a merge main can have a base with f_base unset — a **legacy
-        # single-file** base (`{table}.parquet`), or one restored/seeded outside the checkpoint path. Gating on
-        # f_base here dropped that base silently. FileNotFoundError (no base yet — the common un-checkpointed
-        # case) is the honest signal; the flat read raises it cheaply.
-        try:
-            base_sql = self._flat_read_select(data_dir, table, as_of=as_of)
-        except FileNotFoundError:
-            base_sql = None
-        if not clogs:
+        data_dir = _as_storage(data_dir)
+        sidecar = load_sidecar(data_dir) if sidecar is None else sidecar
+        snap = merge_snapshot(data_dir, table, sidecar, as_of)
+        base_sql = _read_parquet_files(snap["base"], as_of) if snap["base"] else None
+        clog = snap["bands"] + snap["hot"]
+        if not clog:
             if base_sql is None:
                 raise FileNotFoundError(data_dir.uri(table))
             return base_sql
-        clog_sql = " UNION ALL BY NAME ".join(f"({c})" for c in clogs)
-        f_base = datetime.fromisoformat(meta["f_base"]) if meta.get("f_base") else None
+        clog_sql = _read_parquet_files(clog, as_of)
+        pk = tuple(meta.get("pk", ()))
         if con is not None:
-            return materialise_reconstruct(con, base_sql, clog_sql, f_base, tuple(meta.get("pk", ())), upper=as_of)
-        return reconstruct_sql(base_sql, clog_sql, f_base, tuple(meta.get("pk", ())), upper=as_of)
+            return materialise_reconstruct(con, base_sql, clog_sql, snap["f_base"], pk, upper=as_of)
+        return reconstruct_sql(base_sql, clog_sql, snap["f_base"], pk, upper=as_of)
 
     def consolidated_count_select(self, data_dir: Path, table: str, meta: dict, as_of=None, pin=None) -> str:
         """A scalar ``SELECT`` for the merge main's **current-state row count**, computed *without scanning the
         base data*: ``count(cold base)`` (Parquet metadata, no scan) **+** the net Z-set weight
-        ``sum(_duckstring_d)`` of the changelog (warm ⊎ hot) above the fold watermark ``f_base``. For a valid
-        merge log each present row nets to weight ``+1``, an update to ``0`` and a delete to ``-1``, so this
-        equals ``count(*)`` over :meth:`_reconstruct_select` — but as metadata + a small delta scan instead of
-        a full base scan. ``as_of`` clamps both tiers (the read seam), same as the reconstruct."""
-        from datetime import datetime
-
-        from .trickle.io import D_COL, F_COL, _ts, changelog_name, warm_name
+        ``sum(_duckstring_d)`` of the read snapshot's bands and hot parts. For a valid merge log each present
+        row nets to weight ``+1``, an update to ``0`` and a delete to ``-1``, so this equals ``count(*)`` over
+        :meth:`_reconstruct_select`, as metadata plus a small delta scan instead of a full base scan."""
+        from .trickle.io import D_COL, F_COL, _ts, load_sidecar
 
         data_dir = _as_storage(data_dir)
         if meta.get("mode") != "merge":  # an overwrite version or an append parts dir: count the read itself
             return f"SELECT count(*) FROM ({self.read_select(data_dir, table, as_of=as_of, pin=pin)})"
-        clogs = []
-        for companion in (changelog_name(table), warm_name(table)):
-            try:
-                clogs.append(self._flat_read_select(data_dir, companion, as_of=as_of))
-            except FileNotFoundError:
-                pass
-        base_sql = None  # attempt the base regardless of f_base (a legacy single-file base has none) — see
-        try:            # _reconstruct_select; FileNotFoundError = no base yet (the common un-checkpointed case)
-            base_sql = self._flat_read_select(data_dir, table, as_of=as_of)
-        except FileNotFoundError:
-            base_sql = None
-        base_cnt = f"(SELECT count(*) FROM ({base_sql}))" if base_sql else "0"
-        if not clogs:
+        snap = merge_snapshot(data_dir, table, load_sidecar(data_dir), as_of)
+        base_cnt = f"(SELECT count(*) FROM ({_read_parquet_files(snap['base'], as_of)}))" if snap["base"] else "0"
+        clog = snap["bands"] + snap["hot"]
+        if not clog:
             return f"SELECT {base_cnt}"
-        clog_sql = " UNION ALL BY NAME ".join(f"({c})" for c in clogs)
-        lo = f' WHERE "{F_COL}" > {_ts(datetime.fromisoformat(meta["f_base"]))}' if meta.get("f_base") else ""
-        delta = f'(SELECT coalesce(sum("{D_COL}"), 0) FROM ({clog_sql}){lo})'
+        lo = f' WHERE "{F_COL}" > {_ts(snap["f_base"])}' if snap["f_base"] is not None else ""
+        delta = f'(SELECT coalesce(sum("{D_COL}"), 0) FROM ({_read_parquet_files(clog, as_of)}){lo})'
         return f"SELECT {base_cnt} + {delta}"
 
     def list_tables(self, data_dir) -> list[str]:
@@ -206,12 +180,13 @@ class DataPlane:
         if versions:
             return [((trickle.version_dir_name(table), versions[-1]), f"{table}.parquet")]
         parts = trickle.table_parts(data_dir, table)
-        if parts:
-            return [((table, n), f"{table}/{n}") for n in parts]
-        chunks = trickle.base_chunks(data_dir, table)
-        if chunks:
+        if parts or trickle.base_chunks(data_dir, table):
+            sidecar = trickle.load_sidecar(data_dir)
+        if parts:  # the committed snapshot's parts (a later Run's, or superseded ones, stay out)
+            return [((table, n), f"{table}/{n}") for n in parts_snapshot(data_dir, table, sidecar)]
+        if trickle.base_chunks(data_dir, table):
             bd = trickle.base_dir_name(table)
-            return [((bd, n), f"{bd}/{n}") for n in chunks]
+            return [((bd, n), f"{bd}/{n}") for n in merge_snapshot(data_dir, table, sidecar)["base_names"]]
         if data_dir.exists(f"{table}.parquet"):
             return [((f"{table}.parquet",), f"{table}.parquet")]
         return []
@@ -234,6 +209,214 @@ def _read_parquet_glob(glob: str, as_of=None) -> str:
     if as_of is not None:
         sel += f' WHERE "{F_COL}" <= {_ts(as_of)}'
     return sel
+
+
+def _read_parquet_files(uris: list[str], as_of=None) -> str:
+    """A ``SELECT`` over an explicit list of Parquet files, clamped to ``as_of`` like
+    :func:`_read_parquet_glob`. A read names its files when it is planned, so a file a later publish adds
+    (another Run's part, a new base) never joins it."""
+    from .trickle.io import F_COL, _ts
+
+    files = ", ".join(f"'{u}'" for u in uris)
+    sel = f"SELECT * FROM read_parquet([{files}], union_by_name=true)"
+    if as_of is not None:
+        sel += f' WHERE "{F_COL}" <= {_ts(as_of)}'
+    return sel
+
+
+# ─── read snapshots (plans/trickle-insert-only.md, Stage 0) ──────────────────────
+#
+# Pond Runs pipeline, so a Source can publish its next Run (and fold or compact a merge main) while a Sink
+# run at an earlier freshness is still reading it. Every read therefore resolves to a fixed set of immutable
+# files when it's planned, chosen from the sidecar (the commit marker: written after the files it declares)
+# and the read's freshness, and a superseded file is deleted only once no in-flight run can need it
+# (:func:`gc_tiers`, bounded by the Catchment's ``retain_from``).
+#
+# For a merge main read as of ``a`` (clamped to the sidecar's run stamp): the newest base token at or below
+# ``a``, the bands above that token up to ``a``, and the change log parts above the newest of those bands up
+# to ``a``. Folded parts, bands and base chunks a later fold or compaction superseded are still on disk until
+# the bound passes, so a reader behind those operations reads exactly its state.
+
+
+def _run_upper(sidecar: dict, as_of=None):
+    """The newest freshness a read may see: ``as_of`` clamped to the sidecar's run stamp (a part or base
+    stamped later is a publish still in progress)."""
+    from datetime import datetime
+
+    from .trickle.io import RUN_KEY
+
+    run = (sidecar.get(RUN_KEY) or {}).get("f")
+    committed = datetime.fromisoformat(run) if run else None
+    if as_of is None:
+        return committed
+    return as_of if committed is None else min(as_of, committed)
+
+
+def _base_tokens(store, table: str) -> dict:
+    """A merge main's published base chunks grouped by checkpoint token (its freshness)."""
+    from .trickle.io import base_chunks, part_f
+
+    tokens: dict = {}
+    for n in base_chunks(store, table):
+        try:
+            tokens.setdefault(part_f(n), []).append(n)
+        except ValueError:
+            tokens.setdefault(None, []).append(n)  # unparseable: part of every snapshot, never collected
+    return tokens
+
+
+def _pick_token(tokens: dict, upper, f_base):
+    """The base token a read at ``upper`` uses: the newest at or below it. With none (a read older than every
+    retained base), the newest at or below the sidecar's ``f_base``, else none."""
+    dated = sorted(t for t in tokens if t is not None)
+    eligible = [t for t in dated if upper is None or t <= upper]
+    if eligible:
+        return eligible[-1]
+    if f_base is not None:
+        older = [t for t in dated if t <= f_base]
+        if older:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "no published base at or below %s; reading the base at %s", upper, older[-1])
+            return older[-1]
+    return None
+
+
+def merge_snapshot(store, table: str, sidecar: dict, as_of=None) -> dict:
+    """The files a read of merge main ``table`` as of ``as_of`` uses (see the section note): ``base`` (file
+    URIs), ``f_base`` (the base's token, the reconstruct's fold watermark), ``bands`` and ``hot`` (change log
+    part URIs, disjoint in freshness)."""
+    from datetime import datetime
+
+    from .trickle.io import base_dir_name, changelog_name, part_f, table_parts, warm_name
+
+    store = _as_storage(store)
+    entry = sidecar.get(table) or {}
+    upper = _run_upper(sidecar, as_of)
+    f_base_entry = datetime.fromisoformat(entry["f_base"]) if entry.get("f_base") else None
+    tokens = _base_tokens(store, table)
+    token = _pick_token(tokens, upper, f_base_entry)
+    bdir = base_dir_name(table)
+    base = [store.uri(bdir, n) for n in tokens.get(token, []) + tokens.get(None, [])] if token is not None else []
+    if not base and not tokens and store.exists(f"{table}.parquet"):
+        base = [store.uri(f"{table}.parquet")]  # a legacy single-file base
+    if token is None and not base and tokens.get(None):
+        base = [store.uri(bdir, n) for n in tokens[None]]
+
+    def within(f, lo):
+        return (lo is None or f > lo) and (upper is None or f <= upper)
+
+    warm = warm_name(table)
+    band_names = [n for n in table_parts(store, warm) if within(part_f(n), token)]
+    f_warm = max((part_f(n) for n in band_names), default=token)
+    clog = changelog_name(table)
+    hot_names = [n for n in table_parts(store, clog) if within(part_f(n), f_warm)]
+    hot = [store.uri(clog, n) for n in hot_names]
+    bands = [store.uri(warm, n) for n in band_names]
+    for name, uris in ((clog, hot), (warm, bands)):  # an unstamped publish writes a tier as one file
+        if not table_parts(store, name) and store.exists(f"{name}.parquet"):
+            uris.append(store.uri(f"{name}.parquet"))
+    return {"base": base, "f_base": token, "bands": bands, "hot": hot, "f_warm": f_warm,
+            "base_names": tokens.get(token, []) if token is not None else [],
+            "band_names": band_names, "hot_names": hot_names}
+
+
+def parts_snapshot(store, table: str, sidecar: dict, as_of=None) -> list[str]:
+    """The part names a read of an append-only parts directory as of ``as_of`` uses: those at or below the
+    read's freshness and, for a reader at or past the table's floor, at or above it (parts below the floor are
+    retention's or a rebuild's drops, kept on disk only for readers still behind it)."""
+    from datetime import datetime
+
+    from .trickle.io import CHANGELOG_SUFFIX, WARM_SUFFIX, base_table_name, part_f, table_parts
+
+    store = _as_storage(store)
+    upper = _run_upper(sidecar, as_of)
+    names = [n for n in table_parts(store, table) if upper is None or part_f(n) <= upper]
+    if table.endswith((CHANGELOG_SUFFIX, WARM_SUFFIX)):
+        return names  # a merge main's tiers: chosen by merge_snapshot, or windowed by a delta read
+    floor_iso = (sidecar.get(base_table_name(table)) or {}).get("floor")
+    floor = datetime.fromisoformat(floor_iso) if floor_iso else None
+    if floor is not None and (upper is None or floor <= upper):
+        names = [n for n in names if part_f(n) >= floor]
+    return names
+
+
+def gc_tiers(store, retain_from=KEEP_ALL) -> int:
+    """Delete the published Trickle files no read at or after ``retain_from`` can use: base chunks of tokens
+    older than the base a read at ``retain_from`` picks, bands at or below that token, change log parts at or
+    below that read's newest band (and its floor), and append parts below the floor once ``retain_from``
+    has passed it. ``KEEP_ALL`` (a standalone publish, with no in-flight readers to protect) and ``None`` (no
+    reader bound) collect up to the newest publish. Run after the sidecar is committed. Returns the number
+    of files removed."""
+    from datetime import datetime
+
+    from .trickle.io import (
+        CHANGELOG_SUFFIX,
+        DROPLOG_SUFFIX,
+        base_dir_name,
+        changelog_name,
+        load_sidecar,
+        part_f,
+        sidecar_tables,
+        table_parts,
+        warm_name,
+    )
+
+    store = _as_storage(store)
+    sidecar = load_sidecar(store)
+    bound = _run_upper(sidecar, None if retain_from is KEEP_ALL else retain_from)
+    removed = 0
+    for table, entry in sidecar_tables(sidecar).items():
+        mode = entry.get("mode")
+        if mode == "merge":
+            snap = merge_snapshot(store, table, sidecar, bound)
+            token, f_warm = snap["f_base"], snap["f_warm"]
+            if token is None:
+                continue  # no base yet at the bound: nothing is superseded
+            bdir = base_dir_name(table)
+            for t, names in _base_tokens(store, table).items():
+                if t is not None and t < token:
+                    for n in names:
+                        store.remove(bdir, n)
+                        removed += 1
+            if store.exists(f"{table}.parquet") and snap["base_names"]:
+                store.remove(f"{table}.parquet")  # a legacy single-file base, superseded by chunks
+                removed += 1
+            warm = warm_name(table)
+            bands = table_parts(store, warm)
+            for n in bands:
+                if part_f(n) <= token:
+                    store.remove(warm, n)
+                    removed += 1
+            if bands and not table_parts(store, warm) and store.is_dir(warm):
+                store.rmtree(warm)  # every band is in the base: no warm tier left
+            floor_iso = entry.get("floor")
+            floor = datetime.fromisoformat(floor_iso) if floor_iso else None
+            clog = changelog_name(table)
+            cut = f_warm if floor is None else min(f_warm, floor)
+            newest = _run_upper(sidecar, None)
+            for n in table_parts(store, clog):
+                # Never the newest Run's part: at a bootstrap it is the empty marker at the floor, which keeps a
+                # covered consumer's delta empty rather than a coverage miss (a fold never takes it either).
+                if part_f(n) <= cut and part_f(n) != newest:
+                    store.remove(clog, n)
+                    removed += 1
+        if mode in ("append", "merge"):
+            floor_iso = entry.get("floor")
+            floor = datetime.fromisoformat(floor_iso) if floor_iso else None
+            if floor is None or (bound is not None and bound < floor):
+                continue  # a reader may still be behind the floor
+            dirs = [table] if mode == "append" else []
+            dirs.append(f"{table}{DROPLOG_SUFFIX}")
+            for d in dirs:
+                if d.endswith(CHANGELOG_SUFFIX):
+                    continue
+                for n in table_parts(store, d):
+                    if part_f(n) < floor:
+                        store.remove(d, n)
+                        removed += 1
+    return removed
 
 
 def select_version(names: list[str], at, *, table: str = "") -> str:
@@ -362,7 +545,7 @@ def validate_publish(con, table: str) -> None:
         )
 
 
-def publish_plan(con, data_dir: Path, f=None, held=frozenset()) -> list[str]:
+def publish_plan(con, data_dir: Path, f=None, held=frozenset(), *, write: bool = True) -> list[str]:
     """Validate the publish set, write the ``_trickle.json`` sidecar, and return the tables to publish.
 
     Trickle tables (a clean *main* + its ``__changelog`` Z-set companion) legitimately carry
@@ -420,7 +603,8 @@ def publish_plan(con, data_dir: Path, f=None, held=frozenset()) -> list[str]:
         payload["objects"] = existing_objects
     if f_iso is not None:
         payload[trickle.RUN_KEY] = {"f": f_iso}
-    trickle.write_sidecar(data_dir, payload)
+    if write:  # the commit marker: an export validates first (write=False) and commits after its files
+        trickle.write_sidecar(data_dir, payload)
     return tables
 
 
@@ -541,12 +725,16 @@ class ParquetDataPlane(DataPlane):
         for main, m in trickle.read_meta(con).items():
             if m.get("mode") == "merge":
                 retry_on_lock(lambda main=main: _publish_local_base(con, data_dir, main))
-        tables = publish_plan(con, data_dir, f, held=kept)
+        # Validate now (a reserved-column violation aborts before anything is written); the sidecar, the
+        # commit marker every read snapshot is chosen from, is written after the files it declares.
+        tables = publish_plan(con, data_dir, f, held=kept, write=False)
         meta = trickle.read_meta(con)
         incremental = trickle.incremental_tables(meta) if f is not None else set()
         version_f = f if f is not None else datetime.now(timezone.utc)  # an unstamped publish still versions
-        plain = {t for t, e in trickle.sidecar_tables(trickle.load_sidecar(data_dir)).items()
-                 if e.get("mode") == "overwrite"}  # publish_plan just wrote it
+        trickle_names = (set(meta) | {trickle.changelog_name(t) for t in meta} | {trickle.warm_name(t) for t in meta}
+                         | {f"{t}{trickle.DROPLOG_SUFFIX}" for t in meta}
+                         | {trickle.cold_base_name(t) for t, m in meta.items() if m.get("mode") == "merge"})
+        plain = {t for t in tables if t not in trickle_names}  # the overwrite tables publish_plan declares
         merge_mains = {t for t, m in meta.items() if m.get("mode") == "merge"}
         colds = {trickle.cold_base_name(t) for t in merge_mains}
 
@@ -569,16 +757,16 @@ class ParquetDataPlane(DataPlane):
                         con.execute(f"COPY ({_concrete_select(con, table)}) TO '{uri}' (FORMAT PARQUET)")
             for main in merge_mains:
                 _publish_tiered_main(con, data_dir, main, f)
-            if merge_mains:  # a checkpoint may have advanced f_base → refresh the sidecar
-                publish_plan(con, data_dir, f, held=kept)
+            publish_plan(con, data_dir, f, held=kept)  # commit: every file it declares is in place
             if retain_from is not KEEP_ALL:
                 prune_versions(data_dir, retain_from)  # after the new version is in place
+            gc_tiers(data_dir, retain_from)  # superseded tiers no in-flight read can use
             _export_companions(con, data_dir, f)  # state-format Extension 1 (runs after the sidecar is final)
             _enrich_sidecar(con, data_dir, f)     # state-format Extension 2 (stats/schema hints, best-effort)
 
         retry_on_lock(_export)
 
-    def _raw_read_select(self, data_dir, table: str, *, as_of=None) -> str:
+    def _raw_read_select(self, data_dir, table: str, *, as_of=None, sidecar=None) -> str:
         """An overwrite table's version for ``as_of`` (see :func:`select_version`), else the flat layer."""
         from . import trickle_io as trickle
 
@@ -587,19 +775,28 @@ class ParquetDataPlane(DataPlane):
         if versions:
             name = select_version(versions, as_of, table=table)
             return f"SELECT * FROM read_parquet('{data_dir.uri(trickle.version_dir_name(table), name)}')"
-        return self._flat_read_select(data_dir, table, as_of=as_of)
+        return self._flat_read_select(data_dir, table, as_of=as_of, sidecar=sidecar)
 
-    def _flat_read_select(self, data_dir, table: str, *, as_of=None) -> str:
+    def _flat_read_select(self, data_dir, table: str, *, as_of=None, sidecar=None) -> str:
         """The unversioned layouts: append parts, merge base chunks, or a single ``{table}.parquet`` (the
         earlier overwrite layout, still used by Puddle snapshots). Trickle operands always land here, so
         they skip the versions probe."""
         from . import trickle_io as trickle
 
         data_dir = _as_storage(data_dir)
-        if trickle.table_parts(data_dir, table):  # append-only parts directory → union the parts
-            return _read_parquet_glob(data_dir.glob("*.parquet", table), as_of)
-        if trickle.base_chunks(data_dir, table):  # log-structured merge-main base → union its chunks
-            return _read_parquet_glob(data_dir.glob("*.parquet", trickle.base_dir_name(table)), as_of)
+        parts = trickle.table_parts(data_dir, table)
+        if parts or trickle.base_chunks(data_dir, table):
+            sidecar = trickle.load_sidecar(data_dir) if sidecar is None else sidecar
+        if parts:  # append-only parts directory → union the snapshot's parts
+            names = parts_snapshot(data_dir, table, sidecar, as_of)
+            if not names:  # nothing at the read's freshness: an empty relation with the table's columns
+                return f"{_read_parquet_files([data_dir.uri(table, parts[0])])} LIMIT 0"
+            return _read_parquet_files([data_dir.uri(table, n) for n in names], as_of)
+        if trickle.base_chunks(data_dir, table):  # log-structured merge-main base → the snapshot's chunks
+            base = merge_snapshot(data_dir, table, sidecar, as_of)["base"]
+            if not base:
+                raise FileNotFoundError(data_dir.uri(trickle.base_dir_name(table)))
+            return _read_parquet_files(base, as_of)
         if not data_dir.exists(f"{table}.parquet"):
             raise FileNotFoundError(data_dir.uri(f"{table}.parquet"))
         return f"SELECT * FROM read_parquet('{data_dir.uri(table + '.parquet')}')"
@@ -627,12 +824,10 @@ def _export_parts(con, data_dir, table: str, f, *, chunk: bool = False) -> None:
     ``_duckstring_f``-homogeneous file per registry freshness not already on disk (so a normal run writes
     just its new slice, and a rebuild/restore backfills any missing parts). Idempotent on replay.
 
-    **Pruning is floor-anchored, never absence-inferred** (plans/s3-resident-state.md step 1): a published
-    part is dropped only when its freshness fell below the table's **floor** — the explicit, positive
-    signal every genuine drop advances (retention ``_apply_retention`` → floor; a warm fold → floor; a
-    checkpoint/rebuild re-bootstrap → floor). A part the registry merely *lacks* is KEPT: absence is what a
-    partially-hydrated registry looks like (a fresh box that pulled only the hot window — the future
-    no-hydration path), and inferring a drop from it deletes real history.
+    It never deletes a part for being below the floor: :func:`gc_tiers` does, after the sidecar commits and
+    once no in-flight read can still be behind the floor. Pruning is floor-anchored, never absence-inferred
+    (plans/s3-resident-state.md step 1): a part the registry merely *lacks* is kept, since absence is what a
+    partially-hydrated registry looks like.
 
     When the table is **empty** (a bootstrap-only changelog with no rows yet), a schema-only marker part is
     still written at the run's ``f`` so the table stays readable as an empty relation — a consumer covered
@@ -666,22 +861,6 @@ def _export_parts(con, data_dir, table: str, f, *, chunk: bool = False) -> None:
             if old not in written:
                 part_store.remove(old)
         existing[fi] = written
-    from datetime import datetime
-
-    floor_iso = trickle.read_meta(con).get(trickle.base_table_name(table), {}).get("floor")
-    floor = datetime.fromisoformat(floor_iso) if floor_iso else None
-    # The floor's boundary is INCLUSIVE only for a merge __changelog: a warm fold moves the slice
-    # `(lo, target]` into the band and sets floor = target, so the boundary part must go (keeping it
-    # would double-count on read). For an append history/droplog the boundary stays STRICT — retention
-    # keeps its cutoff rows in the registry (shielded by `fi in reg_fs`), and pruning an at-floor part
-    # that is merely un-hydrated would lose real rows from full reads.
-    inclusive = table.endswith(trickle.CHANGELOG_SUFFIX)
-    for fi, names in existing.items():
-        if fi in reg_fs or floor is None:
-            continue
-        if fi <= floor if inclusive else fi < floor:
-            for name in names:
-                part_store.remove(name)  # genuinely dropped (retention / fold / re-bootstrap raised the floor)
 
 
 def _write_part_chunks(con, part_store, fi, select: str) -> list[str]:
@@ -784,13 +963,15 @@ def _published_bytes(data_dir, table: str) -> int:
     versions = trickle.table_versions(data_dir, table)
     if versions:
         total += data_dir.size(trickle.version_dir_name(table), versions[-1])
-    for t in (table, trickle.changelog_name(table), trickle.warm_name(table)):
-        for n in trickle.table_parts(data_dir, t):
-            total += data_dir.size(t, n)
-    base = trickle.base_dir_name(table)
-    for n in trickle.base_chunks(data_dir, table):
-        total += data_dir.size(base, n)
-    return total
+    sidecar = trickle.load_sidecar(data_dir)
+    if (sidecar.get(table) or {}).get("mode") == "merge":
+        snap = merge_snapshot(data_dir, table, sidecar)
+        files = [(trickle.base_dir_name(table), n) for n in snap["base_names"]]
+        files += [(trickle.warm_name(table), n) for n in snap["band_names"]]
+        files += [(trickle.changelog_name(table), n) for n in snap["hot_names"]]
+    else:
+        files = [(table, n) for n in parts_snapshot(data_dir, table, sidecar)]
+    return total + sum(data_dir.size(*f) for f in files)
 
 
 def _delta_rows_last(con, table: str, mode: str, f) -> int:
@@ -896,8 +1077,9 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
             # Duck must not copy it down to run a small delta, and a steady-state incremental run never reads it
             # (only a checkpoint / comprehensive fallback does, and they read on demand). See
             # plans/s3-resident-state.md. The changelog/warm below stay materialised for now (later steps).
-            if trickle.base_chunks(store, table) or store.exists(f"{table}.parquet"):
-                sql = plane._raw_read_select(store, table)
+            snap = merge_snapshot(store, table, sidecar)  # the committed state: its base, bands and hot parts
+            if snap["base"]:
+                sql = _read_parquet_files(snap["base"])
                 cold = trickle.cold_base_name(table)
                 trickle._drop_relation(con, table)  # a legacy base under the main's own name
                 trickle._drop_relation(con, cold)
@@ -910,10 +1092,19 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
                 con.execute(f'CREATE OR REPLACE TABLE {trickle._q(table)} AS {sql}')
                 loaded = True
         for companion in (trickle.changelog_name(table), f"{table}{trickle.DROPLOG_SUFFIX}"):
-            if trickle.table_parts(store, companion):
-                sql = plane._flat_read_select(store, companion)
-                con.execute(f'CREATE OR REPLACE TABLE {trickle._q(companion)} AS {sql}')
-                loaded = True
+            parts = trickle.table_parts(store, companion)
+            if not parts:
+                continue
+            if companion == trickle.changelog_name(table) and mode == "merge":
+                # The hot parts above the newest band; folded parts a reader may still need stay on disk,
+                # but their rows are in the bands.
+                names = snap["hot_names"]
+            else:
+                names = parts_snapshot(store, companion, sidecar)
+            uris = [store.uri(companion, n) for n in (names or parts[:1])]
+            sql = _read_parquet_files(uris) + ("" if names else " LIMIT 0")
+            con.execute(f'CREATE OR REPLACE TABLE {trickle._q(companion)} AS {sql}')
+            loaded = True
         from datetime import datetime
 
         f_base = datetime.fromisoformat(entry["f_base"]) if entry.get("f_base") else None
@@ -1140,7 +1331,7 @@ def _compact_threshold(con=None, main=None) -> int:
     return int(os.environ.get("DUCKSTRING_COMPACT_THRESHOLD", str(256 * 1024 * 1024)))
 
 
-def _base_bytes(data_dir, main: str) -> int:
+def _base_bytes(data_dir, main: str, f_base=None) -> int:
     """The on-disk size of a merge main's published base — the sum of its ``{main}__base/`` chunks, or the
     legacy single ``{main}.parquet`` file. ``0`` when no base has been published yet."""
     from . import trickle_io as trickle
@@ -1148,7 +1339,8 @@ def _base_bytes(data_dir, main: str) -> int:
     chunks = trickle.base_chunks(data_dir, main)
     if chunks:
         base = data_dir.child(trickle.base_dir_name(main))
-        return sum(base.size(n) for n in chunks)
+        current = _current_base_names(data_dir, main, f_base) if f_base is not None else chunks
+        return sum(base.size(n) for n in current or chunks)
     return data_dir.size(f"{main}.parquet")
 
 
@@ -1169,8 +1361,9 @@ def _publish_tiered_main(con, data_dir: Path, main: str, f) -> None:
     threshold = _compact_threshold(con, main)
     clog, warm = trickle.changelog_name(main), trickle.warm_name(main)
     warm_store = data_dir.child(warm)
-    warm_bytes = sum(warm_store.size(n) for n in trickle.table_parts(data_dir, warm))
-    cold_bytes = _base_bytes(data_dir, main)
+    f_base_now = trickle._f_base(con, main)
+    warm_bytes = sum(warm_store.size(n) for n in _band_names(data_dir, main, f_base_now))
+    cold_bytes = _base_bytes(data_dir, main, f_base_now)
 
     clog_store = data_dir.child(clog)
     f_warm = trickle._f_warm(con, main) or trickle._f_base(con, main)
@@ -1186,8 +1379,7 @@ def _publish_tiered_main(con, data_dir: Path, main: str, f) -> None:
         if trickle._table_exists(con, trickle.cold_base_name(main)):
             _publish_base_chunks(con, data_dir, main, f, threshold)
             _review_base(con, data_dir, main)  # drop the local base; point the registry at the published S3 chunks
-        if data_dir.is_dir(warm):
-            data_dir.rmtree(warm)  # the warm bands are now folded into the cold base
+        # The bands are folded into the new base now; they stay until no in-flight read uses them (gc_tiers).
         _export_parts(con, data_dir, clog, f)  # re-sync the hot parts after retention trim
         return
 
@@ -1251,14 +1443,9 @@ def _publish_local_base(con, data_dir: Path, main: str) -> None:
         base_store.mkdir()
         token = trickle.part_name(f_base)[: -len(".parquet")]
         stage = data_dir.child(BOOT_STAGING, main)
-        written = []
         for i, name in enumerate(staged):
             stage.move_into(base_store, name, f"{token}__{i}.parquet")
-            written.append(f"{token}__{i}.parquet")
-        for old in base_store.parquet_names():  # an earlier base (a rebuild): a different token
-            if old not in written:
-                base_store.remove(old)
-        data_dir.remove(f"{main}.parquet")  # supersede a legacy single-file base (no-op if absent)
+        # An earlier base (a rebuild's predecessor) has another token and stays until gc_tiers.
     else:
         _publish_base_chunks(con, data_dir, main, f_base, _compact_threshold(con, main))
     _review_base(con, data_dir, main)
@@ -1275,13 +1462,24 @@ def _review_base(con, data_dir: Path, main: str) -> None:
     from . import trickle_io as trickle
 
     data_dir = _as_storage(data_dir)
-    if not trickle.base_chunks(data_dir, main):  # nothing published (shouldn't happen post-publish) → leave as-is
+    names = _current_base_names(data_dir, main, trickle._f_base(con, main))
+    if not names:  # nothing published (shouldn't happen post-publish) → leave as-is
         return
-    sql = ParquetDataPlane()._raw_read_select(data_dir, main)  # the base chunks glob (flat layer)
+    sql = _read_parquet_files([data_dir.uri(trickle.base_dir_name(main), n) for n in names])
     cold = trickle.cold_base_name(main)
     trickle._drop_relation(con, cold)
     con.execute(f'CREATE VIEW {trickle._q(cold)} AS {sql}')
     trickle.refresh_current_view(con, main)
+
+
+def _current_base_names(data_dir, main: str, f_base) -> list[str]:
+    """The chunk names of merge main ``main``'s base at token ``f_base`` (the registry's or the sidecar's):
+    older tokens may still be on disk for in-flight readers (:func:`gc_tiers`). Every chunk when ``f_base``
+    is unknown."""
+    tokens = _base_tokens(data_dir, main)
+    if f_base is None or f_base not in tokens:
+        return [n for names in tokens.values() for n in names] if f_base is None else []
+    return tokens[f_base] + tokens.get(None, [])
 
 
 def _band_names(data_dir, main: str, f_base) -> list[str]:
@@ -1510,11 +1708,9 @@ def _base_order_select(con, main: str, cold: str) -> str:
 def _publish_base_chunks(con, data_dir: Path, main: str, f, chunk_bytes: int) -> None:
     """Publish the registry base table ``main`` as a directory of size-bounded Parquet chunks
     (``{main}__base/``), ordered by its primary key or its declared ``cluster_by`` (:func:`_base_order_select`).
-    **Lock-free, overlap-safe**: the new chunks are written under this
-    checkpoint's unique token, then the chunks of any *other* token are removed — a concurrent reader that
-    momentarily sees both old and new chunks reconstructs latest-per-PK over base ⊎ changelog, which is
-    idempotent (the published sidecar's ``f_base`` only advances *after* this returns, so the changelog
-    still covers any row a stale chunk would otherwise resurrect). Replaces a legacy single-file base."""
+    The new chunks are written under this checkpoint's unique token (its freshness); a read picks one token
+    (:func:`merge_snapshot`), and the older tokens' chunks are removed by :func:`gc_tiers` once no in-flight
+    read can pick them."""
     from . import trickle_io as trickle
 
     base_name = trickle.base_dir_name(main)
@@ -1536,10 +1732,7 @@ def _publish_base_chunks(con, data_dir: Path, main: str, f, chunk_bytes: int) ->
             staging_store.move_into(base_store, name, dest)
             written.append(dest)
     data_dir.rmtree(staging_name)
-    for old in base_store.parquet_names():  # drop the previous checkpoint's chunks (different token)
-        if old not in written:
-            base_store.remove(old)
-    data_dir.remove(f"{main}.parquet")  # supersede a legacy single-file base (no-op if absent)
+    # The previous checkpoint's chunks (another token) stay until no in-flight read can pick them (gc_tiers).
 
 
 def get_data_plane() -> DataPlane:
