@@ -122,6 +122,9 @@ VERSION_SUFFIX = "__v"
 # ``_duckstring_agg_{name}`` companion. Reserved prefix → ``registry_tables`` hides it from publish; the
 # published main holds only the derived user columns.
 AGG_STATE_PREFIX = "_duckstring_agg_"
+# The groups an incremental aggregate dropped (their count reached zero), by key and freshness, so the host can
+# publish the state's change rather than the whole state each run. Registry-only, like the state.
+AGG_DROP_PREFIX = "_duckstring_aggdrop_"
 # A ``.accumulate(...)`` (order-dependent scan) output keeps its per-group **carried fold-state** (the running
 # accumulators after the last row + that row's ``.along`` value, f-stamped for replay) in a
 # ``_duckstring_acc_{name}`` companion. Reserved prefix → hidden from publish; the output append table holds
@@ -473,7 +476,7 @@ def drop_table(con, name: str) -> None:
     for t in (
         name, cold_base_name(name), changelog_name(name), warm_name(name), warm_pending_name(name),
         f"{name}{DROPLOG_SUFFIX}",
-        f"{AGG_STATE_PREFIX}{name}", f"{ACC_STATE_PREFIX}{name}",
+        f"{AGG_STATE_PREFIX}{name}", f"{AGG_DROP_PREFIX}{name}", f"{ACC_STATE_PREFIX}{name}",
     ):
         _drop_relation(con, t)  # a merge main's name and cold base may be views
     drop_meta(con, name)
@@ -1544,6 +1547,13 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     except Exception:
         con.execute("ROLLBACK")
         raise
+    # Record the groups this run empties before dropping them: a host publishing only the state's change
+    # (rows stamped f) needs their keys too. A replay at the same f records them again.
+    drops = f"{AGG_DROP_PREFIX}{name}"
+    con.execute(f"CREATE TABLE IF NOT EXISTS {_q(drops)} AS SELECT {by_list}, {_q(F_COL)} FROM {_q(state)} WHERE false")
+    con.execute(f"DELETE FROM {_q(drops)} WHERE {_q(F_COL)} = {_ts(f)}")
+    con.execute(f"INSERT INTO {_q(drops)} SELECT {by_list}, {_q(F_COL)} FROM {_q(state)} "
+                f"WHERE _a_cnt <= 0 AND {_q(F_COL)} = {_ts(f)}")
     con.execute(f"DELETE FROM {_q(state)} WHERE _a_cnt <= 0 "
                 f"AND EXISTS (SELECT 1 FROM {_q(dacc)} AS _k WHERE {_key_match(_q(state), '_k', by)})")
 

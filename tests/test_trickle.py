@@ -541,7 +541,8 @@ def test_agg_companion_published_and_resumable(tmp_path):
     reg_rows = snk.sql('SELECT * FROM "_duckstring_agg_by_k" ORDER BY k').fetchall()
     snap_rows = snk.sql(f"SELECT * FROM read_parquet('{snap1}') ORDER BY k").fetchall()
     assert snap_rows == reg_rows
-    assert T.load_sidecar(snk_dir)["state"] == {"agg/by_k": {"f": ts(1).isoformat()}}
+    assert T.load_sidecar(snk_dir)["state"] == {"agg/by_k": {"f": ts(1).isoformat(), "full": ts(1).isoformat(),
+                                                             "by": ["k"], "delta_rows": 0}}
     # Hidden from the read surface: the companion isn't a listed/readable table.
     assert "_duckstring_agg_by_k" not in ParquetDataPlane().list_tables(snk_dir)
     assert "by_k" in ParquetDataPlane().list_tables(snk_dir)
@@ -552,8 +553,8 @@ def test_agg_companion_published_and_resumable(tmp_path):
     publish(f_con, f_dir, f=ts(2))
     run(ts(2), ts(1))
     kept = sorted(p.name for p in (snk_dir / "state" / "agg" / "by_k").glob("*.parquet"))
-    assert kept == [T.part_name(ts(2))]  # only the latest snapshot survives
-    assert T.load_sidecar(snk_dir)["state"] == {"agg/by_k": {"f": ts(2).isoformat()}}
+    assert kept == [T.part_name(ts(2))]  # every group changed: a new snapshot, the previous one pruned
+    assert T.load_sidecar(snk_dir)["state"]["agg/by_k"]["full"] == ts(2).isoformat()
     persistent = rows(snk, snk_dir, "by_k", "k, mn, n")
     assert persistent == [("A", 10, 1), ("B", 1, 2)]
 
