@@ -361,6 +361,10 @@ class Driver(TapsMixin):
         # grace rather than the steady-state silence window. Cleared on first contact.
         self._awaiting_first_contact: set[str] = set()
         self._outdated_ducks: set[str] = set()  # Ponds whose Duck runs a version a redeploy replaced
+        # Ponds whose Duck collected an idle shutdown and is finishing up (its S3 copy) before it exits. A Run
+        # dispatched meanwhile finds its process alive, so nothing is spawned: either the Duck collects the Run
+        # (and stays) or it exits first and _replace_departed_ducks gives the Run to a fresh Duck.
+        self._departing_ducks: set[str] = set()
         # key -> cumulative Flock dispatch counters ({dispatched, failed, last_error}), accumulated from
         # the per-Ripple-Run deltas Ducks report (see _record_flock). Observability only (in-memory; a
         # restart just waits for the next report).
@@ -2612,6 +2616,10 @@ class Driver(TapsMixin):
                 return [{"kind": "shutdown"}]
             jobs = self.jobs.get(pond, [])
             self.jobs[pond] = []
+            if any(j.get("kind") == "begin_run" for j in jobs):
+                self._departing_ducks.discard(pond)  # it has work again, so it stays (the Duck clears its shutdown)
+            elif any(j.get("kind") == "shutdown" for j in jobs):
+                self._departing_ducks.add(pond)
             if any(j.get("kind") == "shutdown" for j in jobs) and hasattr(self.launcher, "release"):
                 # The Duck exits once idle. Forget a remote task or instance now, so a Run that arrives
                 # after it has gone launches a new Duck instead of waiting on the departed one.
@@ -3008,6 +3016,7 @@ class Driver(TapsMixin):
         with self.lock:
             now = _now()
             self._replace_outdated_ducks(now)  # before liveness, so a handed-off Pond isn't judged Duck-less
+            self._replace_departed_ducks(now)  # likewise for a Run that arrived as its Duck was shutting down
             self._check_liveness(now)
             self._tick_process(now)
             self._check_freshness(now)
@@ -3140,6 +3149,24 @@ class Driver(TapsMixin):
             self._outdated_ducks.discard(pond)
             if any(j.get("kind") == "begin_run" for j in self.jobs.get(pond, [])):
                 meta = self.meta[pond]
+                self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=self.duck_config(pond))
+                self.last_seen[pond] = now
+                self._awaiting_first_contact.add(pond)
+
+    def _replace_departed_ducks(self, now: datetime) -> None:
+        """Spawn a fresh Duck for each Pond whose departing Duck (one that collected an idle shutdown) exited with
+        a Run still queued for it. Before this the Run waited for a Duck that never polled again, and the
+        liveness check failed it as a dead Duck (found by the TPC-DS benchmark, 2026-10-25)."""
+        for pond in list(self._departing_ducks):
+            if pond not in self.meta:
+                self._departing_ducks.discard(pond)
+                continue
+            if self.launcher.is_running(pond):
+                continue
+            self._departing_ducks.discard(pond)
+            if any(j.get("kind") == "begin_run" for j in self.jobs.get(pond, [])):
+                meta = self.meta[pond]
+                self.launcher.terminate(pond)  # drop the exited process's record so ensure() spawns
                 self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=self.duck_config(pond))
                 self.last_seen[pond] = now
                 self._awaiting_first_contact.add(pond)

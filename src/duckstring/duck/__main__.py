@@ -162,6 +162,8 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                             if executor.prune(_retain_from(data)) and core.last_begin_f > NEVER:
                                 _start_persist(core.last_begin_f)  # carry the deletions to the durable layer
                     elif data.get("kind") == "begin_run":
+                        # A Run after a shutdown means the Catchment wants this Duck again: stay once it's done.
+                        shutdown_requested = False
                         if "orphan_minutes" in data:  # the Catchment's setting (see _orphan_after_s)
                             orphan_after = _orphan_s(data["orphan_minutes"])
                         prev = data.get("previous_f")
