@@ -1183,6 +1183,25 @@ class Pond:
             raise MissingSourceAsset(source_pond, table) from exc
         return _strip_system(self.con.sql(select))
 
+    def source_columns(self, ref: str) -> list[str]:
+        """The columns :meth:`read_table` gives for ``ref``, without its read: a Source table's query is bound,
+        which reads only its files' metadata, where :meth:`read_table` consolidates a merge Trickle's change log
+        (the Trickle builder's hook, so a run whose terms need only the deltas never reads the current state)."""
+        from .dataplane import get_data_plane
+        from .trickle_io import _strip_system
+
+        source_pond, table = self._resolve_ref(ref)
+        if source_pond is None:
+            return list(self.read_table(ref).columns)  # an own table is a registry view: binding it is the read
+        self._record_read(source_pond, table)
+        data_dir = self._source_data_dir(source_pond)
+        data_dir.duckdb_setup(self.con)
+        try:
+            select = get_data_plane().read_select(data_dir, table, as_of=self.f, pin=self._pin(source_pond))
+        except FileNotFoundError as exc:
+            raise MissingSourceAsset(source_pond, table) from exc
+        return list(_strip_system(self.con.sql(select)).columns)
+
     def source_view(self, source: str, table: str) -> str:
         """Register a Source table at this run's pinned version as a view local to this connection and
         return its name. How a SQL Ripple reads ``source.table`` (see :mod:`duckstring.sql_ripples`)."""

@@ -1458,8 +1458,6 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     # over a 269M-row Source, though few of those groups had lost an extreme.
     rescan = None
     if needs_rescan and current is not None:
-        cur = unique_name("aggcur")
-        current.create_view(cur, replace=True)
         rexprs = [f"MIN({_q(c)}) AS _a_min_{j}, MAX({_q(c)}) AS _a_max_{j}" for j, c in enumerate(ext_cols)]
         rexprs += _arg_rescan_exprs(arg_specs)
         rexprs += _sg_rescan_exprs(sg_specs)
@@ -1480,20 +1478,28 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         rescan = unique_name("aggrs")
         counts = first_row(con.execute(
             f"SELECT count(*), {', '.join(f'count({_q(b)})' for b in by)} FROM {_q(keys)}"))
-        any_lost = counts[0] > 0
-        # The NULL-safe match is a hash join DuckDB can't push into the current state's scan, so a key column
-        # with no NULL among the lost groups is matched with `=` first, which it can (the rescan read the whole
-        # Source otherwise: 269M rows at TPC-DS SF100, for a few thousand groups).
-        exact = next((b for b, n in zip(by, counts[1:], strict=True) if n == counts[0]), None)
-        narrow = (f"SEMI JOIN (SELECT DISTINCT {_q(exact)} FROM {_q(keys)}) AS _e "
-                  f"ON {_q(cur)}.{_q(exact)} = _e.{_q(exact)} " if exact is not None else "")
-        con.execute(
-            f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS "
-            f"SELECT {by_list}, {', '.join(rexprs)}, TRUE AS _a_rs FROM {_q(cur)} "
-            + (f"{narrow}SEMI JOIN {_q(keys)} AS _k ON {_key_match(_q(cur), '_k', by)} " if any_lost
-               else "WHERE false ")
-            + f"GROUP BY {by_list}"
-        )
+        if counts[0] == 0:
+            # Nothing to rescan, so the current state isn't read (``current`` may be a function that builds
+            # it): an empty rescan with the accumulators' columns and types, which are the state's.
+            names = [n for j in range(len(ext_cols)) for n in (f"_a_min_{j}", f"_a_max_{j}")]
+            names += [n for a in range(len(arg_specs)) for n in (f"_g_key_{a}", f"_g_arg_{a}")]
+            names += [f"_s_val_{g}" for g in range(len(sg_specs))]
+            con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS SELECT {by_list}, "
+                        f"{', '.join(_q(n) for n in names)}, TRUE AS _a_rs FROM {_q(state)} WHERE false")
+        else:
+            cur = unique_name("aggcur")
+            (current() if callable(current) else current).create_view(cur, replace=True)
+            # The NULL-safe match is a hash join DuckDB can't push into the current state's scan, so a key
+            # column with no NULL among the lost groups is matched with `=` first, which it can (the rescan read
+            # the whole Source otherwise: 269M rows at TPC-DS SF100, for a few thousand groups).
+            exact = next((b for b, n in zip(by, counts[1:], strict=True) if n == counts[0]), None)
+            narrow = (f"SEMI JOIN (SELECT DISTINCT {_q(exact)} FROM {_q(keys)}) AS _e "
+                      f"ON {_q(cur)}.{_q(exact)} = _e.{_q(exact)} " if exact is not None else "")
+            con.execute(
+                f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS "
+                f"SELECT {by_list}, {', '.join(rexprs)}, TRUE AS _a_rs FROM {_q(cur)} "
+                f"{narrow}SEMI JOIN {_q(keys)} AS _k ON {_key_match(_q(cur), '_k', by)} GROUP BY {by_list}"
+            )
 
     # Merge the delta into the state — additive for the distributive accumulators; for extremes, extend in
     # place from the inserts, or take the rescanned value when the group retracted. For affected groups not
