@@ -1359,13 +1359,15 @@ class Pond:
         return changed
 
     def apply_zset(self, name: str, zset, *, pk, retain_t=None, retain_n=None,
-                   compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
+                   compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None,
+                   insert_only=False) -> bool:
         """Append an already-computed change to the merge Trickle ``name`` without comparing it with the state.
 
         ``zset`` holds the table's columns plus ``_duckstring_d`` (``+1`` added, ``-1`` removed; an update is a
         ``-1`` of the old row and a ``+1`` of the new). It is consolidated before writing. ``pk`` is required;
         ``retain_t``, ``retain_n``, ``compact_threshold``, ``cluster_by``, ``interleave`` and ``cluster_bits``
-        are as for :meth:`merge_table`. Returns ``True`` if the consolidated change is non-empty.
+        are as for :meth:`merge_table`. Returns ``True`` if the consolidated change is non-empty. ``insert_only``
+        says every row is ``+1`` (the builder knows when), so the change is written without consolidating it.
 
         This is the write the Trickle builder uses. Prefer :meth:`trickle` or :meth:`merge_table`: a wrong
         weight corrupts the table for every consumer.
@@ -1377,7 +1379,7 @@ class Pond:
             self.con, name, zset, self.f, self._resolve_pk(pk),
             retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
             cluster_by=cluster_by, interleave=interleave, cluster_bits=cluster_bits,
-            stage_base=self._stage_base,
+            stage_base=self._stage_base, insert_only=insert_only,
         )
         self._changes.record_write(name, changed)
         return changed

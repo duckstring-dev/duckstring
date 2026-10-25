@@ -241,16 +241,19 @@ class _NodeState:
     ``current`` (view name for the full current state), ``delta`` (view name for the Z-set ΔO, unconsolidated
     for a join, or ``None``), ``changed`` and ``is_full``. ``current`` may be given as a function, built the
     first time a term reads it: a Source's current state can be costly to read (a merge Trickle's change log
-    is consolidated), and a run whose terms only need the deltas never reads it."""
+    is consolidated), and a run whose terms only need the deltas never reads it. ``insert_only``: the delta
+    holds only added rows (see :meth:`TrickleBuilder._compile_join` for when a join's does), so it needs no
+    consolidation."""
 
-    __slots__ = ("cols", "_current", "delta", "changed", "is_full")
+    __slots__ = ("cols", "_current", "delta", "changed", "is_full", "insert_only")
 
-    def __init__(self, cols, current, delta, changed, is_full) -> None:
+    def __init__(self, cols, current, delta, changed, is_full, insert_only=False) -> None:
         self.cols = cols
         self._current = current
         self.delta = delta
         self.changed = changed
         self.is_full = is_full
+        self.insert_only = insert_only and delta is not None
 
     @property
     def current(self) -> str:
@@ -599,7 +602,8 @@ class TrickleBuilder:
         if kind == "comprehensive":
             changed = ctx.merge_table(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
         elif kind == "incremental":
-            changed = ctx.apply_zset(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
+            extra = {"insert_only": True} if self._insert_only else {}  # nothing to consolidate before writing
+            changed = ctx.apply_zset(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n, **extra)
         else:
             changed = False  # "empty": nothing changed (and no full read) → output unchanged, no write.
         return self._chain(name, out_pk, changed=changed)
@@ -675,7 +679,7 @@ class TrickleBuilder:
 
         by, metrics, along = self._acc["by"], self._acc["metrics"], self._along
         out_pk = normalize_pk(pk)
-        kind, rel = self._compute(self._acc_required(out_pk), name, ivm=True, key_filter=True)
+        kind, rel = self._compute(self._acc_required(out_pk), name, ivm=True, key_filter=True, consolidate="always")
         trickle.apply_accumulate(
             self.ctx.con, name, by, along, metrics, kind, rel, self.ctx.f, pk,
             fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
@@ -692,7 +696,7 @@ class TrickleBuilder:
         out_pk = normalize_pk(pk)
         if not out_pk:
             raise BuildError(f"pond.trickle('{self.spine_ref}')...accumulate(...).merge('{name}'): pass merge(pk=...)")
-        kind, rel = self._compute(self._acc_required(out_pk), name, ivm=True, key_filter=True)
+        kind, rel = self._compute(self._acc_required(out_pk), name, ivm=True, key_filter=True, consolidate="always")
         trickle.apply_accumulate_merge(
             self.ctx.con, name, by, along, metrics, kind, rel, self._full_join(), self.ctx.f, pk,
             retain_t=retain_t, retain_n=retain_n,
@@ -797,7 +801,9 @@ class TrickleBuilder:
         as (see :meth:`_offer`); ``None`` never offers. ``consolidate=False`` leaves a join's ΔO unconsolidated,
         for a writer that consolidates what it writes anyway (``apply_zset``, ``append_zset``); otherwise it is
         consolidated once, after the output pipeline (which is row-local, so it commutes), over the output
-        columns rather than every leaf's.
+        columns rather than every leaf's, unless it is insert-only (nothing can cancel, and a weight-aware
+        writer or aggregate reads repeated rows as their sum); ``"always"`` consolidates that too, for the scans,
+        which read rows rather than weights.
 
         Two orthogonal strategy flags, both default ``True`` (the normal path), exposed on the terminals as
         manual escapes — reach for them only when you've measured the default hurts a specific build:
@@ -817,6 +823,7 @@ class TrickleBuilder:
         # onto a nonexistent log would persist just that delta as a false bootstrap. `name not in read_meta`
         # (not raw table-existence — a young merge main has only a changelog pre-checkpoint) is the signal.
         # See plans/deletes.md. `ivm=False` is the manual sibling escape.
+        self._insert_only = False
         if not ivm or name not in read_meta(self.ctx.con):
             return self._comprehensive(out_pk, offer)
         self._key_filter = key_filter
@@ -829,8 +836,9 @@ class TrickleBuilder:
         delta_rel = self._project_delta(state)
         cols = [c for c in delta_rel.columns if c != D_COL]
         self._require_pk(out_pk, cols)
-        if consolidate and isinstance(self._root, _Join):  # a source's own delta is consolidated already
-            projected = unique_name("proj")
+        self._insert_only = state.insert_only  # the row pipeline keeps it: it only drops or rewrites rows
+        if consolidate and isinstance(self._root, _Join) and not (state.insert_only and consolidate != "always"):
+            projected = unique_name("proj")  # a source's own delta is consolidated already
             delta_rel.create_view(projected, replace=True)
             delta_rel = self.ctx.con.sql(f"SELECT * FROM {_q(self._consolidate(projected, cols))}")
         return "incremental", delta_rel
@@ -1038,7 +1046,8 @@ class TrickleBuilder:
         dbase = unique_name("dsrc")
         delta.zset.create_view(dbase, replace=True)
         dsel = ", ".join(f'{_q(c)} AS {_q(f"{a}.{c}")}' for c in bare) + f", {_q(D_COL)} AS {_q(D_COL)}"
-        return _NodeState(cols, current, self._view(f"SELECT {dsel} FROM {_q(dbase)}"), True, False)
+        return _NodeState(cols, current, self._view(f"SELECT {dsel} FROM {_q(dbase)}"), True, False,
+                          insert_only=getattr(delta, "insert_only", False))
 
     def _compile_join(self, node: _Join) -> _NodeState:
         ls = self._compile(node.left)
@@ -1058,7 +1067,12 @@ class TrickleBuilder:
                                                  (False, node.right, rs, node.left, ls)):
             if isinstance(child, _Join) and own.delta is not None and self._reads_twice(node, left, sibling, other):
                 own.delta = self._scratch_table(own.delta)
-        return _NodeState(out_cols, current, self._join_delta(node, ls, rs), True, False)
+        # Insert-only when one side changed, by inserts only, and the join is one pass from it: its one term
+        # multiplies +1 rows by the other side's current rows. (Two changed sides, or a change on the side an
+        # outer, semi or anti join pads or tests, can retract.)
+        insert_only = ((ls.insert_only and rs.delta is None and node.how in _ONE_PASS_LEFT)
+                       or (rs.insert_only and ls.delta is None and node.how in _ONE_PASS_RIGHT))
+        return _NodeState(out_cols, current, self._join_delta(node, ls, rs), True, False, insert_only=insert_only)
 
     def _reads_twice(self, node: _Join, left: bool, sibling, other: _NodeState) -> bool:
         """Whether ``node``'s delta terms read one side's delta (the ``left`` one, or the right) more than once.

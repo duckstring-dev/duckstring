@@ -1129,7 +1129,7 @@ def count_current(con, name: str) -> int:
 
 def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
                compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None,
-               stage_base=None) -> bool:
+               stage_base=None, insert_only=False) -> bool:
     """Append a Z-set ``zset`` (user columns + ``_duckstring_d``) to the merge main's append-only
     ``__changelog``. The main is **log-structured**: the changelog is the source of truth and the clean
     current state is reconstructed on read (:func:`reconstruct_current`) from a base table (written only by
@@ -1164,12 +1164,18 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
 
     # Consolidate by full row (the Z-set `distinct` operator). The weight stays BIGINT (SUM would widen it to
     # HUGEINT), so the changelog's column type is stable across runs and parts.
+    # ``insert_only`` (the builder's word that every row is +1) skips it: nothing can cancel, and a repeated
+    # image is the same Z-set as one with weight 2.
     consol = unique_name("consol")
-    con.execute(
-        f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
-        f'SELECT {sel_user}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} FROM {_q(src)} '
-        f'GROUP BY {sel_user} HAVING SUM({_q(D_COL)}) <> 0'
-    )
+    if insert_only:
+        con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
+                    f'SELECT {sel_user}, CAST({_q(D_COL)} AS BIGINT) AS {_q(D_COL)} FROM {_q(src)}')
+    else:
+        con.execute(
+            f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
+            f'SELECT {sel_user}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} FROM {_q(src)} '
+            f'GROUP BY {sel_user} HAVING SUM({_q(D_COL)}) <> 0'
+        )
     nonempty = first_row(con.execute(f'SELECT count(*) FROM {_q(consol)}'))[0] > 0
     _ensure_changelog(con, clog, consol)  # borrows schema from the delta; works before any base exists
     if boot:
@@ -2687,16 +2693,19 @@ class Delta:
         is_full: ``True`` for a full read rather than a window of changes (a first run, a consumer
             behind the Source's retained history, or a republished plain table). A full read must be
             treated as a complete recompute, not an increment.
+        insert_only: ``True`` when the window holds only added rows (no ``-1``): an append Trickle's, or a
+            merge Trickle's that inserted new keys and changed none. Nothing in it can cancel.
         pk: The Source table's primary key, if it declared one.
 
     Reference: https://docs.duckstring.com/reference/python/trickle_io
     """
 
-    def __init__(self, con, pk: tuple[str, ...], zset, *, is_full: bool = False) -> None:
+    def __init__(self, con, pk: tuple[str, ...], zset, *, is_full: bool = False, insert_only: bool = False) -> None:
         self.con = con
         self.pk = tuple(pk)
         self.zset = zset
         self.is_full = is_full
+        self.insert_only = insert_only and not is_full
 
     def is_empty(self) -> bool:
         """Whether there are no changes."""
@@ -2843,7 +2852,8 @@ def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor, mater
     upper = f"{_q(F_COL)} <= {_ts(f)}"
     cond = upper if full else f"{_q(F_COL)} > {_ts(previous_f)} AND {upper}"
     zset = _as_zset(_strip_system(rel.filter(cond)), 1)
-    return Delta(con, pk, _materialise(con, zset) if materialise and not full else zset, is_full=full)
+    return Delta(con, pk, _materialise(con, zset) if materialise and not full else zset, is_full=full,
+                 insert_only=True)
 
 
 def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise=False) -> Delta:
@@ -2873,13 +2883,18 @@ def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, flo
     # NOT a named view: several read_delta calls in one run would share a view name and re-bind.
     user = [c for c in con.sql(clog_sql).columns if c not in (F_COL, D_COL)]
     sel = ", ".join(_q(c) for c in user)
-    zset = con.sql(
-        f"SELECT {sel}, SUM({_q(D_COL)}) AS {_q(D_COL)} FROM ("
-        f"  SELECT * FROM ({clog_sql}) "
-        f"  WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)}"
-        f") GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0"
-    )
-    return Delta(con, pk, _materialise(con, zset) if materialise else zset, is_full=False)
+    window = (f"SELECT * FROM ({clog_sql}) "
+              f"WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)}")
+    # A window with no retraction inserted new keys only: a consolidated merge log pairs every update's +1
+    # with a -1, so no key appears twice and nothing can cancel. Read it as it is (an insert-only change).
+    lowest = first_row(con.sql(f"SELECT min({_q(D_COL)}) FROM ({window})"))[0]
+    insert_only = lowest is None or lowest > 0
+    if insert_only:
+        zset = con.sql(f"SELECT {sel}, CAST({_q(D_COL)} AS BIGINT) AS {_q(D_COL)} FROM ({window})")
+    else:
+        zset = con.sql(f"SELECT {sel}, SUM({_q(D_COL)}) AS {_q(D_COL)} FROM ({window}) "
+                       f"GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0")
+    return Delta(con, pk, _materialise(con, zset) if materialise else zset, is_full=False, insert_only=insert_only)
 
 
 def _materialise(con, rel):

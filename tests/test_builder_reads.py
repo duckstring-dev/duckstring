@@ -165,3 +165,44 @@ def test_a_terminal_prepares_a_chained_change_only_when_something_chains(tmp_pat
     sales([(1, "a", 2), (2, "b", 2), (3, "c", 1)], ts(3))
     run(ts(3), ts(2), chain=False)
     assert deltas == []
+
+
+def test_an_insert_only_change_is_written_without_consolidating(tmp_path, monkeypatch):
+    """New keys only, joined to unchanged dimensions: the change is insert-only from the Source's delta to
+    the writer, so nothing consolidates it. One update in a later run takes the general path again."""
+    from trickle import io as trickle_io
+
+    sales, catalog = _sales(tmp_path), _catalog(tmp_path)
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    out = tmp_path / "ponds" / "lines" / "m1" / "data"
+
+    def run(f, pf):
+        pond = Pond("lines", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f,
+                    previous_f=pf)
+        (pond.trickle("sales.line", p=1.0).alias("l")
+             .join(pond.trickle("catalog.product", p=1.0).alias("p"), on="product_id", how="left")
+             .select("l.order_id, l.qty, p.category")
+             .merge("lines", pk="order_id"))
+        _publish(snk, out, f)
+
+    catalog([("a", "x"), ("b", "y")], ts(1))
+    sales([(1, "a", 2), (2, "b", 1)], ts(1))
+    run(ts(1), NEVER)
+    flags = []
+    orig = trickle_io.apply_zset
+
+    def spy(con, name, *a, insert_only=False, **k):
+        if name == "lines":  # the producers' own merges write through it too
+            flags.append(insert_only)
+        return orig(con, name, *a, insert_only=insert_only, **k)
+
+    monkeypatch.setattr(trickle_io, "apply_zset", spy)
+    sales([(1, "a", 2), (2, "b", 1), (3, "a", 4), (4, "z", 1)], ts(2))  # two new orders
+    run(ts(2), ts(1))
+    sales([(1, "a", 7), (2, "b", 1), (3, "a", 4), (4, "z", 1), (5, "b", 3)], ts(3))  # an update and a new order
+    run(ts(3), ts(2))
+    assert flags == [True, False]
+    assert _rows(snk, out, "lines", "order_id, qty, category") == [
+        (1, 7, "x"), (2, 1, "y"), (3, 4, "x"), (4, 1, None), (5, 3, "y")]
+    delta = T.read_delta(duckdb.connect(), out, "lines", previous_f=ts(1), f=ts(2), dp=ParquetDataPlane())
+    assert delta.insert_only and sorted(delta.zset.fetchall()) == [(3, 4, "x", 1), (4, 1, None, 1)]
