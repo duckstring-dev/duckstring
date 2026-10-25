@@ -250,3 +250,37 @@ The general path stays the oracle.
    Part 1 item 5, and item 6 as a single-file write. Measure.
 3. Writing once. Measure.
 4. Splitting mixed changes, if the fact case still warrants it.
+
+## As built (2026-10-25)
+
+Stages 0 to 2 are built (f1aa90d4, cd9d0b08, 62c2250f). What differs from the plan above:
+
+- **Stage 0** follows the plan. The sidecar is written last; reads name explicit files (`merge_snapshot`,
+  `parts_snapshot`); `gc_tiers` collects superseded files after the commit, at the reap and after a Draw lands.
+  `tests/test_read_snapshots.py` reproduces both hazards (they fail on the code before it).
+- **Item 1.1** builds a Source's current state the first time a term reads it (columns come from a binding,
+  `Pond.source_columns`), and an aggregate builds its current state only when a group rescans. Stage 0 makes the
+  later read safe.
+- **Item 1.3** consolidates once, after the pipeline, and only for an aggregate or a scan: `apply_zset` and
+  `append_zset` consolidate what they write anyway.
+- **Detection** reads `min(_duckstring_d)` over the window's rows (one column of the change) rather than Parquet
+  footers: simpler, and cheap next to the window it guards.
+- **The key-collision check** wasn't needed. Consolidation only nets identical rows; it never checked a `+1` for a
+  key already present, so writing an insert-only change unconsolidated is the same Z-set as before.
+- **Item 1.6 and Stage 3 are dropped.** A single-file write of SF1000's 13.4M-row change takes 0.4 s on the
+  laptop whatever the options, so chunking the change log would gain nothing. The publish's time is elsewhere:
+  `_export_parts` scans the registry change log (`DISTINCT f`, then `WHERE f =`) to find the run's rows, and an
+  aggregate's Extension-1 state snapshot rewrites every group each run (`_export_companions`).
+- **Item 1.5** (footer counts) is left: the `p` check costs 0.05 to 0.1 s at SF100.
+
+Cooled SF100 changes on the laptop (each after 150 s idle; every output checked against DuckDB's rebuild, which
+takes 25.7 s cooled):
+
+| Change | before (1296df96) | after (62c2250f) |
+|---|---|---|
+| New sales | 4.17 s | 2.21 s |
+| Fact | 5.58 s | 4.59 s |
+| Mixed | 8.91 s | 7.82 s |
+
+Next, for the new-sales case at SF1000 (est. 2.2 s and 1.4 s there): publish a run's change log part from the
+change the write already holds, and snapshot only an aggregate's changed groups.

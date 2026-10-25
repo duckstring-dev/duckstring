@@ -125,7 +125,7 @@ What the delta contains depends on the Source table:
 | Source table | Result |
 |---|---|
 | Append Trickle | The rows appended in the window, all weighted `+1`. |
-| Merge Trickle | The change-log rows in the window, consolidated: weights of identical rows are summed and zero-weight rows dropped, so several changes to one row collapse to the net change. |
+| Merge Trickle | The change-log rows in the window, consolidated: weights of identical rows are summed and zero-weight rows dropped, so several changes to one row collapse to the net change. A window that only inserted new keys has nothing to consolidate and is read as it is (`insert_only=True`). |
 | Plain table (`write_table`) | If the version this run reads was published after `previous_f`, the whole table weighted `+1` with `is_full=True`. Otherwise an empty delta. A Source run that found the table unchanged with `if_changed=True` publishes no new version, so the delta stays empty (see [Change detection](pond.md#change-detection)). |
 | Any table, on this Pond's first run or when `previous_f` is older than the Source's retained history | The whole table weighted `+1`, with `is_full=True`. |
 
@@ -143,6 +143,7 @@ The result of `read_delta`.
 |---|---|---|
 | `zset` | `duckdb.DuckDBPyRelation` | The changes: the Source's columns plus `_duckstring_d`. |
 | `is_full` | `bool` | `True` when this is a full read rather than a window of changes. A consumer must then recompute its whole output from it instead of applying it as an increment. |
+| `insert_only` | `bool` | `True` when the window holds only added rows, weighted `+1`: always for an append Trickle, and for a merge Trickle whose window inserted new keys and changed none. Nothing in it cancels. |
 | `pk` | `tuple[str, ...]` | The Source table's primary key, if it declared one. |
 | `upserts` | `duckdb.DuckDBPyRelation` | Rows present after the change (net weight above zero), without system columns. |
 | `deletes` | `duckdb.DuckDBPyRelation` | Primary key values that were removed and not re-added. Empty when the Source has no primary key. |
