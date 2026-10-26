@@ -89,6 +89,9 @@ class EngineState:
     # Engine-synthesised passes (no-change Runs completed in-engine, no Duck): (pond_id, f) per pass.
     # The Catchment drains these to record a no-change pond_run row for history + reload counts.
     pending_passes: list[tuple[PondId, datetime]] = field(default_factory=list)
+    # Memory slots per machine (plans/memory-budget.md): ``{pool: N}``. A Pond whose ``pool`` is here needs
+    # a slot for its Duck to go from idle to busy; empty (the default, and the Playground) gates nothing.
+    slot_capacity: dict[str, int] = field(default_factory=dict)
 
     def clone(self) -> EngineState:
         return EngineState(
@@ -99,6 +102,7 @@ class EngineState:
             refreshes=self.refreshes,
             pending_begin_runs=list(self.pending_begin_runs),
             pending_passes=list(self.pending_passes),
+            slot_capacity=dict(self.slot_capacity),
         )
 
 
@@ -386,13 +390,23 @@ def _count_demand(s: EngineState, pid: PondId) -> None:
     th = _throttle(s, pid)
     for rid in ripples_of(s, pid):
         rs = s.ripple_states[rid]
-        if not rs.is_running:
+        if not _busy(s, rid):
             continue
         run, n = th.counts.get(rid, (rs.runs_started, 0))
         n = n + 1 if run == rs.runs_started else 1
         th.counts[rid] = (rs.runs_started, n)
         if n >= 2:
             th.slow.add(rid)
+
+
+def _busy(s: EngineState, rid: RippleId) -> bool:
+    """Busy, for the throttle: running, or a root Ripple of a Pond waiting for a memory slot. A Pond held for
+    memory is a bottleneck like a slow one: demand reaching it while it waits counts, and as a bottleneck it
+    releases upstream once its roots start, which is when its slot comes (plans/memory-budget.md)."""
+    if s.ripple_states[rid].is_running:
+        return True
+    pid = s.ripples[rid].pond_id
+    return s.pond_states[pid].slot_wait_since is not None and rid in roots_of(s, pid)
 
 
 def is_throttled(s: EngineState, pid: PondId) -> bool:
@@ -437,7 +451,7 @@ def _settle_throttle(s: EngineState, now: datetime) -> bool:
         th = ps.throttle
         if th is None:
             continue
-        idle = {rid for rid in th.slow if not s.ripple_states[rid].is_running}
+        idle = {rid for rid in th.slow if not _busy(s, rid)}
         if idle:
             th.slow -= idle
             changed = True
@@ -610,6 +624,117 @@ def _pass_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     s.pending_passes.append((pid, target_f))
 
 
+def _must_run(s: EngineState, pid: PondId) -> bool:
+    """Whether a Run of this Pond runs even with its Sources unchanged (never an engine pass)."""
+    pond, ps = s.ponds[pid], s.pond_states[pid]
+    return (not pond.sources or pond.always_run or pond.is_draw or pond.is_spout
+            or ps.force_pending or ps.rebuild_pending or ps.repairing)
+
+
+# ─── Memory slots (plans/memory-budget.md) ────────────────────────────────────
+#
+# A machine's Ducks share its memory as ``N`` slots (``EngineState.slot_capacity[pool]``). A Duck takes its
+# slots when it goes from idle to busy and gives them back when nothing of its Pond is in flight; a pipelined
+# Run of a busy Pond takes none. A Pond ready to start without a slot isn't started: its demand keeps
+# collecting, and the Run it gets when its turn comes stamps its Sources' freshness then. FIFO by when a Pond
+# began waiting, no backfilling (a head that can't fit holds the queue), and slots still free with nobody
+# waiting go to the Ponds admitted in that pass, leaving one free while other demand is outstanding.
+
+
+def _in_flight(s: EngineState, pid: PondId) -> bool:
+    """Has this Pond's Duck work in flight (so it holds its slots)? A failed, killed or parked Pond doesn't."""
+    if any_ripple_busy(s, pid):
+        return True
+    ps = s.pond_states[pid]
+    return ps.start_f > ps.end_f and not ps.is_failed and not ps.is_killed
+
+
+def _needs_slot(s: EngineState, pid: PondId) -> bool:
+    """Would starting this Pond now take slots? Only for a Pond on a slotted machine whose Duck is idle and
+    whose Run would dispatch (a pass, a Draw and a Spout run no Duck)."""
+    pond, ps = s.ponds[pid], s.pond_states[pid]
+    if pond.pool not in s.slot_capacity or pond.is_draw or pond.is_spout or ps.slots > 0:
+        return False
+    return _must_run(s, pid) or _pond_sources_changed(s, pid, ps.start_f)
+
+
+def _yields(s: EngineState, pid: PondId) -> bool:
+    """Does a busy Duck hold off its next pipelined Run? Yes while another Pond in its group waits for slots:
+    otherwise a Pond whose Runs overlap under a continuous Refresh would never be idle, never give its slots
+    back, and starve the queue. It drains, goes idle and queues like anyone else."""
+    pond, ps = s.ponds[pid], s.pond_states[pid]
+    if ps.slots == 0 or pond.pool not in s.slot_capacity:
+        return False
+    return any(s.pond_states[q].slot_wait_since is not None for q in s.ponds
+               if q != pid and s.ponds[q].pool == pond.pool)
+
+
+def restore_slots(s: EngineState) -> None:
+    """After a reload (slots are soft state): give each Pond with a Run in flight on a slotted machine its slots
+    back, so the Runs a restart resumes are counted and nothing is admitted over them. If they hold more than
+    the capacity (it was lowered across the restart), nothing new starts until enough of them drain."""
+    for pid, ps in s.pond_states.items():
+        cap = s.slot_capacity.get(s.ponds[pid].pool)
+        if cap is not None and not ps.slots and _in_flight(s, pid):
+            ps.slots = max(1, min(s.ponds[pid].slot_need, cap))
+
+
+def _release_slots(s: EngineState) -> None:
+    for pid, ps in s.pond_states.items():
+        if ps.slots and not _in_flight(s, pid):
+            ps.slots = 0
+
+
+def _admit(s: EngineState, ready: list[PondId], now: datetime, admitted: list[PondId]) -> bool:
+    """Start the Ponds waiting for slots that fit, in queue order, adding them to ``admitted``. Returns whether
+    any started."""
+    for pid in ready:
+        if s.pond_states[pid].slot_wait_since is None:
+            s.pond_states[pid].slot_wait_since = now
+    waiting = set(ready)
+    for pid, ps in s.pond_states.items():
+        if ps.slot_wait_since is not None and pid not in waiting:
+            ps.slot_wait_since = None  # no longer ready (slept, killed, its demand cleared)
+    started = False
+    for group, cap in s.slot_capacity.items():
+        members = [pid for pid in s.ponds if s.ponds[pid].pool == group]
+        free = cap - sum(s.pond_states[pid].slots for pid in members)
+        queue = sorted((pid for pid in ready if s.ponds[pid].pool == group),
+                       key=lambda pid: (s.pond_states[pid].slot_wait_since, pid))
+        for pid in queue:
+            ps = s.pond_states[pid]
+            need = cap if ps.slot_exclusive else max(1, min(s.ponds[pid].slot_need, cap))
+            if need > free:
+                break  # no backfilling: the head holds the queue until its slots free
+            start_pond_run(s, pid, now)
+            ps.slots, ps.slot_exclusive, ps.slot_wait_since = need, False, None
+            free -= need
+            admitted.append(pid)
+            started = True
+    return started
+
+
+def _share_spare(s: EngineState, admitted: list[PondId]) -> None:
+    """At the end of a pass, once demand has finished flowing: slots still free in a group nobody is waiting
+    in go to the Ponds admitted in this pass, in queue order, keeping one free while another Pond of the
+    group has outstanding demand. (Shared any earlier, the first Ponds admitted would take slots that Ponds
+    the same pass makes ready a moment later need.)"""
+    for group, cap in s.slot_capacity.items():
+        members = [pid for pid in s.ponds if s.ponds[pid].pool == group]
+        takers = [pid for pid in admitted if s.ponds[pid].pool == group and s.pond_states[pid].slots < cap]
+        if not takers or any(s.pond_states[pid].slot_wait_since is not None for pid in members):
+            continue
+        free = cap - sum(s.pond_states[pid].slots for pid in members)
+        others = any(pid not in admitted and not _in_flight(s, pid)
+                     and any(t > NEVER for t in s.pond_states[pid].demand) for pid in members)
+        spare = free - (1 if others else 0)
+        i = 0
+        while spare > 0:
+            s.pond_states[takers[i % len(takers)]].slots += 1
+            spare -= 1
+            i += 1
+
+
 def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     ps = s.pond_states[pid]
     pond = s.ponds[pid]
@@ -653,12 +778,8 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     # an Inlet (determines change by content, the engine can't), a Force/Rebuild/repair (recompute by
     # intent), an ``always_run`` side-effecting Pond, or a Draw/Spout (run off-Duck by the poller/egress
     # worker). Otherwise dispatch a BeginRun for the Duck (force = recompute; rebuild = cold rebuild).
-    must_run = (
-        not pond.sources or pond.always_run or pond.is_draw or pond.is_spout
-        or ps.force_pending or ps.rebuild_pending or ps.repairing
-    )
     sources_changed = _pond_sources_changed(s, pid, prior_f)
-    if must_run or sources_changed:
+    if _must_run(s, pid) or sources_changed:
         s.pending_begin_runs.append(BeginRun(
             pid, ps.start_f, force=ps.force_pending, rebuild=ps.rebuild_pending,
             sources_changed=sources_changed,
@@ -932,6 +1053,7 @@ def sentinel(now: datetime, state: EngineState) -> tuple[EngineState, list[Rippl
     ``state.pending_begin_runs`` for the Catchment to dispatch."""
     s = state.clone()
     started: list[RippleId] = []
+    admitted: list[PondId] = []  # Ponds given memory slots in this pass (_share_spare tops them up)
     # Start to a fixpoint, then settle the throttle: a release can enable more starts, so repeat
     # (bounded). Sends are decided only after the starts, so a slow Ripple that finished and restarted in
     # the same instant reads as one turnover, not as idle (clear, release) and then turned over (release).
@@ -939,10 +1061,20 @@ def sentinel(now: datetime, state: EngineState) -> tuple[EngineState, list[Rippl
         changed = True
         while changed:
             changed = False
+            _release_slots(s)
+            ready = []  # ready to start, but needing a memory slot (_admit decides)
             for pid in list(s.pond_states):
                 if can_start_pond(s, pid, now):
+                    if _needs_slot(s, pid):
+                        ready.append(pid)
+                        continue
+                    if _yields(s, pid):
+                        continue
                     start_pond_run(s, pid, now)
                     changed = True
+            if (ready or any(ps.slot_wait_since is not None for ps in s.pond_states.values())) \
+                    and _admit(s, ready, now, admitted):
+                changed = True
             for rid in list(s.ripple_states):
                 if can_start_ripple(s, rid):
                     start_ripple(s, rid, now)
@@ -950,6 +1082,8 @@ def sentinel(now: datetime, state: EngineState) -> tuple[EngineState, list[Rippl
                     changed = True
         if not _settle_throttle(s, now):
             break
+    if admitted:
+        _share_spare(s, admitted)
     return s, started
 
 
