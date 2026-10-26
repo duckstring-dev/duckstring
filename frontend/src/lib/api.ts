@@ -109,7 +109,11 @@ export interface RawPond {
   version: string;
   has_tables: boolean; // this major line has published at least one table — the data viewer is offered
   has_objects: boolean; // this major line has published at least one non-tabular Object — the Objects tab is offered
-  status: 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
+  status: 'running' | 'queued' | 'waiting' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
+  // Memory slots on the Catchment's machine (null when not gated): held, of how many, needed, and while waiting
+  // for them, since when and the place in the queue (1 = next).
+  memory?: { slots: number; of: number; need: number; waiting_since: string | null; position: number | null;
+    declared_bytes: number | null } | null;
   gen: number;
   runs_completed: number;
   demand_f: string | null;

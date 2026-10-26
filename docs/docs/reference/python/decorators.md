@@ -14,7 +14,7 @@ from duckstring import ripple, puddle
 ## `@ripple`
 
 ```python
-ripple(func=None, *, parents=None, name=None, always_run=False)
+ripple(func=None, *, parents=None, name=None, always_run=False, memory=None)
 ```
 
 Registers a function as a [Ripple](../../concepts/ripples.md). Can be used bare (`@ripple`) or with arguments (`@ripple(parents=[...])`).
@@ -26,6 +26,7 @@ The decorated function takes one argument, the [Pond handle](pond.md), and its r
 | `parents` | list of functions or names | `[]` | Ripples in the same Pond that must finish before this one starts, given as function references or as names. A name can also refer to a [SQL Ripple](../../guides/sql_ripples.md) declared in `pond.toml`. Dependencies on other Ponds are declared in `pond.toml`, never here. |
 | `name` | `str` | the function name | The Ripple's name, used in run history, the UI and `duckstring pond run --ripple`. |
 | `always_run` | `bool` | `False` | Run even when no Source has changed since the last Pond Run. Without it, such a run is skipped. Set this on a Ripple with side effects that must happen every run. If any Ripple in a Pond sets it, the whole Pond always runs. |
+| `memory` | size or `int` | `pond.toml`'s `[pond] memory`, else none | The memory the Ripple holds outside DuckDB, such as a pandas DataFrame or a model, as a size (`"6GB"`, `"512MB"`, `"2GiB"`) or bytes. The Catchment reserves it on the machine while the Pond runs, and leaves it out of DuckDB's share. Work done in DuckDB needs none: DuckDB keeps to its share and spills to disk. |
 
 Ripples with no parents in common run in parallel. A Ripple runs at most once at a time, but Ripples from consecutive Pond Runs can overlap.
 

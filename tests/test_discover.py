@@ -42,8 +42,8 @@ def _pond(tmp_path: Path, pond_py: str, toml: str = _TOML) -> Path:
 def test_discovers_ripples_by_name(tmp_path):
     found = discover(sys.executable, _pond(tmp_path, _GOOD))
     assert found["ripples"] == [
-        {"name": "a", "parents": [], "always_run": False},
-        {"name": "b", "parents": ["a"], "always_run": True},
+        {"name": "a", "parents": [], "always_run": False, "memory": None},
+        {"name": "b", "parents": ["a"], "always_run": True, "memory": None},
     ]
 
 

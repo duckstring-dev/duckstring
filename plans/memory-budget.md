@@ -1,9 +1,9 @@
 # Memory budget: sharing one machine's memory between its Ducks
 
-Status: **designed 2026-10-27, after measurement; replaces the 2026-10-24 proposal** (leases sized from each
+Status: **built 2026-10-27 (shakedown pending); replaces the 2026-10-24 proposal** (leases sized from each
 Pond's history), which the author rejected as fragile. The design here takes no estimate of a Run's memory
 from history, data sizes or plans: a Catchment-level concurrency limit with memory slots, gated at the
-engine's start decision. Not built.
+engine's start decision.
 
 ## Why
 
@@ -128,8 +128,10 @@ the engine a freshness completed with no data published lets a Sink stamp old da
   Refresh reached together) are admitted together and share the free slots. A short window opened by the
   first arrival (a few ms, at the Driver) can widen that later; it isn't needed for the cases measured.
 - **Several slots for a lone Run**: at the end of a pass, once demand has finished flowing, slots still free
-  with nobody waiting go to the Ponds admitted in that pass, in queue order, keeping one free while any other
-  Pond in the group has outstanding demand (always so under a continuous Refresh). Shared any earlier, the
+  with nobody waiting go to the Ponds admitted in that pass, in queue order, keeping one free whenever the
+  machine has another Pond that could run. (Keeping one only while other demand was outstanding wasn't
+  enough: a Refresh of another Pond seconds later can't be known in advance, and it then waited for the whole
+  Run; found by the multi-major tests once the Driver turned slots on.) Shared any earlier, the
   first Ponds admitted take slots that Ponds the same pass makes ready a moment later need: the throttle
   passes demand upstream after the starts (found by the "no gate is unchanged" test, with 100 slots).
 - **A busy Duck yields**: while another Pond in its group waits for slots, a Duck with a Run in flight starts
@@ -172,10 +174,20 @@ unmet), with its place in the queue.
    no gate, so the Playground and every existing test are unchanged), `Pond.slot_need`, `PondState.slots`,
    `slot_wait_since`, `slot_exclusive`; admission in `sentinel`; the throttle's busy predicate. Tests: the
    scheduling cases below, in `tests/test_engine_slots.py`.
-2. **Driver and Duck**: the budget and `N` from the environment; `slot_capacity` for the Catchment's pool;
-   the grant (slots times budget/`N`) on the `begin_run` job; the Duck's `SET memory_limit` at idle-to-busy
-   and its idle floor; status; the memory-failure retry.
-3. **Declarations**: `@ripple(memory=)`, the `pond.toml` default, `slot_need` at deploy.
+2. **Driver and Duck** (built 2026-10-27, `tests/test_memory_slots_driver.py`, `tests/test_memory_slots_runtime.py`):
+   `DUCKSTRING_RUN_SLOTS` (default 4, `0` off), `DUCKSTRING_MEMORY_BUDGET` (default 80% of physical memory less
+   2 GB) and `DUCKSTRING_IDLE_MEMORY` (default 256 MB); `slot_capacity` for the `catchment` pool; the grant
+   (slots times budget/`N`, less the memory declared outside DuckDB, at least 256 MB) as the `begin_run` job's
+   `memory_limit`, which the Duck applies only when it has nothing in flight, with spills in its own
+   `tmp/{pond}_m{major}`, and its `idle_memory` floor once it has nothing in flight again; status `waiting` and
+   the `memory` entry (slots held, of, need, place in the queue) on `/api/status`, and a "Waiting for memory"
+   card in the UI; one retry with every slot for a DuckDB out-of-memory error or a Duck killed with SIGKILL
+   (`_retry_for_memory`: the Run is failed, cleared and woken, outside the failure budget), and a message
+   pointing at `memory=` when the retry also fails. dbt Ponds have no persistent registry instance, so their
+   limit isn't applied yet.
+3. **Declarations** (built): `@ripple(memory=)`, `pond.toml [pond] memory` for Python Ripples, the
+   `ripple.memory_bytes` column (migration `033`); a Pond's need is one slot plus enough for its largest
+   declaration.
 4. **Shakedown**: SF1000 with `N` = 1, 2 and 4 (first build and change), on the r7gd.8xlarge and a 128 GB
    machine.
 

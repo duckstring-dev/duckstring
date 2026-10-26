@@ -145,6 +145,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
     poller.start()
 
     shutdown_requested = False
+    idle_memory = None  # the floor the Catchment set for this Duck's idle times (begin_run's idle_memory)
     try:
         while True:
             try:
@@ -164,6 +165,13 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                     elif data.get("kind") == "begin_run":
                         # A Run after a shutdown means the Catchment wants this Duck again: stay once it's done.
                         shutdown_requested = False
+                        # Memory slots (plans/memory-budget.md): DuckDB's limit is set only when the Duck has
+                        # nothing in flight (a running query can't be resized dependably), so a pipelined Run
+                        # shares the grant its Duck went busy with.
+                        if data.get("memory_limit") and core.idle() and inflight == 0:
+                            executor.set_memory_limit(data["memory_limit"])
+                        if data.get("idle_memory"):
+                            idle_memory = data["idle_memory"]
                         if "orphan_minutes" in data:  # the Catchment's setting (see _orphan_after_s)
                             orphan_after = _orphan_s(data["orphan_minutes"])
                         prev = data.get("previous_f")
@@ -232,6 +240,8 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                         ))
 
                 core.flush(client.post_event)
+                if idle_memory and core.idle() and inflight == 0:
+                    executor.set_memory_limit(idle_memory)  # nothing in flight: release DuckDB's cache
             except Exception as exc:
                 # A Pond-level error (e.g. a failed ledger write): report it against the most recent
                 # Pond Run and exit. The Catchment fails the Pond (and may retry it on change).

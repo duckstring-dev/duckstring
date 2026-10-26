@@ -60,6 +60,11 @@ class SubprocessLauncher:
         proc = self._procs.get(pond_key)
         return proc is not None and proc.poll() is None
 
+    def exit_code(self, pond_key: str) -> int | None:
+        """The Duck process's exit code once it has exited (negative: killed by that signal), else None."""
+        proc = self._procs.get(pond_key)
+        return proc.poll() if proc is not None else None
+
     def ensure(self, pond_key: str, version: str, source_path: str, duck: dict | None = None) -> None:
         if self.base_url is None:
             self._pending[pond_key] = (version, source_path, duck)
@@ -254,6 +259,13 @@ class DispatchingLauncher:
         owner = self._owner.get(pond_key)
         if owner is not None and hasattr(owner, "launch_error"):
             return owner.launch_error(pond_key)
+        return None
+
+    def exit_code(self, pond_key: str) -> int | None:
+        """The local Duck's exit code (a remote backend's Ducks report none)."""
+        owner = self._owner.get(pond_key)
+        if owner is None or owner is self.local:
+            return self.local.exit_code(pond_key)
         return None
 
     def diagnose(self, pond_key: str) -> str | None:

@@ -115,7 +115,7 @@ def test_siblings_share_the_slots_and_a_lone_run_keeps_one_spare():
     d.run(2.5)  # P completes; the three Sinks become ready in the same pass
     times = {d.starts[pid][0][0] for pid in ("X", "Y", "Z")}
     assert len(times) == 1  # admitted together
-    assert sorted(d.state.pond_states[pid].slots for pid in ("X", "Y", "Z")) == [1, 1, 2]  # 3 + the spare
+    assert sorted(d.state.pond_states[pid].slots for pid in ("X", "Y", "Z")) == [1, 1, 1]  # one kept for P
     d.run(3)
     assert used(d.state) == 0
 

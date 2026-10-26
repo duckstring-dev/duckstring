@@ -716,17 +716,17 @@ def _admit(s: EngineState, ready: list[PondId], now: datetime, admitted: list[Po
 
 def _share_spare(s: EngineState, admitted: list[PondId]) -> None:
     """At the end of a pass, once demand has finished flowing: slots still free in a group nobody is waiting
-    in go to the Ponds admitted in this pass, in queue order, keeping one free while another Pond of the
-    group has outstanding demand. (Shared any earlier, the first Ponds admitted would take slots that Ponds
-    the same pass makes ready a moment later need.)"""
+    in go to the Ponds admitted in this pass, in queue order, keeping one free whenever the group has another
+    Pond that could run. (Shared any earlier, the first Ponds admitted would take slots that Ponds the same
+    pass makes ready a moment later need. Keeping one only while other demand was outstanding wasn't enough:
+    a Refresh of another Pond seconds later, unknowable in advance, then waited for the whole Run.)"""
     for group, cap in s.slot_capacity.items():
         members = [pid for pid in s.ponds if s.ponds[pid].pool == group]
         takers = [pid for pid in admitted if s.ponds[pid].pool == group and s.pond_states[pid].slots < cap]
         if not takers or any(s.pond_states[pid].slot_wait_since is not None for pid in members):
             continue
         free = cap - sum(s.pond_states[pid].slots for pid in members)
-        others = any(pid not in admitted and not _in_flight(s, pid)
-                     and any(t > NEVER for t in s.pond_states[pid].demand) for pid in members)
+        others = any(pid not in admitted and not (s.ponds[pid].is_draw or s.ponds[pid].is_spout) for pid in members)
         spare = free - (1 if others else 0)
         i = 0
         while spare > 0:

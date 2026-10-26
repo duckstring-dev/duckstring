@@ -172,6 +172,7 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
       blockedBy: p.blocked_by ?? [],
       error: p.error,
       failureKind: p.failure_kind ?? null,
+      memory: p.memory ? { slots: p.memory.slots, of: p.memory.of, need: p.memory.need, position: p.memory.position } : null,
       immediateRetries: p.immediate_retries,
       sourceRetries: p.source_retries,
       duck: p.duck ?? null,
@@ -722,6 +723,7 @@ export const THEME_WAKE = '#15803d'; // Wake — a muted/dark green (the soft "g
 export const STATE_COLORS: Record<string, string> = {
   running: THEME_RUNNING,
   queued: THEME_DEMAND,
+  waiting: THEME_AMBER, // ready, waiting for a memory slot
   idle: '#71717a',
   failed: THEME_DANGER,
   killed: THEME_DANGER, // killed reads as red, like failed

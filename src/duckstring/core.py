@@ -35,7 +35,30 @@ def retry_on_lock(fn, attempts: int = 12, base: float = 0.05):
             time.sleep(min(base * (2**i), 0.5))
 
 
-def ripple(func=None, *, parents=None, name=None, always_run=False):
+def parse_size(value) -> int | None:
+    """A memory size in bytes: an int, or a string such as ``"6GB"``, ``"512MB"`` or ``"2GiB"`` (``KB``/``MB``/
+    ``GB``/``TB`` are powers of 1000, ``KiB``/``MiB``/``GiB``/``TiB`` of 1024, as in DuckDB). ``None`` stays
+    ``None``. Raises ``ValueError`` on anything else."""
+    import re
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"not a memory size: {value!r}")
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(f"a memory size can't be negative: {value}")
+        return value
+    m = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]i?B|B)?\s*", str(value), re.IGNORECASE)
+    if not m:
+        raise ValueError(f"not a memory size: {value!r} (for example \"6GB\" or \"512MB\")")
+    unit = (m.group(2) or "B").upper()
+    scale = {"B": 1, "KB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12,
+             "KIB": 2**10, "MIB": 2**20, "GIB": 2**30, "TIB": 2**40}[unit]
+    return int(float(m.group(1)) * scale)
+
+
+def ripple(func=None, *, parents=None, name=None, always_run=False, memory=None):
     """Register a function as a Ripple.
 
     Use bare (``@ripple``) or with arguments (``@ripple(parents=[...])``). The function takes one argument,
@@ -48,6 +71,10 @@ def ripple(func=None, *, parents=None, name=None, always_run=False):
         name: The Ripple's name. Defaults to the function name.
         always_run: Run even when no Source has changed since the last Pond Run. If any Ripple in a Pond
             sets this, the whole Pond always runs.
+        memory: The memory the Ripple holds outside DuckDB, such as a pandas DataFrame or a model, as a size
+            (``"6GB"``) or bytes. The Catchment reserves it while the Pond runs. Work done in DuckDB needs no
+            declaration: DuckDB keeps to its share and spills to disk. Defaults to ``pond.toml``'s
+            ``[pond] memory``, else nothing.
 
     Example::
 
@@ -59,16 +86,17 @@ def ripple(func=None, *, parents=None, name=None, always_run=False):
 
     Reference: https://docs.duckstring.com/reference/python/decorators
     """
+    memory_bytes = parse_size(memory)
     if func is not None:
         # Called as @ripple without arguments
         _RIPPLES.append({"func": func, "name": name or func.__name__, "parents": parents or [],
-                         "always_run": always_run})
+                         "always_run": always_run, "memory": memory_bytes})
         return func
 
     # Called as @ripple(...) with arguments
     def decorator(f):
         _RIPPLES.append({"func": f, "name": name or f.__name__, "parents": parents or [],
-                         "always_run": always_run})
+                         "always_run": always_run, "memory": memory_bytes})
         return f
 
     return decorator
@@ -84,7 +112,8 @@ def collect_ripples() -> list[dict]:
 class PondRipples:
     """Every Ripple of a Pond, Python and SQL, with parents resolved to names (see :func:`load_ripples`).
 
-    ``ripples`` rows are ``{"name", "func", "parents": [names], "always_run", "kind": "python"|"sql"}``;
+    ``ripples`` rows are ``{"name", "func", "parents": [names], "always_run", "memory" (bytes or None),
+    "kind": "python"|"sql"}``;
     ``statics`` maps each static table's name to its file."""
 
     def __init__(self, ripples: list[dict], statics: dict[str, Path]):
@@ -183,12 +212,18 @@ def load_ripples(source_dir: Path, info: dict | None = None, *, require_entry: b
             raise RippleDeclarationError(f"Ripple '{owner}' lists itself as a parent")
         return name
 
+    try:
+        default_memory = parse_size(info.get("pond", {}).get("memory"))  # Python Ripples' memory outside DuckDB
+    except ValueError as exc:
+        raise RippleDeclarationError(f"pond.toml [pond] memory: {exc}") from exc
     for r in raw:
+        memory = r.get("memory") if r.get("memory") is not None else default_memory
         rows.append({"name": r["name"], "func": r["func"], "always_run": bool(r.get("always_run")),
-                     "parents": [resolve(r["name"], p) for p in r["parents"]], "kind": "python"})
-    for r in sql:
+                     "parents": [resolve(r["name"], p) for p in r["parents"]], "kind": "python",
+                     "memory": memory})
+    for r in sql:  # a SQL Ripple's work is all in DuckDB
         rows.append({"name": r.name, "func": sql_ripples.make_callable(r), "always_run": r.always_run,
-                     "parents": [resolve(r.name, p) for p in r.parents], "kind": "sql", "sql": r})
+                     "parents": [resolve(r.name, p) for p in r.parents], "kind": "sql", "sql": r, "memory": None})
     pond = PondRipples(rows, statics)
     if len(pond.order()) != len(rows):
         stuck = sorted(set(pond.by_name) - set(pond.order()))
