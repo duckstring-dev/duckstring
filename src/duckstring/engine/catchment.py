@@ -576,15 +576,20 @@ def can_start_pond(s: EngineState, pid: PondId, now: datetime) -> bool:
         src_f = max((source_visible_f(s, sp, pid) for sp in s.ponds[pid].sources), default=NEVER)
         if src_f <= ps.missing_asset_f:
             return False
+    ready = False
     if not ps.is_failed:  # a blocked-but-not-failed Pond still drains available Source freshness
         mt = min_demand(ps.demand)
-        if mt is not None and f >= mt:
-            return True
+        ready = mt is not None and f >= mt
     # Retry on change: a failed Pond with budget left re-runs when its Sources offer something fresher
     # than its last attempt (bypasses is_blocked — this is how the failure recovers).
-    if ps.failed_f != NEVER and ps.failures <= s.ponds[pid].retry_on_change and f > ps.start_f:
-        return True
-    return False
+    if not ready and ps.failed_f != NEVER and ps.failures <= s.ponds[pid].retry_on_change and f > ps.start_f:
+        ready = True
+    # A Run that would pass waits for the Run in flight before it: a pass completes at once, and completing
+    # ahead of that Run would move end_f past it, so its completion (end_f only climbs) would be dropped with
+    # its change. Once it completes, the pass is decided again, in order.
+    if ready and ps.start_f > ps.end_f and not ps.is_failed and _would_pass(s, pid):
+        return False
+    return ready
 
 
 def _pond_sources_changed(s: EngineState, pid: PondId, prior_f: datetime) -> bool:
@@ -605,6 +610,17 @@ def _pond_sources_changed(s: EngineState, pid: PondId, prior_f: datetime) -> boo
             continue
         cfs.append(sps.changed_f if sps.changed_f > NEVER else sps.end_f)
     return bool(cfs) and max(cfs) > prior_f
+
+
+def _prior_f(ps: PondState) -> datetime:
+    """The freshness a new Run builds on, for the pass test: the newest Run started, or, after it failed, the
+    newest completed (a failed Run published nothing, so its Sources' changes are still to do)."""
+    return ps.end_f if ps.is_failed else ps.start_f
+
+
+def _would_pass(s: EngineState, pid: PondId) -> bool:
+    """Would a Run starting now be a pass: no reason to run regardless, and no Source changed since its prior?"""
+    return not _must_run(s, pid) and not _pond_sources_changed(s, pid, _prior_f(s.pond_states[pid]))
 
 
 def _pass_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
@@ -655,7 +671,7 @@ def _needs_slot(s: EngineState, pid: PondId) -> bool:
     pond, ps = s.ponds[pid], s.pond_states[pid]
     if pond.pool not in s.slot_capacity or pond.is_draw or pond.is_spout or ps.slots > 0:
         return False
-    return _must_run(s, pid) or _pond_sources_changed(s, pid, ps.start_f)
+    return not _would_pass(s, pid)
 
 
 def _yields(s: EngineState, pid: PondId) -> bool:
@@ -738,7 +754,7 @@ def _share_spare(s: EngineState, admitted: list[PondId]) -> None:
 def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     ps = s.pond_states[pid]
     pond = s.ponds[pid]
-    prior_f = ps.start_f  # the freshness this Run builds on (captured before the reset below)
+    prior_f = _prior_f(ps)  # the freshness this Run builds on (captured before the reset below)
     f, window_d = pond_source_f(s, pid, now)
     assert f is not None
 
