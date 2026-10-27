@@ -8,6 +8,7 @@ date: 2026-01-01
 authors: [isaac]
 tags: []
 description: One sentence for search results and link previews.
+image: /img/blog/post-title/share.png  # a PNG or JPEG (not SVG): the link preview, and the picture in the blog's listings
 draft: true  # remove to publish
 ---
 
