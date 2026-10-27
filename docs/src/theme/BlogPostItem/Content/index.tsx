@@ -10,18 +10,24 @@ import styles from './styles.module.css';
 
 type Props = WrapperProps<typeof ContentType>;
 
-// In the blog's listings, a post's social image (`image` in its front matter) sits above its excerpt, linked to the
-// post, so every post shows the same picture there as in a shared link. The post's own page is unchanged.
+// A post's social image (`image` in its front matter) sits above its excerpt in the blog's listings, linked to the
+// post, so every post shows the same picture there as in a shared link. On the post's own page it leads the post
+// only with `image_on_page: true`, for an image that isn't already in the body. `image_alt` describes it (default:
+// the title).
 export default function ContentWrapper(props: Props): React.ReactElement {
   const {isBlogPostPage, metadata, frontMatter, assets} = useBlogPost();
-  const image = useBaseUrl(assets.image ?? frontMatter.image ?? '');
+  const extra = frontMatter as {image_on_page?: boolean; image_alt?: string};
+  const source = assets.image ?? frontMatter.image;
+  const src = useBaseUrl(source ?? '');
+  const img = <img src={src} alt={extra.image_alt ?? metadata.title} loading={isBlogPostPage ? 'eager' : 'lazy'} />;
   return (
     <>
-      {!isBlogPostPage && (assets.image ?? frontMatter.image) && (
+      {source && !isBlogPostPage && (
         <Link to={metadata.permalink} className={styles.cover}>
-          <img src={image} alt={metadata.title} loading="lazy" />
+          {img}
         </Link>
       )}
+      {source && isBlogPostPage && extra.image_on_page && <div className={styles.cover}>{img}</div>}
       <Content {...props} />
     </>
   );
