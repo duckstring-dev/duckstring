@@ -105,6 +105,7 @@ def test_reconstruct_keeps_rows_beside_a_null_key(db):
     assert _sorted(db, "m", cols) == [(1, "a", 10), (1, None, 21), (2, None, 30)]
 
 
+@pytest.mark.timeout(60)  # many random runs; about 1.5 s locally, past the default on a CI runner
 def test_extremes_after_random_changes_match_a_recompute(db):
     """Extremes rescan a group only when a retraction may have taken its stored min, max or arg row: the
     result after rounds of random inserts, deletes and updates, retracting values inside the range and at
