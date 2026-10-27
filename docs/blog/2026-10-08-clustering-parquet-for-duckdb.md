@@ -5,6 +5,7 @@ date: 2026-10-08
 authors: [isaac]
 tags: [duckdb, parquet, performance]
 description: How to order Parquet files for efficient pipelines using multiple columns for downstream queries.
+image: /img/blog/clustering/share.png
 draft: false
 ---
 
