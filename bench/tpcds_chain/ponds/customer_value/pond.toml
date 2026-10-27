@@ -1,0 +1,7 @@
+[pond]
+name = "customer_value"
+version = "1.0.0"
+type = "outlet"
+
+[sources]
+sales_enriched = "1.0.0"

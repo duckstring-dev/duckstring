@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 284" width="720" height="284" role="img" aria-label="Peak read rate from S3 during the 100 GB rebuild, against each setup's rated bandwidth" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title>Peak read rate from S3 during the 100 GB rebuild, against each setup's rated bandwidth</title>
+<rect y="0" width="720" height="284" rx="8" fill="#1a1a19"/>
+<line x1="220.0" y1="8" x2="220.0" y2="256" stroke="#383835"/>
+<text x="220.0" y="272.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">0</text>
+<line x1="327.5" y1="8" x2="327.5" y2="256" stroke="#383835"/>
+<text x="327.5" y="272.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">5 Gbit/s</text>
+<line x1="435.0" y1="8" x2="435.0" y2="256" stroke="#383835"/>
+<text x="435.0" y="272.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">10 Gbit/s</text>
+<line x1="542.5" y1="8" x2="542.5" y2="256" stroke="#383835"/>
+<text x="542.5" y="272.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">15 Gbit/s</text>
+<line x1="650.0" y1="8" x2="650.0" y2="256" stroke="#383835"/>
+<text x="650.0" y="272.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">20 Gbit/s</text>
+<text x="208.0" y="29.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Rated bandwidth, 1 machine</text>
+<rect x="220.8" y="14.8" width="321.0" height="20.5" rx="4" fill="none" stroke="#8a897f" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="548.5" y="29.5" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">15 Gbit/s</text>
+<text x="208.0" y="65.5" font-size="13" fill="#ffffff" text-anchor="end" font-weight="600">DuckDB, 1 machine</text>
+<path d="M220.0,50.0 h281.9 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-281.9 z" fill="#199e70"/>
+<text x="511.9" y="65.5" font-size="13" fill="#ffffff" text-anchor="start" font-weight="400">13.3 Gbit/s</text>
+<text x="208.0" y="101.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">StarRocks, 1 machine</text>
+<path d="M220.0,86.0 h71.2 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-71.2 z" fill="#6f6e66"/>
+<text x="301.2" y="101.5" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">3.5 Gbit/s</text>
+<text x="208.0" y="137.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Spark, 1 machine</text>
+<path d="M220.0,122.0 h178.8 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-178.8 z" fill="#3987e5"/>
+<text x="408.8" y="137.5" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">8.5 Gbit/s</text>
+<text x="208.0" y="173.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Rated bandwidth, 4 machines</text>
+<rect x="220.8" y="158.8" width="321.0" height="20.5" rx="4" fill="none" stroke="#8a897f" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="548.5" y="173.5" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">15 sustained, 60 burst</text>
+<text x="208.0" y="209.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">StarRocks, 4 machines</text>
+<path d="M220.0,194.0 h67.0 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-67.0 z" fill="#6f6e66"/>
+<text x="296.9" y="209.5" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">3.3 Gbit/s</text>
+<text x="208.0" y="245.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Spark, 4 machines</text>
+<path d="M220.0,230.0 h193.8 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-193.8 z" fill="#3987e5"/>
+<text x="423.8" y="245.5" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">9.2 Gbit/s</text>
+</svg>

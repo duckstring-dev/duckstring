@@ -1,0 +1,33 @@
+#argv	/opt/ds/lib/python3.12/site-packages/duckstring/duck/__main__.py --pond sales_feed --major 1 --version 1.0.0 --catchment http://127.0.0.1:41823 --token=*** --root /mnt/nvme/ds --source-path ponds/sales_feed/1.0.0 --data-root=s3://YOUR-BENCH-BUCKET/runs/20261026T235158Z-sf1000_rerun/duckstring_prof_append_1 --persist-root=s3://YOUR-BENCH-BUCKET/runs/20261026T235158Z-sf1000_rerun/duckstring_prof_append_1
+1793062847.812	MainThread	2	core.import_pond_module	352.0
+1793062847.812	MainThread	1	core.load_ripples	353.7
+1793062847.812	MainThread	0	executor.load_topology	356.0
+1793062847.846	MainThread	0	executor.open_registry	31.8
+1793062848.161	ThreadPoolExecutor-0_0	2	core.import_pond_module	309.3
+1793062848.161	ThreadPoolExecutor-0_0	1	core.load_ripples	309.6
+1793062848.161	ThreadPoolExecutor-0_0	0	executor._load_ripple	309.7
+1793062848.548	ThreadPoolExecutor-0_0	3	io._table_exists	10.4
+1793062849.390	ThreadPoolExecutor-0_0	3	io._record_meta	6.0
+1793062849.392	ThreadPoolExecutor-0_0	2	io.append_table	872.7
+1793062849.392	ThreadPoolExecutor-0_0	1	Pond.append_table	872.8
+1793062849.509	ThreadPoolExecutor-0_0	2	io.append_table	49.3
+1793062849.509	ThreadPoolExecutor-0_0	1	Pond.append_table	49.5
+1793062849.510	ThreadPoolExecutor-0_0	0	executor._run_ripple	1349.1
+1793062849.552	MainThread	5	dataplane._export_parts	27.1
+1793062849.869	MainThread	6	dataplane._write_part_chunks	173.8
+1793062849.869	MainThread	5	dataplane._export_parts	316.9
+1793062849.875	MainThread	5	dataplane.publish_plan	5.5
+1793062849.882	MainThread	5	dataplane._export_companions	5.8
+1793062849.914	MainThread	6	dataplane._delta_rows_last	32.5
+1793062849.929	MainThread	5	dataplane._enrich_sidecar	47.1
+1793062849.929	MainThread	4	core.retry_on_lock	403.7
+1793062849.929	MainThread	3	ParquetDataPlane.export	414.2
+1793062849.929	MainThread	2	executor._export_data	416.7
+1793062849.929	MainThread	1	RippleExecutor.export	416.8
+1793062849.929	MainThread	0	DuckCore.ripple_completed	418.9
+1793062849.939	MainThread	0	DuckCore.flush	9.7
+1793062850.100	MainThread	0	RippleExecutor.set_memory_limit	160.4
+1793062850.236	Thread-2 (_run)	2	dataplane._mirror_dir	305.5
+1793062851.896	Thread-2 (_run)	2	dataplane._mirror_dir	1660.5
+1793062851.957	Thread-2 (_run)	1	dataplane.persist_tree	2027.5
+1793062851.957	Thread-2 (_run)	0	RippleExecutor.persist	2027.6

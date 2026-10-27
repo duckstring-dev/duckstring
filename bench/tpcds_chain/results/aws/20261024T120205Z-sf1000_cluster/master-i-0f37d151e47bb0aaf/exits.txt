@@ -1,0 +1,6 @@
+exit 0 sparkcluster_mix_1
+verify 0 sparkcluster_mix_1
+exit 0 sparkcluster_fact_1
+verify 0 sparkcluster_fact_1
+exit 0 sparkcluster_append_1
+verify 0 sparkcluster_append_1

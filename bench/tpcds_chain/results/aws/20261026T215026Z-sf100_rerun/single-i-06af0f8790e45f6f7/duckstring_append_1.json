@@ -1,0 +1,3 @@
+{"phase": "initial", "seconds": 40.07, "finished_seconds": 24.06, "pond_run_seconds": {"category_month": 2.94, "store_quarter": 3.21, "customer_value": 3.54, "sales_enriched": 9.0, "sales_feed": 11.47, "dimensions": 2.79}}
+{"phase": "batch_1", "seconds": 4.83, "finished_seconds": 3.95, "pond_run_seconds": {"category_month": 0.43, "store_quarter": 0.44, "customer_value": 1.16, "sales_enriched": 1.17, "sales_feed": 0.82, "dimensions": 1.59}}
+{"root_bytes": 18318205603, "data_root_bytes": 13238143805}

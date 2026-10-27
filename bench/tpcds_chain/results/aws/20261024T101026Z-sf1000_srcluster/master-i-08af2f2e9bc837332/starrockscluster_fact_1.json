@@ -1,0 +1,1 @@
+{"engine": "starrocks", "starrocks": "4.1.6-6862092", "version": 1, "schema": "declared", "seconds": 606.52, "stages": {"enriched": 264.52, "enriched_schema": 0.3, "category_month": 111.27, "store_quarter": 128.09, "customer_value": 102.32}}

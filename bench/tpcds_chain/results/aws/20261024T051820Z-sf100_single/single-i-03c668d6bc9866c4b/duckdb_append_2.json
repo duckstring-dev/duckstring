@@ -1,0 +1,1 @@
+{"engine": "duckdb", "duckdb": "2.0.0", "version": 1, "seconds": 16.9, "stages": {"enriched": 11.12, "category_month": 2.7, "store_quarter": 0.68, "customer_value": 1.1}}

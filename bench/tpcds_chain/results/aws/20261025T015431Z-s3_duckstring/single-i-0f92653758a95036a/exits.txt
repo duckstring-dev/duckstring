@@ -1,0 +1,4 @@
+exit 1 duckstring_1
+verify 1 duckstring_1
+exit 1 duckstring_2
+verify 1 duckstring_2

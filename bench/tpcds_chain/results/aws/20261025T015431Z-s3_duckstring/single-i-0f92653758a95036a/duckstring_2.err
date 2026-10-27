@@ -1,0 +1,21 @@
+[initial] 34.59s, run history 0.01s
+Traceback (most recent call last):
+  File "/opt/bench/run_duckstring.py", line 218, in <module>
+    main()
+  File "/opt/bench/run_duckstring.py", line 201, in main
+    results.append(phase(url, f"batch_{k}", args.timeout))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/bench/run_duckstring.py", line 152, in phase
+    finished = wait_fresh(url, t_req, timeout, t0)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/bench/run_duckstring.py", line 127, in wait_fresh
+    raise RuntimeError(f"failed: {failed}\n" + json.dumps(failures, indent=1, default=str)[:20000])
+RuntimeError: failed: ['dimensions', 'sales_enriched', 'category_month', 'store_quarter', 'customer_value']
+[
+ {
+  "pond": "dimensions",
+  "ripple": null,
+  "error": "Duck process is not running (it crashed or exited)",
+  "traceback": null
+ }
+]

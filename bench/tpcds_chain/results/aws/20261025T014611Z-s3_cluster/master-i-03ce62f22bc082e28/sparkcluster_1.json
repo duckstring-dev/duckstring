@@ -1,0 +1,1 @@
+{"engine": "spark", "spark": "4.2.0", "master": "spark://172.31.4.87:7077", "version": 1, "seconds": 122.71, "startup": 4.86, "stages": {"enriched": 76.77, "category_month": 6.52, "store_quarter": 5.38, "customer_value": 16.53}}

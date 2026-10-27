@@ -1,0 +1,11 @@
+/data/deploy/starrocks/LICENSE.txt
+/data/deploy/starrocks/NOTICE.txt
+/data/deploy/starrocks/be
+/data/deploy/starrocks/director
+/data/deploy/starrocks/fe
+/data/deploy/starrocks/feproxy
+/data/deploy/starrocks/supervisor
+32
+               total        used        free      shared  buff/cache   available
+Mem:             123           2         112           0           9         120
+Swap:              0           0           0

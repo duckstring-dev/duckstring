@@ -1,0 +1,2 @@
+starrocks_mix_1 memory.peak 17357565952
+starrocks_mix_2 memory.peak 18344329216

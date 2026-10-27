@@ -1,0 +1,386 @@
+{
+  "warm": false,
+  "data": "s3://YOUR-BENCH-BUCKET/data/sf1000_fact",
+  "data_root": "s3://YOUR-BENCH-BUCKET/runs/20261024T060655Z-sf1000_shakedown/duckstring_fact_1",
+  "phases": [
+    {
+      "phase": "initial",
+      "seconds": 338.58,
+      "finished_seconds": 157.41,
+      "pond_run_seconds": {
+        "category_month": 17.17,
+        "store_quarter": 22.65,
+        "customer_value": 26.26,
+        "sales_enriched": 80.53,
+        "sales_feed": 50.6,
+        "dimensions": 3.03
+      },
+      "runs": [
+        {
+          "pond": "category_month",
+          "major": 1,
+          "id": "category_month@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:39:07.231024+00:00",
+          "started_at": "2026-10-24T06:41:18.355288+00:00",
+          "finished_at": "2026-10-24T06:41:35.530007+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:41:35.519923+00:00",
+            "finished_at": "2026-10-24T06:41:36.129869+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "aggregate",
+              "started_at": "2026-10-24T06:41:18.991530+00:00",
+              "finished_at": "2026-10-24T06:41:35.219178+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        },
+        {
+          "pond": "store_quarter",
+          "major": 1,
+          "id": "store_quarter@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:39:07.231024+00:00",
+          "started_at": "2026-10-24T06:41:18.355288+00:00",
+          "finished_at": "2026-10-24T06:41:41.005925+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:41:40.989933+00:00",
+            "finished_at": "2026-10-24T06:41:41.506282+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "aggregate",
+              "started_at": "2026-10-24T06:41:19.031342+00:00",
+              "finished_at": "2026-10-24T06:41:40.601760+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        },
+        {
+          "pond": "customer_value",
+          "major": 1,
+          "id": "customer_value@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:39:07.231024+00:00",
+          "started_at": "2026-10-24T06:41:18.355288+00:00",
+          "finished_at": "2026-10-24T06:41:44.618742+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:41:44.614335+00:00",
+            "finished_at": "2026-10-24T06:41:46.561472+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "aggregate",
+              "started_at": "2026-10-24T06:41:19.009056+00:00",
+              "finished_at": "2026-10-24T06:41:43.502490+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        },
+        {
+          "pond": "sales_enriched",
+          "major": 1,
+          "id": "sales_enriched@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:39:07.231024+00:00",
+          "started_at": "2026-10-24T06:39:57.858649+00:00",
+          "finished_at": "2026-10-24T06:41:18.392521+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:41:18.353471+00:00",
+            "finished_at": "2026-10-24T06:44:45.780270+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "enrich",
+              "started_at": "2026-10-24T06:39:58.472667+00:00",
+              "finished_at": "2026-10-24T06:41:17.557546+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        },
+        {
+          "pond": "sales_feed",
+          "major": 1,
+          "id": "sales_feed@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:39:07.231024+00:00",
+          "started_at": "2026-10-24T06:39:07.285031+00:00",
+          "finished_at": "2026-10-24T06:39:57.883478+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:39:57.856676+00:00",
+            "finished_at": "2026-10-24T06:43:22.039293+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "ingest",
+              "started_at": "2026-10-24T06:39:08.094255+00:00",
+              "finished_at": "2026-10-24T06:39:55.587696+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        },
+        {
+          "pond": "dimensions",
+          "major": 1,
+          "id": "dimensions@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:39:07.231024+00:00",
+          "started_at": "2026-10-24T06:39:07.285031+00:00",
+          "finished_at": "2026-10-24T06:39:10.312328+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:39:10.302359+00:00",
+            "finished_at": "2026-10-24T06:39:12.502094+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "ingest",
+              "started_at": "2026-10-24T06:39:07.842105+00:00",
+              "finished_at": "2026-10-24T06:39:10.045860+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "phase": "batch_1",
+      "seconds": 32.01,
+      "finished_seconds": 29.95,
+      "pond_run_seconds": {
+        "category_month": 4.21,
+        "store_quarter": 4.36,
+        "customer_value": 11.01,
+        "sales_enriched": 15.43,
+        "sales_feed": 3.47,
+        "dimensions": 2.55
+      },
+      "runs": [
+        {
+          "pond": "category_month",
+          "major": 1,
+          "id": "category_month@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:44:45.882695+00:00",
+          "started_at": "2026-10-24T06:45:04.782783+00:00",
+          "finished_at": "2026-10-24T06:45:08.992048+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:45:08.985435+00:00",
+            "finished_at": "2026-10-24T06:45:09.710928+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "aggregate",
+              "started_at": "2026-10-24T06:45:05.015805+00:00",
+              "finished_at": "2026-10-24T06:45:08.904045+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        },
+        {
+          "pond": "store_quarter",
+          "major": 1,
+          "id": "store_quarter@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:44:45.882695+00:00",
+          "started_at": "2026-10-24T06:45:04.782783+00:00",
+          "finished_at": "2026-10-24T06:45:09.146303+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:45:09.139574+00:00",
+            "finished_at": "2026-10-24T06:45:09.906141+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "aggregate",
+              "started_at": "2026-10-24T06:45:05.016614+00:00",
+              "finished_at": "2026-10-24T06:45:09.036969+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        },
+        {
+          "pond": "customer_value",
+          "major": 1,
+          "id": "customer_value@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:44:45.882695+00:00",
+          "started_at": "2026-10-24T06:45:04.782783+00:00",
+          "finished_at": "2026-10-24T06:45:15.793533+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:45:15.788228+00:00",
+            "finished_at": "2026-10-24T06:45:17.883277+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "aggregate",
+              "started_at": "2026-10-24T06:45:05.016625+00:00",
+              "finished_at": "2026-10-24T06:45:14.985317+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        },
+        {
+          "pond": "sales_enriched",
+          "major": 1,
+          "id": "sales_enriched@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:44:45.882695+00:00",
+          "started_at": "2026-10-24T06:44:49.356439+00:00",
+          "finished_at": "2026-10-24T06:45:04.789271+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:45:04.781121+00:00",
+            "finished_at": "2026-10-24T06:45:06.232351+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "enrich",
+              "started_at": "2026-10-24T06:44:49.592326+00:00",
+              "finished_at": "2026-10-24T06:45:02.769186+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        },
+        {
+          "pond": "sales_feed",
+          "major": 1,
+          "id": "sales_feed@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:44:45.882695+00:00",
+          "started_at": "2026-10-24T06:44:45.890674+00:00",
+          "finished_at": "2026-10-24T06:44:49.360292+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:44:49.354601+00:00",
+            "finished_at": "2026-10-24T06:44:50.966501+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "ingest",
+              "started_at": "2026-10-24T06:44:46.457511+00:00",
+              "finished_at": "2026-10-24T06:44:48.401588+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        },
+        {
+          "pond": "dimensions",
+          "major": 1,
+          "id": "dimensions@1",
+          "version": "1.0.0",
+          "f": "2026-10-24T06:44:45.882695+00:00",
+          "started_at": "2026-10-24T06:44:45.890674+00:00",
+          "finished_at": "2026-10-24T06:44:48.439510+00:00",
+          "status": "success",
+          "error": null,
+          "traceback": null,
+          "persist": {
+            "status": "success",
+            "error": null,
+            "started_at": "2026-10-24T06:44:48.419580+00:00",
+            "finished_at": "2026-10-24T06:44:49.435353+00:00"
+          },
+          "ripples": [
+            {
+              "ripple": "ingest",
+              "started_at": "2026-10-24T06:44:46.162776+00:00",
+              "finished_at": "2026-10-24T06:44:48.234876+00:00",
+              "status": "success",
+              "retry": 0,
+              "error": null,
+              "traceback": null
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "root_bytes": 136429788107
+}

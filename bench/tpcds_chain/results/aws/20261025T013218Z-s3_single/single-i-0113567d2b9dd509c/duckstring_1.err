@@ -1,0 +1,13 @@
+[initial] 34.26s, run history 0.01s
+Traceback (most recent call last):
+  File "/opt/bench/run_duckstring.py", line 212, in <module>
+    main()
+  File "/opt/bench/run_duckstring.py", line 195, in main
+    results.append(phase(url, f"batch_{k}", args.timeout))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/bench/run_duckstring.py", line 146, in phase
+    finished = wait_fresh(url, t_req, timeout, t0)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/bench/run_duckstring.py", line 121, in wait_fresh
+    raise RuntimeError(f"failed: {failed}")
+RuntimeError: failed: ['dimensions', 'sales_enriched', 'category_month', 'store_quarter', 'customer_value']

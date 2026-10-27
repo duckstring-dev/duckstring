@@ -1,0 +1,28 @@
+{
+  "sf": 100.0,
+  "scenario": "append",
+  "duckdb": "2.0.0",
+  "source": "dsdgen",
+  "base_rows": {
+    "store_sales": 268565596,
+    "store_returns": 28795080,
+    "item": 204000,
+    "store": 402,
+    "date_dim": 73049,
+    "customer": 2000000,
+    "customer_address": 1000000
+  },
+  "batches": [
+    {
+      "batch": 1,
+      "scenario": "append",
+      "scale": 1.0,
+      "sales_updated": 0,
+      "sales_deleted": 0,
+      "sales_inserted": 1344948,
+      "returns_inserted": 0,
+      "items_reclassified": 0,
+      "customers_moved": 0
+    }
+  ]
+}

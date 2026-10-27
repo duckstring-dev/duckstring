@@ -1,0 +1,9 @@
+starrockscluster_mix_1 memory.peak 5680721920
+starrockscluster_mix_2 memory.peak 5680721920
+starrockscluster_mix_3 memory.peak 5680721920
+starrockscluster_fact_1 memory.peak 5696507904
+starrockscluster_fact_2 memory.peak 5882494976
+starrockscluster_fact_3 memory.peak 5882494976
+starrockscluster_append_1 memory.peak 5882494976
+starrockscluster_append_2 memory.peak 5913616384
+starrockscluster_append_3 memory.peak 5913616384

@@ -1,0 +1,43 @@
+#argv	/opt/ds/lib/python3.12/site-packages/duckstring/duck/__main__.py --pond sales_feed --major 1 --version 1.0.0 --catchment http://127.0.0.1:41823 --token=*** --root /mnt/nvme/ds --source-path ponds/sales_feed/1.0.0 --data-root=s3://YOUR-BENCH-BUCKET/runs/20261026T235158Z-sf1000_rerun/duckstring_prof_append_1 --persist-root=s3://YOUR-BENCH-BUCKET/runs/20261026T235158Z-sf1000_rerun/duckstring_prof_append_1
+1793062471.442	MainThread	2	core.import_pond_module	359.0
+1793062471.442	MainThread	1	core.load_ripples	360.6
+1793062471.443	MainThread	0	executor.load_topology	363.0
+1793062471.474	MainThread	0	executor.open_registry	28.7
+1793062471.954	ThreadPoolExecutor-0_0	2	core.import_pond_module	211.6
+1793062471.954	ThreadPoolExecutor-0_0	1	core.load_ripples	211.9
+1793062471.955	ThreadPoolExecutor-0_0	0	executor._load_ripple	212.0
+1793062473.721	ThreadPoolExecutor-0_0	3	io._table_exists	9.9
+1793062530.120	ThreadPoolExecutor-0_0	3	io._record_meta	21.9
+1793062530.122	ThreadPoolExecutor-0_0	2	io.append_table	57240.8
+1793062530.122	ThreadPoolExecutor-0_0	1	Pond.append_table	57240.9
+1793062530.449	ThreadPoolExecutor-0_0	3	io._table_exists	5.4
+1793062535.722	ThreadPoolExecutor-0_0	3	io._record_meta	19.9
+1793062535.724	ThreadPoolExecutor-0_0	2	io.append_table	5341.7
+1793062535.724	ThreadPoolExecutor-0_0	1	Pond.append_table	5341.7
+1793062535.769	ThreadPoolExecutor-0_0	0	executor._run_ripple	63814.6
+1793062535.786	MainThread	4	dataplane.publish_plan	7.7
+1793062535.793	MainThread	4	io.read_meta	7.2
+1793062537.703	MainThread	6	dataplane._write_part_chunks	1786.3
+1793062537.703	MainThread	5	dataplane._export_parts	1909.9
+1793062569.429	MainThread	6	dataplane._write_part_chunks	31599.3
+1793062569.429	MainThread	5	dataplane._export_parts	31726.1
+1793062569.435	MainThread	6	io.read_meta	5.3
+1793062569.437	MainThread	5	dataplane.publish_plan	8.0
+1793062569.444	MainThread	6	io.read_meta	5.3
+1793062569.450	MainThread	5	dataplane._export_companions	11.2
+1793062569.475	MainThread	6	dataplane._delta_rows_last	25.2
+1793062569.508	MainThread	6	dataplane._delta_rows_last	5.7
+1793062569.516	MainThread	5	dataplane._enrich_sidecar	65.8
+1793062569.516	MainThread	4	core.retry_on_lock	33722.5
+1793062569.516	MainThread	3	ParquetDataPlane.export	33742.3
+1793062569.516	MainThread	2	executor._export_data	33744.7
+1793062569.516	MainThread	1	RippleExecutor.export	33744.9
+1793062569.537	MainThread	0	DuckCore.ripple_completed	33767.4
+1793062569.638	MainThread	0	DuckCore.flush	101.0
+1793062577.177	MainThread	0	RippleExecutor.set_memory_limit	7539.0
+1793062586.721	Thread-2 (_run)	2	dataplane._mirror_dir	17183.3
+1793062654.199	MainThread	0	RippleExecutor.set_memory_limit	16.0
+1793062773.962	Thread-2 (_run)	2	dataplane._mirror_dir	187241.0
+1793062774.020	Thread-2 (_run)	1	dataplane.persist_tree	204482.6
+1793062774.020	Thread-2 (_run)	0	RippleExecutor.persist	204482.7
+1793062775.650	MainThread	0	RippleExecutor.shutdown	1627.2

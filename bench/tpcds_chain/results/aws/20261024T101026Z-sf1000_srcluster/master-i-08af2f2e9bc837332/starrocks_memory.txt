@@ -1,0 +1,3 @@
+starrockscluster_mix_1 memory.peak 9284657152
+starrockscluster_fact_1 memory.peak 9473990656
+starrockscluster_append_1 memory.peak 9473990656

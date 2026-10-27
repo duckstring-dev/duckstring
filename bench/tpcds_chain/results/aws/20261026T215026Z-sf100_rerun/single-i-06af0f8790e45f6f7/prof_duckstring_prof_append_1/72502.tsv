@@ -1,0 +1,3 @@
+#argv	/opt/ds/lib/python3.12/site-packages/duckstring/discover.py /mnt/nvme/tmp/duckstring-discover-l6dulx7y/in.json /mnt/nvme/tmp/duckstring-discover-l6dulx7y/out.json
+1793053244.835	MainThread	1	core.import_pond_module	404.0
+1793053244.835	MainThread	0	core.load_ripples	405.6

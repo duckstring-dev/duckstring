@@ -1,0 +1,126 @@
+#argv	/opt/ds/lib/python3.12/site-packages/duckstring/duck/__main__.py --pond dimensions --major 1 --version 1.0.0 --catchment http://127.0.0.1:39075 --token=*** --root /mnt/nvme/ds --source-path ponds/dimensions/1.0.0 --data-root=s3://YOUR-BENCH-BUCKET/runs/20261026T215026Z-sf100_rerun/duckstring_prof_mix_1 --persist-root=s3://YOUR-BENCH-BUCKET/runs/20261026T215026Z-sf100_rerun/duckstring_prof_mix_1
+1793053376.405	MainThread	2	core.import_pond_module	16.6
+1793053376.405	MainThread	1	core.load_ripples	18.2
+1793053376.405	MainThread	0	executor.load_topology	20.4
+1793053376.432	MainThread	0	executor.open_registry	24.2
+1793053377.211	ThreadPoolExecutor-0_0	5	io._table_exists	10.0
+1793053377.211	ThreadPoolExecutor-0_0	4	io._has_rows	10.0
+1793053377.216	ThreadPoolExecutor-0_0	3	io._bootstrapping	14.9
+1793053377.236	ThreadPoolExecutor-0_0	4	io._record_meta	5.4
+1793053377.322	ThreadPoolExecutor-0_0	5	dataplane.stage_boot_base	85.5
+1793053377.322	ThreadPoolExecutor-0_0	4	Pond._stage_base	85.6
+1793053377.325	ThreadPoolExecutor-0_0	3	io._write_boot_base	94.2
+1793053377.338	ThreadPoolExecutor-0_0	4	io._reconstruct_sql_for	7.7
+1793053377.341	ThreadPoolExecutor-0_0	3	io.refresh_current_view	13.6
+1793053377.342	ThreadPoolExecutor-0_0	2	io.merge_table	142.3
+1793053377.342	ThreadPoolExecutor-0_0	1	Pond.merge_table	142.3
+1793053377.416	ThreadPoolExecutor-0_0	3	io._bootstrapping	5.4
+1793053377.433	ThreadPoolExecutor-0_0	4	io._record_meta	5.3
+1793053377.447	ThreadPoolExecutor-0_0	5	dataplane.stage_boot_base	14.4
+1793053377.447	ThreadPoolExecutor-0_0	4	Pond._stage_base	14.4
+1793053377.450	ThreadPoolExecutor-0_0	3	io._write_boot_base	22.3
+1793053377.463	ThreadPoolExecutor-0_0	4	io._reconstruct_sql_for	7.7
+1793053377.466	ThreadPoolExecutor-0_0	3	io.refresh_current_view	13.0
+1793053377.467	ThreadPoolExecutor-0_0	2	io.merge_table	57.2
+1793053377.467	ThreadPoolExecutor-0_0	1	Pond.merge_table	57.2
+1793053377.549	ThreadPoolExecutor-0_0	3	io._bootstrapping	5.5
+1793053377.590	ThreadPoolExecutor-0_0	5	dataplane.stage_boot_base	22.9
+1793053377.590	ThreadPoolExecutor-0_0	4	Pond._stage_base	23.0
+1793053377.593	ThreadPoolExecutor-0_0	3	io._write_boot_base	30.6
+1793053377.606	ThreadPoolExecutor-0_0	4	io._reconstruct_sql_for	7.9
+1793053377.609	ThreadPoolExecutor-0_0	3	io.refresh_current_view	13.4
+1793053377.610	ThreadPoolExecutor-0_0	2	io.merge_table	67.1
+1793053377.610	ThreadPoolExecutor-0_0	1	Pond.merge_table	67.2
+1793053377.967	ThreadPoolExecutor-0_0	3	io._bootstrapping	7.2
+1793053377.989	ThreadPoolExecutor-0_0	4	io._record_meta	6.3
+1793053378.083	ThreadPoolExecutor-0_0	5	dataplane.stage_boot_base	93.3
+1793053378.083	ThreadPoolExecutor-0_0	4	Pond._stage_base	93.3
+1793053378.087	ThreadPoolExecutor-0_0	3	io._write_boot_base	104.0
+1793053378.108	ThreadPoolExecutor-0_0	4	io._reconstruct_sql_for	12.7
+1793053378.113	ThreadPoolExecutor-0_0	3	io.refresh_current_view	21.7
+1793053378.115	ThreadPoolExecutor-0_0	2	io.merge_table	156.7
+1793053378.115	ThreadPoolExecutor-0_0	1	Pond.merge_table	156.8
+1793053378.319	ThreadPoolExecutor-0_0	5	io._table_exists	13.9
+1793053378.319	ThreadPoolExecutor-0_0	4	io._has_rows	13.9
+1793053378.326	ThreadPoolExecutor-0_0	3	io._bootstrapping	22.7
+1793053378.363	ThreadPoolExecutor-0_0	4	io._record_meta	13.5
+1793053378.370	ThreadPoolExecutor-0_0	7	io.read_meta	7.4
+1793053378.370	ThreadPoolExecutor-0_0	6	dataplane._compact_threshold	7.5
+1793053378.450	ThreadPoolExecutor-0_0	5	dataplane.stage_boot_base	86.6
+1793053378.450	ThreadPoolExecutor-0_0	4	Pond._stage_base	86.6
+1793053378.454	ThreadPoolExecutor-0_0	3	io._write_boot_base	104.8
+1793053378.469	ThreadPoolExecutor-0_0	6	io._table_exists	5.7
+1793053378.469	ThreadPoolExecutor-0_0	5	io._migrate_base	5.8
+1793053378.483	ThreadPoolExecutor-0_0	5	io.read_meta	7.2
+1793053378.485	ThreadPoolExecutor-0_0	4	io._reconstruct_sql_for	22.0
+1793053378.490	ThreadPoolExecutor-0_0	3	io.refresh_current_view	30.6
+1793053378.491	ThreadPoolExecutor-0_0	2	io.merge_table	199.0
+1793053378.491	ThreadPoolExecutor-0_0	1	Pond.merge_table	200.2
+1793053378.497	ThreadPoolExecutor-0_0	0	executor._run_ripple	1753.8
+1793053378.571	MainThread	8	io._reconstruct_sql_for	10.3
+1793053378.576	MainThread	7	io.refresh_current_view	19.0
+1793053378.576	MainThread	6	dataplane._review_base	26.4
+1793053378.576	MainThread	5	dataplane._publish_local_base	34.5
+1793053378.577	MainThread	4	core.retry_on_lock	34.5
+1793053378.602	MainThread	8	io._reconstruct_sql_for	10.6
+1793053378.606	MainThread	7	io.refresh_current_view	18.3
+1793053378.606	MainThread	6	dataplane._review_base	23.1
+1793053378.607	MainThread	5	dataplane._publish_local_base	30.0
+1793053378.607	MainThread	4	core.retry_on_lock	30.1
+1793053378.630	MainThread	8	io._reconstruct_sql_for	9.8
+1793053378.634	MainThread	7	io.refresh_current_view	17.6
+1793053378.635	MainThread	6	dataplane._review_base	21.9
+1793053378.635	MainThread	5	dataplane._publish_local_base	28.1
+1793053378.635	MainThread	4	core.retry_on_lock	28.2
+1793053378.663	MainThread	8	io._reconstruct_sql_for	12.4
+1793053378.668	MainThread	7	io.refresh_current_view	21.9
+1793053378.668	MainThread	6	dataplane._review_base	27.3
+1793053378.669	MainThread	5	dataplane._publish_local_base	33.9
+1793053378.669	MainThread	4	core.retry_on_lock	34.0
+1793053378.698	MainThread	8	io._reconstruct_sql_for	13.1
+1793053378.704	MainThread	7	io.refresh_current_view	23.1
+1793053378.705	MainThread	6	dataplane._review_base	28.1
+1793053378.705	MainThread	5	dataplane._publish_local_base	36.0
+1793053378.705	MainThread	4	core.retry_on_lock	36.1
+1793053378.713	MainThread	4	dataplane.publish_plan	8.2
+1793053378.746	MainThread	7	io.read_meta	5.2
+1793053378.746	MainThread	6	dataplane._compact_threshold	5.3
+1793053378.751	MainThread	5	dataplane._publish_tiered_main	12.7
+1793053378.763	MainThread	5	dataplane._publish_tiered_main	11.6
+1793053378.775	MainThread	5	dataplane._publish_tiered_main	12.3
+1793053378.786	MainThread	5	dataplane._publish_tiered_main	10.8
+1793053378.793	MainThread	8	io._table_exists	5.5
+1793053378.796	MainThread	7	io.read_meta	8.1
+1793053378.796	MainThread	6	dataplane._compact_threshold	8.2
+1793053378.801	MainThread	5	dataplane._publish_tiered_main	15.5
+1793053378.806	MainThread	6	io.read_meta	5.1
+1793053378.810	MainThread	5	dataplane.publish_plan	8.6
+1793053378.828	MainThread	5	dataplane._export_companions	16.9
+1793053378.846	MainThread	6	io.count_current	14.7
+1793053378.865	MainThread	7	io._clog_union_sql	5.2
+1793053378.872	MainThread	6	io.count_current	19.1
+1793053378.894	MainThread	6	io.count_current	15.7
+1793053378.913	MainThread	6	io.count_current	14.1
+1793053378.936	MainThread	6	io.count_current	15.4
+1793053378.940	MainThread	5	dataplane._enrich_sidecar	111.3
+1793053378.940	MainThread	4	core.retry_on_lock	223.2
+1793053378.940	MainThread	3	ParquetDataPlane.export	402.0
+1793053378.940	MainThread	2	executor._export_data	419.2
+1793053378.940	MainThread	1	RippleExecutor.export	419.3
+1793053378.941	MainThread	0	DuckCore.ripple_completed	443.6
+1793053378.958	MainThread	0	DuckCore.flush	16.8
+1793053379.010	Thread-2 (_run)	2	dataplane._mirror_dir	66.7
+1793053379.018	MainThread	0	RippleExecutor.set_memory_limit	60.0
+1793053379.389	Thread-2 (_run)	2	dataplane._mirror_dir	378.8
+1793053379.480	Thread-2 (_run)	2	dataplane._mirror_dir	91.0
+1793053379.633	Thread-2 (_run)	2	dataplane._mirror_dir	153.3
+1793053379.760	Thread-2 (_run)	2	dataplane._mirror_dir	126.4
+1793053379.915	Thread-2 (_run)	2	dataplane._mirror_dir	155.0
+1793053380.003	Thread-2 (_run)	2	dataplane._mirror_dir	88.3
+1793053380.107	Thread-2 (_run)	2	dataplane._mirror_dir	103.5
+1793053380.223	Thread-2 (_run)	2	dataplane._mirror_dir	115.6
+1793053380.362	Thread-2 (_run)	2	dataplane._mirror_dir	139.3
+1793053380.465	Thread-2 (_run)	2	dataplane._mirror_dir	102.6
+1793053380.524	Thread-2 (_run)	1	dataplane.persist_tree	1583.1
+1793053380.524	Thread-2 (_run)	0	RippleExecutor.persist	1583.2
+1793053409.890	MainThread	0	RippleExecutor.shutdown	23.4

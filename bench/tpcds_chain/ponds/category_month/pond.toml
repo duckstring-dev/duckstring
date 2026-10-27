@@ -1,0 +1,7 @@
+[pond]
+name = "category_month"
+version = "1.0.0"
+type = "outlet"
+
+[sources]
+sales_enriched = "1.0.0"
