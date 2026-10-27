@@ -1,10 +1,10 @@
 ---
-title: "DuckDB v2 as a Pipeline Engine"
+title: "DuckDB 2.0 as a Pipeline Engine"
 slug: duckdb-pipeline-engine
-date: 2026-10-25
+date: 2026-10-28
 authors: [isaac]
 tags: [duckdb, performance, benchmarks, incremental]
-description: Run as a data pipeline engine on TPC-DS at 100 GB and 1 TB, one DuckDB v2 machine beat Spark and StarRocks clusters of the same size.
+description: On TPC-DS pipelines at 100 GB and 1 TB, one DuckDB 2.0 machine ran 3 to 10 times faster than Spark and StarRocks clusters of the same size.
 draft: false
 ---
 
@@ -16,16 +16,10 @@ medium sized data'.
 I think this is underselling it. With version 2.0, released on 21 October, I think DuckDB has become among the best of
 the engines available for batch data pipelines for any **realistic** data size, up to at least a terabyte. This is 
 especially the case if truly enormous data is handled in the only sane way: incrementally. In this post I compare DuckDB 
-2.0 with two leading engines: Spark and StarRocks. Then I compare Duckstring's incremental framework performance 
-against this baseline.
+2.0 with two leading engines: Spark and StarRocks. Then I show how Duckstring's incremental runs 
+compare against this baseline.
 
-For the test, I am intentionally emulating a very common processing pattern, in which all data is in object storage 
-(e.g. S3). A data processing step is then a read from object storage, computation, and subsequent write back to object
-storage. This is of course not optimal for performance, but it is very common, practical and flexible, so I believe 
-it is the scenario that is of most value to understand deeply. The test considered an example pipeline built around
-TPC-DS at both SF100 and SF1000 scales (~100 GB and ~1 TB).
-
-In short, the tests confirmed that one DuckDB machine beat a same-sized Spark cluster and a StarRocks cluster, at 
+In short, the tests confirmed that one DuckDB machine beat same-sized Spark and StarRocks clusters, at 
 both 100 GB and 1 TB scales, by between 3 and 10 times. The 100 GB pipeline (which I suspect is already bigger than most
 real-world data pipelines) ran comfortably on my 32 GB laptop in less than 30 seconds. For Duckstring's incremental workloads 
 (sub-1% changes per pass) this was cut dramatically again, by up to 13 times.
@@ -33,6 +27,11 @@ real-world data pipelines) ran comfortably on my 32 GB laptop in less than 30 se
 <!-- truncate -->
 
 ## Testing setup
+
+For the test, I am intentionally emulating a very common processing pattern, in which all data is in object storage 
+(e.g. S3). A data processing step is then a read from object storage, computation, and subsequent write back to object
+storage. This is of course not optimal for performance, but it is very common, practical and flexible, so I believe 
+it is the scenario that is of most value to understand deeply.
 
 The example pipeline is intended to emulate the sort of thing many data teams would run each day: a large fact table
 enriched with its dimensions, then aggregated for reporting. It has six steps:
