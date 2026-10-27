@@ -2,7 +2,7 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
-## Unreleased (0.7.1)
+## 0.7.1 — 2026-10-27
 
 Faster incremental runs, a machine's memory shared out between its Ducks, and fixes for three ways an incremental
 pipeline could publish a wrong answer. Needs `duckstring-trickle` 0.3.1.
@@ -23,8 +23,8 @@ pipeline could publish a wrong answer. Needs `duckstring-trickle` 0.3.1.
 - **A Run dispatched to a Duck that was shutting down** after going idle waited for a Duck that never polled again,
   and failed as a dead Duck. A fresh Duck now takes it.
 - **The first rows of a merge table could hang on DuckDB 2.0.** `duckstring query POND.TABLE`, or any `LIMIT` over a
-  merge table read from its published files, never returned once its change log held some thousands of rows, while
-  the whole table read in a second (fixed in Trickle 0.3.1).
+  merge table, never returned once more than 65,536 changed rows had built up since its last compaction, while the
+  whole table read in a second. It's a DuckDB 2.0 deadlock (duckdb/duckdb#27925), which Trickle 0.3.1 avoids.
 - **A Duck's first copy to S3 could fail** on a half-imported module when its S3 client was first built
   concurrently; a failed copy is now retried once.
 

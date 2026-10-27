@@ -62,10 +62,12 @@ first insert-only change (any append Trickle feeding a builder). As 0.3.0 it can
   fresh Fargate Ducks, two minutes of a continuous Refresh with Ducks reading S3 snapshots ran clean, memory slots
   showed Ponds waiting (two slots, four Inlets), and orphaned Ducks exited about 3.5 minutes after the hard kill.
   **Two findings, both fixed on `fix-limit-hang`:**
-  - `duckstring query revenue.revenue_by_product` timed out: a `LIMIT` over `reconstruct_sql` read from Parquet
-    never finished on DuckDB 2.0 once the change log held some thousands of rows (its consolidation, a CTE
-    referenced twice, was materialised). The CTE is now `NOT MATERIALIZED`: Trickle 0.3.1, which 0.7.1 requires.
+  - `duckstring query revenue.revenue_by_product` timed out: a `LIMIT` over `reconstruct_sql` deadlocked on
+    DuckDB 2.0 once its consolidation, a CTE referenced twice and so materialised, held more than 65,536 rows
+    (a known DuckDB bug: duckdb/duckdb#27737 and #27925, fix in review as #27936). The CTE is now `NOT MATERIALIZED`: Trickle 0.3.1, which 0.7.1 requires.
   - Two Inlet Ducks' first copy to S3 failed with a `KeyError` from a half-imported module (botocore, urllib3);
     later copies covered it. A failed persist is now retried once.
-- Next: merge `fix-limit-hang`, publish Trickle 0.3.1, cut 0.7.1rc2, smoke-test it, then 0.7.1.
+- 2026-10-27: PR #39 merged; Trickle 0.3.1 published (`trickle-v0.3.1`); 0.7.1rc2 published and smoke-tested
+  (run `20261027T113215Z`): every round passed, both `duckstring query` reads returned, no failed persist, Inlets
+  waited for slots, and the last orphaned Duck exited about 3.2 minutes after the hard kill. 0.7.1 released.
 

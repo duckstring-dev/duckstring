@@ -998,9 +998,9 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
     will join should use :func:`materialise_reconstruct`.
 
     The consolidation is a ``NOT MATERIALIZED`` CTE, computed once for the anti-join and once for the upserts.
-    DuckDB 2.0 materialises a CTE referenced twice by default, and a ``LIMIT`` over that plan never finished
-    once the change log held some thousands of rows (a few per key were enough; 1.5 is unaffected): the
-    query route's ``SELECT * ... LIMIT 10`` of a merge table hung while the whole table read in a second."""
+    DuckDB 2.0 materialises a CTE referenced twice by default, and a ``LIMIT`` over that plan deadlocks once
+    the CTE holds more than 65,536 rows (duckdb/duckdb#27925; 1.5 is unaffected): the query route's
+    ``SELECT * ... LIMIT 10`` of a merge table hung while the whole table read in a second."""
     consol = consolidate_sql(clog_sql, f_base, upper=upper, before=before)
     upserts = f"SELECT * EXCLUDE ({_q(D_COL)}) FROM {_RECON_CTE} WHERE {_q(D_COL)} > 0"
     if base_sql is None:
