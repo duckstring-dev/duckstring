@@ -5,7 +5,7 @@ Notable changes per release. Versions before 0.5.0 are recorded in the git histo
 ## Unreleased (0.7.1)
 
 Faster incremental runs, a machine's memory shared out between its Ducks, and fixes for three ways an incremental
-pipeline could publish a wrong answer. Needs `duckstring-trickle` 0.3.0.
+pipeline could publish a wrong answer. Needs `duckstring-trickle` 0.3.1.
 
 ### Fixes
 
@@ -22,6 +22,11 @@ pipeline could publish a wrong answer. Needs `duckstring-trickle` 0.3.0.
 - **Aggregate groups with a NULL key** fell out of date in incremental runs.
 - **A Run dispatched to a Duck that was shutting down** after going idle waited for a Duck that never polled again,
   and failed as a dead Duck. A fresh Duck now takes it.
+- **The first rows of a merge table could hang on DuckDB 2.0.** `duckstring query POND.TABLE`, or any `LIMIT` over a
+  merge table read from its published files, never returned once its change log held some thousands of rows, while
+  the whole table read in a second (fixed in Trickle 0.3.1).
+- **A Duck's first copy to S3 could fail** on a half-imported module when its S3 client was first built
+  concurrently; a failed copy is now retried once.
 
 ### Memory slots
 
@@ -59,10 +64,12 @@ On the TPC-DS benchmark at 1 TB, a change of new sales now takes 12.9 s (from 21
 - A Duck collects a new job as soon as it's queued, rather than at its next poll, so each pipeline stage starts at
   once.
 
-### Trickle 0.3.0
+### Trickle 0.3
 
 `Context.apply_zset` takes `insert_only`, which the builder passes for a change that only adds rows, so a host
-must accept it. Duckstring 0.7.1 requires Trickle 0.3; 0.7.0 stays on Trickle 0.2. `Delta.insert_only` is new.
+must accept it. Duckstring 0.7.1 requires Trickle 0.3.1; 0.7.0 stays on Trickle 0.2. `Delta.insert_only` is new.
+0.3.1 fixes a `LIMIT` over `reconstruct_sql` that never finished on DuckDB 2.0 (its consolidation CTE is now
+`NOT MATERIALIZED`).
 
 ## 0.7.0 — 2026-10-22
 

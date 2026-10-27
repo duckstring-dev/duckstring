@@ -99,10 +99,18 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
         def _run(f=f):
             err = None
             started = _now()
-            try:
-                executor.persist()
-            except Exception as exc:
-                err = _msg(exc)
+            # One retry after a pause: a persist is a reconcile, so a second attempt is safe, and the first
+            # S3 call in a fresh Duck could fail on a half-imported module (a KeyError from botocore or
+            # urllib3) when the S3 client was first built concurrently (the 0.7.1rc1 smoke test, two Ducks).
+            for attempt in (1, 2):
+                try:
+                    executor.persist()
+                    err = None
+                    break
+                except Exception as exc:
+                    err = _msg(exc)
+                    if attempt == 1:
+                        time.sleep(1.0)
             q.put(("persisted", (f, err, started, _now())))
 
         threading.Thread(target=_run, daemon=True).start()

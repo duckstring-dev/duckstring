@@ -995,12 +995,17 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
     a net retraction drops the PK; an unchanged base PK keeps its base row and base freshness. Column-agnostic
     (``* EXCLUDE`` + ``GROUP BY ALL``) — needs only the PK, so it composes over any base/changelog SELECT
     without inspecting schemas (the data plane builds it straight from the sidecar). A read that a query
-    will join should use :func:`materialise_reconstruct`."""
+    will join should use :func:`materialise_reconstruct`.
+
+    The consolidation is a ``NOT MATERIALIZED`` CTE, computed once for the anti-join and once for the upserts.
+    DuckDB 2.0 materialises a CTE referenced twice by default, and a ``LIMIT`` over that plan never finished
+    once the change log held some thousands of rows (a few per key were enough; 1.5 is unaffected): the
+    query route's ``SELECT * ... LIMIT 10`` of a merge table hung while the whole table read in a second."""
     consol = consolidate_sql(clog_sql, f_base, upper=upper, before=before)
     upserts = f"SELECT * EXCLUDE ({_q(D_COL)}) FROM {_RECON_CTE} WHERE {_q(D_COL)} > 0"
     if base_sql is None:
-        return f"WITH {_RECON_CTE} AS ({consol}) {upserts}"
-    return f"WITH {_RECON_CTE} AS ({consol}) {reconstruct_from(base_sql, _RECON_CTE, pk)}"
+        return f"WITH {_RECON_CTE} AS NOT MATERIALIZED ({consol}) {upserts}"
+    return f"WITH {_RECON_CTE} AS NOT MATERIALIZED ({consol}) {reconstruct_from(base_sql, _RECON_CTE, pk)}"
 
 
 def consolidate_sql(clog_sql, f_base, *, upper=None, before=None) -> str:

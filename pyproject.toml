@@ -16,7 +16,7 @@ dependencies = [
   "duckdb>=1.5,<3",
   # The incremental engine (packages/trickle), released separately. A compatible range: while it's 0.x a
   # minor release can change its API or storage format, so Duckstring moves to one deliberately.
-  "duckstring-trickle>=0.3.0,<0.4",
+  "duckstring-trickle>=0.3.1,<0.4",
   "rich>=13.7",
   "typer>=0.12",
   "fastapi>=0.111",
