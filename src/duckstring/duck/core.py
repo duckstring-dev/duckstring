@@ -87,6 +87,7 @@ class DuckCore:
         self.attempts: dict[str, int] = {}  # ripple name → attempt index of its current in-flight run
         self.last_begin_f: datetime = NEVER  # freshness of the most recently started Pond Run
         self._previous_f: dict[datetime, datetime] = {}  # Pond Run freshness → the prior run's freshness
+        self._rebuilds: set[datetime] = set()  # Pond Runs that read their Sources in full (a Rebuild)
         self.contract: dict | None = None  # the major line's additive schema contract (gated at publish)
         # No-change tracking (plans/no-change-skip.md), keyed by Pond Run freshness so concurrent Runs
         # don't cross-contaminate. ``_skipped`` holds Runs a Ripple marked no-change via ``pond.skip()``;
@@ -119,25 +120,42 @@ class DuckCore:
     def begin_run(
         self, f: datetime, now: datetime, retry_immediately: int = 0, force: bool = False,
         previous_f: datetime = NEVER, contract: dict | None = None, sources_changed: bool = True,
+        rebuild: bool = False,
     ) -> list[str]:
         """Start a Pond Run at freshness ``f`` (idempotent — completed Ripples are not re-stamped, unless
         ``force``, which recomputes every Ripple). ``retry_immediately`` is the Run's Ripple-retry budget
         (the Catchment's live setting); ``previous_f`` is the prior completed run's freshness (the
         Catchment computes it at dispatch), carried through to the Ripples as ``pond.previous_f``;
-        ``contract`` is the major line's additive schema contract, vetted at publish.
+        ``contract`` is the major line's additive schema contract, vetted at publish; ``rebuild`` marks a
+        Run that reads its Sources in full (``previous_f`` is ``NEVER``, whatever the Ripples last ran at).
         Returns the Ripple names the caller must launch."""
         self.contract = contract
         self.state = worker.begin_run(self.state, f, retry_immediately, force=force)
         self.last_begin_f = max(self.last_begin_f, f)
         self._previous_f[f] = previous_f
+        if rebuild:
+            self._rebuilds.add(f)
         self._sources_changed[f] = sources_changed
         ledger.record_pond_run_start(self.con, f, now)
         return self._advance(now)
 
-    def previous_f_for(self, f: datetime) -> datetime:
+    def previous_f_for(self, f: datetime, ripple: str | None = None) -> datetime:
         """The prior run's freshness for the in-flight Pond Run at ``f`` (``NEVER`` if unknown — e.g.
-        a Run recovered from the ledger after a Duck restart, with no live ``begin_run`` to carry it)."""
-        return self._previous_f.get(f, NEVER)
+        a Run recovered from the ledger after a Duck restart, with no live ``begin_run`` to carry it).
+
+        Given the ``ripple`` about to run, it is that Ripple's own last completed freshness when that is
+        later. The Catchment sends the Pond's ``end_f`` at dispatch, and Pond Runs pipeline: a Run
+        dispatched while an earlier one is in flight is sent the same ``end_f`` as that earlier Run, but
+        each Ripple runs its Pond Runs in order, so by the time it starts this one it has finished the
+        earlier one. Without this, both Runs read the same Source changes, and a Ripple that applies
+        them (the Trickle builder, an incremental aggregate) applies them twice."""
+        if f not in self._previous_f:
+            return NEVER
+        carried = self._previous_f[f]
+        if ripple is None or f in self._rebuilds:
+            return carried
+        own = self.state.states[ripple].end_f
+        return own if carried < own < f else carried
 
     def pond_failed(self, error: str | None = None, traceback: str | None = None) -> None:
         """Buffer a Pond-level failure (a Duck error not tied to a Ripple — e.g. a failed ledger
@@ -178,6 +196,7 @@ class DuckCore:
                     schema = export(rc.f, self.contract)
                 except ContractViolation as exc:
                     self._previous_f.pop(rc.f, None)
+                    self._rebuilds.discard(rc.f)
                     self.changes.drop(rc.f)
                     ledger.record_pond_run_finish(self.con, rc.f, now, status="failed")  # don't re-run on restart
                     # The Run didn't complete, so the Catchment must not hear that its last Ripple succeeded:
@@ -192,6 +211,7 @@ class DuckCore:
                     return self._advance(now)
             ledger.record_pond_run_finish(self.con, rc.f, now)
             self._previous_f.pop(rc.f, None)  # the Run is done; drop its carried previous_f
+            self._rebuilds.discard(rc.f)
             self.changes.drop(rc.f)
             self.events.append(Event(kind="run_completed", f=rc.f, schema=schema, changed=changed))
         return self._advance(now)

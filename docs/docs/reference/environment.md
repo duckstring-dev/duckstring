@@ -35,7 +35,10 @@ Run only one Catchment process against a state directory, and only one Catchment
 
 | Variable | Default | Description |
 |---|---|---|
-| `DUCKSTRING_MEMORY_LIMIT` | DuckDB's default | Memory limit for each Duck's DuckDB, such as `12GB`. Also sets the size at which the Flock takes over a computation. Set it to about 80% of the Duck's memory. |
+| `DUCKSTRING_MEMORY_LIMIT` | DuckDB's default | Memory limit for each Duck's DuckDB, such as `12GB`. Also sets the size at which the Flock takes over a computation. Set it to about 80% of the Duck's memory. On the Catchment's own machine, the memory slots below set each Duck's limit instead. |
+| `DUCKSTRING_RUN_SLOTS` | `4` | How many Ducks run at once on the Catchment's own machine. Each gets an equal share of the memory budget as its DuckDB limit; a Pond that would run beyond them waits, in the order it became ready, and shows as waiting for memory. A Duck running alone may take the spare slots, keeping one for another Pond. A Run that runs out of memory is retried once with every slot, without counting against its failure budget. `0` turns this off, leaving each Duck to size itself. |
+| `DUCKSTRING_MEMORY_BUDGET` | 80% of the machine's memory, less 2 GB | The memory the slots divide, such as `100GB`. |
+| `DUCKSTRING_IDLE_MEMORY` | `256MB` | The DuckDB limit a Duck drops to when it has nothing running, which releases what it was caching. |
 | `DUCKSTRING_DUCK_LAUNCHER` | built in | `module:Class` of a custom launcher that replaces how Ducks are started. |
 | `DUCKSTRING_DUCK_ORPHAN_MINUTES` | `60` | How long an idle Duck goes without contact from its Catchment before it exits, so a Duck whose Catchment is gone for good doesn't run indefinitely. A Duck mid-run finishes first. `0` keeps Ducks waiting forever. Set it on the Catchment, which passes it to every Duck, including cloud ones. Pool machines aren't affected. |
 | `DUCKSTRING_DISABLE_DUCKS` | off | Start no Ducks at all. For testing the Catchment on its own. |

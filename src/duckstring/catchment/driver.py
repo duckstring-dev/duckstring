@@ -50,6 +50,7 @@ from ..engine import (
     refresh_now,
     repair_pond,
     resend_held_demand,
+    restore_slots,
     sentinel,
     sleep_pond,
     tick,
@@ -59,6 +60,41 @@ from ..flock import job_settings as flock_job_settings
 from ..keys import pond_key
 from ..trickle_io import first_row
 from .taps import TapsMixin
+
+# Memory slots (plans/memory-budget.md): the Ducks on the Catchment's own machine share its memory budget as
+# DUCKSTRING_RUN_SLOTS slots (0 turns the gate off), each worth budget / slots. The budget is
+# DUCKSTRING_MEMORY_BUDGET, else 80% of physical memory less 2 GB for the Catchment and the OS. A Duck with
+# nothing in flight drops to DUCKSTRING_IDLE_MEMORY, which releases DuckDB's cache.
+_DEFAULT_RUN_SLOTS = 4
+_DEFAULT_IDLE_MEMORY = "256MB"
+_MIN_DUCKDB_GRANT = 256 * 10**6  # never set DuckDB below this, whatever a Ripple declares outside it
+
+
+def _out_of_memory(error: str | None) -> bool:
+    """Whether a Ripple's error is DuckDB running out of memory (``OutOfMemoryException``)."""
+    return bool(error) and ("Out of Memory Error" in error or "OutOfMemoryException" in error)
+
+
+def _run_slots() -> int:
+    raw = os.environ.get("DUCKSTRING_RUN_SLOTS")
+    try:
+        return max(0, int(raw)) if raw not in (None, "") else _DEFAULT_RUN_SLOTS
+    except ValueError:
+        return _DEFAULT_RUN_SLOTS
+
+
+def _memory_budget() -> int:
+    from ..core import parse_size
+
+    raw = os.environ.get("DUCKSTRING_MEMORY_BUDGET")
+    if raw:
+        return parse_size(raw)
+    try:
+        physical = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        physical = 16 * 10**9
+    return max(int(physical * 0.8) - 2 * 10**9, 10**9)
+
 
 # A Duck is presumed dead if it holds an in-flight Run but hasn't contacted the Catchment within this
 # window (the secondary, transport-level signal; process-liveness is the primary one). Comfortably
@@ -361,6 +397,19 @@ class Driver(TapsMixin):
         # grace rather than the steady-state silence window. Cleared on first contact.
         self._awaiting_first_contact: set[str] = set()
         self._outdated_ducks: set[str] = set()  # Ponds whose Duck runs a version a redeploy replaced
+        # Ponds whose Duck collected an idle shutdown and is finishing up (its S3 copy) before it exits. A Run
+        # dispatched meanwhile finds its process alive, so nothing is spawned: either the Duck collects the Run
+        # (and stays) or it exits first and _replace_departed_ducks gives the Run to a fresh Duck.
+        self._departing_ducks: set[str] = set()
+        # Memory slots (plans/memory-budget.md): how many, the machine's budget, and the memory each Pond's
+        # Ripples declare outside DuckDB (the largest; it decides the Pond's slot need and is left out of
+        # DuckDB's share). ``_memory_retry``: Ponds retried with every slot after running out of memory, until
+        # a Run succeeds.
+        self.run_slots = _run_slots()
+        self.memory_budget = _memory_budget()
+        self.idle_memory = os.environ.get("DUCKSTRING_IDLE_MEMORY") or _DEFAULT_IDLE_MEMORY
+        self.declared_memory: dict[str, int] = {}
+        self._memory_retry: set[str] = set()
         # key -> cumulative Flock dispatch counters ({dispatched, failed, last_error}), accumulated from
         # the per-Ripple-Run deltas Ducks report (see _record_flock). Observability only (in-memory; a
         # restart just waits for the next report).
@@ -383,6 +432,7 @@ class Driver(TapsMixin):
         # Wakes the egress worker (a Pond Run published → its Spouts may have work). Same cross-thread
         # shape as _notify_cb; None when no worker is attached (NoopLauncher tests).
         self._egress_cb = None
+        self._jobs_cb = None  # called with a pond key when a job is queued for its Duck (routes/duck.py)
         # Spout runs the engine dispatched (instead of to a Duck), awaiting the egress worker — mirrors
         # _pending_transfers for Draws. (spout_key, f). In-memory: a crash re-dispatches on restart.
         self._pending_egress: list[tuple[str, datetime]] = []
@@ -425,10 +475,15 @@ class Driver(TapsMixin):
         if self._egress_cb is not None:
             self._egress_cb()
 
+    def set_jobs_notify(self, cb) -> None:
+        self._jobs_cb = cb
+
     def _enqueue_job(self, pond: str, job: dict) -> None:
-        """Queue a job for a Duck. It collects on its next poll (routes/duck.py explains why delivery is
-        a poll rather than a push)."""
+        """Queue a job for a Duck. It collects on its next poll, and a poll being held for it returns at
+        once so the Duck polls again (routes/duck.py explains why delivery is still a poll)."""
         self.jobs.setdefault(pond, []).append(job)
+        if self._jobs_cb is not None:
+            self._jobs_cb(pond)
 
     def set_alert_notify(self, cb) -> None:
         self._alert_cb = cb
@@ -526,6 +581,9 @@ class Driver(TapsMixin):
                 always_run = bool(first_row(db.execute(
                     "SELECT MAX(always_run) FROM ripple WHERE pond_version_id = ?", (pv_id,)
                 ))[0])
+                declared = first_row(db.execute(
+                    "SELECT MAX(memory_bytes) FROM ripple WHERE pond_version_id = ?", (pv_id,)))[0]
+                self.declared_memory[key] = int(declared or 0)
                 # Pool identity + persist mode (plans/persist.md): where this Pond's Duck actually runs
                 # decides whose Sinks see end_f (same Pool) vs persisted_f (cross-Pool), and whether its
                 # own publish is async-mirrored. Draws/Spouts run in the Catchment process → Catchment Pool.
@@ -603,6 +661,7 @@ class Driver(TapsMixin):
                 ponds=ponds, pond_states=pond_states, ripples=ripples,
                 ripple_states=ripple_states, refreshes=refreshes,
             )
+            self._configure_slots()
             self._load_taps(pondid_to_key)
             # Recompute blocked from the freshly-loaded topology: a Source that is absent now (or has
             # since become present, e.g. a duct was added) flips has_missing_source, so the persisted
@@ -631,6 +690,47 @@ class Driver(TapsMixin):
             resend_held_demand(self.state)
             self.jobs = {key: self.jobs.get(key, []) for key in ponds}
             self.state_version += 1  # topology/config (deploy, ducts, windows) changed
+
+    def _memory_status(self, key: str) -> dict | None:
+        ps, pond = self.state.pond_states[key], self.state.ponds[key]
+        cap = self.state.slot_capacity.get(pond.pool)
+        if cap is None:
+            return None
+        position = None
+        if ps.slot_wait_since is not None:
+            queue = sorted((q for q, qs in self.state.pond_states.items()
+                            if qs.slot_wait_since is not None and self.state.ponds[q].pool == pond.pool),
+                           key=lambda q: (self.state.pond_states[q].slot_wait_since, q))
+            position = queue.index(key) + 1
+        return {"slots": ps.slots, "of": cap, "need": cap if ps.slot_exclusive else pond.slot_need,
+                "waiting_since": _iso(ps.slot_wait_since) if ps.slot_wait_since else None, "position": position,
+                "declared_bytes": self.declared_memory.get(key) or None}
+
+    def _slot_bytes(self) -> int:
+        return self.memory_budget // max(1, self.run_slots)
+
+    def _configure_slots(self) -> None:
+        """Gate the Ducks on the Catchment's own machine on memory slots (plans/memory-budget.md): its pool's
+        capacity, each Pond's need (one slot for DuckDB, plus enough for what its Ripples declare outside it),
+        and, after a reload, the slots the Runs still in flight hold."""
+        if self.run_slots <= 0:
+            self.state.slot_capacity = {}
+            return
+        self.state.slot_capacity = {"catchment": self.run_slots}
+        slot = self._slot_bytes()
+        for key, pond in self.state.ponds.items():
+            declared = self.declared_memory.get(key, 0)
+            pond.slot_need = min(self.run_slots, 1 + -(-declared // slot)) if declared else 1
+        restore_slots(self.state)
+
+    def _memory_grant(self, pond: str) -> str | None:
+        """DuckDB's limit for this Pond's Duck: its slots' worth, less what its Ripples declare outside DuckDB.
+        ``None`` when the Pond isn't gated (another machine, or no slots configured)."""
+        slots = self.state.pond_states[pond].slots
+        if not slots:
+            return None
+        grant = slots * self._slot_bytes() - self.declared_memory.get(pond, 0)
+        return f"{max(grant, _MIN_DUCKDB_GRANT) // 10**6}MB"
 
     def _reconcile_lost_publishes(self) -> None:
         """Pool-loss rollback (plans/persist.md phase 4): make each async_persist Pond's freshness claims
@@ -2496,8 +2596,13 @@ class Driver(TapsMixin):
                         self._record_flock(pond, payload["flock"])
                     self._process(now)
             elif kind == "failed":
-                # The Pond Run gave up at this Ripple's freshness: fail the Pond (and block downstream).
-                self._fail_at_ripple(pond, payload, now)
+                # The Pond Run gave up at this Ripple's freshness: fail the Pond (and block downstream), unless
+                # it ran out of memory and gets one retry with every slot (plans/memory-budget.md).
+                if not (_out_of_memory(payload.get("error")) and self._retry_for_memory(pond, payload, now)):
+                    if _out_of_memory(payload.get("error")) and self._memory_gated(pond):
+                        payload = {**payload, "error": f"{payload.get('error')} (it ran out of memory with every "
+                                                      "memory slot on the machine to itself)"}
+                    self._fail_at_ripple(pond, payload, now)
             elif kind == "missing_source":
                 # A Ripple read a Source asset that isn't published (deleted, or not produced yet). Park the
                 # Pond blocked-with-a-reason — NOT failed: no retry-budget burn, no failure alert. It
@@ -2519,6 +2624,7 @@ class Driver(TapsMixin):
                     )
                     self._process(now)
             elif kind == "run_completed":
+                self._memory_retry.discard(pond)  # a Run succeeded: a later memory failure gets its retry again
                 self.state = clear_missing_asset(self.state, pond)  # a clean read → the wait (if any) is over
                 self.data_version += 1  # the Pond published new output → the serving surface changed
                 self._finish_pond_run(pond, f, now, changed=payload.get("changed", True))
@@ -2549,6 +2655,42 @@ class Driver(TapsMixin):
                 # A Duck-level error (e.g. a failed ledger write): fail the whole Pond at its most
                 # recently started Run. The Duck exits after reporting; liveness will not double-fail.
                 self._fail_whole_pond(pond, now, payload.get("error"), payload.get("traceback"))
+
+    def _memory_gated(self, pond: str) -> bool:
+        return self.state.ponds[pond].pool in self.state.slot_capacity
+
+    def _retry_for_memory(self, pond: str, payload: dict | None, now: datetime, error: str | None = None) -> bool:
+        """A Run that ran out of memory (DuckDB couldn't fit something it can't spill, or the kernel killed the
+        Duck) is retried once, outside the user's failure budget (it isn't a fault in the Ripple's logic), with
+        every memory slot: the attempt is recorded as failed, the Pond cleared and woken, and its next Run
+        waits for the machine to itself. Returns False when it doesn't apply (not gated, or this is already the
+        retry), and the caller fails the Pond as usual."""
+        if not self._memory_gated(pond) or pond in self._memory_retry:
+            return False
+        ps = self.state.pond_states[pond]
+        f = (payload or {}).get("f") or (_iso(ps.start_f) if ps.start_f > ps.end_f else None)
+        note = f"{error or (payload or {}).get('error') or 'out of memory'}; retrying with every memory slot"
+        if f:
+            self._fail_pond_run(pond, f, now, note, (payload or {}).get("traceback"))
+        if payload is not None and payload.get("ripple"):
+            self._record_ripple_run(
+                pond, payload["ripple"], f, "failed", started_at=payload.get("started_at"),
+                finished_at=payload.get("finished_at") or _iso(now), retry=payload.get("retry", 0),
+                error=note, traceback=payload.get("traceback"),
+            )
+        eid = f"{pond}.{(payload or {}).get('ripple')}"
+        if payload is not None and eid in self.state.ripple_states:  # stop the Run where it failed...
+            if f:
+                self.state.ripple_states[eid].start_f = datetime.fromisoformat(f)
+            self.state = fail_ripple(self.state, eid, now)
+        else:
+            self.state = fail_pond(self.state, pond, now)
+        self.state = clear_pond(self.state, pond, now)  # ...then abandon it: no failure kept, nothing blocked
+        self.state = wake_pond(self.state, pond, now)
+        self.state.pond_states[pond].slot_exclusive = True
+        self._memory_retry.add(pond)
+        self._process(now)
+        return True
 
     def _fail_at_ripple(self, pond: str, payload: dict, now: datetime, alert_kind: str = "failure") -> None:
         """A Pond Run gave up at one Ripple (``payload``: a ``failed`` or ``contract_failed`` event): fail
@@ -2606,6 +2748,10 @@ class Driver(TapsMixin):
                 return [{"kind": "shutdown"}]
             jobs = self.jobs.get(pond, [])
             self.jobs[pond] = []
+            if any(j.get("kind") == "begin_run" for j in jobs):
+                self._departing_ducks.discard(pond)  # it has work again, so it stays (the Duck clears its shutdown)
+            elif any(j.get("kind") == "shutdown" for j in jobs):
+                self._departing_ducks.add(pond)
             if any(j.get("kind") == "shutdown" for j in jobs) and hasattr(self.launcher, "release"):
                 # The Duck exits once idle. Forget a remote task or instance now, so a Run that arrives
                 # after it has gone launches a new Duck instead of waiting on the departed one.
@@ -2706,19 +2852,22 @@ class Driver(TapsMixin):
             self._process(now, notify=False)  # poller-driven
 
     def _prune_draw_versions(self, pond: str) -> None:
-        """A Draw has no Duck, so its landed overwrite versions are trimmed here, once the landing has
-        advanced its freshness: Sinks dispatched from now on pin the version just landed, and in-flight
-        ones are covered by ``_retain_from``. Housekeeping: a failure never fails the transfer."""
+        """A Draw has no Duck, so its landed overwrite versions and superseded Trickle tiers are trimmed
+        here, once the landing has advanced its freshness: Sinks dispatched from now on read what just
+        landed, and in-flight ones are covered by ``_retain_from``. Housekeeping: a failure never fails the
+        transfer."""
         from pathlib import Path
 
-        from ..dataplane import prune_versions
+        from ..dataplane import gc_tiers, prune_versions
         from .registry import pond_data_dir
 
         meta = self.meta[pond]
         try:
             raw = self._retain_from(pond)
-            prune_versions(pond_data_dir(Path(self.root), meta["name"], meta["major"], self.data_root),
-                           datetime.fromisoformat(raw) if raw else None)
+            bound = datetime.fromisoformat(raw) if raw else None
+            data_dir = pond_data_dir(Path(self.root), meta["name"], meta["major"], self.data_root)
+            prune_versions(data_dir, bound)
+            gc_tiers(data_dir, bound)  # superseded Trickle tiers, as a Duck's publish collects its own
         except Exception as exc:  # noqa: BLE001
             print(f"[catchment] version prune for draw {pond} skipped: {exc}", flush=True)
 
@@ -3002,6 +3151,7 @@ class Driver(TapsMixin):
         with self.lock:
             now = _now()
             self._replace_outdated_ducks(now)  # before liveness, so a handed-off Pond isn't judged Duck-less
+            self._replace_departed_ducks(now)  # likewise for a Run that arrived as its Duck was shutting down
             self._check_liveness(now)
             self._tick_process(now)
             self._check_freshness(now)
@@ -3138,6 +3288,24 @@ class Driver(TapsMixin):
                 self.last_seen[pond] = now
                 self._awaiting_first_contact.add(pond)
 
+    def _replace_departed_ducks(self, now: datetime) -> None:
+        """Spawn a fresh Duck for each Pond whose departing Duck (one that collected an idle shutdown) exited with
+        a Run still queued for it. Before this the Run waited for a Duck that never polled again, and the
+        liveness check failed it as a dead Duck (found by the TPC-DS benchmark, 2026-10-25)."""
+        for pond in list(self._departing_ducks):
+            if pond not in self.meta:
+                self._departing_ducks.discard(pond)
+                continue
+            if self.launcher.is_running(pond):
+                continue
+            self._departing_ducks.discard(pond)
+            if any(j.get("kind") == "begin_run" for j in self.jobs.get(pond, [])):
+                meta = self.meta[pond]
+                self.launcher.terminate(pond)  # drop the exited process's record so ensure() spawns
+                self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=self.duck_config(pond))
+                self.last_seen[pond] = now
+                self._awaiting_first_contact.add(pond)
+
     def _check_liveness(self, now: datetime) -> None:
         """Fail any Pond whose Duck has died (process gone) or fallen silent (no contact) while a Run
         is in flight, attributing it to that Run (``start_f``). Only for launchers that own real Duck
@@ -3162,7 +3330,14 @@ class Driver(TapsMixin):
                 # Prefer the launcher's specific spawn-failure reason (e.g. a remote pool missing its
                 # image/AMI/IAM) over the generic crash message, so the operator sees the real cause.
                 reason = getattr(self.launcher, "launch_error", lambda _k: None)(pond)
+                code = getattr(self.launcher, "exit_code", lambda _k: None)(pond)
                 self.launcher.terminate(pond)  # clear any dead record so a retry re-spawns
+                if code == -9 and not reason:  # SIGKILL: on Linux, almost always the kernel reclaiming memory
+                    killed = "The Duck was killed (SIGKILL), most likely by the kernel for memory"
+                    if self._retry_for_memory(pond, None, now, error=killed):
+                        continue
+                    reason = (f"{killed}. If a Ripple holds data outside DuckDB (pandas, a model), declare it with "
+                              "@ripple(memory=...).")
                 self._fail_whole_pond(pond, now, reason or "Duck process is not running (it crashed or exited)")
             elif silent:
                 # A remote Duck that launched but never (or no longer) dials back: ask its backend what the
@@ -3267,6 +3442,10 @@ class Driver(TapsMixin):
             # How long the Duck waits, idle, without hearing from this Catchment before it exits. Sent
             # here because a cloud Duck doesn't inherit the Catchment's environment.
             "orphan_minutes": os.environ.get("DUCKSTRING_DUCK_ORPHAN_MINUTES"),
+            # DuckDB's memory limit for this Duck's slots (applied when it goes from idle to busy) and the
+            # floor it drops to when it has nothing in flight (plans/memory-budget.md). None: not gated.
+            "memory_limit": self._memory_grant(pond),
+            "idle_memory": self.idle_memory if self._memory_grant(pond) else None,
         })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI. A Force re-opens the Run.
@@ -3953,6 +4132,8 @@ class Driver(TapsMixin):
                     st = "repairing"
                 elif ps.is_blocked:
                     st = "blocked"
+                elif ps.slot_wait_since is not None and not busy:
+                    st = "waiting"  # ready, but waiting for a memory slot (plans/memory-budget.md)
                 else:
                     st = _demand_status(ps, busy)
 
@@ -4003,6 +4184,9 @@ class Driver(TapsMixin):
                     "has_tables": has_tables,
                     "has_objects": has_objects,
                     "status": st,
+                    # Memory slots (plans/memory-budget.md): what its Duck holds, and, while it waits for them,
+                    # since when and its place in the machine's queue (1 = next).
+                    "memory": self._memory_status(key),
                     "gen": ps.runs_started,
                     "runs_completed": ps.runs_completed,
                     "demand_f": ts(min_demand(ps.demand)),

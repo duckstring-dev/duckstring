@@ -67,7 +67,7 @@ Merges the complete current state of a table into the merge Trickle `name`. Duck
 | `retain_t` | `timedelta` | `None` | Drop change-log rows stamped earlier than `f - retain_t`. The current state is never trimmed. |
 | `retain_n` | `int` | `None` | Keep only the change-log rows from the newest `retain_n` runs. |
 | `compact_threshold` | `int` (bytes) | `None` | Override the size the change log must reach before it is folded into the table's base. Defaults to `DUCKSTRING_COMPACT_THRESHOLD` (256 MiB). |
-| `cluster_by` | `str` or list of `str` | `None` | Columns to order the compacted base by, so reads filtering on them skip most of it. `None` orders it by `pk`. Applies at the next compaction. See [Clustering a merge table](../../guides/append_and_merge.md#clustering-a-merge-table). |
+| `cluster_by` | `str` or list of `str` | `None` | Columns to order the compacted base by, so reads filtering on them skip most of it. `None` orders it by `pk` from the first compaction (a first load keeps the order its rows arrive in). A declared order applies when the base is next written: the first load, or a compaction. See [Clustering a merge table](../../guides/append_and_merge.md#clustering-a-merge-table). |
 | `interleave` | `bool` | `True` | With two or more `cluster_by` columns, interleave them in a rank-Hilbert order so each is clustered. `False` sorts by them in order instead. |
 | `cluster_bits` | `int` | `None` | The interleaved order splits the data into `2**cluster_bits` cells, from one bit per column up to 63, rounded up to a multiple of the column count. `None` chooses it at each compaction so a cell is a little under one row group. Only with two or more interleaved columns. |
 
@@ -125,7 +125,7 @@ What the delta contains depends on the Source table:
 | Source table | Result |
 |---|---|
 | Append Trickle | The rows appended in the window, all weighted `+1`. |
-| Merge Trickle | The change-log rows in the window, consolidated: weights of identical rows are summed and zero-weight rows dropped, so several changes to one row collapse to the net change. |
+| Merge Trickle | The change-log rows in the window, consolidated: weights of identical rows are summed and zero-weight rows dropped, so several changes to one row collapse to the net change. A window that only inserted new keys has nothing to consolidate and is read as it is (`insert_only=True`). |
 | Plain table (`write_table`) | If the version this run reads was published after `previous_f`, the whole table weighted `+1` with `is_full=True`. Otherwise an empty delta. A Source run that found the table unchanged with `if_changed=True` publishes no new version, so the delta stays empty (see [Change detection](pond.md#change-detection)). |
 | Any table, on this Pond's first run or when `previous_f` is older than the Source's retained history | The whole table weighted `+1`, with `is_full=True`. |
 
@@ -143,6 +143,7 @@ The result of `read_delta`.
 |---|---|---|
 | `zset` | `duckdb.DuckDBPyRelation` | The changes: the Source's columns plus `_duckstring_d`. |
 | `is_full` | `bool` | `True` when this is a full read rather than a window of changes. A consumer must then recompute its whole output from it instead of applying it as an increment. |
+| `insert_only` | `bool` | `True` when the window holds only added rows, weighted `+1`: always for an append Trickle, and for a merge Trickle whose window inserted new keys and changed none. Nothing in it cancels. |
 | `pk` | `tuple[str, ...]` | The Source table's primary key, if it declared one. |
 | `upserts` | `duckdb.DuckDBPyRelation` | Rows present after the change (net weight above zero), without system columns. |
 | `deletes` | `duckdb.DuckDBPyRelation` | Primary key values that were removed and not re-added. Empty when the Source has no primary key. |

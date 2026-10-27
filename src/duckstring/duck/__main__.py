@@ -113,6 +113,9 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
             jobs = client.poll_jobs()
             for job in jobs:
                 q.put(("job", job))
+            if getattr(client, "woken", False):
+                idle_rounds = 0        # the Catchment held the poll: a job was queued, or the hold ended
+                continue
             if jobs or inflight:
                 idle_rounds = 0        # work arrived or is running — stay responsive
                 if not jobs:
@@ -130,7 +133,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
             executor.submit(
                 name,
                 start_f,
-                core.previous_f_for(start_f),  # the prior run's freshness, exposed as pond.previous_f
+                core.previous_f_for(start_f, name),  # the prior run's freshness, exposed as pond.previous_f
                 on_done=lambda n, started, finished, lineage=None: q.put(("done", (n, started, finished, lineage))),
                 on_error=lambda n, exc, started, finished: q.put(("error", (n, exc, started, finished))),
                 sources_changed=core.sources_changed_for(start_f),  # backs pond.sources_changed()
@@ -142,6 +145,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
     poller.start()
 
     shutdown_requested = False
+    idle_memory = None  # the floor the Catchment set for this Duck's idle times (begin_run's idle_memory)
     try:
         while True:
             try:
@@ -159,6 +163,15 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                             if executor.prune(_retain_from(data)) and core.last_begin_f > NEVER:
                                 _start_persist(core.last_begin_f)  # carry the deletions to the durable layer
                     elif data.get("kind") == "begin_run":
+                        # A Run after a shutdown means the Catchment wants this Duck again: stay once it's done.
+                        shutdown_requested = False
+                        # Memory slots (plans/memory-budget.md): DuckDB's limit is set only when the Duck has
+                        # nothing in flight (a running query can't be resized dependably), so a pipelined Run
+                        # shares the grant its Duck went busy with.
+                        if data.get("memory_limit") and core.idle() and inflight == 0:
+                            executor.set_memory_limit(data["memory_limit"])
+                        if data.get("idle_memory"):
+                            idle_memory = data["idle_memory"]
                         if "orphan_minutes" in data:  # the Catchment's setting (see _orphan_after_s)
                             orphan_after = _orphan_s(data["orphan_minutes"])
                         prev = data.get("previous_f")
@@ -179,6 +192,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                             previous_f=datetime.fromisoformat(prev) if prev else NEVER,
                             contract=data.get("contract"),
                             sources_changed=data.get("sources_changed", True),
+                            rebuild=bool(data.get("rebuild")),
                         ))
                 elif kind == "done":
                     inflight -= 1
@@ -226,6 +240,8 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                         ))
 
                 core.flush(client.post_event)
+                if idle_memory and core.idle() and inflight == 0:
+                    executor.set_memory_limit(idle_memory)  # nothing in flight: release DuckDB's cache
             except Exception as exc:
                 # A Pond-level error (e.g. a failed ledger write): report it against the most recent
                 # Pond Run and exit. The Catchment fails the Pond (and may retry it on change).

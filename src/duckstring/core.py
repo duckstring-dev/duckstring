@@ -35,7 +35,30 @@ def retry_on_lock(fn, attempts: int = 12, base: float = 0.05):
             time.sleep(min(base * (2**i), 0.5))
 
 
-def ripple(func=None, *, parents=None, name=None, always_run=False):
+def parse_size(value) -> int | None:
+    """A memory size in bytes: an int, or a string such as ``"6GB"``, ``"512MB"`` or ``"2GiB"`` (``KB``/``MB``/
+    ``GB``/``TB`` are powers of 1000, ``KiB``/``MiB``/``GiB``/``TiB`` of 1024, as in DuckDB). ``None`` stays
+    ``None``. Raises ``ValueError`` on anything else."""
+    import re
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"not a memory size: {value!r}")
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(f"a memory size can't be negative: {value}")
+        return value
+    m = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]i?B|B)?\s*", str(value), re.IGNORECASE)
+    if not m:
+        raise ValueError(f"not a memory size: {value!r} (for example \"6GB\" or \"512MB\")")
+    unit = (m.group(2) or "B").upper()
+    scale = {"B": 1, "KB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12,
+             "KIB": 2**10, "MIB": 2**20, "GIB": 2**30, "TIB": 2**40}[unit]
+    return int(float(m.group(1)) * scale)
+
+
+def ripple(func=None, *, parents=None, name=None, always_run=False, memory=None):
     """Register a function as a Ripple.
 
     Use bare (``@ripple``) or with arguments (``@ripple(parents=[...])``). The function takes one argument,
@@ -48,6 +71,10 @@ def ripple(func=None, *, parents=None, name=None, always_run=False):
         name: The Ripple's name. Defaults to the function name.
         always_run: Run even when no Source has changed since the last Pond Run. If any Ripple in a Pond
             sets this, the whole Pond always runs.
+        memory: The memory the Ripple holds outside DuckDB, such as a pandas DataFrame or a model, as a size
+            (``"6GB"``) or bytes. The Catchment reserves it while the Pond runs. Work done in DuckDB needs no
+            declaration: DuckDB keeps to its share and spills to disk. Defaults to ``pond.toml``'s
+            ``[pond] memory``, else nothing.
 
     Example::
 
@@ -59,16 +86,17 @@ def ripple(func=None, *, parents=None, name=None, always_run=False):
 
     Reference: https://docs.duckstring.com/reference/python/decorators
     """
+    memory_bytes = parse_size(memory)
     if func is not None:
         # Called as @ripple without arguments
         _RIPPLES.append({"func": func, "name": name or func.__name__, "parents": parents or [],
-                         "always_run": always_run})
+                         "always_run": always_run, "memory": memory_bytes})
         return func
 
     # Called as @ripple(...) with arguments
     def decorator(f):
         _RIPPLES.append({"func": f, "name": name or f.__name__, "parents": parents or [],
-                         "always_run": always_run})
+                         "always_run": always_run, "memory": memory_bytes})
         return f
 
     return decorator
@@ -84,7 +112,8 @@ def collect_ripples() -> list[dict]:
 class PondRipples:
     """Every Ripple of a Pond, Python and SQL, with parents resolved to names (see :func:`load_ripples`).
 
-    ``ripples`` rows are ``{"name", "func", "parents": [names], "always_run", "kind": "python"|"sql"}``;
+    ``ripples`` rows are ``{"name", "func", "parents": [names], "always_run", "memory" (bytes or None),
+    "kind": "python"|"sql"}``;
     ``statics`` maps each static table's name to its file."""
 
     def __init__(self, ripples: list[dict], statics: dict[str, Path]):
@@ -183,12 +212,18 @@ def load_ripples(source_dir: Path, info: dict | None = None, *, require_entry: b
             raise RippleDeclarationError(f"Ripple '{owner}' lists itself as a parent")
         return name
 
+    try:
+        default_memory = parse_size(info.get("pond", {}).get("memory"))  # Python Ripples' memory outside DuckDB
+    except ValueError as exc:
+        raise RippleDeclarationError(f"pond.toml [pond] memory: {exc}") from exc
     for r in raw:
+        memory = r.get("memory") if r.get("memory") is not None else default_memory
         rows.append({"name": r["name"], "func": r["func"], "always_run": bool(r.get("always_run")),
-                     "parents": [resolve(r["name"], p) for p in r["parents"]], "kind": "python"})
-    for r in sql:
+                     "parents": [resolve(r["name"], p) for p in r["parents"]], "kind": "python",
+                     "memory": memory})
+    for r in sql:  # a SQL Ripple's work is all in DuckDB
         rows.append({"name": r.name, "func": sql_ripples.make_callable(r), "always_run": r.always_run,
-                     "parents": [resolve(r.name, p) for p in r.parents], "kind": "sql", "sql": r})
+                     "parents": [resolve(r.name, p) for p in r.parents], "kind": "sql", "sql": r, "memory": None})
     pond = PondRipples(rows, statics)
     if len(pond.order()) != len(rows):
         stuck = sorted(set(pond.by_name) - set(pond.order()))
@@ -1176,10 +1211,31 @@ class Pond:
         dp = get_data_plane()
         data_dir.duckdb_setup(self.con)  # object store → httpfs + credentials (no-op for local)
         try:
-            select = dp.read_select(data_dir, table, as_of=self.f, pin=self._pin(source_pond))
+            # On this connection: a merge Trickle's changelog consolidation becomes a temporary table, so a
+            # join's key filter can reach the Source's base scan (trickle.io.materialise_reconstruct).
+            select = dp.read_select(data_dir, table, as_of=self.f, pin=self._pin(source_pond), con=self.con)
         except FileNotFoundError as exc:
             raise MissingSourceAsset(source_pond, table) from exc
         return _strip_system(self.con.sql(select))
+
+    def source_columns(self, ref: str) -> list[str]:
+        """The columns :meth:`read_table` gives for ``ref``, without its read: a Source table's query is bound,
+        which reads only its files' metadata, where :meth:`read_table` consolidates a merge Trickle's change log
+        (the Trickle builder's hook, so a run whose terms need only the deltas never reads the current state)."""
+        from .dataplane import get_data_plane
+        from .trickle_io import _strip_system
+
+        source_pond, table = self._resolve_ref(ref)
+        if source_pond is None:
+            return list(self.read_table(ref).columns)  # an own table is a registry view: binding it is the read
+        self._record_read(source_pond, table)
+        data_dir = self._source_data_dir(source_pond)
+        data_dir.duckdb_setup(self.con)
+        try:
+            select = get_data_plane().read_select(data_dir, table, as_of=self.f, pin=self._pin(source_pond))
+        except FileNotFoundError as exc:
+            raise MissingSourceAsset(source_pond, table) from exc
+        return list(_strip_system(self.con.sql(select)).columns)
 
     def source_view(self, source: str, table: str) -> str:
         """Register a Source table at this run's pinned version as a view local to this connection and
@@ -1308,7 +1364,9 @@ class Pond:
             compact_threshold: Bytes the change log must reach before it is folded into the table's base.
                 Defaults to ``DUCKSTRING_COMPACT_THRESHOLD`` (256 MiB).
             cluster_by: A column or columns to order the table's compacted base by, so reads filtering on
-                them skip most of it. Defaults to ordering by ``pk``. Takes effect at the next compaction.
+                them skip most of it. Defaults to ordering by ``pk`` from the first compaction (a first load keeps
+                the order its rows arrive in). A declared order takes effect when the base is next written
+                (the first load, or a compaction).
             interleave: With two or more ``cluster_by`` columns, interleave them (a rank-Hilbert order, so
                 each column is clustered about equally) rather than sort by them in order. Default ``True``.
             cluster_bits: The interleaved order's precision: it splits the data into ``2**cluster_bits``
@@ -1330,18 +1388,21 @@ class Pond:
             self.con, name, relation, self.f, self._resolve_pk(pk),
             retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
             cluster_by=cluster_by, interleave=interleave, cluster_bits=cluster_bits,
+            stage_base=self._stage_base,
         )
         self._changes.record_write(name, changed)
         return changed
 
     def apply_zset(self, name: str, zset, *, pk, retain_t=None, retain_n=None,
-                   compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
+                   compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None,
+                   insert_only=False) -> bool:
         """Append an already-computed change to the merge Trickle ``name`` without comparing it with the state.
 
         ``zset`` holds the table's columns plus ``_duckstring_d`` (``+1`` added, ``-1`` removed; an update is a
         ``-1`` of the old row and a ``+1`` of the new). It is consolidated before writing. ``pk`` is required;
         ``retain_t``, ``retain_n``, ``compact_threshold``, ``cluster_by``, ``interleave`` and ``cluster_bits``
-        are as for :meth:`merge_table`. Returns ``True`` if the consolidated change is non-empty.
+        are as for :meth:`merge_table`. Returns ``True`` if the consolidated change is non-empty. ``insert_only``
+        says every row is ``+1`` (the builder knows when), so the change is written without consolidating it.
 
         This is the write the Trickle builder uses. Prefer :meth:`trickle` or :meth:`merge_table`: a wrong
         weight corrupts the table for every consumer.
@@ -1353,9 +1414,23 @@ class Pond:
             self.con, name, zset, self.f, self._resolve_pk(pk),
             retain_t=retain_t, retain_n=retain_n, compact_threshold=compact_threshold,
             cluster_by=cluster_by, interleave=interleave, cluster_bits=cluster_bits,
+            stage_base=self._stage_base, insert_only=insert_only,
         )
         self._changes.record_write(name, changed)
         return changed
+
+    def _stage_base(self, con, name: str, rows_sql: str, f):
+        """Stage a merge table's first load as Parquet beside this Pond's published data, for the publish to
+        move into place (``dataplane.stage_boot_base``). Declines (``None``: the base is a registry table)
+        without a local data directory."""
+        from .storage import LocalStorage
+
+        store = self._own_store() if self._own_data_dir is not None else None
+        if not isinstance(store, LocalStorage):
+            return None
+        from .dataplane import stage_boot_base
+
+        return stage_boot_base(con, store, name, rows_sql)
 
     def read_delta(self, ref: str):
         """The changes to a Source table (``"source.table"``) over this run's window ``(previous_f, f]``.
@@ -1384,8 +1459,9 @@ class Pond:
         dp = get_data_plane()
         data_dir.duckdb_setup(self.con)
         try:
+            # Materialised: a Ripple reads its delta many times (see trickle.io._materialise).
             return trickle.read_delta(self.con, data_dir, table, self.previous_f, self.f, dp=dp,
-                                      pin=self._pin(source_pond))
+                                      pin=self._pin(source_pond), materialise=True)
         except FileNotFoundError as exc:
             raise MissingSourceAsset(source_pond, table) from exc
 

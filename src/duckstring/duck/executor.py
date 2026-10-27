@@ -199,12 +199,18 @@ class RunInputs:
         rec = self._inputs().pop(f, None)
         return rec["retain_from"] if rec is not None else KEEP_ALL
 
-    def prune(self, retain_from) -> int:
-        """Trim superseded overwrite versions now (the Catchment's ``shutdown`` job, sent when the Pond goes
-        idle). See :func:`duckstring.dataplane.prune_versions`."""
-        from ..dataplane import prune_versions
+    def set_memory_limit(self, limit: str) -> bool:
+        """Set DuckDB's memory limit for this Duck (plans/memory-budget.md). A Duck without a persistent
+        registry instance (dbt) has nothing to set."""
+        return False
 
-        return prune_versions(self.own_data_dir, retain_from)
+    def prune(self, retain_from) -> int:
+        """Trim superseded overwrite versions and Trickle tiers now (the Catchment's ``shutdown`` job, sent when
+        the Pond goes idle). See :func:`duckstring.dataplane.prune_versions` and :func:`~duckstring.dataplane.gc_tiers`."""
+        from ..dataplane import gc_tiers, prune_versions
+
+        removed = prune_versions(self.own_data_dir, retain_from)
+        return removed + gc_tiers(self.own_data_dir, retain_from)
 
 
 class RippleExecutor(RunInputs):
@@ -363,6 +369,30 @@ class RippleExecutor(RunInputs):
         from ..dataplane import persist_tree
 
         return persist_tree(self.own_data_dir, self.persist_dir)
+
+    def set_memory_limit(self, limit: str) -> bool:
+        """Set DuckDB's memory limit on the registry instance (every Ripple's cursor shares it): the Duck's
+        slots when it goes from idle to busy, its idle floor when it has nothing in flight. Spills go to this
+        Duck's own directory under the root's ``tmp``. DuckDB refuses a lower limit while a query holds more
+        than it (it never spills to make room), so a refusal is logged and the limit left as it was: the Duck
+        only lowers it when idle, where a refusal means a cache it couldn't release."""
+        import logging
+
+        import duckdb
+
+        if limit == getattr(self, "_memory_limit", None):
+            return True
+        if not getattr(self, "_spill_dir", None):
+            self._spill_dir = Path(self.root) / "tmp" / f"{self.pond_name}_m{self.major}"
+            self._spill_dir.mkdir(parents=True, exist_ok=True)
+            self._registry.execute(f"SET temp_directory = '{self._spill_dir}'")
+        try:
+            self._registry.execute(f"SET memory_limit = '{limit}'")
+        except duckdb.Error as exc:
+            logging.getLogger(__name__).warning("memory_limit %s not applied: %s", limit, exc)
+            return False
+        self._memory_limit = limit
+        return True
 
     def wipe(self) -> None:
         """Drop every table in the Pond's registry — a Rebuild's cold reset. The next run then reads its

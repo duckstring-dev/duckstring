@@ -1,10 +1,10 @@
 """CatchmentClient — the Duck's HTTP link to the Catchment.
 
-Catchment→Duck is a long-poll the Duck holds open (``GET /api/duck/{pond}/jobs``) for ``begin_run`` /
-``shutdown`` commands; Duck→Catchment is a plain POST per event. Both are Duck-initiated, so the same
-client works identically for a local subprocess and (later) a remote Duck. All calls are best-effort:
-failures are swallowed so the run ledger remains the durable source of truth and events buffer for
-replay.
+Catchment→Duck is a poll (``GET /api/duck/{pond}/jobs``) for ``begin_run`` / ``shutdown`` commands, which
+the Catchment holds briefly when nothing is queued and releases when a job is (``woken``); Duck→Catchment
+is a plain POST per event. Both are Duck-initiated, so the same client works identically for a local
+subprocess and a remote Duck. All calls are best-effort: failures are swallowed so the run ledger remains
+the durable source of truth and events buffer for replay.
 """
 
 from __future__ import annotations
@@ -27,10 +27,15 @@ class CatchmentClient:
         # When the Catchment last answered (time.monotonic()): a poll or an event it accepted. A refused
         # request (a recreated Catchment's new token, a removed Pond) is no contact either.
         self.last_contact = time.monotonic()
+        # Whether the last empty poll was held by the Catchment (released by a queued job, or at the end of
+        # its hold): the Duck then polls again at once rather than backing off (routes/duck.py).
+        self.woken = False
 
     def poll_jobs(self) -> list[dict]:
-        """Long-poll for commands. Returns a list of ``{"kind": "begin_run", "f": ...}`` /
-        ``{"kind": "shutdown"}`` dicts; empty on timeout. Returns ``[]`` on any transport error."""
+        """Poll for commands. Returns a list of ``{"kind": "begin_run", "f": ...}`` / ``{"kind": "shutdown"}``
+        dicts, empty when nothing is queued; ``woken`` says whether the Catchment held the empty poll.
+        Returns ``[]`` on any transport error."""
+        self.woken = False
         try:
             params: dict = {"wait": self.poll_timeout}
             if self.version:
@@ -38,7 +43,9 @@ class CatchmentClient:
             r = self._client.get(f"{self.base}/api/duck/{self.pond}/{self.major}/jobs", params=params)
             r.raise_for_status()
             self.last_contact = time.monotonic()
-            return r.json().get("jobs", [])
+            body = r.json()
+            self.woken = bool(body.get("wake") or body.get("held"))
+            return body.get("jobs", [])
         except Exception:
             return []
 

@@ -53,6 +53,107 @@ def test_builder_aggregate_distributive_incremental(db):
     assert rows(db, "revenue_by_product", "product_id, total_revenue") == [("p1", 50), ("p2", 45)]
 
 
+def _sorted(db, table, proj):
+    """``proj`` over ``table``'s current state, ordered in SQL (NULLs last), since Python can't sort None."""
+    return T.current_state(db, table).query("t", f"SELECT {proj} FROM t ORDER BY ALL").fetchall()
+
+
+def test_aggregate_null_group_keys_are_maintained(db):
+    """A NULL group key is one group, as in SQL's GROUP BY. Incremental runs must reach it: inserts,
+    retractions (with an extreme's rescan) and emptying it, then a change after the output's cold base is
+    compacted, where the base is reconciled with the change log by key."""
+    cols = "id, k1, k2, x"
+
+    def run(f, pf):
+        (at(db, f, pf).source("fact", p=1.0)
+         .aggregate(by=["k1", "k2"], total=agg.sum("x"), n=agg.count(), top=agg.max("x"))
+         .merge("by_k"))
+
+    def expected():
+        return db.sql("SELECT k1, k2, sum(x), count(*), max(x) FROM fact GROUP BY k1, k2 ORDER BY ALL").fetchall()
+
+    state = [(1, "a", None, 5), (2, "a", None, 7), (3, "a", "u", 1), (4, None, None, 2)]
+    merge(db, "fact", state, cols, ts(1), "id")
+    run(ts(1), NEVER)
+    assert _sorted(db, "by_k", "k1, k2, total, n, top") == expected()
+
+    state = [*state, (5, "a", None, 9)]  # an insert into a NULL group
+    merge(db, "fact", state, cols, ts(2), "id")
+    run(ts(2), ts(1))
+    assert _sorted(db, "by_k", "k1, k2, total, n, top") == expected()
+
+    state = [r for r in state if r[0] not in (5, 4)]  # a retraction of its max, and the all-NULL group emptied
+    merge(db, "fact", state, cols, ts(3), "id")
+    run(ts(3), ts(2))
+    assert _sorted(db, "by_k", "k1, k2, total, n, top") == expected()
+    assert (None, None) not in _sorted(db, "by_k", "k1, k2")
+
+    T.checkpoint(db, "by_k", ts(3))  # the output now has a cold base holding the ("a", NULL) group
+    state = [*state, (6, "a", None, 3), (7, None, None, 4)]
+    merge(db, "fact", state, cols, ts(4), "id")
+    run(ts(4), ts(3))
+    assert _sorted(db, "by_k", "k1, k2, total, n, top") == expected()
+
+
+def test_reconstruct_keeps_rows_beside_a_null_key(db):
+    """A merge main whose key has a NULL part: after a checkpoint, a change to (1, NULL) must replace that row
+    and leave (1, 'a') alone (a row NOT IN against a NULL-bearing key drops it)."""
+    cols = "k1, k2, v"
+    merge(db, "m", [(1, "a", 10), (1, None, 20), (2, None, 30)], cols, ts(1), ["k1", "k2"])
+    T.checkpoint(db, "m", ts(1))
+    merge(db, "m", [(1, "a", 10), (1, None, 21), (2, None, 30)], cols, ts(2), ["k1", "k2"])
+    assert _sorted(db, "m", cols) == [(1, "a", 10), (1, None, 21), (2, None, 30)]
+
+
+@pytest.mark.timeout(60)  # many random runs; about 1.5 s locally, past the default on a CI runner
+def test_extremes_after_random_changes_match_a_recompute(db):
+    """Extremes rescan a group only when a retraction may have taken its stored min, max or arg row: the
+    result after rounds of random inserts, deletes and updates, retracting values inside the range and at
+    its edges, matches a recompute every time."""
+    import random
+
+    rng = random.Random(7)
+    values = rng.sample(range(10_000), 2_000)  # distinct, so argmin/argmax have no ties
+    state = {i: (rng.randrange(20), values[i], rng.random() < 0.05) for i in range(300)}  # few TRUEs per group
+    next_id = 300
+
+    def write(f):
+        rows = [(i, g, x, b) for i, (g, x, b) in state.items()]
+        merge(db, "fact", rows, "id, g, x, b", f, "id", types="INTEGER, INTEGER, INTEGER, BOOLEAN")
+
+    def run(f, pf):
+        # Separate outputs, so each family's rescan condition is tested on its own (an argmin over x would
+        # rescan a group whose min of x was retracted anyway).
+        t = at(db, f, pf)
+        t.source("fact", p=1.0).aggregate(by="g", lo=agg.min("x"), hi=agg.max("x"), n=agg.count()).merge("ext")
+        (t.source("fact", p=1.0).aggregate(by="g", first=agg.argmin("id", "x"), last=agg.argmax("id", "x"))
+         .merge("args"))
+        t.source("fact", p=1.0).aggregate(by="g", any_b=agg.bool_or("b")).merge("flags")
+
+    checks = {
+        "ext": ("g, lo, hi, n", "SELECT g, min(x), max(x), count(*) FROM fact GROUP BY g ORDER BY g"),
+        "args": ("g, first, last", "SELECT g, arg_min(id, x), arg_max(id, x) FROM fact GROUP BY g ORDER BY g"),
+        "flags": ("g, any_b", "SELECT g, bool_or(b) FROM fact GROUP BY g ORDER BY g"),
+    }
+    write(ts(1))
+    run(ts(1), NEVER)
+    for r in range(2, 10):
+        for i in rng.sample(sorted(state), 25):
+            del state[i]  # deletes, including groups' extremes
+        for i in rng.sample(sorted(state), 25):
+            g, _x, _b = state[i]
+            state[i] = (g, values[next_id], rng.random() < 0.05)  # updates move a row's value and flag
+            next_id += 1
+        for _ in range(25):
+            state[next_id] = (rng.randrange(20), values[next_id], rng.random() < 0.05)
+            next_id += 1
+        write(ts(r))
+        run(ts(r), ts(r - 1))
+        for table, (cols, expected) in checks.items():
+            got = T.current_state(db, table).query("t", f"SELECT {cols} FROM t ORDER BY g").fetchall()
+            assert got == db.sql(expected).fetchall(), f"{table}, round {r}"
+
+
 def test_builder_aggregate_group_emptied(db):
     ol, pr = star(db)
 

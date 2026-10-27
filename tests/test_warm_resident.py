@@ -151,15 +151,17 @@ def test_a_legacy_warm_table_is_converted_without_double_counting(tmp_path):
 
 def test_a_band_staged_before_a_crash_is_published_by_the_next_export(tmp_path):
     con, out = _con(), tmp_path / "data"
-    _merge(con, 1, [(1, "a")])
+    _merge(con, 1, [(1, "a")])  # the bootstrap: the base
     _publish(con, out, 1)
     _merge(con, 2, [(1, "b")])
-    T.fold_warm(con, "m", ts(1))  # staged, then the Duck dies before publishing
-    assert T._table_exists(con, T.warm_pending_name("m"))
-    assert _current(con) == [(1, "b")]
     _publish(con, out, 2)
-    assert _bands(out) == [T.part_name(ts(1))] and _is_view(con, "m__band")
-    assert _current(con) == [(1, "b")]
+    _merge(con, 3, [(1, "c")])
+    T.fold_warm(con, "m", ts(2))  # staged, then the Duck dies before publishing
+    assert T._table_exists(con, T.warm_pending_name("m"))
+    assert _current(con) == [(1, "c")]
+    _publish(con, out, 3)
+    assert _bands(out) == [T.part_name(ts(2))] and _is_view(con, "m__band")
+    assert _current(con) == [(1, "c")]
 
 
 def test_persist_keeps_live_bands_as_the_floor_rises_and_prunes_folded_ones(tmp_path, monkeypatch):

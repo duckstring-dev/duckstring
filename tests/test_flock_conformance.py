@@ -90,16 +90,12 @@ def _run(tmp_path, monkeypatch, engine, projection="s0.id, s0.grp, s0.amount"):
 
 def _published(pond):
     """The published output as (schema, rows) — what a consumer would actually see."""
-    schema = {c: str(t) for c, t in zip(*_describe(pond, "out__changelog"), strict=True)}
-    rows = pond.con.execute(
-        "SELECT id, grp, amount FROM out__changelog WHERE _duckstring_d = 1 ORDER BY id"
-    ).fetchall()
+    from duckstring import trickle_io as T
+
+    rel = T.current_state(pond.con, "out")
+    schema = {c: str(t) for c, t in zip(rel.columns, rel.types, strict=True)}
+    rows = rel.project("id, grp, amount").order("id").fetchall()
     return schema, rows
-
-
-def _describe(pond, table):
-    rel = pond.con.sql(f'SELECT * EXCLUDE (_duckstring_d, _duckstring_f) FROM "{table}"')
-    return rel.columns, rel.types
 
 
 # ─── the oracle: a faithful engine must be indistinguishable from local compute ──

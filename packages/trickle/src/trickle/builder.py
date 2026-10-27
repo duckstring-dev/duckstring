@@ -93,6 +93,10 @@ _JOIN_SQL = {"inner": "JOIN", "left": "LEFT JOIN", "right": "RIGHT JOIN", "full"
 _LEFT_ONLY = {"semi", "anti"}
 # Join types whose output includes the matched (inner) rows.
 _MATCHED = {"inner", "left", "right", "full"}
+# The joins whose delta is one pass from a changed left (right) side when the other side is unchanged: a single
+# term reads that delta once (TrickleBuilder._one_pass, _matched_terms, _exists_delta).
+_ONE_PASS_LEFT = {"inner", "left", "semi", "anti"}
+_ONE_PASS_RIGHT = {"inner", "right"}
 # A join a keys filter passes down through (``_pushed``). Whatever uses the filtered subtree joins it on the key
 # by equality, so a row whose key side is NULL-padded never contributes. Filtering a padded side would turn rows
 # it removes into such padded rows (harmless, but as many as the other side has rows), so the join is tightened
@@ -199,13 +203,20 @@ class _Source:
     """A leaf: a base table read as a Z-set source. ``alias`` is the explicit ``.alias()`` name (else a
     positional ``s{i}`` is assigned at compile); ``threaded_delta`` is set when this source is a
     just-materialised in-run Trickle (a chained ``.merge()`` result read from the registry, not the
-    not-yet-published data plane)."""
+    not-yet-published data plane). It may be given as a function, called the first time it's used, so a
+    terminal whose result nothing chains from never reads its own change back."""
 
     def __init__(self, ref: str, p: float, *, alias: str | None = None, threaded_delta=None) -> None:
         self.ref = ref
         self.p = p
         self.alias = alias
-        self.threaded_delta = threaded_delta
+        self._threaded = threaded_delta
+
+    @property
+    def threaded_delta(self):
+        if callable(self._threaded):
+            self._threaded = self._threaded()
+        return self._threaded
 
     def leaves(self) -> list["_Source"]:
         return [self]
@@ -228,16 +239,27 @@ class _Join:
 class _NodeState:
     """The compiled SQL handles for one DAG node over this run: ``cols`` (qualified output columns),
     ``current`` (view name for the full current state), ``delta`` (view name for the Z-set ΔO, unconsolidated
-    for a join, or ``None``), ``changed`` and ``is_full``."""
+    for a join, or ``None``), ``changed`` and ``is_full``. ``current`` may be given as a function, built the
+    first time a term reads it: a Source's current state can be costly to read (a merge Trickle's change log
+    is consolidated), and a run whose terms only need the deltas never reads it. ``insert_only``: the delta
+    holds only added rows (see :meth:`TrickleBuilder._compile_join` for when a join's does), so it needs no
+    consolidation."""
 
-    __slots__ = ("cols", "current", "delta", "changed", "is_full")
+    __slots__ = ("cols", "_current", "delta", "changed", "is_full", "insert_only")
 
-    def __init__(self, cols, current, delta, changed, is_full) -> None:
+    def __init__(self, cols, current, delta, changed, is_full, insert_only=False) -> None:
         self.cols = cols
-        self.current = current
+        self._current = current
         self.delta = delta
         self.changed = changed
         self.is_full = is_full
+        self.insert_only = insert_only and delta is not None
+
+    @property
+    def current(self) -> str:
+        if callable(self._current):
+            self._current = self._current()
+        return self._current
 
 
 class TrickleBuilder:
@@ -278,6 +300,7 @@ class TrickleBuilder:
         self._cols_cache: dict[int, list[str]] = {}
         self._states: dict[int, _NodeState] = {}
         self._scratch: list[str] = []  # temp tables a compile made (materialised join deltas), dropped by _chain
+        self._pushed_memo: dict = {}  # _pushed's views by (node, key columns, keys view): reused, then materialised
         # While emitting a comprehensive recompute as one query (:meth:`_query_sql`), every view the compile
         # creates is also logged here as ``(name, sql, leaf)``; ``leaf`` is set for a source's base read.
         self._view_log: list | None = None
@@ -565,7 +588,7 @@ class TrickleBuilder:
                 by + tuple(c for m in metrics.values() for c in (m.col, m.col2) if c is not None)))
             kind, rel = self._compute(required, name, ivm=ivm, key_filter=key_filter, offer="aggregate")
             needs_current = kind == "incremental" and any(m.kind in RESCAN_KINDS for m in metrics.values())
-            current = self._full_join() if needs_current else None
+            current = self._full_join if needs_current else None  # built only if a group must rescan
             trickle.apply_aggregate(ctx.con, name, by, metrics, kind, rel, current, ctx.f,
                                     retain_t=retain_t, retain_n=retain_n)
             return self._chain(name, out_pk)
@@ -575,11 +598,12 @@ class TrickleBuilder:
         if self._is_sql:  # comprehensive mode (post-.sql) → diff the relation vs prior main
             changed = ctx.merge_table(name, self._sql_result(out_pk), pk=out_pk, retain_t=retain_t, retain_n=retain_n)
             return self._chain(name, out_pk, changed=changed)
-        kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter, offer="rows")
+        kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter, offer="rows", consolidate=False)
         if kind == "comprehensive":
             changed = ctx.merge_table(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
         elif kind == "incremental":
-            changed = ctx.apply_zset(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n)
+            extra = {"insert_only": True} if self._insert_only else {}  # nothing to consolidate before writing
+            changed = ctx.apply_zset(name, rel, pk=out_pk, retain_t=retain_t, retain_n=retain_n, **extra)
         else:
             changed = False  # "empty": nothing changed (and no full read) → output unchanged, no write.
         return self._chain(name, out_pk, changed=changed)
@@ -631,7 +655,7 @@ class TrickleBuilder:
             )
             return self._chain(name, out_pk, changed=changed)
 
-        kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter, offer="rows")
+        kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter, offer="rows", consolidate=False)
         changed = False
         if kind != "empty":
             zset = trickle._as_zset(rel, 1) if kind == "comprehensive" else rel
@@ -655,7 +679,7 @@ class TrickleBuilder:
 
         by, metrics, along = self._acc["by"], self._acc["metrics"], self._along
         out_pk = normalize_pk(pk)
-        kind, rel = self._compute(self._acc_required(out_pk), name, ivm=True, key_filter=True)
+        kind, rel = self._compute(self._acc_required(out_pk), name, ivm=True, key_filter=True, consolidate="always")
         trickle.apply_accumulate(
             self.ctx.con, name, by, along, metrics, kind, rel, self.ctx.f, pk,
             fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
@@ -672,7 +696,7 @@ class TrickleBuilder:
         out_pk = normalize_pk(pk)
         if not out_pk:
             raise BuildError(f"pond.trickle('{self.spine_ref}')...accumulate(...).merge('{name}'): pass merge(pk=...)")
-        kind, rel = self._compute(self._acc_required(out_pk), name, ivm=True, key_filter=True)
+        kind, rel = self._compute(self._acc_required(out_pk), name, ivm=True, key_filter=True, consolidate="always")
         trickle.apply_accumulate_merge(
             self.ctx.con, name, by, along, metrics, kind, rel, self._full_join(), self.ctx.f, pk,
             retain_t=retain_t, retain_n=retain_n,
@@ -690,13 +714,7 @@ class TrickleBuilder:
         bare = (isinstance(self._root, _Source) and not self._ops
                 and not self._is_sql and self._agg is None)
         if bare:
-            ref = self._root.ref
-            if (trickle.read_meta(con).get(ref) or {}).get("mode") in ("merge", "append"):
-                return trickle.count_current(con, ref)  # local registry Trickle → metadata-fast
-            counter = getattr(self.ctx, "count_table", None)  # external source → host's fast path if any
-            if counter is not None:
-                return int(counter(ref))
-            return int(first_row(self.ctx.read_table(ref).aggregate("count(*)"))[0])  # correct fallback
+            return self._source_rows(self._root.ref)
         view = trickle.unique_name("count")
         if self._agg is not None:
             # group count: distinct groups in the current composed state — never runs the metric aggregations.
@@ -772,14 +790,20 @@ class TrickleBuilder:
 
     # ─── compute (the shared ΔO step behind .merge() and .append()) ───────────────
 
-    def _compute(self, out_pk, name: str, *, ivm: bool = True, key_filter: bool = True, offer: str | None = None):
+    def _compute(self, out_pk, name: str, *, ivm: bool = True, key_filter: bool = True, offer: str | None = None,
+                 consolidate: bool = True):
         """Compose this DAG's change once. Returns ``(kind, rel)``: ``("comprehensive", o_prime)`` (whole
         output recomputed, clean rows — the caller diffs it against the stored main), ``("incremental",
         delta)`` (the Z-set ΔO, user cols + ``_duckstring_d``), ``("empty", None)`` (nothing changed), or
         ``("state", state)`` when an ``offer="aggregate"`` recompute was run by the host and returned the
         aggregate's accumulator state. Validates ``.select`` is present for a joined DAG and that it includes
         the PK. ``offer`` (``"rows"`` or ``"aggregate"``) is what a wholesale recompute is offered to the host
-        as (see :meth:`_offer`); ``None`` never offers.
+        as (see :meth:`_offer`); ``None`` never offers. ``consolidate=False`` leaves a join's ΔO unconsolidated,
+        for a writer that consolidates what it writes anyway (``apply_zset``, ``append_zset``); otherwise it is
+        consolidated once, after the output pipeline (which is row-local, so it commutes), over the output
+        columns rather than every leaf's, unless it is insert-only (nothing can cancel, and a weight-aware
+        writer or aggregate reads repeated rows as their sum); ``"always"`` consolidates that too, for the scans,
+        which read rows rather than weights.
 
         Two orthogonal strategy flags, both default ``True`` (the normal path), exposed on the terminals as
         manual escapes — reach for them only when you've measured the default hurts a specific build:
@@ -799,6 +823,7 @@ class TrickleBuilder:
         # onto a nonexistent log would persist just that delta as a false bootstrap. `name not in read_meta`
         # (not raw table-existence — a young merge main has only a changelog pre-checkpoint) is the signal.
         # See plans/deletes.md. `ivm=False` is the manual sibling escape.
+        self._insert_only = False
         if not ivm or name not in read_meta(self.ctx.con):
             return self._comprehensive(out_pk, offer)
         self._key_filter = key_filter
@@ -808,10 +833,14 @@ class TrickleBuilder:
             return self._comprehensive(out_pk, offer, state)
         if not state.changed:
             return "empty", None
-        if isinstance(self._root, _Join):  # one consolidation, at the root, before the output pipeline
-            state.delta = self._consolidate(state.delta, state.cols)
         delta_rel = self._project_delta(state)
-        self._require_pk(out_pk, [c for c in delta_rel.columns if c != D_COL])
+        cols = [c for c in delta_rel.columns if c != D_COL]
+        self._require_pk(out_pk, cols)
+        self._insert_only = state.insert_only  # the row pipeline keeps it: it only drops or rewrites rows
+        if consolidate and isinstance(self._root, _Join) and not (state.insert_only and consolidate != "always"):
+            projected = unique_name("proj")  # a source's own delta is consolidated already
+            delta_rel.create_view(projected, replace=True)
+            delta_rel = self.ctx.con.sql(f"SELECT * FROM {_q(self._consolidate(projected, cols))}")
         return "incremental", delta_rel
 
     def _comprehensive(self, out_pk, offer: str | None, state: _NodeState | None = None):
@@ -922,8 +951,12 @@ class TrickleBuilder:
         return self._alias_of[id(leaf)]
 
     def _bare_cols(self, leaf: _Source) -> list[str]:
+        """A source's columns, from the host's ``source_columns`` hook where it has one (a binding, without
+        the read :meth:`read_table` does), else from the read."""
         if id(leaf) not in self._cols_cache:
-            self._cols_cache[id(leaf)] = list(self.ctx.read_table(leaf.ref).columns)
+            hook = getattr(self.ctx, "source_columns", None)
+            cols = hook(leaf.ref) if hook is not None else self.ctx.read_table(leaf.ref).columns
+            self._cols_cache[id(leaf)] = list(cols)
         return self._cols_cache[id(leaf)]
 
     @property
@@ -994,14 +1027,14 @@ class TrickleBuilder:
 
     def _compile_source(self, node: _Source) -> _NodeState:
         a = self._alias_for(node)
-        rel = self.ctx.read_table(node.ref)
-        bare = list(rel.columns)
-        self._cols_cache[id(node)] = bare
+        bare = self._bare_cols(node)
         cols = [f"{a}.{c}" for c in bare]
-        base = unique_name("src")
-        rel.create_view(base, replace=True)
         sel = ", ".join(f'{_q(c)} AS {_q(f"{a}.{c}")}' for c in bare)
-        current = self._view(f"SELECT {sel} FROM {_q(base)}")
+
+        def current() -> str:
+            base = unique_name("src")
+            self.ctx.read_table(node.ref).create_view(base, replace=True)
+            return self._view(f"SELECT {sel} FROM {_q(base)}")
 
         delta = node.threaded_delta if node.threaded_delta is not None else self.ctx.read_delta(node.ref)
         if delta.is_full:
@@ -1013,7 +1046,8 @@ class TrickleBuilder:
         dbase = unique_name("dsrc")
         delta.zset.create_view(dbase, replace=True)
         dsel = ", ".join(f'{_q(c)} AS {_q(f"{a}.{c}")}' for c in bare) + f", {_q(D_COL)} AS {_q(D_COL)}"
-        return _NodeState(cols, current, self._view(f"SELECT {dsel} FROM {_q(dbase)}"), True, False)
+        return _NodeState(cols, current, self._view(f"SELECT {dsel} FROM {_q(dbase)}"), True, False,
+                          insert_only=getattr(delta, "insert_only", False))
 
     def _compile_join(self, node: _Join) -> _NodeState:
         ls = self._compile(node.left)
@@ -1021,22 +1055,35 @@ class TrickleBuilder:
         out_cols = ls.cols if node.how in _LEFT_ONLY else ls.cols + rs.cols
         is_full = ls.is_full or rs.is_full
         changed = ls.changed or rs.changed
-        _, current = self._join_view(node, ls.cols, ls.current, rs.cols, rs.current)
+
+        def current() -> str:
+            return self._join_view(node, ls.cols, ls.current, rs.cols, rs.current)[1]
+
         if is_full or not changed:
             return _NodeState(out_cols, current, None, changed, is_full)
         # A child join's delta is an inline view, re-evaluated at every reference. When this join reads it more
         # than once, down a chain the bottom delta would run 2^depth times; a delta is small, so compute it once.
-        for child, own, sibling, other in ((node.left, ls, node.right, rs), (node.right, rs, node.left, ls)):
-            if isinstance(child, _Join) and own.delta is not None and self._reads_twice(node, sibling, other):
+        for left, child, own, sibling, other in ((True, node.left, ls, node.right, rs),
+                                                 (False, node.right, rs, node.left, ls)):
+            if isinstance(child, _Join) and own.delta is not None and self._reads_twice(node, left, sibling, other):
                 own.delta = self._scratch_table(own.delta)
-        return _NodeState(out_cols, current, self._join_delta(node, ls, rs), True, False)
+        # Insert-only when one side changed, by inserts only, and the join is one pass from it: its one term
+        # multiplies +1 rows by the other side's current rows. (Two changed sides, or a change on the side an
+        # outer, semi or anti join pads or tests, can retract.)
+        insert_only = ((ls.insert_only and rs.delta is None and node.how in _ONE_PASS_LEFT)
+                       or (rs.insert_only and ls.delta is None and node.how in _ONE_PASS_RIGHT))
+        return _NodeState(out_cols, current, self._join_delta(node, ls, rs), True, False, insert_only=insert_only)
 
-    def _reads_twice(self, node: _Join, sibling, other: _NodeState) -> bool:
-        """Whether ``node``'s delta terms read one side's delta more than once: always for the existence terms
-        (semi, anti and the outer joins' padded rows), else when the other side (``sibling``, compiled to
-        ``other``) changed too (``δL ⋈ δR``) or is a join the delta's keys are pushed into."""
-        return (node.how != "inner" or other.delta is not None
-                or (self._key_filter and isinstance(sibling, _Join)))
+    def _reads_twice(self, node: _Join, left: bool, sibling, other: _NodeState) -> bool:
+        """Whether ``node``'s delta terms read one side's delta (the ``left`` one, or the right) more than once.
+        Once when the other side (``sibling``, compiled to ``other``) is unchanged and the join is one pass from
+        this side (:meth:`_one_pass`), unless the delta's keys are also pushed into the other side's subtree.
+        Otherwise more than once: ``δL ⋈ δR``, and the existence terms of the semi, anti and outer joins."""
+        if other.delta is not None:
+            return True
+        if node.how not in (_ONE_PASS_LEFT if left else _ONE_PASS_RIGHT):
+            return True
+        return self._key_filter and isinstance(sibling, _Join)
 
     # ─── the join delta (plans/trickle-join-delta.md) ────────────────────────────
 
@@ -1047,6 +1094,9 @@ class TrickleBuilder:
         so its terms aren't generated."""
         pairs = self._resolve_pairs(node)
         lk, rk = [lq for lq, _ in pairs], [rq for _, rq in pairs]
+        one = self._one_pass(node, ls, rs, lk, rk)
+        if one is not None:
+            return one
         terms = []
         if node.how in _MATCHED:
             terms += self._matched_terms(node, ls, rs, lk, rk)
@@ -1059,6 +1109,25 @@ class TrickleBuilder:
         if node.how in _LEFT_ONLY:
             terms.append(self._exists_delta(node.left, ls, lk, node.right, rs, rk, semi=node.how == "semi"))
         return self._view(" UNION ALL BY NAME ".join(f"SELECT * FROM {_q(t)}" for t in terms))
+
+    def _one_pass(self, node: _Join, ls: _NodeState, rs: _NodeState, lk, rk) -> str | None:
+        """An outer join whose other side didn't change, in one pass. A left join is linear in its left side for
+        a fixed right side, so with ``δR`` empty, ``δ(L ⟕ R) = δL ⟕ R'`` for any ``δL``, retractions included
+        (and a right join likewise). The general terms would read ``δL`` twice, matched and padded. A full join
+        isn't linear in either side (a new left row can take a right row's padding away), so it has none."""
+        if node.how == "left" and ls.delta is not None and rs.delta is None:
+            delta, dside, other, how = ls.delta, "L", self._pushed(node.right, rs, rk, ls.delta, lk), "LEFT JOIN"
+            lview, rview = delta, other
+        elif node.how == "right" and rs.delta is not None and ls.delta is None:
+            delta, dside, other, how = rs.delta, "R", self._pushed(node.left, ls, lk, rs.delta, rk), "RIGHT JOIN"
+            lview, rview = other, delta
+        else:
+            return None
+        cond = " AND ".join(f"L.{_q(a)} = R.{_q(b)}" for a, b in zip(lk, rk, strict=True))
+        sel = ", ".join(f"L.{_q(c)} AS {_q(c)}" for c in ls.cols) + ", "
+        sel += ", ".join(f"R.{_q(c)} AS {_q(c)}" for c in rs.cols)
+        return self._view(f"SELECT {sel}, {dside}.{_q(D_COL)} AS {_q(D_COL)} "
+                          f"FROM {_q(lview)} L {how} {_q(rview)} R ON {cond}")
 
     def _matched_terms(self, node: _Join, ls: _NodeState, rs: _NodeState, lk, rk) -> list[str]:
         """The inner join's delta terms. A row's weight is the product of its operands' weights (a current
@@ -1096,7 +1165,9 @@ class TrickleBuilder:
             flips = self._flips(qnode, qs, qk)
             knames = [f"k{i}" for i in range(len(pk))]
             cond = " AND ".join(f"P.{_q(a)} = F.{k}" for a, k in zip(pk, knames, strict=True))
-            pcur = self._pushed(pnode, ps, pk, flips, knames)
+            # Restricted to δQ's keys rather than the flip set's (a superset, and the join with F narrows it), so
+            # an outer join's matched term, which pushes the same keys into P, reads the same view (_pushed).
+            pcur = self._pushed(pnode, ps, pk, qs.delta, qk)
             sign = "" if semi else "-"
             parts.append(f"SELECT {sel}, {sign}F.s AS {d} FROM {_q(pcur)} P JOIN {_q(flips)} F ON {cond}")
             if ps.delta is not None:
@@ -1154,9 +1225,23 @@ class TrickleBuilder:
                 present.setdefault(jid, set()).add(side)
         if not filters:
             return state.current
+        # Two terms can push the same keys into the same subtree (an outer join's matched rows and its padded
+        # rows both read L' at δR's keys): each would re-read the subtree, for a large fact a full pass, so the
+        # view is computed once when it's asked for a second time. Not while the views are being logged for a
+        # comprehensive job, which wants them as SQL.
+        memo = (id(node), tuple(cols), src, tuple(src_cols))
+        if memo in self._pushed_memo:
+            view, reused = self._pushed_memo[memo]
+            if not reused and self._view_log is None:
+                name = self._scratch_table(view)
+                self.ctx.con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(view)} AS SELECT * FROM {_q(name)}")
+            self._pushed_memo[memo] = (view, True)
+            return view
         ksel = ", ".join(f"{_q(c)} AS k{i}" for i, c in enumerate(src_cols))
         keys = self._view(f"SELECT DISTINCT {ksel} FROM {_q(src)}")
-        return self._filtered_current(node, filters, keys, present)
+        view = self._filtered_current(node, filters, keys, present)
+        self._pushed_memo[memo] = (view, False)
+        return view
 
     def _push_path(self, node, col: str):
         """``(leaf, [(join id, side)])`` for the qualified column ``col``: the leaf that owns it and, for each
@@ -1375,6 +1460,7 @@ class TrickleBuilder:
         for t in self._scratch:  # the write is done, so nothing reads the materialised deltas any more
             self.ctx.con.execute(f"DROP TABLE IF EXISTS {_q(t)}")
         self._scratch = []
+        self._pushed_memo = {}
         # Observed-lineage hook (optional host capability, like ``count_table``): a terminal just wrote
         # ``name`` straight to the registry, so tell the host — trickle/ stays dependency-free.
         hook = getattr(self.ctx, "record_lineage_write", None)
@@ -1383,8 +1469,8 @@ class TrickleBuilder:
         hook = getattr(self.ctx, "record_change", None)  # likewise for the host's change tracking
         if hook is not None:
             hook(name, changed)
-        threaded = read_registry_delta(self.ctx.con, name, self.ctx.previous_f, self.ctx.f, out_pk)
-        nxt = TrickleBuilder(self.ctx, name, _spine_delta=threaded)
+        con, previous_f, f = self.ctx.con, self.ctx.previous_f, self.ctx.f
+        nxt = TrickleBuilder(self.ctx, name, _spine_delta=lambda: read_registry_delta(con, name, previous_f, f, out_pk))
         nxt._was_changed = changed
         return nxt
 
@@ -1398,12 +1484,26 @@ class TrickleBuilder:
         """
         return self._was_changed
 
+    def _source_rows(self, ref: str) -> int:
+        """A source's current row count, from metadata where possible: a Trickle in this registry counts
+        itself, and an external source uses the host's ``count_table`` if it has one. Only otherwise is the
+        source read and counted, which for a large merge Trickle reconstructs its whole state."""
+        from . import io as trickle
+
+        con = self.ctx.con
+        if (trickle.read_meta(con).get(ref) or {}).get("mode") in ("merge", "append"):
+            return trickle.count_current(con, ref)
+        counter = getattr(self.ctx, "count_table", None)
+        if counter is not None:
+            return int(counter(ref))
+        return int(first_row(self.ctx.read_table(ref).aggregate("count(*)"))[0])
+
     def _over_threshold(self, ref: str, delta, p: float) -> bool:
         """Whether ``delta`` touches more than fraction ``p`` of ``ref``'s current rows (``p >= 1`` never
         trips and skips the count; ``p <= 0`` trips on any change)."""
         if p >= 1.0 or delta.is_full:
             return False
-        total = first_row(self.ctx.read_table(ref).aggregate("count(*) AS n"))[0] or 0
+        total = self._source_rows(ref) or 0
         if total == 0:
             return False
         return delta.keys_count() > p * total

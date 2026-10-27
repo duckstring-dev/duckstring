@@ -187,10 +187,7 @@ def test_always_mode_dispatches_via_injected_engine(tmp_path, monkeypatch):
     # projection would (correctly) stay local — see test_flock_conformance.
     pond.trickle("src").select("s0.id, s0.v").merge("out", pk="id")
     assert engine.dispatched
-    net = first_row(pond.con.execute(
-        "SELECT count(*) FROM out__changelog WHERE _duckstring_d = 1"
-    ))[0]
-    assert net == 1000
+    assert first_row(pond.con.execute("SELECT count(*) FROM out"))[0] == 1000
 
 
 def test_upgrade_mode_fails_up_on_oom(tmp_path, monkeypatch):

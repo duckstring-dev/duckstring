@@ -122,6 +122,9 @@ VERSION_SUFFIX = "__v"
 # ``_duckstring_agg_{name}`` companion. Reserved prefix → ``registry_tables`` hides it from publish; the
 # published main holds only the derived user columns.
 AGG_STATE_PREFIX = "_duckstring_agg_"
+# The groups an incremental aggregate dropped (their count reached zero), by key and freshness, so the host can
+# publish the state's change rather than the whole state each run. Registry-only, like the state.
+AGG_DROP_PREFIX = "_duckstring_aggdrop_"
 # A ``.accumulate(...)`` (order-dependent scan) output keeps its per-group **carried fold-state** (the running
 # accumulators after the last row + that row's ``.along`` value, f-stamped for replay) in a
 # ``_duckstring_acc_{name}`` companion. Reserved prefix → hidden from publish; the output append table holds
@@ -264,6 +267,15 @@ def _q(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
+def _key_match(left: str, right: str, cols) -> str:
+    """A NULL-safe match of ``cols`` between two relations (already-quoted names or aliases). A key column
+    can be NULL (a group key, like SQL's ``GROUP BY``), and ``=``, ``USING`` and row ``IN`` never match NULL,
+    while row ``NOT IN`` drops a row whose comparison with any key is unknown. Filter with an explicit
+    ``SEMI JOIN``/``ANTI JOIN`` on it: DuckDB plans a correlated ``[NOT] EXISTS`` as a mark join, which scans
+    the whole left side (about 7x slower over a large base, and a ``LIMIT`` no longer reaches the scan)."""
+    return " AND ".join(f"{left}.{_q(c)} IS NOT DISTINCT FROM {right}.{_q(c)}" for c in cols)
+
+
 def _ts(dt) -> str:
     return f"TIMESTAMPTZ '{dt.isoformat()}'"
 
@@ -401,7 +413,7 @@ def _ensure_meta(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
         f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR, "
-        f"compact_threshold VARCHAR, f_warm VARCHAR, cluster VARCHAR, format_version INTEGER)"
+        f"compact_threshold VARCHAR, f_warm VARCHAR, cluster VARCHAR, format_version INTEGER, f_boot VARCHAR)"
     )
     # Migrate an older meta table that predates a column: f_base (the cold-base fold watermark),
     # compact_threshold (the per-table checkpoint-size override), f_warm (the warm-tier fold watermark).
@@ -416,6 +428,8 @@ def _ensure_meta(con) -> None:
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN cluster VARCHAR')
     if "format_version" not in cols:  # FORMAT_VERSION; NULL (a row from before it was recorded) means 1
         con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN format_version INTEGER')
+    if "f_boot" not in cols:  # the freshness whose write became the base directly (see _bootstrapping)
+        con.execute(f'ALTER TABLE {_q(META_TABLE)} ADD COLUMN f_boot VARCHAR')
 
 
 def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
@@ -462,7 +476,7 @@ def drop_table(con, name: str) -> None:
     for t in (
         name, cold_base_name(name), changelog_name(name), warm_name(name), warm_pending_name(name),
         f"{name}{DROPLOG_SUFFIX}",
-        f"{AGG_STATE_PREFIX}{name}", f"{ACC_STATE_PREFIX}{name}",
+        f"{AGG_STATE_PREFIX}{name}", f"{AGG_DROP_PREFIX}{name}", f"{ACC_STATE_PREFIX}{name}",
     ):
         _drop_relation(con, t)  # a merge main's name and cold base may be views
     drop_meta(con, name)
@@ -506,6 +520,38 @@ def _set_f_warm(con, table: str, f) -> None:
     _ensure_meta(con)
     val = f.astimezone(timezone.utc).isoformat() if f is not None else None
     con.execute(f'UPDATE {_q(META_TABLE)} SET f_warm = ? WHERE table_name = ?', [val, table])
+
+
+def _f_boot(con, table: str):
+    """The freshness of the write that became merge main ``table``'s base directly (its first write, see
+    :func:`_bootstrapping`), or ``None``."""
+    from datetime import datetime
+
+    if not _table_exists(con, META_TABLE):
+        return None
+    _ensure_meta(con)  # a meta table from before f_boot was recorded
+    row = first_row(con.execute(f'SELECT f_boot FROM {_q(META_TABLE)} WHERE table_name = ?', [table]))
+    return datetime.fromisoformat(row[0]) if (row and row[0]) else None
+
+
+def _has_rows(con, name: str) -> bool:
+    return _table_exists(con, name) and first_row(con.execute(f'SELECT 1 FROM {_q(name)} LIMIT 1')) is not None
+
+
+def _bootstrapping(con, name: str, f) -> bool:
+    """Whether a write at ``f`` to merge main ``name`` is its **bootstrap**: nothing has been written yet, or
+    only the bootstrap at this same ``f`` (a replay, which replaces it, as a replay replaces any run's
+    changelog window). A bootstrap goes straight to the cold base instead of the changelog: its window is
+    never read as a delta (the floor is set to ``f``, and a window starts after the floor), so writing it
+    to the changelog only for a checkpoint to fold it into a base costs a second full copy and a full-row
+    ``GROUP BY`` on every read until then."""
+    if any(_has_rows(con, t) for t in (changelog_name(name), warm_name(name), warm_pending_name(name))):
+        return False
+    _migrate_base(con, name)
+    if not _table_exists(con, cold_base_name(name)):
+        return True
+    boot = _f_boot(con, name)
+    return boot is not None and boot == f
 
 
 def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
@@ -575,8 +621,8 @@ def cluster_spec(cluster_by=None, interleave: bool = True, cluster_bits=None) ->
 
 def _set_cluster(con, table: str, spec: dict | None) -> None:
     """Record merge main ``table``'s cold-base ordering (:func:`cluster_spec`); ``None`` clears it, so the
-    base goes back to primary-key order. Applied at the next compaction. Raises :class:`DeltaError` for a
-    ``cluster_by`` column the table doesn't have."""
+    base goes back to primary-key order. Applied when the base is next written (the first load, or a
+    compaction). Raises :class:`DeltaError` for a ``cluster_by`` column the table doesn't have."""
     if spec is not None:
         src = changelog_name(table) if _table_exists(con, changelog_name(table)) else cold_base_name(table)
         if _table_exists(con, src):
@@ -667,17 +713,20 @@ def part_name(f) -> str:
 
 
 def part_f(name: str):
-    """Recover the freshness ``f`` a part file was stamped with from its :func:`part_name`."""
+    """Recover the freshness ``f`` a part file was stamped with from its :func:`part_name`, or from a chunk of
+    a part written as several files (``{part}__{i}.parquet``, an append history's large run)."""
     from datetime import datetime
 
     stem = name[: -len(".parquet")] if name.endswith(".parquet") else name
+    stem = re.sub(r"__\d+$", "", stem)
     return datetime.fromisoformat(stem.replace("_", ":"))
 
 
 def table_parts(data_dir, table: str) -> list[str]:
     """The per-run part **names** of an append-only ``table`` (its directory), sorted oldest-first (the
-    part names are canonical-UTC ISO, so a lexical sort is freshness order); ``[]`` if it is not a parts
-    directory (e.g. a wholesale single-file table, or absent)."""
+    part names are canonical-UTC ISO, so a lexical sort is freshness order; a run written as several chunks
+    has several names, each with its :func:`part_f`); ``[]`` if it is not a parts directory (e.g. a wholesale
+    single-file table, or absent)."""
     return _store(data_dir).parquet_names(table)
 
 
@@ -763,7 +812,7 @@ def append_table(
         if not first:
             # Collide only against rows from *other* runs — a replay re-appends this f's identical rows.
             coll = first_row(con.execute(
-                f'SELECT 1 FROM {_q(src)} s JOIN {_q(name)} t USING ({pk_list}) '
+                f'SELECT 1 FROM {_q(src)} s JOIN {_q(name)} t ON {_key_match("s", "t", pk)} '
                 f'WHERE t.{_q(F_COL)} IS DISTINCT FROM {_ts(f)} LIMIT 1'
             ))
             if coll:
@@ -854,7 +903,7 @@ def append_zset(
         if not first:
             eq = " AND ".join(f'p.{_q(c)} IS NOT DISTINCT FROM h.{_q(c)}' for c in user)
             hist_conflict = first_row(con.execute(
-                f'SELECT count(*) FROM {_q(consol)} p JOIN {_q(name)} h USING ({pk_list}) '
+                f'SELECT count(*) FROM {_q(consol)} p JOIN {_q(name)} h ON {_key_match("p", "h", pk)} '
                 f'WHERE p.{_q(D_COL)} > 0 AND NOT ({eq})'
             ))[0]
 
@@ -869,8 +918,8 @@ def append_zset(
     if pk and not first:
         pk_list = ", ".join(_q(c) for c in pk)
         new_rows = con.sql(
-            f'SELECT {sel} FROM {_q(consol)} WHERE {_q(D_COL)} > 0 '
-            f'AND ({pk_list}) NOT IN (SELECT {pk_list} FROM {_q(name)})'
+            f'SELECT {sel} FROM {_q(consol)} AS _c ANTI JOIN {_q(name)} AS _h ON {_key_match("_c", "_h", pk)} '
+            f'WHERE {_q(D_COL)} > 0'
         )
     else:
         new_rows = con.sql(f'SELECT {sel} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
@@ -902,12 +951,11 @@ def _log_drops(con, name, consol, user, pk, f, first_output) -> None:
     drops = f"{name}{DROPLOG_SUFFIX}"
     sel = ", ".join(_q(c) for c in user)
     if pk:
-        pk_list = ", ".join(_q(c) for c in pk)
         eq = " AND ".join(f'c.{_q(col)} IS NOT DISTINCT FROM h.{_q(col)}' for col in user)
         # Present rows that collided with a *different* image in history (benign identical-image skips excluded).
         conflicts = (
             f'SELECT {", ".join(f"c.{_q(col)}" for col in user)}, c.{_q(D_COL)} FROM {_q(consol)} c '
-            f'JOIN {_q(name)} h USING ({pk_list}) WHERE c.{_q(D_COL)} > 0 AND NOT ({eq})'
+            f'JOIN {_q(name)} h ON {_key_match("c", "h", pk)} WHERE c.{_q(D_COL)} > 0 AND NOT ({eq})'
         )
     else:
         conflicts = f'SELECT {sel}, {_q(D_COL)} FROM {_q(consol)} WHERE 1=0'
@@ -946,28 +994,65 @@ def reconstruct_sql(base_sql, clog_sql, f_base, pk, *, upper=None, before=None) 
     lagging consumer's window read). An update a→b→c collapses to the surviving image with its latest ``f``;
     a net retraction drops the PK; an unchanged base PK keeps its base row and base freshness. Column-agnostic
     (``* EXCLUDE`` + ``GROUP BY ALL``) — needs only the PK, so it composes over any base/changelog SELECT
-    without inspecting schemas (the data plane builds it straight from the sidecar)."""
-    pksel = ", ".join(_q(c) for c in pk)
+    without inspecting schemas (the data plane builds it straight from the sidecar). A read that a query
+    will join should use :func:`materialise_reconstruct`."""
+    consol = consolidate_sql(clog_sql, f_base, upper=upper, before=before)
+    upserts = f"SELECT * EXCLUDE ({_q(D_COL)}) FROM {_RECON_CTE} WHERE {_q(D_COL)} > 0"
+    if base_sql is None:
+        return f"WITH {_RECON_CTE} AS ({consol}) {upserts}"
+    return f"WITH {_RECON_CTE} AS ({consol}) {reconstruct_from(base_sql, _RECON_CTE, pk)}"
+
+
+def consolidate_sql(clog_sql, f_base, *, upper=None, before=None) -> str:
+    """The changelog window ``(f_base, upper]`` (or ``< before``) consolidated by full row: one row per image
+    with its net weight and latest freshness, dropping the images that net to zero."""
     lo = f"{_q(F_COL)} > {_ts(f_base)}" if f_base is not None else "1=1"
     hi = f" AND {_q(F_COL)} <= {_ts(upper)}" if upper is not None else ""
     if before is not None:  # exclusive upper — the state strictly *before* a freshness (the merge prior)
         hi += f" AND {_q(F_COL)} < {_ts(before)}"
-    # The consolidated weight is only sign-tested (``> 0`` in ``upserts``, below) and then dropped — it never
-    # reaches the output — so leave it as DuckDB's native SUM (HUGEINT) rather than ``CAST(... AS BIGINT)``: a
+    # The consolidated weight is only sign-tested (``> 0`` in the upserts) and then dropped — it never reaches
+    # the output — so leave it as DuckDB's native SUM (HUGEINT) rather than ``CAST(... AS BIGINT)``: a
     # discarded value must not be able to overflow and crash a read.
-    consol = (
+    return (
         f"SELECT * EXCLUDE ({_q(D_COL)}, {_q(F_COL)}), MAX({_q(F_COL)}) AS {_q(F_COL)}, "
         f"SUM({_q(D_COL)}) AS {_q(D_COL)} "
         f"FROM (SELECT * FROM ({clog_sql}) WHERE {lo}{hi}) GROUP BY ALL HAVING SUM({_q(D_COL)}) <> 0"
     )
-    upserts = f"SELECT * EXCLUDE ({_q(D_COL)}) FROM {_RECON_CTE} WHERE {_q(D_COL)} > 0"
+
+
+def reconstruct_from(base_sql, consol_ref: str, pk) -> str:
+    """The current state from the ``base`` and a relation of consolidated changelog rows (``consol_ref``, a
+    CTE name or a table): the base anti-joined by the changed keys, then the surviving images."""
+    upserts = f"SELECT * EXCLUDE ({_q(D_COL)}) FROM {consol_ref} WHERE {_q(D_COL)} > 0"
     if base_sql is None:
-        return f"WITH {_RECON_CTE} AS ({consol}) {upserts}"
-    return (
-        f"WITH {_RECON_CTE} AS ({consol}) "
-        f"SELECT * FROM ({base_sql}) WHERE ({pksel}) NOT IN (SELECT {pksel} FROM {_RECON_CTE}) "
-        f"UNION ALL BY NAME {upserts}"
-    )
+        return upserts
+    return (f"SELECT _b.* FROM ({base_sql}) AS _b ANTI JOIN {consol_ref} AS _r ON {_key_match('_b', '_r', pk)} "
+            f"UNION ALL BY NAME {upserts}")
+
+
+def materialise_reconstruct(con, base_sql, clog_sql, f_base, pk, *, upper=None) -> str:
+    """:func:`reconstruct_sql` for a read on ``con`` that will be joined, with the changelog's consolidation
+    written to a connection-local temporary table first, so the query has no CTE.
+
+    DuckDB materialises a CTE referenced twice (the reconstruction's anti-join and its upserts), and a hash
+    join's key filter doesn't reach a scan below a materialised CTE nested in the consumer's query. A Trickle
+    term that wants only the rows of the keys that changed then read the whole base: at TPC-DS SF100, 269M
+    rows scanned for 0.15M wanted. Marking the CTE ``NOT MATERIALIZED`` lets the filter through but leaves the
+    planner estimating it, and a six-way join over such reads took 109 s instead of 32 s. A temporary table
+    gives the planner the consolidation's real size and nothing to stop the filter.
+
+    With no change since the base (every first load, and any Source that didn't change), the state is the
+    base itself, and the anti-join is left out: DuckDB estimates an anti-join against an empty table at no
+    rows, and a first load's six-way join, its fact estimated at 0.4M rows instead of 269M, built a hash table
+    on the fact and took 117 s instead of 20 s."""
+    if clog_sql is None:
+        return base_sql
+    name = unique_name("consol")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(name)} AS {consolidate_sql(clog_sql, f_base, upper=upper)}")
+    if base_sql is not None and first_row(con.execute(f"SELECT count(*) FROM {_q(name)}"))[0] == 0:
+        con.execute(f"DROP TABLE {_q(name)}")
+        return base_sql
+    return reconstruct_from(base_sql, _q(name), pk)
 
 
 def _clog_union_sql(con, name: str) -> str | None:
@@ -989,6 +1074,8 @@ def _reconstruct_sql_for(con, name: str, *, upper=None, before=None) -> str | No
     ``name`` overlaid by the warm tier ⊎ hot ``__changelog`` (:func:`_clog_union_sql`). ``None`` if nothing
     has been written yet (no base, no warm, no changelog)."""
     _migrate_base(con, name)
+    if before is not None and _bootstrapping(con, name, before) and _f_boot(con, name) == before:
+        return None  # the base is the bootstrap at `before`: nothing came before it
     cold = cold_base_name(name)
     base_sql = f'SELECT * FROM {_q(cold)}' if _table_exists(con, cold) else None
     clog_sql = _clog_union_sql(con, name)
@@ -1044,7 +1131,8 @@ def count_current(con, name: str) -> int:
 
 
 def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
-               compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
+               compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None,
+               stage_base=None, insert_only=False) -> bool:
     """Append a Z-set ``zset`` (user columns + ``_duckstring_d``) to the merge main's append-only
     ``__changelog``. The main is **log-structured**: the changelog is the source of truth and the clean
     current state is reconstructed on read (:func:`reconstruct_current`) from a base table (written only by
@@ -1075,18 +1163,30 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     sel_user = ", ".join(_q(c) for c in user)
     clog = changelog_name(name)
     clog_existed = _table_exists(con, clog)
+    boot = _bootstrapping(con, name, f)
 
     # Consolidate by full row (the Z-set `distinct` operator). The weight stays BIGINT (SUM would widen it to
     # HUGEINT), so the changelog's column type is stable across runs and parts.
+    # ``insert_only`` (the builder's word that every row is +1) skips it: nothing can cancel, and a repeated
+    # image is the same Z-set as one with weight 2.
     consol = unique_name("consol")
-    con.execute(
-        f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
-        f'SELECT {sel_user}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} FROM {_q(src)} '
-        f'GROUP BY {sel_user} HAVING SUM({_q(D_COL)}) <> 0'
-    )
+    if insert_only:
+        con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
+                    f'SELECT {sel_user}, CAST({_q(D_COL)} AS BIGINT) AS {_q(D_COL)} FROM {_q(src)}')
+    else:
+        con.execute(
+            f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
+            f'SELECT {sel_user}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} FROM {_q(src)} '
+            f'GROUP BY {sel_user} HAVING SUM({_q(D_COL)}) <> 0'
+        )
     nonempty = first_row(con.execute(f'SELECT count(*) FROM {_q(consol)}'))[0] > 0
     _ensure_changelog(con, clog, consol)  # borrows schema from the delta; works before any base exists
-    if nonempty:
+    if boot:
+        # The bootstrap is the base (see _bootstrapping): its present rows, stamped with f, and the changelog
+        # stays empty. A net retraction has nothing to retract, so it is dropped, as reconstruction would.
+        _write_boot_base(con, name, pk, f'SELECT {sel_user}, {_ts(f)} AS {_q(F_COL)} '
+                                        f'FROM {_q(consol)} WHERE {_q(D_COL)} > 0', f, stage_base)
+    elif nonempty:
         con.execute("BEGIN TRANSACTION")
         try:
             con.execute(f'DELETE FROM {_q(clog)} WHERE {_q(F_COL)} = {_ts(f)}')  # idempotent replay
@@ -1101,14 +1201,44 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
     _record_meta(con, name, "merge", pk)
     _set_compact_threshold(con, name, compact_threshold)
     _set_cluster(con, name, cluster)
-    _advance_floor(con, name, bootstrap_f=(f if not clog_existed else None))
+    _advance_floor(con, name, bootstrap_f=(f if boot or not clog_existed else None))
     _retain_merge(con, name, f, retain_t, retain_n)
     refresh_current_view(con, name)
     return nonempty
 
 
+def _write_boot_base(con, name: str, pk: tuple[str, ...], rows_sql: str, f, stage_base=None) -> None:
+    """Write merge main ``name``'s bootstrap at ``f`` as its cold base: ``rows_sql`` (its user columns and
+    ``_duckstring_f``) replaces the base, and the watermarks move to ``f`` (see :func:`_bootstrapping`).
+
+    ``stage_base(con, name, rows_sql, f)`` is a host's way to keep a large first load out of the database:
+    it writes the rows to files and returns a ``SELECT`` over them (or ``None`` to decline), and the base
+    becomes a view over that ``SELECT``. Duckstring stages them as Parquet beside its published data and
+    moves them into place at publish, so a first load is written once. Without it the base is a table."""
+    from datetime import timezone
+
+    _record_meta(con, name, "merge", pk)
+    cold = cold_base_name(name)
+    iso = f.astimezone(timezone.utc).isoformat()
+    staged = stage_base(con, name, rows_sql, f) if stage_base is not None else None
+    con.execute("BEGIN TRANSACTION")
+    try:
+        _drop_relation(con, cold)
+        if staged is not None:
+            con.execute(f'CREATE VIEW {_q(cold)} AS {staged}')
+        else:
+            con.execute(f'CREATE TABLE {_q(cold)} AS {rows_sql}')
+        con.execute(f'UPDATE {_q(META_TABLE)} SET f_base = ?, f_warm = ?, f_boot = ? WHERE table_name = ?',
+                    [iso, iso, iso, name])
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
+
 def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=None, retain_n=None,
-                compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> bool:
+                compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None,
+                stage_base=None) -> bool:
     """Comprehensive merge: ``relation`` is the **complete current state**. Diff it against the
     reconstructed prior state (base ⊎ changelog) as a full-row Z-set (``new(+1) ⊎ prior(-1)``, consolidated)
     and append the diff to the changelog. Returns whether the diff was non-empty (the state actually
@@ -1123,6 +1253,23 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
     sel = ", ".join(_q(c) for c in cols)
     state = unique_name("state")
     relation.create_view(state, replace=True)
+    if f is not None and _bootstrapping(con, name, f):
+        # The state is the whole of the bootstrap: it goes straight to the base, without the consolidation a
+        # Z-set needs (every row is a +1, and the primary key is unique by this function's contract). For a
+        # large first load that pass is as costly as writing the base itself.
+        cluster = cluster_spec(cluster_by, interleave, cluster_bits)
+        clog = changelog_name(name)
+        if not _table_exists(con, clog):
+            con.execute(f'CREATE TABLE {_q(clog)} AS SELECT {sel}, CAST(0 AS BIGINT) AS {_q(D_COL)}, '
+                        f'CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(state)} LIMIT 0')
+        _write_boot_base(con, name, pk, f'SELECT {sel}, {_ts(f)} AS {_q(F_COL)} FROM {_q(state)}', f,
+                         stage_base)
+        _set_compact_threshold(con, name, compact_threshold)
+        _set_cluster(con, name, cluster)
+        _advance_floor(con, name, bootstrap_f=f)
+        _retain_merge(con, name, f, retain_t, retain_n)
+        refresh_current_view(con, name)
+        return first_row(con.execute(f'SELECT count(*) FROM {_q(cold_base_name(name))}'))[0] > 0
     # The prior is the state *strictly before* this run's f — so a second merge at the same f (or a replay)
     # diffs against the pre-f state and replaces this f's changelog window with the full net change, rather
     # than diffing against its own earlier write at the same f and losing it.
@@ -1138,7 +1285,7 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
         zset = con.sql(f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)}')
     return apply_zset(con, name, zset, f, pk, retain_t=retain_t, retain_n=retain_n,
                       compact_threshold=compact_threshold, cluster_by=cluster_by, interleave=interleave,
-                      cluster_bits=cluster_bits)
+                      cluster_bits=cluster_bits, stage_base=stage_base)
 
 
 def fold_warm(con, name: str, target_f) -> None:
@@ -1280,6 +1427,10 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     for j, c in enumerate(ext_cols):
         pexprs.append(f"MIN({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_minp_{j}")
         pexprs.append(f"MAX({_q(c)}) FILTER (WHERE {_q(D_COL)} > 0) AS _a_maxp_{j}")
+        # The retracted rows' extremes: a retraction strictly inside the stored range can't move it.
+        pexprs.append(f"MIN({_q(c)}) FILTER (WHERE {_q(D_COL)} < 0) AS _a_minr_{j}")
+        pexprs.append(f"MAX({_q(c)}) FILTER (WHERE {_q(D_COL)} < 0) AS _a_maxr_{j}")
+    pexprs += _arg_retracted_exprs(arg_specs)
     if needs_rescan:
         pexprs.append(f"BOOL_OR({_q(D_COL)} < 0) AS _a_ret")
     pm = unique_name("aggpm")
@@ -1290,36 +1441,74 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     dacc = unique_name("dacc")
     mom_exprs = _agg_part_moment_exprs(add_cols, pm) + _co_part_moment_exprs(co_pairs, pm)
     if mom_exprs:
+        dkeys = ", ".join(f"{_q(delta)}.{_q(b)}" for b in by)
+        dby = ", ".join(f"{_q(delta)}.{_q(b)} AS {_q(b)}" for b in by)
         # Second pass: the partition central (co-)moments Σ d·(x − x̄)(…) about each partition mean from `pm` —
         # the numerically stable form (deviations are O(spread), not O(value)). Joined back onto `pm` → `dacc`.
         dev = unique_name("aggdev")
         con.execute(
             f"CREATE OR REPLACE TEMP TABLE {_q(dev)} AS "
-            f"SELECT {by_list}, {', '.join(mom_exprs)} "
-            f"FROM {_q(delta)} JOIN {_q(pm)} USING ({by_list}) GROUP BY {by_list}"
+            f"SELECT {dby}, {', '.join(mom_exprs)} "
+            f"FROM {_q(delta)} JOIN {_q(pm)} ON {_key_match(_q(delta), _q(pm), by)} GROUP BY {dkeys}"
         )
         con.execute(
             f"CREATE OR REPLACE TEMP TABLE {_q(dacc)} AS "
-            f"SELECT * FROM {_q(pm)} JOIN {_q(dev)} USING ({by_list})"
+            f"SELECT {_q(pm)}.*, {_q(dev)}.* EXCLUDE ({by_list}) "
+            f"FROM {_q(pm)} JOIN {_q(dev)} ON {_key_match(_q(pm), _q(dev), by)}"
         )
     else:
         con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(dacc)} AS SELECT * FROM {_q(pm)}")
 
-    # Rescan the *current* membership for the extreme columns of groups that saw a retraction (the supporting
-    # min/max may be gone). Bounded by those groups; append-only groups never rescan.
+    # Rescan the *current* membership of the groups whose stored extreme a retraction may have taken away: a
+    # retracted value at or beyond the stored min/max (or argmin/argmax key), or any retraction for a
+    # bool/bit reduction. Every other group extends its extremes from the inserts, which is exact, since what
+    # it retracted lay strictly inside them. A group that empties is dropped, so it never rescans, and
+    # append-only groups never do. Before, any retraction rescanned its group: at TPC-DS SF100 a 3.5 s pass
+    # over a 269M-row Source, though few of those groups had lost an extreme.
     rescan = None
     if needs_rescan and current is not None:
-        cur = unique_name("aggcur")
-        current.create_view(cur, replace=True)
         rexprs = [f"MIN({_q(c)}) AS _a_min_{j}, MAX({_q(c)}) AS _a_max_{j}" for j, c in enumerate(ext_cols)]
         rexprs += _arg_rescan_exprs(arg_specs)
         rexprs += _sg_rescan_exprs(sg_specs)
-        rescan = unique_name("aggrs")
+        lost = []
+        for j in range(len(ext_cols)):
+            lost.append(f"(d._a_minr_{j} IS NOT NULL AND (a._a_min_{j} IS NULL OR d._a_minr_{j} <= a._a_min_{j}))")
+            lost.append(f"(d._a_maxr_{j} IS NOT NULL AND (a._a_max_{j} IS NULL OR d._a_maxr_{j} >= a._a_max_{j}))")
+        lost += _arg_lost_exprs(arg_specs)
+        if sg_specs:
+            lost.append("TRUE")
+        keys = unique_name("aggrk")
         con.execute(
-            f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS "
-            f"SELECT {by_list}, {', '.join(rexprs)} FROM {_q(cur)} "
-            f"WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(dacc)} WHERE _a_ret) GROUP BY {by_list}"
+            f"CREATE OR REPLACE TEMP TABLE {_q(keys)} AS "
+            f"SELECT {', '.join(f'd.{_q(b)} AS {_q(b)}' for b in by)} "
+            f"FROM {_q(dacc)} d LEFT JOIN {_q(state)} a ON {_key_match('d', 'a', by)} "
+            f"WHERE d._a_ret AND COALESCE(a._a_cnt, 0) + d._a_cnt > 0 AND ({' OR '.join(lost)})"
         )
+        rescan = unique_name("aggrs")
+        counts = first_row(con.execute(
+            f"SELECT count(*), {', '.join(f'count({_q(b)})' for b in by)} FROM {_q(keys)}"))
+        if counts[0] == 0:
+            # Nothing to rescan, so the current state isn't read (``current`` may be a function that builds
+            # it): an empty rescan with the accumulators' columns and types, which are the state's.
+            names = [n for j in range(len(ext_cols)) for n in (f"_a_min_{j}", f"_a_max_{j}")]
+            names += [n for a in range(len(arg_specs)) for n in (f"_g_key_{a}", f"_g_arg_{a}")]
+            names += [f"_s_val_{g}" for g in range(len(sg_specs))]
+            con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS SELECT {by_list}, "
+                        f"{', '.join(_q(n) for n in names)}, TRUE AS _a_rs FROM {_q(state)} WHERE false")
+        else:
+            cur = unique_name("aggcur")
+            (current() if callable(current) else current).create_view(cur, replace=True)
+            # The NULL-safe match is a hash join DuckDB can't push into the current state's scan, so a key
+            # column with no NULL among the lost groups is matched with `=` first, which it can (the rescan read
+            # the whole Source otherwise: 269M rows at TPC-DS SF100, for a few thousand groups).
+            exact = next((b for b, n in zip(by, counts[1:], strict=True) if n == counts[0]), None)
+            narrow = (f"SEMI JOIN (SELECT DISTINCT {_q(exact)} FROM {_q(keys)}) AS _e "
+                      f"ON {_q(cur)}.{_q(exact)} = _e.{_q(exact)} " if exact is not None else "")
+            con.execute(
+                f"CREATE OR REPLACE TEMP TABLE {_q(rescan)} AS "
+                f"SELECT {by_list}, {', '.join(rexprs)}, TRUE AS _a_rs FROM {_q(cur)} "
+                f"{narrow}SEMI JOIN {_q(keys)} AS _k ON {_key_match(_q(cur), '_k', by)} GROUP BY {by_list}"
+            )
 
     # Merge the delta into the state — additive for the distributive accumulators; for extremes, extend in
     # place from the inserts, or take the rescanned value when the group retracted. For affected groups not
@@ -1330,25 +1519,26 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
         macc.append(f"CAST(COALESCE(a._a_cnt_{i}, 0) + d._a_cnt_{i} AS BIGINT) AS _a_cnt_{i}")
         macc.append(f"{_m2_merge_expr(i)} AS _a_m2_{i}")
     for j in range(len(ext_cols)):
-        macc.append(f"(CASE WHEN d._a_ret THEN r._a_min_{j} ELSE least(a._a_min_{j}, d._a_minp_{j}) END) AS _a_min_{j}")
-        macc.append(f"(CASE WHEN d._a_ret THEN r._a_max_{j} ELSE greatest(a._a_max_{j}, d._a_maxp_{j}) END) AS _a_max_{j}")
+        macc.append(f"(CASE WHEN r._a_rs THEN r._a_min_{j} ELSE least(a._a_min_{j}, d._a_minp_{j}) END) AS _a_min_{j}")
+        macc.append(f"(CASE WHEN r._a_rs THEN r._a_max_{j} ELSE greatest(a._a_max_{j}, d._a_maxp_{j}) END) AS _a_max_{j}")
     for k in range(len(co_pairs)):
         macc += _co_merge_exprs(k)
     macc += _wgt_merge_exprs(len(wgt_units))
     macc += _prod_merge_exprs(len(prod_cols))
     macc += _arg_merge_exprs(arg_specs)
     macc += _sg_merge_exprs(sg_specs)
-    rescan_join = f" LEFT JOIN {_q(rescan)} r USING ({by_list})" if rescan is not None else ""
+    rescan_join = f" LEFT JOIN {_q(rescan)} r ON {_key_match('d', 'r', by)}" if rescan is not None else ""
     merged = unique_name("magg")
     con.execute(
         f"CREATE OR REPLACE TEMP TABLE {_q(merged)} AS "
         f"SELECT {', '.join(f'd.{_q(b)} AS {_q(b)}' for b in by)}, {', '.join(macc)} "
-        f"FROM {_q(dacc)} d LEFT JOIN {_q(state)} a USING ({by_list}){rescan_join} "
+        f"FROM {_q(dacc)} d LEFT JOIN {_q(state)} a ON {_key_match('d', 'a', by)}{rescan_join} "
         f"WHERE a.{_q(F_COL)} IS DISTINCT FROM {_ts(f)}"
     )
     con.execute("BEGIN TRANSACTION")
     try:
-        con.execute(f"DELETE FROM {_q(state)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(merged)})")
+        con.execute(f"DELETE FROM {_q(state)} "
+                    f"WHERE EXISTS (SELECT 1 FROM {_q(merged)} AS _k WHERE {_key_match(_q(state), '_k', by)})")
         con.execute(
             f"INSERT INTO {_q(state)} ({by_list}, {', '.join(acc_order)}, {_q(F_COL)}) "
             f"SELECT {by_list}, {', '.join(acc_order)}, {_ts(f)} FROM {_q(merged)}"
@@ -1357,17 +1547,25 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     except Exception:
         con.execute("ROLLBACK")
         raise
-    con.execute(f"DELETE FROM {_q(state)} WHERE _a_cnt <= 0 AND ({by_list}) IN (SELECT {by_list} FROM {_q(dacc)})")
+    # Record the groups this run empties before dropping them: a host publishing only the state's change
+    # (rows stamped f) needs their keys too. A replay at the same f records them again.
+    drops = f"{AGG_DROP_PREFIX}{name}"
+    con.execute(f"CREATE TABLE IF NOT EXISTS {_q(drops)} AS SELECT {by_list}, {_q(F_COL)} FROM {_q(state)} WHERE false")
+    con.execute(f"DELETE FROM {_q(drops)} WHERE {_q(F_COL)} = {_ts(f)}")
+    con.execute(f"INSERT INTO {_q(drops)} SELECT {by_list}, {_q(F_COL)} FROM {_q(state)} "
+                f"WHERE _a_cnt <= 0 AND {_q(F_COL)} = {_ts(f)}")
+    con.execute(f"DELETE FROM {_q(state)} WHERE _a_cnt <= 0 "
+                f"AND EXISTS (SELECT 1 FROM {_q(dacc)} AS _k WHERE {_key_match(_q(state), '_k', by)})")
 
     # Emit the output delta for the affected groups: new (derived from the updated state) +1, old (the prior
     # published main) −1 — unchanged groups cancel; emptied groups (gone from state) are retracted.
-    affected = f"({by_list}) IN (SELECT {by_list} FROM {_q(dacc)})"
+    affected = f"SEMI JOIN {_q(dacc)} AS _k ON {_key_match('_o', '_k', by)}"
     out_cols = list(by) + list(metrics.keys())
     out_sel = ", ".join(_q(c) for c in out_cols)
-    new_out = f"SELECT {by_list}, {_agg_derive(metrics, idx)} FROM {_q(state)} WHERE {affected} AND _a_cnt > 0"
+    new_out = f"SELECT {by_list}, {_agg_derive(metrics, idx)} FROM {_q(state)} AS _o {affected} WHERE _a_cnt > 0"
     # The prior published main is the reconstructed current state (the agg output is a log-structured merge).
     recon = _reconstruct_sql_for(con, name)
-    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE {affected}" if recon \
+    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o {affected}" if recon \
         else f"SELECT {out_sel} FROM {_q(state)} WHERE 1=0"
     delta_out = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM ({new_out}) "
@@ -1503,7 +1701,7 @@ def _fold(rows, idx, by, along, metric_list, init_states) -> tuple:
 
 
 def _keys_table(con, by, type_of, keys) -> str:
-    """A temp table holding a set of group keys (for an ``(by) IN (...)`` filter)."""
+    """A temp table holding a set of group keys (for a NULL-safe ``SEMI JOIN``, :func:`_key_match`)."""
     t = unique_name("amk")
     con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(t)} ({', '.join(f'{_q(b)} {type_of[b]}' for b in by)})")
     if keys:
@@ -1555,7 +1753,6 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
         return
     by = tuple(by)
     pk = normalize_pk(pk)
-    by_list = ", ".join(_q(b) for b in by)
     metric_list = list(metrics.items())
     state = f"{ACC_STATE_PREFIX}{name}"
     cur = unique_name("amcur")
@@ -1589,8 +1786,8 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     if tail_keys:   # resume from carried state, fold only this run's new (d>0) rows
         tk = _keys_table(con, by, type_of, tail_keys)
         trows = con.execute(
-            f"SELECT {ucols_sql} FROM {_q(delta)} WHERE {_q(D_COL)} > 0 "
-            f"AND ({by_list}) IN (SELECT {by_list} FROM {_q(tk)}) ORDER BY {order_by}"
+            f"SELECT {ucols_sql} FROM {_q(delta)} SEMI JOIN {_q(tk)} AS _k ON {_key_match(_q(delta), '_k', by)} "
+            f"WHERE {_q(D_COL)} > 0 ORDER BY {order_by}"
         ).fetchall()
         t_out, t_group, _ = _fold(trows, idx, by, along, metric_list,
                                   {gk: carried[gk] for gk in tail_keys if gk in carried})
@@ -1599,7 +1796,7 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     if past_keys:   # full re-fold of the current membership
         pkt = _keys_table(con, by, type_of, past_keys)
         prows = con.execute(
-            f"SELECT {ucols_sql} FROM {_q(cur)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(pkt)}) "
+            f"SELECT {ucols_sql} FROM {_q(cur)} SEMI JOIN {_q(pkt)} AS _k ON {_key_match(_q(cur), '_k', by)} "
             f"ORDER BY {order_by}"
         ).fetchall()
         p_out, p_group, _ = _fold(prows, idx, by, along, metric_list, {})
@@ -1609,7 +1806,7 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     tmp = _acc_out_table(con, out_rows, usercols, metric_list, type_of)
     recon = _reconstruct_sql_for(con, name)
     # only the past-changed groups have prior output rows that may change (tail groups only add new rows).
-    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(pkt)})" \
+    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o SEMI JOIN {_q(pkt)} AS _k ON {_key_match('_o', '_k', by)}" \
         if (past_keys and recon) else f"SELECT {out_sel} FROM {_q(tmp)} WHERE 1=0"
     zset = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM (SELECT {out_sel} FROM {_q(tmp)}) "
@@ -1631,7 +1828,6 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     if kind == "empty":
         return
     by = tuple(by)
-    by_list = ", ".join(_q(b) for b in by)
     metric_list = list(metrics.items())
     state = f"{ACC_STATE_PREFIX}{name}"
     cur = unique_name("orcur")
@@ -1676,8 +1872,8 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     if tail_keys:
         tk = _keys_table(con, by, type_of, tail_keys)
         trows = con.execute(
-            f"SELECT {ucols_sql} FROM {_q(delta)} WHERE {_q(D_COL)} > 0 "
-            f"AND ({by_list}) IN (SELECT {by_list} FROM {_q(tk)}) ORDER BY {order_by}"
+            f"SELECT {ucols_sql} FROM {_q(delta)} SEMI JOIN {_q(tk)} AS _k ON {_key_match(_q(delta), '_k', by)} "
+            f"WHERE {_q(D_COL)} > 0 ORDER BY {order_by}"
         ).fetchall()
         _o, t_group, t_finals = _fold(trows, idx, by, along, metric_list,
                                       {gk: carried[gk] for gk in tail_keys if gk in carried})
@@ -1686,7 +1882,7 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     if past_keys:
         pkt = _keys_table(con, by, type_of, past_keys)
         prows = con.execute(
-            f"SELECT {ucols_sql} FROM {_q(cur)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(pkt)}) "
+            f"SELECT {ucols_sql} FROM {_q(cur)} SEMI JOIN {_q(pkt)} AS _k ON {_key_match(_q(cur), '_k', by)} "
             f"ORDER BY {order_by}"
         ).fetchall()
         _o, p_group, p_finals = _fold(prows, idx, by, along, metric_list, {})
@@ -1696,7 +1892,7 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     akt = _keys_table(con, by, type_of, tail_keys + past_keys)   # a reduction value changes for any affected group
     recon = _reconstruct_sql_for(con, name)
     t = _build(finals)
-    old_out = f"SELECT {out_sel} FROM ({recon}) WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(akt)})" \
+    old_out = f"SELECT {out_sel} FROM ({recon}) AS _o SEMI JOIN {_q(akt)} AS _k ON {_key_match('_o', '_k', by)}" \
         if recon else f"SELECT {out_sel} FROM {_q(t)} WHERE 1=0"
     zset = con.sql(
         f"SELECT {out_sel}, 1 AS {_q(D_COL)} FROM (SELECT {out_sel} FROM {_q(t)}) "
@@ -1718,22 +1914,23 @@ def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols
     seed is the running value at the end of the previous run; the new per-group seed is the old value combined
     with this run's batch aggregate. ``f``-stamped replay + the non-decreasing-``along`` check are kept."""
     state = f"{ACC_STATE_PREFIX}{name}"
-    by_list = ", ".join(_q(b) for b in by)
     alq = _q(along)
-    win = f"PARTITION BY {by_list} ORDER BY {alq} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
     b = unique_name("accb")
+    bby = ", ".join(f"{_q(b)}.{_q(c)}" for c in by)  # qualified: the seed's join carries the keys twice
+    win = f"PARTITION BY {bby} ORDER BY {_q(b)}.{alq} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
     con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(b)} AS "
                 f"SELECT {', '.join(_q(c) for c in usercols)} FROM {_q(src)}{where}")
 
     if kind == "comprehensive":
         con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
     seeded = _table_exists(con, state)
-    join = f" LEFT JOIN {_q(state)} ss USING ({by_list})" if seeded else ""
+    join = f" LEFT JOIN {_q(state)} ss ON {_key_match(_q(b), 'ss', by)}" if seeded else ""
     skip = f" WHERE ss.{_q(F_COL)} IS DISTINCT FROM {_ts(f)}" if seeded else ""   # replay: skip groups at this f
 
     if seeded:
         bad = first_row(con.execute(
-            f"SELECT count(*) FROM {_q(b)} bb JOIN {_q(state)} ss USING ({by_list}) WHERE bb.{alq} < ss._k_along"
+            f"SELECT count(*) FROM {_q(b)} bb JOIN {_q(state)} ss ON {_key_match('bb', 'ss', by)} "
+            f"WHERE bb.{alq} < ss._k_along"
         ))[0]
         if bad:
             raise DeltaError(
@@ -1774,14 +1971,16 @@ def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols
     seedt = unique_name("accseed")
     con.execute(
         f"CREATE OR REPLACE TEMP TABLE {_q(seedt)} AS "
-        f"SELECT {by_list}, {', '.join(seed_exprs)}, {hw} AS _k_along, {_ts(f)} AS {_q(F_COL)} "
-        f"FROM {_q(b)}{join}{skip} GROUP BY {by_list}"
+        f"SELECT {', '.join(f'{_q(b)}.{_q(c)} AS {_q(c)}' for c in by)}, {', '.join(seed_exprs)}, "
+        f"{hw} AS _k_along, {_ts(f)} AS {_q(F_COL)} "
+        f"FROM {_q(b)}{join}{skip} GROUP BY {bby}"
     )
     if not _table_exists(con, state):
         con.execute(f"CREATE TABLE {_q(state)} AS SELECT * FROM {_q(seedt)} WHERE false")
     con.execute("BEGIN TRANSACTION")
     try:
-        con.execute(f"DELETE FROM {_q(state)} WHERE ({by_list}) IN (SELECT {by_list} FROM {_q(seedt)})")
+        con.execute(f"DELETE FROM {_q(state)} "
+                    f"WHERE EXISTS (SELECT 1 FROM {_q(seedt)} AS _k WHERE {_key_match(_q(state), '_k', by)})")
         con.execute(f"INSERT INTO {_q(state)} SELECT * FROM {_q(seedt)}")
         con.execute("COMMIT")
     except Exception:
@@ -2327,6 +2526,23 @@ def _sg_part_exprs(sg_specs) -> list[str]:
             for g, (kind, col) in enumerate(sg_specs)]
 
 
+def _arg_retracted_exprs(arg_specs) -> list[str]:
+    """The retracted rows' extreme key per argmin/argmax: one strictly worse than the stored key can't have
+    been its row."""
+    d = _q(D_COL)
+    return [f"{_arg_extreme(kind)[0]}({_q(key)}) FILTER (WHERE {d} < 0) AS _g_keyr_{a}"
+            for a, (kind, _arg, key) in enumerate(arg_specs)]
+
+
+def _arg_lost_exprs(arg_specs) -> list[str]:
+    """Per argmin/argmax, whether a retraction may have taken the stored row (``d`` the delta, ``a`` the state)."""
+    out = []
+    for a, (kind, _arg, _key) in enumerate(arg_specs):
+        cmp = "<=" if kind == "argmin" else ">="
+        out.append(f"(d._g_keyr_{a} IS NOT NULL AND (a._g_key_{a} IS NULL OR d._g_keyr_{a} {cmp} a._g_key_{a}))")
+    return out
+
+
 def _arg_rescan_exprs(arg_specs) -> list[str]:
     out: list[str] = []
     for a, (kind, arg, key) in enumerate(arg_specs):
@@ -2347,10 +2563,10 @@ def _arg_merge_exprs(arg_specs) -> list[str]:
     for a, (kind, _arg, _key) in enumerate(arg_specs):
         better = "<" if kind == "argmin" else ">"
         ext = "least" if kind == "argmin" else "greatest"
-        out.append(f"(CASE WHEN d._a_ret THEN r._g_key_{a} ELSE {ext}(a._g_key_{a}, d._g_keyp_{a}) END) "
+        out.append(f"(CASE WHEN r._a_rs THEN r._g_key_{a} ELSE {ext}(a._g_key_{a}, d._g_keyp_{a}) END) "
                    f"AS _g_key_{a}")
         out.append(
-            f"(CASE WHEN d._a_ret THEN r._g_arg_{a} "
+            f"(CASE WHEN r._a_rs THEN r._g_arg_{a} "
             f"WHEN a._g_key_{a} IS NULL OR d._g_keyp_{a} {better} a._g_key_{a} THEN d._g_argp_{a} "
             f"ELSE a._g_arg_{a} END) AS _g_arg_{a}"
         )
@@ -2362,7 +2578,7 @@ def _sg_merge_exprs(sg_specs) -> list[str]:
     for g, (kind, _col) in enumerate(sg_specs):
         combine = _SG[kind][1].format(a=f"a._s_val_{g}", i=f"d._s_valp_{g}")
         out.append(
-            f"(CASE WHEN d._a_ret THEN r._s_val_{g} "
+            f"(CASE WHEN r._a_rs THEN r._s_val_{g} "
             f"WHEN a._s_val_{g} IS NULL THEN d._s_valp_{g} "
             f"WHEN d._s_valp_{g} IS NULL THEN a._s_val_{g} "
             f"ELSE ({combine}) END) AS _s_val_{g}"
@@ -2487,16 +2703,19 @@ class Delta:
         is_full: ``True`` for a full read rather than a window of changes (a first run, a consumer
             behind the Source's retained history, or a republished plain table). A full read must be
             treated as a complete recompute, not an increment.
+        insert_only: ``True`` when the window holds only added rows (no ``-1``): an append Trickle's, or a
+            merge Trickle's that inserted new keys and changed none. Nothing in it can cancel.
         pk: The Source table's primary key, if it declared one.
 
     Reference: https://docs.duckstring.com/reference/python/trickle_io
     """
 
-    def __init__(self, con, pk: tuple[str, ...], zset, *, is_full: bool = False) -> None:
+    def __init__(self, con, pk: tuple[str, ...], zset, *, is_full: bool = False, insert_only: bool = False) -> None:
         self.con = con
         self.pk = tuple(pk)
         self.zset = zset
         self.is_full = is_full
+        self.insert_only = insert_only and not is_full
 
     def is_empty(self) -> bool:
         """Whether there are no changes."""
@@ -2532,12 +2751,13 @@ class Delta:
         )
 
 
-def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None) -> Delta:
+def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None, materialise=False) -> Delta:
     """Resolve ``table``'s mode in ``data_dir`` and read its Z-set change over ``(previous_f, f]``.
 
     ``pin`` is the Source's published freshness when this run started: an overwrite Source is read at the
     version it names (``dp.read_select(..., pin=)``). A Trickle Source is bounded by ``f`` regardless, since
-    its delta windows must tile."""
+    its delta windows must tile. ``materialise`` computes a windowed delta once into a temporary table
+    (:func:`_materialise`), for a caller that will read it more than once."""
     from datetime import datetime
 
     from .context import NEVER
@@ -2549,9 +2769,9 @@ def read_delta(con, data_dir: Path, table: str, previous_f, f, *, dp, pin=None) 
     floor = datetime.fromisoformat(meta["floor"]) if meta.get("floor") else None
 
     if mode == "append":
-        return _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
+        return _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise)
     if mode == "merge":
-        return _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor)
+        return _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise)
 
     # overwrite source (a plain Ripple): no history. If the version this run reads was published at or
     # before the consumer's previous_f, it is unchanged → an empty delta (stable history operand).
@@ -2626,13 +2846,14 @@ def _covered(previous_f, NEVER, floor, oldest) -> bool:
     return bound is None or previous_f >= bound
 
 
-def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor) -> Delta:
+def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise=False) -> Delta:
     # As-of pin to `f`: read the one Source snapshot at this run's freshness (the data plane pins it; the
     # coverage probe shares the same SELECT so a mid-run republish can't make them see different snapshots).
-    return _append_delta_from_sql(con, dp.read_select(data_dir, table, as_of=f), previous_f, f, pk, NEVER, floor)
+    return _append_delta_from_sql(con, dp.read_select(data_dir, table, as_of=f), previous_f, f, pk, NEVER, floor,
+                                  materialise)
 
 
-def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor) -> Delta:
+def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor, materialise=False) -> Delta:
     """The append-delta core over a single history SELECT — shared by the published read and the in-run
     registry read. Append rows are all present (``+1``); never retracted."""
     rel = con.sql(hist_sql)  # includes _duckstring_f
@@ -2640,20 +2861,22 @@ def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor) -> De
     full = not _covered(previous_f, NEVER, floor, oldest)
     upper = f"{_q(F_COL)} <= {_ts(f)}"
     cond = upper if full else f"{_q(F_COL)} > {_ts(previous_f)} AND {upper}"
-    return Delta(con, pk, _as_zset(_strip_system(rel.filter(cond)), 1), is_full=full)
+    zset = _as_zset(_strip_system(rel.filter(cond)), 1)
+    return Delta(con, pk, _materialise(con, zset) if materialise and not full else zset, is_full=full,
+                 insert_only=True)
 
 
-def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor) -> Delta:
+def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise=False) -> Delta:
     clog = changelog_name(table)
     try:
         clog_sql = dp.read_select(data_dir, clog, as_of=f)  # as-of pin to this run's freshness
     except FileNotFoundError:
         clog_sql = None
     main_sql = dp.read_select(data_dir, table, as_of=f)
-    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, floor)
+    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, floor, materialise)
 
 
-def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, floor) -> Delta:
+def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, floor, materialise=False) -> Delta:
     """The merge-delta core over two source SELECTs — a clean *main* and its *changelog* (``None`` if the
     changelog is unavailable). Shared by the published read (``_read_merge_delta``, over the data plane) and
     the in-run registry read (:func:`read_registry_delta`). ``previous_f`` covered by the floor → a windowed
@@ -2670,13 +2893,33 @@ def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, flo
     # NOT a named view: several read_delta calls in one run would share a view name and re-bind.
     user = [c for c in con.sql(clog_sql).columns if c not in (F_COL, D_COL)]
     sel = ", ".join(_q(c) for c in user)
-    zset = con.sql(
-        f"SELECT {sel}, SUM({_q(D_COL)}) AS {_q(D_COL)} FROM ("
-        f"  SELECT * FROM ({clog_sql}) "
-        f"  WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)}"
-        f") GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0"
-    )
-    return Delta(con, pk, zset, is_full=False)
+    window = (f"SELECT * FROM ({clog_sql}) "
+              f"WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)}")
+    # A window with no retraction inserted new keys only: a consolidated merge log pairs every update's +1
+    # with a -1, so no key appears twice and nothing can cancel. Read it as it is (an insert-only change).
+    lowest = first_row(con.sql(f"SELECT min({_q(D_COL)}) FROM ({window})"))[0]
+    insert_only = lowest is None or lowest > 0
+    if insert_only:
+        zset = con.sql(f"SELECT {sel}, CAST({_q(D_COL)} AS BIGINT) AS {_q(D_COL)} FROM ({window})")
+    else:
+        zset = con.sql(f"SELECT {sel}, SUM({_q(D_COL)}) AS {_q(D_COL)} FROM ({window}) "
+                       f"GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0")
+    return Delta(con, pk, _materialise(con, zset) if materialise else zset, is_full=False, insert_only=insert_only)
+
+
+def _materialise(con, rel):
+    """``rel`` computed once into a uniquely named temporary table, as a relation over it. A windowed delta is
+    the size of the change, and a run reads it many times (whether it's empty, how many keys it touches, an
+    aggregate's two passes, every join term): left as a query, each reference re-read the Source's changelog
+    and re-consolidated it. At TPC-DS SF100 an incremental aggregate read its Source's 1.3M-row delta eight
+    times. The table lives as long as the connection, which is the run's. Opt-in (``materialise=``): a caller
+    reading inside a transaction that writes another attached database (the DuckLake Spout) can't create
+    one."""
+    name = unique_name("delta")
+    rel.create_view(name + "_q", replace=True)
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(name)} AS SELECT * FROM {_q(name + '_q')}")
+    con.execute(f"DROP VIEW {_q(name + '_q')}")
+    return con.table(name)
 
 
 def read_registry_delta(con, table, previous_f, f, pk=None) -> Delta:
@@ -2699,12 +2942,12 @@ def read_registry_delta(con, table, previous_f, f, pk=None) -> Delta:
     floor = datetime.fromisoformat(m["floor"]) if m.get("floor") else None
     out_pk = normalize_pk(pk if pk is not None else m.get("pk", ()))
     if m.get("mode") == "append":
-        return _append_delta_from_sql(con, f'SELECT * FROM {_q(table)}', previous_f, f, out_pk, NEVER, floor)
+        return _append_delta_from_sql(con, f'SELECT * FROM {_q(table)}', previous_f, f, out_pk, NEVER, floor, True)
     clog = changelog_name(table)
     clog_sql = f'SELECT * FROM {_q(clog)}' if _table_exists(con, clog) else None
     # The full-read main is the *reconstructed* current state (base ⊎ changelog), not the bare base table.
     main_sql = _reconstruct_sql_for(con, table) or f'SELECT * FROM {_q(table)}'
-    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, out_pk, NEVER, floor)
+    return _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, out_pk, NEVER, floor, True)
 
 
 def _strip_system(rel):

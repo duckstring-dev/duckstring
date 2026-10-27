@@ -5,7 +5,7 @@
 export type PondId = string; // the pond key "name@major" — one live major line
 export type RippleId = string; // `${pondId}.${ripple}`
 
-export type DemandStatus = 'running' | 'queued' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
+export type DemandStatus = 'running' | 'queued' | 'waiting' | 'idle' | 'failed' | 'killed' | 'blocked' | 'repairing';
 export type FreqUnit = 'SECOND' | 'MINUTE' | 'HOUR' | 'DAY' | 'WEEK';
 export type Weekday = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI' | 'SAT' | 'SUN';
 
@@ -89,6 +89,8 @@ export interface PondInfo {
   // The most recent Flock dispatch failure — a failed dispatch still completes the run on local
   // compute, so this warning is the only visible tell that the Flock is degrading. Null when clean.
   flockError: string | null;
+  // Memory slots: held/of/needed, and the queue place while waiting for them (null when not gated).
+  memory: { slots: number; of: number; need: number; position: number | null } | null;
   // Spout nodes only: its egress config + standing-Wake armed state.
   spout?: { destination: string; table: string | null; mode: string; armed: boolean } | null;
 }

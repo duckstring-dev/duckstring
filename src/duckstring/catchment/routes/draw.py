@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import zipfile
 from datetime import datetime
 from typing import Optional
@@ -70,18 +71,21 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
     base is not re-sent. Omit ``after``/``base_after`` (bootstrap) → the whole set."""
     from datetime import datetime
 
+    from ...dataplane import _run_upper, merge_snapshot, parts_snapshot
     from ...trickle_io import (
         BASE_SUFFIX,
         SIDECAR,
         VERSION_SUFFIX,
         base_chunks,
         base_dir_name,
-        load_sidecar,
+        base_table_name,
+        changelog_name,
         part_f,
         part_tables,
-        table_parts,
+        sidecar_tables,
         table_versions,
         version_dir_name,
+        warm_name,
     )
 
     m = _resolve_major(request, name, major, None)
@@ -103,14 +107,21 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
     )
     if not files and not dirs and not base_dirs and not versioned and not data_dir.exists():
         raise HTTPException(status_code=404, detail=f"No exported data for '{name}' (major {m})")
-    sidecar_meta = load_sidecar(data_dir)
+    # One read snapshot (plans/trickle-insert-only.md, Stage 0): the sidecar is the commit marker, written after
+    # the files it declares, so every file chosen from it is complete; a Run publishing meanwhile adds files
+    # with later freshness, which stay out, and superseded files stay on disk for a publish cycle.
+    sidecar_text = data_dir.read_text(SIDECAR)
+    sidecar_meta = json.loads(sidecar_text) if sidecar_text else {}
+    snaps = {t: merge_snapshot(data_dir, t, sidecar_meta) for t, e in sidecar_tables(sidecar_meta).items()
+             if e.get("mode") == "merge"}
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for n in files:  # wholesale single-file tables (legacy merge base / plain output)
             zf.writestr(n, data_dir.read_bytes(n))
         for table in versioned:  # an overwrite table: its newest version, landed as the consumer's own
-            versions = table_versions(data_dir, table)
+            committed = _run_upper(sidecar_meta)  # a version written after the sidecar isn't committed yet
+            versions = [v for v in table_versions(data_dir, table) if committed is None or part_f(v) <= committed]
             if versions:
                 vd = version_dir_name(table)
                 zf.writestr(f"{vd}/{versions[-1]}", data_dir.child(vd).read_bytes(versions[-1]))
@@ -119,11 +130,19 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
             if base_after_dt is not None and fb is not None and datetime.fromisoformat(fb) <= base_after_dt:
                 continue  # the consumer already holds this cold base — don't re-ship it
             base = data_dir.child(base_dir_name(main))
-            for chunk in base_chunks(data_dir, main):
+            snap = snaps.get(main)
+            for chunk in snap["base_names"] if snap else base_chunks(data_dir, main):
                 zf.writestr(f"{main}{BASE_SUFFIX}/{chunk}", base.read_bytes(chunk))
         for table in dirs:  # append-only parts → ship only the parts newer than `after`
             part_store = data_dir.child(table)
-            for part in table_parts(data_dir, table):
+            main = base_table_name(table)
+            if main in snaps and table == changelog_name(main):
+                names = snaps[main]["hot_names"]
+            elif main in snaps and table == warm_name(main):
+                names = snaps[main]["band_names"]
+            else:
+                names = parts_snapshot(data_dir, table, sidecar_meta)
+            for part in names:
                 if after_dt is None or part_f(part) > after_dt:
                     zf.writestr(f"{table}/{part}", part_store.read_bytes(part))
         # Non-tabular Objects — overwrite-only, so ship each object subtree whose freshness advanced past
@@ -131,9 +150,8 @@ def draw(name: str, major: int, request: Request, tables: Optional[str] = None, 
         _ship_objects(zf, data_dir, sidecar_meta.get("objects") or {}, objects_after)
         # The Trickle mode/PK sidecar travels with the data so the consuming Catchment's read_delta can
         # resolve a Trickle source (mode/PK aren't in the downstream's duck.db). Harmless for plain Ponds.
-        sidecar = data_dir.read_text(SIDECAR)
-        if sidecar is not None:
-            zf.writestr(SIDECAR, sidecar)
+        if sidecar_text is not None:
+            zf.writestr(SIDECAR, sidecar_text)  # the snapshot's own sidecar, not a newer one
     return Response(content=buf.getvalue(), media_type="application/zip")
 
 

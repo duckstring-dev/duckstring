@@ -75,7 +75,7 @@ The computation isn't incremental, but its output is: anything downstream receiv
 
 A merge table's older rows are kept in a compacted base, stored as Parquet. Every row group in it records the smallest and largest value of each column, and DuckDB skips the row groups whose range rules out a filter. So a read that filters on a column (a query, a downstream Pond reading only the keys that changed, a lookup) touches little of the base when similar values are stored together, and nearly all of it when they're scattered.
 
-By default the base is ordered by the primary key, so filters on the key skip almost everything. To order it for other columns, declare them on the write:
+By default the base is ordered by the primary key, so filters on the key skip almost everything. A table's first load is the exception: it's stored in the order its rows arrive, so that a large one is written only once, and it takes primary-key order at its first compaction. To order it for other columns, declare them on the write:
 
 ```python
 pond.merge_table("customer", state, pk="customer_id", cluster_by=["region", "signup_day"])
@@ -95,7 +95,7 @@ Interleaving three columns touched about 27% for each. Every extra column dilute
 
 To sort by several columns instead, pass `interleave=False`. The interleaved key splits the data into `2**cluster_bits` cells, with the same number of bits for every column (`cluster_bits` is rounded up to a multiple of the column count). By default Duckstring picks `cluster_bits` at each compaction so that a cell is a little under one row group, which is as fine as pruning can use; set it only to fix the precision. A column with NULLs keeps its top bucket for them. On a base of more than ten million rows, the bucket boundaries are approximate quantiles, which cluster just as well and avoid sorting each column first.
 
-Clustering changes how the base is stored, not its contents, so it never affects the version contract. It applies when the base is next rewritten by compaction, and it's declared on every write: leaving `cluster_by` out returns the base to primary-key order at its next compaction. Once a table is clustered by other columns, its primary-key order is gone, so if lookups by key matter too, include the key in `cluster_by`.
+Clustering changes how the base is stored, not its contents, so it never affects the version contract. It applies whenever the base is written, which is the table's first load and each compaction after it, and it's declared on every write: leaving `cluster_by` out returns the base to primary-key order at its next compaction. Once a table is clustered by other columns, its primary-key order is gone, so if lookups by key matter too, include the key in `cluster_by`.
 
 A plain table written with `write_table` takes the same options. It's rewritten every run, so it's sorted on every write, and without `cluster_by` it keeps the order its query produced.
 

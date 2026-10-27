@@ -82,12 +82,45 @@ def test_merge_changelog_is_full_image_zset(db):
         f"SELECT id, v, {T.D_COL}, {T.F_COL} FROM dim__changelog ORDER BY {T.F_COL}, id, {T.D_COL}"
     ).fetchall()
     assert clog == [
-        # The main is log-structured: the bootstrap writes the initial state to the changelog as +1s.
-        (1, "a", 1, ts(1)), (2, "b", 1, ts(1)),                       # run 1: initial inserts
         (2, "b", -1, ts(2)), (2, "B", 1, ts(2)), (3, "c", 1, ts(2)),  # run 2: update 2 = -old +new; insert 3
         (1, "a", -1, ts(3)), (3, "c", -1, ts(3)),                      # run 3: delete 1 and 3 (retractions)
     ]
-    assert T.read_meta(db)["dim"]["floor"] == ts(1).isoformat()
+    # The bootstrap is the base, not a changelog window: no consumer reads it as a delta (the floor is at it).
+    base = db.sql(f"SELECT id, v, {T.F_COL} FROM dim__base ORDER BY id").fetchall()
+    assert base == [(1, "a", ts(1)), (2, "b", ts(1))]
+    meta = T.read_meta(db)["dim"]
+    assert meta["floor"] == meta["f_base"] == ts(1).isoformat()
+
+
+def test_a_bootstrap_is_the_base_and_a_replay_replaces_it(db):
+    """A merge main's first write is its base, with an empty changelog. A replay at the same f replaces the
+    base (as a replay replaces any run's changelog window), through merge_table and apply_zset alike; the
+    next run's changes go to the changelog as usual."""
+    _dim(db, [(1, "a"), (2, "b")], ts(1))
+    _dim(db, [(1, "a"), (3, "c")], ts(1))  # a replay of the bootstrap with different data
+    assert rows(db, "dim", "id, v") == [(1, "a"), (3, "c")]
+    assert first_row(db.sql("SELECT count(*) FROM dim__changelog"))[0] == 0
+    zset = db.sql("SELECT * FROM (VALUES (1, 'x', 1), (9, 'z', -1)) t(id, v, _duckstring_d)")
+    T.apply_zset(db, "dim", zset, ts(1), ("id",))  # a retraction with nothing to retract is dropped
+    assert rows(db, "dim", "id, v") == [(1, "x")]
+    _dim(db, [(1, "x"), (2, "b")], ts(2))
+    assert rows(db, "dim", "id, v") == [(1, "x"), (2, "b")]
+    assert first_row(db.sql("SELECT count(*) FROM dim__changelog"))[0] == 1
+    assert T.read_meta(db)["dim"]["f_base"] == ts(1).isoformat()
+
+
+def test_a_materialised_reconstruction_matches_the_cte_one(db):
+    """materialise_reconstruct (the consolidation in a temporary table, for a read that will be joined) gives
+    the same rows as reconstruct_sql, and with no change since the base it is the base itself."""
+    _dim(db, [(1, "a"), (2, "b"), (3, "c")], ts(1))
+    base = 'SELECT * FROM "dim__base"'
+    clog = 'SELECT * FROM "dim__changelog"'
+    assert T.materialise_reconstruct(db, base, clog, ts(1), ("id",)) == base  # nothing changed yet
+    _dim(db, [(1, "a"), (2, "B"), (4, "d")], ts(2))  # an update, a delete and an insert
+    via_cte = sorted(db.sql(f"SELECT id, v FROM ({T.reconstruct_sql(base, clog, ts(1), ('id',))})").fetchall())
+    via_table = sorted(db.sql(f"SELECT id, v FROM ({T.materialise_reconstruct(db, base, clog, ts(1), ('id',))})")
+                       .fetchall())
+    assert via_cte == via_table == [(1, "a"), (2, "B"), (4, "d")]
 
 
 def test_merge_idempotent_replay(db):
@@ -193,9 +226,10 @@ def test_plain_sql_reads_current_state_after_compaction(db):
 def test_plain_sql_includes_the_warm_tier(db):
     _dim(db, [(1, "a")], ts(1))
     _dim(db, [(1, "a"), (2, "b")], ts(2))
-    T.fold_warm(db, "dim", ts(1))  # moves the first run's changes into a warm band, staged until published
+    _dim(db, [(1, "a"), (2, "b"), (3, "c")], ts(3))
+    T.fold_warm(db, "dim", ts(2))  # moves the second run's changes into a warm band, staged until published
     assert T._table_exists(db, T.warm_pending_name("dim"))
-    assert sorted(db.sql("SELECT * FROM dim").fetchall()) == rows(db, "dim") == [(1, "a"), (2, "b")]
+    assert sorted(db.sql("SELECT * FROM dim").fetchall()) == rows(db, "dim") == [(1, "a"), (2, "b"), (3, "c")]
 
 
 @pytest.mark.parametrize("legacy_form", ["table", "view"])

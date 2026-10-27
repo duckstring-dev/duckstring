@@ -54,12 +54,9 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
     from ..trickle_io import (
         BASE_SUFFIX,
         SIDECAR,
-        changelog_name,
         landed_after,
         load_sidecar,
-        part_f,
         sidecar_tables,
-        warm_name,
     )
 
     data_dir = pond_data_dir(root, name, major, data_root)
@@ -97,23 +94,8 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
             data_dir.write_bytes(zf.read(info), *parts)  # atomic per-object write (rename local / PUT object)
             if len(parts) > 1 and parts[0].endswith(BASE_SUFFIX):
                 landed_base.setdefault(parts[0], set()).add(parts[-1])
-        for base_name, kept in landed_base.items():  # prune the previous compaction's chunks (overlap-safe)
-            base = data_dir.child(base_name)
-            for old in base.parquet_names():
-                if old not in kept:
-                    base.remove(old)
-    # Reclaim warm bands / hot changelog parts now subsumed by the (possibly advanced) cold base: anything
-    # at-or-below a merge main's published f_base is folded into the base, so reconstruct ignores it
-    # (it filters `> f_base`). Storage-only — correctness already holds via that filter.
-    for main, m in sidecar_tables(load_sidecar(data_dir)).items():
-        if m.get("mode") != "merge" or not m.get("f_base"):
-            continue
-        f_base = datetime.fromisoformat(m["f_base"])
-        for companion in (warm_name(main), changelog_name(main)):
-            comp = data_dir.child(companion)
-            for part in comp.parquet_names():
-                if part_f(part) <= f_base:
-                    comp.remove(part)
+    # The previous base's chunks and the bands and parts a newer base subsumes stay until no in-flight Sink run of
+    # this Draw can read them: the Driver collects them after the landing (Driver._prune_draw_versions).
 
 
 async def poll_once(driver, root, client: httpx.AsyncClient, solicited: dict | None = None) -> None:

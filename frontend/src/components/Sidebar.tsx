@@ -124,6 +124,14 @@ function StatusBox({ info, ponds, canControl }: { info: PondInfo; ponds: Record<
     }
     return <StatusCard color={THEME_BLOCKED} title="Blocked" />;
   }
+  if (info.memory?.position) {
+    const { position, need, of } = info.memory;
+    return (
+      <StatusCard color={THEME_AMBER} title="Waiting for memory">
+        {position === 1 ? 'Next' : `Number ${position}`} in the queue for this machine's memory. It needs {need} of {of} slots.
+      </StatusCard>
+    );
+  }
   return null;
 }
 

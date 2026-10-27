@@ -8,7 +8,7 @@ lineage, and writes the result as JSON to ``OUT``. It never writes to stdout, wh
 ``IN``: ``{"source_dir": str, "catalog": {"source.table": [columns]}}``. ``catalog`` is the Source schemas
 the lineage capture needs, since the subprocess has no Catchment database.
 
-``OUT``: ``{"ok": true, "ripples": [{"name", "parents": [names], "always_run"}], "lineage": [[table, column,
+``OUT``: ``{"ok": true, "ripples": [{"name", "parents": [names], "always_run", "memory"}], "lineage": [[table, column,
 kind, src_ref, src_column], ...]}``, or ``{"ok": false, "error": str, "traceback": str}``.
 """
 
@@ -139,8 +139,8 @@ def run(spec: dict) -> dict:
     # Python and SQL Ripples together, parents resolved and each SQL Ripple's query checked against its
     # declaration; a RippleDeclarationError here is a failed deploy with the reason.
     pond = load_ripples(source_dir, info)
-    ripples = [{"name": r["name"], "parents": list(r["parents"]), "always_run": r["always_run"]}
-               for r in pond.ripples]
+    ripples = [{"name": r["name"], "parents": list(r["parents"]), "always_run": r["always_run"],
+                "memory": r.get("memory")} for r in pond.ripples]
     from .sql_ripples import lineage_rows as sql_lineage_rows
 
     catalog = spec.get("catalog") or {}

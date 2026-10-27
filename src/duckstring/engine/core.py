@@ -162,6 +162,10 @@ class Pond:
     # completion (no cloud, or a remote Duck writing the data root directly), so ``persisted_f``
     # tracks ``end_f`` and cross-Pool visibility never lags.
     async_persist: bool = False
+    # Memory slots (plans/memory-budget.md): how many of its machine's slots this Pond's Duck needs when it
+    # goes from idle to busy (more when a Ripple declares memory outside DuckDB). Used only when the
+    # Pond's ``pool`` has a slot capacity (``EngineState.slot_capacity``).
+    slot_need: int = 1
 
 
 @dataclass
@@ -297,6 +301,13 @@ class PondState:
     gen_start_times: dict[int, datetime] = field(default_factory=dict)
     completion_times: list[datetime] = field(default_factory=list)
     throttle: ThrottleState | None = None  # the throttle's soft state, created on first use
+    # Memory slots (plans/memory-budget.md). ``slots``: held by this Pond's Duck while it has a Run in flight
+    # (0 when idle). ``slot_wait_since``: when it became ready to start and couldn't get them (its place in
+    # the FIFO queue; None when not waiting). ``slot_exclusive``: its next Run asks for every slot (a retry
+    # after running out of memory). Soft, like the throttle.
+    slots: int = 0
+    slot_wait_since: datetime | None = None
+    slot_exclusive: bool = False
 
     def copy(self) -> PondState:
         return replace(

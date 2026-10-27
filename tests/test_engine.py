@@ -1546,6 +1546,115 @@ def test_continuous_steady_state_only_inlet_runs_when_nothing_changes():
     assert p2.changed_f == p2_changed_f  # content mark frozen
 
 
+@pytest.mark.timeout(1)
+def test_a_pass_waits_for_the_run_in_flight_before_it():
+    """Pond Runs pipeline: a Run that would pass (its Sources unchanged since the Run before it started) must not
+    complete while that Run is still in flight. Completing it first moved end_f past the real Run's freshness,
+    whose completion was then dropped (end_f only climbs): changed_f never took its change, and Sinks, passing
+    in turn and reading deltas after the pass, lost it. Found by the TPC-DS benchmark's continuous run."""
+    s, _ = chain_topology()
+    f0, f1, f2 = T0 + secs(5), T0 + secs(10), T0 + secs(15)
+    _settle_chain_at(s, f0)
+    p1 = s.pond_states["p1"]
+    p1.start_f = p1.end_f = p1.changed_f = f1  # p1 changed at f1...
+    for rid in ("r1", "r2", "r3"):
+        s.ripple_states[rid].start_f = s.ripple_states[rid].end_f = f1
+    s.pond_states["p2"].demand = [f1]
+    s, started = sentinel(f1, s)
+    assert "s1" in started  # ...so p2 runs at f1 for real
+    s.pending_begin_runs.clear()
+    p1 = s.pond_states["p1"]
+    p1.start_f = p1.end_f = f2  # p1 republishes at f2 unchanged while p2's f1 Run is in flight
+    for rid in ("r1", "r2", "r3"):
+        s.ripple_states[rid].start_f = s.ripple_states[rid].end_f = f2
+    s.pond_states["p2"].demand = [f2]
+
+    s, started = sentinel(f2, s)
+    p2 = s.pond_states["p2"]
+    assert (p2.start_f, p2.end_f) == (f1, f0)  # the pass waits: the f1 Run is still the newest
+    assert s.ripple_states["s1"].is_running and s.ripple_states["s1"].start_f == f1
+
+    s = complete_ripple(s, "s1", f2 + secs(1))
+    assert (s.pond_states["p2"].end_f, s.pond_states["p2"].changed_f) == (f1, f1)  # f1 completes, with its change
+    s, started = sentinel(f2 + secs(1), s)
+    p2 = s.pond_states["p2"]
+    assert "s1" not in started and (p2.end_f, p2.changed_f) == (f2, f1)  # then the pass at f2
+    assert not s.pending_begin_runs
+
+
+@pytest.mark.timeout(1)
+def test_a_failed_runs_retry_does_its_change_rather_than_passing():
+    """A failed Run never published, so its retry builds on the newest completed Run, not the failed one: with
+    p1's change at f1 and an unchanged republish at f2, p2's retry at f2 must do real work."""
+    s, _ = chain_topology()
+    f0, f1, f2 = T0 + secs(5), T0 + secs(10), T0 + secs(15)
+    _settle_chain_at(s, f0)
+    s.ponds["p2"].retry_on_change = 1
+    p1 = s.pond_states["p1"]
+    p1.start_f = p1.end_f = f2
+    p1.changed_f = f1
+    for rid in ("r1", "r2", "r3"):
+        s.ripple_states[rid].start_f = s.ripple_states[rid].end_f = f2
+    p2 = s.pond_states["p2"]
+    p2.start_f, p2.failed_f, p2.failures, p2.is_failed = f1, f1, 1, True  # its f1 Run failed
+    s.ripple_states["s1"].start_f = f1
+
+    s, started = sentinel(f2, s)
+    assert "s1" in started  # the retry runs...
+    assert any(br.pond_id == "p2" for br in s.pending_begin_runs)  # ...on a Duck, not as a pass
+    assert s.pond_states["p2"].changed_f == f0
+
+
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("seed", range(8))
+def test_no_change_is_passed_over_under_a_continuous_refresh(seed):
+    """p1 (an Inlet whose runs change its output or not, at random) -> p2 (slow, so its Runs pipeline) -> p3,
+    under a continuous Refresh on p3. Each Ripple run that changes its Pond's output publishes a part stamped
+    with the freshness it ran at; each run of a Sink's Ripple reads the window from its last freshness to its
+    new one, and a pass moves that start on without reading. Every part a Source publishes must fall in a
+    window its Sink read. Before passes waited for the Run in flight, a pass stepped over the part of the Run
+    it overtook."""
+    import random
+
+    rng = random.Random(seed)
+    ponds = [Pond("p1", "p1"), Pond("p2", "p2", sources=["p1"]), Pond("p3", "p3", sources=["p2"])]
+    ripples = [Ripple("r1", "p1", "r1"), Ripple("s1", "p2", "s1"), Ripple("t1", "p3", "t1")]
+    d = Driver(build(ponds, ripples), {"r1": secs(0.5), "s1": secs(2.3), "t1": secs(0.7)})
+    d.state.refreshes["p3"] = [continuous("p3")]
+    running: dict[str, tuple[datetime, datetime]] = {}  # rid -> (window start, freshness) when it started
+    parts: dict[str, list[datetime]] = {"r1": [], "s1": []}
+    read: dict[str, list[tuple[datetime, datetime]]] = {"s1": [], "t1": []}
+
+    def react():
+        d.state, started = sentinel(d.now, d.state)
+        for rid in started:
+            rs = d.state.ripple_states[rid]
+            running[rid] = (rs.end_f, rs.start_f)
+            d.inflight[rid] = d.now + d.durations[rid]
+
+    for i in range(450):
+        if i % 5 == 0 and i < 400:  # p1's output changes on some runs only (an Inlet calling pond.skip())
+            (d.unchanged.discard if rng.random() < 0.4 else d.unchanged.add)("r1")
+        elif i == 400:
+            d.unchanged.discard("r1")
+            d.state.refreshes.clear()
+        for rid in [r for r in d.state.ripple_states if r in d.inflight and d.inflight[r] <= d.now]:
+            del d.inflight[rid]
+            window = running.pop(rid)
+            if rid in parts and rid not in d.unchanged:
+                parts[rid].append(window[1])
+            if rid in read:
+                read[rid].append(window)
+            d.state = complete_ripple(d.state, rid, d.now, changed=rid not in d.unchanged)
+        d.state = tick(d.now, d.state)
+        react()
+        d.advance()
+    for src, sink in (("r1", "s1"), ("s1", "t1")):
+        upto = d.state.ripple_states[sink].end_f
+        missed = [f for f in parts[src] if f <= upto and not any(a < f <= b for a, b in read[sink])]
+        assert parts[src] and not missed, (src, sink, missed[:3])
+
+
 # ─── Pool-aware freshness visibility (plans/persist.md phase 3) ────────────────
 
 
