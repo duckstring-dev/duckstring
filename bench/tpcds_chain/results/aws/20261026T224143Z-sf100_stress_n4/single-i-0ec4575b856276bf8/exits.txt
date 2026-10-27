@@ -1,0 +1,2 @@
+exit 0 duckstring_mix8_1
+verify 0 duckstring_mix8_1

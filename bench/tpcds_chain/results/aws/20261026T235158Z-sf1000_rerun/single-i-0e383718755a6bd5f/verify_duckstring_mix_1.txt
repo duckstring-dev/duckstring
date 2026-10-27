@@ -1,0 +1,4 @@
+enriched: 2,690,494,557 vs 2,690,494,557 rows; row fingerprints match: OK
+category_month: 671 vs 671 rows; 0 only in A, 0 only in B, 0 with different values: OK
+store_quarter: 3,843 vs 3,843 rows; 0 only in A, 0 only in B, 0 with different values: OK
+customer_value: 12,000,000 vs 12,000,000 rows; row fingerprints match: OK

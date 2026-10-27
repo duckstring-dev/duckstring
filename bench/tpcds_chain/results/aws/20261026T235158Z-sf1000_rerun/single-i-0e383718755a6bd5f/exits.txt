@@ -1,0 +1,13 @@
+exit 0 duckdb_append_1
+exit 0 duckstring_append_1
+verify 0 duckstring_append_1
+exit 0 duckdb_fact_1
+exit 0 duckstring_fact_1
+verify 0 duckstring_fact_1
+exit 0 duckdb_mix_1
+exit 0 duckstring_mix_1
+verify 0 duckstring_mix_1
+exit 0 duckstring_off_append_1
+verify 0 duckstring_off_append_1
+exit 0 duckstring_prof_append_1
+verify 0 duckstring_prof_append_1

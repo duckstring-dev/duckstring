@@ -1,0 +1,7 @@
+[pond]
+name = "store_quarter"
+version = "1.0.0"
+type = "outlet"
+
+[sources]
+sales_enriched = "1.0.0"

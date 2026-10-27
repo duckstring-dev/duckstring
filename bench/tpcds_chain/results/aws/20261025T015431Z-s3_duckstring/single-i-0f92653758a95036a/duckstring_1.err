@@ -1,0 +1,26 @@
+Traceback (most recent call last):
+  File "/opt/bench/run_duckstring.py", line 218, in <module>
+    main()
+  File "/opt/bench/run_duckstring.py", line 192, in main
+    results.append(phase(url, "initial", args.timeout))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/bench/run_duckstring.py", line 152, in phase
+    finished = wait_fresh(url, t_req, timeout, t0)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/bench/run_duckstring.py", line 127, in wait_fresh
+    raise RuntimeError(f"failed: {failed}\n" + json.dumps(failures, indent=1, default=str)[:20000])
+RuntimeError: failed: ['dimensions', 'sales_enriched', 'category_month', 'store_quarter', 'customer_value']
+[
+ {
+  "pond": "dimensions",
+  "ripple": null,
+  "error": "IOException: IO Error: Extension \"/root/.duckdb/extensions/v2.0.0/linux_arm64/httpfs.duckdb_extension\" not found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/root/.local/share/uv/python/cpython-3.12.15-linux-aarch64-gnu/lib/python3.12/concurrent/futures/thread.py\", line 59, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/duckstring/duck/executor.py\", line 313, in _task\n    timing[\"lineage\"] = _run_ripple(\n                        ^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/duckstring/duck/executor.py\", line 91, in _run_ripple\n    func(pond)\n  File \"/mnt/nvme/ds/ponds/dimensions/1.0.0/src/pond.py\", line 70, in ingest\n    _s3(con)\n  File \"/mnt/nvme/ds/ponds/dimensions/1.0.0/src/pond.py\", line 45, in _s3\n    con.execute(\"LOAD httpfs\")\n_duckdb.IOException: IO Error: Extension \"/root/.duckdb/extensions/v2.0.0/linux_arm64/httpfs.duckdb_extension\" not found.\nExtension \"httpfs\" is an existing extension.\n\nInstall it first using \"INSTALL httpfs\".\n"
+ },
+ {
+  "pond": "dimensions",
+  "ripple": "ingest",
+  "error": "IOException: IO Error: Extension \"/root/.duckdb/extensions/v2.0.0/linux_arm64/httpfs.duckdb_extension\" not found.",
+  "traceback": "Traceback (most recent call last):\n  File \"/root/.local/share/uv/python/cpython-3.12.15-linux-aarch64-gnu/lib/python3.12/concurrent/futures/thread.py\", line 59, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/duckstring/duck/executor.py\", line 313, in _task\n    timing[\"lineage\"] = _run_ripple(\n                        ^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/duckstring/duck/executor.py\", line 91, in _run_ripple\n    func(pond)\n  File \"/mnt/nvme/ds/ponds/dimensions/1.0.0/src/pond.py\", line 70, in ingest\n    _s3(con)\n  File \"/mnt/nvme/ds/ponds/dimensions/1.0.0/src/pond.py\", line 45, in _s3\n    con.execute(\"LOAD httpfs\")\n_duckdb.IOException: IO Error: Extension \"/root/.duckdb/extensions/v2.0.0/linux_arm64/httpfs.duckdb_extension\" not found.\nExtension \"httpfs\" is an existing extension.\n\nInstall it first using \"INSTALL httpfs\".\n"
+ }
+]

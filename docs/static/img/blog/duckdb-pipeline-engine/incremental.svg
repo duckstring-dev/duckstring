@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 320" width="720" height="320" role="img" aria-label="Time to absorb each change against a full rebuild, at 100 GB and 1 TB" font-family="Inter, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title>Time to absorb each change against a full rebuild, at 100 GB and 1 TB</title>
+<rect y="0" width="720" height="320" rx="8" fill="#1a1a19"/>
+<rect x="170" y="14" width="12" height="12" rx="3" fill="#199e70"/>
+<text x="188.0" y="24.0" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">DuckDB, rebuild</text>
+<rect x="304.0" y="14" width="12" height="12" rx="3" fill="#d27a14"/>
+<text x="322.0" y="24.0" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">New sales</text>
+<rect x="394.8" y="14" width="12" height="12" rx="3" fill="#d55181"/>
+<text x="412.8" y="24.0" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">Fact changes</text>
+<rect x="507.20000000000005" y="14" width="12" height="12" rx="3" fill="#9085e9"/>
+<text x="525.2" y="24.0" font-size="13" fill="#c3c2b7" text-anchor="start" font-weight="400">Mixed</text>
+<line x1="170.0" y1="30" x2="170.0" y2="290" stroke="#383835"/>
+<text x="170.0" y="306.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">0</text>
+<line x1="250.0" y1="30" x2="250.0" y2="290" stroke="#383835"/>
+<text x="250.0" y="306.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">30 s</text>
+<line x1="330.0" y1="30" x2="330.0" y2="290" stroke="#383835"/>
+<text x="330.0" y="306.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">60 s</text>
+<line x1="410.0" y1="30" x2="410.0" y2="290" stroke="#383835"/>
+<text x="410.0" y="306.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">90 s</text>
+<line x1="490.0" y1="30" x2="490.0" y2="290" stroke="#383835"/>
+<text x="490.0" y="306.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">120 s</text>
+<line x1="570.0" y1="30" x2="570.0" y2="290" stroke="#383835"/>
+<text x="570.0" y="306.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">150 s</text>
+<line x1="650.0" y1="30" x2="650.0" y2="290" stroke="#383835"/>
+<text x="650.0" y="306.0" font-size="11" fill="#8a897f" text-anchor="middle" font-weight="400">180 s</text>
+<text x="158.0" y="55.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">New sales, 100 GB</text>
+<path d="M170.0,36.0 h41.1 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-41.1 z" fill="#199e70"/>
+<text x="221.1" y="47.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">16.9 s</text>
+<path d="M170.0,52.0 h6.7 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-6.7 z" fill="#d27a14"/>
+<text x="186.7" y="63.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">4 s</text>
+<text x="158.0" y="99.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Fact changes, 100 GB</text>
+<path d="M170.0,80.0 h41.9 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-41.9 z" fill="#199e70"/>
+<text x="221.9" y="91.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">17.2 s</text>
+<path d="M170.0,96.0 h10.4 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-10.4 z" fill="#d55181"/>
+<text x="190.4" y="107.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">5.4 s</text>
+<text x="158.0" y="143.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Mixed, 100 GB</text>
+<path d="M170.0,124.0 h42.9 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-42.9 z" fill="#199e70"/>
+<text x="222.9" y="135.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">17.6 s</text>
+<path d="M170.0,140.0 h16.5 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-16.5 z" fill="#9085e9"/>
+<text x="196.5" y="151.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">7.7 s</text>
+<text x="158.0" y="187.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">New sales, 1 TB</text>
+<path d="M170.0,168.0 h439.7 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-439.7 z" fill="#199e70"/>
+<text x="619.7" y="179.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">166 s</text>
+<path d="M170.0,184.0 h30.4 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-30.4 z" fill="#d27a14"/>
+<text x="210.4" y="195.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">12.9 s</text>
+<text x="158.0" y="231.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Fact changes, 1 TB</text>
+<path d="M170.0,212.0 h441.1 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-441.1 z" fill="#199e70"/>
+<text x="621.1" y="223.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">167 s</text>
+<path d="M170.0,228.0 h58.7 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-58.7 z" fill="#d55181"/>
+<text x="238.7" y="239.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">24 s</text>
+<text x="158.0" y="275.5" font-size="13" fill="#c3c2b7" text-anchor="end" font-weight="400">Mixed, 1 TB</text>
+<path d="M170.0,256.0 h441.1 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-441.1 z" fill="#199e70"/>
+<text x="621.1" y="267.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">167 s</text>
+<path d="M170.0,272.0 h96.0 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-96.0 z" fill="#9085e9"/>
+<text x="276.0" y="283.0" font-size="12" fill="#c3c2b7" text-anchor="start" font-weight="400">38 s</text>
+</svg>

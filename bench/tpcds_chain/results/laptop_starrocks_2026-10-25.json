@@ -1,0 +1,11 @@
+{
+  "machine": "MacBook Air (fanless), Apple M4, 10 cores, 32 GB, on mains power",
+  "engine": "StarRocks 4.1.6 all-in-one container (starrocks/allin1-ubuntu:4.1.6) in a Colima VM, 10 vCPU, 24 GB",
+  "data": "SF100 mixed snapshot (v1), copied into the container; read with FILES() and written with INSERT INTO FILES as file:// paths inside the container (run_starrocks.py --container-data)",
+  "protocol": "Each run after 150 s idle, as for the other laptop runs. Output of run 1 verified identical to DuckDB's rebuild.",
+  "seconds": [61.99, 58.64, 64.65],
+  "median_seconds": 61.99,
+  "stages_run_1": {"enriched": 37.26, "category_month": 8.2, "store_quarter": 9.36, "customer_value": 7.15},
+  "container_memory_peak_bytes": 14884024320,
+  "note": "The DuckDB reference run afterwards took 32.7 s: not a benchmark number (no cool-down, the VM still holding memory); the cooled laptop DuckDB rebuild is 25.2 s."
+}

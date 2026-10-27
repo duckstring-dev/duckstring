@@ -1,0 +1,16 @@
+exit 0 ceiling_32
+exit 0 ceiling_64
+exit 0 ceiling_128
+exit 0 duckdb_s3_1
+exit 0 duckdb_s3_2
+exit 0 duckdb_local_1
+exit 0 duckdb_local_2
+exit 1 duckstring_1
+exit 0 spark_s3_1
+exit 0 starrocks_s3_1
+verify 0 duckdb_s3_2
+verify 0 out_local_1
+verify 0 out_local_2
+verify 1 duckstring_1
+verify 0 spark_s3_1
+verify 0 starrocks_s3_1

@@ -1,0 +1,107 @@
+{
+  "machine": "MacBook Air (fanless), Apple M4, 10 cores, 32 GB, on mains power",
+  "duckdb": "2.0.0",
+  "duckstring": "branch performance @ 4bcafa2e (0.7.0 + fixes)",
+  "spark": "4.2.0 local[*], driver 24g, JDK 17",
+  "change": "one batch, about 0.5% of the enriched sales (gen.py FRACTIONS)",
+  "note": "Exploratory: one run each, not medians. Every Duckstring and Spark output verified identical to DuckDB's.",
+  "sf10": {
+    "duckdb_rebuild_s": {
+      "before": 2.65,
+      "after": 2.84
+    },
+    "spark_rebuild_s": {
+      "after": 24.85,
+      "startup": 1.87
+    },
+    "duckstring_s": {
+      "first_build": 4.36,
+      "incremental": [
+        2.33,
+        2.42
+      ]
+    },
+    "duckstring_0.7.0_s": {
+      "first_build": 27.04,
+      "incremental": [
+        7.15,
+        8.47
+      ]
+    }
+  },
+  "sf100": {
+    "duckdb_rebuild_s": {
+      "before": 44.56,
+      "after": 47.63
+    },
+    "spark_rebuild_s": {
+      "after": 284.9,
+      "startup": 2.88
+    },
+    "duckstring_s": {
+      "first_build": 53.39,
+      "incremental": 26.06
+    },
+    "duckstring_before_staged_first_load_s": {
+      "first_build": 257.67,
+      "incremental": 32.89
+    },
+    "duckstring_incremental_breakdown_s": {
+      "sales_enriched": 18.15,
+      "customer_value": 7.01,
+      "category_month": 2.85,
+      "store_quarter": 2.87,
+      "note": "sales_enriched: three scans of the 269M-row fact's current state, one each for the item, customer and return changes; customer_value: a 3.5 s rescan of enriched for max(d_date)"
+    }
+  },
+  "protocol": "Fanless laptop: sustained runs throttle (DuckDB's SF100 rebuild took 45 s warm, 25.7 s cool), so the sf100_cooled numbers each follow a 3 min idle. Earlier sf100 numbers were taken warm.",
+  "sf100_cooled": {
+    "duckdb_rebuild_s": {
+      "before": 25.63,
+      "after": 25.73
+    },
+    "duckstring_s": {
+      "first_build": [
+        34.99,
+        34.89
+      ],
+      "incremental": [
+        9.91,
+        9.82
+      ]
+    },
+    "duckstring_incremental_critical_path_s": {
+      "inlets": 0.55,
+      "sales_enriched": 5.7,
+      "customer_value": 3.57
+    },
+    "spark": "not yet re-run cooled (284.9 s warm)"
+  },
+  "sf100_scenarios_cooled_2026-10-24": {
+    "note": "Each run after a 2.5 min idle. Every Duckstring and Spark output verified identical to DuckDB's. Append re-run at 4bcafa2e (chunked append parts): first build 73.65 s before.",
+    "duckdb_rebuild_s": {
+      "append": 26.03,
+      "fact": 25.23,
+      "mix": 25.24
+    },
+    "spark_rebuild_s": {
+      "mix": 200.01,
+      "startup": 2.3
+    },
+    "duckstring_first_build_s": {
+      "append": 41.66,
+      "fact": 34.34,
+      "mix": 34.35
+    },
+    "duckstring_incremental_s": {
+      "append": 3.93,
+      "fact": 5.55,
+      "mix": 8.68
+    },
+    "changes": {
+      "append": "1,344,948 new sales (0.5%)",
+      "fact": "538,735 new, 130,336 corrected, 47,837 voided sales; 72,665 returns",
+      "mix": "fact, plus 97 items reclassified and 1,974 customers moved"
+    }
+  }
+}

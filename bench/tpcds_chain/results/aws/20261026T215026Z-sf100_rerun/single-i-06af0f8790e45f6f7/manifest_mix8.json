@@ -1,0 +1,105 @@
+{
+  "sf": 100.0,
+  "scenario": "mix",
+  "duckdb": "2.0.0",
+  "source": "dsdgen",
+  "base_rows": {
+    "store_sales": 268565596,
+    "store_returns": 28795080,
+    "item": 204000,
+    "store": 402,
+    "date_dim": 73049,
+    "customer": 2000000,
+    "customer_address": 1000000
+  },
+  "batches": [
+    {
+      "batch": 1,
+      "scenario": "mix",
+      "scale": 1.0,
+      "sales_updated": 130336,
+      "sales_deleted": 47837,
+      "sales_inserted": 538735,
+      "returns_inserted": 72665,
+      "items_reclassified": 97,
+      "customers_moved": 1974
+    },
+    {
+      "batch": 2,
+      "scenario": "mix",
+      "scale": 1.0,
+      "sales_updated": 130417,
+      "sales_deleted": 48530,
+      "sales_inserted": 538834,
+      "returns_inserted": 72574,
+      "items_reclassified": 109,
+      "customers_moved": 1942
+    },
+    {
+      "batch": 3,
+      "scenario": "mix",
+      "scale": 1.0,
+      "sales_updated": 131161,
+      "sales_deleted": 48961,
+      "sales_inserted": 542038,
+      "returns_inserted": 72247,
+      "items_reclassified": 89,
+      "customers_moved": 2001
+    },
+    {
+      "batch": 4,
+      "scenario": "mix",
+      "scale": 1.0,
+      "sales_updated": 131016,
+      "sales_deleted": 48463,
+      "sales_inserted": 539699,
+      "returns_inserted": 73161,
+      "items_reclassified": 129,
+      "customers_moved": 2024
+    },
+    {
+      "batch": 5,
+      "scenario": "mix",
+      "scale": 1.0,
+      "sales_updated": 130205,
+      "sales_deleted": 48395,
+      "sales_inserted": 541698,
+      "returns_inserted": 72826,
+      "items_reclassified": 102,
+      "customers_moved": 1920
+    },
+    {
+      "batch": 6,
+      "scenario": "mix",
+      "scale": 1.0,
+      "sales_updated": 131213,
+      "sales_deleted": 48742,
+      "sales_inserted": 543658,
+      "returns_inserted": 73353,
+      "items_reclassified": 75,
+      "customers_moved": 2039
+    },
+    {
+      "batch": 7,
+      "scenario": "mix",
+      "scale": 1.0,
+      "sales_updated": 131406,
+      "sales_deleted": 48696,
+      "sales_inserted": 543159,
+      "returns_inserted": 73552,
+      "items_reclassified": 103,
+      "customers_moved": 2054
+    },
+    {
+      "batch": 8,
+      "scenario": "mix",
+      "scale": 1.0,
+      "sales_updated": 132103,
+      "sales_deleted": 48818,
+      "sales_inserted": 544906,
+      "returns_inserted": 73462,
+      "items_reclassified": 106,
+      "customers_moved": 2112
+    }
+  ]
+}

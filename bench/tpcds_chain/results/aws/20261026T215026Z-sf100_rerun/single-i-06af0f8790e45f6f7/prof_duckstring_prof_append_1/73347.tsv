@@ -1,0 +1,123 @@
+#argv	/opt/ds/lib/python3.12/site-packages/duckstring/duck/__main__.py --pond category_month --major 1 --version 1.0.0 --catchment http://127.0.0.1:46167 --token=*** --root /mnt/nvme/ds --source-path ponds/category_month/1.0.0 --data-root=s3://YOUR-BENCH-BUCKET/runs/20261026T215026Z-sf100_rerun/duckstring_prof_append_1 --persist-root=s3://YOUR-BENCH-BUCKET/runs/20261026T215026Z-sf100_rerun/duckstring_prof_append_1
+1793053266.973	MainThread	0	executor.load_topology	5.3
+1793053267.001	MainThread	0	executor.open_registry	26.0
+1793053267.391	ThreadPoolExecutor-0_0	5	io._table_exists	10.3
+1793053267.391	ThreadPoolExecutor-0_0	4	io.read_meta	10.4
+1793053267.450	ThreadPoolExecutor-0_0	6	Pond.dispatch_comprehensive	58.7
+1793053267.450	ThreadPoolExecutor-0_0	5	TrickleBuilder._offer	58.7
+1793053267.673	ThreadPoolExecutor-0_0	10	Pond._source_data_dir	223.3
+1793053267.692	ThreadPoolExecutor-0_0	9	Pond._source_relation	241.8
+1793053267.711	ThreadPoolExecutor-0_0	8	Pond.read_table	261.0
+1793053267.752	ThreadPoolExecutor-0_0	8	TrickleBuilder._view	11.8
+1793053267.752	ThreadPoolExecutor-0_0	7	TrickleBuilder._compile_current	302.5
+1793053267.753	ThreadPoolExecutor-0_0	6	TrickleBuilder._full_join_sql	302.6
+1793053267.764	ThreadPoolExecutor-0_0	5	TrickleBuilder._full_join	314.0
+1793053267.764	ThreadPoolExecutor-0_0	4	TrickleBuilder._comprehensive	372.8
+1793053267.764	ThreadPoolExecutor-0_0	3	TrickleBuilder._compute	383.2
+1793053269.517	ThreadPoolExecutor-0_0	4	io._agg_rebuild	1753.0
+1793053269.532	ThreadPoolExecutor-0_0	5	io._bootstrapping	12.2
+1793053269.555	ThreadPoolExecutor-0_0	6	io._record_meta	20.2
+1793053269.568	ThreadPoolExecutor-0_0	6	io._drop_relation	12.2
+1793053269.573	ThreadPoolExecutor-0_0	5	io._write_boot_base	38.2
+1793053269.584	ThreadPoolExecutor-0_0	6	io.read_meta	5.1
+1793053269.592	ThreadPoolExecutor-0_0	7	io._clog_union_sql	5.1
+1793053269.600	ThreadPoolExecutor-0_0	7	io.read_meta	8.4
+1793053269.606	ThreadPoolExecutor-0_0	7	io._f_base	5.5
+1793053269.606	ThreadPoolExecutor-0_0	6	io._reconstruct_sql_for	21.7
+1793053269.610	ThreadPoolExecutor-0_0	5	io.refresh_current_view	31.6
+1793053269.611	ThreadPoolExecutor-0_0	4	io.merge_table	93.2
+1793053269.611	ThreadPoolExecutor-0_0	3	io.apply_aggregate	1847.2
+1793053269.611	ThreadPoolExecutor-0_0	2	TrickleBuilder._merge	2230.5
+1793053269.614	ThreadPoolExecutor-0_0	1	TrickleBuilder.merge	2232.9
+1793053269.614	ThreadPoolExecutor-0_0	0	executor._run_ripple	2234.1
+1793053269.626	MainThread	4	io.read_meta	8.7
+1793053269.652	MainThread	8	io.read_meta	8.1
+1793053269.652	MainThread	7	dataplane._base_order_select	8.2
+1793053269.659	MainThread	6	dataplane._publish_base_chunks	16.2
+1793053269.666	MainThread	8	io._table_exists	6.6
+1793053269.669	MainThread	7	io._f_base	9.9
+1793053269.679	MainThread	7	io._drop_relation	9.2
+1793053269.688	MainThread	9	io._table_exists	7.1
+1793053269.691	MainThread	8	io.read_meta	10.2
+1793053269.707	MainThread	10	io._ensure_meta	5.9
+1793053269.708	MainThread	9	io.read_meta	8.4
+1793053269.710	MainThread	8	io._reconstruct_sql_for	19.1
+1793053269.719	MainThread	7	io.refresh_current_view	37.5
+1793053269.719	MainThread	6	dataplane._review_base	59.2
+1793053269.719	MainThread	5	dataplane._publish_local_base	93.1
+1793053269.719	MainThread	4	core.retry_on_lock	93.1
+1793053269.739	MainThread	6	io._ensure_meta	17.1
+1793053269.740	MainThread	5	io.read_meta	21.3
+1793053269.746	MainThread	4	dataplane.publish_plan	27.3
+1793053269.761	MainThread	7	io.read_meta	5.7
+1793053269.761	MainThread	6	dataplane._compact_threshold	5.8
+1793053269.779	MainThread	7	io._table_exists	18.4
+1793053269.781	MainThread	6	io._f_base	19.7
+1793053269.784	MainThread	5	dataplane._publish_tiered_main	30.6
+1793053269.789	MainThread	6	io.read_meta	5.2
+1793053269.799	MainThread	6	dataplane.registry_tables	10.0
+1793053269.802	MainThread	5	dataplane.publish_plan	17.8
+1793053269.808	MainThread	6	io.read_meta	5.0
+1793053269.859	MainThread	6	io._table_exists	9.6
+1793053269.862	MainThread	5	dataplane._export_companions	59.2
+1793053269.869	MainThread	7	io._table_exists	6.7
+1793053269.870	MainThread	6	dataplane._delta_rows_last	8.1
+1793053269.884	MainThread	6	io.count_current	13.5
+1793053269.887	MainThread	5	dataplane._enrich_sidecar	25.3
+1793053269.887	MainThread	4	core.retry_on_lock	137.2
+1793053269.887	MainThread	3	ParquetDataPlane.export	270.2
+1793053269.887	MainThread	2	executor._export_data	272.6
+1793053269.887	MainThread	1	RippleExecutor.export	272.8
+1793053269.888	MainThread	0	DuckCore.ripple_completed	273.7
+1793053269.894	MainThread	0	DuckCore.flush	6.1
+1793053269.943	MainThread	0	RippleExecutor.set_memory_limit	48.9
+1793053270.050	Thread-2 (_run)	2	dataplane._mirror_dir	161.7
+1793053270.158	Thread-2 (_run)	2	dataplane._mirror_dir	108.0
+1793053270.441	Thread-2 (_run)	4	dataplane._mirror_dir	179.7
+1793053270.481	Thread-2 (_run)	3	dataplane._mirror_dir	279.1
+1793053270.509	Thread-2 (_run)	2	dataplane._mirror_dir	350.8
+1793053270.610	Thread-2 (_run)	1	dataplane.persist_tree	722.6
+1793053270.610	Thread-2 (_run)	0	RippleExecutor.persist	722.7
+1793053289.929	ThreadPoolExecutor-0_0	7	Pond.source_columns	16.0
+1793053289.929	ThreadPoolExecutor-0_0	6	TrickleBuilder._bare_cols	16.1
+1793053290.005	ThreadPoolExecutor-0_0	10	io._materialise	63.1
+1793053290.005	ThreadPoolExecutor-0_0	9	io._merge_delta_from_sql	74.5
+1793053290.005	ThreadPoolExecutor-0_0	8	io._read_merge_delta	75.3
+1793053290.005	ThreadPoolExecutor-0_0	7	io.read_delta	75.4
+1793053290.005	ThreadPoolExecutor-0_0	6	Pond.read_delta	75.7
+1793053290.064	ThreadPoolExecutor-0_0	8	Pond.count_table	51.4
+1793053290.064	ThreadPoolExecutor-0_0	7	TrickleBuilder._source_rows	54.8
+1793053290.065	ThreadPoolExecutor-0_0	6	TrickleBuilder._over_threshold	56.2
+1793053290.067	ThreadPoolExecutor-0_0	5	TrickleBuilder._compile_source	154.3
+1793053290.067	ThreadPoolExecutor-0_0	4	TrickleBuilder._compile	154.3
+1793053290.068	ThreadPoolExecutor-0_0	3	TrickleBuilder._compute	158.4
+1793053290.187	ThreadPoolExecutor-0_0	4	io._reconstruct_sql_for	10.2
+1793053290.205	ThreadPoolExecutor-0_0	5	io._bootstrapping	8.1
+1793053290.225	ThreadPoolExecutor-0_0	5	io._record_meta	5.1
+1793053290.241	ThreadPoolExecutor-0_0	6	io._reconstruct_sql_for	8.9
+1793053290.245	ThreadPoolExecutor-0_0	5	io.refresh_current_view	16.0
+1793053290.245	ThreadPoolExecutor-0_0	4	io.apply_zset	54.7
+1793053290.245	ThreadPoolExecutor-0_0	3	io.apply_aggregate	176.8
+1793053290.245	ThreadPoolExecutor-0_0	2	TrickleBuilder._merge	335.3
+1793053290.247	ThreadPoolExecutor-0_0	1	TrickleBuilder.merge	337.1
+1793053290.249	ThreadPoolExecutor-0_0	0	executor._run_ripple	339.6
+1793053290.264	MainThread	4	dataplane.publish_plan	5.3
+1793053290.273	MainThread	5	dataplane._export_parts	6.0
+1793053290.281	MainThread	5	dataplane._publish_tiered_main	7.8
+1793053290.298	MainThread	5	dataplane._export_companions	11.0
+1793053290.310	MainThread	6	io.count_current	11.0
+1793053290.313	MainThread	5	dataplane._enrich_sidecar	15.9
+1793053290.313	MainThread	4	core.retry_on_lock	46.1
+1793053290.313	MainThread	3	ParquetDataPlane.export	62.0
+1793053290.314	MainThread	2	executor._export_data	63.8
+1793053290.314	MainThread	1	RippleExecutor.export	63.9
+1793053290.314	MainThread	0	DuckCore.ripple_completed	64.7
+1793053290.320	MainThread	0	DuckCore.flush	6.3
+1793053290.357	MainThread	0	RippleExecutor.set_memory_limit	36.1
+1793053290.369	Thread-3 (_run)	2	dataplane._mirror_dir	54.1
+1793053290.465	Thread-3 (_run)	2	dataplane._mirror_dir	96.0
+1793053290.608	Thread-3 (_run)	4	dataplane._mirror_dir	109.2
+1793053290.624	Thread-3 (_run)	3	dataplane._mirror_dir	142.3
+1793053290.642	Thread-3 (_run)	2	dataplane._mirror_dir	176.8
+1793053290.690	Thread-3 (_run)	1	dataplane.persist_tree	376.4
+1793053290.691	Thread-3 (_run)	0	RippleExecutor.persist	376.5

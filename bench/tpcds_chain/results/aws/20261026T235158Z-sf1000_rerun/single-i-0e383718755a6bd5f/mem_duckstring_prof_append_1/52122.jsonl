@@ -1,0 +1,68 @@
+{"t": 1793062850.1262174, "event": "start", "pid": 52122, "pond": "sales_enriched", "major": "1"}
+{"t": 1793062850.125, "rss": 51662848, "rss_peak": 132435968}
+{"t": 1793062850.181, "event": "open_registry", "path": "/mnt/nvme/ds/ponds/sales_enriched/m1/registry.duckdb", "state": null}
+{"t": 1793062850.187, "event": "memory_limit", "limit": "175309MB", "ok": true}
+{"t": 1793062850.377, "rss": 116244480, "rss_peak": 132435968, "db": 524288, "db_spill": 0, "tags": {"BASE_TABLE": 524288}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062850.639, "rss": 375541760, "rss_peak": 377409536, "db": 566050, "db_spill": 0, "tags": {"BASE_TABLE": 524288, "OBJECT_CACHE": 41762}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062850.892, "rss": 375296000, "rss_peak": 377409536, "db": 1614626, "db_spill": 0, "tags": {"BASE_TABLE": 524288, "ALLOCATOR": 1048576, "OBJECT_CACHE": 41762}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062851.43, "rss": 414711808, "rss_peak": 409583616, "db": 566050, "db_spill": 0, "tags": {"BASE_TABLE": 524288, "OBJECT_CACHE": 41762}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062851.682, "rss": 414941184, "rss_peak": 409583616, "db": 9220898, "db_spill": 0, "tags": {"BASE_TABLE": 524288, "ALLOCATOR": 8650752, "TRANSACTION": 4096, "OBJECT_CACHE": 41762}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062851.934, "rss": 2010824704, "rss_peak": 2005319680, "db": 1043927546, "db_spill": 0, "tags": {"BASE_TABLE": 524288, "IN_MEMORY_TABLE": 1043361496, "OBJECT_CACHE": 41762}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062852.187, "rss": 2007793664, "rss_peak": 2005319680, "db": 1043928682, "db_spill": 0, "tags": {"BASE_TABLE": 524288, "IN_MEMORY_TABLE": 1043361496, "OBJECT_CACHE": 42898}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062852.44, "rss": 2007990272, "rss_peak": 2005319680, "db": 1043933310, "db_spill": 0, "tags": {"BASE_TABLE": 524288, "IN_MEMORY_TABLE": 1043361496, "OBJECT_CACHE": 47526}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062852.693, "rss": 3932672000, "rss_peak": 3931168768, "db": 2819030014, "db_spill": 0, "tags": {"BASE_TABLE": 524288, "HASH_TABLE": 1493172224, "IN_MEMORY_TABLE": 1043361496, "ALLOCATOR": 281920384, "TRANSACTION": 4096, "OBJECT_CACHE": 47526}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062852.947, "rss": 4931145728, "rss_peak": 5176487936, "db": 4066556326, "db_spill": 0, "tags": {"BASE_TABLE": 14680064, "IN_MEMORY_TABLE": 4027711488, "ALLOCATOR": 24117248, "OBJECT_CACHE": 47526}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062853.199, "rss": 5036515328, "rss_peak": 5176487936, "db": 4408193654, "db_spill": 0, "tags": {"BASE_TABLE": 230424576, "IN_MEMORY_TABLE": 4131453128, "ALLOCATOR": 46268424, "OBJECT_CACHE": 47526}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062853.452, "rss": 5027794944, "rss_peak": 5176487936, "db": 3696107951, "db_spill": 0, "tags": {"BASE_TABLE": 329252864, "IN_MEMORY_TABLE": 3365234696, "ALLOCATOR": 1572865, "OBJECT_CACHE": 47526}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062853.704, "rss": 5025189888, "rss_peak": 5176487936, "db": 3616028846, "db_spill": 0, "tags": {"BASE_TABLE": 348127232, "IN_MEMORY_TABLE": 3267852040, "ALLOCATOR": 2048, "OBJECT_CACHE": 47526}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062853.956, "rss": 5224828928, "rss_peak": 5320806400, "db": 588468034, "db_spill": 0, "tags": {"BASE_TABLE": 348127232, "ART_INDEX": 262144, "IN_MEMORY_TABLE": 239982800, "OBJECT_CACHE": 95858}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062854.209, "rss": 4864430080, "rss_peak": 5320806400, "db": 1885335296, "db_spill": 0, "tags": {"BASE_TABLE": 348127232, "ART_INDEX": 262144, "COLUMN_DATA": 813694976, "ALLOCATOR": 723155086, "OBJECT_CACHE": 95858}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062854.471, "rss": 4760215552, "rss_peak": 5320806400, "db": 348485234, "db_spill": 0, "tags": {"BASE_TABLE": 348127232, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062854.724, "rss": 4615225344, "rss_peak": 5320806400, "db": 348485234, "db_spill": 0, "tags": {"BASE_TABLE": 348127232, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062854.981, "rss": 3102158848, "rss_peak": 5320806400, "db": 255688306, "db_spill": 0, "tags": {"BASE_TABLE": 255328256, "ART_INDEX": 262144, "ALLOCATOR": 2048, "OBJECT_CACHE": 95858}, "limit": "163.2 GiB", "temp_files": 0}
+{"t": 1793062855.17, "event": "memory_limit", "limit": "256MB", "ok": true}
+{"t": 1793062855.235, "rss": 637648896, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062855.488, "rss": 908472320, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062855.744, "rss": 1139187712, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062855.999, "rss": 1130512384, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062856.17, "event": "memory_limit", "limit": "256MB", "ok": true}
+{"t": 1793062856.274, "rss": 649273344, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062856.53, "event": "memory_limit", "limit": "256MB", "ok": true}
+{"t": 1793062856.528, "rss": 649265152, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062856.781, "rss": 649240576, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062857.034, "rss": 649252864, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062857.295, "rss": 649261056, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062857.53, "event": "memory_limit", "limit": "256MB", "ok": true}
+{"t": 1793062857.561, "rss": 649236480, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062857.815, "rss": 649220096, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062858.071, "rss": 649199616, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062858.325, "rss": 649228288, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062858.53, "event": "memory_limit", "limit": "256MB", "ok": true}
+{"t": 1793062858.587, "rss": 649154560, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062858.84, "rss": 649134080, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062859.099, "rss": 649138176, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062859.361, "rss": 649138176, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062859.53, "event": "memory_limit", "limit": "256MB", "ok": true}
+{"t": 1793062859.614, "rss": 649142272, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062859.866, "rss": 649125888, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062860.118, "rss": 649105408, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062860.371, "rss": 649109504, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062860.531, "event": "memory_limit", "limit": "256MB", "ok": true}
+{"t": 1793062860.624, "rss": 649097216, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062860.876, "rss": 649080832, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062861.128, "rss": 649052160, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062861.381, "rss": 649043968, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062861.531, "event": "memory_limit", "limit": "256MB", "ok": true}
+{"t": 1793062861.633, "rss": 649019392, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062861.885, "rss": 648990720, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062862.137, "rss": 648970240, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062862.39, "rss": 643305472, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062862.531, "event": "memory_limit", "limit": "256MB", "ok": true}
+{"t": 1793062862.642, "rss": 632274944, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062862.894, "rss": 632258560, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062863.147, "rss": 632246272, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062863.4, "rss": 628629504, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062863.531, "event": "memory_limit", "limit": "256MB", "ok": true}
+{"t": 1793062863.652, "rss": 628629504, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062863.904, "rss": 628629504, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}
+{"t": 1793062864.156, "rss": 628637696, "rss_peak": 5320806400, "db": 255424114, "db_spill": 0, "tags": {"BASE_TABLE": 255066112, "ART_INDEX": 262144, "OBJECT_CACHE": 95858}, "limit": "244.1 MiB", "temp_files": 0}

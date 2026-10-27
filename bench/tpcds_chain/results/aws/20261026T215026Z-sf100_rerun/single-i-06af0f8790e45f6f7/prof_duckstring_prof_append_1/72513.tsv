@@ -1,0 +1,61 @@
+#argv	/opt/ds/lib/python3.12/site-packages/duckstring/duck/__main__.py --pond sales_feed --major 1 --version 1.0.0 --catchment http://127.0.0.1:46167 --token=*** --root /mnt/nvme/ds --source-path ponds/sales_feed/1.0.0 --data-root=s3://YOUR-BENCH-BUCKET/runs/20261026T215026Z-sf100_rerun/duckstring_prof_append_1 --persist-root=s3://YOUR-BENCH-BUCKET/runs/20261026T215026Z-sf100_rerun/duckstring_prof_append_1
+1793053246.384	MainThread	2	core.import_pond_module	351.7
+1793053246.384	MainThread	1	core.load_ripples	353.3
+1793053246.384	MainThread	0	executor.load_topology	355.6
+1793053246.415	MainThread	0	executor.open_registry	28.1
+1793053246.915	ThreadPoolExecutor-0_0	2	core.import_pond_module	215.8
+1793053246.916	ThreadPoolExecutor-0_0	1	core.load_ripples	216.0
+1793053246.916	ThreadPoolExecutor-0_0	0	executor._load_ripple	216.1
+1793053247.366	ThreadPoolExecutor-0_0	3	io._table_exists	9.9
+1793053254.135	ThreadPoolExecutor-0_0	3	io._record_meta	10.9
+1793053254.136	ThreadPoolExecutor-0_0	2	io.append_table	6859.4
+1793053254.136	ThreadPoolExecutor-0_0	1	Pond.append_table	6859.5
+1793053254.991	ThreadPoolExecutor-0_0	3	io._record_meta	11.5
+1793053254.992	ThreadPoolExecutor-0_0	2	io.append_table	708.8
+1793053254.992	ThreadPoolExecutor-0_0	1	Pond.append_table	708.9
+1793053255.050	ThreadPoolExecutor-0_0	0	executor._run_ripple	8134.7
+1793053255.265	MainThread	6	dataplane._write_part_chunks	194.6
+1793053255.265	MainThread	5	dataplane._export_parts	199.9
+1793053257.751	MainThread	6	dataplane._write_part_chunks	2467.2
+1793053257.751	MainThread	5	dataplane._export_parts	2485.9
+1793053257.756	MainThread	5	dataplane.publish_plan	5.4
+1793053257.762	MainThread	5	dataplane._export_companions	5.9
+1793053257.773	MainThread	5	dataplane._enrich_sidecar	10.9
+1793053257.773	MainThread	4	core.retry_on_lock	2708.5
+1793053257.773	MainThread	3	ParquetDataPlane.export	2718.9
+1793053257.773	MainThread	2	executor._export_data	2721.2
+1793053257.773	MainThread	1	RippleExecutor.export	2721.3
+1793053257.774	MainThread	0	DuckCore.ripple_completed	2723.4
+1793053257.781	MainThread	0	DuckCore.flush	7.0
+1793053258.425	MainThread	0	RippleExecutor.set_memory_limit	643.5
+1793053259.348	Thread-2 (_run)	2	dataplane._mirror_dir	1572.8
+1793053277.105	Thread-2 (_run)	2	dataplane._mirror_dir	17757.5
+1793053277.166	Thread-2 (_run)	1	dataplane.persist_tree	19391.9
+1793053277.166	Thread-2 (_run)	0	RippleExecutor.persist	19392.0
+1793053287.253	ThreadPoolExecutor-0_0	2	core.import_pond_module	68.5
+1793053287.253	ThreadPoolExecutor-0_0	1	core.load_ripples	68.9
+1793053287.253	ThreadPoolExecutor-0_0	0	executor._load_ripple	68.9
+1793053287.771	ThreadPoolExecutor-0_0	3	io._record_meta	6.5
+1793053287.772	ThreadPoolExecutor-0_0	2	io.append_table	295.3
+1793053287.772	ThreadPoolExecutor-0_0	1	Pond.append_table	295.4
+1793053287.856	ThreadPoolExecutor-0_0	3	io._record_meta	5.3
+1793053287.858	ThreadPoolExecutor-0_0	2	io.append_table	49.3
+1793053287.858	ThreadPoolExecutor-0_0	1	Pond.append_table	49.4
+1793053287.860	ThreadPoolExecutor-0_0	0	executor._run_ripple	606.1
+1793053287.957	MainThread	6	dataplane._write_part_chunks	63.7
+1793053287.957	MainThread	5	dataplane._export_parts	81.7
+1793053287.963	MainThread	5	dataplane.publish_plan	5.6
+1793053287.970	MainThread	5	dataplane._export_companions	6.5
+1793053287.977	MainThread	6	dataplane._delta_rows_last	6.3
+1793053287.985	MainThread	5	dataplane._enrich_sidecar	14.4
+1793053287.985	MainThread	4	core.retry_on_lock	112.0
+1793053287.985	MainThread	3	ParquetDataPlane.export	121.9
+1793053287.985	MainThread	2	executor._export_data	124.8
+1793053287.985	MainThread	1	RippleExecutor.export	124.9
+1793053287.985	MainThread	0	DuckCore.ripple_completed	125.5
+1793053287.992	MainThread	0	DuckCore.flush	6.5
+1793053288.031	MainThread	0	RippleExecutor.set_memory_limit	38.9
+1793053288.037	Thread-3 (_run)	2	dataplane._mirror_dir	50.9
+1793053288.535	Thread-3 (_run)	2	dataplane._mirror_dir	498.0
+1793053288.589	Thread-3 (_run)	1	dataplane.persist_tree	603.4
+1793053288.589	Thread-3 (_run)	0	RippleExecutor.persist	603.5

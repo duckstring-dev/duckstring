@@ -1,0 +1,28 @@
+{
+  "sf": 1000.0,
+  "scenario": "mix",
+  "duckdb": "2.0.0",
+  "source": "s3://redshift-downloads/TPC-DS/2.13/1TB",
+  "base_rows": {
+    "store_sales": 2685607201,
+    "store_returns": 287999764,
+    "item": 300000,
+    "store": 1002,
+    "date_dim": 73049,
+    "customer": 12000000,
+    "customer_address": 6000000
+  },
+  "batches": [
+    {
+      "batch": 1,
+      "scenario": "mix",
+      "scale": 1.0,
+      "sales_updated": 1300729,
+      "sales_deleted": 483725,
+      "sales_inserted": 5371081,
+      "returns_inserted": 724749,
+      "items_reclassified": 143,
+      "customers_moved": 11757
+    }
+  ]
+}

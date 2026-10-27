@@ -1,0 +1,910 @@
+{
+ "warm": false,
+ "data": "s3://YOUR-BENCH-BUCKET/data/sf100_mix8",
+ "data_root": "s3://YOUR-BENCH-BUCKET/runs/20261026T215026Z-sf100_rerun/duckstring_off_mix8_1",
+ "phases": [
+  {
+   "phase": "initial",
+   "seconds": 35.07,
+   "finished_seconds": 19.15,
+   "pond_run_seconds": {
+    "category_month": 2.97,
+    "store_quarter": 3.21,
+    "customer_value": 3.51,
+    "sales_enriched": 8.93,
+    "sales_feed": 6.7,
+    "dimensions": 2.8
+   },
+   "runs": [
+    {
+     "pond": "category_month",
+     "major": 1,
+     "id": "category_month@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:26:25.015104+00:00",
+     "started_at": "2026-10-26T22:26:40.692362+00:00",
+     "finished_at": "2026-10-26T22:26:43.662633+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:26:43.606364+00:00",
+      "finished_at": "2026-10-26T22:26:44.139598+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "aggregate",
+       "started_at": "2026-10-26T22:26:41.268903+00:00",
+       "finished_at": "2026-10-26T22:26:43.282475+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    },
+    {
+     "pond": "store_quarter",
+     "major": 1,
+     "id": "store_quarter@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:26:25.015104+00:00",
+     "started_at": "2026-10-26T22:26:40.692362+00:00",
+     "finished_at": "2026-10-26T22:26:43.900757+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:26:43.857310+00:00",
+      "finished_at": "2026-10-26T22:26:44.361659+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "aggregate",
+       "started_at": "2026-10-26T22:26:41.261373+00:00",
+       "finished_at": "2026-10-26T22:26:43.767684+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    },
+    {
+     "pond": "customer_value",
+     "major": 1,
+     "id": "customer_value@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:26:25.015104+00:00",
+     "started_at": "2026-10-26T22:26:40.692362+00:00",
+     "finished_at": "2026-10-26T22:26:44.202251+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:26:44.150970+00:00",
+      "finished_at": "2026-10-26T22:26:45.345931+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "aggregate",
+       "started_at": "2026-10-26T22:26:41.259960+00:00",
+       "finished_at": "2026-10-26T22:26:43.932490+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    },
+    {
+     "pond": "sales_enriched",
+     "major": 1,
+     "id": "sales_enriched@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:26:25.015104+00:00",
+     "started_at": "2026-10-26T22:26:31.765136+00:00",
+     "finished_at": "2026-10-26T22:26:40.697340+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:26:40.661456+00:00",
+      "finished_at": "2026-10-26T22:27:00.049238+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "enrich",
+       "started_at": "2026-10-26T22:26:32.332703+00:00",
+       "finished_at": "2026-10-26T22:26:40.498353+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    },
+    {
+     "pond": "sales_feed",
+     "major": 1,
+     "id": "sales_feed@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:26:25.015104+00:00",
+     "started_at": "2026-10-26T22:26:25.071132+00:00",
+     "finished_at": "2026-10-26T22:26:31.768700+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:26:31.763414+00:00",
+      "finished_at": "2026-10-26T22:26:51.543920+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "ingest",
+       "started_at": "2026-10-26T22:26:25.913616+00:00",
+       "finished_at": "2026-10-26T22:26:31.394088+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    },
+    {
+     "pond": "dimensions",
+     "major": 1,
+     "id": "dimensions@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:26:25.015104+00:00",
+     "started_at": "2026-10-26T22:26:25.071132+00:00",
+     "finished_at": "2026-10-26T22:26:27.870012+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:26:27.862307+00:00",
+      "finished_at": "2026-10-26T22:26:29.250860+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "ingest",
+       "started_at": "2026-10-26T22:26:25.629228+00:00",
+       "finished_at": "2026-10-26T22:26:27.414971+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "phase": "batch_1",
+   "seconds": 8.2,
+   "finished_seconds": 7.5,
+   "pond_run_seconds": {
+    "category_month": 0.57,
+    "store_quarter": 0.64,
+    "customer_value": 1.69,
+    "sales_enriched": 3.91,
+    "sales_feed": 1.08,
+    "dimensions": 1.88
+   },
+   "runs": [
+    {
+     "pond": "category_month",
+     "major": 1,
+     "id": "category_month@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:27:00.172746+00:00",
+     "started_at": "2026-10-26T22:27:05.956885+00:00",
+     "finished_at": "2026-10-26T22:27:06.524184+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:27:06.518907+00:00",
+      "finished_at": "2026-10-26T22:27:06.927136+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "aggregate",
+       "started_at": "2026-10-26T22:27:05.966342+00:00",
+       "finished_at": "2026-10-26T22:27:06.451938+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    },
+    {
+     "pond": "store_quarter",
+     "major": 1,
+     "id": "store_quarter@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:27:00.172746+00:00",
+     "started_at": "2026-10-26T22:27:05.956885+00:00",
+     "finished_at": "2026-10-26T22:27:06.599416+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:27:06.593980+00:00",
+      "finished_at": "2026-10-26T22:27:07.068794+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "aggregate",
+       "started_at": "2026-10-26T22:27:05.966178+00:00",
+       "finished_at": "2026-10-26T22:27:06.512743+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    },
+    {
+     "pond": "customer_value",
+     "major": 1,
+     "id": "customer_value@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:27:00.172746+00:00",
+     "started_at": "2026-10-26T22:27:05.956885+00:00",
+     "finished_at": "2026-10-26T22:27:07.642650+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:27:07.638247+00:00",
+      "finished_at": "2026-10-26T22:27:08.357118+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "aggregate",
+       "started_at": "2026-10-26T22:27:05.966025+00:00",
+       "finished_at": "2026-10-26T22:27:07.475665+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    },
+    {
+     "pond": "sales_enriched",
+     "major": 1,
+     "id": "sales_enriched@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:27:00.172746+00:00",
+     "started_at": "2026-10-26T22:27:02.053787+00:00",
+     "finished_at": "2026-10-26T22:27:05.962910+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:27:05.954865+00:00",
+      "finished_at": "2026-10-26T22:27:06.945153+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "enrich",
+       "started_at": "2026-10-26T22:27:02.059136+00:00",
+       "finished_at": "2026-10-26T22:27:05.703628+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    },
+    {
+     "pond": "sales_feed",
+     "major": 1,
+     "id": "sales_feed@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:27:00.172746+00:00",
+     "started_at": "2026-10-26T22:27:00.179116+00:00",
+     "finished_at": "2026-10-26T22:27:01.256723+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:27:01.251796+00:00",
+      "finished_at": "2026-10-26T22:27:01.953755+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "ingest",
+       "started_at": "2026-10-26T22:27:00.183871+00:00",
+       "finished_at": "2026-10-26T22:27:01.073949+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    },
+    {
+     "pond": "dimensions",
+     "major": 1,
+     "id": "dimensions@1",
+     "version": "1.0.0",
+     "f": "2026-10-26T22:27:00.172746+00:00",
+     "started_at": "2026-10-26T22:27:00.179116+00:00",
+     "finished_at": "2026-10-26T22:27:02.058207+00:00",
+     "status": "success",
+     "error": null,
+     "traceback": null,
+     "persist": {
+      "status": "success",
+      "error": null,
+      "started_at": "2026-10-26T22:27:02.052251+00:00",
+      "finished_at": "2026-10-26T22:27:03.014989+00:00"
+     },
+     "ripples": [
+      {
+       "ripple": "ingest",
+       "started_at": "2026-10-26T22:27:00.431274+00:00",
+       "finished_at": "2026-10-26T22:27:01.886336+00:00",
+       "status": "success",
+       "retry": 0,
+       "error": null,
+       "traceback": null
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "root_bytes": 13770401123,
+ "events": [
+  {
+   "t": 1793053583.632,
+   "event": "catchment_started",
+   "url": "http://127.0.0.1:47143"
+  },
+  {
+   "t": 1793053585.015,
+   "event": "deployed"
+  },
+  {
+   "t": 1793053585.015,
+   "event": "phase_start",
+   "phase": "initial",
+   "at": "2026-10-26T22:26:25.015104+00:00"
+  },
+  {
+   "t": 1793053620.084,
+   "event": "phase_end",
+   "phase": "initial",
+   "seconds": 35.07
+  },
+  {
+   "t": 1793053620.173,
+   "event": "release",
+   "batch": 1
+  },
+  {
+   "t": 1793053620.173,
+   "event": "phase_start",
+   "phase": "batch_1",
+   "at": "2026-10-26T22:27:00.172746+00:00"
+  },
+  {
+   "t": 1793053628.377,
+   "event": "phase_end",
+   "phase": "batch_1",
+   "seconds": 8.2
+  },
+  {
+   "t": 1793053628.384,
+   "event": "continuous_start",
+   "first": 2,
+   "count": 7,
+   "every": 10.0
+  },
+  {
+   "t": 1793053628.409,
+   "event": "refreshes_added"
+  },
+  {
+   "t": 1793053628.477,
+   "event": "release",
+   "batch": 2
+  },
+  {
+   "t": 1793053638.451,
+   "event": "release",
+   "batch": 3
+  },
+  {
+   "t": 1793053648.437,
+   "event": "release",
+   "batch": 4
+  },
+  {
+   "t": 1793053658.446,
+   "event": "release",
+   "batch": 5
+  },
+  {
+   "t": 1793053668.453,
+   "event": "release",
+   "batch": 6
+  },
+  {
+   "t": 1793053678.448,
+   "event": "release",
+   "batch": 7
+  },
+  {
+   "t": 1793053688.456,
+   "event": "release",
+   "batch": 8
+  }
+ ],
+ "history": [
+  {
+   "pond": "dimensions",
+   "major": 1,
+   "id": "dimensions@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:26:25.015104+00:00",
+   "started_at": "2026-10-26T22:26:25.071132+00:00",
+   "finished_at": "2026-10-26T22:26:27.870012+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:26:27.862307+00:00",
+    "finished_at": "2026-10-26T22:26:29.250860+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "ingest",
+     "started_at": "2026-10-26T22:26:25.629228+00:00",
+     "finished_at": "2026-10-26T22:26:27.414971+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "sales_feed",
+   "major": 1,
+   "id": "sales_feed@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:26:25.015104+00:00",
+   "started_at": "2026-10-26T22:26:25.071132+00:00",
+   "finished_at": "2026-10-26T22:26:31.768700+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:26:31.763414+00:00",
+    "finished_at": "2026-10-26T22:26:51.543920+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "ingest",
+     "started_at": "2026-10-26T22:26:25.913616+00:00",
+     "finished_at": "2026-10-26T22:26:31.394088+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "sales_enriched",
+   "major": 1,
+   "id": "sales_enriched@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:26:25.015104+00:00",
+   "started_at": "2026-10-26T22:26:31.765136+00:00",
+   "finished_at": "2026-10-26T22:26:40.697340+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:26:40.661456+00:00",
+    "finished_at": "2026-10-26T22:27:00.049238+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "enrich",
+     "started_at": "2026-10-26T22:26:32.332703+00:00",
+     "finished_at": "2026-10-26T22:26:40.498353+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "category_month",
+   "major": 1,
+   "id": "category_month@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:26:25.015104+00:00",
+   "started_at": "2026-10-26T22:26:40.692362+00:00",
+   "finished_at": "2026-10-26T22:26:43.662633+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:26:43.606364+00:00",
+    "finished_at": "2026-10-26T22:26:44.139598+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "aggregate",
+     "started_at": "2026-10-26T22:26:41.268903+00:00",
+     "finished_at": "2026-10-26T22:26:43.282475+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "customer_value",
+   "major": 1,
+   "id": "customer_value@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:26:25.015104+00:00",
+   "started_at": "2026-10-26T22:26:40.692362+00:00",
+   "finished_at": "2026-10-26T22:26:44.202251+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:26:44.150970+00:00",
+    "finished_at": "2026-10-26T22:26:45.345931+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "aggregate",
+     "started_at": "2026-10-26T22:26:41.259960+00:00",
+     "finished_at": "2026-10-26T22:26:43.932490+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "store_quarter",
+   "major": 1,
+   "id": "store_quarter@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:26:25.015104+00:00",
+   "started_at": "2026-10-26T22:26:40.692362+00:00",
+   "finished_at": "2026-10-26T22:26:43.900757+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:26:43.857310+00:00",
+    "finished_at": "2026-10-26T22:26:44.361659+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "aggregate",
+     "started_at": "2026-10-26T22:26:41.261373+00:00",
+     "finished_at": "2026-10-26T22:26:43.767684+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "dimensions",
+   "major": 1,
+   "id": "dimensions@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:27:00.172746+00:00",
+   "started_at": "2026-10-26T22:27:00.179116+00:00",
+   "finished_at": "2026-10-26T22:27:02.058207+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:27:02.052251+00:00",
+    "finished_at": "2026-10-26T22:27:03.014989+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "ingest",
+     "started_at": "2026-10-26T22:27:00.431274+00:00",
+     "finished_at": "2026-10-26T22:27:01.886336+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "sales_feed",
+   "major": 1,
+   "id": "sales_feed@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:27:00.172746+00:00",
+   "started_at": "2026-10-26T22:27:00.179116+00:00",
+   "finished_at": "2026-10-26T22:27:01.256723+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:27:01.251796+00:00",
+    "finished_at": "2026-10-26T22:27:01.953755+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "ingest",
+     "started_at": "2026-10-26T22:27:00.183871+00:00",
+     "finished_at": "2026-10-26T22:27:01.073949+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "sales_enriched",
+   "major": 1,
+   "id": "sales_enriched@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:27:00.172746+00:00",
+   "started_at": "2026-10-26T22:27:02.053787+00:00",
+   "finished_at": "2026-10-26T22:27:05.962910+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:27:05.954865+00:00",
+    "finished_at": "2026-10-26T22:27:06.945153+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "enrich",
+     "started_at": "2026-10-26T22:27:02.059136+00:00",
+     "finished_at": "2026-10-26T22:27:05.703628+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "category_month",
+   "major": 1,
+   "id": "category_month@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:27:00.172746+00:00",
+   "started_at": "2026-10-26T22:27:05.956885+00:00",
+   "finished_at": "2026-10-26T22:27:06.524184+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:27:06.518907+00:00",
+    "finished_at": "2026-10-26T22:27:06.927136+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "aggregate",
+     "started_at": "2026-10-26T22:27:05.966342+00:00",
+     "finished_at": "2026-10-26T22:27:06.451938+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "customer_value",
+   "major": 1,
+   "id": "customer_value@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:27:00.172746+00:00",
+   "started_at": "2026-10-26T22:27:05.956885+00:00",
+   "finished_at": "2026-10-26T22:27:07.642650+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:27:07.638247+00:00",
+    "finished_at": "2026-10-26T22:27:08.357118+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "aggregate",
+     "started_at": "2026-10-26T22:27:05.966025+00:00",
+     "finished_at": "2026-10-26T22:27:07.475665+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "store_quarter",
+   "major": 1,
+   "id": "store_quarter@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:27:00.172746+00:00",
+   "started_at": "2026-10-26T22:27:05.956885+00:00",
+   "finished_at": "2026-10-26T22:27:06.599416+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:27:06.593980+00:00",
+    "finished_at": "2026-10-26T22:27:07.068794+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "aggregate",
+     "started_at": "2026-10-26T22:27:05.966178+00:00",
+     "finished_at": "2026-10-26T22:27:06.512743+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "dimensions",
+   "major": 1,
+   "id": "dimensions@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:27:08.390510+00:00",
+   "started_at": "2026-10-26T22:27:08.390510+00:00",
+   "finished_at": "2026-10-26T22:27:08.473024+00:00",
+   "status": "failed",
+   "error": "FileExpired: [Errno 16] The remote file corresponding to filename YOUR-BENCH-BUCKET/data/sf100_mix8/landing/RELEASED and Etag \"c4ca4238a0b923820dcc509a6f75849b\" no longer exists.",
+   "traceback": "Traceback (most recent call last):\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 169, in _error_wrapper\n    return await func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/aiobotocore/context.py\", line 36, in wrapper\n    return await func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/aiobotocore/client.py\", line 449, in _make_api_call\n    raise error_class(parsed_response, operation_name)\nbotocore.exceptions.ClientError: An error occurred (PreconditionFailed) when calling the GetObject operation: At least one of the pre-conditions you specified did not hold\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 2716, in _fetch_range\n    return _fetch_range(\n           ^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 2888, in _fetch_range\n    return sync(\n           ^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/fsspec/asyn.py\", line 106, in sync\n    raise return_result\n  File \"/opt/ds/lib/python3.12/site-packages/fsspec/asyn.py\", line 59, in _runner\n    result[0] = await coro\n                ^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 2919, in _inner_fetch\n    return await _error_wrapper(_call_and_read, retries=fs.retries)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 216, in _error_wrapper\n    raise err\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 169, in _error_wrapper\n    return await func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 2900, in _call_and_read\n    resp = await fs._call_s3(\n           ^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 466, in _call_s3\n    return await _error_wrapper(\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 216, in _error_wrapper\n    raise err\nOSError: [Errno 22] At least one of the pre-conditions you specified did not hold\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/root/.local/share/uv/python/cpython-3.12.15-linux-aarch64-gnu/lib/python3.12/concurrent/futures/thread.py\", line 59, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/duckstring/duck/executor.py\", line 319, in _task\n    timing[\"lineage\"] = _run_ripple(\n                        ^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/duckstring/duck/executor.py\", line 91, in _run_ripple\n    func(pond)\n  File \"/mnt/nvme/ds/ponds/dimensions/1.0.0/src/pond.py\", line 79, in ingest\n    released = _released()  # read once, so every table comes from the same release\n               ^^^^^^^^^^^\n  File \"/mnt/nvme/ds/ponds/dimensions/1.0.0/src/pond.py\", line 35, in _released\n    return int(f.read())\n               ^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/fsspec/spec.py\", line 2189, in read\n    out = self.cache._fetch(self.loc, self.loc + length)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/fsspec/caching.py\", line 280, in _fetch\n    self.cache = self.fetcher(start, end)  # new block replaces old\n                 ^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 2729, in _fetch_range\n    raise FileExpired(\ns3fs.utils.FileExpired: [Errno 16] The remote file corresponding to filename YOUR-BENCH-BUCKET/data/sf100_mix8/landing/RELEASED and Etag \"c4ca4238a0b923820dcc509a6f75849b\" no longer exists.\n",
+   "persist": null,
+   "ripples": [
+    {
+     "ripple": "ingest",
+     "started_at": "2026-10-26T22:27:08.395685+00:00",
+     "finished_at": "2026-10-26T22:27:08.468916+00:00",
+     "status": "failed",
+     "retry": 0,
+     "error": "FileExpired: [Errno 16] The remote file corresponding to filename YOUR-BENCH-BUCKET/data/sf100_mix8/landing/RELEASED and Etag \"c4ca4238a0b923820dcc509a6f75849b\" no longer exists.",
+     "traceback": "Traceback (most recent call last):\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 169, in _error_wrapper\n    return await func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/aiobotocore/context.py\", line 36, in wrapper\n    return await func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/aiobotocore/client.py\", line 449, in _make_api_call\n    raise error_class(parsed_response, operation_name)\nbotocore.exceptions.ClientError: An error occurred (PreconditionFailed) when calling the GetObject operation: At least one of the pre-conditions you specified did not hold\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 2716, in _fetch_range\n    return _fetch_range(\n           ^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 2888, in _fetch_range\n    return sync(\n           ^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/fsspec/asyn.py\", line 106, in sync\n    raise return_result\n  File \"/opt/ds/lib/python3.12/site-packages/fsspec/asyn.py\", line 59, in _runner\n    result[0] = await coro\n                ^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 2919, in _inner_fetch\n    return await _error_wrapper(_call_and_read, retries=fs.retries)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 216, in _error_wrapper\n    raise err\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 169, in _error_wrapper\n    return await func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 2900, in _call_and_read\n    resp = await fs._call_s3(\n           ^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 466, in _call_s3\n    return await _error_wrapper(\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 216, in _error_wrapper\n    raise err\nOSError: [Errno 22] At least one of the pre-conditions you specified did not hold\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/root/.local/share/uv/python/cpython-3.12.15-linux-aarch64-gnu/lib/python3.12/concurrent/futures/thread.py\", line 59, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/duckstring/duck/executor.py\", line 319, in _task\n    timing[\"lineage\"] = _run_ripple(\n                        ^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/duckstring/duck/executor.py\", line 91, in _run_ripple\n    func(pond)\n  File \"/mnt/nvme/ds/ponds/dimensions/1.0.0/src/pond.py\", line 79, in ingest\n    released = _released()  # read once, so every table comes from the same release\n               ^^^^^^^^^^^\n  File \"/mnt/nvme/ds/ponds/dimensions/1.0.0/src/pond.py\", line 35, in _released\n    return int(f.read())\n               ^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/fsspec/spec.py\", line 2189, in read\n    out = self.cache._fetch(self.loc, self.loc + length)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/fsspec/caching.py\", line 280, in _fetch\n    self.cache = self.fetcher(start, end)  # new block replaces old\n                 ^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/ds/lib/python3.12/site-packages/s3fs/core.py\", line 2729, in _fetch_range\n    raise FileExpired(\ns3fs.utils.FileExpired: [Errno 16] The remote file corresponding to filename YOUR-BENCH-BUCKET/data/sf100_mix8/landing/RELEASED and Etag \"c4ca4238a0b923820dcc509a6f75849b\" no longer exists.\n"
+    }
+   ]
+  },
+  {
+   "pond": "sales_feed",
+   "major": 1,
+   "id": "sales_feed@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:27:08.390510+00:00",
+   "started_at": "2026-10-26T22:27:08.390510+00:00",
+   "finished_at": "2026-10-26T22:27:09.370572+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:27:09.364314+00:00",
+    "finished_at": "2026-10-26T22:27:09.996903+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "ingest",
+     "started_at": "2026-10-26T22:27:08.395532+00:00",
+     "finished_at": "2026-10-26T22:27:09.213331+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  },
+  {
+   "pond": "sales_feed",
+   "major": 1,
+   "id": "sales_feed@1",
+   "version": "1.0.0",
+   "f": "2026-10-26T22:27:08.407825+00:00",
+   "started_at": "2026-10-26T22:27:09.366215+00:00",
+   "finished_at": "2026-10-26T22:27:09.573911+00:00",
+   "status": "success",
+   "error": null,
+   "traceback": null,
+   "persist": {
+    "status": "success",
+    "error": null,
+    "started_at": "2026-10-26T22:27:09.997085+00:00",
+    "finished_at": "2026-10-26T22:27:10.222752+00:00"
+   },
+   "ripples": [
+    {
+     "ripple": "ingest",
+     "started_at": "2026-10-26T22:27:09.372973+00:00",
+     "finished_at": "2026-10-26T22:27:09.475353+00:00",
+     "status": "success",
+     "retry": 0,
+     "error": null,
+     "traceback": null
+    }
+   ]
+  }
+ ],
+ "env": {
+  "DUCKSTRING_RUN_SLOTS": "0",
+  "DS_MEM_LOG": "/root/out/mem_duckstring_off_mix8_1",
+  "DS_ARGS": "--continuous 7 --every 10",
+  "DUCKSTRING_RELAY": "off"
+ }
+}

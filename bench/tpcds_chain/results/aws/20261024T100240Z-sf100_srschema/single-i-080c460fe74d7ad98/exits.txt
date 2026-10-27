@@ -1,0 +1,4 @@
+exit 0 starrocks_mix_1
+verify 0 starrocks_mix_1
+exit 0 starrocks_mix_2
+verify 0 starrocks_mix_2

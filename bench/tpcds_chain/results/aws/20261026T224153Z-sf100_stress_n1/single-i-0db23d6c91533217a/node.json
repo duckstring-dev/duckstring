@@ -1,0 +1,1 @@
+{"instance": "i-0db23d6c91533217a", "type": "c7gd.2xlarge", "role": "single", "code": "s3://YOUR-BENCH-BUCKET/code/9e0235fb", "cpus": 8, "mem_gb": 15}

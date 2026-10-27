@@ -1,0 +1,6 @@
+exit 0 starrockscluster_mix_1
+verify 0 starrockscluster_mix_1
+exit 0 starrockscluster_fact_1
+verify 0 starrockscluster_fact_1
+exit 0 starrockscluster_append_1
+verify 0 starrockscluster_append_1

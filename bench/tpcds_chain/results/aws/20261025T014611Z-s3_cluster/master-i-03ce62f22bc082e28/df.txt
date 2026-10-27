@@ -1,0 +1,11 @@
+Filesystem        Size  Used Avail Use% Mounted on
+devtmpfs          4.0M     0  4.0M   0% /dev
+tmpfs              16G     0   16G   0% /dev/shm
+tmpfs             6.2G  604K  6.2G   1% /run
+efivarfs          128K  3.0K  126K   3% /sys/firmware/efi/efivars
+/dev/nvme0n1p1     40G  3.7G   37G  10% /
+tmpfs              16G  296K   16G   1% /tmp
+/dev/nvme0n1p128   10M  1.4M  8.6M  14% /boot/efi
+/dev/nvme1n1      442G   12G  430G   3% /mnt/nvme
+overlay           442G   12G  430G   3% /mnt/nvme/docker/overlay2/443fc60f52fee51c26dd32510a5a809f54f7952cc23d6855d6f95a65269d6bc4/merged
+overlay           442G   12G  430G   3% /mnt/nvme/docker/overlay2/0df31a974c7dcd5533a37b8964489c6f2aa3980014e6cff20cb2d6e7585dacb6/merged

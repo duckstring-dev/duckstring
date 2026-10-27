@@ -1,0 +1,1 @@
+{"engine": "spark", "spark": "4.2.0", "master": "local[*]", "version": 1, "seconds": 113.02, "startup": 4.6, "stages": {"enriched": 72.43, "category_month": 6.87, "store_quarter": 5.84, "customer_value": 17.75}}

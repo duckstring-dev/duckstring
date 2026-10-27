@@ -1,0 +1,21 @@
+Traceback (most recent call last):
+  File "/opt/bench/verify.py", line 99, in <module>
+    main()
+  File "/opt/bench/verify.py", line 94, in main
+    ok = all([compare(con, a, b, table) for table in TABLES])
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/bench/verify.py", line 50, in compare
+    con.execute(f"CREATE OR REPLACE TEMP VIEW a AS {source_select(a, table)}")
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/bench/verify.py", line 44, in source_select
+    return get_data_plane().read_select(data_dir, table)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/ds/lib/python3.12/site-packages/duckstring/dataplane.py", line 90, in read_select
+    return self._raw_read_select(data_dir, table, as_of=pin if pin is not None else as_of)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/ds/lib/python3.12/site-packages/duckstring/dataplane.py", line 590, in _raw_read_select
+    return self._flat_read_select(data_dir, table, as_of=as_of)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/ds/lib/python3.12/site-packages/duckstring/dataplane.py", line 604, in _flat_read_select
+    raise FileNotFoundError(data_dir.uri(f"{table}.parquet"))
+FileNotFoundError: s3://YOUR-BENCH-BUCKET/runs/20261025T015431Z-s3_duckstring/duckstring_1/sales_enriched/m1/data/enriched.parquet

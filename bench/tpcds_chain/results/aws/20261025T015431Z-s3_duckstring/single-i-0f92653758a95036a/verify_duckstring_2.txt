@@ -1,0 +1,4 @@
+enriched: 268,565,596 vs 269,056,494 rows; row fingerprints differ: DIFFERENT
+category_month: 671 vs 671 rows; 0 only in A, 0 only in B, 671 with different values: DIFFERENT
+store_quarter: 1,680 vs 1,680 rows; 0 only in A, 0 only in B, 1,680 with different values: DIFFERENT
+customer_value: 1,999,984 vs 1,999,984 rows; 1,911 only in A, 1,911 only in B, 635,710 with different values: DIFFERENT

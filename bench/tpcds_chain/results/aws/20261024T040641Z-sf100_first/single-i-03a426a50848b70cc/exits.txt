@@ -1,0 +1,5 @@
+exit 0 duckdb_mix_1
+exit 0 duckstring_mix_1
+verify 0 duckstring_mix_1
+exit 0 spark_mix_1
+verify 0 spark_mix_1

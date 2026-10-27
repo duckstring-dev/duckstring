@@ -1,0 +1,4 @@
+exit 0 sparkcluster_1
+exit 0 starrockscluster_1
+verify 0 sparkcluster_1
+verify 0 starrockscluster_1

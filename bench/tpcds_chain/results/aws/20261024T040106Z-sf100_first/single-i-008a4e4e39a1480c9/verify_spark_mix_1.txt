@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "/opt/bench/verify.py", line 99, in <module>
+    main()
+  File "/opt/bench/verify.py", line 94, in main
+    ok = all([compare(con, a, b, table) for table in TABLES])
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/bench/verify.py", line 50, in compare
+    con.execute(f"CREATE OR REPLACE TEMP VIEW a AS {source_select(a, table)}")
+_duckdb.IOException: IO Error: No files found that match the pattern "s3://YOUR-BENCH-BUCKET/runs/20261024T040106Z-sf100_first/spark_mix_1/enriched/*.parquet"
+
+LINE 1: CREATE OR REPLACE TEMP VIEW a AS SELECT * FROM read_parquet('s3://YOUR-BENCH-BUCKET/runs...
+                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
