@@ -6,6 +6,8 @@ authors: [isaac]
 tags: [duckdb, performance, benchmarks, incremental]
 description: On TPC-DS pipelines at 100 GB and 1 TB, one DuckDB 2.0 machine ran 3 to 10 times faster than Spark and StarRocks clusters of the same size.
 image: /img/blog/duckdb-pipeline-engine/share.png
+image_on_page: true
+image_alt: "Run times for the six-step TPC-DS pipeline, data in and out of S3. At 1 TB: DuckDB 2.0 on one machine 166 s, StarRocks 4.1 on four machines 622 s, Spark 4.2 on four machines 1,605 s. At 100 GB: DuckDB 17.6 s, StarRocks 60 s, Spark 122 s"
 draft: false
 ---
 

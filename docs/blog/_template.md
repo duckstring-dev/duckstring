@@ -9,6 +9,8 @@ authors: [isaac]
 tags: []
 description: One sentence for search results and link previews.
 image: /img/blog/post-title/share.png  # a PNG or JPEG (not SVG): the link preview, and the picture in the blog's listings
+# image_on_page: true  # also lead the post with it (when the image isn't already in the body)
+# image_alt: What the image shows, for screen readers (default: the title)
 draft: true  # remove to publish
 ---
 
