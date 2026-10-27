@@ -1,9 +1,24 @@
 name: CI
 
+# Changes only to the docs site, plans, the benchmark harness or top-level Markdown don't run the suite (nothing
+# tested reads them; the docs build is checked where the site deploys). Markdown under src/ still runs it: the demo
+# Ponds ship their README.md, and a test checks it's there.
 on:
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "plans/**"
+      - "bench/**"
+      - "*.md"
+      - "packages/trickle/*.md"
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "plans/**"
+      - "bench/**"
+      - "*.md"
+      - "packages/trickle/*.md"
 
 jobs:
   # The core suite across the supported Python range (pyproject requires-python >= 3.10).
