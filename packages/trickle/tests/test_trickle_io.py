@@ -123,6 +123,36 @@ def test_a_materialised_reconstruction_matches_the_cte_one(db):
     assert via_cte == via_table == [(1, "a"), (2, "B"), (4, "d")]
 
 
+@pytest.mark.timeout(60)
+def test_a_limit_over_a_reconstruction_from_parquet_returns(tmp_path):
+    """A ``LIMIT`` over reconstruct_sql read from Parquet answers at once. With the consolidation a materialised
+    CTE, DuckDB 2.0 never finished this once the change log held some thousands of rows (the query route's
+    first rows of a merge table hung while the whole table read in a second)."""
+    import threading
+
+    import duckdb
+
+    con = duckdb.connect()
+    f1 = ts(1).isoformat()
+    con.execute(f"COPY (SELECT range::INTEGER AS id, (range * 1.5)::DECIMAL(38, 2) AS v, TIMESTAMPTZ '{f1}' AS "
+                f"{T.F_COL} FROM range(100000)) TO '{tmp_path}/base.parquet'")
+    for k in range(15):
+        f = ts(2 + k).isoformat()
+        con.execute(f"""COPY (SELECT (hash(range, {k}) % 100000)::INTEGER AS id, ((range + {k}) * 1.5)::DECIMAL(38, 2) AS v,
+                       1::BIGINT AS {T.D_COL}, TIMESTAMPTZ '{f}' AS {T.F_COL} FROM range(5000)
+                       UNION ALL SELECT (hash(range, {k}) % 100000)::INTEGER, ((range + {k} - 1) * 1.5)::DECIMAL(38, 2),
+                       -1::BIGINT, TIMESTAMPTZ '{f}' FROM range(5000)) TO '{tmp_path}/c{k:02d}.parquet'""")
+    files = ", ".join(f"'{tmp_path}/c{k:02d}.parquet'" for k in range(15))
+    sql = T.reconstruct_sql(f"SELECT * FROM read_parquet(['{tmp_path}/base.parquet'])",
+                            f"SELECT * FROM read_parquet([{files}])", ts(1), ("id",))
+    timer = threading.Timer(20, con.interrupt)  # a hang fails the test rather than the run
+    timer.start()
+    try:
+        assert len(con.execute(f"SELECT * FROM ({sql}) LIMIT 10").fetchall()) == 10
+    finally:
+        timer.cancel()
+
+
 def test_merge_idempotent_replay(db):
     _dim(db, [(1, "a"), (2, "b")], ts(1))
     _dim(db, [(1, "a"), (2, "B")], ts(2))

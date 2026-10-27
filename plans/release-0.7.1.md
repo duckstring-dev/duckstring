@@ -54,3 +54,18 @@ first insert-only change (any append Trickle feeding a builder). As 0.3.0 it can
   the blog repo's `e23e282`; 0.7.1 must ship that code (steps 2 to 6 release exactly `performance`).
 - The 1 TB runs used six memory slots (`DUCKSTRING_RUN_SLOTS=6`); the default is four. The post says six.
 - It links `github.com/duckstring-dev/duckstring/tree/main/bench/tpcds_chain`, which exists once step 7 merges.
+
+## Progress
+
+- 2026-10-27: PR #38 merged (`d0883bb9`); Trickle 0.3.0 published (`trickle-v0.3.0`); 0.7.1rc1 published
+  (`v0.7.1rc1`, `17138cde`) and smoke-tested (run `20261027T094646Z`, ap-southeast-2). Every round passed on
+  fresh Fargate Ducks, two minutes of a continuous Refresh with Ducks reading S3 snapshots ran clean, memory slots
+  showed Ponds waiting (two slots, four Inlets), and orphaned Ducks exited about 3.5 minutes after the hard kill.
+  **Two findings, both fixed on `fix-limit-hang`:**
+  - `duckstring query revenue.revenue_by_product` timed out: a `LIMIT` over `reconstruct_sql` read from Parquet
+    never finished on DuckDB 2.0 once the change log held some thousands of rows (its consolidation, a CTE
+    referenced twice, was materialised). The CTE is now `NOT MATERIALIZED`: Trickle 0.3.1, which 0.7.1 requires.
+  - Two Inlet Ducks' first copy to S3 failed with a `KeyError` from a half-imported module (botocore, urllib3);
+    later copies covered it. A failed persist is now retried once.
+- Next: merge `fix-limit-hang`, publish Trickle 0.3.1, cut 0.7.1rc2, smoke-test it, then 0.7.1.
+
