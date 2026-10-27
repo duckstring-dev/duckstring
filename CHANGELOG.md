@@ -2,6 +2,68 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
+## Unreleased (0.7.1)
+
+Faster incremental runs, a machine's memory shared out between its Ducks, and fixes for three ways an incremental
+pipeline could publish a wrong answer. Needs `duckstring-trickle` 0.3.0.
+
+### Fixes
+
+- **Overlapping runs applied a change twice.** When a Pond Run started while an earlier one was still running (as
+  a continuous Refresh often does), both read the same Source changes, and the Trickle builder and incremental
+  aggregates applied them twice. Each Ripple now reads from its own last completed Run.
+- **A run with nothing new to do could overtake one still running,** so the Ponds downstream never read that run's
+  change. A run that would pass now waits for the run before it to finish. A failed run's retry also no longer
+  passes over the change it failed on.
+- **A Sink could lose rows while its Source compacted.** A Sink reading a Source as of an earlier run, while the
+  Source folded or compacted its tables, missed the rows changed in between, and a Draw taken mid-publish could ship
+  part of a run. Every read now names the files of one committed snapshot (the sidecar is written last, as the
+  commit), and superseded files are removed only once no reader can still pick them.
+- **Aggregate groups with a NULL key** fell out of date in incremental runs.
+- **A Run dispatched to a Duck that was shutting down** after going idle waited for a Duck that never polled again,
+  and failed as a dead Duck. A fresh Duck now takes it.
+
+### Memory slots
+
+Each Pond runs in its own DuckDB process, and each sized itself as if it had the machine (DuckDB's default is 80%
+of RAM), so several running at once could overcommit memory until the kernel killed one. A machine's memory budget
+(`DUCKSTRING_MEMORY_BUDGET`, by default 80% of RAM less 2 GB) is now divided into slots (`DUCKSTRING_RUN_SLOTS`,
+default 4). A Duck gets its slots' share as DuckDB's memory limit when it starts work and drops to a small idle
+limit when it has none (`DUCKSTRING_IDLE_MEMORY`, default 256 MB), and a Pond that's ready to run with no slot free
+waits its turn, first come first served, shown as "Waiting for memory" in the web UI and `waiting` on
+`/api/status`. A Pond running alone takes the spare slots too. A Python Ripple that holds data outside DuckDB
+declares it, `@ripple(memory="6GB")` or `[pond] memory` in `pond.toml`, and takes the slots that cover it. A Run that
+runs out of memory is retried once with every slot. On the TPC-DS benchmark this halved peak memory with no change
+in run times.
+
+Upgrading:
+
+- With more than four Ponds running at once on one machine, some now wait for a slot. Set `DUCKSTRING_RUN_SLOTS`
+  to the number that run together to avoid that, or to `0` to turn slots off.
+- Migration `033` adds the declared memory to each Ripple.
+
+### Faster incremental runs
+
+On the TPC-DS benchmark at 1 TB, a change of new sales now takes 12.9 s (from 21.7), and a mixed change 37.5 s
+(from 44.9). The main changes:
+
+- A change that only adds rows (an append Trickle, or a merge window that only inserted new keys) is written without
+  consolidating it, and a join whose other side didn't change reads that side once. `Delta.insert_only` reports it.
+- A builder run reads only the current states its terms use.
+- An incremental min or max rescans a group only when a removed row may have held its extreme.
+- An aggregate's published state is written as its change each run, rather than in full.
+- A merge table's first load goes straight to its base, and a large append run is published as chunks written in
+  parallel.
+- A Ripple's windowed Source change is read once per run, and the change-fraction check counts a Source's rows from
+  metadata.
+- A Duck collects a new job as soon as it's queued, rather than at its next poll, so each pipeline stage starts at
+  once.
+
+### Trickle 0.3.0
+
+`Context.apply_zset` takes `insert_only`, which the builder passes for a change that only adds rows, so a host
+must accept it. Duckstring 0.7.1 requires Trickle 0.3; 0.7.0 stays on Trickle 0.2. `Delta.insert_only` is new.
+
 ## 0.7.0 — 2026-10-22
 
 A single trigger, Refresh, replaces Tap, Wave, Pulse and Tide, and a Tap is now an app's access point to a

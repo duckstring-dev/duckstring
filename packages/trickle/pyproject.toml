@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "duckstring-trickle"
-version = "0.2.1"
+version = "0.3.0"
 description = "Trickle: incremental joins and aggregates for DuckDB. Write a query once and it updates from the changes to its inputs."
 readme = "README.md"
 requires-python = ">=3.10"

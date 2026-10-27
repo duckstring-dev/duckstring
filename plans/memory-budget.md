@@ -1,6 +1,6 @@
 # Memory budget: sharing one machine's memory between its Ducks
 
-Status: **built 2026-10-27 (shakedown pending); replaces the 2026-10-24 proposal** (leases sized from each
+Status: **built and measured on AWS 2026-10-27 (see Measured on AWS at the end); replaces the 2026-10-24 proposal** (leases sized from each
 Pond's history), which the author rejected as fragile. The design here takes no estimate of a Run's memory
 from history, data sizes or plans: a Catchment-level concurrency limit with memory slots, gated at the
 engine's start decision.
@@ -213,3 +213,21 @@ unmet), with its place in the queue.
 - Pools: the same slots in the Pool agent for a Pool instance running several Ducks.
 - The budget's fraction and reserve (0.8 and 2 GB to start), the idle floor, and `N`'s default from the
   shakedown.
+
+## Measured on AWS (2026-10-27)
+
+TPC-DS chain benchmark (`bench/tpcds_chain`, runs in `results/aws/`), every output verified against DuckDB:
+
+- **SF100, one m7gd.8xlarge (128 GB), 3 runs each:** four slots against slots off took the same time (changes 4.0 /
+  5.4 / 7.7 s against 4.0 / 5.3 / 7.6) and peaked at about half the memory (11.7 against 21.6 GB for new sales).
+  A continuous run (seven batches 10 s apart) kept the same lag either way, peaking at 8.6 against 16.8 GB.
+- **SF1000, one r7gd.8xlarge (256 GB), six slots (one per Pond, so none waited):** new sales peaked at 73 GB against
+  140 GB with slots off, in the same time; `sales_feed`'s first load, capped at two slots (70 GB), spilled 0.1 GB.
+- **SF100 on 16 GB machines (c7gd.2xlarge) with a continuous backlog:** two slots cleared it in 87 s, one in 100,
+  off in 110 and four in 119. Fewer slots meant fewer, larger incremental runs (the join ran 9 times with two
+  against 13 with four); four slots of 2.7 GB made `customer_value` spill 1.8 GB. Slots off never ran out of memory
+  (10 GB peak).
+- **Open:** the number of slots should follow memory (a minimum slot size) rather than a fixed four, and spare
+  slots go round-robin by name rather than by need (`dimensions` took three of six at SF1000 while `sales_feed`
+  had two).
+
