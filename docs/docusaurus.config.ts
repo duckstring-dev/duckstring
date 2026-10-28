@@ -133,6 +133,7 @@ const config: Config = {
           items: [
             {label: 'Blog', to: '/blog'},
             {label: 'GitHub', href: 'https://github.com/duckstring-dev/duckstring'},
+            {label: 'Discussions', href: 'https://github.com/duckstring-dev/duckstring/discussions'},
             {label: 'Contact', href: 'mailto:dev@duckstring.com'},
           ],
         },

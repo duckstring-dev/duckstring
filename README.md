@@ -102,6 +102,10 @@ The [Quickstart](https://docs.duckstring.com/quickstart) goes through the same s
 
 [docs.duckstring.com](https://docs.duckstring.com) has the concepts, task guides, and a reference for the CLI, Python API, `pond.toml` and HTTP API. To try pull orchestration without installing anything, the [Playground](https://playground.duckstring.com) simulates it in the browser, with a guided tour.
 
+## Questions and discussion
+
+Ask questions, share what you're building or suggest ideas in [GitHub Discussions](https://github.com/duckstring-dev/duckstring/discussions). Bugs go in [Issues](https://github.com/duckstring-dev/duckstring/issues).
+
 ## Status
 
 Duckstring is pre-1.0, so interfaces may still change between minor versions. Changes are listed in the [changelog](CHANGELOG.md).
