@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { ReactFlowProvider, useReactFlow } from '@xyflow/react';
 import { track } from '@vercel/analytics';
 import { usePlaygroundStore, THEME_BRAND } from '@/lib/store';
-import { holdMs, playStory, setUpStory, type SayOptions, type StoryCtx } from '@/lib/story';
+import { holdMs, jumpCtx, LAST_LINE, playStory, setUpStory, STORY_LINES, type SayOptions, type StoryCtx } from '@/lib/story';
 import type { PondId } from '@/lib/types';
 import { DagCanvas } from '../DagCanvas';
 import { TraceChart } from '../TraceChart';
@@ -15,12 +15,20 @@ import { JoinGrid } from '../trickle/JoinGrid';
 // and scaled up while centred, so the move never reflows the text). The page fits any shape: a wide frame lays the
 // graph out left to right with the run chart beside the caption, a tall one top to bottom with the chart above it.
 //
-// ?autoplay=1 starts at once (the landing page loads it on a click); otherwise a Play button waits. ?rate=N runs the
-// whole story N times faster (the tests). It pauses itself while scrolled out of view or in a hidden tab.
+// ?autoplay=1 starts at once (the landing page loads it on a click); otherwise a Play button waits, under the opening
+// question. Either way the viewer has just read the question (the landing page's poster shows it too), so the story
+// starts at the line after it; Watch again and restart say it. ?rate=N runs the whole story N times faster (the
+// tests). It pauses itself while scrolled out of view or in a hidden tab.
 // It can fill the screen (useExpand): a button, or on a touch screen the first tap while it plays.
+// Back and skip (buttons in the bottom corners, where a thumb reaches them, or the arrow keys) step a line at a time:
+// skip goes straight to the next line (the end, from the last), back to the one before. A jump replays the lines
+// before it off screen (jumpCtx), so tapping skip shows every line, just faster.
 
 const MONO = 'ui-monospace, SFMono-Regular, monospace';
 const BG = '#0f0f14';
+const NAV = 44; // back and skip: thumb-sized, in the bottom corners
+const NAV_INSET = 10;
+const DOCK_BOTTOM = 10;
 
 class Stopped extends Error {}
 
@@ -40,11 +48,12 @@ function useViewport() {
 
 // The frame's shape decides the layout: wide lays the graph out left to right with the chart beside the caption,
 // tall top to bottom with the chart above it. The caption's size in the band (centred, it's scaled up); narrow frames
-// dock it narrower, so it can grow.
+// dock it narrower, so it can grow. Docked, it sits between the back and skip buttons, so a tall frame gives it up to
+// four lines.
 function dims(w: number, h: number) {
   const wide = w / h >= 1.15;
   const fs = wide ? Math.max(12, Math.min(19, w / 57)) : Math.max(13, Math.min(17, w / 25));
-  return { wide, fs, capMax: wide ? fs * 29.5 : w * 0.74, capLines: wide ? 2 : 3, maxScale: wide ? 1.5 : 1.35 };
+  return { wide, fs, capMax: wide ? fs * 29.5 : w * 0.74, capLines: wide ? 2 : 4, maxScale: wide ? 1.5 : 1.35 };
 }
 
 function param(name: string): string | null {
@@ -99,6 +108,8 @@ function StoryInner() {
   const { w, h } = useViewport();
   const { wide, fs, capLines } = dims(w, h);
   const direction = wide ? 'LR' : 'TB';
+  const slotH = capLines * fs * 1.4 + 12;
+  const navBottom = DOCK_BOTTOM + Math.max(0, (slotH - NAV) / 2); // back and skip, centred on the caption's slot
 
   const [phase, setPhase] = useState<Phase>('ready');
   const [userPaused, setUserPaused] = useState(false);
@@ -123,12 +134,19 @@ function StoryInner() {
   const holding = useRef(false); // a line is up and the pipeline paused for it
   const skip = useRef(false);
   const speedX = useRef(1);
-  const run = useRef(0); // bumped to stop a run (restart, unmount)
+  const run = useRef(0); // bumped to stop a run (restart, jump, unmount)
+  const line = useRef({ index: 0, text: '' }); // the line showing (counting the lines said, from 0)
+  const opening = useRef(true); // whether this run says the opening question
   const caption = useRef<Caption>('hidden');
 
   const running = phase === 'playing' && !userPaused && !hidden;
   const expand = useExpand();
   const tapExpands = expand.touch && expand.canExpand && !expand.expanded;
+  const [embedded, setEmbedded] = useState(false);
+  useEffect(() => {
+    const t = window.setTimeout(() => setEmbedded(window.parent !== window), 0);
+    return () => window.clearTimeout(t);
+  }, []);
 
   const syncSim = useCallback(() => {
     const st = usePlaygroundStore.getState();
@@ -233,7 +251,7 @@ function StoryInner() {
   };
 
   const makeCtx = useCallback(
-    (token: number): StoryCtx => {
+    (token: number, opening: boolean): StoryCtx => {
       const alive = () => {
         if (token !== run.current) throw new Stopped();
       };
@@ -287,6 +305,7 @@ function StoryInner() {
         await wait(450);
       };
       return {
+        opening,
         get: () => usePlaygroundStore.getState(),
         say,
         wait,
@@ -331,28 +350,96 @@ function StoryInner() {
     syncSim();
   }, [syncSim]);
 
-  const start = useCallback(() => {
-    reset();
-    const token = run.current;
-    setPhase('playing');
-    setUserPaused(false);
-    track('Story', { event: 'start' });
-    playStory(makeCtx(token))
-      .then(() => {
+  // Plays from line `from` to the end. A later line starts from the state the ones before it reach (jumpCtx).
+  const playFrom = useCallback(
+    async (from: number, withOpening: boolean) => {
+      reset();
+      const token = run.current;
+      opening.current = withOpening;
+      line.current = { index: from, text: '' };
+      setPhase('playing');
+      setUserPaused(false);
+      const ctx = jumpCtx(makeCtx(token, withOpening), from, {
+        onLive: (reached) => {
+          speedX.current = reached.speed;
+          setFast(reached.speed !== 1);
+          setChartPond(reached.chart);
+          syncSim();
+        },
+        onLine: (index, text) => {
+          line.current = { index, text };
+        },
+      });
+      try {
+        await playStory(ctx);
         if (token !== run.current) return;
         setPhase('ended');
         setEnding(true);
         track('Story', { event: 'end' });
-      })
-      .catch((e) => {
+      } catch (e) {
         if (!(e instanceof Stopped)) throw e;
-      });
-  }, [reset, makeCtx]);
+      }
+    },
+    [reset, makeCtx, syncSim]
+  );
+
+  // From the Play button or autoplay, past the question just read; from Watch again or restart, with it.
+  const start = useCallback(
+    (withOpening = true) => {
+      if (!withOpening) track('Story', { event: 'start' }); // Watch again and restart track their own
+      void playFrom(0, withOpening);
+    },
+    [playFrom]
+  );
+
+  // Skipping the last line ends the story where it would have: that line up, centred, over the end buttons.
+  const finish = useCallback(() => {
+    run.current += 1;
+    holding.current = true;
+    setRings([]);
+    setGridOn(false);
+    setChartPond(null);
+    const cap = capRef.current;
+    if (cap) {
+      cap.textContent = LAST_LINE;
+      cap.style.opacity = '1';
+    }
+    caption.current = 'centred';
+    place(true, false);
+    setDim(true);
+    syncSim();
+    setPhase('ended');
+    setEnding(true);
+  }, [place, syncSim]);
+
+  const back = useCallback(() => {
+    const to = Math.max(0, line.current.index - 1);
+    track('Story', { event: 'back', line: to });
+    void playFrom(to, opening.current);
+  }, [playFrom]);
+
+  const next = useCallback(() => {
+    const { index, text } = line.current;
+    track('Story', { event: 'skip', line: index + 1 });
+    if (text === LAST_LINE) finish();
+    else void playFrom(index + 1, opening.current);
+  }, [playFrom, finish]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowLeft' && phase !== 'ready') back();
+      else if (e.key === 'ArrowRight' && phase === 'playing') next();
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [phase, back, next]);
 
   useEffect(() => {
     setUpStory(usePlaygroundStore.getState);
     syncSim();
-    const t = param('autoplay') === '1' ? window.setTimeout(start, 0) : 0;
+    const t = param('autoplay') === '1' ? window.setTimeout(() => start(false), 0) : 0;
     return () => {
       window.clearTimeout(t);
       run.current += 1;
@@ -393,11 +480,12 @@ function StoryInner() {
           flexDirection: wide ? 'row' : 'column-reverse',
           alignItems: wide ? 'flex-end' : 'center',
           gap: 12,
-          padding: '8px 14px 10px',
+          // The caption sits between the back and skip buttons in the corners.
+          padding: `8px ${NAV + NAV_INSET + (wide ? 12 : 6)}px ${DOCK_BOTTOM}px`,
           pointerEvents: 'none',
         }}
       >
-        <div ref={slotRef} style={{ flex: wide ? 1 : undefined, alignSelf: 'stretch', minHeight: capLines * fs * 1.4 + 12 }} />
+        <div ref={slotRef} style={{ flex: wide ? 1 : undefined, alignSelf: 'stretch', minHeight: slotH }} />
         {chartPond && <ChartPanel pond={chartPond} width={wide ? 250 : Math.min(280, w - 32)} />}
       </div>
 
@@ -480,9 +568,50 @@ function StoryInner() {
         </div>
       )}
 
+      {phase !== 'ready' && (
+        <NavButton label="Back" testId="story-back" side="left" bottom={navBottom} onClick={back}>
+          ⏮
+        </NavButton>
+      )}
+      {phase === 'playing' && (
+        <NavButton label="Skip" testId="story-skip" side="right" bottom={navBottom} onClick={next}>
+          ⏭
+        </NavButton>
+      )}
+
       {phase === 'ready' && (
-        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(9,9,12,0.72)' }}>
-          <button data-testid="story-play" onClick={start} style={bigButton(true)}>
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 22,
+            padding: '0 16px',
+            background: 'rgba(9,9,12,0.72)',
+          }}
+        >
+          {/* Who it's for, on its own (embedded, the landing page around it says so). */}
+          {!embedded && (
+            <div data-testid="story-label" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, textAlign: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src="/logo.svg" alt="" width={Math.round(fs * 2.2)} height={Math.round(fs * 2.2)} />
+                <span style={{ color: '#f4f4f5', fontWeight: 700, fontSize: fs * 1.5 }}>Duckstring</span>
+              </div>
+              <div style={{ color: '#a1a1aa', fontSize: Math.max(12, fs * 0.85) }}>DuckDB Data Engineering</div>
+            </div>
+          )}
+          {/* What it's about, before anyone commits two minutes to it (the landing page's poster says the same). */}
+          <div
+            data-testid="story-opening"
+            style={{ fontSize: fs * 1.25, fontWeight: 700, lineHeight: 1.4, textAlign: 'center', color: '#f4f4f5', maxWidth: Math.min(w - 32, fs * 30) }}
+          >
+            {STORY_LINES.question}
+          </div>
+          <button data-testid="story-play" onClick={() => start(false)} style={bigButton(true)}>
             ▶ Play <span style={{ fontWeight: 400, opacity: 0.75 }}>(2 min)</span>
           </button>
         </div>
@@ -497,27 +626,45 @@ function StoryInner() {
             right: 0,
             top: `calc(50% + ${Math.max(44, fs * 3)}px)`,
             display: 'flex',
-            justifyContent: 'center',
-            flexWrap: 'wrap',
-            gap: 10,
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 12,
             padding: '0 16px',
             opacity: ending ? 1 : 0,
             transition: 'opacity 500ms ease',
           }}
         >
-          <button
-            data-testid="story-replay"
-            onClick={() => {
-              track('Story', { event: 'replay' });
-              start();
-            }}
-            style={bigButton(false)}
-          >
-            ↺ Watch again
-          </button>
-          <a href="/" target="_blank" rel="noopener noreferrer" onClick={() => track('Story', { event: 'playground' })} style={bigButton(true)}>
-            Try the Playground ↗
-          </a>
+          <div data-testid="story-pitch" style={{ fontSize: 13, lineHeight: 1.5, color: '#a1a1aa', textAlign: 'center', maxWidth: 460 }}>
+            {embedded ? 'Play with this now in the Playground simulator.' : 'Play with this now in the Playground simulator, or check out the project site.'}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'center', flexWrap: 'wrap', gap: 10 }}>
+            <button
+              data-testid="story-replay"
+              onClick={() => {
+                track('Story', { event: 'replay' });
+                start();
+              }}
+              style={bigButton(false)}
+            >
+              ↺ Watch again
+            </button>
+            {/* Embedded, the story is already on the home page. */}
+            {!embedded && (
+              <a
+                data-testid="story-home"
+                href="https://duckstring.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => track('Story', { event: 'home' })}
+                style={bigButton(false)}
+              >
+                About Duckstring ↗
+              </a>
+            )}
+            <a href="/" target="_blank" rel="noopener noreferrer" onClick={() => track('Story', { event: 'playground' })} style={bigButton(true)}>
+              Try the Playground ↗
+            </a>
+          </div>
         </div>
       )}
     </div>
@@ -566,6 +713,50 @@ function IconButton({ label, testId, onClick, children }: { label: string; testI
   );
 }
 
+function NavButton({
+  label,
+  testId,
+  side,
+  bottom,
+  onClick,
+  children,
+}: {
+  label: string;
+  testId: string;
+  side: 'left' | 'right';
+  bottom: number;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      aria-label={label}
+      title={label}
+      data-testid={testId}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      style={{
+        position: 'absolute',
+        [side]: NAV_INSET,
+        bottom: `calc(${bottom}px + env(safe-area-inset-bottom, 0px))`,
+        width: NAV,
+        height: NAV,
+        borderRadius: 10,
+        cursor: 'pointer',
+        background: 'rgba(24,24,27,0.85)',
+        border: '1px solid #3f3f46',
+        color: '#d4d4d8',
+        fontFamily: MONO,
+        fontSize: 15,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 // Fits the graph into the space between the controls and the caption band, whenever the frame, the band or the
 // graph changes.
 function StoryFramer({ dockH, w, h, direction }: { dockH: number; w: number; h: number; direction: string }) {
@@ -588,7 +779,9 @@ function StoryFramer({ dockH, w, h, direction }: { dockH: number; w: number; h: 
   return null;
 }
 
-// The tour's white ring around canvas nodes, tracking them as the canvas moves.
+// The tour's white ring around canvas nodes, tracking them as the canvas moves. React Flow re-measures a node when
+// the layout changes (a box widening for its stats, about twice a second while things run), and for that frame it is
+// hidden and placed as if outside its Pond: the ring stays where it was rather than flashing there.
 function Rings({ ids }: { ids: string[] }) {
   const layer = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -606,9 +799,10 @@ function Rings({ ids }: { ids: string[] }) {
     let raf = 0;
     const tick = () => {
       ids.forEach((id, i) => {
-        const node = document.querySelector(`.react-flow__node[data-id="${id}"]`);
+        const node = document.querySelector<HTMLElement>(`.react-flow__node[data-id="${id}"]`);
         const d = el.children[i] as HTMLDivElement;
         const b = node?.getBoundingClientRect();
+        if (node && getComputedStyle(node).visibility === 'hidden') return; // being re-measured: hold (or stay hidden)
         if (!b || !b.width) {
           d.style.display = 'none';
           return;
