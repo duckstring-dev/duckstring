@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { ReactFlowProvider, useReactFlow } from '@xyflow/react';
 import { track } from '@vercel/analytics';
 import { usePlaygroundStore, THEME_BRAND } from '@/lib/store';
-import { fastForward, holdMs, LAST_LINE, setUpStory, STORY_SCENES, type SayOptions, type StoryCtx } from '@/lib/story';
+import { fastForward, holdMs, LAST_LINE, setUpStory, STORY_LINES, STORY_SCENES, type SayOptions, type StoryCtx } from '@/lib/story';
 import type { PondId } from '@/lib/types';
 import { DagCanvas } from '../DagCanvas';
 import { TraceChart } from '../TraceChart';
@@ -560,7 +560,26 @@ function StoryInner() {
       )}
 
       {phase === 'ready' && (
-        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(9,9,12,0.72)' }}>
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 22,
+            padding: '0 16px',
+            background: 'rgba(9,9,12,0.72)',
+          }}
+        >
+          {/* What it's about, before anyone commits two minutes to it (the landing page's poster says the same). */}
+          <div
+            data-testid="story-opening"
+            style={{ fontSize: fs * 1.25, fontWeight: 700, lineHeight: 1.4, textAlign: 'center', color: '#f4f4f5', maxWidth: Math.min(w - 32, fs * 30) }}
+          >
+            {STORY_LINES.question}
+          </div>
           <button data-testid="story-play" onClick={start} style={bigButton(true)}>
             ▶ Play <span style={{ fontWeight: 400, opacity: 0.75 }}>(2 min)</span>
           </button>
@@ -585,7 +604,7 @@ function StoryInner() {
           }}
         >
           <div data-testid="story-pitch" style={{ fontSize: 13, lineHeight: 1.5, color: '#a1a1aa', textAlign: 'center', maxWidth: 460 }}>
-            The Playground is this pipeline in your browser, to change and run yourself, with a guided tour.
+            {embedded ? 'Play with this now in the Playground simulator.' : 'Play with this now in the Playground simulator, or check out the project site.'}
           </div>
           <div style={{ display: 'flex', justifyContent: 'center', flexWrap: 'wrap', gap: 10 }}>
             <button

@@ -45,10 +45,14 @@ test('a line docks into the band, clear of the middle of the frame', async ({ pa
   await onScreen(page, 'story-caption', 'docked');
 });
 
-test('without autoplay it waits for Play, and pause stops it', async ({ page }) => {
+test('without autoplay it says what it is and waits for Play, and pause stops it', async ({ page }, info) => {
   await page.goto('/story?rate=4');
   const story = page.getByTestId('story');
   await expect(story).toHaveAttribute('data-phase', 'ready');
+  await expect(page.getByTestId('story-opening')).toHaveText(STORY_LINES.question);
+  await onScreen(page, 'story-opening', 'opening question');
+  await onScreen(page, 'story-play', 'play button');
+  await page.screenshot({ path: info.outputPath('ready.png') });
   await page.waitForTimeout(600);
   await expect(page.getByTestId('story-caption')).toHaveText('');
   await page.getByTestId('story-play').click();
