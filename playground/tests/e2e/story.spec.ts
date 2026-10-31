@@ -59,3 +59,43 @@ test('without autoplay it waits for Play, and pause stops it', async ({ page }) 
   await page.getByTestId('story-pause').click();
   await expect(page.getByTestId('story-caption')).toHaveText(STORY_LINES.shared, { timeout: 10_000 });
 });
+
+test('skip moves to the next scene and back returns to the one before', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto('/story?autoplay=1&rate=4');
+  const caption = page.getByTestId('story-caption');
+  await expect(caption).toHaveText(STORY_LINES.question);
+  await page.getByTestId('story-skip').click();
+  await expect(caption).toHaveText(STORY_LINES.continuous, { timeout: 10_000 });
+  await page.getByTestId('story-skip').click();
+  await expect(caption).toHaveText(STORY_LINES.breaking, { timeout: 10_000 });
+  // Just begun: back goes to the scene before.
+  await page.getByTestId('story-back').click();
+  await expect(caption).toHaveText(STORY_LINES.continuous, { timeout: 10_000 });
+  // Well into it: back restarts it.
+  await expect(caption).toHaveText(STORY_LINES.paced, { timeout: 30_000 });
+  await page.getByTestId('story-back').click();
+  await expect(caption).toHaveText(STORY_LINES.continuous, { timeout: 10_000 });
+  // The arrow keys do the same.
+  await page.keyboard.press('ArrowRight');
+  await expect(caption).toHaveText(STORY_LINES.breaking, { timeout: 10_000 });
+  expect(errors).toEqual([]);
+});
+
+test('skipping the last scene ends the story, with the Playground explained and a way home', async ({ page }, info) => {
+  await page.goto('/story?autoplay=1&rate=4');
+  const caption = page.getByTestId('story-caption');
+  await expect(caption).toHaveText(STORY_LINES.question);
+  for (let i = 0; i < 4; i++) await page.getByTestId('story-skip').click();
+  await expect(page.getByTestId('story')).toHaveAttribute('data-phase', 'ended', { timeout: 10_000 });
+  await expect(caption).toHaveText(STORY_LINES.work);
+  await expect(page.getByTestId('story-pitch')).toBeVisible();
+  await expect(page.getByTestId('story-home')).toHaveAttribute('href', 'https://duckstring.com');
+  for (const id of ['story-pitch', 'story-replay', 'story-home']) await onScreen(page, id, id);
+  await page.waitForTimeout(600); // the buttons fade in
+  await page.screenshot({ path: info.outputPath('end.png') });
+  // Back from the end replays the last scene.
+  await page.getByTestId('story-back').click();
+  await expect(caption).toHaveText(STORY_LINES.trickle, { timeout: 10_000 });
+});

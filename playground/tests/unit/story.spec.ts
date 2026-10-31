@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { usePlaygroundStore } from '../../src/lib/store';
-import { inSwitchWindow, setUpStory } from '../../src/lib/story';
+import { fastForward, inSwitchWindow, setUpStory, STORY_SCENES } from '../../src/lib/story';
 import { pondByName } from '../../src/lib/tourSteps';
 
 // The story switches `reports` from every 6 s to continuous only inside inSwitchWindow, because other moments can
@@ -67,4 +67,35 @@ test('outside the window, the switch can lock the staler rhythm (so the window m
   get().setRefresh(reports, { everyMs: 0 });
   advance(60000);
   expect(meanAge(reports, get().now - 30000)).toBeGreaterThan(9500);
+});
+
+// Back and skip start a scene from the state fastForward replays to, off screen. Each scene has to start from what
+// the story would have shown by then.
+test('fast-forwarding reaches the state each scene starts from', async () => {
+  const every = (ref: string) => get().refreshes[pondByName(get(), ref)!]?.[0]?.everyMs;
+
+  setUpStory(get);
+  let reached = await fastForward(get, 1);
+  expect(every('reports')).toBe(6000);
+  expect(every('forecast')).toBe(18000);
+  expect(get().pondStates[pondByName(get(), 'forecast')!].runsCompleted).toBeGreaterThanOrEqual(2);
+  expect(reached).toEqual({ speed: 2, chart: pondByName(get(), 'sales') });
+
+  setUpStory(get);
+  reached = await fastForward(get, 2);
+  expect(every('reports')).toBe(0);
+  expect(reached).toEqual({ speed: 2, chart: pondByName(get(), 'reports') });
+
+  setUpStory(get);
+  reached = await fastForward(get, 3);
+  const names = Object.values(get().ponds).map((p) => `${p.name}@${p.major ?? 1}`).sort();
+  expect(names).toEqual(['forecast@2', 'products@1', 'reports@2', 'sales@2', 'transactions@1']);
+  expect(every('reports@2')).toBe(0);
+  expect(every('forecast@2')).toBe(18000);
+  expect(reached).toEqual({ speed: 1, chart: null });
+
+  setUpStory(get);
+  const t = performance.now();
+  await fastForward(get, STORY_SCENES.length - 1);
+  expect(performance.now() - t, 'a jump to the last scene is quick').toBeLessThan(1000);
 });

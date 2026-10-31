@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { ReactFlowProvider, useReactFlow } from '@xyflow/react';
 import { track } from '@vercel/analytics';
 import { usePlaygroundStore, THEME_BRAND } from '@/lib/store';
-import { holdMs, playStory, setUpStory, type SayOptions, type StoryCtx } from '@/lib/story';
+import { fastForward, holdMs, LAST_LINE, setUpStory, STORY_SCENES, type SayOptions, type StoryCtx } from '@/lib/story';
 import type { PondId } from '@/lib/types';
 import { DagCanvas } from '../DagCanvas';
 import { TraceChart } from '../TraceChart';
@@ -18,9 +18,12 @@ import { JoinGrid } from '../trickle/JoinGrid';
 // ?autoplay=1 starts at once (the landing page loads it on a click); otherwise a Play button waits. ?rate=N runs the
 // whole story N times faster (the tests). It pauses itself while scrolled out of view or in a hidden tab.
 // It can fill the screen (useExpand): a button, or on a touch screen the first tap while it plays.
+// Back and skip (buttons, or the arrow keys) move between scenes: back restarts the scene, or goes to the one before
+// if it has only just begun; skip goes to the next, or to the end from the last.
 
 const MONO = 'ui-monospace, SFMono-Regular, monospace';
 const BG = '#0f0f14';
+const BACK_RESTARTS_AFTER = 3000; // story ms into a scene: before this, back goes to the scene before
 
 class Stopped extends Error {}
 
@@ -123,12 +126,18 @@ function StoryInner() {
   const holding = useRef(false); // a line is up and the pipeline paused for it
   const skip = useRef(false);
   const speedX = useRef(1);
-  const run = useRef(0); // bumped to stop a run (restart, unmount)
+  const run = useRef(0); // bumped to stop a run (restart, jump, unmount)
+  const scene = useRef({ index: 0, start: 0 }); // the scene playing, and the story time it began
   const caption = useRef<Caption>('hidden');
 
   const running = phase === 'playing' && !userPaused && !hidden;
   const expand = useExpand();
   const tapExpands = expand.touch && expand.canExpand && !expand.expanded;
+  const [embedded, setEmbedded] = useState(false);
+  useEffect(() => {
+    const t = window.setTimeout(() => setEmbedded(window.parent !== window), 0);
+    return () => window.clearTimeout(t);
+  }, []);
 
   const syncSim = useCallback(() => {
     const st = usePlaygroundStore.getState();
@@ -331,23 +340,87 @@ function StoryInner() {
     syncSim();
   }, [syncSim]);
 
-  const start = useCallback(() => {
-    reset();
-    const token = run.current;
-    setPhase('playing');
-    setUserPaused(false);
-    track('Story', { event: 'start' });
-    playStory(makeCtx(token))
-      .then(() => {
+  // Plays from scene `from` to the end. A later scene starts from the state the ones before it reach (fastForward).
+  const playFrom = useCallback(
+    async (from: number) => {
+      reset();
+      const token = run.current;
+      setPhase('playing');
+      setUserPaused(false);
+      try {
+        if (from > 0) {
+          const reached = await fastForward(usePlaygroundStore.getState, from);
+          if (token !== run.current) return;
+          speedX.current = reached.speed;
+          setFast(reached.speed !== 1);
+          setChartPond(reached.chart);
+          syncSim();
+        }
+        const ctx = makeCtx(token);
+        for (let i = from; i < STORY_SCENES.length; i++) {
+          scene.current = { index: i, start: clock.current.t };
+          await STORY_SCENES[i](ctx);
+        }
         if (token !== run.current) return;
         setPhase('ended');
         setEnding(true);
         track('Story', { event: 'end' });
-      })
-      .catch((e) => {
+      } catch (e) {
         if (!(e instanceof Stopped)) throw e;
-      });
-  }, [reset, makeCtx]);
+      }
+    },
+    [reset, makeCtx, syncSim]
+  );
+
+  const start = useCallback(() => {
+    track('Story', { event: 'start' });
+    void playFrom(0);
+  }, [playFrom]);
+
+  // Skipping the last scene ends the story where it would have: its last line up, centred, over the end buttons.
+  const finish = useCallback(() => {
+    run.current += 1;
+    holding.current = true;
+    setRings([]);
+    setGridOn(false);
+    setChartPond(null);
+    const cap = capRef.current;
+    if (cap) {
+      cap.textContent = LAST_LINE;
+      cap.style.opacity = '1';
+    }
+    caption.current = 'centred';
+    place(true, false);
+    setDim(true);
+    syncSim();
+    setPhase('ended');
+    setEnding(true);
+  }, [place, syncSim]);
+
+  const back = useCallback(() => {
+    const { index, start: begun } = scene.current;
+    const to = phase === 'ended' ? STORY_SCENES.length - 1 : clock.current.t - begun > BACK_RESTARTS_AFTER ? index : Math.max(0, index - 1);
+    track('Story', { event: 'back', scene: to + 1 });
+    void playFrom(to);
+  }, [phase, playFrom]);
+
+  const next = useCallback(() => {
+    const to = scene.current.index + 1;
+    track('Story', { event: 'skip', scene: to + 1 });
+    if (to < STORY_SCENES.length) void playFrom(to);
+    else finish();
+  }, [playFrom, finish]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowLeft' && phase !== 'ready') back();
+      else if (e.key === 'ArrowRight' && phase === 'playing') next();
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [phase, back, next]);
 
   useEffect(() => {
     setUpStory(usePlaygroundStore.getState);
@@ -451,10 +524,16 @@ function StoryInner() {
 
       {phase !== 'ready' && (
         <div style={{ position: 'absolute', right: 10, top: 8, display: 'flex', gap: 6 }}>
+          <IconButton label="Back" testId="story-back" onClick={back}>
+            ⏮
+          </IconButton>
           {phase === 'playing' && (
             <>
               <IconButton label={userPaused ? 'Play' : 'Pause'} testId="story-pause" onClick={() => setUserPaused((p) => !p)}>
                 {userPaused ? '▶' : '❚❚'}
+              </IconButton>
+              <IconButton label="Skip" testId="story-skip" onClick={next}>
+                ⏭
               </IconButton>
               <IconButton
                 label="Start again"
@@ -497,27 +576,45 @@ function StoryInner() {
             right: 0,
             top: `calc(50% + ${Math.max(44, fs * 3)}px)`,
             display: 'flex',
-            justifyContent: 'center',
-            flexWrap: 'wrap',
-            gap: 10,
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 12,
             padding: '0 16px',
             opacity: ending ? 1 : 0,
             transition: 'opacity 500ms ease',
           }}
         >
-          <button
-            data-testid="story-replay"
-            onClick={() => {
-              track('Story', { event: 'replay' });
-              start();
-            }}
-            style={bigButton(false)}
-          >
-            ↺ Watch again
-          </button>
-          <a href="/" target="_blank" rel="noopener noreferrer" onClick={() => track('Story', { event: 'playground' })} style={bigButton(true)}>
-            Try the Playground ↗
-          </a>
+          <div data-testid="story-pitch" style={{ fontSize: 13, lineHeight: 1.5, color: '#a1a1aa', textAlign: 'center', maxWidth: 460 }}>
+            The Playground is this pipeline in your browser, to change and run yourself, with a guided tour.
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'center', flexWrap: 'wrap', gap: 10 }}>
+            <button
+              data-testid="story-replay"
+              onClick={() => {
+                track('Story', { event: 'replay' });
+                start();
+              }}
+              style={bigButton(false)}
+            >
+              ↺ Watch again
+            </button>
+            {/* Embedded, the story is already on the home page. */}
+            {!embedded && (
+              <a
+                data-testid="story-home"
+                href="https://duckstring.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => track('Story', { event: 'home' })}
+                style={bigButton(false)}
+              >
+                About Duckstring ↗
+              </a>
+            )}
+            <a href="/" target="_blank" rel="noopener noreferrer" onClick={() => track('Story', { event: 'playground' })} style={bigButton(true)}>
+              Try the Playground ↗
+            </a>
+          </div>
         </div>
       )}
     </div>
