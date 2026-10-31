@@ -122,7 +122,8 @@ def test_an_aggregate_is_offered_as_its_accumulator_state(db, sources, tmp_path)
     assert list(t.offered[0].schema())[:3] == ["product_id", "_a_cnt", "_a_sum_0"]
     for table in ("local", "_duckstring_agg_local"):
         for a, b in zip(rows(db, table), rows(db, table.replace("local", "remote")), strict=True):
-            assert a == pytest.approx(b, rel=1e-12)  # float accumulators may differ in the last bit
+            # Float accumulators may differ in the last bit; keys compare exactly (pytest 9.2's approx refuses a str).
+            assert [x if isinstance(x, str) else pytest.approx(x, rel=1e-12) for x in a] == list(b)
 
 
 def test_sql_runs_at_the_terminal(db, sources, tmp_path):
