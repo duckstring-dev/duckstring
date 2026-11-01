@@ -76,7 +76,7 @@ CREATE TABLE pond_state (
     d_ms              INTEGER NOT NULL DEFAULT 0,
     has_pull          INTEGER NOT NULL DEFAULT 0,
     has_received_pull INTEGER NOT NULL DEFAULT 0,
-    -- Fault tolerance runtime (see docs/guide/theory.md "Fault Tolerance").
+    -- Fault tolerance runtime (see "Fault tolerance" in CLAUDE.md).
     is_failed         INTEGER NOT NULL DEFAULT 0,  -- a Pond Run gave up, not yet superseded
     is_blocked        INTEGER NOT NULL DEFAULT 0,  -- this Pond, or a required Source, is failed/blocked/killed
     failed_f          TEXT,                        -- freshness of the freshest failed Run (NULL if none)

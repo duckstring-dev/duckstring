@@ -46,6 +46,45 @@ const config: Config = {
   },
 
   themes: ['@docusaurus/theme-mermaid'],
+  plugins: [
+    [
+      // Pages from before the docs rewrite (and the removed Orchestration Theory spec), sent to where their
+      // content lives now, since old links and search results still reach them.
+      '@docusaurus/plugin-client-redirects',
+      {
+        redirects: [
+          {to: '/concepts/orchestration', from: ['/concepts/freshness', '/getting-started/playground', '/old/concepts/freshness', '/old/getting-started/playground', '/reference/orchestration_theory', '/reference/theory', '/theory']},
+          {to: '/concepts/trickles', from: ['/concepts/trickle', '/incremental-theory', '/old/concepts/trickle']},
+          {to: '/concepts/catchments', from: ['/concepts/catchment', '/old/concepts/catchment']},
+          {to: '/concepts/ponds', from: ['/concepts/versioning', '/old/concepts/versioning']},
+          {to: '/concepts/management_and_execution', from: ['/old/reference/architecture', '/reference/architecture']},
+          {to: '/', from: ['/intro']},
+          {to: '/quickstart', from: ['/getting-started/installation', '/getting-started/quickstart', '/old/getting-started/installation', '/old/getting-started/quickstart']},
+          {to: '/guides/testing_with_puddles', from: ['/concepts/puddles', '/guides/local-testing', '/old/concepts/puddles', '/old/guides/local-testing']},
+          {to: '/guides/cloud_compute_on_aws', from: ['/guides/cloud', '/old/guides/cloud']},
+          {to: '/guides/connecting_catchments', from: ['/guides/connecting-catchments', '/old/guides/connecting-catchments']},
+          {to: '/guides/writing_ripples', from: ['/guides/creating-a-pond', '/old/guides/creating-a-pond']},
+          {to: '/guides/dbt_projects', from: ['/guides/dbt', '/old/guides/dbt']},
+          {to: '/guides/upgrades', from: ['/guides/deploying', '/old/guides/deploying']},
+          {to: '/guides/ingesting_data', from: ['/guides/external-pipelines', '/old/guides/external-pipelines']},
+          {to: '/guides/monitoring_and_failures', from: ['/guides/fault-tolerance', '/old/guides/fault-tolerance']},
+          {to: '/guides/append_and_merge', from: ['/guides/incremental-ripples', '/guides/trickle', '/old/guides/incremental-ripples', '/old/guides/trickle']},
+          {to: '/guides/querying', from: ['/guides/querying-data', '/old/guides/querying-data']},
+          {to: '/guides/running_on_a_server', from: ['/guides/running-a-catchment', '/guides/web-ui', '/old/guides/running-a-catchment', '/old/guides/web-ui']},
+          {to: '/guides/scheduling', from: ['/guides/triggers', '/guides/windows', '/old/guides/triggers', '/old/guides/windows']},
+          {to: '/reference/cli/control', from: ['/guides/control', '/old/guides/control', '/reference/cli/do']},
+          {to: '/reference/cli/data', from: ['/guides/lineage', '/old/guides/lineage', '/reference/cli/serve']},
+          {to: '/reference/cli/pond', from: ['/reference/cli/puddle']},
+          {to: '/reference/cli/refresh', from: ['/reference/cli/tap', '/reference/cli/trigger']},
+          {to: '/reference/http_api', from: ['/old/reference/http-api', '/reference/http-api']},
+          {to: '/reference/pond_toml', from: ['/old/reference/pond-toml', '/reference/pond-toml']},
+          {to: '/reference/python/decorators', from: ['/old/reference/python-api', '/reference/python-api']},
+          {to: '/concepts/ripples', from: ['/old/concepts/ripples']},
+          {to: '/reference/cli', from: ['/old/reference/cli']},
+        ],
+      },
+    ],
+  ],
 
   presets: [
     [
