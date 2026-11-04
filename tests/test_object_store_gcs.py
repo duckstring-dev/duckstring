@@ -8,7 +8,8 @@ Two halves, two stand-ins, since no one emulator serves both:
   Google's own server accepts the token: that is DuckDB's contract with Google, checked by the real-account
   smoke test.
 - **fsspec** (gcsfs: listing, sidecars, leases, deletes) speaks the JSON API. It runs against fake-gcs-server
-  when ``DUCKSTRING_TEST_GCS`` names one (CI starts it), else skips.
+  when ``DUCKSTRING_TEST_GCS`` names one (CI starts it), else skips. Set ``GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false``
+  with it: gcsfs otherwise probes each bucket's layout over gRPC with TLS, which the emulator doesn't serve.
 """
 
 from __future__ import annotations
