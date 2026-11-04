@@ -229,8 +229,8 @@ def init(
     ),
     data_root: Optional[str] = typer.Option(
         None, "--data-root", help="Where published tables are stored: a local path, or a URI such as "
-                                  "s3://, gs://, abfss:// or /Volumes/. Credentials as ${env:NAME} in the "
-                                  "URI query. Defaults to under --root."
+                                  "s3://, gs://, az://, abfss:// or /Volumes/. Credentials as ${env:NAME} in "
+                                  "the URI query. Defaults to under --root."
     ),
     state_backup: Optional[str] = typer.Option(
         None, "--state-backup", help="Where to copy state checkpoints (object store or path), so a "
@@ -376,12 +376,13 @@ def rotate_keys(
 def settings(
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
     data_root: Optional[str] = typer.Option(
-        None, "--data-root", help="Set where published tables are stored: s3://, gs:// or a shared path."),
+        None, "--data-root", help="Set where published tables are stored: s3://, gs://, az://, abfss:// or a "
+                                  "shared path."),
 ) -> None:
     """Show the Catchment's cloud configuration, or set where published tables are stored.
 
     The data root can only be changed before any Pond has published data. Cloud compute is enabled once the
-    data root is remote and AWS credentials are available.
+    data root is in S3 or Google Cloud Storage and AWS credentials are available.
     """
     from . import _http
     from .config import resolve_catchment

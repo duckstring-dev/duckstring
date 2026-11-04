@@ -26,7 +26,7 @@ Creates a Catchment on this machine, registers it under `NAME`, offers to make i
 | `--host` | `127.0.0.1` | Address to bind. |
 | `--port`, `-p` | `7474` | Port to listen on. The web UI is served at the same address. |
 | `--root` | `~/.duckstring/{name}` | Directory for the Catchment's state (its database, run ledgers and working databases). Must be a local path. |
-| `--data-root` | under `--root` | Where published tables are stored: a local path or an object-store URI (`s3://`, `gs://`, `abfss://`, `/Volumes/...`). Credentials go in the URI query as `${env:NAME}`. See [Formats](../formats.md#data-root-uris). |
+| `--data-root` | under `--root` | Where published tables are stored: a local path or an object-store URI (`s3://`, `gs://`, `az://`, `abfss://`, `/Volumes/...`). Credentials go in the URI query as `${env:NAME}`. See [Formats](../formats.md#data-root-uris). |
 | `--state-backup` | none | An object-store URI or path to copy state checkpoints to, so a Catchment on a disposable machine can recover its state. |
 | `--checkpoint-every` | `60s` | How often the state database is copied to `--state-backup`. |
 | `--key` | none | A single full-access API key the server requires. The registration stores it so the CLI sends it. |
@@ -93,7 +93,7 @@ Removes a registration. For a Catchment on this machine, asks whether to delete 
 duckstring catchment settings [-c NAME] [--data-root URI]
 ```
 
-Shows the Catchment's cloud configuration, including whether cloud compute is enabled. With `--data-root`, sets where published tables are stored (`s3://`, `gs://` or a shared path). The data root can only be changed before any Pond has published data. Cloud compute is enabled once the data root is remote and AWS credentials are available to the Catchment.
+Shows the Catchment's cloud configuration, including whether cloud compute is enabled. With `--data-root`, sets where published tables are stored (`s3://`, `gs://`, `az://`, `abfss://` or a shared path). The data root can only be changed before any Pond has published data. Cloud compute is enabled once the data root is in S3 or Google Cloud Storage and AWS credentials are available to the Catchment.
 
 ### `rotate-keys`
 

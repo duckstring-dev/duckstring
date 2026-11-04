@@ -38,7 +38,7 @@ duckstring secret set PARTNER_SECRET
 duckstring spout add reports --to 's3://partner-drop/duckstring?region=eu-west-2&key_id=${secret:PARTNER_KEY_ID}&secret=${secret:PARTNER_SECRET}'
 ```
 
-Quote the URI in single quotes so the shell leaves `${...}` alone. References are resolved only when delivering; the Spout stores the reference, and neither `spout ls` nor the UI ever shows a value. `${env:NAME}` reads an environment variable on the Catchment instead. Google Cloud Storage needs HMAC keys as `key_id` and `secret`. S3-compatible stores take `endpoint=`; see [Destination URIs](../reference/formats.md#destination-uris).
+Quote the URI in single quotes so the shell leaves `${...}` alone. References are resolved only when delivering; the Spout stores the reference, and neither `spout ls` nor the UI ever shows a value. `${env:NAME}` reads an environment variable on the Catchment instead. Google Cloud Storage (`gs://`) and Azure (`az://`, `abfss://`) take their own credential parameters, and S3-compatible stores take `endpoint=`; see [Destination URIs](../reference/formats.md#destination-uris).
 
 By default each delivery rewrites the whole table. For a large append Trickle, `--mode append` copies only each run's new files, keeping Duckstring's file layout in the destination, which suits a consumer reading with DuckDB or another Parquet reader.
 

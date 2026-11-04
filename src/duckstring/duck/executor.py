@@ -312,6 +312,9 @@ class RippleExecutor(RunInputs):
 
         def _task():
             timing["started"] = datetime.now(timezone.utc)
+            # Rewrite the registry's object-store secret: a hydrated registry's views read published files, and
+            # a Google access token set when the Duck started expires after an hour.
+            self.own_data_dir.duckdb_setup(self._registry)
             func, pond = _load_ripple(self.source_path, str(self.root), ripple_name)
             # Over-envelope offload happens inside the ripple, at the pond.trickle(...) terminals
             # (the Flock seam — duckstring.flock, env-gated, engine-pluggable). The executor just

@@ -8,9 +8,11 @@ driver removes before attaching (other query parameters, such as a Postgres cata
     ducklake:/srv/lake/meta.ducklake
 
 Options: ``data_path`` (where a new lake keeps its files; an existing lake remembers its own), ``schema``
-(default ``main``), and for an ``s3://``/``gs://`` data path the object-store credentials (``key_id``,
-``secret``, ``session_token``, ``region``, ``endpoint``, ``use_ssl``, ``url_style``; with none, ``s3://``
-uses the AWS credential chain), read exactly as an object-store Spout reads them.
+(default ``main``), and for an object-store data path its credentials (``s3://``/``gs://``: ``key_id``,
+``secret``, ``session_token``, ``region``, ``endpoint``, ``use_ssl``, ``url_style``; ``gs://``: ``credentials``;
+Azure: ``account_name``, ``account_key``, ``connection_string``, ``sas_token``, ``tenant_id``,
+``client_id``, ``client_secret``; with none, each cloud's ambient credentials), read exactly as an object-store
+Spout reads them.
 
 Every source works. A merge Trickle's changelog window is applied by its key, an append Trickle's window is
 inserted, and an overwrite table is replaced whole when its version advances, each in one transaction with
@@ -35,7 +37,10 @@ from .base import Capabilities
 from .destination import Destination
 
 _ALIAS = "duckstring_egress_lake"
-_CREDENTIALS = ("key_id", "secret", "session_token", "region", "endpoint", "use_ssl", "url_style")
+_CREDENTIALS = ("key_id", "secret", "session_token", "region", "endpoint", "use_ssl", "url_style",
+                "credentials",
+                "account_name", "account_key", "connection_string", "sas_token", "tenant_id", "client_id", "client_secret")
+_STORE_SCHEMES = ("s3", "gs", "az", "abfs", "abfss")
 _OPTIONS = {"data_path", "schema", *_CREDENTIALS}
 
 
@@ -74,12 +79,12 @@ class DuckLakeEgressDriver(AttachedCatalogDriver):
         return re.sub(r"(://[^:/@\s]+:)[^@\s]+@", r"\1***@", message)
 
     def _data_store(self, options: dict[str, str]):
-        """The object-store driver for an ``s3://``/``gs://`` data path, for its credentials, else None."""
+        """The object-store driver for an object-store data path, for its credentials, else None."""
         from .object_store import ObjectStoreEgressDriver
 
         path = options.get("data_path", "")
         scheme = path.partition("://")[0].lower()
-        if scheme not in ("s3", "gs"):
+        if scheme not in _STORE_SCHEMES:
             return None
         creds = {k: options[k] for k in _CREDENTIALS if k in options}
         return ObjectStoreEgressDriver(Destination(scheme=scheme, raw=path + ("?" + urlencode(creds) if creds else "")))

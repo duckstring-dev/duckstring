@@ -10,11 +10,13 @@ Two write shapes, chosen by the Spout's ``mode``:
   Duckstring-layout consumer (``ParquetDataPlane.read_select``, a downstream Catchment).
 
 - ``file://`` — local path, written atomically (tmp + ``os.replace``).
-- ``s3://`` / ``gs://`` — snapshots via DuckDB ``httpfs`` + the secret manager; mirrors via the
-  :mod:`duckstring.storage` fsspec layer (byte-copies, listing, deletes). Credentials come from the URI
-  query (``?key_id=${env:..}&secret=${env:..}&region=..``, resolved at egress time); with none given,
-  ``s3://`` falls back to the AWS credential chain (env / instance profile). A single PUT / completed
-  multipart upload is effectively atomic, so target keys are written directly.
+- ``s3://`` / ``gs://`` / ``az://`` / ``abfss://``: snapshots via DuckDB (``httpfs``, or ``azure``) + the
+  secret manager; mirrors via the :mod:`duckstring.storage` fsspec layer (byte-copies, listing, deletes).
+  Credentials come from the URI query (``?key_id=${env:..}&secret=${env:..}&region=..``, resolved at
+  egress time); with none given, each cloud's ambient credentials are used (the AWS chain, Google's
+  application default credentials, the Azure default chain). The ``gs://`` and Azure secrets are the data
+  plane's (:func:`duckstring.storage.duckdb_secret_sql`). A single PUT / completed multipart upload (or
+  committed block list) is effectively atomic, so target keys are written directly.
 """
 
 from __future__ import annotations
@@ -43,7 +45,7 @@ def _q(value: str) -> str:
 
 
 class ObjectStoreEgressDriver:
-    SCHEMES = ("file", "s3", "gs")
+    SCHEMES = ("file", "s3", "gs", "az", "abfs", "abfss")
 
     def __init__(self, dest: Destination):
         self.dest = dest
@@ -109,7 +111,10 @@ class ObjectStoreEgressDriver:
         )
 
         t = _safe_table(table)
-        dest = get_storage(credentials.resolve(self.dest.raw))
+        # The query stays unresolved: the storage layer resolves each parameter after splitting it (see _query).
+        raw = credentials.resolve(self.dest.raw) if credentials.whole_reference(self.dest.raw) else self.dest.raw
+        base, sep, query = raw.partition("?")
+        dest = get_storage(credentials.resolve(base) + sep + query)
         dest.mkdir()
         dest_sidecar = load_sidecar(dest)
         dest_entry = dest_sidecar.get(t) if isinstance(dest_sidecar.get(t), dict) else {}
@@ -164,8 +169,8 @@ class ObjectStoreEgressDriver:
 
     def test_connection(self, con) -> None:
         """Probe without writing data: ``file://`` does a write+delete probe in the target directory
-        (so it exactly tests the write permission egress needs); ``s3://``/``gs://`` configure httpfs +
-        the secret and list the prefix (credentials resolve, the bucket is reachable + authorised)."""
+        (so it exactly tests the write permission egress needs); an object store configures DuckDB and
+        the secret and lists the prefix (credentials resolve, the bucket is reachable + authorised)."""
         if self.dest.scheme == "file":
             base = self._file_base()
             base.mkdir(parents=True, exist_ok=True)
@@ -200,7 +205,7 @@ class ObjectStoreEgressDriver:
             )
         return Path(u.path)
 
-    # ─── s3:// / gs:// ───────────────────────────────────────────────────────
+    # ─── s3:// / gs:// / az:// / abfss:// ─────────────────────────────────────
 
     def _remote_target(self, table: str) -> str:
         """``{scheme}://{bucket}/{prefix}/{table}.parquet`` — the target key, with no credential query
@@ -212,54 +217,66 @@ class ObjectStoreEgressDriver:
         key = f"{prefix}/{table}.parquet" if prefix else f"{table}.parquet"
         return f"{self.dest.scheme}://{u.netloc}/{key}"
 
-    def _secret_sql(self) -> str:
-        """A ``CREATE OR REPLACE SECRET`` from the destination's query params (``${env}`` resolved).
-        s3 with no key falls back to ``credential_chain``; gs requires HMAC key_id + secret."""
-        u = urlparse(credentials.resolve(self.dest.raw))
-        q = {k.lower(): v[0] for k, v in parse_qs(u.query).items()}
+    def _secret_sql(self) -> str | None:
+        """A ``CREATE OR REPLACE SECRET`` from the destination's query params (``${env}`` resolved), or None
+        when no secret is needed (an anonymous ``gs://``). s3 with no key falls back to ``credential_chain``;
+        gs:// and Azure use the data plane's secret (Google or Azure credentials, or HMAC keys for gs)."""
+        q = self._query()
+        if self.dest.scheme != "s3":
+            from ..storage import duckdb_secret_sql
+
+            return duckdb_secret_sql(self._base_uri(), q, name=_SECRET)[1]
         clauses: list[str] = []
 
         def add(qkey: str, name: str) -> None:
             if qkey in q:
                 clauses.append(f"{name} {_q(q[qkey])}")
 
-        if self.dest.scheme == "gs":
-            if "key_id" not in q or "secret" not in q:
-                raise ValueError(
-                    "gs:// egress needs HMAC credentials in the URI: ?key_id=${env:...}&secret=${env:...}"
-                )
-            clauses += ["TYPE gcs"]
+        clauses.append("TYPE s3")
+        if "key_id" in q or "secret" in q:
             add("key_id", "KEY_ID")
             add("secret", "SECRET")
-        else:  # s3
-            clauses.append("TYPE s3")
-            if "key_id" in q or "secret" in q:
-                add("key_id", "KEY_ID")
-                add("secret", "SECRET")
-                add("session_token", "SESSION_TOKEN")
-            else:
-                clauses.append("PROVIDER credential_chain")
-            add("region", "REGION")
-            # An S3-compatible endpoint (MinIO, Ceph, R2), from ?endpoint= or DUCKSTRING_S3_ENDPOINT, read
-            # the way the data plane reads it: DuckDB wants host:port, USE_SSL from the scheme, path style.
-            from ..storage import _s3_endpoint, _split_endpoint
+            add("session_token", "SESSION_TOKEN")
+        else:
+            clauses.append("PROVIDER credential_chain")
+        add("region", "REGION")
+        # An S3-compatible endpoint (MinIO, Ceph, R2), from ?endpoint= or DUCKSTRING_S3_ENDPOINT, read
+        # the way the data plane reads it: DuckDB wants host:port, USE_SSL from the scheme, path style.
+        from ..storage import _s3_endpoint, _split_endpoint
 
-            endpoint = _s3_endpoint(q)
-            if endpoint:
-                host, ssl = _split_endpoint(endpoint)
-                clauses.append(f"ENDPOINT {_q(host)}")
-                ssl = q["use_ssl"].lower() in ("1", "true", "yes") if "use_ssl" in q else ssl
-                clauses.append(f"USE_SSL {'true' if ssl else 'false'}")
-                clauses.append(f"URL_STYLE {_q(q.get('url_style', 'path'))}")
-            else:
-                add("url_style", "URL_STYLE")
-                if "use_ssl" in q:
-                    clauses.append(f"USE_SSL {'true' if q['use_ssl'].lower() in ('1', 'true', 'yes') else 'false'}")
+        endpoint = _s3_endpoint(q)
+        if endpoint:
+            host, ssl = _split_endpoint(endpoint)
+            clauses.append(f"ENDPOINT {_q(host)}")
+            ssl = q["use_ssl"].lower() in ("1", "true", "yes") if "use_ssl" in q else ssl
+            clauses.append(f"USE_SSL {'true' if ssl else 'false'}")
+            clauses.append(f"URL_STYLE {_q(q.get('url_style', 'path'))}")
+        else:
+            add("url_style", "URL_STYLE")
+            if "use_ssl" in q:
+                clauses.append(f"USE_SSL {'true' if q['use_ssl'].lower() in ('1', 'true', 'yes') else 'false'}")
         return f"CREATE OR REPLACE SECRET {_SECRET} (" + ", ".join(clauses) + ")"
 
+    def _query(self) -> dict[str, str]:
+        """The destination's query parameters, lower-cased, each value's references resolved. Parsed before
+        resolving (unless the whole destination is one reference), so a credential holding ``+``, ``&`` or
+        ``=`` (an AWS secret key, a service-account key's JSON) arrives intact."""
+        raw = self.dest.raw
+        if credentials.whole_reference(raw):
+            raw = credentials.resolve(raw)
+        return {k.lower(): credentials.resolve(v[0]) for k, v in parse_qs(urlparse(raw).query).items()}
+
+    def _base_uri(self) -> str:
+        """The destination with its query removed and references resolved: what the secret is scoped to."""
+        u = urlparse(credentials.resolve(self.dest.raw))
+        return f"{u.scheme}://{u.netloc}{u.path}"
+
     def _prepare_remote(self, con) -> None:
-        con.execute("INSTALL httpfs; LOAD httpfs")  # offline/install errors surface (no credentials in them)
-        secret_sql = self._secret_sql()  # ValueError (gs creds) / CredentialError (missing env) surface — safe
+        extension = "azure" if self.dest.scheme in ("az", "abfs", "abfss") else "httpfs"
+        con.execute(f"INSTALL {extension}; LOAD {extension}")  # offline/install errors carry no credentials
+        secret_sql = self._secret_sql()  # ValueError / CredentialError (missing env) surface: safe
+        if secret_sql is None:
+            return  # anonymous
         try:
             con.execute(secret_sql)
         except Exception:

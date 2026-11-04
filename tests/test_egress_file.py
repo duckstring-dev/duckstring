@@ -114,10 +114,30 @@ def test_s3_secret_sql_falls_back_to_credential_chain():
     assert "PROVIDER credential_chain" in sql and "KEY_ID" not in sql
 
 
-def test_gs_secret_sql_requires_hmac_credentials():
-    assert "TYPE gcs" in get_egress("gs://b/p?key_id=GK&secret=GS")._secret_sql()
-    with pytest.raises(ValueError, match="HMAC credentials"):
-        get_egress("gs://bucket/prefix")._secret_sql()
+def test_gs_secret_sql_takes_hmac_keys_or_google_credentials(monkeypatch):
+    from duckstring import storage
+
+    sql = get_egress("gs://b/p?key_id=GK&secret=GS")._secret_sql()
+    assert sql == "CREATE OR REPLACE SECRET __duckstring_egress (TYPE GCS, KEY_ID 'GK', SECRET 'GS', SCOPE 'gs://b')"
+    monkeypatch.setattr(storage, "_google_token", lambda spec: "ya29.token")
+    assert "BEARER_TOKEN 'ya29.token'" in get_egress("gs://bucket/prefix")._secret_sql()
+    assert get_egress("gs://bucket/prefix?credentials=anon")._secret_sql() is None  # a public bucket
+
+
+def test_azure_destinations_are_accepted_and_write_under_their_prefix():
+    drv = get_egress("abfss://lake@acct.dfs.core.windows.net/exports/?client_id=c")
+    assert drv._remote_target("revenue") == "abfss://lake@acct.dfs.core.windows.net/exports/revenue.parquet"
+    sql = get_egress("az://lake/exports?account_name=acct")._secret_sql()
+    assert sql == ("CREATE OR REPLACE SECRET __duckstring_egress (TYPE AZURE, PROVIDER credential_chain, "
+                   "ACCOUNT_NAME 'acct', SCOPE 'az://lake')")
+
+
+def test_a_credential_holding_a_plus_reaches_the_secret_intact(monkeypatch):
+    """Query values are resolved after the query is parsed: resolving first let parse_qs turn a secret key's
+    ``+`` into a space (every AWS secret key with a ``+`` failed to sign)."""
+    monkeypatch.setenv("AWS_SECRET", "ab+cd/ef=&g")
+    sql = get_egress("s3://bucket/out?key_id=AK&secret=${env:AWS_SECRET}")._secret_sql()
+    assert "SECRET 'ab+cd/ef=&g'" in sql
 
 
 def test_remote_credentials_resolved_from_env_at_egress_time(monkeypatch):

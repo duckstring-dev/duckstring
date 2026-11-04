@@ -5,7 +5,7 @@ description: Every setting read from the environment.
 
 # Environment Variables
 
-These variables are read by the Catchment process, and passed on to its Ducks where relevant. Most have an equivalent CLI option on `catchment init`, which takes precedence when given. AWS credentials use the standard `AWS_*` variables, or `AWS_*` entries in the [secret store](cli/secret.md).
+These variables are read by the Catchment process, and passed on to its Ducks where relevant. Most have an equivalent CLI option on `catchment init`, which takes precedence when given. AWS credentials use the standard `AWS_*` variables, or `AWS_*` entries in the [secret store](cli/secret.md). A Google Cloud Storage or Azure data root reads Google's and Azure's own variables, such as `GOOGLE_APPLICATION_CREDENTIALS` and `AZURE_STORAGE_ACCOUNT_NAME`; see [Data root URIs](formats.md#data-root-uris).
 
 ## Catchment
 
