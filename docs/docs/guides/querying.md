@@ -71,7 +71,7 @@ The client queries one Pond at a time, at its highest deployed major version.
 
 ## From a BI tool or SQL client
 
-The Catchment can serve the catalog over the Postgres wire protocol, so psql, Metabase, Tableau and most Postgres drivers can connect. Enable it with an environment variable on the Catchment:
+The Catchment can serve the catalog over the Postgres wire protocol, so psql, Power BI, Metabase, Tableau and most Postgres drivers can connect. Enable it with an environment variable on the Catchment:
 
 ```bash
 DUCKSTRING_SERVE_PG_PORT=5433 DUCKSTRING_SERVE_HOST=0.0.0.0 duckstring catchment start prod
@@ -87,7 +87,35 @@ psql "host=catchment.internal port=5433 user=analyst dbname=duckstring password=
 SELECT * FROM reports_v1.monthly_summary;
 ```
 
-The key's level decides what's visible, as above. The password is sent in plain text, so only expose the port behind TLS or on a private network.
+The key's level decides what's visible, as above.
+
+The password is an API key, so encrypt the connection. Give the Catchment a certificate and its private key, as PEM files, and it accepts only encrypted connections:
+
+```bash
+DUCKSTRING_SERVE_PG_PORT=5433 DUCKSTRING_SERVE_HOST=0.0.0.0 \
+DUCKSTRING_SERVE_PG_TLS_CERT=/etc/duckstring/tls/cert.pem \
+DUCKSTRING_SERVE_PG_TLS_KEY=/etc/duckstring/tls/key.pem \
+duckstring catchment start prod
+```
+
+Clients then connect with `sslmode=require`, or `sslmode=verify-full` to also check the certificate. Without a certificate, keep the port on a private network or behind a proxy that handles TLS.
+
+### Power BI
+
+Connect with Power BI's own PostgreSQL connector:
+
+1. In Power BI Desktop, choose **Get Data**, then **PostgreSQL database**.
+2. Enter the Catchment's host and port as the server, such as `catchment.internal:5433`, and any database name, such as `duckstring`.
+3. Choose **Import** or **DirectQuery**.
+4. For credentials, choose **Database**, enter any user name, and an API key as the password.
+
+The navigator lists each Pond as a schema with its tables, in the same names as in SQL above.
+
+Power BI encrypts the connection by default and checks the certificate against the machine's trusted certificate authorities. Use a certificate from an authority the machine trusts, or install the Catchment's certificate in its Trusted Root Certification Authorities. Without a certificate, Power BI asks before connecting unencrypted.
+
+To refresh a published report, the Power BI service needs to reach the Catchment: directly, if the port is reachable from the internet, or through an on-premises data gateway that can reach it.
+
+In DirectQuery mode, Power BI queries the Catchment as people use the report. With a [Tap](serving_apps_with_taps.md)'s key as the password, those queries keep the Pond fresh while the report is in use. An imported report reads the data only when it refreshes, so schedule a recurring Refresh to land shortly before Power BI's scheduled refresh instead.
 
 For columnar results in Python, the same catalog is available over Arrow Flight (`DUCKSTRING_SERVE_FLIGHT_PORT`). The ticket is the SQL text:
 

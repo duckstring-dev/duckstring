@@ -200,6 +200,24 @@ jobs:
           # gcsfs 2026.x probes a bucket's layout over gRPC with TLS, which fake-gcs-server doesn't serve (60 s per probe).
           GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT: "false"
 
+  # The Postgres wire against Npgsql, the driver Power BI's PostgreSQL connector bundles (4.0.17, in Desktop and
+  # the on-premises gateway), and the current release: types in binary, parameters, pooled-connection resets, TLS
+  # and a logged Power BI session (tests/npgsql).
+  npgsql:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: pip install -e packages/trickle -e .[dev]
+      - run: pytest tests/test_pg_wire_npgsql.py tests/test_pg_wire.py -v -rs
+        env:
+          DUCKSTRING_TEST_NPGSQL: "4.0.17,10.0.3"
+
   # The StarRocks Flock engine against a real StarRocks (plans/flock-coverage.md): every construct the
   # engine sends is run on both StarRocks and DuckDB and must agree, through the engine's real path (sources
   # staged to MinIO, read with FILES(), the result unloaded with INSERT INTO FILES). StarRocks reaches MinIO
