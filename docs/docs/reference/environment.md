@@ -5,7 +5,7 @@ description: Every setting read from the environment.
 
 # Environment Variables
 
-These variables are read by the Catchment process, and passed on to its Ducks where relevant. Most have an equivalent CLI option on `catchment init`, which takes precedence when given. AWS credentials use the standard `AWS_*` variables, or `AWS_*` entries in the [secret store](cli/secret.md).
+These variables are read by the Catchment process, and passed on to its Ducks where relevant. Most have an equivalent CLI option on `catchment init`, which takes precedence when given. AWS credentials use the standard `AWS_*` variables, or `AWS_*` entries in the [secret store](cli/secret.md). A Google Cloud Storage or Azure data root reads Google's and Azure's own variables, such as `GOOGLE_APPLICATION_CREDENTIALS` and `AZURE_STORAGE_ACCOUNT_NAME`; see [Data root URIs](formats.md#data-root-uris).
 
 ## Catchment
 
@@ -49,8 +49,10 @@ Run only one Catchment process against a state directory, and only one Catchment
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_SERVE_PG_PORT` | none | Serve the catalog over the Postgres wire protocol on this port. |
+| `DUCKSTRING_SERVE_PG_TLS_CERT` | none | A PEM certificate (or chain) for the Postgres wire. With it, the server accepts only encrypted connections. |
+| `DUCKSTRING_SERVE_PG_TLS_KEY` | the certificate file | The PEM private key for `DUCKSTRING_SERVE_PG_TLS_CERT`, when it's in a file of its own. |
 | `DUCKSTRING_SERVE_FLIGHT_PORT` | none | Serve the catalog over Arrow Flight on this port, with the SQL as the ticket. Needs `pyarrow` with Flight support. |
-| `DUCKSTRING_SERVE_HOST` | `127.0.0.1` | Address both servers bind to. Put TLS and network restrictions in front of them when exposing them. |
+| `DUCKSTRING_SERVE_HOST` | `127.0.0.1` | Address both servers bind to. When exposing them, restrict network access, give the Postgres wire a certificate, and put TLS in front of Flight. |
 
 ## Flock
 

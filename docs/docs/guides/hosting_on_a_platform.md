@@ -76,6 +76,6 @@ Published tables are stored under the state directory by default, which makes th
 DUCKSTRING_DATA_ROOT=s3://acme-lake/duckstring?region=eu-west-2
 ```
 
-Tables then persist independently of the app, downloads stay small, and cloud compute becomes available (see [Cloud Compute on AWS](cloud_compute_on_aws.md)). Credentials come from the platform's AWS setup or from `${env:NAME}` references in the URI.
+Tables then persist independently of the app, downloads stay small, and cloud compute becomes available (see [Cloud Compute on AWS](cloud_compute_on_aws.md)). Credentials come from the platform's cloud setup or from `${env:NAME}` references in the URI. Google Cloud Storage and Azure work the same way; see [Data root URIs](../reference/formats.md#data-root-uris).
 
 A data root must belong to one Catchment. A Catchment that finds another live Catchment using its data root refuses to start. If you're sure the other one is gone, for example an old deployment that wasn't shut down cleanly, set `DUCKSTRING_FORCE_TAKEOVER=1` once to claim it.

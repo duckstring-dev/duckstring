@@ -58,6 +58,17 @@ aws = [
   "boto3>=1.34",
   "sqlglot>=30.21,<31",
 ]
+# Azure and Google Cloud (plans/azure-gcp.md): the fsspec half of an az:// / abfss:// or gs:// data root and
+# Spouts (DuckDB's own azure and httpfs extensions do the Parquet I/O), plus each cloud's credential library.
+# Remote compute on these clouds adds its SDKs here.
+azure = [
+  "adlfs>=2024.4",
+  "azure-identity>=1.15",
+]
+gcp = [
+  "gcsfs>=2024.2",
+  "google-auth[requests]>=2.20",
+]
 # The StarRocks Flock engine (plans/flock-coverage.md): the MySQL-protocol client, and sqlglot to translate
 # jobs. sqlglot is pinned to one major because what an engine is trusted with is measured against its
 # translations: re-run tests/test_flock_starrocks_conformance.py before widening it.
@@ -76,6 +87,10 @@ dev = [
   "sqlglot>=30.21,<31",
   "s3fs>=2023.1",
   "boto3>=1.34",
+  "adlfs>=2024.4",
+  "azure-identity>=1.15",
+  "gcsfs>=2024.2",
+  "google-auth[requests]>=2.20",
   "pg8000>=1.31",
   "pymysql>=1.1",
 ]

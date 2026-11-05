@@ -93,6 +93,24 @@ def test_spout_options_leave_the_attach_string(monkeypatch):
     assert drv._schema() == "sales"
 
 
+def test_a_lake_on_azure_or_google_storage_gets_their_credentials(monkeypatch):
+    """A DuckLake data path on Azure or GCS takes those clouds' credential options (plans/azure-gcp.md), which
+    leave the attach string and configure the store's secret."""
+    from duckstring import storage
+
+    monkeypatch.setenv("LAKE_AZ_KEY", "a2V5+/=")
+    drv = get_egress("ducklake:sqlite:/srv/meta.sqlite?data_path=az://lake/files/&account_name=acct"
+                     "&account_key=${env:LAKE_AZ_KEY}")
+    attach, options = drv._parts()
+    assert attach == "ducklake:sqlite:/srv/meta.sqlite"
+    sql = drv._data_store(options)._secret_sql()
+    assert "TYPE AZURE" in sql and "AccountKey=a2V5+/=" in sql and "SCOPE 'az://lake'" in sql
+
+    monkeypatch.setattr(storage, "_google_token", lambda spec: "ya29.token")
+    drv = get_egress("ducklake:sqlite:/srv/meta.sqlite?data_path=gs://bucket/files/")
+    assert "BEARER_TOKEN 'ya29.token'" in drv._data_store(drv._parts()[1])._secret_sql()
+
+
 def test_an_attach_error_keeps_its_detail_and_masks_credentials(monkeypatch):
     monkeypatch.setenv("LAKE_PG", "hunter2")
     drv = get_egress("ducklake:postgres:dbname=lake host=h password=${env:LAKE_PG}")

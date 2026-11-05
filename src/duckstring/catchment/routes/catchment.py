@@ -95,7 +95,7 @@ def get_migration(request: Request):
 
 
 class _SettingsBody(BaseModel):
-    data_root: str = ""       # an object-store URI (s3://…, gs://…) / path; empty → local (the state root)
+    data_root: str = ""       # an object-store URI (s3://…, gs://…, abfss://…) / path; empty → local
     confirm: str | None = None  # must equal the catchment name to SWITCH once a root / data already exists
     mode: str = "empty"       # "empty" (reset+dormant) | "adopt" (pick up the target) | "migrate" (copy+adopt)
 
@@ -124,7 +124,7 @@ def put_settings(request: Request, body: _SettingsBody):
                 "unchanged": True}
     # Guard against a bare/relative value (e.g. a bucket name with no scheme): it would resolve to a LOCAL
     # relative directory (created in the process cwd), not the intended object store. Require a recognised
-    # object-store URI (s3://…, gs://…) or an absolute path.
+    # object-store URI (s3://…, gs://…, az://…, abfss://…) or an absolute path.
     if new is not None:
         import os
         from urllib.parse import urlsplit
@@ -134,7 +134,8 @@ def put_settings(request: Request, body: _SettingsBody):
         candidate = urlsplit(new).path if new.startswith("file://") else new
         if not is_object_uri(new) and not os.path.isabs(os.path.expanduser(candidate)):
             raise HTTPException(status_code=422, detail=(
-                f"data_root must be an object-store URI (s3://…, gs://…) or an absolute path — got {new!r}. "
+                f"data_root must be an object-store URI (s3://…, gs://…, az://…, abfss://…) or an absolute path, "
+                f"not {new!r}. "
                 f"A bare name is treated as a LOCAL relative directory; an S3 bucket needs the s3:// prefix."))
     # A switch to a NON-local target is gated behind the catchment name once there's an existing root or
     # published data (so it isn't done by accident). Reverting to local (new is None) is the safe escape

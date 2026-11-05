@@ -84,15 +84,17 @@ async def _lifespan(app: FastAPI):
     driver.resume_incomplete()
 
     # Data-serving wire adapters (plans/data-serving.md): the Postgres wire (default) + Arrow Flight SQL,
-    # each on its own port when configured, sharing the sandboxed serving core. Put TLS + a network ACL
-    # in front for a hosted Catchment (the password is an API key).
+    # each on its own port when configured, sharing the sandboxed serving core. The password is an API key, so
+    # give the Postgres wire a certificate (it then refuses unencrypted clients), or put TLS + a network ACL in front.
     app.state.serve_wires = []
     pg_port = os.environ.get("DUCKSTRING_SERVE_PG_PORT")
     if pg_port:
-        from .pg_wire import PgWireServer
+        from .pg_wire import PgWireServer, tls_context
 
         pg = PgWireServer(driver, api_key=app.state.api_key,
-                          host=os.environ.get("DUCKSTRING_SERVE_HOST", "127.0.0.1"), port=int(pg_port))
+                          host=os.environ.get("DUCKSTRING_SERVE_HOST", "127.0.0.1"), port=int(pg_port),
+                          tls=tls_context(os.environ.get("DUCKSTRING_SERVE_PG_TLS_CERT"),
+                                          os.environ.get("DUCKSTRING_SERVE_PG_TLS_KEY")))
         pg.start()
         app.state.serve_wires.append(pg)
     flight_port = os.environ.get("DUCKSTRING_SERVE_FLIGHT_PORT")

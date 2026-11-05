@@ -103,7 +103,9 @@ By default, published tables are stored under the state directory on the server'
 duckstring catchment init --name prod --data-root 's3://acme-lake/duckstring?region=eu-west-2' ...
 ```
 
-An object-store data root is also what enables [cloud compute](cloud_compute_on_aws.md). One Catchment should own a data root; give each Catchment its own prefix.
+Amazon S3, Google Cloud Storage (`gs://`) and Azure (`az://`, `abfss://`) are supported, each with its extra installed (`pip install 'duckstring[aws]'`, `[gcp]` or `[azure]`). The server's own cloud credentials are used unless the URI names others; see [Data root URIs](../reference/formats.md#data-root-uris).
+
+An S3 or Google Cloud Storage data root is also what enables [cloud compute](cloud_compute_on_aws.md). One Catchment should own a data root; give each Catchment its own prefix.
 
 When disk space runs low, the Catchment frees space by removing the working databases of idle Ponds, which are rebuilt when next needed. The threshold is `DUCKSTRING_MIN_FREE_BYTES`, 1 GiB by default.
 
