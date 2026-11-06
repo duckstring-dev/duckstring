@@ -31,7 +31,7 @@ products = "1.1.0"
 | `puddles` | string | `"src/puddles.py"` | Path to the module defining the Puddles. |
 | `immediate_retries` | integer | `0` | How many times a failed Ripple is retried within the same Pond Run. |
 | `source_retries` | integer | `0` | How many times a failed Pond Run is retried when a Source next updates. |
-| `memory` | string | | The memory each Python Ripple holds outside DuckDB, such as `"6GB"`, unless the Ripple sets its own with `@ripple(memory=...)`. SQL Ripples and dbt models never need it. See [`@ripple`](python/decorators.md#ripple). |
+| `memory` | string | | The memory each Python Ripple holds outside DuckDB, such as `"6GB"`, unless the Ripple sets its own with `@ripple(memory=...)`. SQL Ripples and dbt models never need it. See [`@ripple`](python/decorators.md#ripple). For an [App](#app), what its process holds outside DuckDB. |
 | `duck` | string | `"catchment"` | Where the Pond runs: `"catchment"` for the Catchment's own machine, a built-in pool (`"S"`, `"M"`, `"L"`, `"XL"`), or the name of a pool defined on the Catchment. Falls back to the Catchment's machine when cloud compute isn't configured or the pool doesn't exist. See [`duckstring duck`](cli/duck.md). |
 | `dbt_project` | string | | Path to a dbt project directory. Makes this a dbt Pond: each model becomes a Ripple, and the Pond can't also define `@ripple` functions, SQL Ripples or static tables. Needs the `duckstring[dbt]` extra. |
 
@@ -181,6 +181,12 @@ The process gets these environment variables:
 | `DUCKSTRING_APP_PATH` | The base path, such as `/apps/sales_dashboard/v1`. |
 | `DUCKSTRING_APP_STATE` | The state directory, with `state = "local"`. |
 | `DUCKSTRING_APP` | What `duckstring.app.pond()` reads to give the App a read-only handle on its Sources. |
+
+While the process runs it holds memory slots on the Catchment's machine, as a Pond Run does: one for its DuckDB, plus enough for `[pond] memory`, which for an App is what the process holds outside DuckDB (data frames, a model, the web framework). Setting it is recommended. A first request waits for the slots while Pond Runs hold them, up to the same 60 seconds, and an idle stop gives them back. The App's handle sets DuckDB's `memory_limit` to the slots' worth less `[pond] memory`. That limit is per process, so a server running several worker processes should declare their total. See [`DUCKSTRING_RUN_SLOTS`](environment.md#ducks).
+
+A Source keeps the version an App is reading. Each request holds what each Source had published when it arrived, until its response has been sent, and a WebSocket connection holds what was published at its latest message from the browser (and at the one before, for a minute). Reads outside a request, such as a background thread or a cache filled at startup, hold theirs with `with pond.hold():`.
+
+A [Tap](cli/refresh.md#refresh-tap) on an App sends it a Refresh on use: every request that reaches the process counts as a query.
 
 A process that exits, or isn't ready within 60 seconds, is started again on the next request, up to `immediate_retries` times in a row. After that the App fails until it's woken with [`control wake`](cli/control.md) or redeployed. [`duckstring app`](cli/app.md) lists its instances and prints their output.
 

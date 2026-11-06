@@ -17,6 +17,7 @@ from . import pond, worker
 from .catchment import (
     EngineState,
     add_demand,
+    app_serving,
     block_on_missing_asset,
     clear_missing_asset,
     clear_pond,
@@ -87,6 +88,7 @@ __all__ = [
     "ripple_add_demand",
     "complete_ripple",
     "fail_ripple",
+    "app_serving",
     "fail_app",
     "fail_pond",
     "required_sinks",

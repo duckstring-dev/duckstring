@@ -217,15 +217,16 @@ def _store_column_lineage(db, name: str, version: str, rows: list[list[str]]) ->
 APP_RIPPLE = "serve"
 
 
-def _prepare(root: Path, staging: Path, db_catalog: dict, *, app: bool = False) -> tuple[Path, dict]:
+def _prepare(root: Path, staging: Path, db_catalog: dict, *, app: dict | None = None) -> tuple[Path, dict]:
     """Build the staged Pond's environment and discover its Ripples in it. Runs in a worker thread. An App
-    has no Ripples to discover, only its environment to build."""
+    (``app``, its config) has no Ripples to discover, only its environment to build; its synthetic Ripple
+    carries ``[pond] memory``, what its process holds outside DuckDB, for its memory slots."""
     from ...discover import discover
     from ...environments import ensure_env
 
     python = ensure_env(root, staging)
-    if app:
-        return python, {"ripples": [{"name": APP_RIPPLE, "parents": []}], "lineage": []}
+    if app is not None:
+        return python, {"ripples": [{"name": APP_RIPPLE, "parents": [], "memory": app.get("memory")}], "lineage": []}
     return python, discover(python, staging, db_catalog)
 
 
@@ -425,7 +426,7 @@ async def deploy(request: Request):
         with locked(db):
             catalog = _source_schemas(db, cfg["sources"])
         try:
-            _, found = await asyncio.to_thread(_prepare, root, staging, catalog, app=cfg["app"] is not None)
+            _, found = await asyncio.to_thread(_prepare, root, staging, catalog, app=cfg["app"])
         except EnvError as exc:
             raise HTTPException(status_code=422, detail=f"Building the Pond's environment failed: {exc}") from exc
         except DiscoveryError as exc:

@@ -118,7 +118,8 @@ function AddTapModal({ pond, onClose }: { pond: Pond; onClose: () => void }) {
         name: name.trim(),
         fresh_within_ms: Math.max(0, parseInt(fresh, 10) || 0) * UNIT_SECONDS[freshUnit] * 1000,
       });
-      setKey(resp.key);
+      if (resp.key) setKey(resp.key);
+      else onClose(); // a Tap on an App has no key: its requests run it
     });
 
   return (

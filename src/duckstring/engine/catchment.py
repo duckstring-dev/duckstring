@@ -406,6 +406,8 @@ def _busy(s: EngineState, rid: RippleId) -> bool:
     if s.ripple_states[rid].is_running:
         return True
     pid = s.ripples[rid].pond_id
+    if s.ponds[pid].is_app:
+        return False  # an App waiting for slots is waiting to start its instance, not a Run
     return s.pond_states[pid].slot_wait_since is not None and rid in roots_of(s, pid)
 
 
@@ -658,7 +660,10 @@ def _must_run(s: EngineState, pid: PondId) -> bool:
 
 
 def _in_flight(s: EngineState, pid: PondId) -> bool:
-    """Has this Pond's Duck work in flight (so it holds its slots)? A failed, killed or parked Pond doesn't."""
+    """Has this Pond's Duck work in flight (so it holds its slots)? A failed, killed or parked Pond doesn't. An
+    App holds them while its instance serves."""
+    if s.ponds[pid].is_app:
+        return s.pond_states[pid].app_serving
     if any_ripple_busy(s, pid):
         return True
     ps = s.pond_states[pid]
@@ -679,7 +684,7 @@ def _yields(s: EngineState, pid: PondId) -> bool:
     otherwise a Pond whose Runs overlap under a continuous Refresh would never be idle, never give its slots
     back, and starve the queue. It drains, goes idle and queues like anyone else."""
     pond, ps = s.ponds[pid], s.pond_states[pid]
-    if ps.slots == 0 or pond.pool not in s.slot_capacity:
+    if ps.slots == 0 or pond.pool not in s.slot_capacity or pond.is_app:
         return False
     return any(s.pond_states[q].slot_wait_since is not None for q in s.ponds
                if q != pid and s.ponds[q].pool == pond.pool)
@@ -691,6 +696,8 @@ def restore_slots(s: EngineState) -> None:
     the capacity (it was lowered across the restart), nothing new starts until enough of them drain."""
     for pid, ps in s.pond_states.items():
         cap = s.slot_capacity.get(s.ponds[pid].pool)
+        if s.ponds[pid].is_app:
+            continue  # the Catchment carries an App's slots over itself, waiting or held
         if cap is not None and not ps.slots and _in_flight(s, pid):
             ps.slots = max(1, min(s.ponds[pid].slot_need, cap))
 
@@ -722,12 +729,31 @@ def _admit(s: EngineState, ready: list[PondId], now: datetime, admitted: list[Po
             need = cap if ps.slot_exclusive else max(1, min(s.ponds[pid].slot_need, cap))
             if need > free:
                 break  # no backfilling: the head holds the queue until its slots free
-            start_pond_run(s, pid, now)
+            if not s.ponds[pid].is_app:  # an App's slots are for its instance, which the Catchment then starts
+                start_pond_run(s, pid, now)
             ps.slots, ps.slot_exclusive, ps.slot_wait_since = need, False, None
             free -= need
             admitted.append(pid)
             started = True
     return started
+
+
+def _apps_waiting(s: EngineState) -> list[PondId]:
+    """Apps whose instance is waiting for its slots (plans/apps.md). They queue with the Ponds, FIFO."""
+    return [pid for pid, ps in s.pond_states.items()
+            if ps.app_serving and not ps.slots and s.ponds[pid].is_app and s.ponds[pid].pool in s.slot_capacity]
+
+
+def app_serving(state: EngineState, pid: PondId, serving: bool, now: datetime) -> EngineState:
+    """An App's instance wants to start (``serving``), or has stopped. On a slotted machine a starting instance
+    queues for the App's slots like a Pond Run, and holds them until it stops (plans/apps.md). The caller runs
+    :func:`sentinel` afterwards, which admits it."""
+    s = state.clone()
+    ps = s.pond_states[pid]
+    ps.app_serving = serving
+    if not serving:
+        ps.slots, ps.slot_wait_since = 0, None
+    return s
 
 
 def _share_spare(s: EngineState, admitted: list[PondId]) -> None:
@@ -738,7 +764,8 @@ def _share_spare(s: EngineState, admitted: list[PondId]) -> None:
     a Refresh of another Pond seconds later, unknowable in advance, then waited for the whole Run.)"""
     for group, cap in s.slot_capacity.items():
         members = [pid for pid in s.ponds if s.ponds[pid].pool == group]
-        takers = [pid for pid in admitted if s.ponds[pid].pool == group and s.pond_states[pid].slots < cap]
+        takers = [pid for pid in admitted if s.ponds[pid].pool == group and s.pond_states[pid].slots < cap
+                  and not s.ponds[pid].is_app]  # an App holds its slots for hours: only what it needs
         if not takers or any(s.pond_states[pid].slot_wait_since is not None for pid in members):
             continue
         free = cap - sum(s.pond_states[pid].slots for pid in members)
@@ -1103,6 +1130,7 @@ def sentinel(now: datetime, state: EngineState) -> tuple[EngineState, list[Rippl
                         continue
                     start_pond_run(s, pid, now)
                     changed = True
+            ready += _apps_waiting(s)
             if (ready or any(ps.slot_wait_since is not None for ps in s.pond_states.values())) \
                     and _admit(s, ready, now, admitted):
                 changed = True

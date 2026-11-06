@@ -69,13 +69,15 @@ A Tap refreshes a Pond whenever an app queries it. It has its own key, which rea
 
 A Tap belongs to one major version of its Pond. Taps are Catchment configuration and survive redeploys; removing the major version removes them. Managing Taps needs a full-access key.
 
+A Tap on an App has no key. Every request the Catchment forwards to the App's process counts as a query, and so does every message from a browser on a WebSocket, at most once a second.
+
 ### `refresh tap add`
 
 ```bash
 duckstring refresh tap add POND --name NAME [--fresh-within DURATION]
 ```
 
-Adds a Tap and prints its key. The key is shown once; only a hash of it is kept.
+Adds a Tap and prints its key. The key is shown once; only a hash of it is kept. A Tap on an App has no key to print.
 
 | Option | Default | Description |
 |---|---|---|
@@ -98,7 +100,7 @@ Lists the Pond's Taps with their policy, when each was last queried, and how man
 duckstring refresh tap rotate POND NAME
 ```
 
-Prints a new key for the Tap. The old key stops working at once.
+Prints a new key for the Tap. The old key stops working at once. A Tap on an App has no key, so it can't be rotated.
 
 ### `refresh tap rm`
 

@@ -46,6 +46,11 @@ def rows():
     return {"n": pond.count_table("sales.revenue"), "sum": int(total), "fresh": str(pond.freshness()["freshness"])}
 
 
+@api.get("/mem")
+def mem():
+    return {"limit": pond.con.execute("SELECT current_setting('memory_limit')").fetchall()[0][0]}
+
+
 @api.websocket("/ws")
 async def ws(socket: WebSocket):
     await socket.accept()
@@ -99,8 +104,9 @@ def _app_entry(client, headers=None) -> dict:
 def test_app_config_validates_the_declaration(tmp_path):
     assert app_config({"pond": {"name": "x"}}) is None
     cfg = app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "1h30m"}})
-    assert cfg == {"command": "run", "static": None, "idle_timeout_s": 5400, "state": "local", "health": None,
-                   "strip_path": True}
+    assert cfg == {"command": "run", "static": None, "memory": None, "idle_timeout_s": 5400, "state": "local",
+                   "health": None, "strip_path": True}
+    assert app_config({"pond": {"type": "app", "memory": "2GB"}, "app": {"command": "run"}})["memory"] == 2 * 10**9
     assert app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "0"}})["idle_timeout_s"] == 0
     (tmp_path / "out").mkdir()
     assert app_config({"pond": {"type": "app"}, "app": {"static": "out"}}, tmp_path)["command"] is None
@@ -110,6 +116,7 @@ def test_app_config_validates_the_declaration(tmp_path):
                 {"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "soon"}},
                 {"pond": {"type": "app"}, "app": {"command": "run", "port": 1}},
                 {"pond": {"type": "app"}, "app": {"command": "run", "strip_path": "no"}},
+                {"pond": {"type": "app", "memory": "lots"}, "app": {"command": "run"}},
                 {"pond": {}, "app": {"command": "run"}}):
         with pytest.raises(ValueError):
             app_config(bad)
@@ -336,3 +343,125 @@ def test_pond_run_gives_an_app_its_puddles(tmp_path):
     assert env["DUCKSTRING_APP_STATE"] == str(tmp_path / "puddles" / "app" / "state")
     cfg = json.loads(env["DUCKSTRING_APP"])
     assert cfg["root"] == str(tmp_path / "puddles") and cfg["sources"] == ["sales"] and "source_majors" not in cfg
+
+
+# ─── read leases, Taps and memory slots ───────────────────────────────────────
+
+
+def _publish(driver, f) -> None:
+    """The Source line publishes at ``f`` (the engine's view of it)."""
+    with driver.lock:
+        ps = driver.state.pond_states["sales@1"]
+        ps.start_f = ps.end_f = ps.changed_f = f
+
+
+def test_a_request_in_flight_keeps_the_source_version_it_may_read(catchment_client):
+    from datetime import datetime, timezone
+
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    driver, supervisor = client.app.state.driver, client.app.state.app_supervisor
+    inst = supervisor._instances["dash@1"]
+    f1, f2 = datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 2, tzinfo=timezone.utc)
+    _publish(driver, f1)
+    ticket = supervisor.begin(inst)  # a request arrives while f1 is the published version
+    _publish(driver, f2)
+    with driver.lock:
+        assert driver._retain_from("sales@1") == f1.isoformat()  # the publish after f2 keeps f1
+    supervisor.end(inst, ticket)
+    with driver.lock:
+        assert driver._retain_from("sales@1") == f2.isoformat()  # the request ended: only the newest
+
+
+def test_a_websocket_renews_its_lease_and_keeps_the_previous_one_for_a_while(catchment_client):
+    from datetime import datetime, timezone
+
+    from duckstring.catchment.app_supervisor import WS_LEASE_GRACE_S
+
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    driver, supervisor = client.app.state.driver, client.app.state.app_supervisor
+    inst = supervisor._instances["dash@1"]
+    f1, f2, f3 = (datetime(2026, 1, d, tzinfo=timezone.utc) for d in (1, 2, 3))
+    _publish(driver, f1)
+    ticket = supervisor.begin(inst)  # the connection opens at f1
+    _publish(driver, f2)
+    supervisor.renew(inst, ticket)  # a message at f2: the work f1's message started may still read f1
+    assert sorted(supervisor.leases("dash@1", "sales@1", "sales")) == [f1, f2]
+    inst.leases[ticket] = [(t - WS_LEASE_GRACE_S - 1, lease) for t, lease in inst.leases[ticket]]
+    _publish(driver, f3)
+    supervisor.renew(inst, ticket)  # a minute on: f1 goes, f2 stays as the one before
+    assert sorted(supervisor.leases("dash@1", "sales@1", "sales")) == [f2, f3]
+    supervisor.end(inst, ticket)
+    assert supervisor.leases("dash@1", "sales@1", "sales") == []
+
+
+def test_hold_keeps_the_versions_current_when_it_began(catchment_client, monkeypatch):
+    import duckstring.app as ds_app
+    from duckstring.catchment.app_supervisor import app_runtime_dir
+
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    root, supervisor = client.app.state.root, client.app.state.app_supervisor
+    f = "2026-01-01T00:00:00+00:00"
+    (root / "ponds" / "sales" / "m1" / "data" / "_trickle.json").write_text(json.dumps({"_duckstring_run": {"f": f}}))
+    monkeypatch.setenv(ds_app.ENV, json.dumps({
+        "name": "dash", "major": 1, "root": str(root), "sources": ["sales"], "source_majors": {"sales": 1},
+        "runtime": str(app_runtime_dir(root, "dash", 1))}))
+    monkeypatch.setattr(ds_app, "_handle", None)
+    pond = ds_app.pond()
+    with pond.hold():
+        assert [d.isoformat() for d in supervisor.leases("dash@1", "sales@1", "sales")] == [f]
+    assert supervisor.leases("dash@1", "sales@1", "sales") == []
+
+
+def test_a_tap_on_an_app_runs_on_its_requests_and_has_no_key(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client)
+    r = client.post("/api/ponds/dash/taps", json={"name": "use", "fresh_within_ms": 0})
+    assert r.status_code == 200 and r.json()["key"] is None
+    assert client.post("/api/ponds/dash/taps/use/rotate").status_code == 422
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    tap = client.get("/api/ponds/dash/taps").json()["taps"][0]
+    assert tap["query_count"] == 1 and tap["refresh_count"] == 1
+    driver = client.app.state.driver
+    with driver.lock:  # the Refresh reached the Source, which started a Run for it
+        ps = driver.state.pond_states["sales@1"]
+        assert ps.demand or ps.start_f > ps.end_f
+        driver._flush_tap_counters()
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    tap = client.get("/api/ponds/dash/taps").json()["taps"][0]
+    assert tap["query_count"] == 2 and tap["refresh_count"] == 1  # a request is already waiting on the Source
+
+
+def test_an_instance_takes_a_memory_slot_and_its_handle_is_capped(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from duckstring.catchment.app import create_app
+
+    monkeypatch.setenv("DUCKSTRING_RUN_SLOTS", "1")
+    monkeypatch.setenv("DUCKSTRING_MEMORY_BUDGET", "2GB")
+    with TestClient(create_app(tmp_path)) as client:
+        _deploy_pipeline(client)
+        driver, supervisor = client.app.state.driver, client.app.state.app_supervisor
+        supervisor.start_timeout = 1.0
+        with driver.lock:  # the Source has a Run in flight, holding the only slot
+            ps = driver.state.pond_states["sales@1"]
+            ps.start_f, ps.slots = datetime(2026, 1, 1, tzinfo=timezone.utc), 1
+        r = client.get("/apps/dash/v1/mem")
+        assert r.status_code == 503 and "waiting for memory" in r.text
+        assert not driver.state.pond_states["dash@1"].app_serving  # it left the queue
+        with driver.lock:
+            ps = driver.state.pond_states["sales@1"]
+            ps.start_f, ps.slots = ps.end_f, 0
+        supervisor.start_timeout = 60.0
+        r = client.get("/apps/dash/v1/mem")
+        assert r.status_code == 200, r.text
+        assert r.json()["limit"] in ("1.8 GiB", "1.9 GiB", "2.0 GB", "1.8 GB")  # DuckDB's rendering of 2000MB
+        assert _app_entry(client)["memory"]["slots"] == 1
+        supervisor._instances["dash@1"].last_used -= 3600
+        supervisor.reconcile()  # an idle stop gives the slot back
+        assert _app_entry(client)["memory"]["slots"] == 0

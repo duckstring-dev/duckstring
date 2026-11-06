@@ -467,6 +467,9 @@ class Driver(TapsMixin):
         # Apps (plans/apps.md): the AppSupervisor's synchronous stop, called with (key, reason) when a Kill or
         # a removal must end an App's instance at once (None without a supervisor, e.g. in tests).
         self.on_app_stop = None
+        # And its read leases, called with (app key, source key, source name): the Source versions the App's
+        # requests in flight and its explicit holds are reading, which _retain_from keeps.
+        self.app_leases = None
         self.reload()
 
     def set_notify(self, cb) -> None:
@@ -669,10 +672,16 @@ class Driver(TapsMixin):
                 if key:
                     refreshes.setdefault(key, []).append(_row_to_refresh(key, row[1:]))
 
+            prior = getattr(self, "state", None)
             self.state = EngineState(
                 ponds=ponds, pond_states=pond_states, ripples=ripples,
                 ripple_states=ripple_states, refreshes=refreshes,
             )
+            if prior is not None:  # an App's instance outlives a reload (a deploy): keep its slots or its place
+                for key, old in prior.pond_states.items():
+                    new = pond_states.get(key)
+                    if old.app_serving and new is not None and ponds[key].is_app:
+                        new.app_serving, new.slots, new.slot_wait_since = True, old.slots, old.slot_wait_since
             self._configure_slots()
             self._load_taps(pondid_to_key)
             # Recompute blocked from the freshly-loaded topology: a Source that is absent now (or has
@@ -2539,6 +2548,67 @@ class Driver(TapsMixin):
                     "sources": {self.meta[sp]["name"]: iso(self.state.pond_states[sp].end_f)
                                 for sp in self.state.ponds[key].sources if sp in self.meta}}
 
+    def app_want_slots(self, key: str) -> bool:
+        """An instance of the App ``key`` is about to start: queue it for the App's memory slots (plans/apps.md),
+        FIFO with the Ponds. Returns whether it has to wait for them (``False`` on a machine without slots)."""
+        from ..engine import app_serving
+
+        with self.lock:
+            if key not in self.state.ponds or self.state.ponds[key].pool not in self.state.slot_capacity:
+                return False
+            now = _now()
+            self.state = app_serving(self.state, key, True, now)
+            self._process(now)
+            return True
+
+    def app_grant(self, key: str) -> tuple[bool, str | None]:
+        """Whether the App's instance has its slots yet, and DuckDB's ``memory_limit`` for its handle: its slots'
+        worth, less what ``[pond] memory`` declares outside DuckDB (``None`` without slots)."""
+        with self.lock:
+            ps = self.state.pond_states.get(key)
+            if ps is None or self.state.ponds[key].pool not in self.state.slot_capacity:
+                return True, None
+            return ps.slots > 0, self._memory_grant(key)
+
+    def app_release_slots(self, key: str, process: bool = True) -> None:
+        """The App's instance stopped (or never started): give its slots back, and start what was waiting for
+        them unless the caller processes the engine itself (``process=False``)."""
+        from ..engine import app_serving
+
+        with self.lock:
+            ps = self.state.pond_states.get(key)
+            if ps is None or not (ps.app_serving or ps.slots):
+                return
+            now = _now()
+            self.state = app_serving(self.state, key, False, now)
+            if process:
+                self._process(now)
+
+    def app_sources_now(self, key: str) -> dict[str, datetime]:
+        """Each Source line's published freshness (``changed_f``) right now: what a read lease taken at this
+        moment holds (plans/apps.md). A read can only resolve to that version or a newer one. Read without the
+        lock: the state is replaced, never mutated in place, by the engine's functions."""
+        state = self.state
+        pond = state.ponds.get(key)
+        if pond is None:
+            return {}
+        return {sp: state.pond_states[sp].changed_f for sp in pond.sources
+                if sp in state.pond_states and state.pond_states[sp].changed_f > NEVER}
+
+    def app_has_taps(self, key: str) -> bool:
+        """Whether the App ``key`` has a Tap (read without the lock: the Taps are replaced whole on change)."""
+        return any(p == key for p, _ in list(getattr(self, "_taps", {})))
+
+    def app_request(self, key: str) -> None:
+        """A request reached the App ``key``'s process: run each of its Taps (plans/apps.md), which may send the
+        App a Refresh. Free when the App has no Taps."""
+        taps = [t for (p, _), t in list(getattr(self, "_taps", {}).items()) if p == key]
+        for tap in taps:
+            try:
+                self.tap_query(tap.scope)
+            except KeyError:
+                pass  # removed meanwhile
+
     def _app_status(self, key: str) -> dict:
         m = self.meta[key]
         from ..app import base_path
@@ -3987,7 +4057,7 @@ class Driver(TapsMixin):
 
         A Sink run with no pin for this line (dispatched before it first published) reads at its own
         freshness, so that bounds it instead. Rows at or below the Sink's ``end_f`` are stranded, not in
-        flight, and are ignored."""
+        flight, and are ignored. An App Sink has no Runs: its read leases bound it instead (plans/apps.md)."""
         meta = self.meta[pond]
         bounds: list[datetime] = []
         ps = self.state.pond_states.get(pond)
@@ -4014,6 +4084,8 @@ class Driver(TapsMixin):
                     pins = {}
                 pin = pins.get(meta["name"])
                 bounds.append(datetime.fromisoformat(pin) if pin else run_f)
+            if sp.is_app and self.app_leases is not None:  # what the App's requests and holds are reading
+                bounds.extend(self.app_leases(sink, pond, meta["name"]))
         return _iso(min(bounds)) if bounds else None
 
     def pond_freshness(self, key: str) -> dict:

@@ -691,8 +691,8 @@ async function postForJSON<T>(path: string, body: unknown, what: string): Promis
   return res.json();
 }
 
-// Add a Tap. The response carries its key, once.
-export function addTap(pond: string, body: AddTapBody): Promise<{ key: string }> {
+// Add a Tap. The response carries its key, once (null for a Tap on an App, which has none).
+export function addTap(pond: string, body: AddTapBody): Promise<{ key: string | null }> {
   return postForJSON(pondPath(pond, 'taps'), body, 'add tap');
 }
 

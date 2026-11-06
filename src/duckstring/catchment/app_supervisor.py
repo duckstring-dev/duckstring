@@ -11,6 +11,16 @@ The process runs ``[app] command`` through ``/bin/sh`` in the App's deployed dir
 ``bin`` first on ``PATH`` and ``PORT``, ``DUCKSTRING_APP_PATH``, ``DUCKSTRING_APP_STATE`` and ``DUCKSTRING_APP``
 set. Its output goes to ``ponds/{name}/m{major}/app/logs/{instance}.log``. Its state directory,
 ``apps/{name}/m{major}/state/``, sits outside the line's runtime directory, so a Catchment reset keeps it.
+
+On a machine with memory slots an instance queues for the App's slots like a Pond Run and holds them until it
+stops; DuckDB's ``memory_limit`` in its handle is the grant.
+
+**Read leases.** A Source keeps the version an App is reading (``Driver._retain_from``). Each request in flight
+holds every Source line's published freshness at the moment it arrived: a read inside it resolves to that
+version or a newer one, so the publish that would prune it keeps it until the request (and a streamed response
+body) ends. A WebSocket connection renews its lease at each message from the browser and keeps the previous
+one for ``WS_LEASE_GRACE_S``, so a long session holds a recent version, not the one it opened on. Work outside
+a request takes a lease with ``pond.hold()``, a file in the runtime's ``holds/`` the handle writes.
 """
 
 from __future__ import annotations
@@ -18,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -33,6 +44,7 @@ from .registry import pond_major_dir
 
 DEFAULT_START_TIMEOUT_S = 60.0
 STOP_GRACE_S = 10.0
+WS_LEASE_GRACE_S = 60.0  # how long a WebSocket keeps the lease of its previous message
 # Never handed to an App's process: the Catchment's own credentials.
 _WITHHELD_ENV = ("DUCKSTRING_API_KEY",)
 
@@ -68,6 +80,10 @@ class Instance:
     active: int = 0  # requests and WebSocket connections in flight
     last_used: float = field(default_factory=time.monotonic)
     stopping: bool = False
+    # Read leases per request or WebSocket in flight: (monotonic time, {source key: changed_f}), oldest first.
+    leases: dict[int, list[tuple[float, dict]]] = field(default_factory=dict)
+    next_ticket: int = 0
+    memory_limit: str | None = None
 
 
 def _now_iso() -> str:
@@ -92,6 +108,7 @@ class AppSupervisor:
         self._mu = threading.Lock()
         self.start_timeout = float(os.environ.get("DUCKSTRING_APP_START_TIMEOUT", DEFAULT_START_TIMEOUT_S))
         driver.on_app_stop = self.stop_now
+        driver.app_leases = self.leases
 
     # ─── serving a request ──────────────────────────────────────────────────
 
@@ -125,9 +142,30 @@ class AppSupervisor:
                 await asyncio.to_thread(self._stop, old, "redeploy")
             if not view["app"]["command"]:
                 raise AppUnavailable(404, "not found")  # a static-only App: nothing to start
-            inst = await asyncio.to_thread(self._spawn, view)
+            memory_limit = await self._wait_slots(key)
+            try:
+                inst = await asyncio.to_thread(self._spawn, view, memory_limit)
+            except BaseException:
+                self.driver.app_release_slots(key)
+                raise
             await self._wait_ready(inst, view)
             return inst
+
+    async def _wait_slots(self, key: str) -> str | None:
+        """Queue for the App's memory slots and wait for them (up to the start timeout, holding the request that
+        started the instance). Returns DuckDB's ``memory_limit`` for the handle, ``None`` without slots."""
+        if not self.driver.app_want_slots(key):
+            return None
+        deadline = time.monotonic() + self.start_timeout
+        while True:
+            granted, limit = self.driver.app_grant(key)
+            if granted:
+                return limit
+            if time.monotonic() >= deadline:
+                self.driver.app_release_slots(key)
+                raise AppUnavailable(503, "the App is waiting for memory: Pond Runs hold the Catchment's memory "
+                                          "slots; try again shortly")
+            await asyncio.sleep(0.1)
 
     def _check_serving(self, key: str, view: dict) -> None:
         if view["is_killed"]:
@@ -146,17 +184,64 @@ class AppSupervisor:
             return inst
         return None
 
-    def begin(self, inst: Instance) -> None:
-        inst.active += 1
-        inst.last_used = time.monotonic()
+    def begin(self, inst: Instance) -> int:
+        """A request or WebSocket connection starts: it keeps the instance from idling and takes a read lease.
+        Returns its ticket for :meth:`renew` and :meth:`end`."""
+        lease = self.driver.app_sources_now(inst.key)
+        now = time.monotonic()
+        with self._mu:
+            inst.active += 1
+            inst.last_used = now
+            inst.next_ticket += 1
+            inst.leases[inst.next_ticket] = [(now, lease)]
+            return inst.next_ticket
 
-    def end(self, inst: Instance) -> None:
-        inst.active -= 1
-        inst.last_used = time.monotonic()
+    def renew(self, inst: Instance, ticket: int) -> None:
+        """A WebSocket message from the browser: lease the Sources' versions now, keep the previous lease for
+        ``WS_LEASE_GRACE_S`` (the work it started may still be reading), and drop older ones."""
+        lease = self.driver.app_sources_now(inst.key)
+        now = time.monotonic()
+        with self._mu:
+            inst.last_used = now
+            entries = inst.leases.get(ticket)
+            if entries is None:
+                return
+            if entries[-1][1] != lease:
+                entries.append((now, lease))
+            # An entry is superseded when the next one is taken, and ends WS_LEASE_GRACE_S after that.
+            keep = [e for e, nxt in zip(entries, entries[1:], strict=False) if now - nxt[0] < WS_LEASE_GRACE_S]
+            inst.leases[ticket] = keep + [entries[-1]]
+
+    def end(self, inst: Instance, ticket: int | None = None) -> None:
+        with self._mu:
+            inst.active -= 1
+            inst.last_used = time.monotonic()
+            inst.leases.pop(ticket, None)
+
+    def leases(self, key: str, source_key: str, source_name: str) -> list[datetime]:
+        """The versions of the Source line ``source_key`` the App ``key`` is reading: the leases of its requests
+        and WebSockets in flight, and its explicit holds (``pond.hold()``). For ``Driver._retain_from``."""
+        with self._mu:
+            inst = self._instances.get(key)
+            if inst is None:
+                return []
+            out = [lease[source_key] for entries in inst.leases.values() for _, lease in entries
+                   if source_key in lease]
+            holds = inst.log_path.parent.parent / "holds"
+        for path in holds.glob("*.json") if holds.is_dir() else ():
+            try:
+                pid = int(path.stem.split("-")[0])
+                os.kill(pid, 0)  # a hold of a process that has gone (a restarted worker) holds nothing
+                f = json.loads(path.read_text()).get("sources", {}).get(source_name)
+            except (ValueError, OSError):
+                continue
+            if f:
+                out.append(datetime.fromisoformat(f))
+        return out
 
     # ─── starting ───────────────────────────────────────────────────────────
 
-    def _spawn(self, view: dict) -> Instance:
+    def _spawn(self, view: dict, memory_limit: str | None = None) -> Instance:
         from ..environments import python_for
 
         name, major = view["name"], view["major"]
@@ -188,8 +273,9 @@ class AppSupervisor:
         env[ENV] = json.dumps({
             "name": name, "major": major, "version": view["version"], "root": str(self.root),
             "data_root": self.data_root, "sources": list(view["sources"]), "source_majors": view["sources"],
-            "runtime": str(runtime),
+            "runtime": str(runtime), "memory_limit": memory_limit,
         })
+        shutil.rmtree(runtime / "holds", ignore_errors=True)  # a previous instance's
         self._write_freshness(view["key"], runtime, force=True)
         with open(log_path, "ab") as log:
             log.write(f"[duckstring] starting {name}@{major} {view['version']} on port {port}\n".encode())
@@ -203,7 +289,7 @@ class AppSupervisor:
             db.execute("UPDATE app_instance SET pid = ? WHERE id = ?", (proc.pid, iid))
             db.commit()
         inst = Instance(key=view["key"], id=iid, version_id=view["version_id"], proc=proc, port=port,
-                        log_path=log_path)
+                        log_path=log_path, memory_limit=memory_limit)
         with self._mu:
             self._instances[view["key"]] = inst
         return inst
@@ -257,8 +343,10 @@ class AppSupervisor:
 
     # ─── stopping ───────────────────────────────────────────────────────────
 
-    def _stop(self, inst: Instance, reason: str) -> None:
-        """End ``inst`` (SIGTERM to its process group, then SIGKILL after a grace) and record it."""
+    def _stop(self, inst: Instance, reason: str, process: bool = True) -> None:
+        """End ``inst`` (SIGTERM to its process group, then SIGKILL after a grace), record it and give its
+        memory slots back. ``process=False`` when the Driver called in (a Kill or a removal) and processes the
+        engine itself."""
         inst.stopping = True
         proc = inst.proc
         if proc.poll() is None:
@@ -277,6 +365,9 @@ class AppSupervisor:
         with self._mu:
             if self._instances.get(inst.key) is inst:
                 del self._instances[inst.key]
+            inst.leases.clear()
+        shutil.rmtree(inst.log_path.parent.parent / "holds", ignore_errors=True)
+        self.driver.app_release_slots(inst.key, process=process)
         db = self.driver.db
         with locked(db):
             db.execute("UPDATE app_instance SET stopped_at = ?, stop_reason = ?, exit_code = ? "
@@ -288,7 +379,7 @@ class AppSupervisor:
         with self._mu:
             inst = self._instances.get(key)
         if inst is not None:
-            self._stop(inst, reason)
+            self._stop(inst, reason, process=False)
         self._crashes.pop(key, None)
 
     def shutdown(self) -> None:

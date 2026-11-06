@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import html
 import re
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -143,7 +144,14 @@ async def forward(request: Request, name: str, rest: str):
         inst = await supervisor.acquire(key)
     except AppUnavailable as exc:
         return _unavailable(exc)
+    await _run_taps(driver, key)
     return await _forward_http(request, supervisor, inst, strip_bearer, view)
+
+
+async def _run_taps(driver, key: str) -> None:
+    """A request reaches the App's process: its Taps may send it a Refresh (the lock only when it has some)."""
+    if driver.app_has_taps(key):
+        await asyncio.to_thread(driver.app_request, key)
 
 
 def _static_file(root: Path, view: dict, below: str) -> Path | None:
@@ -198,20 +206,20 @@ async def _forward_http(request: Request, supervisor, inst, strip_bearer: bool, 
     url = f"http://127.0.0.1:{inst.port}{_upstream_path(request, view)}" + (f"?{query}" if query else "")
     headers = _request_headers(request, strip_bearer, base_path(view["name"], view["major"]))
     upstream = client.build_request(request.method, url, headers=headers, content=request.stream())
-    supervisor.begin(inst)
+    ticket = supervisor.begin(inst)  # until the response body ends: a streamed body may still be reading
     done = False
 
     async def finish():
         nonlocal done
         if not done:
             done = True
-            supervisor.end(inst)
+            supervisor.end(inst, ticket)
             await resp.aclose()
 
     try:
         resp = await client.send(upstream, stream=True)
     except httpx.HTTPError as exc:
-        supervisor.end(inst)
+        supervisor.end(inst, ticket)
         return Response(f"the App didn't answer: {type(exc).__name__}\n", status_code=502, media_type="text/plain")
 
     async def body():
@@ -253,12 +261,23 @@ async def forward_websocket(websocket: WebSocket, name: str, rest: str):
     except AppUnavailable:
         await websocket.close(code=1013)
         return
+    await _run_taps(driver, key)
     query = websocket.scope.get("query_string", b"").decode("latin-1")
     url = f"ws://127.0.0.1:{inst.port}{_upstream_path(websocket, view)}" + (f"?{query}" if query else "")
     headers = [(k, v) for k, v in _request_headers(websocket, strip_bearer, base_path(name, major))
                if k.lower() != "host" and not k.lower().startswith("sec-websocket-")]
     subprotocols = websocket.scope.get("subprotocols") or None
-    supervisor.begin(inst)
+    ticket = supervisor.begin(inst)
+    last_tap = time.monotonic()
+
+    async def on_message():
+        # A message from the browser is a use: renew the read lease, and run the Taps at most once a second.
+        nonlocal last_tap
+        supervisor.renew(inst, ticket)
+        if time.monotonic() - last_tap >= 1.0:
+            last_tap = time.monotonic()
+            await _run_taps(driver, key)
+
     try:
         try:
             upstream = await websockets.connect(url, additional_headers=headers, subprotocols=subprotocols,
@@ -268,12 +287,12 @@ async def forward_websocket(websocket: WebSocket, name: str, rest: str):
             return
         async with upstream:
             await websocket.accept(subprotocol=upstream.subprotocol)
-            await _pump(websocket, upstream)
+            await _pump(websocket, upstream, on_message)
     finally:
-        supervisor.end(inst)
+        supervisor.end(inst, ticket)
 
 
-async def _pump(websocket: WebSocket, upstream) -> None:
+async def _pump(websocket: WebSocket, upstream, on_message) -> None:
     from websockets.exceptions import ConnectionClosed
 
     async def client_to_app():
@@ -282,6 +301,7 @@ async def _pump(websocket: WebSocket, upstream) -> None:
             if msg["type"] == "websocket.disconnect":
                 await upstream.close(code=msg.get("code", 1000))
                 return
+            await on_message()
             if msg.get("text") is not None:
                 await upstream.send(msg["text"])
             elif msg.get("bytes") is not None:

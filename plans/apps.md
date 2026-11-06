@@ -272,6 +272,26 @@ Where it departs from the plan above:
 - **Sleep** doesn't stop an instance (only Kill and removal do); the idle timeout ends it.
 - `catchment download` doesn't yet snapshot an App's SQLite through the backup API.
 
-Still to build: the web UI (the App node, instances and logs in the Sidebar, an Open link), Taps on Apps, read
-leases in `_retain_from`, memory slots for instances, the archive's SQLite snapshots, the guide and framework
-recipes.
+## As built (part 2, 2026-11-06)
+
+Built: read leases, memory slots for instances, and Taps on Apps. Tests in `tests/test_app.py` and
+`tests/test_engine_slots.py`.
+
+- **Read leases** are the proposal above. A request's lease is each Source line's `changed_f` when it arrived and
+  lasts until its response body has been sent, which settles the open question on streamed responses. A WebSocket
+  renews at each message from the browser and keeps the lease before it for 60 seconds, since the work an earlier
+  message started may still be reading. `pond.hold()` writes a file under the App's runtime directory, so the
+  Catchment needs no channel back from the App; the handle rewrites it until the Sources' run stamps are stable,
+  and a hold whose process has gone is ignored.
+- **Memory slots**: `[pond] memory` means what it means for a Ripple, memory held outside DuckDB, so an App takes
+  one slot plus enough for it, and DuckDB's `memory_limit` in the handle is the grant less that. The limit is per
+  process, so a server with several workers should declare their total. A start that can't get its slots within
+  the start timeout answers 503 and leaves the queue. An App never takes the spare slots a lone Run gets, since it
+  holds them for as long as it serves.
+- **Taps on Apps** have no key (`pond_tap.key_hash` became nullable, migration `035`). Every forwarded request
+  runs them, as does every message from the browser on a WebSocket, at most once a second. Requests for static
+  files don't.
+
+Still to build: the web UI (the App node, instances and logs in the Sidebar, an Open link), the archive's SQLite
+snapshots, the guide and framework recipes. The full-access serving connection's views (the other open
+question) were not looked at.

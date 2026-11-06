@@ -24,6 +24,8 @@ import json
 import os
 import re
 import threading
+from contextlib import contextmanager
+from itertools import count
 from pathlib import Path
 
 ENV = "DUCKSTRING_APP"  # the JSON the runtime hands an App's process, read by pond()
@@ -77,9 +79,16 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     health = section.get("health")
     if health is not None and (not isinstance(health, str) or not health.startswith("/")):
         raise ValueError('pond.toml [app] health: expected a path starting with "/"')
+    from .core import parse_size
+
+    try:
+        memory = parse_size(pond.get("memory"))  # held outside DuckDB: sizes the App's memory slots
+    except ValueError as exc:
+        raise ValueError(f"pond.toml [pond] memory: {exc}") from exc
     return {
         "command": command,
         "static": static,
+        "memory": memory,
         "idle_timeout_s": _duration_s(section.get("idle_timeout", DEFAULT_IDLE_TIMEOUT), "[app] idle_timeout"),
         "state": state,
         "health": health,
@@ -152,6 +161,41 @@ def _pond_class():
             return {"freshness": when(raw.get("freshness")),
                     "sources": {k: when(v) for k, v in raw.get("sources", {}).items()}}
 
+        @contextmanager
+        def hold(self):
+            """Keep the Source versions current now while the block runs, for reads outside a request (a
+            background thread, a cache warmed at startup). A read inside a request needs none: the Catchment
+            keeps what a request in flight may read until its response ends. A no-op outside a Catchment."""
+            if self._runtime is None:
+                yield self
+                return
+            holds = self._runtime / "holds"
+            holds.mkdir(parents=True, exist_ok=True)
+            path = holds / f"{os.getpid()}-{threading.get_ident()}-{next(_hold_ids)}.json"
+            tmp = path.with_name(path.name + ".tmp")
+            try:
+                # Written, then checked: a Source that published meanwhile is held at its newer version, since a
+                # read in the block may resolve to it.
+                for _ in range(10):
+                    stamps = self._stamps()
+                    tmp.write_text(json.dumps({"sources": stamps}))
+                    tmp.replace(path)
+                    if self._stamps() == stamps:
+                        break
+                yield self
+            finally:
+                path.unlink(missing_ok=True)
+
+        def _stamps(self) -> dict:
+            from .catchment.registry import local_publish_f
+
+            out = {}
+            for source in self._declared_sources or ():
+                f = local_publish_f(self._source_data_dir(source))
+                if f:
+                    out[source] = f
+            return out
+
         def _read_only(self, *_a, **_k):
             raise TypeError("an App can't publish tables or Objects; write to its state directory or a database")
 
@@ -171,12 +215,13 @@ def _pond_class():
 
 _handle = None
 _handle_lock = threading.Lock()
+_hold_ids = count(1)
 
 
 def pond():
     """The App's read-only Pond handle: :meth:`~duckstring.Pond.read_table`, ``count_table``, ``read_object``,
     ``object_path``, ``source_columns`` and ``con`` over its declared Sources, at their newest published data,
-    plus ``freshness()``. One handle per process; each thread gets its own cursor."""
+    plus ``freshness()`` and ``hold()``. One handle per process; each thread gets its own cursor."""
     global _handle
     with _handle_lock:
         if _handle is None:
@@ -192,8 +237,11 @@ def _make_handle():
         raise RuntimeError(f"{ENV} isn't set: run the App through the Catchment or `duckstring pond run`")
     cfg = json.loads(raw)
     runtime = Path(cfg["runtime"]) if cfg.get("runtime") else None
+    con = duckdb.connect()
+    if cfg.get("memory_limit"):  # the App's memory slots' worth, on a machine with slots
+        con.execute(f"SET memory_limit = '{cfg['memory_limit']}'")
     return _pond_class()(
-        cfg["name"], cfg.get("version", "0.0.0"), duckdb.connect(), cfg["root"],
+        cfg["name"], cfg.get("version", "0.0.0"), con, cfg["root"],
         source_majors=cfg.get("source_majors") or None, data_root=cfg.get("data_root"),
         sources=list(cfg.get("sources", [])), runtime=runtime,
     )

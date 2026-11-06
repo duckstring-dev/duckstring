@@ -363,3 +363,43 @@ def test_random_pipelines_with_control_actions_never_overcommit_and_drain(seed):
             continue  # a failure downstream of a Source that failed again: blocked, by design
         assert not [t for t in ps.demand if t > NEVER], (pid, ps.demand)
         assert ps.slots == 0 and ps.slot_wait_since is None, pid
+
+
+def _app(d, pid: str) -> None:
+    """Make ``pid`` an App (plans/apps.md): its Runs are passes, and its instance takes the slots."""
+    d.state.ponds[pid].is_app = True
+
+
+@pytest.mark.timeout(10)
+def test_an_apps_instance_holds_its_slot_until_it_stops():
+    d = Checked(graph([("A", 3, []), ("W", 1, ["A"])]), 2)
+    _app(d, "W")
+    d.state = engine.app_serving(d.state, "W", True, d.now)
+    d.process()
+    assert d.state.pond_states["W"].slots == 1  # admitted at once, with nothing else in the way
+    d.refresh("W")  # its Refresh reaches A; the App's own Runs are passes and take nothing
+    d.run(5)
+    assert d.state.pond_states["A"].runs_completed == 1 and d.state.pond_states["W"].slots == 1
+    d.state = engine.app_serving(d.state, "W", False, d.now)
+    d.process()
+    assert used(d.state) == 0
+
+
+@pytest.mark.timeout(10)
+def test_an_app_waits_in_the_queue_with_the_ponds():
+    d = Checked(graph([("A", 3, []), ("B", 1, []), ("W", 1, [])]), 1)
+    _app(d, "W")
+    d.refresh("A")  # A holds the only slot for 3 s
+    d.run(0.5)
+    d.state = engine.app_serving(d.state, "W", True, d.now)
+    d.process()
+    d.run(0.5)
+    d.refresh("B")  # after the App: behind it in the queue
+    d.run(1)
+    assert d.state.pond_states["W"].slots == 0 and d.state.pond_states["W"].slot_wait_since is not None
+    d.run(2)  # A completes at 3 s: its slot goes to the App, and B waits for the App to stop
+    assert d.state.pond_states["W"].slots == 1 and d.state.pond_states["B"].runs_started == 0
+    d.state = engine.app_serving(d.state, "W", False, d.now)
+    d.process()
+    d.run(1.5)
+    assert d.state.pond_states["B"].runs_completed == 1

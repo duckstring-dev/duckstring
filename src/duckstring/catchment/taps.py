@@ -1,5 +1,8 @@
 """Taps (plans/taps.md): named access points on a Pond (one major line) for an app to query.
 
+A Tap on an App (plans/apps.md) has no key: it runs on every request the Catchment forwards to the App's
+process (``Driver.app_request``), since those requests already passed the Catchment's gate.
+
 A Tap has its own key, so a query is classified by the credential it arrives with: the Tap's key means the
 Tap's app, and every other key (the web UI's, the CLI's, a notebook's) never sends demand. A query through a
 Tap may send the Pond a Refresh, by the floating Refresh's clock evaluated per query (``engine.tap_due``): due
@@ -40,7 +43,7 @@ def mint_tap_key() -> str:
 class Tap:
     pond: str                    # the pond key "name@major"
     name: str
-    key_hash: str
+    key_hash: str | None         # None: a Tap on an App, which has no key
     fresh_within: timedelta
     created_at: str
     last_query_at: datetime | None = None
@@ -92,7 +95,7 @@ class TapsMixin:
                 tap.refresh_count, tap.dirty = prev.refresh_count, True
             taps[(key, name)] = tap
         self._taps = taps
-        self._tap_by_hash = {t.key_hash: t.scope for t in taps.values()}
+        self._tap_by_hash = {t.key_hash: t.scope for t in taps.values() if t.key_hash}
 
     # ─── Key lookup (auth) ────────────────────────────────────────────────────
 
@@ -108,9 +111,10 @@ class TapsMixin:
 
     # ─── CRUD ─────────────────────────────────────────────────────────────────
 
-    def add_tap(self, pond: str, name: str, *, fresh_within: timedelta = timedelta(0)) -> tuple[dict, str]:
-        """Add a Tap to a Pond line and return it with its key (shown once; only its hash is kept). Raises
-        ValueError on a bad name, a duplicate, a negative period or a Spout."""
+    def add_tap(self, pond: str, name: str, *, fresh_within: timedelta = timedelta(0)) -> tuple[dict, str | None]:
+        """Add a Tap to a Pond line and return it with its key (shown once; only its hash is kept), or ``None``
+        for an App's Tap, which has none. Raises ValueError on a bad name, a duplicate, a negative period or a
+        Spout."""
         name = (name or "").strip()
         if not _NAME_RE.match(name):
             raise ValueError("a Tap's name is letters, digits, '.', '_' or '-' (up to 64), starting with a letter "
@@ -123,11 +127,12 @@ class TapsMixin:
                 raise ValueError("a Spout has no tables to query: add the Tap to its source Pond")
             if (pond, name) in self._taps:
                 raise ValueError(f"'{pond}' already has a Tap named '{name}': rotate its key or remove it first")
-            key = mint_tap_key()
+            key = None if meta.get("is_app") else mint_tap_key()
             created = _now().isoformat()
             self.db.execute(
                 "INSERT INTO pond_tap (pond_id, name, key_hash, fresh_within_ms, created_at) VALUES (?, ?, ?, ?, ?)",
-                (meta["pond_id"], name, hash_key(key), int(fresh_within.total_seconds() * 1000), created),
+                (meta["pond_id"], name, hash_key(key) if key else None, int(fresh_within.total_seconds() * 1000),
+                 created),
             )
             self.db.commit()
             self._reload_taps()
@@ -151,7 +156,8 @@ class TapsMixin:
     def rotate_tap(self, pond: str, name: str) -> str:
         """Mint a new key for a Tap; the old one stops working at once."""
         with self.lock:
-            self._tap(TapScope(pond, name))
+            if self._tap(TapScope(pond, name)).key_hash is None:
+                raise ValueError("a Tap on an App has no key to rotate: it runs on the App's requests")
             self._flush_tap_counters()
             key = mint_tap_key()
             self.db.execute("UPDATE pond_tap SET key_hash = ? WHERE pond_id = ? AND name = ?",
@@ -206,11 +212,13 @@ class TapsMixin:
         if not dirty:
             return
         for t in dirty:
+            if t.pond not in self.meta:
+                continue
             self.db.execute(
                 "UPDATE pond_tap SET last_query_at = ?, query_count = ?, refresh_count = ? "
-                "WHERE key_hash = ?",
+                "WHERE pond_id = ? AND name = ?",
                 (t.last_query_at.isoformat() if t.last_query_at else None, t.query_count, t.refresh_count,
-                 t.key_hash),
+                 self.meta[t.pond]["pond_id"], t.name),
             )
             t.dirty = False
         self.db.commit()

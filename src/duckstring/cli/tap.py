@@ -55,7 +55,8 @@ def add(
 ) -> None:
     """Add a Tap (Refresh upon query).
 
-    Prints the Tap's key, once: only a hash of it is kept.
+    Prints the Tap's key, once: only a hash of it is kept. A Tap on an App has no key: each request to the App
+    counts as a query.
     """
     from . import _http
 
@@ -64,6 +65,9 @@ def add(
     resp = _http.post(f"{url}/api/ponds/{pond}/taps", auth=cfg, params=_http.pond_params(major, version),
                       json=body).json()
     typer.echo(f"Tap '{name}' added on '{resp['pond']}'.")
+    if resp["key"] is None:
+        typer.echo("It's on an App, so it has no key: requests to the App use it.")
+        return
     _print_key(resp["key"], resp["pond"], name)
 
 
