@@ -61,7 +61,7 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     command = section.get("command")
     if command is not None and (not isinstance(command, str) or not command.strip()):
         raise ValueError("pond.toml [app] command: expected a command line")
-    unknown = set(section) - {"command", "static", "idle_timeout", "state", "health", "strip_path"}
+    unknown = set(section) - {"command", "static", "idle_timeout", "state", "health", "strip_path", "download"}
     if unknown:
         raise ValueError(f"pond.toml [app]: unknown {', '.join(sorted(unknown))}")
     static = section.get("static")
@@ -73,6 +73,12 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     state = section.get("state", "local")
     if state not in ("local", "none"):
         raise ValueError(f'pond.toml [app] state: expected "local" or "none", got {state!r}')
+    download = section.get("download")
+    if download is not None:
+        if not isinstance(download, str) or not download.strip():
+            raise ValueError("pond.toml [app] download: expected a command line")
+        if state == "none":
+            raise ValueError('pond.toml [app] download: an App with state = "none" has no state to download')
     strip_path = section.get("strip_path", True)
     if not isinstance(strip_path, bool):
         raise ValueError("pond.toml [app] strip_path: expected true or false")
@@ -93,6 +99,7 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
         "state": state,
         "health": health,
         "strip_path": strip_path,
+        "download": download,
     }
 
 

@@ -469,6 +469,83 @@ def instance_rows(db, version_ids: list[int], limit: int = 20) -> list[dict]:
              "stop_reason": r[5], "exit_code": r[6], "log_path": r[7]} for r in rows]
 
 
+# ─── downloads ────────────────────────────────────────────────────────────────
+#
+# What an App keeps is its own business, so the Catchment never copies an App's files on its own: its state
+# directory and runtime directory stay out of `catchment download` and the state backup. An App that wants
+# its state carried declares `[app] download`, a command that writes into `$DUCKSTRING_APP_DOWNLOAD` what its
+# state directory should hold after a restore (a consistent copy of a database, an export, without secrets).
+
+DOWNLOAD_TIMEOUT_S = 600.0
+
+
+class AppDownloadError(Exception):
+    """An App's ``download`` command failed or timed out; the message names the App and ends with its output."""
+
+
+def is_app_file(rel: tuple[str, ...]) -> bool:
+    """Whether a root-relative path (as parts) belongs to an App: its state (``apps/...``) or its runtime
+    directory (``ponds/{name}/m{major}/app/...``: logs, holds, the freshness file)."""
+    if rel[:1] == ("apps",):
+        return True
+    return len(rel) > 3 and rel[0] == "ponds" and rel[2].startswith("m") and rel[3] == "app"
+
+
+def run_download(root: Path, view: dict, out: Path, timeout: float | None = None) -> None:
+    """Run an App's ``download`` command in its environment, writing into ``out``. Raises
+    :class:`AppDownloadError`."""
+    from ..environments import python_for
+
+    name, major = view["name"], view["major"]
+    python = python_for(root, view["source_path"])
+    state = app_state_dir(root, name, major)
+    state.mkdir(parents=True, exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if k not in _WITHHELD_ENV}
+    env["PATH"] = str(Path(python).parent) + os.pathsep + env.get("PATH", "")
+    env["DUCKSTRING_APP_STATE"] = str(state)
+    env["DUCKSTRING_APP_DOWNLOAD"] = str(out)
+    try:
+        done = subprocess.run(
+            ["/bin/sh", "-c", "exec " + view["app"]["download"]], cwd=root / view["source_path"], env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=timeout or DOWNLOAD_TIMEOUT_S, start_new_session=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        tail = (exc.stdout or b"").decode(errors="replace")[-2000:]
+        raise AppDownloadError(f"App '{name}' (v{major}): its download command didn't finish within "
+                               f"{timeout or DOWNLOAD_TIMEOUT_S:.0f}s\n{tail}") from None
+    if done.returncode != 0:
+        tail = done.stdout.decode(errors="replace")[-2000:]
+        raise AppDownloadError(f"App '{name}' (v{major}): its download command exited with code "
+                               f"{done.returncode}\n{tail}")
+
+
+def snapshot_apps(driver, root: Path) -> tuple[Path | None, list[tuple[Path, str]]]:
+    """Run every deployed App's ``download`` command into a fresh temporary directory, and return it (the
+    caller removes it) with the files to archive, as ``(path, arcname)`` under ``apps/{name}/m{major}/state/``.
+    Raises :class:`AppDownloadError` on the first failure, having removed the directory."""
+    import tempfile
+
+    views = [v for v in (driver.app_view(k) for k in sorted(driver.app_keys())) if v and v["app"].get("download")]
+    if not views:
+        return None, []
+    tmp = Path(tempfile.mkdtemp(prefix="duckstring-app-download-"))
+    files: list[tuple[Path, str]] = []
+    try:
+        for view in views:
+            out = tmp / view["name"] / f"m{view['major']}"
+            out.mkdir(parents=True)
+            run_download(Path(root), view, out)
+            arc = f"apps/{view['name']}/m{view['major']}/state"
+            for path in sorted(out.rglob("*")):
+                if path.is_file() or path.is_symlink():
+                    files.append((path, f"{arc}/{path.relative_to(out).as_posix()}"))
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return tmp, files
+
+
 def version_ids_of(db, name: str, major: int) -> list[int]:
     with locked(db):
         return [r[0] for r in db.execute(

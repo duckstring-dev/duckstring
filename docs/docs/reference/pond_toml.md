@@ -171,7 +171,8 @@ The Catchment serves the App at `/apps/{name}/v{major}/` on its own port, and `/
 | `strip_path` | boolean | `true` | Whether requests reach the App with its base path removed, the convention `uvicorn --root-path` and WSGI servers expect. The base path is sent as `X-Forwarded-Prefix` either way. Set `false` for frameworks configured with the full path, such as Streamlit's `server.baseUrlPath`. |
 | `health` | string | | A path, below the base path, that answers `2xx` once the App is ready. Without it, the App is ready once its port accepts connections. |
 | `idle_timeout` | string | `"30m"` | How long without a request before the process stops, such as `"10m"` or `"1h"`. The next request starts it again. `"0"` keeps it running. |
-| `state` | string | `"local"` | `"local"` gives the App a directory that survives restarts and redeploys, for SQLite or files, at `$DUCKSTRING_APP_STATE`. `"none"` gives it none. |
+| `state` | string | `"local"` | `"local"` gives the App a directory that survives restarts and redeploys, for a database or files, at `$DUCKSTRING_APP_STATE`. `"none"` gives it none. |
+| `download` | string | | A command that writes the App's state for [`catchment download`](cli/catchment.md#download) and the state backup. Without it, the App's state isn't included in either. |
 
 The process gets these environment variables:
 
@@ -183,6 +184,8 @@ The process gets these environment variables:
 | `DUCKSTRING_APP` | What `duckstring.app.pond()` reads to give the App a read-only handle on its Sources. |
 
 While the process runs it holds memory slots on the Catchment's machine, as a Pond Run does: one for its DuckDB, plus enough for `[pond] memory`, which for an App is what the process holds outside DuckDB (data frames, a model, the web framework). Setting it is recommended. A first request waits for the slots while Pond Runs hold them, up to the same 60 seconds, and an idle stop gives them back. The App's handle sets DuckDB's `memory_limit` to the slots' worth less `[pond] memory`. That limit is per process, so a server running several worker processes should declare their total. See [`DUCKSTRING_RUN_SLOTS`](environment.md#ducks).
+
+`catchment download` and the state backup never copy an App's files as they are. Only the App knows which of its files matter and how to copy them consistently while it runs, so they include its state only through `download`. The command runs in the App's directory and environment with `$DUCKSTRING_APP_STATE` set, whether or not the App is running, and writes into `$DUCKSTRING_APP_DOWNLOAD` exactly what the state directory should hold after a restore: a consistent copy of a database, say, leaving out anything secret. If it fails or takes longer than 10 minutes, the download fails with its output, and a state backup goes ahead without that App's state. The App's logs are never included.
 
 A Source keeps the version an App is reading. Each request holds what each Source had published when it arrived, until its response has been sent, and a WebSocket connection holds what was published at its latest message from the browser (and at the one before, for a minute). Reads outside a request, such as a background thread or a cache filled at startup, hold theirs with `with pond.hold():`.
 

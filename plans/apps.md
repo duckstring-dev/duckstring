@@ -131,11 +131,13 @@ DuckDB.
 
 `state = "local"` gives the App a durable directory, `apps/{name}/m{major}/state/`, passed as
 `$DUCKSTRING_APP_STATE`. It lives outside the version directory, so it survives redeploys, as a Pond's
-registry does. SQLite there works normally, including from several worker processes on the Catchment (WAL
-mode handles several processes on one machine). `catchment download` includes it. The archive snapshots
-SQLite with the backup API only for a `.db` suffix today (`routes/catchment.py`), and an App's database may
-be `.sqlite` or `.sqlite3`, so the archive should recognise SQLite by its file header under `apps/`, and
-skip `-wal`/`-shm` files for every suffix.
+registry does. What the App keeps there, and in what format, is its own business.
+
+`catchment download` and the state backup never copy an App's files as they are, since only the App knows
+which of them matter, how to copy them while it runs, and which are secret. An App opts in with
+`[app] download`, a command that writes into `$DUCKSTRING_APP_DOWNLOAD` what its state directory should
+hold after a restore. Without it, the App's state isn't included (decided 2026-11-06, over copying the whole
+directory or leaving downloads to an API the App serves itself). See "As built (part 3)".
 
 An App can write anything it likes: SQLite in its state directory, or an external database such as Postgres.
 It cannot publish Duckstring tables or Objects. To bring an App's data into a pipeline, the App serves it
@@ -270,7 +272,7 @@ Where it departs from the plan above:
 - **Browsers on a keyed Catchment** get a minimal sign-in form that stores the key in an `HttpOnly` cookie scoped to
   `/apps/`; the cookie and a bearer key are removed before forwarding.
 - **Sleep** doesn't stop an instance (only Kill and removal do); the idle timeout ends it.
-- `catchment download` doesn't yet snapshot an App's SQLite through the backup API.
+- `catchment download` included the state directory as plain files (replaced in part 3).
 
 ## As built (part 2, 2026-11-06)
 
@@ -292,6 +294,21 @@ Built: read leases, memory slots for instances, and Taps on Apps. Tests in `test
   runs them, as does every message from the browser on a WebSocket, at most once a second. Requests for static
   files don't.
 
-Still to build: the web UI (the App node, instances and logs in the Sidebar, an Open link), the archive's SQLite
-snapshots, the guide and framework recipes. The full-access serving connection's views (the other open
+Still to build: the web UI (the App node, instances and logs in the Sidebar, an Open link), the guide and
+framework recipes. The full-access serving connection's views (the other open
 question) were not looked at.
+
+## As built (part 3, 2026-11-06): downloads
+
+- `[app] download` is a command, run in the App's directory and environment with `$DUCKSTRING_APP_STATE` and
+  `$DUCKSTRING_APP_DOWNLOAD` set (`app_supervisor.run_download`). It runs whether or not an instance is running,
+  so a download never starts an idle App. Declaring it with `state = "none"` is an error.
+- `catchment download` runs every deployed App's command before the archive streams (`snapshot_apps`), so a
+  failure or a timeout (10 minutes) is an error response naming the App, with the tail of its output, rather than
+  a broken tar. The output lands at `apps/{name}/m{major}/state/` in the archive, so the extracted root is a
+  restore. `usage` estimates it by the state directory's current size.
+- Nothing else of an App is copied: not `apps/` and not the runtime directory `ponds/{name}/m{major}/app/`
+  (logs, holds, the freshness file). Before this the logs were included too.
+- The state backup's shutdown bundle (`state_sync.checkpoint_full`) follows the same rule. There a failing
+  command leaves that App's state out with a warning, since a backup is best effort and shutdown can't wait on
+  it.

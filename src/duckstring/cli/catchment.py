@@ -537,6 +537,7 @@ def download(
 
     Use it for a backup, or to carry state across a platform redeploy. Secrets are never included, and
     neither are published tables held in an external data root. Download while nothing is running.
+    An App's state is included only as its [app] download command writes it.
     """
     import tarfile
     import tempfile
@@ -572,7 +573,14 @@ def download(
                 "GET", f"{url}/api/catchment/archive", headers=auth_headers(cfg),
                 timeout=httpx.Timeout(None, connect=5.0),
             ) as resp:
-                resp.raise_for_status()
+                if resp.status_code >= 400:  # an App's download command failed, say: show why
+                    resp.read()
+                    try:
+                        detail = resp.json().get("detail") or resp.text
+                    except ValueError:
+                        detail = resp.text
+                    typer.echo(f"Error: {resp.status_code} from Catchment\n{detail}", err=True)
+                    raise typer.Exit(1)
                 with Progress(
                     TextColumn("[progress.description]{task.description}"), BarColumn(),
                     DownloadColumn(), TransferSpeedColumn(), console=console,

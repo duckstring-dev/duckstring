@@ -85,21 +85,36 @@ def checkpoint_tier1(root: Path, backup_uri: str | None) -> bool:
         return False
 
 
-def checkpoint_full(root: Path, backup_uri: str | None) -> bool:
+def checkpoint_full(root: Path, backup_uri: str | None, driver=None) -> bool:
     """Package the whole **quiescent** state root (a ``duck.db`` snapshot + the ``pond.db`` ledgers +
     ``registry.duckdb`` registries, minus WAL sidecars and the secret store) into a single ``state.tar``
     object, and refresh Tier-1. Call only when the Ducks are stopped (graceful shutdown) — DuckDB
-    registries have no live-copy guarantee. Best-effort."""
+    registries have no live-copy guarantee. Best-effort.
+
+    An App's files are left out, as from ``catchment download``: with ``driver``, its state goes in as what
+    its ``[app] download`` command writes; a failing command leaves that App's state out (logged)."""
     if not backup_uri:
         return False
     root = Path(root)
     from ..storage import get_storage
+    from .app_supervisor import AppDownloadError, is_app_file, snapshot_apps
+
+    app_tmp, app_files = None, []
+    if driver is not None:
+        try:
+            app_tmp, app_files = snapshot_apps(driver, root)
+        except AppDownloadError as exc:
+            import logging
+
+            logging.getLogger(__name__).warning("Apps' state left out of the state checkpoint: %s", exc)
 
     try:
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:
             for path in sorted(root.rglob("*")):
                 if not path.is_file() or path.name.endswith(_SKIP_SUFFIXES) or path.name in _SKIP_NAMES:
+                    continue
+                if is_app_file(path.relative_to(root).parts):
                     continue
                 arc = path.relative_to(root).as_posix()
                 if path.suffix == ".db":  # SQLite → consistent snapshot
@@ -109,6 +124,8 @@ def checkpoint_full(root: Path, backup_uri: str | None) -> bool:
                     tar.addfile(info, io.BytesIO(data))
                 else:
                     tar.add(path, arcname=arc, recursive=False)
+            for path, arc in app_files:
+                tar.add(path, arcname=arc, recursive=False)
         storage = get_storage(backup_uri)
         storage.write_bytes(buf.getvalue(), _TIER2)
         storage.write_bytes(_snapshot_sqlite_bytes(root / "duck.db"), _TIER1)
@@ -118,6 +135,11 @@ def checkpoint_full(root: Path, backup_uri: str | None) -> bool:
 
         logging.getLogger(__name__).warning("Tier-2 state checkpoint failed: %s", exc)
         return False
+    finally:
+        if app_tmp is not None:
+            import shutil
+
+            shutil.rmtree(app_tmp, ignore_errors=True)
 
 
 def _pull_state(storage, root: Path) -> bool:

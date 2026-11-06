@@ -105,7 +105,7 @@ def test_app_config_validates_the_declaration(tmp_path):
     assert app_config({"pond": {"name": "x"}}) is None
     cfg = app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "1h30m"}})
     assert cfg == {"command": "run", "static": None, "memory": None, "idle_timeout_s": 5400, "state": "local",
-                   "health": None, "strip_path": True}
+                   "health": None, "strip_path": True, "download": None}
     assert app_config({"pond": {"type": "app", "memory": "2GB"}, "app": {"command": "run"}})["memory"] == 2 * 10**9
     assert app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "0"}})["idle_timeout_s"] == 0
     (tmp_path / "out").mkdir()
@@ -117,6 +117,8 @@ def test_app_config_validates_the_declaration(tmp_path):
                 {"pond": {"type": "app"}, "app": {"command": "run", "port": 1}},
                 {"pond": {"type": "app"}, "app": {"command": "run", "strip_path": "no"}},
                 {"pond": {"type": "app", "memory": "lots"}, "app": {"command": "run"}},
+                {"pond": {"type": "app"}, "app": {"command": "run", "download": ""}},
+                {"pond": {"type": "app"}, "app": {"command": "run", "state": "none", "download": "snap"}},
                 {"pond": {}, "app": {"command": "run"}}):
         with pytest.raises(ValueError):
             app_config(bad)
@@ -465,3 +467,73 @@ def test_an_instance_takes_a_memory_slot_and_its_handle_is_capped(tmp_path, monk
         supervisor._instances["dash@1"].last_used -= 3600
         supervisor.reconcile()  # an idle stop gives the slot back
         assert _app_entry(client)["memory"]["slots"] == 0
+
+
+# ─── downloads ────────────────────────────────────────────────────────────────
+
+_SNAPSHOT = ("python -c \"import os, pathlib; pathlib.Path(os.environ['DUCKSTRING_APP_DOWNLOAD'], 'db.copy')"
+             ".write_text(pathlib.Path(os.environ['DUCKSTRING_APP_STATE'], 'db').read_text())\"")
+
+
+def _archive_names(client) -> tuple[int, dict[str, bytes]]:
+    import tarfile
+
+    r = client.get("/api/catchment/archive")
+    if r.status_code != 200:
+        return r.status_code, {"detail": r.json()["detail"].encode()}
+    with tarfile.open(fileobj=io.BytesIO(r.content), mode="r") as tar:
+        return 200, {m.name: tar.extractfile(m).read() for m in tar.getmembers() if m.isfile()}
+
+
+def _app_files(root) -> None:
+    state = root / "apps" / "dash" / "m1" / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "db").write_text("rows")
+    (state / "secret").write_text("token")
+    logs = root / "ponds" / "dash" / "m1" / "app" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "1.log").write_text("printed a token")
+
+
+def test_an_apps_files_stay_out_of_a_download_without_a_download_command(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client)
+    _app_files(client.app.state.root)
+    status, files = _archive_names(client)
+    assert status == 200 and "duck.db" in files
+    assert not [n for n in files if n.startswith("apps/") or "/app/" in n]
+
+
+def test_a_download_carries_what_the_apps_command_writes(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client, {"pond.toml": _app_toml(extra=f"download = {json.dumps(_SNAPSHOT)}\n"),
+                              "main.py": _APP_PY})
+    root = client.app.state.root
+    _app_files(root)
+    status, files = _archive_names(client)
+    assert status == 200
+    assert files["apps/dash/m1/state/db.copy"] == b"rows"  # what the command wrote, where a restore wants it
+    assert not [n for n in files if n.startswith("apps/") and n != "apps/dash/m1/state/db.copy"]
+    assert not [n for n in files if "/app/" in n]  # never its logs
+    use = client.get("/api/catchment/usage").json()
+    assert use["file_count"] == len([n for n in files if not n.startswith("apps/")])
+    # The state backup follows the same rule.
+    from duckstring.catchment.state_sync import checkpoint_full, restore_state
+
+    backup = str(root.parent / "backup")
+    assert checkpoint_full(root, backup, client.app.state.driver) is True
+    fresh = root.parent / "fresh"
+    assert restore_state(fresh, backup) is True
+    assert (fresh / "apps" / "dash" / "m1" / "state" / "db.copy").read_text() == "rows"
+    assert not (fresh / "apps" / "dash" / "m1" / "state" / "secret").exists()
+    assert not (fresh / "ponds" / "dash" / "m1" / "app").exists()
+
+
+def test_a_failing_download_command_fails_the_download(catchment_client):
+    client = catchment_client
+    failing = "python -c \"print('no database here'); raise SystemExit(4)\""
+    _deploy_pipeline(client, {"pond.toml": _app_toml(extra=f"download = {json.dumps(failing)}\n"),
+                              "main.py": _APP_PY})
+    status, body = _archive_names(client)
+    assert status == 500
+    assert b"App 'dash' (v1)" in body["detail"] and b"code 4" in body["detail"] and b"no database here" in body["detail"]

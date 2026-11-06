@@ -5,12 +5,17 @@ exported data, registries, and ledgers. SQLite files (`duck.db`, the Duck ledger
 consistent snapshots via the backup API; live WAL sidecars are skipped (the snapshot subsumes
 them). DuckDB registries are copied as-is, so download while the Catchment is quiescent if you
 need the registries to be coherent.
+
+An App's files are never copied as they are (plans/apps.md): its state is included only as what its
+``[app] download`` command writes, run just before the archive streams, and its runtime directory (logs)
+not at all.
 """
 
 from __future__ import annotations
 
 import io
 import queue
+import shutil
 import sqlite3
 import tarfile
 import tempfile
@@ -22,6 +27,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import auth
+from ..app_supervisor import AppDownloadError, app_state_dir, is_app_file, snapshot_apps
 from ..db import locked
 
 router = APIRouter()
@@ -418,7 +424,10 @@ def _root_files(root: Path) -> list[tuple[Path, str]]:
             continue
         if _SERVING_TMP in path.parts:
             continue  # a serving connection's spill scratch: transient, can be huge, and rebuilt on demand
-        files.append((path, path.relative_to(root).as_posix()))
+        rel = path.relative_to(root)
+        if is_app_file(rel.parts):
+            continue  # an App's own files: only what its download command writes is included
+        files.append((path, rel.as_posix()))
     return files
 
 
@@ -433,9 +442,17 @@ def _tar_size(file_sizes: list[int]) -> int:
 def usage(request: Request):
     """The root's total state size — what `catchment download` would pull. ``archive_bytes`` is a
     close estimate of the tar the archive endpoint streams (SQLite snapshots and long path headers
-    can shift it slightly) — good enough for a progress total."""
-    files = _root_files(Path(request.app.state.root))
+    can shift it slightly), good enough for a progress total. An App's download is estimated by its
+    state directory's size, since its command only runs for the archive."""
+    root = Path(request.app.state.root)
+    files = _root_files(root)
     sizes = [p.stat().st_size for p, _ in files]
+    driver = request.app.state.driver
+    for key in driver.app_keys():
+        view = driver.app_view(key)
+        if view and view["app"].get("download"):
+            state = app_state_dir(root, view["name"], view["major"])
+            sizes += [f.stat().st_size for f in state.rglob("*") if f.is_file()] if state.is_dir() else []
     return {"total_bytes": sum(sizes), "file_count": len(files), "archive_bytes": _tar_size(sizes)}
 
 
@@ -470,8 +487,13 @@ class _QueueWriter(io.RawIOBase):
 @router.get("/catchment/archive", dependencies=[auth.full])
 def archive(request: Request):
     """Stream the Catchment root as an uncompressed tar (no server-side temp copy of the data;
-    SQLite files are snapshotted one at a time)."""
+    SQLite files are snapshotted one at a time). Apps' download commands run first, so a failing one
+    is an error response rather than a broken stream."""
     root = Path(request.app.state.root)
+    try:
+        app_tmp, app_files = snapshot_apps(request.app.state.driver, root)
+    except AppDownloadError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     files = _root_files(root)
     q: queue.Queue = queue.Queue(maxsize=64)  # bounded: production blocks until the client drains
 
@@ -482,7 +504,11 @@ def archive(request: Request):
                     for path, arcname in files:
                         src = _sqlite_snapshot(path, tmpdir) if path.suffix == ".db" else path
                         tar.add(src, arcname=arcname, recursive=False)
+                    for path, arcname in app_files:  # as the App's command wrote them, never snapshotted
+                        tar.add(path, arcname=arcname, recursive=False)
         finally:
+            if app_tmp is not None:
+                shutil.rmtree(app_tmp, ignore_errors=True)
             q.put(None)
 
     threading.Thread(target=produce, daemon=True).start()

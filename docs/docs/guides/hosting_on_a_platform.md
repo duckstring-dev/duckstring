@@ -64,7 +64,7 @@ duckstring catchment download -c prod        # writes ./.duckstring
 # deploy the bundle as usual
 ```
 
-Download while no runs are in progress. Secrets aren't included, so set them again after redeploying.
+Download while no runs are in progress. Secrets aren't included, so set them again after redeploying. An App's state is included only if the App declares how to write it, with [`[app] download`](../reference/pond_toml.md#app).
 
 **Back it up continuously.** Set `DUCKSTRING_STATE_BACKUP_URI` to an object-store location. The Catchment copies its database there every minute (`DUCKSTRING_CHECKPOINT_INTERVAL`), and its full state when it shuts down cleanly. A Catchment starting with an empty state directory restores from it automatically. This suits platforms with no persistent disk, such as scale-to-zero containers.
 

@@ -187,7 +187,7 @@ async def _lifespan(app: FastAPI):
         if app.state.state_backup:
             from fastapi.concurrency import run_in_threadpool
 
-            await run_in_threadpool(checkpoint_full, app.state.root, app.state.state_backup)
+            await run_in_threadpool(checkpoint_full, app.state.root, app.state.state_backup, driver)
 
 
 def create_app(
