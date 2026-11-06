@@ -312,3 +312,13 @@ question) were not looked at.
 - The state backup's shutdown bundle (`state_sync.checkpoint_full`) follows the same rule. There a failing
   command leaves that App's state out with a warning, since a backup is best effort and shutdown can't wait on
   it.
+
+## As built: redeploying an App's running version
+
+- A Pond's running version can't be redeployed without `--force` (a version is an immutable artifact, and a
+  warm Duck would keep the old code). An App is exempt, since nothing can name it as a Source: its version
+  matters only for the major in its address. The author's call, 2026-11-06.
+- The deploy stops the running instance before replacing its directory (`stop_now(..., process=True)`), so it
+  never runs from a half-replaced folder; the next request starts the new code. Instances compare
+  `pond_version.deployed_at` as well as the version id (`_current`), so one started between the stop and the
+  record landing is replaced by the next `reconcile`.

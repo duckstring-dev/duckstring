@@ -113,13 +113,16 @@ def _deploy_one(
 
     mode = f"git:{git}" if git else "local"
     console.print(f"Deploying [bold]{name}[/bold] v[bold]{version}[/bold] ([dim]{mode}[/dim]) → [bold]{catchment_name}[/bold]")
-    if version_exists is True and version_active and not force:
+    if version_exists is True and version_active and pond_type == "app":
+        console.print("[yellow]This version is currently deployed. Its running instance will be stopped, and the "
+                      "next request starts the new deploy.[/yellow]")
+    elif version_exists is True and version_active and not force:
         typer.echo(f"Error: {name} {version} is already deployed. Bump the version in pond.toml, or pass --force "
                    "to replace it in place.", err=True)
         raise typer.Exit(1)
-    if version_exists is True and version_active:
-        console.print("[yellow]This version is currently deployed and will be replaced in place. A running Duck or "
-                      "App keeps the code it loaded until it restarts.[/yellow]")
+    elif version_exists is True and version_active:
+        console.print("[yellow]This version is currently deployed and will be replaced in place. A running Duck "
+                      "keeps the code it loaded until it restarts.[/yellow]")
     elif version_exists is True:
         # The version's deployment record + run history survive a removal, but nothing is live against
         # it — redeploying re-activates the retired line rather than overwriting a running one.
@@ -180,9 +183,9 @@ def deploy(
     """Deploy the Pond project in the current directory to a Catchment.
 
     Deploying a version replaces the running version of its major line. A new major version is deployed
-    alongside the existing ones. Redeploying the version a line is running is refused without --force.
-    Files matched by .pondignore (or its defaults: puddles/, .env, hidden directories, caches) aren't
-    uploaded; --dry-run lists what would be.
+    alongside the existing ones. Redeploying the version a line is running is refused without --force,
+    except for an App, whose running instance is replaced. Files matched by .pondignore (or its defaults:
+    puddles/, .env, hidden directories, caches) aren't uploaded; --dry-run lists what would be.
     """
     from rich.console import Console
 

@@ -526,22 +526,23 @@ class Driver(TapsMixin):
             name_by_pnid = {r[0]: r[1] for r in db.execute("SELECT id, name FROM pond_name")}
             rows = db.execute("""
                 SELECT pn.name, p.major, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind,
-                       p.is_draw, p.is_spout, pv.dbt, pv.app
+                       p.is_draw, p.is_spout, pv.dbt, pv.app, pv.deployed_at
                 FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id
                 JOIN pond_version pv ON pv.id = p.pond_version_id
             """).fetchall()
             deployed = {pond_key(name, major) for name, major, *_ in rows}
             pondid_to_key = {pid: pond_key(nm, mj) for nm, mj, pid, *_ in rows}
-            for name, major, pond_id, pv_id, version, source_path, kind, is_draw, is_spout, dbt, app in rows:
+            for name, major, pond_id, pv_id, version, source_path, kind, is_draw, is_spout, dbt, app, deployed_at in rows:
                 self.meta[pond_key(name, major)] = {
                     "name": name, "major": major, "version_id": pv_id, "version": version,
                     "source_path": source_path, "pond_id": pond_id, "kind": kind,
                     "is_draw": bool(is_draw), "is_spout": bool(is_spout), "dbt": bool(dbt), "ripple_ids": {},
                     # An App (plans/apps.md): its validated [app] section, run by the AppSupervisor.
                     "is_app": app is not None, "app": json.loads(app) if app is not None else None,
+                    "deployed_at": deployed_at,
                 }
 
-            for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw, is_spout, _dbt, app in rows:
+            for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw, is_spout, _dbt, app, _at in rows:
                 is_app = app is not None
                 key = pond_key(name, major)
                 sources, optional, missing = [], set(), []
@@ -2516,7 +2517,8 @@ class Driver(TapsMixin):
             pond = self.state.ponds[key]
             return {
                 "key": key, "name": m["name"], "major": m["major"], "version": m["version"],
-                "version_id": m["version_id"], "source_path": m["source_path"], "app": m["app"],
+                "version_id": m["version_id"], "deployed_at": m["deployed_at"], "source_path": m["source_path"],
+                "app": m["app"],
                 "sources": {self.meta[sp]["name"]: self.meta[sp]["major"] for sp in pond.sources if sp in self.meta},
                 "immediate_retries": pond.retry_immediately,
                 "is_failed": ps.is_failed, "is_killed": ps.is_killed,

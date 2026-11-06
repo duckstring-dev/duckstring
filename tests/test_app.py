@@ -202,6 +202,26 @@ def test_a_redeploy_replaces_the_instance(catchment_client):
     assert client.get("/api/ponds/dash/app/instances").json()["instances"][0]["version"] == "1.1.0"
 
 
+def test_an_app_redeploys_its_running_version_in_place(catchment_client):
+    # Nothing pins an App, so the running version can be redeployed without --force; the instance is stopped
+    # before its directory is replaced, and the next request starts the new code.
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    assert client.get("/apps/dash/v1/new").status_code == 404
+    new_py = _APP_PY + '\n\n@api.get("/new")\ndef new():\n    return {"new": True}\n'
+    assert _deploy(client, "dash", {"pond.toml": _app_toml(), "main.py": new_py}).status_code == 200
+    instances = client.get("/api/ponds/dash/app/instances").json()["instances"]
+    assert instances[0]["stop_reason"] == "redeploy"
+    assert client.get("/apps/dash/v1/new").json() == {"new": True}
+    # An instance started before the redeploy's record lands is replaced by the next reconcile.
+    supervisor = client.app.state.app_supervisor
+    inst = supervisor._instances["dash@1"]
+    inst.deployed_at = "an earlier deploy"
+    supervisor.reconcile()
+    assert inst.proc.poll() is not None and "dash@1" not in supervisor._instances
+
+
 def test_an_app_that_exits_fails_until_woken(catchment_client):
     client = catchment_client
     _deploy_pipeline(client, {"pond.toml": _app_toml(command="python -c 'import sys; sys.exit(3)'"),

@@ -193,4 +193,6 @@ A [Tap](cli/refresh.md#refresh-tap) on an App sends it a Refresh on use: every r
 
 A process that exits, or isn't ready within 60 seconds, is started again on the next request, up to `immediate_retries` times in a row. After that the App fails until it's woken with [`control wake`](cli/control.md) or redeployed. [`duckstring app`](cli/app.md) lists its instances and prints their output.
 
+Nothing can depend on an App, so its version only matters for the major in its address: a new major runs beside the old one. The running version can be redeployed as it is, without bumping it. Its process is stopped and the next request starts the new code.
+
 `duckstring pond run` in an App's directory serves it at `http://127.0.0.1:8000/` against its [Puddles](../guides/testing_with_puddles.md), with an empty base path.

@@ -73,6 +73,7 @@ class Instance:
     key: str
     id: int
     version_id: int
+    deployed_at: str | None  # with version_id, the deploy it runs: a same-version redeploy replaces it
     proc: subprocess.Popen
     port: int
     log_path: Path
@@ -84,6 +85,11 @@ class Instance:
     leases: dict[int, list[tuple[float, dict]]] = field(default_factory=dict)
     next_ticket: int = 0
     memory_limit: str | None = None
+
+
+def _current(inst: Instance, view: dict) -> bool:
+    """Whether ``inst`` runs the deploy ``view`` selects: its version, and that version's latest deploy."""
+    return inst.version_id == view["version_id"] and inst.deployed_at == view["deployed_at"]
 
 
 def _now_iso() -> str:
@@ -138,7 +144,7 @@ class AppSupervisor:
                 if view is None:
                     raise AppUnavailable(404, "no such App")
                 self._check_serving(key, view)
-            elif old is not None:  # an older version's instance
+            elif old is not None:  # an older deploy's instance
                 await asyncio.to_thread(self._stop, old, "redeploy")
             if not view["app"]["command"]:
                 raise AppUnavailable(404, "not found")  # a static-only App: nothing to start
@@ -180,7 +186,7 @@ class AppSupervisor:
     def _ready(self, key: str, view: dict) -> Instance | None:
         inst = self._instances.get(key)
         if (inst is not None and inst.ready and not inst.stopping and inst.proc.poll() is None
-                and inst.version_id == view["version_id"]):
+                and _current(inst, view)):
             return inst
         return None
 
@@ -288,7 +294,8 @@ class AppSupervisor:
         with locked(db):
             db.execute("UPDATE app_instance SET pid = ? WHERE id = ?", (proc.pid, iid))
             db.commit()
-        inst = Instance(key=view["key"], id=iid, version_id=view["version_id"], proc=proc, port=port,
+        inst = Instance(key=view["key"], id=iid, version_id=view["version_id"], deployed_at=view["deployed_at"],
+                        proc=proc, port=port,
                         log_path=log_path, memory_limit=memory_limit)
         with self._mu:
             self._instances[view["key"]] = inst
@@ -374,12 +381,13 @@ class AppSupervisor:
                        "WHERE id = ? AND stopped_at IS NULL", (_now_iso(), reason, proc.returncode, inst.id))
             db.commit()
 
-    def stop_now(self, key: str, reason: str) -> None:
-        """Stop ``key``'s instance at once (the Driver's hook for a Kill or a removal)."""
+    def stop_now(self, key: str, reason: str, process: bool = False) -> None:
+        """Stop ``key``'s instance at once: the Driver's hook for a Kill or a removal (``process=False``, as the
+        Driver processes the engine itself), and a same-version redeploy's, before its directory is replaced."""
         with self._mu:
             inst = self._instances.get(key)
         if inst is not None:
-            self._stop(inst, reason, process=False)
+            self._stop(inst, reason, process=process)
         self._crashes.pop(key, None)
 
     def shutdown(self) -> None:
@@ -409,7 +417,7 @@ class AppSupervisor:
                 self._stop(inst, "removed")
             elif view["is_killed"]:
                 self._stop(inst, "killed")
-            elif view["version_id"] != inst.version_id:
+            elif not _current(inst, view):
                 self._stop(inst, "redeploy")
                 self._crashes.pop(inst.key, None)
             elif (view["app"]["idle_timeout_s"] > 0 and inst.active <= 0

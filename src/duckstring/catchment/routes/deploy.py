@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from ...keys import pond_key
 from ...keys import version_key as _version_key
 from ...trickle_io import first_row
 from .. import auth
@@ -48,16 +49,14 @@ def _selected_version(db, source_name: str, major: int) -> str | None:
     return row[0] if row else None
 
 
-def _refuse_live_version(db, name: str, version: str, force: bool) -> None:
-    """A version is an immutable artifact: redeploying the one a line runs is refused without ``force``.
-    Forced, the running Duck and App instance keep the code they loaded (their restart checks compare
-    versions), and the version's directory is replaced under them. A removed or older version is fine."""
+def _is_live_version(db, name: str, version: str) -> bool:
+    """Whether ``version`` is the one its major line runs. A version is an immutable artifact, so redeploying
+    it is refused without ``force``: forced, a running Duck keeps the code it loaded (its restart check
+    compares versions) while the version's directory is replaced under it. An App is exempt (nothing pins
+    it): its instance is stopped and the next request starts the new deploy (``deployed_at`` tells them
+    apart). A removed or older version is a restore or a rollback, never refused."""
     with locked(db):
-        selected = _selected_version(db, name, int(version.split(".")[0]))
-    if selected == version and not force:
-        raise HTTPException(status_code=409, detail=(
-            f"{name} {version} is already deployed. Bump the version, or pass --force to replace it in place "
-            "(a running Duck or App keeps the code it loaded until it restarts)."))
+        return _selected_version(db, name, int(version.split(".")[0])) == version
 
 
 def _check_version_contracts(db, pn_id: int, name: str, version: str, cfg: dict) -> None:
@@ -411,7 +410,7 @@ async def deploy(request: Request):
             name = form["name"]
             version = form["version"]
             kind = form.get("type", "pond")
-            _refuse_live_version(db, name, version, form.get("force") == "true")
+            force = form.get("force") == "true"
             archive_bytes = await form["pond"].read()
             try:
                 with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
@@ -420,8 +419,7 @@ async def deploy(request: Request):
                 raise HTTPException(status_code=422, detail="Uploaded file is not a valid zip archive") from exc
         else:
             body = _GitBody(**(await request.json()))
-            name, version, kind = body.name, body.version, body.type
-            _refuse_live_version(db, name, version, body.force)
+            name, version, kind, force = body.name, body.version, body.type, body.force
             shutil.rmtree(staging)  # git clone wants to create the directory itself
             try:
                 subprocess.run(["git", "clone", body.repo_url, str(staging)], check=True, capture_output=True)
@@ -438,6 +436,11 @@ async def deploy(request: Request):
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if cfg["kind"]:
             kind = cfg["kind"]
+        live = _is_live_version(db, name, version)
+        if live and not force and cfg["app"] is None:
+            raise HTTPException(status_code=409, detail=(
+                f"{name} {version} is already deployed. Bump the version, or pass --force to replace it in place "
+                "(a running Duck keeps the code it loaded until it restarts)."))
         with locked(db):
             catalog = _source_schemas(db, cfg["sources"])
         try:
@@ -451,6 +454,12 @@ async def deploy(request: Request):
             raise HTTPException(status_code=422, detail=detail) from exc
 
         dest = root / "ponds" / name / version
+        supervisor = getattr(request.app.state, "app_supervisor", None)
+        if live and cfg["app"] is not None and supervisor is not None:
+            # Replaced in place: stop the running instance first, so it never runs from a half-replaced
+            # directory. The next request starts the new deploy.
+            await asyncio.to_thread(supervisor.stop_now, pond_key(name, int(version.split(".")[0])), "redeploy",
+                                    process=True)
         if dest.exists():
             shutil.rmtree(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
