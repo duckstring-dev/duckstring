@@ -1,6 +1,7 @@
 # Apps: serving an application from the Catchment
 
-Status: **agreed in outline with the author on 2026-11-05; not built.** v1 runs Apps on the Catchment only.
+Status: **agreed in outline with the author on 2026-11-05; part 1 built 2026-11-06** on the `apps` branch (see
+"As built" at the end). v1 runs Apps on the Catchment only.
 
 ## Why
 
@@ -242,3 +243,35 @@ Deferred:
   sees, not until the handler returns.
 - **Whether the sandboxed serving connection has the same gap.** It materialises tables per connection, so
   probably not, but the full-access serving connection's views read files in place and may.
+
+## As built (part 1, 2026-11-06)
+
+Built: the declaration and deploy, the engine node, instances (start on request, idle stop, health, failure,
+logs), forwarding with WebSockets and the sign-in gate, static files, the read-only handle, `pond run` against
+Puddles, `duckstring app instances|logs`, the instance and log routes, reference docs. Tests: `tests/test_app.py`.
+
+Where it departs from the plan above:
+
+- **The base path is stripped by default.** `uvicorn --root-path` prepends the root path to the request path, so an
+  unstripped request reached FastAPI as `/apps/x/v1/apps/x/v1/...`. ASGI and WSGI servers expect the proxy to strip
+  it; Streamlit's `baseUrlPath` and Dash's path prefixes expect it kept. `[app] strip_path` (default `true`) chooses,
+  and `X-Forwarded-Prefix` names the base path either way.
+- **The bare path redirects** (307) to `/apps/{name}/v{major}/`, so every instance has one base path and the App
+  doesn't restart when `pond promote` moves the served major. A WebSocket can't follow a redirect, so a bare
+  WebSocket path is refused.
+- **`command` is optional when `static` is given**, for a site that builds to files (a static-only App never starts
+  a process).
+- **Freshness** is kept by a standing Wake on every App (as a Spout's), so `end_f` follows the Sources without
+  soliciting them. The handle reads it from a `freshness.json` the supervisor rewrites when it changes, since an
+  App has no key to call the Catchment with.
+- **The state directory** is `apps/{name}/m{major}/state/`, outside the line's runtime directory, so a Catchment
+  reset (which scrubs `ponds/*/m*/`) keeps it; removing the line deletes it. Logs live in the runtime directory,
+  `ponds/{name}/m{major}/app/logs/`.
+- **Browsers on a keyed Catchment** get a minimal sign-in form that stores the key in an `HttpOnly` cookie scoped to
+  `/apps/`; the cookie and a bearer key are removed before forwarding.
+- **Sleep** doesn't stop an instance (only Kill and removal do); the idle timeout ends it.
+- `catchment download` doesn't yet snapshot an App's SQLite through the backup API.
+
+Still to build: the web UI (the App node, instances and logs in the Sidebar, an Open link), Taps on Apps, read
+leases in `_retain_from`, memory slots for instances, the archive's SQLite snapshots, the guide and framework
+recipes.

@@ -89,6 +89,7 @@ The web UI prompts for a key on 401 and keeps it in localStorage. `_http.get/pos
 src/duckstring/
   core.py                  # Pond/Ripple handles, @ripple/@puddle decorators, Catchment client, pond.toml/entrypoint/import helpers.
                            # load_ripples: THE one collection of a Pond's Ripples (Python + SQL), used by discovery, Duck, runner.
+  app.py                   # Apps: [app] validation (app_config), base_path, and the read-only handle duckstring.app.pond()
   sql_ripples.py           # SQL Ripples ([ripples.NAME]) and static tables ([static.NAME]) from pond.toml: validation, the
                            # json_serialize_sql reference check, source.table rewriting, the synthesised Ripple callable.
                            # Incremental I/O is a capability of the Pond handle; there is no separate @trickle node type.
@@ -128,6 +129,8 @@ src/duckstring/
     auth.py                #   access-level key ladder, route guards, Duck token
     driver.py              #   Driver: engine + Duck coordination + persistence + refresh/window/spout CRUD + restart restore
     taps.py                #   TapsMixin (on the Driver): Tap CRUD, key-hash index, the per-query policy, counters
+    app_supervisor.py      #   AppSupervisor: App instances (start on request, idle stop, logs, failure)
+    app_proxy.py           #   /apps/{name}/v{major}/ forwarding (HTTP + WebSockets), static files, the sign-in gate
     egress_worker.py       #   delivers published output to Spouts
     alert_worker.py        #   drains the alert_delivery outbox → notifier.send
     launcher.py            #   DispatchingLauncher, SubprocessLauncher, NoopLauncher (see Duck launchers)
@@ -153,6 +156,7 @@ src/duckstring/
                            #   group: ls, delete, expose, lineage/trace (cli/lineage.py). Assets are POND.NAME (core.parse_ref)
     window.py              #   window add|ls|rm POND
     tap.py                 #   refresh tap add|ls|rm|rotate POND (an app's access point; prints the key once)
+    app.py                 #   app instances|logs APP (an App's processes; see Apps)
     control.py             #   wake/force/rebuild/repair/reset/wipe/sleep/kill/clear on any number of Ponds (control.select:
                            #   name or name@major, --all/--tree/--between/--downstream), plus reset-contract/failure-budget
     pond.py, deploy.py     #   pond init/demo/hydrate/run/deploy/remove/promote, and pond puddle … (cli/puddle.py)
@@ -163,7 +167,7 @@ src/duckstring/
     secret.py              #   secret set/ls/rm (value prompted, never in argv)
     alert.py               #   alert add/ls/rm/test/log
     status.py, catchment.py, duct.py (catchment duct …, incl. open/close), config.py, _http.py
-                           #   Top level (13): status query get refresh window control data pond catchment duck spout secret alert
+                           #   Top level (14): status query get refresh window control data pond catchment duck spout secret alert app
   alerts/                  # Failure and freshness notifications
     event.py               #   AlertEvent (rendered and sanitised; never a traceback) + KNOWN_EVENTS/normalise_events
     base.py                #   Notifier protocol + get_notifier(uri) scheme registry + destination validation
@@ -290,6 +294,17 @@ A **Tap** is an app's access point on one Pond line: `pond_tap (pond_id, name)` 
 - **Surface**: routes `GET/POST /api/ponds/{name}/taps`, `POST .../taps/{tap}/rotate|remove` (full); `/api/query` (`pond` optional with a Tap key), `/api/serve/query`, `GET /api/serve` and its own Pond's `/freshness` accept the key; every front door calls `taps.apply_tap` (HTTP: `routes/tap.tap_gate`); the pg wire takes it as the password (not on an open Catchment, which never asks), Flight as the bearer (`do_get` gates, `get_flight_info` doesn't). The Python `Catchment` client omits `pond` for a `tap_` key.
 - **Counters** (`query_count`, `refresh_count`, `last_query_at`) live in memory and flush from `scheduler_tick` (`_flush_tap_counters`); `/metrics` `duckstring_tap_queries_total`/`_refreshes_total`; `/api/status` per-Pond `taps` (never keys). Removing a line deletes its Taps; Sleep/Kill leave them.
 - **UI**: `TapList` (`TapEditor.tsx`) at the foot of the Refresh section (full only): a "Taps (Refresh on Request)" button opening the add modal, then Tap names; a name opens its details with Rotate and Delete. The key is shown once with Copy. On the canvas a Pond's recurring Refreshes and Taps are a strip joined to the bottom of its box (`PondNode`, sized by `layout.demandStripHeight`/`demandStripWidth`), not a separate node, so it never overlaps or truncates.
+
+## Apps (`app.py`, `catchment/app_supervisor.py`, `catchment/app_proxy.py`, migration `034`; see `plans/apps.md`)
+
+An **App** is an Outlet that serves HTTP: `[pond] type = "app"` + `[app]` (`app.app_config`: `command` and/or `static`, `strip_path` default true, `health`, `idle_timeout` default 30m (`"0"` = keep running), `state` local|none). Stored as kind `outlet` with `pond_version.app` (JSON); `meta["is_app"]`. Part 1 built 2026-11-06 on branch `apps` (Catchment compute only).
+- **Deploy** (`routes/deploy.py`): no discovery (`_prepare(app=True)` builds the env only; one synthetic Ripple `serve`, like a Spout's `egress`); refused with `src/pond.py`, `[ripples]`, `[static]` or `dbt_project`; `_check_apps_terminal`: nothing may name an App as a Source, either deploy order.
+- **Engine**: `Pond.is_app`. A Run of an App always completes in-engine as a pass (`start_pond_run`), never a BeginRun or a slot; the Driver arms a standing Wake on every App, so its freshness is the one a Pond Run would adopt now. `_record_pass` writes no `pond_run` for an App. `engine.fail_app` fails it at `end_f` (no Run in flight); `retry_on_change` is forced 0. Demand, Refreshes and the throttle are a normal Outlet's.
+- **Instances** (`AppSupervisor`, on `app.state.app_supervisor`, loop `run_app_supervisor` every 1 s; `app_instance` keyed on the version): started by the first request (`acquire`, per-App asyncio lock), `/bin/sh -c "exec {command}"` in the deployed dir, env bin first on PATH, its own process group, output to `ponds/{name}/m{major}/app/logs/{id}.log`; env `PORT`, `DUCKSTRING_APP_PATH` (`/apps/{name}/v{major}`), `DUCKSTRING_APP_STATE` (`apps/{name}/m{major}/state/`, outside the line's runtime dir so a Catchment reset keeps it; `remove_pond` deletes it), `DUCKSTRING_APP` (JSON for the handle); `DUCKSTRING_API_KEY` withheld. Ready = `health` 2xx or the port accepting, within `DUCKSTRING_APP_START_TIMEOUT` (60 s). `reconcile` stops idle (no request in flight and `idle_timeout` passed), outdated (redeploy), killed and removed instances, records ones that exited, and writes `freshness.json` (the App's and Sources' `end_f`) for `pond.freshness()`. An exit or failed start counts against `immediate_retries` in a row (`_crashes`, reset by an idle or redeploy stop or once the App is no longer failed); past it `Driver.fail_app` (alert, `is_failed`, error from the last instance row via `app_stop_message`). Kill and removal call `Driver.on_app_stop` synchronously. `close_orphans` records instances a previous process left open.
+- **Forwarding** (`app_proxy.py`, mounted at the root before the static UI, outside the `/api` audit): `/apps/{name}/...` 307s to the served major (`Driver.app_major`); `/apps/{name}/v{major}/...` serves `static` files itself, else forwards (httpx streaming, `app.state.app_http`; hop-by-hop headers dropped, duplicate response headers kept via `raw_headers`, `X-Forwarded-For/Proto/Host/Prefix`). `strip_path` true sends the path below the base (uvicorn `--root-path` doubles an unstripped path); false sends it whole (Streamlit, Dash). WebSockets forwarded with the `websockets` client (`_pump`); a bare WebSocket path is refused, since it can't redirect. In-flight requests and sockets keep an instance from idling (`begin`/`end`; a streamed body ends when it finishes). Gate (`_allowed`): open Catchment → open; else a key at any level as a bearer or the `duckstring_key` cookie (`POST /apps/_signin`, a minimal form shown to browsers on 401), stripped before forwarding. End-user sign-in beyond that is the App's or commercial.
+- **Handle** (`duckstring.app.pond()`, `AppPond(Pond)`): reads Sources only (own refs raise), newest published data (no pin, `f=None`), a DuckDB cursor per thread, `freshness()`; writes, `read_delta`, `trickle`, `skip` raise. `pond run` in an App's dir serves it on `--port` (8000) against `puddles/` (flat layout, empty base path, state in `puddles/app/state/`; `local/app.py`).
+- **Surface**: `/api/status` per-Pond `is_app` and `app` (`path`, running `instance`); `GET /api/ponds/{name}/app/instances` (read), `/app/logs` (full; `tail`/`offset`, `x-log-offset`); CLI `duckstring app instances|logs [--follow]`. Not yet: the web UI, Taps on Apps, read leases in `_retain_from`, memory slots for instances, remote compute.
+- Tests: `tests/test_app.py`.
 
 ## Postgres wire (`catchment/pg_wire.py`, `catchment/pg_types.py`)
 

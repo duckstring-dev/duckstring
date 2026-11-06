@@ -22,6 +22,7 @@ import os
 import threading
 from datetime import datetime, timedelta, timezone
 
+from ..app import app_stop_message
 from ..egress.credentials import secret_value
 from ..engine import (
     NEVER,
@@ -463,6 +464,9 @@ class Driver(TapsMixin):
         self.data_version = 0
         # In-flight/last data-plane migration progress (None until one runs); see migrate().
         self.migration: dict | None = None
+        # Apps (plans/apps.md): the AppSupervisor's synchronous stop, called with (key, reason) when a Kill or
+        # a removal must end an App's instance at once (None without a supervisor, e.g. in tests).
+        self.on_app_stop = None
         self.reload()
 
     def set_notify(self, cb) -> None:
@@ -519,20 +523,23 @@ class Driver(TapsMixin):
             name_by_pnid = {r[0]: r[1] for r in db.execute("SELECT id, name FROM pond_name")}
             rows = db.execute("""
                 SELECT pn.name, p.major, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind,
-                       p.is_draw, p.is_spout, pv.dbt
+                       p.is_draw, p.is_spout, pv.dbt, pv.app
                 FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id
                 JOIN pond_version pv ON pv.id = p.pond_version_id
             """).fetchall()
             deployed = {pond_key(name, major) for name, major, *_ in rows}
             pondid_to_key = {pid: pond_key(nm, mj) for nm, mj, pid, *_ in rows}
-            for name, major, pond_id, pv_id, version, source_path, kind, is_draw, is_spout, dbt in rows:
+            for name, major, pond_id, pv_id, version, source_path, kind, is_draw, is_spout, dbt, app in rows:
                 self.meta[pond_key(name, major)] = {
                     "name": name, "major": major, "version_id": pv_id, "version": version,
                     "source_path": source_path, "pond_id": pond_id, "kind": kind,
                     "is_draw": bool(is_draw), "is_spout": bool(is_spout), "dbt": bool(dbt), "ripple_ids": {},
+                    # An App (plans/apps.md): its validated [app] section, run by the AppSupervisor.
+                    "is_app": app is not None, "app": json.loads(app) if app is not None else None,
                 }
 
-            for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw, is_spout, _dbt in rows:
+            for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw, is_spout, _dbt, app in rows:
+                is_app = app is not None
                 key = pond_key(name, major)
                 sources, optional, missing = [], set(), []
                 for snid, smajor, required in db.execute(
@@ -560,6 +567,8 @@ class Driver(TapsMixin):
                 # A Spout with no budget set retries a failed delivery on its Pond's next few publishes
                 # (delivery failures are often transient); a Pond defaults to no retries.
                 imm, onc = retry if retry else (0, SPOUT_SOURCE_RETRIES if is_spout else 0)
+                if is_app:  # an App's failure is its process's, never retried by a Source changing
+                    onc = 0
                 duck_row = first_row(db.execute(
                     "SELECT duck_target, dedicated_instance_type, dedicated_auto_stop, "
                     "flock_mode, flock_engine, oom_policy, deploy_config, flock_accept FROM pond_duck "
@@ -587,19 +596,22 @@ class Driver(TapsMixin):
                 # Pool identity + persist mode (plans/persist.md): where this Pond's Duck actually runs
                 # decides whose Sinks see end_f (same Pool) vs persisted_f (cross-Pool), and whether its
                 # own publish is async-mirrored. Draws/Spouts run in the Catchment process → Catchment Pool.
-                pool = self._pool_of(key) if not (is_draw or is_spout) else "catchment"
+                pool = self._pool_of(key) if not (is_draw or is_spout or is_app) else "catchment"
                 ponds[key] = Pond(
                     id=key, name=key, sources=sources, optional_sources=optional, windows=windows,
                     retry_immediately=imm, retry_on_change=onc, is_draw=bool(is_draw),
-                    is_spout=bool(is_spout), has_missing_source=has_missing_source, always_run=always_run,
-                    pool=pool,
+                    is_spout=bool(is_spout), is_app=is_app, has_missing_source=has_missing_source,
+                    always_run=always_run, pool=pool,
                     # Local-first publish + async Persist applies on every SHARED filesystem — the
                     # Catchment Pool and named Pools (whose agent passes --persist-root). Only a
                     # per-Pond remote Duck ("duck:*" — preset/dedicated) publishes the plane directly.
-                    async_persist=(self.data_root is not None and not (is_draw or is_spout)
+                    async_persist=(self.data_root is not None and not (is_draw or is_spout or is_app)
                                    and not pool.startswith("duck:")),
                 )
                 pond_states[key] = self._load_pond_state(pond_id)
+                # An App's freshness follows its Sources (the freshness a Pond Run would adopt now): a
+                # standing Wake completes it, in the engine, whenever they advance. It never solicits them.
+                pond_states[key].standing_wake = pond_states[key].standing_wake or is_app
                 if is_spout:
                     # The egress config + the standing-Wake armed state (Sleep persists as armed=0).
                     cfg = first_row(db.execute(
@@ -1327,7 +1339,7 @@ class Driver(TapsMixin):
             if ps is not None:  # guard: idle + demand-free (the whole op is atomic under the lock)
                 if ps.start_f > ps.end_f:
                     raise ValueError("the Pond is running — sleep it first, then remove")
-                if ps.demand or ps.standing_wake or self.state.refreshes.get(key):
+                if ps.demand or (ps.standing_wake and not meta.get("is_app")) or self.state.refreshes.get(key):
                     raise ValueError("the Pond has demand — clear it first (duckstring control sleep)")
             pond_id = meta["pond_id"]
             (pn_id,) = first_row(self.db.execute("SELECT pond_name_id FROM pond WHERE id = ?", (pond_id,)))
@@ -1342,6 +1354,12 @@ class Driver(TapsMixin):
             # 1. Quiesce + scrub the on-disk runtime (registry + pond.db ledger + local data). Keep the
             #    {version}/ artifacts + the deployment/history rows.
             self.launcher.terminate(key, wait=True)
+            if meta.get("is_app"):
+                if self.on_app_stop is not None:
+                    self.on_app_stop(key, "removed")
+                from .app_supervisor import app_state_dir
+
+                shutil.rmtree(app_state_dir(Path(self.root), name, major), ignore_errors=True)
             self._idle_since.pop(key, None)
             shutil.rmtree(pond_major_dir(Path(self.root), name, major), ignore_errors=True)
             if self.data_root is not None:  # published data outside the state root
@@ -1561,6 +1579,8 @@ class Driver(TapsMixin):
             in_flight = ps.start_f if ps.start_f > ps.end_f else None
             self.state = kill_pond(self.state, pond, now)
             self.launcher.terminate(pond)  # cancel the Duck's running Ripples (kills the process)
+            if self.meta.get(pond, {}).get("is_app") and self.on_app_stop is not None:
+                self.on_app_stop(pond, "killed")
             self.jobs[pond] = []
             if in_flight is not None:
                 self._kill_pond_run(pond, _iso(in_flight), now)
@@ -1700,7 +1720,7 @@ class Driver(TapsMixin):
         change (a duck override, a pool created/removed) — cheaper than a full reload, and demand-safe
         (freshness/demand state untouched; only the visibility/persist model updates)."""
         for key, pond in self.state.ponds.items():
-            if pond.is_draw or pond.is_spout:
+            if pond.is_draw or pond.is_spout or pond.is_app:
                 continue
             pond.pool = self._pool_of(key)
             pond.async_persist = (self.data_root is not None
@@ -2458,6 +2478,86 @@ class Driver(TapsMixin):
         except Exception as exc:  # noqa: BLE001 — alerting must never break the engine
             print(f"[catchment] alert emit failed ({kind}): {exc}", flush=True)
 
+    # ─── Apps (plans/apps.md) ────────────────────────────────────────────────────
+
+    def fail_app(self, key: str, message: str) -> None:
+        """An App's instance exited unexpectedly or never became ready, with its restarts spent: fail the App
+        (it serves nothing until an operator Wake/Clear or a redeploy) and alert."""
+        from ..engine import fail_app
+
+        with self.lock:
+            if key not in self.state.ponds or self.state.pond_states[key].is_failed:
+                return
+            now = _now()
+            self.state = fail_app(self.state, key, now)
+            m = self.meta[key]
+            self._alert_failure(key, "failure", scope_pond=m["name"], scope_major=m["major"],
+                                f=_iso(self.state.pond_states[key].end_f),
+                                title=f"App '{m['name']}' failed", message=message)
+            self._process(now)
+
+    def app_view(self, key: str) -> dict | None:
+        """What the AppSupervisor needs to run or gate an App: its config, version and Sources, and whether
+        it may serve (not failed or killed). ``None`` when ``key`` isn't a deployed App."""
+        with self.lock:
+            m = self.meta.get(key)
+            if m is None or not m.get("is_app"):
+                return None
+            ps = self.state.pond_states[key]
+            pond = self.state.ponds[key]
+            return {
+                "key": key, "name": m["name"], "major": m["major"], "version": m["version"],
+                "version_id": m["version_id"], "source_path": m["source_path"], "app": m["app"],
+                "sources": {self.meta[sp]["name"]: self.meta[sp]["major"] for sp in pond.sources if sp in self.meta},
+                "immediate_retries": pond.retry_immediately,
+                "is_failed": ps.is_failed, "is_killed": ps.is_killed,
+            }
+
+    def app_keys(self) -> list[str]:
+        with self.lock:
+            return [k for k, m in self.meta.items() if m.get("is_app")]
+
+    def app_major(self, name: str) -> int | None:
+        """The major a bare App ``name`` resolves to: its served major (``pond promote`` moves it), else the
+        highest deployed."""
+        with self.lock:
+            majors = self.deployed_majors(name)
+            if not majors:
+                return None
+            served = self.served_major(name)
+            return served if served in majors else max(majors)
+
+    def app_freshness(self, key: str) -> dict:
+        """The App's freshness and each Source's (``{"freshness": iso | None, "sources": {name: iso}}``),
+        which the AppSupervisor hands the App's process for ``pond.freshness()``."""
+        with self.lock:
+            ps = self.state.pond_states.get(key)
+            if ps is None:
+                return {"freshness": None, "sources": {}}
+            iso = lambda dt: _iso(dt) if dt != NEVER else None  # noqa: E731
+            return {"freshness": iso(ps.end_f),
+                    "sources": {self.meta[sp]["name"]: iso(self.state.pond_states[sp].end_f)
+                                for sp in self.state.ponds[key].sources if sp in self.meta}}
+
+    def _app_status(self, key: str) -> dict:
+        m = self.meta[key]
+        from ..app import base_path
+
+        row = first_row(self.db.execute(
+            "SELECT id, started_at, ready_at FROM app_instance WHERE pond_version_id = ? AND stopped_at IS NULL "
+            "ORDER BY id DESC LIMIT 1", (m["version_id"],)))
+        return {"path": base_path(m["name"], m["major"]) + "/",
+                "instance": {"id": row[0], "started_at": row[1], "ready_at": row[2]} if row else None}
+
+    def _app_error(self, key: str) -> str | None:
+        """Why an App failed, from its last instance (survives a restart with no extra state)."""
+        row = first_row(self.db.execute(
+            "SELECT stop_reason, exit_code FROM app_instance WHERE pond_version_id = ? AND stopped_at IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", (self.meta[key]["version_id"],)))
+        if row is None:
+            return None
+        return app_stop_message(row[0], row[1])
+
     def _alert_failure(self, key: str, kind: str, *, scope_pond: str | None, scope_major: int | None,
                        f: str | None, title: str, message: str) -> None:
         """Fire a failure/contract/spout alert and remember the key so its recovery is emitted when it
@@ -3210,7 +3310,7 @@ class Driver(TapsMixin):
         root = _Path(self.root)
         candidates = []
         for key, pond in self.state.ponds.items():
-            if pond.is_draw or pond.is_spout:
+            if pond.is_draw or pond.is_spout or pond.is_app:
                 continue
             ps = self.state.pond_states[key]
             if ps.start_f > ps.end_f or ps.demand or key in self.jobs and self.jobs[key]:
@@ -3314,7 +3414,7 @@ class Driver(TapsMixin):
             return
         for pond in list(self.state.ponds):
             p = self.state.ponds[pond]
-            if p.is_draw or p.is_spout:  # no Duck process — the poller/egress worker drives these
+            if p.is_draw or p.is_spout or p.is_app:  # no Duck: the poller/egress worker/AppSupervisor
                 continue
             ps = self.state.pond_states[pond]
             if ps.is_blocked or ps.is_killed:  # killed Ponds are intentionally down — don't re-fail
@@ -3597,6 +3697,8 @@ class Driver(TapsMixin):
         """An engine-synthesised pass (no Duck): record an instant, successful no-change pond_run so the
         history is honest and reload's run counts stay correct (see plans/no-change-skip.md)."""
         meta = self.meta[pond]
+        if meta.get("is_app"):  # an App's Runs complete at once with nothing to record: it has instances
+            return
         fi = _iso(f)
         self.db.execute(
             "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, finished_at, status, changed) "
@@ -4151,7 +4253,9 @@ class Driver(TapsMixin):
                 # kind is derivable here (and after a restart) with no extra state.
                 error = None
                 failure_kind = None
-                if ps.is_failed:
+                if ps.is_failed and self.meta[key].get("is_app"):
+                    error, failure_kind = self._app_error(key), "error"
+                elif ps.is_failed:
                     from ..schema_contract import CONTRACT_PREFIX
 
                     row = first_row(self.db.execute(
@@ -4175,6 +4279,9 @@ class Driver(TapsMixin):
                     "is_draw": self.meta[key].get("is_draw", False),
                     "is_spout": self.meta[key].get("is_spout", False),
                     "dbt": self.meta[key].get("dbt", False),  # dbt-mode Pond (models are Ripples) — UI flag
+                    # An App (plans/apps.md): where it serves and its running instance, if any.
+                    "is_app": self.meta[key].get("is_app", False),
+                    "app": self._app_status(key) if self.meta[key].get("is_app") else None,
                     # A Spout's egress config + armed state, for the node's control panel.
                     "spout": (
                         {**self.meta[key]["spout"], "armed": ps.standing_wake}
@@ -4220,7 +4327,7 @@ class Driver(TapsMixin):
                     # The effective compute config (target/size + Flock posture) + its declared/override
                     # provenance. Draws/Spouts are not run by a Duck, so they carry none.
                     "duck": (None if self.meta[key].get("is_draw") or self.meta[key].get("is_spout")
-                             else self.duck_config(key)),
+                             or self.meta[key].get("is_app") else self.duck_config(key)),
                     # The most recent Flock dispatch failure (None while dispatching cleanly / no Flock).
                     # A failed dispatch still completes the run locally, so without this a broken Flock is
                     # indistinguishable from a working one. Sanitised engine message, never a traceback.
@@ -4259,7 +4366,7 @@ class Driver(TapsMixin):
                 }
                 # Compute-cost signal (plans/cloud-config.md increment 4): where the Duck runs + its
                 # Flock posture, so a scrape can attribute cost. Draws/Spouts have no Duck.
-                if not node["is_spout"] and not node["is_draw"]:
+                if not node["is_spout"] and not node["is_draw"] and not m.get("is_app"):
                     dc = self.duck_config(key)
                     node["duck_target"] = dc["duck_target"]
                     node["flock_mode"] = dc["flock_mode"]

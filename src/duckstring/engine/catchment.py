@@ -669,7 +669,7 @@ def _needs_slot(s: EngineState, pid: PondId) -> bool:
     """Would starting this Pond now take slots? Only for a Pond on a slotted machine whose Duck is idle and
     whose Run would dispatch (a pass, a Draw and a Spout run no Duck)."""
     pond, ps = s.ponds[pid], s.pond_states[pid]
-    if pond.pool not in s.slot_capacity or pond.is_draw or pond.is_spout or ps.slots > 0:
+    if pond.pool not in s.slot_capacity or pond.is_draw or pond.is_spout or pond.is_app or ps.slots > 0:
         return False
     return not _would_pass(s, pid)
 
@@ -795,7 +795,9 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     # intent), an ``always_run`` side-effecting Pond, or a Draw/Spout (run off-Duck by the poller/egress
     # worker). Otherwise dispatch a BeginRun for the Duck (force = recompute; rebuild = cold rebuild).
     sources_changed = _pond_sources_changed(s, pid, prior_f)
-    if _must_run(s, pid) or sources_changed:
+    if pond.is_app:  # an App has nothing to compute: its Run completes at once
+        _pass_pond_run(s, pid, now)
+    elif _must_run(s, pid) or sources_changed:
         s.pending_begin_runs.append(BeginRun(
             pid, ps.start_f, force=ps.force_pending, rebuild=ps.rebuild_pending,
             sources_changed=sources_changed,
@@ -938,6 +940,19 @@ def tap_due(state: EngineState, pid: PondId, now: datetime, fresh_within: timede
     if pending is not None and pending > ps.start_f:
         return False
     return now + ps.d - _clock_ref(ps) >= fresh_within
+
+
+def fail_app(state: EngineState, pid: PondId, now: datetime) -> EngineState:
+    """Fail an App whose process exited or never became ready (plans/apps.md). An App has no Run in flight to
+    attribute it to, so it fails at its current freshness; it stays failed (its standing Wake parked) until an
+    operator Wake/Clear or a redeploy. Terminal, so it blocks nothing downstream."""
+    s = state.clone()
+    ps = s.pond_states[pid]
+    ps.is_failed = True
+    ps.failures += 1
+    ps.failed_f = max(ps.failed_f, ps.end_f)
+    derive_blocked(s, pid)
+    return s
 
 
 def sleep_pond(state: EngineState, pid: PondId, now: datetime, upstream: bool = False) -> EngineState:

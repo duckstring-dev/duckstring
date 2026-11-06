@@ -132,7 +132,16 @@ async def _lifespan(app: FastAPI):
 
     driver.set_jobs_notify(lambda key: loop.call_soon_threadsafe(wake_job_polls, app, key))
 
+    # Apps (plans/apps.md): their processes, started on a request and stopped when idle, and the client that
+    # forwards requests to them.
+    import httpx
+
+    from .app_supervisor import AppSupervisor, run_app_supervisor
     from .state_sync import checkpoint_full, run_checkpoint_worker
+
+    app.state.app_supervisor = AppSupervisor(driver, app.state.root, app.state.data_root)
+    app.state.app_supervisor.close_orphans()
+    app.state.app_http = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=5.0), follow_redirects=False)
 
     scheduler = asyncio.create_task(_scheduler(driver))
     poller = asyncio.create_task(run_poller(driver, app.state.root, wake))
@@ -144,7 +153,8 @@ async def _lifespan(app: FastAPI):
         run_checkpoint_worker(app.state.root, app.state.state_backup, app.state.checkpoint_every)
     )
     # Renew the data-root writer lease so a live Catchment's ownership never lapses (external data root only).
-    tasks = [scheduler, poller, egress, alerts, checkpointer]
+    tasks = [scheduler, poller, egress, alerts, checkpointer,
+             asyncio.create_task(run_app_supervisor(app.state.app_supervisor))]
     if app.state.data_lease is not None:
         from .data_lease import run_lease_renewer
 
@@ -160,6 +170,8 @@ async def _lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
         launcher.shutdown_all()
+        await asyncio.to_thread(app.state.app_supervisor.shutdown)
+        await app.state.app_http.aclose()
         for wire in getattr(app.state, "serve_wires", []):
             wire.stop()
         if app.state.data_lease is not None:
@@ -268,6 +280,9 @@ def create_app(
     # the static "/" catch-all so it resolves, and outside "/api" so the access-level audit doesn't cover it.
     from .routes.metrics import router as metrics_router
     app.include_router(metrics_router)
+    # Apps at /apps/ (plans/apps.md): outside "/api", gated by the forwarding itself, before the static catch-all.
+    from .app_proxy import router as app_proxy_router
+    app.include_router(app_proxy_router)
 
     if _STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="frontend")

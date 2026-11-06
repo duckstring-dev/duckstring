@@ -149,6 +149,10 @@ class Pond:
     # Source's output to an external system, is run by the egress worker (not a Duck), and never
     # propagates (a Wake up, terminal down). The egress dual of a Draw. See plans/egress.md.
     is_spout: bool = False
+    # An App (plans/apps.md): a terminal Outlet that serves HTTP. It has nothing to compute, so a Run of it
+    # completes in the engine at once (a pass, never a BeginRun), and with a standing Wake its freshness
+    # follows its Sources: the freshness a Pond Run would adopt now.
+    is_app: bool = False
     # At least one declared Source (required OR optional) is absent from the Catchment — not deployed
     # and not drawn over a duct. The Pond cannot run with a missing dependency, so it is hard-blocked
     # until every Source is present (e.g. the Source is deployed, or a duct draws it in).

@@ -300,8 +300,10 @@ def run(
     ripple: Optional[str] = typer.Option(None, "--ripple", "-r", help="Run only this Ripple, against the existing local "
                                                                       "output."),
     fresh: bool = typer.Option(False, "--fresh", help="Ignore the Pond's own Puddle and start from nothing."),
+    port: int = typer.Option(8000, "--port", help="For an App: the port to serve on."),
 ) -> None:
-    """Run this Pond once on this machine against its Puddles, with no Catchment. Output goes to puddles/out/."""
+    """Run this Pond once on this machine against its Puddles, with no Catchment. Output goes to puddles/out/.
+    For an App, serve it on this machine against its Puddles until stopped."""
     _use_pond_env()
     from rich.console import Console
 
@@ -309,6 +311,16 @@ def run(
 
     console = Console()
     project = _load_project()
+    if project.info.get("pond", {}).get("type") == "app":
+        from ..local.app import serve_app
+
+        try:
+            console.print(f"Serving [bold]{project.name}[/bold] at http://127.0.0.1:{port}/ against its Puddles "
+                          "[dim](Ctrl-C to stop)[/dim]")
+            raise typer.Exit(serve_app(project, port))
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1) from None
     try:
         result = run_pond(project, ripple=ripple, fresh=fresh)
     except (ValueError, FileNotFoundError) as exc:

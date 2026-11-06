@@ -1,0 +1,338 @@
+"""Apps (plans/apps.md): an Outlet that serves HTTP. Deploying one, the engine node, the AppSupervisor's
+instances, forwarding (HTTP and WebSockets) with the Catchment's gate, and the read-only Pond handle."""
+
+from __future__ import annotations
+
+import io
+import json
+import time
+import zipfile
+
+import duckdb
+import pytest
+from fastapi.testclient import TestClient
+
+from duckstring.app import app_config
+
+pytestmark = pytest.mark.timeout(90)
+
+_SOURCE_TOML = '[pond]\nname = "sales"\nversion = "1.0.0"\n'
+_SOURCE_PY = "from duckstring import ripple\n\n@ripple\ndef revenue(pond):\n    pass\n"
+
+_APP_PY = '''import os
+
+from fastapi import FastAPI, Request, WebSocket
+
+from duckstring import app as ds_app
+
+api = FastAPI()
+pond = ds_app.pond()
+
+
+@api.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
+@api.get("/hello")
+def hello(request: Request):
+    return {"base": os.environ["DUCKSTRING_APP_PATH"], "state": os.environ.get("DUCKSTRING_APP_STATE"),
+            "headers": dict(request.headers), "key_env": os.environ.get("DUCKSTRING_API_KEY")}
+
+
+@api.get("/rows")
+def rows():
+    total = pond.read_table("sales.revenue").aggregate("sum(id)").fetchall()[0][0]
+    return {"n": pond.count_table("sales.revenue"), "sum": int(total), "fresh": str(pond.freshness()["freshness"])}
+
+
+@api.websocket("/ws")
+async def ws(socket: WebSocket):
+    await socket.accept()
+    message = await socket.receive_text()
+    await socket.send_text("echo:" + message)
+    await socket.close()
+'''
+
+
+def _app_toml(command: str = "uvicorn main:api --port $PORT --root-path $DUCKSTRING_APP_PATH",
+              extra: str = "", sources: str = 'sales = "1.0.0"\n') -> str:
+    return ('[pond]\nname = "dash"\nversion = "1.0.0"\ntype = "app"\n\n[sources]\n' + sources +
+            f'\n[app]\ncommand = {json.dumps(command)}\nhealth = "/healthz"\n' + extra)
+
+
+def _zip(files: dict[str, str]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, text in files.items():
+            zf.writestr(name, text)
+    return buf.getvalue()
+
+
+def _deploy(client, name: str, files: dict[str, str], version: str = "1.0.0", headers=None):
+    return client.post("/api/deploy", files={"pond": ("pond.zip", _zip(files), "application/zip")},
+                       data={"name": name, "version": version, "type": "pond"}, headers=headers or {})
+
+
+def _seed(root, rows: int = 4) -> None:
+    data = root / "ponds" / "sales" / "m1" / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    duckdb.connect().execute(f"COPY (SELECT range AS id FROM range({rows})) TO '{data / 'revenue.parquet'}' (FORMAT PARQUET)")
+
+
+def _deploy_pipeline(client, app_files: dict[str, str] | None = None, headers=None):
+    r = _deploy(client, "sales", {"pond.toml": _SOURCE_TOML, "src/pond.py": _SOURCE_PY}, headers=headers)
+    assert r.status_code == 200, r.text
+    _seed(client.app.state.root)
+    r = _deploy(client, "dash", app_files or {"pond.toml": _app_toml(), "main.py": _APP_PY}, headers=headers)
+    assert r.status_code == 200, r.text
+
+
+def _app_entry(client, headers=None) -> dict:
+    status = client.get("/api/status", headers=headers or {}).json()
+    return next(p for p in status["ponds"] if p["name"] == "dash")
+
+
+# ─── declaration ───────────────────────────────────────────────────────────────
+
+
+def test_app_config_validates_the_declaration(tmp_path):
+    assert app_config({"pond": {"name": "x"}}) is None
+    cfg = app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "1h30m"}})
+    assert cfg == {"command": "run", "static": None, "idle_timeout_s": 5400, "state": "local", "health": None,
+                   "strip_path": True}
+    assert app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "0"}})["idle_timeout_s"] == 0
+    (tmp_path / "out").mkdir()
+    assert app_config({"pond": {"type": "app"}, "app": {"static": "out"}}, tmp_path)["command"] is None
+    for bad in ({"pond": {"type": "app"}},
+                {"pond": {"type": "app"}, "app": {"command": "run", "state": "shared"}},
+                {"pond": {"type": "app"}, "app": {"command": "run", "health": "healthz"}},
+                {"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "soon"}},
+                {"pond": {"type": "app"}, "app": {"command": "run", "port": 1}},
+                {"pond": {"type": "app"}, "app": {"command": "run", "strip_path": "no"}},
+                {"pond": {}, "app": {"command": "run"}}):
+        with pytest.raises(ValueError):
+            app_config(bad)
+    with pytest.raises(ValueError, match="no directory"):
+        app_config({"pond": {"type": "app"}, "app": {"static": "missing"}}, tmp_path)
+
+
+def test_an_app_has_no_ripples_and_is_never_a_source(catchment_client):
+    r = _deploy(catchment_client, "dash", {"pond.toml": _app_toml(sources=""), "main.py": _APP_PY,
+                                           "src/pond.py": _SOURCE_PY})
+    assert r.status_code == 422 and "no Ripples" in r.json()["detail"]
+    assert _deploy(catchment_client, "dash", {"pond.toml": _app_toml(sources=""), "main.py": _APP_PY}).status_code == 200
+    sink = '[pond]\nname = "after"\nversion = "1.0.0"\n\n[sources]\ndash = "1.0.0"\n'
+    r = _deploy(catchment_client, "after", {"pond.toml": sink, "src/pond.py": _SOURCE_PY})
+    assert r.status_code == 422 and "can't be a Source" in r.json()["detail"]
+
+
+# ─── serving ───────────────────────────────────────────────────────────────────
+
+
+def test_an_app_serves_its_sources_over_http_and_websockets(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client)
+    entry = _app_entry(client)
+    assert entry["is_app"] and entry["kind"] == "outlet" and entry["duck"] is None
+    assert entry["app"] == {"path": "/apps/dash/v1/", "instance": None}
+
+    r = client.get("/apps/dash/hello?x=1", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/apps/dash/v1/hello?x=1"
+    r = client.get("/apps/dash/v1/hello")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["base"] == "/apps/dash/v1"
+    assert body["state"].endswith("apps/dash/m1/state")
+    assert body["headers"]["x-forwarded-proto"] == "http"
+    assert body["headers"]["x-forwarded-prefix"] == "/apps/dash/v1"
+    assert body["key_env"] is None
+
+    r = client.get("/apps/dash/v1/rows")
+    assert r.status_code == 200, r.text
+    assert r.json()["n"] == 4 and r.json()["sum"] == 6
+
+    with client.websocket_connect("/apps/dash/v1/ws") as ws:
+        ws.send_text("hi")
+        assert ws.receive_text() == "echo:hi"
+
+    entry = _app_entry(client)
+    assert entry["app"]["instance"] is not None
+    instances = client.get("/api/ponds/dash/app/instances").json()["instances"]
+    assert len(instances) == 1 and instances[0]["ready_at"] and instances[0]["stopped_at"] is None
+    log = client.get("/api/ponds/dash/app/logs")
+    assert "starting dash@1 1.0.0" in log.text and log.headers["x-log-running"] == "1"
+    # An App's Runs are not history: it has no pond_run rows.
+    assert client.get("/api/runs", params={"pond": "dash"}).json()["runs"] == []
+
+
+def test_an_idle_instance_stops_and_the_next_request_starts_another(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    supervisor = client.app.state.app_supervisor
+    inst = supervisor._instances["dash@1"]
+    inst.last_used -= 3600  # longer ago than the default idle timeout
+    supervisor.reconcile()
+    assert inst.proc.poll() is not None and "dash@1" not in supervisor._instances
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    instances = client.get("/api/ponds/dash/app/instances").json()["instances"]
+    assert [i["stop_reason"] for i in instances] == [None, "idle"]
+
+
+def test_a_redeploy_replaces_the_instance(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    toml = _app_toml().replace('version = "1.0.0"\ntype', 'version = "1.1.0"\ntype')
+    assert _deploy(client, "dash", {"pond.toml": toml, "main.py": _APP_PY}, version="1.1.0").status_code == 200
+    client.app.state.app_supervisor.reconcile()
+    instances = client.get("/api/ponds/dash/app/instances").json()["instances"]
+    assert instances[0]["stop_reason"] == "redeploy"
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    assert client.get("/api/ponds/dash/app/instances").json()["instances"][0]["version"] == "1.1.0"
+
+
+def test_an_app_that_exits_fails_until_woken(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client, {"pond.toml": _app_toml(command="python -c 'import sys; sys.exit(3)'"),
+                              "main.py": _APP_PY})
+    r = client.get("/apps/dash/v1/hello")
+    assert r.status_code == 503 and "exited while starting" in r.text
+    entry = _app_entry(client)
+    assert entry["is_failed"] and "exit code 3" in entry["error"]
+    r = client.get("/apps/dash/v1/hello")
+    assert r.status_code == 503 and "failed" in r.text
+    assert client.post("/api/ponds/dash/wake").status_code == 200
+    assert not _app_entry(client)["is_failed"]
+    assert client.get("/apps/dash/v1/hello").status_code == 503  # tried again, and failed again
+
+
+def test_kill_stops_the_instance(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    inst = client.app.state.app_supervisor._instances["dash@1"]
+    assert client.post("/api/ponds/dash/kill").status_code == 200
+    assert inst.proc.poll() is not None
+    assert client.get("/apps/dash/v1/hello").status_code == 503
+
+
+def test_an_apps_freshness_follows_its_sources(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client)
+    driver = client.app.state.driver
+    assert _app_entry(client)["end_f"] is None
+    with driver.lock:  # the Source completes a Run: the App's standing Wake takes its freshness
+        from datetime import datetime, timezone
+
+        f = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ps = driver.state.pond_states["sales@1"]
+        ps.start_f = ps.end_f = ps.changed_f = f
+        driver.scheduler_tick()
+    assert _app_entry(client)["end_f"] == f.isoformat()
+    assert client.get("/apps/dash/v1/rows").json()["fresh"] == str(f)
+
+
+_ECHO_PY = """async def app(scope, receive, send):
+    if scope["type"] != "http":
+        return
+    body = (scope["path"] + "?" + scope["query_string"].decode()).encode()
+    await send({"type": "http.response.start", "status": 200, "headers": [(b"set-cookie", b"a=1"), (b"set-cookie", b"b=2")]})
+    await send({"type": "http.response.body", "body": body})
+"""
+
+
+def test_strip_path_false_keeps_the_base_path(catchment_client):
+    _deploy_pipeline(catchment_client, {
+        "pond.toml": _app_toml(command="uvicorn echo:app --port $PORT", extra="strip_path = false\n")
+        .replace('health = "/healthz"\n', ""), "echo.py": _ECHO_PY})
+    r = catchment_client.get("/apps/dash/v1/a/b%20c?q=1")
+    assert r.status_code == 200 and r.text == "/apps/dash/v1/a/b c?q=1"
+    assert r.headers.get_list("set-cookie") == ["a=1", "b=2"]
+
+
+def test_static_files_are_served_by_the_catchment(catchment_client):
+    toml = '[pond]\nname = "site"\nversion = "1.0.0"\ntype = "app"\n\n[app]\nstatic = "out"\n'
+    r = _deploy(catchment_client, "site", {"pond.toml": toml, "out/index.html": "<h1>hi</h1>",
+                                           "out/docs/index.html": "docs", "out/app.js": "x"})
+    assert r.status_code == 200, r.text
+    assert catchment_client.get("/apps/site/v1/").text == "<h1>hi</h1>"
+    assert catchment_client.get("/apps/site/v1/docs/").text == "docs"
+    assert catchment_client.get("/apps/site/v1/app.js").text == "x"
+    assert catchment_client.get("/apps/site/v1/missing").status_code == 404
+    assert catchment_client.get("/apps/site/v1/../../pond.toml").status_code == 404
+
+
+# ─── access ────────────────────────────────────────────────────────────────────
+
+
+def test_a_keyed_catchment_gates_apps_and_strips_the_key(tmp_path):
+    from duckstring.catchment.app import create_app
+
+    with TestClient(create_app(tmp_path, api_key="full-key")) as client:
+        auth = {"Authorization": "Bearer full-key"}
+        _deploy_pipeline(client, headers=auth)
+        assert client.get("/apps/dash/v1/hello").status_code == 401
+        page = client.get("/apps/dash/v1/hello", headers={"accept": "text/html"})
+        assert page.status_code == 401 and 'name="key"' in page.text
+        r = client.get("/apps/dash/v1/hello", headers=auth)
+        assert r.status_code == 200 and "authorization" not in r.json()["headers"]
+        r = client.post("/apps/_signin", data={"key": "wrong", "next": "/apps/dash/v1/hello"})
+        assert r.status_code == 401
+        r = client.post("/apps/_signin", data={"key": "full-key", "next": "/apps/dash/v1/hello"},
+                        follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/apps/dash/v1/hello"
+        client.cookies.set("duckstring_key", "full-key")
+        client.cookies.set("theme", "dark")
+        r = client.get("/apps/dash/v1/hello")
+        assert r.status_code == 200
+        assert r.json()["headers"]["cookie"] == "theme=dark"
+
+
+# ─── the handle ────────────────────────────────────────────────────────────────
+
+
+def test_the_handle_reads_sources_and_refuses_writes(tmp_path, monkeypatch):
+    import duckstring.app as ds_app
+
+    data = tmp_path / "ponds" / "sales" / "data"
+    data.mkdir(parents=True)
+    duckdb.connect().execute(f"COPY (SELECT range AS id FROM range(3)) TO '{data / 'revenue.parquet'}' (FORMAT PARQUET)")
+    monkeypatch.setenv(ds_app.ENV, json.dumps({"name": "dash", "major": 1, "root": str(tmp_path),
+                                               "sources": ["sales"]}))
+    monkeypatch.setattr(ds_app, "_handle", None)
+    pond = ds_app.pond()
+    assert pond is ds_app.pond()
+    assert pond.count_table("sales.revenue") == 3
+    assert pond.read_table("sales.revenue").aggregate("max(id)").fetchall() == [(2,)]
+    assert pond.freshness() == {"freshness": None, "sources": {}}
+    with pytest.raises(ValueError, match="'other' is not a Source"):
+        pond.read_table("other.revenue")
+    with pytest.raises(ValueError, match="reads only its Sources"):
+        pond.read_table("revenue")
+    with pytest.raises(TypeError):
+        pond.write_table("t", pond.con.sql("SELECT 1"))
+    with pytest.raises(TypeError):
+        pond.read_delta("sales.revenue")
+
+    import threading
+
+    seen = []
+    t = threading.Thread(target=lambda: seen.append(pond.con))
+    t.start()
+    t.join()
+    assert seen[0] is not pond.con  # each thread its own cursor
+    time.sleep(0)
+
+
+def test_pond_run_gives_an_app_its_puddles(tmp_path):
+    from duckstring.local import load_project
+    from duckstring.local.app import app_env
+
+    (tmp_path / "pond.toml").write_text(_app_toml())
+    env = app_env(load_project(tmp_path), 8123)
+    assert env["PORT"] == "8123" and env["DUCKSTRING_APP_PATH"] == ""
+    assert env["DUCKSTRING_APP_STATE"] == str(tmp_path / "puddles" / "app" / "state")
+    cfg = json.loads(env["DUCKSTRING_APP"])
+    assert cfg["root"] == str(tmp_path / "puddles") and cfg["sources"] == ["sales"] and "source_majors" not in cfg

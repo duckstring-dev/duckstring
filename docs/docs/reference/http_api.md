@@ -171,6 +171,15 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | POST | `/api/ponds/{name}/taps/{tap}/rotate` | full | A new key for a Tap, returned once. |
 | POST | `/api/ponds/{name}/taps/{tap}/remove` | full | Remove a Tap. |
 
+### Apps
+
+| Method | Path | Level | Description |
+|---|---|---|---|
+| GET | `/api/ponds/{name}/app/instances` | read | An App's recent instances, newest first. `limit` (default 20). |
+| GET | `/api/ponds/{name}/app/logs` | full | An instance's output as text. `instance` (default the newest), `tail` (bytes from the end, default 65536) or `offset` (bytes from there on). The `x-log-offset` header is where the next read starts. |
+
+Requests to an App itself go to `/apps/{name}/v{major}/...` on the Catchment's port, outside `/api`; see [`[app]`](pond_toml.md#app).
+
 ### Secrets and alerts
 
 | Method | Path | Level | Description |

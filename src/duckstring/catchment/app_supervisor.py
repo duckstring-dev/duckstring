@@ -1,0 +1,387 @@
+"""The AppSupervisor (plans/apps.md): runs each App's process on the Catchment's own machine.
+
+An App's unit is an **instance**: one process, from start to stop, recorded in ``app_instance``. The first request
+after a deploy or an idle stop starts one (the request waits until it is ready); it stops after the App's
+``idle_timeout`` without a request, on a redeploy (the next request starts the new version), on a Kill or a
+removal, and when the Catchment shuts down. An instance that exits on its own, or never becomes ready, counts
+against the App's ``immediate_retries``; past them the App fails (``Driver.fail_app``) until an operator Wake or
+Clear, or a redeploy.
+
+The process runs ``[app] command`` through ``/bin/sh`` in the App's deployed directory, with its environment's
+``bin`` first on ``PATH`` and ``PORT``, ``DUCKSTRING_APP_PATH``, ``DUCKSTRING_APP_STATE`` and ``DUCKSTRING_APP``
+set. Its output goes to ``ponds/{name}/m{major}/app/logs/{instance}.log``. Its state directory,
+``apps/{name}/m{major}/state/``, sits outside the line's runtime directory, so a Catchment reset keeps it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import signal
+import socket
+import subprocess
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+from ..app import ENV, app_stop_message, base_path
+from .db import locked
+from .registry import pond_major_dir
+
+DEFAULT_START_TIMEOUT_S = 60.0
+STOP_GRACE_S = 10.0
+# Never handed to an App's process: the Catchment's own credentials.
+_WITHHELD_ENV = ("DUCKSTRING_API_KEY",)
+
+
+def app_runtime_dir(root: Path, name: str, major: int) -> Path:
+    """An App line's runtime files (logs, the freshness file): part of the line's runtime, like a registry."""
+    return pond_major_dir(root, name, major) / "app"
+
+
+def app_state_dir(root: Path, name: str, major: int) -> Path:
+    """An App line's durable state directory (``state = "local"``)."""
+    return root / "apps" / name / f"m{major}" / "state"
+
+
+class AppUnavailable(Exception):
+    """The App can't serve this request: ``status`` is the HTTP status to answer with."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+@dataclass
+class Instance:
+    key: str
+    id: int
+    version_id: int
+    proc: subprocess.Popen
+    port: int
+    log_path: Path
+    ready: bool = False
+    active: int = 0  # requests and WebSocket connections in flight
+    last_used: float = field(default_factory=time.monotonic)
+    stopping: bool = False
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class AppSupervisor:
+    def __init__(self, driver, root: Path, data_root: str | None = None):
+        self.driver = driver
+        self.root = Path(root)
+        self.data_root = data_root
+        self._instances: dict[str, Instance] = {}
+        self._starts: dict[str, asyncio.Lock] = {}
+        self._crashes: dict[str, int] = {}  # consecutive instances that exited on their own or never got ready
+        self._freshness: dict[str, dict] = {}  # last freshness written per App, to write only on change
+        self._mu = threading.Lock()
+        self.start_timeout = float(os.environ.get("DUCKSTRING_APP_START_TIMEOUT", DEFAULT_START_TIMEOUT_S))
+        driver.on_app_stop = self.stop_now
+
+    # ─── serving a request ──────────────────────────────────────────────────
+
+    async def acquire(self, key: str) -> Instance:
+        """A ready instance of the App ``key``, started if needed. Raises :class:`AppUnavailable`."""
+        view = self.driver.app_view(key)
+        if view is None:
+            raise AppUnavailable(404, "no such App")
+        self._check_serving(key, view)
+        inst = self._ready(key, view)
+        if inst is not None:
+            return inst
+        lock = self._starts.setdefault(key, asyncio.Lock())
+        async with lock:
+            view = self.driver.app_view(key)
+            if view is None:
+                raise AppUnavailable(404, "no such App")
+            self._check_serving(key, view)
+            inst = self._ready(key, view)
+            if inst is not None:
+                return inst
+            old = self._instances.get(key)
+            if old is not None and old.proc.poll() is not None and not old.stopping:  # it died: count it
+                await asyncio.to_thread(self._stop, old, "exited")
+                self._exited(view, "exited", old.proc.returncode)
+                view = self.driver.app_view(key)
+                if view is None:
+                    raise AppUnavailable(404, "no such App")
+                self._check_serving(key, view)
+            elif old is not None:  # an older version's instance
+                await asyncio.to_thread(self._stop, old, "redeploy")
+            if not view["app"]["command"]:
+                raise AppUnavailable(404, "not found")  # a static-only App: nothing to start
+            inst = await asyncio.to_thread(self._spawn, view)
+            await self._wait_ready(inst, view)
+            return inst
+
+    def _check_serving(self, key: str, view: dict) -> None:
+        if view["is_killed"]:
+            raise AppUnavailable(503, "the App was killed; an operator can wake it with `duckstring control wake`")
+        if view["is_failed"]:
+            raise AppUnavailable(503, "the App failed; see `duckstring app logs`, then wake it with "
+                                      "`duckstring control wake`")
+        # Not failed: any earlier run of exits was cleared (by a Wake, a Clear or a redeploy).
+        if self._crashes.get(key, 0) > view["immediate_retries"]:
+            self._crashes[key] = 0
+
+    def _ready(self, key: str, view: dict) -> Instance | None:
+        inst = self._instances.get(key)
+        if (inst is not None and inst.ready and not inst.stopping and inst.proc.poll() is None
+                and inst.version_id == view["version_id"]):
+            return inst
+        return None
+
+    def begin(self, inst: Instance) -> None:
+        inst.active += 1
+        inst.last_used = time.monotonic()
+
+    def end(self, inst: Instance) -> None:
+        inst.active -= 1
+        inst.last_used = time.monotonic()
+
+    # ─── starting ───────────────────────────────────────────────────────────
+
+    def _spawn(self, view: dict) -> Instance:
+        from ..environments import python_for
+
+        name, major = view["name"], view["major"]
+        cfg = view["app"]
+        runtime = app_runtime_dir(self.root, name, major)
+        (runtime / "logs").mkdir(parents=True, exist_ok=True)
+        port = _free_port()
+        db = self.driver.db
+        with locked(db):
+            cur = db.execute(
+                "INSERT INTO app_instance (pond_version_id, started_at, port, log_path) VALUES (?, ?, ?, '')",
+                (view["version_id"], _now_iso(), port))
+            iid = cur.lastrowid
+            log_path = runtime / "logs" / f"{iid}.log"
+            db.execute("UPDATE app_instance SET log_path = ? WHERE id = ?",
+                       (str(log_path.relative_to(self.root)), iid))
+            db.commit()
+
+        python = python_for(self.root, view["source_path"])
+        env = {k: v for k, v in os.environ.items() if k not in _WITHHELD_ENV}
+        env["PATH"] = str(Path(python).parent) + os.pathsep + env.get("PATH", "")
+        env["PORT"] = str(port)
+        env["DUCKSTRING_APP_PATH"] = base_path(name, major)
+        env["PYTHONUNBUFFERED"] = "1"
+        if cfg["state"] == "local":
+            state = app_state_dir(self.root, name, major)
+            state.mkdir(parents=True, exist_ok=True)
+            env["DUCKSTRING_APP_STATE"] = str(state)
+        env[ENV] = json.dumps({
+            "name": name, "major": major, "version": view["version"], "root": str(self.root),
+            "data_root": self.data_root, "sources": list(view["sources"]), "source_majors": view["sources"],
+            "runtime": str(runtime),
+        })
+        self._write_freshness(view["key"], runtime, force=True)
+        with open(log_path, "ab") as log:
+            log.write(f"[duckstring] starting {name}@{major} {view['version']} on port {port}\n".encode())
+            log.flush()
+            proc = subprocess.Popen(
+                ["/bin/sh", "-c", "exec " + cfg["command"]], cwd=self.root / view["source_path"], env=env,
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True,  # its own process group, so a stop reaches what the shell starts
+            )
+        with locked(db):
+            db.execute("UPDATE app_instance SET pid = ? WHERE id = ?", (proc.pid, iid))
+            db.commit()
+        inst = Instance(key=view["key"], id=iid, version_id=view["version_id"], proc=proc, port=port,
+                        log_path=log_path)
+        with self._mu:
+            self._instances[view["key"]] = inst
+        return inst
+
+    async def _wait_ready(self, inst: Instance, view: dict) -> None:
+        """Wait until the instance answers its health path (2xx), or accepts connections when it declares none."""
+        import httpx
+
+        health = view["app"].get("health")
+        prefix = "" if view["app"]["strip_path"] else base_path(view["name"], view["major"])
+        url = f"http://127.0.0.1:{inst.port}{prefix}{health}" if health else None
+        deadline = time.monotonic() + self.start_timeout
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            while time.monotonic() < deadline:
+                if inst.proc.poll() is not None:
+                    await asyncio.to_thread(self._stop, inst, "start_failed")
+                    self._exited(view, "start_failed", inst.proc.returncode)
+                    raise AppUnavailable(503, "the App exited while starting; see `duckstring app logs`")
+                if await self._answers(client, inst.port, url):
+                    inst.ready = True
+                    inst.last_used = time.monotonic()
+                    with locked(self.driver.db):
+                        self.driver.db.execute("UPDATE app_instance SET ready_at = ? WHERE id = ?",
+                                               (_now_iso(), inst.id))
+                        self.driver.db.commit()
+                    return
+                await asyncio.sleep(0.1)
+        await asyncio.to_thread(self._stop, inst, "start_failed")
+        self._exited(view, "start_failed", None)
+        raise AppUnavailable(503, f"the App didn't become ready within {self.start_timeout:.0f}s; "
+                                  "see `duckstring app logs`")
+
+    @staticmethod
+    async def _answers(client, port: int, url: str | None) -> bool:
+        try:
+            if url is None:
+                _, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.close()
+                return True
+            r = await client.get(url)
+            return 200 <= r.status_code < 300
+        except (OSError, Exception):  # not listening yet, or not answering yet
+            return False
+
+    def _exited(self, view: dict, reason: str, exit_code: int | None) -> None:
+        """An instance ended on its own: fail the App once its restarts are spent."""
+        key = view["key"]
+        self._crashes[key] = self._crashes.get(key, 0) + 1
+        if self._crashes[key] > view["immediate_retries"]:
+            self.driver.fail_app(key, app_stop_message(reason, exit_code))
+
+    # ─── stopping ───────────────────────────────────────────────────────────
+
+    def _stop(self, inst: Instance, reason: str) -> None:
+        """End ``inst`` (SIGTERM to its process group, then SIGKILL after a grace) and record it."""
+        inst.stopping = True
+        proc = inst.proc
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                proc.wait(timeout=STOP_GRACE_S)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                proc.wait()
+        with self._mu:
+            if self._instances.get(inst.key) is inst:
+                del self._instances[inst.key]
+        db = self.driver.db
+        with locked(db):
+            db.execute("UPDATE app_instance SET stopped_at = ?, stop_reason = ?, exit_code = ? "
+                       "WHERE id = ? AND stopped_at IS NULL", (_now_iso(), reason, proc.returncode, inst.id))
+            db.commit()
+
+    def stop_now(self, key: str, reason: str) -> None:
+        """Stop ``key``'s instance at once (the Driver's hook for a Kill or a removal)."""
+        with self._mu:
+            inst = self._instances.get(key)
+        if inst is not None:
+            self._stop(inst, reason)
+        self._crashes.pop(key, None)
+
+    def shutdown(self) -> None:
+        with self._mu:
+            instances = list(self._instances.values())
+        for inst in instances:
+            self._stop(inst, "shutdown")
+
+    # ─── the loop ───────────────────────────────────────────────────────────
+
+    def reconcile(self) -> None:
+        """One pass: record instances that exited on their own, stop idle and outdated ones, and refresh
+        each running App's freshness file."""
+        with self._mu:
+            instances = list(self._instances.values())
+        now = time.monotonic()
+        for inst in instances:
+            if inst.stopping or not inst.ready:
+                continue  # a start in progress is _wait_ready's to judge
+            view = self.driver.app_view(inst.key)
+            if inst.proc.poll() is not None:
+                self._stop(inst, "exited")
+                if view is not None:
+                    self._exited(view, "exited", inst.proc.returncode)
+                continue
+            if view is None:
+                self._stop(inst, "removed")
+            elif view["is_killed"]:
+                self._stop(inst, "killed")
+            elif view["version_id"] != inst.version_id:
+                self._stop(inst, "redeploy")
+                self._crashes.pop(inst.key, None)
+            elif (view["app"]["idle_timeout_s"] > 0 and inst.active <= 0
+                  and now - inst.last_used >= view["app"]["idle_timeout_s"]):
+                self._stop(inst, "idle")
+                self._crashes.pop(inst.key, None)
+            else:
+                self._write_freshness(inst.key, app_runtime_dir(self.root, view["name"], view["major"]))
+
+    def _write_freshness(self, key: str, runtime: Path, force: bool = False) -> None:
+        fresh = self.driver.app_freshness(key)
+        if not force and self._freshness.get(key) == fresh:
+            return
+        runtime.mkdir(parents=True, exist_ok=True)
+        tmp = runtime / "freshness.json.tmp"
+        tmp.write_text(json.dumps(fresh))
+        tmp.replace(runtime / "freshness.json")
+        self._freshness[key] = fresh
+
+    def close_orphans(self) -> None:
+        """At startup: an instance still open in the database belongs to a previous Catchment process, which
+        took it down with it (or left it running, outside our control). Record it as shut down."""
+        db = self.driver.db
+        with locked(db):
+            for iid, pid in db.execute("SELECT id, pid FROM app_instance WHERE stopped_at IS NULL").fetchall():
+                if pid:
+                    try:
+                        os.killpg(pid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+                db.execute("UPDATE app_instance SET stopped_at = ?, stop_reason = 'shutdown' WHERE id = ?",
+                           (_now_iso(), iid))
+            db.commit()
+
+
+async def run_app_supervisor(supervisor: AppSupervisor, interval: float = 1.0) -> None:
+    """The supervisor's loop: :meth:`AppSupervisor.reconcile` every ``interval`` seconds."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.to_thread(supervisor.reconcile)
+        except Exception as exc:  # keep the loop alive
+            print(f"[catchment] app supervisor error: {exc}", flush=True)
+
+
+def instance_rows(db, version_ids: list[int], limit: int = 20) -> list[dict]:
+    """Recent instances of the given versions, newest first, for the CLI and API."""
+    if not version_ids:
+        return []
+    marks = ",".join("?" * len(version_ids))
+    with locked(db):
+        rows = db.execute(
+            f"SELECT ai.id, pv.version, ai.started_at, ai.ready_at, ai.stopped_at, ai.stop_reason, ai.exit_code, "
+            f"ai.log_path FROM app_instance ai JOIN pond_version pv ON pv.id = ai.pond_version_id "
+            f"WHERE ai.pond_version_id IN ({marks}) ORDER BY ai.id DESC LIMIT ?", (*version_ids, limit)).fetchall()
+    return [{"id": r[0], "version": r[1], "started_at": r[2], "ready_at": r[3], "stopped_at": r[4],
+             "stop_reason": r[5], "exit_code": r[6], "log_path": r[7]} for r in rows]
+
+
+def version_ids_of(db, name: str, major: int) -> list[int]:
+    with locked(db):
+        return [r[0] for r in db.execute(
+            "SELECT pv.id FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
+            "WHERE pn.name = ? AND pv.major = ? AND pv.app IS NOT NULL", (name, major)).fetchall()]
+
+

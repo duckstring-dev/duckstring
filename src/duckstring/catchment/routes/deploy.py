@@ -102,7 +102,7 @@ def _pond_config(toml_path: Path) -> dict:
     are operational config managed via `duckstring window`, not declared at deploy time.)"""
     cfg = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": None, "dbt_project": None,
            "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None,
-           "flock_accept": None}
+           "flock_accept": None, "app": None}
     if not toml_path.exists():
         return cfg
     info = _read_toml(toml_path.read_text(encoding="utf-8"))
@@ -130,6 +130,17 @@ def _pond_config(toml_path: Path) -> dict:
     if not isinstance(tables, list) or any(not isinstance(t, str) for t in tables):
         raise ValueError("pond.toml [serve] tables: expected a list of table names")
     cfg["serve_tables"] = tables
+    # An App (plans/apps.md): an Outlet that serves HTTP. Stored as an Outlet (pond_name.kind has no 'app'),
+    # with its [app] section on the version.
+    from ...app import app_config
+
+    cfg["app"] = app_config(info, toml_path.parent)
+    if cfg["app"] is not None:
+        cfg["kind"] = "outlet"
+        entry = pond.get("ripples", "src/pond.py")
+        if info.get("ripples") or info.get("static") or cfg["dbt_project"] or (toml_path.parent / entry).exists():
+            raise ValueError(f"an App serves HTTP and has no Ripples: remove {entry}, [ripples], [static] and "
+                             "dbt_project from it, or make it a Pond")
     return cfg
 
 
@@ -202,18 +213,46 @@ def _store_column_lineage(db, name: str, version: str, rows: list[list[str]]) ->
         print(f"[catchment] storing column lineage failed for {name}@{version}: {exc}", flush=True)
 
 
-def _prepare(root: Path, staging: Path, db_catalog: dict) -> tuple[Path, dict]:
-    """Build the staged Pond's environment and discover its Ripples in it. Runs in a worker thread."""
+# An App's one synthetic Ripple: the engine models every node with Ripples, as a Spout's `egress`.
+APP_RIPPLE = "serve"
+
+
+def _prepare(root: Path, staging: Path, db_catalog: dict, *, app: bool = False) -> tuple[Path, dict]:
+    """Build the staged Pond's environment and discover its Ripples in it. Runs in a worker thread. An App
+    has no Ripples to discover, only its environment to build."""
     from ...discover import discover
     from ...environments import ensure_env
 
     python = ensure_env(root, staging)
+    if app:
+        return python, {"ripples": [{"name": APP_RIPPLE, "parents": []}], "lineage": []}
     return python, discover(python, staging, db_catalog)
 
 
+def _check_apps_terminal(db, pn_id: int, name: str, major: int, cfg: dict) -> None:
+    """An App is always terminal: nothing may name one as a Source (raises ValueError → HTTP 422)."""
+    if cfg.get("app") is not None:
+        sink = first_row(db.execute(
+            "SELECT pn.name FROM pond_to_pond ptp JOIN pond p ON p.id = ptp.pond_id "
+            "JOIN pond_name pn ON pn.id = p.pond_name_id "
+            "WHERE ptp.source_pond_name_id = ? AND ptp.source_major = ?", (pn_id, major)))
+        if sink:
+            raise ValueError(f"'{name}' is an App, and an App can't be a Source, but '{sink[0]}' reads it")
+    for src_name, ver_str in cfg["sources"].items():
+        src_major = _parse_version(ver_str)[0]
+        if first_row(db.execute(
+            "SELECT 1 FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id "
+            "JOIN pond_version pv ON pv.id = p.pond_version_id "
+            "WHERE pn.name = ? AND p.major = ? AND pv.app IS NOT NULL", (src_name, src_major))):
+            raise ValueError(f"'{src_name}' is an App, and an App can't be a Source")
+
+
 def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
+    import json
+
     major = int(version.split(".")[0])
     deployed_at = datetime.now(timezone.utc).isoformat()
+    app_json = json.dumps(cfg["app"]) if cfg.get("app") is not None else None
     with db:
         db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, ?)", (name, kind))
         db.execute("UPDATE pond_name SET kind = ? WHERE name = ?", (kind, name))
@@ -243,19 +282,20 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
             db.execute(
                 "UPDATE pond_version SET source_path = ?, major = ?, immediate_retries = ?, "
                 "source_retries = ?, deployed_at = ?, duck_pool = ?, flock_mode = ?, flock_engine = ?, "
-                "oom_policy = ?, flock_accept = ?, dbt = ? WHERE id = ?",
+                "oom_policy = ?, flock_accept = ?, dbt = ?, app = ? WHERE id = ?",
                 (source_path, major, cfg["immediate_retries"], cfg["source_retries"], deployed_at,
                  cfg.get("duck_pool"), cfg.get("flock_mode"), cfg.get("flock_engine"),
-                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))), pv_id),
+                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))),
+                 app_json, pv_id),
             )
         else:
             db.execute(
                 "INSERT INTO pond_version (pond_name_id, version, major, source_path, "
                 "immediate_retries, source_retries, deployed_at, duck_pool, flock_mode, flock_engine, "
-                "oom_policy, flock_accept, dbt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "oom_policy, flock_accept, dbt, app) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (pn_id, version, major, source_path, cfg["immediate_retries"], cfg["source_retries"],
                  deployed_at, cfg.get("duck_pool"), cfg.get("flock_mode"), cfg.get("flock_engine"),
-                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project")))),
+                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))), app_json),
             )
             (pv_id,) = first_row(db.execute(
                 "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
@@ -321,6 +361,7 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
             )
 
         _check_version_contracts(db, pn_id, name, version, cfg)
+        _check_apps_terminal(db, pn_id, name, major, cfg)
 
         from ..dag import assert_no_cycles
         assert_no_cycles(db)
@@ -384,7 +425,7 @@ async def deploy(request: Request):
         with locked(db):
             catalog = _source_schemas(db, cfg["sources"])
         try:
-            _, found = await asyncio.to_thread(_prepare, root, staging, catalog)
+            _, found = await asyncio.to_thread(_prepare, root, staging, catalog, app=cfg["app"] is not None)
         except EnvError as exc:
             raise HTTPException(status_code=422, detail=f"Building the Pond's environment failed: {exc}") from exc
         except DiscoveryError as exc:

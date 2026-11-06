@@ -108,6 +108,7 @@ const sidebars: SidebarsConfig = {
             'reference/cli/spout',
             'reference/cli/secret',
             'reference/cli/alert',
+            'reference/cli/app',
           ],
         },
         'reference/http_api',
