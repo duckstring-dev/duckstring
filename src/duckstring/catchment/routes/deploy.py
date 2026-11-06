@@ -48,6 +48,18 @@ def _selected_version(db, source_name: str, major: int) -> str | None:
     return row[0] if row else None
 
 
+def _refuse_live_version(db, name: str, version: str, force: bool) -> None:
+    """A version is an immutable artifact: redeploying the one a line runs is refused without ``force``.
+    Forced, the running Duck and App instance keep the code they loaded (their restart checks compare
+    versions), and the version's directory is replaced under them. A removed or older version is fine."""
+    with locked(db):
+        selected = _selected_version(db, name, int(version.split(".")[0]))
+    if selected == version and not force:
+        raise HTTPException(status_code=409, detail=(
+            f"{name} {version} is already deployed. Bump the version, or pass --force to replace it in place "
+            "(a running Duck or App keeps the code it loaded until it restarts)."))
+
+
 def _check_version_contracts(db, pn_id: int, name: str, version: str, cfg: dict) -> None:
     """Enforce the ``min_version`` contract on this deploy (raises ValueError → HTTP 422 on violation):
 
@@ -374,6 +386,7 @@ class _GitBody(BaseModel):
     type: str = "pond"
     git_ref: str
     repo_url: str
+    force: bool = False
 
 
 @router.post("/deploy", dependencies=[auth.full])
@@ -398,6 +411,7 @@ async def deploy(request: Request):
             name = form["name"]
             version = form["version"]
             kind = form.get("type", "pond")
+            _refuse_live_version(db, name, version, form.get("force") == "true")
             archive_bytes = await form["pond"].read()
             try:
                 with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
@@ -407,6 +421,7 @@ async def deploy(request: Request):
         else:
             body = _GitBody(**(await request.json()))
             name, version, kind = body.name, body.version, body.type
+            _refuse_live_version(db, name, version, body.force)
             shutil.rmtree(staging)  # git clone wants to create the directory itself
             try:
                 subprocess.run(["git", "clone", body.repo_url, str(staging)], check=True, capture_output=True)

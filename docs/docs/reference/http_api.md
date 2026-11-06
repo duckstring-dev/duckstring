@@ -82,7 +82,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/deploy` | full | Deploy a Pond (a packaged upload or a git reference). |
+| POST | `/api/deploy` | full | Deploy a Pond (a packaged upload or a git reference). Redeploying the version a line runs is a 409 unless `force` is set. |
 | GET | `/api/ponds/{name}/versions/{version}` | read | Whether a version is deployed. |
 | DELETE | `/api/ponds/{name}` | full | Remove a major line. |
 

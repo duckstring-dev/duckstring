@@ -215,7 +215,7 @@ def test_deploy_builds_the_ponds_environment(tmp_path, catchment_client):
     r = catchment_client.post(
         "/api/deploy",
         files={"pond": ("pond.zip", _zip(pond), "application/zip")},
-        data={"name": "envp", "version": "1.0.0", "type": "inlet"},
+        data={"name": "envp", "version": "1.0.0", "type": "inlet", "force": "true"},
     )
     assert r.status_code == 422
     assert "uv lock" in r.json()["detail"]

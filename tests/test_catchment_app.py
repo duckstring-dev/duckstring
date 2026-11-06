@@ -78,12 +78,13 @@ def make_pond_zip(*, toml_text: str, pond_py_text: str = "") -> bytes:
     return buf.getvalue()
 
 
-def _deploy(client, *, name: str, version: str, kind: str, toml_text: str, pond_py_text: str = ""):
+def _deploy(client, *, name: str, version: str, kind: str, toml_text: str, pond_py_text: str = "",
+            force: bool = False):
     archive = make_pond_zip(toml_text=toml_text, pond_py_text=pond_py_text)
     return client.post(
         "/api/deploy",
         files={"pond": ("pond.zip", archive, "application/zip")},
-        data={"name": name, "version": version, "type": kind},
+        data={"name": name, "version": version, "type": kind, **({"force": "true"} if force else {})},
     )
 
 
@@ -166,6 +167,19 @@ def test_deploy_local_registers_version(catchment_client):
     row = first_row(db.execute("SELECT version, major, source_path FROM pond_version WHERE version = '1.0.0'"))
     assert row == ("1.0.0", 1, "ponds/inlet/1.0.0")
     assert _selected_version(db, "inlet") == {"1.0.0"}  # the pond pointer selects it
+
+
+def test_redeploying_the_running_version_needs_force(catchment_client):
+    assert _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet", toml_text=INLET_TOML).status_code == 200
+    r = _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet", toml_text=INLET_TOML)
+    assert r.status_code == 409
+    assert "already deployed" in r.json()["detail"]
+    r = _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet", toml_text=INLET_TOML, force=True)
+    assert r.status_code == 200
+    # A version the line isn't running is a rollback, not a replacement.
+    toml_2 = INLET_TOML.replace("1.0.0", "1.1.0")
+    assert _deploy(catchment_client, name="inlet", version="1.1.0", kind="inlet", toml_text=toml_2).status_code == 200
+    assert _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet", toml_text=INLET_TOML).status_code == 200
 
 
 def test_deploy_local_registers_sources(catchment_client):
@@ -292,7 +306,7 @@ def test_redeploy_changed_topology_keeps_pond_runs(catchment_client):
     # Redeploy the same version with a different intra-Pond graph (drop the edge).
     one_ripple = "from duckstring import ripple\n\n@ripple\ndef load(pond): ...\n"
     _deploy(catchment_client, name="inlet", version="1.0.0", kind="inlet",
-            toml_text=INLET_TOML, pond_py_text=one_ripple)
+            toml_text=INLET_TOML, pond_py_text=one_ripple, force=True)
     assert {r[0] for r in db.execute("SELECT name FROM ripple WHERE pond_version_id = ?", (pv_id,))} == {"load"}
     assert first_row(db.execute("SELECT count(*) FROM pond_run WHERE pond_version_id = ?", (pv_id,)))[0] == 1
 
@@ -763,7 +777,7 @@ def test_redeploy_same_version_after_run_history(catchment_client):
     )
     assert _pond_status(catchment_client, "outlet")["is_failed"]
     r = _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
-                toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES)
+                toml_text=OUTLET_ONLY_TOML, pond_py_text=POND_PY_TWO_RIPPLES, force=True)
     assert r.status_code == 200
     # Redeploying the (fixed) artifact auto-clears the failure — no manual `control clear` needed.
     assert not _pond_status(catchment_client, "outlet")["is_failed"]

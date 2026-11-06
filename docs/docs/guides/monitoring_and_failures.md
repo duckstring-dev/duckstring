@@ -82,7 +82,7 @@ Retried and replayed Ripples run with the same `pond.f`, so write them to be saf
 
 Start from the failed Pond, not the blocked ones downstream: once it recovers, they unblock.
 
-**Fix the code.** Deploy a corrected version. A redeploy clears the Pond's failure, and it runs again the next time it's needed. If it's needed now:
+**Fix the code.** Bump the version in `pond.toml` and deploy the fix. A redeploy clears the Pond's failure, and it runs again the next time it's needed. If it's needed now:
 
 ```bash
 duckstring pond deploy
