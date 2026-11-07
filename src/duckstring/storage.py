@@ -798,8 +798,14 @@ def duckdb_secret_sql(uri: str, params: dict, *, name: str) -> tuple[str, str | 
         raise ValueError(f"no shared DuckDB secret for {scheme}://")
     if body is None:
         return extension, None
-    scope = f"{scheme}://{parts.netloc}"
-    return extension, f"CREATE OR REPLACE SECRET {name} ({', '.join(body)}, SCOPE {_q(scope)})"
+    scopes = [f"{scheme}://{parts.netloc}"]
+    if scheme in _AZURE_SCHEMES and "@" in parts.netloc:
+        # DuckDB's azure extension names the files a glob expands to `abfss://account.dfs.core.windows.net/
+        # container/…`, so a scope in the `container@account` form alone left every glob read unauthenticated.
+        container, host = parts.netloc.split("@", 1)
+        scopes.append(f"{scheme}://{host}/{container}")
+    scope = _q(scopes[0]) if len(scopes) == 1 else "[" + ", ".join(_q(s) for s in scopes) + "]"
+    return extension, f"CREATE OR REPLACE SECRET {name} ({', '.join(body)}, SCOPE {scope})"
 
 
 def credential_generation(location: str | None) -> int:

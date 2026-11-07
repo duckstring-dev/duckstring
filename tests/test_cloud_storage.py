@@ -98,7 +98,8 @@ def test_azure_secrets_are_scoped_to_their_container_and_name_the_account():
     extension, sql = duckdb_secret_sql(_ABFSS, {}, name="duckstring_data")
     assert extension == "azure"
     assert sql == ("CREATE OR REPLACE SECRET duckstring_data (TYPE AZURE, PROVIDER credential_chain, "
-                   "ACCOUNT_NAME 'acct', SCOPE 'abfss://lake@acct.dfs.core.windows.net')")
+                   "ACCOUNT_NAME 'acct', SCOPE ['abfss://lake@acct.dfs.core.windows.net', "
+                   "'abfss://acct.dfs.core.windows.net/lake'])")  # the second is the form a glob's files take
     _, sql = duckdb_secret_sql("az://lake/p", {"account_name": "acct", "account_key": "k'ey"}, name="s")
     assert "AccountKey=k''ey" in sql and sql.endswith("SCOPE 'az://lake')")  # quoted, not injectable
 
@@ -121,7 +122,12 @@ def test_duckdb_accepts_every_azure_secret(params):
         pytest.skip(f"DuckDB's {extension} extension is unavailable: {exc}")
     con.execute(sql)
     scope = con.execute("SELECT scope FROM duckdb_secrets() WHERE name = 'probe'").fetchall()[0][0]
-    assert scope == ["abfss://lake@acct.dfs.core.windows.net"]
+    assert scope == ["abfss://lake@acct.dfs.core.windows.net", "abfss://acct.dfs.core.windows.net/lake"]
+    # A glob's files come back in the account-host form, and must still find the secret.
+    for path in ("abfss://lake@acct.dfs.core.windows.net/t/p.parquet", "abfss://acct.dfs.core.windows.net/lake/t/p.parquet"):
+        assert con.execute(f"SELECT name FROM which_secret('{path}', 'azure')").fetchall() == [("probe",)]
+    assert con.execute("SELECT name FROM which_secret('abfss://acct.dfs.core.windows.net/other/p.parquet', 'azure')"
+                       ).fetchall() == []
 
 
 def test_adlfs_gets_the_account_from_an_abfss_uri(monkeypatch):
