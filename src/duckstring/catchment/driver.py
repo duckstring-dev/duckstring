@@ -470,6 +470,8 @@ class Driver(TapsMixin):
         # And its read leases, called with (app key, source key, source name): the Source versions the App's
         # requests in flight and its explicit holds are reading, which _retain_from keeps.
         self.app_leases = None
+        # And its instance activity for /api/status, called with (key, idle timeout in seconds).
+        self.app_activity = None
         self.reload()
 
     def set_notify(self, cb) -> None:
@@ -1552,9 +1554,12 @@ class Driver(TapsMixin):
                 except Exception as exc:  # best-effort per Pond — collect, don't abort the batch
                     errors.append({"pond": key, "op": op, "error": str(exc)})
 
+            def _rebuilds(k: str) -> bool:  # an App has no data to rebuild (and is terminal, so no gap)
+                return not self.meta.get(k, {}).get("is_app")
+
             for op in ops:
                 if op == "repair":
-                    live = [k for k in keys if k not in removed]
+                    live = [k for k in keys if k not in removed and _rebuilds(k)]
                     if live:
                         _run("repair", None, lambda live=live: self.repair(
                             [(k.rpartition("@")[0], int(k.rpartition("@")[2])) for k in live]))
@@ -1570,7 +1575,7 @@ class Driver(TapsMixin):
                         _run(op, key, lambda k=key: self.wipe_history(k))
                     elif op == "clear":
                         _run(op, key, lambda k=key: self.clear(k))
-                    elif op == "rebuild":
+                    elif op == "rebuild" and _rebuilds(key):
                         _run(op, key, lambda k=key: self.rebuild(k))
                     elif op == "remove":
                         n, _, mj = key.rpartition("@")
@@ -2524,6 +2529,14 @@ class Driver(TapsMixin):
                 "is_failed": ps.is_failed, "is_killed": ps.is_killed,
             }
 
+    def prepare_app_restart(self, key: str) -> None:
+        """Before an App restarts: clear a failure or a Kill, so the fresh instance may serve."""
+        with self.lock:
+            ps = self.state.pond_states.get(key)
+            halted = ps is not None and (ps.is_failed or ps.is_killed)
+        if halted:
+            self.clear(key)
+
     def app_keys(self) -> list[str]:
         with self.lock:
             return [k for k, m in self.meta.items() if m.get("is_app")]
@@ -2618,8 +2631,13 @@ class Driver(TapsMixin):
         row = first_row(self.db.execute(
             "SELECT id, started_at, ready_at FROM app_instance WHERE pond_version_id = ? AND stopped_at IS NULL "
             "ORDER BY id DESC LIMIT 1", (m["version_id"],)))
-        return {"path": base_path(m["name"], m["major"]) + "/",
-                "instance": {"id": row[0], "started_at": row[1], "ready_at": row[2]} if row else None}
+        instance = None
+        if row:
+            instance = {"id": row[0], "started_at": row[1], "ready_at": row[2], "active": 0, "idle_at": None}
+            activity = self.app_activity(key, m["app"]["idle_timeout_s"]) if self.app_activity else None
+            instance.update(activity or {})
+        return {"path": base_path(m["name"], m["major"]) + "/", "deployed_at": m["deployed_at"],
+                "idle_timeout_s": m["app"]["idle_timeout_s"], "instance": instance}
 
     def _app_error(self, key: str) -> str | None:
         """Why an App failed, from its last instance (survives a restart with no extra state)."""

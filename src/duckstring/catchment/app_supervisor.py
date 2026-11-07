@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import signal
@@ -35,12 +36,14 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..app import ENV, app_stop_message, base_path
 from .db import locked
 from .registry import pond_major_dir
+
+log = logging.getLogger(__name__)
 
 DEFAULT_START_TIMEOUT_S = 60.0
 STOP_GRACE_S = 10.0
@@ -115,6 +118,7 @@ class AppSupervisor:
         self.start_timeout = float(os.environ.get("DUCKSTRING_APP_START_TIMEOUT", DEFAULT_START_TIMEOUT_S))
         driver.on_app_stop = self.stop_now
         driver.app_leases = self.leases
+        driver.app_activity = self.activity
 
     # ─── serving a request ──────────────────────────────────────────────────
 
@@ -244,6 +248,20 @@ class AppSupervisor:
             if f:
                 out.append(datetime.fromisoformat(f))
         return out
+
+    def activity(self, key: str, idle_timeout_s: float) -> dict | None:
+        """For ``/api/status``: the requests in flight on ``key``'s instance, and when it will stop for idleness
+        (``None`` while busy, or with no idle timeout). ``None`` with no instance."""
+        with self._mu:
+            inst = self._instances.get(key)
+            if inst is None or inst.stopping:
+                return None
+            active, last_used = inst.active, inst.last_used
+        idle_at = None
+        if idle_timeout_s > 0 and active <= 0:
+            left = max(0.0, idle_timeout_s - (time.monotonic() - last_used))
+            idle_at = (datetime.now(timezone.utc) + timedelta(seconds=left)).isoformat()
+        return {"active": max(active, 0), "idle_at": idle_at}
 
     # ─── starting ───────────────────────────────────────────────────────────
 
@@ -389,6 +407,17 @@ class AppSupervisor:
         if inst is not None:
             self._stop(inst, reason, process=process)
         self._crashes.pop(key, None)
+
+    async def restart(self, key: str) -> None:
+        """Stop ``key``'s instance and start a fresh one. The Driver has already cleared a failure or a Kill.
+        A start that fails counts like any other."""
+        await asyncio.to_thread(self.stop_now, key, "restart", True)
+        try:
+            await self.acquire(key)
+        except AppUnavailable as exc:
+            log.warning("restarting %s: %s", key, exc.message)
+        except Exception:
+            log.exception("restarting %s", key)
 
     def shutdown(self) -> None:
         with self._mu:

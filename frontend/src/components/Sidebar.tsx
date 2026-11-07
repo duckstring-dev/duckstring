@@ -1,12 +1,14 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { fetchAlerts, fetchLineage, fetchRuns, fetchSecrets, testSpout, type RawAlertChannel, type RawLineageRipple } from '@/lib/api';
-import { useLiveStore, atLeast, formatAge, mapRun, parseTs, runKey, THEME_AMBER, THEME_DEMAND, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE, THEME_BRAND } from '@/lib/store';
+import { fetchAlerts, fetchLineage, fetchRuns, fetchSecrets, openApp, testSpout, type RawAlertChannel, type RawLineageRipple } from '@/lib/api';
+import { useLiveStore, appState, atLeast, formatAge, mapRun, parseTs, runKey, THEME_AMBER, THEME_DEMAND, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE, THEME_BRAND } from '@/lib/store';
 import type { Pond, PondInfo, PondRun } from '@/lib/types';
 import { AlertChannelForm, ChannelRow } from './AlertsMenu';
 import { DbtIcon } from './DbtIcon';
 import { DuckSection } from './DuckSection';
+import { OpenIcon } from './PondNode';
+import { clock } from './RunHistory';
 import { TraceChart } from './TraceChart';
 import { RefreshEditor } from './RefreshEditor';
 import { WindowEditor } from './WindowEditor';
@@ -133,6 +135,142 @@ function StatusBox({ info, ponds, canControl }: { info: PondInfo; ponds: Record<
     );
   }
   return null;
+}
+
+// An App node: where it's served, its instance, the Sources whose freshness it reads, and its own Control set
+// (Restart and Kill: Force, Wake and Sleep mean little for a node whose Runs are passes).
+function AppPanel({ pond, canDemand, canControl, onOptions }: {
+  pond: Pond; canDemand: boolean; canControl: boolean; onOptions: () => void;
+}) {
+  const info = useLiveStore((s) => s.pondInfo[pond.id]);
+  const view = useLiveStore((s) => s.pondViews[pond.id]);
+  const ponds = useLiveStore((s) => s.ponds);
+  const pondViews = useLiveStore((s) => s.pondViews);
+  const now = useLiveStore((s) => s.now);
+  const restartApp = useLiveStore((s) => s.restartApp);
+  const kill = useLiveStore((s) => s.kill);
+  if (!info) return null;
+  const state = appState(info);
+  const app = info.app;
+  const inst = app?.instance ?? null;
+  const halted = info.isFailed || info.isKilled || info.isBlocked;
+
+  let instance: React.ReactNode;
+  if (info.isFailed) {
+    instance = <StatusCard color={THEME_DANGER} title="Failed">{info.error ?? 'The App stopped.'}</StatusCard>;
+  } else if (info.isKilled) {
+    instance = (
+      <StatusCard color={THEME_DANGER} title="Killed">
+        Stopped by an operator.{canControl ? ' Restart to bring it back.' : ''}
+      </StatusCard>
+    );
+  } else if (halted || state === 'waiting') {
+    instance = <StatusBox info={info} ponds={ponds} canControl={canControl} />;
+  } else if (inst) {
+    const idleAt = inst.idleAt ? parseTs(inst.idleAt) : null;
+    instance = (
+      <div style={{ fontSize: 12, color: '#a1a1aa', lineHeight: 1.7 }}>
+        <div>
+          <span style={{ color: THEME_BRAND, fontWeight: 700 }}>{state === 'running' ? 'Running' : 'Starting'}</span>
+          <span style={{ color: '#52525b' }}> · </span>since {clock(inst.readyAt ?? inst.startedAt)}
+        </div>
+        {state === 'running' && (
+          <div>
+            {inst.active > 0
+              ? `${inst.active} request${inst.active === 1 ? '' : 's'} in flight`
+              : idleAt !== null
+                ? `Stops when idle in ${formatAge(now, Math.max(idleAt, now))}`  // the time from now to idleAt
+                : app?.idleTimeoutS === 0 ? 'Keeps running until stopped' : 'Idle'}
+          </div>
+        )}
+      </div>
+    );
+  } else {
+    instance = <div style={{ fontSize: 12, color: '#71717a', lineHeight: 1.7 }}>Stopped. The next request starts it.</div>;
+  }
+
+  return (
+    <>
+      <Section>
+        <div style={{ fontSize: 18, fontWeight: 700, color: '#f4f4f5', lineHeight: 1.2, wordBreak: 'break-word', marginBottom: 8 }}>
+          {pond.name}
+        </div>
+        <div style={{ fontSize: 11, color: '#71717a', marginBottom: 10, lineHeight: 1.7 }}>
+          <div>
+            app<span style={{ color: '#52525b' }}> · </span>v<span style={{ color: '#a1a1aa' }}>{info.version}</span>
+            {app?.deployedAt && (
+              <>
+                <span style={{ color: '#52525b' }}> · </span>
+                deployed <span style={{ color: '#a1a1aa' }}>{formatAge(parseTs(app.deployedAt), now)}</span> ago
+              </>
+            )}
+          </div>
+          <div>
+            data fresh <span style={{ color: '#a1a1aa' }}>{formatAge(view?.endF ?? 0, now)}</span> old
+          </div>
+        </div>
+        {app && (
+          <button
+            onClick={() => openApp(app.path)}
+            style={{
+              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              background: `${THEME_BRAND}14`, border: `1px solid ${THEME_BRAND}`, borderRadius: 6, padding: '8px 12px',
+              color: THEME_BRAND, fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+            }}
+          >
+            <OpenIcon /> Open App
+          </button>
+        )}
+        {pond.sources.length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <Label>Sources</Label>
+            {pond.sources.map((sid) => (
+              <div key={sid} style={{ display: 'flex', fontSize: 12, color: '#a1a1aa', marginBottom: 3, gap: 8 }}>
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{ponds[sid]?.name ?? sid}</span>
+                <span style={{ color: '#71717a' }}>{formatAge(pondViews[sid]?.endF ?? 0, now)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section>
+        <Label>Instance</Label>
+        {instance}
+      </Section>
+
+      {/* A Refresh has no effect while halted; the reason is shown above. */}
+      {!halted && (
+        <Section>
+          <Label>Refresh</Label>
+          <RefreshEditor pond={pond} canDemand={canDemand} />
+        </Section>
+      )}
+
+      {canControl && (
+        <Section>
+          <Label>Control</Label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
+            <Btn block onClick={() => restartApp(pond.id)} color={THEME_SUCCESS}>Restart</Btn>
+            <Btn block onClick={() => kill(pond.id)} color={THEME_DANGER} disabled={info.isKilled}>Kill</Btn>
+          </div>
+        </Section>
+      )}
+
+      <div style={{ borderTop: '1px solid #27272a', marginTop: 14, paddingTop: 14 }}>
+        <button
+          onClick={onOptions}
+          style={{
+            width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            background: '#1a1a1f', border: '1px solid #3f3f46', borderRadius: 6, padding: '8px 12px',
+            color: '#a1a1aa', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+          }}
+        >
+          ⚙ Options
+        </button>
+      </div>
+    </>
+  );
 }
 
 // A Spout node (egress) — its destination + state, and the Control set on its standing Wake.
@@ -561,10 +699,11 @@ function PondOptionsModal({ pond, canControl, onClose }: { pond: Pond; canContro
           {canControl && (
             <Section>
               <Label>Failures · retry budgets</Label>
+              {/* An App's on-change budget is always 0: its failure is its process's, never retried by a Source. */}
               {([
                 ['Immediate Retries', immRetries, setImmRetries],
                 ['On Change Retries', srcRetries, setSrcRetries],
-              ] as const).map(([label, value, setValue]) => (
+              ] as const).filter(([label]) => !pond.isApp || label === 'Immediate Retries').map(([label, value, setValue]) => (
                 <div key={label} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
                   <span style={{ flex: 1, fontSize: 11, color: '#a1a1aa' }}>{label}</span>
                   <input type="number" min="0" step="1" value={value} onChange={(e) => setValue(e.target.value)} style={{ ...numInput, width: 48 }} />
@@ -588,9 +727,9 @@ function PondOptionsModal({ pond, canControl, onClose }: { pond: Pond; canContro
             </Section>
           )}
           {/* Egress Spouts — a Draw can't be a source. */}
-          {!pond.isDraw && <SpoutEditor sourceId={pond.id} canControl={canControl} />}
-          {/* Observed lineage (read-visible) + alert channels scoped to this Pond. */}
-          {!pond.isDraw && <LineageSection key={`lin-${pond.id}`} pond={pond} />}
+          {!pond.isDraw && !pond.isApp && <SpoutEditor sourceId={pond.id} canControl={canControl} />}
+          {/* Observed lineage (read-visible) + alert channels scoped to this Pond. An App records none. */}
+          {!pond.isDraw && !pond.isApp && <LineageSection key={`lin-${pond.id}`} pond={pond} />}
           <AlertEditor key={pond.id} pond={pond} canControl={canControl} />
         </div>
       </div>
@@ -760,8 +899,13 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
         </>
       )}
 
+      {/* App selected: its own panel (header, instance, Refresh, Restart/Kill). */}
+      {selectedPond && !selectedRippleId && selectedPond.isApp && (
+        <AppPanel pond={selectedPond} canDemand={canDemand} canControl={canControl} onOptions={() => setOptionsOpen(true)} />
+      )}
+
       {/* Pond selected */}
-      {selectedPond && !selectedRippleId && (
+      {selectedPond && !selectedRippleId && !selectedPond.isApp && (
         <>
           <Section>
             {/* The Pond name is the sidebar's headline — prominent, and shown verbatim (not upper-cased).

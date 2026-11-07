@@ -28,7 +28,7 @@ duckstring --install-completion   # enable shell completion
 | [`spout`](spout.md) | Deliver tables to external systems. |
 | [`secret`](secret.md) | The Catchment's write-only secret store. |
 | [`alert`](alert.md) | Failure and freshness notifications. |
-| [`app`](app.md) | An App's instances and their output. |
+| [`app`](app.md) | An App's instances and their output, and restarting it. |
 
 Tables and Objects are named `POND.NAME`, as in the Python API, for example `reports.monthly_summary`.
 

@@ -9,6 +9,7 @@ import { DagCanvas } from './DagCanvas';
 import { Sidebar, TracePanel } from './Sidebar';
 import { RunHistory } from './RunHistory';
 import { RunDetail } from './RunDetail';
+import { AppInstances } from './AppInstances';
 import { DataViewerModal } from './DataViewerModal';
 import { ConfirmDialog } from './ConfirmDialog';
 import { TopBar } from './OptionsMenu';
@@ -80,6 +81,7 @@ function KeyPrompt() {
 function MobileRunsPanel() {
   const [open, setOpen] = useState(false);
   const selectedRun = useLiveStore((s) => s.selectedRun);
+  const appId = useSelectedApp();
   return (
     <div style={{ borderTop: '1px solid #27272a', background: '#0c0c10', flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
       <div
@@ -87,12 +89,17 @@ function MobileRunsPanel() {
         style={{ display: 'flex', alignItems: 'center', padding: '8px 14px', cursor: 'pointer', userSelect: 'none', flexShrink: 0 }}
       >
         <span style={{ fontSize: 11, fontWeight: 700, color: '#a1a1aa', letterSpacing: '0.08em' }}>
-          {open ? '▾' : '▸'} RUNS
+          {open ? '▾' : '▸'} {appId ? 'INSTANCES' : 'RUNS'}
         </span>
       </div>
       {open && (
         // Fixed height so both sheets open can't push past a short phone's screen;
         // history and detail split it evenly (each scrolls internally).
+        appId ? (
+          <div style={{ height: '40dvh', minHeight: 0, borderTop: '1px solid #27272a' }}>
+            <AppInstances pondId={appId} vertical />
+          </div>
+        ) : (
         <div style={{ display: 'flex', flexDirection: 'column', height: '40dvh', minHeight: 0 }}>
           <div style={{ flex: 1, minHeight: 0, borderTop: '1px solid #27272a' }}>
             <RunHistory />
@@ -103,9 +110,16 @@ function MobileRunsPanel() {
             </div>
           )}
         </div>
+        )
       )}
     </div>
   );
+}
+
+// The selected node when it's an App: the bottom panel shows its instances and log in place of runs.
+function useSelectedApp(): string | null {
+  return useLiveStore((s) => (s.selectedPondId && !s.selectedRippleId && s.ponds[s.selectedPondId]?.isApp
+    ? s.selectedPondId : null));
 }
 
 // Cyan is the default accent for the Selector (the Duckstring brand colour, used wherever there is no
@@ -284,6 +298,7 @@ export function App() {
   const refresh = useLiveStore((s) => s.refresh);
   const needsKey = useLiveStore((s) => s.needsKey);
   const isMobile = useIsMobile();
+  const appId = useSelectedApp();
 
   useEffect(() => {
     // Long-poll loop: refresh() holds (via /api/status?since=) until the engine state changes, then
@@ -328,6 +343,10 @@ export function App() {
       </div>
       {isMobile ? (
         <MobileRunsPanel />
+      ) : appId ? (
+        <div style={{ height: 260, minHeight: 0, borderTop: '1px solid #27272a' }}>
+          <AppInstances pondId={appId} />
+        </div>
       ) : (
         <div style={{ display: 'flex', height: 260, minHeight: 0, borderTop: '1px solid #27272a' }}>
           <div style={{ flex: 1, minWidth: 0, borderRight: '1px solid #27272a' }}>

@@ -1,13 +1,15 @@
-"""An App's instances and logs (plans/apps.md). Instances are read level, like run history; logs are full, since
-an App's output can carry anything its code prints."""
+"""An App's instances, logs and restart (plans/apps.md). Instances are read level, like run history; logs are full,
+since an App's output can carry anything its code prints, and so is a restart, like the other Control verbs."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
+from ...keys import pond_key
 from .. import auth
 from ..app_supervisor import instance_rows, version_ids_of
 from .orchestrate import _driver, _resolve
@@ -63,3 +65,20 @@ def app_logs(name: str, request: Request, major: int | None = None, version: str
     return PlainTextResponse(data.decode("utf-8", errors="replace"),
                              headers={"x-log-offset": str(start + len(data)), "x-log-instance": str(row["id"]),
                                       "x-log-running": "1" if row["stopped_at"] is None else "0"})
+
+
+@router.post("/ponds/{name}/app/restart", dependencies=[auth.full])
+async def app_restart(name: str, request: Request, major: int | None = None, version: str | None = None):
+    """Stop the App's instance and start a fresh one, clearing a failure or a Kill first. Returns at once; the
+    start shows on ``/api/status``."""
+    pond, mj = _app_line(request, name, major, version)
+    supervisor = getattr(request.app.state, "app_supervisor", None)
+    if supervisor is None:
+        raise HTTPException(status_code=503, detail="this Catchment isn't running Apps")
+    key = pond_key(pond, mj)
+    await asyncio.to_thread(_driver(request).prepare_app_restart, key)
+    request.app.state.app_restarts = getattr(request.app.state, "app_restarts", set())
+    task = asyncio.create_task(supervisor.restart(key))
+    request.app.state.app_restarts.add(task)  # held until done, so the task isn't collected mid-start
+    task.add_done_callback(request.app.state.app_restarts.discard)
+    return {"ok": True}

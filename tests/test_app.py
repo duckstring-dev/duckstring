@@ -144,7 +144,8 @@ def test_an_app_serves_its_sources_over_http_and_websockets(catchment_client):
     _deploy_pipeline(client)
     entry = _app_entry(client)
     assert entry["is_app"] and entry["kind"] == "outlet" and entry["duck"] is None
-    assert entry["app"] == {"path": "/apps/dash/v1/", "instance": None}
+    assert entry["app"]["path"] == "/apps/dash/v1/" and entry["app"]["instance"] is None
+    assert entry["app"]["idle_timeout_s"] == 1800
 
     r = client.get("/apps/dash/hello?x=1", follow_redirects=False)
     assert r.status_code == 307 and r.headers["location"] == "/apps/dash/v1/hello?x=1"
@@ -245,6 +246,44 @@ def test_kill_stops_the_instance(catchment_client):
     assert client.post("/api/ponds/dash/kill").status_code == 200
     assert inst.proc.poll() is not None
     assert client.get("/apps/dash/v1/hello").status_code == 503
+
+
+def _wait_for(predicate, timeout: float = 30.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.1)
+    raise AssertionError("timed out")
+
+
+def test_restart_replaces_the_instance_and_reports_it_on_status(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert _app_entry(client)["app"]["instance"] is None
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    app = _app_entry(client)["app"]
+    first = app["instance"]
+    assert first["ready_at"] and first["active"] == 0 and first["idle_at"] and app["deployed_at"]
+    assert client.post("/api/ponds/dash/app/restart").status_code == 200
+    second = _wait_for(lambda: (i := _app_entry(client)["app"]["instance"]) and i["id"] != first["id"]
+                       and i["ready_at"] and i)
+    assert second["id"] > first["id"]
+    reasons = [i["stop_reason"] for i in client.get("/api/ponds/dash/app/instances").json()["instances"]]
+    assert reasons[:2] == [None, "restart"]
+
+
+def test_restart_brings_back_a_killed_app(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.post("/api/ponds/dash/kill").status_code == 200
+    assert _app_entry(client)["is_killed"]
+    assert client.post("/api/ponds/dash/app/restart").status_code == 200
+    assert not _app_entry(client)["is_killed"]
+    _wait_for(lambda: (i := _app_entry(client)["app"]["instance"]) and i["ready_at"])
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    assert client.post("/api/ponds/sales/app/restart").status_code == 422  # not an App
 
 
 def test_an_apps_freshness_follows_its_sources(catchment_client):
@@ -557,3 +596,17 @@ def test_a_failing_download_command_fails_the_download(catchment_client):
     status, body = _archive_names(client)
     assert status == 500
     assert b"App 'dash' (v1)" in body["detail"] and b"code 4" in body["detail"] and b"no database here" in body["detail"]
+
+
+def test_bulk_rebuild_and_repair_pass_over_an_app(catchment_client):
+    client = catchment_client
+    _deploy_pipeline(client)
+    r = client.post("/api/ponds/batch", json={"ponds": [{"name": "sales"}, {"name": "dash"}],
+                                             "operations": ["rebuild"]})
+    assert r.status_code == 200 and r.json()["errors"] == []
+    assert not _app_entry(client)["rebuild_pending"]
+    sales = next(p for p in client.get("/api/status").json()["ponds"] if p["name"] == "sales")
+    assert sales["rebuild_pending"]
+    r = client.post("/api/ponds/batch", json={"ponds": [{"name": "dash"}], "operations": ["repair"]})
+    assert r.status_code == 200 and r.json()["errors"] == []
+    assert not _app_entry(client)["repairing"]

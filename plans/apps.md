@@ -322,3 +322,12 @@ question) were not looked at.
   never runs from a half-replaced folder; the next request starts the new code. Instances compare
   `pond_version.deployed_at` as well as the version id (`_current`), so one started between the stop and the
   record landing is replaced by the next `reconcile`.
+
+## As built: the web UI (2026-11-07)
+
+- An App node is subtly distinct: a rounder box, no Ripple (the synthetic `serve` is hidden), and an Open button where a Pond shows its table button. Its second line is its state (idle, starting, running, waiting for memory, failed, killed) and its data age; run counts are left out, since an App's Runs are passes. While an instance serves, the rim is the running colour.
+- Opening an App from the UI signs the new tab in with the key the UI holds (a form POST to `/apps/_signin`), so the App doesn't ask for it again.
+- The sidebar shows the version and when it was deployed (a version can be redeployed in place), Open App, the Sources with their ages, the instance (running since, requests in flight or when it stops for idleness), Refresh with Taps, and Restart and Kill. Options keeps the immediate retry budget and Alerts.
+- The bottom panel shows the App's instances and the selected one's log, following a running instance. Logs need full access, as in the CLI.
+- **Restart** (`POST /api/ponds/{name}/app/restart`, `duckstring app restart`): clears a failure or a Kill, stops the instance (reason `restart`) and starts a fresh one in the background. It replaces Force, Wake and Sleep in the App's Control row.
+- Bulk Rebuild and Repair pass over Apps (nothing to rebuild).

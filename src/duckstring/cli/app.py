@@ -1,10 +1,11 @@
-"""`duckstring app instances|logs {app}`: an App's instances and their output (plans/apps.md).
+"""`duckstring app instances|logs|restart {app}`: an App's instances and their output (plans/apps.md).
 
 An App is deployed with `duckstring pond deploy` like any Pond, and its Refreshes and Control verbs are the usual
-ones. These commands show its instances (one process each, from start to stop) and read their logs::
+ones. These commands show its instances (one process each, from start to stop), read their logs, and restart it::
 
     duckstring app instances sales_dashboard
     duckstring app logs sales_dashboard --follow
+    duckstring app restart sales_dashboard
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="Inspect an App's instances and logs.", no_args_is_help=True)
+app = typer.Typer(help="Inspect an App's instances and logs, and restart it.", no_args_is_help=True)
 
 
 def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
@@ -88,3 +89,18 @@ def logs(
             running = resp.headers.get("x-log-running") == "1"
     except KeyboardInterrupt:
         pass
+
+
+@app.command("restart")
+def restart(
+    name: str = typer.Argument(..., help="The App."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    major: Optional[int] = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific semver to target."),
+) -> None:
+    """Stop the App's instance and start a fresh one. Clears a failure or a Kill first."""
+    from . import _http
+
+    url, cfg = _resolve(catchment)
+    _http.post(f"{url}/api/ponds/{name}/app/restart", auth=cfg, params=_http.pond_params(major, version))
+    typer.echo(f"Restarting {name}: see `duckstring app instances {name}`.")
