@@ -48,5 +48,13 @@ RUN pip install uv \
 USER duck
 WORKDIR /var/lib/duckstring
 
+# DuckDB's extensions for this cloud's storage (httpfs for S3 and GCS, azure for Azure) and for DuckLake
+# Spouts, placed in the duck user's extension directory, where INSTALL finds them and LOAD reads them.
+# Otherwise every new container downloads them at its first read (1-1.6 s and 18-43 MB each, measured), and a
+# Duck in a network with no internet access can't (docker/duckdb_extensions.py fetches the files).
+COPY docker/duckdb_extensions.py /opt/duckstring/
+RUN case "${EXTRAS}" in azure) storage=azure ;; *) storage=httpfs ;; esac \
+    && python /opt/duckstring/duckdb_extensions.py "$storage" ducklake
+
 ENTRYPOINT ["python", "-m"]
 CMD ["duckstring.duck", "--help"]
