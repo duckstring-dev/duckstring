@@ -15,7 +15,7 @@ from duckstring.catchment import cloud, cloud_deploy, providers
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
 from duckstring.catchment.launcher import DispatchingLauncher, NoopLauncher, SubprocessLauncher
-from duckstring.catchment.providers import aws
+from duckstring.catchment.providers import aws, azure
 from duckstring.catchment.routes import router
 from duckstring.catchment.routes.deploy import _register
 from duckstring.catchment.secrets import SecretStore
@@ -29,6 +29,10 @@ def _aws_creds_from_secrets_only(monkeypatch):
     for k in ("AWS_ACCESS_KEY_ID", "AWS_PROFILE", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(aws, "_chain_has_credentials", lambda: False)
+    for k in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_SECRET", "IDENTITY_ENDPOINT", "MSI_ENDPOINT"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(azure, "_cli_signed_in", lambda: False)
+    monkeypatch.setattr(azure, "_managed_identity_available", lambda: False)
     monkeypatch.setenv("DUCKSTRING_RELAY", "off")
 
 
@@ -68,10 +72,11 @@ def test_a_local_root_has_no_cloud(root):
 
 
 def test_backends_belong_to_one_cloud():
-    assert providers.all_backends() == ["fargate", "ec2"]
+    assert providers.all_backends() == ["fargate", "ec2", "containerapps"]
     assert providers.for_backend("fargate").name == "aws" and providers.for_backend("ec2").name == "aws"
+    assert providers.for_backend("containerapps").name == "azure"
     assert providers.for_backend(providers.LOCAL_BACKEND) is None and providers.for_backend("k8s") is None
-    assert not providers.get("azure").compute and not providers.get("gcp").compute
+    assert providers.get("azure").compute and not providers.get("gcp").compute
     for p in providers.providers().values():
         assert not p.presets or set(p.presets) == set(providers.PRESET_NAMES)
 
@@ -156,7 +161,7 @@ def test_an_aws_catchment_takes_its_own_backends_only(tmp_path):
 def test_a_local_catchment_accepts_any_backend_until_it_has_a_cloud(tmp_path):
     d = _driver(tmp_path)
     d.add_pool("heavy", provider="ec2", instance_type="m6i.large")
-    with pytest.raises(ValueError, match="fargate, ec2, local$"):
+    with pytest.raises(ValueError, match="fargate, ec2, containerapps, local$"):
         d.add_pool("bad", provider="k8s")
 
 
@@ -191,17 +196,17 @@ def test_compute_defaults_list_every_backend(tmp_path):
     d = _driver(tmp_path)
     app.state.driver, app.state.db = d, d.db
     got = TestClient(app).get("/api/catchment/compute-defaults").json()
-    assert set(got) == {"fargate", "ec2"} and got["ec2"]["fields"] == list(aws.EC2.fields)
+    assert set(got) == {"fargate", "ec2", "containerapps"} and got["ec2"]["fields"] == list(aws.EC2.fields)
 
 
 def test_a_storage_only_clouds_secrets_stay_out_of_the_environment(tmp_path, monkeypatch):
-    # Until Azure has remote Ducks an AZURE_* secret is an ordinary secret (a Spout's ${secret:} reference):
-    # loading it into the environment would change how the data root's adlfs and DuckDB authenticate.
-    monkeypatch.delenv("AZURE_CLIENT_SECRET", raising=False)
+    # Until Google has remote Ducks a GOOGLE_* secret is an ordinary secret (a Spout's ${secret:} reference):
+    # loading it into the environment would change how the data root authenticates.
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     from duckstring.catchment.app import create_app
 
     with TestClient(create_app(tmp_path)) as c:
-        assert c.post("/api/secrets", json={"name": "AZURE_CLIENT_SECRET", "value": "s"}).status_code == 200
-    assert "AZURE_CLIENT_SECRET" not in os.environ
+        assert c.post("/api/secrets", json={"name": "GOOGLE_CLOUD_PROJECT", "value": "p"}).status_code == 200
+    assert "GOOGLE_CLOUD_PROJECT" not in os.environ
     cloud.load_env(SecretStore(tmp_path))
-    assert "AZURE_CLIENT_SECRET" not in os.environ
+    assert "GOOGLE_CLOUD_PROJECT" not in os.environ

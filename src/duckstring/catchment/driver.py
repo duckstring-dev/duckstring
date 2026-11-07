@@ -112,7 +112,7 @@ _DUCK_DEAD_AFTER = timedelta(seconds=60)
 # always failed even when perfectly configured. Applies only until the Duck first speaks; after that the
 # steady-state window above governs.
 _STARTUP_GRACE = {"catchment": timedelta(seconds=60), "fargate": timedelta(minutes=3),
-                  "ec2": timedelta(minutes=8)}
+                  "ec2": timedelta(minutes=8), "containerapps": timedelta(minutes=3)}
 
 # Keep an idle Duck warm for this long before reaping it. Reaping the instant a Pond goes idle, then
 # respawning on the next run, races: a Pond re-armed in the window between the shutdown being sent and

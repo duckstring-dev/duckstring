@@ -8,9 +8,10 @@ catches a dead machine). The **machine backend** brings up the ONE machine per P
 
 - :class:`LocalPoolMachine` — a subprocess agent with its own root dir: the offline test double AND a
   legitimate second Pool on this box for dev.
-- :class:`FargatePoolMachine` / :class:`Ec2PoolMachine` — start one task/instance running the agent
-  command, reusing the per-Pond launchers' config resolution (image/roles/networking from the pool's
-  deploy_config over the env defaults). Real-AWS validation is the gate run's job.
+- :class:`FargatePoolMachine` / :class:`Ec2PoolMachine` / :class:`ContainerAppsPoolMachine`: start one
+  task/instance/execution running the agent command, reusing the per-Pond launchers' config resolution
+  (image/roles/networking from the pool's deploy_config over the env defaults). Real-cloud validation is the
+  gate run's job.
 
 A Pool never scales out (one filesystem, by definition — plans/persist.md); machine idle/scale-to-zero
 scheduling is deferred (v1: the machine starts on first need, stops on shutdown_all)."""
@@ -228,6 +229,69 @@ class FargatePoolMachine(_RemoteMachine):
         except Exception:
             log.exception("fargate: failed to stop the pool machine for '%s'", self.pool)
         self._task_arn = None
+
+    def error(self) -> str | None:
+        return self._error
+
+
+class ContainerAppsPoolMachine(_RemoteMachine):
+    """One Container Apps job execution running the Pool agent, over the per-Pond ContainerAppsLauncher's job
+    (created from the pool's deploy_config over the env defaults). Sizing = the pool's cpu/memory."""
+
+    def __init__(self, pool: str, pool_spec: dict, launcher):
+        self.pool = pool
+        self.spec = pool_spec or {}
+        self.cl = launcher
+        self._execution: tuple | None = None
+        self._error: str | None = None
+
+    def _record(self):
+        return self._execution[3] if self._execution else None
+
+    def _forget(self) -> None:
+        self._execution = None
+
+    def _probe(self) -> bool:
+        from .containerapps_launcher import _LIVE
+
+        return self.cl.execution_status(self._execution) in _LIVE
+
+    def start(self) -> None:
+        from .containerapps_launcher import _REMOTE_ROOT, _cpu, _memory
+
+        if self.check():
+            return
+        if self.cl.remote_base_url is None:
+            self.cl.dialback.request()
+            self._error = "containerapps pool: waiting for a reachable Catchment URL (dial-back)"
+            return
+        dc = self.spec.get("deploy_config") or {}
+        args = [
+            "duckstring.duck.pool_agent", "--pool", self.pool,
+            "--catchment", self.cl.remote_base_url, f"--token={self.cl.token}",
+            "--root", _REMOTE_ROOT,
+            f"--data-root={self.cl.data_root or ''}",
+            f"--persist-root={self.cl.data_root or ''}",  # a Pool Duck persists to the data root
+        ]
+        try:
+            self._execution = self.cl.start_execution(dc, args, _cpu(self.spec, dc), _memory(self.spec, dc))
+            self._error = None
+            log.info("containerapps: started pool machine %s for pool '%s'", self._execution[3], self.pool)
+        except Exception as exc:
+            log.exception("containerapps: failed to start the pool machine for '%s'", self.pool)
+            self._error = f"containerapps pool: {exc}"
+
+    def is_up(self) -> bool:
+        return self._execution is not None
+
+    def stop(self) -> None:
+        if self._execution is None:
+            return
+        try:
+            self.cl.stop_execution(self._execution)
+        except Exception:
+            log.exception("containerapps: failed to stop the pool machine for '%s'", self.pool)
+        self._execution = None
 
     def error(self) -> str | None:
         return self._error
