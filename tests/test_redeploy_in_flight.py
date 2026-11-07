@@ -102,3 +102,44 @@ def test_a_duck_on_a_replaced_version_hands_its_work_to_a_new_duck(tmp_path):
     assert launcher.spawned[-1] == ("p@1", "1.0.1")
     assert [j["kind"] for j in d.take_jobs("p@1", version="1.0.1")] == ["begin_run"]
     assert d.take_jobs("p@1") == []  # a Duck that doesn't say its version is taken at its word
+
+
+class _Placed(_OneDuck):
+    """A pretend dispatching launcher that knows each Duck's backend."""
+
+    def __init__(self):
+        super().__init__()
+        self.backend: dict[str, str] = {}
+
+    def placed_elsewhere(self, pond_key, duck):
+        return pond_key in self.running and self.backend.get(pond_key) != duck["duck_target"]
+
+    def ensure(self, pond_key, version, source_path, duck=None):
+        super().ensure(pond_key, version, source_path, duck)
+        self.backend.setdefault(pond_key, duck["duck_target"])
+
+
+def test_a_duck_on_compute_the_pond_left_hands_its_work_to_a_new_duck(tmp_path):
+    """Moving a Pond to other compute while its Duck was alive replaced that Duck at the next dispatch, killing it
+    with a Run it had already taken: the new Duck never got that Run, which showed running for good. Now the old
+    Duck is told only to shut down (it finishes what it holds), as for a redeploy."""
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "p", "1.0.0", "inlet", "ponds/p/1.0.0", _CFG, _RIPPLES)
+    launcher = _Placed()
+    d = Driver(db, tmp_path, "http://x", launcher)
+    d.add_pool("box", provider="local")
+    d.set_duck("p@1", duck_target="box")
+    d.refresh_now("p@1")
+    assert [j["kind"] for j in d.take_jobs("p@1", version="1.0.0")] == ["begin_run"]
+    _finish(d, d.state.pond_states["p@1"].start_f.isoformat())
+
+    d.set_duck("p@1", duck_target="catchment")
+    d.refresh_now("p@1")
+    assert launcher.spawned == [("p@1", "1.0.0")]  # not replaced while it lives
+    assert d.take_jobs("p@1", version="1.0.0") == [{"kind": "shutdown"}]  # the Pool's Duck gets no new work
+    del launcher.running["p@1"]
+    launcher.backend.pop("p@1")
+    d.scheduler_tick()
+    assert len(launcher.spawned) == 2 and launcher.backend["p@1"] == "catchment"
+    assert [j["kind"] for j in d.take_jobs("p@1", version="1.0.0")] == ["begin_run"]

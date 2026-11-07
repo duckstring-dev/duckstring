@@ -396,7 +396,9 @@ class Driver(TapsMixin):
         # Ponds whose Duck was spawned but has never spoken — they get the provider's (longer) startup
         # grace rather than the steady-state silence window. Cleared on first contact.
         self._awaiting_first_contact: set[str] = set()
-        self._outdated_ducks: set[str] = set()  # Ponds whose Duck runs a version a redeploy replaced
+        # Ponds whose Duck must hand over: it runs a version a redeploy replaced, or on compute the Pond no longer
+        # targets. It gets only a shutdown and the new Duck starts once it has gone (_replace_outdated_ducks).
+        self._outdated_ducks: set[str] = set()
         # Ponds whose Duck collected an idle shutdown and is finishing up (its S3 copy) before it exits. A Run
         # dispatched meanwhile finds its process alive, so nothing is spawned: either the Duck collects the Run
         # (and stays) or it exits first and _replace_departed_ducks gives the Run to a fresh Duck.
@@ -2963,7 +2965,7 @@ class Driver(TapsMixin):
             self.last_seen[pond] = _now()  # the Duck is alive — it just polled
             self._awaiting_first_contact.discard(pond)
             selected = self.meta.get(pond, {}).get("version")
-            if version is not None and selected is not None and version != selected:
+            if (version is not None and selected is not None and version != selected) or pond in self._outdated_ducks:
                 self._outdated_ducks.add(pond)
                 if hasattr(self.launcher, "release"):
                     self.launcher.release(pond)
@@ -3631,7 +3633,14 @@ class Driver(TapsMixin):
             self._signal_egress()
             return
         duck_cfg = self.duck_config(pond)
-        self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=duck_cfg)
+        placed_elsewhere = getattr(self.launcher, "placed_elsewhere", None)
+        if placed_elsewhere is not None and placed_elsewhere(pond, duck_cfg):
+            # The Pond's compute changed while its Duck is alive: that Duck may already hold a Run, and replacing
+            # it now killed it with that Run taken, so the new Duck waited for a job that never came (the Run
+            # showed running for good; found on Azure, 2026-11-07). Hand over as for a redeploy instead.
+            self._outdated_ducks.add(pond)
+        else:
+            self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=duck_cfg)
         self.last_seen[pond] = now  # grace clock: a freshly (re)spawned Duck isn't immediately stale
         self._awaiting_first_contact.add(pond)  # until it speaks, judge it by the spawn grace (see below)
         self._idle_since.pop(pond, None)  # it's running again — reset its reap grace clock

@@ -284,6 +284,13 @@ class DispatchingLauncher:
             return True
         return any(r.is_running(pond_key) for r in self.remotes.values())
 
+    def placed_elsewhere(self, pond_key: str, duck: dict | None) -> bool:
+        """Whether the Pond's Duck is alive on another backend than ``duck`` now routes to (its compute changed).
+        The driver then hands its work over as for a redeploy instead of calling ``ensure``, which would kill
+        the old Duck with a Run it had already taken."""
+        owner = self._owner.get(pond_key)
+        return owner is not None and owner is not self._backend_for(duck) and owner.is_running(pond_key)
+
     def ensure(self, pond_key: str, version: str, source_path: str, duck: dict | None = None) -> None:
         backend = self._backend_for(duck)
         # If a Pond's target changed lines between runs, tear down the stale backend's Duck first.
