@@ -12,6 +12,7 @@ needs no provider at all. Azure and Google offer storage only until phases 3 and
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -52,6 +53,10 @@ class Provider:
 
     def load_env(self, secret_store=None) -> None:
         """Load this cloud's credential secrets into the environment, so its SDKs' default chains see them."""
+
+    def apply_secret(self, name: str, value: str, secret_store) -> None:
+        """A credential secret was just set: make it live now (an explicit set wins over an ambient value)."""
+        os.environ[name] = value
 
     def credentials_changed(self) -> None:
         """A credential secret was just set into the environment: drop anything cached about the credentials."""

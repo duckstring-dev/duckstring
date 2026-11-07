@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BACKENDS, cloudBackends, deployConfigMissing } from './clouds';
+import { BACKENDS, cloudBackends, cloudrunMemory, deployConfigMissing } from './clouds';
 import type { CloudGate, ComputeDefaults } from './api';
 
 const gate = (backends: Record<string, boolean>) => ({ backends } as unknown as CloudGate);
@@ -15,6 +15,7 @@ describe('deployConfigMissing', () => {
     const defaults = { containerapps: { fields: [], env: { environment: '/subscriptions/x' }, missing_without_input: [] } } as ComputeDefaults;
     expect(deployConfigMissing('containerapps', {}, defaults)).toEqual(['identity']);
     expect(deployConfigMissing('azurevm', { subnet: 's', identity: 'i' }, null)).toEqual(['location']);
+    expect(deployConfigMissing('cloudrun', { registry: 'r', region: 'x' }, null)).toEqual(['service_account']);
   });
 });
 
@@ -25,6 +26,13 @@ describe('cloudBackends', () => {
   });
 
   it('knows every backend the server has', () => {
-    expect(Object.keys(BACKENDS).sort()).toEqual(['azurevm', 'containerapps', 'ec2', 'fargate']);
+    expect(Object.keys(BACKENDS).sort()).toEqual(['azurevm', 'cloudrun', 'containerapps', 'ec2', 'fargate', 'gce']);
+  });
+});
+
+describe('cloudrunMemory', () => {
+  it('caps memory at 4 GiB per vCPU', () => {
+    expect(cloudrunMemory(1024)).toEqual([1024, 2048, 3072, 4096]);
+    expect(cloudrunMemory(8192).at(-1)).toBe(32768);
   });
 });

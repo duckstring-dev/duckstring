@@ -2,7 +2,7 @@
 
 import type { ComputeDefaults } from '@/lib/api';
 import { FARGATE_CPU, FARGATE_MEMORY, cpuLabel, memoryLabel } from '@/lib/aws';
-import { CONSUMPTION_CPU, backendInfo, consumptionMemory, deployConfigMissing } from '@/lib/clouds';
+import { CLOUDRUN_CPU, CONSUMPTION_CPU, backendInfo, cloudrunMemory, consumptionMemory, deployConfigMissing } from '@/lib/clouds';
 import { InstanceTypePicker } from './InstanceTypePicker';
 
 export { deployConfigMissing } from '@/lib/clouds';
@@ -81,6 +81,22 @@ export function SizeFields({ provider, cpu, memory, onSize, instanceType, onInst
         </select>
         <select value={memory} onChange={(e) => onSize(cpu, e.target.value)} style={style}>
           {(FARGATE_MEMORY[Number(cpu)] ?? []).map((m) => <option key={m} value={m}>{memoryLabel(m)}</option>)}
+        </select>
+      </div>
+    );
+  }
+  if (sizing === 'cloudrun') {
+    const pickCpu = (v: string) => {
+      const mems = cloudrunMemory(Number(v));
+      onSize(v, mems.includes(Number(memory)) ? memory : String(mems[mems.length > 1 ? 1 : 0]));
+    };
+    return (
+      <div style={{ display: 'flex', gap: 6 }}>
+        <select value={cpu} onChange={(e) => pickCpu(e.target.value)} style={style}>
+          {CLOUDRUN_CPU.map((c) => <option key={c} value={c}>{c / 1024} vCPU</option>)}
+        </select>
+        <select value={memory} onChange={(e) => onSize(cpu, e.target.value)} style={style}>
+          {cloudrunMemory(Number(cpu)).map((m) => <option key={m} value={m}>{m / 1024} GiB</option>)}
         </select>
       </div>
     );

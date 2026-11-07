@@ -3,8 +3,8 @@ with remote Ducks only on that cloud. AWS keeps its behaviour; Azure and Google 
 
 from __future__ import annotations
 
+import functools
 import logging
-import os
 import types
 
 import pytest
@@ -15,7 +15,7 @@ from duckstring.catchment import cloud, cloud_deploy, providers
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
 from duckstring.catchment.launcher import DispatchingLauncher, NoopLauncher, SubprocessLauncher
-from duckstring.catchment.providers import aws, azure
+from duckstring.catchment.providers import aws, azure, gcp
 from duckstring.catchment.routes import router
 from duckstring.catchment.routes.deploy import _register
 from duckstring.catchment.secrets import SecretStore
@@ -33,6 +33,8 @@ def _aws_creds_from_secrets_only(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(azure, "_cli_signed_in", lambda: False)
     monkeypatch.setattr(azure, "_managed_identity_available", lambda: False)
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.setattr(gcp, "_default_credentials", functools.lru_cache(maxsize=1)(lambda: False))
     monkeypatch.setenv("DUCKSTRING_RELAY", "off")
 
 
@@ -72,11 +74,12 @@ def test_a_local_root_has_no_cloud(root):
 
 
 def test_backends_belong_to_one_cloud():
-    assert providers.all_backends() == ["fargate", "ec2", "containerapps", "azurevm"]
+    assert providers.all_backends() == ["fargate", "ec2", "containerapps", "azurevm", "cloudrun", "gce"]
     assert providers.for_backend("fargate").name == "aws" and providers.for_backend("ec2").name == "aws"
     assert providers.for_backend("containerapps").name == "azure"
     assert providers.for_backend(providers.LOCAL_BACKEND) is None and providers.for_backend("k8s") is None
-    assert providers.get("azure").compute and not providers.get("gcp").compute
+    assert all(p.compute for p in providers.providers().values())
+    assert providers.for_backend("cloudrun").name == "gcp" and providers.for_backend("gce").name == "gcp"
     for p in providers.providers().values():
         assert not p.presets or set(p.presets) == set(providers.PRESET_NAMES)
 
@@ -91,11 +94,12 @@ def test_deploy_fields_come_from_the_backends_provider():
 # ─── the gate: one cloud per Catchment ───────────────────────────────────────────
 
 def test_aws_credentials_no_longer_enable_compute_for_a_gcs_root():
-    # The accident phase 2 removes: a gs:// root plus AWS credentials enabled Fargate Ducks, whose image
-    # can't read Google storage.
+    # The accident phase 2 removed: a gs:// root plus AWS credentials enabled Fargate Ducks, whose image
+    # can't read Google storage. A gs:// root needs Google credentials, and then offers Google's backends.
     st = cloud.cloud_status("gs://bucket/p", _AWS)
-    assert st["provider"] == "gcp" and st["data_root_remote"] is True and st["compute_available"] is False
-    assert st["cloud_enabled"] is False and st["fargate_enabled"] is False and st["backends"] == {}
+    assert st["provider"] == "gcp" and st["data_root_remote"] is True and st["compute_available"] is True
+    assert st["cloud_enabled"] is False and st["fargate_enabled"] is False
+    assert st["backends"] == {"cloudrun": False, "gce": False}
     assert st["aws_configured"] is True  # still reported, for the UI
     assert not cloud.compute_enabled("gs://bucket/p", _AWS)
     assert not cloud.compute_enabled("abfss://lake@acct.dfs.core.windows.net/p", _AWS)
@@ -157,7 +161,7 @@ def test_a_dedicated_duck_runs_on_its_deploy_configs_backend_with_its_size(tmp_p
 
 def test_a_pool_must_use_a_backend_on_the_catchments_cloud(tmp_path):
     d = _driver(tmp_path, data_root="gs://bucket/p")
-    with pytest.raises(ValueError, match="provider must be one of local on Google Cloud"):
+    with pytest.raises(ValueError, match="provider must be one of cloudrun, gce, local on Google Cloud"):
         d.add_pool("heavy", provider="fargate", cpu=1024, memory=4096)
     d.add_pool("box", provider="local")
     assert d.get_pool("box")["provider"] == "local"
@@ -175,7 +179,7 @@ def test_an_aws_catchment_takes_its_own_backends_only(tmp_path):
 def test_a_local_catchment_accepts_any_backend_until_it_has_a_cloud(tmp_path):
     d = _driver(tmp_path)
     d.add_pool("heavy", provider="ec2", instance_type="m6i.large")
-    with pytest.raises(ValueError, match="fargate, ec2, containerapps, azurevm, local$"):
+    with pytest.raises(ValueError, match="fargate, ec2, containerapps, azurevm, cloudrun, gce, local$"):
         d.add_pool("bad", provider="k8s")
 
 
@@ -195,11 +199,11 @@ def test_a_pool_left_on_another_cloud_runs_on_the_catchment(tmp_path, caplog):
 
 
 def test_presets_resolve_on_the_catchments_cloud(tmp_path):
-    for i, root in enumerate((None, "s3://bucket/p", "gs://bucket/p")):
+    for i, (root, backend) in enumerate(((None, "fargate"), ("s3://bucket/p", "fargate"), ("gs://bucket/p", "cloudrun"))):
         (tmp_path / str(i)).mkdir()
         presets = {p["name"]: p for p in _driver(tmp_path / str(i), root).list_pools() if p.get("managed")}
         assert set(presets) == set(providers.PRESET_NAMES)
-        assert presets["M"]["provider"] == "fargate" and presets["M"]["memory"] == 4096
+        assert presets["M"]["provider"] == backend and presets["M"]["memory"] == 4096
 
 
 # ─── routes ──────────────────────────────────────────────────────────────────────
@@ -210,17 +214,5 @@ def test_compute_defaults_list_every_backend(tmp_path):
     d = _driver(tmp_path)
     app.state.driver, app.state.db = d, d.db
     got = TestClient(app).get("/api/catchment/compute-defaults").json()
-    assert set(got) == {"fargate", "ec2", "containerapps", "azurevm"} and got["ec2"]["fields"] == list(aws.EC2.fields)
-
-
-def test_a_storage_only_clouds_secrets_stay_out_of_the_environment(tmp_path, monkeypatch):
-    # Until Google has remote Ducks a GOOGLE_* secret is an ordinary secret (a Spout's ${secret:} reference):
-    # loading it into the environment would change how the data root authenticates.
-    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
-    from duckstring.catchment.app import create_app
-
-    with TestClient(create_app(tmp_path)) as c:
-        assert c.post("/api/secrets", json={"name": "GOOGLE_CLOUD_PROJECT", "value": "p"}).status_code == 200
-    assert "GOOGLE_CLOUD_PROJECT" not in os.environ
-    cloud.load_env(SecretStore(tmp_path))
-    assert "GOOGLE_CLOUD_PROJECT" not in os.environ
+    assert set(got) == {"fargate", "ec2", "containerapps", "azurevm", "cloudrun", "gce"}
+    assert got["ec2"]["fields"] == list(aws.EC2.fields)

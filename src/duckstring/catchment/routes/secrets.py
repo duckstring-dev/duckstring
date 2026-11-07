@@ -7,8 +7,6 @@ use HTTPS. Referenced from a Spout destination as ``${secret:NAME}``, resolved o
 
 from __future__ import annotations
 
-import os
-
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -41,7 +39,7 @@ def set_secret(request: Request, body: _SecretBody):
     # Ducks: until then an AZURE_*/GOOGLE_* secret is just a secret (a Spout's ${secret:} reference).
     provider = providers.secret_matches(body.name)
     if provider is not None and provider.compute:
-        os.environ[body.name] = body.value
+        provider.apply_secret(body.name, body.value, request.app.state.secret_store)
         provider.credentials_changed()
         # Adding/rotating a credential must make remote compute usable (and pick up the new value)
         # without a restart — attach or refresh the remote backends live. Guarded so it never fails set.

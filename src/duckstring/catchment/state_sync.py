@@ -33,7 +33,7 @@ import tempfile
 from pathlib import Path
 
 _SKIP_SUFFIXES = (".db-wal", ".db-shm")  # subsumed by the SQLite snapshot
-_SKIP_NAMES = {"secrets.json", "secrets.json.tmp"}  # the write-only secret store never travels in a bundle
+_SKIP_NAMES = {"secrets.json", "secrets.json.tmp", "google-credentials.json"}  # secrets never travel in a bundle
 _TIER1 = "duck.db"  # the frequent small Tier-1 object
 _TIER2 = "state.tar"  # the on-shutdown warm bundle (ledgers + registries + a duck.db snapshot)
 

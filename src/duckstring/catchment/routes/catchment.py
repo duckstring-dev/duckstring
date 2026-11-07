@@ -33,7 +33,7 @@ from ..db import locked
 router = APIRouter()
 
 _SKIP_SUFFIXES = (".db-wal", ".db-shm")  # subsumed by the SQLite snapshot
-_SKIP_NAMES = {"secrets.json", "secrets.json.tmp"}  # the write-only secret store never travels in a bundle
+_SKIP_NAMES = {"secrets.json", "secrets.json.tmp", "google-credentials.json"}  # secrets never travel in a bundle
 _SERVING_TMP = ".serving-tmp"  # the sandbox's private spill dir (see serving._temp_dir)
 # Top-level dirs rebuilt on demand, never shipped: Pond environments and uv's cache
 # (plans/pond-environments.md). Hundreds of MB, and an environment only works at the path and with the

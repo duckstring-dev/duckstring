@@ -7,8 +7,8 @@ import type { CloudGate, ComputeDefaults } from './api';
 
 export type Field = { key: string; label: string; ph: string; required?: boolean };
 // How a backend is sized: a Fargate task (cpu × memory matrix), a Container Apps consumption size (2 GiB per
-// vCPU), or a VM's instance type.
-export type Sizing = 'fargate' | 'consumption' | 'vm';
+// vCPU), a Cloud Run job (whole vCPUs, memory capped per vCPU), or a VM's instance type.
+export type Sizing = 'fargate' | 'consumption' | 'cloudrun' | 'vm';
 
 export interface BackendInfo {
   label: string;      // the option text in a backend picker
@@ -63,6 +63,29 @@ export const BACKENDS: Record<string, BackendInfo> = {
       { key: 'pip_spec', label: 'pip spec', ph: 'duckstring[azure]==x.y (boot override)' },
     ],
   },
+  cloudrun: {
+    label: 'cloudrun (serverless)', sizing: 'cloudrun', oneOf: [['image', 'registry']],
+    fields: [
+      { key: 'region', label: 'Region', ph: 'australia-southeast1', required: true },
+      { key: 'service_account', label: 'Service account', ph: 'duck@<project>.iam.gserviceaccount.com (bucket access)', required: true },
+      { key: 'image', label: 'Container image', ph: '<region>-docker.pkg.dev/<project>/<repo>/duckstring:<version>-gcp', required: true },
+      { key: 'registry', label: 'or registry', ph: '<region>-docker.pkg.dev/<project>/ghcr (proxying ghcr.io)' },
+      { key: 'project', label: 'Project', ph: "the credentials' project" },
+      { key: 'job', label: 'Job name', ph: 'duckstring-duck-… (one per config and size)' },
+    ],
+  },
+  gce: {
+    label: 'gce (big / GPU)', sizing: 'vm', location: 'zone',
+    fields: [
+      { key: 'zone', label: 'Zone', ph: 'australia-southeast1-a', required: true },
+      { key: 'service_account', label: 'Service account', ph: 'duck@<project>.iam.gserviceaccount.com (bucket access)', required: true },
+      { key: 'project', label: 'Project', ph: "the credentials' project" },
+      { key: 'subnetwork', label: 'Subnetwork', ph: 'regions/<region>/subnetworks/<name> (blank = default network)' },
+      { key: 'image', label: 'Image', ph: 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64' },
+      { key: 'assign_public_ip', label: 'Public IP', ph: 'true' },
+      { key: 'pip_spec', label: 'pip spec', ph: 'duckstring[gcp]==x.y (boot override)' },
+    ],
+  },
 };
 
 export function backendInfo(backend: string): BackendInfo {
@@ -91,6 +114,14 @@ export function deployConfigMissing(backend: string, value: Record<string, strin
 export const CONSUMPTION_CPU: number[] = [256, 512, 1024, 2048, 3072, 4096];
 export const consumptionMemory = (cpu: number): number => cpu * 2;
 
+// Cloud Run job sizes: whole vCPUs, and memory up to 4 GiB per vCPU (to 32 GiB at 8).
+export const CLOUDRUN_CPU: number[] = [1024, 2048, 4096, 6144, 8192];
+export function cloudrunMemory(cpu: number): number[] {
+  const out: number[] = [];
+  for (let m = 1024; m <= Math.min(cpu * 4, 32768); m += 1024) out.push(m);
+  return out;
+}
+
 export interface CredentialField { secret: string; placeholder: string; password?: boolean; required?: boolean }
 
 // The credential secrets the Cloud menu can store for a cloud (each loads into the Catchment's environment).
@@ -110,6 +141,13 @@ export const CREDENTIALS: Record<string, { title: string; fields: CredentialFiel
       { secret: 'AZURE_CLIENT_ID', placeholder: 'service principal client ID', required: true },
       { secret: 'AZURE_CLIENT_SECRET', placeholder: 'client secret', password: true, required: true },
       { secret: 'AZURE_SUBSCRIPTION_ID', placeholder: 'subscription ID (for VM sizes)' },
+    ],
+  },
+  gcp: {
+    title: 'GOOGLE CLOUD CREDENTIALS',
+    fields: [
+      { secret: 'GOOGLE_CREDENTIALS', placeholder: 'service-account key (paste the JSON)', password: true, required: true },
+      { secret: 'GOOGLE_CLOUD_PROJECT', placeholder: 'project ID' },
     ],
   },
 };

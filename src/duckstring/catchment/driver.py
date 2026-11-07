@@ -113,7 +113,7 @@ _DUCK_DEAD_AFTER = timedelta(seconds=60)
 # steady-state window above governs.
 _STARTUP_GRACE = {"catchment": timedelta(seconds=60), "fargate": timedelta(minutes=3),
                   "ec2": timedelta(minutes=8), "containerapps": timedelta(minutes=3),
-                  "azurevm": timedelta(minutes=8)}
+                  "azurevm": timedelta(minutes=8), "cloudrun": timedelta(minutes=3), "gce": timedelta(minutes=8)}
 
 # Keep an idle Duck warm for this long before reaping it. Reaping the instant a Pond goes idle, then
 # respawning on the next run, races: a Pond re-armed in the window between the shutdown being sent and
