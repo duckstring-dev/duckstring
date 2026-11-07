@@ -14,6 +14,7 @@ import duckdb
 import pytest
 
 from duckstring import storage
+from duckstring.storage import _azure_token as _real_azure_token
 from duckstring.storage import duckdb_secret_sql, get_storage
 
 _AZURE_ENV = ("AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_ACCOUNT_NAME", "AZURE_STORAGE_ACCOUNT_KEY",
@@ -64,7 +65,7 @@ def _duckdb_choice(base: str, params: dict) -> str:
         return "sas"
     if "AccountKey=a2V5" in sql:
         return "account_key"
-    return "service_principal" if "service_principal" in sql else "chain"
+    return "service_principal" if "service_principal" in sql else "chain"  # access_token: minted from the chain
 
 
 _CS = "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=Y29ubg==;EndpointSuffix=core.windows.net"
@@ -281,3 +282,64 @@ def test_the_ops_serving_surface_is_rebuilt_when_the_token_is_reminted(monkeypat
     assert cache.connection(_Driver(), sandboxed=False) is not ops  # its views read with the old token
     assert cache.connection(_Driver(), sandboxed=True) is sandbox  # materialised: no credential needed later
     assert built == [False, True, False]
+
+
+def test_the_default_chain_reaches_duckdb_as_an_access_token(monkeypatch):
+    # DuckDB's own chain can't use a Container Apps managed identity, so the token is minted in Python (the chain
+    # adlfs uses) and handed to DuckDB; with none found, DuckDB's chain is the fallback.
+    from duckstring import storage
+
+    monkeypatch.setattr(storage, "_azure_token", lambda: "tok'en")
+    sql = duckdb_secret_sql(_ABFSS, {}, name="s")[1]
+    assert "PROVIDER access_token, ACCESS_TOKEN 'tok''en'" in sql and "credential_chain" not in sql
+    sql = duckdb_secret_sql(_ABFSS, dict(_SP), name="s")[1]
+    assert "service_principal" in sql and "ACCESS_TOKEN" not in sql  # explicit credentials win
+
+
+def test_an_azure_token_is_cached_and_reminted_near_expiry(monkeypatch):
+    import sys
+    import time as _time
+    import types
+
+    from duckstring import storage
+
+    minted = []
+
+    class _Cred:
+        def get_token(self, scope):
+            minted.append(scope)
+            return types.SimpleNamespace(token=f"t{len(minted)}", expires_on=_time.time() + life)
+
+    monkeypatch.setitem(sys.modules, "azure.identity", types.SimpleNamespace(DefaultAzureCredential=_Cred))
+    monkeypatch.setattr(storage, "_azure_token", _real_azure_token)  # undo conftest's stub
+    monkeypatch.setattr(storage, "_azure_state", {})
+    life = 3600
+    gen = storage._token_generation
+    assert storage._azure_token() == "t1" and storage._azure_token() == "t1"
+    assert minted == ["https://storage.azure.com/.default"] and storage._token_generation == gen + 1
+    storage._azure_state["token"].expires_on = _time.time() + 60  # under 40 minutes left
+    assert storage._azure_token() == "t2" and storage._token_generation == gen + 2
+
+
+@pytest.mark.timeout(120)
+def test_the_azure_extension_uses_curl_on_linux(monkeypatch):
+    from duckstring import storage
+
+    for platform, expected in (("linux", "curl"), ("darwin", "default")):
+        monkeypatch.setattr(storage.sys, "platform", platform)
+        con = duckdb.connect()
+        try:
+            storage.load_extension(con, "azure")
+        except duckdb.Error as exc:  # offline with no cached extension
+            pytest.skip(f"DuckDB's azure extension is unavailable: {exc}")
+        # A cursor too: the serving surface queries on cursors of the connection it set up.
+        assert con.cursor().execute("SELECT current_setting('azure_transport_option_type')").fetchall() == [(expected,)]
+
+
+def test_warm_imports_loads_the_roots_filesystem_and_credential_library():
+    import sys
+
+    from duckstring.storage import warm_imports
+
+    warm_imports(None, "/local/path", "abfss://lake@acct.dfs.core.windows.net/p")
+    assert {"asyncio", "adlfs", "azure.identity.aio"} <= set(sys.modules)

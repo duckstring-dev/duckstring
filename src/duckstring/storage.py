@@ -31,12 +31,17 @@ safe without distributed locks — there is never a competing writer to a given 
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Iterator
 from urllib.parse import urlsplit, urlunsplit
+
+log = logging.getLogger(__name__)
 
 # URI schemes that mean "object store / fsspec", as opposed to a local POSIX path. A bare path or a
 # ``file://`` URI is local; everything else routes through fsspec + DuckDB httpfs.
@@ -528,12 +533,15 @@ class ObjectStorage(Storage):
     # ─── DuckDB credentials ──────────────────────────────────────────────────────
 
     def credential_generation(self) -> int:
-        """A number that changes whenever this store's DuckDB credential does: a Google access token being
-        re-minted (checked here, so a stale one is refreshed). A connection that outlives one ``duckdb_setup``
+        """A number that changes whenever this store's DuckDB credential does: a Google or Azure access token
+        being re-minted (checked here, so a stale one is refreshed). A connection that outlives one ``duckdb_setup``
         (the serving surface's views) keys on it. Always 0 for credentials DuckDB keeps fresh itself."""
         scheme = urlsplit(self.base).scheme.lower()
         if scheme in _GCS_SCHEMES and _gcs_uses_google(self.params):
             _google_token(self.params.get("credentials"))
+            return _token_generation
+        if scheme in _AZURE_SCHEMES and "PROVIDER access_token" in " ".join(
+                _azure_secret_body(self.base, {k.lower(): v for k, v in self.params.items()})):
             return _token_generation
         return 0
 
@@ -554,8 +562,7 @@ class ObjectStorage(Storage):
             name = "duckstring_data_" + hashlib.sha256(scope.encode()).hexdigest()[:12]
             extension, sql = duckdb_secret_sql(self.base, self.params, name=name)
             try:
-                con.execute(f"INSTALL {extension}")
-                con.execute(f"LOAD {extension}")
+                load_extension(con, extension)
             except Exception:
                 pass
             if sql is None:
@@ -670,15 +677,50 @@ def _azure_secret_body(base: str, params: dict) -> list[str]:
         return ["TYPE AZURE", "CONNECTION_STRING " + _q(
             f"BlobEndpoint=https://{account}.blob.core.windows.net;SharedAccessSignature={sas.lstrip('?')}")]
     bits = ["TYPE AZURE"]
+    token = None if all(principal) else _azure_token()
     if all(principal):
         tenant, client, client_secret = principal
         bits += ["PROVIDER service_principal", f"TENANT_ID {_q(tenant)}", f"CLIENT_ID {_q(client)}",
                  f"CLIENT_SECRET {_q(client_secret)}"]
+    elif token:
+        bits += ["PROVIDER access_token", f"ACCESS_TOKEN {_q(token)}"]
     else:
         bits.append("PROVIDER credential_chain")
     if account:
         bits.append(f"ACCOUNT_NAME {_q(account)}")
     return bits
+
+
+_AZURE_STORAGE_SCOPE = "https://storage.azure.com/.default"
+_azure_lock = threading.Lock()
+_azure_state: dict[str, object] = {}
+
+
+def _azure_token() -> str | None:
+    """A storage access token from Azure's default chain, minted in Python (the chain adlfs uses), for DuckDB's
+    ``access_token`` provider. DuckDB's own ``credential_chain`` can't use a Container Apps managed identity
+    (measured 2026-11-07 in a job execution: Python got a token, every DuckDB chain and its ``managed_identity``
+    provider failed), so a remote Duck on Azure could never read its Sources. Cached and re-minted with under
+    ``_TOKEN_MIN_LIFE_S`` left, as for Google (DuckDB never refreshes it). None when no credential is found, so
+    the caller falls back to DuckDB's chain."""
+    global _token_generation
+    try:
+        from azure.identity import DefaultAzureCredential
+    except ImportError:
+        return None
+    with _azure_lock:
+        token = _azure_state.get("token")
+        if token is not None and token.expires_on - time.time() >= _TOKEN_MIN_LIFE_S:
+            return token.token
+        try:
+            credential = _azure_state.get("credential") or DefaultAzureCredential()
+            token = credential.get_token(_AZURE_STORAGE_SCOPE)
+        except Exception:
+            log.warning("no Azure credential for DuckDB; falling back to its own credential chain", exc_info=True)
+            return None
+        _azure_state.update(credential=credential, token=token)
+        _token_generation += 1
+        return token.token
 
 
 # ─── Google Cloud Storage ────────────────────────────────────────────────────────
@@ -780,6 +822,41 @@ def _gcs_secret_body(params: dict) -> list[str] | None:
         host, ssl = _split_endpoint(endpoint)
         bits += [f"ENDPOINT {_q(host)}", f"USE_SSL {str(ssl).lower()}", "URL_STYLE 'path'"]
     return bits
+
+
+def warm_imports(*locations: str | None) -> None:
+    """Import, on the calling thread, what object-store I/O for these locations imports later: asyncio, the
+    location's fsspec filesystem (adlfs, s3fs, gcsfs, which import their async stacks), and Azure's credential
+    library. Call it before starting threads. Two threads importing these at once can leave a package
+    half-imported for good: a remote Duck on Azure (2026-11-07) failed every persist with ``NameError: name
+    'base_events' is not defined`` (asyncio's package import failed while another thread finished
+    ``asyncio.base_events``, which then never attaches to the re-imported package), so its Sinks waited forever."""
+    import asyncio  # noqa: F401
+
+    for location in locations:
+        if not location or not is_object_uri(location):
+            continue
+        scheme = urlsplit(location).scheme.lower()
+        try:
+            import fsspec
+
+            fsspec.get_filesystem_class(_FSSPEC_PROTOCOL.get(scheme, scheme))
+            if scheme in _AZURE_SCHEMES:
+                import azure.identity  # noqa: F401
+                import azure.identity.aio  # noqa: F401
+        except ImportError:
+            pass  # a missing extra fails later, with its install hint
+
+
+def load_extension(con, extension: str) -> None:
+    """Install and load the extension a DuckDB secret from :func:`duckdb_secret_sql` needs. On Linux the azure
+    extension uses curl: its default transport looks for CA certificates where Debian's image doesn't keep them
+    ("Problem with the SSL CA cert", measured 2026-11-07 in a Container Apps job on the python:3.13-slim image;
+    the curl transport read the same file)."""
+    con.execute(f"INSTALL {extension}")
+    con.execute(f"LOAD {extension}")
+    if extension == "azure" and sys.platform.startswith("linux"):
+        con.execute("SET GLOBAL azure_transport_option_type = 'curl'")  # session scope missed the serving cursors
 
 
 def duckdb_secret_sql(uri: str, params: dict, *, name: str) -> tuple[str, str | None]:

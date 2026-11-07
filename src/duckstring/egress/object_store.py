@@ -272,8 +272,9 @@ class ObjectStoreEgressDriver:
         return f"{u.scheme}://{u.netloc}{u.path}"
 
     def _prepare_remote(self, con) -> None:
-        extension = "azure" if self.dest.scheme in ("az", "abfs", "abfss") else "httpfs"
-        con.execute(f"INSTALL {extension}; LOAD {extension}")  # offline/install errors carry no credentials
+        from ..storage import load_extension
+
+        load_extension(con, "azure" if self.dest.scheme in ("az", "abfs", "abfss") else "httpfs")  # no credentials
         secret_sql = self._secret_sql()  # ValueError / CredentialError (missing env) surface: safe
         if secret_sql is None:
             return  # anonymous

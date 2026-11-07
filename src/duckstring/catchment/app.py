@@ -239,6 +239,9 @@ def create_app(
     app.state.job_polls = {}  # pond key -> the events of the Duck job polls held for it (routes/duck.py)
     app.state.data_lease = data_lease
     app.state.data_root = data_root
+    from ..storage import warm_imports
+
+    warm_imports(data_root)  # before request and worker threads do object-store I/O
     app.state.state_backup = state_backup
     app.state.checkpoint_every = checkpoint_every
     app.state.db = con

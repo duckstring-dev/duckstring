@@ -353,6 +353,9 @@ def main() -> None:
         _unpack_artifact(client.fetch_artifact(), source_dir)
         log.info("[%s@%s] fetched source artifact -> %s", args.pond, args.major, source_dir)
     _use_pond_env(root, source_dir, client)
+    from ..storage import warm_imports
+
+    warm_imports(data_root, persist_root)  # before serve() starts the persist and Ripple threads
     parents = load_topology(source_dir)
     major_dir = pond_major_dir(root, args.pond, args.major)
     major_dir.mkdir(parents=True, exist_ok=True)
