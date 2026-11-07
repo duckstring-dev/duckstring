@@ -186,6 +186,20 @@ def test_the_pool_machine_runs_the_agent_as_one_execution():
     assert not m.check() and "disappeared" in m.error()
 
 
+def test_the_catchments_audience_reaches_cloud_run_ducks_and_pool_agents(monkeypatch):
+    # A private Catchment behind a custom domain: Ducks can't infer the audience from the URL they dial, and
+    # don't inherit the Catchment's environment, so it goes on their command line.
+    from duckstring.catchment.pool_launcher import ExecutionPoolMachine
+
+    monkeypatch.setenv("DUCKSTRING_CATCHMENT_AUDIENCE", "https://ds-catchment-123.a.run.app")
+    s = _Session()
+    la = _run_launcher(s)
+    la.ensure("sales@1", "1.0.0", "ponds/sales/1.0.0", duck={"pool": {"cpu": 1024, "memory": 4096}})
+    ExecutionPoolMachine("heavy", {"cpu": 1024, "memory": 4096}, la).start()
+    runs = [c[3]["overrides"]["containerOverrides"][0]["args"] for c in s.calls if c[1].endswith(":run")]
+    assert len(runs) == 2 and all("--audience=https://ds-catchment-123.a.run.app" in a for a in runs)
+
+
 def test_a_new_job_retires_this_catchments_idle_jobs_on_older_images():
     s = _Session()
     la = _run_launcher(s)
@@ -234,6 +248,14 @@ def test_a_duck_is_a_vm_with_the_service_account_and_a_boot_script():
     script = body["metadata"]["items"][0]["value"]
     assert "'duckstring[gcp]==9.9'" in script and "-m duckstring.duck --pond sales --major 1" in script
     assert la.is_running("sales@1")
+
+
+def test_the_catchments_audience_reaches_compute_engine_ducks(monkeypatch):
+    monkeypatch.setenv("DUCKSTRING_CATCHMENT_AUDIENCE", "https://ds-catchment-123.a.run.app")
+    s = _Session()
+    _gce(s).ensure("sales@1", "1.0.0", "ponds/sales/1.0.0", duck={"pool": {}})
+    [(_, _, _, body)] = [c for c in s.calls if c[0] == "POST" and c[1].endswith("/instances")]
+    assert "--audience=https://ds-catchment-123.a.run.app" in body["metadata"]["items"][0]["value"]
 
 
 def test_terminate_deletes_and_release_deletes_once_the_duck_has_exited():

@@ -60,7 +60,7 @@ Configure one or more engines on the Catchment. A Pond uses the first configured
 
 MotherDuck runs DuckDB, so a job's SQL runs unchanged and its results match by construction. StarRocks and Athena are different engines, so each job is translated to their SQL, and each construct in it (a function, an operator, a cast) is sent only if its translation was measured to give DuckDB's answer. A job containing anything else runs in the Duck, with the construct named in the log. The [section on accuracy](#accuracy-on-starrocks-and-athena) has the detail.
 
-The Catchment sends each Pond's Flock settings, and its engine's credentials, to the Duck with every run. Ducks on Fargate or EC2 need no Flock configuration of their own, and a rotated credential takes effect from the next run.
+The Catchment sends each Pond's Flock settings, and its engine's credentials, to the Duck with every run. Cloud Ducks need no Flock configuration of their own, and a rotated credential takes effect from the next run.
 
 ## MotherDuck
 

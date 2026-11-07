@@ -382,8 +382,8 @@ def settings(
     """Show the Catchment's cloud configuration, or set where published tables are stored.
 
     The data root can only be changed before any Pond has published data. Its scheme picks the Catchment's
-    cloud, and cloud compute is enabled once that cloud's credentials are available. Remote Ducks run on AWS
-    (an s3:// data root) for now.
+    cloud (s3:// AWS, az:// or abfss:// Azure, gs:// Google Cloud), and cloud compute is enabled once that
+    cloud's credentials are available.
     """
     from . import _http
     from .config import resolve_catchment

@@ -21,6 +21,7 @@ import hashlib
 import logging
 import os
 
+from ..duck.id_token import audience_args
 from ..keys import split_pond_key
 from . import gcp_rest
 from .vm_boot import REMOTE_ROOT
@@ -224,6 +225,7 @@ class CloudRunLauncher:
             "duckstring.duck", "--pond", name, "--major", str(major), "--version", version,
             "--catchment", self.remote_base_url, f"--token={self.token}",
             "--root", REMOTE_ROOT, "--source-path", source_path, f"--data-root={self.data_root or ''}",
+            *audience_args(),
         ]
         try:
             address = self.start_execution(dc, args, *self.size(pool, dc))

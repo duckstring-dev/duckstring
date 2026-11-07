@@ -6,8 +6,9 @@ the metadata server, so it sends it in ``X-Serverless-Authorization`` (Cloud Run
 on, leaving ``Authorization`` to the app; the Duck channel authenticates with ``X-Duck-Token``). The operator
 grants the Duck's service account ``roles/run.invoker`` on the service.
 
-The token is sent when the Catchment's URL is a Cloud Run address (``*.run.app``), or when
-``DUCKSTRING_CATCHMENT_AUDIENCE`` names the audience (a custom domain in front of the service).
+The token is sent when the Catchment's URL is a Cloud Run address (``*.run.app``), or when an audience is named
+for a custom domain in front of the service: ``DUCKSTRING_CATCHMENT_AUDIENCE`` set on the Catchment, which its
+launchers pass to each Duck and Pool agent as ``--audience`` (cloud Ducks don't inherit the Catchment's env).
 """
 
 from __future__ import annotations
@@ -28,9 +29,21 @@ HEADER = "X-Serverless-Authorization"
 _MIN_LIFE_S = 5 * 60  # a token is re-fetched with less than this left (they live an hour)
 
 
-def audience_for(base_url: str) -> str | None:
-    """The identity-token audience for this Catchment URL, or None when it needs no token."""
-    explicit = os.environ.get("DUCKSTRING_CATCHMENT_AUDIENCE")
+AUDIENCE_ENV = "DUCKSTRING_CATCHMENT_AUDIENCE"
+
+
+def audience_args() -> list[str]:
+    """The ``--audience`` argument a launcher gives a Duck or Pool agent: the Catchment's
+    ``DUCKSTRING_CATCHMENT_AUDIENCE``, or nothing when it isn't set."""
+    audience = os.environ.get(AUDIENCE_ENV)
+    return [f"--audience={audience}"] if audience else []
+
+
+def audience_for(base_url: str, audience: str | None = None) -> str | None:
+    """The identity-token audience for this Catchment URL, or None when it needs no token: ``audience`` (the
+    ``--audience`` argument), else ``DUCKSTRING_CATCHMENT_AUDIENCE``, else the URL itself for a ``*.run.app``
+    address."""
+    explicit = audience or os.environ.get(AUDIENCE_ENV)
     if explicit:
         return explicit
     parts = urlsplit(base_url)
@@ -83,7 +96,7 @@ class IdTokenAuth(httpx.Auth):
         yield request
 
 
-def catchment_auth(base_url: str) -> IdTokenAuth | None:
+def catchment_auth(base_url: str, audience: str | None = None) -> IdTokenAuth | None:
     """The auth hook for a Duck's client to this Catchment, or None when it needs none."""
-    audience = audience_for(base_url)
+    audience = audience_for(base_url, audience)
     return IdTokenAuth(audience) if audience else None

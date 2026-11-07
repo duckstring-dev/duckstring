@@ -71,7 +71,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | POST | `/api/catchment/duck-pools` | full | Create or update a pool. |
 | DELETE | `/api/catchment/duck-pools/{name}` | full | Remove a pool. |
 | GET | `/api/catchment/compute-defaults` | read | Catchment-wide compute defaults. |
-| GET | `/api/catchment/instance-types` | full | Available EC2 instance types. |
+| GET | `/api/catchment/instance-types` | full | Machine types available on the Catchment's cloud: EC2 instance types, Azure VM sizes or Compute Engine machine types. |
 | POST | `/api/catchment/cloud/verify` | full | Check the cloud configuration. |
 | POST | `/api/catchment/keys/rotate` | full | Replace API keys. |
 | POST | `/api/catchment/reset` | full | Reset every Pond. |

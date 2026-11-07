@@ -16,7 +16,7 @@ import httpx
 
 class CatchmentClient:
     def __init__(self, base_url: str, pond_name: str, major: int, token: str, poll_timeout: float = 25.0,
-                 version: str | None = None):
+                 version: str | None = None, audience: str | None = None):
         self.base = base_url.rstrip("/")
         self.pond = pond_name
         self.major = major
@@ -27,7 +27,7 @@ class CatchmentClient:
 
         # A private Catchment on Cloud Run also wants a Google identity token (see id_token).
         self._client = httpx.Client(timeout=poll_timeout + 5.0, headers={"X-Duck-Token": token},
-                                    auth=catchment_auth(self.base))
+                                    auth=catchment_auth(self.base, audience))
         # When the Catchment last answered (time.monotonic()): a poll or an event it accepted. A refused
         # request (a recreated Catchment's new token, a removed Pond) is no contact either.
         self.last_contact = time.monotonic()

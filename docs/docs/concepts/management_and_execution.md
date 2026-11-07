@@ -28,7 +28,7 @@ For a shared Catchment that is always on, run the same server on a dedicated mac
 
 ## Cloud Compute
 
-By default, Ponds run on the Catchment's own machine. Individual Ponds can instead run on cloud compute, on AWS Fargate or EC2. This needs the Catchment's data stored in S3 and AWS credentials configured. The choice is made per Pond, in `pond.toml` or on the Catchment. Where cloud compute isn't configured, the Pond simply runs locally, so the same code works everywhere.
+By default, Ponds run on the Catchment's own machine. Individual Ponds can instead run on cloud compute: AWS Fargate or EC2, Azure Container Apps or VMs, or Google Cloud Run or Compute Engine. This needs the Catchment's data stored on that cloud (S3, Azure storage or Cloud Storage) and the cloud's credentials configured. A Catchment runs cloud compute only on the cloud its data is stored on. The choice is made per Pond, in `pond.toml` or on the Catchment. Where cloud compute isn't configured, the Pond simply runs locally, so the same code works everywhere.
 
 ## Ducks and Flocks
 
@@ -58,5 +58,5 @@ Beyond Refreshes, a few commands act directly on a Pond's execution. They're ava
 
 ## See also
 
-- Guides: [Running on a Server](../guides/running_on_a_server.md), [Hosting on a Platform](../guides/hosting_on_a_platform.md), [Cloud Compute on AWS](../guides/cloud_compute_on_aws.md), [Monitoring and Failures](../guides/monitoring_and_failures.md)
+- Guides: [Running on a Server](../guides/running_on_a_server.md), [Hosting on a Platform](../guides/hosting_on_a_platform.md), [Cloud Compute on AWS](../guides/cloud_compute_on_aws.md), [Cloud Compute on Azure](../guides/cloud_compute_on_azure.md), [Cloud Compute on Google Cloud](../guides/cloud_compute_on_google_cloud.md), [Monitoring and Failures](../guides/monitoring_and_failures.md)
 - Reference: [CLI Overview](../reference/cli/index.md), [duckstring control](../reference/cli/control.md), [duckstring duck](../reference/cli/duck.md), [Environment Variables](../reference/environment.md), [HTTP API](../reference/http_api.md)

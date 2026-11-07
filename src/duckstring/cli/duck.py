@@ -87,7 +87,8 @@ def set_(
     accept: Optional[str] = typer.Option(
         None, "--accept",
         help="Known differences a SQL engine may have, comma-separated (float_order, half_rounding), or none."),
-    instance_type: Optional[str] = typer.Option(None, "--instance-type", help="EC2 instance type for a dedicated Duck."),
+    instance_type: Optional[str] = typer.Option(
+        None, "--instance-type", help="Machine type for a dedicated Duck on a VM backend (EC2, Azure VMs or Compute Engine)."),
     auto_stop: Optional[bool] = typer.Option(None, "--auto-stop/--no-auto-stop",
                                              help="Stop a dedicated Duck after each run."),
     clear: bool = typer.Option(False, "--clear", help="Remove the override, reverting to pond.toml and the defaults."),
@@ -123,10 +124,13 @@ def set_(
 # ─── Duck Pools ──────────────────────────────────────────────────────────────────
 
 
+_CONTAINER_BACKENDS = ("fargate", "containerapps", "cloudrun")  # sized by cpu/memory, not an instance type
+
+
 def _fmt_pool(p: dict) -> str:
     provider = p.get("provider") or "fargate"
     bits = [f"{p['name']}", f"[{provider}]"]
-    if provider == "fargate" and (p.get("cpu") or p.get("memory")):
+    if provider in _CONTAINER_BACKENDS and (p.get("cpu") or p.get("memory")):
         bits.append(f"{p.get('cpu') or '?'}cpu / {p.get('memory') or '?'}MiB")
     elif p.get("instance_type"):
         bits.append(p["instance_type"])
@@ -156,10 +160,13 @@ def pool_ls(catchment: Optional[str] = _CATCHMENT) -> None:
 def pool_add(
     name: str = typer.Argument(..., help="Pool name (referenced by pond.toml `duck = \"<name>\"`)."),
     catchment: Optional[str] = _CATCHMENT,
-    provider: Optional[str] = typer.Option(None, "--provider", help="fargate (default) or ec2."),
-    cpu: Optional[int] = typer.Option(None, "--cpu", help="Fargate task CPU units (1024 = 1 vCPU)."),
-    memory: Optional[int] = typer.Option(None, "--memory", help="Fargate task memory (MiB)."),
-    instance_type: Optional[str] = typer.Option(None, "--instance-type", "-t", help="EC2 instance type."),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", help="The backend: fargate or ec2 (AWS), containerapps or azurevm (Azure), cloudrun or gce "
+                                 "(Google Cloud), or local. Defaults to the cloud's container backend."),
+    cpu: Optional[int] = typer.Option(None, "--cpu", help="CPU for a container backend, in 1024ths of a vCPU (1024 = 1 vCPU)."),
+    memory: Optional[int] = typer.Option(None, "--memory", help="Memory for a container backend, in MiB."),
+    instance_type: Optional[str] = typer.Option(
+        None, "--instance-type", "-t", help="Machine type for a VM backend (EC2, Azure VMs or Compute Engine)."),
     min_instances: Optional[int] = typer.Option(None, "--min", help="Minimum size. Stored; automatic scaling isn't "
                                                                     "implemented yet."),
     max_instances: Optional[int] = typer.Option(None, "--max", help="Maximum size. Stored; automatic scaling isn't "
@@ -168,12 +175,12 @@ def pool_add(
                                                                       "implemented yet."),
     idle_timeout: Optional[int] = typer.Option(None, "--idle-timeout", help="Idle seconds before scaling down. Stored; not "
                                                                             "implemented yet."),
-    region: Optional[str] = typer.Option(None, "--region", help="AWS region (defaults to the Catchment's)."),
+    region: Optional[str] = typer.Option(None, "--region", help="AWS region for an EC2 pool (defaults to the Catchment's)."),
 ) -> None:
     """Create or update a Duck pool.
 
     The Ponds assigned to a defined pool share one machine of its size. The built-in S, M, L and XL pools
-    need no definition and give each Pond its own task.
+    need no definition and give each Pond its own Duck.
     """
     from . import _http
     from .config import resolve_catchment

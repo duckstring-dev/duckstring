@@ -93,7 +93,7 @@ Removes a registration. For a Catchment on this machine, asks whether to delete 
 duckstring catchment settings [-c NAME] [--data-root URI]
 ```
 
-Shows the Catchment's cloud configuration, including whether cloud compute is enabled. With `--data-root`, sets where published tables are stored (`s3://`, `gs://`, `az://`, `abfss://` or a shared path). The data root can only be changed before any Pond has published data. The data root's scheme picks the Catchment's cloud, and cloud compute is enabled once that cloud's credentials are available to the Catchment. Remote Ducks run on AWS (an `s3://` data root) for now; on Azure and Google Cloud the Catchment's own Ducks read the data root.
+Shows the Catchment's cloud configuration, including whether cloud compute is enabled. With `--data-root`, sets where published tables are stored (`s3://`, `gs://`, `az://`, `abfss://` or a shared path). The data root can only be changed before any Pond has published data. The data root's scheme picks the Catchment's cloud (`s3://` AWS, `az://` or `abfss://` Azure, `gs://` Google Cloud), and cloud compute is enabled once that cloud's credentials are available to the Catchment. The output's `compute` line says whether it is, and why not.
 
 ### `rotate-keys`
 

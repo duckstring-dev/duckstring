@@ -86,7 +86,7 @@ def ingest(pond):
 
 Pass the relation to `write_table` as shown. Don't refer to a Python variable by name in SQL (`FROM records`): DuckDB finds such variables by scanning the call stack, which is unreliable when Ripples run in parallel.
 
-Ripple code reads credentials from its environment. A Duck running on the Catchment's machine inherits the Catchment's environment variables, so set them where the Catchment starts. A Duck in the cloud doesn't inherit them, and gets AWS access from its task or instance role instead; see [Cloud Compute on AWS](cloud_compute_on_aws.md).
+Ripple code reads credentials from its environment. A Duck running on the Catchment's machine inherits the Catchment's environment variables, so set them where the Catchment starts. A Duck in the cloud doesn't inherit them, and gets cloud access from the identity it runs as instead: its task or instance role on AWS, its managed identity on Azure, or its service account on Google Cloud. See Cloud Compute on [AWS](cloud_compute_on_aws.md), [Azure](cloud_compute_on_azure.md) or [Google Cloud](cloud_compute_on_google_cloud.md).
 
 ## Choosing a table type
 

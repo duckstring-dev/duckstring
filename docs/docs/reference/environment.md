@@ -5,7 +5,7 @@ description: Every setting read from the environment.
 
 # Environment Variables
 
-These variables are read by the Catchment process, and passed on to its Ducks where relevant. Most have an equivalent CLI option on `catchment init`, which takes precedence when given. AWS credentials use the standard `AWS_*` variables, or `AWS_*` entries in the [secret store](cli/secret.md). A Google Cloud Storage or Azure data root reads Google's and Azure's own variables, such as `GOOGLE_APPLICATION_CREDENTIALS` and `AZURE_STORAGE_ACCOUNT_NAME`; see [Data root URIs](formats.md#data-root-uris).
+These variables are read by the Catchment process, and passed on to its Ducks where relevant. Most have an equivalent CLI option on `catchment init`, which takes precedence when given. AWS credentials use the standard `AWS_*` variables, or `AWS_*` entries in the [secret store](cli/secret.md). Azure credentials use Azure's own variables (such as `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET`) or `AZURE_*` secrets, and Google credentials use `GOOGLE_APPLICATION_CREDENTIALS` or a service-account key stored as the `GOOGLE_CREDENTIALS` secret. A Google Cloud Storage or Azure data root also reads variables such as `AZURE_STORAGE_ACCOUNT_NAME`; see [Data root URIs](formats.md#data-root-uris).
 
 ## Catchment
 
@@ -19,6 +19,7 @@ These variables are read by the Catchment process, and passed on to its Ducks wh
 | `DUCKSTRING_CATCHMENT_NAME` | none | A display name recorded for the Catchment. |
 | `DUCKSTRING_CATCHMENT_URL` | the bind address | The address local Ducks use to reach the Catchment. Normally unnecessary: when unset, the Catchment learns its address from the first request it serves. |
 | `DUCKSTRING_CATCHMENT_PUBLIC_URL` | none | The address remote Ducks use to reach the Catchment. Needed when cloud Ducks can't reach the bind address and the automatic relay isn't used. |
+| `DUCKSTRING_CATCHMENT_AUDIENCE` | none | For a private Catchment on Cloud Run behind a custom domain: the service's `run.app` URL, which Ducks use as the audience of the Google identity token they send. Without it, Ducks send a token only when the Catchment's address is itself a `run.app` URL. |
 | `DUCKSTRING_FORCE_TAKEOVER` | off | `1` lets a Catchment start on a data root that another live Catchment has claimed. Only for recovering from a Catchment that is known to be gone. |
 | `DUCKSTRING_MIN_FREE_BYTES` | `1073741824` (1 GiB) | When free disk space falls below this, the working databases of idle Ponds are removed, least recently used first, and rebuilt when next needed. `0` disables this. |
 
@@ -110,9 +111,65 @@ The engines' credentials are secrets (`duckstring secret set`), sent with each r
 | `DUCKSTRING_EC2_SECURITY_GROUPS` | | Security groups for Duck instances. Without them, instances use the VPC's default group and usually can't reach the Catchment. |
 | `DUCKSTRING_EC2_ASSIGN_PUBLIC_IP` | | Whether instances get a public IP. |
 
+## Cloud Ducks on Container Apps
+
+Azure's default backend. See [Cloud Compute on Azure](../guides/cloud_compute_on_azure.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `DUCKSTRING_CONTAINERAPPS_ENVIRONMENT` | | Resource id of the Container Apps environment Ducks run in. The subscription, resource group, location and log workspace come from it. Required. |
+| `DUCKSTRING_CONTAINERAPPS_IDENTITY` | | Resource id of the user-assigned managed identity Ducks run as, which needs access to the data root. Required. |
+| `DUCKSTRING_CONTAINERAPPS_IMAGE` | `ghcr.io/duckstring-dev/duckstring:<version>-azure` | Container image for Ducks. |
+| `DUCKSTRING_CONTAINERAPPS_WORKLOAD_PROFILE` | `Consumption` | The environment's workload profile to run Ducks on. |
+| `DUCKSTRING_CONTAINERAPPS_JOB` | | A job name of your own. Without it, the Catchment creates and names its jobs, and deletes ones left on an old image. |
+| `DUCKSTRING_CONTAINERAPPS_CPU` | `1024` | CPU units for Ducks not using a pool's size. |
+| `DUCKSTRING_CONTAINERAPPS_MEMORY` | `2048` | Memory in MiB for Ducks not using a pool's size. |
+
+## Cloud Ducks on Azure VMs
+
+| Variable | Default | Description |
+|---|---|---|
+| `DUCKSTRING_AZUREVM_SUBNET` | | Resource id of the subnet for Duck VMs. Required. |
+| `DUCKSTRING_AZUREVM_IDENTITY` | | Resource id of the user-assigned managed identity Ducks run as. Required. |
+| `DUCKSTRING_AZUREVM_LOCATION` | | Azure region for Duck VMs. Required. |
+| `DUCKSTRING_AZUREVM_RESOURCE_GROUP` | the subnet's | Resource group the VMs are created in. |
+| `DUCKSTRING_AZUREVM_IMAGE` | Ubuntu 24.04 | A marketplace URN or an image resource id. |
+| `DUCKSTRING_AZUREVM_ASSIGN_PUBLIC_IP` | `true` | Whether VMs get a public IP. New Azure subnets have no default outbound access, and a VM needs it to install Duckstring. |
+| `DUCKSTRING_AZUREVM_PIP_SPEC` | `duckstring[azure]==<version>` | What the VM installs on boot. |
+| `DUCKSTRING_AZUREVM_DISK_GB` | the image's | OS disk size. |
+
+## Cloud Ducks on Cloud Run
+
+Google Cloud's default backend. See [Cloud Compute on Google Cloud](../guides/cloud_compute_on_google_cloud.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `DUCKSTRING_CLOUDRUN_REGION` | | Region for Duck jobs. Required. |
+| `DUCKSTRING_CLOUDRUN_SERVICE_ACCOUNT` | | Email of the service account Ducks run as, which needs access to the data root. Required. |
+| `DUCKSTRING_CLOUDRUN_IMAGE` | | Container image for Ducks, in Artifact Registry. This or `DUCKSTRING_CLOUDRUN_REGISTRY` is required. |
+| `DUCKSTRING_CLOUDRUN_REGISTRY` | | An Artifact Registry remote repository that proxies `ghcr.io`. Ducks then run `<registry>/duckstring-dev/duckstring:<version>-gcp`. |
+| `DUCKSTRING_CLOUDRUN_PROJECT` | `GOOGLE_CLOUD_PROJECT`, else the credentials' project | Project for Duck jobs. |
+| `DUCKSTRING_CLOUDRUN_JOB` | | A job name of your own. Without it, the Catchment creates and names its jobs, and deletes ones left on an old image. |
+| `DUCKSTRING_CLOUDRUN_CPU` | `1024` | CPU units for Ducks not using a pool's size. |
+| `DUCKSTRING_CLOUDRUN_MEMORY` | `2048` | Memory in MiB for Ducks not using a pool's size. |
+
+## Cloud Ducks on Compute Engine
+
+| Variable | Default | Description |
+|---|---|---|
+| `DUCKSTRING_GCE_ZONE` | | Zone for Duck VMs. Required. |
+| `DUCKSTRING_GCE_SERVICE_ACCOUNT` | | Email of the service account Ducks run as. Required. |
+| `DUCKSTRING_GCE_PROJECT` | `GOOGLE_CLOUD_PROJECT`, else the credentials' project | Project for Duck VMs. |
+| `DUCKSTRING_GCE_IMAGE` | Ubuntu 24.04 | Boot image. |
+| `DUCKSTRING_GCE_NETWORK` | the project's `default` network | VPC network. |
+| `DUCKSTRING_GCE_SUBNETWORK` | | A subnetwork of that network. |
+| `DUCKSTRING_GCE_ASSIGN_PUBLIC_IP` | `true` | Whether VMs get an external IP. The default network has no Cloud NAT, and a VM needs outbound access to install Duckstring. |
+| `DUCKSTRING_GCE_PIP_SPEC` | `duckstring[gcp]==<version>` | What the VM installs on boot. |
+| `DUCKSTRING_GCE_DISK_GB` | `20` | Boot disk size. |
+
 ## Relay
 
-When a Catchment on a private network (such as a laptop) runs cloud Ducks, it can start a small EC2 relay that the Ducks connect to, with an SSH tunnel back to the Catchment.
+When a Catchment on a private network (such as a laptop) runs cloud Ducks on AWS, it can start a small EC2 relay that the Ducks connect to, with an SSH tunnel back to the Catchment. Azure and Google Cloud have no relay, so a Catchment there needs `DUCKSTRING_CATCHMENT_PUBLIC_URL` or an address Ducks can reach.
 
 | Variable | Default | Description |
 |---|---|---|

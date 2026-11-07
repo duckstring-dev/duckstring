@@ -235,6 +235,7 @@ class FargatePoolMachine(_RemoteMachine):
 
 
 def _agent_args(pool: str, launcher) -> list[str]:
+    from ..duck.id_token import audience_args
     from .vm_boot import REMOTE_ROOT
 
     return [
@@ -243,6 +244,7 @@ def _agent_args(pool: str, launcher) -> list[str]:
         "--root", REMOTE_ROOT,
         f"--data-root={launcher.data_root or ''}",
         f"--persist-root={launcher.data_root or ''}",  # a Pool Duck persists to the data root
+        *audience_args(),
     ]
 
 

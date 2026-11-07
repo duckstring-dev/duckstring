@@ -336,6 +336,8 @@ def main() -> None:
     ap.add_argument("--persist-root", default="", help="durable persist layer (plans/persist.md): publish "
                                                        "locally, async-mirror here; empty = publish to "
                                                        "--data-root directly (remote Duck / no cloud)")
+    ap.add_argument("--audience", default="", help="Google identity-token audience for a private Catchment on "
+                                                   "Cloud Run behind a custom domain")
     args = ap.parse_args()
     # Configure logging at entry: without this a Duck has no handler, so INFO is dropped and
     # WARNING+ goes through the bare last-resort handler with no timestamp.
@@ -348,7 +350,8 @@ def main() -> None:
     data_root = args.data_root or None
     persist_root = args.persist_root or None
     source_dir = root / args.source_path
-    client = CatchmentClient(args.catchment, args.pond, args.major, args.token, version=args.version)
+    client = CatchmentClient(args.catchment, args.pond, args.major, args.token, version=args.version,
+                             audience=args.audience or None)
     if not source_dir.is_dir():
         # Remote-Duck boot (prereqs D6): this host doesn't share the Catchment's disk — fetch the
         # deployed source bundle over the duck channel and unpack it where the executor expects it.
