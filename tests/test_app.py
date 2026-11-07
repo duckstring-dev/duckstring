@@ -172,7 +172,7 @@ def test_an_app_serves_its_sources_over_http_and_websockets(catchment_client):
     assert len(instances) == 1 and instances[0]["ready_at"] and instances[0]["stopped_at"] is None
     log = client.get("/api/ponds/dash/app/logs")
     assert "starting dash@1 1.0.0" in log.text and log.headers["x-log-running"] == "1"
-    # An App's Runs are not history: it has no pond_run rows.
+    # Its Sources were seeded, never run, so the App hasn't taken any freshness: no runs yet.
     assert client.get("/api/runs", params={"pond": "dash"}).json()["runs"] == []
 
 
@@ -300,6 +300,14 @@ def test_an_apps_freshness_follows_its_sources(catchment_client):
         driver.scheduler_tick()
     assert _app_entry(client)["end_f"] == f.isoformat()
     assert client.get("/apps/dash/v1/rows").json()["fresh"] == str(f)
+    with driver.lock:  # and again: each freshness the App takes is one instant run in its history
+        g = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        ps = driver.state.pond_states["sales@1"]  # a tick replaces the engine state
+        ps.start_f = ps.end_f = ps.changed_f = g
+        driver.scheduler_tick()
+    runs = client.get("/api/runs", params={"pond": "dash"}).json()["runs"]
+    assert [r["f"] for r in runs] == [g.isoformat(), f.isoformat()]
+    assert all(r["status"] == "success" and r["started_at"] == r["finished_at"] for r in runs)
 
 
 _ECHO_PY = """async def app(scope, receive, send):

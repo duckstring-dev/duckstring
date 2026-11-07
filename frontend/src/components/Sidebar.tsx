@@ -139,8 +139,8 @@ function StatusBox({ info, ponds, canControl }: { info: PondInfo; ponds: Record<
 
 // An App node: where it's served, its instance, the Sources whose freshness it reads, and its own Control set
 // (Restart and Kill: Force, Wake and Sleep mean little for a node whose Runs are passes).
-function AppPanel({ pond, canDemand, canControl, onOptions }: {
-  pond: Pond; canDemand: boolean; canControl: boolean; onOptions: () => void;
+function AppPanel({ pond, canDemand, canControl, onOptions, mobile }: {
+  pond: Pond; canDemand: boolean; canControl: boolean; onOptions: () => void; mobile: boolean;
 }) {
   const info = useLiveStore((s) => s.pondInfo[pond.id]);
   const view = useLiveStore((s) => s.pondViews[pond.id]);
@@ -149,6 +149,7 @@ function AppPanel({ pond, canDemand, canControl, onOptions }: {
   const now = useLiveStore((s) => s.now);
   const restartApp = useLiveStore((s) => s.restartApp);
   const kill = useLiveStore((s) => s.kill);
+  const runs = useLiveStore((s) => s.selectedPondRuns);
   if (!info) return null;
   const state = appState(info);
   const app = info.app;
@@ -269,6 +270,13 @@ function AppPanel({ pond, canDemand, canControl, onOptions }: {
           ⚙ Options
         </button>
       </div>
+
+      {/* Desktop shows the data timing in the bottom-right quadrant (TracePanel); mobile keeps it here. */}
+      {mobile && (
+        <Section>
+          <RunTrace points={pondTrace(runs.slice(0, RUN_CAP))} app />
+        </Section>
+      )}
     </>
   );
 }
@@ -602,9 +610,10 @@ const ms = (iso: string | null): number => parseTs(iso);
 // The plot shows at most this many (most-recent) runs; older windows are reached via the date range.
 const RUN_CAP = 50;
 
-// A per-run point on the timing trace — one per run that has a duration (both timestamps). `run` is the
-// Pond Run it maps to, so a click selects it (opening Run Detail) and a selected run highlights back here.
-type TracePoint = { key: string; time: number; duration: number; run: PondRun };
+// A per-run point on the timing trace, one per run that has a duration (both timestamps). `age` is how old
+// the run's data was when it completed (completion time minus its freshness). `run` is the Pond Run it maps
+// to, so a click selects it (opening Run Detail) and a selected run highlights back here.
+type TracePoint = { key: string; time: number; duration: number; age: number; run: PondRun };
 
 // Per-run points for a set of Pond Runs — each run's completion time + its duration. Sorted ascending by
 // time so the plot renders oldest→newest regardless of the source order (the feed is newest-first, but a
@@ -613,7 +622,8 @@ function pondTrace(runs: PondRun[]): TracePoint[] {
   const pts: TracePoint[] = [];
   for (const r of runs) {
     if (r.startedAt && r.finishedAt) {
-      pts.push({ key: runKey(r), time: ms(r.finishedAt), duration: ms(r.finishedAt) - ms(r.startedAt), run: r });
+      const time = ms(r.finishedAt);
+      pts.push({ key: runKey(r), time, duration: time - ms(r.startedAt), age: time - ms(r.f), run: r });
     }
   }
   return pts.sort((a, b) => a.time - b.time);
@@ -626,23 +636,27 @@ function rippleTrace(runs: PondRun[], rippleName: string): TracePoint[] {
   for (const r of runs) {
     const rr = r.ripples?.find((x) => x.ripple === rippleName);
     if (rr?.startedAt && rr?.finishedAt) {
-      pts.push({ key: runKey(r), time: ms(rr.finishedAt), duration: ms(rr.finishedAt) - ms(rr.startedAt), run: r });
+      const time = ms(rr.finishedAt);
+      pts.push({ key: runKey(r), time, duration: time - ms(rr.startedAt), age: time - ms(r.f), run: r });
     }
   }
   return pts.sort((a, b) => a.time - b.time);
 }
 
 // The interactive timing chart wired to run selection: clicking a point opens that run in Run Detail;
-// the selected run (from anywhere — e.g. a Run History click) enlarges its point here.
-function RunTrace({ points }: { points: TracePoint[] }) {
+// the selected run (from anywhere, e.g. a Run History click) enlarges its point here. An App's runs are
+// instant passes with no Run Detail to open: its chart is interval and age, and not clickable.
+function RunTrace({ points, app = false }: { points: TracePoint[]; app?: boolean }) {
   const selectRun = useLiveStore((s) => s.selectRun);
   const selectedRun = useLiveStore((s) => s.selectedRun);
-  const selectedKey = selectedRun ? runKey(selectedRun) : null;
+  const selectedKey = selectedRun && !app ? runKey(selectedRun) : null;
   return (
     <TraceChart
       points={points}
       selectedKey={selectedKey}
-      onSelect={(key) => { const p = points.find((x) => x.key === key); if (p) selectRun(p.run); }}
+      durations={!app}
+      empty={app ? 'No data yet.' : undefined}
+      onSelect={app ? undefined : (key) => { const p = points.find((x) => x.key === key); if (p) selectRun(p.run); }}
     />
   );
 }
@@ -776,10 +790,12 @@ export function TracePanel() {
   const [to, setTo] = useState('');
   const [rangeRuns, setRangeRuns] = useState<PondRun[] | null>(null);
   const rangeActive = !!(from || to);
+  const [rangeOpen, setRangeOpen] = useState(false); // the bounds sit behind the title row's "range" toggle
+  const showRange = rangeOpen || rangeActive;
 
   // A selection change abandons a stale range (it would show another node's dates).
   const [prevSel, setPrevSel] = useState(selectedPondId);
-  if (selectedPondId !== prevSel) { setPrevSel(selectedPondId); setFrom(''); setTo(''); setRangeRuns(null); }
+  if (selectedPondId !== prevSel) { setPrevSel(selectedPondId); setFrom(''); setTo(''); setRangeRuns(null); setRangeOpen(false); }
 
   useEffect(() => {
     if (!rangeActive || !selectedPondId) return;
@@ -796,14 +812,32 @@ export function TracePanel() {
   let title: string | null = null;
   let points: TracePoint[] | null = null;
   if (selectedRipple) { title = `${selectedRipple.name} · run timing`; points = rippleTrace(source, selectedRipple.name); }
-  else if (pond) { title = `${pond.name} · run timing`; points = pondTrace(source); }
+  else if (pond) { title = `${pond.name} · ${pond.isApp ? 'data timing' : 'run timing'}`; points = pondTrace(source); }
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: 14, boxSizing: 'border-box', overflow: 'hidden', background: '#15151a' }}>
-      <div style={{ fontSize: 10, fontWeight: 700, color: '#52525b', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-        {title ?? 'Run timing'}
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: 14, boxSizing: 'border-box', overflowY: 'auto', background: '#15151a' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8, flexShrink: 0 }}>
+        <span style={{ flex: 1, minWidth: 0, fontSize: 10, fontWeight: 700, color: '#52525b', letterSpacing: '0.1em', textTransform: 'uppercase', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {title ?? 'Run timing'}
+        </span>
+        {points && (
+          <span style={{ fontSize: 10, color: '#3f3f46', whiteSpace: 'nowrap' }}>
+            {rangeActive ? `${points.length} in range` : `last ${points.length}`}
+          </span>
+        )}
+        {active && (
+          <button
+            onClick={() => setRangeOpen((v) => !v)}
+            disabled={rangeActive}
+            title={rangeActive ? 'Clear the bounds to hide the range' : 'Show runs from a time range'}
+            style={{ background: 'transparent', border: 'none', padding: 0, fontSize: 10, fontFamily: 'inherit',
+                     color: showRange ? THEME_BRAND : '#71717a', cursor: rangeActive ? 'default' : 'pointer' }}
+          >
+            range
+          </button>
+        )}
       </div>
-      {active && (
+      {active && showRange && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ width: 26, fontSize: 10, color: '#52525b' }}>from</span>
@@ -821,11 +855,10 @@ export function TracePanel() {
       )}
       {points ? (
         <>
-          <RunTrace points={points} />
-          <div style={{ fontSize: 10, color: '#3f3f46', marginTop: 4 }}>
-            {rangeActive ? `${points.length} in range` : `last ${points.length}`}
-            {!rangeActive && selectedPondRuns.length > RUN_CAP ? ' · set a time range for older' : ''}
-          </div>
+          <RunTrace points={points} app={!selectedRipple && !!pond?.isApp} />
+          {showRange && !rangeActive && selectedPondRuns.length > RUN_CAP && (
+            <div style={{ fontSize: 10, color: '#3f3f46', marginTop: 4 }}>Set a bound for older runs.</div>
+          )}
         </>
       ) : (
         <div style={{ fontSize: 12, color: '#52525b', margin: 'auto', textAlign: 'center' }}>Select a Pond or Ripple</div>
@@ -901,7 +934,8 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
 
       {/* App selected: its own panel (header, instance, Refresh, Restart/Kill). */}
       {selectedPond && !selectedRippleId && selectedPond.isApp && (
-        <AppPanel pond={selectedPond} canDemand={canDemand} canControl={canControl} onOptions={() => setOptionsOpen(true)} />
+        <AppPanel pond={selectedPond} canDemand={canDemand} canControl={canControl} onOptions={() => setOptionsOpen(true)}
+                  mobile={!!mobile} />
       )}
 
       {/* Pond selected */}

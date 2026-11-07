@@ -115,7 +115,8 @@ The App is an engine node so that demand and freshness work unchanged, but it ha
 freshness is the freshness a Pond Run would adopt if it started now: `pond_source_f` over its Sources, with
 the same rules for optional Sources and windows as any Pond. Demand on the App is met as soon as that
 freshness reaches it. A `BeginRun` never goes to a Duck: like a Spout's it goes to a worker, which completes it
-at once. Those completions are not recorded as `pond_run` rows (the Sidebar shows instances instead), and an
+at once. Those completions are recorded as instant no-change `pond_run` rows, like any pass, so the UI can chart
+the App's freshness (interval and data age; 2026-11-07, before which they were skipped), and an
 App gets a synthetic Ripple as a Spout gets `egress`.
 
 ### Memory

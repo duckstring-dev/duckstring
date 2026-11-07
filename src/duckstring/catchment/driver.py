@@ -3785,10 +3785,9 @@ class Driver(TapsMixin):
 
     def _record_pass(self, pond: str, f: datetime, now: datetime) -> None:
         """An engine-synthesised pass (no Duck): record an instant, successful no-change pond_run so the
-        history is honest and reload's run counts stay correct (see plans/no-change-skip.md)."""
+        history is honest and reload's run counts stay correct (see plans/no-change-skip.md). Every Run of an
+        App is one, so its rows are the App's freshness history: when it took on its Sources' data, and how old."""
         meta = self.meta[pond]
-        if meta.get("is_app"):  # an App's Runs complete at once with nothing to record: it has instances
-            return
         fi = _iso(f)
         self.db.execute(
             "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, finished_at, status, changed) "

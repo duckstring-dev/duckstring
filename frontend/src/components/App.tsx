@@ -344,8 +344,14 @@ export function App() {
       {isMobile ? (
         <MobileRunsPanel />
       ) : appId ? (
-        <div style={{ height: 260, minHeight: 0, borderTop: '1px solid #27272a' }}>
-          <AppInstances pondId={appId} />
+        <div style={{ display: 'flex', height: 260, minHeight: 0, borderTop: '1px solid #27272a' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <AppInstances pondId={appId} />
+          </div>
+          {/* Under the sidebar, as for a Pond: the App's data timing (interval and age). */}
+          <div style={{ width: 320, minWidth: 320, borderLeft: '1px solid #27272a' }}>
+            <TracePanel />
+          </div>
         </div>
       ) : (
         <div style={{ display: 'flex', height: 260, minHeight: 0, borderTop: '1px solid #27272a' }}>
