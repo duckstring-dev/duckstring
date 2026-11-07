@@ -1,4 +1,4 @@
-"""Azure: Container Apps job Ducks, ``az://`` and ``abfs[s]://`` data roots, credentials from Azure's default
+"""Azure: Container Apps job and VM Ducks, ``az://`` and ``abfs[s]://`` data roots, credentials from Azure's default
 chain (a service principal's ``AZURE_*`` environment or secrets, workload or managed identity, the Azure CLI)."""
 
 from __future__ import annotations
@@ -25,6 +25,21 @@ CONTAINERAPPS = DeploySpec(
     },
     required=("environment", "identity"),
 )
+
+# The Azure VM deployment config (the EC2 analogue). The resource group defaults to the subnet's.
+AZUREVM = DeploySpec(
+    fields=("image", "subnet", "identity", "location", "resource_group", "assign_public_ip", "pip_spec", "disk_gb"),
+    env={
+        "image": "DUCKSTRING_AZUREVM_IMAGE", "subnet": "DUCKSTRING_AZUREVM_SUBNET",
+        "identity": "DUCKSTRING_AZUREVM_IDENTITY", "location": "DUCKSTRING_AZUREVM_LOCATION",
+        "resource_group": "DUCKSTRING_AZUREVM_RESOURCE_GROUP",
+        "assign_public_ip": "DUCKSTRING_AZUREVM_ASSIGN_PUBLIC_IP", "pip_spec": "DUCKSTRING_AZUREVM_PIP_SPEC",
+        "disk_gb": "DUCKSTRING_AZUREVM_DISK_GB",
+    },
+    required=("subnet", "identity", "location"),
+)
+
+_INSTANCE_TYPES: dict[str, list[dict]] = {}  # location → sorted VM sizes; process-lifetime cache
 
 # The presets as Container Apps consumption sizes: the same vCPUs as AWS's, at the consumption profile's
 # 2 GiB per vCPU (its largest is 4 vCPU / 8 GiB). Units as on every pool: cpu in 1024ths of a vCPU, memory MiB.
@@ -170,20 +185,77 @@ class AzureProvider(Provider):
                 result["bucket_error"] = _error(exc)
         return result
 
+    def instance_types(self, region: str | None) -> dict:
+        """The VM sizes offered in a location (Compute resource SKUs, without the ones restricted for this
+        subscription), with vCPU / memory / GPU, cached per location for the process lifetime."""
+        region = (region or "").strip() or os.environ.get("DUCKSTRING_AZUREVM_LOCATION")
+        if not region:
+            return {"available": False, "error": "no location: pass ?region= or set DUCKSTRING_AZUREVM_LOCATION",
+                    "types": []}
+        region = region.replace(" ", "").lower()
+        if region in _INSTANCE_TYPES:
+            return {"available": True, "region": region, "types": _INSTANCE_TYPES[region]}
+        subscription = os.environ.get("AZURE_SUBSCRIPTION_ID") or _subscription_from_config()
+        if not subscription:
+            return {"available": False, "region": region, "types": [],
+                    "error": "no subscription: set AZURE_SUBSCRIPTION_ID or DUCKSTRING_AZUREVM_SUBNET"}
+        try:
+            from azure.identity import DefaultAzureCredential
+            from azure.mgmt.compute import ComputeManagementClient
+
+            client = ComputeManagementClient(DefaultAzureCredential(), subscription)
+            types = _vm_sizes(client.resource_skus.list(filter=f"location eq '{region}'"))
+        except Exception as exc:
+            return {"available": False, "region": region, "error": _error(exc), "types": []}
+        _INSTANCE_TYPES[region] = types
+        return {"available": True, "region": region, "types": types}
+
     def build_backends(self, root, base_url: str | None, *, token: str, data_root: str | None, dialback) -> dict:
+        from ..azurevm_launcher import AzureVmLauncher
         from ..containerapps_launcher import ContainerAppsLauncher
 
         image = os.environ.get("DUCKSTRING_CONTAINERAPPS_IMAGE") or default_image()
-        return {"containerapps": ContainerAppsLauncher(root, base_url, token=token, data_root=data_root,
-                                                       dialback=dialback, image=image)}
+        kw = dict(token=token, data_root=data_root, dialback=dialback)
+        return {"containerapps": ContainerAppsLauncher(root, base_url, image=image, **kw),
+                "azurevm": AzureVmLauncher(root, base_url, **kw)}
 
     def pool_machine(self, backend: str, pool: str, spec: dict, remote):
-        from ..pool_launcher import ContainerAppsPoolMachine
+        from ..pool_launcher import AzureVmPoolMachine, ContainerAppsPoolMachine
 
+        if backend == "azurevm":
+            return AzureVmPoolMachine(pool, spec, remote)
         return ContainerAppsPoolMachine(pool, spec, remote)
+
+
+def _subscription_from_config() -> str | None:
+    from ..containerapps_launcher import _resource_part
+
+    for var in ("DUCKSTRING_AZUREVM_SUBNET", "DUCKSTRING_CONTAINERAPPS_ENVIRONMENT"):
+        if os.environ.get(var):
+            return _resource_part(os.environ[var], "subscriptions")
+    return None
+
+
+def _vm_sizes(skus) -> list[dict]:
+    """``virtualMachines`` SKUs as ``{name, vcpu, memory_gib, gpu}``, sorted like AWS's instance types."""
+    out = []
+    for sku in skus:
+        if getattr(sku, "resource_type", None) != "virtualMachines":
+            continue
+        # A Zone restriction only rules out some zones (most SKUs carry one); a Location one, the whole region.
+        if any(str(getattr(r.type, "value", r.type)) == "Location" for r in (sku.restrictions or [])):
+            continue
+        caps = {c.name: c.value for c in (sku.capabilities or [])}
+        try:
+            out.append({"name": sku.name, "vcpu": int(caps.get("vCPUs", 0)),
+                        "memory_gib": float(caps.get("MemoryGB", 0)), "gpu": int(caps.get("GPUs", 0) or 0)})
+        except (TypeError, ValueError):
+            continue
+    out.sort(key=lambda t: (t["vcpu"], t["memory_gib"], t["name"]))
+    return out
 
 
 AZURE = AzureProvider(
     name="azure", title="Azure", storage_schemes=("az", "abfs", "abfss"), secret_prefixes=(SECRET_PREFIX,),
-    backends={"containerapps": CONTAINERAPPS}, default_backend="containerapps", presets=PRESETS,
+    backends={"containerapps": CONTAINERAPPS, "azurevm": AZUREVM}, default_backend="containerapps", presets=PRESETS,
 )

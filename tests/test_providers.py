@@ -72,7 +72,7 @@ def test_a_local_root_has_no_cloud(root):
 
 
 def test_backends_belong_to_one_cloud():
-    assert providers.all_backends() == ["fargate", "ec2", "containerapps"]
+    assert providers.all_backends() == ["fargate", "ec2", "containerapps", "azurevm"]
     assert providers.for_backend("fargate").name == "aws" and providers.for_backend("ec2").name == "aws"
     assert providers.for_backend("containerapps").name == "azure"
     assert providers.for_backend(providers.LOCAL_BACKEND) is None and providers.for_backend("k8s") is None
@@ -161,7 +161,7 @@ def test_an_aws_catchment_takes_its_own_backends_only(tmp_path):
 def test_a_local_catchment_accepts_any_backend_until_it_has_a_cloud(tmp_path):
     d = _driver(tmp_path)
     d.add_pool("heavy", provider="ec2", instance_type="m6i.large")
-    with pytest.raises(ValueError, match="fargate, ec2, containerapps, local$"):
+    with pytest.raises(ValueError, match="fargate, ec2, containerapps, azurevm, local$"):
         d.add_pool("bad", provider="k8s")
 
 
@@ -196,7 +196,7 @@ def test_compute_defaults_list_every_backend(tmp_path):
     d = _driver(tmp_path)
     app.state.driver, app.state.db = d, d.db
     got = TestClient(app).get("/api/catchment/compute-defaults").json()
-    assert set(got) == {"fargate", "ec2", "containerapps"} and got["ec2"]["fields"] == list(aws.EC2.fields)
+    assert set(got) == {"fargate", "ec2", "containerapps", "azurevm"} and got["ec2"]["fields"] == list(aws.EC2.fields)
 
 
 def test_a_storage_only_clouds_secrets_stay_out_of_the_environment(tmp_path, monkeypatch):

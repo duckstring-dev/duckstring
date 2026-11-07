@@ -206,7 +206,8 @@ def test_resource_ids_split_by_segment_name():
 def no_ambient_azure(monkeypatch):
     for k in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_SECRET", "AZURE_FEDERATED_TOKEN_FILE",
               "AZURE_CLIENT_CERTIFICATE_PATH", "IDENTITY_ENDPOINT", "MSI_ENDPOINT", "DUCKSTRING_CONTAINERAPPS_IMAGE",
-              "DUCKSTRING_CONTAINERAPPS_ENVIRONMENT", "DUCKSTRING_CONTAINERAPPS_IDENTITY"):
+              "DUCKSTRING_CONTAINERAPPS_ENVIRONMENT", "DUCKSTRING_CONTAINERAPPS_IDENTITY", "DUCKSTRING_AZUREVM_SUBNET",
+              "DUCKSTRING_AZUREVM_IDENTITY", "DUCKSTRING_AZUREVM_LOCATION", "DUCKSTRING_AZUREVM_PIP_SPEC"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(azure, "_cli_signed_in", lambda: False)
     monkeypatch.setattr(azure, "_managed_identity_available", lambda: False)
@@ -254,10 +255,10 @@ def test_an_azure_root_with_credentials_enables_container_apps(no_ambient_azure,
     monkeypatch.setenv("IDENTITY_ENDPOINT", "http://localhost:42356/msi/token")
     st = cloud.cloud_status(ROOT, None)
     assert st["provider"] == "azure" and st["cloud_enabled"] is True
-    assert st["backends"] == {"containerapps": False}  # no environment or identity configured yet
+    assert st["backends"] == {"containerapps": False, "azurevm": False}  # nothing configured yet
     monkeypatch.setenv("DUCKSTRING_CONTAINERAPPS_ENVIRONMENT", ENV)
     monkeypatch.setenv("DUCKSTRING_CONTAINERAPPS_IDENTITY", IDN)
-    assert cloud.cloud_status(ROOT, None)["backends"] == {"containerapps": True}
+    assert cloud.cloud_status(ROOT, None)["backends"] == {"containerapps": True, "azurevm": False}
     assert cloud.cloud_status(ROOT.replace("abfss", "az"), _Secrets({}))["fargate_enabled"] is False
 
 
@@ -267,12 +268,13 @@ def test_container_apps_needs_an_environment_and_an_identity(no_ambient_azure):
     assert cloud_deploy.clean("containerapps", {"environment": ENV, "ami": "x"}) == {"environment": ENV}
 
 
-def test_the_backend_defaults_to_the_releases_azure_image(no_ambient_azure, tmp_path):
+def test_the_backends_default_to_the_releases_image_and_package(no_ambient_azure, tmp_path):
     from duckstring import __version__
 
     remotes = providers.get("azure").build_backends(tmp_path, "http://x:1", token="t", data_root=ROOT,
                                                     dialback=RemoteDialback("http://x:1"))
     assert remotes["containerapps"].image == f"ghcr.io/duckstring-dev/duckstring:{__version__}-azure"
+    assert remotes["azurevm"].pip_spec == f"duckstring[azure]=={__version__}"
 
 
 def test_azure_presets_are_consumption_sizes(tmp_path):
@@ -287,5 +289,19 @@ def test_azure_presets_are_consumption_sizes(tmp_path):
     assert presets["XL"] == {**presets["XL"], "provider": "containerapps", "cpu": 4096, "memory": 8192}
     d.add_pool("light")
     assert d.get_pool("light")["provider"] == "containerapps"
-    with pytest.raises(ValueError, match="containerapps, local on Azure"):
+    with pytest.raises(ValueError, match="containerapps, azurevm, local on Azure"):
         d.add_pool("bad", provider="fargate")
+
+
+def test_vm_sizes_skip_only_those_restricted_in_the_whole_location():
+    def sku(name, *restrictions, kind="virtualMachines", vcpu="2"):
+        caps = [types.SimpleNamespace(name="vCPUs", value=vcpu), types.SimpleNamespace(name="MemoryGB", value="8")]
+        return types.SimpleNamespace(name=name, resource_type=kind, capabilities=caps, restrictions=[
+            types.SimpleNamespace(type=types.SimpleNamespace(value=r), reason_code="NotAvailableForSubscription")
+            for r in restrictions])
+
+    # As the real list returns them: most sizes are restricted in one zone and usable in the region.
+    sizes = azure._vm_sizes([sku("Standard_D4s_v5", "Zone", vcpu="4"), sku("Standard_D2s_v5", "Zone"),
+                             sku("Standard_M416", "Location"), sku("Standard_LRS", kind="disks")])
+    assert [s["name"] for s in sizes] == ["Standard_D2s_v5", "Standard_D4s_v5"]
+    assert sizes[0] == {"name": "Standard_D2s_v5", "vcpu": 2, "memory_gib": 8.0, "gpu": 0}
