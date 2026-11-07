@@ -381,8 +381,9 @@ def settings(
 ) -> None:
     """Show the Catchment's cloud configuration, or set where published tables are stored.
 
-    The data root can only be changed before any Pond has published data. Cloud compute is enabled once the
-    data root is in S3 or Google Cloud Storage and AWS credentials are available.
+    The data root can only be changed before any Pond has published data. Its scheme picks the Catchment's
+    cloud, and cloud compute is enabled once that cloud's credentials are available. Remote Ducks run on AWS
+    (an s3:// data root) for now.
     """
     from . import _http
     from .config import resolve_catchment
@@ -392,11 +393,20 @@ def settings(
         _http.put(f"{cfg['url']}/api/catchment/settings", auth=cfg, json={"data_root": data_root})
         typer.echo(f"Data root set to {data_root}.")
     got = _http.get(f"{cfg['url']}/api/catchment/settings", auth=cfg).json()
+    title = got.get("provider_title")
     typer.echo(f"data root:  {got.get('data_root') or '(local)'}")
-    typer.echo(f"AWS creds:  {'yes' if got.get('aws_configured') else 'no'}")
-    typer.echo(f"cloud:      {'enabled' if got.get('cloud_enabled') else 'disabled'}"
-               + ("" if got.get("cloud_enabled")
-                  else "  (needs a remote data root + AWS credentials)"))
+    typer.echo(f"cloud:      {title or '(none)'}")
+    if title and got.get("compute_available"):
+        typer.echo(f"creds:      {'yes' if got.get('credentials_configured') else 'no'}")
+    if got.get("cloud_enabled"):
+        reason = ""
+    elif not title:
+        reason = "  (needs a data root on a cloud, such as s3://)"
+    elif not got.get("compute_available"):
+        reason = f"  (remote Ducks on {title} aren't available yet; Catchment Ducks read this data root)"
+    else:
+        reason = f"  (needs {title} credentials)"
+    typer.echo(f"compute:    {'enabled' if got.get('cloud_enabled') else 'disabled'}{reason}")
     if got.get("has_data"):
         typer.echo("note:       the data root is now set-once (the Catchment has published data).")
 

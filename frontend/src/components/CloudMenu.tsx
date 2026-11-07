@@ -431,7 +431,11 @@ export function CloudMenu({ onClose }: { onClose: () => void }) {
             </span>
           )}
           {!enabled && settings && (
-            <span style={{ fontSize: 10, color: '#52525b' }}>needs a remote data root + AWS credentials</span>
+            <span style={{ fontSize: 10, color: '#52525b' }}>
+              {settings.provider_title && !settings.compute_available
+                ? `remote Ducks on ${settings.provider_title} aren't available yet`
+                : 'needs an S3 data root + AWS credentials'}
+            </span>
           )}
           <button onClick={onClose} title="Close (Esc)"
                   style={{ marginLeft: 'auto', background: 'transparent', border: '1px solid #3f3f46', borderRadius: 5,

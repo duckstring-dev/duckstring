@@ -52,21 +52,24 @@ async def _lifespan(app: FastAPI):
             )
         else:
             # The dispatching launcher: `catchment`-targeted Ponds on this box (subprocess), pool/
-            # dedicated ones on EC2 — the same code whether the Catchment is local or hosted. The EC2
-            # backend is only built when cloud is enabled (remote data root + AWS creds); otherwise
-            # remote targets degrade to local (plans/cloud-config.md).
+            # dedicated ones on the data root's cloud: the same code whether the Catchment is local or
+            # hosted. The cloud's backends are only built when cloud is enabled (a data root on a cloud with
+            # remote Ducks + its creds); otherwise remote targets degrade to local (plans/cloud-config.md).
+            from . import providers
             from .cloud_backends import build_remote_backends
             from .launcher import DispatchingLauncher
 
             local = SubprocessLauncher(
                 app.state.root, base_url, token=app.state.duck_token, data_root=app.state.data_root
             )
-            # The remote backends (Fargate/EC2 + the shared dial-back) exist only when cloud is enabled
-            # (remote data root + AWS creds); otherwise remote targets degrade to local. The same builder
-            # re-attaches them live when creds / the data root change at runtime (see cloud_backends).
+            # The remote backends (AWS: Fargate/EC2) + the shared dial-back exist only when cloud is enabled;
+            # otherwise remote targets degrade to local. The same builder re-attaches them live when creds /
+            # the data root change at runtime (see cloud_backends).
             remotes, dialback = build_remote_backends(
                 app.state.root, base_url, app.state.duck_token, app.state.data_root, app.state.secret_store)
-            launcher = DispatchingLauncher(local, remotes, dialback=dialback, default_provider="fargate")
+            cloud = providers.for_data_root(app.state.data_root)
+            launcher = DispatchingLauncher(local, remotes, dialback=dialback,
+                                           default_provider=(cloud and cloud.default_backend) or "fargate")
     driver = Driver(app.state.db, app.state.root, base_url, launcher, data_root=app.state.data_root)
     app.state.driver = driver
     app.state.launcher = launcher
@@ -251,10 +254,10 @@ def create_app(
     from .secrets import SecretStore
     app.state.secret_store = SecretStore(root)
     credentials.set_secret_provider(app.state.secret_store.get)
-    # Give the AWS_* secrets teeth: load them into the environment so botocore's chain uses them (the
-    # enable-by-secret cloud flow). Real env wins.
+    # Give the cloud credential secrets (AWS_*) teeth: load them into the environment so the cloud SDK's
+    # chain uses them (the enable-by-secret cloud flow). Real env wins.
     from . import cloud as _cloud
-    _cloud.load_aws_env(app.state.secret_store)
+    _cloud.load_env(app.state.secret_store)
     # The address Ducks dial back to: explicit argument (the CLI passes its bind address), or the
     # environment, or None — unknown, because the host platform picks the bind address (e.g. Posit
     # Connect). When None it is learned from the first request's ASGI scope below.

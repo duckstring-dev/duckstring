@@ -130,6 +130,17 @@ Pull the AWS knowledge behind one interface, `catchment/providers/{aws,azure,gcp
   `fargate_enabled`/`ec2_enabled` (keep those two keys for the UI until it's updated).
 - Migration: none for data; the seam is code. Tests: the AWS suites unchanged, plus a provider registry test.
 
+**As built (2026-11-07).** `catchment/providers/{__init__,aws,azure,gcp}.py`. The AWS provider holds the moved
+code (credential gate and secret loading, STS validation, the Verify probe, EC2 instance types, the relay,
+the Fargate/EC2 launchers and pool machines, the presets); `cloud_deploy` reads each backend's `DeploySpec`
+from it. Azure and Google are storage-only providers (no backends, no credential checks yet), so on their
+roots `cloud_enabled` is false and the Catchment's own Ducks run everything. Differences from the plan:
+`credentials_present`/`load_env`/`validate` for Azure and Google wait for phases 3 and 4, and until then their
+`AZURE_*`/`GOOGLE_*` secrets are not loaded into the environment (they would change how the data root
+authenticates). With a local data root a pool may name any backend (no cloud chosen yet). The UI only
+changed its disabled hint; `fargate_enabled`/`ec2_enabled`/`aws_configured` stay. The image is built from
+`ARG EXTRAS` (default `aws`) and tagged `-aws` plus the bare version; the build itself wasn't run here.
+
 ## Images, one per cloud (decided 2026-11-04)
 
 A Catchment picks a cloud and is optimised for it; most users never use a second, so another cloud's

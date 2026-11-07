@@ -125,13 +125,14 @@ class SubprocessLauncher:
 class DispatchingLauncher:
     """Routes each Pond's Duck to a backend by its ``duck_target`` + provider (plans/cloud-config.md):
     the Catchment's own box (``local`` — the subprocess backend), or a remote backend chosen by the
-    target pool's provider (Fargate by default, EC2 for the escape-hatch pools). This is what makes "a
+    target pool's backend (on AWS: Fargate by default, EC2 for the escape-hatch pools). This is what makes "a
     local Catchment running cloud Ducks" the same code path as a hosted one — ``catchment``-targeted
     Ponds always run on the Catchment's box, everything else remote. With no remote backend (cloud not
     enabled), remote targets degrade to local, so a ``duck = "M"`` pond.toml still runs anywhere.
 
-    ``remotes`` is a ``{provider: backend}`` map (a single backend is accepted for back-compat and takes
-    every remote spawn). ``dialback`` is the shared reachable-URL/relay holder torn down once here."""
+    ``remotes`` is a ``{backend name: launcher}`` map for the Catchment's cloud (a single backend is
+    accepted for back-compat and takes every remote spawn). ``dialback`` is the shared reachable-URL/relay
+    holder torn down once here."""
 
     manages_processes = True  # liveness routes through is_running() → the owning backend
 
@@ -158,15 +159,15 @@ class DispatchingLauncher:
             return None
         if "_any" in self.remotes:
             return self.remotes["_any"]
-        provider = ((duck or {}).get("pool") or {}).get("provider") or self.default_provider
-        return self.remotes.get(provider) or self.remotes.get(self.default_provider)
+        # Only the pool's own backend: one on another cloud (the data root moved) runs on the Catchment's box.
+        return self.remotes.get(((duck or {}).get("pool") or {}).get("provider") or self.default_provider)
 
     def pool_identity(self, duck: dict | None) -> str | None:
         """The named Pool this spawn belongs to, or ``None`` for per-machine routing. A named,
         non-preset pool is ONE shared machine (plans/pool-agent.md; presets/dedicated stay isolated
         task-per-Pond by the settled taxonomy). Routable only when the durable plane exists (cross-Pool
         reads go through it) and the pool's provider has a machine to offer: ``local`` needs only the
-        data root; ``fargate``/``ec2`` need their remote backend attached (cloud enabled)."""
+        data root; a cloud backend (``fargate``/``ec2``) needs its launcher attached (cloud enabled)."""
         if not duck or not duck.get("remote") or duck.get("preset"):
             return None
         target = duck.get("duck_target")
@@ -186,26 +187,20 @@ class DispatchingLauncher:
         return self.pools.get(name)
 
     def _pool_backend(self, name: str, duck: dict):
-        from .pool_launcher import (
-            Ec2PoolMachine,
-            FargatePoolMachine,
-            LocalPoolMachine,
-            PoolLauncher,
-        )
+        from . import providers
+        from .pool_launcher import LocalPoolMachine, PoolLauncher
 
         pl = self.pools.get(name)
         if pl is not None:
             return pl
         spec = duck.get("pool") or {}
         provider = spec.get("provider") or self.default_provider
-        if provider == "local":
+        if provider == providers.LOCAL_BACKEND:
             machine = LocalPoolMachine(
                 name, Path(self.local.root) / "pools" / name, self.local.base_url,
                 getattr(self.local, "token", ""), self.data_root, self.data_root)
-        elif provider == "ec2":
-            machine = Ec2PoolMachine(name, spec, self._remote_for(duck))
         else:
-            machine = FargatePoolMachine(name, spec, self._remote_for(duck))
+            machine = providers.for_backend(provider).pool_machine(provider, name, spec, self._remote_for(duck))
         pl = self.pools[name] = PoolLauncher(name, machine)
         return pl
 

@@ -30,8 +30,9 @@ duckstring catchment settings
 
 ```text
 data root:  s3://acme-lake/duckstring
-AWS creds:  yes
-cloud:      enabled
+cloud:      AWS
+creds:      yes
+compute:    enabled
 ```
 
 ## Step 1: the data root

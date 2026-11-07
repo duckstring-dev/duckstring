@@ -18,6 +18,7 @@ SQLite is the durable mirror, the per-Pond ``pond.db`` ledgers the fallback.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone
@@ -60,7 +61,10 @@ from ..engine import (
 from ..flock import job_settings as flock_job_settings
 from ..keys import pond_key
 from ..trickle_io import first_row
+from . import providers
 from .taps import TapsMixin
+
+_log = logging.getLogger("duckstring.catchment")
 
 # Memory slots (plans/memory-budget.md): the Ducks on the Catchment's own machine share its memory budget as
 # DUCKSTRING_RUN_SLOTS slots (0 turns the gate off), each worth budget / slots. The budget is
@@ -302,22 +306,16 @@ OOM_POLICIES = ("fail_up", "fail")
 # A Spout's default on-change retry budget: a failed delivery is retried on its Pond's next publishes.
 # Editable per Spout with `control failure-budget {pond}#{spout}`.
 SPOUT_SOURCE_RETRIES = 3
-POOL_PROVIDERS = ("fargate", "ec2", "local")  # local = a shared Pool machine on this box (dev/test)
-
-# Built-in preset Duck Pools (plans/cloud-config.md §4b): Fargate task sizes, always available so a
-# `pond.toml duck = "M"` works with zero pool setup — and DSC ships the SAME names backed by its own
-# serverless pools, so a project transfers seamlessly (only the backend differs). Names are reserved.
-PRESET_POOLS = {
-    "S": {"cpu": 512, "memory": 2048},
-    "M": {"cpu": 1024, "memory": 4096},
-    "L": {"cpu": 2048, "memory": 8192},
-    "XL": {"cpu": 4096, "memory": 16384},
-}
+# Built-in preset Duck Pools (plans/cloud-config.md §4b): each cloud backs the same names with its own sizes
+# (AWS: Fargate tasks), always available so a `pond.toml duck = "M"` works with zero pool setup, and DSC ships
+# the SAME names backed by its own serverless pools, so a project transfers seamlessly. Names are reserved.
+PRESET_POOLS = providers.PRESET_NAMES
 
 
-def _preset_pool(name: str) -> dict:
-    p = PRESET_POOLS[name]
-    return {"name": name, "provider": "fargate", "instance_type": None, "cpu": p["cpu"],
+def _preset_pool(name: str, provider: providers.Provider | None = None) -> dict:
+    """A preset on the Catchment's cloud (AWS's sizes where the cloud has none yet: inert without its backends)."""
+    p = (provider.presets if provider is not None and provider.presets else providers.get("aws").presets)[name]
+    return {"name": name, "provider": p["provider"], "instance_type": None, "cpu": p["cpu"],
             "memory": p["memory"], "min_instances": 0, "max_instances": 1, "idle_timeout": None,
             "keep_warm": 0, "region": None, "deploy_config": None, "managed": True}
 
@@ -525,6 +523,7 @@ class Driver(TapsMixin):
             self.duck_pool_names = set(PRESET_POOLS) | {r[0] for r in db.execute("SELECT name FROM duck_pool")}
             self._pool_cache = None  # user-pool list cache (invalidated on add/remove) — status()'s per-Pond
             #                          duck_config resolves pools off this instead of a DB query per poll
+            self._off_cloud_warned: set[str] = set()  # pools on another cloud, warned about once each
             name_by_pnid = {r[0]: r[1] for r in db.execute("SELECT id, name FROM pond_name")}
             rows = db.execute("""
                 SELECT pn.name, p.major, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind,
@@ -1193,6 +1192,8 @@ class Driver(TapsMixin):
             # 2. Re-point future spawns (publish + read) at the new plane. NOTE: the OLD location is not
             #    touched — no scrub — so it remains a hand-migration source / switch-back backup.
             self.data_root = new_root
+            self._pool_cache = None  # a NULL pool provider means the (possibly new) cloud's default backend
+            self._off_cloud_warned.clear()
             if hasattr(self.launcher, "set_data_root"):
                 self.launcher.set_data_root(new_root)
             else:
@@ -1699,7 +1700,7 @@ class Driver(TapsMixin):
                 # hosted-platform path), surfacing a clear launch error if the env is also unset.
                 if new["duck_target"] == "dedicated" and new.get("deploy_config"):
                     dc = new["deploy_config"]
-                    provider = dc.get("provider") or "fargate"
+                    provider = dc.get("provider") or self._default_backend()
                     from . import cloud_deploy
                     miss = cloud_deploy.missing_fields(provider, dc)
                     if miss:
@@ -1789,6 +1790,14 @@ class Driver(TapsMixin):
         # Embed the resolved pool spec so the dispatching launcher can act without DB access; `remote`
         # is the routing signal (anything but the Catchment's own box).
         pool = self.get_pool(target) if target not in ("catchment", "dedicated") else None
+        if pool is not None and not self._backend_on_cloud(pool["provider"]):
+            # A pool on another cloud (the data root moved clouds): Ducks run next to their data, so it runs
+            # on the Catchment's box, as an undefined pool does.
+            if target not in self._off_cloud_warned:
+                self._off_cloud_warned.add(target)
+                _log.warning("pool %r runs on %s, but this Catchment's data root is on %s: its Ponds run on "
+                             "the Catchment's own machine", target, pool["provider"], self._cloud().title)
+            target, pool = "catchment", None
         return {
             "duck_target": target,
             "remote": target != "catchment",
@@ -1812,6 +1821,21 @@ class Driver(TapsMixin):
     _POOL_FIELDS = ("provider", "instance_type", "cpu", "memory", "min_instances", "max_instances",
                     "idle_timeout", "keep_warm", "region")
 
+    def _cloud(self) -> providers.Provider | None:
+        """The Catchment's cloud: its data root's provider (None for a local root)."""
+        return providers.for_data_root(self.data_root)
+
+    def _default_backend(self) -> str:
+        cloud = self._cloud()
+        return cloud.default_backend if cloud is not None and cloud.default_backend else "fargate"
+
+    def _backend_on_cloud(self, backend: str | None) -> bool:
+        """Whether a pool's backend can run here: ``local`` always; a cloud backend on the Catchment's cloud,
+        or any while the data root is local (no cloud chosen yet: such a pool waits for one)."""
+        cloud = self._cloud()
+        return backend == providers.LOCAL_BACKEND or (backend in cloud.backends if cloud is not None
+                                                      else backend in providers.all_backends())
+
     def _user_pools(self) -> list[dict]:
         # Cached: rebuilt only when a pool is added/removed (or on reload), so status()'s per-Pond
         # duck_config resolution doesn't run a DB query per Pond per ~1 s poll.
@@ -1824,26 +1848,31 @@ class Driver(TapsMixin):
         cols = ("name", *self._POOL_FIELDS, "deploy_config")
         pools = [dict(zip(cols, r, strict=True)) for r in rows]
         for p in pools:
-            p["provider"] = p["provider"] or "fargate"  # NULL → the default provider
+            p["provider"] = p["provider"] or self._default_backend()  # NULL → the cloud's default backend
             p["deploy_config"] = _load_json(p["deploy_config"])
             p["managed"] = False
         self._pool_cache = pools
         return pools
 
     def list_pools(self) -> list[dict]:
-        """The presets (built-in Fargate S/M/L/XL, `managed`) followed by user-defined pools."""
-        return [_preset_pool(n) for n in PRESET_POOLS] + self._user_pools()
+        """The presets (built-in S/M/L/XL on the Catchment's cloud, `managed`) followed by user-defined pools."""
+        return [_preset_pool(n, self._cloud()) for n in PRESET_POOLS] + self._user_pools()
 
     def add_pool(self, name: str, **fields) -> dict:
-        """Create or update a user Duck Pool. Provider defaults to fargate; a preset name is reserved."""
+        """Create or update a user Duck Pool. Its provider (a backend) defaults to the cloud's default and must
+        be on the Catchment's cloud (or ``local``); a preset name is reserved."""
         if not name or not name.strip():
             raise ValueError("a pool name is required")
         if name in PRESET_POOLS:
             raise ValueError(f"'{name}' is a built-in preset pool — pick another name")
         vals = {k: fields.get(k) for k in self._POOL_FIELDS}
-        vals["provider"] = vals["provider"] or "fargate"
-        if vals["provider"] not in POOL_PROVIDERS:
-            raise ValueError(f"provider must be one of {', '.join(POOL_PROVIDERS)}")
+        vals["provider"] = vals["provider"] or self._default_backend()
+        if not self._backend_on_cloud(vals["provider"]):
+            cloud = self._cloud()
+            allowed = [*cloud.backends, providers.LOCAL_BACKEND] if cloud is not None else [
+                *providers.all_backends(), providers.LOCAL_BACKEND]
+            where = f" on {cloud.title}, this Catchment's cloud" if cloud is not None else ""
+            raise ValueError(f"provider must be one of {', '.join(allowed)}{where}")
         for k in ("min_instances", "max_instances", "keep_warm"):
             if vals[k] is not None and int(vals[k]) < 0:
                 raise ValueError(f"{k} must be >= 0")
@@ -1884,7 +1913,7 @@ class Driver(TapsMixin):
 
     def get_pool(self, name: str) -> dict | None:
         if name in PRESET_POOLS:
-            return _preset_pool(name)
+            return _preset_pool(name, self._cloud())
         for p in self._user_pools():
             if p["name"] == name:
                 return p
@@ -3457,7 +3486,7 @@ class Driver(TapsMixin):
         try:
             duck = self.duck_config(pond)
             if duck.get("remote"):
-                provider = (duck.get("pool") or {}).get("provider") or "fargate"
+                provider = (duck.get("pool") or {}).get("provider") or self._default_backend()
         except Exception:
             pass
         return max(_STARTUP_GRACE.get(provider, _DUCK_DEAD_AFTER), _DUCK_DEAD_AFTER)

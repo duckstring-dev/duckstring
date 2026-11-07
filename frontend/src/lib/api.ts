@@ -210,13 +210,18 @@ export interface DuckConfig {
   defaults: { duck_target: string; flock_mode: string; flock_engine: string | null; oom_policy: string };
 }
 
-// The cloud-enable gate — remote data root + AWS creds (plans/cloud-config.md). Surfaced on /api/status
-// so the UI greys out remote-compute options until both hold.
+// The cloud-enable gate: a data root on a cloud with remote Ducks + that cloud's creds (plans/cloud-config.md,
+// plans/azure-gcp.md). Surfaced on /api/status so the UI greys out remote-compute options until both hold.
 export interface CloudGate {
   data_root: string | null;
   data_root_remote: boolean;
+  provider: string | null;           // the data root's cloud: 'aws' | 'azure' | 'gcp'; null for a local root
+  provider_title: string | null;
+  compute_available: boolean;        // whether that cloud offers remote Ducks yet
+  credentials_configured: boolean;   // that cloud's credentials are present
   aws_configured: boolean;
   cloud_enabled: boolean;
+  backends: Record<string, boolean>; // each backend's readiness (fargate_enabled/ec2_enabled below repeat AWS's)
   // Provider readiness (Cloud enabled + the provider's env deployment config is adequate). fargate_enabled
   // gates the S/M/L/XL presets — they rely on the env, so they aren't offered until Fargate is ready.
   fargate_enabled: boolean;

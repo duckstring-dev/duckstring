@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 
 from duckstring.catchment import auth, cloud
 from duckstring.catchment.app import create_app
-from duckstring.catchment.routes import catchment as croute
+from duckstring.catchment.providers import aws
+from duckstring.catchment.providers.aws import AWS
 from duckstring.catchment.secrets import SecretStore
 
 pytestmark = pytest.mark.timeout(10)
@@ -26,15 +27,15 @@ def _clean_aws_env():
     for k in list(os.environ):
         if k.startswith("AWS_"):
             del os.environ[k]
-    croute._INSTANCE_TYPES.clear()
-    cloud._chain_has_credentials.cache_clear()
+    aws._INSTANCE_TYPES.clear()
+    aws._chain_has_credentials.cache_clear()
     yield
     for k in list(os.environ):
         if k.startswith("AWS_"):
             del os.environ[k]
     os.environ.update(saved)
-    croute._INSTANCE_TYPES.clear()
-    cloud._chain_has_credentials.cache_clear()
+    aws._INSTANCE_TYPES.clear()
+    aws._chain_has_credentials.cache_clear()
 
 
 # ─── Fake boto3 (injected via sys.modules so `import boto3` in a route returns it) ──
@@ -109,7 +110,7 @@ def test_load_aws_env_injects_only_aws_prefixed(tmp_path):
     store = SecretStore(tmp_path)
     store.set("AWS_ACCESS_KEY_ID", "AKIA_TEST")
     store.set("PGPASS", "hunter2")
-    cloud.load_aws_env(store)
+    AWS.load_env(store)
     assert os.environ.get("AWS_ACCESS_KEY_ID") == "AKIA_TEST"
     assert "PGPASS" not in os.environ  # a non-AWS_ secret is never leaked into the environment
 
@@ -118,7 +119,7 @@ def test_load_aws_env_real_env_wins(tmp_path):
     os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
     store = SecretStore(tmp_path)
     store.set("AWS_DEFAULT_REGION", "eu-west-1")
-    cloud.load_aws_env(store)
+    AWS.load_env(store)
     assert os.environ["AWS_DEFAULT_REGION"] == "us-east-1"  # setdefault: ambient env is authoritative
 
 
@@ -181,12 +182,12 @@ def test_verify_flags_unwritable_bucket(client, monkeypatch):
 
 def test_validate_credentials_ok(monkeypatch):
     monkeypatch.setitem(sys.modules, "boto3", _make_boto3())
-    assert cloud.validate_credentials() is None
+    assert AWS.validate() is None
 
 
 def test_validate_credentials_reports_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "boto3", _make_boto3(sts_error=RuntimeError("ExpiredToken")))
-    assert cloud.validate_credentials() == "ExpiredToken"
+    assert AWS.validate() == "ExpiredToken"
 
 
 # ─── Credential-validity surface (the persistent-warning source) ─────────────────
