@@ -341,6 +341,8 @@ def main() -> None:
     # WARNING+ goes through the bare last-resort handler with no timestamp.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # The Azure SDK logs every HTTP request and response at INFO, which buries the Duck's own lines.
+    logging.getLogger("azure").setLevel(logging.WARNING)
 
     root = Path(args.root)
     data_root = args.data_root or None
