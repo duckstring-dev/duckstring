@@ -47,11 +47,21 @@ class _Jobs:
         self.c.calls.append(("stop", rg, job, name))
         return _Poller()
 
+    def list_by_resource_group(self, rg):
+        return self.c.existing
+
+    def begin_delete(self, rg, name):
+        self.c.calls.append(("delete", rg, name))
+        return _Poller()
+
 
 class _Client:
     def __init__(self, status="Running", fail_start=None):
         self.calls, self.n, self.status, self.fail_start = [], 0, status, fail_start
+        self.existing, self.live = [], {}  # jobs already in the group; job name → its executions' statuses
         self.jobs = _Jobs(self)
+        self.jobs_executions = types.SimpleNamespace(list=lambda rg, job: [
+            types.SimpleNamespace(status=types.SimpleNamespace(value=v)) for v in self.live.get(job, [])])
         if fail_start:
             self.jobs.begin_start = lambda *a, **k: (_ for _ in ()).throw(fail_start)
         logs = types.SimpleNamespace(log_analytics_configuration=types.SimpleNamespace(customer_id="ws-1"))
@@ -305,3 +315,27 @@ def test_vm_sizes_skip_only_those_restricted_in_the_whole_location():
                              sku("Standard_M416", "Location"), sku("Standard_LRS", kind="disks")])
     assert [s["name"] for s in sizes] == ["Standard_D2s_v5", "Standard_D4s_v5"]
     assert sizes[0] == {"name": "Standard_D2s_v5", "vcpu": 2, "memory_gib": 8.0, "gpu": 0}
+
+
+def _job(name, image, tag):
+    return types.SimpleNamespace(name=name, tags={"duckstring": "duck", "duckstring-catchment": tag},
+                                 template=types.SimpleNamespace(containers=[types.SimpleNamespace(image=image)]))
+
+
+def test_a_new_job_retires_this_catchments_idle_jobs_on_older_images():
+    client = _Client()
+    la = _launcher(client)  # image ghcr.io/duckstring-dev/duckstring:0.8.0-azure
+    old = "ghcr.io/duckstring-dev/duckstring:0.7.0-azure"
+    client.existing = [
+        _job("duckstring-duck-aaaa0001", old, la.catchment_tag),               # retired
+        _job("duckstring-duck-aaaa0002", old, la.catchment_tag),               # a Duck still running on it: kept
+        _job("duckstring-duck-aaaa0003", old, "another-catchment"),            # not ours: kept
+        _job("duckstring-duck-aaaa0004", la.image, la.catchment_tag),          # current image (another size): kept
+        _job("my-ducks", old, la.catchment_tag),                               # named by the operator: kept
+    ]
+    client.live = {"duckstring-duck-aaaa0002": ["Running", "Succeeded"], "duckstring-duck-aaaa0001": ["Succeeded"]}
+    la.ensure("sales@1", "1.0.0", "p", duck={})
+    assert [c[2] for c in _calls(client, "delete")] == ["duckstring-duck-aaaa0001"]
+    assert _calls(client, "create")[0][3]["tags"]["duckstring-catchment"] == la.catchment_tag
+    la.ensure("reports@1", "1.0.0", "p", duck={})  # the job exists now: no second sweep
+    assert len(_calls(client, "delete")) == 1

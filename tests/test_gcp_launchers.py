@@ -38,6 +38,7 @@ class _Session:
     def __init__(self):
         self.calls, self.jobs, self.executions, self.instances = [], set(), {}, {}
         self.logs: list[dict] = []
+        self.listed, self.job_executions, self.deleted = [], {}, []
         self.n = 0
 
     def request(self, method, url, timeout=None, params=None, json=None):
@@ -53,8 +54,15 @@ class _Session:
             self.executions[name] = {}
             return _Resp(200, {"name": "projects/proj/locations/r/operations/run", "metadata": {
                 "name": f"projects/proj/locations/r/jobs/{m.group(1)}/executions/{name}"}})
+        if m := re.search(r"/locations/[^/]+/jobs/([^/:]+)/executions$", url):
+            return _Resp(200, {"executions": self.job_executions.get(m.group(1), [])})
         if m := re.search(r"/locations/[^/]+/jobs/([^/:]+)$", url):
+            if method == "DELETE":
+                self.deleted.append(m.group(1))
+                return _Resp(200, {})
             return _Resp(200, {}) if m.group(1) in self.jobs else _Resp(404, {"error": {"message": "not found"}})
+        if url.endswith("/jobs") and method == "GET":
+            return _Resp(200, {"jobs": self.listed})
         if url.endswith("/jobs") and method == "POST":
             self.jobs.add(params["jobId"])
             return _Resp(200, {"name": "projects/proj/locations/r/operations/create"})
@@ -176,6 +184,27 @@ def test_the_pool_machine_runs_the_agent_as_one_execution():
     s.executions[m._execution[3]] = {"completionTime": "t", "succeededCount": 1}
     m._probed_at = 0
     assert not m.check() and "disappeared" in m.error()
+
+
+def test_a_new_job_retires_this_catchments_idle_jobs_on_older_images():
+    s = _Session()
+    la = _run_launcher(s)
+    old = "australia-southeast1-docker.pkg.dev/proj/ducks/duckstring:0.7.0-gcp"
+
+    def job(name, image, tag):
+        return {"name": f"projects/proj/locations/australia-southeast1/jobs/{name}",
+                "labels": {"duckstring": "duck", "duckstring-catchment": tag},
+                "template": {"template": {"containers": [{"image": image}]}}}
+
+    s.listed = [job("duckstring-duck-aaaa0001", old, la.catchment_tag), job("duckstring-duck-aaaa0002", old, la.catchment_tag),
+                job("duckstring-duck-aaaa0003", old, "another"), job("duckstring-duck-aaaa0004", la.image, la.catchment_tag),
+                job("my-ducks", old, la.catchment_tag)]
+    s.job_executions = {"duckstring-duck-aaaa0002": [{"completionTime": "t"}, {}],  # one still running: kept
+                        "duckstring-duck-aaaa0001": [{"completionTime": "t"}]}
+    la.ensure("sales@1", "1.0.0", "p", duck={})
+    assert s.deleted == ["duckstring-duck-aaaa0001"]
+    create = [c for c in s.calls if c[0] == "POST" and c[1].endswith("/jobs")][0]
+    assert create[3]["labels"]["duckstring-catchment"] == la.catchment_tag
 
 
 # ─── Compute Engine ──────────────────────────────────────────────────────────────

@@ -81,6 +81,8 @@ class CloudRunLauncher:
         self._session_project: str | None = None
         self._jobs: dict[tuple, str] = {}  # config → job name (created or found)
         self._executions: dict[str, tuple[str, str, str, str]] = {}  # pond key → (project, region, job, execution)
+        # Labels this Catchment's jobs, so retiring old ones never touches another Catchment's in a shared project.
+        self.catchment_tag = hashlib.sha256(f"duckstring:{token}".encode()).hexdigest()[:16]
         self._pending: dict[str, tuple] = {}
         self._launch_errors: dict[str, str] = {}
 
@@ -131,7 +133,7 @@ class CloudRunLauncher:
             if exc.status != 404:
                 raise
             body = {
-                "labels": {"duckstring": "duck"},
+                "labels": {"duckstring": "duck", "duckstring-catchment": self.catchment_tag},
                 "template": {"taskCount": 1, "template": {
                     "containers": [{"image": image, "resources": {"limits": {"cpu": cpu, "memory": memory}}}],
                     "serviceAccount": account, "maxRetries": 0, "timeout": _TASK_TIMEOUT,
@@ -140,8 +142,31 @@ class CloudRunLauncher:
             op = gcp_rest.call(self._s(), "POST", f"{base}/jobs", params={"jobId": name}, json=body)
             gcp_rest.wait_operation(self._s(), f"{_RUN}/{op['name']}")
             log.info("cloudrun: job %s ready in %s", name, region)
+            if not (dc.get("job") or self.job):
+                self._retire_old_jobs(base, image, keep=name)
         self._jobs[sig] = name
         return project, region, name
+
+    def _retire_old_jobs(self, base: str, image: str, keep: str) -> None:
+        """Delete this Catchment's other auto-named jobs that run another image (an older Duckstring) and have no
+        execution in flight: each new image makes a new job, and nothing else removes the old ones. Best effort."""
+        try:
+            jobs = gcp_rest.call(self._s(), "GET", f"{base}/jobs", params={"pageSize": 500}).get("jobs") or []
+            for job in jobs:
+                short = job["name"].rsplit("/", 1)[-1]
+                if short == keep or not short.startswith(f"{_JOB_PREFIX}-"):
+                    continue
+                if (job.get("labels") or {}).get("duckstring-catchment") != self.catchment_tag:
+                    continue
+                if job["template"]["template"]["containers"][0]["image"] == image:
+                    continue
+                executions = gcp_rest.call(self._s(), "GET", f"{base}/jobs/{short}/executions").get("executions") or []
+                if any(not e.get("completionTime") for e in executions):
+                    continue
+                gcp_rest.call(self._s(), "DELETE", f"{base}/jobs/{short}")
+                log.info("cloudrun: deleting job %s", short)
+        except Exception:
+            log.warning("cloudrun: could not retire old Duck jobs", exc_info=True)
 
     def start_execution(self, dc: dict, args: list[str], cpu: str, memory: str) -> tuple[str, str, str, str]:
         """Run one execution of the job for this config and size with ``python -m <args>``; returns its address."""

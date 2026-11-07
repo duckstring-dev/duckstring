@@ -97,6 +97,8 @@ class ContainerAppsLauncher:
         self._workspaces: dict[tuple[str, str], str] = {}  # (resource group, job) → Log Analytics workspace id
         self._jobs: dict[tuple, tuple[str, str, str | None]] = {}  # config → (resource group, job, client id)
         self._executions: dict[str, tuple[str, str, str, str]] = {}  # pond key → (sub, rg, job, execution)
+        # Tags this Catchment's jobs, so retiring old ones never touches another Catchment's in a shared group.
+        self.catchment_tag = hashlib.sha256(f"duckstring:{token}".encode()).hexdigest()[:16]
         self._pending: dict[str, tuple] = {}
         self._launch_errors: dict[str, str] = {}
 
@@ -177,9 +179,11 @@ class ContainerAppsLauncher:
                 "template": {"containers": [{"name": _CONTAINER, "image": image,
                                              "resources": {"cpu": 1.0, "memory": "2Gi"}}]},
             },
-            "tags": {"duckstring": "duck"},
+            "tags": {"duckstring": "duck", "duckstring-catchment": self.catchment_tag},
         }
         job = self._client(sub).jobs.begin_create_or_update(rg, name, body).result()
+        if not (dc.get("job") or self.job):
+            self._retire_old_jobs(sub, rg, image, keep=name)
         client_id = None
         for key, value in ((getattr(job, "identity", None) and job.identity.user_assigned_identities) or {}).items():
             if key.lower() == identity.lower():
@@ -190,6 +194,25 @@ class ContainerAppsLauncher:
             self._workspaces[(rg, name)] = logs.customer_id
         log.info("containerapps: job %s ready in %s", name, rg)
         return sub, rg, name, client_id
+
+    def _retire_old_jobs(self, sub: str, rg: str, image: str, keep: str) -> None:
+        """Delete this Catchment's other auto-named jobs that run another image (an older Duckstring) and have no
+        execution in flight: each new image makes a new job, and nothing else removes the old ones. Best effort."""
+        client = self._client(sub)
+        try:
+            for job in client.jobs.list_by_resource_group(rg):
+                if job.name == keep or not job.name.startswith(f"{_JOB_PREFIX}-"):
+                    continue
+                if (job.tags or {}).get("duckstring-catchment") != self.catchment_tag:
+                    continue
+                if job.template.containers[0].image == image:
+                    continue
+                if any(_status(e.status) in _LIVE for e in client.jobs_executions.list(rg, job.name)):
+                    continue
+                client.jobs.begin_delete(rg, job.name)
+                log.info("containerapps: deleting job %s (it ran %s)", job.name, job.template.containers[0].image)
+        except Exception:
+            log.warning("containerapps: could not retire old Duck jobs in %s", rg, exc_info=True)
 
     def start_execution(self, dc: dict, args: list[str], cpu: float, memory: str) -> tuple[str, str, str, str]:
         """Start one execution of the config's job running ``python -m <args>``; returns its address."""
