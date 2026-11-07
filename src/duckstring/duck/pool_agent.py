@@ -43,7 +43,9 @@ class PoolAgent:
         self.persist_root = persist_root
         self.poll_interval = poll_interval
         self._procs: dict[str, subprocess.Popen] = {}  # "{pond}@{major}" -> child Duck
-        self._client = httpx.Client(timeout=10.0, headers={"X-Duck-Token": token})
+        from .id_token import catchment_auth
+
+        self._client = httpx.Client(timeout=10.0, headers={"X-Duck-Token": token}, auth=catchment_auth(self.base))
 
     # ─── the dial-back channel ───────────────────────────────────────────────────
 

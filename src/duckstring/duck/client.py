@@ -23,7 +23,11 @@ class CatchmentClient:
         self.version = version  # the code this Duck runs, sent on each poll so a redeploy can replace it
         self.token = token
         self.poll_timeout = poll_timeout
-        self._client = httpx.Client(timeout=poll_timeout + 5.0, headers={"X-Duck-Token": token})
+        from .id_token import catchment_auth
+
+        # A private Catchment on Cloud Run also wants a Google identity token (see id_token).
+        self._client = httpx.Client(timeout=poll_timeout + 5.0, headers={"X-Duck-Token": token},
+                                    auth=catchment_auth(self.base))
         # When the Catchment last answered (time.monotonic()): a poll or an event it accepted. A refused
         # request (a recreated Catchment's new token, a removed Pond) is no contact either.
         self.last_contact = time.monotonic()
