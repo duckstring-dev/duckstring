@@ -1,46 +1,21 @@
 'use client';
 
 import type { ComputeDefaults } from '@/lib/api';
+import { FARGATE_CPU, FARGATE_MEMORY, cpuLabel, memoryLabel } from '@/lib/aws';
+import { CONSUMPTION_CPU, backendInfo, consumptionMemory, deployConfigMissing } from '@/lib/clouds';
+import { InstanceTypePicker } from './InstanceTypePicker';
 
-// The AWS deployment fields a remote Duck needs (plans/compute-config-ui.md), shared by the Cloud-menu
-// pool form and a Pond's Dedicated Duck. Fields already supplied by the Catchment env show a muted "env:…"
-// placeholder and are optional; the rest are required to launch. `deployConfigMissing` mirrors the backend
-// validation so the caller can gate its save button.
+export { deployConfigMissing } from '@/lib/clouds';
 
-type Provider = 'fargate' | 'ec2';
+// The deployment fields a remote Duck needs (plans/compute-config-ui.md), per backend (lib/clouds.ts), shared
+// by the Cloud-menu pool form and a Pond's Dedicated Duck. Fields already supplied by the Catchment env show a
+// muted "env:…" placeholder and are optional; the rest are required to launch. `deployConfigMissing` mirrors
+// the backend validation so the caller can gate its save button.
+
 type Cfg = Record<string, string>;
 
-const FIELDS: Record<Provider, { key: string; label: string; ph: string; required?: boolean }[]> = {
-  fargate: [
-    { key: 'image', label: 'Container image', ph: '…dkr.ecr….amazonaws.com/duckstring:tag', required: true },
-    { key: 'task_definition', label: 'or task-def ARN', ph: 'family:revision (skips image registration)' },
-    { key: 'subnets', label: 'Subnets', ph: 'subnet-aaa,subnet-bbb', required: true },
-    { key: 'security_groups', label: 'Security groups', ph: 'sg-aaa,sg-bbb' },
-    { key: 'execution_role', label: 'Execution role', ph: 'arn:aws:iam::…:role/exec (image pull + logs)', required: true },
-    { key: 'task_role', label: 'Task role', ph: 'arn:aws:iam::…:role/task (S3 access)', required: true },
-    { key: 'cluster', label: 'Cluster', ph: 'default' },
-    { key: 'assign_public_ip', label: 'Public IP', ph: 'ENABLED' },
-    { key: 'cpu_arch', label: 'CPU arch', ph: 'X86_64' },
-  ],
-  ec2: [
-    { key: 'ami', label: 'AMI', ph: 'ami-… (with duckstring installed)', required: true },
-    { key: 'instance_profile', label: 'Instance profile', ph: 'duckstring-worker (IAM for S3)', required: true },
-    { key: 'pip_spec', label: 'pip spec', ph: 'duckstring==x.y (boot override)' },
-  ],
-};
-
-// The required deployment fields still unsatisfied by input OR env — empty means ready to launch.
-export function deployConfigMissing(provider: Provider, value: Cfg, defaults: ComputeDefaults | null): string[] {
-  const env = defaults?.[provider]?.env ?? {};
-  const has = (k: string) => (value[k]?.trim() || env[k]) ? true : false;
-  if (provider === 'ec2') return ['ami', 'instance_profile'].filter((k) => !has(k));
-  const miss = ['subnets', 'execution_role', 'task_role'].filter((k) => !has(k));
-  if (!has('image') && !has('task_definition')) miss.unshift('image');
-  return miss;
-}
-
 export function DeployConfigForm({ provider, value, onChange, defaults }: {
-  provider: Provider;
+  provider: string;
   value: Cfg;
   onChange: (v: Cfg) => void;
   defaults: ComputeDefaults | null;
@@ -54,7 +29,7 @@ export function DeployConfigForm({ provider, value, onChange, defaults }: {
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-      {FIELDS[provider].map((f) => {
+      {backendInfo(provider).fields.map((f) => {
         const fromEnv = env[f.key] != null;
         return (
           <div key={f.key} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -78,5 +53,56 @@ export function DeployConfigForm({ provider, value, onChange, defaults }: {
         </div>
       )}
     </div>
+  );
+}
+
+// A backend's size: a Fargate cpu × memory pair, a Container Apps consumption size (memory follows the cpu), or
+// a VM instance type (listed for the region, else typed). The region input is shown only where the backend
+// takes it on the pool (EC2); an Azure VM's location is one of its deployment fields.
+export function SizeFields({ provider, cpu, memory, onSize, instanceType, onInstanceType, region, onRegion,
+                             location, style }: {
+  provider: string;
+  cpu: string; memory: string; onSize: (cpu: string, memory: string) => void;
+  instanceType: string; onInstanceType: (v: string) => void;
+  region: string; onRegion: (v: string) => void;
+  location?: string;
+  style: React.CSSProperties;
+}) {
+  const sizing = backendInfo(provider).sizing;
+  if (sizing === 'fargate') {
+    const pickCpu = (v: string) => {
+      const mems = FARGATE_MEMORY[Number(v)] ?? [];
+      onSize(v, mems.includes(Number(memory)) ? memory : String(mems[0] ?? ''));
+    };
+    return (
+      <div style={{ display: 'flex', gap: 6 }}>
+        <select value={cpu} onChange={(e) => pickCpu(e.target.value)} style={style}>
+          {FARGATE_CPU.map((c) => <option key={c} value={c}>{cpuLabel(c)}</option>)}
+        </select>
+        <select value={memory} onChange={(e) => onSize(cpu, e.target.value)} style={style}>
+          {(FARGATE_MEMORY[Number(cpu)] ?? []).map((m) => <option key={m} value={m}>{memoryLabel(m)}</option>)}
+        </select>
+      </div>
+    );
+  }
+  if (sizing === 'consumption') {
+    return (
+      <select value={cpu} onChange={(e) => onSize(e.target.value, String(consumptionMemory(Number(e.target.value))))}
+              style={style}>
+        {CONSUMPTION_CPU.map((c) => (
+          <option key={c} value={c}>{c / 1024} vCPU · {consumptionMemory(c) / 1024} GiB</option>
+        ))}
+      </select>
+    );
+  }
+  const where = backendInfo(provider).location ? location : region;
+  return (
+    <>
+      {!backendInfo(provider).location && (
+        <input value={region} onChange={(e) => onRegion(e.target.value)} placeholder="region (blank = Catchment default)"
+               style={style} />
+      )}
+      <InstanceTypePicker value={instanceType} onCommit={onInstanceType} region={where?.trim() || undefined} style={style} />
+    </>
   );
 }

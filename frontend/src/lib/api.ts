@@ -157,7 +157,7 @@ export interface RawApp {
 // presets are just pools; the picker renders whatever /catchment/duck-pools returns.
 export interface DuckPool {
   name: string;
-  provider: string; // 'fargate' (default) | 'ec2'
+  provider: string; // a backend on the Catchment's cloud ('fargate' | 'ec2' | 'containerapps' | 'azurevm' | 'local')
   instance_type: string | null; // EC2 pools
   cpu: number | null; // Fargate task cpu units
   memory: number | null; // Fargate task memory (MiB)
@@ -172,10 +172,7 @@ export interface DuckPool {
 
 // Per-provider deployment config metadata (GET /catchment/compute-defaults): which fields the launcher
 // already reads from env (shown as inherited) + the required fields still missing without any UI input.
-export interface ComputeDefaults {
-  fargate: { fields: string[]; env: Record<string, string>; missing_without_input: string[] };
-  ec2: { fields: string[]; env: Record<string, string>; missing_without_input: string[] };
-}
+export type ComputeDefaults = Record<string, { fields: string[]; env: Record<string, string>; missing_without_input: string[] }>;
 
 export function fetchComputeDefaults(): Promise<ComputeDefaults> {
   return getJSON<ComputeDefaults>('/catchment/compute-defaults');

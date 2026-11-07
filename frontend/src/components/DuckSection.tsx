@@ -6,9 +6,9 @@ import {
   fetchComputeDefaults, fetchDuckPools, setDuck as apiSetDuck,
   type ComputeDefaults, type DuckConfig, type DuckPool,
 } from '@/lib/api';
-import { cpuLabel, defaultMemoryFor, FARGATE_CPU, FARGATE_MEMORY, memoryLabel } from '@/lib/aws';
-import { DeployConfigForm, deployConfigMissing } from './DeployConfigForm';
-import { InstanceTypePicker } from './InstanceTypePicker';
+import { defaultMemoryFor } from '@/lib/aws';
+import { backendInfo, cloudBackends } from '@/lib/clouds';
+import { DeployConfigForm, SizeFields, deployConfigMissing } from './DeployConfigForm';
 
 // The per-Pond compute config (plans/cloud-config.md): the Duck TARGET (where it runs) + size, and the
 // Flock posture (over-envelope offload). The effective value coalesces override ?? declared ?? default;
@@ -54,15 +54,16 @@ export function DuckSection({ pondId, duck, flockError }: {
 
   const target = duck.duck_target;
   const cloudEnabled = cloud?.cloud_enabled ?? false;
-  const fargateEnabled = cloud?.fargate_enabled ?? false;
+  // The S/M/L/XL presets run on the cloud's default backend (AWS: Fargate) and rely on its env config.
+  const presetBackend = cloudBackends(cloud)[0];
+  const presetLabel = backendInfo(presetBackend).label.split(' ')[0];
+  const presetsReady = cloud?.backends?.[presetBackend] ?? cloud?.fargate_enabled ?? false;
   const credsInvalid = cloudEnabled && cloud?.creds_valid === false;
   const remoteSelected = target !== 'catchment';
   const hasOverride = Object.values(duck.override).some((v) => v != null);
 
-  // The S/M/L/XL Fargate presets (managed) aren't an option until Fargate is enabled — they rely on the
-  // Catchment's Fargate env config.
-  const targets = ['catchment', ...pools.filter((p) => !p.managed || fargateEnabled).map((p) => p.name), 'dedicated'];
-  const onUnavailablePreset = !fargateEnabled && !!pools.find((p) => p.name === target)?.managed;
+  const targets = ['catchment', ...pools.filter((p) => !p.managed || presetsReady).map((p) => p.name), 'dedicated'];
+  const onUnavailablePreset = !presetsReady && !!pools.find((p) => p.name === target)?.managed;
 
   return (
     <div>
@@ -72,7 +73,7 @@ export function DuckSection({ pondId, duck, flockError }: {
           fontSize: 10, lineHeight: 1.4, color: '#f59e0b', border: '1px solid #f59e0b66',
           background: '#f59e0b14', borderRadius: 5, padding: '5px 7px', marginBottom: 8,
         }}>
-          ⚠ AWS credentials are not authenticating — a remote target won&apos;t launch. Fix in Options → Cloud.
+          ⚠ {cloud?.provider_title ?? 'Cloud'} credentials are not authenticating — a remote target won&apos;t launch. Fix in Options → Cloud.
         </div>
       )}
       {/* Where the Duck runs. 'catchment' = the Catchment's own box; a pool / 'dedicated' = remote. */}
@@ -85,17 +86,17 @@ export function DuckSection({ pondId, duck, flockError }: {
         ))}
       </div>
 
-      {/* Its declared target is a Fargate preset, but Fargate isn't enabled — it won't launch until it is. */}
+      {/* Its declared target is a preset, but the backend behind it isn't enabled — it won't launch until it is. */}
       {onUnavailablePreset && (
         <div style={{ fontSize: 10, color: THEME_AMBER, marginBottom: 6, lineHeight: 1.4 }}>
-          This Pond targets the <b>{target}</b> Fargate preset, but Fargate isn&apos;t enabled — add the
-          Fargate deployment config in Options → Cloud, or pick another target.
+          This Pond targets the <b>{target}</b> preset, but {presetLabel} isn&apos;t enabled — add its deployment
+          config in Options → Cloud, or pick another target.
         </div>
       )}
       {/* A remote target is valid config anywhere, but only runs remotely once cloud is enabled. */}
       {remoteSelected && !cloudEnabled && (
         <div style={{ fontSize: 10, color: THEME_AMBER, marginBottom: 6, lineHeight: 1.4 }}>
-          Runs locally until cloud is enabled (attach an S3 data root + AWS creds in Options → Cloud).
+          Runs locally until cloud is enabled (a data root on a cloud + its credentials, in Options → Cloud).
         </div>
       )}
       {pools.length === 0 && (
@@ -104,8 +105,8 @@ export function DuckSection({ pondId, duck, flockError }: {
         </div>
       )}
 
-      {/* Dedicated: a remote Duck of one — the SAME provider setup a pool uses (provider + size + region +
-          AWS deployment config), scoped to this Duck (plans/compute-config-ui.md). */}
+      {/* Dedicated: a remote Duck of one — the SAME backend setup a pool uses (backend + size + deployment
+          config), scoped to this Duck (plans/compute-config-ui.md). */}
       {target === 'dedicated' && <DedicatedDuckConfig pondId={pondId} duck={duck} />}
 
       {/* Flock posture (over-envelope offload). Off is inert; upgrade/always need a configured engine. */}
@@ -160,15 +161,17 @@ export function DuckSection({ pondId, duck, flockError }: {
   );
 }
 
-// A Pond's Dedicated Duck: the same provider setup as a pool (provider + size + region + AWS deployment
-// config), scoped to this one Duck, validated before it's accepted (the backend rejects an inadequate
-// config; the form gates Apply the same way).
+// A Pond's Dedicated Duck: the same backend setup as a pool (backend + size + deployment config), scoped to
+// this one Duck, validated before it's accepted (the backend rejects an inadequate config; the form gates Apply
+// the same way).
 function DedicatedDuckConfig({ pondId, duck }: { pondId: string; duck: DuckConfig }) {
+  const cloud = useLiveStore((s) => s.cloud);
+  const backends = cloudBackends(cloud);
   const [defaults, setDefaults] = useState<ComputeDefaults | null>(null);
   useEffect(() => { void fetchComputeDefaults().then(setDefaults).catch(() => setDefaults(null)); }, []);
 
   const cur = duck.deploy_config ?? {};
-  const [provider, setProvider] = useState<'fargate' | 'ec2'>(cur.provider === 'ec2' ? 'ec2' : 'fargate');
+  const [provider, setProvider] = useState(cur.provider && backends.includes(cur.provider) ? cur.provider : backends[0]);
   const [cfg, setCfg] = useState<Record<string, string>>(cur);
   const [instanceType, setInstanceType] = useState(cur.instance_type ?? duck.dedicated_instance_type ?? '');
   const [cpu, setCpu] = useState(cur.cpu ?? '1024');
@@ -177,20 +180,16 @@ function DedicatedDuckConfig({ pondId, duck }: { pondId: string; duck: DuckConfi
   const [autoStop, setAutoStop] = useState(!!duck.dedicated_auto_stop);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-
-  const pickCpu = (v: string) => {
-    setCpu(v);
-    const m = FARGATE_MEMORY[Number(v)] ?? [];
-    if (!m.includes(Number(mem))) setMem(String(m[0] ?? ''));
-  };
   const missing = deployConfigMissing(provider, cfg, defaults);
+  const sizing = backendInfo(provider).sizing;
 
   const apply = async () => {
     setBusy(true); setErr(null);
     const deploy: Record<string, string> = { provider, ...cfg };
-    if (region.trim()) deploy.region = region.trim();
-    if (provider === 'ec2') { if (instanceType.trim()) deploy.instance_type = instanceType.trim(); }
-    else { deploy.cpu = cpu; deploy.memory = mem; }
+    if (sizing === 'vm') {
+      if (instanceType.trim()) deploy.instance_type = instanceType.trim();
+      if (region.trim()) deploy.region = region.trim();
+    } else { deploy.cpu = cpu; deploy.memory = mem; }
     try {
       await apiSetDuck(pondId, { duck_target: 'dedicated', deploy_config: deploy, dedicated_auto_stop: autoStop });
     } catch (e) { setErr(e instanceof Error ? e.message : 'failed'); } finally { setBusy(false); }
@@ -198,23 +197,12 @@ function DedicatedDuckConfig({ pondId, duck }: { pondId: string; duck: DuckConfi
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
-      <select value={provider} onChange={(e) => setProvider(e.target.value as 'fargate' | 'ec2')} style={input}>
-        <option value="fargate">fargate (serverless)</option>
-        <option value="ec2">ec2 (big / GPU)</option>
+      <select value={provider} onChange={(e) => setProvider(e.target.value)} style={input}>
+        {backends.map((b) => <option key={b} value={b}>{backendInfo(b).label}</option>)}
       </select>
-      <input value={region} onChange={(e) => setRegion(e.target.value)} placeholder="region (e.g. us-east-1)" style={input} />
-      {provider === 'fargate' ? (
-        <div style={{ display: 'flex', gap: 6 }}>
-          <select value={cpu} onChange={(e) => pickCpu(e.target.value)} style={input}>
-            {FARGATE_CPU.map((c) => <option key={c} value={c}>{cpuLabel(c)}</option>)}
-          </select>
-          <select value={mem} onChange={(e) => setMem(e.target.value)} style={input}>
-            {(FARGATE_MEMORY[Number(cpu)] ?? []).map((m) => <option key={m} value={m}>{memoryLabel(m)}</option>)}
-          </select>
-        </div>
-      ) : (
-        <InstanceTypePicker value={instanceType} onCommit={setInstanceType} region={region.trim() || undefined} style={input} />
-      )}
+      <SizeFields provider={provider} cpu={cpu} memory={mem} onSize={(c, m) => { setCpu(c); setMem(m); }}
+                  instanceType={instanceType} onInstanceType={setInstanceType} region={region} onRegion={setRegion}
+                  location={cfg[backendInfo(provider).location ?? '']} style={input} />
       <div style={{ borderTop: '1px solid #27272a', paddingTop: 6 }}>
         <div style={{ fontSize: 10, color: '#71717a', marginBottom: 4 }}>Deployment ({provider})</div>
         <DeployConfigForm provider={provider} value={cfg} onChange={setCfg} defaults={defaults} />
