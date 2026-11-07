@@ -159,8 +159,12 @@ class DispatchingLauncher:
             return None
         if "_any" in self.remotes:
             return self.remotes["_any"]
-        # Only the pool's own backend: one on another cloud (the data root moved) runs on the Catchment's box.
-        return self.remotes.get(((duck or {}).get("pool") or {}).get("provider") or self.default_provider)
+        # Only the Duck's own backend (its pool's, or a dedicated Duck's deploy config's): one on another cloud
+        # (the data root moved) runs on the Catchment's box.
+        duck = duck or {}
+        backend = ((duck.get("pool") or {}).get("provider") or (duck.get("deploy_config") or {}).get("provider")
+                   or self.default_provider)
+        return self.remotes.get(backend)
 
     def pool_identity(self, duck: dict | None) -> str | None:
         """The named Pool this spawn belongs to, or ``None`` for per-machine routing. A named,

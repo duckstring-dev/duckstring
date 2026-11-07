@@ -139,6 +139,20 @@ def test_a_pool_never_borrows_another_backend():
     assert disp._remote_for({"pool": {"provider": "ec2"}}) is None  # before: Fargate took it
 
 
+def test_a_dedicated_duck_runs_on_its_deploy_configs_backend_with_its_size(tmp_path, monkeypatch):
+    # Before: a dedicated EC2 Duck went to Fargate (routing read only a pool's provider), and saving one
+    # stripped its size from the deploy config.
+    disp = DispatchingLauncher(object(), {"fargate": "F", "ec2": "E"})
+    assert disp._remote_for({"duck_target": "dedicated", "deploy_config": {"provider": "ec2"}}) == "E"
+    for k in ("DUCKSTRING_EC2_AMI", "DUCKSTRING_EC2_INSTANCE_PROFILE"):
+        monkeypatch.setenv(k, "x")
+    d = _driver(tmp_path, data_root="s3://bucket/p")
+    d.set_duck("src@1", duck_target="dedicated", deploy_config={
+        "provider": "ec2", "instance_type": "r6i.4xlarge", "region": "eu-west-2", "subnet": "subnet-1", "junk": "x"})
+    assert d.duck_config("src@1")["deploy_config"] == {
+        "provider": "ec2", "subnet": "subnet-1", "instance_type": "r6i.4xlarge", "region": "eu-west-2"}
+
+
 # ─── pools on the Catchment's cloud ──────────────────────────────────────────────
 
 def test_a_pool_must_use_a_backend_on_the_catchments_cloud(tmp_path):

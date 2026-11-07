@@ -1708,7 +1708,9 @@ class Driver(TapsMixin):
                         raise ValueError(
                             f"dedicated {provider} Duck is missing required deployment config: "
                             f"{', '.join(miss)} — set them (or the DUCKSTRING_{provider.upper()}_* env)")
-                    new["deploy_config"] = {"provider": provider, **cloud_deploy.clean(provider, dc)}
+                    # The size travels in the same blob (cpu/memory, or instance_type; region): keep it.
+                    size = {k: dc[k] for k in ("cpu", "memory", "instance_type", "region") if dc.get(k) not in (None, "")}
+                    new["deploy_config"] = {"provider": provider, **cloud_deploy.clean(provider, dc), **size}
                 self.db.execute(
                     "INSERT INTO pond_duck (pond_id, duck_target, dedicated_instance_type, "
                     "dedicated_auto_stop, flock_mode, flock_engine, oom_policy, deploy_config, flock_accept) "

@@ -290,7 +290,8 @@ class AzureVmLauncher:
         name, major = split_pond_key(pond_key)
         pool = (duck or {}).get("pool") or {}
         dc = (duck or {}).get("deploy_config") or pool.get("deploy_config") or {}
-        size = (duck or {}).get("dedicated_instance_type") or pool.get("instance_type") or _DEFAULT_SIZE
+        size = ((duck or {}).get("dedicated_instance_type") or pool.get("instance_type") or dc.get("instance_type")
+                or _DEFAULT_SIZE)
         args = [
             "duckstring.duck", "--pond", name, "--major", str(major), "--version", version,
             "--catchment", self.remote_base_url, f"--token={self.token}",
