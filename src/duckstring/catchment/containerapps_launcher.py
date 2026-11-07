@@ -24,10 +24,10 @@ import os
 from datetime import timedelta
 
 from ..keys import split_pond_key
+from .vm_boot import REMOTE_ROOT
 
 log = logging.getLogger("duckstring.containerapps")
 
-_REMOTE_ROOT = "/var/lib/duckstring"
 _CONTAINER = "duck"
 _JOB_PREFIX = "duckstring-duck"
 # How long one execution may run. A Duck exits on its own once idle (and after DUCKSTRING_DUCK_ORPHAN_MINUTES
@@ -69,6 +69,7 @@ def _memory(pool: dict, dc: dict) -> str:
 
 class ContainerAppsLauncher:
     manages_processes = True
+    name = "containerapps"
 
     def __init__(self, root, base_url: str | None, token: str = "", data_root: str | None = None,
                  *, dialback=None, image: str | None = None, environment: str | None = None,
@@ -204,6 +205,12 @@ class ContainerAppsLauncher:
         sub, rg, job, name = address
         return _status(self._client(sub).job_execution(rg, job, name).status)
 
+    def size(self, pool: dict, dc: dict) -> tuple[float, str]:
+        return _cpu(pool, dc), _memory(pool, dc)
+
+    def execution_live(self, address: tuple[str, str, str, str]) -> bool:
+        return self.execution_status(address) in _LIVE
+
     def stop_execution(self, address: tuple[str, str, str, str]) -> None:
         sub, rg, job, name = address
         self._client(sub).jobs.begin_stop_execution(rg, job, name)
@@ -235,10 +242,10 @@ class ContainerAppsLauncher:
         args = [
             "duckstring.duck", "--pond", name, "--major", str(major), "--version", version,
             "--catchment", self.remote_base_url, f"--token={self.token}",
-            "--root", _REMOTE_ROOT, "--source-path", source_path, f"--data-root={self.data_root or ''}",
+            "--root", REMOTE_ROOT, "--source-path", source_path, f"--data-root={self.data_root or ''}",
         ]
         try:
-            address = self.start_execution(dc, args, _cpu(pool, dc), _memory(pool, dc))
+            address = self.start_execution(dc, args, *self.size(pool, dc))
         except ValueError as exc:
             log.error("%s", exc)
             self._launch_errors[pond_key] = str(exc)

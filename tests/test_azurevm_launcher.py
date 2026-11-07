@@ -8,8 +8,9 @@ import types
 
 import pytest
 
-from duckstring.catchment.azurevm_launcher import AzureVmLauncher, _image_reference, custom_data
+from duckstring.catchment.azurevm_launcher import AzureVmLauncher, _image_reference
 from duckstring.catchment.dialback import RemoteDialback
+from duckstring.catchment.vm_boot import boot_script
 
 pytestmark = pytest.mark.timeout(10)
 
@@ -155,10 +156,10 @@ def test_diagnose_reports_the_vms_statuses():
 
 
 def test_the_pool_machine_is_one_vm_running_the_agent():
-    from duckstring.catchment.pool_launcher import AzureVmPoolMachine
+    from duckstring.catchment.pool_launcher import VmPoolMachine
 
     la, vms = _launcher()
-    m = AzureVmPoolMachine("heavy", {"instance_type": "Standard_D16s_v5"}, la)
+    m = VmPoolMachine("heavy", {"instance_type": "Standard_D16s_v5"}, la)
     m.start()
     [(_, _, name, body)] = _created(vms)
     script = base64.b64decode(body["properties"]["osProfile"]["customData"]).decode()
@@ -181,5 +182,5 @@ def test_images_are_urns_or_resource_ids():
 
 
 def test_the_boot_script_quotes_its_arguments():
-    script = custom_data(["duckstring.duck", "--token=a b'c"], "duckstring[azure]==1.0")
+    script = boot_script(["duckstring.duck", "--token=a b'c"], "duckstring[azure]==1.0")
     assert "'--token=a b'\"'\"'c'" in script

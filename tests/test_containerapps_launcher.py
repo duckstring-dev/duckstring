@@ -175,11 +175,11 @@ def test_diagnose_reports_the_status_and_the_log_tail():
 
 
 def test_the_pool_machine_runs_the_agent_as_one_execution():
-    from duckstring.catchment.pool_launcher import ContainerAppsPoolMachine
+    from duckstring.catchment.pool_launcher import ExecutionPoolMachine
 
     client = _Client()
     la = _launcher(client)
-    m = ContainerAppsPoolMachine("heavy", {"cpu": 4096, "memory": 8192}, la)
+    m = ExecutionPoolMachine("heavy", {"cpu": 4096, "memory": 8192}, la)
     m.start()
     container = _calls(client, "start")[0][3]["containers"][0]
     assert container["args"][:3] == ["duckstring.duck.pool_agent", "--pool", "heavy"]

@@ -8,8 +8,8 @@ catches a dead machine). The **machine backend** brings up the ONE machine per P
 
 - :class:`LocalPoolMachine` — a subprocess agent with its own root dir: the offline test double AND a
   legitimate second Pool on this box for dev.
-- :class:`FargatePoolMachine` / :class:`Ec2PoolMachine` / :class:`ContainerAppsPoolMachine` /
-  :class:`AzureVmPoolMachine`: start one task/instance/execution/VM running the agent command, reusing the
+- :class:`FargatePoolMachine` / :class:`Ec2PoolMachine` / :class:`ExecutionPoolMachine` /
+  :class:`VmPoolMachine`: start one task/instance/execution/VM running the agent command, reusing the
   per-Pond launchers' config resolution (image/roles/networking from the pool's deploy_config over the env
   defaults). Real-cloud validation is the gate run's job.
 
@@ -234,9 +234,23 @@ class FargatePoolMachine(_RemoteMachine):
         return self._error
 
 
-class ContainerAppsPoolMachine(_RemoteMachine):
-    """One Container Apps job execution running the Pool agent, over the per-Pond ContainerAppsLauncher's job
-    (created from the pool's deploy_config over the env defaults). Sizing = the pool's cpu/memory."""
+def _agent_args(pool: str, launcher) -> list[str]:
+    from .vm_boot import REMOTE_ROOT
+
+    return [
+        "duckstring.duck.pool_agent", "--pool", pool,
+        "--catchment", launcher.remote_base_url, f"--token={launcher.token}",
+        "--root", REMOTE_ROOT,
+        f"--data-root={launcher.data_root or ''}",
+        f"--persist-root={launcher.data_root or ''}",  # a Pool Duck persists to the data root
+    ]
+
+
+class ExecutionPoolMachine(_RemoteMachine):
+    """One job execution running the Pool agent (Container Apps, Cloud Run), over the per-Pond launcher's job,
+    created from the pool's deploy_config over the env defaults. Sizing = the pool's cpu/memory. The launcher
+    provides ``name``, ``size``, ``start_execution``, ``execution_live`` and ``stop_execution``; an execution's
+    address ends with its name."""
 
     def __init__(self, pool: str, pool_spec: dict, launcher):
         self.pool = pool
@@ -246,40 +260,29 @@ class ContainerAppsPoolMachine(_RemoteMachine):
         self._error: str | None = None
 
     def _record(self):
-        return self._execution[3] if self._execution else None
+        return self._execution[-1] if self._execution else None
 
     def _forget(self) -> None:
         self._execution = None
 
     def _probe(self) -> bool:
-        from .containerapps_launcher import _LIVE
-
-        return self.cl.execution_status(self._execution) in _LIVE
+        return self.cl.execution_live(self._execution)
 
     def start(self) -> None:
-        from .containerapps_launcher import _REMOTE_ROOT, _cpu, _memory
-
         if self.check():
             return
         if self.cl.remote_base_url is None:
             self.cl.dialback.request()
-            self._error = "containerapps pool: waiting for a reachable Catchment URL (dial-back)"
+            self._error = f"{self.cl.name} pool: waiting for a reachable Catchment URL (dial-back)"
             return
         dc = self.spec.get("deploy_config") or {}
-        args = [
-            "duckstring.duck.pool_agent", "--pool", self.pool,
-            "--catchment", self.cl.remote_base_url, f"--token={self.cl.token}",
-            "--root", _REMOTE_ROOT,
-            f"--data-root={self.cl.data_root or ''}",
-            f"--persist-root={self.cl.data_root or ''}",  # a Pool Duck persists to the data root
-        ]
         try:
-            self._execution = self.cl.start_execution(dc, args, _cpu(self.spec, dc), _memory(self.spec, dc))
+            self._execution = self.cl.start_execution(dc, _agent_args(self.pool, self.cl), *self.cl.size(self.spec, dc))
             self._error = None
-            log.info("containerapps: started pool machine %s for pool '%s'", self._execution[3], self.pool)
+            log.info("%s: started pool machine %s for pool '%s'", self.cl.name, self._execution[-1], self.pool)
         except Exception as exc:
-            log.exception("containerapps: failed to start the pool machine for '%s'", self.pool)
-            self._error = f"containerapps pool: {exc}"
+            log.exception("%s: failed to start the pool machine for '%s'", self.cl.name, self.pool)
+            self._error = f"{self.cl.name} pool: {exc}"
 
     def is_up(self) -> bool:
         return self._execution is not None
@@ -290,15 +293,17 @@ class ContainerAppsPoolMachine(_RemoteMachine):
         try:
             self.cl.stop_execution(self._execution)
         except Exception:
-            log.exception("containerapps: failed to stop the pool machine for '%s'", self.pool)
+            log.exception("%s: failed to stop the pool machine for '%s'", self.cl.name, self.pool)
         self._execution = None
 
     def error(self) -> str | None:
         return self._error
 
 
-class AzureVmPoolMachine(_RemoteMachine):
-    """One Azure VM running the Pool agent, over the per-Pond AzureVmLauncher's placement and teardown."""
+class VmPoolMachine(_RemoteMachine):
+    """One VM running the Pool agent (Azure VMs, Compute Engine), over the per-Pond VM launcher's placement and
+    teardown. The launcher provides ``name``, ``default_size``, ``start_vm``, ``vm_live`` and ``delete_vm``; a
+    VM's address ends with its name."""
 
     def __init__(self, pool: str, pool_spec: dict, launcher):
         self.pool = pool
@@ -308,41 +313,32 @@ class AzureVmPoolMachine(_RemoteMachine):
         self._error: str | None = None
 
     def _record(self):
-        return self._vm[2] if self._vm else None
+        return self._vm[-1] if self._vm else None
 
     def _forget(self) -> None:
         self._vm = None
 
     def _probe(self) -> bool:
-        from .azurevm_launcher import _STOPPED
-
-        state = self.vl.power_state(self._vm)
-        return state not in (*_STOPPED, "gone")
+        return self.vl.vm_live(self._vm)
 
     def start(self) -> None:
-        from .azurevm_launcher import _DEFAULT_SIZE, _REMOTE_ROOT, _vm_name
+        from .vm_boot import vm_name
 
         if self.check():
             return
         if self.vl.remote_base_url is None:
             self.vl.dialback.request()
-            self._error = "azurevm pool: waiting for a reachable Catchment URL (dial-back)"
+            self._error = f"{self.vl.name} pool: waiting for a reachable Catchment URL (dial-back)"
             return
-        args = [
-            "duckstring.duck.pool_agent", "--pool", self.pool,
-            "--catchment", self.vl.remote_base_url, f"--token={self.vl.token}",
-            "--root", _REMOTE_ROOT,
-            f"--data-root={self.vl.data_root or ''}",
-            f"--persist-root={self.vl.data_root or ''}",  # a Pool Duck persists to the data root
-        ]
         try:
-            self._vm = self.vl.start_vm(_vm_name(f"pool-{self.pool}"), self.spec.get("deploy_config") or {},
-                                        self.spec.get("instance_type") or _DEFAULT_SIZE, args, role="pool-agent")
+            self._vm = self.vl.start_vm(vm_name(f"pool-{self.pool}"), self.spec.get("deploy_config") or {},
+                                        self.spec.get("instance_type") or self.vl.default_size,
+                                        _agent_args(self.pool, self.vl), role="pool-agent")
             self._error = None
-            log.info("azurevm: creating pool machine %s for pool '%s'", self._vm[2], self.pool)
+            log.info("%s: creating pool machine %s for pool '%s'", self.vl.name, self._vm[-1], self.pool)
         except Exception as exc:
-            log.exception("azurevm: failed to start the pool machine for '%s'", self.pool)
-            self._error = f"azurevm pool: {exc}"
+            log.exception("%s: failed to start the pool machine for '%s'", self.vl.name, self.pool)
+            self._error = f"{self.vl.name} pool: {exc}"
 
     def is_up(self) -> bool:
         return self._vm is not None
@@ -353,7 +349,7 @@ class AzureVmPoolMachine(_RemoteMachine):
         try:
             self.vl.delete_vm(self._vm)
         except Exception:
-            log.exception("azurevm: failed to delete the pool machine for '%s'", self.pool)
+            log.exception("%s: failed to delete the pool machine for '%s'", self.vl.name, self.pool)
         self._vm = None
 
     def error(self) -> str | None:

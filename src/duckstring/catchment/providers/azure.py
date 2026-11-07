@@ -220,11 +220,9 @@ class AzureProvider(Provider):
                 "azurevm": AzureVmLauncher(root, base_url, **kw)}
 
     def pool_machine(self, backend: str, pool: str, spec: dict, remote):
-        from ..pool_launcher import AzureVmPoolMachine, ContainerAppsPoolMachine
+        from ..pool_launcher import ExecutionPoolMachine, VmPoolMachine
 
-        if backend == "azurevm":
-            return AzureVmPoolMachine(pool, spec, remote)
-        return ContainerAppsPoolMachine(pool, spec, remote)
+        return (VmPoolMachine if backend == "azurevm" else ExecutionPoolMachine)(pool, spec, remote)
 
 
 def _subscription_from_config() -> str | None:

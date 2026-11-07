@@ -23,23 +23,17 @@ import base64
 import hashlib
 import logging
 import os
-import re
-import secrets
-import shlex
 import threading
-import time
 import urllib.request
 
 from ..keys import split_pond_key
 from .containerapps_launcher import _resource_part
+from .vm_boot import REMOTE_ROOT, WATCH_POLL_S, boot_script, default_pip_spec, delete_when_stopped, vm_name
 
 log = logging.getLogger("duckstring.azurevm")
 
-_REMOTE_ROOT = "/var/lib/duckstring"
 _DEFAULT_IMAGE = "Canonical:ubuntu-24_04-lts:server:latest"
 _DEFAULT_SIZE = "Standard_D2s_v5"
-_REAP_POLL_S = 20.0
-_REAP_FOR_S = 6 * 3600.0  # how long a released VM is watched for its Duck to exit
 _STOPPED = ("PowerState/stopped", "PowerState/deallocated")
 _NO_CONFIG = (
     "Azure VM cannot launch: no subnet, identity or location configured. An azurevm pool needs "
@@ -66,45 +60,16 @@ def _ssh_public_key() -> str:
                                          serialization.PublicFormat.OpenSSH).decode()
 
 
-def _vm_name(pond_key: str) -> str:
-    """A unique VM name from the pond key (Linux allows 64 characters: letters, digits and hyphens)."""
-    stem = re.sub(r"[^a-z0-9-]+", "-", pond_key.lower()).strip("-")[:40]
-    return f"duck-{stem}-{secrets.token_hex(3)}"
-
-
-def custom_data(args: list[str], pip_spec: str) -> str:
-    """The cloud-init script: install Duckstring into its own environment with uv (Ubuntu's system Python
-    refuses ``pip install``), run the module, and power off when it exits cleanly. Output goes to the serial
-    console, which boot diagnostics keeps for ``diagnose``."""
-    run = " ".join(shlex.quote(a) for a in ["/opt/duckstring/bin/python", "-m", *args])
-    lines = [
-        "#!/bin/bash",
-        "set -euxo pipefail",
-        "exec > >(tee -a /dev/console /var/log/duckstring-boot.log) 2>&1",
-        f"mkdir -p {_REMOTE_ROOT}",
-        f"export HOME=/root UV_CACHE_DIR={_REMOTE_ROOT}/uv-cache",
-        "curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh",
-        "uv venv /opt/duckstring --python 3.12",
-        f"uv pip install --python /opt/duckstring/bin/python {shlex.quote(pip_spec)}",
-        f"{run} && shutdown -h now",
-    ]
-    return "\n".join(lines) + "\n"
-
-
-def default_pip_spec() -> str:
-    from .. import __version__
-
-    return f"duckstring[azure]=={__version__}"
-
-
 class AzureVmLauncher:
     manages_processes = True
+    name = "azurevm"
+    default_size = _DEFAULT_SIZE
 
     def __init__(self, root, base_url: str | None, token: str = "", data_root: str | None = None,
                  *, dialback=None, image: str | None = None, subnet: str | None = None,
                  identity: str | None = None, location: str | None = None, resource_group: str | None = None,
                  assign_public_ip: str | None = None, pip_spec: str | None = None, disk_gb: int | None = None,
-                 credential=None, client=None, reap_poll_s: float = _REAP_POLL_S):
+                 credential=None, client=None, reap_poll_s: float = WATCH_POLL_S):
         from .dialback import RemoteDialback
 
         self.root = root
@@ -120,7 +85,7 @@ class AzureVmLauncher:
         self.location = location or env("DUCKSTRING_AZUREVM_LOCATION")
         self.resource_group = resource_group or env("DUCKSTRING_AZUREVM_RESOURCE_GROUP")
         self.assign_public_ip = assign_public_ip or env("DUCKSTRING_AZUREVM_ASSIGN_PUBLIC_IP") or "true"
-        self.pip_spec = pip_spec or env("DUCKSTRING_AZUREVM_PIP_SPEC") or default_pip_spec()
+        self.pip_spec = pip_spec or env("DUCKSTRING_AZUREVM_PIP_SPEC") or default_pip_spec("azure")
         self.disk_gb = disk_gb or (int(env("DUCKSTRING_AZUREVM_DISK_GB")) if env("DUCKSTRING_AZUREVM_DISK_GB") else None)
         # Tags this Catchment's Duck VMs, so a sweep never touches another Catchment's in a shared group.
         self.catchment_tag = hashlib.sha256(f"duckstring:{token}".encode()).hexdigest()[:16]
@@ -182,7 +147,7 @@ class AzureVmLauncher:
         disk_gb = dc.get("disk_gb") or self.disk_gb
         if disk_gb:
             os_disk["diskSizeGB"] = int(disk_gb)
-        script = custom_data(args, dc.get("pip_spec") or self.pip_spec)
+        script = boot_script(args, dc.get("pip_spec") or self.pip_spec)
         return {
             "location": dc.get("location") or self.location,
             "identity": {"type": "UserAssigned", "userAssignedIdentities": {identity: {}}},
@@ -213,7 +178,7 @@ class AzureVmLauncher:
             rg, name, self._body(name, dc, size, args, subnet, identity, role))
         return sub, rg, name
 
-    def power_state(self, address: tuple[str, str, str]) -> str | None:
+    def vm_state(self, address: tuple[str, str, str]) -> str | None:
         """The VM's ``PowerState/…`` code, ``"gone"`` when it doesn't exist, None while it has none yet."""
         sub, rg, name = address
         try:
@@ -226,6 +191,9 @@ class AzureVmLauncher:
             if (status.code or "").startswith("PowerState/"):
                 return status.code
         return None
+
+    def vm_live(self, address: tuple[str, str, str]) -> bool:
+        return self.vm_state(address) not in (*_STOPPED, "gone")
 
     def delete_vm(self, address: tuple[str, str, str]) -> None:
         sub, rg, name = address
@@ -243,28 +211,10 @@ class AzureVmLauncher:
                 tags = getattr(vm, "tags", None) or {}
                 if tags.get("duckstring-catchment") != self.catchment_tag:
                     continue
-                if self.power_state((sub, rg, vm.name)) in _STOPPED:
+                if self.vm_state((sub, rg, vm.name)) in _STOPPED:
                     self.delete_vm((sub, rg, vm.name))
         except Exception:
             log.warning("azurevm: could not sweep stopped Duck VMs in %s", rg, exc_info=True)
-
-    def _reap_when_stopped(self, address: tuple[str, str, str]) -> None:
-        """Watch a released VM until its Duck has exited (the OS powered off), then delete it."""
-        deadline = time.monotonic() + _REAP_FOR_S
-        while time.monotonic() < deadline:
-            try:
-                state = self.power_state(address)
-                if state == "gone":
-                    return
-                if state in _STOPPED:
-                    self.delete_vm(address)
-                    return
-            except Exception:
-                log.debug("azurevm: power state failed for %s", address[2], exc_info=True)
-            time.sleep(self._reap_poll_s)
-        log.warning("azurevm: %s still running %d h after its Duck was released; deleting it",
-                    address[2], _REAP_FOR_S // 3600)
-        self.delete_vm(address)
 
     # ─── the launcher interface ─────────────────────────────────────────────────
 
@@ -295,10 +245,10 @@ class AzureVmLauncher:
         args = [
             "duckstring.duck", "--pond", name, "--major", str(major), "--version", version,
             "--catchment", self.remote_base_url, f"--token={self.token}",
-            "--root", _REMOTE_ROOT, "--source-path", source_path, f"--data-root={self.data_root or ''}",
+            "--root", REMOTE_ROOT, "--source-path", source_path, f"--data-root={self.data_root or ''}",
         ]
         try:
-            address = self.start_vm(_vm_name(pond_key), dc, size, args)
+            address = self.start_vm(vm_name(pond_key), dc, size, args)
         except ValueError as exc:
             log.error("%s", exc)
             self._launch_errors[pond_key] = str(exc)
@@ -353,8 +303,8 @@ class AzureVmLauncher:
         self._pending.pop(pond_key, None)
         address = self._vms.pop(pond_key, None)
         if address is not None:
-            threading.Thread(target=self._reap_when_stopped, args=(address,), daemon=True,
-                             name=f"azurevm-reap-{address[2]}").start()
+            threading.Thread(target=delete_when_stopped, args=(self, address), kwargs={"poll_s": self._reap_poll_s},
+                             daemon=True, name=f"azurevm-reap-{address[2]}").start()
 
     def terminate(self, pond_key: str, wait: bool = False) -> None:
         self._pending.pop(pond_key, None)
