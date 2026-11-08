@@ -15,6 +15,7 @@ import json
 import os
 import re
 import tempfile
+from urllib.parse import unquote
 
 import duckdb
 import httpx
@@ -32,6 +33,8 @@ class FakeWorkspace:
         for name in catalogs:
             self.con.execute(f"ATTACH ':memory:' AS {name}")
         self.files: dict[str, bytes] = {}
+        self.dirs: set[str] = set()  # directories made explicitly (others exist while they hold a file)
+        self.empty_reads = 0  # the next this-many file reads come back empty, as during an overwrite
         self.statements: dict[str, dict] = {}
         self.executed: list[str] = []
         self.auth: list[str] = []
@@ -51,25 +54,50 @@ class FakeWorkspace:
             return httpx.Response(200, json={"access_token": "m2m-token", "expires_in": 3600})
         self.auth.append(request.headers.get("authorization", ""))
         if path.startswith("/api/2.0/fs/files/"):
-            key = path[len("/api/2.0/fs/files"):]
+            key = unquote(path[len("/api/2.0/fs/files"):])
             if request.method == "PUT":
                 self.files[key] = request.read()
                 return httpx.Response(204)
             if request.method == "DELETE":
                 return httpx.Response(204 if self.files.pop(key, None) is not None else 404)
+            if key not in self.files:
+                return httpx.Response(404, json={"message": "not found"})
+            data = self.files[key]
+            if request.method == "HEAD":
+                return httpx.Response(200, headers={"content-length": str(len(data)),
+                                                    "last-modified": "Sun, 08 Nov 2026 11:01:07 GMT"})
+            if self.empty_reads:  # an overwrite in flight: the Files API answers 200 with no body
+                self.empty_reads -= 1
+                return httpx.Response(200, content=b"")
+            rng = re.fullmatch(r"bytes=(\d+)-(\d+)", request.headers.get("range", ""))
+            if rng:
+                return httpx.Response(206, content=data[int(rng.group(1)):int(rng.group(2)) + 1])
+            return httpx.Response(200, content=data)
         if path.startswith("/api/2.0/fs/directories/"):
-            key = path[len("/api/2.0/fs/directories"):].rstrip("/")
-            if request.method == "DELETE":
+            key = unquote(path[len("/api/2.0/fs/directories"):]).rstrip("/")
+            if request.method == "PUT":
+                self.dirs.add(key)
                 return httpx.Response(204)
             children = {}
             for f in self.files:
                 if f.startswith(key + "/"):
                     head = f[len(key) + 1:].split("/", 1)
-                    children[head[0]] = len(head) > 1
-            if not children:
+                    children[head[0]] = (len(head) > 1, 0 if len(head) > 1 else len(self.files[f]))
+            for d in self.dirs:
+                if d.startswith(key + "/"):
+                    children.setdefault(d[len(key) + 1:].split("/", 1)[0], (True, 0))
+            if request.method == "DELETE":
+                if children:  # Databricks refuses to delete a directory that isn't empty
+                    return httpx.Response(409, json={"message": "directory not empty"})
+                self.dirs.discard(key)
+                return httpx.Response(204)
+            if not children and key not in self.dirs:
                 return httpx.Response(404, json={"message": "not found"})
+            if request.method == "HEAD":
+                return httpx.Response(200)
             return httpx.Response(200, json={"contents": [
-                {"path": f"{key}/{n}", "is_directory": d} for n, d in sorted(children.items())]})
+                {"path": f"{key}/{n}", "name": n, "is_directory": d, **({} if d else {"file_size": size})}
+                for n, (d, size) in sorted(children.items())]})
         if path == "/api/2.0/sql/statements" and request.method == "POST":
             return self._run(json.loads(request.read()))
         m = re.fullmatch(r"/api/2.0/sql/statements/([^/]+)", path)

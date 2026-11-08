@@ -3105,13 +3105,13 @@ class Driver(TapsMixin):
         from pathlib import Path
 
         from ..dataplane import gc_tiers, prune_versions
-        from .registry import pond_data_dir
+        from .registry import landing_root, pond_data_dir
 
         meta = self.meta[pond]
         try:
             raw = self._retain_from(pond)
             bound = datetime.fromisoformat(raw) if raw else None
-            data_dir = pond_data_dir(Path(self.root), meta["name"], meta["major"], self.data_root)
+            data_dir = pond_data_dir(Path(self.root), meta["name"], meta["major"], landing_root(self.data_root))
             prune_versions(data_dir, bound)
             gc_tiers(data_dir, bound)  # superseded Trickle tiers, as a Duck's publish collects its own
         except Exception as exc:  # noqa: BLE001
@@ -3451,7 +3451,7 @@ class Driver(TapsMixin):
         from pathlib import Path as _Path
 
         from ..trickle_io import load_sidecar
-        from .registry import pond_data_dir, pond_registry_path
+        from .registry import pond_data_dir, pond_registry_path, readable_root
 
         root = _Path(self.root)
         candidates = []
@@ -3473,7 +3473,10 @@ class Driver(TapsMixin):
             except Exception:
                 local_f = None
             claimed = _iso(ps.changed_f) if ps.changed_f != NEVER else None
-            mirrored = pond.async_persist and claimed is not None and _iso(ps.persisted_f) >= claimed
+            # The local publish is shed only where reads can fall through to the durable plane, which DuckDB
+            # can't do for a Volume reached through the Files API.
+            mirrored = pond.async_persist and claimed is not None and _iso(ps.persisted_f) >= claimed \
+                and readable_root(self.data_root)
             backed_local = claimed is None or (local_f is not None and local_f >= claimed)
             if not (backed_local or mirrored):
                 continue  # the registry is the only copy of something — never evict

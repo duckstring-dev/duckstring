@@ -65,7 +65,7 @@ Where a Catchment stores published tables (`catchment init --data-root`, `catchm
 | Form | Storage |
 |---|---|
 | a local path | A directory on the Catchment's machine. The default is under the state directory. |
-| `/Volumes/...` | A Databricks Volume, used as a local path. |
+| `/Volumes/...` | A Unity Catalog Volume: a local path where Volumes are mounted, such as on a cluster, and otherwise reached through the Databricks Files API with `DATABRICKS_HOST` and the Databricks credentials, as in a Databricks App. Through the Files API it holds a durable copy, and every table is read from a copy on the Catchment's own disk, restored when it starts. Needs the `duckstring[databricks]` extra there. |
 | `s3://bucket/prefix` | Amazon S3 or an S3-compatible store. Needs the `duckstring[aws]` extra. |
 | `gs://bucket/prefix` | Google Cloud Storage. Needs the `duckstring[gcp]` extra. |
 | `az://container/prefix` | Azure Blob Storage, in the account given by `account_name`. Needs the `duckstring[azure]` extra. |

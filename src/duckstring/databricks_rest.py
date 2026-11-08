@@ -161,6 +161,45 @@ class Client:
             self.request("PUT", f"/api/2.0/fs/files{_path(volume_path)}?overwrite=true", content=fh,
                          headers={"Content-Type": "application/octet-stream"})
 
+    def upload_bytes(self, data: bytes, volume_path: str) -> None:
+        self.request("PUT", f"/api/2.0/fs/files{_path(volume_path)}?overwrite=true", content=data,
+                     headers={"Content-Type": "application/octet-stream"})
+
+    def head(self, volume_path: str) -> dict | None:
+        """A file's ``{"size", "modified"}`` (``None`` when there is no file there; a directory isn't one)."""
+        resp = self.request("HEAD", f"/api/2.0/fs/files{_path(volume_path)}", ok=(200, 404))
+        if resp.status_code == 404:
+            return None
+        return {"size": int(resp.headers.get("content-length") or 0), "modified": resp.headers.get("last-modified")}
+
+    def is_dir(self, volume_path: str) -> bool:
+        resp = self.request("HEAD", f"/api/2.0/fs/directories{_path(volume_path)}", ok=(200, 404))
+        return resp.status_code == 200
+
+    def download(self, volume_path: str) -> bytes:
+        return self.request("GET", f"/api/2.0/fs/files{_path(volume_path)}").content
+
+    def download_to(self, volume_path: str, local_path) -> int:
+        """Stream a file to ``local_path``; the bytes written."""
+        n = 0
+        with self._http.stream("GET", f"{self.host}/api/2.0/fs/files{_path(volume_path)}",
+                               headers={"Authorization": f"Bearer {self._bearer()}"}) as resp:
+            if resp.status_code >= 300:
+                resp.read()
+                raise DatabricksError(f"GET {volume_path} failed ({resp.status_code}): {_message(resp)}",
+                                      resp.status_code)
+            with open(local_path, "wb") as fh:
+                for chunk in resp.iter_bytes():
+                    fh.write(chunk)
+                    n += len(chunk)
+        return n
+
+    def delete_file(self, volume_path: str) -> None:
+        self.request("DELETE", f"/api/2.0/fs/files{_path(volume_path)}", ok=(200, 204, 404))
+
+    def mkdirs(self, volume_path: str) -> None:
+        self.request("PUT", f"/api/2.0/fs/directories{_path(volume_path)}", ok=(200, 201, 204, 409))
+
     def list_dir(self, volume_path: str) -> list[dict]:
         out, token = [], None
         while True:

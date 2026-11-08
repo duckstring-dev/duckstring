@@ -233,6 +233,15 @@ def create_app(
         lease_store = get_storage(data_root)
         acquire_lease(lease_store, owner_id)  # raises LeaseConflict → the server does not start
         data_lease = (lease_store, owner_id)
+        if not lease_store.duckdb_readable:
+            # A Volume through the Files API: reads only take local copies, so a machine that lost its disk
+            # gets every line's publish back before any Duck runs or the Driver reconciles against it.
+            from ..dataplane import restore_published
+
+            restored = restore_published(root, data_root)
+            if restored:
+                print(f"[catchment] restored the local publish of {len(restored)} line(s) from {data_root}: "
+                      + ", ".join(f"{k} ({n} files)" for k, n in sorted(restored.items())), flush=True)
 
     app = FastAPI(title="Duckstring Catchment", lifespan=_lifespan)
     app.state.root = root

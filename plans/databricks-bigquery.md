@@ -342,11 +342,23 @@ needed the schema grants and Can use on the warehouse, given by the author (the 
   directory listing (404 for a missing directory), delete. A PUT replaces an existing file even without
   `overwrite=true` (no create-if-absent), and an overwrite isn't atomic for readers: 3 of 7 reads during 10
   overwrites returned a 200 with an empty body.
-- Open: durable state in an App needs a store behind the Files API (an fsspec filesystem for `/Volumes/...` when
-  not mounted, used by the data root and the state backup; DuckDB never reads it, since the Catchment's own Ducks
-  publish locally first and restore copies down). Its writes must tolerate a reader seeing an empty file.
+- **Built (2026-11-08): Volumes through the Files API** (`volumes.py`, `storage.VolumeStorage`; see CLAUDE.md Data
+  plane). Where `/Volumes` isn't mounted a `/Volumes/...` data root and state backup go through the Files API;
+  DuckDB never reads them: reads always take the local publish, which `create_app` restores from the Volume at
+  start (`dataplane.restore_published`), eviction keeps it, Draws land locally. Live: the operations and a
+  persist/restore round trip from a laptop (14 s); on the App, the Trickle demo persisted to the Volume (12 files,
+  36 MB, the lease and the state backup) and came back whole after a compute stop/start, with Gen and the
+  revenue total unchanged and the next refresh running on. A clean stop took 102 s (the full state checkpoint),
+  so `state.tar` restored the local publishes itself; the Files API restore is the path for a Catchment that dies
+  without one (not forceable through the Apps API).
+- Also fixed: a Duck logged every job poll at INFO through httpx, which filled the App's log window (it keeps
+  only the newest lines) and pushed out start-up; httpx is now at WARNING in the Duck, as the Azure SDK was.
+- Open risk, not specific to Volumes: a `state.tar` older than `duck.db` (a shutdown killed mid-upload leaves the
+  previous one) restores registries older than the published state, and a Duck only rehydrates a registry that's
+  missing. The 15 s App shutdown window makes this likelier on a large Catchment.
 
 **Docs handoff** (to write in a fresh session; facts only):
+- Reference done here: `environment.md` (`DUCKSTRING_VOLUMES`), `formats.md` (the `/Volumes/...` data root row).
 - Reference done here: `environment.md` (the BigQuery and Databricks variables, the engine order, the credentials
   paragraph, the memory budget's container limit), `formats.md` (`databricks://`), `cli/duck.md` and
   `cli/spout.md` (engine and scheme lists, with the CLI help strings).

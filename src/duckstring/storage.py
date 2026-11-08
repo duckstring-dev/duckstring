@@ -13,8 +13,11 @@ The Catchment runtime splits along two storage classes (see ``plans/storage-deco
 Two implementations:
 
 - :class:`LocalStorage` — today's behaviour exactly: a ``Path`` root with ``tmp + os.replace`` atomic
-  writes. A Databricks Volume mounted at ``/Volumes/…`` is just a local path here (the zero-config
-  fallback), as is the default (the state root's ``ponds/``).
+  writes. A Databricks Volume mounted at ``/Volumes/…`` is just a local path here, as is the default (the
+  state root's ``ponds/``).
+- :class:`VolumeStorage` — a ``/Volumes/…`` path on a machine that doesn't mount Volumes (a Databricks App),
+  through the Files API (:mod:`duckstring.volumes`). DuckDB can't reach it (``duckdb_readable`` is false), so
+  it only ever holds the durable copy of a publish that is read locally.
 - :class:`ObjectStorage` — ``fsspec``-backed (``s3://``, ``gs://``, ``abfss://``, the ``databricks``
   filesystem). An atomic-overwrite is a single-object PUT — object stores make that atomic, so the
   rename dance is unnecessary; ``list`` is a list-prefix and ``delete`` is a delete-object.
@@ -70,10 +73,25 @@ def is_object_uri(uri: str) -> bool:
     return scheme in _OBJECT_SCHEMES
 
 
+def volume_api(location: str | os.PathLike) -> bool:
+    """Whether a ``/Volumes/...`` location is reached through the Files API rather than as a local path: where
+    ``/Volumes`` isn't mounted (a Databricks App doesn't mount it). ``DUCKSTRING_VOLUMES`` = ``api`` or ``mount``
+    decides it instead."""
+    text = os.fspath(location)
+    if text != "/Volumes" and not text.startswith("/Volumes/"):
+        return False
+    mode = os.environ.get("DUCKSTRING_VOLUMES", "").lower()
+    if mode in ("api", "mount"):
+        return mode == "api"
+    return not os.path.isdir("/Volumes")
+
+
 def get_storage(location: str | os.PathLike, params: dict[str, str] | None = None) -> "Storage":
     """The :class:`Storage` for a data-root ``location`` (a local path or an object-store URI). Any
     credential/option query params already split off the URI are passed back in via ``params``."""
     text = os.fspath(location)
+    if volume_api(text):
+        return VolumeStorage(text)
     if is_object_uri(text):
         base, q = _split_query(text)
         merged = {**q, **(params or {})}
@@ -90,6 +108,9 @@ class Storage:
     addresses the directory itself."""
 
     is_local: bool = True
+    # Whether DuckDB can read and write here (``uri``/``glob``/``copy_to``). False only for a Volume reached
+    # through the Files API, which holds durable copies that are always read from a local restore.
+    duckdb_readable: bool = True
 
     # ─── addressing ──────────────────────────────────────────────────────────────
 
@@ -606,6 +627,62 @@ class ObjectStorage(Storage):
 
 
 # fsspec protocol / option-name remaps for the schemes we accept.
+class VolumeStorage(ObjectStorage):
+    """A Unity Catalog Volume directory reached through the Files API, on a machine that doesn't mount
+    ``/Volumes`` (:func:`volume_api`). The filesystem operations are :class:`ObjectStorage`'s over
+    :class:`duckstring.volumes.VolumeFileSystem`; DuckDB can't address it, so a caller that would hand DuckDB a
+    path gets an error naming the problem rather than a failed read."""
+
+    duckdb_readable = False
+
+    def __init__(self, base: str, params: dict[str, str] | None = None, fs=None) -> None:
+        super().__init__("/" + base.strip("/"), params)
+        self._fs = fs
+
+    @property
+    def fs(self):
+        if self._fs is None:
+            try:
+                from .volumes import VolumeFileSystem
+            except ImportError as exc:
+                raise ImportError("a Volume reached through the Files API needs the databricks extra: "
+                                  "pip install 'duckstring[databricks]'") from exc
+            self._fs = VolumeFileSystem()
+        return self._fs
+
+    def child(self, *parts: str) -> "VolumeStorage":
+        return VolumeStorage(self._key(*parts), self.params, fs=self._fs)
+
+    def _unreadable(self):
+        return RuntimeError(f"{self.base} is a Volume reached through the Files API (/Volumes isn't mounted "
+                            f"here), which DuckDB can't read or write; it is read from a local restore")
+
+    def uri(self, *parts: str) -> str:
+        raise self._unreadable()
+
+    def glob(self, pattern: str = "*.parquet", *parts: str) -> str:
+        raise self._unreadable()
+
+    @contextmanager
+    def copy_to(self, *parts: str) -> Iterator[str]:
+        raise self._unreadable()
+        yield ""  # pragma: no cover
+
+    @contextmanager
+    def copy_dir_to(self, *parts: str) -> Iterator[str]:
+        raise self._unreadable()
+        yield ""  # pragma: no cover
+
+    def mkdir(self, *parts: str) -> None:
+        self.fs.mkdir(self._key(*parts))
+
+    def duckdb_setup(self, con) -> None:
+        return None
+
+    def credential_generation(self) -> int:
+        return 0
+
+
 _FSSPEC_PROTOCOL = {"gs": "gcs", "s3a": "s3", "az": "abfs", "abfss": "abfs", "wasb": "abfs", "wasbs": "abfs",
                     "dbfs": "databricks"}
 _FSSPEC_OPT = {"key_id": "key", "account_key": "account_key"}
@@ -834,6 +911,12 @@ def warm_imports(*locations: str | None) -> None:
     import asyncio  # noqa: F401
 
     for location in locations:
+        if location and volume_api(location):
+            try:
+                from . import volumes  # noqa: F401  (fsspec and the Files API client)
+            except ImportError:
+                pass  # the databricks extra is missing: the first use says so
+            continue
         if not location or not is_object_uri(location):
             continue
         scheme = urlsplit(location).scheme.lower()

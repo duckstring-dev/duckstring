@@ -1245,6 +1245,47 @@ def restore_tree(src, dest) -> int:
     return count
 
 
+def restore_published(root, data_root: str) -> dict[str, int]:
+    """Restore every line's local publish from a durable ``data_root`` that DuckDB can't read (a Volume through
+    the Files API), at Catchment start, before any Duck runs: reads only ever take the local copy there
+    (``registry.resolve_data_dir``), so a machine that lost its disk must have it back first. A line is restored
+    when its local sidecar is missing or older than the durable one. Returns ``{"name@major": files}``."""
+    from pathlib import Path
+
+    from .catchment.registry import pond_data_dir
+    from .storage import get_storage
+
+    plane = get_storage(data_root)
+    restored: dict[str, int] = {}
+    for name in plane.subdir_names():
+        for line in plane.child(name).subdir_names():
+            if not (line.startswith("m") and line[1:].isdigit()):
+                continue
+            remote = plane.child(name, line, "data")
+            remote_f = _sidecar_run_f(remote)
+            if remote_f is None:
+                continue
+            local = pond_data_dir(Path(root), name, int(line[1:]), None)
+            local_f = _sidecar_run_f(local)
+            if local_f is not None and local_f >= remote_f:
+                continue
+            restored[f"{name}@{line[1:]}"] = restore_tree(remote, local)
+    return restored
+
+
+def _sidecar_run_f(store) -> str | None:
+    """The freshness a published layout's sidecar commits to (its run stamp, else the newest entry), or ``None``
+    when it has no readable sidecar."""
+    from .catchment.driver import _plane_freshness
+    from .trickle.io import load_sidecar
+
+    try:
+        sidecar = load_sidecar(store)
+    except Exception:  # noqa: BLE001
+        return None
+    return _plane_freshness(sidecar) if sidecar else None
+
+
 def persist_tree(local_dir, dest) -> int:
     """Mirror a Pond's locally-published output to its durable **persist layer** (plans/persist.md) —
     the async Duck-side reconcile behind ``persisted_f``. Returns the number of files uploaded.

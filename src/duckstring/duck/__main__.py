@@ -343,8 +343,10 @@ def main() -> None:
     # WARNING+ goes through the bare last-resort handler with no timestamp.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    # The Azure SDK logs every HTTP request and response at INFO, which buries the Duck's own lines.
+    # The Azure SDK and httpx log every HTTP request at INFO (httpx: each job poll, about one a second), which
+    # buries the Duck's own lines; a Databricks App's log keeps only its newest lines, so they pushed out the rest.
     logging.getLogger("azure").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     root = Path(args.root)
     data_root = args.data_root or None

@@ -73,11 +73,13 @@ gcp = [
   "google-auth[requests]>=2.20",
   "sqlglot>=30.21,<31",  # the BigQuery Flock engine translates jobs (plans/databricks-bigquery.md)
 ]
-# Databricks (plans/databricks-bigquery.md): the Databricks SQL Flock engine and the Databricks Spout, over the
-# REST APIs with httpx and pyarrow (both core). sqlglot translates Flock jobs; on Azure an Entra token comes
-# from azure-identity (the azure extra).
+# Databricks (plans/databricks-bigquery.md): the Databricks SQL Flock engine, the Databricks Spout and Volumes
+# reached through the Files API (a Databricks App), over the REST APIs with httpx and pyarrow (both core).
+# sqlglot translates Flock jobs, fsspec carries the Volume filesystem; on Azure an Entra token comes from
+# azure-identity (the azure extra).
 databricks = [
   "sqlglot>=30.21,<31",
+  "fsspec>=2023.1",
 ]
 # The StarRocks Flock engine (plans/flock-coverage.md): the MySQL-protocol client, and sqlglot to translate
 # jobs. sqlglot is pinned to one major because what an engine is trusted with is measured against its

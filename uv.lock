@@ -1257,6 +1257,7 @@ azure = [
     { name = "azure-monitor-query" },
 ]
 databricks = [
+    { name = "fsspec" },
     { name = "sqlglot" },
 ]
 dbt = [
@@ -1314,6 +1315,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.5,<3" },
     { name = "duckstring-trickle", editable = "packages/trickle" },
     { name = "fastapi", specifier = ">=0.111" },
+    { name = "fsspec", marker = "extra == 'databricks'", specifier = ">=2023.1" },
     { name = "gcsfs", marker = "extra == 'dev'", specifier = ">=2024.2" },
     { name = "gcsfs", marker = "extra == 'gcp'", specifier = ">=2024.2" },
     { name = "google-auth", extras = ["requests"], marker = "extra == 'dev'", specifier = ">=2.20" },
