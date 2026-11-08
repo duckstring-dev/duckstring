@@ -130,6 +130,8 @@ file:///srv/exports/sales
 
 Writes `{table}.parquet` into the directory, replacing each file atomically.
 
+A Unity Catalog Volume path, `/Volumes/catalog/schema/volume/prefix` (or `file:///Volumes/...`), is written the same way where Volumes are mounted, and through the Databricks Files API elsewhere, as for a [data root](#data-root-uris). Through the Files API a file is visible, and empty, until its upload finishes, so a reader there should follow [change files](#change-files) rather than whole-table files.
+
 ### Object storage
 
 ```text
@@ -144,6 +146,28 @@ abfss://exports@acmedata.dfs.core.windows.net/duckstring?client_id=${secret:SP_I
 |---|---|
 | `session_token` | An S3 session token. |
 | `url_style`, `use_ssl` | Override the addressing style (`path` or `vhost`) and TLS for an `endpoint`. |
+
+### Change files
+
+With `--mode changes`, a `file://`, `/Volumes/...` or object-storage Spout lands each delivery as files: for each table, the delivery's changes (or the whole table), then a manifest naming those files. The manifest is the commit, so read the manifests rather than listing the table folders.
+
+```text
+orders/2026-11-09T01_00_00+00_00.parquet          changes
+totals/2026-11-09T01_00_00+00_00.full.parquet     the whole table (.full.{i}.parquet when chunked)
+_duckstring/manifests/2026-11-09/01/2026-11-09T01_00_00+00_00.json
+_duckstring/latest.json                           the Spout's progress; leave it in place
+```
+
+Every file has the table's columns plus `_duckstring_f`, the delivery's freshness, and one more column:
+
+| Column | When | Meaning |
+|---|---|---|
+| `_duckstring_op` | the table has a primary key | One row per changed key: `1` with its new row (insert or update), `-1` with its old row (delete). Across deliveries, the newest row for a key wins. |
+| `_duckstring_d` | it has none | The changes as weighted rows: `1` added, `-1` removed. Across deliveries, weights add up per row. |
+
+A whole-table file replaces what a reader holds. One arrives on the first delivery, on a `spout resync`, and when the Spout fell behind the Pond's retained history. A plain (non-Trickle) table arrives whole on every delivery.
+
+A manifest records the delivery's position, the files per table, each table's kind (`changes` or `full`), primary key and row count. Positions order deliveries: a freshness, with `#n` added for a repeat delivery at the same freshness (a resync). The Python functions `duckstring.landing.deliveries(path, after=)` and `duckstring.landing.changes(con, path, table, after=)` read them, the second combining one table's deliveries into a single DuckDB relation.
 
 ### `postgres://`
 

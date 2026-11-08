@@ -40,6 +40,7 @@ class FakeWorkspace:
         self.statements: dict[str, dict] = {}
         self.executed: list[str] = []
         self.auth: list[str] = []
+        self.calls: list[tuple[str, str]] = []  # Files API (method, path)
         self.chunk_rows = chunk_rows
         self.pending_polls = pending_polls
         self._tmp = tempfile.mkdtemp()
@@ -57,6 +58,7 @@ class FakeWorkspace:
         self.auth.append(request.headers.get("authorization", ""))
         if path.startswith("/api/2.0/fs/files/"):
             key = unquote(path[len("/api/2.0/fs/files"):])
+            self.calls.append((request.method, key))
             if request.method == "PUT":
                 self.files[key] = request.read()
                 return httpx.Response(204)
@@ -66,6 +68,8 @@ class FakeWorkspace:
                 return httpx.Response(404, json={"message": "not found"})
             data = self.files[key]
             if request.method == "HEAD":
+                if self.empty_reads:  # in flight, HEAD reports 0 too (measured 2026-11-09)
+                    return httpx.Response(200, headers={"content-length": "0"})
                 return httpx.Response(200, headers={"content-length": str(len(data)),
                                                     "last-modified": "Sun, 08 Nov 2026 11:01:07 GMT"})
             if self.empty_reads:  # an overwrite in flight: the Files API answers 200 with no body

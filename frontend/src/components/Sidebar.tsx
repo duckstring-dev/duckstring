@@ -495,6 +495,7 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
               <option value="auto">auto</option>
               <option value="full">full</option>
               <option value="append">append</option>
+              <option value="changes">changes</option>
             </select>
           </div>
           <div style={{ fontSize: 10, color: '#52525b', lineHeight: 1.5 }}>

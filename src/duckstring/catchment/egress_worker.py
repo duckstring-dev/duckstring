@@ -32,7 +32,8 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
     A **transactional, delta-capable** destination (Postgres) syncs *incrementally*: read the changelog
     delta over ``(destination watermark, f]`` and ``apply_delta`` (upserts + deletes), falling back to a
     full reload on a full read (bootstrap / coverage-miss / a changed overwrite source). A lake (DuckLake) does
-    the same for any source, inside one batch per run. Others snapshot."""
+    the same for any source, inside one batch per run. ``mode=changes`` reads the same window from the
+    destination's own watermark and lands it as change files with a manifest. Others snapshot."""
     from datetime import datetime
 
     import duckdb
@@ -75,9 +76,23 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
         # A driver that can deliver a run's tables together (a lake: one snapshot per run) does so.
         batch = getattr(driver, "batch", None)
 
+        landing = getattr(driver, "landing", None)
+        if mode == "changes" and landing is None:
+            raise ValueError("mode=changes lands change files: it needs a file://, object-store or /Volumes "
+                             "destination")
+
         def deliver(table: str, c) -> None:
             pk = sidecar.get(table, {}).get("pk") or None
-            if mode == "append" and getattr(caps, "mirrors_layout", False):
+            if mode == "changes":
+                previous_f = NEVER if job.get("resync") else land.delivered or NEVER
+                if previous_f >= f:
+                    return  # already delivered (a replay)
+                delta = read_delta(c, data_dir, table, previous_f, f, dp=dp, pin=pin)
+                if delta.is_full:
+                    land.land_full(c, c.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk)
+                else:
+                    land.land_delta(c, delta, table=table, pk=pk)
+            elif mode == "append" and getattr(caps, "mirrors_layout", False):
                 # The incremental object-store path (opt-in — `mode=append`): mirror the table's
                 # published collection to the destination, syncing only new/changed artifacts. The
                 # destination stays a readable Duckstring layout (parts + tiers + sidecar).
@@ -106,8 +121,14 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
             else:
                 driver.write_full(c, c.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk, f=f)
 
-        with batch(con, pond=job["pond_name"], major=job["major"], f=f) if batch else nullcontext():
-            if getattr(driver, "parallel_tables", False) and len(tables) > 1:
+        if mode == "changes":
+            scope = landing(con, pond=job["pond_name"], major=job["major"], f=f)
+        elif batch:
+            scope = batch(con, pond=job["pond_name"], major=job["major"], f=f)
+        else:
+            scope = nullcontext()
+        with scope as land:
+            if (getattr(driver, "parallel_tables", False) or mode == "changes") and len(tables) > 1:
                 # A destination whose every statement is a network round trip (a Databricks warehouse) takes the
                 # run's tables at once, each on its own cursor of the in-memory connection.
                 from concurrent.futures import ThreadPoolExecutor

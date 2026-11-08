@@ -2168,11 +2168,14 @@ class Driver(TapsMixin):
         """Bind a Spout to a Pond (its source): a real engine node (the egress dual of a Draw) that
         delivers ``table`` (or all tables) to ``destination`` in ``mode`` via the egress worker. Returns
         the Spout's (possibly generated) name. Raises ValueError on a bad destination/mode/duplicate."""
-        from ..egress.destination import parse_destination, validate_mode
+        from ..egress.destination import OBJECT_STORE_SCHEMES, parse_destination, validate_mode
         from ..keys import split_pond_key
 
         dest = parse_destination(destination)
         validate_mode(mode)
+        if mode == "changes" and dest.scheme not in (None, *OBJECT_STORE_SCHEMES):
+            raise ValueError("mode=changes lands change files: it needs a file://, object-store or /Volumes "
+                             f"destination, not {dest.scheme}")
         with self.lock:
             m = self.meta[pond]
             if dest.transactional:

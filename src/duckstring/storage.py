@@ -90,16 +90,15 @@ def get_storage(location: str | os.PathLike, params: dict[str, str] | None = Non
     """The :class:`Storage` for a data-root ``location`` (a local path or an object-store URI). Any
     credential/option query params already split off the URI are passed back in via ``params``."""
     text = os.fspath(location)
+    if text.startswith("file://"):
+        text = urlsplit(text).path
     if volume_api(text):
         return VolumeStorage(text)
     if is_object_uri(text):
         base, q = _split_query(text)
         merged = {**q, **(params or {})}
         return ObjectStorage(base, merged)
-    # A local path or file:// URI.
-    if text.startswith("file://"):
-        text = urlsplit(text).path
-    return LocalStorage(Path(text).expanduser())
+    return LocalStorage(Path(text).expanduser())  # a local path (or a file:// URI's)
 
 
 class Storage:
@@ -178,6 +177,11 @@ class Storage:
     def write_bytes(self, data: bytes, *parts: str) -> None:
         """Atomically write ``data`` to the addressed file."""
         raise NotImplementedError
+
+    def write_new(self, data: bytes, *parts: str) -> None:
+        """Write a file that is written once and never replaced (a change-files manifest). The same as
+        :meth:`write_bytes`, except on a Volume, where it skips the shadow an overwrite needs."""
+        self.write_bytes(data, *parts)
 
     def put_file(self, local: Path, *parts: str) -> None:
         """Upload one local file to the addressed location — streaming (never whole-file-in-memory),
@@ -675,6 +679,9 @@ class VolumeStorage(ObjectStorage):
 
     def mkdir(self, *parts: str) -> None:
         self.fs.mkdir(self._key(*parts))
+
+    def write_new(self, data: bytes, *parts: str) -> None:
+        self.fs.pipe_file(self._key(*parts), data, shadow=False)
 
     def duckdb_setup(self, con) -> None:
         return None

@@ -1,7 +1,7 @@
 """Volumes through the Files API, for a machine that doesn't mount /Volumes (a Databricks App;
 plans/databricks-bigquery.md part 5), offline on the fake workspace: when a /Volumes path takes the API, the
-filesystem (including a read that comes back empty during an overwrite), a published layout persisted there and
-restored at start, reads that never fall through to it, the state backup, and the writer lease."""
+filesystem (including overwrites through a shadow and reads during an upload), a published layout persisted there
+and restored at start, reads that never fall through to it, the state backup, and the writer lease."""
 
 from __future__ import annotations
 
@@ -76,17 +76,43 @@ def test_the_filesystem_reads_writes_lists_and_removes(ws):
         store.uri("t", "p", "1.parquet")
 
 
-def test_a_read_during_an_overwrite_is_retried(ws, tmp_path):
+def test_a_file_duckstring_overwrites_goes_through_a_shadow(ws):
     store = get_storage(VOL)
-    store.write_bytes(b'{"run": 1}', "_trickle.json")
-    ws.empty_reads = 3  # the Files API answered 200 with no body while the file was being replaced
-    assert store.read_text("_trickle.json") == '{"run": 1}'
-    ws.empty_reads = 2
+    store.write_text('{"run": 1}', "_trickle.json")
+    ws.calls.clear()
+    store.write_text('{"run": 2}', "_trickle.json")
+    shadow = f"{VOL}/._trickle.json.duckstring-next"
+    assert ws.calls == [("PUT", shadow), ("PUT", f"{VOL}/_trickle.json"), ("DELETE", shadow)]
+    ws.calls.clear()
+    store.write_new(b"{}", "manifest.json")  # written once: no shadow
+    store.write_bytes(b"PAR1", "part.parquet")  # Parquet is written once under its name
+    assert [m for m, _ in ws.calls] == ["PUT", "PUT"]
+
+
+def test_a_writer_that_died_mid_overwrite_leaves_the_new_content_readable(ws, tmp_path):
+    store = get_storage(VOL)
+    # The shadow was written, then the upload of the file itself died: the Files API left it empty.
+    ws.files[f"{VOL}/._trickle.json.duckstring-next"] = b'{"run": 2}'
+    ws.files[f"{VOL}/_trickle.json"] = b""
+    assert store.read_text("_trickle.json") == '{"run": 2}'
     store.fetch(tmp_path / "s.json", "_trickle.json")
-    assert (tmp_path / "s.json").read_bytes() == b'{"run": 1}'
-    store.write_bytes(b"", "empty")  # a file that really is empty reads as empty, at once
-    ws.empty_reads = 1
-    assert store.read_bytes("empty") == b""
+    assert (tmp_path / "s.json").read_bytes() == b'{"run": 2}'
+    assert store.names() == ["_trickle.json"]  # the shadow is never listed
+    store.write_text('{"run": 3}', "_trickle.json")
+    assert store.read_text("_trickle.json") == '{"run": 3}'
+    assert f"{VOL}/._trickle.json.duckstring-next" not in ws.files
+    store.write_bytes(b"", "empty.json")  # a file that really is empty reads as empty, at once
+    assert store.read_bytes("empty.json") == b""
+
+
+def test_a_parquet_read_during_an_upload_is_retried(ws, tmp_path):
+    store = get_storage(VOL)
+    store.write_bytes(b"PAR1-data", "t", "part.parquet")
+    ws.empty_reads = 3  # 200 with no body, and HEAD reporting 0, while the upload is in flight
+    assert store.read_bytes("t", "part.parquet") == b"PAR1-data"
+    ws.empty_reads = 2
+    store.fetch(tmp_path / "p.parquet", "t", "part.parquet")
+    assert (tmp_path / "p.parquet").read_bytes() == b"PAR1-data"
 
 
 def _publish(root, f, orders, totals):

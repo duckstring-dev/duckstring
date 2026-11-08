@@ -20,10 +20,10 @@ duckstring spout add POND --to URI [--table TABLE | --all] [--mode MODE] [--name
 
 | Option | Default | Description |
 |---|---|---|
-| `--to`, `-t` | required | The destination URI. Its scheme picks how data is written: `file://`, `s3://`, `gs://`, `az://`, `abfss://`, `postgres://`, `ducklake:` or `databricks://`. Credentials are written as `${env:NAME}` or `${secret:NAME}` references and resolved only at delivery, and a single reference can be the whole destination. See [Destination URIs](../formats.md#destination-uris). |
+| `--to`, `-t` | required | The destination URI. Its scheme picks how data is written: `file://`, `s3://`, `gs://`, `az://`, `abfss://`, a `/Volumes/...` path, `postgres://`, `ducklake:` or `databricks://`. Credentials are written as `${env:NAME}` or `${secret:NAME}` references and resolved only at delivery, and a single reference can be the whole destination. See [Destination URIs](../formats.md#destination-uris). |
 | `--table`, `-T` | all tables | Deliver only this table. |
 | `--all` | | Deliver every table (the default, stated explicitly). |
-| `--mode` | `auto` | `auto`: send only changes where the destination supports it, otherwise the whole table. `full`: always write the whole table. `append`: for an object store, copy each run's new files, keeping the destination in Duckstring's file layout. |
+| `--mode` | `auto` | `auto`: send only changes where the destination supports it, otherwise the whole table. `full`: always write the whole table. `append`: for an object store, copy each run's new files, keeping the destination in Duckstring's file layout. `changes`: for a file, Volume or object-store destination, write each delivery's changes as files with a manifest; see [Change files](../formats.md#change-files). |
 | `--name`, `-n` | the table name, or the scheme for all tables | The Spout's name. A suffix such as `-2` is added if it's taken. |
 
 Postgres delivery is incremental and exactly-once: each run deletes and re-inserts the changed rows in one transaction, and records its progress in a `_duckstring_egress` table in the destination. It needs a table with a primary key, which means a merge Trickle.

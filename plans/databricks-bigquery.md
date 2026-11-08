@@ -357,7 +357,48 @@ needed the schema grants and Can use on the warehouse, given by the author (the 
   previous one) restores registries older than the published state, and a Duck only rehydrates a registry that's
   missing. The 15 s App shutdown window makes this likelier on a large Catchment.
 
+**Change files, built 2026-11-09** (`mode=changes`; the author's design calls: performance before plain
+integration, so a reader in Duckstring is fine; an op column only where there's a key).
+- Measured first (from a laptop, hybrid workspace): a **new** file is visible from the moment its upload starts,
+  listed and answering HEAD with size 0, a ranged read 400, for the whole upload (64 MiB in 10 s, 256 MiB in 40 s,
+  6.3 MiB/s on a home uplink); an **overwrite** blanks the file for the whole upload (HEAD 0, empty body, the old
+  content gone at once). Calls: PUT 2 KiB 230 ms, HEAD 120 ms, GET 140 ms, list 160 ms (medians).
+- That overturned the shipped Volume store's retry, which assumed HEAD kept reporting a size during an overwrite,
+  and meant a writer dying mid-overwrite of a sidecar (or `duck.db`, `state.tar`, the lease) left it empty.
+  `VolumeFileSystem` now writes every non-Parquet file through a shadow (`.{name}.duckstring-next`: shadow, file,
+  delete the shadow); a read finding the file empty takes the shadow, then reads the file once more (an upload that
+  just finished) before calling it empty. Parquet is never shadowed (written once under a name a commit point
+  names); an empty Parquet read is retried. Shadows are hidden from `ls`. `Storage.write_new` skips the shadow for
+  a file written once (a manifest). Cost: two more calls per overwrite (a `state.tar` uploads twice).
+- The Spout (`egress/landing.py` writer, `landing.py` layout and reader; formats.md "Change files" has the layout):
+  per delivery, per table, the window as one file (chunked at 256 MiB) or the whole table (`.full`), then a
+  manifest under `_duckstring/manifests/{day}/{hour}/`. A table with a pk: one row per changed key with
+  `_duckstring_op` (+1 new row, -1 old row of a key removed and not re-added); without: the Z-set with
+  `_duckstring_d`. `_duckstring_f` (the delivery's freshness) on every row. Positions order deliveries (`f`, plus
+  `#n` for a repeat at the same `f`: a resync, whose files take `.n`), so a reader past `f` still sees a resync.
+- Exactly-once: `_duckstring/latest.json` records `{"f": delivered, "pending": attempting}` before the first data
+  file; the next delivery takes the pending one only if its manifest is whole (an empty one left by a dead writer
+  is removed). A failure the worker sees removes that attempt's files. The delivered position is cached per
+  process (`_KNOWN`), so a warm delivery reads nothing back: a Volume delivery is the `latest.json` write (three
+  calls), one PUT per table (tables in parallel, `_PARALLEL_TABLES`) and the manifest.
+- `/Volumes/...` (or `file:///Volumes/...`) is accepted as a `file` destination for every object-store mode;
+  `get_storage` now resolves `file://` before the Volume check. `add_spout` refuses `changes` on other schemes.
+- A plain (overwrite) table is republished by every Pond run, so it lands whole every delivery (as the Databricks
+  Spout's `INSERT OVERWRITE` does); `write_table(if_changed=True)` holds an unchanged one.
+- Live (`landing_live.py` in the session scratchpad): four deliveries of a merge and an append table to
+  `/Volumes/hybrid_dbx/duckstring_test/staging/landing-live` from the laptop took 1.3 to 2.0 s each (the Databricks
+  Spout: 7.5 s); the reader matched the source; the warehouse applied the files with `read_files(...,
+  schemaEvolutionMode => 'none')` + `MERGE` (one per delivery, and all at once with a newest-per-key `QUALIFY`),
+  ending equal to the source. Databricks reads `_duckstring_op` as tinyint, `_duckstring_f` as timestamp.
+- Not built: retention of landed files and manifests (the consumer's; Auto Loader can't watch the folder, see
+  above), a Spark/PySpark reader (the DuckDB `changes()` and the `deliveries()` file lists are the reader for now;
+  the MERGE recipe above is the Databricks path), an in-region throughput measurement from an App.
+
 **Docs handoff** (to write in a fresh session; facts only):
+- Reference done here (change files): `formats.md` ("Change files", and `/Volumes/...` under `file://`),
+  `cli/spout.md` (`--to`, `--mode`), matching the CLI help. Still to write: the Python reference page for
+  `duckstring.landing` (`deliveries`, `changes`, `Changes`), and a `delivering_with_spouts.md` section on change
+  files with the Databricks MERGE recipe.
 - Reference done here: `environment.md` (`DUCKSTRING_VOLUMES`), `formats.md` (the `/Volumes/...` data root row).
 - Reference done here: `environment.md` (the BigQuery and Databricks variables, the engine order, the credentials
   paragraph, the memory budget's container limit), `formats.md` (`databricks://`), `cli/duck.md` and
@@ -370,4 +411,4 @@ needed the schema grants and Can use on the warehouse, given by the author (the 
   Databricks section: the destination, the permissions, the `_duckstring_f` column on append tables, warehouse
   time per delivery), and the Databricks App section of `hosting_on_a_platform.md` once the workspace run is done.
 - The UI's Spout add form (`frontend/src/components/Sidebar.tsx`) has no `databricks://` option yet; the CLI and
-  API take it.
+  API take it. It does offer `changes` as a mode.

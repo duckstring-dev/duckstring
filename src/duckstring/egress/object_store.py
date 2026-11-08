@@ -1,6 +1,6 @@
 """Object-store egress driver (see plans/egress.md "Object-store egress").
 
-Two write shapes, chosen by the Spout's ``mode``:
+Three write shapes, chosen by the Spout's ``mode``:
 
 - **snapshot** (``mode=full``/``auto``): each egressed table as one Parquet file under the destination
   prefix (``{prefix}/{table}.parquet``) — the simplest correct "land my Pond's output over there".
@@ -8,6 +8,12 @@ Two write shapes, chosen by the Spout's ``mode``:
   changelog/band/base tiers + the sidecar + the Extension-1 ``state/`` snapshots), reconciled by file
   name per delivery — O(new parts), and the destination stays directly readable by any
   Duckstring-layout consumer (``ParquetDataPlane.read_select``, a downstream Catchment).
+- **change files** (``mode=changes``): per delivery, each changed table's window of changes (or the whole
+  table) as its own files, then a manifest naming them: :mod:`duckstring.egress.landing`, read back with
+  :mod:`duckstring.landing`.
+
+A ``/Volumes/...`` destination (or ``file:///Volumes/...``) is a local path where Volumes are mounted and the
+Files API elsewhere (a Databricks App): files are written locally and uploaded.
 
 - ``file://`` — local path, written atomically (tmp + ``os.replace``).
 - ``s3://`` / ``gs://`` / ``az://`` / ``abfss://``: snapshots via DuckDB (``httpfs``, or ``azure``) + the
@@ -22,6 +28,9 @@ Two write shapes, chosen by the Spout's ``mode``:
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -55,12 +64,19 @@ class ObjectStoreEgressDriver:
                             mirrors_layout=True)
 
     def ensure(self, *, table: str, schema: dict | None, pk: list[str] | None) -> None:
-        if self.dest.scheme == "file":
+        if self.dest.scheme == "file" and self._store().is_local:
             self._file_base().mkdir(parents=True, exist_ok=True)  # buckets must already exist for s3/gs
 
     def write_full(self, con, relation, *, table: str, pk: list[str] | None, f: datetime) -> None:
         t = _safe_table(table)
-        if self.dest.scheme == "file":
+        if self.dest.scheme == "file" and not self._store().is_local:  # a Volume through the Files API
+            local = Path(tempfile.mkdtemp(prefix="duckstring-egress-"))
+            try:
+                relation.write_parquet(str(local / f"{t}.parquet"))
+                self._store().put_file(local / f"{t}.parquet", f"{t}.parquet")
+            finally:
+                shutil.rmtree(local, ignore_errors=True)
+        elif self.dest.scheme == "file":
             base = self._file_base()
             base.mkdir(parents=True, exist_ok=True)
             target = base / f"{t}.parquet"
@@ -80,6 +96,33 @@ class ObjectStoreEgressDriver:
             "object-store egress has no row-level apply_delta — use mode=append (mirror) or mode=full"
         )
 
+    # ─── change files (mode=changes) ──────────────────────────────────────────────
+
+    @contextmanager
+    def landing(self, con, *, pond: str, major: int, f: datetime):
+        """One delivery's change files: yields a :class:`duckstring.egress.landing.Landing` the worker lands each
+        table through, and commits it (the manifest) when the block finishes, or removes what it wrote if it
+        raised."""
+        from .landing import Landing
+
+        store = self._store()
+        land = Landing(store, key=self._base_uri(), pond=pond, major=major, f=f)
+        try:
+            yield land
+        except BaseException:
+            land.abandon()
+            raise
+        land.commit()
+
+    def _store(self):
+        """The destination as a :class:`duckstring.storage.Storage`. The query stays unresolved: the storage layer
+        resolves each parameter after splitting it (see ``_query``)."""
+        from ..storage import get_storage
+
+        raw = credentials.resolve(self.dest.raw) if credentials.whole_reference(self.dest.raw) else self.dest.raw
+        base, sep, query = raw.partition("?")
+        return get_storage(credentials.resolve(base) + sep + query)
+
     # ─── the incremental path: mirror the published collection (mode=append) ─────
 
     def mirror(self, source_store, table: str, entry: dict, *, f: datetime | None = None) -> None:
@@ -97,7 +140,6 @@ class ObjectStoreEgressDriver:
         ``f``/``f_base`` advanced past the destination sidecar's. The Extension-1 ``state/`` snapshots
         ride along, so the mirror carries the incremental state too. The destination sidecar entry is written
         **last** — the commit point, exactly like a publish."""
-        from ..storage import get_storage
         from ..trickle.io import (
             DROPLOG_SUFFIX,
             base_dir_name,
@@ -111,10 +153,7 @@ class ObjectStoreEgressDriver:
         )
 
         t = _safe_table(table)
-        # The query stays unresolved: the storage layer resolves each parameter after splitting it (see _query).
-        raw = credentials.resolve(self.dest.raw) if credentials.whole_reference(self.dest.raw) else self.dest.raw
-        base, sep, query = raw.partition("?")
-        dest = get_storage(credentials.resolve(base) + sep + query)
+        dest = self._store()
         dest.mkdir()
         dest_sidecar = load_sidecar(dest)
         dest_entry = dest_sidecar.get(t) if isinstance(dest_sidecar.get(t), dict) else {}
@@ -171,6 +210,11 @@ class ObjectStoreEgressDriver:
         """Probe without writing data: ``file://`` does a write+delete probe in the target directory
         (so it exactly tests the write permission egress needs); an object store configures DuckDB and
         the secret and lists the prefix (credentials resolve, the bucket is reachable + authorised)."""
+        if self.dest.scheme == "file" and not self._store().is_local:  # a Volume through the Files API
+            store = self._store()
+            store.write_bytes(b"ok", f".duckstring_egress_test.{os.getpid()}.tmp")
+            store.remove(f".duckstring_egress_test.{os.getpid()}.tmp")
+            return
         if self.dest.scheme == "file":
             base = self._file_base()
             base.mkdir(parents=True, exist_ok=True)

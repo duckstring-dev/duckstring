@@ -6,10 +6,16 @@ DuckDB never reads or writes it: the Catchment's own Ducks publish to local disk
 here, and the Catchment restores every line's local publish from here when it starts (``dataplane.restore_published``),
 so reads always find a local copy. That keeps the store to the filesystem operations the data plane needs.
 
-Two measured behaviours of the Files API (2026-11-08) shape it:
+Measured behaviours of the Files API (2026-11-08 and 2026-11-09) shape it:
 
-- an upload replaces the file whole, but isn't atomic for a reader: a read during an overwrite can return a 200
-  with an empty body. A read that comes back empty while the file reports a size is retried.
+- a file is visible from the moment its upload starts: listed, and answering HEAD, with size 0 and an empty body
+  until the upload completes. An overwrite is the same: the old content is gone at once, so a reader during an
+  overwrite (or after a writer that died in one) finds an empty file. Duckstring's Parquet files are written
+  once under names a commit point (a sidecar) refers to, so only the files it overwrites need care: those are
+  written through a **shadow** (``.{name}.duckstring-next``) holding the new content first, then the file, then
+  the shadow is deleted. A read that finds the file empty takes the shadow's content, so a reader always gets
+  the old content or the new, and a writer that dies part way leaves one of them whole. Shadows are hidden from
+  listings.
 - there is no create-if-absent and no rename: ``mv`` is a copy and a delete, so it isn't atomic either. The data
   plane's single writer per line is what makes that safe.
 
@@ -26,8 +32,25 @@ from fsspec import AbstractFileSystem
 
 from . import databricks_rest as dbx
 
-_EMPTY_READ_RETRIES = 8
+_EMPTY_READ_RETRIES = 8  # a Parquet file is never empty, so an empty read is one in flight
 _UPLOAD_LIMIT = 5 * 1024**3  # the Files API takes a file up to 5 GiB in one upload
+SHADOW_SUFFIX = ".duckstring-next"
+
+
+def shadowed(path: str) -> bool:
+    """Whether writes to ``path`` go through a shadow: every file but Parquet, which Duckstring writes once under
+    a name a commit point refers to (a sidecar, a manifest)."""
+    return not path.endswith(".parquet")
+
+
+def shadow_of(path: str) -> str:
+    head, _, name = path.rpartition("/")
+    return f"{head}/.{name}{SHADOW_SUFFIX}"
+
+
+def _is_shadow(path: str) -> bool:
+    name = path.rstrip("/").rpartition("/")[2]
+    return name.startswith(".") and name.endswith(SHADOW_SUFFIX)
 
 
 class VolumeFileSystem(AbstractFileSystem):
@@ -65,7 +88,7 @@ class VolumeFileSystem(AbstractFileSystem):
                 return [info] if detail else [info["name"]]
             raise FileNotFoundError(path)
         out = [{"name": "/" + e["path"].strip("/"), "type": "directory" if e.get("is_directory") else "file",
-                "size": int(e.get("file_size") or 0)} for e in entries]
+                "size": int(e.get("file_size") or 0)} for e in entries if not _is_shadow(e["path"])]
         return out if detail else [e["name"] for e in out]
 
     def info(self, path, **kwargs):
@@ -85,24 +108,42 @@ class VolumeFileSystem(AbstractFileSystem):
         return data[start:end] if start is not None or end is not None else data
 
     def _read(self, path: str) -> bytes:
-        """The file's bytes, retrying a read that comes back empty while the file reports a size (an overwrite in
-        flight)."""
-        try:
-            data = self.client.download(path)
-        except dbx.DatabricksError as exc:
-            if exc.status == 404:
-                raise FileNotFoundError(path) from None
-            raise
+        """The file's bytes. An empty read is an upload in flight, or one a writer died in: a shadowed file takes
+        its shadow's content, and a Parquet file (never empty) is read again."""
+        def fetch(p):
+            try:
+                return self.client.download(p)
+            except dbx.DatabricksError as exc:
+                if exc.status == 404:
+                    return None
+                raise
+
+        return self._settled(path, fetch)
+
+    def _settled(self, path: str, fetch):
+        """``fetch(path)``'s content once it isn't an overwrite in flight (see :meth:`_read`). ``fetch`` returns
+        the content (anything with a length) or None for a missing file."""
+        data = fetch(path)
+        if data is None:
+            raise FileNotFoundError(path)
+        if shadowed(path):
+            for _ in range(2):  # the file, then (empty) the shadow, then the file again: an upload just finished
+                if len(data):
+                    return data
+                shadow = fetch(shadow_of(path))
+                if shadow is not None and len(shadow):
+                    return shadow
+                data = fetch(path)
+                if data is None:
+                    raise FileNotFoundError(path)
+            return data  # empty, with no shadow: a file that really is empty
         for attempt in range(_EMPTY_READ_RETRIES):
-            if data:
-                return data
-            head = self.client.head(path)
-            if head is None:
-                raise FileNotFoundError(path)
-            if head["size"] == 0:
+            if len(data):
                 return data
             time.sleep(0.1 * (attempt + 1))
-            data = self.client.download(path)
+            data = fetch(path)
+            if data is None:
+                raise FileNotFoundError(path)
         return data
 
     def get_file(self, rpath, lpath, **kwargs):
@@ -111,19 +152,23 @@ class VolumeFileSystem(AbstractFileSystem):
             os.makedirs(lpath, exist_ok=True)
             return
         os.makedirs(os.path.dirname(os.path.abspath(lpath)), exist_ok=True)
-        for attempt in range(_EMPTY_READ_RETRIES):
+
+        class _Written:
+            def __init__(self, n):
+                self.n = n
+
+            def __len__(self):
+                return self.n
+
+        def fetch(p):
             try:
-                n = self.client.download_to(rpath, lpath)
+                return _Written(self.client.download_to(p, lpath))
             except dbx.DatabricksError as exc:
                 if exc.status == 404:
-                    raise FileNotFoundError(rpath) from None
+                    return None
                 raise
-            if n:
-                return
-            head = self.client.head(rpath)
-            if head is None or head["size"] == 0:
-                return
-            time.sleep(0.1 * (attempt + 1))
+
+        self._settled(rpath, fetch)  # each attempt streams into lpath; the last one is what's kept
 
     def _open(self, path, mode="rb", **kwargs):
         if "r" not in mode:
@@ -137,7 +182,9 @@ class VolumeFileSystem(AbstractFileSystem):
     def pipe_file(self, path, value, **kwargs):
         if len(value) > _UPLOAD_LIMIT:
             raise ValueError(f"{path}: the Files API takes a file up to 5 GiB")
-        self.client.upload_bytes(bytes(value), self._strip_protocol(path))
+        data = bytes(value)
+        self._write(self._strip_protocol(path), lambda p: self.client.upload_bytes(data, p),
+                    shadow=kwargs.get("shadow"))
 
     def put_file(self, lpath, rpath, **kwargs):
         rpath = self._strip_protocol(rpath)
@@ -146,7 +193,17 @@ class VolumeFileSystem(AbstractFileSystem):
             return
         if os.path.getsize(lpath) > _UPLOAD_LIMIT:
             raise ValueError(f"{lpath}: the Files API takes a file up to 5 GiB")
-        self.client.upload(lpath, rpath)
+        self._write(rpath, lambda p: self.client.upload(lpath, p))
+
+    def _write(self, path: str, upload, shadow: bool | None = None) -> None:
+        """``upload(path)``, through a shadow for a file Duckstring overwrites (see the module docstring);
+        ``shadow=False`` for one written once."""
+        if not (shadowed(path) if shadow is None else shadow):
+            return upload(path)
+        shadow = shadow_of(path)
+        upload(shadow)
+        upload(path)
+        self.client.delete_file(shadow)
 
     def mkdir(self, path, create_parents=True, **kwargs):
         self.client.mkdirs(self._strip_protocol(path))
@@ -159,12 +216,14 @@ class VolumeFileSystem(AbstractFileSystem):
         if self.client.head(path) is None:
             raise FileNotFoundError(path)
         self.client.delete_file(path)
+        if shadowed(path):
+            self.client.delete_file(shadow_of(path))  # one a writer died beside (a missing one is fine)
 
     def rm(self, path, recursive=False, maxdepth=None):
         for p in [path] if isinstance(path, str) else path:
             p = self._strip_protocol(p)
             if self.client.head(p) is not None:
-                self.client.delete_file(p)
+                self.rm_file(p)
             elif self.client.is_dir(p):
                 if not recursive:
                     raise IsADirectoryError(p)
