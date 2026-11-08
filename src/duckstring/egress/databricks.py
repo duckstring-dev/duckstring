@@ -199,7 +199,7 @@ class DatabricksEgressDriver:
                             f"FILE_SIZE_BYTES {_STAGE_FILE_BYTES}, OVERWRITE_OR_IGNORE)")
                 for name in sorted(os.listdir(rows)):
                     self.client().upload(os.path.join(rows, name), f"{remote}/{name}")
-                yield f"read_files({dbx.sql_string(remote)}, format => 'parquet')"
+                yield f"read_files({dbx.sql_string(remote)}, format => 'parquet', schemaEvolutionMode => 'none')"
             finally:
                 shutil.rmtree(local, ignore_errors=True)
                 try:

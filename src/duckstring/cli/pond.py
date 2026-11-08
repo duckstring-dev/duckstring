@@ -193,7 +193,7 @@ def demo(
 ) -> None:
     """Create a set of demo Pond projects as subdirectories.
 
-    --dbt needs the dbt extra to deploy and run: pip install 'duckstring[dbt]'.
+    --dbt needs the dbt extra to deploy and run: pip install 'duckstring\\[dbt]'.
     """
     import shutil
 

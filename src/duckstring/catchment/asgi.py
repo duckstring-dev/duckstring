@@ -9,10 +9,11 @@ Configuration is environment-only:
 
 - ``DUCKSTRING_STATE_ROOT`` (alias: ``DUCKSTRING_ROOT``) — the local POSIX root for **hot state**
   (``duck.db``, the ledgers, the working registries). Defaults to ``./.duckstring``. On a node with
-  ephemeral local disk (Databricks Apps' ``/local_disk0``, a scale-to-zero container) this is lost on
-  redeploy/scale-down — set ``DUCKSTRING_STATE_BACKUP_URI`` to make it durable.
+  ephemeral local disk (a Databricks App, which keeps it across a redeploy but not a compute restart; a
+  scale-to-zero container) this is lost on restart — set ``DUCKSTRING_STATE_BACKUP_URI`` to make it durable.
 - ``DUCKSTRING_DATA_ROOT`` — where the data plane publishes/reads tables: a local path **or** an
-  object-store / Volume URI (``s3://…``, ``gs://…``, ``abfss://…``, ``/Volumes/…``). Credentials ride
+  object-store / Volume URI (``s3://…``, ``gs://…``, ``abfss://…``, ``/Volumes/…`` where Volumes are mounted, which
+  a Databricks App doesn't do). Credentials ride
   the URI query as ``${env:NAME}`` refs, resolved at runtime. Unset → under the state root (today's
   behaviour). An object-store data root auto-selects the parquet data plane.
 - ``DUCKSTRING_STATE_BACKUP_URI`` — where Tier-1/2 state checkpoints sync (object store / Volume / path).

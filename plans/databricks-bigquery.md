@@ -1,6 +1,6 @@
 # BigQuery and Databricks: Flock engines, a Databricks Spout, Catchments on Databricks Apps
 
-**Status: parts 1 to 4 built offline (2026-11-08), BigQuery measured live; Databricks waits for a workspace. For 0.8.0.** See "As built" at the end. Decided in conversation with the author on 2026-11-08. Each fact
+**Status: parts 1 to 4 built (2026-11-08), BigQuery and Databricks (Flock and Spout) measured live; part 5 (the Catchment as a Databricks App) not yet tried. For 0.8.0.** See "As built" at the end. Decided in conversation with the author on 2026-11-08. Each fact
 is tagged as on the Azure/Google plan: **[code]** read in this repo, **[docs]** from the vendor's docs,
 **[unverified]** believed but not checked, **[decision]** the author's call.
 
@@ -276,8 +276,8 @@ source holds the changed rows (`__ds_op = 'u'`) and the removed keys not re-adde
 plain table is `INSERT OVERWRITE t (cols) SELECT ...`. The table is created with `CREATE TABLE IF NOT EXISTS ... AS
 SELECT ... LIMIT 0` from the staged files (types as the warehouse reads the Parquet), new columns with `ALTER TABLE
 ... ADD COLUMNS` typed from `DESCRIBE QUERY`. An empty window skips the warehouse and only moves the watermark.
-All of this runs against a fake workspace offline (`tests/databricks_fake.py`); none of it has met a real
-warehouse, so the statement forms are [unverified] until the workspace run.
+All of this runs against a fake workspace offline (`tests/databricks_fake.py`), and was run live on 2026-11-08
+(below).
 
 **BigQuery, measured 2026-11-08** (australia-southeast1, sqlglot 30.22; dataset `duckstring_flock` with a 1-day
 default table expiration, scratch `gs://duckstring-test-gcloud-data/flock-scratch`). First report: arithmetic, all
@@ -291,6 +291,60 @@ mapping), the aggregates and most windows agreed. Fixed from the report:
 - Kept out: `CAST(DECIMAL AS VARCHAR)` (trailing zeros dropped), `first_value` (NULLS LAST refused in a RANGE
   frame), `% ` on DOUBLE, `median`, `regr_*`, ordered `string_agg`. Each dispatch took 3 to 5 s and was billed at
   BigQuery's 10 MB minimum.
+
+**Databricks, measured 2026-11-08** (Azure Databricks workspace `adb-7405616522734253.13`, Australia Southeast,
+Premium, a serverless workspace; catalog `ds_test_dbx`, schema `duckstring_test`, Volume `staging`; a 2X-Small serverless SQL warehouse,
+Databricks SQL 4.2.0; sqlglot 30.22). Signed in as the Entra service principal `duckstring-test-claude` with an
+Entra token (no Databricks secret), with workspace access, Databricks SQL access, Can use on the warehouse, and on
+the schema `USE CATALOG`, `USE SCHEMA, CREATE TABLE, MODIFY, SELECT, READ VOLUME, WRITE VOLUME`: enough for both
+the Flock and the Spout.
+- Found live: `read_files` adds a `_rescued_data` column by default, which the Spout created in every delivered
+  table. Both read sites pass `schemaEvolutionMode => 'none'`, and the fake workspace adds the column unless that
+  option is given (the offline Spout tests fail without the fix).
+- Flock report: arithmetic, all three zero-division cases (through the CASE rewrite), CASTs to integers (the
+  `round`/`bround` rewrite), strings, the aggregates (the statistics within float_order), `regr_slope/sxx/count`,
+  ordered `string_agg` and every window agreed. Fixed: `dayofweek` (Sunday is 1) rewritten as `dayofweek - 1`.
+  Kept out: `floor`/`ceil` on DOUBLE (a clamped BIGINT; with a scale, a DECIMAL overflow), `//` on DECIMAL (the
+  int_only rule), `date_trunc` (returns an instant from a naive timestamp or a date, so time-zone dependent),
+  `median`, `strftime`. Every builder shape agreed through conform and sampled verification (119 passed, 11 not
+  sent). About 1.2 s per dispatch on a warm warehouse; the first took 12.7 s.
+- Spout: the offline suite's scenarios against real Unity Catalog tables (`spout_live.py` in the session
+  scratchpad): first delivery, a merge (changed, removed and added keys in one MERGE), an append, an overwrite,
+  the watermark, a replay after a lost watermark changing nothing, a gained column, the Test probe. Each
+  delivery's staging directory is removed; the empty `{volume}/.duckstring-staging/` parent stays.
+- Databricks Apps aren't offered in Australia Southeast (Microsoft's feature-region table; the Apps API answered
+  503 TEMPORARILY_UNAVAILABLE there), so part 5 runs on a second, Hybrid workspace in Australia East.
+
+**Part 5, measured 2026-11-08** on a Hybrid workspace in Australia East (`adb-7405616089776615.15`, catalog
+`hybrid_dbx`, warehouse `22f730191698ef19`). App `duckstring` (Medium), created and deployed by the test service
+principal through the Apps API (source uploaded with the Workspace API to its home folder: `app.yaml`, a
+`start.py` that probes then execs uvicorn on `duckstring.catchment.asgi:app`, and `requirements.txt` naming this
+branch's two wheels by relative path, which pip installed from the App folder). The App's own service principal
+needed the schema grants and Can use on the warehouse, given by the author (the test SP can't grant).
+- **No `/Volumes` in an App** [measured]: the path doesn't exist and `/` isn't writable, so a `/Volumes/...` data
+  root or state backup fails at boot (`Permission denied: '/Volumes'`). The plan's assumption (and the fractfs
+  recipe's) was wrong. No `/local_disk0` either.
+- Disk: `/home/app`, `/tmp` and the source folder are writable, one 184 GB disk (160 GB free). Kept across a
+  **redeploy** (state, runs, Spouts all survived), lost on a **compute stop/start** (41 s to stop, 122 s to come
+  back, `No Ponds deployed`).
+- Memory: cgroup v1, `memory.limit_in_bytes` 8 GiB (the machine reports 15.5 GB; the cgroup fix applies).
+  `os.cpu_count()` 4.
+- Outbound: PyPI reachable; `github.com` timed out (504) [the extension host was probed with a bad URL; unknown].
+- Injected env as documented, plus `DATABRICKS_APP_NAME`, `_APP_URL`, `_WORKSPACE_ID`, `UVICORN_HOST`.
+- **CLI access**: the App's sign-in proxy refuses an Entra token (401) and accepts a Databricks OAuth M2M token
+  (`/oidc/v1/token`, scope `all-apis`) as `Authorization: Bearer`, so `catchment connect --header` works (an hour's
+  token). `/logz/batch` returns the App log as JSON with the same token.
+- With everything on local disk: the Trickle demo deployed and ran end to end (Ducks as subprocesses; the
+  dial-back address learned from the first request, nothing set), queries served, and two Databricks Spouts
+  (`databricks:///hybrid_dbx.duckstring_test?...`, host and credentials from the App's injected env) delivered
+  `revenue_by_product` (100,000 rows) and `priced_line` (1,525,000) to Unity Catalog, counts matching.
+- **Files API as a store** [measured from a laptop]: ranged GET (206), HEAD (size, Last-Modified, no ETag),
+  directory listing (404 for a missing directory), delete. A PUT replaces an existing file even without
+  `overwrite=true` (no create-if-absent), and an overwrite isn't atomic for readers: 3 of 7 reads during 10
+  overwrites returned a 200 with an empty body.
+- Open: durable state in an App needs a store behind the Files API (an fsspec filesystem for `/Volumes/...` when
+  not mounted, used by the data root and the state backup; DuckDB never reads it, since the Catchment's own Ducks
+  publish locally first and restore copies down). Its writes must tolerate a reader seeing an empty file.
 
 **Docs handoff** (to write in a fresh session; facts only):
 - Reference done here: `environment.md` (the BigQuery and Databricks variables, the engine order, the credentials

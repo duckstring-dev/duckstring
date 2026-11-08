@@ -2,9 +2,10 @@
 the Statement Execution API running each statement on one DuckDB connection, so tables persist between statements.
 
 A statement is translated from Databricks SQL to DuckDB with sqlglot, ``read_files`` over a Volume path becoming
-``read_parquet`` over the uploads. The few Databricks statements DuckDB lacks are rewritten first: ``INSERT
-OVERWRITE``, ``INSERT INTO ... REPLACE WHERE``, ``DESCRIBE QUERY``/``DESCRIBE TABLE`` and ``ADD COLUMNS``. Results
-come back as Arrow chunks behind presigned links, or inline as JSON rows.
+``read_parquet`` over the uploads (plus Databricks' ``_rescued_data`` column unless ``schemaEvolutionMode =>
+'none'``). The few Databricks statements DuckDB lacks are rewritten first: ``INSERT OVERWRITE``, ``INSERT INTO ...
+REPLACE WHERE``, ``DESCRIBE QUERY``/``DESCRIBE TABLE`` and ``ADD COLUMNS``. Results come back as Arrow chunks behind
+presigned links, or inline as JSON rows.
 """
 
 from __future__ import annotations
@@ -95,7 +96,10 @@ class FakeWorkspace:
                     with open(p, "wb") as fh:
                         fh.write(data)
                     local.append(p)
-            return "read_parquet([" + ", ".join(f"'{p}'" for p in local) + "])"
+            scan = "read_parquet([" + ", ".join(f"'{p}'" for p in local) + "])"
+            if re.search(r"schemaEvolutionMode\s*=>\s*'none'", m.group(0), flags=re.IGNORECASE):
+                return scan
+            return f"(SELECT *, NULL::VARCHAR AS _rescued_data FROM {scan})"  # as Databricks adds by default
 
         try:
             table = self._statement(sql, files)

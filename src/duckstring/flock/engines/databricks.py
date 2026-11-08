@@ -42,9 +42,43 @@ from .sql_engine import SqlEngine
 # warehouse over the same staged data, and compared after conform: the battery and report are
 # tests/test_flock_databricks_conformance.py (python tests/test_flock_databricks_conformance.py prints the full
 # report). Run it after a sqlglot upgrade.
-ALLOWED = frozenset({"Add", "Sub", "Mul", "Abs", "Nullif", "Greatest", "Least", "Count", "Min", "Max"})
-KINDS: dict[str, str] = {}
-FLOAT_KINDS: frozenset[str] = frozenset()
+#
+# Measured 2026-11-08 (Azure Databricks, Australia Southeast, a serverless SQL warehouse on Databricks SQL 4.2;
+# sqlglot 30.22): these agreed exactly, or (KINDS) within float_order. About 1.2 s per dispatch on a warm warehouse.
+#
+# Kept out, each for a measured reason:
+#   floor, ceil on DOUBLE     Databricks returns a BIGINT (1e300 clamped to 2^63); with a scale, a DECIMAL that
+#                             can't hold it (refused by _check).
+#   // on DECIMAL             DuckDB keeps the fraction (1.25), Databricks doesn't (the int_only rule).
+#   CAST(DOUBLE AS VARCHAR)   formats differ ('1e+300' against '1.0E300'; the translator's rule).
+#   CAST(VARCHAR AS …)        DuckDB raises on a malformed string where an engine may not (the translator's rule).
+#   date_trunc                Databricks returns a TIMESTAMP (an instant) from a TIMESTAMP_NTZ or a DATE, so the
+#                             result depends on the warehouse's and the Duck's time zones.
+#   median                    interpolates differently on DECIMAL.
+#   strftime                  format codes only partly shared.
+ALLOWED = frozenset({
+    # arithmetic (Div, CAST to an integer and DayOfWeek are rewritten, see _rewrite)
+    "Add", "Sub", "Mul", "Div", "IntDiv", "Mod", "Abs", "Floor", "Ceil", "Round", "Sign", "Greatest", "Least",
+    "Nullif", "Pow", "Sqrt", "Ln", "Exp", "Log",
+    # strings
+    "Upper", "Lower", "Length", "Substring", "Concat", "DPipe", "Trim", "Replace", "Like", "ILike", "StartsWith",
+    "Pad", "Reverse", "Left", "StrPosition", "Contains",
+    # dates
+    "Year", "Month", "Day", "DayOfWeek", "Quarter", "Interval", "DateDiff", "Extract",
+    # aggregates
+    "Count", "Sum", "Avg", "Min", "Max", "VariancePop", "Variance", "StddevPop", "Stddev", "StddevSamp",
+    "CovarPop", "Corr", "RegrSlope", "RegrSxx", "RegrCount", "ArgMin", "ArgMax", "LogicalAnd", "LogicalOr",
+    "BitwiseAndAgg", "BitwiseOrAgg", "Filter", "GroupConcat",
+    # windows
+    "RowNumber", "Rank", "DenseRank", "Lag", "Lead", "FirstValue",
+})
+# float_order: floating-point results that differ in the last bits. Sum and Avg are exact on integer and DECIMAL
+# input (FLOAT_KINDS); the statistics compute in floating point whatever the input, and ln/exp/pow/log aren't
+# correctly rounded by every math library.
+KINDS = {name: "float_order" for name in (
+    "Sum", "Avg", "VariancePop", "Variance", "StddevPop", "Stddev", "StddevSamp", "CovarPop", "Corr", "RegrSlope",
+    "RegrSxx", "Log", "Ln", "Exp", "Pow")}
+FLOAT_KINDS = frozenset({"Sum", "Avg"})
 _FAIL = "duckstring: a division by zero Databricks cannot reproduce"
 _STAGE_FILE_BYTES = 1 << 30  # a Files API upload is limited to about 5 GiB
 
@@ -62,6 +96,7 @@ def _rewrite(tree, exp):
       be -0.0, which flips the infinity's sign, so a row with one raises and the job runs locally.
     - ``CAST(x AS <integer>)`` rounds in DuckDB (DECIMAL half away from zero, DOUBLE half to even) where
       Databricks truncates: ``round`` (half up) and ``bround`` (half even) first.
+    - ``dayofweek`` counts Sunday as 0 in DuckDB and 1 in Databricks.
     """
     import sqlglot
 
@@ -90,9 +125,18 @@ def _rewrite(tree, exp):
             x = node.this.sql("duckdb")
             fn = "round" if src.startswith("DECIMAL") or src == "BIGDECIMAL" else "bround"
             return parse(f"CAST({fn}({x}) AS {node.to.sql('duckdb')})")
+        if isinstance(node, exp.DayOfWeek):
+            return parse(f"(dayofweek({node.this.sql('duckdb')}) - 1)")
         return node
 
     return tree.transform(fix)
+
+
+def _check(node, exp) -> str | None:
+    """Databricks' refusals beyond construct names."""
+    if isinstance(node, (exp.Floor, exp.Ceil)) and _type(node.this) in ("FLOAT", "DOUBLE", "UNKNOWN"):
+        return "floor/ceil of a DOUBLE isn't sent: Databricks returns a BIGINT"
+    return None
 
 
 PROFILE = translate.Profile(
@@ -102,6 +146,7 @@ PROFILE = translate.Profile(
     kinds=KINDS,
     float_kinds=FLOAT_KINDS,
     int_only=frozenset({"IntDiv", "Mod"}),
+    check=_check,
     cast_to=frozenset({"BIGINT", "INT", "SMALLINT", "TINYINT", "DOUBLE", "DECIMAL", "VARCHAR", "TEXT", "DATE",
                        "TIMESTAMP", "TIMESTAMPNTZ"}),
 )
@@ -157,7 +202,7 @@ class DatabricksEngine(SqlEngine):
         remote = f"{self.volume}/{tag}/src{i}"
         for path in sorted(Path(uri).glob("*.parquet")):
             self.client().upload(path, f"{remote}/{path.name}")
-        return f"read_files({dbx.sql_string(remote)}, format => 'parquet')"
+        return f"read_files({dbx.sql_string(remote)}, format => 'parquet', schemaEvolutionMode => 'none')"
 
     def execute(self, sql: str, out_uri: str, tag: str) -> dict:
         import pyarrow.parquet as pq
