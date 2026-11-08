@@ -57,7 +57,7 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
         return None
     if not isinstance(section, dict) or not (section.get("command") or section.get("static")):
         raise ValueError('pond.toml: an App needs [app] command (for example '
-                         '"uvicorn main:app --port $PORT --root-path $DUCKSTRING_APP_PATH"), static, or both')
+                         '\'uvicorn main:app --port $PORT --root-path "$DUCKSTRING_APP_PATH"\'), static, or both')
     command = section.get("command")
     if command is not None and (not isinstance(command, str) or not command.strip()):
         raise ValueError("pond.toml [app] command: expected a command line")

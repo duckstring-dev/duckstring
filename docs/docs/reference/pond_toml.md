@@ -158,7 +158,7 @@ type = "app"
 reports = "1.2.0"
 
 [app]
-command = "uvicorn main:app --port $PORT --root-path $DUCKSTRING_APP_PATH"
+command = 'uvicorn main:app --port $PORT --root-path "$DUCKSTRING_APP_PATH"'
 health = "/healthz"
 ```
 

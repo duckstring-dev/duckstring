@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from ..app import ENV, app_config
 from .project import Project
@@ -19,6 +20,8 @@ from .project import Project
 def app_env(project: Project, port: int) -> dict[str, str]:
     cfg = app_config(project.info, project.dir)
     env = dict(os.environ)
+    # As on the Catchment: the environment's bin first, so a command it installs (streamlit, gunicorn) is found.
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
     env["PORT"] = str(port)
     env["DUCKSTRING_APP_PATH"] = ""
     env["PYTHONUNBUFFERED"] = "1"

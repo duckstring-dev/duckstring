@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import sys
 import time
 import zipfile
+from pathlib import Path
 
 import duckdb
 import pytest
@@ -409,6 +412,7 @@ def test_pond_run_gives_an_app_its_puddles(tmp_path):
     (tmp_path / "pond.toml").write_text(_app_toml())
     env = app_env(load_project(tmp_path), 8123)
     assert env["PORT"] == "8123" and env["DUCKSTRING_APP_PATH"] == ""
+    assert env["PATH"].split(os.pathsep)[0] == str(Path(sys.executable).parent)  # the environment's commands
     assert env["DUCKSTRING_APP_STATE"] == str(tmp_path / "puddles" / "app" / "state")
     cfg = json.loads(env["DUCKSTRING_APP"])
     assert cfg["root"] == str(tmp_path / "puddles") and cfg["sources"] == ["sales"] and "source_majors" not in cfg
