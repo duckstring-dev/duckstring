@@ -16,6 +16,7 @@ from duckstring import databricks_rest as dbx
 from duckstring.catchment.egress_worker import _egress_spout
 from duckstring.catchment.registry import pond_data_dir
 from duckstring.dataplane import ParquetDataPlane
+from duckstring.egress import databricks as egress_databricks
 from duckstring.egress import get_egress
 from duckstring.egress.destination import DestinationError, parse_destination
 
@@ -34,6 +35,9 @@ def ws(monkeypatch):
     """The fake workspace, reached by every Databricks client the driver makes."""
     ws = FakeWorkspace(pending_polls=0)
     ws.con.execute("CREATE SCHEMA lake.sales")
+    # What the driver knows exists is per process; every test's workspace starts empty.
+    monkeypatch.setattr(egress_databricks, "_KNOWN_WATERMARKS", set())
+    monkeypatch.setattr(egress_databricks, "_KNOWN_COLUMNS", {})
     monkeypatch.setenv("DBX_TOKEN", "pat-x")
     real = dbx.Client
 
@@ -95,9 +99,8 @@ def test_a_replayed_window_changes_nothing(tmp_path, ws):
     _deliver(tmp_path, F2)
     assert {t: ws.table(f"lake.sales.{t}") for t in ("orders", "events", "totals")} == before
     n = len(ws.executed)
-    _deliver(tmp_path, F2)  # the watermark covers it now: nothing is written
-    assert all(s.startswith("CREATE TABLE IF NOT EXISTS") or s.startswith("SELECT f FROM")
-               for s in ws.executed[n:])
+    _deliver(tmp_path, F2)  # the watermark covers it now: one read of the watermarks, nothing written
+    assert [s.split(" FROM")[0] for s in ws.executed[n:]] == ["SELECT table_name, f"]
 
 
 def test_a_column_the_source_gains_is_added(tmp_path, ws):
@@ -142,3 +145,40 @@ def test_the_test_button_writes_nothing_but_a_removed_probe(tmp_path, ws):
     get_egress(DEST).test_connection(duckdb.connect())
     assert ws.executed == ["SELECT 1"] and not ws.files
     assert set(ws.auth) == {"Bearer pat-x"}
+
+
+def test_a_replay_across_an_unrecorded_delivery_adds_nothing_twice(tmp_path, ws):
+    src = _Source(tmp_path)
+    src.run(F1, orders="(1, 'a')", events="('e1', 1)", totals="('k', 10)")
+    _deliver(tmp_path, F1)
+    src.run(F2, orders="(1, 'a')", events="('e2', 2)", totals="('k', 10)")
+    _deliver(tmp_path, F2)
+    # The F2 delivery committed its rows but its watermark was lost: the next window is (F1, F3], which holds e2 again.
+    ws.con.execute("UPDATE lake.sales._duckstring_egress SET f = ? WHERE table_name = 'events'", [F1.isoformat()])
+    src.run(F3, orders="(1, 'a')", events="('e3', 3)", totals="('k', 10)")
+    _deliver(tmp_path, F3)
+    assert sorted(r[:2] for r in ws.table("lake.sales.events")) == [("e1", 1), ("e2", 2), ("e3", 3)]
+
+
+def test_a_warm_run_sends_one_statement_per_table_and_two_for_the_watermarks(tmp_path, ws):
+    src = _Source(tmp_path)
+    src.run(F1, orders="(1, 'a')", events="('e1', 1)", totals="('k', 10)")
+    _deliver(tmp_path, F1)
+    src.run(F2, orders="(1, 'b')", events="('e2', 2)", totals="('k', 20)")
+    _deliver(tmp_path, F2)  # the first append window: events gains its _duckstring_f column
+    src.run(F3, orders="(1, 'c')", events="('e3', 3)", totals="('k', 30)")
+    n = len(ws.executed)
+    _deliver(tmp_path, F3)
+    kinds = sorted(s.split(" ")[0] + (" " + s.split(" ")[2] if s.startswith("MERGE") else "") for s in ws.executed[n:])
+    assert kinds == ["INSERT", "INSERT", "MERGE `lake`.`sales`.`_duckstring_egress`", "MERGE `lake`.`sales`.`orders`",
+                     "SELECT"]  # the events append, the totals overwrite, both MERGEs, the one watermark read
+
+
+def test_a_target_dropped_since_is_made_again(tmp_path, ws):
+    src = _Source(tmp_path)
+    src.run(F1, orders="(1, 'a')", events="('e1', 1)", totals="('k', 10)")
+    _deliver(tmp_path, F1, table="totals")
+    ws.con.execute("DROP TABLE lake.sales.totals")  # behind this process's back
+    src.run(F2, orders="(1, 'a')", events="('e1', 1)", totals="('k', 20)")
+    _deliver(tmp_path, F2, table="totals")
+    assert ws.table("lake.sales.totals") == [("k", 20)]

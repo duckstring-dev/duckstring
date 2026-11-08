@@ -15,6 +15,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 from urllib.parse import unquote
 
 import duckdb
@@ -35,6 +36,7 @@ class FakeWorkspace:
         self.files: dict[str, bytes] = {}
         self.dirs: set[str] = set()  # directories made explicitly (others exist while they hold a file)
         self.empty_reads = 0  # the next this-many file reads come back empty, as during an overwrite
+        self._lock = threading.Lock()
         self.statements: dict[str, dict] = {}
         self.executed: list[str] = []
         self.auth: list[str] = []
@@ -112,6 +114,10 @@ class FakeWorkspace:
         return httpx.Response(404, json={"message": f"no route {request.method} {path}"})
 
     def _run(self, body):
+        with self._lock:  # a warehouse takes statements concurrently; the fake runs them one at a time
+            return self._run_one(body)
+
+    def _run_one(self, body):
         sql = body["statement"]
         self.executed.append(sql)
 
@@ -132,8 +138,11 @@ class FakeWorkspace:
         try:
             table = self._statement(sql, files)
         except duckdb.Error as exc:
+            message = str(exc)
+            if isinstance(exc, duckdb.CatalogException) and "does not exist" in message:
+                message = f"[TABLE_OR_VIEW_NOT_FOUND] {message}"  # Databricks' error class for a missing table
             st = {"statement_id": f"s{len(self.statements)}", "_polls": 0,
-                  "status": {"state": "FAILED", "error": {"message": str(exc)}}}
+                  "status": {"state": "FAILED", "error": {"message": message}}}
             self.statements[st["statement_id"]] = st
             return httpx.Response(200, json=self._view(st))
         sid = f"s{len(self.statements)}"
