@@ -94,11 +94,12 @@ def get_egress(destination: str) -> EgressDriver:
 
 # Register the bundled drivers. Imported here (not at package import) to keep the dependency one-way.
 def _register_builtins() -> None:
+    from .databricks import DatabricksEgressDriver
     from .ducklake import DuckLakeEgressDriver
     from .object_store import ObjectStoreEgressDriver
     from .postgres import PostgresEgressDriver
 
-    for driver in (ObjectStoreEgressDriver, PostgresEgressDriver, DuckLakeEgressDriver):
+    for driver in (ObjectStoreEgressDriver, PostgresEgressDriver, DuckLakeEgressDriver, DatabricksEgressDriver):
         for scheme in driver.SCHEMES:
             register(scheme, driver)
 

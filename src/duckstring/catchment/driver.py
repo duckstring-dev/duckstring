@@ -22,6 +22,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from ..app import app_stop_message
 from ..egress.credentials import secret_value
@@ -98,7 +99,28 @@ def _memory_budget() -> int:
         physical = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     except (ValueError, OSError, AttributeError):
         physical = 16 * 10**9
+    limit = _container_memory_limit()
+    if limit is not None:
+        physical = min(physical, limit)
     return max(int(physical * 0.8) - 2 * 10**9, 10**9)
+
+
+# Where a container's memory limit is (cgroup v2, then v1). Inside a container sysconf reports the host's memory
+# (a Databricks App, Container Apps, Cloud Run), so slots sized from it would let the Ducks outgrow the limit.
+_CGROUP_MEMORY_FILES = ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes")
+
+
+def _container_memory_limit() -> int | None:
+    """The container's memory limit in bytes, or ``None`` when there is none (or it can't be read)."""
+    for path in _CGROUP_MEMORY_FILES:
+        try:
+            raw = Path(path).read_text().strip()
+        except OSError:
+            continue
+        if raw.isdigit() and int(raw) < 2**60:  # v2 says "max" for no limit; v1 a huge number
+            return int(raw)
+        return None
+    return None
 
 
 # A Duck is presumed dead if it holds an in-flight Run but hasn't contacted the Catchment within this

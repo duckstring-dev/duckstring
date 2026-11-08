@@ -30,8 +30,8 @@ def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
 def add(
     pond: str = typer.Argument(..., help="The Pond whose tables to deliver."),
     to: str = typer.Option(..., "--to", "-t", help="Destination URI: file://, s3://, gs://, "
-                                                   "az://, abfss://, postgres:// or ducklake:. Credentials "
-                                                   "as ${env:NAME} or ${secret:NAME}."),
+                                                   "az://, abfss://, postgres://, ducklake: or databricks://. "
+                                                   "Credentials as ${env:NAME} or ${secret:NAME}."),
     table: Optional[str] = typer.Option(None, "--table", "-T", help="Deliver only this table (default: all tables)."),
     all_tables: bool = typer.Option(False, "--all", help="Deliver every table (the default)."),
     mode: str = typer.Option("auto", "--mode", help="auto (only changes where supported), full, or append."),

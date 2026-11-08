@@ -38,7 +38,7 @@ Run only one Catchment process against a state directory, and only one Catchment
 |---|---|---|
 | `DUCKSTRING_MEMORY_LIMIT` | DuckDB's default | Memory limit for each Duck's DuckDB, such as `12GB`. Also sets the size at which the Flock takes over a computation. Set it to about 80% of the Duck's memory. On the Catchment's own machine, the memory slots below set each Duck's limit instead. |
 | `DUCKSTRING_RUN_SLOTS` | `4` | How many Ducks run at once on the Catchment's own machine. Each gets an equal share of the memory budget as its DuckDB limit; a Pond that would run beyond them waits, in the order it became ready, and shows as waiting for memory. A Duck running alone may take the spare slots, keeping one for another Pond. A Run that runs out of memory is retried once with every slot, without counting against its failure budget. A running [App](pond_toml.md#app) holds slots too, until it stops. `0` turns this off, leaving each Duck to size itself. |
-| `DUCKSTRING_MEMORY_BUDGET` | 80% of the machine's memory, less 2 GB | The memory the slots divide, such as `100GB`. |
+| `DUCKSTRING_MEMORY_BUDGET` | 80% of the machine's memory (or the container's limit, when lower), less 2 GB | The memory the slots divide, such as `100GB`. |
 | `DUCKSTRING_IDLE_MEMORY` | `256MB` | The DuckDB limit a Duck drops to when it has nothing running, which releases what it was caching. |
 | `DUCKSTRING_DUCK_LAUNCHER` | built in | `module:Class` of a custom launcher that replaces how Ducks are started. |
 | `DUCKSTRING_DUCK_ORPHAN_MINUTES` | `60` | How long an idle Duck goes without contact from its Catchment before it exits, so a Duck whose Catchment is gone for good doesn't run indefinitely. A Duck mid-run finishes first. `0` keeps Ducks waiting forever. Set it on the Catchment, which passes it to every Duck, including cloud ones. Pool machines aren't affected. |
@@ -62,11 +62,11 @@ Set these on the Catchment. It sends them to each Duck with every run, together 
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_FLOCK_MODE` | `off` | Catchment default for [`[flock] mode`](pond_toml.md#flock). |
-| `DUCKSTRING_FLOCK_ENGINE` | the first configured | Catchment default engine: `motherduck`, `motherduck/<profile>`, `starrocks`, `athena`, or `module:Class`. Unset, the first of `motherduck`, `starrocks` and `athena` that is configured. An engine that can't be loaded turns the Flock off. |
+| `DUCKSTRING_FLOCK_ENGINE` | the first configured | Catchment default engine: `motherduck`, `motherduck/<profile>`, `starrocks`, `databricks`, `bigquery`, `athena`, or `module:Class`. Unset, the first of `motherduck`, `starrocks`, `databricks`, `bigquery` and `athena` that is configured. An engine that can't be loaded turns the Flock off. |
 | `DUCKSTRING_FLOCK_OOM_POLICY` | `fail_up` | Catchment default for `[flock] oom_policy`. |
 | `DUCKSTRING_FLOCK_ACCEPT` | | Catchment default for `[flock] accept`, comma-separated. |
 | `DUCKSTRING_FLOCK_MIN_ROWS` | from `DUCKSTRING_MEMORY_LIMIT` | The row count above which `upgrade` mode sends a computation to the Flock up front. |
-| `DUCKSTRING_FLOCK_VERIFY_KEYS` | `1000` | How many keys of a StarRocks or Athena result are recomputed in the Duck and compared before it's used. `0` turns verification off. |
+| `DUCKSTRING_FLOCK_VERIFY_KEYS` | `1000` | How many keys of a StarRocks, Databricks, BigQuery or Athena result are recomputed in the Duck and compared before it's used. `0` turns verification off. |
 | `DUCKSTRING_FLOCK_MOTHERDUCK_DATABASE` | `duckstring_flock` | The MotherDuck database that sources are uploaded to for a job. |
 | `DUCKSTRING_FLOCK_STARROCKS_HOST` | | StarRocks frontend host. |
 | `DUCKSTRING_FLOCK_STARROCKS_PORT` | `9030` | StarRocks MySQL-protocol port. |
@@ -76,12 +76,21 @@ Set these on the Catchment. It sends them to each Duck with every run, together 
 | `DUCKSTRING_FLOCK_STARROCKS_REGION` | | Region of the scratch bucket. |
 | `DUCKSTRING_FLOCK_STARROCKS_S3_ENDPOINT` | | The scratch bucket's endpoint as StarRocks sees it, for an S3-compatible store. |
 | `DUCKSTRING_FLOCK_STARROCKS_TIMEOUT` | `900` | Seconds a job may run on StarRocks, including a suspended warehouse resuming. |
+| `DUCKSTRING_FLOCK_DATABRICKS_HOST` | `DATABRICKS_HOST` | Databricks workspace URL. |
+| `DUCKSTRING_FLOCK_DATABRICKS_WAREHOUSE` | | SQL warehouse id. |
+| `DUCKSTRING_FLOCK_DATABRICKS_VOLUME` | | Unity Catalog Volume path for staged sources, `/Volumes/<catalog>/<schema>/<volume>`, optionally with a directory. |
+| `DUCKSTRING_FLOCK_DATABRICKS_TIMEOUT` | `900` | Seconds a job may run on Databricks, including the warehouse starting. |
+| `DUCKSTRING_FLOCK_BIGQUERY_DATASET` | | BigQuery dataset for temporary tables, in the scratch bucket's location. |
+| `DUCKSTRING_FLOCK_BIGQUERY_SCRATCH` | | `gs://` prefix for staged sources and results. |
+| `DUCKSTRING_FLOCK_BIGQUERY_PROJECT` | the credentials' project | Project jobs run in. |
+| `DUCKSTRING_FLOCK_BIGQUERY_LOCATION` | | The dataset's location. |
+| `DUCKSTRING_FLOCK_BIGQUERY_TIMEOUT` | `900` | Seconds a job may run on BigQuery. |
 | `DUCKSTRING_FLOCK_ATHENA_WORKGROUP` | | Athena workgroup. |
 | `DUCKSTRING_FLOCK_ATHENA_DATABASE` | | Athena database. |
 | `DUCKSTRING_FLOCK_ATHENA_SCRATCH` | | S3 location for staged sources and Athena results. |
 | `DUCKSTRING_FLOCK_ATHENA_REGION` | | Athena region. |
 
-The engines' credentials are secrets (`duckstring secret set`), sent with each run only while the Pond's Flock is on: `MOTHERDUCK_TOKEN` (or `MOTHERDUCK_TOKEN_<PROFILE>` for `motherduck/<profile>`), and `STARROCKS_PASSWORD`, `STARROCKS_S3_ACCESS_KEY` and `STARROCKS_S3_SECRET_KEY`. Athena uses the Duck's IAM role.
+The engines' credentials are secrets (`duckstring secret set`), sent with each run only while the Pond's Flock is on: `MOTHERDUCK_TOKEN` (or `MOTHERDUCK_TOKEN_<PROFILE>` for `motherduck/<profile>`), `STARROCKS_PASSWORD`, `STARROCKS_S3_ACCESS_KEY` and `STARROCKS_S3_SECRET_KEY`, and `DATABRICKS_TOKEN`, or `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` (on Azure Databricks, without them, a Microsoft Entra token from the Duck's identity). BigQuery uses Google credentials (`credentials=` on the scratch URI, else the Duck's own), and Athena the Duck's IAM role.
 
 ## Cloud Ducks on Fargate
 

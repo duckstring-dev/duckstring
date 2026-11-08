@@ -171,6 +171,26 @@ The string DuckDB's `ATTACH` takes for a [DuckLake](https://ducklake.select), fo
 
 Any table can be delivered: a merge Trickle by its primary key, an append Trickle's new rows, and a plain table replaced whole. Each delivery is one transaction, so it adds one snapshot to the lake, with author `duckstring` and the Pond as `{name}@{major}` in the commit message. The catalog is never migrated. A lake created under DuckDB 2.0 uses DuckLake 1.1, which DuckDB 1.5 can't read. It needs DuckDB's `ducklake` extension, downloaded on first use.
 
+### `databricks://`
+
+```text
+databricks://adb-1234567890123456.7.azuredatabricks.net/main.sales?warehouse=1a2b3c4d5e6f7a8b&volume=/Volumes/main/sales/staging
+databricks:///main.sales?warehouse=1a2b3c4d5e6f7a8b&volume=/Volumes/main/sales/staging
+```
+
+Delivers to Unity Catalog tables in the `catalog.schema` named by the path. Without a host, it's taken from `DATABRICKS_HOST`, which a Databricks App sets.
+
+| Parameter | Description |
+|---|---|
+| `warehouse` | The SQL warehouse that applies each delivery. Required. |
+| `volume` | A Unity Catalog Volume, `/Volumes/<catalog>/<schema>/<volume>`, where each delivery is staged and removed after. Required. |
+| `token` | A personal access token, as a `${secret:NAME}` reference. |
+| `client_id`, `client_secret` | A Databricks service principal's OAuth credentials, as references. |
+
+Without credentials in the destination, the Catchment's `DATABRICKS_TOKEN`, or `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET`, are used, and on Azure Databricks without those, a Microsoft Entra token from the Catchment's identity. The identity needs to use the warehouse, write the Volume, and create and modify tables in the schema. No external location or storage credential is needed.
+
+Any table can be delivered: a merge Trickle as one `MERGE` by its primary key, an append Trickle's new rows, and a plain table replaced whole. An append table's rows carry the freshness of the delivery that wrote them in a `_duckstring_f` column, so a delivery repeated after a crash replaces its own rows rather than adding them again. Delivery progress is recorded in a `_duckstring_egress` table in the schema. A column the source gains is added to the table.
+
 ## Notification URIs
 
 Where an [alert channel](cli/alert.md) sends.

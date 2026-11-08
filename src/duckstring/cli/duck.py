@@ -82,7 +82,7 @@ def set_(
     duck: Optional[str] = typer.Option(None, "--duck", help="Where the Pond runs: catchment, a pool name, or dedicated."),
     flock: Optional[str] = typer.Option(None, "--flock", help="Flock mode: off, upgrade or always."),
     engine: Optional[str] = typer.Option(
-        None, "--engine", help="Flock engine: motherduck, motherduck/<profile>, starrocks or athena."),
+        None, "--engine", help="Flock engine: motherduck, motherduck/<profile>, starrocks, databricks, bigquery or athena."),
     oom: Optional[str] = typer.Option(None, "--oom", help="On running out of memory: fail_up (retry on the Flock) or fail."),
     accept: Optional[str] = typer.Option(
         None, "--accept",

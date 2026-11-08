@@ -1,0 +1,194 @@
+"""The Databricks SQL Flock engine (plans/databricks-bigquery.md, part 3): a job translated to Databricks SQL and
+run on a SQL warehouse, on any cloud.
+
+Databricks isn't DuckDB, so a job is translated (:mod:`duckstring.flock.translate`) and only constructs whose
+translation was measured to agree are sent (the list below, from ``tests/test_flock_databricks_conformance.py``
+against a real workspace); the Pond can accept known, bounded differences by name. Every builder shape is
+eligible.
+
+Staging needs no external location or storage credential, only a Unity Catalog **Volume** the caller can write:
+each source is written as Parquet on the Duck, uploaded to the Volume through the Files API, and read by the
+warehouse with ``read_files``. The result comes back through the Statement Execution API as Arrow chunks, which
+the Duck writes as Parquet locally and reads. So the engine works from any Duck, inside Databricks or not.
+
+Config (``host``, ``warehouse`` and ``volume`` are required to enable):
+
+- ``DUCKSTRING_FLOCK_DATABRICKS_HOST``: the workspace URL (else ``DATABRICKS_HOST``, which a Databricks App has).
+- ``DUCKSTRING_FLOCK_DATABRICKS_WAREHOUSE``: the SQL warehouse id. A serverless warehouse starts in seconds.
+- ``DUCKSTRING_FLOCK_DATABRICKS_VOLUME``: a Volume path for staged sources, ``/Volumes/{catalog}/{schema}/{volume}``
+  plus an optional directory.
+- ``DUCKSTRING_FLOCK_DATABRICKS_TIMEOUT``: seconds a dispatch may run (default 900), including the warehouse
+  starting.
+- credentials as :mod:`duckstring.databricks_rest` describes: the secrets ``DATABRICKS_TOKEN``, or
+  ``DATABRICKS_CLIENT_ID`` and ``DATABRICKS_CLIENT_SECRET``; on Azure, an Entra token.
+
+Requires sqlglot (``pip install 'duckstring[databricks]'``).
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+from pathlib import Path
+
+from ... import databricks_rest as dbx
+from .. import translate
+from .sql_engine import SqlEngine
+
+# ── What Databricks is trusted with ────────────────────────────────────────────
+#
+# Each construct below was run on DuckDB and, translated (sqlglot plus the rewrites below), on a Databricks SQL
+# warehouse over the same staged data, and compared after conform: the battery and report are
+# tests/test_flock_databricks_conformance.py (python tests/test_flock_databricks_conformance.py prints the full
+# report). Run it after a sqlglot upgrade.
+ALLOWED = frozenset({"Add", "Sub", "Mul", "Abs", "Nullif", "Greatest", "Least", "Count", "Min", "Max"})
+KINDS: dict[str, str] = {}
+FLOAT_KINDS: frozenset[str] = frozenset()
+_FAIL = "duckstring: a division by zero Databricks cannot reproduce"
+_STAGE_FILE_BYTES = 1 << 30  # a Files API upload is limited to about 5 GiB
+
+
+def _type(node) -> str:
+    t = getattr(node, "type", None)
+    return t.this.name if t is not None else "UNKNOWN"
+
+
+def _rewrite(tree, exp):
+    """DuckDB's semantics spelled out in Databricks SQL where Databricks' own differ:
+
+    - ``a / b`` is DOUBLE division in DuckDB, giving ±inf (or NaN for ``0/0``) for a zero divisor where Databricks
+      raises (ANSI mode) or returns NULL. Reproduced for an integer or DECIMAL divisor; a DOUBLE zero divisor may
+      be -0.0, which flips the infinity's sign, so a row with one raises and the job runs locally.
+    - ``CAST(x AS <integer>)`` rounds in DuckDB (DECIMAL half away from zero, DOUBLE half to even) where
+      Databricks truncates: ``round`` (half up) and ``bround`` (half even) first.
+    """
+    import sqlglot
+
+    def parse(sql):
+        out = sqlglot.parse_one(sql, read="duckdb")
+        for node in out.walk():
+            node.set("_duckstring", True)
+        return out
+
+    def fix(node):
+        if node.args.get("_duckstring"):
+            return node
+        if isinstance(node, exp.Div):
+            a = f"CAST(({node.this.sql('duckdb')}) AS DOUBLE)"
+            b = f"CAST(({node.expression.sql('duckdb')}) AS DOUBLE)"
+            zero = (f"WHEN {a} > 0 THEN CAST('Infinity' AS DOUBLE) WHEN {a} < 0 THEN CAST('-Infinity' AS DOUBLE) "
+                    f"WHEN {a} = 0 THEN CAST('NaN' AS DOUBLE)")
+            if _type(node.expression) in ("FLOAT", "DOUBLE", "UNKNOWN"):
+                zero = f"WHEN {a} IS NOT NULL THEN CAST(raise_error('{_FAIL}') AS DOUBLE)"
+            return parse(f"CASE WHEN {b} = 0 THEN CASE {zero} END ELSE {a} / {b} END")
+        if isinstance(node, exp.Cast):
+            to = node.to.this.name if isinstance(node.to, exp.DataType) else ""
+            src = _type(node.this)
+            if to not in translate._INT_TYPES or src in translate._INT_TYPES:
+                return node
+            x = node.this.sql("duckdb")
+            fn = "round" if src.startswith("DECIMAL") or src == "BIGDECIMAL" else "bround"
+            return parse(f"CAST({fn}({x}) AS {node.to.sql('duckdb')})")
+        return node
+
+    return tree.transform(fix)
+
+
+PROFILE = translate.Profile(
+    dialect="databricks",
+    rewrite=_rewrite,
+    allowed=ALLOWED,
+    kinds=KINDS,
+    float_kinds=FLOAT_KINDS,
+    int_only=frozenset({"IntDiv", "Mod"}),
+    cast_to=frozenset({"BIGINT", "INT", "SMALLINT", "TINYINT", "DOUBLE", "DECIMAL", "VARCHAR", "TEXT", "DATE",
+                       "TIMESTAMP", "TIMESTAMPNTZ"}),
+)
+
+# Databricks result types (the statement manifest's type_name) as DuckDB types, for an empty result.
+_DUCK_TYPES = {"BOOLEAN": "BOOLEAN", "BYTE": "TINYINT", "SHORT": "SMALLINT", "INT": "INTEGER", "LONG": "BIGINT",
+               "FLOAT": "FLOAT", "DOUBLE": "DOUBLE", "STRING": "VARCHAR", "DATE": "DATE", "TIMESTAMP": "TIMESTAMPTZ",
+               "TIMESTAMP_NTZ": "TIMESTAMP", "BINARY": "BLOB"}
+
+
+class DatabricksEngine(SqlEngine):
+    """A :class:`duckstring.flock.FlockEngine` on a Databricks SQL warehouse."""
+
+    PROFILE = PROFILE
+    SECRETS: tuple[str, ...] = dbx.SECRETS
+    STAGE_FILE_BYTES = _STAGE_FILE_BYTES
+
+    def __init__(self, env, name: str | None = None):
+        super().__init__(env, name or "databricks")
+        self.host = self._setting("HOST") or env.get("DATABRICKS_HOST")
+        self.warehouse = self._setting("WAREHOUSE")
+        self.volume = (self._setting("VOLUME") or "").rstrip("/") or None
+        self.timeout = int(self._setting("TIMEOUT") or 900)
+        self._local: str | None = None
+        self._client: dbx.Client | None = None
+        self.transport = None  # an httpx transport, for tests
+
+    def _setting(self, key: str) -> str | None:
+        return self.env.get(f"DUCKSTRING_FLOCK_DATABRICKS_{key}") or None
+
+    def enabled(self) -> bool:
+        return bool(self.host and self.warehouse and self.volume)
+
+    def client(self) -> dbx.Client:
+        if self._client is None:
+            self._client = dbx.Client(self.host, self.env, transport=self.transport)
+        return self._client
+
+    # ── SqlEngine ─────────────────────────────────────────────────────────────
+
+    def _storage(self):
+        """Staging is local; read_of uploads each source to the Volume."""
+        from ...storage import get_storage
+
+        if self._local is None:
+            self._local = tempfile.mkdtemp(prefix="duckstring-flock-databricks-")
+        return get_storage(self._local)
+
+    def prepare(self, con, storage) -> None:
+        pass
+
+    def read_of(self, uri: str, columns: dict[str, str], tag: str, i: int) -> str:
+        remote = f"{self.volume}/{tag}/src{i}"
+        for path in sorted(Path(uri).glob("*.parquet")):
+            self.client().upload(path, f"{remote}/{path.name}")
+        return f"read_files({dbx.sql_string(remote)}, format => 'parquet')"
+
+    def execute(self, sql: str, out_uri: str, tag: str) -> dict:
+        import pyarrow.parquet as pq
+
+        st = self.client().execute(self.warehouse, sql, arrow=True, timeout_s=self.timeout)
+        os.makedirs(out_uri, exist_ok=True)
+        n = rows = 0
+        for n, table in enumerate(self.client().arrow_chunks(st), start=1):
+            pq.write_table(table, os.path.join(out_uri, f"part-{n:05d}.parquet"))
+            rows += table.num_rows
+        if n == 0:  # no chunks: an empty result, typed from the manifest
+            self._write_empty(st, out_uri)
+        return {"rows": rows, "chunks": n}
+
+    def _write_empty(self, st: dict, out_uri: str) -> None:
+        import duckdb
+
+        cols = []
+        for c in self.client().schema_of(st):
+            t = str(c.get("type_name", "STRING")).upper()
+            duck = (f"DECIMAL({c.get('type_precision', 38)},{c.get('type_scale', 0)})" if t == "DECIMAL"
+                    else _DUCK_TYPES.get(t, "VARCHAR"))
+            cols.append(f'CAST(NULL AS {duck}) AS "{c["name"]}"')
+        path = os.path.join(out_uri, "part-00000.parquet").replace("'", "''")
+        duckdb.connect().execute(f"COPY (SELECT {', '.join(cols) or '1 AS x'} WHERE false) TO '{path}' "
+                                 "(FORMAT PARQUET)")
+
+    def cleanup(self, tag: str) -> None:
+        try:  # best effort
+            self.client().remove_tree(f"{self.volume}/{tag}")
+        except Exception:  # noqa: BLE001
+            pass
+        if self._local:
+            shutil.rmtree(os.path.join(self._local, "stage", tag), ignore_errors=True)

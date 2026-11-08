@@ -1256,6 +1256,9 @@ azure = [
     { name = "azure-mgmt-compute" },
     { name = "azure-monitor-query" },
 ]
+databricks = [
+    { name = "sqlglot" },
+]
 dbt = [
     { name = "dbt-duckdb" },
 ]
@@ -1282,6 +1285,7 @@ dev = [
 gcp = [
     { name = "gcsfs" },
     { name = "google-auth", extra = ["requests"] },
+    { name = "sqlglot" },
 ]
 lineage = [
     { name = "sqlglot" },
@@ -1331,7 +1335,9 @@ requires-dist = [
     { name = "s3fs", marker = "extra == 'aws'", specifier = ">=2023.1" },
     { name = "s3fs", marker = "extra == 'dev'", specifier = ">=2023.1" },
     { name = "sqlglot", marker = "extra == 'aws'", specifier = ">=30.21,<31" },
+    { name = "sqlglot", marker = "extra == 'databricks'", specifier = ">=30.21,<31" },
     { name = "sqlglot", marker = "extra == 'dev'", specifier = ">=30.21,<31" },
+    { name = "sqlglot", marker = "extra == 'gcp'", specifier = ">=30.21,<31" },
     { name = "sqlglot", marker = "extra == 'lineage'", specifier = ">=23" },
     { name = "sqlglot", marker = "extra == 'starrocks'", specifier = ">=30.21,<31" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
@@ -1340,7 +1346,7 @@ requires-dist = [
     { name = "uv", specifier = ">=0.5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29" },
 ]
-provides-extras = ["dbt", "lineage", "aws", "azure", "gcp", "starrocks", "dev"]
+provides-extras = ["dbt", "lineage", "aws", "azure", "gcp", "databricks", "starrocks", "dev"]
 
 [[package]]
 name = "duckstring-trickle"
