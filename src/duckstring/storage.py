@@ -758,8 +758,10 @@ def _azure_secret_body(base: str, params: dict) -> list[str]:
         return ["TYPE AZURE", "CONNECTION_STRING " + _q(
             f"DefaultEndpointsProtocol=https;AccountName={account};AccountKey={key};EndpointSuffix=core.windows.net")]
     if sas and account:
+        # DuckDB refuses a SAS connection string without ``AccountName`` ("invalid connection string", measured
+        # 2026-11-09 against ADLS), so a SAS data root never authenticated.
         return ["TYPE AZURE", "CONNECTION_STRING " + _q(
-            f"BlobEndpoint=https://{account}.blob.core.windows.net;SharedAccessSignature={sas.lstrip('?')}")]
+            f"AccountName={account};SharedAccessSignature={sas.lstrip('?')}")]
     bits = ["TYPE AZURE"]
     token = None if all(principal) else _azure_token()
     if all(principal):

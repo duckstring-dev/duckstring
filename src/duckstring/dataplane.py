@@ -607,9 +607,33 @@ def publish_plan(con, data_dir: Path, f=None, held=frozenset(), *, write: bool =
         payload["state"] = existing["state"]
     if f_iso is not None:
         payload[trickle.RUN_KEY] = {"f": f_iso}
+        inputs = _run_inputs(con, f, existing)
+        if inputs:
+            payload[trickle.RUN_KEY]["inputs"] = inputs
     if write:  # the commit marker: an export validates first (write=False) and commits after its files
         trickle.write_sidecar(data_dir, payload)
     return tables
+
+
+def _run_inputs(con, f, existing: dict) -> dict:
+    """What the run read from outside the Catchment (:mod:`duckstring.databricks`), for the run stamp: each
+    input's newest recorded state at or before ``f`` (``core.INPUTS_TABLE``), over the previous stamp's for
+    inputs this run didn't read. A Duck that rebuilt its registry reads it back (``Pond._input_state``)."""
+    import json
+
+    import duckdb
+
+    from . import trickle_io as trickle
+    from .core import INPUTS_TABLE
+
+    inputs = dict((existing.get(trickle.RUN_KEY) or {}).get("inputs") or {})
+    try:
+        rows = con.execute(f"SELECT ref, arg_max(state, f) FROM {INPUTS_TABLE} WHERE f <= ? GROUP BY ref",
+                           [f]).fetchall()
+    except duckdb.CatalogException:
+        rows = []
+    inputs.update({ref: json.loads(state) for ref, state in rows})
+    return inputs
 
 
 def held_tables(data_dir, held, sidecar=None) -> set[str]:

@@ -1217,3 +1217,62 @@ def test_a_pool_duck_builds_its_ponds_environment(runtime, tmp_path, tmp_path_fa
     assert envs, "the Pool agent's machine built no environment"
     data = next((agent_root / "ponds" / "envp" / "m1" / "data" / "answer__v").glob("*.parquet"))
     assert first_row(duckdb.sql(f"SELECT n FROM '{data}'")) == (42,)
+
+
+def test_an_inlet_reads_only_what_databricks_added_since_its_last_run(runtime, tmp_path):
+    """duckstring.databricks on a real Duck: an Inlet appends the files a Spark job committed since its previous
+    run (``files(...).added()``), skips when nothing changed, and the position survives in the run stamp."""
+    import json
+    import textwrap
+    import uuid
+
+    import duckdb
+
+    from duckstring.dataplane import ParquetDataPlane
+    from duckstring.trickle.io import load_sidecar
+
+    url, root = runtime
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+
+    def spark_job(tid, ids):  # what a committed Spark write leaves: data files and _committed_<tid>
+        name = f"part-00000-tid-{tid}-{uuid.uuid4()}-1.c000.snappy.parquet"
+        duckdb.execute(f"COPY (SELECT unnest({ids}) AS id) TO '{inbox / name}' (FORMAT PARQUET)")
+        (inbox / f"_committed_{tid}").write_text(json.dumps({"added": [name], "removed": []}))
+
+    d = tmp_path / "feed"
+    (d / "src").mkdir(parents=True)
+    (d / "pond.toml").write_text('[pond]\nname = "feed"\nversion = "1.0.0"\ntype = "inlet"\n')
+    (d / "src" / "pond.py").write_text(textwrap.dedent(f"""
+        from duckstring import databricks, ripple
+
+        @ripple
+        def events(pond):
+            src = databricks.files(pond, {str(inbox)!r})
+            if not src.changed:
+                return pond.skip()
+            pond.append_table("events", src.added())
+    """))
+    r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip_dir(d), "application/zip")},
+                   data={"name": "feed", "version": "1.0.0", "type": "inlet"}, timeout=15.0)
+    assert r.status_code == 200, r.text
+    data = root / "ponds" / "feed" / "m1" / "data"
+
+    def refresh():
+        before = (_pond_status(url, "feed") or {}).get("end_f")
+        httpx.post(f"{url}/api/ponds/feed/refresh", timeout=5.0)
+        assert _wait(lambda: (_pond_status(url, "feed") or {}).get("end_f") not in (None, before)
+                     and _pond_status(url, "feed")["status"] == "idle")
+
+    def events():
+        return sorted(r[0] for r in duckdb.sql(ParquetDataPlane().read_select(data, "events")).fetchall())
+
+    spark_job("1", [1, 2])
+    refresh()
+    assert events() == [1, 2]
+    spark_job("2", [3])
+    refresh()
+    assert events() == [1, 2, 3]  # only the new file was appended
+    refresh()
+    assert events() == [1, 2, 3]
+    assert str(inbox) in load_sidecar(data)["_duckstring_run"]["inputs"]

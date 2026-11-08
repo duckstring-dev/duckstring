@@ -394,6 +394,65 @@ integration, so a reader in Duckstring is fine; an op column only where there's 
   above), a Spark/PySpark reader (the DuckDB `changes()` and the `deliveries()` file lists are the reader for now;
   the MERGE recipe above is the Databricks path), an in-region throughput measurement from an App.
 
+**Reading from Databricks, built 2026-11-09** (`duckstring.databricks`, `delta_log.py`; the author's calls: both
+routes, since IT setups differ; the Volume route is expected to be the common one, and Databricks shouldn't have to
+change how it writes). Two calls in Ripple code, each returning an `Input` (`version`, `changed`, `via`, `read()`,
+`added()`, `NotAppendOnly`):
+- `databricks.table(pond, "catalog.schema.table", warehouse=None)`: the version is Unity Catalog's table info
+  property `delta.lastUpdateVersion` (measured: it advances on every commit, immediately; the GET takes about 50 ms
+  and wakes no warehouse). Read from storage with `temporary-table-credentials` (`operation: READ`; Azure gives a
+  user-delegation SAS, AWS temporary keys, mapped to a DuckDB secret scoped to the table's location) and
+  `delta_scan(location, version => v)`; else, or for a view, a non-Delta table or one with
+  `delta.feature.catalog*` (catalog-managed commits, which DuckDB's reader doesn't follow), through the warehouse
+  (`warehouse=`, `DUCKSTRING_DATABRICKS_WAREHOUSE`, `DATABRICKS_WAREHOUSE_ID`) as `SELECT * ... VERSION AS OF v`,
+  Arrow chunks saved as Parquet in the cache. With neither, the error names the refusal. `added()` on the warehouse
+  is `v EXCEPT ALL previous` after a count of `previous EXCEPT ALL v` (non-zero = `NotAppendOnly`).
+- `databricks.files(pond, path, format=None)`: a Delta table when `_delta_log/` exists, else Parquet. Any path
+  `get_storage` takes; read in place when DuckDB can (a mounted Volume, local, an object store), else (a Volume
+  through the Files API) mirrored into `DUCKSTRING_INPUT_CACHE` (default the temp dir; `duckstring-inputs/{hash of
+  registry path and input}`), fetching only files it doesn't hold (names are immutable), 8 at a time, pruning
+  what the current read doesn't need. Delta: `delta_log.files_at` replays the newest checkpoint (classic,
+  multi-part or v2 with sidecars) and the commits after it to find the data files and deletion-vector files
+  (`storageType u`: Z85-decoded uuid, verified against a Databricks table) a version reads, and mirrors those plus
+  the log files. Parquet: Spark on Databricks writes data files named `...-tid-{id}-...`, `_started_{id}`, then
+  `_committed_{id}` (JSON `{"added": [...], "removed": [...]}`) and `_SUCCESS` (measured from a serverless job on a
+  Volume, plain and `partitionBy`); a file counts once a marker of its job is readable and no marker removed it;
+  files without a tid count unless empty; `_`/`.` directories are skipped; `k=v` directories are Hive columns.
+  The version is a digest of the committed files and sizes. `added()` = the new files; a missing previous file
+  (an overwrite) is `NotAppendOnly`.
+- Delta `added()` (both routes): when every commit since only adds files without deletion vectors, the new files
+  are read through `delta_scan(..., filename = true)` filtered by name; otherwise (compaction, which Databricks ran
+  on its own within a minute of a DELETE on the probe table, or an update) `v EXCEPT ALL previous`, after checking
+  `previous EXCEPT ALL v` is empty. DuckDB's delta extension reads older versions (`version =>`) and deletion
+  vectors (measured: the probe table's 90,000 live rows of 100,000).
+- The position: `Pond._record_input` writes `(ref, f, state)` to the registry-only `_duckstring_inputs` at each
+  read, keeping the previous run's row; `_input_state` takes the newest row at or before `previous_f` (so a Run
+  dispatched while an earlier one is in flight, and a failed run, behave as Trickle windows do), else the published
+  run stamp's `inputs` (`publish_plan` writes each input's newest state at or before the run's `f` there, over the
+  previous stamp's), so a Duck that rebuilt its registry keeps it. `previous_f = NEVER` (first run, Rebuild): no
+  position, everything is changed and added.
+- Also fixed: `storage._azure_secret_body` built a SAS connection string without `AccountName`, which DuckDB
+  accepts at `CREATE SECRET` and refuses at the first read ("invalid connection string", measured against ADLS), so
+  a SAS-authenticated `abfss://` data root never worked. `databricks_rest.Client.save_result` is the Flock's result
+  download, shared.
+- Live, from the laptop on the hybrid workspace: through the Files API, the probe's Delta table (deletion vectors)
+  1.6 s to open and 1.1 s to read cold, Parquet 1.2 + 0.4 s, partitioned Parquet 3.4 + 1.8 s (one listing per
+  partition); unchanged next run 0 to 30 ms. Real Spark jobs between runs: an append gave 70 Delta rows (log only)
+  and 50 Parquet rows; an append + `OPTIMIZE` + append gave exactly the 8 new rows (the difference path); a DELETE
+  raised `NotAppendOnly`. A catalog table on the warehouse (vending refused): first read 2.4 s, unchanged 70 ms (no
+  statement), an insert gave the 25 new rows, an update raised `NotAppendOnly`. The storage route is not yet run
+  live: the test metastore has external data access off (`EXTERNAL_ACCESS_DISABLED_ON_METASTORE`), and the test
+  service principal is neither metastore admin nor has MANAGE on `hybrid_dbx`, so the author enables it and grants
+  `EXTERNAL USE SCHEMA`. Measured instead: DuckDB's `delta_scan` reads an ADLS Delta table with only a
+  user-delegation SAS. AWS vending is written but unmeasured.
+- Tests: `tests/test_databricks_inputs.py` (Spark-style output with markers, a hand-written Delta log, both through
+  the fake workspace's Files API, the catalog on both routes, Rebuild, a lost registry, a failed run),
+  `test_runtime.test_an_inlet_reads_only_what_databricks_added_since_its_last_run` (a real Duck).
+- Not built: GCP vending (`gcp_oauth_token`; it falls back to the warehouse), Volume credential vending (the Files
+  API is the route), CSV/JSON files, a column-mapped or partitioned Delta table through the fast `added()` path
+  (column mapping and partition values are delta-kernel's, so they go through it; only the filename filter is ours,
+  untested on partitioned tables), retention of the cache (it holds the current snapshot).
+
 **Docs handoff** (to write in a fresh session; facts only):
 - Reference done here (change files): `formats.md` ("Change files", and `/Volumes/...` under `file://`),
   `cli/spout.md` (`--to`, `--mode`), matching the CLI help. Still to write: the Python reference page for
@@ -410,5 +469,12 @@ integration, so a reader in Duckstring is fine; an op column only where there's 
   `cloud_compute_on_azure.md` (the Flock on Azure Databricks, the Entra path), `delivering_with_spouts.md` (a
   Databricks section: the destination, the permissions, the `_duckstring_f` column on append tables, warehouse
   time per delivery), and the Databricks App section of `hosting_on_a_platform.md` once the workspace run is done.
+- Reading from Databricks (`duckstring.databricks`): a Python reference page (`table`, `files`, `Input`,
+  `NotAppendOnly`, matching the module docstrings), `environment.md` (`DUCKSTRING_DATABRICKS_WAREHOUSE`,
+  `DATABRICKS_WAREHOUSE_ID`, `DUCKSTRING_INPUT_CACHE`), and a guide (Getting Data In, or with the Databricks App
+  hosting section): the two routes and when each applies, the metastore setting and `EXTERNAL USE SCHEMA` for the
+  storage route, the warehouse fallback, writing to the Catchment's Volume (Parquet or Delta, any mode), `changed`
+  + `pond.skip()` and `added()` + `append_table` vs `read()` + `merge_table`, checking `changed` before `added()`
+  (an unchanged `added()` on the warehouse is still a statement), and the cache's disk use.
 - The UI's Spout add form (`frontend/src/components/Sidebar.tsx`) has no `databricks://` option yet; the CLI and
   API take it. It does offer `changes` as a mode.

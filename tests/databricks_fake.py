@@ -1,5 +1,6 @@
 """A fake Databricks workspace for offline tests (an httpx mock transport): Volume files kept in memory, OAuth, and
-the Statement Execution API running each statement on one DuckDB connection, so tables persist between statements.
+the Statement Execution API running each statement on one DuckDB connection, so tables persist between statements,
+and Unity Catalog's table info and credential vending (``uc_tables``, ``vend``).
 
 A statement is translated from Databricks SQL to DuckDB with sqlglot, ``read_files`` over a Volume path becoming
 ``read_parquet`` over the uploads (plus Databricks' ``_rescued_data`` column unless ``schemaEvolutionMode =>
@@ -41,6 +42,8 @@ class FakeWorkspace:
         self.executed: list[str] = []
         self.auth: list[str] = []
         self.calls: list[tuple[str, str]] = []  # Files API (method, path)
+        self.uc_tables: dict[str, dict] = {}  # Unity Catalog table info by full name
+        self.vend: dict | int = 403  # temporary-table-credentials: the response, or the refusal's status
         self.chunk_rows = chunk_rows
         self.pending_polls = pending_polls
         self._tmp = tempfile.mkdtemp()
@@ -104,6 +107,14 @@ class FakeWorkspace:
             return httpx.Response(200, json={"contents": [
                 {"path": f"{key}/{n}", "name": n, "is_directory": d, **({} if d else {"file_size": size})}
                 for n, (d, size) in sorted(children.items())]})
+        if path.startswith("/api/2.1/unity-catalog/tables/"):
+            info = self.uc_tables.get(unquote(path.rsplit("/", 1)[1]))
+            return httpx.Response(200, json=info) if info else httpx.Response(404, json={"message": "not found"})
+        if path == "/api/2.1/unity-catalog/temporary-table-credentials":
+            if isinstance(self.vend, int):
+                return httpx.Response(self.vend, json={"error_code": "PERMISSION_DENIED",
+                                                       "message": "External Data Access ... is disabled"})
+            return httpx.Response(200, json=self.vend)
         if path == "/api/2.0/sql/statements" and request.method == "POST":
             return self._run(json.loads(request.read()))
         m = re.fullmatch(r"/api/2.0/sql/statements/([^/]+)", path)
@@ -183,6 +194,8 @@ class FakeWorkspace:
         import sqlglot
 
         def duck(text: str) -> str:
+            # Time travel: `c`.`s`.`t` VERSION AS OF n reads the test's snapshot table `c`.`s`.`t__vn`.
+            text = re.sub(r"`([^`]+)` VERSION AS OF (\d+)", r"`\1__v\2`", text)
             out = sqlglot.transpile(text, read="databricks", write="duckdb")[0]
             return re.sub(r"READ_FILES\('([^']+)'[^)]*\)", files, out, flags=re.IGNORECASE)
 

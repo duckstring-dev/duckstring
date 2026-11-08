@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 import time
+from datetime import datetime
 from pathlib import Path
 
 from .trickle_io import first_row
 
 _RIPPLES: list[dict] = []
+# Where a Ripple records what it last read from outside the Catchment (duckstring.databricks): one row per input
+# and run. Registry-only (the reserved prefix); each run's rows are published in its run stamp.
+INPUTS_TABLE = "_duckstring_inputs"
 _PUDDLES: list[dict] = []
 
 
@@ -962,6 +967,50 @@ class Pond:
 
             self._own_sidecar_cache = load_sidecar(self._own_store()) if self._own_data_dir is not None else {}
         return self._own_sidecar_cache
+
+    # ─── input positions (duckstring.databricks: what an Inlet last read from outside) ─────────────────
+
+    def _input_state(self, ref: str) -> dict | None:
+        """What this Ripple recorded about the external input ``ref`` at its previous completed run, or None
+        (a first run, a Rebuild, or nothing recorded). The registry holds every run's (a Run dispatched while
+        an earlier one is in flight sees that one's), the published run stamp the last published run's (for a
+        Duck that rebuilt its registry)."""
+        import duckdb
+
+        from .engine.core import NEVER
+        from .trickle_io import RUN_KEY
+
+        if self.previous_f is None or self.previous_f <= NEVER:
+            return None
+        try:
+            row = first_row(self.con.execute(
+                f"SELECT state FROM {INPUTS_TABLE} WHERE ref = ? AND f <= ? ORDER BY f DESC LIMIT 1",
+                [ref, self.previous_f]))
+        except duckdb.CatalogException:
+            row = None
+        if row is not None:
+            return json.loads(row[0])
+        run = self._own_sidecar().get(RUN_KEY) or {}
+        state = (run.get("inputs") or {}).get(ref)
+        if state is None or not run.get("f") or datetime.fromisoformat(run["f"]) > self.previous_f:
+            return None
+        return state
+
+    def _record_input(self, ref: str, state: dict) -> None:
+        """Record ``state`` as what this run read of the external input ``ref`` (see :meth:`_input_state`). It is
+        published in the run stamp with the run's tables."""
+        if self.f is None:
+            return
+        text = json.dumps(state, sort_keys=True)
+
+        def write():
+            self.con.execute(f"CREATE TABLE IF NOT EXISTS {INPUTS_TABLE} (ref VARCHAR, f TIMESTAMPTZ, state VARCHAR)")
+            # Keep the previous run's row (a retry at this f still needs it) and anything newer.
+            self.con.execute(f"DELETE FROM {INPUTS_TABLE} WHERE ref = ? AND (f = ? OR f < ?)",
+                             [ref, self.f, min(self.previous_f, self.f)])
+            self.con.execute(f"INSERT INTO {INPUTS_TABLE} VALUES (?, ?, ?)", [ref, self.f, text])
+
+        retry_on_lock(write)
 
     def record_change(self, name: str, changed: bool) -> None:
         """Record that this run wrote ``name`` and whether the write changed it: the optional host hook the

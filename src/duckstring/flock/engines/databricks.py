@@ -152,11 +152,6 @@ PROFILE = translate.Profile(
 )
 
 # Databricks result types (the statement manifest's type_name) as DuckDB types, for an empty result.
-_DUCK_TYPES = {"BOOLEAN": "BOOLEAN", "BYTE": "TINYINT", "SHORT": "SMALLINT", "INT": "INTEGER", "LONG": "BIGINT",
-               "FLOAT": "FLOAT", "DOUBLE": "DOUBLE", "STRING": "VARCHAR", "DATE": "DATE", "TIMESTAMP": "TIMESTAMPTZ",
-               "TIMESTAMP_NTZ": "TIMESTAMP", "BINARY": "BLOB"}
-
-
 class DatabricksEngine(SqlEngine):
     """A :class:`duckstring.flock.FlockEngine` on a Databricks SQL warehouse."""
 
@@ -205,30 +200,8 @@ class DatabricksEngine(SqlEngine):
         return f"read_files({dbx.sql_string(remote)}, format => 'parquet', schemaEvolutionMode => 'none')"
 
     def execute(self, sql: str, out_uri: str, tag: str) -> dict:
-        import pyarrow.parquet as pq
-
         st = self.client().execute(self.warehouse, sql, arrow=True, timeout_s=self.timeout)
-        os.makedirs(out_uri, exist_ok=True)
-        n = rows = 0
-        for n, table in enumerate(self.client().arrow_chunks(st), start=1):
-            pq.write_table(table, os.path.join(out_uri, f"part-{n:05d}.parquet"))
-            rows += table.num_rows
-        if n == 0:  # no chunks: an empty result, typed from the manifest
-            self._write_empty(st, out_uri)
-        return {"rows": rows, "chunks": n}
-
-    def _write_empty(self, st: dict, out_uri: str) -> None:
-        import duckdb
-
-        cols = []
-        for c in self.client().schema_of(st):
-            t = str(c.get("type_name", "STRING")).upper()
-            duck = (f"DECIMAL({c.get('type_precision', 38)},{c.get('type_scale', 0)})" if t == "DECIMAL"
-                    else _DUCK_TYPES.get(t, "VARCHAR"))
-            cols.append(f'CAST(NULL AS {duck}) AS "{c["name"]}"')
-        path = os.path.join(out_uri, "part-00000.parquet").replace("'", "''")
-        duckdb.connect().execute(f"COPY (SELECT {', '.join(cols) or '1 AS x'} WHERE false) TO '{path}' "
-                                 "(FORMAT PARQUET)")
+        return self.client().save_result(st, out_uri)
 
     def cleanup(self, tag: str) -> None:
         try:  # best effort

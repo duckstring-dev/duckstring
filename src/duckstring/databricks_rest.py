@@ -13,6 +13,7 @@ Databricks SDK. Authentication, in Databricks' own order of precedence:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from urllib.parse import quote
@@ -20,6 +21,10 @@ from urllib.parse import quote
 ENTRA_RESOURCE = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"  # Azure Databricks, the same in every Azure environment
 _TOKEN_MIN_LIFE_S = 5 * 60
 SECRETS = ("DATABRICKS_TOKEN", "DATABRICKS_CLIENT_ID", "DATABRICKS_CLIENT_SECRET")
+# A Databricks result column's type name → the DuckDB type an empty result is written with.
+DUCK_TYPES = {"BOOLEAN": "BOOLEAN", "BYTE": "TINYINT", "SHORT": "SMALLINT", "INT": "INTEGER", "LONG": "BIGINT",
+              "FLOAT": "FLOAT", "DOUBLE": "DOUBLE", "STRING": "VARCHAR", "DATE": "DATE", "TIMESTAMP": "TIMESTAMPTZ",
+              "TIMESTAMP_NTZ": "TIMESTAMP", "BINARY": "BLOB"}
 
 
 class DatabricksError(RuntimeError):
@@ -145,6 +150,33 @@ class Client:
             if resp.status_code >= 300:
                 raise DatabricksError(f"downloading result chunk {index} failed ({resp.status_code})", resp.status_code)
             yield pa.ipc.open_stream(resp.content).read_all()
+
+    def save_result(self, st: dict, out_dir) -> dict:
+        """Write an ``arrow`` statement's result into ``out_dir`` as Parquet files (one per chunk; an empty
+        result as one empty file typed from the manifest). Returns ``{"rows", "chunks"}``."""
+        import pyarrow.parquet as pq
+
+        os.makedirs(out_dir, exist_ok=True)
+        n = rows = 0
+        for n, table in enumerate(self.arrow_chunks(st), start=1):
+            pq.write_table(table, os.path.join(out_dir, f"part-{n:05d}.parquet"))
+            rows += table.num_rows
+        if n == 0:
+            self._write_empty(st, out_dir)
+        return {"rows": rows, "chunks": n}
+
+    def _write_empty(self, st: dict, out_dir) -> None:
+        import duckdb
+
+        cols = []
+        for c in self.schema_of(st):
+            t = str(c.get("type_name", "STRING")).upper()
+            duck = (f"DECIMAL({c.get('type_precision', 38)},{c.get('type_scale', 0)})" if t == "DECIMAL"
+                    else DUCK_TYPES.get(t, "VARCHAR"))
+            cols.append(f'CAST(NULL AS {duck}) AS "{c["name"]}"')
+        path = os.path.join(out_dir, "part-00000.parquet").replace("'", "''")
+        duckdb.connect().execute(f"COPY (SELECT {', '.join(cols) or '1 AS x'} WHERE false) TO '{path}' "
+                                 "(FORMAT PARQUET)")
 
     def schema_of(self, st: dict) -> list[dict]:
         """The result's columns from a statement's manifest: ``[{name, type_text, ...}]``."""

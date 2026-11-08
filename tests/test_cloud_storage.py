@@ -105,6 +105,13 @@ def test_azure_secrets_are_scoped_to_their_container_and_name_the_account():
     assert "AccountKey=k''ey" in sql and sql.endswith("SCOPE 'az://lake')")  # quoted, not injectable
 
 
+def test_a_sas_connection_string_names_the_account():
+    # DuckDB parses a SAS connection string without AccountName at CREATE SECRET but refuses it at the first read
+    # ("invalid connection string"; measured against ADLS 2026-11-09), so this checks the string itself.
+    _, sql = duckdb_secret_sql(_ABFSS, {"sas_token": "?sv=1&sig=x"}, name="s")
+    assert "CONNECTION_STRING 'AccountName=acct;SharedAccessSignature=sv=1&sig=x'" in sql
+
+
 def test_azure_credentials_are_resolved_from_references(monkeypatch):
     monkeypatch.setenv("LAKE_KEY", "c2VjcmV0+/=")
     _, sql = duckdb_secret_sql("az://lake/p", {"account_name": "acct", "account_key": "${env:LAKE_KEY}"}, name="s")

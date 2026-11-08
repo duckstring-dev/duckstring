@@ -93,6 +93,8 @@ src/duckstring/
   databricks_rest.py       # Databricks REST (httpx): auth (PAT > OAuth M2M > Entra), SQL statements + Arrow chunks, Volume
                            # files. Shared by the Databricks Flock engine, the Databricks Spout and volumes.py.
   volumes.py               # VolumeFileSystem: an fsspec filesystem over the Files API, for /Volumes where it isn't mounted.
+  databricks.py            # Reading Databricks into a Pond: table() (vended storage, else the warehouse) and files() (a
+                           # Volume's Delta or Spark Parquet), with the read position per run. delta_log.py: the log reader.
   sql_ripples.py           # SQL Ripples ([ripples.NAME]) and static tables ([static.NAME]) from pond.toml: validation, the
                            # json_serialize_sql reference check, source.table rewriting, the synthesised Ripple callable.
                            # Incremental I/O is a capability of the Pond handle; there is no separate @trickle node type.
@@ -410,6 +412,19 @@ A **Spout** is a Pond's egress binding `(pond, major, table|*, destination, mode
   process (`_KNOWN`). Tables in parallel. Reader: `landing.deliveries(path, after=)`, `landing.changes(con, path,
   table, after=)` (newest row per key, or summed weights; from the newest full). Tests:
   `tests/test_egress_landing.py`.
+- **Reading from Databricks** (ingest, the other direction; `databricks.py`, `delta_log.py`, built 2026-11-09,
+  plans/databricks-bigquery.md "Reading from Databricks"): `databricks.table(pond, "c.s.t")` and
+  `databricks.files(pond, path)` return an `Input` (`version`, `changed`, `via`, `read()`, `added()`,
+  `NotAppendOnly`). A table: version from UC table info (`delta.lastUpdateVersion`, no warehouse), data from storage
+  with vended credentials (`temporary-table-credentials`, `delta_scan`), else the warehouse (`VERSION AS OF`); views,
+  non-Delta and `delta.feature.catalog*` tables always the warehouse. Files: Delta (`_delta_log`) or Parquet (Spark's
+  `_committed_<tid>` markers decide what counts; empty files are uploads in flight), read in place or, through the
+  Files API, mirrored into `DUCKSTRING_INPUT_CACHE` by what the version reads (`delta_log.files_at`: checkpoint +
+  commits, deletion vectors by Z85 id). `added()`: new files (Parquet; Delta when the commits since only add),
+  else `v EXCEPT ALL previous` with a removal check. The position is `core.INPUTS_TABLE` (registry, `(ref, f,
+  state)`, newest at or before `previous_f`) and the run stamp's `inputs` (`dataplane._run_inputs`), so it
+  survives registry loss; `previous_f = NEVER` starts over. Storage route unmeasured live (the test metastore's
+  external access is off); `delta_scan` with a SAS on ADLS is measured. Tests: `tests/test_databricks_inputs.py`.
 - **Shared with Postgres** (`egress/attached.py`, `AttachedCatalogDriver`): `write_full` strips `_duckstring_*` columns (a full read carries `_duckstring_f`, deltas don't; before 2026-10-22 a Postgres bootstrap created the column and deltas left it NULL), a source's new column becomes `ADD COLUMN`, and an empty delta still advances the watermark (keeps the cursor ahead of retention). The worker skips a table whose watermark already covers `f` (a replay writes nothing). `spout resync` (`Driver._resync_spouts` → the job's `resync`) reads from `NEVER` past the destination's watermark; before, it was a no-op for Postgres.
 - **Postgres** (`egress/postgres.py`, `postgres://`, capabilities delta + delete + transactional) is the main incremental sink, since a merge Trickle's changelog is a CDC stream. It uses the DuckDB `postgres` extension (ATTACH plus plain DuckDB SQL; no SQLAlchemy or psycopg). `apply_delta` deletes the changed and removed keys and re-inserts the present rows in one transaction (the same net effect as `INSERT … ON CONFLICT`, but portable). The watermark lives in the destination (`_duckstring_egress`, written in the same transaction), giving exactly-once delivery across crashes. Only a merge Trickle has a primary key, so the transactional-PK requirement is checked at `add_spout` (`Driver._assert_transactional_pk`, on a published table) and again at egress.
 
