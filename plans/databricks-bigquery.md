@@ -466,7 +466,9 @@ change how it writes). Two calls in Ripple code, each returning an `Input` (`ver
   (column mapping and partition values are delta-kernel's, so they go through it; only the filename filter is ours,
   untested on partitioned tables), retention of the cache (it holds the current snapshot).
 
-**Docs handoff** (to write in a fresh session; facts only):
+**Docs handoff** (to write in a fresh session; facts only). The "Running Duckstring on Databricks" guide, which
+gathers the App hosting, reading, Spout, change-files and Flock material for Databricks users, has its own
+handoff in `plans/databricks-guide.md`; the items below are the per-page reference and the other guides.
 - Reference done here (change files): `formats.md` ("Change files", and `/Volumes/...` under `file://`),
   `cli/spout.md` (`--to`, `--mode`), matching the CLI help. Still to write: the Python reference page for
   `duckstring.landing` (`deliveries`, `changes`, `Changes`), and a `delivering_with_spouts.md` section on change
