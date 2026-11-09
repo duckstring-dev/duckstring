@@ -130,7 +130,7 @@ function StatusBox({ info, ponds, canControl }: { info: PondInfo; ponds: Record<
     const { position, need, of } = info.memory;
     return (
       <StatusCard color={THEME_AMBER} title="Waiting for memory">
-        {position === 1 ? 'Next' : `Number ${position}`} in the queue for this machine's memory. It needs {need} of {of} slots.
+        {position === 1 ? 'Next' : `Number ${position}`} in the queue for this machine’s memory. It needs {need} of {of} slots.
       </StatusCard>
     );
   }
@@ -344,6 +344,9 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
   const [path, setPath] = useState('');
   // A DuckLake's data path (where a new lake keeps its files; an existing lake remembers its own).
   const [dataPath, setDataPath] = useState('');
+  // A Databricks Spout's SQL warehouse id and the Volume it stages through.
+  const [warehouse, setWarehouse] = useState('');
+  const [volume, setVolume] = useState('');
   const [table, setTable] = useState('');
   const [keyVar, setKeyVar] = useState('');
   const [secretVar, setSecretVar] = useState('');
@@ -374,8 +377,13 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
     if (scheme === 'postgres') return `postgres://${path}`;
     const q: string[] = [];
     if (scheme === 'ducklake' && dataPath.trim()) q.push(`data_path=${dataPath.trim()}`);
-    if (keyVar.trim()) q.push(`key_id=${ref(keyVar)}`);
-    if (secretVar.trim()) q.push(`secret=${ref(secretVar)}`);
+    if (scheme === 'databricks') {
+      if (warehouse.trim()) q.push(`warehouse=${warehouse.trim()}`);
+      if (volume.trim()) q.push(`volume=${volume.trim()}`);
+    }
+    const [keyParam, secretParam] = scheme === 'databricks' ? ['client_id', 'client_secret'] : ['key_id', 'secret'];
+    if (keyVar.trim()) q.push(`${keyParam}=${ref(keyVar)}`);
+    if (secretVar.trim()) q.push(`${secretParam}=${ref(secretVar)}`);
     if (scheme === 'ducklake') return `ducklake:${path}${q.length ? '?' + q.join('&') : ''}`;
     return `${scheme}://${path}${q.length ? '?' + q.join('&') : ''}`;
   };
@@ -402,6 +410,8 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
       setOpen(false);
       setPath('');
       setDataPath('');
+      setWarehouse('');
+      setVolume('');
       setTable('');
       setKeyVar('');
       setSecretVar('');
@@ -438,9 +448,11 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
             <select value={scheme} onChange={(e) => setScheme(e.target.value)} style={selectInput}>
               <option value="s3">s3://</option>
               <option value="gs">gs://</option>
+              <option value="abfss">abfss://</option>
               <option value="file">file://</option>
               <option value="postgres">postgres://</option>
               <option value="ducklake">ducklake:</option>
+              <option value="databricks">databricks://</option>
             </select>
             <input
               value={path}
@@ -449,6 +461,8 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
                 scheme === 'file' ? '/abs/path'
                   : scheme === 'postgres' ? 'user:${env:PW}@host/db'
                   : scheme === 'ducklake' ? 'sqlite:/srv/lake/meta.sqlite'
+                  : scheme === 'databricks' ? 'host/catalog.schema (or /catalog.schema)'
+                  : scheme === 'abfss' ? 'container@account.dfs.core.windows.net/prefix'
                   : 'bucket/prefix'
               }
               style={{ ...fld, flex: 1 }}
@@ -462,7 +476,19 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
               style={fld}
             />
           )}
-          {(scheme === 's3' || scheme === 'gs' || (scheme === 'ducklake' && /^(s3|gs):\/\//.test(dataPath.trim()))) && (
+          {scheme === 'databricks' && (
+            <>
+              <input value={warehouse} onChange={(e) => setWarehouse(e.target.value)} placeholder="SQL warehouse id" style={fld} />
+              <input
+                value={volume}
+                onChange={(e) => setVolume(e.target.value)}
+                placeholder="Volume to stage through (/Volumes/catalog/schema/name)"
+                style={fld}
+              />
+            </>
+          )}
+          {(scheme === 's3' || scheme === 'gs' || scheme === 'databricks'
+            || (scheme === 'ducklake' && /^(s3|gs):\/\//.test(dataPath.trim()))) && (
             <>
               <select value={credKind} onChange={(e) => setCredKind(e.target.value as 'env' | 'secret')} style={selectInput}>
                 <option value="env">env var</option>
@@ -472,14 +498,18 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
                 value={keyVar}
                 onChange={(e) => setKeyVar(e.target.value)}
                 list={credKind === 'secret' ? 'spout-secret-names' : undefined}
-                placeholder={`key id — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_KEY)`}
+                placeholder={scheme === 'databricks'
+                  ? `client id — ${credKind === 'secret' ? 'secret name' : 'env var name'} (blank = the Catchment's own)`
+                  : `key id — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_KEY)`}
                 style={fld}
               />
               <input
                 value={secretVar}
                 onChange={(e) => setSecretVar(e.target.value)}
                 list={credKind === 'secret' ? 'spout-secret-names' : undefined}
-                placeholder={`secret — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_SECRET)`}
+                placeholder={scheme === 'databricks'
+                  ? `client secret — ${credKind === 'secret' ? 'secret name' : 'env var name'}`
+                  : `secret — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_SECRET)`}
                 style={fld}
               />
               {credKind === 'secret' && (

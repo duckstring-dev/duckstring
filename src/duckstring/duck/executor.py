@@ -151,15 +151,21 @@ def open_registry(path: Path):
         if not _is_unreadable(exc):
             raise
         reason = str(exc).splitlines()[0]
+    aside = _set_aside(path, "unreadable")
+    print(f"[executor] registry {path} is unreadable ({reason}); moved it to {aside.name} and rebuilding",
+          flush=True)
+    return duckdb.connect(str(path)), "unreadable"
+
+
+def _set_aside(path: Path, why: str) -> Path:
+    """Rename a registry (and its WAL) out of the way, kept for inspection."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    aside = path.with_name(f"{path.name}.unreadable-{stamp}")
+    aside = path.with_name(f"{path.name}.{why}-{stamp}")
     path.rename(aside)
     wal = path.with_name(f"{path.name}.wal")
     if wal.exists():
         wal.rename(aside.with_name(f"{aside.name}.wal"))
-    print(f"[executor] registry {path} is unreadable ({reason}); moved it to {aside.name} and rebuilding",
-          flush=True)
-    return duckdb.connect(str(path)), "unreadable"
+    return aside
 
 
 class RunInputs:
@@ -250,6 +256,20 @@ class RippleExecutor(RunInputs):
         # off it. Separate `connect()`s to the same file in one process raise a "file handle conflict"
         # (a Binder error, not a transient lock) the moment two overlap — single instance avoids it.
         self._registry, recovery = open_registry(self.registry_path)
+        if recovery is None:
+            # A registry older than its published state (a state backup older than the data root) would
+            # resume against old state: set it aside and rebuild, as for an unreadable one.
+            from ..dataplane import registry_behind
+
+            published = registry_behind(self._registry, self.own_data_dir, self.persist_dir)
+            if published is not None:
+                import duckdb
+
+                self._registry.close()
+                aside = _set_aside(self.registry_path, "behind")
+                print(f"[executor] registry {self.registry_path} is behind the published state ({published}); "
+                      f"moved it to {aside.name} and rebuilding", flush=True)
+                self._registry, recovery = duckdb.connect(str(self.registry_path)), "behind"
         recover = recovery is not None
         # A containerised Duck must hit DuckDB's own limit (a catchable OutOfMemoryException,
         # with disk spill first) rather than the kernel's cgroup OOM-kill: the launcher sets

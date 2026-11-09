@@ -226,6 +226,98 @@ def test_auth_headers_merging():
     assert auth_headers({}) == {}
 
 
+def _jwt(exp: float) -> str:
+    """A token shaped like a JWT with only an ``exp`` claim (the CLI reads it without verifying)."""
+    import base64
+    import json
+
+    def part(d):
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
+    return f"{part({'alg': 'none'})}.{part({'exp': exp})}.sig"
+
+
+def test_header_command_values():
+    from duckstring.cli.config import _header_value
+
+    # databricks auth token prints JSON: the access token as a Bearer, its expiry kept.
+    value, expires = _header_value("Authorization", '{"access_token": "abc", "token_type": "Bearer", '
+                                                     '"expiry": "2026-11-09T10:00:00Z"}')
+    assert value == "Bearer abc" and expires == 1794218400.0
+    # A bare JWT (gcloud print-identity-token) for an authorization header: Bearer, expiry from the token.
+    token = _jwt(2_000_000_000)
+    assert _header_value("X-Serverless-Authorization", token) == (f"Bearer {token}", 2_000_000_000.0)
+    # Anything else passes through as printed, with no known expiry.
+    assert _header_value("X-Team", "blue") == ("blue", None)
+    assert _header_value("Authorization", "Key posit") == ("Key posit", None)
+
+
+def test_a_header_command_is_cached_until_its_token_expires(tmp_path):
+    import sys
+    import time
+
+    from duckstring.cli.config import HeaderCommandError, command_header
+
+    counter = tmp_path / "runs"
+    script = tmp_path / "token.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        f"p = pathlib.Path({str(counter)!r})\n"
+        "n = int(p.read_text()) + 1 if p.exists() else 1\n"
+        "p.write_text(str(n))\n"
+        "print(sys.argv[1])\n"
+    )
+    later = _jwt(time.time() + 3600)
+    command = f"{sys.executable} {script} {later}"
+    assert command_header("Authorization", command) == f"Bearer {later}"
+    assert command_header("Authorization", command) == f"Bearer {later}"
+    assert counter.read_text() == "1"  # the second came from the cache
+    command_header("Authorization", command, refresh=True)
+    assert counter.read_text() == "2"
+    soon = _jwt(time.time() + 60)  # inside the margin: never cached as good
+    command_header("Authorization", f"{sys.executable} {script} {soon}")
+    command_header("Authorization", f"{sys.executable} {script} {soon}")
+    assert counter.read_text() == "4"
+    with pytest.raises(HeaderCommandError, match="failed"):
+        command_header("Authorization", "exit 3")
+
+
+def test_cli_runs_a_header_command_and_again_after_a_401(runner, keyed_catchment, tmp_path):
+    """A cached token the Catchment refuses (revoked, or a clock skewed) is fetched again once."""
+    import sys
+    import time
+
+    from duckstring.cli.config import _write_header_cache, load_config
+
+    script = tmp_path / "key.py"
+    script.write_text(f"print({KEY!r})\n")
+    result = runner.invoke(
+        cli_app,
+        ["catchment", "connect", "--name", "cmd", "--path", keyed_catchment,
+         "--header-command", f"Authorization: {sys.executable} {script}", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    assert load_config()["catchments"]["cmd"]["header_commands"] == {"Authorization": f"{sys.executable} {script}"}
+    result = runner.invoke(cli_app, ["status", "--once", "-c", "cmd"])
+    assert result.exit_code == 0, result.output
+
+    # A stale value in the cache: the first request is refused, the command runs, the retry passes.
+    import hashlib
+    command = f"{sys.executable} {script}"
+    key = hashlib.sha256(f"Authorization\n{command}".encode()).hexdigest()[:24]
+    _write_header_cache({key: {"value": "Bearer stale", "expires": time.time() + 3600}})
+    result = runner.invoke(cli_app, ["status", "--once", "-c", "cmd"])
+    assert result.exit_code == 0, result.output
+
+
+def test_connect_malformed_header_command_rejected(runner):
+    result = runner.invoke(
+        cli_app,
+        ["catchment", "connect", "--name", "bad", "--path", "http://x", "--header-command", "no-colon", "--yes"],
+    )
+    assert result.exit_code == 1
+    assert "invalid --header-command" in result.output
+
+
 def test_config_file_is_private(runner, keyed_catchment):
     from duckstring.cli.config import CONFIG_FILE, register_catchment
 

@@ -227,10 +227,10 @@ From a laptop, connect with both the Catchment's API key and your own identity t
 
 ```bash
 duckstring catchment connect --name gcp --path https://catchment-123456789.australia-southeast1.run.app --key <key> \
-  --header "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token --audiences=https://catchment-123456789.australia-southeast1.run.app)"
+  --header-command "X-Serverless-Authorization: gcloud auth print-identity-token --audiences=https://catchment-123456789.australia-southeast1.run.app"
 ```
 
-An identity token lasts an hour, so run the command again when Cloud Run starts refusing requests.
+An identity token lasts an hour, and the CLI runs the command again when it's about to expire.
 
 ## Where data goes
 

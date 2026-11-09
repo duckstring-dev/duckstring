@@ -156,6 +156,7 @@ def _register_or_abort(
     name: str, url: str, kind: str, root: str | None = None, key: str | None = None,
     headers: dict[str, str] | None = None, data_root: str | None = None,
     state_backup: str | None = None, checkpoint_every: str | None = None,
+    header_commands: dict[str, str] | None = None,
 ) -> None:
     """Call register_catchment, printing a friendly error on conflict."""
     from .config import CatchmentConflict, register_catchment
@@ -164,6 +165,7 @@ def _register_or_abort(
         register_catchment(
             name, url=url, kind=kind, root=root, key=key, headers=headers,
             data_root=data_root, state_backup=state_backup, checkpoint_every=checkpoint_every,
+            header_commands=header_commands,
         )
     except CatchmentConflict as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -216,6 +218,25 @@ _HEADER_HELP = (
     "A header sent with every request to this Catchment, as 'Name: value'. Repeatable. For a hosting "
     "platform that authenticates requests, e.g. 'Authorization: Key ...' for Posit Connect."
 )
+_HEADER_COMMAND_HELP = (
+    "A header whose value a shell command prints, as 'Name: command', run again when the token it gives "
+    "expires. Repeatable. For a platform with short-lived tokens, e.g. "
+    "'Authorization: databricks auth token --host https://adb-....azuredatabricks.net' for a Databricks App."
+)
+
+
+def _parse_header_commands(values: Optional[list[str]]) -> Optional[dict[str, str]]:
+    """``["Name: command", ...]`` → ``{name: command}``; friendly error on a malformed entry."""
+    if not values:
+        return None
+    commands: dict[str, str] = {}
+    for raw in values:
+        hname, sep, command = raw.partition(":")
+        if not sep or not hname.strip() or not command.strip():
+            typer.echo(f"Error: invalid --header-command {raw!r} — use 'Name: command'.", err=True)
+            raise typer.Exit(1)
+        commands[hname.strip()] = command.strip()
+    return commands
 
 
 @app.command()
@@ -293,20 +314,24 @@ def init(
         state_backup = state_backup or existing.get("state_backup")
         checkpoint_every = checkpoint_every or existing.get("checkpoint_every")
     store_kw = dict(data_root=data_root, state_backup=state_backup, checkpoint_every=checkpoint_every)
+    header_commands = existing.get("header_commands") if existing else None
 
     if existing:
         if existing_root == str(root_dir):
             typer.echo(f"Catchment '{name}' already registered at {root_dir}.")
-            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers, **store_kw)
+            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers,
+                           header_commands=header_commands, **store_kw)
         else:
             typer.echo(f"Catchment '{name}' is already registered with data at: {existing_root}")
             if not typer.confirm(f"Update root to {root_dir}?", default=False):
                 raise typer.Exit(0)
             root_dir.mkdir(parents=True, exist_ok=True)
-            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers, **store_kw)
+            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers,
+                           header_commands=header_commands, **store_kw)
     else:
         root_dir.mkdir(parents=True, exist_ok=True)
-        _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers, **store_kw)
+        _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers,
+                           header_commands=header_commands, **store_kw)
         _offer_default(name, yes)
 
     if no_start:
@@ -443,12 +468,14 @@ def connect(
         None, "--key", help="An API key to send with every request to this Catchment."
     ),
     header: Optional[list[str]] = typer.Option(None, "--header", help=_HEADER_HELP),
+    header_command: Optional[list[str]] = typer.Option(None, "--header-command", help=_HEADER_COMMAND_HELP),
     yes: bool = typer.Option(False, "--yes", "-y", help="Make it the default Catchment without asking."),
 ) -> None:
     """Register a Catchment running elsewhere."""
     from rich.console import Console
 
-    _register_or_abort(name, url=path, kind="remote", key=key, headers=_parse_headers(header))
+    _register_or_abort(name, url=path, kind="remote", key=key, headers=_parse_headers(header),
+                       header_commands=_parse_header_commands(header_command))
     console = Console()
     console.print(f"[green]Registered[/green] catchment [bold]{name}[/bold] → {path}")
     _offer_default(name, yes)

@@ -355,7 +355,20 @@ needed the schema grants and Can use on the warehouse, given by the author (the 
   only the newest lines) and pushed out start-up; httpx is now at WARNING in the Duck, as the Azure SDK was.
 - Open risk, not specific to Volumes: a `state.tar` older than `duck.db` (a shutdown killed mid-upload leaves the
   previous one) restores registries older than the published state, and a Duck only rehydrates a registry that's
-  missing. The 15 s App shutdown window makes this likelier on a large Catchment.
+  missing. The 15 s App shutdown window makes this likelier on a large Catchment. **Fixed 2026-11-09:** each
+  export records its run's `f` in the registry (`dataplane.PUBLISHED_TABLE`, `_duckstring_published`, written
+  before the sidecar commit; hydration records the sidecar's run stamp), and a Duck whose registry holds an older
+  `f` than the published run stamp (local publish, else the persist layer) sets it aside as
+  `registry.duckdb.behind-{stamp}` and rehydrates (`dataplane.registry_behind`, `executor._set_aside`). A registry
+  with no record (empty, wiped by a Rebuild, or from before the fix) is never called behind. The dbt executor
+  doesn't check. Test: `test_hydrate.test_executor_rebuilds_a_registry_older_than_its_published_state`.
+- **CLI behind short-lived tokens (2026-11-09):** `catchment connect --header-command 'Name: command'`
+  (`config.command_header`): the shell command's output is the value (JSON with `access_token`, as `databricks
+  auth token` prints, gives `Bearer <token>`; a bare token for an `*Authorization` header gets `Bearer`), cached
+  in `~/.duckstring/header-cache.json` (0600) until 5 min before its expiry (a JWT's `exp` or the JSON's
+  `expiry`; unknown = run per request); `_http.request` re-runs it once on a 401. A Duct stores only the current
+  value (warned). Not yet tried against a real Databricks App with `databricks auth token` (U2M); the App proxy
+  was measured to accept an M2M OAuth token. Docs: `cli/catchment.md`, the Google guide's connect example.
 
 **Change files, built 2026-11-09** (`mode=changes`; the author's design calls: performance before plain
 integration, so a reader in Duckstring is fine; an op column only where there's a key).
@@ -476,5 +489,5 @@ change how it writes). Two calls in Ripple code, each returning an `Input` (`ver
   storage route, the warehouse fallback, writing to the Catchment's Volume (Parquet or Delta, any mode), `changed`
   + `pond.skip()` and `added()` + `append_table` vs `read()` + `merge_table`, checking `changed` before `added()`
   (an unchanged `added()` on the warehouse is still a statement), and the cache's disk use.
-- The UI's Spout add form (`frontend/src/components/Sidebar.tsx`) has no `databricks://` option yet; the CLI and
-  API take it. It does offer `changes` as a mode.
+- The UI's Spout add form (`frontend/src/components/Sidebar.tsx`) offers `databricks://` (warehouse id, Volume,
+  optional `client_id`/`client_secret` names) and `abfss://` since 2026-11-09, and `changes` as a mode.

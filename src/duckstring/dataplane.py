@@ -785,6 +785,9 @@ class ParquetDataPlane(DataPlane):
                         con.execute(f"COPY ({_concrete_select(con, table)}) TO '{uri}' (FORMAT PARQUET)")
             for main in merge_mains:
                 _publish_tiered_main(con, data_dir, main, f)
+            if f is not None:
+                # Before the commit, so the registry is never behind its sidecar.
+                retry_on_lock(lambda: record_published(con, f))
             publish_plan(con, data_dir, f, held=kept)  # commit: every file it declares is in place
             if retain_from is not KEEP_ALL:
                 prune_versions(data_dir, retain_from)  # after the new version is in place
@@ -1246,7 +1249,49 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
                 loaded = True
         if loaded:
             hydrated.append(table)
+    run = (sidecar.get(trickle.RUN_KEY) or {}).get("f")
+    if run:
+        record_published(con, datetime.fromisoformat(run))
     return hydrated
+
+
+# ─── how far a registry is published ─────────────────────────────────────────
+#
+# A registry and its published state are restored separately on some platforms: a state backup holds the
+# registries, the durable data root the publishes. A backup older than the data root (a shutdown that died
+# mid-upload leaves the previous one) restores a registry behind what is published, and resuming from it would
+# apply changes against old state. Each export records its run's freshness in the registry, so a Duck can tell.
+
+PUBLISHED_TABLE = f"{RESERVED_PREFIX}published"
+
+
+def record_published(con, f) -> None:
+    """Record that ``con``'s registry holds the state published at ``f`` (kept as the newest)."""
+    con.execute(f'CREATE TABLE IF NOT EXISTS "{PUBLISHED_TABLE}" (f TIMESTAMPTZ)')
+    con.execute(f'DELETE FROM "{PUBLISHED_TABLE}" WHERE f < ?', [f])
+    con.execute(f'INSERT INTO "{PUBLISHED_TABLE}" SELECT ? WHERE NOT EXISTS (SELECT 1 FROM "{PUBLISHED_TABLE}")', [f])
+
+
+def registry_behind(con, *stores):
+    """The published run's freshness when ``con``'s registry is older than it, else None. Read from the
+    first of ``stores`` with a sidecar. A registry with no record (empty, wiped by a Rebuild, or written
+    before the record existed) is never called behind."""
+    from . import trickle_io as trickle
+
+    if not trickle._table_exists(con, PUBLISHED_TABLE):
+        return None
+    for store in stores:
+        if store is None:
+            continue
+        store = _as_storage(store)
+        if store.exists("_trickle.json"):
+            run = (trickle.load_sidecar(store).get(trickle.RUN_KEY) or {}).get("f")
+            if not run:
+                return None
+            published = datetime.fromisoformat(run)
+            held = first_row(con.execute(f'SELECT max(f) FROM "{PUBLISHED_TABLE}"'))[0]
+            return published if held is None or held < published else None
+    return None
 
 
 def restore_tree(src, dest) -> int:
