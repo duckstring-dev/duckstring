@@ -1255,6 +1255,7 @@ azure = [
     { name = "azure-mgmt-appcontainers" },
     { name = "azure-mgmt-compute" },
     { name = "azure-monitor-query" },
+    { name = "sqlglot" },
 ]
 databricks = [
     { name = "fsspec" },
@@ -1337,6 +1338,7 @@ requires-dist = [
     { name = "s3fs", marker = "extra == 'aws'", specifier = ">=2023.1" },
     { name = "s3fs", marker = "extra == 'dev'", specifier = ">=2023.1" },
     { name = "sqlglot", marker = "extra == 'aws'", specifier = ">=30.21,<31" },
+    { name = "sqlglot", marker = "extra == 'azure'", specifier = ">=30.21,<31" },
     { name = "sqlglot", marker = "extra == 'databricks'", specifier = ">=30.21,<31" },
     { name = "sqlglot", marker = "extra == 'dev'", specifier = ">=30.21,<31" },
     { name = "sqlglot", marker = "extra == 'gcp'", specifier = ">=30.21,<31" },

@@ -33,6 +33,19 @@ Run only one Catchment process against a state directory, and only one Catchment
 | `DUCKSTRING_S3_ENDPOINT` | none | An S3-compatible endpoint, such as MinIO, for the data root. Equivalent to `?endpoint=` on the URI. |
 | `DUCKSTRING_VOLUMES` | `auto` | How a `/Volumes/...` data root or state backup is reached: `mount` uses it as a local path, `api` goes through the Databricks Files API. `auto` uses the Files API where `/Volumes` isn't mounted, as in a Databricks App. |
 
+## Databricks
+
+These are read wherever Duckstring reaches a Databricks workspace: a `/Volumes/...` data root or state backup, a [`databricks://` Spout](formats.md#databricks), and Ripple code reading with [`duckstring.databricks`](python/databricks.md), which runs in a Duck. Ducks on the Catchment's machine inherit the Catchment's environment. A Databricks App sets the host and its own service principal's credentials.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABRICKS_HOST` | none | The workspace URL. |
+| `DATABRICKS_TOKEN` | none | A personal access token. Used first when set. |
+| `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET` | none | A Databricks service principal's OAuth credentials, used when there's no token. On Azure Databricks without either, a Microsoft Entra token from the process's Azure identity is used. |
+| `DUCKSTRING_DATABRICKS_WAREHOUSE` | none | The SQL warehouse id `databricks.table` reads through when a table can't be read from its storage. |
+| `DATABRICKS_WAREHOUSE_ID` | none | Used when `DUCKSTRING_DATABRICKS_WAREHOUSE` is unset, and as a `databricks://` Spout's warehouse when its destination doesn't name one. |
+| `DUCKSTRING_INPUT_CACHE` | the system's temporary directory | Where `duckstring.databricks` keeps the files it fetches through the Files API and the results it downloads from a warehouse, under `duckstring-inputs/`. Holds about one copy of each input a Pond reads this way. |
+
 ## Ducks
 
 | Variable | Default | Description |

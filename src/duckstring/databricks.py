@@ -67,7 +67,7 @@ class Input:
         version: The input's version now: a Delta version, or a digest of the committed files. None for a
             view, which has no version (it always reads as changed).
         changed: Whether the version differs from the one the Ripple's previous completed run read (always
-            true on a first run or after a Rebuild).
+            true on a first run, after a Rebuild, and for an input without a version).
         via: How the data was reached, once read: ``"storage"`` (vended credentials), ``"warehouse"``,
             ``"files"`` (in place) or ``"cache"`` (fetched through the Files API).
     """
@@ -89,7 +89,9 @@ class Input:
 
     def added(self):
         """The rows added since the Ripple's previous completed run: everything on a first run (or after a
-        Rebuild), nothing when unchanged. Raises :class:`NotAppendOnly` when rows were changed or removed since."""
+        Rebuild, or for an input without a version), nothing when unchanged. Through a warehouse an unchanged
+        ``added()`` still runs the full query, so check :attr:`changed` first. Raises :class:`NotAppendOnly` when
+        rows were changed or removed since."""
         raise NotImplementedError
 
     def _previous_version(self):
@@ -100,7 +102,8 @@ def table(pond, name: str, *, warehouse: str | None = None, env=None) -> Input:
     """A Unity Catalog table (``catalog.schema.table``) as an :class:`Input`.
 
     Read with credentials Unity Catalog vends for the table's storage when it allows them, else on the SQL
-    warehouse ``warehouse`` (default ``DUCKSTRING_DATABRICKS_WAREHOUSE``, else ``DATABRICKS_WAREHOUSE_ID``).
+    warehouse ``warehouse`` (default ``DUCKSTRING_DATABRICKS_WAREHOUSE``, else ``DATABRICKS_WAREHOUSE_ID``). A
+    view, a table that isn't Delta and one whose commits the catalog manages always go through the warehouse.
     The workspace is ``DATABRICKS_HOST``, signed in as :mod:`duckstring.databricks_rest` describes. ``env``
     replaces the process environment for both."""
     env = os.environ if env is None else env

@@ -92,6 +92,8 @@ const sidebars: SidebarsConfig = {
             'reference/python/acc',
             'reference/python/puddle',
             'reference/python/catchment',
+            'reference/python/databricks',
+            'reference/python/landing',
           ],
         },
         'reference/pond_toml',

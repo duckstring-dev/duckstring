@@ -1,6 +1,6 @@
 ---
 title: Ingesting Data
-description: Bring data into Duckstring with Inlets, and skip runs when nothing new has arrived.
+description: Bring data into Duckstring with Inlets, including from Databricks, and skip runs when nothing new has arrived.
 ---
 
 # Ingesting Data
@@ -28,7 +28,7 @@ def ingest(pond):
 
 Deploy it like any other Pond, and the Ponds that list `products` in `[sources]` read `products.product`.
 
-This guide covers reading from common systems, choosing how to store what you read, pulling only new data, and skipping runs when nothing has changed. It assumes you've read [Writing Ripples](writing_ripples.md).
+This guide covers reading from common systems, choosing how to store what you read, pulling only new data, skipping runs when nothing has changed, and reading from Databricks. It assumes you've read [Writing Ripples](writing_ripples.md).
 
 ## Inlets
 
@@ -178,6 +178,63 @@ def done(pond):
 `pond.changed()` reports whether this run changed any of the Pond's tables or Objects. A table written with `if_changed=True` whose content was the same doesn't count, nor does a merge or append that changed nothing.
 
 The fingerprint is a hash, so two different tables could in principle match. To rule that out for a table, check it with `pond.detect_change("product", rel, exact=True)` before writing, which compares the rows themselves. See [Change detection](../reference/python/pond.md#change-detection) for the details, including the cases where a check always reports a change.
+
+## Reading from Databricks
+
+Data in Databricks usually reaches a Pond one of two ways: a Databricks job writes files to a Volume, or the Pond reads a Unity Catalog table directly. `duckstring.databricks` reads both, and tells the Ripple whether the data changed since its previous run and which rows were added, so an Inlet can skip a run or append only what's new. [Databricks Inputs](../reference/python/databricks.md) has the full reference.
+
+The Ripple signs in to the workspace in `DATABRICKS_HOST` with `DATABRICKS_TOKEN`, or `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET`, from its environment, or on Azure Databricks with the Duck's Microsoft Entra identity. A Databricks App sets the host and its own service principal's credentials, so a Catchment hosted in one needs nothing more.
+
+### Files a job writes to a Volume
+
+This route needs the fewest permissions, and nothing changes about how Databricks writes. Have a job write its output to a Volume as Parquet or Delta, in whatever mode it already uses, and read the files:
+
+```python
+from duckstring import databricks, ripple
+
+
+@ripple
+def ingest(pond):
+    src = databricks.files(pond, "/Volumes/main/sales/exports/order_line")
+    if not src.changed:
+        pond.skip()
+        return
+    pond.append_table("order_line", src.added())
+```
+
+`src.changed` says whether the files changed since the Ripple's previous run, and `src.added()` returns only the rows added since then. If the job overwrote or deleted rows instead, `added()` raises `databricks.NotAppendOnly`. For such an input, read it whole with `src.read()` and write it with `merge_table`. The reading identity needs `READ VOLUME` on the Volume, with `USE CATALOG` and `USE SCHEMA` on its catalog and schema.
+
+A directory with a `_delta_log` is read as a Delta table, deletion vectors included, and anything else as Parquet. A Spark job's Parquet output counts only once the job has committed it, so files a job is still writing are picked up on the next run. Directories named `key=value` become columns.
+
+On Databricks compute, where Volumes are mounted, the files are read in place. Elsewhere, such as in a Databricks App, they're fetched through the Databricks Files API into a local cache first, in `DUCKSTRING_INPUT_CACHE` (default the system's temporary directory). Only files the cache doesn't hold yet are fetched, so an unchanged run fetches nothing, but the cache holds about one copy of the input, so leave room for it on the Duck's disk. `files` also reads a local path or object storage.
+
+### Unity Catalog tables
+
+```python
+@ripple
+def ingest(pond):
+    src = databricks.table(pond, "main.sales.customer")
+    if not src.changed:
+        pond.skip()
+        return
+    pond.merge_table("customer", src.read(), pk="customer_id")
+```
+
+`changed` comes from the table's Delta version in Unity Catalog, which takes about 50 milliseconds and no warehouse. The data itself is read one of two ways.
+
+The first is straight from the table's storage, with short-lived credentials Unity Catalog vends for it, so no warehouse runs. This needs a metastore admin to turn on External data access for the metastore, and the reading identity to hold `EXTERNAL USE SCHEMA` on the table's schema, which only the catalog's owner can grant (`ALL PRIVILEGES` doesn't include it):
+
+```sql
+GRANT EXTERNAL USE SCHEMA ON SCHEMA main.sales TO `<identity>`;
+```
+
+It works for tables stored on Azure or AWS, and has only been tested offline, against a local Delta table.
+
+The second is through a SQL warehouse, used when storage can't be read. Name the warehouse with `DUCKSTRING_DATABRICKS_WAREHOUSE`, or `warehouse=` on the call. Views, tables that aren't Delta and tables whose commits Unity Catalog manages always take this route. The result is downloaded into the same local cache. In testing, the first read of a small table through a warehouse took 2.4 seconds. The reading identity needs `USE CATALOG`, `USE SCHEMA` and `SELECT`, plus **Can use** on the warehouse.
+
+`added()` works on a table too, returning the rows added since the previous run and raising `NotAppendOnly` after an update or delete. Check `changed` before calling it: through a warehouse, `added()` runs the full query even when nothing changed.
+
+Each read records the input's version with the run, so `changed` and `added()` compare against the previous run even after a Duck rebuilds its database. A [Rebuild](../reference/cli/control.md#rebuild) reads everything again.
 
 ## Files and models as Objects
 

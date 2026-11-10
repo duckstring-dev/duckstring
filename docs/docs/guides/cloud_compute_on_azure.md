@@ -216,6 +216,32 @@ duckstring catchment init --name prod --host 0.0.0.0 --data-root 'abfss://lake@a
 
 A container loses its filesystem when it restarts, and the Catchment's own state (its database of Ponds, runs and settings) lives there. Give it a state backup with `DUCKSTRING_STATE_BACKUP_URI`, as described in [Hosting on a Platform](hosting_on_a_platform.md#keeping-state).
 
+## The Flock on Azure Databricks
+
+The [Flock](offloading_large_recomputes.md) sends a recompute too large for a Duck to another engine, and on Azure that can be a Databricks SQL warehouse. Ducks can sign in to the workspace with their own managed identity, so no Databricks credential needs to be stored.
+
+1. In the workspace's admin settings, add the Duck identity as a Microsoft Entra ID managed service principal, using its client id, with the Workspace access and Databricks SQL access entitlements.
+2. Give it **Can use** on a serverless SQL warehouse, which starts in seconds and stops itself when idle.
+3. Grant it a Volume to stage data in:
+
+```sql
+GRANT USE CATALOG ON CATALOG main TO `<client id>`;
+GRANT USE SCHEMA ON SCHEMA main.duckstring TO `<client id>`;
+GRANT READ VOLUME, WRITE VOLUME ON VOLUME main.duckstring.flock TO `<client id>`;
+```
+
+Then configure the Catchment:
+
+```bash
+DUCKSTRING_FLOCK_DATABRICKS_HOST=https://adb-1234567890123456.7.azuredatabricks.net
+DUCKSTRING_FLOCK_DATABRICKS_WAREHOUSE=1a2b3c4d5e6f7a8b
+DUCKSTRING_FLOCK_DATABRICKS_VOLUME=/Volumes/main/duckstring/flock
+```
+
+When no Databricks credentials are set (`DATABRICKS_TOKEN`, or `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET`, as secrets or environment variables), a Duck working with an `azuredatabricks.net` workspace asks its Azure identity for a Microsoft Entra token for Azure Databricks. Container Apps Ducks use the Duck identity, whose client id the Catchment gives each one, and VM Ducks the one identity assigned to the VM. The token and the Flock's Databricks engine both come with the `azure` extra, which the `-azure` Duck image includes. A Pond running on the Catchment's own machine signs in as the Catchment's identity, which then needs the same access.
+
+DuckDB stays the authority on results: Databricks only gets constructs measured to agree with DuckDB, and every result is cast to DuckDB's schema and checked against a local recompute of a sample before it's used. [Offloading Large Recomputes](offloading_large_recomputes.md#databricks) has the detail.
+
 ## Where data goes
 
 A Pond running on the Catchment's own machine publishes locally first, then copies its output to the data root in the background. A Pond on a cloud Duck publishes straight to the data root. A Pond downstream on a different machine waits until its Source's output has reached the data root, never reading output that isn't there yet.
@@ -251,6 +277,7 @@ Duckstring itself costs nothing; you pay Azure for:
 - the Catchment's machine or Container App, which runs continuously and is most of a small deployment's cost;
 - Ducks, per run, since each is stopped when its Pond goes idle (a Pond with a recurring Refresh keeps its Duck warm, and a Duck that loses its Catchment stops itself after an hour idle; see `DUCKSTRING_DUCK_ORPHAN_MINUTES`);
 - the Log Analytics workspace, and the container registry if you use one;
+- a Databricks SQL warehouse, while it runs, only when the Flock uses it;
 - storage and transactions.
 
 ## Checklist

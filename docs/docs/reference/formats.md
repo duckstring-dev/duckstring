@@ -206,7 +206,7 @@ Delivers to Unity Catalog tables in the `catalog.schema` named by the path. With
 
 | Parameter | Description |
 |---|---|
-| `warehouse` | The SQL warehouse that applies each delivery. Required. |
+| `warehouse` | The SQL warehouse that applies each delivery. Required unless the Catchment has `DATABRICKS_WAREHOUSE_ID`. |
 | `volume` | A Unity Catalog Volume, `/Volumes/<catalog>/<schema>/<volume>`, where each delivery is staged and removed after. Required. |
 | `token` | A personal access token, as a `${secret:NAME}` reference. |
 | `client_id`, `client_secret` | A Databricks service principal's OAuth credentials, as references. |

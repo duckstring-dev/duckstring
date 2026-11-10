@@ -232,6 +232,32 @@ duckstring catchment connect --name gcp --path https://catchment-123456789.austr
 
 An identity token lasts an hour, and the CLI runs the command again when it's about to expire.
 
+## The Flock on BigQuery
+
+The [Flock](offloading_large_recomputes.md) sends a recompute too large for a Duck to another engine. To use BigQuery, enable its API and create a dataset for the Flock's temporary tables, in the same location as the bucket the scratch prefix is in. A default table expiration, here a day, removes any table a failed job leaves behind:
+
+```bash
+gcloud services enable bigquery.googleapis.com
+bq --location=australia-southeast1 mk --dataset --default_table_expiration=86400 acme-data:duckstring_flock
+```
+
+The Duck runs the jobs as itself, so grant its service account BigQuery Job User on the project, and BigQuery Data Editor on the dataset only (from the dataset's sharing settings):
+
+```bash
+gcloud projects add-iam-policy-binding acme-data \
+  --member=serviceAccount:duckstring-duck@acme-data.iam.gserviceaccount.com --role=roles/bigquery.jobUser
+```
+
+A Pond on the Catchment's own machine runs its jobs with the Catchment's credentials, which then need the same roles. Then configure the Catchment, putting the scratch prefix in the data root's bucket, which the Duck's service account can already read and write:
+
+```bash
+DUCKSTRING_FLOCK_BIGQUERY_DATASET=duckstring_flock
+DUCKSTRING_FLOCK_BIGQUERY_SCRATCH=gs://acme-lake/flock-scratch
+DUCKSTRING_FLOCK_BIGQUERY_LOCATION=australia-southeast1
+```
+
+Give the scratch prefix a lifecycle rule as well, since everything in it is temporary. DuckDB stays the authority on results: BigQuery only gets constructs measured to agree with DuckDB, and every result is cast to DuckDB's schema and checked against a local recompute of a sample before it's used. [Offloading Large Recomputes](offloading_large_recomputes.md#bigquery) has the detail.
+
 ## Where data goes
 
 A Pond running on the Catchment's own machine publishes locally first, then copies its output to the bucket in the background. A Pond on a cloud Duck publishes straight to the bucket. A Pond downstream on a different machine waits until its Source's output has reached the bucket, never reading output that isn't there yet.
@@ -261,6 +287,7 @@ Duckstring itself costs nothing; you pay Google Cloud for:
 - the Catchment's machine or Cloud Run service, which runs continuously (with CPU always allocated) and is most of a small deployment's cost;
 - Ducks, per run, since each is stopped when its Pond goes idle (a Pond with a recurring Refresh keeps its Duck warm, and a Duck that loses its Catchment stops itself after an hour idle; see `DUCKSTRING_DUCK_ORPHAN_MINUTES`);
 - Artifact Registry storage for the image;
+- BigQuery, for the data each Flock job processes, only when the Flock uses it;
 - Cloud Storage storage and operations.
 
 ## Checklist

@@ -93,6 +93,7 @@ The [Quickstart](https://docs.duckstring.com/quickstart) goes through the same s
 - [Local testing](https://docs.duckstring.com/guides/testing_with_puddles) against small samples of each Source, called Puddles
 - [dbt projects](https://docs.duckstring.com/guides/dbt_projects) deployed as Ponds, one step per model
 - [Delivery](https://docs.duckstring.com/guides/delivering_with_spouts) to Postgres (incremental and exactly once), S3, Google Cloud Storage and local files
+- [Databricks](https://docs.duckstring.com/guides/ingesting_data#reading-from-databricks): read Unity Catalog tables and Volume files into Ponds, deliver back to Unity Catalog, and send large recomputes to a SQL warehouse
 - [Retries, alerts and Prometheus metrics](https://docs.duckstring.com/guides/monitoring_and_failures)
 - [Per-Pond Python environments](https://docs.duckstring.com/guides/writing_ripples#python-dependencies) from `pyproject.toml` and `uv.lock`
 - [Cloud compute](https://docs.duckstring.com/guides/cloud_compute_on_aws) on AWS Fargate or EC2, chosen per Pond, with data on S3

@@ -1,6 +1,6 @@
 ---
 title: Offloading Large Recomputes
-description: Send a recompute that won't fit in a Duck to MotherDuck, StarRocks or Athena with the Flock.
+description: Send a recompute that won't fit in a Duck to MotherDuck, StarRocks, Databricks, BigQuery or Athena with the Flock.
 ---
 
 # Offloading Large Recomputes
@@ -56,9 +56,11 @@ Configure one or more engines on the Catchment. A Pond uses the first configured
 |---|---|---|---|
 | `motherduck` | DuckDB, in MotherDuck | everything the builder expresses in SQL | read in place from S3 or GCS, or uploaded by the Duck |
 | `starrocks` | StarRocks (CelerData or self-hosted) | every builder shape, with expressions measured to agree | staged under a scratch prefix in your bucket |
+| `databricks` | Databricks SQL, on a SQL warehouse on any cloud | every builder shape, with expressions measured to agree | staged in a Unity Catalog Volume |
+| `bigquery` | Google BigQuery | every builder shape, with expressions measured to agree | staged under a scratch prefix in Cloud Storage |
 | `athena` | Trino, in Amazon Athena | every builder shape, with a short list of measured expressions | staged under a scratch prefix in your bucket |
 
-MotherDuck runs DuckDB, so a job's SQL runs unchanged and its results match by construction. StarRocks and Athena are different engines, so each job is translated to their SQL, and each construct in it (a function, an operator, a cast) is sent only if its translation was measured to give DuckDB's answer. A job containing anything else runs in the Duck, with the construct named in the log. The [section on accuracy](#accuracy-on-starrocks-and-athena) has the detail.
+MotherDuck runs DuckDB, so a job's SQL runs unchanged and its results match by construction. The other engines aren't DuckDB, so each job is translated to their SQL, and each construct in it (a function, an operator, a cast) is sent only if its translation was measured to give DuckDB's answer. A job containing anything else runs in the Duck, with the construct named in the log. The [section on accuracy](#accuracy-on-other-engines) has the detail.
 
 The Catchment sends each Pond's Flock settings, and its engine's credentials, to the Duck with every run. Cloud Ducks need no Flock configuration of their own, and a rotated credential takes effect from the next run.
 
@@ -89,7 +91,7 @@ CREATE SECRET IN MOTHERDUCK (TYPE S3, KEY_ID '...', SECRET '...', REGION 'ap-sou
 
 Anything MotherDuck can't read in place is uploaded by the Duck for the job and dropped afterwards: the Pond's own tables, a source published only on the Duck's machine, a Source whose copy on the data root hasn't caught up yet, and tables a `.sql()` query reads by name. Uploads go to a MotherDuck database, `duckstring_flock` by default (`DUCKSTRING_FLOCK_MOTHERDUCK_DATABASE`). With a local data root, every source is uploaded.
 
-Data sent to MotherDuck leaves your AWS account. If it must stay there, use StarRocks or Athena.
+Data sent to MotherDuck is processed in MotherDuck's cloud, outside your own cloud account. If it must stay in your account, use one of the other engines.
 
 ## StarRocks
 
@@ -116,6 +118,47 @@ For each job the Duck writes its sources as Parquet under the scratch prefix, St
 
 A query sent to a suspended warehouse waits for it to resume, which counts against the job's timeout (`DUCKSTRING_FLOCK_STARROCKS_TIMEOUT`, 900 seconds by default).
 
+## Databricks
+
+The Flock can run on a Databricks SQL warehouse, on any cloud. Install the client with `pip install 'duckstring[databricks]'` and configure the Catchment:
+
+```bash
+DUCKSTRING_FLOCK_DATABRICKS_HOST=https://adb-1234567890123456.7.azuredatabricks.net
+DUCKSTRING_FLOCK_DATABRICKS_WAREHOUSE=1a2b3c4d5e6f7a8b
+DUCKSTRING_FLOCK_DATABRICKS_VOLUME=/Volumes/main/duckstring/flock
+```
+
+The host defaults to `DATABRICKS_HOST`, which a Databricks App sets. For each job the Duck writes its sources as Parquet and uploads them to the Volume through the Files API, the warehouse reads them with `read_files`, and the result comes back through the Statement Execution API as Arrow. Each job's files are removed from the Volume when it finishes. No external location or storage credential is involved, but the result is downloaded from links into the workspace's own storage, so a Duck behind a restrictive firewall needs to reach that storage as well as the workspace.
+
+Store the credentials as secrets, either a service principal's OAuth credentials or a personal access token:
+
+```bash
+duckstring secret set DATABRICKS_CLIENT_ID
+duckstring secret set DATABRICKS_CLIENT_SECRET
+```
+
+On Azure Databricks, Ducks without these sign in with their own Microsoft Entra identity instead; [Cloud Compute on Azure](cloud_compute_on_azure.md#the-flock-on-azure-databricks) sets that up. Whichever identity is used needs **Can use** on the warehouse, and `READ VOLUME` and `WRITE VOLUME` on the Volume, with `USE CATALOG` and `USE SCHEMA` on its catalog and schema.
+
+Use a serverless SQL warehouse, which starts in seconds and stops itself when idle. On a 2X-Small serverless warehouse a job took about 1.2 seconds once the warehouse was running, and 12.7 seconds for the first. A job's timeout, `DUCKSTRING_FLOCK_DATABRICKS_TIMEOUT` (900 seconds by default), includes the warehouse starting.
+
+Databricks takes every builder shape and most expressions. A few constructs whose results differ on Databricks run in the Duck, among them `floor` and `ceil` of a floating-point value, `date_trunc`, `median` and `strftime`.
+
+## BigQuery
+
+Install the client with `pip install 'duckstring[gcp]'` and configure the Catchment:
+
+```bash
+DUCKSTRING_FLOCK_BIGQUERY_DATASET=duckstring_flock
+DUCKSTRING_FLOCK_BIGQUERY_SCRATCH=gs://acme-lake/flock-scratch
+DUCKSTRING_FLOCK_BIGQUERY_LOCATION=australia-southeast1
+```
+
+Jobs run in the credentials' project unless `DUCKSTRING_FLOCK_BIGQUERY_PROJECT` names another. For each job the Duck writes its sources as Parquet under the scratch prefix, BigQuery reads them through temporary external tables in the dataset and writes the result back under the prefix with `EXPORT DATA`, and the Duck reads it. The tables and files are removed when the job finishes. Keep the dataset in the scratch bucket's location, and give it a default table expiration as a backstop.
+
+The Duck uses its own Google credentials, or a service-account key named by `credentials=` on the scratch URI, as for a [`gs://` data root](../reference/formats.md#data-root-uris). It needs BigQuery Job User on the project, BigQuery Data Editor on the dataset, and read and write access to the scratch prefix. [Cloud Compute on Google Cloud](cloud_compute_on_google_cloud.md#the-flock-on-bigquery) sets this up.
+
+When measured, each job took 3 to 5 seconds, and BigQuery billed each at its 10 MB minimum. BigQuery takes every builder shape and most expressions. A few constructs whose results differ on BigQuery run in the Duck, among them a cast of a decimal to text, `%` on floating-point values, `first_value` and `median`.
+
 ## Athena
 
 ```bash
@@ -127,11 +170,11 @@ DUCKSTRING_FLOCK_ATHENA_REGION=ap-southeast-2
 
 Sources are staged under the scratch prefix and registered as temporary Glue tables, and the result comes back through an `UNLOAD`. The Duck's IAM role needs Athena and Glue access, plus `s3:GetBucketLocation` and `s3:ListBucketMultipartUploads` on the scratch bucket; without those, Athena reports "Unable to verify/create output bucket". [Cloud Compute on AWS](cloud_compute_on_aws.md#the-flock-on-athena) covers the roles.
 
-Athena takes every builder shape, but its expression list is short: arithmetic other than division, `round`, `abs`, `floor`, `ceil`, `coalesce`, `nullif`, `least` and `greatest`. Aggregates aren't measured on Athena yet, so an `.aggregate()` stays in the Duck.
+Athena takes every builder shape, but its expression list is short: arithmetic other than division, `round`, `abs`, `floor`, `ceil`, `coalesce`, `nullif`, `least` and `greatest`. Aggregates haven't been measured on Athena, so an `.aggregate()` stays in the Duck.
 
-## Accuracy on StarRocks and Athena
+## Accuracy on other engines
 
-DuckDB is the authority on what a Pond publishes; the Flock only decides where the work runs. Four checks keep a SQL engine's answer equal to DuckDB's.
+DuckDB is the authority on what a Pond publishes; the Flock only decides where the work runs. Four checks keep the answer of an engine other than DuckDB equal to DuckDB's.
 
 1. **Measured constructs.** Each engine has a list of the constructs it was measured to agree on, run through the same translation the engine uses. Where an engine's own semantics differ, the translation spells out DuckDB's: on StarRocks, `/` becomes floating-point division with DuckDB's results for a zero divisor, `CAST` to an integer rounds as DuckDB does, and `var_samp` stays the sample variance. A value the engine can't represent (DuckDB's NaN from `0/0`) stops the job, which then runs in the Duck.
 2. **Named differences.** Some differences are known and bounded, and a Pond can accept them by name (below).
@@ -159,7 +202,7 @@ accept = ["float_order"]
 
 or `duckstring duck set priced --accept float_order`. Whether last-bit differences matter depends on the data, so this is the Pond author's call, and nothing is accepted by default. With `float_order` accepted, verification compares floating-point columns within a relative 1e-9.
 
-An `.aggregate()` with a `sum` or `mean` keeps the centred second moment it would need for a variance, which is computed in floating point, so on StarRocks it needs `float_order`. One with only counts, minimums and maximums doesn't.
+An `.aggregate()` with a `sum` or `mean` keeps the centred second moment it would need for a variance, which is computed in floating point, so on StarRocks, Databricks and BigQuery it needs `float_order`. One with only counts, minimums and maximums doesn't.
 
 A difference that changes what kind of value comes back (an integer where DuckDB gives a fraction, NULL where DuckDB raises an error, or the reverse) is never on an engine's list, and no name can accept it.
 

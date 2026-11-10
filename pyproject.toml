@@ -67,6 +67,7 @@ azure = [
   "azure-mgmt-appcontainers>=5.0",
   "azure-mgmt-compute>=34",
   "azure-monitor-query>=1.2",
+  "sqlglot>=30.21,<31",  # the Databricks Flock engine translates jobs on the -azure Duck image
 ]
 gcp = [
   "gcsfs>=2024.2",

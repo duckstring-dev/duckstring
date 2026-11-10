@@ -220,7 +220,7 @@ DUCKSTRING_FLOCK_ATHENA_SCRATCH=s3://acme-lake/flock-scratch
 
 The Duck's role, which dispatches the work, also needs Athena and Glue access, plus `s3:GetBucketLocation` and `s3:ListBucketMultipartUploads` on the scratch bucket. Without those, Athena reports "Unable to verify/create output bucket". Give the scratch prefix a lifecycle rule, since everything in it is temporary. StarRocks reads the same kind of scratch prefix with its own instance profile, so on AWS its role needs read and write access to it too.
 
-DuckDB stays the authority on results: Athena only gets constructs measured to agree with DuckDB, and every result is cast to DuckDB's schema and checked against a local recompute of a sample before it's used. Anything else runs in the Duck. [Offloading Large Recomputes](offloading_large_recomputes.md#accuracy-on-starrocks-and-athena) has the detail.
+DuckDB stays the authority on results: Athena only gets constructs measured to agree with DuckDB, and every result is cast to DuckDB's schema and checked against a local recompute of a sample before it's used. Anything else runs in the Duck. [Offloading Large Recomputes](offloading_large_recomputes.md#accuracy-on-other-engines) has the detail.
 
 ## Where data goes
 
