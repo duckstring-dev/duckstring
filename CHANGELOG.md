@@ -69,6 +69,8 @@ Upgrading:
 - **A Catchment as a Databricks App** keeps its data root and state on a Volume through the Files API (an App
   doesn't mount `/Volumes`), and comes back whole after a compute restart.
 - **The Flock** can send large recomputes to BigQuery and Databricks SQL, each measured against a real warehouse.
+- Reading a table from its storage, and `files()` of a Delta table, need DuckDB 2.0 (1.5's Delta reader can't
+  read a version). On 1.5 a table is read through the warehouse.
 - New guide: Running Duckstring on Databricks.
 
 ### Other changes
@@ -90,6 +92,9 @@ Upgrading:
 
 ### Fixes
 
+- **A Sink could find its Source's table version deleted** while it read it, when a new pipeline's first
+  Runs overlapped (as under a continuous Refresh): a Run dispatched before its Pond had ever published kept only
+  its own version. Every version is now kept until the Pond has published once.
 - **Moving a Pond to other compute while its Duck was running** left a Run showing running for good. The old Duck
   now finishes what it holds and the new one starts once it has gone, as for a redeploy.
 - **A dedicated EC2 Duck ran on Fargate,** and saving a dedicated Duck dropped its size.
