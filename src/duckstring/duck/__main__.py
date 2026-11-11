@@ -336,23 +336,33 @@ def main() -> None:
     ap.add_argument("--persist-root", default="", help="durable persist layer (plans/persist.md): publish "
                                                        "locally, async-mirror here; empty = publish to "
                                                        "--data-root directly (remote Duck / no cloud)")
+    ap.add_argument("--audience", default="", help="Google identity-token audience for a private Catchment on "
+                                                   "Cloud Run behind a custom domain")
     args = ap.parse_args()
     # Configure logging at entry: without this a Duck has no handler, so INFO is dropped and
     # WARNING+ goes through the bare last-resort handler with no timestamp.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # The Azure SDK and httpx log every HTTP request at INFO (httpx: each job poll, about one a second), which
+    # buries the Duck's own lines; a Databricks App's log keeps only its newest lines, so they pushed out the rest.
+    logging.getLogger("azure").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     root = Path(args.root)
     data_root = args.data_root or None
     persist_root = args.persist_root or None
     source_dir = root / args.source_path
-    client = CatchmentClient(args.catchment, args.pond, args.major, args.token, version=args.version)
+    client = CatchmentClient(args.catchment, args.pond, args.major, args.token, version=args.version,
+                             audience=args.audience or None)
     if not source_dir.is_dir():
         # Remote-Duck boot (prereqs D6): this host doesn't share the Catchment's disk — fetch the
         # deployed source bundle over the duck channel and unpack it where the executor expects it.
         _unpack_artifact(client.fetch_artifact(), source_dir)
         log.info("[%s@%s] fetched source artifact -> %s", args.pond, args.major, source_dir)
     _use_pond_env(root, source_dir, client)
+    from ..storage import warm_imports
+
+    warm_imports(data_root, persist_root)  # before serve() starts the persist and Ripple threads
     parents = load_topology(source_dir)
     major_dir = pond_major_dir(root, args.pond, args.major)
     major_dir.mkdir(parents=True, exist_ok=True)

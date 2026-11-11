@@ -130,3 +130,26 @@ def test_a_success_resets_the_memory_retry(tmp_path, monkeypatch):
     f = d.state.pond_states["a@1"].start_f.isoformat()
     d.on_event("a@1", {"kind": "failed", "f": f, "ripple": "r", "error": OOM})
     assert not d.state.pond_states["a@1"].is_failed  # a later memory failure gets its retry again
+
+
+@pytest.mark.parametrize("limit,expected", [
+    ("4000000000", 4 * 10**9),  # cgroup v2 with a limit
+    ("max", None),  # cgroup v2 without one
+    ("9223372036854771712", None),  # cgroup v1 without one
+])
+def test_the_budget_follows_a_containers_memory_limit(tmp_path, monkeypatch, limit, expected):
+    from duckstring.catchment import driver
+
+    (tmp_path / "memory.max").write_text(limit + "\n")
+    monkeypatch.setattr(driver, "_CGROUP_MEMORY_FILES", (str(tmp_path / "memory.max"),))
+    monkeypatch.delenv("DUCKSTRING_MEMORY_BUDGET", raising=False)
+    assert driver._container_memory_limit() == expected
+    if expected is not None:  # a 4 GB container on a bigger host: 80% less 2 GB, floored at 1 GB
+        assert driver._memory_budget() == max(int(expected * 0.8) - 2 * 10**9, 10**9)
+
+
+def test_no_cgroup_files_leaves_physical_memory(tmp_path, monkeypatch):
+    from duckstring.catchment import driver
+
+    monkeypatch.setattr(driver, "_CGROUP_MEMORY_FILES", (str(tmp_path / "absent"),))
+    assert driver._container_memory_limit() is None

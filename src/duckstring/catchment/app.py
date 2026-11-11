@@ -52,21 +52,24 @@ async def _lifespan(app: FastAPI):
             )
         else:
             # The dispatching launcher: `catchment`-targeted Ponds on this box (subprocess), pool/
-            # dedicated ones on EC2 — the same code whether the Catchment is local or hosted. The EC2
-            # backend is only built when cloud is enabled (remote data root + AWS creds); otherwise
-            # remote targets degrade to local (plans/cloud-config.md).
+            # dedicated ones on the data root's cloud: the same code whether the Catchment is local or
+            # hosted. The cloud's backends are only built when cloud is enabled (a data root on a cloud with
+            # remote Ducks + its creds); otherwise remote targets degrade to local (plans/cloud-config.md).
+            from . import providers
             from .cloud_backends import build_remote_backends
             from .launcher import DispatchingLauncher
 
             local = SubprocessLauncher(
                 app.state.root, base_url, token=app.state.duck_token, data_root=app.state.data_root
             )
-            # The remote backends (Fargate/EC2 + the shared dial-back) exist only when cloud is enabled
-            # (remote data root + AWS creds); otherwise remote targets degrade to local. The same builder
-            # re-attaches them live when creds / the data root change at runtime (see cloud_backends).
+            # The remote backends (AWS: Fargate/EC2) + the shared dial-back exist only when cloud is enabled;
+            # otherwise remote targets degrade to local. The same builder re-attaches them live when creds /
+            # the data root change at runtime (see cloud_backends).
             remotes, dialback = build_remote_backends(
                 app.state.root, base_url, app.state.duck_token, app.state.data_root, app.state.secret_store)
-            launcher = DispatchingLauncher(local, remotes, dialback=dialback, default_provider="fargate")
+            cloud = providers.for_data_root(app.state.data_root)
+            launcher = DispatchingLauncher(local, remotes, dialback=dialback,
+                                           default_provider=(cloud and cloud.default_backend) or "fargate")
     driver = Driver(app.state.db, app.state.root, base_url, launcher, data_root=app.state.data_root)
     app.state.driver = driver
     app.state.launcher = launcher
@@ -84,15 +87,17 @@ async def _lifespan(app: FastAPI):
     driver.resume_incomplete()
 
     # Data-serving wire adapters (plans/data-serving.md): the Postgres wire (default) + Arrow Flight SQL,
-    # each on its own port when configured, sharing the sandboxed serving core. Put TLS + a network ACL
-    # in front for a hosted Catchment (the password is an API key).
+    # each on its own port when configured, sharing the sandboxed serving core. The password is an API key, so
+    # give the Postgres wire a certificate (it then refuses unencrypted clients), or put TLS + a network ACL in front.
     app.state.serve_wires = []
     pg_port = os.environ.get("DUCKSTRING_SERVE_PG_PORT")
     if pg_port:
-        from .pg_wire import PgWireServer
+        from .pg_wire import PgWireServer, tls_context
 
         pg = PgWireServer(driver, api_key=app.state.api_key,
-                          host=os.environ.get("DUCKSTRING_SERVE_HOST", "127.0.0.1"), port=int(pg_port))
+                          host=os.environ.get("DUCKSTRING_SERVE_HOST", "127.0.0.1"), port=int(pg_port),
+                          tls=tls_context(os.environ.get("DUCKSTRING_SERVE_PG_TLS_CERT"),
+                                          os.environ.get("DUCKSTRING_SERVE_PG_TLS_KEY")))
         pg.start()
         app.state.serve_wires.append(pg)
     flight_port = os.environ.get("DUCKSTRING_SERVE_FLIGHT_PORT")
@@ -130,7 +135,16 @@ async def _lifespan(app: FastAPI):
 
     driver.set_jobs_notify(lambda key: loop.call_soon_threadsafe(wake_job_polls, app, key))
 
+    # Apps (plans/apps.md): their processes, started on a request and stopped when idle, and the client that
+    # forwards requests to them.
+    import httpx
+
+    from .app_supervisor import AppSupervisor, run_app_supervisor
     from .state_sync import checkpoint_full, run_checkpoint_worker
+
+    app.state.app_supervisor = AppSupervisor(driver, app.state.root, app.state.data_root)
+    app.state.app_supervisor.close_orphans()
+    app.state.app_http = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=5.0), follow_redirects=False)
 
     scheduler = asyncio.create_task(_scheduler(driver))
     poller = asyncio.create_task(run_poller(driver, app.state.root, wake))
@@ -142,7 +156,8 @@ async def _lifespan(app: FastAPI):
         run_checkpoint_worker(app.state.root, app.state.state_backup, app.state.checkpoint_every)
     )
     # Renew the data-root writer lease so a live Catchment's ownership never lapses (external data root only).
-    tasks = [scheduler, poller, egress, alerts, checkpointer]
+    tasks = [scheduler, poller, egress, alerts, checkpointer,
+             asyncio.create_task(run_app_supervisor(app.state.app_supervisor))]
     if app.state.data_lease is not None:
         from .data_lease import run_lease_renewer
 
@@ -158,6 +173,8 @@ async def _lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
         launcher.shutdown_all()
+        await asyncio.to_thread(app.state.app_supervisor.shutdown)
+        await app.state.app_http.aclose()
         for wire in getattr(app.state, "serve_wires", []):
             wire.stop()
         if app.state.data_lease is not None:
@@ -173,7 +190,7 @@ async def _lifespan(app: FastAPI):
         if app.state.state_backup:
             from fastapi.concurrency import run_in_threadpool
 
-            await run_in_threadpool(checkpoint_full, app.state.root, app.state.state_backup)
+            await run_in_threadpool(checkpoint_full, app.state.root, app.state.state_backup, driver)
 
 
 def create_app(
@@ -216,12 +233,24 @@ def create_app(
         lease_store = get_storage(data_root)
         acquire_lease(lease_store, owner_id)  # raises LeaseConflict → the server does not start
         data_lease = (lease_store, owner_id)
+        if not lease_store.duckdb_readable:
+            # A Volume through the Files API: reads only take local copies, so a machine that lost its disk
+            # gets every line's publish back before any Duck runs or the Driver reconciles against it.
+            from ..dataplane import restore_published
+
+            restored = restore_published(root, data_root)
+            if restored:
+                print(f"[catchment] restored the local publish of {len(restored)} line(s) from {data_root}: "
+                      + ", ".join(f"{k} ({n} files)" for k, n in sorted(restored.items())), flush=True)
 
     app = FastAPI(title="Duckstring Catchment", lifespan=_lifespan)
     app.state.root = root
     app.state.job_polls = {}  # pond key -> the events of the Duck job polls held for it (routes/duck.py)
     app.state.data_lease = data_lease
     app.state.data_root = data_root
+    from ..storage import warm_imports
+
+    warm_imports(data_root)  # before request and worker threads do object-store I/O
     app.state.state_backup = state_backup
     app.state.checkpoint_every = checkpoint_every
     app.state.db = con
@@ -237,10 +266,10 @@ def create_app(
     from .secrets import SecretStore
     app.state.secret_store = SecretStore(root)
     credentials.set_secret_provider(app.state.secret_store.get)
-    # Give the AWS_* secrets teeth: load them into the environment so botocore's chain uses them (the
-    # enable-by-secret cloud flow). Real env wins.
+    # Give the cloud credential secrets (AWS_*) teeth: load them into the environment so the cloud SDK's
+    # chain uses them (the enable-by-secret cloud flow). Real env wins.
     from . import cloud as _cloud
-    _cloud.load_aws_env(app.state.secret_store)
+    _cloud.load_env(app.state.secret_store)
     # The address Ducks dial back to: explicit argument (the CLI passes its bind address), or the
     # environment, or None — unknown, because the host platform picks the bind address (e.g. Posit
     # Connect). When None it is learned from the first request's ASGI scope below.
@@ -266,6 +295,9 @@ def create_app(
     # the static "/" catch-all so it resolves, and outside "/api" so the access-level audit doesn't cover it.
     from .routes.metrics import router as metrics_router
     app.include_router(metrics_router)
+    # Apps at /apps/ (plans/apps.md): outside "/api", gated by the forwarding itself, before the static catch-all.
+    from .app_proxy import router as app_proxy_router
+    app.include_router(app_proxy_router)
 
     if _STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="frontend")

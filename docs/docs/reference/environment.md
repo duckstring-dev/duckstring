@@ -5,7 +5,7 @@ description: Every setting read from the environment.
 
 # Environment Variables
 
-These variables are read by the Catchment process, and passed on to its Ducks where relevant. Most have an equivalent CLI option on `catchment init`, which takes precedence when given. AWS credentials use the standard `AWS_*` variables, or `AWS_*` entries in the [secret store](cli/secret.md).
+These variables are read by the Catchment process, and passed on to its Ducks where relevant. Most have an equivalent CLI option on `catchment init`, which takes precedence when given. AWS credentials use the standard `AWS_*` variables, or `AWS_*` entries in the [secret store](cli/secret.md). Azure credentials use Azure's own variables (such as `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET`) or `AZURE_*` secrets, and Google credentials use `GOOGLE_APPLICATION_CREDENTIALS` or a service-account key stored as the `GOOGLE_CREDENTIALS` secret. A Google Cloud Storage or Azure data root also reads variables such as `AZURE_STORAGE_ACCOUNT_NAME`; see [Data root URIs](formats.md#data-root-uris).
 
 ## Catchment
 
@@ -19,6 +19,7 @@ These variables are read by the Catchment process, and passed on to its Ducks wh
 | `DUCKSTRING_CATCHMENT_NAME` | none | A display name recorded for the Catchment. |
 | `DUCKSTRING_CATCHMENT_URL` | the bind address | The address local Ducks use to reach the Catchment. Normally unnecessary: when unset, the Catchment learns its address from the first request it serves. |
 | `DUCKSTRING_CATCHMENT_PUBLIC_URL` | none | The address remote Ducks use to reach the Catchment. Needed when cloud Ducks can't reach the bind address and the automatic relay isn't used. |
+| `DUCKSTRING_CATCHMENT_AUDIENCE` | none | For a private Catchment on Cloud Run behind a custom domain: the service's `run.app` URL, which Ducks use as the audience of the Google identity token they send. Without it, Ducks send a token only when the Catchment's address is itself a `run.app` URL. |
 | `DUCKSTRING_FORCE_TAKEOVER` | off | `1` lets a Catchment start on a data root that another live Catchment has claimed. Only for recovering from a Catchment that is known to be gone. |
 | `DUCKSTRING_MIN_FREE_BYTES` | `1073741824` (1 GiB) | When free disk space falls below this, the working databases of idle Ponds are removed, least recently used first, and rebuilt when next needed. `0` disables this. |
 
@@ -30,27 +31,51 @@ Run only one Catchment process against a state directory, and only one Catchment
 |---|---|---|
 | `DUCKSTRING_COMPACT_THRESHOLD` | `268435456` (256 MiB) | The size a merge Trickle's change log must reach before it's folded into the table's base. Can be set per table with `merge_table(compact_threshold=...)`. |
 | `DUCKSTRING_S3_ENDPOINT` | none | An S3-compatible endpoint, such as MinIO, for the data root. Equivalent to `?endpoint=` on the URI. |
+| `DUCKSTRING_VOLUMES` | `auto` | How a `/Volumes/...` data root or state backup is reached: `mount` uses it as a local path, `api` goes through the Databricks Files API. `auto` uses the Files API where `/Volumes` isn't mounted, as in a Databricks App. |
+
+## Databricks
+
+These are read wherever Duckstring reaches a Databricks workspace: a `/Volumes/...` data root or state backup, a [`databricks://` Spout](formats.md#databricks), and Ripple code reading with [`duckstring.databricks`](python/databricks.md), which runs in a Duck. Ducks on the Catchment's machine inherit the Catchment's environment. A Databricks App sets the host and its own service principal's credentials.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABRICKS_HOST` | none | The workspace URL. |
+| `DATABRICKS_TOKEN` | none | A personal access token. Used first when set. |
+| `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET` | none | A Databricks service principal's OAuth credentials, used when there's no token. On Azure Databricks without either, a Microsoft Entra token from the process's Azure identity is used. |
+| `DUCKSTRING_DATABRICKS_WAREHOUSE` | none | The SQL warehouse id `databricks.table` reads through when a table can't be read from its storage. |
+| `DATABRICKS_WAREHOUSE_ID` | none | Used when `DUCKSTRING_DATABRICKS_WAREHOUSE` is unset, and as a `databricks://` Spout's warehouse when its destination doesn't name one. |
+| `DUCKSTRING_INPUT_CACHE` | the system's temporary directory | Where `duckstring.databricks` keeps the files it fetches through the Files API and the results it downloads from a warehouse, under `duckstring-inputs/`. Holds about one copy of each input a Pond reads this way. |
 
 ## Ducks
 
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_MEMORY_LIMIT` | DuckDB's default | Memory limit for each Duck's DuckDB, such as `12GB`. Also sets the size at which the Flock takes over a computation. Set it to about 80% of the Duck's memory. On the Catchment's own machine, the memory slots below set each Duck's limit instead. |
-| `DUCKSTRING_RUN_SLOTS` | `4` | How many Ducks run at once on the Catchment's own machine. Each gets an equal share of the memory budget as its DuckDB limit; a Pond that would run beyond them waits, in the order it became ready, and shows as waiting for memory. A Duck running alone may take the spare slots, keeping one for another Pond. A Run that runs out of memory is retried once with every slot, without counting against its failure budget. `0` turns this off, leaving each Duck to size itself. |
-| `DUCKSTRING_MEMORY_BUDGET` | 80% of the machine's memory, less 2 GB | The memory the slots divide, such as `100GB`. |
+| `DUCKSTRING_RUN_SLOTS` | `4` | How many Ducks run at once on the Catchment's own machine. Each gets an equal share of the memory budget as its DuckDB limit; a Pond that would run beyond them waits, in the order it became ready, and shows as waiting for memory. A Duck running alone may take the spare slots, keeping one for another Pond. A Run that runs out of memory is retried once with every slot, without counting against its failure budget. A running [App](pond_toml.md#app) sets its `[pond] memory` aside from the budget first, and the slots share the rest. `0` turns this off, leaving each Duck to size itself. |
+| `DUCKSTRING_MEMORY_BUDGET` | 80% of the machine's memory (or the container's limit, when lower), less 2 GB | The memory the slots divide, such as `100GB`, less what running [Apps](pond_toml.md#app) set aside. |
 | `DUCKSTRING_IDLE_MEMORY` | `256MB` | The DuckDB limit a Duck drops to when it has nothing running, which releases what it was caching. |
 | `DUCKSTRING_DUCK_LAUNCHER` | built in | `module:Class` of a custom launcher that replaces how Ducks are started. |
 | `DUCKSTRING_DUCK_ORPHAN_MINUTES` | `60` | How long an idle Duck goes without contact from its Catchment before it exits, so a Duck whose Catchment is gone for good doesn't run indefinitely. A Duck mid-run finishes first. `0` keeps Ducks waiting forever. Set it on the Catchment, which passes it to every Duck, including cloud ones. Pool machines aren't affected. |
 | `DUCKSTRING_DISABLE_DUCKS` | off | Start no Ducks at all. For testing the Catchment on its own. |
 | `DUCKSTRING_DISCOVER_TIMEOUT` | `300` | Seconds a deploy waits for the Pond's code to load while its Ripples are discovered. |
 
+## Apps
+
+| Variable | Default | Description |
+|---|---|---|
+| `DUCKSTRING_APP_START_TIMEOUT` | `60` | Seconds a request that starts an [App](pond_toml.md#app) waits for the App to be ready. Past that, the request gets a `503`, and the start counts as a failed one. |
+
+The variables an App's own process receives, such as `PORT` and `DUCKSTRING_APP_PATH`, are listed under [`[app]`](pond_toml.md#app).
+
 ## Serving
 
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_SERVE_PG_PORT` | none | Serve the catalog over the Postgres wire protocol on this port. |
+| `DUCKSTRING_SERVE_PG_TLS_CERT` | none | A PEM certificate (or chain) for the Postgres wire. With it, the server accepts only encrypted connections. |
+| `DUCKSTRING_SERVE_PG_TLS_KEY` | the certificate file | The PEM private key for `DUCKSTRING_SERVE_PG_TLS_CERT`, when it's in a file of its own. |
 | `DUCKSTRING_SERVE_FLIGHT_PORT` | none | Serve the catalog over Arrow Flight on this port, with the SQL as the ticket. Needs `pyarrow` with Flight support. |
-| `DUCKSTRING_SERVE_HOST` | `127.0.0.1` | Address both servers bind to. Put TLS and network restrictions in front of them when exposing them. |
+| `DUCKSTRING_SERVE_HOST` | `127.0.0.1` | Address both servers bind to. When exposing them, restrict network access, give the Postgres wire a certificate, and put TLS in front of Flight. |
 
 ## Flock
 
@@ -59,11 +84,11 @@ Set these on the Catchment. It sends them to each Duck with every run, together 
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_FLOCK_MODE` | `off` | Catchment default for [`[flock] mode`](pond_toml.md#flock). |
-| `DUCKSTRING_FLOCK_ENGINE` | the first configured | Catchment default engine: `motherduck`, `motherduck/<profile>`, `starrocks`, `athena`, or `module:Class`. Unset, the first of `motherduck`, `starrocks` and `athena` that is configured. An engine that can't be loaded turns the Flock off. |
+| `DUCKSTRING_FLOCK_ENGINE` | the first configured | Catchment default engine: `motherduck`, `motherduck/<profile>`, `starrocks`, `databricks`, `bigquery`, `athena`, or `module:Class`. Unset, the first of `motherduck`, `starrocks`, `databricks`, `bigquery` and `athena` that is configured. An engine that can't be loaded turns the Flock off. |
 | `DUCKSTRING_FLOCK_OOM_POLICY` | `fail_up` | Catchment default for `[flock] oom_policy`. |
 | `DUCKSTRING_FLOCK_ACCEPT` | | Catchment default for `[flock] accept`, comma-separated. |
 | `DUCKSTRING_FLOCK_MIN_ROWS` | from `DUCKSTRING_MEMORY_LIMIT` | The row count above which `upgrade` mode sends a computation to the Flock up front. |
-| `DUCKSTRING_FLOCK_VERIFY_KEYS` | `1000` | How many keys of a StarRocks or Athena result are recomputed in the Duck and compared before it's used. `0` turns verification off. |
+| `DUCKSTRING_FLOCK_VERIFY_KEYS` | `1000` | How many keys of a StarRocks, Databricks, BigQuery or Athena result are recomputed in the Duck and compared before it's used. `0` turns verification off. |
 | `DUCKSTRING_FLOCK_MOTHERDUCK_DATABASE` | `duckstring_flock` | The MotherDuck database that sources are uploaded to for a job. |
 | `DUCKSTRING_FLOCK_STARROCKS_HOST` | | StarRocks frontend host. |
 | `DUCKSTRING_FLOCK_STARROCKS_PORT` | `9030` | StarRocks MySQL-protocol port. |
@@ -73,12 +98,21 @@ Set these on the Catchment. It sends them to each Duck with every run, together 
 | `DUCKSTRING_FLOCK_STARROCKS_REGION` | | Region of the scratch bucket. |
 | `DUCKSTRING_FLOCK_STARROCKS_S3_ENDPOINT` | | The scratch bucket's endpoint as StarRocks sees it, for an S3-compatible store. |
 | `DUCKSTRING_FLOCK_STARROCKS_TIMEOUT` | `900` | Seconds a job may run on StarRocks, including a suspended warehouse resuming. |
+| `DUCKSTRING_FLOCK_DATABRICKS_HOST` | `DATABRICKS_HOST` | Databricks workspace URL. |
+| `DUCKSTRING_FLOCK_DATABRICKS_WAREHOUSE` | | SQL warehouse id. |
+| `DUCKSTRING_FLOCK_DATABRICKS_VOLUME` | | Unity Catalog Volume path for staged sources, `/Volumes/<catalog>/<schema>/<volume>`, optionally with a directory. |
+| `DUCKSTRING_FLOCK_DATABRICKS_TIMEOUT` | `900` | Seconds a job may run on Databricks, including the warehouse starting. |
+| `DUCKSTRING_FLOCK_BIGQUERY_DATASET` | | BigQuery dataset for temporary tables, in the scratch bucket's location. |
+| `DUCKSTRING_FLOCK_BIGQUERY_SCRATCH` | | `gs://` prefix for staged sources and results. |
+| `DUCKSTRING_FLOCK_BIGQUERY_PROJECT` | the credentials' project | Project jobs run in. |
+| `DUCKSTRING_FLOCK_BIGQUERY_LOCATION` | | The dataset's location. |
+| `DUCKSTRING_FLOCK_BIGQUERY_TIMEOUT` | `900` | Seconds a job may run on BigQuery. |
 | `DUCKSTRING_FLOCK_ATHENA_WORKGROUP` | | Athena workgroup. |
 | `DUCKSTRING_FLOCK_ATHENA_DATABASE` | | Athena database. |
 | `DUCKSTRING_FLOCK_ATHENA_SCRATCH` | | S3 location for staged sources and Athena results. |
 | `DUCKSTRING_FLOCK_ATHENA_REGION` | | Athena region. |
 
-The engines' credentials are secrets (`duckstring secret set`), sent with each run only while the Pond's Flock is on: `MOTHERDUCK_TOKEN` (or `MOTHERDUCK_TOKEN_<PROFILE>` for `motherduck/<profile>`), and `STARROCKS_PASSWORD`, `STARROCKS_S3_ACCESS_KEY` and `STARROCKS_S3_SECRET_KEY`. Athena uses the Duck's IAM role.
+The engines' credentials are secrets (`duckstring secret set`), sent with each run only while the Pond's Flock is on: `MOTHERDUCK_TOKEN` (or `MOTHERDUCK_TOKEN_<PROFILE>` for `motherduck/<profile>`), `STARROCKS_PASSWORD`, `STARROCKS_S3_ACCESS_KEY` and `STARROCKS_S3_SECRET_KEY`, and `DATABRICKS_TOKEN`, or `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` (on Azure Databricks, without them, a Microsoft Entra token from the Duck's identity). BigQuery uses Google credentials (`credentials=` on the scratch URI, else the Duck's own), and Athena the Duck's IAM role.
 
 ## Cloud Ducks on Fargate
 
@@ -108,9 +142,65 @@ The engines' credentials are secrets (`duckstring secret set`), sent with each r
 | `DUCKSTRING_EC2_SECURITY_GROUPS` | | Security groups for Duck instances. Without them, instances use the VPC's default group and usually can't reach the Catchment. |
 | `DUCKSTRING_EC2_ASSIGN_PUBLIC_IP` | | Whether instances get a public IP. |
 
+## Cloud Ducks on Container Apps
+
+Azure's default backend. See [Cloud Compute on Azure](../guides/cloud_compute_on_azure.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `DUCKSTRING_CONTAINERAPPS_ENVIRONMENT` | | Resource id of the Container Apps environment Ducks run in. The subscription, resource group, location and log workspace come from it. Required. |
+| `DUCKSTRING_CONTAINERAPPS_IDENTITY` | | Resource id of the user-assigned managed identity Ducks run as, which needs access to the data root. Required. |
+| `DUCKSTRING_CONTAINERAPPS_IMAGE` | `ghcr.io/duckstring-dev/duckstring:<version>-azure` | Container image for Ducks. |
+| `DUCKSTRING_CONTAINERAPPS_WORKLOAD_PROFILE` | `Consumption` | The environment's workload profile to run Ducks on. |
+| `DUCKSTRING_CONTAINERAPPS_JOB` | | A job name of your own. Without it, the Catchment creates and names its jobs, and deletes ones left on an old image. |
+| `DUCKSTRING_CONTAINERAPPS_CPU` | `1024` | CPU units for Ducks not using a pool's size. |
+| `DUCKSTRING_CONTAINERAPPS_MEMORY` | `2048` | Memory in MiB for Ducks not using a pool's size. |
+
+## Cloud Ducks on Azure VMs
+
+| Variable | Default | Description |
+|---|---|---|
+| `DUCKSTRING_AZUREVM_SUBNET` | | Resource id of the subnet for Duck VMs. Required. |
+| `DUCKSTRING_AZUREVM_IDENTITY` | | Resource id of the user-assigned managed identity Ducks run as. Required. |
+| `DUCKSTRING_AZUREVM_LOCATION` | | Azure region for Duck VMs. Required. |
+| `DUCKSTRING_AZUREVM_RESOURCE_GROUP` | the subnet's | Resource group the VMs are created in. |
+| `DUCKSTRING_AZUREVM_IMAGE` | Ubuntu 24.04 | A marketplace URN or an image resource id. |
+| `DUCKSTRING_AZUREVM_ASSIGN_PUBLIC_IP` | `true` | Whether VMs get a public IP. New Azure subnets have no default outbound access, and a VM needs it to install Duckstring. |
+| `DUCKSTRING_AZUREVM_PIP_SPEC` | `duckstring[azure]==<version>` | What the VM installs on boot. |
+| `DUCKSTRING_AZUREVM_DISK_GB` | the image's | OS disk size. |
+
+## Cloud Ducks on Cloud Run
+
+Google Cloud's default backend. See [Cloud Compute on Google Cloud](../guides/cloud_compute_on_google_cloud.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `DUCKSTRING_CLOUDRUN_REGION` | | Region for Duck jobs. Required. |
+| `DUCKSTRING_CLOUDRUN_SERVICE_ACCOUNT` | | Email of the service account Ducks run as, which needs access to the data root. Required. |
+| `DUCKSTRING_CLOUDRUN_IMAGE` | | Container image for Ducks, in Artifact Registry. This or `DUCKSTRING_CLOUDRUN_REGISTRY` is required. |
+| `DUCKSTRING_CLOUDRUN_REGISTRY` | | An Artifact Registry remote repository that proxies `ghcr.io`. Ducks then run `<registry>/duckstring-dev/duckstring:<version>-gcp`. |
+| `DUCKSTRING_CLOUDRUN_PROJECT` | `GOOGLE_CLOUD_PROJECT`, else the credentials' project | Project for Duck jobs. |
+| `DUCKSTRING_CLOUDRUN_JOB` | | A job name of your own. Without it, the Catchment creates and names its jobs, and deletes ones left on an old image. |
+| `DUCKSTRING_CLOUDRUN_CPU` | `1024` | CPU units for Ducks not using a pool's size. |
+| `DUCKSTRING_CLOUDRUN_MEMORY` | `2048` | Memory in MiB for Ducks not using a pool's size. |
+
+## Cloud Ducks on Compute Engine
+
+| Variable | Default | Description |
+|---|---|---|
+| `DUCKSTRING_GCE_ZONE` | | Zone for Duck VMs. Required. |
+| `DUCKSTRING_GCE_SERVICE_ACCOUNT` | | Email of the service account Ducks run as. Required. |
+| `DUCKSTRING_GCE_PROJECT` | `GOOGLE_CLOUD_PROJECT`, else the credentials' project | Project for Duck VMs. |
+| `DUCKSTRING_GCE_IMAGE` | Ubuntu 24.04 | Boot image. |
+| `DUCKSTRING_GCE_NETWORK` | the project's `default` network | VPC network. |
+| `DUCKSTRING_GCE_SUBNETWORK` | | A subnetwork of that network. |
+| `DUCKSTRING_GCE_ASSIGN_PUBLIC_IP` | `true` | Whether VMs get an external IP. The default network has no Cloud NAT, and a VM needs outbound access to install Duckstring. |
+| `DUCKSTRING_GCE_PIP_SPEC` | `duckstring[gcp]==<version>` | What the VM installs on boot. |
+| `DUCKSTRING_GCE_DISK_GB` | `20` | Boot disk size. |
+
 ## Relay
 
-When a Catchment on a private network (such as a laptop) runs cloud Ducks, it can start a small EC2 relay that the Ducks connect to, with an SSH tunnel back to the Catchment.
+When a Catchment on a private network (such as a laptop) runs cloud Ducks on AWS, it can start a small EC2 relay that the Ducks connect to, with an SSH tunnel back to the Catchment. Azure and Google Cloud have no relay, so a Catchment there needs `DUCKSTRING_CATCHMENT_PUBLIC_URL` or an address Ducks can reach.
 
 | Variable | Default | Description |
 |---|---|---|

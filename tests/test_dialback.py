@@ -77,12 +77,13 @@ def test_create_app_wires_public_url_into_the_dialback(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     import duckstring.catchment.app as app_mod
-    from duckstring.catchment import cloud, data_lease
+    from duckstring.catchment import data_lease
     from duckstring.catchment.app import create_app
+    from duckstring.catchment.providers.aws import AwsProvider
 
     monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)
     monkeypatch.setenv("DUCKSTRING_CATCHMENT_PUBLIC_URL", "https://tunnel.example")
-    monkeypatch.setattr(cloud, "aws_configured", lambda *a, **k: True)
+    monkeypatch.setattr(AwsProvider, "credentials_present", lambda *a, **k: True)
     monkeypatch.setattr(data_lease, "acquire_lease", lambda *a, **k: {})
     monkeypatch.setattr(app_mod, "acquire_lease", lambda *a, **k: {}, raising=False)
 

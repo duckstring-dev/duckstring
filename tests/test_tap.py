@@ -5,7 +5,7 @@ the regression for the old tap-on-get: no other reader ever sends demand."""
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import duckdb
 import pytest
@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient
 from trickle.io import first_row
 
 from duckstring.catchment import auth
+from duckstring.catchment import driver as drv_mod
+from duckstring.catchment import taps as taps_mod
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
 from duckstring.catchment.launcher import NoopLauncher
@@ -21,6 +23,7 @@ from duckstring.catchment.registry import pond_data_dir
 from duckstring.catchment.routes import router
 from duckstring.catchment.routes.deploy import _register
 from duckstring.engine import NEVER, max_demand
+from duckstring.engine.catchment import ripples_of
 from duckstring.keys import pond_key
 
 pytestmark = pytest.mark.timeout(15)
@@ -121,6 +124,126 @@ def test_a_blocked_pond_is_served_but_not_refreshed(tmp_path):
         driver.state.pond_states[KEY].is_blocked = True
     assert driver.tap_query(auth.TapScope(KEY, "app")) is False
     assert driver.list_taps(KEY)[0]["refresh_count"] == 0
+
+
+# ─── fresh within: how far the Refresh reaches ──────────────────────────────
+
+NOW = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def _chain(tmp_path, monkeypatch, clock: list[datetime] | None = None):
+    """A core pipeline (``inlet`` → ``core``) with a cheap ``extra`` Pond hanging off it, the clock at NOW (or
+    ``clock[0]``), and a Tap on ``extra`` that wants data no older than a day."""
+    clock = clock or [NOW]
+    monkeypatch.setattr(drv_mod, "_now", lambda: clock[0])
+    monkeypatch.setattr(taps_mod, "_now", lambda: clock[0])
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    base = {"immediate_retries": 0, "source_retries": 0}
+    _register(db, "inlet", "1.0.0", "inlet", "ponds/inlet/1.0.0", {**base, "sources": {}, "kind": "inlet"}, _RIPPLES)
+    _register(db, "core", "1.0.0", "pond", "ponds/core/1.0.0",
+              {**base, "sources": {"inlet": "1.0.0"}, "kind": "pond"}, _RIPPLES)
+    _register(db, "extra", "1.0.0", "outlet", "ponds/extra/1.0.0",
+              {**base, "sources": {"core": "1.0.0"}, "kind": "outlet"}, _RIPPLES)
+    driver = Driver(db, tmp_path, "http://x", NoopLauncher())
+    driver.add_tap("extra@1", "app", fresh_within=timedelta(days=1))
+    return driver
+
+
+def _ran(driver, key: str, ago: timedelta) -> None:
+    with driver.lock:
+        ps = driver.state.pond_states[key]
+        ps.start_f = ps.end_f = ps.changed_f = NOW - ago
+        for rid in ripples_of(driver.state, key):
+            driver.state.ripple_states[rid].start_f = driver.state.ripple_states[rid].end_f = NOW - ago
+
+
+def _complete(driver, key: str) -> None:
+    f = driver.state.pond_states[key].start_f.isoformat()
+    driver.on_event(key, {"kind": "ripple", "f": f, "ripple": "r", "status": "success"})
+    driver.on_event(key, {"kind": "run_completed", "f": f})
+
+
+def test_a_tap_runs_only_what_is_older_than_fresh_within(tmp_path, monkeypatch):
+    """The core pipeline refreshed six hours ago; the app's own Pond hasn't run for a week. A query runs only the
+    app's Pond, on the core's data, instead of the whole pipeline from its Inlet."""
+    driver = _chain(tmp_path, monkeypatch)
+    _ran(driver, "inlet@1", timedelta(hours=6))
+    _ran(driver, "core@1", timedelta(hours=6))
+    _ran(driver, "extra@1", timedelta(days=7))
+    assert driver.tap_query(auth.TapScope("extra@1", "app"))
+    st = lambda key: driver.state.pond_states[key]  # noqa: E731
+    assert st("inlet@1").start_f == st("core@1").start_f == NOW - timedelta(hours=6)  # nothing upstream runs
+    assert not st("inlet@1").demand and not st("core@1").demand
+    assert st("extra@1").start_f == NOW - timedelta(hours=6)  # extra runs, at the core's freshness
+    _complete(driver, "extra@1")
+    assert not driver.tap_query(auth.TapScope("extra@1", "app"))  # fresh within the day: not due again
+
+
+def test_a_tap_reaches_the_inlet_when_the_core_is_older_and_the_inlet_stamps_now(tmp_path, monkeypatch):
+    """With the core older than a day too, the Refresh reaches the Inlet, which stamps the time it runs (not the
+    day-old time asked for), so the next query isn't due again straight away."""
+    driver = _chain(tmp_path, monkeypatch)
+    for key in ("inlet@1", "core@1", "extra@1"):
+        _ran(driver, key, timedelta(days=3))
+    scope = auth.TapScope("extra@1", "app")
+    assert driver.tap_query(scope)
+    assert driver.state.pond_states["inlet@1"].start_f == NOW
+    assert not driver.tap_query(scope)  # a request is waiting on the Run in flight
+    for key in ("inlet@1", "core@1", "extra@1"):
+        _complete(driver, key)
+    assert driver.state.pond_states["extra@1"].end_f == NOW
+    assert not driver.tap_query(scope)
+    assert driver.list_taps("extra@1")[0]["refresh_count"] == 1
+
+
+def test_a_tap_rides_a_core_run_already_in_flight(tmp_path, monkeypatch):
+    """The core's daily run has started at its Inlet but hasn't reached ``core``: the request waits for that run
+    rather than starting another at the Inlet."""
+    clock = [NOW - timedelta(hours=1)]
+    driver = _chain(tmp_path, monkeypatch, clock)
+    _ran(driver, "inlet@1", timedelta(days=1, hours=1))
+    _ran(driver, "core@1", timedelta(days=1, hours=1))
+    _ran(driver, "extra@1", timedelta(days=7))
+    driver.refresh_now("core@1")  # the core's daily Refresh, an hour ago: the Inlet starts
+    clock[0] = NOW
+    assert driver.tap_query(auth.TapScope("extra@1", "app"))
+    st = lambda key: driver.state.pond_states[key]  # noqa: E731
+    assert st("inlet@1").start_f == NOW - timedelta(hours=1) and not st("inlet@1").demand  # no second Inlet run
+    assert NOW - timedelta(days=1) in st("core@1").demand  # core waits for the run in flight
+    _complete(driver, "inlet@1")
+    assert st("core@1").start_f == NOW - timedelta(hours=1) and not st("core@1").demand
+    assert st("inlet@1").start_f == NOW - timedelta(hours=1)
+
+
+def test_fresh_within_zero_still_asks_for_now(tmp_path, monkeypatch):
+    driver = _chain(tmp_path, monkeypatch)
+    with driver.lock:
+        driver._taps[("extra@1", "app")].fresh_within = timedelta(0)
+    for key in ("inlet@1", "core@1", "extra@1"):
+        _ran(driver, key, timedelta(hours=6))
+    assert driver.tap_query(auth.TapScope("extra@1", "app"))
+    assert driver.state.pond_states["inlet@1"].start_f == NOW
+
+
+def test_refresh_now_takes_fresh_within(tmp_path, monkeypatch):
+    driver = _chain(tmp_path, monkeypatch)
+    _ran(driver, "inlet@1", timedelta(hours=6))
+    _ran(driver, "core@1", timedelta(hours=6))
+    _ran(driver, "extra@1", timedelta(days=7))
+    app = FastAPI()
+    app.include_router(router, prefix="/api")
+    app.state.driver, app.state.db, app.state.root, app.state.data_root = driver, driver.db, tmp_path, None
+    client = TestClient(app)
+    ms = int(timedelta(days=1).total_seconds() * 1000)
+    assert client.post("/api/ponds/extra/refresh", params={"fresh_within_ms": ms}).json() == {"ok": True}
+    st = lambda key: driver.state.pond_states[key]  # noqa: E731
+    assert st("inlet@1").start_f == NOW - timedelta(hours=6) and st("extra@1").start_f == NOW - timedelta(hours=6)
+    assert client.post("/api/ponds/extra/refresh", params={"fresh_within_ms": -1}).status_code == 422
+    r = client.post("/api/ponds/extra/refresh", params={"fresh_within_ms": ms, "at": NOW.isoformat()})
+    assert r.status_code == 422
+    client.post("/api/ponds/extra/refresh")  # without it: as fresh as now, so the Inlet runs
+    assert st("inlet@1").start_f == NOW
 
 
 # ─── the key ─────────────────────────────────────────────────────────────────

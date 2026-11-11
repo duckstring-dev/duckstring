@@ -74,6 +74,7 @@ def _deploy_one(
     catchment_name: str,
     git: Optional[str],
     yes: bool,
+    force: bool = False,
 ) -> bool:
     """Deploy a single pond directory. Returns True on success, False if skipped."""
     from . import _http
@@ -112,8 +113,16 @@ def _deploy_one(
 
     mode = f"git:{git}" if git else "local"
     console.print(f"Deploying [bold]{name}[/bold] v[bold]{version}[/bold] ([dim]{mode}[/dim]) → [bold]{catchment_name}[/bold]")
-    if version_exists is True and version_active:
-        console.print("[yellow]This version is currently deployed and will be overwritten.[/yellow]")
+    if version_exists is True and version_active and pond_type == "app":
+        console.print("[yellow]This version is currently deployed. Its running instance will be stopped, and the "
+                      "next request starts the new deploy.[/yellow]")
+    elif version_exists is True and version_active and not force:
+        typer.echo(f"Error: {name} {version} is already deployed. Bump the version in pond.toml, or pass --force "
+                   "to replace it in place.", err=True)
+        raise typer.Exit(1)
+    elif version_exists is True and version_active:
+        console.print("[yellow]This version is currently deployed and will be replaced in place. A running Duck "
+                      "keeps the code it loaded until it restarts.[/yellow]")
     elif version_exists is True:
         # The version's deployment record + run history survive a removal, but nothing is live against
         # it — redeploying re-activates the retired line rather than overwriting a running one.
@@ -142,7 +151,8 @@ def _deploy_one(
 
         _http.post(
             f"{url}/api/deploy", auth=cfg,
-            json={"name": name, "version": version, "type": pond_type, "git_ref": git, "repo_url": repo_url},
+            json={"name": name, "version": version, "type": pond_type, "git_ref": git, "repo_url": repo_url,
+                  "force": force},
             timeout=_DEPLOY_TIMEOUT_S,
         )
     else:
@@ -152,7 +162,7 @@ def _deploy_one(
         _http.post(
             f"{url}/api/deploy", auth=cfg,
             files={"pond": ("pond.zip", archive, "application/zip")},
-            data={"name": name, "version": version, "type": pond_type},
+            data={"name": name, "version": version, "type": pond_type, **({"force": "true"} if force else {})},
             timeout=_DEPLOY_TIMEOUT_S,
         )
 
@@ -168,12 +178,14 @@ def deploy(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts."),
     all_ponds: bool = typer.Option(False, "--all", help="Deploy all Ponds found in subdirectories of the current directory."),
     dry_run: bool = typer.Option(False, "--dry-run", help="List the files a deploy would upload, and upload nothing."),
+    force: bool = typer.Option(False, "--force", help="Replace the version a major line is running, in place."),
 ) -> None:
     """Deploy the Pond project in the current directory to a Catchment.
 
     Deploying a version replaces the running version of its major line. A new major version is deployed
-    alongside the existing ones. Files matched by .pondignore (or its defaults: puddles/, .env, hidden
-    directories, caches) aren't uploaded; --dry-run lists what would be.
+    alongside the existing ones. Redeploying the version a line is running is refused without --force,
+    except for an App, whose running instance is replaced. Files matched by .pondignore (or its defaults:
+    puddles/, .env, hidden directories, caches) aren't uploaded; --dry-run lists what would be.
     """
     from rich.console import Console
 
@@ -205,7 +217,7 @@ def deploy(
     for pond_dir in pond_dirs:
         if all_ponds:
             console.rule(pond_dir.name)
-        _deploy_one(console, pond_dir, url, cfg, catchment_name, git, yes)
+        _deploy_one(console, pond_dir, url, cfg, catchment_name, git, yes, force)
 
 
 def remove(

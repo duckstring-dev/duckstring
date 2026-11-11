@@ -69,6 +69,9 @@ def _resolve_pair(upstream: str, consumer: Optional[str]):
 
     consumer_name, consumer_cfg = resolve_catchment(consumer)
     _, up_cfg = resolve_catchment(upstream)
+    if up_cfg.get("header_commands"):
+        typer.echo(f"Warning: the duct stores the current value of {', '.join(up_cfg['header_commands'])}; the "
+                   "consuming Catchment can't run the command again when that token expires.", err=True)
     return consumer_name, consumer_cfg, up_cfg["url"], auth_headers(up_cfg)
 
 

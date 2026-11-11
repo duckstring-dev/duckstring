@@ -123,13 +123,16 @@ def test_deploy_aborts_on_no(runner, tmp_path, monkeypatch, live_catchment):
     assert r.status_code == 404
 
 
-def test_deploy_shows_overwrite_warning(runner, tmp_path, monkeypatch, live_catchment):
+def test_redeploying_the_running_version_needs_force(runner, tmp_path, monkeypatch, live_catchment):
     monkeypatch.chdir(tmp_path)
     _make_pond(tmp_path, name="my_pond", version="1.0.0")
     runner.invoke(app, ["pond", "deploy", "--yes"])
-    result = runner.invoke(app, ["pond", "deploy"], input="y\n")
+    result = runner.invoke(app, ["pond", "deploy", "--yes"])
+    assert result.exit_code == 1
+    assert "already deployed" in result.output
+    result = runner.invoke(app, ["pond", "deploy", "--force"], input="y\n")
     assert result.exit_code == 0, result.output
-    assert "overwritten" in result.output
+    assert "replaced in place" in result.output
 
 
 def test_deploy_yes_flag_skips_prompt(runner, tmp_path, monkeypatch, live_catchment):

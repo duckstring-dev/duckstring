@@ -20,7 +20,7 @@ def request(method: str, url: str, auth: dict | None = None, **kwargs):
     :func:`duckstring.cli.config.auth_headers`."""
     import httpx
 
-    from .config import auth_headers
+    from .config import HeaderCommandError, auth_headers
 
     # A Spout is addressed as "{pond}#{spout}". Catchment URLs never carry a fragment, so a "#" is always
     # part of a name: encode it, or the client would treat the rest of the path as a fragment and drop it.
@@ -34,15 +34,23 @@ def request(method: str, url: str, auth: dict | None = None, **kwargs):
     else:
         timeout = raw_timeout
 
-    if auth:
-        headers = kwargs.pop("headers", None) or {}
-        for name, value in auth_headers(auth).items():
-            headers.setdefault(name, value)
-        if headers:
-            kwargs["headers"] = headers
+    given = kwargs.pop("headers", None) or {}
+
+    def _send(refresh: bool = False):
+        headers = dict(given)
+        if auth:
+            try:
+                for name, value in auth_headers(auth, refresh=refresh).items():
+                    headers.setdefault(name, value)
+            except HeaderCommandError as exc:
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(1) from None
+        return httpx.request(method, url, timeout=timeout, headers=headers or None, **kwargs)
 
     try:
-        resp = httpx.request(method, url, timeout=timeout, **kwargs)
+        resp = _send()
+        if resp.status_code == 401 and auth and auth.get("header_commands"):
+            resp = _send(refresh=True)  # the cached token may have been revoked or the clock skewed
         resp.raise_for_status()
         return resp
     except httpx.ConnectError:
@@ -56,7 +64,8 @@ def request(method: str, url: str, auth: dict | None = None, **kwargs):
         if exc.response.status_code == 401:
             typer.echo("Error: the Catchment (or the service in front of it) rejected the request (401).", err=True)
             typer.echo("Set its credentials on the registration: duckstring catchment connect --name <name> "
-                       "--path <url> --key <key>  (or --header 'Name: value' for platform auth)", err=True)
+                       "--path <url> --key <key>  (or --header 'Name: value' or --header-command 'Name: command' "
+                       "for platform auth)", err=True)
         elif exc.response.status_code == 404:
             typer.echo(f"Error: endpoint not found — {exc.request.url}", err=True)
             try:

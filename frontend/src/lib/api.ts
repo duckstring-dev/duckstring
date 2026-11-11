@@ -105,6 +105,8 @@ export interface RawPond {
   is_draw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment, not run by a Duck
   is_spout: boolean; // a Spout — egresses its source's output to an external system (run by the egress worker)
   dbt: boolean; // a dbt-mode Pond — its Ripples are dbt models
+  is_app?: boolean; // an App: an Outlet serving HTTP; its one Ripple (`serve`) is synthetic
+  app?: RawApp | null;
   spout: { destination: string; table: string | null; mode: string; armed: boolean } | null;
   version: string;
   has_tables: boolean; // this major line has published at least one table — the data viewer is offered
@@ -144,11 +146,18 @@ export interface RawPond {
   ripple_edges: [string, string][]; // [sourceName, sinkName] within the Pond
 }
 
+export interface RawApp {
+  path: string;
+  deployed_at: string | null;
+  idle_timeout_s: number;
+  instance: { id: number; started_at: string; ready_at: string | null; active: number; idle_at: string | null } | null;
+}
+
 // A named Duck Pool — Catchment-level remote compute (plans/cloud-config.md). On DSC the S/M/L/XL
 // presets are just pools; the picker renders whatever /catchment/duck-pools returns.
 export interface DuckPool {
   name: string;
-  provider: string; // 'fargate' (default) | 'ec2'
+  provider: string; // a backend on the Catchment's cloud ('fargate' | 'ec2' | 'containerapps' | 'azurevm' | 'local')
   instance_type: string | null; // EC2 pools
   cpu: number | null; // Fargate task cpu units
   memory: number | null; // Fargate task memory (MiB)
@@ -163,10 +172,7 @@ export interface DuckPool {
 
 // Per-provider deployment config metadata (GET /catchment/compute-defaults): which fields the launcher
 // already reads from env (shown as inherited) + the required fields still missing without any UI input.
-export interface ComputeDefaults {
-  fargate: { fields: string[]; env: Record<string, string>; missing_without_input: string[] };
-  ec2: { fields: string[]; env: Record<string, string>; missing_without_input: string[] };
-}
+export type ComputeDefaults = Record<string, { fields: string[]; env: Record<string, string>; missing_without_input: string[] }>;
 
 export function fetchComputeDefaults(): Promise<ComputeDefaults> {
   return getJSON<ComputeDefaults>('/catchment/compute-defaults');
@@ -201,13 +207,18 @@ export interface DuckConfig {
   defaults: { duck_target: string; flock_mode: string; flock_engine: string | null; oom_policy: string };
 }
 
-// The cloud-enable gate — remote data root + AWS creds (plans/cloud-config.md). Surfaced on /api/status
-// so the UI greys out remote-compute options until both hold.
+// The cloud-enable gate: a data root on a cloud with remote Ducks + that cloud's creds (plans/cloud-config.md,
+// plans/azure-gcp.md). Surfaced on /api/status so the UI greys out remote-compute options until both hold.
 export interface CloudGate {
   data_root: string | null;
   data_root_remote: boolean;
+  provider: string | null;           // the data root's cloud: 'aws' | 'azure' | 'gcp'; null for a local root
+  provider_title: string | null;
+  compute_available: boolean;        // whether that cloud offers remote Ducks yet
+  credentials_configured: boolean;   // that cloud's credentials are present
   aws_configured: boolean;
   cloud_enabled: boolean;
+  backends: Record<string, boolean>; // each backend's readiness (fargate_enabled/ec2_enabled below repeat AWS's)
   // Provider readiness (Cloud enabled + the provider's env deployment config is adequate). fargate_enabled
   // gates the S/M/L/XL presets — they rely on the env, so they aren't offered until Fargate is ready.
   fargate_enabled: boolean;
@@ -352,9 +363,87 @@ export function postTrigger(pond: string, endpoint: string, body: unknown = {}):
   return postJSON(pondPath(pond, endpoint), body);
 }
 
-// Refresh now: ask for the Pond's data at least as fresh as now.
-export function refreshNow(pond: string): Promise<void> {
-  return postJSON(pondPath(pond, 'refresh'));
+// ─── Apps ────────────────────────────────────────────────────────────────────
+
+export interface RawAppInstance {
+  id: number;
+  version: string;
+  started_at: string;
+  ready_at: string | null;
+  stopped_at: string | null;
+  stop_reason: string | null;
+  exit_code: number | null;
+}
+
+export async function fetchAppInstances(pond: string, limit = 50): Promise<RawAppInstance[]> {
+  const r = await getJSON<{ instances: RawAppInstance[] }>(pondPath(pond, `app/instances?limit=${limit}`));
+  return r.instances;
+}
+
+export interface AppLogChunk {
+  text: string;
+  offset: number; // where the next read starts
+  instance: number;
+  running: boolean; // the instance hasn't stopped, so more may come
+}
+
+// An instance's log: the last `tail` bytes, or with `offset` everything from there on (to follow it).
+export async function fetchAppLog(
+  pond: string, q: { instance?: number; offset?: number; tail?: number } = {},
+): Promise<AppLogChunk> {
+  const params = new URLSearchParams();
+  if (q.instance !== undefined) params.set('instance', String(q.instance));
+  if (q.offset !== undefined) params.set('offset', String(q.offset));
+  if (q.tail !== undefined) params.set('tail', String(q.tail));
+  const qs = params.toString();
+  const path = pondPath(pond, `app/logs${qs ? `?${qs}` : ''}`);
+  const res = await fetch(`${apiBase()}${path}`, { cache: 'no-store', headers: authHeaders() });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error(`GET ${path} → ${res.status}`);
+  return {
+    text: await res.text(),
+    offset: Number(res.headers.get('x-log-offset') ?? 0),
+    instance: Number(res.headers.get('x-log-instance') ?? 0),
+    running: res.headers.get('x-log-running') === '1',
+  };
+}
+
+// An App's address as this browser reaches it: the status path is from the Catchment's root, which is
+// where this page is mounted (possibly under a prefix, like the API).
+export function appUrl(path: string): string {
+  return `${apiBase().slice(0, -'api'.length)}${path.replace(/^\//, '')}`;
+}
+
+// Open an App in a new tab. With a key in this browser, sign the tab in with it first (the App's gate takes
+// the key as a cookie, which this page can't set itself), so the App doesn't ask for it again. A form
+// submitted from the click keeps it a user gesture, which a popup blocker allows.
+export function openApp(path: string): void {
+  const key = getApiKey();
+  if (!key) {
+    window.open(appUrl(path), '_blank', 'noopener');
+    return;
+  }
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = appUrl('/apps/_signin');
+  form.target = '_blank';
+  form.rel = 'noopener';
+  for (const [name, value] of [['key', key], ['next', path]]) {
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = name;
+    input.value = value;
+    form.appendChild(input);
+  }
+  document.body.appendChild(form);
+  form.submit();
+  form.remove();
+}
+
+// Refresh now: ask for the Pond's data at least as fresh as now, or with `freshWithinMs` no older than that (Ponds
+// upstream already that fresh don't run).
+export function refreshNow(pond: string, freshWithinMs?: number): Promise<void> {
+  return postJSON(pondPath(pond, freshWithinMs ? `refresh?fresh_within_ms=${Math.round(freshWithinMs)}` : 'refresh'));
 }
 
 export interface AddRefreshBody {
@@ -691,8 +780,8 @@ async function postForJSON<T>(path: string, body: unknown, what: string): Promis
   return res.json();
 }
 
-// Add a Tap. The response carries its key, once.
-export function addTap(pond: string, body: AddTapBody): Promise<{ key: string }> {
+// Add a Tap. The response carries its key, once (null for a Tap on an App, which has none).
+export function addTap(pond: string, body: AddTapBody): Promise<{ key: string | null }> {
   return postForJSON(pondPath(pond, 'taps'), body, 'add tap');
 }
 

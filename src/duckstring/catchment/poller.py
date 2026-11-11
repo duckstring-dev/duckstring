@@ -23,7 +23,7 @@ from datetime import datetime
 
 import httpx
 
-from .registry import pond_data_dir
+from .registry import landing_root, pond_data_dir
 
 _MAX_WAIT = 25.0  # ceiling on a held wait (refresh baselines / survive a silently-dropped connection)
 _ERR_BACKOFF = 2.0  # after a failed wait, pause before re-issuing so an unreachable upstream isn't hammered
@@ -59,7 +59,7 @@ async def _land_transfer(client: httpx.AsyncClient, url: str, auth: dict, root, 
         sidecar_tables,
     )
 
-    data_dir = pond_data_dir(root, name, major, data_root)
+    data_dir = pond_data_dir(root, name, major, landing_root(data_root))
     after = landed_after(data_dir)  # what we already hold; None → wholesale (bootstrap)
     # The cold base is wholesale but rewritten rarely — tell the producer the oldest cold-base freshness we
     # already hold so it re-ships a base only when its fold watermark has advanced past it.

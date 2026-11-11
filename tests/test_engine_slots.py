@@ -363,3 +363,20 @@ def test_random_pipelines_with_control_actions_never_overcommit_and_drain(seed):
             continue  # a failure downstream of a Source that failed again: blocked, by design
         assert not [t for t in ps.demand if t > NEVER], (pid, ps.demand)
         assert ps.slots == 0 and ps.slot_wait_since is None, pid
+
+
+def _app(d, pid: str) -> None:
+    """Make ``pid`` an App (plans/apps.md): its Runs are passes, and its instance's memory is set aside outside
+    the slots, by the Catchment."""
+    d.state.ponds[pid].is_app = True
+
+
+@pytest.mark.timeout(10)
+def test_an_app_takes_no_slot():
+    d = Checked(graph([("A", 3, []), ("W", 1, ["A"])]), 1)
+    _app(d, "W")
+    d.refresh("W")  # its Refresh reaches A; the App's own Runs are passes and never queue
+    d.run(5)
+    assert d.state.pond_states["A"].runs_completed == 1
+    assert d.state.pond_states["W"].slots == 0 and d.state.pond_states["W"].slot_wait_since is None
+    assert used(d.state) == 0

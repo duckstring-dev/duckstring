@@ -70,12 +70,12 @@ When the Pond has a `pyproject.toml` and a `.venv` (created by `uv sync`), the c
 ## `deploy`
 
 ```bash
-duckstring pond deploy [-c NAME] [--all] [--git REF] [--dry-run] [--yes]
+duckstring pond deploy [-c NAME] [--all] [--git REF] [--dry-run] [--force] [--yes]
 ```
 
-Packages the Pond project and deploys it to a Catchment. Before deploying, it reports whether the version is new, already deployed (and will be overwritten), or previously removed (and will be restored), and asks for confirmation. It then prints how many files it's uploading and their total size.
+Packages the Pond project and deploys it to a Catchment. Before deploying, it reports whether the version is new or previously removed (and will be restored), and asks for confirmation. It then prints how many files it's uploading and their total size.
 
-Deploying a version selects it for its major line, replacing whichever version was running there. A new major version is deployed alongside the existing ones. The Catchment rejects a deployment that breaks a `[sources]` pin; see [`pond.toml`](../pond_toml.md#sources).
+Deploying a version selects it for its major line, replacing whichever version was running there. A new major version is deployed alongside the existing ones. Redeploying the version a line is running is refused: bump the version in `pond.toml`. An [App](../pond_toml.md#app) is the exception, since nothing depends on its version: its running process is stopped, and the next request starts the new code. The Catchment rejects a deployment that breaks a `[sources]` pin; see [`pond.toml`](../pond_toml.md#sources).
 
 The Catchment builds the Pond's [Python environment](../pond_toml.md#python-dependencies) if it declares one, then loads the Pond's code in it to find its Ripples. A deployment fails, and leaves any running copy of that version in place, if the environment can't be built or the code can't be imported. The error includes uv's output or the import traceback. A first deploy of a new environment can take a minute or more.
 
@@ -85,6 +85,7 @@ The Catchment builds the Pond's [Python environment](../pond_toml.md#python-depe
 | `--all` | Deploy every Pond project found in subdirectories of the current directory. |
 | `--git` | Deploy a branch, commit or tag instead of the working directory. The Catchment clones the repository from the project's `origin` remote, so it needs access to it. |
 | `--dry-run` | List the files a deploy would upload, with their sizes, and upload nothing. Needs no Catchment. |
+| `--force` | Replace the version a line is running, in place. A running Duck keeps the code it loaded until it next starts, so changes can take effect partway through. |
 | `--yes`, `-y` | Skip confirmations. |
 
 ### `.pondignore`

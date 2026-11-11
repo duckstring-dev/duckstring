@@ -13,8 +13,11 @@ The Catchment runtime splits along two storage classes (see ``plans/storage-deco
 Two implementations:
 
 - :class:`LocalStorage` — today's behaviour exactly: a ``Path`` root with ``tmp + os.replace`` atomic
-  writes. A Databricks Volume mounted at ``/Volumes/…`` is just a local path here (the zero-config
-  fallback), as is the default (the state root's ``ponds/``).
+  writes. A Databricks Volume mounted at ``/Volumes/…`` is just a local path here, as is the default (the
+  state root's ``ponds/``).
+- :class:`VolumeStorage` — a ``/Volumes/…`` path on a machine that doesn't mount Volumes (a Databricks App),
+  through the Files API (:mod:`duckstring.volumes`). DuckDB can't reach it (``duckdb_readable`` is false), so
+  it only ever holds the durable copy of a publish that is read locally.
 - :class:`ObjectStorage` — ``fsspec``-backed (``s3://``, ``gs://``, ``abfss://``, the ``databricks``
   filesystem). An atomic-overwrite is a single-object PUT — object stores make that atomic, so the
   rename dance is unnecessary; ``list`` is a list-prefix and ``delete`` is a delete-object.
@@ -31,11 +34,17 @@ safe without distributed locks — there is never a competing writer to a given 
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Iterator
 from urllib.parse import urlsplit, urlunsplit
+
+log = logging.getLogger(__name__)
 
 # URI schemes that mean "object store / fsspec", as opposed to a local POSIX path. A bare path or a
 # ``file://`` URI is local; everything else routes through fsspec + DuckDB httpfs.
@@ -64,18 +73,32 @@ def is_object_uri(uri: str) -> bool:
     return scheme in _OBJECT_SCHEMES
 
 
+def volume_api(location: str | os.PathLike) -> bool:
+    """Whether a ``/Volumes/...`` location is reached through the Files API rather than as a local path: where
+    ``/Volumes`` isn't mounted (a Databricks App doesn't mount it). ``DUCKSTRING_VOLUMES`` = ``api`` or ``mount``
+    decides it instead."""
+    text = os.fspath(location)
+    if text != "/Volumes" and not text.startswith("/Volumes/"):
+        return False
+    mode = os.environ.get("DUCKSTRING_VOLUMES", "").lower()
+    if mode in ("api", "mount"):
+        return mode == "api"
+    return not os.path.isdir("/Volumes")
+
+
 def get_storage(location: str | os.PathLike, params: dict[str, str] | None = None) -> "Storage":
     """The :class:`Storage` for a data-root ``location`` (a local path or an object-store URI). Any
     credential/option query params already split off the URI are passed back in via ``params``."""
     text = os.fspath(location)
+    if text.startswith("file://"):
+        text = urlsplit(text).path
+    if volume_api(text):
+        return VolumeStorage(text)
     if is_object_uri(text):
         base, q = _split_query(text)
         merged = {**q, **(params or {})}
         return ObjectStorage(base, merged)
-    # A local path or file:// URI.
-    if text.startswith("file://"):
-        text = urlsplit(text).path
-    return LocalStorage(Path(text).expanduser())
+    return LocalStorage(Path(text).expanduser())  # a local path (or a file:// URI's)
 
 
 class Storage:
@@ -84,6 +107,9 @@ class Storage:
     addresses the directory itself."""
 
     is_local: bool = True
+    # Whether DuckDB can read and write here (``uri``/``glob``/``copy_to``). False only for a Volume reached
+    # through the Files API, which holds durable copies that are always read from a local restore.
+    duckdb_readable: bool = True
 
     # ─── addressing ──────────────────────────────────────────────────────────────
 
@@ -151,6 +177,11 @@ class Storage:
     def write_bytes(self, data: bytes, *parts: str) -> None:
         """Atomically write ``data`` to the addressed file."""
         raise NotImplementedError
+
+    def write_new(self, data: bytes, *parts: str) -> None:
+        """Write a file that is written once and never replaced (a change-files manifest). The same as
+        :meth:`write_bytes`, except on a Volume, where it skips the shadow an overwrite needs."""
+        self.write_bytes(data, *parts)
 
     def put_file(self, local: Path, *parts: str) -> None:
         """Upload one local file to the addressed location — streaming (never whole-file-in-memory),
@@ -361,7 +392,11 @@ class ObjectStorage(Storage):
             # freshly-written child returns False, `parquet_names` comes back empty, and a merge read raises
             # FileNotFoundError (an opaque 500 on the data viewer). Correctness across processes forbids it.
             opts: dict = {"use_listings_cache": False}
-            for k, v in self.params.items():
+            if protocol == "abfs":
+                opts.update(_adlfs_options(self.base, self.params))
+            elif protocol == "gcs":
+                opts.update(_gcsfs_options(self.params))
+            for k, v in ({} if protocol in ("abfs", "gcs") else self.params).items():
                 if k == "region":
                     # s3fs/aiobotocore takes the region under client_kwargs.region_name, NOT a bare
                     # ``region=`` kwarg (which raises); other backends derive it, so only pass it to s3.
@@ -374,7 +409,14 @@ class ObjectStorage(Storage):
                 if endpoint:
                     host, ssl = _split_endpoint(endpoint)
                     opts.setdefault("client_kwargs", {})["endpoint_url"] = f"{'https' if ssl else 'http'}://{host}"
-            self._fs = fsspec.filesystem(protocol, **opts)
+            try:
+                self._fs = fsspec.filesystem(protocol, **opts)
+            except ImportError as exc:
+                extra = _EXTRA_FOR_PROTOCOL.get(protocol)
+                if extra is None:
+                    raise
+                raise ImportError(f"{scheme}:// storage needs the {extra} extra: pip install 'duckstring[{extra}]'"
+                                  ) from exc
         return self._fs
 
     def _key(self, *parts: str) -> str:
@@ -515,22 +557,54 @@ class ObjectStorage(Storage):
 
     # ─── DuckDB credentials ──────────────────────────────────────────────────────
 
+    def credential_generation(self) -> int:
+        """A number that changes whenever this store's DuckDB credential does: a Google or Azure access token
+        being re-minted (checked here, so a stale one is refreshed). A connection that outlives one ``duckdb_setup``
+        (the serving surface's views) keys on it. Always 0 for credentials DuckDB keeps fresh itself."""
+        scheme = urlsplit(self.base).scheme.lower()
+        if scheme in _GCS_SCHEMES and _gcs_uses_google(self.params):
+            _google_token(self.params.get("credentials"))
+            return _token_generation
+        if scheme in _AZURE_SCHEMES and "PROVIDER access_token" in " ".join(
+                _azure_secret_body(self.base, {k.lower(): v for k, v in self.params.items()})):
+            return _token_generation
+        return 0
+
     def duckdb_setup(self, con) -> None:
-        """Load ``httpfs`` and register a DuckDB secret so ``COPY``/``read_parquet`` reach the bucket.
-        Mirrors the s3:// egress driver. With no explicit key the ambient credential chain (instance
-        profile / managed identity) is used; the secret-``CREATE`` error is masked so it can never echo a
-        credential value."""
+        """Load DuckDB's ``httpfs`` (or ``azure``) extension and register a secret so ``COPY``/``read_parquet``
+        reach the bucket or container. Mirrors the object-store egress driver. With no explicit key the
+        ambient credentials are used (the AWS chain, Google's application default credentials, the Azure
+        default chain); the secret-``CREATE`` error is masked so it can never echo a credential value."""
         from .egress import credentials
 
         scheme = urlsplit(self.base).scheme.lower()
+        if scheme in _AZURE_SCHEMES or scheme in _GCS_SCHEMES:
+            # Named per bucket or container: a secret's name is unique across types, so one fixed name let a
+            # second store on the connection (the Flock's S3 staging prefix) replace the data root's secret.
+            import hashlib
+
+            scope = f"{scheme}://{urlsplit(self.base).netloc}"
+            name = "duckstring_data_" + hashlib.sha256(scope.encode()).hexdigest()[:12]
+            extension, sql = duckdb_secret_sql(self.base, self.params, name=name)
+            try:
+                load_extension(con, extension)
+            except Exception:
+                pass
+            if sql is None:
+                return
+            try:
+                con.execute(sql)
+            except Exception:  # never echo a credential value in the error
+                raise RuntimeError(f"failed to configure DuckDB {scheme}:// credentials for the data plane") from None
+            return
         try:
             con.execute("INSTALL httpfs")
             con.execute("LOAD httpfs")
         except Exception:
             pass
-        duck_type = {"s3": "S3", "s3a": "S3", "gs": "GCS", "gcs": "GCS"}.get(scheme)
+        duck_type = {"s3": "S3", "s3a": "S3"}.get(scheme)
         if duck_type is None:
-            return  # abfss / databricks etc. configured via env / fsspec; DuckDB httpfs covers s3/gcs
+            return  # databricks etc. configured via env / fsspec
         bits = [f"TYPE {duck_type}"]
         key = self.params.get("key_id") or self.params.get("key")
         secret = self.params.get("secret")
@@ -557,8 +631,358 @@ class ObjectStorage(Storage):
 
 
 # fsspec protocol / option-name remaps for the schemes we accept.
-_FSSPEC_PROTOCOL = {"gs": "gcs", "s3a": "s3", "az": "abfs", "wasb": "abfs", "wasbs": "abfs", "dbfs": "databricks"}
+class VolumeStorage(ObjectStorage):
+    """A Unity Catalog Volume directory reached through the Files API, on a machine that doesn't mount
+    ``/Volumes`` (:func:`volume_api`). The filesystem operations are :class:`ObjectStorage`'s over
+    :class:`duckstring.volumes.VolumeFileSystem`; DuckDB can't address it, so a caller that would hand DuckDB a
+    path gets an error naming the problem rather than a failed read."""
+
+    duckdb_readable = False
+
+    def __init__(self, base: str, params: dict[str, str] | None = None, fs=None) -> None:
+        super().__init__("/" + base.strip("/"), params)
+        self._fs = fs
+
+    @property
+    def fs(self):
+        if self._fs is None:
+            try:
+                from .volumes import VolumeFileSystem
+            except ImportError as exc:
+                raise ImportError("a Volume reached through the Files API needs the databricks extra: "
+                                  "pip install 'duckstring[databricks]'") from exc
+            self._fs = VolumeFileSystem()
+        return self._fs
+
+    def child(self, *parts: str) -> "VolumeStorage":
+        return VolumeStorage(self._key(*parts), self.params, fs=self._fs)
+
+    def _unreadable(self):
+        return RuntimeError(f"{self.base} is a Volume reached through the Files API (/Volumes isn't mounted "
+                            f"here), which DuckDB can't read or write; it is read from a local restore")
+
+    def uri(self, *parts: str) -> str:
+        raise self._unreadable()
+
+    def glob(self, pattern: str = "*.parquet", *parts: str) -> str:
+        raise self._unreadable()
+
+    @contextmanager
+    def copy_to(self, *parts: str) -> Iterator[str]:
+        raise self._unreadable()
+        yield ""  # pragma: no cover
+
+    @contextmanager
+    def copy_dir_to(self, *parts: str) -> Iterator[str]:
+        raise self._unreadable()
+        yield ""  # pragma: no cover
+
+    def mkdir(self, *parts: str) -> None:
+        self.fs.mkdir(self._key(*parts))
+
+    def write_new(self, data: bytes, *parts: str) -> None:
+        self.fs.pipe_file(self._key(*parts), data, shadow=False)
+
+    def duckdb_setup(self, con) -> None:
+        return None
+
+    def credential_generation(self) -> int:
+        return 0
+
+
+_FSSPEC_PROTOCOL = {"gs": "gcs", "s3a": "s3", "az": "abfs", "abfss": "abfs", "wasb": "abfs", "wasbs": "abfs",
+                    "dbfs": "databricks"}
 _FSSPEC_OPT = {"key_id": "key", "account_key": "account_key"}
+_EXTRA_FOR_PROTOCOL = {"s3": "aws", "abfs": "azure", "gcs": "gcp"}
+
+# The schemes DuckDB's `azure` extension and adlfs both address (DuckDB's `azure://` has no adlfs twin).
+_AZURE_SCHEMES = {"az", "abfs", "abfss"}
+_GCS_SCHEMES = {"gs", "gcs"}
+
+
+def _q(value: str) -> str:
+    """A single-quoted SQL string literal (doubling embedded quotes)."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _resolved(params: dict, key: str, env: str | None = None) -> str | None:
+    """``params[key]`` with its ``${env:}``/``${secret:}`` references resolved, else the ``env`` variable."""
+    from .egress import credentials
+
+    value = params.get(key)
+    if value:
+        return credentials.resolve(value)
+    return os.environ.get(env) if env else None
+
+
+# ─── Azure ───────────────────────────────────────────────────────────────────────
+#
+# adlfs and DuckDB's `azure` extension must pick the SAME credential, so DuckDB's secret follows adlfs's
+# precedence and its environment names: a connection string, then an account key, then a SAS token, then a
+# service principal (AZURE_STORAGE_CLIENT_*), else the Azure default chain (environment, workload identity,
+# managed identity, CLI), which both libraries run on their own.
+
+
+def azure_account(base: str, params: dict) -> str | None:
+    """The storage account: from ``abfss://container@account.dfs.core.windows.net/…``, ``?account_name=``, or
+    ``AZURE_STORAGE_ACCOUNT_NAME``. None when only a connection string names it."""
+    host = urlsplit(base).netloc
+    if "@" in host:
+        return host.split("@", 1)[1].split(".", 1)[0]
+    return _resolved(params, "account_name", "AZURE_STORAGE_ACCOUNT_NAME")
+
+
+def _adlfs_options(base: str, params: dict) -> dict:
+    """adlfs keyword arguments. Only explicit parameters: adlfs reads the same environment variables itself,
+    with the precedence the DuckDB secret copies."""
+    opts: dict = {}
+    account = azure_account(base, params)
+    if account:
+        opts["account_name"] = account
+    for k in ("connection_string", "account_key", "sas_token", "tenant_id", "client_id", "client_secret"):
+        value = _resolved(params, k)
+        if value:
+            opts[k] = value
+    return opts
+
+
+def _azure_secret_body(base: str, params: dict) -> list[str]:
+    account = azure_account(base, params)
+    connection = _resolved(params, "connection_string", "AZURE_STORAGE_CONNECTION_STRING")
+    key = _resolved(params, "account_key", "AZURE_STORAGE_ACCOUNT_KEY")
+    sas = _resolved(params, "sas_token", "AZURE_STORAGE_SAS_TOKEN")
+    principal = [_resolved(params, k, f"AZURE_STORAGE_{k.upper()}") for k in ("tenant_id", "client_id", "client_secret")]
+    if connection:
+        return ["TYPE AZURE", f"CONNECTION_STRING {_q(connection)}"]
+    if key and account:
+        return ["TYPE AZURE", "CONNECTION_STRING " + _q(
+            f"DefaultEndpointsProtocol=https;AccountName={account};AccountKey={key};EndpointSuffix=core.windows.net")]
+    if sas and account:
+        # DuckDB refuses a SAS connection string without ``AccountName`` ("invalid connection string", measured
+        # 2026-11-09 against ADLS), so a SAS data root never authenticated.
+        return ["TYPE AZURE", "CONNECTION_STRING " + _q(
+            f"AccountName={account};SharedAccessSignature={sas.lstrip('?')}")]
+    bits = ["TYPE AZURE"]
+    token = None if all(principal) else _azure_token()
+    if all(principal):
+        tenant, client, client_secret = principal
+        bits += ["PROVIDER service_principal", f"TENANT_ID {_q(tenant)}", f"CLIENT_ID {_q(client)}",
+                 f"CLIENT_SECRET {_q(client_secret)}"]
+    elif token:
+        bits += ["PROVIDER access_token", f"ACCESS_TOKEN {_q(token)}"]
+    else:
+        bits.append("PROVIDER credential_chain")
+    if account:
+        bits.append(f"ACCOUNT_NAME {_q(account)}")
+    return bits
+
+
+_AZURE_STORAGE_SCOPE = "https://storage.azure.com/.default"
+_azure_lock = threading.Lock()
+_azure_state: dict[str, object] = {}
+
+
+def _azure_token() -> str | None:
+    """A storage access token from Azure's default chain, minted in Python (the chain adlfs uses), for DuckDB's
+    ``access_token`` provider. DuckDB's own ``credential_chain`` can't use a Container Apps managed identity
+    (measured 2026-11-07 in a job execution: Python got a token, every DuckDB chain and its ``managed_identity``
+    provider failed), so a remote Duck on Azure could never read its Sources. Cached and re-minted with under
+    ``_TOKEN_MIN_LIFE_S`` left, as for Google (DuckDB never refreshes it). None when no credential is found, so
+    the caller falls back to DuckDB's chain."""
+    global _token_generation
+    try:
+        from azure.identity import DefaultAzureCredential
+    except ImportError:
+        return None
+    with _azure_lock:
+        token = _azure_state.get("token")
+        if token is not None and token.expires_on - time.time() >= _TOKEN_MIN_LIFE_S:
+            return token.token
+        try:
+            credential = _azure_state.get("credential") or DefaultAzureCredential()
+            token = credential.get_token(_AZURE_STORAGE_SCOPE)
+        except Exception:
+            log.warning("no Azure credential for DuckDB; falling back to its own credential chain", exc_info=True)
+            return None
+        _azure_state.update(credential=credential, token=token)
+        _token_generation += 1
+        return token.token
+
+
+# ─── Google Cloud Storage ────────────────────────────────────────────────────────
+#
+# Google credentials on both halves: gcsfs takes them as `token=`, and DuckDB gets an OAuth access token minted
+# from the same credentials as a GCS `BEARER_TOKEN` secret (DuckDB's GCS `credential_chain` is the AWS chain
+# looking for HMAC keys, so it can't be used). HMAC `key_id`/`secret` still serve the DuckDB half alone.
+
+_GCS_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write"
+# DuckDB never refreshes a bearer secret, so a token is re-minted while this much of its life is left: every
+# statement started after a `duckdb_setup` has at least this long to finish.
+_TOKEN_MIN_LIFE_S = 40 * 60
+_google_lock = threading.Lock()
+_google_creds: dict[str, object] = {}
+_token_generation = 0
+
+
+def _gcs_uses_google(params: dict) -> bool:
+    """Whether the DuckDB half authenticates with Google credentials (no HMAC keys, not anonymous)."""
+    hmac = (params.get("key_id") or params.get("key")) and params.get("secret")
+    return not hmac and (params.get("credentials") or "").strip() != "anon"
+
+
+def _service_account_info(spec: str) -> dict:
+    """A service-account key from ``credentials=``: the JSON itself (as a ``${secret:}`` holds it) or a file path."""
+    import json
+
+    from .egress import credentials
+
+    text = credentials.resolve(spec).strip()
+    try:
+        if text.startswith("{"):
+            return json.loads(text)
+        with open(os.path.expanduser(text), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        raise ValueError("credentials= must be a Google service-account key: its JSON, or the path to it") from None
+
+
+def _google_token(spec: str | None) -> str:
+    """A Google access token for ``spec`` (a service-account key, or None for application default credentials),
+    cached and re-minted when less than ``_TOKEN_MIN_LIFE_S`` of its life is left."""
+    global _token_generation
+    from datetime import datetime, timezone
+
+    from .egress import credentials
+
+    try:
+        import google.auth
+        from google.auth.transport.requests import Request
+    except ImportError:
+        raise ImportError("gs:// storage needs the gcp extra: pip install 'duckstring[gcp]'") from None
+    key = credentials.resolve(spec) if spec else ""  # a rotated ${secret:} key gets fresh credentials
+    with _google_lock:
+        creds = _google_creds.get(key)
+        if creds is None:
+            if key:
+                from google.oauth2 import service_account
+
+                creds = service_account.Credentials.from_service_account_info(
+                    _service_account_info(key), scopes=[_GCS_SCOPE])
+            else:
+                creds, _project = google.auth.default(scopes=[_GCS_SCOPE])
+            _google_creds[key] = creds
+        expiry = getattr(creds, "expiry", None)  # naive UTC in google-auth
+        left = (expiry.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).total_seconds() if expiry else 0
+        if not getattr(creds, "token", None) or left < _TOKEN_MIN_LIFE_S:
+            creds.refresh(Request())
+            _token_generation += 1
+        return creds.token
+
+
+def _gcsfs_options(params: dict) -> dict:
+    """gcsfs keyword arguments: the service-account key, ``anon``, or nothing (application default credentials).
+    HMAC keys are DuckDB's alone; gcsfs can't use them."""
+    opts: dict = {}
+    spec = params.get("credentials")
+    if spec and spec.strip() == "anon":
+        opts["token"] = "anon"
+    elif spec:
+        opts["token"] = _service_account_info(spec)
+    endpoint = _resolved(params, "endpoint")
+    if endpoint:
+        opts["endpoint_url"] = endpoint if "://" in endpoint else f"https://{endpoint}"
+    return opts
+
+
+def _gcs_secret_body(params: dict) -> list[str] | None:
+    bits = ["TYPE GCS"]
+    key, secret = _resolved(params, "key_id") or _resolved(params, "key"), _resolved(params, "secret")
+    if key and secret:
+        bits += [f"KEY_ID {_q(key)}", f"SECRET {_q(secret)}"]
+    elif _gcs_uses_google(params):
+        bits.append(f"BEARER_TOKEN {_q(_google_token(params.get('credentials')))}")
+    else:
+        return None  # anonymous: no secret, DuckDB sends unauthenticated requests
+    endpoint = _resolved(params, "endpoint")
+    if endpoint:  # an emulator, or a test standing in for Google
+        host, ssl = _split_endpoint(endpoint)
+        bits += [f"ENDPOINT {_q(host)}", f"USE_SSL {str(ssl).lower()}", "URL_STYLE 'path'"]
+    return bits
+
+
+def warm_imports(*locations: str | None) -> None:
+    """Import, on the calling thread, what object-store I/O for these locations imports later: asyncio, the
+    location's fsspec filesystem (adlfs, s3fs, gcsfs, which import their async stacks), and Azure's credential
+    library. Call it before starting threads. Two threads importing these at once can leave a package
+    half-imported for good: a remote Duck on Azure (2026-11-07) failed every persist with ``NameError: name
+    'base_events' is not defined`` (asyncio's package import failed while another thread finished
+    ``asyncio.base_events``, which then never attaches to the re-imported package), so its Sinks waited forever."""
+    import asyncio  # noqa: F401
+
+    for location in locations:
+        if location and volume_api(location):
+            try:
+                from . import volumes  # noqa: F401  (fsspec and the Files API client)
+            except ImportError:
+                pass  # the databricks extra is missing: the first use says so
+            continue
+        if not location or not is_object_uri(location):
+            continue
+        scheme = urlsplit(location).scheme.lower()
+        try:
+            import fsspec
+
+            fsspec.get_filesystem_class(_FSSPEC_PROTOCOL.get(scheme, scheme))
+            if scheme in _AZURE_SCHEMES:
+                import azure.identity  # noqa: F401
+                import azure.identity.aio  # noqa: F401
+        except ImportError:
+            pass  # a missing extra fails later, with its install hint
+
+
+def load_extension(con, extension: str) -> None:
+    """Install and load the extension a DuckDB secret from :func:`duckdb_secret_sql` needs. On Linux the azure
+    extension uses curl: its default transport looks for CA certificates where Debian's image doesn't keep them
+    ("Problem with the SSL CA cert", measured 2026-11-07 in a Container Apps job on the python:3.13-slim image;
+    the curl transport read the same file)."""
+    con.execute(f"INSTALL {extension}")
+    con.execute(f"LOAD {extension}")
+    if extension == "azure" and sys.platform.startswith("linux"):
+        con.execute("SET GLOBAL azure_transport_option_type = 'curl'")  # session scope missed the serving cursors
+
+
+def duckdb_secret_sql(uri: str, params: dict, *, name: str) -> tuple[str, str | None]:
+    """``(extension, CREATE SECRET statement or None)`` for an Azure or GCS location: what DuckDB needs to read
+    and write it, from the URI's parameters (``${env:}``/``${secret:}`` resolved) and the environment. The
+    secret is scoped to the bucket or container, so a data root and a Spout in different accounts each keep
+    their own. The statement carries resolved credentials: callers mask its errors."""
+    parts = urlsplit(uri)
+    scheme = parts.scheme.lower()
+    params = {k.lower(): v for k, v in params.items()}
+    if scheme in _AZURE_SCHEMES:
+        extension, body = "azure", _azure_secret_body(uri, params)
+    elif scheme in _GCS_SCHEMES:
+        extension, body = "httpfs", _gcs_secret_body(params)
+    else:
+        raise ValueError(f"no shared DuckDB secret for {scheme}://")
+    if body is None:
+        return extension, None
+    scopes = [f"{scheme}://{parts.netloc}"]
+    if scheme in _AZURE_SCHEMES and "@" in parts.netloc:
+        # DuckDB's azure extension names the files a glob expands to `abfss://account.dfs.core.windows.net/
+        # container/…`, so a scope in the `container@account` form alone left every glob read unauthenticated.
+        container, host = parts.netloc.split("@", 1)
+        scopes.append(f"{scheme}://{host}/{container}")
+    scope = _q(scopes[0]) if len(scopes) == 1 else "[" + ", ".join(_q(s) for s in scopes) + "]"
+    return extension, f"CREATE OR REPLACE SECRET {name} ({', '.join(body)}, SCOPE {scope})"
+
+
+def credential_generation(location: str | None) -> int:
+    """:meth:`ObjectStorage.credential_generation` for a data root (0 for a local one or None)."""
+    if not location or not is_object_uri(location):
+        return 0
+    store = get_storage(location)
+    return store.credential_generation() if isinstance(store, ObjectStorage) else 0
 
 
 # ─── cross-store tree copy (data-plane migration) ────────────────────────────────

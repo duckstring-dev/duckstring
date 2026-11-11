@@ -42,6 +42,15 @@ def runner():
 
 
 @pytest.fixture(autouse=True)
+def no_ambient_azure_token(monkeypatch):
+    """Never mint a real Azure token from the machine's own login (a developer's `az login`): a test that wants
+    the access-token path sets `duckstring.storage._azure_token` itself."""
+    from duckstring import storage
+
+    monkeypatch.setattr(storage, "_azure_token", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
     """Redirect ~/.duckstring/config.toml to a per-test temp directory."""
     cfg_dir = tmp_path / ".duckstring"

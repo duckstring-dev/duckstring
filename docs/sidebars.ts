@@ -59,7 +59,7 @@ const sidebars: SidebarsConfig = {
         {
           type: 'category',
           label: 'Getting Data Out',
-          items: ['guides/querying', 'guides/serving_apps_with_taps', 'guides/delivering_with_spouts'],
+          items: ['guides/querying', 'guides/serving_apps_with_taps', 'guides/building_apps', 'guides/delivering_with_spouts'],
         },
         {
           type: 'category',
@@ -67,7 +67,10 @@ const sidebars: SidebarsConfig = {
           items: [
             'guides/running_on_a_server',
             'guides/hosting_on_a_platform',
+            'guides/running_on_databricks',
             'guides/cloud_compute_on_aws',
+            'guides/cloud_compute_on_azure',
+            'guides/cloud_compute_on_google_cloud',
             'guides/offloading_large_recomputes',
             'guides/connecting_catchments',
           ],
@@ -90,6 +93,9 @@ const sidebars: SidebarsConfig = {
             'reference/python/acc',
             'reference/python/puddle',
             'reference/python/catchment',
+            'reference/python/app',
+            'reference/python/databricks',
+            'reference/python/landing',
           ],
         },
         'reference/pond_toml',
@@ -108,6 +114,7 @@ const sidebars: SidebarsConfig = {
             'reference/cli/spout',
             'reference/cli/secret',
             'reference/cli/alert',
+            'reference/cli/app',
           ],
         },
         'reference/http_api',

@@ -162,6 +162,17 @@ quiet. It needs only the demand-at-now path the playground already has, plus the
 - ~~The policy clock~~: settled 2026-10-14. `--fresh-within` and `--every` share one clock, the later of the
   newest request and the Pond's freshness, so neither refreshes data something else already keeps fresh.
 
+## How far a Tap's Refresh reaches (2026-11-11)
+
+A due query sends `refresh_now` at `now - fresh_within`, not `now`: data no older than `fresh_within`. The request
+stops at any Pond already that fresh. Before, an app on a small Pond hanging off a core pipeline refreshed daily
+(`fresh_within 1d`, unused for a week) re-ran the whole core from its Inlets on its first query, though the core's
+data was well within a day. `fresh_within 0` is unchanged. This needed Inlets to stamp their Run's start rather
+than the request (`plans/minted-freshness.md`, superseded), or the Inlet would label fresh data a day old. `refresh
+now --fresh-within` (`fresh_within_ms` on the route) asks the same way. So `--fresh-within 1d` no longer behaves
+exactly like `refresh add --every 1d`, which still requests `now`. Tests: `tests/test_tap.py` (the fresh-within
+section), `tests/test_engine.py::test_a_request_for_older_data_runs_only_the_ponds_older_than_it`.
+
 ## As built (2026-10-17)
 
 Where it lives: `engine.tap_due`/`tap_wait_target` (the policy, pure), `catchment/taps.py` (`TapsMixin` on the

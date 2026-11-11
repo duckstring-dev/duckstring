@@ -1,5 +1,6 @@
-"""The shared machinery of the Flock's SQL engines (StarRocks, Athena): engines that aren't DuckDB, so a job
-is translated (:mod:`duckstring.flock.translate`) and only what the engine was measured to agree on is sent.
+"""The shared machinery of the Flock's SQL engines (StarRocks, BigQuery, Databricks, Athena): engines that aren't
+DuckDB, so a job is translated (:mod:`duckstring.flock.translate`) and only what the engine was measured to agree on
+is sent.
 
 A dispatch:
 
@@ -77,6 +78,9 @@ class SqlEngine:
     PROFILE: translate.Profile
     SECRETS: tuple[str, ...] = ()
     VERIFY = True  # flock._dispatch recomputes a sample of keys locally (duckstring.flock.verify)
+    # Stage each source as several files of about this size instead of one data.parquet (an engine whose uploads
+    # are size-limited); read_of then gets a directory of data_{n}.parquet files.
+    STAGE_FILE_BYTES: int | None = None
 
     def __init__(self, env, name: str | None = None):
         self.env = env
@@ -165,8 +169,12 @@ class SqlEngine:
             for i, leaf in enumerate(t.leaves):
                 stage.mkdir(f"src{i}")  # a no-op on an object store
                 staged = con.sql(stage_select(job.ctx.read_table(leaf.ref)))
-                con.execute(f"COPY ({staged.sql_query()}) TO '{stage.uri(f'src{i}', 'data.parquet')}' "
-                            "(FORMAT PARQUET)")
+                if self.STAGE_FILE_BYTES:  # a directory of data_{n}.parquet files, none much past the size
+                    con.execute(f"COPY ({staged.sql_query()}) TO '{stage.uri(f'src{i}')}' (FORMAT PARQUET, "
+                                f"FILE_SIZE_BYTES {int(self.STAGE_FILE_BYTES)}, OVERWRITE_OR_IGNORE)")
+                else:
+                    con.execute(f"COPY ({staged.sql_query()}) TO '{stage.uri(f'src{i}', 'data.parquet')}' "
+                                "(FORMAT PARQUET)")
                 columns = dict(zip(staged.columns, (str(t) for t in staged.types), strict=True))
                 reads.append(self.read_of(_location(stage.child(f"src{i}")), columns, tag, i))
             sql = translate.substitute(t.sql, lambda i: reads[i])

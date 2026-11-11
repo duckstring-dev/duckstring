@@ -6,14 +6,15 @@ import {
   setDataRoot, setSecret, verifyCloud, type CloudSettings, type CloudVerifyResult, type ComputeDefaults,
   type DuckPool, type MigrationStatus,
 } from '@/lib/api';
-import { cpuLabel, defaultMemoryFor, FARGATE_CPU, FARGATE_MEMORY, memoryLabel } from '@/lib/aws';
+import { defaultMemoryFor } from '@/lib/aws';
+import { CREDENTIALS, backendInfo, cloudBackends, consumptionMemory } from '@/lib/clouds';
 import { useLiveStore } from '@/lib/store';
-import { DeployConfigForm, deployConfigMissing } from './DeployConfigForm';
-import { InstanceTypePicker } from './InstanceTypePicker';
+import { DeployConfigForm, SizeFields, deployConfigMissing } from './DeployConfigForm';
 
 // Catchment-level cloud config (plans/cloud-config.md + plans/cloud-menu-redesign.md, full access only).
-// A modal with one section per concern: Status, Data plane, AWS credentials, Duck pools. Cloud enabling is
-// EMERGENT (a remote data root + valid AWS creds → the gate flips), not a wizard. Reverting to local is
+// A modal with one section per concern: Status, Data plane, credentials, Duck pools, each following the
+// Catchment's cloud (its data root's: lib/clouds.ts). Cloud enabling is EMERGENT (a data root on a cloud + valid
+// credentials for it → the gate flips), not a wizard. Reverting to local is
 // always available (no creds, no target). The backend surface is unchanged.
 
 const input: React.CSSProperties = {
@@ -228,32 +229,30 @@ function DataPlanePanel({ settings, catchmentName, reload }:
   );
 }
 
-// ─── AWS credentials ─────────────────────────────────────────────────────────
+// ─── Credentials (the Catchment's cloud's) ───────────────────────────────────
 
 function CredentialsPanel({ settings, reload }: { settings: CloudSettings; reload: () => void }) {
-  const [akid, setAkid] = useState('');
-  const [secret, setSecret_] = useState('');
-  const [region, setRegion] = useState('');
+  const cloud = CREDENTIALS[settings.provider ?? 'aws'] ?? CREDENTIALS.aws;
+  const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<CloudVerifyResult | null>(null);
   const [e, setE] = useState<string | null>(null);
+  const configured = settings.credentials_configured ?? settings.aws_configured;
 
   const run = async (withSave: boolean) => {
     setE(null); setResult(null); setBusy(true);
     try {
       if (withSave) {
-        if (akid.trim()) await setSecret('AWS_ACCESS_KEY_ID', akid.trim());
-        if (secret.trim()) await setSecret('AWS_SECRET_ACCESS_KEY', secret.trim());
-        if (region.trim()) await setSecret('AWS_DEFAULT_REGION', region.trim());
+        for (const f of cloud.fields) if (values[f.secret]?.trim()) await setSecret(f.secret, values[f.secret].trim());
       }
       const res = await verifyCloud();
       setResult(res);
-      if (res.ok) { setAkid(''); setSecret_(''); }
+      if (res.ok) setValues({});
       reload();
     } catch (ex) { setE(ex instanceof Error ? ex.message : 'failed'); } finally { setBusy(false); }
   };
 
-  const badge = settings.aws_configured
+  const badge = configured
     ? (settings.creds_valid === false
         ? <span style={{ fontSize: 10, color: '#ef4444' }}>configured · failing ✗</span>
         : settings.creds_valid
@@ -261,25 +260,27 @@ function CredentialsPanel({ settings, reload }: { settings: CloudSettings; reloa
           : <span style={{ fontSize: 10, color: '#a1a1aa' }}>configured</span>)
     : <span style={{ fontSize: 10, color: '#71717a' }}>not set</span>;
 
-  const canSave = !busy && akid.trim() !== '' && secret.trim() !== '';
+  const canSave = !busy && cloud.fields.every((f) => !f.required || !!values[f.secret]?.trim());
   return (
-    <Section title="AWS CREDENTIALS" right={badge}>
+    <Section title={cloud.title} right={badge}>
       {settings.creds_valid === false && (
         <div style={{ fontSize: 11, color: '#f59e0b', marginBottom: 7 }}>
           ⚠ The stored credentials are not authenticating{settings.creds_error ? <span style={{ color: '#a1a1aa' }}> ({settings.creds_error})</span> : null}. Remote Duck launches will fail — update them below.
         </div>
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <input value={akid} onChange={(ev) => setAkid(ev.target.value)} placeholder="AWS access key ID" style={smallInput} autoComplete="off" />
-        <input value={secret} onChange={(ev) => setSecret_(ev.target.value)} placeholder="AWS secret access key" type="password" style={smallInput} autoComplete="off" />
-        <input value={region} onChange={(ev) => setRegion(ev.target.value)} placeholder="region (e.g. us-east-1)" style={smallInput} />
+        {cloud.fields.map((f) => (
+          <input key={f.secret} value={values[f.secret] ?? ''} placeholder={f.placeholder} style={smallInput}
+                 type={f.password ? 'password' : undefined} autoComplete="off"
+                 onChange={(ev) => setValues({ ...values, [f.secret]: ev.target.value })} />
+        ))}
         {result && (result.ok
           ? <div style={{ fontSize: 10, color: '#22c55e', wordBreak: 'break-word' }}>authenticated ✓ {result.arn}{result.account ? ` · account ${result.account}` : ''}</div>
           : err(`verification failed: ${result.error}`))}
         {e && err(e)}
         <div style={{ display: 'flex', gap: 6 }}>
           <button onClick={() => run(true)} disabled={!canSave} style={btn('#f59e0b', !canSave)}>{busy ? 'Verifying…' : 'Save & verify'}</button>
-          <button onClick={() => run(false)} disabled={busy || !settings.aws_configured} style={btn('#a1a1aa', busy || !settings.aws_configured)}
+          <button onClick={() => run(false)} disabled={busy || !configured} style={btn('#a1a1aa', busy || !configured)}
                   title="Re-check the stored credentials">Verify</button>
         </div>
         <div style={{ fontSize: 10, color: '#52525b', lineHeight: 1.4 }}>Sent over the wire — use HTTPS. Stored write-only.</div>
@@ -290,22 +291,23 @@ function CredentialsPanel({ settings, reload }: { settings: CloudSettings; reloa
 
 // ─── Duck pools ──────────────────────────────────────────────────────────────
 
-function PoolsPanel({ pools, reload, defaults, fargateReady }:
-  { pools: DuckPool[]; reload: () => void; defaults: ComputeDefaults | null; fargateReady: boolean }) {
+function PoolsPanel({ pools, reload, defaults, backends, presetsReady }:
+  { pools: DuckPool[]; reload: () => void; defaults: ComputeDefaults | null; backends: string[]; presetsReady: boolean }) {
   const [busy, setBusy] = useState(false);
   const [pName, setPName] = useState('');
-  const [pProvider, setPProvider] = useState<'fargate' | 'ec2'>('fargate');
+  const [pProvider, setPProvider] = useState(backends[0]);
   const [pType, setPType] = useState('');
   const [pRegion, setPRegion] = useState('');
   const [pCpu, setPCpu] = useState('1024');
   const [pMem, setPMem] = useState(String(defaultMemoryFor(1024)));
   const [deploy, setDeploy] = useState<Record<string, string>>({});
   const [pErr, setPErr] = useState<string | null>(null);
+  const sizing = backendInfo(pProvider).sizing;
+  const presetBackend = backendInfo(backends[0]).label.split(' ')[0];
 
-  const pickCpu = (v: string) => {
-    setPCpu(v);
-    const mems = FARGATE_MEMORY[Number(v)] ?? [];
-    if (!mems.includes(Number(pMem))) setPMem(String(mems[0] ?? ''));
+  const pickBackend = (b: string) => {
+    setPProvider(b); setDeploy({});
+    if (backendInfo(b).sizing === 'consumption') setPMem(String(consumptionMemory(Number(pCpu))));
   };
 
   const addPool = async () => {
@@ -314,10 +316,10 @@ function PoolsPanel({ pools, reload, defaults, fargateReady }:
       await addDuckPool({
         name: pName.trim(),
         provider: pProvider,
-        instance_type: pProvider === 'ec2' ? pType.trim() || null : null,
-        cpu: pProvider === 'fargate' && pCpu ? Number(pCpu) : null,
-        memory: pProvider === 'fargate' && pMem ? Number(pMem) : null,
-        region: pProvider === 'ec2' && pRegion.trim() ? pRegion.trim() : null,
+        instance_type: sizing === 'vm' ? pType.trim() || null : null,
+        cpu: sizing !== 'vm' && pCpu ? Number(pCpu) : null,
+        memory: sizing !== 'vm' && pMem ? Number(pMem) : null,
+        region: sizing === 'vm' && pRegion.trim() ? pRegion.trim() : null,
         deploy_config: deploy,
       });
       setPName(''); setPType(''); setPRegion(''); setDeploy({}); reload();
@@ -327,22 +329,23 @@ function PoolsPanel({ pools, reload, defaults, fargateReady }:
 
   return (
     <Section title="DUCK POOLS">
-      {!fargateReady && (
+      {!presetsReady && (
         <div style={{ fontSize: 10, color: '#71717a', marginBottom: 8, lineHeight: 1.4 }}>
-          The S/M/L/XL Fargate presets are unavailable until Fargate is enabled — add the Fargate deployment
-          config (image + VPC + IAM) via the env or a pool below.
+          The S/M/L/XL presets are unavailable until {presetBackend} is enabled — add its deployment config via
+          the env or a pool below.
         </div>
       )}
       {pools.map((p) => {
-        const spec = (p.provider || 'fargate') === 'fargate'
-          ? (p.cpu || p.memory ? `${p.cpu ?? '?'}cpu / ${p.memory ?? '?'}MiB` : '—')
-          : (p.instance_type || '—');
-        const unavailable = p.managed && !fargateReady;  // a preset with no Fargate env behind it
+        const backend = p.provider || backends[0];
+        const spec = backendInfo(backend).sizing === 'vm'
+          ? (p.instance_type || '—')
+          : (p.cpu || p.memory ? `${p.cpu ?? '?'}cpu / ${p.memory ?? '?'}MiB` : '—');
+        const unavailable = p.managed && !presetsReady;  // a preset with no backend env behind it
         return (
           <div key={p.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, opacity: unavailable ? 0.5 : 1 }}>
             <span style={{ fontSize: 12, color: '#a1a1aa' }}>
               {p.name}
-              <span style={{ color: '#52525b', fontSize: 10 }}> [{p.provider || 'fargate'}] {spec}{p.managed ? (unavailable ? ' · preset · needs Fargate' : ' · preset') : ''}</span>
+              <span style={{ color: '#52525b', fontSize: 10 }}> [{backend}] {spec}{p.managed ? (unavailable ? ` · preset · needs ${presetBackend}` : ' · preset') : ''}</span>
             </span>
             {!p.managed && (
               <span role="button" title="Remove" onClick={() => removeDuckPool(p.name).then(reload).catch(() => undefined)}
@@ -353,25 +356,12 @@ function PoolsPanel({ pools, reload, defaults, fargateReady }:
       })}
       <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
         <input value={pName} onChange={(e) => setPName(e.target.value)} placeholder="pool name (e.g. heavy)" style={smallInput} />
-        <select value={pProvider} onChange={(e) => setPProvider(e.target.value as 'fargate' | 'ec2')} style={smallInput}>
-          <option value="fargate">fargate (serverless)</option>
-          <option value="ec2">ec2 (big / GPU)</option>
+        <select value={pProvider} onChange={(e) => pickBackend(e.target.value)} style={smallInput}>
+          {backends.map((b) => <option key={b} value={b}>{backendInfo(b).label}</option>)}
         </select>
-        {pProvider === 'fargate' ? (
-          <div style={{ display: 'flex', gap: 6 }}>
-            <select value={pCpu} onChange={(e) => pickCpu(e.target.value)} style={smallInput}>
-              {FARGATE_CPU.map((c) => <option key={c} value={c}>{cpuLabel(c)}</option>)}
-            </select>
-            <select value={pMem} onChange={(e) => setPMem(e.target.value)} style={smallInput}>
-              {(FARGATE_MEMORY[Number(pCpu)] ?? []).map((m) => <option key={m} value={m}>{memoryLabel(m)}</option>)}
-            </select>
-          </div>
-        ) : (
-          <>
-            <input value={pRegion} onChange={(e) => setPRegion(e.target.value)} placeholder="region (blank = Catchment default)" style={smallInput} />
-            <InstanceTypePicker value={pType} onCommit={setPType} region={pRegion.trim() || undefined} style={smallInput} />
-          </>
-        )}
+        <SizeFields provider={pProvider} cpu={pCpu} memory={pMem} onSize={(c, m) => { setPCpu(c); setPMem(m); }}
+                    instanceType={pType} onInstanceType={setPType} region={pRegion} onRegion={setPRegion}
+                    location={deploy[backendInfo(pProvider).location ?? '']} style={smallInput} />
         <div style={{ borderTop: '1px solid #27272a', paddingTop: 6, marginTop: 2 }}>
           <div style={{ fontSize: 10, color: '#71717a', marginBottom: 4 }}>Deployment ({pProvider})</div>
           <DeployConfigForm provider={pProvider} value={deploy} onChange={setDeploy} defaults={defaults} />
@@ -426,12 +416,19 @@ export function CloudMenu({ onClose }: { onClose: () => void }) {
           {statusBadge}
           {enabled && settings && (
             <span style={{ display: 'flex', gap: 5, marginLeft: 2 }}>
-              <StateChip label="Fargate" on={settings.fargate_enabled} />
-              <StateChip label="EC2" on={settings.ec2_enabled} />
+              {cloudBackends(settings).map((b) => (
+                <StateChip key={b} label={backendInfo(b).label.split(' ')[0]} on={!!settings.backends?.[b]} />
+              ))}
             </span>
           )}
           {!enabled && settings && (
-            <span style={{ fontSize: 10, color: '#52525b' }}>needs a remote data root + AWS credentials</span>
+            <span style={{ fontSize: 10, color: '#52525b' }}>
+              {!settings.provider_title
+                ? 'needs a data root on a cloud + its credentials'
+                : settings.compute_available
+                  ? `needs ${settings.provider_title} credentials`
+                  : `remote Ducks on ${settings.provider_title} aren't available yet`}
+            </span>
           )}
           <button onClick={onClose} title="Close (Esc)"
                   style={{ marginLeft: 'auto', background: 'transparent', border: '1px solid #3f3f46', borderRadius: 5,
@@ -443,7 +440,10 @@ export function CloudMenu({ onClose }: { onClose: () => void }) {
           <MigrationBanner onDone={load} />
           {settings && <DataPlanePanel settings={settings} catchmentName={catchmentName} reload={load} />}
           {settings && <CredentialsPanel settings={settings} reload={load} />}
-          {enabled && <PoolsPanel pools={pools} reload={load} defaults={computeDefaults} fargateReady={!!settings?.fargate_enabled} />}
+          {enabled && settings && (
+            <PoolsPanel pools={pools} reload={load} defaults={computeDefaults} backends={cloudBackends(settings)}
+                        presetsReady={!!settings.backends?.[cloudBackends(settings)[0]]} />
+          )}
         </div>
       </div>
     </div>

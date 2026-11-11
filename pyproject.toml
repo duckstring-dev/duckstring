@@ -58,6 +58,30 @@ aws = [
   "boto3>=1.34",
   "sqlglot>=30.21,<31",
 ]
+# Azure and Google Cloud (plans/azure-gcp.md): the fsspec half of an az:// / abfss:// or gs:// data root and
+# Spouts (DuckDB's own azure and httpfs extensions do the Parquet I/O), plus each cloud's credential library.
+# Remote compute on these clouds adds its SDKs here.
+azure = [
+  "adlfs>=2024.4",
+  "azure-identity>=1.15",
+  "azure-mgmt-appcontainers>=5.0",
+  "azure-mgmt-compute>=34",
+  "azure-monitor-query>=1.2",
+  "sqlglot>=30.21,<31",  # the Databricks Flock engine translates jobs on the -azure Duck image
+]
+gcp = [
+  "gcsfs>=2024.2",
+  "google-auth[requests]>=2.20",
+  "sqlglot>=30.21,<31",  # the BigQuery Flock engine translates jobs (plans/databricks-bigquery.md)
+]
+# Databricks (plans/databricks-bigquery.md): the Databricks SQL Flock engine, the Databricks Spout and Volumes
+# reached through the Files API (a Databricks App), over the REST APIs with httpx and pyarrow (both core).
+# sqlglot translates Flock jobs, fsspec carries the Volume filesystem; on Azure an Entra token comes from
+# azure-identity (the azure extra).
+databricks = [
+  "sqlglot>=30.21,<31",
+  "fsspec>=2023.1",
+]
 # The StarRocks Flock engine (plans/flock-coverage.md): the MySQL-protocol client, and sqlglot to translate
 # jobs. sqlglot is pinned to one major because what an engine is trusted with is measured against its
 # translations: re-run tests/test_flock_starrocks_conformance.py before widening it.
@@ -76,6 +100,13 @@ dev = [
   "sqlglot>=30.21,<31",
   "s3fs>=2023.1",
   "boto3>=1.34",
+  "adlfs>=2024.4",
+  "azure-identity>=1.15",
+  "azure-mgmt-appcontainers>=5.0",
+  "azure-mgmt-compute>=34",
+  "azure-monitor-query>=1.2",
+  "gcsfs>=2024.2",
+  "google-auth[requests]>=2.20",
   "pg8000>=1.31",
   "pymysql>=1.1",
 ]

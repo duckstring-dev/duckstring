@@ -2,7 +2,8 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore, formatAge, stateColor, nodeFill, THEME_BRAND, THEME_DEMAND } from '@/lib/store';
+import { useLiveStore, appState, formatAge, stateColor, nodeFill, STATE_COLORS, THEME_BRAND, THEME_DEMAND } from '@/lib/store';
+import { openApp } from '@/lib/api';
 import { STRIP_LINE_H, STRIP_PAD, demandStripHeight } from '@/lib/layout';
 import { DemandIndicators } from './DemandIndicators';
 import { DbtIcon } from './DbtIcon';
@@ -17,6 +18,23 @@ function TableIcon() {
     </svg>
   );
 }
+
+// An arrow out of a box: the affordance to open an App in a new tab (an App has no tables to view).
+export function OpenIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"
+         strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9.5 2.5h4v4" />
+      <line x1="13.5" y1="2.5" x2="7.5" y2="8.5" />
+      <path d="M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3" />
+    </svg>
+  );
+}
+
+const APP_STATE_COLOR: Record<string, string> = {
+  running: STATE_COLORS.running, starting: STATE_COLORS.running,
+  idle: '#71717a', failed: STATE_COLORS.failed, killed: STATE_COLORS.killed,
+};
 
 export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const pondId = data.pondId as string;
@@ -46,7 +64,10 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
 
   if (!pond || !view) return null;
 
-  const borderColor = stateColor(view);
+  // An App's rim follows its instance: brand cyan while one is serving (or starting), as a Run would.
+  const app = pond.isApp ? appState(info) : null;
+  const borderColor = app ? (view.status === 'blocked' ? stateColor(view) : APP_STATE_COLOR[app]) : stateColor(view);
+  const radius = pond.isApp ? 16 : 10;
   const isSelected = selectedPondId === pondId;
   // A Spout's pond name is "{source}#{spout}" — show just the spout part on the node.
   const displayName = pond.isSpout ? pond.name.split('#').slice(1).join('#') || pond.name : pond.name;
@@ -74,7 +95,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           : rebuildPending
             ? `0 0 0 2px #ee9333aa`  // pending refresh — an amber hint
             : isSelected ? `0 0 0 3px ${borderColor}40` : undefined,
-        borderRadius: 10,
+        borderRadius: radius,
         background: nodeFill(borderColor),
         cursor: 'pointer',
         position: 'relative',
@@ -84,7 +105,24 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
     >
       <Handle id="in" type="target" position={vertical ? Position.Top : Position.Left} style={{ background: '#52525b' }} />
 
-      {(hasTables || hasObjects) && (
+      {pond.isApp && info?.app && (
+        <span
+          role="button"
+          title="Open App"
+          onClick={(e) => {
+            e.stopPropagation();
+            openApp(info.app!.path);
+          }}
+          style={{
+            position: 'absolute', top: 7, right: 9, zIndex: 1, lineHeight: 0, padding: 3, borderRadius: 5,
+            cursor: 'pointer', color: borderColor, background: '#0f0f14cc', opacity: 0.9,
+          }}
+        >
+          <OpenIcon />
+        </span>
+      )}
+
+      {!pond.isApp && (hasTables || hasObjects) && (
         <span
           role="button"
           title="View data"
@@ -114,7 +152,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           justifyContent: 'center',
           gap: 5,
           // No divider when there's no ripple area beneath to separate — a Draw/Spout, or a collapsed Pond.
-          borderBottom: boundary || collapsed ? 'none' : `1px solid ${borderColor}30`,
+          borderBottom: boundary || collapsed || pond.isApp ? 'none' : `1px solid ${borderColor}30`,
         }}
       >
         <span style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
@@ -144,8 +182,18 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
         </span>
         <span style={{ fontSize: 11, color: '#71717a', display: 'flex', alignItems: 'center', gap: 6 }}>
           <DemandIndicators demandF={view.demandF} now={now} />
-          <span style={{ color: '#a1a1aa' }}>↑{formatAge(view.startF, now)} ({view.runsStarted})</span>
-          <span>✓{formatAge(view.endF, now)} ({view.runsCompleted})</span>
+          {app ? (
+            // An App's Runs are passes, so run counts mean nothing: its instance state and data freshness instead.
+            <>
+              <span style={{ color: APP_STATE_COLOR[app] === '#71717a' ? '#a1a1aa' : APP_STATE_COLOR[app] }}>{app}</span>
+              <span>✓{formatAge(view.endF, now)}</span>
+            </>
+          ) : (
+            <>
+              <span style={{ color: '#a1a1aa' }}>↑{formatAge(view.startF, now)} ({view.runsStarted})</span>
+              <span>✓{formatAge(view.endF, now)} ({view.runsCompleted})</span>
+            </>
+          )}
         </span>
       </div>
 
@@ -161,7 +209,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
             boxSizing: 'border-box',
             padding: `${STRIP_PAD}px 12px`,
             borderTop: `1px dashed ${THEME_DEMAND}80`,
-            borderRadius: '0 0 8px 8px',
+            borderRadius: `0 0 ${radius - 2}px ${radius - 2}px`,
             background: `${THEME_DEMAND}12`,
           }}
         >

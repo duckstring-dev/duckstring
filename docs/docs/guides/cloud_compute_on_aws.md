@@ -30,8 +30,9 @@ duckstring catchment settings
 
 ```text
 data root:  s3://acme-lake/duckstring
-AWS creds:  yes
-cloud:      enabled
+cloud:      AWS
+creds:      yes
+compute:    enabled
 ```
 
 ## Step 1: the data root
@@ -53,7 +54,7 @@ Three roles are involved.
 - `iam:PassRole` for every role it gives to a Duck.
 - Read and write access to the data bucket.
 
-:::warning Two permissions that are easy to miss
+:::warning[Two permissions that are easy to miss]
 `ecs:TagResource` is needed because every task is tagged at launch; without it, `RunTask` is denied. `iam:PassRole` is needed to hand a role to a task or instance. Both failures appear only in the Pond's failure message.
 :::
 
@@ -72,7 +73,7 @@ Three roles are involved.
 }
 ```
 
-:::warning Both resource forms
+:::warning[Both resource forms]
 With only one of the two ARNs, tasks fail with `ResourceInitializationError: failed to validate logger args`, which reads like a configuration problem. `CreateLogGroup` is only exercised the first time, so a broken policy can go unnoticed for weeks and then fail on a new account.
 :::
 
@@ -125,7 +126,7 @@ Each Pond on a built-in size gets its own task. A pool you define, with `duckstr
 
 ### The Duck image
 
-Each release of Duckstring publishes a Duck image at `ghcr.io/duckstring-dev/duckstring`, tagged with its version and built for both Fargate architectures. Use the tag that matches the Catchment's own version, since a Duck and its Catchment must run the same Duckstring.
+Each release of Duckstring publishes a Duck image at `ghcr.io/duckstring-dev/duckstring`, built for both Fargate architectures. The AWS image is tagged with the version and `-aws`, and the plain version tag is kept as an alias of it, so `0.8.0-aws` and `0.8.0` are the same image. Releases before 0.8.0 have only the plain tag. Use the tag that matches the Catchment's own version, since a Duck and its Catchment must run the same Duckstring.
 
 A Duck downloads its Pond's code from the Catchment when it starts. A Pond that declares its own [Python dependencies](writing_ripples.md#python-dependencies) has its environment built at the same time, so the published image runs it as it is. That happens on every cold start, and needs access to the package index (see [networking](#step-3-networking)).
 
@@ -182,11 +183,11 @@ duckstring duck pool add heavy --provider ec2 --instance-type m6i.4xlarge
 duckstring duck set sales --duck heavy
 ```
 
-:::warning Subnet and security group are required
+:::warning[Subnet and security group are required]
 Without them, AWS puts the instance in the VPC's default security group, which usually can't reach the Catchment. The Duck boots and installs, and is then marked unresponsive a minute later, which looks like a crash rather than a networking problem.
 :::
 
-:::warning The AMI's default Python
+:::warning[The AMI's default Python]
 An EC2 Duck boots by running `pip3 install` (when `DUCKSTRING_EC2_PIP_SPEC` is set) and then `python3 -m duckstring.duck`. The image's default `python3` must be 3.10 or newer, with a matching `pip3`. Stock Amazon Linux 2023 has 3.9, and a Duck on it exits without a word.
 
 Bake an AMI instead: launch a small instance, make Python 3.11 the default `python3`, install `duckstring[aws]` and your dependencies with `pip install --force-reinstall`, and create an image. To let Ducks reuse those packages when building a Pond's environment, as in the container image above, install them with `UV_CACHE_DIR=/var/lib/duckstring/uv-cache UV_LINK_MODE=hardlink uv pip install --system` instead; EC2 Ducks use that cache directory. Before creating it, check that `find /usr/local/lib/python3.11/site-packages -name '*.py' -size 0 | wc -l` prints `0`. An interrupted install can leave empty files that a later install skips, and a single one produced a Duck that started and exited successfully having done nothing.
@@ -219,7 +220,7 @@ DUCKSTRING_FLOCK_ATHENA_SCRATCH=s3://acme-lake/flock-scratch
 
 The Duck's role, which dispatches the work, also needs Athena and Glue access, plus `s3:GetBucketLocation` and `s3:ListBucketMultipartUploads` on the scratch bucket. Without those, Athena reports "Unable to verify/create output bucket". Give the scratch prefix a lifecycle rule, since everything in it is temporary. StarRocks reads the same kind of scratch prefix with its own instance profile, so on AWS its role needs read and write access to it too.
 
-DuckDB stays the authority on results: Athena only gets constructs measured to agree with DuckDB, and every result is cast to DuckDB's schema and checked against a local recompute of a sample before it's used. Anything else runs in the Duck. [Offloading Large Recomputes](offloading_large_recomputes.md#accuracy-on-starrocks-and-athena) has the detail.
+DuckDB stays the authority on results: Athena only gets constructs measured to agree with DuckDB, and every result is cast to DuckDB's schema and checked against a local recompute of a sample before it's used. Anything else runs in the Duck. [Offloading Large Recomputes](offloading_large_recomputes.md#accuracy-on-other-engines) has the detail.
 
 ## Where data goes
 
@@ -268,7 +269,7 @@ Duckstring itself costs nothing; you pay AWS for:
 
 If cloud Ducks don't start:
 
-- [ ] `duckstring catchment settings` shows `cloud: enabled`
+- [ ] `duckstring catchment settings` shows `compute: enabled`
 - [ ] The Catchment's role has `ecs:TagResource`, and `iam:PassRole` for every role it hands out
 - [ ] The execution role has both log-group ARN forms
 - [ ] `sg-catchment` allows the Catchment's port from `sg-duck`

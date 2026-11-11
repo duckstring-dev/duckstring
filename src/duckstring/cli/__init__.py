@@ -3,6 +3,7 @@ from __future__ import annotations
 import typer
 
 from . import alert as alert_cmd
+from . import app as app_cmd
 from . import catchment as catchment_cmd
 from . import data as data_cmd
 from . import duck as duck_cmd
@@ -86,6 +87,7 @@ app.add_typer(duck_cmd.app, name="duck")
 app.add_typer(spout_cmd.app, name="spout")
 app.add_typer(secret_cmd.app, name="secret")
 app.add_typer(alert_cmd.app, name="alert")
+app.add_typer(app_cmd.app, name="app")
 
 
 def main() -> None:

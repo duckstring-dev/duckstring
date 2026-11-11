@@ -149,6 +149,10 @@ class Pond:
     # Source's output to an external system, is run by the egress worker (not a Duck), and never
     # propagates (a Wake up, terminal down). The egress dual of a Draw. See plans/egress.md.
     is_spout: bool = False
+    # An App (plans/apps.md): a terminal Outlet that serves HTTP. It has nothing to compute, so a Run of it
+    # completes in the engine at once (a pass, never a BeginRun), and with a standing Wake its freshness
+    # follows its Sources: the freshness a Pond Run would adopt now.
+    is_app: bool = False
     # At least one declared Source (required OR optional) is absent from the Catchment — not deployed
     # and not drawn over a duct. The Pond cannot run with a missing dependency, so it is hard-blocked
     # until every Source is present (e.g. the Source is deployed, or a duct draws it in).
@@ -247,10 +251,9 @@ class ThrottleState:
     # nothing to wait for (else one already throttled through a Source another Refresh paces would hold its
     # first request until a completion that request is needed for).
     completed: bool = True
-    released: bool = False  # Inlets: a release reached it, so its next Run stamps its start
     # Sibling alignment: demand held back from the Sources that aren't throttled until the throttled ones
-    # start a new Run (Source -> (newest demand held back, whether a release)), and their runs_started then.
-    deferred: dict[PondId, tuple[datetime, bool]] = field(default_factory=dict)
+    # start a new Run (Source -> newest demand held back), and their runs_started then.
+    deferred: dict[PondId, datetime] = field(default_factory=dict)
     deferred_at: dict[PondId, int] = field(default_factory=dict)
 
     def copy(self) -> ThrottleState:

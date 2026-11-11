@@ -36,6 +36,19 @@ def pond_data_dir(root: Path, pond_name: str, major: int, data_root: str | None 
     return get_storage(data_root).child(pond_name, f"m{major}", "data")
 
 
+def readable_root(data_root: str | None) -> bool:
+    """Whether DuckDB can read a line's data at ``data_root`` (always, but for a Volume reached through the
+    Files API)."""
+    return data_root is None or get_storage(data_root).duckdb_readable
+
+
+def landing_root(data_root: str | None) -> str | None:
+    """Where a Draw lands its transfers: the data root, or the local layout when DuckDB can't read the data
+    root. A local landing is lost with the machine and drawn again in full, since what a Draw holds is read
+    from its landing."""
+    return data_root if readable_root(data_root) else None
+
+
 def pond_connect(root: Path, pond_name: str, major: int) -> duckdb.DuckDBPyConnection:
     return connect(pond_registry_path(root, pond_name, major))
 
@@ -73,7 +86,9 @@ def resolve_data_dir(root: Path, pond_name: str, major: int, data_root: str | No
 
     Reading the local sidecar is one small local file read; the data root is only touched when the local
     copy actually looks stale, so the fast handoff keeps costing nothing."""
-    if data_root is None:
+    if data_root is None or not readable_root(data_root):
+        # A durable layer DuckDB can't read (a Volume through the Files API) is restored locally at boot
+        # (dataplane.restore_published), so the local publish is the only one read.
         return pond_data_dir(root, pond_name, major, None)
     local = pond_data_dir(root, pond_name, major, None)
     if not local.exists("_trickle.json"):

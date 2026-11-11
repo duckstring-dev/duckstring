@@ -7,12 +7,10 @@ use HTTPS. Referenced from a Spout destination as ``${secret:NAME}``, resolved o
 
 from __future__ import annotations
 
-import os
-
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from .. import auth, cloud
+from .. import auth, providers
 
 router = APIRouter()
 
@@ -35,12 +33,14 @@ def set_secret(request: Request, body: _SecretBody):
         request.app.state.secret_store.set(body.name, body.value)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    # An AWS_* secret is a control-plane credential — apply it to the live environment immediately (an
-    # explicit set wins over any stale ambient value) so boto3 uses it without a restart. This is what
-    # makes the UI "enable cloud" flow actually work.
-    if body.name.startswith(cloud.AWS_SECRET_PREFIX):
-        os.environ[body.name] = body.value
-        cloud._chain_has_credentials.cache_clear()
+    # A cloud's credential secret (AWS_*) is a control-plane credential: apply it to the live environment
+    # immediately (an explicit set wins over any stale ambient value) so the cloud's SDK uses it without a
+    # restart. This is what makes the UI "enable cloud" flow actually work. Only for a cloud with remote
+    # Ducks: until then an AZURE_*/GOOGLE_* secret is just a secret (a Spout's ${secret:} reference).
+    provider = providers.secret_matches(body.name)
+    if provider is not None and provider.compute:
+        provider.apply_secret(body.name, body.value, request.app.state.secret_store)
+        provider.credentials_changed()
         # Adding/rotating a credential must make remote compute usable (and pick up the new value)
         # without a restart — attach or refresh the remote backends live. Guarded so it never fails set.
         try:

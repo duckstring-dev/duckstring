@@ -65,12 +65,15 @@ Where a Catchment stores published tables (`catchment init --data-root`, `catchm
 | Form | Storage |
 |---|---|
 | a local path | A directory on the Catchment's machine. The default is under the state directory. |
-| `/Volumes/...` | A Databricks Volume, used as a local path. |
-| `s3://bucket/prefix` | Amazon S3 or an S3-compatible store. |
-| `gs://bucket/prefix` | Google Cloud Storage. |
-| `abfss://container@account.dfs.core.windows.net/prefix` | Azure Data Lake Storage, configured through the environment. |
+| `/Volumes/...` | A Unity Catalog Volume: a local path where Volumes are mounted, such as on a cluster, and otherwise reached through the Databricks Files API with `DATABRICKS_HOST` and the Databricks credentials, as in a Databricks App. Through the Files API it holds a durable copy, and every table is read from a copy on the Catchment's own disk, restored when it starts. Needs the `duckstring[databricks]` extra there. |
+| `s3://bucket/prefix` | Amazon S3 or an S3-compatible store. Needs the `duckstring[aws]` extra. |
+| `gs://bucket/prefix` | Google Cloud Storage. Needs the `duckstring[gcp]` extra. |
+| `az://container/prefix` | Azure Blob Storage, in the account given by `account_name`. Needs the `duckstring[azure]` extra. |
+| `abfss://container@account.dfs.core.windows.net/prefix` | Azure Data Lake Storage. Needs the `duckstring[azure]` extra. |
 
-Query parameters for `s3://` and `gs://`:
+Credentials and options are query parameters on the URI. Ducks read the data root as well as the Catchment, so a credential in a data root can only be an `${env:NAME}` reference, and the variable must be set wherever Ducks run. Without credentials in the URI, each cloud's usual credentials are used, such as an instance role, an attached service account or a managed identity.
+
+### S3
 
 | Parameter | Description |
 |---|---|
@@ -80,7 +83,39 @@ Query parameters for `s3://` and `gs://`:
 | `endpoint` | An S3-compatible endpoint such as `http://minio:9000`, using path-style addressing. Also settable as `DUCKSTRING_S3_ENDPOINT`. |
 
 ```text
-s3://my-lake/duckstring?region=eu-west-2&key_id=${env:AWS_KEY}&secret=${secret:AWS_SECRET}
+s3://my-lake/duckstring?region=eu-west-2&key_id=${env:AWS_KEY}&secret=${env:AWS_SECRET}
+```
+
+### Google Cloud Storage
+
+| Parameter | Description |
+|---|---|
+| `credentials` | A service-account key: the path to its JSON file, or the JSON itself as a reference. Without it, Google's application default credentials are used: `GOOGLE_APPLICATION_CREDENTIALS`, the service account attached to the machine, or a `gcloud auth application-default login`. `anon` reads a public bucket without credentials. |
+| `key_id`, `secret` | HMAC keys. They cover reading and writing tables, but listing and small files still need Google credentials, so a data root can't use HMAC keys alone. |
+| `endpoint` | Another endpoint, such as an emulator. |
+
+DuckDB reads and writes with an access token made from the Google credentials, which is renewed while less than 40 minutes of its hour remain.
+
+```text
+gs://my-lake/duckstring
+gs://my-lake/duckstring?credentials=/etc/duckstring/gcs-key.json
+```
+
+### Azure
+
+| Parameter | Description |
+|---|---|
+| `account_name` | The storage account, for an `az://` URI. Defaults to `AZURE_STORAGE_ACCOUNT_NAME`. An `abfss://` URI names its account. |
+| `connection_string` | A connection string. Defaults to `AZURE_STORAGE_CONNECTION_STRING`. |
+| `account_key` | An account key. Defaults to `AZURE_STORAGE_ACCOUNT_KEY`. |
+| `sas_token` | A shared access signature. Defaults to `AZURE_STORAGE_SAS_TOKEN`. |
+| `tenant_id`, `client_id`, `client_secret` | A service principal. Default to `AZURE_STORAGE_TENANT_ID`, `AZURE_STORAGE_CLIENT_ID` and `AZURE_STORAGE_CLIENT_SECRET`. |
+
+The first credential that is set is used, in the order of the table. With none, the Azure default credential chain is used: the `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` variables, workload identity, a managed identity, or the Azure CLI's login.
+
+```text
+abfss://lake@acmedata.dfs.core.windows.net/duckstring
+az://lake/duckstring?account_name=acmedata&account_key=${env:AZURE_KEY}
 ```
 
 ## Destination URIs
@@ -95,22 +130,44 @@ file:///srv/exports/sales
 
 Writes `{table}.parquet` into the directory, replacing each file atomically.
 
-### `s3://` and `gs://`
+A Unity Catalog Volume path, `/Volumes/catalog/schema/volume/prefix` (or `file:///Volumes/...`), is written the same way where Volumes are mounted, and through the Databricks Files API elsewhere, as for a [data root](#data-root-uris). Through the Files API a file is visible, and empty, until its upload finishes, so a reader there should follow [change files](#change-files) rather than whole-table files.
+
+### Object storage
 
 ```text
 s3://bucket/prefix?region=eu-west-2
-gs://bucket/prefix?key_id=${env:GCS_HMAC_ID}&secret=${env:GCS_HMAC_SECRET}
+gs://bucket/prefix
+abfss://exports@acmedata.dfs.core.windows.net/duckstring?client_id=${secret:SP_ID}&tenant_id=${secret:SP_TENANT}&client_secret=${secret:SP_SECRET}
 ```
 
-Writes `{prefix}/{table}.parquet`, or with `--mode append`, the table's per-run files.
+`s3://`, `gs://`, `az://` and `abfss://` write `{prefix}/{table}.parquet`, or with `--mode append`, the table's per-run files. They take the parameters of a [data root](#data-root-uris) in the same store, and credentials can also be `${secret:NAME}` references, since Spouts deliver from the Catchment. A `gs://` Spout that writes whole tables can use HMAC keys alone; one with `--mode append` also needs Google credentials. `s3://` also takes:
 
 | Parameter | Description |
 |---|---|
-| `key_id`, `secret` | Credentials. Required for `gs://` (as HMAC keys). For `s3://`, the AWS credential chain is used without them. |
 | `session_token` | An S3 session token. |
-| `region` | S3 region. |
-| `endpoint` | An S3-compatible endpoint such as `http://minio:9000`, as for a [data root](#data-root-uris). Defaults to `DUCKSTRING_S3_ENDPOINT`. The scheme sets whether TLS is used, and addressing is path-style. |
-| `url_style`, `use_ssl` | Override the addressing style (`path` or `vhost`) and TLS for an endpoint. |
+| `url_style`, `use_ssl` | Override the addressing style (`path` or `vhost`) and TLS for an `endpoint`. |
+
+### Change files
+
+With `--mode changes`, a `file://`, `/Volumes/...` or object-storage Spout lands each delivery as files: for each table, the delivery's changes (or the whole table), then a manifest naming those files. The manifest is the commit, so read the manifests rather than listing the table folders.
+
+```text
+orders/2026-11-09T01_00_00+00_00.parquet          changes
+totals/2026-11-09T01_00_00+00_00.full.parquet     the whole table (.full.{i}.parquet when chunked)
+_duckstring/manifests/2026-11-09/01/2026-11-09T01_00_00+00_00.json
+_duckstring/latest.json                           the Spout's progress; leave it in place
+```
+
+Every file has the table's columns plus `_duckstring_f`, the delivery's freshness, and one more column:
+
+| Column | When | Meaning |
+|---|---|---|
+| `_duckstring_op` | the table has a primary key | One row per changed key: `1` with its new row (insert or update), `-1` with its old row (delete). Across deliveries, the newest row for a key wins. |
+| `_duckstring_d` | it has none | The changes as weighted rows: `1` added, `-1` removed. Across deliveries, weights add up per row. |
+
+A whole-table file replaces what a reader holds. One arrives on the first delivery, on a `spout resync`, and when the Spout fell behind the Pond's retained history. A plain (non-Trickle) table arrives whole on every delivery.
+
+A manifest records the delivery's position, the files per table, each table's kind (`changes` or `full`), primary key and row count. Positions order deliveries: a freshness, with `#n` added for a repeat delivery at the same freshness (a resync). The Python functions `duckstring.landing.deliveries(path, after=)` and `duckstring.landing.changes(con, path, table, after=)` read them, the second combining one table's deliveries into a single DuckDB relation.
 
 ### `postgres://`
 
@@ -118,7 +175,7 @@ Writes `{prefix}/{table}.parquet`, or with `--mode append`, the table's per-run 
 postgres://loader:${secret:PG_PASSWORD}@db.internal:5432/analytics?schema=duckstring
 ```
 
-A standard libpq connection URI (`postgresql://` also works). Tables are created in the `schema` query parameter (default `public`), and delivery progress is recorded in a `_duckstring_egress` table there. The table being delivered needs a primary key.
+A standard libpq connection URI (`postgresql://` also works). Tables are created in the `schema` query parameter (default `public`), and delivery progress is recorded in a `_duckstring_egress` table there. Any table can be delivered: a merge Trickle by its primary key, an append Trickle's new rows, and a plain table replaced whole.
 
 ### `ducklake:`
 
@@ -134,9 +191,29 @@ The string DuckDB's `ATTACH` takes for a [DuckLake](https://ducklake.select), fo
 |---|---|
 | `data_path` | Where a new lake keeps its data files. An existing lake uses the path it was created with. |
 | `schema` | The schema tables are delivered to (default `main`). Delivery progress is recorded in a `_duckstring_egress` table there. |
-| `key_id`, `secret`, `session_token`, `region`, `endpoint`, `url_style`, `use_ssl` | Credentials for an `s3://` or `gs://` data path, as for [`s3://` and `gs://`](#s3-and-gs). |
+| store credentials | Credentials for an object-store `data_path`, with the same parameters as an [object-storage destination](#object-storage). |
 
 Any table can be delivered: a merge Trickle by its primary key, an append Trickle's new rows, and a plain table replaced whole. Each delivery is one transaction, so it adds one snapshot to the lake, with author `duckstring` and the Pond as `{name}@{major}` in the commit message. The catalog is never migrated. A lake created under DuckDB 2.0 uses DuckLake 1.1, which DuckDB 1.5 can't read. It needs DuckDB's `ducklake` extension, downloaded on first use.
+
+### `databricks://`
+
+```text
+databricks://adb-1234567890123456.7.azuredatabricks.net/main.sales?warehouse=1a2b3c4d5e6f7a8b&volume=/Volumes/main/sales/staging
+databricks:///main.sales?warehouse=1a2b3c4d5e6f7a8b&volume=/Volumes/main/sales/staging
+```
+
+Delivers to Unity Catalog tables in the `catalog.schema` named by the path. Without a host, it's taken from `DATABRICKS_HOST`, which a Databricks App sets.
+
+| Parameter | Description |
+|---|---|
+| `warehouse` | The SQL warehouse that applies each delivery. Required unless the Catchment has `DATABRICKS_WAREHOUSE_ID`. |
+| `volume` | A Unity Catalog Volume, `/Volumes/<catalog>/<schema>/<volume>`, where each delivery is staged and removed after. Required. |
+| `token` | A personal access token, as a `${secret:NAME}` reference. |
+| `client_id`, `client_secret` | A Databricks service principal's OAuth credentials, as references. |
+
+Without credentials in the destination, the Catchment's `DATABRICKS_TOKEN`, or `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET`, are used, and on Azure Databricks without those, a Microsoft Entra token from the Catchment's identity. The identity needs to use the warehouse, write the Volume, and create and modify tables in the schema. No external location or storage credential is needed.
+
+Any table can be delivered: a merge Trickle as one `MERGE` by its primary key, an append Trickle's new rows, and a plain table replaced whole. An append table's rows carry the freshness of the delivery that wrote them in a `_duckstring_f` column, so a delivery repeated after a crash replaces its own rows rather than adding them again. Delivery progress is recorded in a `_duckstring_egress` table in the schema. A column the source gains is added to the table.
 
 ## Notification URIs
 

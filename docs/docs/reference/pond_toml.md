@@ -26,12 +26,12 @@ products = "1.1.0"
 |---|---|---|---|
 | `name` | string | required | The Pond's name, unique within a Catchment. |
 | `version` | string | required | A semantic version, `MAJOR.MINOR.PATCH`. The major version decides which line a deployment joins: the same major upgrades the running line, a new major deploys alongside it. See [Versioning](../concepts/ponds.md#versioning). |
-| `type` | string | `"pond"` | `"inlet"`, `"pond"` or `"outlet"`. Descriptive: it records the Pond's intended role and is shown in the UI, but doesn't change how it runs. |
+| `type` | string | `"pond"` | `"inlet"`, `"pond"` or `"outlet"`. Descriptive: it records the Pond's intended role and is shown in the UI, but doesn't change how it runs. `"app"` is different: it makes the Pond an [App](#app). |
 | `ripples` | string | `"src/pond.py"` | Path to the module defining the Python Ripples. Optional when the Pond has only [SQL Ripples](#ripples). |
 | `puddles` | string | `"src/puddles.py"` | Path to the module defining the Puddles. |
 | `immediate_retries` | integer | `0` | How many times a failed Ripple is retried within the same Pond Run. |
 | `source_retries` | integer | `0` | How many times a failed Pond Run is retried when a Source next updates. |
-| `memory` | string | | The memory each Python Ripple holds outside DuckDB, such as `"6GB"`, unless the Ripple sets its own with `@ripple(memory=...)`. SQL Ripples and dbt models never need it. See [`@ripple`](python/decorators.md#ripple). |
+| `memory` | string | | The memory each Python Ripple holds outside DuckDB, such as `"6GB"`, unless the Ripple sets its own with `@ripple(memory=...)`. SQL Ripples and dbt models never need it. See [`@ripple`](python/decorators.md#ripple). For an [App](#app), the memory it sets aside while it runs, DuckDB included. |
 | `duck` | string | `"catchment"` | Where the Pond runs: `"catchment"` for the Catchment's own machine, a built-in pool (`"S"`, `"M"`, `"L"`, `"XL"`), or the name of a pool defined on the Catchment. Falls back to the Catchment's machine when cloud compute isn't configured or the pool doesn't exist. See [`duckstring duck`](cli/duck.md). |
 | `dbt_project` | string | | Path to a dbt project directory. Makes this a dbt Pond: each model becomes a Ripple, and the Pond can't also define `@ripple` functions, SQL Ripples or static tables. Needs the `duckstring[dbt]` extra. |
 
@@ -143,3 +143,56 @@ Environments are stored under the Catchment's state directory in `envs/`, one pe
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `tables` | list of strings | `[]` | Tables exposed to users with read-only access when querying the catalog. Users with full access see every table. Can be overridden on the Catchment with [`duckstring data expose`](cli/data.md#data-expose). |
+
+## `[app]`
+
+With `type = "app"`, the Pond is an App: an Outlet that serves HTTP instead of running Ripples. It declares its Sources in `[sources]` like any Pond, so a Refresh on it reaches every Source it reads, and it can't be a Source itself. It has no Ripples, SQL Ripples, static tables or dbt project.
+
+```toml
+[pond]
+name = "sales_dashboard"
+version = "1.0.0"
+type = "app"
+
+[sources]
+reports = "1.2.0"
+
+[app]
+command = 'uvicorn main:app --port $PORT --root-path "$DUCKSTRING_APP_PATH"'
+health = "/healthz"
+```
+
+The Catchment serves the App at `/apps/{name}/v{major}/` on its own port, and `/apps/{name}/` redirects to the major [`pond promote`](cli/pond.md) last chose (the first deployed until then). The first request starts the App's process on the Catchment's machine and waits until it's ready. Requests need the same access as the Catchment's API: none on an open Catchment, otherwise a read-level key, which a browser enters once on a sign-in page. The key is removed before the request reaches the App.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `command` | string | | The command that serves the App, run with `/bin/sh` in the App's directory, with its Python environment's `bin` first on `PATH`. It must listen on `127.0.0.1:$PORT`. |
+| `static` | string | | A directory of files the Catchment serves itself, such as a built frontend. A request for a file in it never reaches the process. An App needs `command`, `static` or both. |
+| `strip_path` | boolean | `true` | Whether requests reach the App with its base path removed, the convention `uvicorn --root-path` and WSGI servers expect. The base path is sent as `X-Forwarded-Prefix` either way. Set `false` for frameworks configured with the full path, such as Streamlit's `server.baseUrlPath`. |
+| `health` | string | | A path, below the base path, that answers `2xx` once the App is ready. Without it, the App is ready once its port accepts connections. |
+| `idle_timeout` | string | `"30m"` | How long without a request before the process stops, such as `"10m"` or `"1h"`. The next request starts it again. `"0"` keeps it running. |
+| `state` | string | `"local"` | `"local"` gives the App a directory that survives restarts and redeploys, for a database or files, at `$DUCKSTRING_APP_STATE`. `"none"` gives it none. |
+| `download` | string | | A command that writes the App's state for [`catchment download`](cli/catchment.md#download) and the state backup. Without it, the App's state isn't included in either. |
+
+The process gets these environment variables:
+
+| Variable | Value |
+|---|---|
+| `PORT` | The port to listen on. |
+| `DUCKSTRING_APP_PATH` | The base path, such as `/apps/sales_dashboard/v1`. |
+| `DUCKSTRING_APP_STATE` | The state directory, with `state = "local"`. |
+| `DUCKSTRING_APP` | What [`duckstring.app.pond()`](python/app.md) reads to give the App a read-only handle on its Sources. |
+
+While the process runs, the App sets `[pond] memory` aside on the Catchment's machine, and the [memory slots](environment.md#ducks) that Pond Runs share divide what's left of the budget. Set it to what the whole App needs, DuckDB included; the App's handle limits DuckDB to that amount. An App that doesn't set it sets nothing aside, and its DuckDB is limited to 256 MB. Running Apps may set aside at most half the budget, and a start that would go past that gets a `503`. The memory comes back when the process stops. DuckDB's limit applies in each process, so in a server with several worker processes, each worker's DuckDB may use that much.
+
+`catchment download` and the state backup never copy an App's files as they are. Only the App knows which of its files matter and how to copy them consistently while it runs, so they include its state only through `download`. The command runs in the App's directory and environment with `$DUCKSTRING_APP_STATE` set, whether or not the App is running, and writes into `$DUCKSTRING_APP_DOWNLOAD` exactly what the state directory should hold after a restore: a consistent copy of a database, say, leaving out anything secret. If it fails or takes longer than 10 minutes, the download fails with its output, and a state backup goes ahead without that App's state. The App's logs are never included.
+
+A Source keeps the version an App is reading. Each request holds what each Source had published when it arrived, until its response has been sent, and a WebSocket connection holds what was published at its latest message from the browser (and at the one before, for a minute). Reads outside a request, such as a background thread or a cache filled at startup, hold theirs with `with pond.hold():`.
+
+A [Tap](cli/refresh.md#refresh-tap) on an App sends it a Refresh on use: every request that reaches the process counts as a query.
+
+A process that exits, or isn't ready within 60 seconds ([`DUCKSTRING_APP_START_TIMEOUT`](environment.md#apps)), is started again on the next request, up to `immediate_retries` times in a row. After that the App fails until it's woken with [`control wake`](cli/control.md) or redeployed. [`duckstring app`](cli/app.md) lists its instances and prints their output.
+
+Nothing can depend on an App, so its version only matters for the major in its address: a new major runs beside the old one. The running version can be redeployed as it is, without bumping it. Its process is stopped and the next request starts the new code.
+
+`duckstring pond run` in an App's directory serves it at `http://127.0.0.1:8000/` against its [Puddles](../guides/testing_with_puddles.md), with an empty base path.

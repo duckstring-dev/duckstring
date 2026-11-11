@@ -1,11 +1,11 @@
 ---
 title: Hosting on a Platform
-description: Run a Catchment on Posit Connect or another Python app host.
+description: Run a Catchment on a platform that hosts Python web apps.
 ---
 
 # Hosting on a Platform
 
-Many teams already have a platform that runs Python web apps, such as Posit Connect, Databricks Apps, or a container service, with authentication handled for them. A Catchment is an ASGI web app, so it can be deployed there like any other. This guide covers the setup, and how to keep the Catchment's state across redeploys, which such platforms don't always preserve.
+Many teams already have a platform that runs Python web apps, such as Databricks Apps or a container service, with authentication handled for them. A Catchment is an ASGI web app, so it can be deployed there like any other. This guide covers the setup, and how to keep the Catchment's state across redeploys, which such platforms don't always preserve.
 
 ## The bundle
 
@@ -34,19 +34,21 @@ Configure the Catchment with environment variables in the platform's settings:
 
 See [Environment Variables](../reference/environment.md) for the rest.
 
-Run exactly one process of the app. The Catchment keeps its scheduler and database in one process, and a second copy would compete with it. On Posit Connect, set "Max processes" to 1 and "Min processes" to 1, so it isn't shut down when idle.
+Run exactly one process of the app. The Catchment keeps its scheduler and database in one process, and a second copy would compete with it. If the platform can stop an app that has had no requests for a while, keep one process running at all times, since the Catchment schedules work between requests.
 
-The web UI works from whatever path the platform serves the app at, such as `/content/{id}/` on Posit Connect.
+The web UI works from whatever path the platform serves the app at, including one below the platform's own address, such as `/content/{id}/`.
 
 ## Authentication
 
-Let the platform control access, and leave `DUCKSTRING_API_KEY` unset. The web UI uses the platform's login session. For the CLI, register the Catchment with whatever header the platform expects. On Posit Connect, that's your Connect API key:
+Let the platform control access, and leave `DUCKSTRING_API_KEY` unset. The web UI uses the platform's login session. For the CLI, register the Catchment with whatever header the platform expects, such as an API key the platform issues:
 
 ```bash
 duckstring catchment connect --name prod \
-  --path https://connect.example.com/content/1a2b3c4d/ \
-  --header "Authorization: Key $CONNECT_API_KEY" --yes
+  --path https://apps.example.com/content/1a2b3c4d/ \
+  --header "Authorization: Bearer $PLATFORM_TOKEN" --yes
 ```
+
+If the platform's tokens expire, use `--header-command` with a command that prints a fresh one; see [`catchment connect`](../reference/cli/catchment.md#connect).
 
 Everyone the platform lets through gets full access to the Catchment, so restrict who can reach the app in the platform's access settings.
 
@@ -64,7 +66,7 @@ duckstring catchment download -c prod        # writes ./.duckstring
 # deploy the bundle as usual
 ```
 
-Download while no runs are in progress. Secrets aren't included, so set them again after redeploying.
+Download while no runs are in progress. Secrets aren't included, so set them again after redeploying. An App's state is included only if the App declares how to write it, with [`[app] download`](../reference/pond_toml.md#app).
 
 **Back it up continuously.** Set `DUCKSTRING_STATE_BACKUP_URI` to an object-store location. The Catchment copies its database there every minute (`DUCKSTRING_CHECKPOINT_INTERVAL`), and its full state when it shuts down cleanly. A Catchment starting with an empty state directory restores from it automatically. This suits platforms with no persistent disk, such as scale-to-zero containers.
 
@@ -76,6 +78,16 @@ Published tables are stored under the state directory by default, which makes th
 DUCKSTRING_DATA_ROOT=s3://acme-lake/duckstring?region=eu-west-2
 ```
 
-Tables then persist independently of the app, downloads stay small, and cloud compute becomes available (see [Cloud Compute on AWS](cloud_compute_on_aws.md)). Credentials come from the platform's AWS setup or from `${env:NAME}` references in the URI.
+Tables then persist independently of the app, downloads stay small, and cloud compute becomes available on that cloud (see Cloud Compute on [AWS](cloud_compute_on_aws.md), [Azure](cloud_compute_on_azure.md) or [Google Cloud](cloud_compute_on_google_cloud.md)). Credentials come from the platform's cloud setup or from `${env:NAME}` references in the URI. Google Cloud Storage and Azure work the same way; see [Data root URIs](../reference/formats.md#data-root-uris).
 
 A data root must belong to one Catchment. A Catchment that finds another live Catchment using its data root refuses to start. If you're sure the other one is gone, for example an old deployment that wasn't shut down cleanly, set `DUCKSTRING_FORCE_TAKEOVER=1` once to claim it.
+
+## BI tools and SQL clients
+
+The platform serves the Catchment at one HTTP address, and the web UI, the CLI, the HTTP API, [Apps](building_apps.md) and `duckstring query` all work through it. The [Postgres and Arrow Flight endpoints](querying.md#from-a-bi-tool-or-sql-client) don't, because they aren't HTTP and each needs a port of its own.
+
+To give BI tools the data, deliver the tables they need with a [Spout](delivering_with_spouts.md) to a database they already connect to, such as Postgres, and connect them there. The database is updated shortly after each run publishes. For BI tools to query the Catchment directly, run it where you can open the ports, as in [Running on a Server](running_on_a_server.md).
+
+## Databricks Apps
+
+On Databricks, a Catchment runs as a custom App: a short start script runs it on the App's port, Databricks' sign-in guards it, and its data root and state backup go on a Unity Catalog Volume, which survives the App's compute restarting. [Running on Databricks](running_on_databricks.md) covers the setup and the access to grant the App's service principal.

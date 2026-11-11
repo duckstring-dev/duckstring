@@ -8,10 +8,15 @@
 # Build (needs both wheels in ./dist, Duckstring's and the Trickle engine's; CI downloads the release
 # artifacts):
 #   python -m build && python -m build packages/trickle --outdir dist && docker build -t duckstring .
+# One image per cloud (plans/azure-gcp.md): EXTRAS picks the cloud's extra (aws, the default; azure or gcp once
+# their compute lands), so an image carries only its own cloud's packages:
+#   docker build --build-arg EXTRAS=aws -t duckstring:0.8.0-aws .
 # The ENTRYPOINT is `python -m`, so `docker run duckstring duckstring.duck --help` works, and Fargate's
 # command override is just `["duckstring.duck", "--pond", ...]`.
 
 FROM python:3.13-slim
+
+ARG EXTRAS=aws
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -25,8 +30,8 @@ RUN useradd --create-home --uid 10001 duck
 
 # The prebuilt wheels: Duckstring's (bundles the schema + web UI) and the Trickle engine's
 # (duckstring-trickle, which Duckstring depends on). Installed rather than `pip install duckstring` so the
-# image always matches the release being built, not whatever PyPI has. The [aws] extra (s3fs + boto3) is
-# included: a Duck launched on EC2/Fargate always reads/writes the data plane on S3. The wheels are KEPT:
+# image always matches the release being built, not whatever PyPI has. The cloud's extra is included
+# ([aws]: s3fs + boto3): a Duck launched on a cloud reads/writes the data plane there. The wheels are KEPT:
 # a Duck whose Pond declares its own environment installs this same Duckstring and Trickle into it, from
 # these files (duckstring.environments.duckstring_requirement), so it works for an unreleased build too.
 COPY dist/*.whl /opt/duckstring/
@@ -37,11 +42,19 @@ COPY dist/*.whl /opt/duckstring/
 # again (measured: 12.7 s -> 3.5 s). One layer, so the chown (uv needs a writable cache) copies nothing.
 RUN pip install uv \
     && uv pip install --system /opt/duckstring/duckstring_trickle-*.whl \
-        "$(ls /opt/duckstring/duckstring-[0-9]*.whl)[aws]" \
+        "$(ls /opt/duckstring/duckstring-[0-9]*.whl)[${EXTRAS}]" \
     && mkdir -p /var/lib/duckstring \
     && chown -R duck:duck /var/lib/duckstring
 USER duck
 WORKDIR /var/lib/duckstring
+
+# DuckDB's extensions for this cloud's storage (httpfs for S3 and GCS, azure for Azure) and for DuckLake
+# Spouts, placed in the duck user's extension directory, where INSTALL finds them and LOAD reads them.
+# Otherwise every new container downloads them at its first read (1-1.6 s and 18-43 MB each, measured), and a
+# Duck in a network with no internet access can't (docker/duckdb_extensions.py fetches the files).
+COPY docker/duckdb_extensions.py /opt/duckstring/
+RUN case "${EXTRAS}" in azure) storage=azure ;; *) storage=httpfs ;; esac \
+    && python /opt/duckstring/duckdb_extensions.py "$storage" ducklake
 
 ENTRYPOINT ["python", "-m"]
 CMD ["duckstring.duck", "--help"]

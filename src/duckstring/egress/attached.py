@@ -5,6 +5,10 @@ extensions), so everything but the ``ATTACH`` itself is common: the in-destinati
 transactional apply, and creating or extending the destination table from the relation's schema. A
 subclass supplies :meth:`AttachedCatalogDriver._attach`.
 
+Any source table works: a merge Trickle's window is applied by its key, an append Trickle's window is
+inserted, and an overwrite table is replaced whole when its version advances (an unchanged one only moves
+the watermark).
+
 **Apply = delete-then-insert in one transaction.** The changelog window is already consolidated per key,
 so deleting the changed and removed keys and re-inserting the present rows is the net effect of an upsert,
 and portable (no reliance on an extension's upsert push-down). The **watermark** lives in the destination
@@ -87,11 +91,6 @@ class AttachedCatalogDriver:
             con.unregister("__ds_full")
 
     def apply_delta(self, con, delta, *, table: str, pk: list[str] | None, f: datetime) -> None:
-        if not pk and self.capabilities().requires_pk:
-            raise ValueError(
-                f"egress to a transactional destination needs a primary key — table {table!r} has none "
-                "(put a merge Trickle, .merge(pk=…), before this Spout)"
-            )
         prefix = self._ensure_attached(con)
         tgt = self._ensure_table(con, prefix, delta.upserts, table, pk)
         cols = ", ".join(qi(c) for c in delta.upserts.columns)

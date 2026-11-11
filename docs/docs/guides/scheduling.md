@@ -30,6 +30,14 @@ In the web UI, select the Pond and choose **Refresh Now**:
   <figcaption>The Refresh section of the sidebar, with <code>reports</code> selected.</figcaption>
 </figure>
 
+When data up to a certain age is good enough, ask for data no older than that instead, and only the Ponds older than it run. The request stops at any Pond that is already that fresh, so a Pond reading from a pipeline another Refresh keeps up to date can be refreshed without running the whole pipeline again:
+
+```bash
+duckstring refresh now reports --fresh-within 1d
+```
+
+In the web UI, the ▾ beside **Refresh Now** opens the same option, **Fresh within**.
+
 To refresh from another system, send the same request over the HTTP API with a key at the demand level or higher:
 
 ```bash
@@ -64,7 +72,7 @@ duckstring refresh add reports --every 1d --start 06:00
 duckstring refresh add reports --every 1d --start 06:00 --on MON,TUE,WED,THU,FRI --name weekday-morning
 ```
 
-A scheduled Refresh asks at each time on its grid, here 06:00 every day (or every weekday), whatever else has refreshed the Pond, and the data is labelled with that time. `--start` takes `HH:MM` in UTC or an ISO 8601 time, `--on` limits it to some weekdays, and `--until` ends it. If the Catchment is down at 06:00, it asks once when it comes back.
+A scheduled Refresh asks at each time on its grid, here 06:00 every day (or every weekday), whatever else has refreshed the Pond. `--start` takes `HH:MM` in UTC or an ISO 8601 time, `--on` limits it to some weekdays, and `--until` ends it. If the Catchment is down at 06:00, it asks once when it comes back.
 
 <figure class="ds-figure">
   <img src="/img/docs/refresh-scheduled.webp" alt="The Recurring Refresh form's options, with Start 06:00 and Monday to Friday selected" width="320" height="420" />

@@ -5,12 +5,17 @@ exported data, registries, and ledgers. SQLite files (`duck.db`, the Duck ledger
 consistent snapshots via the backup API; live WAL sidecars are skipped (the snapshot subsumes
 them). DuckDB registries are copied as-is, so download while the Catchment is quiescent if you
 need the registries to be coherent.
+
+An App's files are never copied as they are (plans/apps.md): its state is included only as what its
+``[app] download`` command writes, run just before the archive streams, and its runtime directory (logs)
+not at all.
 """
 
 from __future__ import annotations
 
 import io
 import queue
+import shutil
 import sqlite3
 import tarfile
 import tempfile
@@ -22,12 +27,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import auth
+from ..app_supervisor import AppDownloadError, app_state_dir, is_app_file, snapshot_apps
 from ..db import locked
 
 router = APIRouter()
 
 _SKIP_SUFFIXES = (".db-wal", ".db-shm")  # subsumed by the SQLite snapshot
-_SKIP_NAMES = {"secrets.json", "secrets.json.tmp"}  # the write-only secret store never travels in a bundle
+_SKIP_NAMES = {"secrets.json", "secrets.json.tmp", "google-credentials.json"}  # secrets never travel in a bundle
 _SERVING_TMP = ".serving-tmp"  # the sandbox's private spill dir (see serving._temp_dir)
 # Top-level dirs rebuilt on demand, never shipped: Pond environments and uv's cache
 # (plans/pond-environments.md). Hundreds of MB, and an environment only works at the path and with the
@@ -62,8 +68,8 @@ def identity(request: Request):
 
 @router.get("/catchment/settings", dependencies=[auth.read])
 def get_settings(request: Request):
-    """The Catchment's cloud config: the data-plane target + the cloud-enable gate (remote data root +
-    AWS creds) and its reasons, so the UI can grey out remote-compute options and explain why. Also
+    """The Catchment's cloud config: the data-plane target + the cloud-enable gate (a data root on a cloud
+    with remote Ducks + that cloud's creds) and its reasons, so the UI can grey out remote-compute options and explain why. Also
     ``has_data`` — once true the data root is set-once (see PUT)."""
     from .. import cloud
     from ..cloud_backends import refresh_credential_status
@@ -95,7 +101,7 @@ def get_migration(request: Request):
 
 
 class _SettingsBody(BaseModel):
-    data_root: str = ""       # an object-store URI (s3://…, gs://…) / path; empty → local (the state root)
+    data_root: str = ""       # an object-store URI (s3://…, gs://…, abfss://…) / path; empty → local
     confirm: str | None = None  # must equal the catchment name to SWITCH once a root / data already exists
     mode: str = "empty"       # "empty" (reset+dormant) | "adopt" (pick up the target) | "migrate" (copy+adopt)
 
@@ -124,7 +130,7 @@ def put_settings(request: Request, body: _SettingsBody):
                 "unchanged": True}
     # Guard against a bare/relative value (e.g. a bucket name with no scheme): it would resolve to a LOCAL
     # relative directory (created in the process cwd), not the intended object store. Require a recognised
-    # object-store URI (s3://…, gs://…) or an absolute path.
+    # object-store URI (s3://…, gs://…, az://…, abfss://…) or an absolute path.
     if new is not None:
         import os
         from urllib.parse import urlsplit
@@ -134,7 +140,8 @@ def put_settings(request: Request, body: _SettingsBody):
         candidate = urlsplit(new).path if new.startswith("file://") else new
         if not is_object_uri(new) and not os.path.isabs(os.path.expanduser(candidate)):
             raise HTTPException(status_code=422, detail=(
-                f"data_root must be an object-store URI (s3://…, gs://…) or an absolute path — got {new!r}. "
+                f"data_root must be an object-store URI (s3://…, gs://…, az://…, abfss://…) or an absolute path, "
+                f"not {new!r}. "
                 f"A bare name is treated as a LOCAL relative directory; an S3 bucket needs the s3:// prefix."))
     # A switch to a NON-local target is gated behind the catchment name once there's an existing root or
     # published data (so it isn't done by accident). Reverting to local (new is None) is the safe escape
@@ -215,7 +222,7 @@ def put_settings(request: Request, body: _SettingsBody):
 
 class _PoolBody(BaseModel):
     name: str
-    provider: str | None = None       # 'fargate' (default) | 'ec2'
+    provider: str | None = None       # a backend on the Catchment's cloud (AWS: 'fargate', the default, | 'ec2')
     instance_type: str | None = None  # EC2 pools
     cpu: int | None = None            # Fargate task cpu units (256 = 0.25 vCPU)
     memory: int | None = None         # Fargate task memory (MiB)
@@ -224,7 +231,7 @@ class _PoolBody(BaseModel):
     idle_timeout: int | None = None   # seconds before scale-down
     keep_warm: int | None = None      # spare capacity beyond current load
     region: str | None = None
-    deploy_config: dict | None = None  # provider AWS deployment config (image/AMI/VPC/IAM); validated
+    deploy_config: dict | None = None  # the backend's deployment config (AWS: image/AMI/VPC/IAM); validated
 
 
 @router.get("/catchment/duck-pools", dependencies=[auth.read])
@@ -239,14 +246,10 @@ def compute_defaults(request: Request):
     """The deployment config each provider's launcher already reads from the environment, plus the field +
     required-field lists — so the UI can show what's inherited from env and validate what's still needed
     (plans/compute-config-ui.md)."""
-    from .. import cloud_deploy
+    from .. import cloud_deploy, providers
 
-    return {
-        "fargate": {"fields": list(cloud_deploy.FARGATE_FIELDS), "env": cloud_deploy.env_defaults("fargate"),
-                    "missing_without_input": cloud_deploy.missing_fields("fargate", None)},
-        "ec2": {"fields": list(cloud_deploy.EC2_FIELDS), "env": cloud_deploy.env_defaults("ec2"),
-                "missing_without_input": cloud_deploy.missing_fields("ec2", None)},
-    }
+    return {b: {"fields": list(cloud_deploy.fields(b)), "env": cloud_deploy.env_defaults(b),
+                "missing_without_input": cloud_deploy.missing_fields(b, None)} for b in providers.all_backends()}
 
 
 @router.post("/catchment/duck-pools", dependencies=[auth.full])
@@ -270,109 +273,44 @@ def delete_duck_pool(request: Request, name: str):
     return {"ok": True}
 
 
-# ─── AWS discovery (instance types) + the cloud-enable verification probe ─────────
+# ─── Instance types + the cloud-enable verification probe ────────────────────────
 #
-# Both use the control-plane AWS creds (env / profile / role, or an AWS_* secret loaded into the env by
-# cloud.load_aws_env). Any AWS failure is a 200 result ({available|ok: false, error}), never a 5xx — the
-# UI degrades to free-text entry and shows the reason rather than erroring.
-
-_INSTANCE_TYPES: dict[str, list[dict]] = {}  # region → sorted spec list; process-lifetime cache
+# Both use the control-plane credentials of the Catchment's cloud (AWS where the data root is local, as
+# before). Any cloud failure is a 200 result ({available|ok: false, error}), never a 5xx: the UI degrades to
+# free-text entry and shows the reason rather than erroring.
 
 
-def _aws_error(exc: Exception) -> str:
-    """A short, non-secret message for the UI. boto3 error strings carry the operation + error code,
-    not credentials, but cap the length so a stray verbose message can't dominate the panel."""
-    msg = str(exc) or exc.__class__.__name__
-    return msg if len(msg) <= 300 else msg[:297] + "..."
+def _provider_for(request: Request):
+    from .. import providers
 
-
-def _region_from_env() -> str | None:
-    import os
-    return os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-
-
-def _describe_instance_types(client) -> list[dict]:
-    """Every current-generation EC2 instance type in the client's region, with vCPU / memory / GPU —
-    enough to render an informative, sortable dropdown."""
-    out: list[dict] = []
-    paginator = client.get_paginator("describe_instance_types")
-    for page in paginator.paginate(Filters=[{"Name": "current-generation", "Values": ["true"]}]):
-        for it in page.get("InstanceTypes", []):
-            gpus = sum(g.get("Count", 0) for g in it.get("GpuInfo", {}).get("Gpus", []))
-            out.append({
-                "name": it["InstanceType"],
-                "vcpu": it.get("VCpuInfo", {}).get("DefaultVCpus"),
-                "memory_gib": round(it.get("MemoryInfo", {}).get("SizeInMiB", 0) / 1024, 1),
-                "gpu": gpus,
-            })
-    out.sort(key=lambda t: (t.get("vcpu") or 0, t.get("memory_gib") or 0, t["name"]))
-    return out
+    return providers.for_data_root(getattr(request.app.state, "data_root", None)) or providers.get("aws")
 
 
 @router.get("/catchment/instance-types", dependencies=[auth.full])
 def instance_types(request: Request, region: str | None = None):
-    """EC2 instance types offered in ``region`` (current generation) with vCPU/memory/GPU — feeds the
-    compute dropdowns so an operator doesn't type an instance type blind. Full-gated (control-plane
-    creds). Cached per region for the process lifetime."""
-    region = (region or "").strip() or _region_from_env()
-    if not region:
-        return {"available": False, "error": "no region — pass ?region= or set AWS_DEFAULT_REGION", "types": []}
-    if region in _INSTANCE_TYPES:
-        return {"available": True, "region": region, "types": _INSTANCE_TYPES[region]}
-    try:
-        import boto3  # lazy — only a cloud-enabled Catchment ever needs it
-        client = boto3.client("ec2", region_name=region)
-        types = _describe_instance_types(client)
-    except Exception as exc:
-        return {"available": False, "region": region, "error": _aws_error(exc), "types": []}
-    _INSTANCE_TYPES[region] = types
-    return {"available": True, "region": region, "types": types}
+    """The VM sizes on offer in ``region`` with vCPU/memory/GPU (AWS: current-generation EC2 instance types),
+    feeds the compute dropdowns so an operator doesn't type an instance type blind. Full-gated
+    (control-plane creds)."""
+    return _provider_for(request).instance_types(region)
 
 
 class _VerifyBody(BaseModel):
-    data_root: str | None = None  # optional: also probe this S3 bucket is writable (before committing it)
-
-
-def _probe_s3_writable(boto3, uri: str, region: str | None) -> None:
-    """Put and delete a tiny probe object under the data-root prefix — proves write access without
-    leaving anything behind. Raises the boto3 error on failure."""
-    rest = uri.split("://", 1)[1]
-    bucket, _, prefix = rest.partition("/")
-    key = f"{prefix.rstrip('/')}/.duckstring-probe" if prefix else ".duckstring-probe"
-    s3 = boto3.client("s3", **({"region_name": region} if region else {}))
-    s3.put_object(Bucket=bucket, Key=key, Body=b"duckstring")
-    s3.delete_object(Bucket=bucket, Key=key)
+    data_root: str | None = None  # optional: also probe this bucket or container is writable (before committing it)
 
 
 @router.post("/catchment/cloud/verify", dependencies=[auth.full])
 def verify_cloud(request: Request, body: _VerifyBody = _VerifyBody()):
-    """Probe the control-plane AWS creds (STS ``GetCallerIdentity``) and, when a ``data_root`` is given,
-    that its S3 bucket is writable (a probe object put+delete) — so the UI can confirm before committing
-    the set-once data root. Returns ``{ok, account?, arn?, region?, bucket_ok?, bucket_error?, error?}``;
-    a credential/permission problem is a 200 ``{ok: false, error}``, not a 5xx. Full-gated."""
-    region = _region_from_env()
-    signing = region or "us-east-1"  # STS/S3 clients need a region to sign; the identity is global
-    try:
-        import boto3
-    except Exception:
-        return {"ok": False, "error": "boto3 is not installed on the Catchment"}
+    """Probe the control-plane credentials (AWS: STS ``GetCallerIdentity``) and, when a ``data_root`` on the
+    same cloud is given, that it's writable (a probe object put+delete), so the UI can confirm before
+    committing the set-once data root. The cloud is the given data root's, else the Catchment's. Returns
+    ``{ok, account?, arn?, region?, bucket_ok?, bucket_error?, error?}``; a credential/permission problem is a
+    200 ``{ok: false, error}``, not a 5xx. Full-gated."""
+    from .. import providers
     from ..cloud_backends import set_credential_status
-    try:
-        ident = boto3.client("sts", region_name=signing).get_caller_identity()
-    except Exception as exc:
-        err = _aws_error(exc)
-        set_credential_status(request.app.state, False, err)  # update the persistent banner immediately
-        return {"ok": False, "region": region, "error": err}
-    set_credential_status(request.app.state, True, None)
-    result = {"ok": True, "account": ident.get("Account"), "arn": ident.get("Arn"), "region": region}
-    root = (body.data_root or "").strip()
-    if root and root.lower().startswith("s3://"):
-        try:
-            _probe_s3_writable(boto3, root, signing)
-            result["bucket_ok"] = True
-        except Exception as exc:
-            result["bucket_ok"] = False
-            result["bucket_error"] = _aws_error(exc)
+
+    provider = providers.for_data_root((body.data_root or "").strip()) or _provider_for(request)
+    result = provider.verify(body.data_root)
+    set_credential_status(request.app.state, bool(result.get("ok")), result.get("error"))  # the banner, now
     return result
 
 
@@ -417,7 +355,10 @@ def _root_files(root: Path) -> list[tuple[Path, str]]:
             continue
         if _SERVING_TMP in path.parts:
             continue  # a serving connection's spill scratch: transient, can be huge, and rebuilt on demand
-        files.append((path, path.relative_to(root).as_posix()))
+        rel = path.relative_to(root)
+        if is_app_file(rel.parts):
+            continue  # an App's own files: only what its download command writes is included
+        files.append((path, rel.as_posix()))
     return files
 
 
@@ -432,9 +373,17 @@ def _tar_size(file_sizes: list[int]) -> int:
 def usage(request: Request):
     """The root's total state size — what `catchment download` would pull. ``archive_bytes`` is a
     close estimate of the tar the archive endpoint streams (SQLite snapshots and long path headers
-    can shift it slightly) — good enough for a progress total."""
-    files = _root_files(Path(request.app.state.root))
+    can shift it slightly), good enough for a progress total. An App's download is estimated by its
+    state directory's size, since its command only runs for the archive."""
+    root = Path(request.app.state.root)
+    files = _root_files(root)
     sizes = [p.stat().st_size for p, _ in files]
+    driver = request.app.state.driver
+    for key in driver.app_keys():
+        view = driver.app_view(key)
+        if view and view["app"].get("download"):
+            state = app_state_dir(root, view["name"], view["major"])
+            sizes += [f.stat().st_size for f in state.rglob("*") if f.is_file()] if state.is_dir() else []
     return {"total_bytes": sum(sizes), "file_count": len(files), "archive_bytes": _tar_size(sizes)}
 
 
@@ -469,8 +418,13 @@ class _QueueWriter(io.RawIOBase):
 @router.get("/catchment/archive", dependencies=[auth.full])
 def archive(request: Request):
     """Stream the Catchment root as an uncompressed tar (no server-side temp copy of the data;
-    SQLite files are snapshotted one at a time)."""
+    SQLite files are snapshotted one at a time). Apps' download commands run first, so a failing one
+    is an error response rather than a broken stream."""
     root = Path(request.app.state.root)
+    try:
+        app_tmp, app_files = snapshot_apps(request.app.state.driver, root)
+    except AppDownloadError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     files = _root_files(root)
     q: queue.Queue = queue.Queue(maxsize=64)  # bounded: production blocks until the client drains
 
@@ -481,7 +435,11 @@ def archive(request: Request):
                     for path, arcname in files:
                         src = _sqlite_snapshot(path, tmpdir) if path.suffix == ".db" else path
                         tar.add(src, arcname=arcname, recursive=False)
+                    for path, arcname in app_files:  # as the App's command wrote them, never snapshotted
+                        tar.add(path, arcname=arcname, recursive=False)
         finally:
+            if app_tmp is not None:
+                shutil.rmtree(app_tmp, ignore_errors=True)
             q.put(None)
 
     threading.Thread(target=produce, daemon=True).start()

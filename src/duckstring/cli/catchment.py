@@ -156,6 +156,7 @@ def _register_or_abort(
     name: str, url: str, kind: str, root: str | None = None, key: str | None = None,
     headers: dict[str, str] | None = None, data_root: str | None = None,
     state_backup: str | None = None, checkpoint_every: str | None = None,
+    header_commands: dict[str, str] | None = None,
 ) -> None:
     """Call register_catchment, printing a friendly error on conflict."""
     from .config import CatchmentConflict, register_catchment
@@ -164,6 +165,7 @@ def _register_or_abort(
         register_catchment(
             name, url=url, kind=kind, root=root, key=key, headers=headers,
             data_root=data_root, state_backup=state_backup, checkpoint_every=checkpoint_every,
+            header_commands=header_commands,
         )
     except CatchmentConflict as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -214,8 +216,27 @@ def _parse_headers(values: Optional[list[str]]) -> Optional[dict[str, str]]:
 
 _HEADER_HELP = (
     "A header sent with every request to this Catchment, as 'Name: value'. Repeatable. For a hosting "
-    "platform that authenticates requests, e.g. 'Authorization: Key ...' for Posit Connect."
+    "platform that authenticates requests, e.g. 'Authorization: Bearer ...'."
 )
+_HEADER_COMMAND_HELP = (
+    "A header whose value a shell command prints, as 'Name: command', run again when the token it gives "
+    "expires. Repeatable. For a platform with short-lived tokens, e.g. "
+    "'Authorization: databricks auth token --host https://adb-....azuredatabricks.net' for a Databricks App."
+)
+
+
+def _parse_header_commands(values: Optional[list[str]]) -> Optional[dict[str, str]]:
+    """``["Name: command", ...]`` → ``{name: command}``; friendly error on a malformed entry."""
+    if not values:
+        return None
+    commands: dict[str, str] = {}
+    for raw in values:
+        hname, sep, command = raw.partition(":")
+        if not sep or not hname.strip() or not command.strip():
+            typer.echo(f"Error: invalid --header-command {raw!r} — use 'Name: command'.", err=True)
+            raise typer.Exit(1)
+        commands[hname.strip()] = command.strip()
+    return commands
 
 
 @app.command()
@@ -229,8 +250,8 @@ def init(
     ),
     data_root: Optional[str] = typer.Option(
         None, "--data-root", help="Where published tables are stored: a local path, or a URI such as "
-                                  "s3://, gs://, abfss:// or /Volumes/. Credentials as ${env:NAME} in the "
-                                  "URI query. Defaults to under --root."
+                                  "s3://, gs://, az://, abfss:// or /Volumes/. Credentials as ${env:NAME} in "
+                                  "the URI query. Defaults to under --root."
     ),
     state_backup: Optional[str] = typer.Option(
         None, "--state-backup", help="Where to copy state checkpoints (object store or path), so a "
@@ -293,20 +314,24 @@ def init(
         state_backup = state_backup or existing.get("state_backup")
         checkpoint_every = checkpoint_every or existing.get("checkpoint_every")
     store_kw = dict(data_root=data_root, state_backup=state_backup, checkpoint_every=checkpoint_every)
+    header_commands = existing.get("header_commands") if existing else None
 
     if existing:
         if existing_root == str(root_dir):
             typer.echo(f"Catchment '{name}' already registered at {root_dir}.")
-            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers, **store_kw)
+            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers,
+                           header_commands=header_commands, **store_kw)
         else:
             typer.echo(f"Catchment '{name}' is already registered with data at: {existing_root}")
             if not typer.confirm(f"Update root to {root_dir}?", default=False):
                 raise typer.Exit(0)
             root_dir.mkdir(parents=True, exist_ok=True)
-            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers, **store_kw)
+            _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers,
+                           header_commands=header_commands, **store_kw)
     else:
         root_dir.mkdir(parents=True, exist_ok=True)
-        _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers, **store_kw)
+        _register_or_abort(name, url=url, kind="local", root=str(root_dir), key=key, headers=headers,
+                           header_commands=header_commands, **store_kw)
         _offer_default(name, yes)
 
     if no_start:
@@ -376,12 +401,14 @@ def rotate_keys(
 def settings(
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
     data_root: Optional[str] = typer.Option(
-        None, "--data-root", help="Set where published tables are stored: s3://, gs:// or a shared path."),
+        None, "--data-root", help="Set where published tables are stored: s3://, gs://, az://, abfss:// or a "
+                                  "shared path."),
 ) -> None:
     """Show the Catchment's cloud configuration, or set where published tables are stored.
 
-    The data root can only be changed before any Pond has published data. Cloud compute is enabled once the
-    data root is remote and AWS credentials are available.
+    The data root can only be changed before any Pond has published data. Its scheme picks the Catchment's
+    cloud (s3:// AWS, az:// or abfss:// Azure, gs:// Google Cloud), and cloud compute is enabled once that
+    cloud's credentials are available.
     """
     from . import _http
     from .config import resolve_catchment
@@ -391,11 +418,20 @@ def settings(
         _http.put(f"{cfg['url']}/api/catchment/settings", auth=cfg, json={"data_root": data_root})
         typer.echo(f"Data root set to {data_root}.")
     got = _http.get(f"{cfg['url']}/api/catchment/settings", auth=cfg).json()
+    title = got.get("provider_title")
     typer.echo(f"data root:  {got.get('data_root') or '(local)'}")
-    typer.echo(f"AWS creds:  {'yes' if got.get('aws_configured') else 'no'}")
-    typer.echo(f"cloud:      {'enabled' if got.get('cloud_enabled') else 'disabled'}"
-               + ("" if got.get("cloud_enabled")
-                  else "  (needs a remote data root + AWS credentials)"))
+    typer.echo(f"cloud:      {title or '(none)'}")
+    if title and got.get("compute_available"):
+        typer.echo(f"creds:      {'yes' if got.get('credentials_configured') else 'no'}")
+    if got.get("cloud_enabled"):
+        reason = ""
+    elif not title:
+        reason = "  (needs a data root on a cloud, such as s3://)"
+    elif not got.get("compute_available"):
+        reason = f"  (remote Ducks on {title} aren't available yet; Catchment Ducks read this data root)"
+    else:
+        reason = f"  (needs {title} credentials)"
+    typer.echo(f"compute:    {'enabled' if got.get('cloud_enabled') else 'disabled'}{reason}")
     if got.get("has_data"):
         typer.echo("note:       the data root is now set-once (the Catchment has published data).")
 
@@ -432,12 +468,14 @@ def connect(
         None, "--key", help="An API key to send with every request to this Catchment."
     ),
     header: Optional[list[str]] = typer.Option(None, "--header", help=_HEADER_HELP),
+    header_command: Optional[list[str]] = typer.Option(None, "--header-command", help=_HEADER_COMMAND_HELP),
     yes: bool = typer.Option(False, "--yes", "-y", help="Make it the default Catchment without asking."),
 ) -> None:
     """Register a Catchment running elsewhere."""
     from rich.console import Console
 
-    _register_or_abort(name, url=path, kind="remote", key=key, headers=_parse_headers(header))
+    _register_or_abort(name, url=path, kind="remote", key=key, headers=_parse_headers(header),
+                       header_commands=_parse_header_commands(header_command))
     console = Console()
     console.print(f"[green]Registered[/green] catchment [bold]{name}[/bold] → {path}")
     _offer_default(name, yes)
@@ -536,6 +574,7 @@ def download(
 
     Use it for a backup, or to carry state across a platform redeploy. Secrets are never included, and
     neither are published tables held in an external data root. Download while nothing is running.
+    An App's state is included only as its [app] download command writes it.
     """
     import tarfile
     import tempfile
@@ -571,7 +610,14 @@ def download(
                 "GET", f"{url}/api/catchment/archive", headers=auth_headers(cfg),
                 timeout=httpx.Timeout(None, connect=5.0),
             ) as resp:
-                resp.raise_for_status()
+                if resp.status_code >= 400:  # an App's download command failed, say: show why
+                    resp.read()
+                    try:
+                        detail = resp.json().get("detail") or resp.text
+                    except ValueError:
+                        detail = resp.text
+                    typer.echo(f"Error: {resp.status_code} from Catchment\n{detail}", err=True)
+                    raise typer.Exit(1)
                 with Progress(
                     TextColumn("[progress.description]{task.description}"), BarColumn(),
                     DownloadColumn(), TransferSpeedColumn(), console=console,

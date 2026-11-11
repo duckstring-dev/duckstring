@@ -607,9 +607,33 @@ def publish_plan(con, data_dir: Path, f=None, held=frozenset(), *, write: bool =
         payload["state"] = existing["state"]
     if f_iso is not None:
         payload[trickle.RUN_KEY] = {"f": f_iso}
+        inputs = _run_inputs(con, f, existing)
+        if inputs:
+            payload[trickle.RUN_KEY]["inputs"] = inputs
     if write:  # the commit marker: an export validates first (write=False) and commits after its files
         trickle.write_sidecar(data_dir, payload)
     return tables
+
+
+def _run_inputs(con, f, existing: dict) -> dict:
+    """What the run read from outside the Catchment (:mod:`duckstring.databricks`), for the run stamp: each
+    input's newest recorded state at or before ``f`` (``core.INPUTS_TABLE``), over the previous stamp's for
+    inputs this run didn't read. A Duck that rebuilt its registry reads it back (``Pond._input_state``)."""
+    import json
+
+    import duckdb
+
+    from . import trickle_io as trickle
+    from .core import INPUTS_TABLE
+
+    inputs = dict((existing.get(trickle.RUN_KEY) or {}).get("inputs") or {})
+    try:
+        rows = con.execute(f"SELECT ref, arg_max(state, f) FROM {INPUTS_TABLE} WHERE f <= ? GROUP BY ref",
+                           [f]).fetchall()
+    except duckdb.CatalogException:
+        rows = []
+    inputs.update({ref: json.loads(state) for ref, state in rows})
+    return inputs
 
 
 def held_tables(data_dir, held, sidecar=None) -> set[str]:
@@ -761,6 +785,9 @@ class ParquetDataPlane(DataPlane):
                         con.execute(f"COPY ({_concrete_select(con, table)}) TO '{uri}' (FORMAT PARQUET)")
             for main in merge_mains:
                 _publish_tiered_main(con, data_dir, main, f)
+            if f is not None:
+                # Before the commit, so the registry is never behind its sidecar.
+                retry_on_lock(lambda: record_published(con, f))
             publish_plan(con, data_dir, f, held=kept)  # commit: every file it declares is in place
             if retain_from is not KEEP_ALL:
                 prune_versions(data_dir, retain_from)  # after the new version is in place
@@ -1222,7 +1249,49 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
                 loaded = True
         if loaded:
             hydrated.append(table)
+    run = (sidecar.get(trickle.RUN_KEY) or {}).get("f")
+    if run:
+        record_published(con, datetime.fromisoformat(run))
     return hydrated
+
+
+# ─── how far a registry is published ─────────────────────────────────────────
+#
+# A registry and its published state are restored separately on some platforms: a state backup holds the
+# registries, the durable data root the publishes. A backup older than the data root (a shutdown that died
+# mid-upload leaves the previous one) restores a registry behind what is published, and resuming from it would
+# apply changes against old state. Each export records its run's freshness in the registry, so a Duck can tell.
+
+PUBLISHED_TABLE = f"{RESERVED_PREFIX}published"
+
+
+def record_published(con, f) -> None:
+    """Record that ``con``'s registry holds the state published at ``f`` (kept as the newest)."""
+    con.execute(f'CREATE TABLE IF NOT EXISTS "{PUBLISHED_TABLE}" (f TIMESTAMPTZ)')
+    con.execute(f'DELETE FROM "{PUBLISHED_TABLE}" WHERE f < ?', [f])
+    con.execute(f'INSERT INTO "{PUBLISHED_TABLE}" SELECT ? WHERE NOT EXISTS (SELECT 1 FROM "{PUBLISHED_TABLE}")', [f])
+
+
+def registry_behind(con, *stores):
+    """The published run's freshness when ``con``'s registry is older than it, else None. Read from the
+    first of ``stores`` with a sidecar. A registry with no record (empty, wiped by a Rebuild, or written
+    before the record existed) is never called behind."""
+    from . import trickle_io as trickle
+
+    if not trickle._table_exists(con, PUBLISHED_TABLE):
+        return None
+    for store in stores:
+        if store is None:
+            continue
+        store = _as_storage(store)
+        if store.exists("_trickle.json"):
+            run = (trickle.load_sidecar(store).get(trickle.RUN_KEY) or {}).get("f")
+            if not run:
+                return None
+            published = datetime.fromisoformat(run)
+            held = first_row(con.execute(f'SELECT max(f) FROM "{PUBLISHED_TABLE}"'))[0]
+            return published if held is None or held < published else None
+    return None
 
 
 def restore_tree(src, dest) -> int:
@@ -1243,6 +1312,47 @@ def restore_tree(src, dest) -> int:
         dest.write_bytes(src.read_bytes(name), name)
         count += 1
     return count
+
+
+def restore_published(root, data_root: str) -> dict[str, int]:
+    """Restore every line's local publish from a durable ``data_root`` that DuckDB can't read (a Volume through
+    the Files API), at Catchment start, before any Duck runs: reads only ever take the local copy there
+    (``registry.resolve_data_dir``), so a machine that lost its disk must have it back first. A line is restored
+    when its local sidecar is missing or older than the durable one. Returns ``{"name@major": files}``."""
+    from pathlib import Path
+
+    from .catchment.registry import pond_data_dir
+    from .storage import get_storage
+
+    plane = get_storage(data_root)
+    restored: dict[str, int] = {}
+    for name in plane.subdir_names():
+        for line in plane.child(name).subdir_names():
+            if not (line.startswith("m") and line[1:].isdigit()):
+                continue
+            remote = plane.child(name, line, "data")
+            remote_f = _sidecar_run_f(remote)
+            if remote_f is None:
+                continue
+            local = pond_data_dir(Path(root), name, int(line[1:]), None)
+            local_f = _sidecar_run_f(local)
+            if local_f is not None and local_f >= remote_f:
+                continue
+            restored[f"{name}@{line[1:]}"] = restore_tree(remote, local)
+    return restored
+
+
+def _sidecar_run_f(store) -> str | None:
+    """The freshness a published layout's sidecar commits to (its run stamp, else the newest entry), or ``None``
+    when it has no readable sidecar."""
+    from .catchment.driver import _plane_freshness
+    from .trickle.io import load_sidecar
+
+    try:
+        sidecar = load_sidecar(store)
+    except Exception:  # noqa: BLE001
+        return None
+    return _plane_freshness(sidecar) if sidecar else None
 
 
 def persist_tree(local_dir, dest) -> int:

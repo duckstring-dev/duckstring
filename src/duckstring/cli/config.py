@@ -29,15 +29,123 @@ def save_config(config: dict[str, Any]) -> None:
     CONFIG_FILE.chmod(0o600)  # may hold API keys / auth headers
 
 
-def auth_headers(cfg: dict[str, Any]) -> dict[str, str]:
+def auth_headers(cfg: dict[str, Any], refresh: bool = False) -> dict[str, str]:
     """The auth headers to attach to every request to a registered Catchment: its custom ``headers``
-    table (``catchment connect --header``), with ``Authorization: Bearer {key}`` filled in from
-    ``key`` when no explicit Authorization header is set."""
+    table (``catchment connect --header``), the values its ``header_commands`` print
+    (``--header-command``; cached, and run again when ``refresh``), with ``Authorization: Bearer {key}``
+    filled in from ``key`` when no explicit Authorization header is set."""
     headers = {str(k): str(v) for k, v in cfg.get("headers", {}).items()}
+    for name, command in (cfg.get("header_commands") or {}).items():
+        headers[str(name)] = command_header(str(name), str(command), refresh=refresh)
     key = cfg.get("key")
     if key and not any(h.lower() == "authorization" for h in headers):
         headers["Authorization"] = f"Bearer {key}"
     return headers
+
+
+_HEADER_MARGIN_S = 300  # a cached value is run again this long before it expires
+
+
+class HeaderCommandError(RuntimeError):
+    """A ``--header-command`` failed or printed nothing."""
+
+
+def command_header(name: str, command: str, refresh: bool = False) -> str:
+    """The value of a header whose value a command prints (``catchment connect --header-command``), for a
+    token that expires, such as Databricks Apps' or a private Cloud Run service's. The command runs in the
+    shell. Its output is the value, except that JSON with an ``access_token`` (``databricks auth token``)
+    gives ``Bearer <access_token>``, and a bare token for an ``Authorization`` header gets ``Bearer``.
+    The value is cached (in ``header-cache.json``, 0600) until shortly before the token's expiry, when that
+    is known (a JWT's ``exp``, or the JSON's ``expiry``); otherwise the command runs on every use."""
+    import hashlib
+    import subprocess
+    import time
+
+    key = hashlib.sha256(f"{name}\n{command}".encode()).hexdigest()[:24]
+    cache = _read_header_cache()
+    hit = cache.get(key)
+    if hit and not refresh and hit.get("expires", 0) > time.time() + _HEADER_MARGIN_S:
+        return hit["value"]
+    try:
+        done = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise HeaderCommandError(f"the command for header {name} took over 2 minutes: {command}") from None
+    out = done.stdout.strip()
+    if done.returncode != 0 or not out:
+        detail = (done.stderr.strip() or "no output").splitlines()[-1]
+        raise HeaderCommandError(f"the command for header {name} failed ({detail}): {command}")
+    value, expires = _header_value(name, out)
+    if expires is not None:
+        cache = {k: v for k, v in cache.items() if v.get("expires", 0) > time.time()}
+        cache[key] = {"value": value, "expires": expires}
+        _write_header_cache(cache)
+    return value
+
+
+def _header_value(name: str, out: str) -> tuple[str, float | None]:
+    """The header value a command's output gives, and when it expires (epoch seconds) if that's known."""
+    import json
+    from datetime import datetime
+
+    token, expires = None, None
+    if out.startswith("{"):
+        try:
+            data = json.loads(out)
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and data.get("access_token"):
+            token = data["access_token"]
+            value = f"{data.get('token_type') or 'Bearer'} {token}"
+            if data.get("expiry"):
+                try:
+                    expires = datetime.fromisoformat(str(data["expiry"]).replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    pass
+        else:
+            value = out
+    elif "authorization" in name.lower() and not any(c.isspace() for c in out):
+        token, value = out, f"Bearer {out}"
+    else:
+        value = out
+    token = token or value.split()[-1]
+    return value, expires if expires is not None else _jwt_expiry(token)
+
+
+def _jwt_expiry(token: str) -> float | None:
+    """A JWT's ``exp`` claim, read without verifying it (only to know when to fetch another)."""
+    import base64
+    import json
+
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+        return float(payload["exp"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def _read_header_cache() -> dict[str, Any]:
+    import json
+
+    try:
+        return json.loads((CONFIG_DIR / "header-cache.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_header_cache(cache: dict[str, Any]) -> None:
+    import json
+    import os
+
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    path = CONFIG_DIR / "header-cache.json"
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(cache, fh)
+    os.replace(tmp, path)
 
 
 class CatchmentConflict(Exception):
@@ -53,6 +161,7 @@ def register_catchment(
     name: str, url: str, kind: str = "local", root: str | None = None, key: str | None = None,
     headers: dict[str, str] | None = None, data_root: str | None = None,
     state_backup: str | None = None, checkpoint_every: str | None = None,
+    header_commands: dict[str, str] | None = None,
 ) -> None:
     config = load_config()
     catchments = config.setdefault("catchments", {})
@@ -76,6 +185,7 @@ def register_catchment(
         **({"root": root} if root else {}),
         **({"key": key} if key else {}),
         **({"headers": headers} if headers else {}),
+        **({"header_commands": header_commands} if header_commands else {}),
         **({"data_root": data_root} if data_root else {}),
         **({"state_backup": state_backup} if state_backup else {}),
         **({"checkpoint_every": checkpoint_every} if checkpoint_every else {}),

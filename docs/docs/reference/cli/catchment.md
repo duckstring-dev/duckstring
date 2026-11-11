@@ -26,7 +26,7 @@ Creates a Catchment on this machine, registers it under `NAME`, offers to make i
 | `--host` | `127.0.0.1` | Address to bind. |
 | `--port`, `-p` | `7474` | Port to listen on. The web UI is served at the same address. |
 | `--root` | `~/.duckstring/{name}` | Directory for the Catchment's state (its database, run ledgers and working databases). Must be a local path. |
-| `--data-root` | under `--root` | Where published tables are stored: a local path or an object-store URI (`s3://`, `gs://`, `abfss://`, `/Volumes/...`). Credentials go in the URI query as `${env:NAME}`. See [Formats](../formats.md#data-root-uris). |
+| `--data-root` | under `--root` | Where published tables are stored: a local path or an object-store URI (`s3://`, `gs://`, `az://`, `abfss://`, `/Volumes/...`). Credentials go in the URI query as `${env:NAME}`. See [Formats](../formats.md#data-root-uris). |
 | `--state-backup` | none | An object-store URI or path to copy state checkpoints to, so a Catchment on a disposable machine can recover its state. |
 | `--checkpoint-every` | `60s` | How often the state database is copied to `--state-backup`. |
 | `--key` | none | A single full-access API key the server requires. The registration stores it so the CLI sends it. |
@@ -48,7 +48,8 @@ Starts the server for a Catchment registered on this machine, with the settings 
 ### `connect`
 
 ```bash
-duckstring catchment connect --name NAME --path URL [--key KEY] [--header 'Name: value'] [--yes]
+duckstring catchment connect --name NAME --path URL [--key KEY] [--header 'Name: value']
+                             [--header-command 'Name: command'] [--yes]
 ```
 
 Registers a Catchment running elsewhere.
@@ -58,7 +59,8 @@ Registers a Catchment running elsewhere.
 | `--name`, `-n` | Name to register it under. |
 | `--path` | The Catchment's URL. |
 | `--key` | An API key to send with every request. |
-| `--header` | A header to send with every request, as `'Name: value'`. Repeatable. Use it when a hosting platform authenticates requests, for example `'Authorization: Key ...'` for Posit Connect. |
+| `--header` | A header to send with every request, as `'Name: value'`. Repeatable. Use it when a hosting platform authenticates requests, for example `'Authorization: Bearer ...'`. |
+| `--header-command` | A header whose value a shell command prints, as `'Name: command'`. Repeatable. For a platform whose tokens expire, such as a Databricks App or a private Cloud Run service. JSON with an `access_token` (as `databricks auth token` prints) is sent as `Bearer <token>`, and so is a bare token for an `Authorization` header. The value is kept until shortly before the token expires (read from a JWT's `exp` or the JSON's `expiry`), then the command runs again; a token the Catchment refuses is fetched again once. Without a known expiry the command runs for every request. A Duct stores only the value at the time it was made. |
 | `--yes`, `-y` | Make it the default without asking. |
 
 ### `list`
@@ -93,7 +95,7 @@ Removes a registration. For a Catchment on this machine, asks whether to delete 
 duckstring catchment settings [-c NAME] [--data-root URI]
 ```
 
-Shows the Catchment's cloud configuration, including whether cloud compute is enabled. With `--data-root`, sets where published tables are stored (`s3://`, `gs://` or a shared path). The data root can only be changed before any Pond has published data. Cloud compute is enabled once the data root is remote and AWS credentials are available to the Catchment.
+Shows the Catchment's cloud configuration, including whether cloud compute is enabled. With `--data-root`, sets where published tables are stored (`s3://`, `gs://`, `az://`, `abfss://` or a shared path). The data root can only be changed before any Pond has published data. The data root's scheme picks the Catchment's cloud (`s3://` AWS, `az://` or `abfss://` Azure, `gs://` Google Cloud), and cloud compute is enabled once that cloud's credentials are available to the Catchment. The output's `compute` line says whether it is, and why not.
 
 ### `rotate-keys`
 
@@ -116,7 +118,7 @@ Replaces the Catchment's API keys and prints the new ones once. The old key for 
 duckstring catchment download [-c NAME] [--path DIR] [--yes]
 ```
 
-Downloads the Catchment's state directory: its database, deployed code, run ledgers and working databases. Use it to back up a Catchment, or to carry its state across a platform redeploy. Shows the size and asks for confirmation first. Secrets are never included, nor are Pond environments, which are rebuilt when needed. When the Catchment has an external data root, the published tables are not included, since they're already stored there.
+Downloads the Catchment's state directory: its database, deployed code, run ledgers and working databases. Use it to back up a Catchment, or to carry its state across a platform redeploy. Shows the size and asks for confirmation first. Secrets are never included, nor are Pond environments, which are rebuilt when needed. When the Catchment has an external data root, the published tables are not included, since they're already stored there. An App's state is included only as its [`download`](../pond_toml.md#app) command writes it, and its logs aren't included.
 
 Download while nothing is running: the working databases are copied as they are.
 

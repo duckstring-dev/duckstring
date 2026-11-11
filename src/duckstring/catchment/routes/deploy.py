@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from ...keys import pond_key
 from ...keys import version_key as _version_key
 from ...trickle_io import first_row
 from .. import auth
@@ -46,6 +47,16 @@ def _selected_version(db, source_name: str, major: int) -> str | None:
         (source_name, major),
     ))
     return row[0] if row else None
+
+
+def _is_live_version(db, name: str, version: str) -> bool:
+    """Whether ``version`` is the one its major line runs. A version is an immutable artifact, so redeploying
+    it is refused without ``force``: forced, a running Duck keeps the code it loaded (its restart check
+    compares versions) while the version's directory is replaced under it. An App is exempt (nothing pins
+    it): its instance is stopped and the next request starts the new deploy (``deployed_at`` tells them
+    apart). A removed or older version is a restore or a rollback, never refused."""
+    with locked(db):
+        return _selected_version(db, name, int(version.split(".")[0])) == version
 
 
 def _check_version_contracts(db, pn_id: int, name: str, version: str, cfg: dict) -> None:
@@ -102,7 +113,7 @@ def _pond_config(toml_path: Path) -> dict:
     are operational config managed via `duckstring window`, not declared at deploy time.)"""
     cfg = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": None, "dbt_project": None,
            "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None,
-           "flock_accept": None}
+           "flock_accept": None, "app": None}
     if not toml_path.exists():
         return cfg
     info = _read_toml(toml_path.read_text(encoding="utf-8"))
@@ -130,6 +141,17 @@ def _pond_config(toml_path: Path) -> dict:
     if not isinstance(tables, list) or any(not isinstance(t, str) for t in tables):
         raise ValueError("pond.toml [serve] tables: expected a list of table names")
     cfg["serve_tables"] = tables
+    # An App (plans/apps.md): an Outlet that serves HTTP. Stored as an Outlet (pond_name.kind has no 'app'),
+    # with its [app] section on the version.
+    from ...app import app_config
+
+    cfg["app"] = app_config(info, toml_path.parent)
+    if cfg["app"] is not None:
+        cfg["kind"] = "outlet"
+        entry = pond.get("ripples", "src/pond.py")
+        if info.get("ripples") or info.get("static") or cfg["dbt_project"] or (toml_path.parent / entry).exists():
+            raise ValueError(f"an App serves HTTP and has no Ripples: remove {entry}, [ripples], [static] and "
+                             "dbt_project from it, or make it a Pond")
     return cfg
 
 
@@ -202,18 +224,47 @@ def _store_column_lineage(db, name: str, version: str, rows: list[list[str]]) ->
         print(f"[catchment] storing column lineage failed for {name}@{version}: {exc}", flush=True)
 
 
-def _prepare(root: Path, staging: Path, db_catalog: dict) -> tuple[Path, dict]:
-    """Build the staged Pond's environment and discover its Ripples in it. Runs in a worker thread."""
+# An App's one synthetic Ripple: the engine models every node with Ripples, as a Spout's `egress`.
+APP_RIPPLE = "serve"
+
+
+def _prepare(root: Path, staging: Path, db_catalog: dict, *, app: dict | None = None) -> tuple[Path, dict]:
+    """Build the staged Pond's environment and discover its Ripples in it. Runs in a worker thread. An App
+    (``app``, its config) has no Ripples to discover, only its environment to build; its synthetic Ripple
+    carries ``[pond] memory``, what its process holds outside DuckDB, for its memory slots."""
     from ...discover import discover
     from ...environments import ensure_env
 
     python = ensure_env(root, staging)
+    if app is not None:
+        return python, {"ripples": [{"name": APP_RIPPLE, "parents": [], "memory": app.get("memory")}], "lineage": []}
     return python, discover(python, staging, db_catalog)
 
 
+def _check_apps_terminal(db, pn_id: int, name: str, major: int, cfg: dict) -> None:
+    """An App is always terminal: nothing may name one as a Source (raises ValueError → HTTP 422)."""
+    if cfg.get("app") is not None:
+        sink = first_row(db.execute(
+            "SELECT pn.name FROM pond_to_pond ptp JOIN pond p ON p.id = ptp.pond_id "
+            "JOIN pond_name pn ON pn.id = p.pond_name_id "
+            "WHERE ptp.source_pond_name_id = ? AND ptp.source_major = ?", (pn_id, major)))
+        if sink:
+            raise ValueError(f"'{name}' is an App, and an App can't be a Source, but '{sink[0]}' reads it")
+    for src_name, ver_str in cfg["sources"].items():
+        src_major = _parse_version(ver_str)[0]
+        if first_row(db.execute(
+            "SELECT 1 FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id "
+            "JOIN pond_version pv ON pv.id = p.pond_version_id "
+            "WHERE pn.name = ? AND p.major = ? AND pv.app IS NOT NULL", (src_name, src_major))):
+            raise ValueError(f"'{src_name}' is an App, and an App can't be a Source")
+
+
 def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
+    import json
+
     major = int(version.split(".")[0])
     deployed_at = datetime.now(timezone.utc).isoformat()
+    app_json = json.dumps(cfg["app"]) if cfg.get("app") is not None else None
     with db:
         db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, ?)", (name, kind))
         db.execute("UPDATE pond_name SET kind = ? WHERE name = ?", (kind, name))
@@ -243,19 +294,20 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
             db.execute(
                 "UPDATE pond_version SET source_path = ?, major = ?, immediate_retries = ?, "
                 "source_retries = ?, deployed_at = ?, duck_pool = ?, flock_mode = ?, flock_engine = ?, "
-                "oom_policy = ?, flock_accept = ?, dbt = ? WHERE id = ?",
+                "oom_policy = ?, flock_accept = ?, dbt = ?, app = ? WHERE id = ?",
                 (source_path, major, cfg["immediate_retries"], cfg["source_retries"], deployed_at,
                  cfg.get("duck_pool"), cfg.get("flock_mode"), cfg.get("flock_engine"),
-                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))), pv_id),
+                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))),
+                 app_json, pv_id),
             )
         else:
             db.execute(
                 "INSERT INTO pond_version (pond_name_id, version, major, source_path, "
                 "immediate_retries, source_retries, deployed_at, duck_pool, flock_mode, flock_engine, "
-                "oom_policy, flock_accept, dbt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "oom_policy, flock_accept, dbt, app) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (pn_id, version, major, source_path, cfg["immediate_retries"], cfg["source_retries"],
                  deployed_at, cfg.get("duck_pool"), cfg.get("flock_mode"), cfg.get("flock_engine"),
-                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project")))),
+                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))), app_json),
             )
             (pv_id,) = first_row(db.execute(
                 "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
@@ -321,6 +373,7 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
             )
 
         _check_version_contracts(db, pn_id, name, version, cfg)
+        _check_apps_terminal(db, pn_id, name, major, cfg)
 
         from ..dag import assert_no_cycles
         assert_no_cycles(db)
@@ -332,6 +385,7 @@ class _GitBody(BaseModel):
     type: str = "pond"
     git_ref: str
     repo_url: str
+    force: bool = False
 
 
 @router.post("/deploy", dependencies=[auth.full])
@@ -356,6 +410,7 @@ async def deploy(request: Request):
             name = form["name"]
             version = form["version"]
             kind = form.get("type", "pond")
+            force = form.get("force") == "true"
             archive_bytes = await form["pond"].read()
             try:
                 with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
@@ -364,7 +419,7 @@ async def deploy(request: Request):
                 raise HTTPException(status_code=422, detail="Uploaded file is not a valid zip archive") from exc
         else:
             body = _GitBody(**(await request.json()))
-            name, version, kind = body.name, body.version, body.type
+            name, version, kind, force = body.name, body.version, body.type, body.force
             shutil.rmtree(staging)  # git clone wants to create the directory itself
             try:
                 subprocess.run(["git", "clone", body.repo_url, str(staging)], check=True, capture_output=True)
@@ -381,10 +436,15 @@ async def deploy(request: Request):
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if cfg["kind"]:
             kind = cfg["kind"]
+        live = _is_live_version(db, name, version)
+        if live and not force and cfg["app"] is None:
+            raise HTTPException(status_code=409, detail=(
+                f"{name} {version} is already deployed. Bump the version, or pass --force to replace it in place "
+                "(a running Duck keeps the code it loaded until it restarts)."))
         with locked(db):
             catalog = _source_schemas(db, cfg["sources"])
         try:
-            _, found = await asyncio.to_thread(_prepare, root, staging, catalog)
+            _, found = await asyncio.to_thread(_prepare, root, staging, catalog, app=cfg["app"])
         except EnvError as exc:
             raise HTTPException(status_code=422, detail=f"Building the Pond's environment failed: {exc}") from exc
         except DiscoveryError as exc:
@@ -394,6 +454,12 @@ async def deploy(request: Request):
             raise HTTPException(status_code=422, detail=detail) from exc
 
         dest = root / "ponds" / name / version
+        supervisor = getattr(request.app.state, "app_supervisor", None)
+        if live and cfg["app"] is not None and supervisor is not None:
+            # Replaced in place: stop the running instance first, so it never runs from a half-replaced
+            # directory. The next request starts the new deploy.
+            await asyncio.to_thread(supervisor.stop_now, pond_key(name, int(version.split(".")[0])), "redeploy",
+                                    process=True)
         if dest.exists():
             shutil.rmtree(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)

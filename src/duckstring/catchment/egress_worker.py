@@ -22,16 +22,18 @@ from fastapi.concurrency import run_in_threadpool
 
 _RECONCILE_INTERVAL = 5.0  # self-healing tick (also catches anything a missed wake left pending)
 _PER_SPOUT_TIMEOUT = 60.0  # ceiling on one Spout's delivery, so a slow destination can't starve others
+_PARALLEL_TABLES = 4  # tables delivered at once to a destination that takes them in parallel
 
 
 def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
     """Deliver one Spout (blocking — runs in the thread pool). Reads the Pond's published tables via the
     data plane and writes each to the destination. Raises on any failure (the caller records it).
 
-    A **transactional, delta-capable** destination (Postgres) syncs *incrementally*: read the changelog
-    delta over ``(destination watermark, f]`` and ``apply_delta`` (upserts + deletes), falling back to a
-    full reload on a full read (bootstrap / coverage-miss / a changed overwrite source). A lake (DuckLake) does
-    the same for any source, inside one batch per run. Others snapshot."""
+    A **transactional, delta-capable** destination (Postgres, DuckLake, Databricks) syncs *incrementally*:
+    read the delta over ``(destination watermark, f]`` and ``apply_delta`` (upserts + deletes), falling back
+    to a full reload on a full read (bootstrap / coverage-miss / a changed overwrite source). A lake does it
+    inside one batch per run. ``mode=changes`` reads the same window from the
+    destination's own watermark and lands it as change files with a manifest. Others snapshot."""
     from datetime import datetime
 
     import duckdb
@@ -73,37 +75,72 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
         mode = (job.get("mode") or "auto").lower()
         # A driver that can deliver a run's tables together (a lake: one snapshot per run) does so.
         batch = getattr(driver, "batch", None)
-        with batch(con, pond=job["pond_name"], major=job["major"], f=f) if batch else nullcontext():
-            for table in tables:
-                pk = sidecar.get(table, {}).get("pk") or None
-                if mode == "append" and getattr(caps, "mirrors_layout", False):
-                    # The incremental object-store path (opt-in — `mode=append`): mirror the table's
-                    # published collection to the destination, syncing only new/changed artifacts. The
-                    # destination stays a readable Duckstring layout (parts + tiers + sidecar).
-                    entry = sidecar.get(table)
-                    if entry is None:
-                        raise ValueError(
-                            f"mode=append mirrors a published Duckstring collection, but table {table!r} "
-                            f"has no sidecar entry at the source — use mode=full for a plain snapshot"
-                        )
-                    driver.mirror(data_dir, table, entry, f=f)
-                elif caps.supports_delta and caps.transactional:
-                    if not pk and caps.requires_pk:  # enforced at egress for a source not checked when added
-                        raise ValueError(
-                            f"egress to a transactional destination needs a primary key — table {table!r} is "
-                            "not a merge Trickle with a declared pk (put a .merge(pk=…) before this Spout)"
-                        )
-                    # The in-destination cursor (exactly-once); a resync reads from the beginning instead.
-                    previous_f = NEVER if job.get("resync") else driver.watermark(con, table) or NEVER
-                    if previous_f >= f:
-                        continue  # already delivered (a replay): nothing to write, not even the watermark
-                    delta = read_delta(con, data_dir, table, previous_f, f, dp=dp, pin=pin)
-                    if delta.is_full:  # bootstrap / coverage-miss / changed overwrite source → reload
-                        driver.write_full(con, con.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk, f=f)
-                    else:
-                        driver.apply_delta(con, delta, table=table, pk=pk, f=f)
+
+        landing = getattr(driver, "landing", None)
+        if mode == "changes" and landing is None:
+            raise ValueError("mode=changes lands change files: it needs a file://, object-store or /Volumes "
+                             "destination")
+
+        def deliver(table: str, c) -> None:
+            pk = sidecar.get(table, {}).get("pk") or None
+            if mode == "changes":
+                previous_f = NEVER if job.get("resync") else land.delivered or NEVER
+                if previous_f >= f:
+                    return  # already delivered (a replay)
+                delta = read_delta(c, data_dir, table, previous_f, f, dp=dp, pin=pin)
+                if delta.is_full:
+                    land.land_full(c, c.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk)
                 else:
-                    driver.write_full(con, con.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk, f=f)
+                    land.land_delta(c, delta, table=table, pk=pk)
+            elif mode == "append" and getattr(caps, "mirrors_layout", False):
+                # The incremental object-store path (opt-in — `mode=append`): mirror the table's
+                # published collection to the destination, syncing only new/changed artifacts. The
+                # destination stays a readable Duckstring layout (parts + tiers + sidecar).
+                entry = sidecar.get(table)
+                if entry is None:
+                    raise ValueError(
+                        f"mode=append mirrors a published Duckstring collection, but table {table!r} "
+                        f"has no sidecar entry at the source — use mode=full for a plain snapshot"
+                    )
+                driver.mirror(data_dir, table, entry, f=f)
+            elif caps.supports_delta and caps.transactional:
+                # The in-destination cursor (exactly-once); a resync reads from the beginning instead.
+                previous_f = NEVER if job.get("resync") else driver.watermark(c, table) or NEVER
+                if previous_f >= f:
+                    return  # already delivered (a replay): nothing to write, not even the watermark
+                delta = read_delta(c, data_dir, table, previous_f, f, dp=dp, pin=pin)
+                if delta.is_full:  # bootstrap / coverage-miss / changed overwrite source → reload
+                    driver.write_full(c, c.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk, f=f)
+                else:
+                    driver.apply_delta(c, delta, table=table, pk=pk, f=f)
+            else:
+                driver.write_full(c, c.sql(dp.read_select(data_dir, table, pin=pin)), table=table, pk=pk, f=f)
+
+        if mode == "changes":
+            scope = landing(con, pond=job["pond_name"], major=job["major"], f=f)
+        elif batch:
+            scope = batch(con, pond=job["pond_name"], major=job["major"], f=f)
+        else:
+            scope = nullcontext()
+        with scope as land:
+            if (getattr(driver, "parallel_tables", False) or mode == "changes") and len(tables) > 1:
+                # A destination whose every statement is a network round trip (a Databricks warehouse) takes the
+                # run's tables at once, each on its own cursor of the in-memory connection.
+                from concurrent.futures import ThreadPoolExecutor
+
+                cursors = [con.cursor() for _ in tables]
+                try:
+                    with ThreadPoolExecutor(max_workers=min(len(tables), _PARALLEL_TABLES)) as pool:
+                        futures = [pool.submit(deliver, t, c) for t, c in zip(tables, cursors, strict=True)]
+                    errors = [fut.exception() for fut in futures if fut.exception() is not None]
+                finally:
+                    for c in cursors:
+                        c.close()
+                if errors:
+                    raise errors[0]
+            else:
+                for table in tables:
+                    deliver(table, con)
     finally:
         con.close()
 

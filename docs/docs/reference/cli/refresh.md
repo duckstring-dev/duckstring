@@ -13,10 +13,14 @@ Every command takes `-c` / `--catchment`, `-m` / `--major` and `-v` / `--version
 ## `refresh now`
 
 ```bash
-duckstring refresh now POND [--silent] [--watch]
+duckstring refresh now POND [--fresh-within DURATION] [--silent] [--watch]
 ```
 
 Asks for data at least as fresh as the moment the command runs. Every Pond upstream that is older runs (an optional Source only if it has never run), and the result flows down to `POND`. Requests that arrive faster than the pipeline can serve them are paced to its slowest step. Opens the live status view until the Pond settles; `--watch` keeps it open, and `--silent` returns once the request is sent.
+
+| Option | Default | Description |
+|---|---|---|
+| `--fresh-within`, `-f` | none | Ask for data no older than this [duration](../formats.md#durations) instead. Only the Ponds older than it run: the request stops at any Pond upstream that is already that fresh. |
 
 ## `refresh add`
 
@@ -28,7 +32,7 @@ duckstring refresh add POND --continuous [--name NAME] [--silent]
 Adds a recurring Refresh, which repeats the request:
 
 - **Every** (`--every` alone): asks once `PERIOD` has passed since the later of the last request and the last refresh of the data, so any other refresh restarts the count. `duckstring refresh add reports --every 1d` refreshes `reports` daily, and the data is at most a day plus the pipeline's run time old.
-- **At set times** (`--every` with `--start`): asks at each time on the grid `START + k × PERIOD`, whatever else refreshes the Pond, and the data is labelled with that time. A Catchment that was down through some of them asks once, for the latest, when it returns.
+- **At set times** (`--every` with `--start`): asks at each time on the grid `START + k × PERIOD`, whatever else refreshes the Pond. A Catchment that was down through some of them asks once, for the latest, when it returns.
 - **Continuous** (`--continuous`, or `--every 0s`): asks whenever the Pond can take more, paced to the pipeline's slowest step.
 
 A Pond can have any number of scheduled Refreshes and one `--every` or continuous Refresh. Adding another `--every` or continuous Refresh replaces it; adding one with an existing name replaces that one. Opens the live status view (a recurring Refresh keeps it open until `Ctrl+C`) unless `--silent`.
@@ -65,9 +69,11 @@ Removes a recurring Refresh by name. Runs already in progress finish. `duckstrin
 
 ## `refresh tap`
 
-A Tap refreshes a Pond whenever an app queries it. It has its own key, which reads the Pond's exposed tables, and a freshness policy: a query through the Tap sends the Pond a Refresh when the newest request on the Pond, or with none waiting its freshness, is at least `--fresh-within` old. Queries with any other key never send one. See [Serving Apps with Taps](../../guides/serving_apps_with_taps.md).
+A Tap refreshes a Pond whenever an app queries it. It has its own key, which reads the Pond's exposed tables, and a freshness policy: a query through the Tap sends the Pond a Refresh, for data no older than `--fresh-within`, when the newest request on the Pond, or with none waiting its freshness, is at least that old. Queries with any other key never send one. See [Refreshing on Use with Taps](../../guides/serving_apps_with_taps.md).
 
 A Tap belongs to one major version of its Pond. Taps are Catchment configuration and survive redeploys; removing the major version removes them. Managing Taps needs a full-access key.
+
+A Tap on an App has no key. Every request the Catchment forwards to the App's process counts as a query, and so does every message from a browser on a WebSocket, at most once a second.
 
 ### `refresh tap add`
 
@@ -75,12 +81,12 @@ A Tap belongs to one major version of its Pond. Taps are Catchment configuration
 duckstring refresh tap add POND --name NAME [--fresh-within DURATION]
 ```
 
-Adds a Tap and prints its key. The key is shown once; only a hash of it is kept.
+Adds a Tap and prints its key. The key is shown once; only a hash of it is kept. A Tap on an App has no key to print.
 
 | Option | Default | Description |
 |---|---|---|
 | `--name`, `-n` | required | The Tap's name: letters, digits, `.`, `_` and `-`, up to 64 characters. |
-| `--fresh-within`, `-f` | `0` | Send a Refresh on a query when the newest request on the Pond, or the data, is at least this old. `0` refreshes on every query, except while a request is already waiting for the Pond to start a run. |
+| `--fresh-within`, `-f` | `0` | Send a Refresh on a query when the newest request on the Pond, or the data, is at least this old. The Refresh asks for data no older than this, so Ponds upstream that are already that fresh don't run. `0` refreshes on every query, except while a request is already waiting for the Pond to start a run. |
 
 Durations combine units: `30s`, `5m`, `1h30m`, `1d`.
 
@@ -98,7 +104,7 @@ Lists the Pond's Taps with their policy, when each was last queried, and how man
 duckstring refresh tap rotate POND NAME
 ```
 
-Prints a new key for the Tap. The old key stops working at once.
+Prints a new key for the Tap. The old key stops working at once. A Tap on an App has no key, so it can't be rotated.
 
 ### `refresh tap rm`
 

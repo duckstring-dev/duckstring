@@ -177,6 +177,52 @@ def test_executor_rebuilds_an_unreadable_registry(tmp_path):
         ex.shutdown()
 
 
+def test_executor_rebuilds_a_registry_older_than_its_published_state(tmp_path):
+    """A state backup older than the data root (a shutdown that died mid-upload) restores a registry behind
+    the published state. Resuming from it would apply changes against old state, so it is set aside and
+    rebuilt; a registry that is up to date is left alone."""
+    import shutil
+
+    from duckstring.duck.executor import RippleExecutor
+
+    src_dir = tmp_path / "sources" / "o"
+    (src_dir / "src").mkdir(parents=True)
+    (src_dir / "pond.toml").write_text('[pond]\nname = "o"\nversion = "1.0.0"\n')
+    (src_dir / "src" / "pond.py").write_text("")
+    data_dir = tmp_path / "ponds" / "o" / "m1" / "data"
+    registry = tmp_path / "ponds" / "o" / "m1" / "registry.duckdb"
+    registry.parent.mkdir(parents=True)
+    backup = tmp_path / "backup.duckdb"
+
+    con = duckdb.connect(str(registry))
+    con.execute("SET TimeZone='UTC'")
+    T.merge_table(con, "m", con.sql("SELECT * FROM (VALUES (1,'a'),(2,'b')) t(id,v)"), ts(1), ("id",))
+    ParquetDataPlane().export(con, data_dir, f=ts(1))
+    con.close()
+    shutil.copy(registry, backup)  # the backup, taken after the first run
+    con = duckdb.connect(str(registry))
+    con.execute("SET TimeZone='UTC'")
+    T.merge_table(con, "m", con.sql("SELECT * FROM (VALUES (1,'a'),(2,'B'),(3,'c')) t(id,v)"), ts(2), ("id",))
+    ParquetDataPlane().export(con, data_dir, f=ts(2))
+    con.close()
+
+    # Up to date: opened as it is.
+    ex = RippleExecutor("o", 1, "1.0.0", "sources/o", tmp_path)
+    ex.shutdown()
+    assert not [p for p in registry.parent.iterdir() if ".behind-" in p.name]
+
+    shutil.copy(backup, registry)  # the old backup restored over it
+    ex = RippleExecutor("o", 1, "1.0.0", "sources/o", tmp_path)
+    try:
+        assert [p for p in registry.parent.iterdir() if ".behind-" in p.name]
+        assert sorted(T.current_state(ex._registry, "m").fetchall()) == [(1, "a"), (2, "B"), (3, "c")]
+    finally:
+        ex.shutdown()
+    ex = RippleExecutor("o", 1, "1.0.0", "sources/o", tmp_path)  # the rebuilt registry is current
+    ex.shutdown()
+    assert len([p for p in registry.parent.iterdir() if ".behind-" in p.name]) == 1
+
+
 def test_only_storage_errors_count_as_unreadable():
     from duckstring.duck.executor import _is_unreadable
 

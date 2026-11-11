@@ -58,7 +58,9 @@ A **Refresh** asks a Pond for data at least as fresh as the moment it was sent. 
   <figcaption>Refresh Now on <code>reports</code> in the Playground. The demand (green) reaches both Inlets, which run first, then <code>sales</code>, then <code>reports</code>.</figcaption>
 </figure>
 
-The whole pipeline reaches one freshness: each Inlet stamps its data with the time of the Refresh, so `reports` ends up exactly as fresh as the moment it was asked.
+Freshness comes from the Inlets: each stamps its data with the time its run started, and every Pond below takes the oldest freshness among its Sources. So `reports` ends up at least as fresh as the moment it was asked.
+
+A Refresh can also ask for data no older than a given age, such as a day. The request then stops at any Pond that is already that fresh, so a small Pond reading from a pipeline that another Refresh keeps up to date can be refreshed without running that pipeline again.
 
 ### Throttling to the bottleneck
 
@@ -109,7 +111,7 @@ You can try Refreshes in the [Playground](https://playground.duckstring.com), on
 
 ## Taps
 
-Some data only needs to be fresh while someone is using it, such as a dashboard opened a few times a day. A **Tap** gives an app its own key for reading a Pond, with a limit on how old the data may be. A query through the Tap refreshes the Pond when its data is older than that, so the pipeline keeps up while the app is in use and goes quiet when it isn't, with no schedule to tune. Queries from anywhere else, such as the web UI or a notebook, never cause a run. See [Serving Apps with Taps](../guides/serving_apps_with_taps.md).
+Some data only needs to be fresh while someone is using it, such as a dashboard opened a few times a day. A **Tap** gives an app its own key for reading a Pond, with a limit on how old the data may be. A query through the Tap refreshes the Pond when its data is older than that, so the pipeline keeps up while the app is in use and goes quiet when it isn't, with no schedule to tune. Queries from anywhere else, such as the web UI or a notebook, never cause a run. See [Refreshing on Use with Taps](../guides/serving_apps_with_taps.md).
 
 ## Windows
 
@@ -139,6 +141,6 @@ Here the Inlet `a` has a window every 8 seconds, standing in for a nightly one, 
 
 ## See also
 
-- Guides: [Scheduling](../guides/scheduling.md), [Serving Apps with Taps](../guides/serving_apps_with_taps.md), [Monitoring and Failures](../guides/monitoring_and_failures.md)
+- Guides: [Scheduling](../guides/scheduling.md), [Refreshing on Use with Taps](../guides/serving_apps_with_taps.md), [Monitoring and Failures](../guides/monitoring_and_failures.md)
 - Reference: [duckstring refresh](../reference/cli/refresh.md), [duckstring window](../reference/cli/window.md), [duckstring control](../reference/cli/control.md)
 - [Playground](https://playground.duckstring.com): this model simulated in the browser, with a guided tour

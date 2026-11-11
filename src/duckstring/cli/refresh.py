@@ -5,6 +5,7 @@ A Refresh asks for a Pond's data to be at least as fresh as now: every older Pon
 flows down. A recurring Refresh repeats it::
 
     duckstring refresh now reports
+    duckstring refresh now reports --fresh-within 1d              # only what is more than a day old runs
     duckstring refresh add reports --every 30m                    # 30 min after the last request or refresh
     duckstring refresh add reports --every 1d --start 06:00 --on MON,TUE,WED,THU,FRI
     duckstring refresh add reports --continuous                   # as fresh as the pipeline allows
@@ -36,13 +37,14 @@ def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
 
 
 def send_and_watch(cfg: dict, pond: str, major: Optional[int], version: Optional[str], silent: bool, watch: bool,
-                   endpoint: str, payload: dict, success_msg: str, one_shot: bool) -> None:
+                   endpoint: str, payload: dict, success_msg: str, one_shot: bool, params: Optional[dict] = None) -> None:
     """POST to a Pond route, then (unless ``silent``) open the live status view on it: a one-shot request
     closes once the Pond settles, a recurring one stays open until Ctrl+C."""
     from . import _http
 
     url = cfg["url"]
-    _http.post(f"{url}/api/ponds/{pond}/{endpoint}", auth=cfg, params=_http.pond_params(major, version), json=payload)
+    _http.post(f"{url}/api/ponds/{pond}/{endpoint}", auth=cfg,
+               params={**_http.pond_params(major, version), **(params or {})}, json=payload)
     if silent:
         typer.echo(success_msg)
         return
@@ -58,16 +60,25 @@ def now(
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
+    fresh_within: Optional[str] = typer.Option(
+        None, "--fresh-within", "-f",
+        help="Ask for data no older than this (e.g. 1h or 1d) instead of as fresh as now: only Ponds older than "
+             "this run."),
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
 ) -> None:
     """Ask for the Pond's data to be at least as fresh as now.
 
     Every older Pond upstream runs (an optional Source only if it has never run), and the result flows down
-    to this Pond.
+    to this Pond. With --fresh-within, Ponds whose data is already that fresh don't run.
     """
+    params = {}
+    if fresh_within is not None:
+        from .tap import _seconds
+        params["fresh_within_ms"] = _seconds(fresh_within) * 1000
     _, cfg = _resolve(catchment)
-    send_and_watch(cfg, pond, major, version, silent, watch, "refresh", {}, "Refresh sent.", one_shot=True)
+    send_and_watch(cfg, pond, major, version, silent, watch, "refresh", {}, "Refresh sent.", one_shot=True,
+                   params=params)
 
 
 def add_payload(every: Optional[str], continuous: bool, start: Optional[str], on: Optional[str],

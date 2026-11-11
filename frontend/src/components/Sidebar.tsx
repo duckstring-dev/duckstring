@@ -1,12 +1,14 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { fetchAlerts, fetchLineage, fetchRuns, fetchSecrets, testSpout, type RawAlertChannel, type RawLineageRipple } from '@/lib/api';
-import { useLiveStore, atLeast, formatAge, mapRun, parseTs, runKey, THEME_AMBER, THEME_DEMAND, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE, THEME_BRAND } from '@/lib/store';
+import { fetchAlerts, fetchLineage, fetchRuns, fetchSecrets, openApp, testSpout, type RawAlertChannel, type RawLineageRipple } from '@/lib/api';
+import { useLiveStore, appState, atLeast, formatAge, mapRun, parseTs, runKey, THEME_AMBER, THEME_DEMAND, THEME_SUCCESS, THEME_DANGER, THEME_BLOCKED, THEME_WAKE, THEME_BRAND } from '@/lib/store';
 import type { Pond, PondInfo, PondRun } from '@/lib/types';
 import { AlertChannelForm, ChannelRow } from './AlertsMenu';
 import { DbtIcon } from './DbtIcon';
 import { DuckSection } from './DuckSection';
+import { OpenIcon } from './PondNode';
+import { clock } from './RunHistory';
 import { TraceChart } from './TraceChart';
 import { RefreshEditor } from './RefreshEditor';
 import { WindowEditor } from './WindowEditor';
@@ -128,11 +130,155 @@ function StatusBox({ info, ponds, canControl }: { info: PondInfo; ponds: Record<
     const { position, need, of } = info.memory;
     return (
       <StatusCard color={THEME_AMBER} title="Waiting for memory">
-        {position === 1 ? 'Next' : `Number ${position}`} in the queue for this machine's memory. It needs {need} of {of} slots.
+        {position === 1 ? 'Next' : `Number ${position}`} in the queue for this machine’s memory. It needs {need} of {of} slots.
       </StatusCard>
     );
   }
   return null;
+}
+
+// An App node: where it's served, its instance, the Sources whose freshness it reads, and its own Control set
+// (Restart and Kill: Force, Wake and Sleep mean little for a node whose Runs are passes).
+function AppPanel({ pond, canDemand, canControl, onOptions, mobile }: {
+  pond: Pond; canDemand: boolean; canControl: boolean; onOptions: () => void; mobile: boolean;
+}) {
+  const info = useLiveStore((s) => s.pondInfo[pond.id]);
+  const view = useLiveStore((s) => s.pondViews[pond.id]);
+  const ponds = useLiveStore((s) => s.ponds);
+  const pondViews = useLiveStore((s) => s.pondViews);
+  const now = useLiveStore((s) => s.now);
+  const restartApp = useLiveStore((s) => s.restartApp);
+  const kill = useLiveStore((s) => s.kill);
+  const runs = useLiveStore((s) => s.selectedPondRuns);
+  if (!info) return null;
+  const state = appState(info);
+  const app = info.app;
+  const inst = app?.instance ?? null;
+  const halted = info.isFailed || info.isKilled || info.isBlocked;
+
+  let instance: React.ReactNode;
+  if (info.isFailed) {
+    instance = <StatusCard color={THEME_DANGER} title="Failed">{info.error ?? 'The App stopped.'}</StatusCard>;
+  } else if (info.isKilled) {
+    instance = (
+      <StatusCard color={THEME_DANGER} title="Killed">
+        Stopped by an operator.{canControl ? ' Restart to bring it back.' : ''}
+      </StatusCard>
+    );
+  } else if (halted) {
+    instance = <StatusBox info={info} ponds={ponds} canControl={canControl} />;
+  } else if (inst) {
+    const idleAt = inst.idleAt ? parseTs(inst.idleAt) : null;
+    instance = (
+      <div style={{ fontSize: 12, color: '#a1a1aa', lineHeight: 1.7 }}>
+        <div>
+          <span style={{ color: THEME_BRAND, fontWeight: 700 }}>{state === 'running' ? 'Running' : 'Starting'}</span>
+          <span style={{ color: '#52525b' }}> · </span>since {clock(inst.readyAt ?? inst.startedAt)}
+        </div>
+        {state === 'running' && (
+          <div>
+            {inst.active > 0
+              ? `${inst.active} request${inst.active === 1 ? '' : 's'} in flight`
+              : idleAt !== null
+                ? `Stops when idle in ${formatAge(now, Math.max(idleAt, now))}`  // the time from now to idleAt
+                : app?.idleTimeoutS === 0 ? 'Keeps running until stopped' : 'Idle'}
+          </div>
+        )}
+      </div>
+    );
+  } else {
+    instance = <div style={{ fontSize: 12, color: '#71717a', lineHeight: 1.7 }}>Stopped. The next request starts it.</div>;
+  }
+
+  return (
+    <>
+      <Section>
+        <div style={{ fontSize: 18, fontWeight: 700, color: '#f4f4f5', lineHeight: 1.2, wordBreak: 'break-word', marginBottom: 8 }}>
+          {pond.name}
+        </div>
+        <div style={{ fontSize: 11, color: '#71717a', marginBottom: 10, lineHeight: 1.7 }}>
+          <div>
+            app<span style={{ color: '#52525b' }}> · </span>v<span style={{ color: '#a1a1aa' }}>{info.version}</span>
+            {app?.deployedAt && (
+              <>
+                <span style={{ color: '#52525b' }}> · </span>
+                deployed <span style={{ color: '#a1a1aa' }}>{formatAge(parseTs(app.deployedAt), now)}</span> ago
+              </>
+            )}
+          </div>
+          <div>
+            data fresh <span style={{ color: '#a1a1aa' }}>{formatAge(view?.endF ?? 0, now)}</span> old
+          </div>
+        </div>
+        {app && (
+          <button
+            onClick={() => openApp(app.path)}
+            style={{
+              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              background: `${THEME_BRAND}14`, border: `1px solid ${THEME_BRAND}`, borderRadius: 6, padding: '8px 12px',
+              color: THEME_BRAND, fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
+            }}
+          >
+            <OpenIcon /> Open App
+          </button>
+        )}
+        {pond.sources.length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <Label>Sources</Label>
+            {pond.sources.map((sid) => (
+              <div key={sid} style={{ display: 'flex', fontSize: 12, color: '#a1a1aa', marginBottom: 3, gap: 8 }}>
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{ponds[sid]?.name ?? sid}</span>
+                <span style={{ color: '#71717a' }}>{formatAge(pondViews[sid]?.endF ?? 0, now)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section>
+        <Label>Instance</Label>
+        {instance}
+      </Section>
+
+      {/* A Refresh has no effect while halted; the reason is shown above. */}
+      {!halted && (
+        <Section>
+          <Label>Refresh</Label>
+          <RefreshEditor pond={pond} canDemand={canDemand} />
+        </Section>
+      )}
+
+      {canControl && (
+        <Section>
+          <Label>Control</Label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
+            <Btn block onClick={() => restartApp(pond.id)} color={THEME_SUCCESS}>Restart</Btn>
+            <Btn block onClick={() => kill(pond.id)} color={THEME_DANGER} disabled={info.isKilled}>Kill</Btn>
+          </div>
+        </Section>
+      )}
+
+      <div style={{ borderTop: '1px solid #27272a', marginTop: 14, paddingTop: 14 }}>
+        <button
+          onClick={onOptions}
+          style={{
+            width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            background: '#1a1a1f', border: '1px solid #3f3f46', borderRadius: 6, padding: '8px 12px',
+            color: '#a1a1aa', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+          }}
+        >
+          ⚙ Options
+        </button>
+      </div>
+
+      {/* Desktop shows the data timing in the bottom-right quadrant (TracePanel); mobile keeps it here. */}
+      {mobile && (
+        <Section>
+          <RunTrace points={pondTrace(runs.slice(0, RUN_CAP))} app />
+        </Section>
+      )}
+    </>
+  );
 }
 
 // A Spout node (egress) — its destination + state, and the Control set on its standing Wake.
@@ -198,6 +344,9 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
   const [path, setPath] = useState('');
   // A DuckLake's data path (where a new lake keeps its files; an existing lake remembers its own).
   const [dataPath, setDataPath] = useState('');
+  // A Databricks Spout's SQL warehouse id and the Volume it stages through.
+  const [warehouse, setWarehouse] = useState('');
+  const [volume, setVolume] = useState('');
   const [table, setTable] = useState('');
   const [keyVar, setKeyVar] = useState('');
   const [secretVar, setSecretVar] = useState('');
@@ -228,8 +377,13 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
     if (scheme === 'postgres') return `postgres://${path}`;
     const q: string[] = [];
     if (scheme === 'ducklake' && dataPath.trim()) q.push(`data_path=${dataPath.trim()}`);
-    if (keyVar.trim()) q.push(`key_id=${ref(keyVar)}`);
-    if (secretVar.trim()) q.push(`secret=${ref(secretVar)}`);
+    if (scheme === 'databricks') {
+      if (warehouse.trim()) q.push(`warehouse=${warehouse.trim()}`);
+      if (volume.trim()) q.push(`volume=${volume.trim()}`);
+    }
+    const [keyParam, secretParam] = scheme === 'databricks' ? ['client_id', 'client_secret'] : ['key_id', 'secret'];
+    if (keyVar.trim()) q.push(`${keyParam}=${ref(keyVar)}`);
+    if (secretVar.trim()) q.push(`${secretParam}=${ref(secretVar)}`);
     if (scheme === 'ducklake') return `ducklake:${path}${q.length ? '?' + q.join('&') : ''}`;
     return `${scheme}://${path}${q.length ? '?' + q.join('&') : ''}`;
   };
@@ -256,6 +410,8 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
       setOpen(false);
       setPath('');
       setDataPath('');
+      setWarehouse('');
+      setVolume('');
       setTable('');
       setKeyVar('');
       setSecretVar('');
@@ -292,9 +448,11 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
             <select value={scheme} onChange={(e) => setScheme(e.target.value)} style={selectInput}>
               <option value="s3">s3://</option>
               <option value="gs">gs://</option>
+              <option value="abfss">abfss://</option>
               <option value="file">file://</option>
               <option value="postgres">postgres://</option>
               <option value="ducklake">ducklake:</option>
+              <option value="databricks">databricks://</option>
             </select>
             <input
               value={path}
@@ -303,6 +461,8 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
                 scheme === 'file' ? '/abs/path'
                   : scheme === 'postgres' ? 'user:${env:PW}@host/db'
                   : scheme === 'ducklake' ? 'sqlite:/srv/lake/meta.sqlite'
+                  : scheme === 'databricks' ? 'host/catalog.schema (or /catalog.schema)'
+                  : scheme === 'abfss' ? 'container@account.dfs.core.windows.net/prefix'
                   : 'bucket/prefix'
               }
               style={{ ...fld, flex: 1 }}
@@ -316,7 +476,19 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
               style={fld}
             />
           )}
-          {(scheme === 's3' || scheme === 'gs' || (scheme === 'ducklake' && /^(s3|gs):\/\//.test(dataPath.trim()))) && (
+          {scheme === 'databricks' && (
+            <>
+              <input value={warehouse} onChange={(e) => setWarehouse(e.target.value)} placeholder="SQL warehouse id" style={fld} />
+              <input
+                value={volume}
+                onChange={(e) => setVolume(e.target.value)}
+                placeholder="Volume to stage through (/Volumes/catalog/schema/name)"
+                style={fld}
+              />
+            </>
+          )}
+          {(scheme === 's3' || scheme === 'gs' || scheme === 'databricks'
+            || (scheme === 'ducklake' && /^(s3|gs):\/\//.test(dataPath.trim()))) && (
             <>
               <select value={credKind} onChange={(e) => setCredKind(e.target.value as 'env' | 'secret')} style={selectInput}>
                 <option value="env">env var</option>
@@ -326,14 +498,18 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
                 value={keyVar}
                 onChange={(e) => setKeyVar(e.target.value)}
                 list={credKind === 'secret' ? 'spout-secret-names' : undefined}
-                placeholder={`key id — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_KEY)`}
+                placeholder={scheme === 'databricks'
+                  ? `client id — ${credKind === 'secret' ? 'secret name' : 'env var name'} (blank = the Catchment's own)`
+                  : `key id — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_KEY)`}
                 style={fld}
               />
               <input
                 value={secretVar}
                 onChange={(e) => setSecretVar(e.target.value)}
                 list={credKind === 'secret' ? 'spout-secret-names' : undefined}
-                placeholder={`secret — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_SECRET)`}
+                placeholder={scheme === 'databricks'
+                  ? `client secret — ${credKind === 'secret' ? 'secret name' : 'env var name'}`
+                  : `secret — ${credKind === 'secret' ? 'secret name' : 'env var name'} (e.g. AWS_SECRET)`}
                 style={fld}
               />
               {credKind === 'secret' && (
@@ -349,6 +525,7 @@ function SpoutEditor({ sourceId, canControl }: { sourceId: string; canControl: b
               <option value="auto">auto</option>
               <option value="full">full</option>
               <option value="append">append</option>
+              <option value="changes">changes</option>
             </select>
           </div>
           <div style={{ fontSize: 10, color: '#52525b', lineHeight: 1.5 }}>
@@ -464,9 +641,10 @@ const ms = (iso: string | null): number => parseTs(iso);
 // The plot shows at most this many (most-recent) runs; older windows are reached via the date range.
 const RUN_CAP = 50;
 
-// A per-run point on the timing trace — one per run that has a duration (both timestamps). `run` is the
-// Pond Run it maps to, so a click selects it (opening Run Detail) and a selected run highlights back here.
-type TracePoint = { key: string; time: number; duration: number; run: PondRun };
+// A per-run point on the timing trace, one per run that has a duration (both timestamps). `age` is how old
+// the run's data was when it completed (completion time minus its freshness). `run` is the Pond Run it maps
+// to, so a click selects it (opening Run Detail) and a selected run highlights back here.
+type TracePoint = { key: string; time: number; duration: number; age: number; run: PondRun };
 
 // Per-run points for a set of Pond Runs — each run's completion time + its duration. Sorted ascending by
 // time so the plot renders oldest→newest regardless of the source order (the feed is newest-first, but a
@@ -475,7 +653,8 @@ function pondTrace(runs: PondRun[]): TracePoint[] {
   const pts: TracePoint[] = [];
   for (const r of runs) {
     if (r.startedAt && r.finishedAt) {
-      pts.push({ key: runKey(r), time: ms(r.finishedAt), duration: ms(r.finishedAt) - ms(r.startedAt), run: r });
+      const time = ms(r.finishedAt);
+      pts.push({ key: runKey(r), time, duration: time - ms(r.startedAt), age: time - ms(r.f), run: r });
     }
   }
   return pts.sort((a, b) => a.time - b.time);
@@ -488,23 +667,27 @@ function rippleTrace(runs: PondRun[], rippleName: string): TracePoint[] {
   for (const r of runs) {
     const rr = r.ripples?.find((x) => x.ripple === rippleName);
     if (rr?.startedAt && rr?.finishedAt) {
-      pts.push({ key: runKey(r), time: ms(rr.finishedAt), duration: ms(rr.finishedAt) - ms(rr.startedAt), run: r });
+      const time = ms(rr.finishedAt);
+      pts.push({ key: runKey(r), time, duration: time - ms(rr.startedAt), age: time - ms(r.f), run: r });
     }
   }
   return pts.sort((a, b) => a.time - b.time);
 }
 
 // The interactive timing chart wired to run selection: clicking a point opens that run in Run Detail;
-// the selected run (from anywhere — e.g. a Run History click) enlarges its point here.
-function RunTrace({ points }: { points: TracePoint[] }) {
+// the selected run (from anywhere, e.g. a Run History click) enlarges its point here. An App's runs are
+// instant passes with no Run Detail to open: its chart is interval and age, and not clickable.
+function RunTrace({ points, app = false }: { points: TracePoint[]; app?: boolean }) {
   const selectRun = useLiveStore((s) => s.selectRun);
   const selectedRun = useLiveStore((s) => s.selectedRun);
-  const selectedKey = selectedRun ? runKey(selectedRun) : null;
+  const selectedKey = selectedRun && !app ? runKey(selectedRun) : null;
   return (
     <TraceChart
       points={points}
       selectedKey={selectedKey}
-      onSelect={(key) => { const p = points.find((x) => x.key === key); if (p) selectRun(p.run); }}
+      durations={!app}
+      empty={app ? 'No data yet.' : undefined}
+      onSelect={app ? undefined : (key) => { const p = points.find((x) => x.key === key); if (p) selectRun(p.run); }}
     />
   );
 }
@@ -561,10 +744,11 @@ function PondOptionsModal({ pond, canControl, onClose }: { pond: Pond; canContro
           {canControl && (
             <Section>
               <Label>Failures · retry budgets</Label>
+              {/* An App's on-change budget is always 0: its failure is its process's, never retried by a Source. */}
               {([
                 ['Immediate Retries', immRetries, setImmRetries],
                 ['On Change Retries', srcRetries, setSrcRetries],
-              ] as const).map(([label, value, setValue]) => (
+              ] as const).filter(([label]) => !pond.isApp || label === 'Immediate Retries').map(([label, value, setValue]) => (
                 <div key={label} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
                   <span style={{ flex: 1, fontSize: 11, color: '#a1a1aa' }}>{label}</span>
                   <input type="number" min="0" step="1" value={value} onChange={(e) => setValue(e.target.value)} style={{ ...numInput, width: 48 }} />
@@ -588,9 +772,9 @@ function PondOptionsModal({ pond, canControl, onClose }: { pond: Pond; canContro
             </Section>
           )}
           {/* Egress Spouts — a Draw can't be a source. */}
-          {!pond.isDraw && <SpoutEditor sourceId={pond.id} canControl={canControl} />}
-          {/* Observed lineage (read-visible) + alert channels scoped to this Pond. */}
-          {!pond.isDraw && <LineageSection key={`lin-${pond.id}`} pond={pond} />}
+          {!pond.isDraw && !pond.isApp && <SpoutEditor sourceId={pond.id} canControl={canControl} />}
+          {/* Observed lineage (read-visible) + alert channels scoped to this Pond. An App records none. */}
+          {!pond.isDraw && !pond.isApp && <LineageSection key={`lin-${pond.id}`} pond={pond} />}
           <AlertEditor key={pond.id} pond={pond} canControl={canControl} />
         </div>
       </div>
@@ -637,10 +821,12 @@ export function TracePanel() {
   const [to, setTo] = useState('');
   const [rangeRuns, setRangeRuns] = useState<PondRun[] | null>(null);
   const rangeActive = !!(from || to);
+  const [rangeOpen, setRangeOpen] = useState(false); // the bounds sit behind the title row's "range" toggle
+  const showRange = rangeOpen || rangeActive;
 
   // A selection change abandons a stale range (it would show another node's dates).
   const [prevSel, setPrevSel] = useState(selectedPondId);
-  if (selectedPondId !== prevSel) { setPrevSel(selectedPondId); setFrom(''); setTo(''); setRangeRuns(null); }
+  if (selectedPondId !== prevSel) { setPrevSel(selectedPondId); setFrom(''); setTo(''); setRangeRuns(null); setRangeOpen(false); }
 
   useEffect(() => {
     if (!rangeActive || !selectedPondId) return;
@@ -657,14 +843,32 @@ export function TracePanel() {
   let title: string | null = null;
   let points: TracePoint[] | null = null;
   if (selectedRipple) { title = `${selectedRipple.name} · run timing`; points = rippleTrace(source, selectedRipple.name); }
-  else if (pond) { title = `${pond.name} · run timing`; points = pondTrace(source); }
+  else if (pond) { title = `${pond.name} · ${pond.isApp ? 'data timing' : 'run timing'}`; points = pondTrace(source); }
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: 14, boxSizing: 'border-box', overflow: 'hidden', background: '#15151a' }}>
-      <div style={{ fontSize: 10, fontWeight: 700, color: '#52525b', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-        {title ?? 'Run timing'}
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: 14, boxSizing: 'border-box', overflowY: 'auto', background: '#15151a' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8, flexShrink: 0 }}>
+        <span style={{ flex: 1, minWidth: 0, fontSize: 10, fontWeight: 700, color: '#52525b', letterSpacing: '0.1em', textTransform: 'uppercase', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {title ?? 'Run timing'}
+        </span>
+        {points && (
+          <span style={{ fontSize: 10, color: '#3f3f46', whiteSpace: 'nowrap' }}>
+            {rangeActive ? `${points.length} in range` : `last ${points.length}`}
+          </span>
+        )}
+        {active && (
+          <button
+            onClick={() => setRangeOpen((v) => !v)}
+            disabled={rangeActive}
+            title={rangeActive ? 'Clear the bounds to hide the range' : 'Show runs from a time range'}
+            style={{ background: 'transparent', border: 'none', padding: 0, fontSize: 10, fontFamily: 'inherit',
+                     color: showRange ? THEME_BRAND : '#71717a', cursor: rangeActive ? 'default' : 'pointer' }}
+          >
+            range
+          </button>
+        )}
       </div>
-      {active && (
+      {active && showRange && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ width: 26, fontSize: 10, color: '#52525b' }}>from</span>
@@ -682,11 +886,10 @@ export function TracePanel() {
       )}
       {points ? (
         <>
-          <RunTrace points={points} />
-          <div style={{ fontSize: 10, color: '#3f3f46', marginTop: 4 }}>
-            {rangeActive ? `${points.length} in range` : `last ${points.length}`}
-            {!rangeActive && selectedPondRuns.length > RUN_CAP ? ' · set a time range for older' : ''}
-          </div>
+          <RunTrace points={points} app={!selectedRipple && !!pond?.isApp} />
+          {showRange && !rangeActive && selectedPondRuns.length > RUN_CAP && (
+            <div style={{ fontSize: 10, color: '#3f3f46', marginTop: 4 }}>Set a bound for older runs.</div>
+          )}
         </>
       ) : (
         <div style={{ fontSize: 12, color: '#52525b', margin: 'auto', textAlign: 'center' }}>Select a Pond or Ripple</div>
@@ -760,8 +963,14 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
         </>
       )}
 
+      {/* App selected: its own panel (header, instance, Refresh, Restart/Kill). */}
+      {selectedPond && !selectedRippleId && selectedPond.isApp && (
+        <AppPanel pond={selectedPond} canDemand={canDemand} canControl={canControl} onOptions={() => setOptionsOpen(true)}
+                  mobile={!!mobile} />
+      )}
+
       {/* Pond selected */}
-      {selectedPond && !selectedRippleId && (
+      {selectedPond && !selectedRippleId && !selectedPond.isApp && (
         <>
           <Section>
             {/* The Pond name is the sidebar's headline — prominent, and shown verbatim (not upper-cased).

@@ -71,11 +71,13 @@ The client queries one Pond at a time, at its highest deployed major version.
 
 ## From a BI tool or SQL client
 
-The Catchment can serve the catalog over the Postgres wire protocol, so psql, Metabase, Tableau and most Postgres drivers can connect. Enable it with an environment variable on the Catchment:
+The Catchment can serve the catalog over the Postgres wire protocol, so psql, BI tools and most Postgres drivers can connect. Enable it with an environment variable on the Catchment:
 
 ```bash
 DUCKSTRING_SERVE_PG_PORT=5433 DUCKSTRING_SERVE_HOST=0.0.0.0 duckstring catchment start prod
 ```
+
+The Postgres endpoint, and the Arrow Flight one below, each need a port of their own, so they work where you run the Catchment yourself, on a server or in a container. A Catchment on a platform that serves it at one HTTP address, such as Databricks Apps, can't offer them; see [BI tools and SQL clients](hosting_on_a_platform.md#bi-tools-and-sql-clients) for what to do there.
 
 Connect with any user name and database, and an API key as the password:
 
@@ -87,7 +89,20 @@ psql "host=catchment.internal port=5433 user=analyst dbname=duckstring password=
 SELECT * FROM reports_v1.monthly_summary;
 ```
 
-The key's level decides what's visible, as above. The password is sent in plain text, so only expose the port behind TLS or on a private network.
+The key's level decides what's visible, as above.
+
+The password is an API key, so encrypt the connection. Give the Catchment a certificate and its private key, as PEM files, and it accepts only encrypted connections:
+
+```bash
+DUCKSTRING_SERVE_PG_PORT=5433 DUCKSTRING_SERVE_HOST=0.0.0.0 \
+DUCKSTRING_SERVE_PG_TLS_CERT=/etc/duckstring/tls/cert.pem \
+DUCKSTRING_SERVE_PG_TLS_KEY=/etc/duckstring/tls/key.pem \
+duckstring catchment start prod
+```
+
+Clients then connect with `sslmode=require`, or `sslmode=verify-full` to also check the certificate. Without a certificate, keep the port on a private network or behind a proxy that handles TLS.
+
+A BI tool that queries as people use a report, rather than importing the data on a schedule, can sign in with a [Tap](serving_apps_with_taps.md)'s key as the password. Its queries then keep the Pond fresh while the report is in use.
 
 For columnar results in Python, the same catalog is available over Arrow Flight (`DUCKSTRING_SERVE_FLIGHT_PORT`). The ticket is the SQL text:
 

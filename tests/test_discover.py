@@ -104,7 +104,7 @@ def _deploy(client, pond_py: str):
     return client.post(
         "/api/deploy",
         files={"pond": ("pond.zip", _zip(pond_py), "application/zip")},
-        data={"name": "p", "version": "1.0.0", "type": "inlet"},
+        data={"name": "p", "version": "1.0.0", "type": "inlet", "force": "true"},
     )
 
 

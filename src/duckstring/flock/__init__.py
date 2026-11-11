@@ -206,10 +206,12 @@ _BUILTIN_ENGINES = {
     "motherduck": "duckstring.flock.engines.motherduck:MotherDuckEngine",
     "starrocks": "duckstring.flock.engines.starrocks:StarRocksEngine",
     "athena": "duckstring.flock.engines.athena:AthenaEngine",
+    "bigquery": "duckstring.flock.engines.bigquery:BigQueryEngine",
+    "databricks": "duckstring.flock.engines.databricks:DatabricksEngine",
 }
 # With no engine named, the first configured one in this order (plans/flock-coverage.md): DuckDB engines
 # first (everything is eligible), then the SQL engines (only what translates provably).
-ENGINE_ORDER = ("motherduck", "starrocks", "athena")
+ENGINE_ORDER = ("motherduck", "starrocks", "databricks", "bigquery", "athena")
 
 
 def _engine_class(name: str):

@@ -92,10 +92,12 @@ The [Quickstart](https://docs.duckstring.com/quickstart) goes through the same s
 
 - [Local testing](https://docs.duckstring.com/guides/testing_with_puddles) against small samples of each Source, called Puddles
 - [dbt projects](https://docs.duckstring.com/guides/dbt_projects) deployed as Ponds, one step per model
-- [Delivery](https://docs.duckstring.com/guides/delivering_with_spouts) to Postgres (incremental and exactly once), S3, Google Cloud Storage and local files
+- [Apps](https://docs.duckstring.com/guides/building_apps): dashboards and small web apps, such as Streamlit or FastAPI, served by the Catchment beside the data they read and started when someone opens them
+- [Delivery](https://docs.duckstring.com/guides/delivering_with_spouts) to Postgres (incremental and exactly once), a DuckLake, S3, Azure Storage, Google Cloud Storage and local files
+- [Databricks](https://docs.duckstring.com/guides/ingesting_data#reading-from-databricks): read Unity Catalog tables and Volume files into Ponds, deliver back to Unity Catalog, and send large recomputes to a SQL warehouse
 - [Retries, alerts and Prometheus metrics](https://docs.duckstring.com/guides/monitoring_and_failures)
 - [Per-Pond Python environments](https://docs.duckstring.com/guides/writing_ripples#python-dependencies) from `pyproject.toml` and `uv.lock`
-- [Cloud compute](https://docs.duckstring.com/guides/cloud_compute_on_aws) on AWS Fargate or EC2, chosen per Pond, with data on S3
+- Cloud compute on [AWS](https://docs.duckstring.com/guides/cloud_compute_on_aws), [Azure](https://docs.duckstring.com/guides/cloud_compute_on_azure) or [Google Cloud](https://docs.duckstring.com/guides/cloud_compute_on_google_cloud), chosen per Pond, with data on S3, Azure Storage or Google Cloud Storage
 - [Connected Catchments](https://docs.duckstring.com/guides/connecting_catchments), where a Pond reads from a Pond on another Catchment
 
 ## Documentation

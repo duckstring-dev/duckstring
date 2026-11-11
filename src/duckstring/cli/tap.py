@@ -48,6 +48,7 @@ def add(
     fresh_within: str = typer.Option(
         "0", "--fresh-within", "-f",
         help="Send a Refresh on a query when the newest request on the Pond, or the data, is at least this old. "
+             "The Refresh asks for data no older than this, so Ponds upstream that are already that fresh don't run. "
              "0 refreshes on every query, except while a request is already waiting for the Pond to start a run."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
@@ -55,7 +56,8 @@ def add(
 ) -> None:
     """Add a Tap (Refresh upon query).
 
-    Prints the Tap's key, once: only a hash of it is kept.
+    Prints the Tap's key, once: only a hash of it is kept. A Tap on an App has no key: each request to the App
+    counts as a query.
     """
     from . import _http
 
@@ -64,6 +66,9 @@ def add(
     resp = _http.post(f"{url}/api/ponds/{pond}/taps", auth=cfg, params=_http.pond_params(major, version),
                       json=body).json()
     typer.echo(f"Tap '{name}' added on '{resp['pond']}'.")
+    if resp["key"] is None:
+        typer.echo("It's on an App, so it has no key: requests to the App use it.")
+        return
     _print_key(resp["key"], resp["pond"], name)
 
 

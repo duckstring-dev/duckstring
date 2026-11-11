@@ -15,6 +15,7 @@ from duckstring.catchment import cloud
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
 from duckstring.catchment.launcher import NoopLauncher
+from duckstring.catchment.providers import aws
 from duckstring.catchment.routes import router
 from duckstring.catchment.routes.deploy import _register
 
@@ -27,8 +28,8 @@ _RIPPLES = [{"func": "f1", "name": "r1", "parents": []}]
 def _no_ambient_aws(monkeypatch):
     """Neutralise the botocore credential-chain fallback so the gate is deterministic regardless of the
     machine's ambient AWS creds (a dev laptop with `aws configure` would otherwise read as configured)."""
-    cloud._chain_has_credentials.cache_clear()
-    monkeypatch.setattr(cloud, "_chain_has_credentials", lambda: False)
+    aws._chain_has_credentials.cache_clear()
+    monkeypatch.setattr(aws, "_chain_has_credentials", lambda: False)
 
 
 def _cfg():
@@ -75,7 +76,7 @@ def test_cloud_gate_needs_remote_root_and_creds(monkeypatch):
 
 def test_env_creds_count_as_configured(monkeypatch):
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA…")
-    assert cloud.aws_configured(_FakeSecrets([])) is True
+    assert aws.AWS.credentials_present(_FakeSecrets([])) is True
 
 
 def test_botocore_chain_counts_as_configured(monkeypatch):
@@ -83,8 +84,8 @@ def test_botocore_chain_counts_as_configured(monkeypatch):
     # the botocore credential chain — the false-negative found against real AWS.
     for k in ("AWS_ACCESS_KEY_ID", "AWS_PROFILE", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"):
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setattr(cloud, "_chain_has_credentials", lambda: True)
-    assert cloud.aws_configured(_FakeSecrets([])) is True
+    monkeypatch.setattr(aws, "_chain_has_credentials", lambda: True)
+    assert aws.AWS.credentials_present(_FakeSecrets([])) is True
 
 
 # ─── the settings endpoints ──────────────────────────────────────────────────────

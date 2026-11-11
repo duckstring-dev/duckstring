@@ -1,6 +1,15 @@
 # Minted-freshness: demand carries an epoch; inlets stamp it
 
-Status: **built** (engine + driver + routes + poller + tests, full suite green). Supersedes the
+Status: **superseded 2026-11-11.** An Inlet now stamps the time its Run starts (a windowed one, its window's
+end), never the request: freshness is when the Inlets read. A request is a lower bound, and an Inlet can't start
+before it, so stamping the start still meets every request (a duct's request from a clock running ahead waits
+for this clock). Why it changed: a Tap asking for data no older than `fresh_within` sends a request in the past,
+and an Inlet stamping that would label fresh data as old and make the Tap due again at once. A throttle release
+no longer needs its `released` flag. The Python engine now matches the Playground's (which always stamped the
+start) in a 2,300-scenario random cross-check, apart from one older difference in when a throttled trigger Pond
+releases (`tests/test_engine.py`, `test_the_throttle_matches_the_playground_engine`).
+
+Original status: **built** (engine + driver + routes + poller + tests, full suite green). Supersedes the
 duct-solicit freshness discussion in cross-catchment-ducts.md.
 
 ## The model

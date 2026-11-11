@@ -155,6 +155,12 @@ class ServingCache:
         # Keyed on data_version (bumps on publish / catalog change), NOT state_version (bumps every engine
         # tick) — so the warm connection isn't rebuilt (read users: re-materialised from S3) on every query.
         version = driver.data_version
+        if not sandboxed and tap is None:
+            # The ops surface is views over published files, read with the credential set when it was built: a
+            # re-minted Google access token (the old one expires) rebuilds it. Sandboxed ones are materialised.
+            from ..storage import credential_generation
+
+            version = (version, credential_generation(driver.data_root))
         slot = ("tap", tap.pond, tap.name) if tap is not None else sandboxed
         entry = self._cache.get(slot)
         if entry is not None and entry[0] == version:

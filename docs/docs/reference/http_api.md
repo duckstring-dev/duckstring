@@ -71,7 +71,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | POST | `/api/catchment/duck-pools` | full | Create or update a pool. |
 | DELETE | `/api/catchment/duck-pools/{name}` | full | Remove a pool. |
 | GET | `/api/catchment/compute-defaults` | read | Catchment-wide compute defaults. |
-| GET | `/api/catchment/instance-types` | full | Available EC2 instance types. |
+| GET | `/api/catchment/instance-types` | full | Machine types available on the Catchment's cloud: EC2 instance types, Azure VM sizes or Compute Engine machine types. |
 | POST | `/api/catchment/cloud/verify` | full | Check the cloud configuration. |
 | POST | `/api/catchment/keys/rotate` | full | Replace API keys. |
 | POST | `/api/catchment/reset` | full | Reset every Pond. |
@@ -82,7 +82,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/deploy` | full | Deploy a Pond (a packaged upload or a git reference). |
+| POST | `/api/deploy` | full | Deploy a Pond (a packaged upload or a git reference). Redeploying the version a line runs is a 409 unless `force` is set or the Pond is an App. |
 | GET | `/api/ponds/{name}/versions/{version}` | read | Whether a version is deployed. |
 | DELETE | `/api/ponds/{name}` | full | Remove a major line. |
 
@@ -101,7 +101,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameter: `at`, an ISO freshness to ask for instead of now. (Before Refresh, this route marked a Pond for a rebuild; that is now `/rebuild`.) |
+| POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameters (at most one): `at`, an ISO freshness to ask for instead of now; `fresh_within_ms`, to ask for data no older than this. (Before Refresh, this route marked a Pond for a rebuild; that is now `/rebuild`.) |
 | GET | `/api/ponds/{name}/refreshes` | read | List the recurring Refreshes, with when each next asks. |
 | POST | `/api/ponds/{name}/refreshes` | demand | Add a recurring Refresh. Body: `every_seconds` (0 is continuous), `continuous`, `start`, `days`, `until`, `name`. |
 | POST | `/api/ponds/{name}/refreshes/{refresh_name}/remove` | demand | Remove a recurring Refresh. |
@@ -170,6 +170,16 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | POST | `/api/ponds/{name}/taps` | full | Add a Tap. Body: `name`, optional `fresh_within_ms`. The response holds the key, once. |
 | POST | `/api/ponds/{name}/taps/{tap}/rotate` | full | A new key for a Tap, returned once. |
 | POST | `/api/ponds/{name}/taps/{tap}/remove` | full | Remove a Tap. |
+
+### Apps
+
+| Method | Path | Level | Description |
+|---|---|---|---|
+| GET | `/api/ponds/{name}/app/instances` | read | An App's recent instances, newest first. `limit` (default 20). |
+| GET | `/api/ponds/{name}/app/logs` | full | An instance's output as text. `instance` (default the newest), `tail` (bytes from the end, default 65536) or `offset` (bytes from there on). The `x-log-offset` header is where the next read starts. |
+| POST | `/api/ponds/{name}/app/restart` | full | Stop an App's instance and start a fresh one, clearing a failure or a Kill first. Returns once the restart has begun. |
+
+Requests to an App itself go to `/apps/{name}/v{major}/...` on the Catchment's port, outside `/api`; see [`[app]`](pond_toml.md#app). A Tap added to an App has no key (`"key": null`): requests to the App run it.
 
 ### Secrets and alerts
 

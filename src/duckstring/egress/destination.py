@@ -1,10 +1,12 @@
 """Destination parsing/validation for a Spout (see plans/egress.md).
 
-A destination is a URI whose **scheme** selects the egress driver (`file://`, `s3://`, `gs://`,
-`postgres://`, `ducklake:`). Credentials travel inside it as ``${env:NAME}`` references, resolved only at egress time
+A destination is a URI whose **scheme** selects the egress driver (`file://`, `s3://`, `gs://`, `az://`,
+`abfss://`, `postgres://`, `ducklake:`, `databricks://`). A Unity Catalog Volume path (``/Volumes/...``) is a
+``file`` destination: a local path where Volumes are mounted, the Files API elsewhere (``storage.volume_api``).
+Credentials travel inside it as ``${env:NAME}`` references, resolved only at egress time
 (:mod:`duckstring.egress.credentials`) — :func:`parse_destination` validates the *syntax* (known scheme,
-well-formed references) without resolving anything, so a Spout can be created before its secrets are
-present in the environment.
+well-formed references) without resolving anything, so a Spout can be created before its secrets are present in
+the environment.
 """
 
 from __future__ import annotations
@@ -16,12 +18,11 @@ from . import credentials
 
 # Schemes a Spout may target. The concrete drivers are added with the egress worker; the construct
 # accepts the destination ahead of that, so the config can be in place when execution lands.
-OBJECT_STORE_SCHEMES = {"file", "s3", "gs"}
-TRANSACTIONAL_SCHEMES = {"postgres", "postgresql"}  # these need a primary key on every source table
-LAKE_SCHEMES = {"ducklake"}  # transactional too, but take any source (see Capabilities.requires_pk)
-KNOWN_SCHEMES = OBJECT_STORE_SCHEMES | TRANSACTIONAL_SCHEMES | LAKE_SCHEMES
+OBJECT_STORE_SCHEMES = {"file", "s3", "gs", "az", "abfs", "abfss"}
+CATALOG_SCHEMES = {"postgres", "postgresql", "ducklake", "databricks"}  # transactional, with an in-destination watermark
+KNOWN_SCHEMES = OBJECT_STORE_SCHEMES | CATALOG_SCHEMES
 
-VALID_MODES = {"auto", "full", "append"}
+VALID_MODES = {"auto", "full", "append", "changes"}
 
 
 class DestinationError(ValueError):
@@ -32,12 +33,6 @@ class DestinationError(ValueError):
 class Destination:
     scheme: str | None  # None: the whole destination is a reference, its scheme known only once resolved
     raw: str  # the original URI, with ${env:...} references intact (resolved only at egress time)
-
-    @property
-    def transactional(self) -> bool:
-        """Whether the destination does identity-based upsert/delete (and so will require a primary
-        key on the source — enforced when the transactional driver lands)."""
-        return self.scheme in TRANSACTIONAL_SCHEMES
 
 
 def parse_destination(uri: str, *, resolve: bool = False) -> Destination:
@@ -60,14 +55,14 @@ def parse_destination(uri: str, *, resolve: bool = False) -> Destination:
             target = credentials.resolve(uri)
         except credentials.CredentialError as exc:
             raise DestinationError(str(exc)) from exc
-        scheme = urlparse(target).scheme.lower()
+        scheme = "file" if _is_volume(target) else urlparse(target).scheme.lower()
         if scheme not in KNOWN_SCHEMES:
             raise DestinationError(
                 f"destination {uri.strip()} resolves to a value without a supported scheme — expected "
                 f"{', '.join(f'{s}://' for s in sorted(KNOWN_SCHEMES))}"
             )
         return Destination(scheme=scheme, raw=uri)
-    scheme = urlparse(uri).scheme.lower()
+    scheme = "file" if _is_volume(uri) else urlparse(uri).scheme.lower()
     if not scheme:
         raise DestinationError(f"destination {uri!r} has no scheme — expected e.g. file://…, s3://…, postgres://…")
     if scheme not in KNOWN_SCHEMES:
@@ -75,6 +70,10 @@ def parse_destination(uri: str, *, resolve: bool = False) -> Destination:
             f"unsupported destination scheme {scheme!r} — supported: {', '.join(sorted(KNOWN_SCHEMES))}"
         )
     return Destination(scheme=scheme, raw=uri)
+
+
+def _is_volume(uri: str) -> bool:
+    return uri.strip().startswith("/Volumes/")
 
 
 def validate_mode(mode: str) -> str:

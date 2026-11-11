@@ -18,6 +18,7 @@ export interface Pond {
   isDraw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment
   isSpout: boolean; // a Spout — egresses its source's output to an external system (terminal)
   dbt: boolean; // a dbt-mode Pond — its Ripples are dbt models (no @ripple code)
+  isApp: boolean; // an App: an Outlet that serves HTTP from the Catchment (plans/apps.md)
   sources: PondId[];
 }
 
@@ -91,8 +92,35 @@ export interface PondInfo {
   flockError: string | null;
   // Memory slots: held/of/needed, and the queue place while waiting for them (null when not gated).
   memory: { slots: number; of: number; need: number; position: number | null } | null;
+  // App nodes only: where it's served, its latest deploy, and its running instance (null while stopped).
+  app?: AppInfo | null;
   // Spout nodes only: its egress config + standing-Wake armed state.
   spout?: { destination: string; table: string | null; mode: string; armed: boolean } | null;
+}
+
+// An App's serving state. An App runs at most one instance at a time: started by a request, stopped when idle.
+export interface AppInfo {
+  path: string; // served at, from the Catchment's root ("/apps/{name}/v{major}/")
+  deployedAt: string | null; // ISO; a version can be redeployed in place, so this tells deploys apart
+  idleTimeoutS: number; // 0 = never stops for idleness
+  instance: {
+    id: number;
+    startedAt: string;
+    readyAt: string | null; // null while starting
+    active: number; // requests and WebSockets in flight
+    idleAt: string | null; // when it will stop for idleness (null while busy or with no idle timeout)
+  } | null;
+}
+
+// One instance of an App, from start to stop (GET /ponds/{name}/app/instances).
+export interface AppInstance {
+  id: number;
+  version: string;
+  startedAt: string;
+  readyAt: string | null;
+  stoppedAt: string | null;
+  stopReason: string | null;
+  exitCode: number | null;
 }
 
 // ─── Run history ─────────────────────────────────────────────────────────────

@@ -152,7 +152,8 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
     if (p.is_draw && !consumed.has(p.id)) continue;
     ponds[p.id] = {
       id: p.id, name: p.name, kind: p.kind,
-      isDraw: p.is_draw ?? false, isSpout: p.is_spout ?? false, dbt: p.dbt ?? false, sources: [],
+      isDraw: p.is_draw ?? false, isSpout: p.is_spout ?? false, dbt: p.dbt ?? false, isApp: p.is_app ?? false,
+      sources: [],
     };
     pondInfo[p.id] = {
       version: p.version,
@@ -178,6 +179,13 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
       duck: p.duck ?? null,
       flockError: p.flock_error ?? null,
       spout: p.spout ?? null,
+      app: p.app ? {
+        path: p.app.path, deployedAt: p.app.deployed_at, idleTimeoutS: p.app.idle_timeout_s,
+        instance: p.app.instance ? {
+          id: p.app.instance.id, startedAt: p.app.instance.started_at, readyAt: p.app.instance.ready_at,
+          active: p.app.instance.active, idleAt: p.app.instance.idle_at,
+        } : null,
+      } : null,
     };
     pondViews[p.id] = nodeView(p, p.d_ms);
     if (p.refreshes?.length) {
@@ -193,9 +201,9 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
       }));
     }
 
-    // A Draw's "draw" ripple and a Spout's "egress" ripple are internal mechanisms — not worth rendering.
-    // Skip them; the node shows bare (its running/idle/failed state is pond-level).
-    if (!p.is_draw && !p.is_spout) {
+    // A Draw's "draw" ripple, a Spout's "egress" ripple and an App's "serve" ripple are internal mechanisms,
+    // not worth rendering. Skip them; the node shows bare (its running/idle/failed state is pond-level).
+    if (!p.is_draw && !p.is_spout && !p.is_app) {
       for (const r of p.ripples) {
         const eid = `${p.id}.${r.name}`;
         ripples[eid] = { id: eid, pondId: p.id, name: r.name, parents: [] };
@@ -277,7 +285,7 @@ export interface LiveState extends StatusSlice {
   selectRipple(id: RippleId | null): void;
   clearSelection(): void;
 
-  refreshNow(pond: PondId): Promise<void>;
+  refreshNow(pond: PondId, freshWithinMs?: number): Promise<void>;
   addRefresh(pond: PondId, body: AddRefreshBody): Promise<void>;
   removeRefresh(pond: PondId, name: string): Promise<void>;
 
@@ -285,6 +293,7 @@ export interface LiveState extends StatusSlice {
   sleep(pond: PondId, upstream?: boolean): Promise<void>;
   force(pond: PondId): Promise<void>;
   kill(pond: PondId): Promise<void>;
+  restartApp(pond: PondId): Promise<void>;
   rebuildPond(pond: PondId, clear?: boolean): Promise<void>;
   resetPond(pond: PondId): Promise<void>;
 
@@ -542,7 +551,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     set({ collapsedPonds: next });
   },
 
-  refreshNow: (pond) => act(get, set, () => refreshNow(pond)),
+  refreshNow: (pond, freshWithinMs) => act(get, set, () => refreshNow(pond, freshWithinMs)),
   addRefresh: (pond, body) => act(get, set, () => addRefresh(pond, body)),
   removeRefresh: (pond, name) => act(get, set, () => removeRefresh(pond, name)),
 
@@ -550,6 +559,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   sleep: (pond, upstream = false) => act(get, set, () => postTrigger(pond, 'sleep', { upstream })),
   force: (pond) => act(get, set, () => postTrigger(pond, 'force')),
   kill: (pond) => act(get, set, () => postTrigger(pond, 'kill')),
+  restartApp: (pond) => act(get, set, () => postTrigger(pond, 'app/restart')),
   rebuildPond: (pond, clear = false) => act(get, set, () => rebuildPond(pond, clear)),
   resetPond: (pond) => act(get, set, () => postTrigger(pond, 'reset')),
 
@@ -730,6 +740,17 @@ export const STATE_COLORS: Record<string, string> = {
   blocked: THEME_BLOCKED,
   repairing: THEME_WAKE, // mid-rebuild — a deliberate operator action, the soft "go" green
 };
+
+// What an App is doing, for its node and sidebar: halted (failed/killed), starting, serving, or stopped until
+// its next request.
+export type AppState = 'failed' | 'killed' | 'starting' | 'running' | 'idle';
+export function appState(info: PondInfo | undefined): AppState {
+  if (info?.isFailed) return 'failed';
+  if (info?.isKilled) return 'killed';
+  const inst = info?.app?.instance;
+  if (!inst) return 'idle';
+  return inst.readyAt ? 'running' : 'starting';
+}
 
 // Border colour for a node. Running is always the brand cyan, idle grey, and queued (holding demand) the
 // demand colour.

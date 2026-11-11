@@ -10,6 +10,7 @@ just the ``now`` argument, fully decoupled from wall-clock — the loop never sl
 from __future__ import annotations
 
 import json
+import random
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -50,6 +51,7 @@ from duckstring.engine import (
     tick,
     wake_pond,
 )
+from duckstring.engine.catchment import ripples_of
 
 UTC = timezone.utc
 T0 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -387,15 +389,115 @@ def test_ripple_source_f_root_and_parents():
 
 
 @pytest.mark.timeout(1)
-def test_inlet_stamps_demand_epoch_not_run_now():
-    # Minted freshness: an Inlet that runs LATER than the request that demanded it stamps the demand
-    # epoch, not its run-now. (Same-tick runs are unchanged because now == the epoch.)
+def test_an_inlet_stamps_when_it_runs_not_when_it_was_asked():
+    # Freshness is when the Inlet read: one that runs later than the request it serves stamps its start.
     s = build([Pond("i", "i")], [Ripple("ir", "i", "ir")])
-    epoch = T0 + secs(5)
-    s.pond_states["i"].demand = [epoch]
-    s2, started = sentinel(T0 + secs(10), s)  # runs at T0+10, but the demand epoch is T0+5
+    s.pond_states["i"].demand = [T0 + secs(5)]
+    s2, started = sentinel(T0 + secs(10), s)
     assert "ir" in started
-    assert s2.pond_states["i"].start_f == epoch
+    assert s2.pond_states["i"].start_f == T0 + secs(10)
+    assert s2.pond_states["i"].demand == []
+
+
+@pytest.mark.timeout(1)
+def test_an_inlet_asked_for_a_later_time_waits_for_it():
+    # A request later than now (a duct from a Catchment whose clock runs ahead) can't be met by a Run now: the
+    # Inlet starts once the clock reaches it, so its stamp is never earlier than what it was asked for.
+    s = build([Pond("i", "i")], [Ripple("ir", "i", "ir")])
+    s.pond_states["i"].demand = [T0 + secs(5)]
+    s2, started = sentinel(T0 + secs(4), s)
+    assert started == [] and s2.pond_states["i"].start_f == NEVER
+    s2, started = sentinel(T0 + secs(6), s2)
+    assert "ir" in started and s2.pond_states["i"].start_f == T0 + secs(6)
+
+
+@pytest.mark.timeout(1)
+def test_a_windowed_inlet_still_stamps_its_windows_end():
+    window = Window(start_anchor=T0, duration=secs(60), freq_unit="MINUTE", freq_interval=1)
+    s = build([Pond("i", "i", windows=[window])], [Ripple("ir", "i", "ir")])
+    s.pond_states["i"].demand = [T0 + secs(5)]
+    s2, started = sentinel(T0 + secs(10), s)
+    assert "ir" in started and s2.pond_states["i"].start_f == T0 + secs(60)
+
+
+def _settled_pipeline(rng: random.Random, now: datetime) -> tuple[EngineState, dict[str, timedelta]]:
+    """A random DAG of up to seven Ponds, idle, each at a random past freshness no fresher than its Sources."""
+    names = [f"P{i}" for i in range(rng.randint(2, 7))]
+    spec = []
+    for i, name in enumerate(names):
+        sources = sorted(rng.sample(names[:i], rng.randint(1, min(2, i)))) if i and rng.random() < 0.85 else []
+        spec.append((name, rng.choice([0.5, 1, 2, [1, 1]]), sources))
+    s, dur = graph(spec)
+    hours = lambda *choices: timedelta(hours=rng.choice(choices))  # noqa: E731
+    for name, _, sources in spec:
+        f = min(s.pond_states[sp].end_f for sp in sources) - hours(0, 0, 3, 48) if sources else now - hours(1, 6, 20, 48, 120)
+        ps = s.pond_states[name]
+        ps.start_f = ps.end_f = ps.changed_f = f
+        for rid in ripples_of(s, name):
+            s.ripple_states[rid].start_f = s.ripple_states[rid].end_f = f
+    return s, dur
+
+
+@pytest.mark.timeout(30)
+def test_a_request_for_older_data_runs_only_the_ponds_older_than_it():
+    """From a random settled pipeline, a request for data at least as fresh as ``t`` (a Tap or ``--fresh-within``:
+    ``t`` in the past) runs exactly the Ponds older than ``t`` that it reaches before a fresher one, each once,
+    and leaves the requested Pond at least that fresh. Every Inlet that runs stamps the time it ran."""
+    for seed in range(100):
+        rng = random.Random(seed)
+        now = T0 + timedelta(days=10)
+        s, dur = _settled_pipeline(rng, now)
+        target = rng.choice(list(s.ponds))
+        t = now - timedelta(hours=rng.choice([0, 12, 24, 72]))
+        before = {pid: ps.start_f for pid, ps in s.pond_states.items()}
+        expected, todo = set(), [target]
+        while todo:
+            pid = todo.pop()
+            if pid not in expected and s.pond_states[pid].end_f < t:
+                expected.add(pid)
+                todo.extend(s.ponds[pid].sources)
+        d = Driver(s, dur, now=now)
+        d.state = refresh_now(d.state, target, t)
+        d._react()
+        d.run(20)  # seven Ponds of at most 2 s each settle well within this
+        ran = {pid for pid, ps in d.state.pond_states.items() if ps.start_f != before[pid]}
+        assert ran == expected, (seed, target, t)
+        assert all(ps.runs_started <= 1 for ps in d.state.pond_states.values()), seed
+        assert d.state.pond_states[target].end_f >= t, seed
+        for pid in ran:
+            assert not d.state.pond_states[pid].demand, (seed, pid)
+            if not s.ponds[pid].sources:
+                assert d.state.pond_states[pid].end_f == now, (seed, pid)
+
+
+@pytest.mark.timeout(30)
+def test_requests_of_any_age_are_all_met_and_inlets_never_stamp_ahead_of_the_clock():
+    """Random streams of requests, as fresh as now or older, at random Ponds while Runs are in flight: once the
+    pipeline goes quiet every request is met and no demand is left, freshness only ever climbs, and an Inlet's
+    freshness is never ahead of the clock (it is the time its Run started)."""
+    for seed in range(50):
+        rng = random.Random(seed)
+        now = T0 + timedelta(days=10)
+        s, dur = _settled_pipeline(rng, now)
+        d = Driver(s, dur, now=now, drift=rng.random() < 0.5)
+        asked: list[tuple[str, datetime]] = []
+        last = {pid: ps.end_f for pid, ps in d.state.pond_states.items()}
+        for step in range(600):
+            if rng.random() < 0.08:
+                pid, t = rng.choice(list(d.state.ponds)), d.now - timedelta(hours=rng.choice([0, 0, 1, 12, 48]))
+                d.state = refresh_now(d.state, pid, t)
+                d._react()
+                asked.append((pid, t))
+            d.step()
+            for pid, ps in d.state.pond_states.items():
+                assert ps.end_f >= last[pid], (seed, step, pid)
+                last[pid] = ps.end_f
+                if not d.state.ponds[pid].sources:
+                    assert ps.start_f <= d.now, (seed, step, pid)
+        d.run(120)
+        for pid, t in asked:
+            assert d.state.pond_states[pid].end_f >= t, (seed, pid, t)
+        assert not any(ps.demand for ps in d.state.pond_states.values()), seed
 
 
 @pytest.mark.timeout(1)
@@ -521,8 +623,7 @@ def scheduled(pid: str, start: datetime, period: float, **kw) -> Refresh:
 
 @pytest.mark.timeout(5)
 def test_scheduled_refresh_requests_each_occurrence_at_its_epoch():
-    """A scheduled Refresh asks for each grid occurrence; the Inlet stamps the occurrence, so the data is
-    labelled with the schedule's time."""
+    """A scheduled Refresh asks for each grid occurrence, and the Inlet runs (and stamps) at it."""
     s, dur = chain(("I", 1), ("O", 1))
     s.refreshes = {"O": [scheduled("O", T0 + secs(10), 60)]}
     d = Driver(s, dur)
@@ -535,13 +636,14 @@ def test_scheduled_refresh_requests_each_occurrence_at_its_epoch():
 
 @pytest.mark.timeout(5)
 def test_scheduled_refresh_catches_up_after_downtime_with_one_request():
-    """A Catchment that was down through several occurrences asks once, for the latest, when it returns."""
+    """A Catchment that was down through several occurrences asks once, for the latest, when it returns. The
+    Inlet stamps when it ran, after the occurrence."""
     s, dur = chain(("I", 1), ("O", 1))
     s.refreshes = {"O": [scheduled("O", T0, 60)]}
     d = Driver(s, dur, now=T0 + secs(250))  # first tick after four missed occurrences
     d.run(5)
     o = d.state.pond_states["O"]
-    assert o.runs_completed == 1 and o.end_f == T0 + secs(240)
+    assert o.runs_completed == 1 and o.end_f == T0 + secs(250)
 
 
 @pytest.mark.timeout(1)
@@ -997,7 +1099,9 @@ def test_demand_lost_at_a_halted_source_is_resent_when_it_unblocks(halted):
     d.run(10)
     for pid in ("I", "M", "N", "O"):
         assert d.state.pond_states[pid].runs_completed == 1, pid
-    assert d.state.pond_states["O"].end_f == T0
+    # The Inlet's one completed Run is the original, or the re-run after its halted one (stamped then).
+    assert d.state.pond_states["O"].end_f == d.state.pond_states["I"].end_f
+    assert d.state.pond_states["I"].end_f == (T0 + secs(0.5) if halted == "I" else T0)
 
 
 # ─── Throttle (plans/throttle.md) ───────────────────────────────────────
@@ -1005,9 +1109,7 @@ def test_demand_lost_at_a_halted_source_is_resent_when_it_unblocks(halted):
 # saturated demand the bottleneck runs as often as it did under a Wave, upstream settles at the bottleneck's
 # rate, and the data is at least as fresh as the Wave's. Sparse demand runs every Pond once per Refresh. Until
 # the bottleneck has started its first run nothing can be detected, so the startup runs unpaced; data age is
-# therefore compared over the second half, as upstream run counts are. (The startup matters for age here and
-# not in the playground: a user's Refresh that reaches a busy Inlet keeps its minted epoch, which the
-# playground doesn't model.)
+# therefore compared over the second half, as upstream run counts are.
 #
 # The engine had a pull trigger, the Wave, until Refresh replaced it. WAVE holds what it measured on each
 # topology (this simulation, 120 s; Outlet, Inlet and bottleneck runs, and mean age), as the yardstick.
@@ -1087,6 +1189,10 @@ WAVE: dict[str, dict[str, tuple[dict[str, int], float]]] = {
 # Beyond the playground spec's topologies: only cross-checked, not part of the saturation port.
 CROSSCHECK_ONLY = {
     "two Outlets on a shared chain": ([("I", 1, []), ("S", 3, ["I"]), ("O1", 1, ["S"]), ("O2", 1, ["S"])], "O1", "I", "S"),
+    "a join reading its Inlet directly and through a slow Pond":
+        ([("I", 2, []), ("M", [2, 0.5, 2], ["I"]), ("O", 3, ["I", "M"])], "O", "I", "M"),
+    "a busy Inlet": ([("I", [0.5, 0.5], []), ("O", 1, ["I"])], "O", "I", "O"),
+    "an Inlet with its own Refresh": ([("I", 2, []), ("O", [2, 0.5], ["I"])], "O", "I", "O"),
 }
 
 
@@ -1172,17 +1278,15 @@ def test_sparse_refreshes_run_every_pond_once_per_refresh(name):
 
 
 @pytest.mark.timeout(5)
-def test_an_inlet_stamps_a_release_at_its_start_and_a_refresh_at_its_epoch():
-    """A throttle release carries no epoch anyone asked for, so a busy Inlet it reaches stamps its next Run's
-    start. A user's Refresh keeps its minted epoch however late the Inlet gets to it."""
-    for release in (False, True):
-        d = Driver(*chain(("I", 4), ("O", 1)))
-        d.refresh("O")
-        d.run(1)  # I busy until T0+4
-        t = d.now
-        add_demand(d.state, "I", t, release=release)
-        d.run(4)  # I's first Ripple frees at T0+4 and the next Run starts
-        assert d.state.pond_states["I"].start_f == (T0 + secs(4) if release else t)
+def test_a_busy_inlet_stamps_its_next_runs_start():
+    """A request reaching a busy Inlet waits for its first Ripple, and the Run that serves it is stamped when
+    it starts, however much earlier it was asked for."""
+    d = Driver(*chain(("I", 4), ("O", 1)))
+    d.refresh("O")
+    d.run(1)  # I busy until T0+4
+    add_demand(d.state, "I", d.now)
+    d.run(4)  # I's first Ripple frees at T0+4 and the next Run starts
+    assert d.state.pond_states["I"].start_f == T0 + secs(4)
 
 
 @pytest.mark.timeout(10)
@@ -1323,7 +1427,7 @@ def test_a_held_back_source_that_becomes_throttled_gets_its_demand_at_once():
     t = T0 + secs(1)
     add_demand(s, "X", t)
     assert t in s.pond_states["S"].demand and s.pond_states["F"].demand == []
-    assert s.pond_states["X"].throttle.deferred == {"F": (t, False)}
+    assert s.pond_states["X"].throttle.deferred == {"F": t}
     s.pond_states["F"].throttle = ThrottleState(slow={"F.r0"})  # F becomes throttled before S starts again
     s, _ = sentinel(t, s)
     assert t in s.pond_states["F"].demand and s.pond_states["X"].throttle.deferred == {}
@@ -1391,7 +1495,7 @@ def test_sleeping_one_outlet_upstream_keeps_another_outlets_demand():
     d.state = sleep_pond(d.state, "A", d.now, upstream=True)
     d._react()
     d.run(10)
-    assert d.state.pond_states["B"].end_f == b_at
+    assert d.state.pond_states["B"].end_f == T0 + secs(1)  # S ran again for B once it was free
     assert d.state.pond_states["A"].runs_completed == 0  # A was still waiting on S: its demand is gone
 
 
@@ -1417,12 +1521,15 @@ def _node_runs_typescript() -> bool:
     ("slow sibling Inlet", dict(standing=0)),  # sibling alignment at the join
     ("two Outlets on a shared chain", dict(standing=0, standings={"O2": 10})),  # every 10 s beside a continuous neighbour
     ("deep chain", dict(schedules={"O": [3, 7]})),  # a scheduled Refresh
+    # Requests reaching a busy Inlet, which stamps when its Run starts in both engines:
+    ("a join reading its Inlet directly and through a slow Pond", dict(standing=0)),
+    ("a busy Inlet", dict(standing=0, schedules={"I": [0, 2]})),
+    ("an Inlet with its own Refresh", dict(every=30, standings={"I": 10})),
 ])
 def test_the_throttle_matches_the_playground_engine(name, opts):
     """Cross-check against the reference: the same scenario through the playground's TypeScript engine and
-    this one gives the same Pond Runs at the same times. (They can differ where a user's Refresh reaches a busy
-    Inlet, which stamps the Refresh's minted epoch here and its start time in the playground; a scheduled Refresh
-    beside another one does, since the stamp moves the other's clock.)"""
+    this one gives the same Pond Runs at the same times. (They can differ where a throttled trigger Pond completed a
+    Run before a request reached it: it releases at once here, and only in the tick of a completion there.)"""
     spec, outlet, _, _ = THROTTLE_TOPOLOGIES.get(name) or CROSSCHECK_ONLY[name]
     scenario = {"spec": spec, "outlet": outlet, "seconds": 120, **opts}
     out = subprocess.run(

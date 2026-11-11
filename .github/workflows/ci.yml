@@ -169,6 +169,55 @@ jobs:
           DUCKSTRING_TEST_S3_KEY: duckstringtest
           DUCKSTRING_TEST_S3_SECRET: duckstringtest
 
+  # Azure and Google Cloud Storage data roots and Spouts against emulators (plans/azure-gcp.md). Azurite serves
+  # both halves of az:// (adlfs and DuckDB's azure extension); fake-gcs-server serves gcsfs's JSON API, while
+  # DuckDB's half of gs:// (the XML API) runs against moto in every job. Azurite's API-version check is skipped
+  # because DuckDB's bundled Azure SDK can be newer than the emulator.
+  cloud-storage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Start Azurite and fake-gcs-server
+        run: |
+          docker run -d --name azurite -p 10000:10000 mcr.microsoft.com/azure-storage/azurite \
+            azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck --loose
+          docker run -d --name fake-gcs -p 4443:4443 fsouza/fake-gcs-server \
+            -scheme http -port 4443 -public-host 127.0.0.1:4443
+          for i in $(seq 1 30); do
+            curl -s -o /dev/null http://127.0.0.1:10000/ && curl -sf http://127.0.0.1:4443/storage/v1/b && exit 0
+            sleep 2
+          done
+          docker logs azurite; docker logs fake-gcs
+          exit 1
+      - run: pip install -e packages/trickle -e .[dev]
+      - run: pytest tests/test_object_store_azure.py tests/test_object_store_gcs.py tests/test_cloud_storage.py -v -rs
+        env:
+          DUCKSTRING_TEST_AZURE: http://127.0.0.1:10000/devstoreaccount1
+          DUCKSTRING_TEST_GCS: http://127.0.0.1:4443
+          # gcsfs 2026.x probes a bucket's layout over gRPC with TLS, which fake-gcs-server doesn't serve (60 s per probe).
+          GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT: "false"
+
+  # The Postgres wire against Npgsql, the driver Power BI's PostgreSQL connector bundles (4.0.17, in Desktop and
+  # the on-premises gateway), and the current release: types in binary, parameters, pooled-connection resets, TLS
+  # and a logged Power BI session (tests/npgsql).
+  npgsql:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: pip install -e packages/trickle -e .[dev]
+      - run: pytest tests/test_pg_wire_npgsql.py tests/test_pg_wire.py -v -rs
+        env:
+          DUCKSTRING_TEST_NPGSQL: "4.0.17,10.0.3"
+
   # The StarRocks Flock engine against a real StarRocks (plans/flock-coverage.md): every construct the
   # engine sends is run on both StarRocks and DuckDB and must agree, through the engine's real path (sources
   # staged to MinIO, read with FILES(), the result unloaded with INSERT INTO FILES). StarRocks reaches MinIO

@@ -22,7 +22,8 @@ class _TapBody(BaseModel):
 
 @router.post("/ponds/{name}/taps", dependencies=[auth.full])
 def add_tap(name: str, body: _TapBody, request: Request, major: int | None = None, version: str | None = None):
-    """Add a Tap. The response carries its key, once: only a hash of it is kept."""
+    """Add a Tap. The response carries its key, once: only a hash of it is kept. A Tap on an App has no key
+    (``null``): it runs on the App's requests."""
     key = _resolve(request, name, major, version)
     try:
         tap, secret = _driver(request).add_tap(key, body.name, fresh_within=timedelta(milliseconds=body.fresh_within_ms))
@@ -44,6 +45,8 @@ def rotate_tap(name: str, tap_name: str, request: Request, major: int | None = N
         secret = _driver(request).rotate_tap(key, tap_name)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"pond": key, "tap": tap_name, "key": secret}
 
 

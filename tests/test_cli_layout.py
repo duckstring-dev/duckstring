@@ -1,6 +1,6 @@
-"""The CLI's layout after the 2026-10 regrouping: thirteen top-level commands, tables and Objects named as
-POND.NAME under `data`, catalog SQL through the top-level `query`, multi-Pond `control` verbs, `pond promote`
-and `pond puddle`, and `catchment duct open|close`."""
+"""The CLI's layout after the 2026-10 regrouping, plus `app` (2026-11): fourteen top-level commands, tables and
+Objects named as POND.NAME under `data`, catalog SQL through the top-level `query`, multi-Pond `control` verbs,
+`pond promote` and `pond puddle`, and `catchment duct open|close`."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from test_execute import _deploy_outlet
 from duckstring.cli import app
 
 TOP_LEVEL = {"status", "query", "get", "refresh", "window", "control", "data", "pond", "catchment", "duck", "spout",
-             "secret", "alert"}
+             "secret", "alert", "app"}
 
 
-def test_the_top_level_is_thirteen_commands():
+def test_the_top_level_is_fourteen_commands():
     import typer.main
 
     group = typer.main.get_command(app)

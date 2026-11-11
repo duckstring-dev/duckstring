@@ -34,7 +34,7 @@ import httpx
 class PoolAgent:
     def __init__(self, pool: str, catchment: str, token: str, root: Path,
                  data_root: str | None = None, persist_root: str | None = None,
-                 poll_interval: float = 0.2):
+                 poll_interval: float = 0.2, audience: str | None = None):
         self.pool = pool
         self.base = catchment.rstrip("/")
         self.token = token
@@ -42,8 +42,12 @@ class PoolAgent:
         self.data_root = data_root
         self.persist_root = persist_root
         self.poll_interval = poll_interval
+        self.audience = audience  # passed on to child Ducks, which dial the same Catchment
         self._procs: dict[str, subprocess.Popen] = {}  # "{pond}@{major}" -> child Duck
-        self._client = httpx.Client(timeout=10.0, headers={"X-Duck-Token": token})
+        from .id_token import catchment_auth
+
+        self._client = httpx.Client(timeout=10.0, headers={"X-Duck-Token": token},
+                                    auth=catchment_auth(self.base, audience))
 
     # ─── the dial-back channel ───────────────────────────────────────────────────
 
@@ -88,6 +92,7 @@ class PoolAgent:
             # co-resident Sinks read) and async-persists to the durable plane, exactly like a
             # Catchment-Pool Duck (plans/persist.md).
             f"--persist-root={self.persist_root or ''}",
+            *([f"--audience={self.audience}"] if self.audience else []),
         ]
         self._procs[key] = subprocess.Popen(argv, env=env)
         self._post_event({"kind": "duck_started", "pond": job["pond"], "major": job["major"]})
@@ -157,6 +162,7 @@ def main() -> None:
     ap.add_argument("--root", required=True)
     ap.add_argument("--data-root", default="")
     ap.add_argument("--persist-root", default="")
+    ap.add_argument("--audience", default="")
     args = ap.parse_args()
     # The launcher stops the agent with SIGTERM. Python's default handling exits without running
     # `finally`, which would leave every child Duck running with nothing supervising it; exit normally.
@@ -164,6 +170,7 @@ def main() -> None:
     PoolAgent(
         args.pool, args.catchment, args.token, Path(args.root),
         data_root=args.data_root or None, persist_root=args.persist_root or None,
+        audience=args.audience or None,
     ).serve()
 
 
