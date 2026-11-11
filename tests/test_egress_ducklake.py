@@ -80,7 +80,7 @@ def _read(tmp_path):
 
 def test_the_scheme_takes_any_source():
     caps = get_egress("ducklake:sqlite:/srv/meta.sqlite").capabilities()
-    assert (caps.supports_delta, caps.transactional, caps.requires_pk) == (True, True, False)
+    assert (caps.supports_delta, caps.transactional) == (True, True)
 
 
 def test_spout_options_leave_the_attach_string(monkeypatch):
@@ -213,13 +213,6 @@ def test_a_column_the_source_gains_is_added_to_the_lake_table(tmp_path):
     assert dict((c, t) for c, t, *_ in con.execute("DESCRIBE r.main.totals").fetchall()) == {
         "k": "VARCHAR", "total": "BIGINT", "currency": "VARCHAR"}  # INTEGER widened; a column added
     assert con.execute("SELECT * FROM r.main.totals").fetchall() == [("all", 20, "eur")]
-
-
-def test_a_lake_spout_accepts_a_table_without_a_key(tmp_path):
-    from tests.test_egress_postgres import _published_driver
-
-    d = _published_driver(tmp_path, {"snapshot": {"mode": "overwrite", "f": F1.isoformat()}})
-    d.add_spout("sales@1", "lake", "snapshot", _lake(tmp_path), "auto")  # refused for Postgres; fine for a lake
 
 
 def test_the_test_button_attaches_without_delivering(tmp_path):

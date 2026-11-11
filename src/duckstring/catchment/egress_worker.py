@@ -29,10 +29,10 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
     """Deliver one Spout (blocking — runs in the thread pool). Reads the Pond's published tables via the
     data plane and writes each to the destination. Raises on any failure (the caller records it).
 
-    A **transactional, delta-capable** destination (Postgres) syncs *incrementally*: read the changelog
-    delta over ``(destination watermark, f]`` and ``apply_delta`` (upserts + deletes), falling back to a
-    full reload on a full read (bootstrap / coverage-miss / a changed overwrite source). A lake (DuckLake) does
-    the same for any source, inside one batch per run. ``mode=changes`` reads the same window from the
+    A **transactional, delta-capable** destination (Postgres, DuckLake, Databricks) syncs *incrementally*:
+    read the delta over ``(destination watermark, f]`` and ``apply_delta`` (upserts + deletes), falling back
+    to a full reload on a full read (bootstrap / coverage-miss / a changed overwrite source). A lake does it
+    inside one batch per run. ``mode=changes`` reads the same window from the
     destination's own watermark and lands it as change files with a manifest. Others snapshot."""
     from datetime import datetime
 
@@ -104,11 +104,6 @@ def _egress_spout(root: Path, job: dict, data_root: str | None = None) -> None:
                     )
                 driver.mirror(data_dir, table, entry, f=f)
             elif caps.supports_delta and caps.transactional:
-                if not pk and caps.requires_pk:  # enforced at egress for a source not checked when added
-                    raise ValueError(
-                        f"egress to a transactional destination needs a primary key — table {table!r} is "
-                        "not a merge Trickle with a declared pk (put a .merge(pk=…) before this Spout)"
-                    )
                 # The in-destination cursor (exactly-once); a resync reads from the beginning instead.
                 previous_f = NEVER if job.get("resync") else driver.watermark(c, table) or NEVER
                 if previous_f >= f:

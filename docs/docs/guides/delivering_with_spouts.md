@@ -44,7 +44,7 @@ By default each delivery rewrites the whole table. For a large append Trickle, `
 
 ## Delivering to Postgres
 
-A Postgres Spout keeps a table in an application's database in sync, sending only the rows that changed:
+A Postgres Spout keeps tables in a Postgres database in sync, such as an application's own database:
 
 ```bash
 duckstring secret set APP_DB_PASSWORD
@@ -60,11 +60,15 @@ duckstring spout add priced --table priced_line --to '${env:DATABASE_URL}'
 
 A destination held entirely in a variable or secret is checked when it's first used, by the first delivery or the UI's **Test** button, rather than when the Spout is added.
 
-The table must be a merge Trickle with a primary key, written with `merge_table` or the builder's `.merge()`. Duckstring creates `analytics.priced_line` on first delivery, from the table's columns. Each later delivery deletes the changed and removed keys and inserts their new rows, in a single transaction.
+Duckstring creates `analytics.priced_line` on first delivery, from the table's columns. What each later delivery does depends on the table:
 
-Delivery is exactly-once. The last delivered freshness is stored in a `_duckstring_egress` table in the same schema, updated in the same transaction as the data, so a delivery interrupted by a crash is rolled back and redone without duplicating anything.
+| Table | Each delivery |
+|---|---|
+| Merge Trickle | Deletes the changed and removed keys and inserts their new rows. The Postgres table has the Trickle's primary key. |
+| Append Trickle | Inserts the new rows. |
+| Plain table | Replaces the whole table when its Pond publishes a new version of it. |
 
-Deliver an append Trickle or a plain table by merging it upstream. A small Ripple that reads it and writes it with `merge_table` gives it the primary key Postgres needs.
+A delivery is a single transaction, so readers of the database see the old rows or the new ones, never a mix. Delivery is exactly-once. The last delivered freshness is stored in a `_duckstring_egress` table in the same schema, updated in the same transaction as the data, so a delivery interrupted by a crash is rolled back and redone without duplicating anything.
 
 ## Delivering to a DuckLake
 
@@ -83,7 +87,7 @@ duckstring spout add reports \
   --to 'ducklake:postgres:dbname=lake host=pg.internal user=loader password=${secret:LAKE_PG}?data_path=s3://lakehouse/files/'
 ```
 
-Any table can go to a lake. A merge Trickle is applied by its primary key, as for Postgres, an append Trickle's new rows are inserted, and a plain table is replaced whole when its Pond publishes a new version of it. When a Spout delivers several tables, a run's tables go in one transaction, so readers of the lake see one snapshot per delivery, with `duckstring` as its author and the Pond (`reports@1`) as its commit message. Delivery is exactly-once, through a `_duckstring_egress` table in the same schema.
+Any table can go to a lake, delivered as for Postgres. When a Spout delivers several tables, a run's tables go in one transaction, so readers of the lake see one snapshot per delivery, with `duckstring` as its author and the Pond (`reports@1`) as its commit message. Delivery is exactly-once, through a `_duckstring_egress` table in the same schema.
 
 Duckstring doesn't compact the lake or expire its snapshots, since those are decisions for whoever owns it (DuckLake's `ducklake_merge_adjacent_files` and `ducklake_expire_snapshots` do both). It never migrates the lake's catalog either. A lake the Spout creates under DuckDB 2.0 uses DuckLake 1.1, which readers on DuckDB 1.5 can't open.
 
@@ -121,7 +125,7 @@ Any table can be delivered. Each table is created on its first delivery, with ty
 
 Progress is recorded in a `_duckstring_egress` table in the schema. A Databricks statement commits one table at a time, so the progress is written after the data, and a crash between the two repeats the delivery. Each kind of delivery is safe to repeat. For an append table, this is what the extra `_duckstring_f` column in the Databricks table is for: it holds the freshness of the delivery that inserted each row, as UTC ISO text, and a repeated delivery replaces the rows inserted after the recorded progress instead of adding them again. Rows written by a delivery of the whole table, such as the first, have it empty.
 
-Every delivery runs statements on the warehouse: one per changed table, and two for the progress of all of them, even when nothing changed. The tables of a delivery are applied in parallel. In testing, a delivery of two tables took about 7.5 seconds. A serverless warehouse stops itself once it has been idle for its auto-stop time, so a Spout delivering more often than that keeps it running. To spend less warehouse time, give the Spout a [window](#controlling-when-deliveries-happen) so it delivers less often, or land change files (below) and apply them on your own schedule.
+Every delivery runs statements on the warehouse: one per changed table, and two for the progress of all of them, even when nothing changed. The tables of a delivery are applied in parallel. A serverless warehouse stops itself once it has been idle for its auto-stop time, so a Spout delivering more often than that keeps it running. To spend less warehouse time, give the Spout a [window](#controlling-when-deliveries-happen) so it delivers less often, or land change files (below) and apply them on your own schedule.
 
 ## Change files
 
@@ -135,7 +139,7 @@ duckstring spout add priced --table priced_line --mode changes --to /Volumes/mai
 
 The manifest is the commit. A file appears in the destination before its upload has finished (on a Volume it reads as empty until then), so read the manifests rather than listing the folders. For the same reason, Databricks Auto Loader can't watch the destination. Delivery is exactly-once: a delivery that stopped before its manifest was written is written again under the same names, and no two manifests name the same changes. The Spout keeps its progress in `_duckstring/latest.json`, which must stay in place.
 
-Writing change files uses no warehouse. In testing, a delivery from a laptop to a Volume took 1.3 to 2 seconds.
+Writing change files uses no warehouse.
 
 ### Applying them in Databricks
 

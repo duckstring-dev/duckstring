@@ -30,7 +30,6 @@ def test_whole_reference_detection():
 def test_spout_destination_is_accepted_unresolved():
     dest = parse_destination("${env:DATABASE_URL}")
     assert dest.scheme is None and dest.raw == "${env:DATABASE_URL}"
-    assert not dest.transactional  # unknown until resolved; the driver enforces a primary key at delivery
 
 
 def test_spout_destination_resolves_to_its_driver(monkeypatch):

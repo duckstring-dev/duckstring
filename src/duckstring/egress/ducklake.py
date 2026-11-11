@@ -48,7 +48,7 @@ class DuckLakeEgressDriver(AttachedCatalogDriver):
     SCHEMES = ("ducklake",)
 
     def capabilities(self) -> Capabilities:
-        return Capabilities(supports_delta=True, supports_delete=True, transactional=True, requires_pk=False)
+        return Capabilities(supports_delta=True, supports_delete=True, transactional=True)
 
     # ─── the destination ─────────────────────────────────────────────────────
 

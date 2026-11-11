@@ -79,7 +79,7 @@ class DatabricksEgressDriver:
         self._previous: dict[str, datetime | None] = {}  # the watermark each table's delivery started from
 
     def capabilities(self) -> Capabilities:
-        return Capabilities(supports_delta=True, supports_delete=True, transactional=True, requires_pk=False)
+        return Capabilities(supports_delta=True, supports_delete=True, transactional=True)
 
     # ─── the destination ─────────────────────────────────────────────────────
 

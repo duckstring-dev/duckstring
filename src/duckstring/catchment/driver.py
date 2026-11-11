@@ -2177,12 +2177,6 @@ class Driver(TapsMixin):
             raise ValueError("mode=changes lands change files: it needs a file://, object-store or /Volumes "
                              f"destination, not {dest.scheme}")
         with self.lock:
-            m = self.meta[pond]
-            if dest.transactional:
-                # A transactional destination does identity-based upsert/delete → it needs a primary key,
-                # which only a merge Trickle declares. Reject what we can see now; a not-yet-published
-                # source is caught at egress instead.
-                self._assert_transactional_pk(m["name"], m["major"], table)
             src_name, major = split_pond_key(pond)
             final = name or self._default_spout_name(src_name, dest.scheme or "spout", table)
             if self.meta.get(pond_key(f"{src_name}#{final}", major), {}).get("is_spout"):
@@ -2199,26 +2193,6 @@ class Driver(TapsMixin):
         src_name, major = split_pond_key(pond)
         skey = pond_key(f"{src_name}#{name}", major)
         return skey if self.meta.get(skey, {}).get("is_spout") else None
-
-    def _assert_transactional_pk(self, name: str, major: int, table: str | None) -> None:
-        """Reject a Spout to a transactional destination whose source table is already published without a
-        primary key (a plain/overwrite Ripple). A table not yet published passes here — the worker enforces
-        the requirement at egress time."""
-        from pathlib import Path
-
-        from ..trickle_io import load_sidecar, sidecar_tables
-        from .registry import resolve_data_dir
-
-        sidecar = load_sidecar(resolve_data_dir(Path(self.root), name, major, self.data_root,
-                                                expected_f=self.published_f(name, major)))
-        targets = [table] if table else list(sidecar_tables(sidecar))
-        for t in targets:
-            meta = sidecar.get(t)
-            if meta is not None and (meta.get("mode") != "merge" or not meta.get("pk")):
-                raise ValueError(
-                    f"egress to a transactional destination needs a primary key — table '{t}' on '{name}' "
-                    "is not a merge Trickle with a declared pk. Put a merge Trickle (.merge(pk=…)) upstream."
-                )
 
     def list_spouts(self, pond: str) -> list[dict]:
         with self.lock:

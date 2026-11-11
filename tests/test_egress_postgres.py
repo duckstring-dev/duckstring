@@ -3,8 +3,8 @@ plain DuckDB SQL against an ATTACHed database — so the full apply/upsert/delet
 exercised here against a **DuckDB-attached** destination (the same SQL path). A real-Postgres write e2e
 (containerised) is the CI follow-up, gated below.
 
-It also covers the transactional **primary-key gate** (a Ripple → Postgres Spout is refused) and the
-worker's incremental path (changelog delta → upserts + deletes; full read → reload)."""
+It also covers the worker's paths for every kind of table (a merge Trickle by key, an append Trickle
+inserted, a plain table replaced whole) and its routing (delta → upserts + deletes; full read → reload)."""
 
 from __future__ import annotations
 
@@ -154,18 +154,81 @@ def test_apply_delta_composite_pk(tmp_path):
     assert _read(con, "g") == [("eu", 1, 70)]
 
 
-def test_apply_delta_without_pk_raises():
-    drv = get_egress("postgres://u@h/db")
+def test_apply_delta_without_pk_inserts_and_refuses_a_retraction(tmp_path):
+    drv = _driver(tmp_path)
     con = _con()
-    with pytest.raises(ValueError, match="needs a primary key"):
-        drv.apply_delta(con, object(), table="t", pk=None, f=F1)
+    drv.write_full(con, con.sql("SELECT 1 AS e"), table="events", pk=None, f=F1)
+    added = _delta(con, None, "SELECT * FROM (VALUES (2), (3)) t(e)", "SELECT 1 AS e WHERE false")
+    drv.apply_delta(con, added, table="events", pk=None, f=F2)
+    assert _read(con, "events") == [(1,), (2,), (3,)]
+    removed = _delta(con, None, "SELECT 1 AS e WHERE false", "SELECT 2 AS e")
+    with pytest.raises(ValueError, match="no primary key"):
+        drv.apply_delta(con, removed, table="events", pk=None, f=datetime(2026, 6, 3, tzinfo=UTC))
+    assert _read(con, "events") == [(1,), (2,), (3,)] and drv.watermark(con, "events") == F2
 
 
 def test_watermark_none_before_any_write(tmp_path):
     assert _driver(tmp_path).watermark(_con(), "never") is None
 
 
-# ─── The transactional primary-key gate (refuse a Ripple → Postgres at creation) ──
+# ─── Every kind of table, through the worker ─────────────────────────────────
+
+
+class _Source:
+    """The source Pond: a registry connection plus its published data directory."""
+
+    def __init__(self, tmp_path):
+        from duckstring.catchment.registry import pond_data_dir
+
+        self.con = _con()
+        self.data_dir = pond_data_dir(tmp_path, "sales", 1).root
+
+    def run(self, f, *, orders, events, totals):
+        """One run: ``orders`` a merge Trickle (complete state), ``events`` appended, ``totals`` overwritten."""
+        import duckstring.trickle_io as T
+        from duckstring.dataplane import ParquetDataPlane
+
+        T.merge_table(self.con, "orders", self.con.sql(f"SELECT * FROM (VALUES {orders}) t(id, v)"), f, ("id",))
+        T.append_table(self.con, "events", self.con.sql(f"SELECT * FROM (VALUES {events}) t(e, n)"), f, ())
+        self.con.execute(f"CREATE OR REPLACE TABLE totals AS SELECT * FROM (VALUES {totals}) t(k, total)")
+        ParquetDataPlane().export(self.con, self.data_dir, f=f)
+
+
+def _deliver_to(tmp_path, monkeypatch, f, dest):
+    import duckstring.egress.base as base
+    from duckstring.catchment.egress_worker import _egress_spout
+
+    monkeypatch.setattr(base, "get_egress", lambda uri: _DuckPg(dest))
+    _egress_spout(tmp_path, {"pond_name": "sales", "major": 1, "table": None, "destination": "postgres://u@h/db",
+                             "f": f.isoformat()})
+
+
+def _destination(dest):
+    con = duckdb.connect(str(dest), read_only=True)
+    try:
+        tables = {t: sorted(con.execute(f'SELECT * FROM "{t}"').fetchall()) for t in ("orders", "events", "totals")}
+        marks = dict(con.execute("SELECT table_name, f FROM _duckstring_egress").fetchall())
+    finally:
+        con.close()
+    return tables, marks
+
+
+def test_every_kind_of_table_is_delivered(tmp_path, monkeypatch):
+    src, dest = _Source(tmp_path), tmp_path / "dest.duckdb"
+    src.run(F1, orders="(1, 'a'), (2, 'b')", events="('x', 1)", totals="('all', 3)")
+    _deliver_to(tmp_path, monkeypatch, F1, dest)
+    tables, marks = _destination(dest)
+    assert tables == {"orders": [(1, "a"), (2, "b")], "events": [("x", 1)], "totals": [("all", 3)]}
+    assert set(marks.values()) == {F1.isoformat()}
+
+    # A merge Trickle by key, an append Trickle's new rows, a plain table replaced whole.
+    src.run(F2, orders="(2, 'B'), (3, 'c')", events="('y', 2)", totals="('all', 5), ('eu', 2)")
+    _deliver_to(tmp_path, monkeypatch, F2, dest)
+    _deliver_to(tmp_path, monkeypatch, F2, dest)  # a replay writes nothing twice
+    tables, marks = _destination(dest)
+    assert tables == {"orders": [(2, "B"), (3, "c")], "events": [("x", 1), ("y", 2)],
+                      "totals": [("all", 5), ("eu", 2)]}
+    assert set(marks.values()) == {F2.isoformat()}
 
 
 def _published_driver(tmp_path, sidecar):
@@ -187,23 +250,14 @@ def _published_driver(tmp_path, sidecar):
     return Driver(db, tmp_path, "http://x", NoopLauncher())
 
 
-def test_add_spout_pk_gate_rejects_non_trickle_to_postgres(tmp_path):
+def test_add_spout_takes_any_table_to_postgres(tmp_path):
     d = _published_driver(tmp_path, {
         "revenue": {"mode": "merge", "pk": ["id"], "floor": None, "f_base": None, "f": F1.isoformat()},
         "snapshot": {"mode": "overwrite", "f": F1.isoformat()},
     })
-    # a merge Trickle with a declared pk → allowed
-    d.add_spout("sales@1", "rev", "revenue", "postgres://u@h/db", "auto")
-    # a plain/overwrite table → refused with the signpost
-    with pytest.raises(ValueError, match="needs a primary key"):
-        d.add_spout("sales@1", "snap", "snapshot", "postgres://u@h/db", "auto")
-    # all-tables → refused because one table (snapshot) has no pk
-    with pytest.raises(ValueError, match="needs a primary key"):
-        d.add_spout("sales@1", "all", None, "postgres://u@h/db", "auto")
-    # the same overwrite table to a non-transactional destination → allowed
-    d.add_spout("sales@1", "lake", "snapshot", f"file://{tmp_path}/out", "auto")
-    # a table not yet published → allowed at creation (the worker enforces at egress)
-    d.add_spout("sales@1", "future", "not_published_yet", "postgres://u@h/db", "auto")
+    d.add_spout("sales@1", "snap", "snapshot", "postgres://u@h/db", "auto")
+    d.add_spout("sales@1", "all", None, "postgres://u@h/db", "auto")
+    assert {s["name"] for s in d.list_spouts("sales@1")} == {"snap", "all"}
 
 
 # ─── The worker routes the changelog: apply_delta vs reload ───────────────────
@@ -310,3 +364,37 @@ def test_postgres_real_e2e(tmp_path):
     assert rows2 == rows
     ver.close()
     src.close()
+
+
+@pytest.mark.skipif("DUCKSTRING_TEST_PG" not in __import__("os").environ,
+                    reason="set DUCKSTRING_TEST_PG to a libpq URI (postgres://user:pass@host:port/db)")
+@pytest.mark.timeout(60)
+def test_postgres_real_every_kind_of_table(tmp_path):
+    """An append Trickle and a plain table, alongside a merge Trickle, through the real extension."""
+    import os
+
+    from duckstring.catchment.egress_worker import _egress_spout
+
+    dsn = os.environ["DUCKSTRING_TEST_PG"]
+    schema = "ds_kinds"
+    dest = f"{dsn}{'&' if '?' in dsn else '?'}schema={schema}"
+    src = _Source(tmp_path)
+    job = {"pond_name": "sales", "major": 1, "table": None, "destination": dest}
+    src.run(F1, orders="(1, 'a'), (2, 'b')", events="('x', 1)", totals="('all', 3)")
+    _egress_spout(tmp_path, dict(job, f=F1.isoformat()))
+    src.run(F2, orders="(2, 'B'), (3, 'c')", events="('y', 2)", totals="('all', 5), ('eu', 2)")
+    _egress_spout(tmp_path, dict(job, f=F2.isoformat()))
+    _egress_spout(tmp_path, dict(job, f=F2.isoformat()))
+
+    ver = _con()
+    ver.execute("INSTALL postgres; LOAD postgres")
+    ver.execute(f"ATTACH '{dsn.split('?')[0]}' AS verify (TYPE postgres)")
+    try:
+        got = {t: sorted(ver.execute(f'SELECT * FROM verify.{schema}."{t}"').fetchall())
+               for t in ("orders", "events", "totals")}
+        assert got == {"orders": [(2, "B"), (3, "c")], "events": [("x", 1), ("y", 2)],
+                       "totals": [("all", 5), ("eu", 2)]}
+    finally:
+        for t in ("orders", "events", "totals", "_duckstring_egress"):
+            ver.execute(f'DROP TABLE IF EXISTS verify.{schema}."{t}"')
+        ver.close()

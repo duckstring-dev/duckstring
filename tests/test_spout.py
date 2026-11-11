@@ -35,8 +35,6 @@ def _driver(tmp_path):
 def test_parse_destination_known_schemes():
     assert dest.parse_destination("file:///tmp/out").scheme == "file"
     assert dest.parse_destination("s3://bucket/prefix").scheme == "s3"
-    assert dest.parse_destination("postgres://u@h/db").transactional is True
-    assert dest.parse_destination("file:///x").transactional is False
 
 
 def test_parse_destination_rejects_unknown_scheme():

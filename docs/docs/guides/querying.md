@@ -77,6 +77,8 @@ The Catchment can serve the catalog over the Postgres wire protocol, so psql, Po
 DUCKSTRING_SERVE_PG_PORT=5433 DUCKSTRING_SERVE_HOST=0.0.0.0 duckstring catchment start prod
 ```
 
+The Postgres endpoint, and the Arrow Flight one below, each need a port of their own, so they work where you run the Catchment yourself, on a server or in a container. A Catchment on a platform that serves it at one HTTP address, such as Posit Connect or Databricks Apps, can't offer them; see [BI tools and SQL clients](hosting_on_a_platform.md#bi-tools-and-sql-clients) for what to do there.
+
 Connect with any user name and database, and an API key as the password:
 
 ```bash

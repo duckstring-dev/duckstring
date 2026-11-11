@@ -19,9 +19,8 @@ from . import credentials
 # Schemes a Spout may target. The concrete drivers are added with the egress worker; the construct
 # accepts the destination ahead of that, so the config can be in place when execution lands.
 OBJECT_STORE_SCHEMES = {"file", "s3", "gs", "az", "abfs", "abfss"}
-TRANSACTIONAL_SCHEMES = {"postgres", "postgresql"}  # these need a primary key on every source table
-LAKE_SCHEMES = {"ducklake", "databricks"}  # transactional too, but take any source (see Capabilities.requires_pk)
-KNOWN_SCHEMES = OBJECT_STORE_SCHEMES | TRANSACTIONAL_SCHEMES | LAKE_SCHEMES
+CATALOG_SCHEMES = {"postgres", "postgresql", "ducklake", "databricks"}  # transactional, with an in-destination watermark
+KNOWN_SCHEMES = OBJECT_STORE_SCHEMES | CATALOG_SCHEMES
 
 VALID_MODES = {"auto", "full", "append", "changes"}
 
@@ -34,12 +33,6 @@ class DestinationError(ValueError):
 class Destination:
     scheme: str | None  # None: the whole destination is a reference, its scheme known only once resolved
     raw: str  # the original URI, with ${env:...} references intact (resolved only at egress time)
-
-    @property
-    def transactional(self) -> bool:
-        """Whether the destination does identity-based upsert/delete (and so will require a primary
-        key on the source — enforced when the transactional driver lands)."""
-        return self.scheme in TRANSACTIONAL_SCHEMES
 
 
 def parse_destination(uri: str, *, resolve: bool = False) -> Destination:

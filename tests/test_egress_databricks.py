@@ -138,7 +138,6 @@ def test_the_destination_names_schema_warehouse_and_volume(monkeypatch):
     monkeypatch.setenv("DATABRICKS_CLIENT_ID", "app-sp")
     cfg = get_egress("databricks:///lake.sales?warehouse=w&volume=/Volumes/a/b/c").config()
     assert cfg["host"] == "https://adb-9.9.azuredatabricks.net" and cfg["env"]["DATABRICKS_CLIENT_ID"] == "app-sp"
-    assert get_egress(DEST).capabilities().requires_pk is False
 
 
 def test_the_test_button_writes_nothing_but_a_removed_probe(tmp_path, ws):

@@ -26,9 +26,7 @@ duckstring spout add POND --to URI [--table TABLE | --all] [--mode MODE] [--name
 | `--mode` | `auto` | `auto`: send only changes where the destination supports it, otherwise the whole table. `full`: always write the whole table. `append`: for an object store, copy each run's new files, keeping the destination in Duckstring's file layout. `changes`: for a file, Volume or object-store destination, write each delivery's changes as files with a manifest; see [Change files](../formats.md#change-files). |
 | `--name`, `-n` | the table name, or the scheme for all tables | The Spout's name. A suffix such as `-2` is added if it's taken. |
 
-Postgres delivery is incremental and exactly-once: each run deletes and re-inserts the changed rows in one transaction, and records its progress in a `_duckstring_egress` table in the destination. It needs a table with a primary key, which means a merge Trickle.
-
-DuckLake delivery works the same way for a merge Trickle, and also takes an append Trickle (its new rows are inserted) or a plain table (replaced whole). Each delivery adds one snapshot to the lake.
+Postgres and DuckLake delivery are incremental and exactly-once. A merge Trickle's changed rows are deleted and re-inserted by its primary key, an append Trickle's new rows are inserted, and a plain table is replaced whole. Each delivery is one transaction, with its progress recorded in a `_duckstring_egress` table in the destination, and each DuckLake delivery adds one snapshot to the lake.
 
 The destination is validated when the Spout is added, but credentials aren't checked until the first delivery. Use the UI's **Test** button to check them beforehand.
 

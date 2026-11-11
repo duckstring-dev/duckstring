@@ -79,3 +79,13 @@ DUCKSTRING_DATA_ROOT=s3://acme-lake/duckstring?region=eu-west-2
 Tables then persist independently of the app, downloads stay small, and cloud compute becomes available on that cloud (see Cloud Compute on [AWS](cloud_compute_on_aws.md), [Azure](cloud_compute_on_azure.md) or [Google Cloud](cloud_compute_on_google_cloud.md)). Credentials come from the platform's cloud setup or from `${env:NAME}` references in the URI. Google Cloud Storage and Azure work the same way; see [Data root URIs](../reference/formats.md#data-root-uris).
 
 A data root must belong to one Catchment. A Catchment that finds another live Catchment using its data root refuses to start. If you're sure the other one is gone, for example an old deployment that wasn't shut down cleanly, set `DUCKSTRING_FORCE_TAKEOVER=1` once to claim it.
+
+## BI tools and SQL clients
+
+The platform serves the Catchment at one HTTP address, and the web UI, the CLI, the HTTP API, [Apps](building_apps.md) and `duckstring query` all work through it. The [Postgres and Arrow Flight endpoints](querying.md#from-a-bi-tool-or-sql-client) don't, because they aren't HTTP and each needs a port of its own.
+
+To give BI tools the data, deliver the tables they need with a [Spout](delivering_with_spouts.md) to a database they already connect to, such as Postgres, and connect them there. The database is updated shortly after each run publishes. For BI tools to query the Catchment directly, run it where you can open the ports, as in [Running on a Server](running_on_a_server.md).
+
+## Databricks Apps
+
+On Databricks, a Catchment runs as a custom App: a short start script runs it on the App's port, Databricks' sign-in guards it, and its data root and state backup go on a Unity Catalog Volume, which survives the App's compute restarting. [Running on Databricks](running_on_databricks.md) covers the setup and the access to grant the App's service principal.

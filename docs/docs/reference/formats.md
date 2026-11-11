@@ -175,7 +175,7 @@ A manifest records the delivery's position, the files per table, each table's ki
 postgres://loader:${secret:PG_PASSWORD}@db.internal:5432/analytics?schema=duckstring
 ```
 
-A standard libpq connection URI (`postgresql://` also works). Tables are created in the `schema` query parameter (default `public`), and delivery progress is recorded in a `_duckstring_egress` table there. The table being delivered needs a primary key.
+A standard libpq connection URI (`postgresql://` also works). Tables are created in the `schema` query parameter (default `public`), and delivery progress is recorded in a `_duckstring_egress` table there. Any table can be delivered: a merge Trickle by its primary key, an append Trickle's new rows, and a plain table replaced whole.
 
 ### `ducklake:`
 

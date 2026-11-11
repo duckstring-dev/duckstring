@@ -67,6 +67,7 @@ const sidebars: SidebarsConfig = {
           items: [
             'guides/running_on_a_server',
             'guides/hosting_on_a_platform',
+            'guides/running_on_databricks',
             'guides/cloud_compute_on_aws',
             'guides/cloud_compute_on_azure',
             'guides/cloud_compute_on_google_cloud',
