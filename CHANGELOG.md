@@ -2,6 +2,106 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
+## Unreleased (0.8.0)
+
+Apps, cloud compute on Azure and Google Cloud, and Databricks and BigQuery in both directions: reading from
+Databricks, delivering to it, and sending large recomputes to a Databricks or BigQuery warehouse. Still needs
+`duckstring-trickle` 0.3.1.
+
+### Apps
+
+An **App** is an Outlet that serves HTTP from the Catchment: a dashboard, a Streamlit or Dash app, a small API or
+static files, next to the data it reads. Declare `[pond] type = "app"` and an `[app]` table (`command` and/or
+`static`) in `pond.toml` and deploy it like any Pond.
+
+- The Catchment starts an instance on the first request to `/apps/{name}/v{major}/` (`/apps/{name}/` redirects to
+  the newest major), forwards HTTP and WebSockets to it, and stops it after `idle_timeout` (default 30 minutes)
+  with no requests, on a redeploy, Kill or removal. Requests need an API key at any level (a bearer token, or a
+  sign-in page that sets a cookie) unless the Catchment is open.
+- App code reads its Sources with `duckstring.app.pond()`, a read-only Pond handle. A Source keeps the version a
+  request may be reading until its response is sent (`pond.hold()` covers reads outside a request).
+- Refreshes and Taps work as on any Outlet. An App's Tap has no key: it runs on each request (at most once a
+  second), so the App's Sources stay fresh while people use it.
+- `[pond] memory` is set aside from the memory budget while an instance runs, and the run slots share the rest.
+- An App's state directory reaches `catchment download` and the state backup only through its `[app] download`
+  command.
+- `duckstring pond run` in an App's directory serves it locally against its Puddles.
+- `duckstring app instances|logs|restart`, and the matching routes under `/api/ponds/{name}/app/`. In the web UI an
+  App has its own node (state, data age and an Open button), Sidebar panel and instances panel with logs.
+- Apps run on the Catchment's machine only. Migrations `034` and `035`.
+
+### Cloud compute on Azure and Google Cloud
+
+Cloud compute was AWS only. A Catchment now runs remote Ducks on the cloud its data root is on:
+
+- **Azure**: an `az://` or `abfss://` data root, Ducks as Container Apps job executions (the default backend, sized
+  like Fargate tasks) or one Azure VM per Duck (`azurevm`), under a user-assigned managed identity.
+- **Google Cloud**: a `gs://` data root, Ducks as Cloud Run job executions (the default) or one Compute Engine VM
+  per Duck (`gce`). A Catchment on Cloud Run can stay private: Ducks send an identity token from their service
+  account.
+- Azure Blob Storage, ADLS and Google Cloud Storage also work as Spout destinations and DuckLake data paths, and
+  both halves of a data root (DuckDB and the file listing) now authenticate the same way. Before, an `abfss://` root
+  was accepted but DuckDB never authenticated, and a keyless `gs://` root signed Google requests with AWS keys.
+- The Duck image is published per cloud, `ghcr.io/duckstring-dev/duckstring:{version}-aws`, `-azure` and `-gcp`,
+  with that cloud's DuckDB extensions built in. Cloud Run can't pull from ghcr.io: use an Artifact Registry image
+  or a remote repository proxying ghcr.io (`DUCKSTRING_CLOUDRUN_REGISTRY`).
+- VMs on both clouds are deleted by the Catchment once their Duck exits (a stopped VM is still billed).
+- The web UI's cloud menu, credentials form, pools and dedicated Ducks follow the Catchment's cloud.
+- New guides: Cloud Compute on Azure and on Google Cloud. Extras `azure` and `gcp`.
+
+Upgrading:
+
+- **One cloud per Catchment.** Remote Ducks run only on the data root's cloud: a `gs://` root with AWS credentials
+  no longer enables Fargate Ducks, a pool must use a backend on the Catchment's cloud, and a pool left on another
+  cloud by a data-root change runs on the Catchment's machine with a warning.
+- The bare `:{version}` image tag is the AWS image, as before.
+
+### Databricks and BigQuery
+
+- **Reading from Databricks.** `duckstring.databricks.table()` reads a Unity Catalog table (from its storage with
+  credentials Unity Catalog vends, else through a SQL warehouse), and `files()` reads a Delta table or Spark's
+  Parquet output from a Volume. Each returns an Input with `version`, `changed`, `read()` and `added()` (only what
+  was added since the last run), and the read position survives a Duck rebuilding its registry.
+- **A Databricks Spout** (`databricks://HOST/catalog.schema?warehouse=&volume=`) delivers any table to a Delta
+  table through a Volume and a SQL warehouse, exactly once, with no external location.
+- **Change files** (`mode=changes`) land each delivery as Parquet change files and a manifest on any object
+  store, `file://` or Volume path, for a downstream job to apply; `duckstring.landing` reads them back.
+- **A Catchment as a Databricks App** keeps its data root and state on a Volume through the Files API (an App
+  doesn't mount `/Volumes`), and comes back whole after a compute restart.
+- **The Flock** can send large recomputes to BigQuery and Databricks SQL, each measured against a real warehouse.
+- New guide: Running Duckstring on Databricks.
+
+### Other changes
+
+- **A Postgres Spout delivers any table.** It used to need a merge Trickle; an append Trickle's new rows are now
+  inserted and a plain table is replaced whole, as for DuckLake.
+- **`refresh now --fresh-within D`** (`fresh_within_ms` on the route, a ▾ beside Refresh Now in the web UI) asks for
+  data no older than `D`, so Ponds already that fresh don't run. A Tap's Refresh asks the same way with its
+  `--fresh-within`, so an app on a small Pond off a daily pipeline no longer re-runs it from its Inlets.
+- **An Inlet's freshness is when its Run starts** (a windowed one, its window's end), never the time it was asked
+  for. Every request is still met.
+- **The Postgres wire works with Npgsql** (the .NET driver many BI tools bundle): type loading, binary results and
+  parameters, session commands, and TLS (`DUCKSTRING_SERVE_PG_TLS_CERT`/`_KEY`). Numerics longer than 28 digits are
+  no longer rounded.
+- **`catchment connect --header-command 'Name: command'`** takes a header's value from a command (`databricks auth
+  token`, `gcloud auth print-identity-token`), cached until the token expires and run again on a 401.
+- The memory budget takes a container's memory limit when it's lower than the machine's.
+- The timing chart plots data age beside the run interval and duration.
+
+### Fixes
+
+- **Moving a Pond to other compute while its Duck was running** left a Run showing running for good. The old Duck
+  now finishes what it holds and the new one starts once it has gone, as for a redeploy.
+- **A dedicated EC2 Duck ran on Fargate,** and saving a dedicated Duck dropped its size.
+- **A registry older than its published state** (an older state backup restored under a newer data root) is set
+  aside and rebuilt from the published data, rather than publishing stale state.
+- `pond run` finds commands a Pond's environment installs.
+
+Upgrading:
+
+- **Redeploying the version a line runs is refused** (409) without `pond deploy --force`: a running Duck kept the
+  code it had loaded while its directory was replaced. Bump the version instead. An App is exempt.
+
 ## 0.7.1 — 2026-10-27
 
 Faster incremental runs, a machine's memory shared out between its Ducks, and fixes for three ways an incremental
