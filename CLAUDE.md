@@ -81,7 +81,7 @@ The web UI prompts for a key on 401 and keeps it in localStorage. `_http.get/pos
 - `duckstring.catchment.asgi` is the env-configured ASGI entry for platforms. `DUCKSTRING_ROOT` defaults to `./.duckstring`, which survives restarts but not a redeploy of the bundle. Run exactly one app process.
 - `duckstring catchment download [--path DIR=./.duckstring]` pulls the whole root through `GET /api/catchment/archive` (a streamed, uncompressed tar; SQLite is snapshotted with the backup API and `-wal/-shm` files are skipped; DuckDB registries are copied as they are, so download while quiescent; an App's files only through its `[app] download` command, see Apps), after confirming the size from `GET /api/catchment/usage`. The default path lands inside a deploy bundle, so state survives a platform redeploy.
 - The address Ducks dial back to comes from `create_app(root, base_url=...)` (the CLI passes its bind address), then `DUCKSTRING_CATCHMENT_URL`. If neither is set, `SubprocessLauncher` defers spawns (pending keys report `is_running` so liveness checks don't fail them) until a middleware learns the bound address from the first request's ASGI scope (`tests/test_platform.py`).
-- `release.yml` builds the frontend and dists on a `v*` tag and publishes via PyPI Trusted Publishing (the `pypi` GitHub environment and the PyPI publisher are configured once).
+- `release.yml` builds the frontend and dists on a `v*` tag and publishes via PyPI Trusted Publishing (the `pypi` GitHub environment and the PyPI publisher are configured once). A final tag also gets a GitHub Release whose notes are the version's `CHANGELOG.md` section (`## {version} …` up to the next `## `), so write that section before tagging.
 
 ## Structure
 
