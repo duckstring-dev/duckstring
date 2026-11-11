@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from trickle.io import first_row
 
+from duckstring.catchment import driver as drv_mod
 from duckstring.catchment.db import connect, migrate
 from duckstring.catchment.driver import Driver
 from duckstring.catchment.launcher import NoopLauncher
@@ -92,7 +93,7 @@ def _complete(driver, key):
     driver.on_event(key, {"kind": "run_completed", "f": f})
 
 
-def test_restart_resends_demand_the_pulse_throttle_held(tmp_path):
+def test_restart_resends_demand_the_pulse_throttle_held(tmp_path, monkeypatch):
     """Demand the throttle holds is persisted as plain demand, but the soft state that would release
     it is lost on restart. The reload re-sends each Pond's newest unmet target once, so it reaches the Inlet
     instead of stranding behind the bottleneck (plans/throttle.md)."""
@@ -104,15 +105,22 @@ def test_restart_resends_demand_the_pulse_throttle_held(tmp_path):
               one)
     _register(db, "out", "1.0.0", "outlet", "ponds/out/1.0.0", {**_CFG, "kind": "outlet", "sources": {"slow": "1.0.0"}},
               one)
-    d = Driver(db, tmp_path, "http://x", NoopLauncher())
     now = datetime.now(timezone.utc)
     t1, t2, t3, t4 = (now - timedelta(seconds=n) for n in (40, 30, 20, 10))
-    d.refresh_now("out@1", at=t1)
+    clock = [t1]
+    monkeypatch.setattr(drv_mod, "_now", lambda: clock[0])
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+
+    def refresh(t):
+        clock[0] = t
+        d.refresh_now("out@1", at=t)
+
+    refresh(t1)
     _complete(d, "inlet@1")  # slow starts at t1
-    d.refresh_now("out@1", at=t2)
+    refresh(t2)
     _complete(d, "inlet@1")
-    d.refresh_now("out@1", at=t3)  # two demands in slow's run: it holds this one
-    d.refresh_now("out@1", at=t4)  # and the throttled Outlet holds this one
+    refresh(t3)  # two demands in slow's run: it holds this one
+    refresh(t4)  # and the throttled Outlet holds this one
     assert d.state.pond_states["inlet@1"].demand == []
     assert d.state.pond_states["out@1"].throttle.held == 1
 
@@ -120,9 +128,10 @@ def test_restart_resends_demand_the_pulse_throttle_held(tmp_path):
     d2 = Driver(d.db, tmp_path, "http://x", NoopLauncher())
     th = d2.state.pond_states["out@1"].throttle
     assert th is None or th.held == 0  # the throttle state is soft
-    d2._process(datetime.now(timezone.utc))
+    clock[0] = now
+    d2._process(now)
     inlet = d2.state.pond_states["inlet@1"]
-    assert inlet.runs_started == runs + 1 and inlet.start_f == t4  # one Run serves the newest held demand
+    assert inlet.runs_started == runs + 1 and inlet.start_f == now  # one Run serves the newest held demand
     assert inlet.demand == []
     d2.reload()  # a later reload adds nothing: the Run in flight covers it
     assert d2.state.pond_states["inlet@1"].demand == []

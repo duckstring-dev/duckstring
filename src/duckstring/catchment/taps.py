@@ -6,7 +6,9 @@ process (``Driver.app_request``), since those requests already passed the Catchm
 A Tap has its own key, so a query is classified by the credential it arrives with: the Tap's key means the
 Tap's app, and every other key (the web UI's, the CLI's, a notebook's) never sends demand. A query through a
 Tap may send the Pond a Refresh, by the floating Refresh's clock evaluated per query (``engine.tap_due``): due
-once the newest request, or with none pending the freshness, is ``fresh_within`` old. The query itself is
+once the newest request, or with none pending the freshness, is ``fresh_within`` old. The Refresh asks for data
+no older than ``fresh_within``, so it stops at any Pond upstream already that fresh (a busy pipeline another
+Refresh keeps fresh isn't run again for a rarely used app hanging off it). The query itself is
 answered at once from what is published; an app reads the freshness it got from ``/api/ponds/{name}/freshness``.
 A Tap's key reads the Pond line's exposed tables: what it may read is the serving core's business, and a Tap only
 decides when the Pond refreshes.
@@ -186,9 +188,9 @@ class TapsMixin:
     # ─── The policy, per query ────────────────────────────────────────────────
 
     def tap_query(self, scope: TapScope) -> bool:
-        """A query arrived through a Tap: count it, and send the Pond a Refresh if its clock says so (returned).
-        The query is answered at once either way. Raises KeyError when the Tap has gone (removed or rotated
-        mid-request)."""
+        """A query arrived through a Tap: count it, and send the Pond a Refresh if its clock says so (returned): a
+        request for data no older than ``fresh_within``. The query is answered at once either way. Raises KeyError
+        when the Tap has gone (removed or rotated mid-request)."""
         with self.lock:
             tap = self._tap(scope)
             now = _now()
@@ -200,7 +202,7 @@ class TapsMixin:
             sent = tap_due(self.state, scope.pond, now, tap.fresh_within)
             if sent:
                 tap.refresh_count += 1
-                self.state = refresh_now(self.state, scope.pond, now)
+                self.state = refresh_now(self.state, scope.pond, now - tap.fresh_within)
                 self._process(now)
             return sent
 

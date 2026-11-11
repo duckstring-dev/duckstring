@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from trickle.io import first_row
 
+from duckstring.catchment import driver as drv_mod
 from duckstring.catchment.db import connect, ensure_identity, migrate
 from duckstring.catchment.driver import Driver
 from duckstring.catchment.launcher import NoopLauncher
@@ -744,17 +745,29 @@ def test_poller_does_not_resend_the_same_demand(tmp_path):
     assert len(sent) == 1  # forwarded once across both cycles
 
 
-def test_refresh_at_makes_an_inlet_stamp_the_forwarded_epoch(tmp_path):
-    # The producer side of the duct: a Refresh carrying `at=T` makes the Inlet stamp T, not now.
+def test_refresh_at_is_met_by_an_inlet_run_stamped_when_it_runs(tmp_path, monkeypatch):
+    # The producer side of the duct: a Refresh carrying `at=T` asks for data at least as fresh as T. The Inlet
+    # stamps the time it runs, and a T ahead of this Catchment's clock (skew) waits until the clock reaches it.
+    clock = [_now()]
+    monkeypatch.setattr(drv_mod, "_now", lambda: clock[0])
     db = connect(tmp_path / "duck.db")
     migrate(db)
     _register(db, "transactions", "1.0.0", "inlet", "ponds/transactions/1.0.0", _cfg(), _RIPPLES)
     d = Driver(db, tmp_path, "http://x", NoopLauncher())
     client = _client(d)
+    key = "transactions@1"
 
-    T = _now() - timedelta(seconds=5)  # an earlier demand epoch
+    T = clock[0] - timedelta(seconds=5)  # an earlier demand epoch
     assert client.post("/api/ponds/transactions/refresh", params={"at": T.isoformat()}).json() == {"ok": True}
-    assert d.state.pond_states["transactions@1"].start_f == T
+    assert d.state.pond_states[key].start_f == clock[0]
+    _complete_run(d, key)
+
+    ahead = clock[0] + timedelta(seconds=5)  # the downstream's clock runs ahead of this one
+    client.post("/api/ponds/transactions/refresh", params={"at": ahead.isoformat()})
+    assert d.state.pond_states[key].start_f < ahead and d.state.pond_states[key].demand == [ahead]
+    clock[0] = ahead + timedelta(seconds=1)
+    d._process(clock[0])
+    assert d.state.pond_states[key].start_f == clock[0]
 
 
 def _complete_run(d, key):
@@ -764,7 +777,7 @@ def _complete_run(d, key):
     d.on_event(key, {"kind": "run_completed", "f": f})
 
 
-def test_duct_refreshes_are_paced_by_the_upstream_throttle(tmp_path):
+def test_duct_refreshes_are_paced_by_the_upstream_throttle(tmp_path, monkeypatch):
     """The producer side of a duct under saturated demand: each downstream request arrives through
     ``Driver.refresh_now(at=...)``, so the exported Pond is a trigger Pond here and this Catchment's throttle paces
     its own graph. Once the slow Pond has seen two demands in one run, further requests are held instead of
@@ -775,15 +788,21 @@ def test_duct_refreshes_are_paced_by_the_upstream_throttle(tmp_path):
     _register(db, "slow", "1.0.0", "pond", "ponds/slow/1.0.0", _cfg(sources={"inlet": "1.0.0"}, kind="pond"), _RIPPLES)
     _register(db, "out", "1.0.0", "outlet", "ponds/out/1.0.0", _cfg(sources={"slow": "1.0.0"}, kind="outlet"),
               _RIPPLES)
-    d = Driver(db, tmp_path, "http://x", NoopLauncher())
     t1, t2, t3, t4 = (_now() - timedelta(seconds=n) for n in (40, 30, 20, 10))
+    clock = [t1]
+    monkeypatch.setattr(drv_mod, "_now", lambda: clock[0])
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
 
-    d.refresh_now("out@1", at=t1)
+    def refresh(t):  # a downstream request, which carries the downstream's clock (here, this one's)
+        clock[0] = t
+        d.refresh_now("out@1", at=t)
+
+    refresh(t1)
     _complete_run(d, "inlet@1")  # slow starts at t1
-    d.refresh_now("out@1", at=t2)  # one demand during slow's run: forwarded, so the Inlet runs at t2
+    refresh(t2)  # one demand during slow's run: forwarded, so the Inlet runs at t2
     _complete_run(d, "inlet@1")
-    d.refresh_now("out@1", at=t3)  # the second in the same run: slow is the bottleneck and holds it
-    d.refresh_now("out@1", at=t4)  # the Outlet is throttled now and holds it
+    refresh(t3)  # the second in the same run: slow is the bottleneck and holds it
+    refresh(t4)  # the Outlet is throttled now and holds it
     inlet = d.state.pond_states["inlet@1"]
     assert inlet.runs_started == 2 and inlet.demand == []
     assert d.state.pond_states["slow@1"].throttle.held == 1

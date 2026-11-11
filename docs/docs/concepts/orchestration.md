@@ -58,7 +58,9 @@ A **Refresh** asks a Pond for data at least as fresh as the moment it was sent. 
   <figcaption>Refresh Now on <code>reports</code> in the Playground. The demand (green) reaches both Inlets, which run first, then <code>sales</code>, then <code>reports</code>.</figcaption>
 </figure>
 
-The whole pipeline reaches one freshness: each Inlet stamps its data with the time of the Refresh, so `reports` ends up exactly as fresh as the moment it was asked.
+Freshness comes from the Inlets: each stamps its data with the time its run started, and every Pond below takes the oldest freshness among its Sources. So `reports` ends up at least as fresh as the moment it was asked.
+
+A Refresh can also ask for data no older than a given age, such as a day. The request then stops at any Pond that is already that fresh, so a small Pond reading from a pipeline that another Refresh keeps up to date can be refreshed without running that pipeline again.
 
 ### Throttling to the bottleneck
 

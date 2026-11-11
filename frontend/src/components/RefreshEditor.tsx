@@ -10,7 +10,8 @@ import {
 import { TapList } from './TapEditor';
 
 // A Pond's Refreshes: the UI for `duckstring refresh now|add|ls|rm POND`, and below them its Taps (`refresh tap`).
-// Refresh Now asks for data at least as fresh as now. A recurring Refresh repeats it: floating (every N, counted
+// Refresh Now asks for data at least as fresh as now; its ▾ opens its options (Fresh within: data no older than
+// that, so Ponds upstream already that fresh don't run). A recurring Refresh repeats it: floating (every N, counted
 // from the later of the last request and the last refresh of the data, so any refresh moves it; one per Pond, a
 // new one replaces it), continuous, or scheduled (a start: fires on that grid whatever else refreshes the Pond).
 // The list shows names only; a click (or hover) shows what each is and when it next asks.
@@ -72,6 +73,9 @@ export function RefreshEditor({ pond, canDemand }: { pond: Pond; canDemand: bool
   const canManage = useLiveStore((s) => atLeast(s.accessLevel, 'full'));
 
   const [adding, setAdding] = useState(false);
+  const [nowOptions, setNowOptions] = useState(false); // Refresh Now's options, under its ▾
+  const [within, setWithin] = useState('1');
+  const [withinUnit, setWithinUnit] = useState<Unit>('DAY');
   const [expanded, setExpanded] = useState<string | null>(null); // the Refresh whose detail line is open
   const [every, setEvery] = useState('30');
   const [unit, setUnit] = useState<Unit>('MINUTE');
@@ -91,6 +95,12 @@ export function RefreshEditor({ pond, canDemand }: { pond: Pond; canDemand: bool
   );
   const effectiveName = nameDirty && name.trim() ? name.trim() : suggested;
   const scheduled = start.trim() !== '';
+
+  const withinMs = Math.max(0, parseFloat(within) || 0) * UNIT_SECONDS[withinUnit] * 1000;
+  const refreshWithin = () => {
+    refreshNow(pond.id, withinMs);
+    setNowOptions(false);
+  };
 
   const done = () => {
     setNameDirty(false);
@@ -116,8 +126,44 @@ export function RefreshEditor({ pond, canDemand }: { pond: Pond; canDemand: bool
     <>
       {canDemand && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 8 }}>
-          <AddButton block onClick={() => refreshNow(pond.id)} color={THEME_DEMAND}>Refresh Now</AddButton>
-          <AddButton block active={adding} onClick={() => setAdding((v) => !v)}>Recurring Refresh</AddButton>
+          <div style={{ display: 'flex', minWidth: 0 }}>
+            <AddButton block onClick={() => refreshNow(pond.id)} color={THEME_DEMAND}
+              style={{ width: 'auto', flex: 1, borderTopRightRadius: 0, borderBottomRightRadius: 0 }}>Refresh Now</AddButton>
+            <AddButton
+              color={THEME_DEMAND}
+              active={nowOptions}
+              label="Refresh Now options"
+              onClick={() => { setNowOptions((v) => !v); setAdding(false); }}
+              style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: 'none', padding: '4px 7px' }}
+            >
+              ▾
+            </AddButton>
+          </div>
+          <AddButton block active={adding} onClick={() => { setAdding((v) => !v); setNowOptions(false); }}>
+            Recurring Refresh
+          </AddButton>
+        </div>
+      )}
+
+      {canDemand && nowOptions && (
+        <div style={{ marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <span
+              title="Ask for data no older than this. Ponds upstream that are already this fresh don't run."
+              style={{ fontSize: 11, color: '#71717a', whiteSpace: 'nowrap' }}
+            >
+              Fresh within
+            </span>
+            <input type="number" min="0" value={within} onChange={(e) => setWithin(e.target.value)} style={numInput} />
+            <select value={withinUnit} onChange={(e) => setWithinUnit(e.target.value as Unit)} style={selectInput}>
+              {UNITS.map((u) => (
+                <option key={u.value} value={u.value}>{u.label}</option>
+              ))}
+            </select>
+          </div>
+          <div style={{ marginTop: 4 }}>
+            <AddButton onClick={refreshWithin} color={THEME_DEMAND}>Refresh</AddButton>
+          </div>
         </div>
       )}
 

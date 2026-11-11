@@ -440,9 +440,10 @@ export function openApp(path: string): void {
   form.remove();
 }
 
-// Refresh now: ask for the Pond's data at least as fresh as now.
-export function refreshNow(pond: string): Promise<void> {
-  return postJSON(pondPath(pond, 'refresh'));
+// Refresh now: ask for the Pond's data at least as fresh as now, or with `freshWithinMs` no older than that (Ponds
+// upstream already that fresh don't run).
+export function refreshNow(pond: string, freshWithinMs?: number): Promise<void> {
+  return postJSON(pondPath(pond, freshWithinMs ? `refresh?fresh_within_ms=${Math.round(freshWithinMs)}` : 'refresh'));
 }
 
 export interface AddRefreshBody {

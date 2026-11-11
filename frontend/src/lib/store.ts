@@ -285,7 +285,7 @@ export interface LiveState extends StatusSlice {
   selectRipple(id: RippleId | null): void;
   clearSelection(): void;
 
-  refreshNow(pond: PondId): Promise<void>;
+  refreshNow(pond: PondId, freshWithinMs?: number): Promise<void>;
   addRefresh(pond: PondId, body: AddRefreshBody): Promise<void>;
   removeRefresh(pond: PondId, name: string): Promise<void>;
 
@@ -551,7 +551,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
     set({ collapsedPonds: next });
   },
 
-  refreshNow: (pond) => act(get, set, () => refreshNow(pond)),
+  refreshNow: (pond, freshWithinMs) => act(get, set, () => refreshNow(pond, freshWithinMs)),
   addRefresh: (pond, body) => act(get, set, () => addRefresh(pond, body)),
   removeRefresh: (pond, name) => act(get, set, () => removeRefresh(pond, name)),
 

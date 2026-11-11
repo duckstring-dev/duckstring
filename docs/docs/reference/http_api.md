@@ -101,7 +101,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameter: `at`, an ISO freshness to ask for instead of now. (Before Refresh, this route marked a Pond for a rebuild; that is now `/rebuild`.) |
+| POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameters (at most one): `at`, an ISO freshness to ask for instead of now; `fresh_within_ms`, to ask for data no older than this. (Before Refresh, this route marked a Pond for a rebuild; that is now `/rebuild`.) |
 | GET | `/api/ponds/{name}/refreshes` | read | List the recurring Refreshes, with when each next asks. |
 | POST | `/api/ponds/{name}/refreshes` | demand | Add a recurring Refresh. Body: `every_seconds` (0 is continuous), `continuous`, `start`, `days`, `until`, `name`. |
 | POST | `/api/ponds/{name}/refreshes/{refresh_name}/remove` | demand | Remove a recurring Refresh. |

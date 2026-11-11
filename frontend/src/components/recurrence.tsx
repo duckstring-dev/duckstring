@@ -91,18 +91,24 @@ export function OptionsToggle({ open, onClick, label = 'Options' }: { open: bool
   );
 }
 
-export function AddButton({ onClick, children, color = THEME_BRAND, block = false, active = false, disabled = false }: {
+export function AddButton({
+  onClick, children, color = THEME_BRAND, block = false, active = false, disabled = false, label, style,
+}: {
   onClick: () => void;
   children: React.ReactNode;
   color?: string;
   block?: boolean; // full width
   active?: boolean; // filled, for a toggle that's on
   disabled?: boolean;
+  label?: string; // aria-label and tooltip, for a button whose text is only a symbol
+  style?: React.CSSProperties; // overrides, such as the joined corners of a split button
 }) {
   return (
     <button
       onClick={disabled ? undefined : onClick}
       disabled={disabled}
+      aria-label={label}
+      title={label}
       style={{
         background: active ? `${color}26` : 'transparent',
         border: `1px solid ${color}`,
@@ -119,6 +125,7 @@ export function AddButton({ onClick, children, color = THEME_BRAND, block = fals
         flexShrink: 0,
         width: block ? '100%' : undefined,
         boxSizing: 'border-box',
+        ...style,
       }}
     >
       {children}

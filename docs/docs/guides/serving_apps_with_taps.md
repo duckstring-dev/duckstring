@@ -48,6 +48,7 @@ A Tap belongs to one major version of the Pond, the highest deployed unless you 
 A query through a Tap sends a Refresh when the newest request on the Pond, or with none waiting the Pond's freshness, is at least `--fresh-within` old. This is the clock a recurring `--every` Refresh uses (see [Scheduling](scheduling.md#every-day-or-every-n)), checked when a query arrives instead of on a timer:
 
 - `--fresh-within 1d` refreshes the Pond at most once a day while the app is in use, and not at all while it isn't.
+- The Refresh asks for data no older than `--fresh-within`, so it stops at any Pond upstream that is already that fresh. An app on a small Pond that reads from a pipeline refreshed daily, with `--fresh-within 1d`, runs only that small Pond, on the pipeline's latest data.
 - Any other refresh of the Pond counts, whether manual, recurring or from a Sink, so a Tap never adds a run that something else already covered.
 - `--fresh-within 0`, the default, refreshes on every query. A request already waiting for the Pond to start a run covers the queries after it, and the pacing described in [Orchestration](../concepts/orchestration.md#throttling-to-the-bottleneck) applies as for any frequent Refresh, so a busy app can't make the pipeline run faster than its slowest step allows.
 

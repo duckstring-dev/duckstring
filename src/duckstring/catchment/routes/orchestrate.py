@@ -131,11 +131,17 @@ def runs(
 @router.post("/ponds/{name}/refresh", dependencies=[auth.demand])
 def refresh(
     name: str, request: Request, major: int | None = None, version: str | None = None,
-    at: str | None = None,
+    at: str | None = None, fresh_within_ms: int | None = None,
 ):
-    """Refresh a Pond now: ask for its data at least as fresh as now. ``at`` (optional ISO freshness) is the
-    demand epoch instead — a duct forwards the downstream's, so the upstream Inlet stamps the same one."""
-    _driver(request).refresh_now(_resolve(request, name, major, version), _parse_f(at))
+    """Refresh a Pond now: ask for its data at least as fresh as now. ``at`` (optional ISO freshness) asks for
+    that time instead (a duct forwards the downstream's); ``fresh_within_ms`` asks for data no older than that,
+    so Ponds upstream already that fresh don't run."""
+    if at is not None and fresh_within_ms is not None:
+        raise HTTPException(status_code=422, detail="give at or fresh_within_ms, not both")
+    if fresh_within_ms is not None and fresh_within_ms < 0:
+        raise HTTPException(status_code=422, detail="fresh_within_ms can't be negative")
+    fresh_within = timedelta(milliseconds=fresh_within_ms) if fresh_within_ms else None
+    _driver(request).refresh_now(_resolve(request, name, major, version), _parse_f(at), fresh_within)
     return {"ok": True}
 
 

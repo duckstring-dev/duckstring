@@ -48,6 +48,7 @@ def add(
     fresh_within: str = typer.Option(
         "0", "--fresh-within", "-f",
         help="Send a Refresh on a query when the newest request on the Pond, or the data, is at least this old. "
+             "The Refresh asks for data no older than this, so Ponds upstream that are already that fresh don't run. "
              "0 refreshes on every query, except while a request is already waiting for the Pond to start a run."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,

@@ -42,6 +42,13 @@ def test_refresh_now_explicit_catchment_and_major(runner, live_catchment):
         assert result.exit_code == 0, result.output
 
 
+def test_refresh_now_fresh_within_reaches_the_route(runner, live_catchment):
+    _deploy_outlet(live_catchment)
+    result = runner.invoke(app, ["refresh", "now", "outlet", "--fresh-within", "1d", "--silent"])
+    assert result.exit_code == 0, result.output
+    assert runner.invoke(app, ["refresh", "now", "outlet", "-f", "soon", "--silent"]).exit_code != 0
+
+
 def test_refresh_unknown_catchment_or_no_default_exits(runner):
     assert runner.invoke(app, ["refresh", "now", "outlet", "-c", "nonexistent"]).exit_code != 0
     assert runner.invoke(app, ["refresh", "now", "outlet"]).exit_code != 0

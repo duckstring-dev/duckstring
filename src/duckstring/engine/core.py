@@ -251,10 +251,9 @@ class ThrottleState:
     # nothing to wait for (else one already throttled through a Source another Refresh paces would hold its
     # first request until a completion that request is needed for).
     completed: bool = True
-    released: bool = False  # Inlets: a release reached it, so its next Run stamps its start
     # Sibling alignment: demand held back from the Sources that aren't throttled until the throttled ones
-    # start a new Run (Source -> (newest demand held back, whether a release)), and their runs_started then.
-    deferred: dict[PondId, tuple[datetime, bool]] = field(default_factory=dict)
+    # start a new Run (Source -> newest demand held back), and their runs_started then.
+    deferred: dict[PondId, datetime] = field(default_factory=dict)
     deferred_at: dict[PondId, int] = field(default_factory=dict)
 
     def copy(self) -> ThrottleState:

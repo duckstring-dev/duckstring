@@ -226,13 +226,11 @@ def ripple_source_f(s: EngineState, rid: RippleId) -> datetime:
 # ─── Demand reactions (synchronous cascades; mutate the working state) ─────────
 
 
-def add_demand(s: EngineState, pid: PondId, t: datetime, from_refresh: bool = False,
-               release: bool = False) -> None:
+def add_demand(s: EngineState, pid: PondId, t: datetime, from_refresh: bool = False) -> None:
     """A Pond is asked for data at least as fresh as ``t``: record it (if unsatisfied and new) and send it
     on to its demand Sources, unless the throttle holds it here (see "Throttle" below). ``from_refresh``
     marks a Refresh's own request (on this Pond, or a duct's from downstream), which makes this a trigger
-    Pond. ``release`` marks a throttle release, which carries no epoch anyone asked for: an Inlet it reaches
-    mints its freshness when the Run starts instead."""
+    Pond. ``t`` is a lower bound: an Inlet stamps the time its Run starts, never ``t``."""
     ps = s.pond_states[pid]
     if ps.is_blocked:  # no new demand enters a blocked Pond (and none propagates upstream from it)
         return
@@ -241,8 +239,6 @@ def add_demand(s: EngineState, pid: PondId, t: datetime, from_refresh: bool = Fa
     if t <= ps.start_f:  # a Run already in flight at or past t will satisfy it (a repeat request for the
         return           # epoch it is running would otherwise re-run it, or complete it early as a pass)
     ps.demand.append(t)
-    if release and not s.ponds[pid].sources:  # an Inlet: stamp the next Run's start (start_pond_run)
-        _throttle(s, pid).released = True
     if from_refresh:
         _throttle(s, pid).trigger = True
     if not ps.repairing:  # the Driver sequences a repair; the throttle neither counts nor holds there
@@ -250,7 +246,7 @@ def add_demand(s: EngineState, pid: PondId, t: datetime, from_refresh: bool = Fa
         if _holds(s, pid):
             _throttle(s, pid).held += 1
             return
-    _forward(s, pid, t, release=release)
+    _forward(s, pid, t)
 
 
 def _local_demand(s: EngineState, pid: PondId, t: datetime | None) -> None:
@@ -280,7 +276,7 @@ def demand_sources(s: EngineState, pid: PondId) -> list[PondId]:
     return [sp for sp in pond.sources if sp not in pond.optional_sources or unbuilt(sp)]
 
 
-def _forward(s: EngineState, pid: PondId, t: datetime, release: bool = False) -> None:
+def _forward(s: EngineState, pid: PondId, t: datetime) -> None:
     """Send demand ``t`` from this Pond to its demand Sources, noting which run each Ripple was in.
 
     Sibling alignment: when some required demand Sources are throttled and others aren't, ``t`` goes to the
@@ -298,13 +294,13 @@ def _forward(s: EngineState, pid: PondId, t: datetime, release: bool = False) ->
     for sp in sources:
         if hold and sp not in lead:
             held = th.deferred.get(sp)
-            if held is None or t > held[0]:
-                th.deferred[sp] = (t, release)
+            if held is None or t > held:
+                th.deferred[sp] = t
             continue
         held = th.deferred.get(sp)
-        if held is not None and held[0] <= t:
+        if held is not None and held <= t:
             del th.deferred[sp]  # this demand covers what was held back from it
-        add_demand(s, sp, t, release=release)
+        add_demand(s, sp, t)
     if not th.deferred:
         th.deferred_at = {}
 
@@ -327,11 +323,11 @@ def _flush_deferred(s: EngineState, pid: PondId) -> bool:
     lead = _lead_sources(s, pid, sources)
     due = all(s.pond_states[sp].runs_started > th.deferred_at.get(sp, -1) for sp in lead)
     changed = False
-    for sp, (t, release) in list(th.deferred.items()):
+    for sp, t in list(th.deferred.items()):
         if due or sp in lead or sp not in sources:
             del th.deferred[sp]
             if sp in sources:
-                add_demand(s, sp, t, release=release)
+                add_demand(s, sp, t)
             changed = True
     if not th.deferred:
         th.deferred_at = {}
@@ -361,10 +357,8 @@ def _flush_deferred(s: EngineState, pid: PondId) -> bool:
 # is held back from the others until each throttled one starts a new Run, so the Sources read together and the
 # join's freshness isn't dragged down by a fast Source that read early (sibling alignment, ``_forward``).
 #
-# A release is pacing and carries no epoch anyone asked for, so an Inlet it reaches stamps its next Run's
-# start rather than the release time (which can be a whole run earlier when the Inlet is busy). The state
-# is soft (``PondState.throttle``, never persisted) and the throttle is silent: it changes only what is
-# forwarded and how a released Inlet stamps.
+# The state is soft (``PondState.throttle``, never persisted) and the throttle is silent: it changes only what
+# is forwarded.
 
 
 def resend_held_demand(s: EngineState) -> None:
@@ -462,7 +456,7 @@ def _settle_throttle(s: EngineState, now: datetime) -> bool:
             th.deferred, th.deferred_at = {}, {}
             continue
         if demand_sources(s, pid) and _release_due(s, pid):
-            _forward(s, pid, now, release=True)
+            _forward(s, pid, now)
             changed = True
     return changed
 
@@ -759,19 +753,8 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     f, window_d = pond_source_f(s, pid, now)
     assert f is not None
 
-    # Minted freshness: an Inlet stamps the demand epoch — the newest freshness it was asked for — not its
-    # run-now. So a Refresh at T yields freshness T for every Inlet it reaches, whenever each physically
-    # runs. Force's NEVER demand is filtered out, so a Force keeps the pond_source_f `now`. Windowed Inlets
-    # and non-Inlets (and Draws) are unaffected — their freshness is window-end / source-derived / remote.
-    # A throttle release mints at the start: it is pacing, and carries no epoch anyone asked for.
-    if not pond.sources and not pond.windows and not pond.is_draw:
-        ms = [t for t in ps.demand if t > NEVER]
-        if ps.throttle is not None and ps.throttle.released:
-            ms.append(now)
-            ps.throttle.released = False
-        if ms:
-            f = max(ms)
-
+    # An Inlet stamps the time its Run starts (a windowed one, its window's end), never the time it was asked
+    # for: a request is a lower bound, and the Run can only start once ``now`` has reached it.
     ps.start_f = f
     ps.demand = [t for t in ps.demand if t > ps.start_f]
 
@@ -921,19 +904,20 @@ def fail_pond(state: EngineState, pid: PondId, now: datetime) -> EngineState:
 # ─── Public entry points (operate on a clone, run cascades) ───────────────────
 
 
-def refresh_now(state: EngineState, pid: PondId, now: datetime) -> EngineState:
-    """Refresh a Pond now: ask for its data to be at least as fresh as ``now`` (a duct passes the
-    downstream's epoch instead, so the upstream Inlet stamps the same freshness)."""
+def refresh_now(state: EngineState, pid: PondId, t: datetime) -> EngineState:
+    """Refresh a Pond: ask for its data to be at least as fresh as ``t``, normally now (a duct passes the
+    downstream's request; a Tap or ``--fresh-within`` an earlier time, so Ponds already that fresh don't run)."""
     s = state.clone()
-    add_demand(s, pid, now, from_refresh=True)
+    add_demand(s, pid, t, from_refresh=True)
     return s
 
 
 def tap_due(state: EngineState, pid: PondId, now: datetime, fresh_within: timedelta) -> bool:
-    """Whether a query through a Tap (plans/taps.md) sends the Pond a Refresh. It uses a floating Refresh's
-    clock, evaluated per query: due once the newest request, or with none pending the freshness, is
-    ``fresh_within`` old. A request already waiting for the Pond to start a Run covers the query, so a busy
-    app adds at most one request beyond the Run in flight (0 still means every query between Runs)."""
+    """Whether a query through a Tap (plans/taps.md) sends the Pond a Refresh (for data no older than
+    ``fresh_within``). It uses a floating Refresh's clock, evaluated per query: due once the newest request, or
+    with none pending the freshness, is ``fresh_within`` old. A request already waiting for the Pond to start a
+    Run covers the query, so a busy app adds at most one request beyond the Run in flight (0 still means every
+    query between Runs)."""
     ps = state.pond_states.get(pid)
     if ps is None or ps.is_blocked:
         return False
