@@ -266,6 +266,36 @@ def test_the_credential_generation_moves_with_a_reminted_token(adc):
     assert storage.credential_generation("gs://bucket/p") == before + 1
 
 
+def test_a_duck_rewrites_its_registrys_secret_only_when_the_credential_changes():
+    """Before each Ripple the executor rewrites the registry's secret only after a re-minted token: rewriting it
+    every time, from concurrent pool threads on one connection, failed a Fargate Duck's Ripple (0.8.0rc1)."""
+    import threading
+
+    from duckstring.duck.executor import RippleExecutor
+
+    class Store:
+        generation, setups = 0, 0
+
+        def credential_generation(self):
+            return self.generation
+
+        def duckdb_setup(self, con):
+            self.setups += 1
+
+    ex = object.__new__(RippleExecutor)
+    ex.own_data_dir, ex._registry, ex._secret_lock = Store(), None, threading.Lock()
+    ex._secret_generation = 0
+    threads = [threading.Thread(target=ex._refresh_secret) for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert ex.own_data_dir.setups == 0  # S3's credential chain, an unexpired token: nothing to rewrite
+    ex.own_data_dir.generation = 1  # a token re-minted
+    threads = [threading.Thread(target=ex._refresh_secret) for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert ex.own_data_dir.setups == 1
+
+
 def test_the_ops_serving_surface_is_rebuilt_when_the_token_is_reminted(monkeypatch):
     from duckstring.catchment import serving
 

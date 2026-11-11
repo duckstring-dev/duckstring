@@ -285,6 +285,8 @@ class RippleExecutor(RunInputs):
         # foreign reads, and the export can all reach S3/GCS. A no-op for a local data root. Without this,
         # the first S3 read (typically hydration) fails with a 403 "no credentials provided".
         self.own_data_dir.duckdb_setup(self._registry)
+        self._secret_lock = threading.Lock()
+        self._secret_generation = self._credential_generation()
         if recover:
             from ..dataplane import hydrate_registry, restore_tree
 
@@ -313,6 +315,22 @@ class RippleExecutor(RunInputs):
         self.table_writers: dict[str, str] = {}
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
 
+    def _credential_generation(self) -> int:
+        generation = getattr(self.own_data_dir, "credential_generation", None)
+        return generation() if generation is not None else 0
+
+    def _refresh_secret(self) -> None:
+        """Rewrite the registry's object-store secret when its credential has changed: a hydrated registry's views
+        read published files, and a Google or Azure access token set when the Duck started expires after an hour.
+        Only then, and one Ripple at a time: rewriting it before every Ripple, from concurrent pool threads on the
+        one registry connection, failed a fresh Fargate Duck's Ripple (0.8.0rc1 smoke test, 2026-11-11)."""
+        generation = self._credential_generation()
+        with self._secret_lock:
+            if generation == self._secret_generation:
+                return
+            self.own_data_dir.duckdb_setup(self._registry)
+            self._secret_generation = generation
+
     def _cursor(self):
         """A fresh connection sharing the one registry instance. Cursor creation is serialised; the
         cursors themselves run concurrently."""
@@ -332,9 +350,7 @@ class RippleExecutor(RunInputs):
 
         def _task():
             timing["started"] = datetime.now(timezone.utc)
-            # Rewrite the registry's object-store secret: a hydrated registry's views read published files, and
-            # a Google access token set when the Duck started expires after an hour.
-            self.own_data_dir.duckdb_setup(self._registry)
+            self._refresh_secret()
             func, pond = _load_ripple(self.source_path, str(self.root), ripple_name)
             # Over-envelope offload happens inside the ripple, at the pond.trickle(...) terminals
             # (the Flock seam — duckstring.flock, env-gated, engine-pluggable). The executor just
