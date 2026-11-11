@@ -65,7 +65,7 @@ Removes a recurring Refresh by name. Runs already in progress finish. `duckstrin
 
 ## `refresh tap`
 
-A Tap refreshes a Pond whenever an app queries it. It has its own key, which reads the Pond's exposed tables, and a freshness policy: a query through the Tap sends the Pond a Refresh when the newest request on the Pond, or with none waiting its freshness, is at least `--fresh-within` old. Queries with any other key never send one. See [Serving Apps with Taps](../../guides/serving_apps_with_taps.md).
+A Tap refreshes a Pond whenever an app queries it. It has its own key, which reads the Pond's exposed tables, and a freshness policy: a query through the Tap sends the Pond a Refresh when the newest request on the Pond, or with none waiting its freshness, is at least `--fresh-within` old. Queries with any other key never send one. See [Refreshing on Use with Taps](../../guides/serving_apps_with_taps.md).
 
 A Tap belongs to one major version of its Pond. Taps are Catchment configuration and survive redeploys; removing the major version removes them. Managing Taps needs a full-access key.
 

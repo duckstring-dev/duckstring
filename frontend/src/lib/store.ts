@@ -741,13 +741,12 @@ export const STATE_COLORS: Record<string, string> = {
   repairing: THEME_WAKE, // mid-rebuild — a deliberate operator action, the soft "go" green
 };
 
-// What an App is doing, for its node and sidebar: halted (failed/killed), waiting for memory to start, starting,
-// serving, or stopped until its next request.
-export type AppState = 'failed' | 'killed' | 'waiting' | 'starting' | 'running' | 'idle';
+// What an App is doing, for its node and sidebar: halted (failed/killed), starting, serving, or stopped until
+// its next request.
+export type AppState = 'failed' | 'killed' | 'starting' | 'running' | 'idle';
 export function appState(info: PondInfo | undefined): AppState {
   if (info?.isFailed) return 'failed';
   if (info?.isKilled) return 'killed';
-  if (info?.memory?.position) return 'waiting';
   const inst = info?.app?.instance;
   if (!inst) return 'idle';
   return inst.readyAt ? 'running' : 'starting';

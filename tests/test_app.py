@@ -510,34 +510,47 @@ def test_a_tap_on_an_app_runs_on_its_requests_and_has_no_key(catchment_client):
     assert tap["query_count"] == 2 and tap["refresh_count"] == 1  # a request is already waiting on the Source
 
 
-def test_an_instance_takes_a_memory_slot_and_its_handle_is_capped(tmp_path, monkeypatch):
+def _size(text: str) -> float:
+    """DuckDB's rendering of a memory setting, such as ``953.6 MiB``, in bytes."""
+    n, unit = text.split()
+    return float(n) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "KB": 1e3, "MB": 1e6, "GB": 1e9}[unit]
+
+
+def test_a_running_app_sets_its_memory_aside_and_the_slots_share_the_rest(tmp_path, monkeypatch):
     from datetime import datetime, timezone
 
     from duckstring.catchment.app import create_app
 
-    monkeypatch.setenv("DUCKSTRING_RUN_SLOTS", "1")
-    monkeypatch.setenv("DUCKSTRING_MEMORY_BUDGET", "2GB")
+    monkeypatch.setenv("DUCKSTRING_RUN_SLOTS", "2")
+    monkeypatch.setenv("DUCKSTRING_MEMORY_BUDGET", "4GB")
+    with_memory = lambda size: _app_toml().replace('type = "app"\n', f'type = "app"\nmemory = "{size}"\n')  # noqa: E731
     with TestClient(create_app(tmp_path)) as client:
         _deploy_pipeline(client)
         driver, supervisor = client.app.state.driver, client.app.state.app_supervisor
-        supervisor.start_timeout = 1.0
-        with driver.lock:  # the Source has a Run in flight, holding the only slot
+        with driver.lock:  # a Run in flight holds every slot: an App doesn't wait for them
             ps = driver.state.pond_states["sales@1"]
-            ps.start_f, ps.slots = datetime(2026, 1, 1, tzinfo=timezone.utc), 1
-        r = client.get("/apps/dash/v1/mem")
-        assert r.status_code == 503 and "waiting for memory" in r.text
-        assert not driver.state.pond_states["dash@1"].app_serving  # it left the queue
-        with driver.lock:
-            ps = driver.state.pond_states["sales@1"]
-            ps.start_f, ps.slots = ps.end_f, 0
-        supervisor.start_timeout = 60.0
+            ps.start_f, ps.slots = datetime(2026, 1, 1, tzinfo=timezone.utc), 2
         r = client.get("/apps/dash/v1/mem")
         assert r.status_code == 200, r.text
-        assert r.json()["limit"] in ("1.8 GiB", "1.9 GiB", "2.0 GB", "1.8 GB")  # DuckDB's rendering of 2000MB
-        assert _app_entry(client)["memory"]["slots"] == 1
+        assert abs(_size(r.json()["limit"]) - 256 * 10**6) < 10**7  # nothing declared: nothing set aside, DuckDB held low
+        assert driver.app_reserved == {} and driver._slot_bytes() == 2 * 10**9
+        assert _app_entry(client)["memory"] is None
+
+        assert _deploy(client, "dash", {"pond.toml": with_memory("1GB"), "main.py": _APP_PY},
+                       version="1.0.1").status_code == 200
+        r = client.get("/apps/dash/v1/mem")  # the outdated instance stops and gives back nothing; the new one sets 1 GB aside
+        assert r.status_code == 200, r.text
+        assert abs(_size(r.json()["limit"]) - 10**9) < 10**7
+        assert driver.app_reserved == {"dash@1": 10**9} and driver._slot_bytes() == 1.5 * 10**9
         supervisor._instances["dash@1"].last_used -= 3600
-        supervisor.reconcile()  # an idle stop gives the slot back
-        assert _app_entry(client)["memory"]["slots"] == 0
+        supervisor.reconcile()  # an idle stop gives it back
+        assert driver.app_reserved == {} and driver._slot_bytes() == 2 * 10**9
+
+        assert _deploy(client, "dash", {"pond.toml": with_memory("3GB"), "main.py": _APP_PY},
+                       version="1.0.2").status_code == 200
+        r = client.get("/apps/dash/v1/mem")  # more than half the budget: refused, never queued
+        assert r.status_code == 503 and "doesn't fit" in r.text
+        assert driver.app_reserved == {} and "dash@1" not in supervisor._instances
 
 
 # ─── downloads ────────────────────────────────────────────────────────────────

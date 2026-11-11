@@ -12,8 +12,8 @@ The process runs ``[app] command`` through ``/bin/sh`` in the App's deployed dir
 set. Its output goes to ``ponds/{name}/m{major}/app/logs/{instance}.log``. Its state directory,
 ``apps/{name}/m{major}/state/``, sits outside the line's runtime directory, so a Catchment reset keeps it.
 
-On a machine with memory slots an instance queues for the App's slots like a Pond Run and holds them until it
-stops; DuckDB's ``memory_limit`` in its handle is the grant.
+While an instance runs, the App's ``[pond] memory`` is set aside from the budget the Pond Runs' memory slots
+divide (``Driver.app_reserve``), and DuckDB's ``memory_limit`` in its handle is that memory.
 
 **Read leases.** A Source keeps the version an App is reading (``Driver._retain_from``). Each request in flight
 holds every Source line's published freshness at the moment it arrived: a read inside it resolves to that
@@ -152,30 +152,17 @@ class AppSupervisor:
                 await asyncio.to_thread(self._stop, old, "redeploy")
             if not view["app"]["command"]:
                 raise AppUnavailable(404, "not found")  # a static-only App: nothing to start
-            memory_limit = await self._wait_slots(key)
+            try:
+                memory_limit = self.driver.app_reserve(key)
+            except ValueError as e:
+                raise AppUnavailable(503, str(e)) from None
             try:
                 inst = await asyncio.to_thread(self._spawn, view, memory_limit)
             except BaseException:
-                self.driver.app_release_slots(key)
+                self.driver.app_release(key)
                 raise
             await self._wait_ready(inst, view)
             return inst
-
-    async def _wait_slots(self, key: str) -> str | None:
-        """Queue for the App's memory slots and wait for them (up to the start timeout, holding the request that
-        started the instance). Returns DuckDB's ``memory_limit`` for the handle, ``None`` without slots."""
-        if not self.driver.app_want_slots(key):
-            return None
-        deadline = time.monotonic() + self.start_timeout
-        while True:
-            granted, limit = self.driver.app_grant(key)
-            if granted:
-                return limit
-            if time.monotonic() >= deadline:
-                self.driver.app_release_slots(key)
-                raise AppUnavailable(503, "the App is waiting for memory: Pond Runs hold the Catchment's memory "
-                                          "slots; try again shortly")
-            await asyncio.sleep(0.1)
 
     def _check_serving(self, key: str, view: dict) -> None:
         if view["is_killed"]:
@@ -370,7 +357,7 @@ class AppSupervisor:
 
     def _stop(self, inst: Instance, reason: str, process: bool = True) -> None:
         """End ``inst`` (SIGTERM to its process group, then SIGKILL after a grace), record it and give its
-        memory slots back. ``process=False`` when the Driver called in (a Kill or a removal) and processes the
+        memory back to the slots. ``process=False`` when the Driver called in (a Kill or a removal) and processes the
         engine itself."""
         inst.stopping = True
         proc = inst.proc
@@ -392,7 +379,7 @@ class AppSupervisor:
                 del self._instances[inst.key]
             inst.leases.clear()
         shutil.rmtree(inst.log_path.parent.parent / "holds", ignore_errors=True)
-        self.driver.app_release_slots(inst.key, process=process)
+        self.driver.app_release(inst.key, process=process)
         db = self.driver.db
         with locked(db):
             db.execute("UPDATE app_instance SET stopped_at = ?, stop_reason = ?, exit_code = ? "

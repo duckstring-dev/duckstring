@@ -220,7 +220,7 @@ def ingest(pond):
     pond.merge_table("customer", src.read(), pk="customer_id")
 ```
 
-`changed` comes from the table's Delta version in Unity Catalog, which takes about 50 milliseconds and no warehouse. The data itself is read one of two ways.
+`changed` comes from the table's Delta version in Unity Catalog, which needs no warehouse. The data itself is read one of two ways.
 
 The first is straight from the table's storage, with short-lived credentials Unity Catalog vends for it, so no warehouse runs. This needs a metastore admin to turn on External data access for the metastore, and the reading identity to hold `EXTERNAL USE SCHEMA` on the table's schema, which only the catalog's owner can grant (`ALL PRIVILEGES` doesn't include it):
 
@@ -230,7 +230,7 @@ GRANT EXTERNAL USE SCHEMA ON SCHEMA main.sales TO `<identity>`;
 
 It works for tables stored on Azure or AWS, and has only been tested offline, against a local Delta table.
 
-The second is through a SQL warehouse, used when storage can't be read. Name the warehouse with `DUCKSTRING_DATABRICKS_WAREHOUSE`, or `warehouse=` on the call. Views, tables that aren't Delta and tables whose commits Unity Catalog manages always take this route. The result is downloaded into the same local cache. In testing, the first read of a small table through a warehouse took 2.4 seconds. The reading identity needs `USE CATALOG`, `USE SCHEMA` and `SELECT`, plus **Can use** on the warehouse.
+The second is through a SQL warehouse, used when storage can't be read. Name the warehouse with `DUCKSTRING_DATABRICKS_WAREHOUSE`, or `warehouse=` on the call. Views, tables that aren't Delta and tables whose commits Unity Catalog manages always take this route. The result is downloaded into the same local cache. The reading identity needs `USE CATALOG`, `USE SCHEMA` and `SELECT`, plus **Can use** on the warehouse.
 
 `added()` works on a table too, returning the rows added since the previous run and raising `NotAppendOnly` after an update or delete. Check `changed` before calling it: through a warehouse, `added()` runs the full query even when nothing changed.
 

@@ -59,7 +59,7 @@ const sidebars: SidebarsConfig = {
         {
           type: 'category',
           label: 'Getting Data Out',
-          items: ['guides/querying', 'guides/serving_apps_with_taps', 'guides/delivering_with_spouts'],
+          items: ['guides/querying', 'guides/serving_apps_with_taps', 'guides/building_apps', 'guides/delivering_with_spouts'],
         },
         {
           type: 'category',
@@ -93,6 +93,7 @@ const sidebars: SidebarsConfig = {
             'reference/python/acc',
             'reference/python/puddle',
             'reference/python/catchment',
+            'reference/python/app',
             'reference/python/databricks',
             'reference/python/landing',
           ],

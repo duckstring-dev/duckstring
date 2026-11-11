@@ -312,9 +312,6 @@ class PondState:
     slots: int = 0
     slot_wait_since: datetime | None = None
     slot_exclusive: bool = False
-    # An App (plans/apps.md): its instance is running or waiting to start. A serving App holds its slots for the
-    # instance's whole life (an idle stop returns them), where a Pond holds them while a Run is in flight.
-    app_serving: bool = False
 
     def copy(self) -> PondState:
         return replace(

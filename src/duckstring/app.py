@@ -227,7 +227,7 @@ _hold_ids = count(1)
 
 def pond():
     """The App's read-only Pond handle: :meth:`~duckstring.Pond.read_table`, ``count_table``, ``read_object``,
-    ``object_path``, ``source_columns`` and ``con`` over its declared Sources, at their newest published data,
+    ``object_path`` and ``con`` over its declared Sources, at their newest published data,
     plus ``freshness()`` and ``hold()``. One handle per process; each thread gets its own cursor."""
     global _handle
     with _handle_lock:
@@ -245,7 +245,7 @@ def _make_handle():
     cfg = json.loads(raw)
     runtime = Path(cfg["runtime"]) if cfg.get("runtime") else None
     con = duckdb.connect()
-    if cfg.get("memory_limit"):  # the App's memory slots' worth, on a machine with slots
+    if cfg.get("memory_limit"):  # the App's [pond] memory (at least 256MB), set aside while it runs
         con.execute(f"SET memory_limit = '{cfg['memory_limit']}'")
     return _pond_class()(
         cfg["name"], cfg.get("version", "0.0.0"), con, cfg["root"],

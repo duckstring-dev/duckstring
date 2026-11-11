@@ -1,13 +1,15 @@
 ---
-title: Serving Apps with Taps
+title: Refreshing on Use with Taps
 description: Give an app its own access to a Pond, and keep the Pond fresh while the app is in use.
 ---
 
-# Serving Apps with Taps
+# Refreshing on Use with Taps
 
 A dashboard or internal app usually reads one Outlet. A recurring Refresh keeps that Outlet fresh on a schedule whether or not anyone is looking, and refreshing from the app instead spreads freshness policy through app code and gives every app a key that can refresh anything.
 
 A **Tap** is an access point on a Pond for one app. It has its own key, and a policy for how fresh the data should be. A query through the Tap sends the Pond a Refresh when the data is older than the policy allows, so the pipeline keeps up while the app is in use and goes quiet when it isn't. Queries with any other key, including the web UI's and the CLI's, never send a Refresh.
+
+This guide is for an app that runs somewhere else and queries the Catchment. An app the Catchment serves itself, an [App](building_apps.md), can have a Tap too, without a key (see [Keeping it fresh](building_apps.md#keeping-it-fresh)).
 
 ## Adding a Tap
 

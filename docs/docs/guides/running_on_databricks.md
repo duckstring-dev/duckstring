@@ -123,7 +123,7 @@ People who use the Catchment need **Can use** on the App itself. Everyone with i
 
 An App keeps its local disk across a redeploy but loses it when its compute stops and starts again, so the data root and the state backup above go on a Volume.
 
-The Volume holds the durable copy of every published table, and the App's disk holds the working copy every read uses. When the Catchment starts, it restores any table whose local copy is missing or older than the Volume's, and a state directory that's empty is restored from the state backup. In a test, the [Trickle demo](../concepts/trickles.md) came back whole after the App's compute was stopped and started (41 seconds to stop and 122 to start), and its next Refresh carried on.
+The Volume holds the durable copy of every published table, and the App's disk holds the working copy every read uses. When the Catchment starts, it restores any table whose local copy is missing or older than the Volume's, and a state directory that's empty is restored from the state backup. In a test, the [Trickle demo](../concepts/trickles.md) came back whole after the App's compute was stopped and started, and its next Refresh carried on.
 
 The state backup copies the Catchment's database every `DUCKSTRING_CHECKPOINT_INTERVAL`, and everything else when the Catchment shuts down. Databricks gives an App 15 seconds to shut down, which may not be long enough for that last copy, hence the short interval. A Pond whose working state is then older than its published tables rebuilds it from the published tables when it next runs.
 

@@ -32,7 +32,7 @@ export function OpenIcon({ size = 14 }: { size?: number }) {
 }
 
 const APP_STATE_COLOR: Record<string, string> = {
-  running: STATE_COLORS.running, starting: STATE_COLORS.running, waiting: STATE_COLORS.waiting,
+  running: STATE_COLORS.running, starting: STATE_COLORS.running,
   idle: '#71717a', failed: STATE_COLORS.failed, killed: STATE_COLORS.killed,
 };
 

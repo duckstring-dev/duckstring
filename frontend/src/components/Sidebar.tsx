@@ -165,7 +165,7 @@ function AppPanel({ pond, canDemand, canControl, onOptions, mobile }: {
         Stopped by an operator.{canControl ? ' Restart to bring it back.' : ''}
       </StatusCard>
     );
-  } else if (halted || state === 'waiting') {
+  } else if (halted) {
     instance = <StatusBox info={info} ponds={ponds} canControl={canControl} />;
   } else if (inst) {
     const idleAt = inst.idleAt ? parseTs(inst.idleAt) : null;

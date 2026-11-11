@@ -121,12 +121,9 @@ App gets a synthetic Ripple as a Spout gets `egress`.
 
 ### Memory
 
-A running instance takes memory slots (`plans/memory-budget.md`) like a Pond Run, and holds them until it
-stops, so an idle stop returns them. The App's `[pond] memory` is its reservation, and the docs recommend
-setting one. An instance waits for its slots like a Pond Run does (FIFO), holding the request that started
-it, up to the same limit as a start. The grant becomes the handle connection's DuckDB `memory_limit`; the
-process as a whole isn't capped in v1 (that would need cgroups), so the reservation is advisory beyond
-DuckDB.
+Reworked 2026-11-10 (see "As built"). A running instance sets the App's `[pond] memory` aside from the
+machine's budget, and the memory slots (`plans/memory-budget.md`) divide what is left. The App never queues:
+its memory is the whole App's, DuckDB included, and the handle's DuckDB `memory_limit` is that amount.
 
 ## State
 
@@ -286,11 +283,17 @@ Built: read leases, memory slots for instances, and Taps on Apps. Tests in `test
   message started may still be reading. `pond.hold()` writes a file under the App's runtime directory, so the
   Catchment needs no channel back from the App; the handle rewrites it until the Sources' run stamps are stable,
   and a hold whose process has gone is ignored.
-- **Memory slots**: `[pond] memory` means what it means for a Ripple, memory held outside DuckDB, so an App takes
-  one slot plus enough for it, and DuckDB's `memory_limit` in the handle is the grant less that. The limit is per
-  process, so a server with several workers should declare their total. A start that can't get its slots within
-  the start timeout answers 503 and leaves the queue. An App never takes the spare slots a lone Run gets, since it
-  holds them for as long as it serves.
+- **Memory** (first built as slots, 2026-11-06; reworked 2026-11-10): an instance first took slots like a Pond
+  Run (one, plus enough for `[pond] memory` held outside DuckDB) and held them for its life. Measured on a
+  32 GB laptop (5.9 GB slots), two Apps declaring 500 MB and 200 MB held all four slots, so the demo
+  pipeline's Runs waited until the Apps were killed, a third App's first request waited 60 s and got a 503,
+  and an App's own Tap Refreshes could never complete while it was in use. Slots are admission control for
+  batch jobs that finish; an App is a service with a small, steady footprint. Now (the author's design): a
+  running App sets aside `[pond] memory` (the whole App's, DuckDB included) and the slots divide the rest of
+  the budget, recomputed as instances start and stop (Runs in flight keep their grants). An App without
+  `memory` sets nothing aside and its DuckDB is held to 256 MB, which the headroom outside the budget (20%
+  and 2 GB) covers for small Apps. Running Apps may set aside at most half the budget; a start past that is
+  refused with a 503. The limit is per process, so several workers can together use a multiple of it.
 - **Taps on Apps** have no key (`pond_tap.key_hash` became nullable, migration `035`). Every forwarded request
   runs them, as does every message from the browser on a WebSocket, at most once a second. Requests for static
   files don't.

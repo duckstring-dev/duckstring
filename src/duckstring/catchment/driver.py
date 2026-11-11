@@ -74,6 +74,11 @@ _log = logging.getLogger("duckstring.catchment")
 _DEFAULT_RUN_SLOTS = 4
 _DEFAULT_IDLE_MEMORY = "256MB"
 _MIN_DUCKDB_GRANT = 256 * 10**6  # never set DuckDB below this, whatever a Ripple declares outside it
+# An App's memory (plans/apps.md): while its instance runs, an App on the Catchment's machine sets aside its
+# `[pond] memory`, the whole App's, DuckDB included, and the slots divide the budget that is left. Running Apps may
+# set aside at most this share of the budget, so Pond Runs always keep the rest. An App that declares nothing sets
+# nothing aside; its DuckDB is held to _MIN_DUCKDB_GRANT, small enough for the headroom outside the budget.
+_APP_SHARE = 0.5
 
 
 def _out_of_memory(error: str | None) -> bool:
@@ -434,6 +439,7 @@ class Driver(TapsMixin):
         self.idle_memory = os.environ.get("DUCKSTRING_IDLE_MEMORY") or _DEFAULT_IDLE_MEMORY
         self.declared_memory: dict[str, int] = {}
         self._memory_retry: set[str] = set()
+        self.app_reserved: dict[str, int] = {}  # App key -> the memory its running instance sets aside
         # key -> cumulative Flock dispatch counters ({dispatched, failed, last_error}), accumulated from
         # the per-Ripple-Run deltas Ducks report (see _record_flock). Observability only (in-memory; a
         # restart just waits for the next report).
@@ -699,16 +705,10 @@ class Driver(TapsMixin):
                 if key:
                     refreshes.setdefault(key, []).append(_row_to_refresh(key, row[1:]))
 
-            prior = getattr(self, "state", None)
             self.state = EngineState(
                 ponds=ponds, pond_states=pond_states, ripples=ripples,
                 ripple_states=ripple_states, refreshes=refreshes,
             )
-            if prior is not None:  # an App's instance outlives a reload (a deploy): keep its slots or its place
-                for key, old in prior.pond_states.items():
-                    new = pond_states.get(key)
-                    if old.app_serving and new is not None and ponds[key].is_app:
-                        new.app_serving, new.slots, new.slot_wait_since = True, old.slots, old.slot_wait_since
             self._configure_slots()
             self._load_taps(pondid_to_key)
             # Recompute blocked from the freshly-loaded topology: a Source that is absent now (or has
@@ -742,7 +742,7 @@ class Driver(TapsMixin):
     def _memory_status(self, key: str) -> dict | None:
         ps, pond = self.state.pond_states[key], self.state.ponds[key]
         cap = self.state.slot_capacity.get(pond.pool)
-        if cap is None:
+        if cap is None or pond.is_app:  # an App sets its memory aside outside the slots
             return None
         position = None
         if ps.slot_wait_since is not None:
@@ -755,7 +755,8 @@ class Driver(TapsMixin):
                 "declared_bytes": self.declared_memory.get(key) or None}
 
     def _slot_bytes(self) -> int:
-        return self.memory_budget // max(1, self.run_slots)
+        """One slot's worth: the budget the running Apps leave, divided between the slots."""
+        return (self.memory_budget - sum(self.app_reserved.values())) // max(1, self.run_slots)
 
     def _configure_slots(self) -> None:
         """Gate the Ducks on the Catchment's own machine on memory slots (plans/memory-budget.md): its pool's
@@ -767,7 +768,7 @@ class Driver(TapsMixin):
         self.state.slot_capacity = {"catchment": self.run_slots}
         slot = self._slot_bytes()
         for key, pond in self.state.ponds.items():
-            declared = self.declared_memory.get(key, 0)
+            declared = 0 if pond.is_app else self.declared_memory.get(key, 0)
             pond.slot_need = min(self.run_slots, 1 + -(-declared // slot)) if declared else 1
         restore_slots(self.state)
 
@@ -2596,41 +2597,34 @@ class Driver(TapsMixin):
                     "sources": {self.meta[sp]["name"]: iso(self.state.pond_states[sp].end_f)
                                 for sp in self.state.ponds[key].sources if sp in self.meta}}
 
-    def app_want_slots(self, key: str) -> bool:
-        """An instance of the App ``key`` is about to start: queue it for the App's memory slots (plans/apps.md),
-        FIFO with the Ponds. Returns whether it has to wait for them (``False`` on a machine without slots)."""
-        from ..engine import app_serving
-
+    def app_reserve(self, key: str) -> str:
+        """An instance of the App ``key`` is about to start: set its ``[pond] memory`` aside from the budget the
+        slots divide (plans/apps.md), and return DuckDB's ``memory_limit`` for its handle, which is that memory
+        (at least ``_MIN_DUCKDB_GRANT``). Raises ``ValueError`` when the running Apps would then set aside more
+        than ``_APP_SHARE`` of the budget. Runs in flight keep their grants; the next ones get the smaller slots."""
         with self.lock:
-            if key not in self.state.ponds or self.state.ponds[key].pool not in self.state.slot_capacity:
-                return False
-            now = _now()
-            self.state = app_serving(self.state, key, True, now)
-            self._process(now)
-            return True
+            declared = self.declared_memory.get(key, 0)
+            if declared and self.run_slots > 0:
+                others = sum(b for k, b in self.app_reserved.items() if k != key)
+                share = int(self.memory_budget * _APP_SHARE)
+                if others + declared > share:
+                    gb = lambda n: f"{n / 10**9:.1f} GB"  # noqa: E731
+                    running = f", and running Apps already hold {gb(others)}" if others else ""
+                    raise ValueError(f"the App's memory ({gb(declared)}) doesn't fit: Apps may set aside "
+                                     f"{gb(share)}, half of this machine's memory budget{running}")
+                self.app_reserved[key] = declared
+                self._configure_slots()
+            return f"{max(declared, _MIN_DUCKDB_GRANT) // 10**6}MB"
 
-    def app_grant(self, key: str) -> tuple[bool, str | None]:
-        """Whether the App's instance has its slots yet, and DuckDB's ``memory_limit`` for its handle: its slots'
-        worth, less what ``[pond] memory`` declares outside DuckDB (``None`` without slots)."""
+    def app_release(self, key: str, process: bool = True) -> None:
+        """The App's instance stopped (or never started): give its memory back to the slots, and start what a
+        Pond's smaller need now admits, unless the caller processes the engine itself (``process=False``)."""
         with self.lock:
-            ps = self.state.pond_states.get(key)
-            if ps is None or self.state.ponds[key].pool not in self.state.slot_capacity:
-                return True, None
-            return ps.slots > 0, self._memory_grant(key)
-
-    def app_release_slots(self, key: str, process: bool = True) -> None:
-        """The App's instance stopped (or never started): give its slots back, and start what was waiting for
-        them unless the caller processes the engine itself (``process=False``)."""
-        from ..engine import app_serving
-
-        with self.lock:
-            ps = self.state.pond_states.get(key)
-            if ps is None or not (ps.app_serving or ps.slots):
+            if self.app_reserved.pop(key, None) is None:
                 return
-            now = _now()
-            self.state = app_serving(self.state, key, False, now)
+            self._configure_slots()
             if process:
-                self._process(now)
+                self._process(_now())
 
     def app_sources_now(self, key: str) -> dict[str, datetime]:
         """Each Source line's published freshness (``changed_f``) right now: what a read lease taken at this
