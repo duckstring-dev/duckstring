@@ -1,6 +1,7 @@
 name: Release
 
-# Tag a release (e.g. `git tag v0.2.0 && git push origin v0.2.0`) to build and publish to PyPI.
+# Tag a release (e.g. `git tag v0.2.0 && git push origin v0.2.0`) to build and publish to PyPI and GHCR. A final
+# version (no rc/a/b/dev suffix) also gets a GitHub Release, its notes taken from its CHANGELOG.md section.
 # Publishing uses PyPI Trusted Publishing (OIDC) — configure the `pypi` environment for this repo
 # and register the publisher on PyPI (project: duckstring, workflow: release.yml, environment: pypi).
 #
@@ -135,3 +136,28 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.licenses=Apache-2.0
+
+  # A GitHub Release for a final version, with that version's CHANGELOG.md section as its notes, so the repo page
+  # shows the current release and anyone watching releases hears of it. Release candidates get none.
+  github-release:
+    needs: [publish, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - id: notes
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$GITHUB_REF_NAME is a pre-release: no GitHub Release"
+            exit 0
+          fi
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '/^## / { if (found) exit; if (index($0, "## " v " ") == 1) { found = 1; next } } found' \
+            CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no section for $v"; exit 1; }
+          echo "final=true" >> "$GITHUB_OUTPUT"
+      - if: steps.notes.outputs.final == 'true'
+        run: gh release create "$GITHUB_REF_NAME" --title "Duckstring ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
