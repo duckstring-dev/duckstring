@@ -42,3 +42,27 @@ Not covered: Power BI itself (Windows), Lakebase (deleted), the Databricks App w
 by the author's choice of scope), the Flock conformance suites (unchanged since measured).
 
 ## Progress
+
+- 2026-11-11: PR #49 merged; CI found two bugs, both fixed before the RC: a never-published line's
+  `retain_from` was None (keep only the newest), so overlapping first Runs deleted a version a Sink was reading;
+  DuckDB 1.5's Delta reader can't read a version (Databricks tables go through the warehouse there).
+  0.8.0rc1 published (`v0.8.0rc1`, run 42994632925).
+- 0.8.0rc1 smoke. **A** passed: clean installs (3.10 → DuckDB 1.5.6, 3.13 → 2.0.0, Trickle 0.3.1, UI present), all
+  four image tags anonymous on amd64/arm64, an upgrade in place from 0.7.1 (migrations to 35; Refresh, Tap,
+  window and Spout kept; rounds and query clean), the App (started on request, keyless Tap refreshed `reports`,
+  stopped when idle), the Postgres wire (pg8000, parameters, a 34-digit numeric), `--header-command` (both
+  clouds). **C** (Azure) passed: Container Apps Ducks on the default `-azure` image, an `azurevm` Pool VM on the
+  default `pip_spec`, three rounds; the dedicated-VM stop-then-delete watcher seen live for the first time (VM
+  deleted about a minute after it stopped, with its disk, NIC and IP); deleting the Catchment deleted the Pool VM.
+  **D** (Google) passed: the Catchment and Cloud Run Ducks on `-gcp` through the Artifact Registry remote
+  repository, a `gce` Pool on the default `pip_spec`, the service's deletion deleted the VM. Its first round failed
+  with a 403 on the Duck's artifact fetch: `run.invoker` granted under two minutes earlier, not yet propagated;
+  rounds after a Clear passed. **B** (AWS) found a regression: a fresh Fargate Duck's `sales.price_tiers` failed
+  in `duckdb_setup` ("failed to configure DuckDB S3 credentials"), from the per-Ripple secret rewrite added for
+  Google and Azure tokens (`3aad674a`), run before every Ripple from concurrent pool threads on the one registry
+  connection. Fixed: rewritten only when the credential generation changes, under a lock. Rounds 3 and 4, the App
+  and the continuous check were blocked behind the failed `sales`; `--fresh-within` passed.
+- Follow-ups (not blocking): after a Ripple fails, the Duck's watchdog reports the Run "stuck" 30 s later and
+  that message replaces the Ripple's error on the Pond; a read of a merge main as of NEVER warns and reads the
+  newest base (from 0.7.1's read snapshots); a pool VM's serial console shows the Duck token in the agent's
+  command line.
