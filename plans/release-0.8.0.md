@@ -1,6 +1,6 @@
 # Release: Duckstring 0.8.0
 
-Status: **started 2026-11-11.** The `apps` branch carries the release (Apps, Azure and Google compute, Databricks
+Status: **released 2026-11-11.** The `apps` branch carries the release (Apps, Azure and Google compute, Databricks
 and BigQuery, the Npgsql wire, Inlet stamping). No Trickle release: since `trickle-v0.3.1` it has only a docstring
 change, so 0.8.0 keeps `duckstring-trickle>=0.3.1,<0.4`. The author gave the go-ahead for this release's pushes,
 tags and PyPI approvals on 2026-11-11.
@@ -66,3 +66,9 @@ by the author's choice of scope), the Flock conformance suites (unchanged since 
   that message replaces the Ripple's error on the Pond; a read of a merge main as of NEVER warns and reads the
   newest base (from 0.7.1's read snapshots); a pool VM's serial console shows the Duck token in the agent's
   command line.
+- 2026-11-11: PR #50 merged; 0.8.0rc2 published (run 43003901556). AWS smoke re-run (run `20261111T104255Z`) passed:
+  four rounds on fresh Fargate Ducks (the bare-version image), `--fresh-within` ran nothing already fresh, the App
+  on the Catchment (started on request, its keyless Tap refreshed `reports` on S3, stopped when idle), two minutes
+  of a continuous Refresh (every Pond 14 to 19 runs, nothing failed), both queries, and orphaned Ducks stopped
+  3.4 minutes after the hard kill. The Azure and Google infrastructure recreated for C and D was deleted after.
+  0.8.0 released.

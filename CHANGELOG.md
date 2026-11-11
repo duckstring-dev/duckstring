@@ -2,7 +2,7 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
-## Unreleased (0.8.0)
+## 0.8.0 — 2026-11-11
 
 Apps, cloud compute on Azure and Google Cloud, and Databricks and BigQuery in both directions: reading from
 Databricks, delivering to it, and sending large recomputes to a Databricks or BigQuery warehouse. Still needs
