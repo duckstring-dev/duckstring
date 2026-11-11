@@ -17,6 +17,7 @@ from duckstring.dataplane import (
     prune_versions,
     retained_versions,
 )
+from duckstring.engine.core import NEVER
 from duckstring.storage import LocalStorage
 from duckstring.trickle.io import load_sidecar, part_name
 
@@ -156,6 +157,17 @@ def test_an_overlapping_runs_version_is_not_pruned(tmp_path):
     _publish(tmp_path, F1, 1, retain_from="keep")
     _publish(tmp_path, F2, 2, retain_from="keep")  # the overlapping run
     _publish(tmp_path, F3, 3, retain_from=F1)       # run X
+    assert _versions(tmp_path) == [part_name(F1), part_name(F2), part_name(F3)]
+
+
+def test_runs_dispatched_before_the_first_publish_keep_each_others_versions(tmp_path):
+    """Under a continuous Refresh, a Source's Runs at F2 and F3 can be dispatched before its first, at F1, has
+    published. Their jobs carry the bound of a line that has never published, so a Sink pinned to F1 (or
+    falling back to F2) still finds its version when F2 and F3 publish. CI, 2026-11-11: the bound was None
+    (keep only the newest), and the Sink found neither."""
+    never = datetime.fromisoformat(NEVER.isoformat())  # as the Duck reads it off the job
+    for f, value in ((F1, 1), (F2, 2), (F3, 3)):
+        _publish(tmp_path, f, value, retain_from=never)
     assert _versions(tmp_path) == [part_name(F1), part_name(F2), part_name(F3)]
 
 
@@ -320,7 +332,7 @@ def _driver(tmp_path):
 
 def test_a_sink_runs_pins_are_recorded_and_bound_its_sources_retention(tmp_path):
     driver = _driver(tmp_path)
-    assert driver._retain_from("sales@1") is None  # nothing published, nothing in flight
+    assert driver._retain_from("sales@1") == NEVER.isoformat()  # never published: keep whatever comes
 
     with driver.lock:
         ss = driver.state.pond_states["sales@1"]

@@ -198,6 +198,10 @@ class _Table(Input):
             return f"it is a {info.get('table_type', 'non-Delta').lower()} with no Delta storage"
         if any(k.startswith("delta.feature.catalog") for k in props):
             return "its commits are managed by the catalog, which DuckDB's Delta reader doesn't follow"
+        if not _delta_reads_versions():
+            import duckdb
+
+            return _NO_VERSIONED_DELTA.format(duckdb.__version__)
         try:
             creds = self._client.request("POST", "/api/2.1/unity-catalog/temporary-table-credentials",
                                          json={"table_id": info["table_id"], "operation": "READ"}).json()
@@ -325,9 +329,39 @@ class _DeltaFiles(Input):
         return local
 
 
+_VERSIONED_DELTA: bool | None = None
+_NO_VERSIONED_DELTA = "DuckDB {}'s Delta reader can't read a table at a version (DuckDB 2.0's can)"
+
+
+def _delta_reads_versions() -> bool:
+    """Whether this DuckDB's Delta reader takes ``version``: DuckDB 1.5's refuses it ("Invalid named parameter",
+    the CI floor job, 2026-11-11), so a read pinned to the version this run took isn't possible there."""
+    global _VERSIONED_DELTA
+    if _VERSIONED_DELTA is None:
+        import duckdb
+
+        from .storage import load_extension
+
+        con = duckdb.connect()
+        try:
+            load_extension(con, "delta")
+            con.sql("SELECT * FROM delta_scan('/duckstring-no-such-table', version => 0)").fetchall()
+        except duckdb.Error as exc:
+            _VERSIONED_DELTA = "Invalid named parameter" not in str(exc)  # else a missing table, or no extension
+        else:
+            _VERSIONED_DELTA = True
+        finally:
+            con.close()
+    return _VERSIONED_DELTA
+
+
 def _delta_scan(con, uri: str, version, *, filename: bool = False):
+    import duckdb
+
     from .storage import load_extension
 
+    if version is not None and not _delta_reads_versions():
+        raise RuntimeError(_NO_VERSIONED_DELTA.format(duckdb.__version__) + f": {uri} can't be read")
     load_extension(con, "delta")
     extra = ", filename = true" if filename else ""
     pinned = f", version => {int(version)}" if version is not None else ""

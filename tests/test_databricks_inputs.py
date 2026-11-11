@@ -261,6 +261,8 @@ def delta_ext():
         con.execute("INSTALL delta; LOAD delta")
     except duckdb.Error as exc:  # offline with no cached extension
         pytest.skip(f"DuckDB's delta extension is unavailable: {exc}")
+    if not databricks._delta_reads_versions():
+        pytest.skip(f"DuckDB {duckdb.__version__}'s delta extension can't read a version")
 
 
 @pytest.mark.timeout(120)
@@ -372,10 +374,21 @@ def test_a_table_is_read_through_the_warehouse_where_storage_isnt_vended(ws, tmp
 def test_without_vended_storage_or_a_warehouse_the_reason_is_given(ws, tmp_path, monkeypatch):
     monkeypatch.delenv("DUCKSTRING_DATABRICKS_WAREHOUSE", raising=False)
     monkeypatch.delenv("DATABRICKS_WAREHOUSE_ID", raising=False)
+    monkeypatch.setattr(databricks, "_VERSIONED_DELTA", True)  # DuckDB 1.5 gives its own reason first
     _uc_table(ws, 0, [1])
     src = databricks.table(Runs(tmp_path).next(), "lake.sales.orders")
     with pytest.raises(dbx.DatabricksError, match="External Data Access.*no SQL warehouse"):
         src.read()
+
+
+def test_without_versioned_delta_reads_a_table_goes_through_the_warehouse(ws, tmp_path, monkeypatch):
+    monkeypatch.setattr(databricks, "_VERSIONED_DELTA", False)
+    _uc_table(ws, 0, [1, 2], location=str(tmp_path / "t"))
+    ws.vend = {"azure_user_delegation_sas": {"sas_token": "sv=1"}, "url": str(tmp_path / "t")}
+    src = databricks.table(Runs(tmp_path).next(), "lake.sales.orders", warehouse="wh-1")
+    assert ids(src.read()) == [1, 2] and src.via == "warehouse"
+    with pytest.raises(RuntimeError, match="can't read a table at a version"):
+        databricks._delta_scan(duckdb.connect(), str(tmp_path / "t"), 0)
 
 
 def test_catalog_managed_commits_go_through_the_warehouse(ws, tmp_path, monkeypatch):

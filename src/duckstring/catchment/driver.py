@@ -4112,7 +4112,8 @@ class Driver(TapsMixin):
         """The retention bound for ``pond``'s superseded overwrite versions (plans/versioned-overwrite.md):
         the oldest version a reader may still need. That is the oldest pin on this line held by an in-flight
         Sink run, lowered to this line's own published freshness now, since a Sink dispatched before the
-        line publishes again is pinned to that. ``None`` when neither exists (keep only the newest).
+        line publishes again is pinned to that, or ``NEVER`` (keep everything) while the line has never published.
+        ``None`` (keep only the newest) for a line the engine doesn't know.
 
         A Sink run with no pin for this line (dispatched before it first published) reads at its own
         freshness, so that bounds it instead. Rows at or below the Sink's ``end_f`` are stranded, not in
@@ -4120,7 +4121,10 @@ class Driver(TapsMixin):
         meta = self.meta[pond]
         bounds: list[datetime] = []
         ps = self.state.pond_states.get(pond)
-        if ps is not None and ps.changed_f > NEVER:
+        if ps is not None:
+            # Never published: Runs dispatched before the first one finishes publish in turn, and a Sink may be
+            # pinned to any of them, so keep them all. None (keep only the newest) deleted the version a Sink was
+            # reading, then the newest it fell back to (CI, a continuous Refresh, 2026-11-11).
             bounds.append(ps.changed_f)
         for sink, sp in self.state.ponds.items():
             if pond not in sp.sources or sink not in self.meta:
