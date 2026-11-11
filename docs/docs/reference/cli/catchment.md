@@ -59,7 +59,7 @@ Registers a Catchment running elsewhere.
 | `--name`, `-n` | Name to register it under. |
 | `--path` | The Catchment's URL. |
 | `--key` | An API key to send with every request. |
-| `--header` | A header to send with every request, as `'Name: value'`. Repeatable. Use it when a hosting platform authenticates requests, for example `'Authorization: Key ...'` for Posit Connect. |
+| `--header` | A header to send with every request, as `'Name: value'`. Repeatable. Use it when a hosting platform authenticates requests, for example `'Authorization: Bearer ...'`. |
 | `--header-command` | A header whose value a shell command prints, as `'Name: command'`. Repeatable. For a platform whose tokens expire, such as a Databricks App or a private Cloud Run service. JSON with an `access_token` (as `databricks auth token` prints) is sent as `Bearer <token>`, and so is a bare token for an `Authorization` header. The value is kept until shortly before the token expires (read from a JWT's `exp` or the JSON's `expiry`), then the command runs again; a token the Catchment refuses is fetched again once. Without a known expiry the command runs for every request. A Duct stores only the value at the time it was made. |
 | `--yes`, `-y` | Make it the default without asking. |
 

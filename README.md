@@ -57,7 +57,7 @@ def priced_line(pond):
 
 ## Code and data together
 
-The runtime, called the *Catchment*, is also the catalog. Each major version of a Pond is a schema holding its tables, with lineage, run history and the version's schema contract recorded alongside. Query it from the CLI, from Python, or from any Postgres client, Power BI included:
+The runtime, called the *Catchment*, is also the catalog. Each major version of a Pond is a schema holding its tables, with lineage, run history and the version's schema contract recorded alongside. Query it from the CLI, from Python, or from any Postgres client:
 
 ```sql
 SELECT * FROM reports_v1.monthly_summary;

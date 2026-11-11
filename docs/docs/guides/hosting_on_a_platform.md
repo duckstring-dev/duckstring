@@ -1,11 +1,11 @@
 ---
 title: Hosting on a Platform
-description: Run a Catchment on Posit Connect or another Python app host.
+description: Run a Catchment on a platform that hosts Python web apps.
 ---
 
 # Hosting on a Platform
 
-Many teams already have a platform that runs Python web apps, such as Posit Connect, Databricks Apps, or a container service, with authentication handled for them. A Catchment is an ASGI web app, so it can be deployed there like any other. This guide covers the setup, and how to keep the Catchment's state across redeploys, which such platforms don't always preserve.
+Many teams already have a platform that runs Python web apps, such as Databricks Apps or a container service, with authentication handled for them. A Catchment is an ASGI web app, so it can be deployed there like any other. This guide covers the setup, and how to keep the Catchment's state across redeploys, which such platforms don't always preserve.
 
 ## The bundle
 
@@ -34,19 +34,21 @@ Configure the Catchment with environment variables in the platform's settings:
 
 See [Environment Variables](../reference/environment.md) for the rest.
 
-Run exactly one process of the app. The Catchment keeps its scheduler and database in one process, and a second copy would compete with it. On Posit Connect, set "Max processes" to 1 and "Min processes" to 1, so it isn't shut down when idle.
+Run exactly one process of the app. The Catchment keeps its scheduler and database in one process, and a second copy would compete with it. If the platform can stop an app that has had no requests for a while, keep one process running at all times, since the Catchment schedules work between requests.
 
-The web UI works from whatever path the platform serves the app at, such as `/content/{id}/` on Posit Connect.
+The web UI works from whatever path the platform serves the app at, including one below the platform's own address, such as `/content/{id}/`.
 
 ## Authentication
 
-Let the platform control access, and leave `DUCKSTRING_API_KEY` unset. The web UI uses the platform's login session. For the CLI, register the Catchment with whatever header the platform expects. On Posit Connect, that's your Connect API key:
+Let the platform control access, and leave `DUCKSTRING_API_KEY` unset. The web UI uses the platform's login session. For the CLI, register the Catchment with whatever header the platform expects, such as an API key the platform issues:
 
 ```bash
 duckstring catchment connect --name prod \
-  --path https://connect.example.com/content/1a2b3c4d/ \
-  --header "Authorization: Key $CONNECT_API_KEY" --yes
+  --path https://apps.example.com/content/1a2b3c4d/ \
+  --header "Authorization: Bearer $PLATFORM_TOKEN" --yes
 ```
+
+If the platform's tokens expire, use `--header-command` with a command that prints a fresh one; see [`catchment connect`](../reference/cli/catchment.md#connect).
 
 Everyone the platform lets through gets full access to the Catchment, so restrict who can reach the app in the platform's access settings.
 

@@ -216,7 +216,7 @@ def _parse_headers(values: Optional[list[str]]) -> Optional[dict[str, str]]:
 
 _HEADER_HELP = (
     "A header sent with every request to this Catchment, as 'Name: value'. Repeatable. For a hosting "
-    "platform that authenticates requests, e.g. 'Authorization: Key ...' for Posit Connect."
+    "platform that authenticates requests, e.g. 'Authorization: Bearer ...'."
 )
 _HEADER_COMMAND_HELP = (
     "A header whose value a shell command prints, as 'Name: command', run again when the token it gives "

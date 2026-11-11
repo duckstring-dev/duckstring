@@ -48,7 +48,7 @@ The same `databricks.table` calls read each table straight from its storage, wit
 The output leaves without a warehouse, in either or both of two ways:
 
 - A Spout writes [change files](delivering_with_spouts.md#change-files) to a Volume, and a scheduled Databricks job applies them to Unity Catalog tables on job compute, with `duckstring` installed for its `landing` functions. [Applying them in Databricks](delivering_with_spouts.md#applying-them-in-databricks) has the job.
-- A [Postgres Spout](delivering_with_spouts.md#delivering-to-postgres) keeps tables up to date in a Lakebase database, which Power BI and applications read with their Postgres connectors.
+- A [Postgres Spout](delivering_with_spouts.md#delivering-to-postgres) keeps tables up to date in a Lakebase database, which BI tools and applications read with their Postgres connectors.
 
 <!-- TODO(0.8.0 RC smoke test): apply change files with the documented job on job compute (the live test applied them on a warehouse). -->
 
@@ -160,7 +160,7 @@ Ripple code reads Databricks with `duckstring.databricks`: `files` for Parquet o
 
 A [Spout](delivering_with_spouts.md) delivers a Pond's tables outside the Catchment. On Databricks it's also how BI tools reach the data, since they can't connect to a Catchment running as an App. Three kinds suit Databricks:
 
-- A [Postgres Spout](delivering_with_spouts.md#delivering-to-postgres) keeps tables up to date in a Lakebase database, Databricks' managed Postgres, without a warehouse. Power BI and Tableau connect with their Postgres connectors, and applications can look rows up by key. See [Delivering to Lakebase](#delivering-to-lakebase).
+- A [Postgres Spout](delivering_with_spouts.md#delivering-to-postgres) keeps tables up to date in a Lakebase database, Databricks' managed Postgres, without a warehouse. BI tools connect with their Postgres connectors, and applications can look rows up by key. See [Delivering to Lakebase](#delivering-to-lakebase).
 - [Change files](delivering_with_spouts.md#change-files) land each delivery's changes on a Volume, and a Databricks job applies them to Unity Catalog tables on its own schedule.
 - A [`databricks://` Spout](delivering_with_spouts.md#delivering-to-databricks) keeps Unity Catalog tables up to date directly, exactly once, by running statements on a SQL warehouse for every delivery. It's the simplest to set up, but a frequent delivery keeps the warehouse running (see [Warehouse-backed](#warehouse-backed)).
 
