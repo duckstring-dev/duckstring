@@ -134,7 +134,7 @@ class Pond:
     # Fault tolerance budgets (operational config, editable against the live Pond; default 0 = no
     # retries). ``retry_immediately`` is consumed per Pond Run by the Duck (Ripple-level retries);
     # ``retry_on_change`` governs how many failed Pond Runs the Catchment re-attempts on a Source
-    # update. See docs/guide/theory.md "Fault Tolerance".
+    # update. See "Fault tolerance" in CLAUDE.md.
     retry_immediately: int = 0
     retry_on_change: int = 0
     # A side-effecting Pond that must run every time (e.g. a monitoring ping): it is never engine-passed
@@ -279,7 +279,7 @@ class PondState:
     remote_down: bool = False  # Pond Draws only: upstream is failed/killed/blocked/unreachable →
                                # the Draw is blocked (drains landed data, solicits nothing)
     demand: list[datetime] = field(default_factory=list)  # unsatisfied requested freshnesses
-    # Fault tolerance (see docs/guide/theory.md "Fault Tolerance").
+    # Fault tolerance (see "Fault tolerance" in CLAUDE.md).
     is_failed: bool = False  # a Pond Run gave up and has not been superseded by a fresher success
     is_blocked: bool = False  # this Pond is failed, or a required Source is failed/blocked/killed
     missing_asset: str | None = None  # a Ripple read an unpublished Source asset ("source.table") — the

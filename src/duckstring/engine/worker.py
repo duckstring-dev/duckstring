@@ -30,7 +30,7 @@ class RunCompleted:
 class RunFailed:
     """A Pond Run gave up at freshness ``f`` (a Ripple failed and the Run's immediate-retry budget was
     exhausted). ``ripple`` is the Ripple that gave up — the Catchment records it and keys the Pond
-    failure off ``f`` (the Run the Ripple was reaching). See docs/guide/theory.md "Fault Tolerance"."""
+    failure off ``f`` (the Run the Ripple was reaching). See "Fault tolerance" in CLAUDE.md."""
 
     f: datetime
     ripple: str
