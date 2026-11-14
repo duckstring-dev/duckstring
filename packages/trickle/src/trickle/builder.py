@@ -46,6 +46,7 @@ from .io import (
     normalize_pk,
     read_meta,
     read_registry_delta,
+    temp_view,
     unique_name,
 )
 
@@ -152,6 +153,40 @@ def _select_items(projection: str) -> list[str]:
 
 _IDENT = re.compile(r"[A-Za-z_]\w*")
 _COLPART = re.compile(r'"[^"]*"|[A-Za-z_]\w*')
+
+
+def _bare_refs(text: str) -> set[str]:
+    """The bare column references in a SQL expression: identifiers (plain or double-quoted) outside string
+    literals that are neither qualified (``x.col``), a qualifier themselves (``x.``) nor a function name. A
+    keyword comes back too; the caller only asks about column names."""
+    refs: set[str] = set()
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "'":  # a string literal, with doubled '' escapes
+            j = i + 1
+            while j < n:
+                if text[j] == "'":
+                    if j + 1 < n and text[j + 1] == "'":
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            i = j
+            continue
+        m = _COLPART.match(text, i) if (ch == '"' or ch.isalpha() or ch == "_") else None
+        if m:
+            word = m.group(0)
+            k = m.end()
+            rest = text[k:].lstrip()
+            qualified = i > 0 and text[i - 1] == "."
+            if not qualified and not rest.startswith(".") and not rest.startswith("("):
+                refs.add(word[1:-1] if word.startswith('"') else word)
+            i = k
+            continue
+        i += 1
+    return refs
 
 
 def _qualify(text: str, aliases: set[str]) -> str:
@@ -346,8 +381,9 @@ class TrickleBuilder:
         return self
 
     def filter(self, predicate: str) -> "TrickleBuilder":
-        """Keep rows matching a SQL boolean ``predicate``, over the source columns (``s0.col`` or ``alias.col``)
-        and any column added by an earlier :meth:`mutate`.
+        """Keep rows matching a SQL boolean ``predicate``, over the source columns and any column added by an
+        earlier :meth:`mutate`. A source column can be named bare (``col``) when only one source has it, otherwise
+        as ``alias.col`` (``s0.col`` for the first source).
         """
         self._ensure_incremental("filter")
         self._ops.append(("filter", predicate))
@@ -356,10 +392,10 @@ class TrickleBuilder:
     def mutate(self, **columns: str) -> "TrickleBuilder":
         """Add computed columns, keeping the existing ones. Each keyword is a column name and a SQL expression.
 
-        A name matching an existing column replaces it. Columns in one call can't refer to each other; chain
-        another call to build on a new column. A computed column can be the output ``pk`` but not a join key.
-        Expressions must be deterministic (no ``now()`` or ``random()``), since removals cancel against earlier
-        additions by matching whole rows.
+        Source columns are named as for :meth:`filter`. A name matching an existing column replaces it. Columns
+        in one call can't refer to each other; chain another call to build on a new column. A computed column can
+        be the output ``pk`` but not a join key. Expressions must be deterministic (no ``now()`` or ``random()``),
+        since removals cancel against earlier additions by matching whole rows.
         """
         self._ensure_incremental("mutate")
         if not columns:
@@ -517,7 +553,7 @@ class TrickleBuilder:
             # A joined DAG with no .select() resolves via the bare `*` (join keys deduplicated); a genuine name
             # collision raises a precise BuildError from _star_output when _full_join projects.
             base = parent._materialise() if parent._is_sql else parent._full_join()
-            base.create_view(alias, replace=True)
+            temp_view(self.ctx.con, base, alias)
             self.ctx.con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(self.spine_ref)} AS {query}')
             self._materialised = self.ctx.con.sql(f'SELECT * FROM {_q(self.spine_ref)}')
         return self._materialised
@@ -530,7 +566,7 @@ class TrickleBuilder:
         if self._materialised is not None:
             return self._materialised
         parent, query, alias = self._sql_of
-        parent._bound().create_view(alias, replace=True)
+        temp_view(self.ctx.con, parent._bound(), alias)
         return self.ctx.con.sql(query)
 
     def schema(self) -> dict[str, str]:
@@ -545,7 +581,7 @@ class TrickleBuilder:
     # ─── terminals ──────────────────────────────────────────────────────────────
 
     def merge(self, name: str, *, pk=None, ivm: bool = True, key_filter: bool = True,
-              retain_t=None, retain_n=None, cluster_by=None, interleave: bool = True,
+              retain_t=None, retain_n=None, compact_threshold=None, cluster_by=None, interleave: bool = True,
               cluster_bits=None) -> "TrickleBuilder":
         """Compute the result and write its changes to the merge Trickle ``name``.
 
@@ -557,17 +593,20 @@ class TrickleBuilder:
             key_filter: ``False`` stops changed keys being passed down into an operand that is itself a join.
                 No effect with ``ivm=False``.
             retain_t, retain_n: Change-log retention, as for ``pond.merge_table``.
+            compact_threshold: Bytes the change log must reach before it is folded into the table's base, as
+                for ``pond.merge_table``.
             cluster_by, interleave, cluster_bits: How the table's compacted base is ordered, as for
                 ``pond.merge_table``.
 
         Only change ``ivm`` or ``key_filter`` after measuring that the default is slower. Returns a builder
         rooted at the written table, so the chain can continue; see :meth:`was_changed`.
         """
-        from .io import _set_cluster, cluster_spec
+        from .io import _set_cluster, _set_compact_threshold, cluster_spec
 
         cluster = cluster_spec(cluster_by, interleave, cluster_bits)  # validated before anything runs
         out = self._merge(name, pk=pk, ivm=ivm, key_filter=key_filter, retain_t=retain_t, retain_n=retain_n)
         _set_cluster(self.ctx.con, name, cluster)  # every write path above; the default clears it
+        _set_compact_threshold(self.ctx.con, name, compact_threshold)
         return out
 
     def _merge(self, name: str, *, pk, ivm: bool, key_filter: bool, retain_t, retain_n) -> "TrickleBuilder":
@@ -719,10 +758,10 @@ class TrickleBuilder:
         if self._agg is not None:
             # group count: distinct groups in the current composed state — never runs the metric aggregations.
             by = ", ".join(_q(c) for c in self._agg["by"])
-            self._full_join().create_view(view, replace=True)
+            temp_view(self.ctx.con, self._full_join(), view)
             return int(first_row(con.execute(f'SELECT count(*) FROM (SELECT DISTINCT {by} FROM {_q(view)})'))[0])
         rel = self._materialise() if self._is_sql else self._full_join()
-        rel.create_view(view, replace=True)
+        temp_view(self.ctx.con, rel, view)
         return int(first_row(con.execute(f'SELECT count(*) FROM {_q(view)}'))[0])
 
     # ─── the append spine-PK fast path (output keyed by the spine's own identity) ──
@@ -761,12 +800,14 @@ class TrickleBuilder:
         if not _table_exists(con, name):
             return new
         v = unique_name("newsp")
-        new.create_view(v, replace=True)
-        spine_cols = ", ".join(_q(smap[p]) for p in out_pk)
+        temp_view(self.ctx.con, new, v)
         out_cols = ", ".join(_q(p) for p in out_pk)
+        # An anti-join, NULL-safe on the key as everywhere else: the row `NOT IN` it replaced read the output's
+        # whole history every Run (10 ms against 1 ms at 2M rows), and dropped every row while any key was NULL.
+        match = " AND ".join(f"_n.{_q(smap[p])} IS NOT DISTINCT FROM _h.{_q(p)}" for p in out_pk)
         return con.sql(
-            f'SELECT * FROM {_q(v)} WHERE ({spine_cols}) NOT IN '
-            f'(SELECT {out_cols} FROM {_q(name)} WHERE {_q(F_COL)} < {_ts(self.ctx.f)})'
+            f'SELECT _n.* FROM {_q(v)} AS _n ANTI JOIN '
+            f'(SELECT {out_cols} FROM {_q(name)} WHERE {_q(F_COL)} < {_ts(self.ctx.f)}) AS _h ON {match}'
         )
 
     # ─── offering a comprehensive recompute to the host (optional host capability) ─────
@@ -839,7 +880,7 @@ class TrickleBuilder:
         self._insert_only = state.insert_only  # the row pipeline keeps it: it only drops or rewrites rows
         if consolidate and isinstance(self._root, _Join) and not (state.insert_only and consolidate != "always"):
             projected = unique_name("proj")  # a source's own delta is consolidated already
-            delta_rel.create_view(projected, replace=True)
+            temp_view(self.ctx.con, delta_rel, projected)
             delta_rel = self.ctx.con.sql(f"SELECT * FROM {_q(self._consolidate(projected, cols))}")
         return "incremental", delta_rel
 
@@ -985,14 +1026,14 @@ class TrickleBuilder:
             if spine_override is not None:
                 cols = [f"{a}.{c}" for c in spine_override.columns]
                 base = unique_name("ovr")
-                spine_override.create_view(base, replace=True)
+                temp_view(self.ctx.con, spine_override, base)
                 bare = spine_override.columns
             else:
                 rel = self.ctx.read_table(node.ref)
                 bare = list(rel.columns)
                 cols = [f"{a}.{c}" for c in bare]
                 base = unique_name("src")
-                rel.create_view(base, replace=True)
+                temp_view(self.ctx.con, rel, base)
                 if self._view_log is not None:
                     self._view_log.append((base, None, node))
             sel = ", ".join(f'{_q(c)} AS {_q(f"{a}.{c}")}' for c in bare)
@@ -1033,7 +1074,7 @@ class TrickleBuilder:
 
         def current() -> str:
             base = unique_name("src")
-            self.ctx.read_table(node.ref).create_view(base, replace=True)
+            temp_view(self.ctx.con, self.ctx.read_table(node.ref), base)
             return self._view(f"SELECT {sel} FROM {_q(base)}")
 
         delta = node.threaded_delta if node.threaded_delta is not None else self.ctx.read_delta(node.ref)
@@ -1044,7 +1085,7 @@ class TrickleBuilder:
         if self._over_threshold(node.ref, delta, node.p):
             return _NodeState(cols, current, None, True, True)
         dbase = unique_name("dsrc")
-        delta.zset.create_view(dbase, replace=True)
+        temp_view(self.ctx.con, delta.zset, dbase)
         dsel = ", ".join(f'{_q(c)} AS {_q(f"{a}.{c}")}' for c in bare) + f", {_q(D_COL)} AS {_q(D_COL)}"
         return _NodeState(cols, current, self._view(f"SELECT {dsel} FROM {_q(dbase)}"), True, False,
                           insert_only=getattr(delta, "insert_only", False))
@@ -1351,13 +1392,17 @@ class TrickleBuilder:
         terminal_select = False
         for kind, payload in self._ops:
             if kind == "filter":
-                frame = f"(SELECT * FROM {frame} WHERE {_qualify(payload, aliases)})"
+                inner, exposed = self._expose_bare(frame, cols, aliases, [payload], "filter")
+                drop = f" EXCLUDE ({', '.join(_q(b) for b in exposed)})" if exposed else ""
+                frame = f"(SELECT *{drop} FROM {inner} WHERE {_qualify(payload, aliases)})"
                 terminal_select = False
             elif kind == "mutate":
+                inner, exposed = self._expose_bare(frame, cols, aliases, list(payload.values()), "mutate")
                 replaced = [c for c in cols if self._bare_of(c) in payload]
-                excl = f" EXCLUDE ({', '.join(_q(c) for c in replaced)})" if replaced else ""
+                gone = [_q(c) for c in replaced] + [_q(b) for b in exposed]
+                excl = f" EXCLUDE ({', '.join(gone)})" if gone else ""
                 adds = ", ".join(f"{_qualify(e, aliases)} AS {_q(n)}" for n, e in payload.items())
-                frame = f"(SELECT *{excl}, {adds} FROM {frame})"
+                frame = f"(SELECT *{excl}, {adds} FROM {inner})"
                 cols = [c for c in cols if c not in replaced] + list(payload)
                 terminal_select = False
             else:  # select — replaces the column set with the chosen (bare-named) list
@@ -1367,6 +1412,28 @@ class TrickleBuilder:
         if terminal_select:
             return f"SELECT * FROM {frame}"  # the select stage already bare-named the columns
         return f"SELECT {self._star_output(cols)}{dd} FROM {frame}"
+
+    def _expose_bare(self, frame: str, cols: list[str], aliases: set[str], exprs: list[str], op: str):
+        """``frame`` with each source column that only one leaf has also named by its bare name, for a
+        :meth:`filter` or :meth:`mutate` expression to use (``.filter("delay > 5")`` as well as
+        ``.filter("s0.delay > 5")``, as ``on`` and :meth:`aggregate` take bare names). Returns the frame and the
+        names added, which the stage drops again. A bare name more than one leaf has raises :class:`BuildError`."""
+        bare_of = {c: self._bare_of(c) for c in cols if "." in c and c.split(".", 1)[0] in aliases}
+        plain = {c for c in cols if c not in bare_of}  # mutated columns, already bare
+        counts: dict[str, int] = {}
+        for b in bare_of.values():
+            counts[b] = counts.get(b, 0) + 1
+        refs = set().union(*(_bare_refs(e) for e in exprs))
+        ambiguous = sorted(b for b in refs if counts.get(b, 0) > 1 and b not in plain)
+        if ambiguous:
+            names = ", ".join(ambiguous)
+            raise BuildError(f"{op}(): {names} is in more than one source; qualify it with the source's alias "
+                             f"(as in {sorted(aliases)[0]}.{ambiguous[0]})")
+        exposed = [(c, b) for c, b in bare_of.items() if counts[b] == 1 and b not in plain and b in refs]
+        if not exposed:
+            return frame, []
+        adds = ", ".join(f"{_q(c)} AS {_q(b)}" for c, b in exposed)
+        return f"(SELECT *, {adds} FROM {frame})", [b for _, b in exposed]
 
     def _select_stage(self, projection: str, aliases: set[str]):
         """Compile one ``.select`` projection to ``(select_list_sql, output_bare_names)``: ``alias.col`` →
@@ -1484,15 +1551,21 @@ class TrickleBuilder:
         """
         return self._was_changed
 
-    def _source_rows(self, ref: str) -> int:
+    def _source_rows(self, ref: str, estimate: bool = False) -> int:
         """A source's current row count, from metadata where possible: a Trickle in this registry counts
         itself, and an external source uses the host's ``count_table`` if it has one. Only otherwise is the
-        source read and counted, which for a large merge Trickle reconstructs its whole state."""
+        source read and counted, which for a large merge Trickle reconstructs its whole state. ``estimate``
+        accepts the host's approximate count (``estimate_rows``), for the change-fraction threshold."""
         from . import io as trickle
 
         con = self.ctx.con
         if (trickle.read_meta(con).get(ref) or {}).get("mode") in ("merge", "append"):
             return trickle.count_current(con, ref)
+        estimator = getattr(self.ctx, "estimate_rows", None) if estimate else None
+        if estimator is not None:
+            n = estimator(ref)
+            if n is not None:
+                return int(n)
         counter = getattr(self.ctx, "count_table", None)
         if counter is not None:
             return int(counter(ref))
@@ -1503,7 +1576,7 @@ class TrickleBuilder:
         trips and skips the count; ``p <= 0`` trips on any change)."""
         if p >= 1.0 or delta.is_full:
             return False
-        total = self._source_rows(ref) or 0
+        total = self._source_rows(ref, estimate=True) or 0
         if total == 0:
             return False
         return delta.keys_count() > p * total
@@ -1575,7 +1648,7 @@ class ComprehensiveJob:
         from .io import agg_rebuild_select
 
         src = unique_name("agginput")
-        rel.create_view(src, replace=True)
+        temp_view(self.ctx.con, rel, src)
         agg = self.builder._agg
         return self.ctx.con.sql(agg_rebuild_select(src, agg["by"], agg["metrics"], self.ctx.f))
 

@@ -17,6 +17,7 @@ The reserved ``_duckstring_*`` system-column namespace is rejected on plain outp
 
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -279,8 +280,10 @@ def _pick_token(tokens: dict, upper, f_base):
         if older:
             import logging
 
-            logging.getLogger(__name__).warning(
-                "no published base at or below %s; reading the base at %s", upper, older[-1])
+            # A read as of NEVER (a first Run's look at the state before it) has no base by definition: not news.
+            level = logging.DEBUG if upper is not None and upper.year == 1 else logging.WARNING
+            logging.getLogger(__name__).log(
+                level, "no published base at or below %s; reading the base at %s", upper, older[-1])
             return older[-1]
     return None
 
@@ -397,11 +400,12 @@ def gc_tiers(store, retain_from=KEEP_ALL) -> int:
             floor = datetime.fromisoformat(floor_iso) if floor_iso else None
             clog = changelog_name(table)
             cut = f_warm if floor is None else min(f_warm, floor)
-            newest = _run_upper(sidecar, None)
-            for n in table_parts(store, clog):
-                # Never the newest Run's part: at a bootstrap it is the empty marker at the floor, which keeps a
-                # covered consumer's delta empty rather than a coverage miss (a fold never takes it either).
-                if part_f(n) <= cut and part_f(n) != newest:
+            parts = table_parts(store, clog)
+            for n in parts[:-1]:
+                # Never the newest part: after a bootstrap it is the empty marker at the floor, which keeps a
+                # covered consumer's delta empty rather than a coverage miss (a fold never takes it either). It is
+                # the newest change of all, so a window above it has nothing to miss.
+                if part_f(n) <= cut:
                     store.remove(clog, n)
                     removed += 1
         if mode in ("append", "merge"):
@@ -636,15 +640,34 @@ def _run_inputs(con, f, existing: dict) -> dict:
     return inputs
 
 
+class _HoldAll(frozenset):
+    """``held`` for a Run that called ``pond.skip()``: every name is held (see :data:`HOLD_ALL`)."""
+
+    def __contains__(self, name) -> bool:
+        return True
+
+    def __repr__(self) -> str:
+        return "HOLD_ALL"
+
+
+# A skipped Run's ``held``: it publishes no new version of any plain table and commits no Object, since
+# ``pond.skip()`` says nothing it publishes changed. Without it every skipped Run copied every plain table into
+# a new version, and kept them all: retention keeps versions back to the line's ``changed_f``, which a skip holds
+# (the transit showcase, a one-row table with 360 identical versions after three hours). Trickle tables need
+# nothing: an unchanged write adds no part.
+HOLD_ALL: frozenset = _HoldAll()
+
+
 def held_tables(data_dir, held, sidecar=None) -> set[str]:
     """Which of ``held`` can be held at publish: overwrite tables with a published version to keep. A name
-    without one (never published, or an Object) is published as usual."""
+    without one (never published, or an Object) is published as usual. :data:`HOLD_ALL` holds every one."""
     from . import trickle_io as trickle
 
-    if not held:
+    if not held and held is not HOLD_ALL:
         return set()
     entries = trickle.sidecar_tables(trickle.load_sidecar(data_dir) if sidecar is None else sidecar)
-    return {t for t in held if entries.get(t, {}).get("mode", "overwrite") == "overwrite" and t in entries
+    names = entries if held is HOLD_ALL else held
+    return {t for t in names if entries.get(t, {}).get("mode", "overwrite") == "overwrite" and t in entries
             and trickle.table_versions(data_dir, t)}
 
 
@@ -682,8 +705,14 @@ def fingerprint(relation) -> str:
     return f"{tag}:{digest}"
 
 
+# Serialises creating the registry's shared system tables: a Pond's Ripples are threads with a cursor each on
+# one registry, and two creating the same table at once fail with "Catalog write-write conflict on create".
+SYSTEM_DDL_LOCK = threading.Lock()
+
+
 def _ensure_fp_table(con) -> None:
-    con.execute(f'CREATE TABLE IF NOT EXISTS "{FP_TABLE}" (table_name VARCHAR PRIMARY KEY, fp VARCHAR, f TIMESTAMPTZ)')
+    with SYSTEM_DDL_LOCK:
+        con.execute(f'CREATE TABLE IF NOT EXISTS "{FP_TABLE}" (table_name VARCHAR PRIMARY KEY, fp VARCHAR, f TIMESTAMPTZ)')
 
 
 def registry_fingerprints(con) -> dict[str, str]:
@@ -832,6 +861,39 @@ class ParquetDataPlane(DataPlane):
             raise FileNotFoundError(data_dir.uri(f"{table}.parquet"))
         return f"SELECT * FROM read_parquet('{data_dir.uri(table + '.parquet')}')"
 
+    def columns_select(self, data_dir, table: str, *, as_of=None, pin=None) -> str:
+        """A ``SELECT`` with ``table``'s columns as read as of ``as_of``, for binding only (it may return no rows).
+        A parts directory binds its newest part in the read's snapshot alone: a table only gains columns, and
+        binding the whole read opened every part's footer (``union_by_name``), a cost that grew with each Run."""
+        from . import trickle_io as trickle
+
+        data_dir = _as_storage(data_dir)
+        if trickle.table_parts(data_dir, table):
+            names = parts_snapshot(data_dir, table, trickle.load_sidecar(data_dir), as_of)
+            if names:
+                return f"{_read_parquet_files([data_dir.uri(table, names[-1])])} LIMIT 0"
+        return self.read_select(data_dir, table, as_of=as_of, pin=pin)
+
+    def read_window(self, data_dir, table: str, *, after, as_of, sidecar=None) -> str:
+        """A ``SELECT`` over the rows of the parts directory ``table`` (an append history, or a merge main's
+        ``__changelog``) stamped in ``(after, as_of]``, reading only the parts in that window, chosen by name. A
+        delta read used to read every part up to ``as_of`` and filter, so its cost grew with the number of Runs
+        published (the transit showcase). Parts are one Run each (or that Run's chunks), named by its freshness.
+        With no part in the window, an empty relation with the table's columns. Raises ``FileNotFoundError``
+        when the table has no parts at all."""
+        from . import trickle_io as trickle
+
+        data_dir = _as_storage(data_dir)
+        parts = trickle.table_parts(data_dir, table)
+        if not parts:
+            raise FileNotFoundError(data_dir.uri(table))
+        sidecar = trickle.load_sidecar(data_dir) if sidecar is None else sidecar
+        names = [n for n in parts_snapshot(data_dir, table, sidecar, as_of) if trickle.part_f(n) > after]
+        if not names:
+            return f"{_read_parquet_files([data_dir.uri(table, parts[-1])])} LIMIT 0"
+        sel = _read_parquet_files([data_dir.uri(table, n) for n in names], as_of)
+        return f'SELECT * FROM ({sel}) WHERE "{trickle.F_COL}" > {trickle._ts(after)}'
+
     def list_tables(self, data_dir) -> list[str]:
         from . import trickle_io as trickle
 
@@ -876,11 +938,14 @@ def _export_parts(con, data_dir, table: str, f, *, chunk: bool = False) -> None:
     unordered = table.endswith((trickle.CHANGELOG_SUFFIX, trickle.WARM_SUFFIX, trickle.DROPLOG_SUFFIX))
     reg_fs = {r[0] for r in con.execute(f'SELECT DISTINCT "{trickle.F_COL}" FROM "{table}"').fetchall()
               if r[0] is not None}
-    if not reg_fs and f is not None:
-        reg_fs = {f}  # synthesize a 0-row marker part (the `WHERE = f` below selects nothing → empty part)
     existing: dict = {}  # freshness -> its part's file names (more than one when chunked)
     for n in part_store.parquet_names():
         existing.setdefault(trickle.part_f(n), []).append(n)
+    if not reg_fs and not existing and f is not None:
+        # Synthesize a 0-row marker part (the `WHERE = f` below selects nothing → empty part), only while the
+        # directory holds no part: one is enough. Named after each Run, a table that bootstrapped and then never
+        # changed gained one per Run (the transit showcase: 359 per table after three hours, all read downstream).
+        reg_fs = {f}
     # Write the parts not yet on disk; *always* (re)write the current run's f, whose content may have changed
     # this run (a same-f re-merge, or a replay) — older f's are immutable history and are skipped if present.
     to_write = (reg_fs - set(existing)) | ({f} if (f is not None and f in reg_fs) else set())
@@ -1091,7 +1156,13 @@ def _published_bytes(data_dir, table: str) -> int:
         files += [(trickle.changelog_name(table), n) for n in snap["hot_names"]]
     else:
         files = [(table, n) for n in parts_snapshot(data_dir, table, sidecar)]
-    return total + sum(data_dir.size(*f) for f in files)
+    # One listing per directory: a size per file was a request per file on an object store, every publish.
+    sizes: dict[str, dict[str, int]] = {}
+    for d, n in files:
+        if d not in sizes:
+            sizes[d] = data_dir.parquet_sizes(d)
+        total += sizes[d].get(n, 0)
+    return total
 
 
 def _delta_rows_last(con, table: str, mode: str, f) -> int:

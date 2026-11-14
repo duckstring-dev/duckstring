@@ -47,6 +47,22 @@ def _dbt_topology(source_dir: Path, info: dict) -> dict[str, list[str]]:
 
 
 
+def _drop_scratch_views(con) -> None:
+    """Drop the scratch views Duckstring 0.8.0 and earlier stored in a registry, eight or so per incremental
+    write and never removed, which slowed every later write's catalog lookups (``trickle.io.temp_view``). Best
+    effort: a registry that can't be cleaned now runs as before."""
+    from ..core import retry_on_lock
+    from ..trickle_io import drop_scratch_views
+
+    try:
+        dropped = retry_on_lock(lambda: drop_scratch_views(con))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[executor] could not drop leftover scratch views: {exc}", flush=True)
+        return
+    if dropped:
+        print(f"[executor] dropped {dropped} leftover scratch view(s) from the registry", flush=True)
+
+
 def _load_ripple(source_path: str, root: str, ripple_name: str):
     """Load ``ripple_name``'s function (Python or SQL) from the deployed code, with the Pond's Ripples
     around it (:func:`duckstring.core.load_ripples`). Importing here (lazily, per run) keeps executor
@@ -302,6 +318,7 @@ class RippleExecutor(RunInputs):
             if hydrated:
                 print(f"[executor] registry file was {recovery} — hydrated {len(hydrated)} table(s) "
                       f"from the {where}: {', '.join(hydrated)}", flush=True)
+        _drop_scratch_views(self._registry)
         self._cursor_lock = threading.Lock()
         # Which major line of each Source this Pond's reads resolve to (its pond.toml pins).
         sources = read_pond_toml(root / source_path).get("sources", {})

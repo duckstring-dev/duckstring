@@ -332,6 +332,33 @@ def test_puddle_ls_show_query(runner, tmp_path, monkeypatch):
     assert "200" in result.output
 
 
+_TRICKLE_POND = """
+    from duckstring import ripple
+
+    @ripple
+    def load(pond):
+        pond.append_table("obs", pond.con.sql("SELECT range AS id, range * 10 AS delay FROM range(4)"), pk="id")
+        pond.merge_table("stop", pond.con.sql("SELECT range AS stop_id, 'stop ' || range AS name FROM range(3)"),
+                         pk="stop_id")
+"""
+
+
+def test_puddle_viewer_sees_append_and_merge_tables(runner, tmp_path, monkeypatch):
+    """The viewer listed single files and plain-table versions only, so every Trickle output was missing from
+    ``ls`` and ``query`` said it didn't exist (the transit showcase: all but three of its tables)."""
+    monkeypatch.chdir(_make_pond(tmp_path, name="trains", sources={}, pond_py=_TRICKLE_POND))
+    run_pond(load_project(tmp_path))
+    result = runner.invoke(app, ["pond", "puddle", "ls"])
+    assert result.exit_code == 0, result.output
+    assert "trains.obs" in result.output and "trains.stop" in result.output
+    assert "changelog" not in result.output
+    result = runner.invoke(app, ["pond", "puddle", "query",
+                                 'SELECT count(*) AS n, sum(delay) AS d FROM "trains"."obs" '
+                                 'CROSS JOIN (SELECT count(*) AS s FROM stop)'])
+    assert result.exit_code == 0, result.output
+    assert "60" in result.output and "_duckstring" not in result.output
+
+
 def test_puddle_ls_empty(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(_make_pond(tmp_path))
     result = runner.invoke(app, ["pond", "puddle", "ls"])

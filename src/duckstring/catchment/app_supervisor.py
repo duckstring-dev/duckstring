@@ -115,6 +115,9 @@ class AppSupervisor:
         self._crashes: dict[str, int] = {}  # consecutive instances that exited on their own or never got ready
         self._freshness: dict[str, dict] = {}  # last freshness written per App, to write only on change
         self._mu = threading.Lock()
+        # Set when the Catchment begins to shut down, before anything stops an instance: its own stops are then
+        # never mistaken for an App exiting on its own (see shutdown).
+        self.closing = False
         self.start_timeout = float(os.environ.get("DUCKSTRING_APP_START_TIMEOUT", DEFAULT_START_TIMEOUT_S))
         driver.on_app_stop = self.stop_now
         driver.app_leases = self.leases
@@ -347,7 +350,10 @@ class AppSupervisor:
             return False
 
     def _exited(self, view: dict, reason: str, exit_code: int | None) -> None:
-        """An instance ended on its own: fail the App once its restarts are spent."""
+        """An instance ended on its own: fail the App once its restarts are spent. Never while the Catchment is
+        shutting down, when an instance's end is the Catchment's doing."""
+        if self.closing:
+            return
         key = view["key"]
         self._crashes[key] = self._crashes.get(key, 0) + 1
         if self._crashes[key] > view["immediate_retries"]:
@@ -407,6 +413,12 @@ class AppSupervisor:
             log.exception("restarting %s", key)
 
     def shutdown(self) -> None:
+        """Stop every instance: the Catchment is shutting down. :meth:`reconcile` runs in a thread that cancelling
+        its loop doesn't stop, so one pass could be under way while the instances are stopped here; it found the
+        process gone, recorded it as exited and failed the App (the transit showcase, one restart in three). The
+        ``closing`` flag, which the Catchment's shutdown sets before it cancels the loop (and this sets again), makes
+        such a pass leave everything alone."""
+        self.closing = True
         with self._mu:
             instances = list(self._instances.values())
         for inst in instances:
@@ -421,10 +433,14 @@ class AppSupervisor:
             instances = list(self._instances.values())
         now = time.monotonic()
         for inst in instances:
+            if self.closing:
+                return  # shutdown stops them (see shutdown)
             if inst.stopping or not inst.ready:
                 continue  # a start in progress is _wait_ready's to judge
             view = self.driver.app_view(inst.key)
             if inst.proc.poll() is not None:
+                if inst.stopping or self.closing:
+                    continue  # stopped since the check above: the stopper records it
                 self._stop(inst, "exited")
                 if view is not None:
                     self._exited(view, "exited", inst.proc.returncode)

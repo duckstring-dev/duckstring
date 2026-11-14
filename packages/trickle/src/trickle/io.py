@@ -45,16 +45,19 @@ import itertools
 import json
 import math
 import re
+import threading
 from pathlib import Path
 
 _uid = itertools.count()
+SCRATCH_PREFIX = "_duckstring_ds_"  # every temporary object this package makes is named under it
 
 
 def unique_name(prefix: str) -> str:
     """A process-unique scratch identifier in the reserved namespace (so ``registry_tables`` hides it).
     Used where a *materialised* result must outlive any shared-name view it was built from (a returned
-    relation that would otherwise re-bind when the next call re-creates that view)."""
-    return f"_duckstring_ds_{prefix}_{next(_uid)}"
+    relation that would otherwise re-bind when the next call re-creates that view). Name only temporary
+    objects with it (:func:`drop_scratch_views` drops stored views under it)."""
+    return f"{SCRATCH_PREFIX}{prefix}_{next(_uid)}"
 
 
 def first_row(result) -> tuple | None:
@@ -280,6 +283,31 @@ def _ts(dt) -> str:
     return f"TIMESTAMPTZ '{dt.isoformat()}'"
 
 
+def temp_view(con, rel, name: str) -> None:
+    """Name the relation ``rel`` as a temporary view ``name`` on ``con``, visible to that connection only.
+
+    ``rel.create_view()`` makes a view in the database itself, on DuckDB 1.5 and 2.0 alike: every cursor of the
+    database sees it, so writers on several threads (a host's Ripples) replaced each other's views, a fixed name
+    raised "Catalog write-write conflict on create" when two created it at once, and the database kept every
+    scratch view ever made (eight per incremental write; Run time grew with them). A temporary view goes with its
+    connection, and can also name a relation that reads a Python object (Arrow, a DataFrame), which a view stored
+    in a database file can't."""
+    con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(name)} AS {rel.sql_query()}")
+
+
+def drop_scratch_views(con) -> int:
+    """Drop the scratch views earlier versions left in the database (see :func:`temp_view`): every view in the
+    database (not a temporary one) named in the scratch namespace. Nothing of this package's is stored under
+    such a name, so this never touches a table's state. Returns how many were dropped."""
+    names = [r[0] for r in con.execute(
+        "SELECT view_name FROM duckdb_views() WHERE NOT temporary AND NOT internal "
+        "AND database_name = current_database() AND starts_with(view_name, ?)", [SCRATCH_PREFIX]
+    ).fetchall()]
+    for name in names:
+        con.execute(f"DROP VIEW IF EXISTS {_q(name)}")
+    return len(names)
+
+
 def _table_exists(con, name: str) -> bool:
     """Whether a **relation** named ``name`` exists in the registry — a base table *or a view*. A merge main's
     base may be a VIEW over the published S3 chunks (the host materialises it lazily, not on every spawn — see
@@ -308,7 +336,7 @@ CURRENT_VIEW_COMMENT = "duckstring:merge-current-state"
 
 
 def _is_current_view(con, name: str) -> bool:
-    row = first_row(con.execute("SELECT comment FROM duckdb_views() WHERE view_name = ?", [name]))
+    row = first_row(con.execute("SELECT comment FROM duckdb_views() WHERE view_name = ? AND NOT temporary", [name]))
     return row is not None and row[0] == CURRENT_VIEW_COMMENT
 
 
@@ -318,9 +346,10 @@ def _migrate_base(con, name: str) -> None:
     cold = cold_base_name(name)
     if _table_exists(con, cold) or _is_current_view(con, name):
         return
-    if first_row(con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ?", [name])):
+    # Stored relations only: a temporary view of that name is a host's (a Source registered under its name).
+    if first_row(con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ? AND NOT temporary", [name])):
         con.execute(f"ALTER VIEW {_q(name)} RENAME TO {_q(cold)}")
-    elif first_row(con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ?", [name])):
+    elif first_row(con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND NOT temporary", [name])):
         con.execute(f"ALTER TABLE {_q(name)} RENAME TO {_q(cold)}")
 
 
@@ -409,7 +438,19 @@ def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
 # ─── meta (mode + PK + floor) ──────────────────────────────────────────────────
 
 
+# Serialises the catalog changes that more than one thread may make to the same database: a host can run
+# several writers as threads with a cursor each on one database (Duckstring's Ripples do), and two of them
+# creating the meta table at once fail with "Catalog write-write conflict on create" at commit. Both run in
+# autocommit, so the second waits here and then finds the table.
+_DDL_LOCK = threading.Lock()
+
+
 def _ensure_meta(con) -> None:
+    with _DDL_LOCK:
+        _ensure_meta_locked(con)
+
+
+def _ensure_meta_locked(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
         f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR, "
@@ -788,8 +829,8 @@ def append_table(
     relation = concrete(relation)  # DuckDB 2.0: never store the NULL type
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
-    src = "_duckstring_ds_append_src"
-    relation.create_view(src, replace=True)
+    src = unique_name("append_src")
+    temp_view(con, relation, src)
     cols = relation.columns
     sel_cols = ", ".join(_q(c) for c in cols)
     first = not _table_exists(con, name)  # the floor anchors at the first append's freshness
@@ -862,7 +903,7 @@ def append_zset(
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     src = unique_name("appz")
-    zset.create_view(src, replace=True)
+    temp_view(con, zset, src)
     user = [c for c in zset.columns if c != D_COL]
     if D_COL not in zset.columns:
         raise DeltaError(f"append_zset('{name}', ...): the relation has no {D_COL} weight column")
@@ -930,7 +971,7 @@ def append_zset(
             f'SELECT {sel}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(consol)} LIMIT 0'
         )
     new_view = unique_name("appn")
-    new_rows.create_view(new_view, replace=True)
+    temp_view(con, new_rows, new_view)
     n_new = first_row(con.execute(f'SELECT count(*) FROM {_q(new_view)}'))[0]
     con.execute(f'INSERT INTO {_q(name)} ({sel}, {_q(F_COL)}) SELECT {sel}, {_ts(f)} FROM {_q(new_view)}')
 
@@ -971,7 +1012,7 @@ def _log_drops(con, name, consol, user, pk, f, first_output) -> None:
     else:
         con.execute(f'DELETE FROM {_q(drops)} WHERE {_q(F_COL)} = {_ts(f)}')  # replay-idempotent
     dview = unique_name("appd")
-    dropped.create_view(dview, replace=True)
+    temp_view(con, dropped, dview)
     con.execute(
         f'INSERT INTO {_q(drops)} ({sel}, {_q(D_COL)}, {_q(F_COL)}) '
         f'SELECT {sel}, {_q(D_COL)}, {_ts(f)} FROM {_q(dview)}'
@@ -1157,7 +1198,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
         raise DeltaError(f"apply_zset('{name}', ...) needs a primary key — pass pk=...")
     cluster = cluster_spec(cluster_by, interleave, cluster_bits)  # validated before anything is written
     src = unique_name("zset")
-    zset.create_view(src, replace=True)
+    temp_view(con, zset, src)
     cols = list(zset.columns)
     if D_COL not in cols:
         raise DeltaError(f"apply_zset('{name}', ...): the relation has no {D_COL} weight column")
@@ -1257,7 +1298,7 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
         raise DeltaError(f"merge_table('{name}', ...): primary key column(s) {missing} not in the relation")
     sel = ", ".join(_q(c) for c in cols)
     state = unique_name("state")
-    relation.create_view(state, replace=True)
+    temp_view(con, relation, state)
     if f is not None and _bootstrapping(con, name, f):
         # The state is the whole of the bootstrap: it goes straight to the base, without the consolidation a
         # Z-set needs (every row is a +1, and the primary key is unique by this function's contract). For a
@@ -1281,7 +1322,7 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
     prior = reconstruct_current(con, name, before=f)
     if prior is not None:
         pv = unique_name("prior")
-        _strip_system(prior).create_view(pv, replace=True)  # user columns only (drop _duckstring_f)
+        temp_view(con, _strip_system(prior), pv)  # user columns only (drop _duckstring_f)
         zset = con.sql(
             f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)} '
             f'UNION ALL BY NAME SELECT {sel}, -1 AS {_q(D_COL)} FROM {_q(pv)}'
@@ -1404,7 +1445,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     if kind in ("comprehensive", "state"):
         if kind == "state":
             src = unique_name("aggstate")
-            rel.create_view(src, replace=True)
+            temp_view(con, rel, src)
             con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
             con.execute(f"CREATE TABLE {_q(state)} AS SELECT * FROM {_q(src)}")
         else:
@@ -1419,7 +1460,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     # _agg_part_* / _m2_merge_expr helpers). For extremes: the min/max of the *inserted* (+1) rows, plus a
     # per-group flag for whether the group has any retraction (which forces a rescan, below).
     delta = unique_name("aggd")
-    rel.create_view(delta, replace=True)
+    temp_view(con, rel, delta)
     # First pass: per-group distributive sums (group count, per-column Σx & non-NULL counts, the insert/delete
     # partition Σx & counts) and the extreme inserts. The partition means it carries seed the second pass.
     pexprs = [f"CAST(SUM({_q(D_COL)}) AS BIGINT) AS _a_cnt"]
@@ -1502,7 +1543,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
                         f"{', '.join(_q(n) for n in names)}, TRUE AS _a_rs FROM {_q(state)} WHERE false")
         else:
             cur = unique_name("aggcur")
-            (current() if callable(current) else current).create_view(cur, replace=True)
+            temp_view(con, (current() if callable(current) else current), cur)
             # The NULL-safe match is a hash join DuckDB can't push into the current state's scan, so a key
             # column with no NULL among the lost groups is matched with `=` first, which it can (the rescan read
             # the whole Source otherwise: 269M rows at TPC-DS SF100, for a few thousand groups).
@@ -1603,7 +1644,7 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
     state = f"{ACC_STATE_PREFIX}{name}"
 
     src = unique_name("accsrc")
-    rel.create_view(src, replace=True)
+    temp_view(con, rel, src)
     type_of = {c: str(t) for c, t in zip(rel.columns, rel.types, strict=True)}
     usercols = [c for c in rel.columns if c != D_COL]
     if along not in usercols:
@@ -1761,7 +1802,7 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     metric_list = list(metrics.items())
     state = f"{ACC_STATE_PREFIX}{name}"
     cur = unique_name("amcur")
-    current.create_view(cur, replace=True)
+    temp_view(con, current, cur)
     type_of = {c: str(t) for c, t in zip(current.columns, current.types, strict=True)}
     usercols = list(current.columns)
     if along not in usercols:
@@ -1781,7 +1822,7 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
         return
 
     delta = unique_name("amd")
-    rel.create_view(delta, replace=True)
+    temp_view(con, rel, delta)
     carried, done = _load_acc_state(con, state, by, metric_list, f)
     tail_keys, past_keys = _classify_affected(con, by, along, delta, carried, done)
     if not tail_keys and not past_keys:
@@ -1836,7 +1877,7 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     metric_list = list(metrics.items())
     state = f"{ACC_STATE_PREFIX}{name}"
     cur = unique_name("orcur")
-    current.create_view(cur, replace=True)
+    temp_view(con, current, cur)
     type_of = {c: str(t) for c, t in zip(current.columns, current.types, strict=True)}
     usercols = list(current.columns)
     if along not in usercols:
@@ -1867,7 +1908,7 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
         return
 
     delta = unique_name("ord")
-    rel.create_view(delta, replace=True)
+    temp_view(con, rel, delta)
     carried, done = _load_acc_state(con, state, by, metric_list, f)
     tail_keys, past_keys = _classify_affected(con, by, along, delta, carried, done)
     if not tail_keys and not past_keys:
@@ -2619,7 +2660,7 @@ def _agg_rebuild(con, state, rel, by, metrics, f) -> None:
     """(Re)build the accumulator state wholesale from a clean full output ``rel``: the comprehensive path
     (bootstrap / coverage-miss). Idempotent: same input → same state."""
     src = unique_name("aggfull")
-    rel.create_view(src, replace=True)
+    temp_view(con, rel, src)
     con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
     con.execute(f"CREATE TABLE {_q(state)} AS {agg_rebuild_select(src, by, metrics, f)}")
 
@@ -2851,7 +2892,24 @@ def _covered(previous_f, NEVER, floor, oldest) -> bool:
     return bound is None or previous_f >= bound
 
 
+def _window_sql(dp, data_dir, table, previous_f, f, floor, NEVER) -> str | None:
+    """The rows of the parts directory ``table`` in ``(previous_f, f]``, reading only the parts in that window
+    (the host data plane's optional ``read_window``), when the floor shows the window is covered. ``None`` when
+    the host has no such read or coverage needs the history itself."""
+    reader = getattr(dp, "read_window", None)
+    if reader is None or floor is None or not _covered(previous_f, NEVER, floor, None):
+        return None
+    try:
+        return reader(data_dir, table, after=previous_f, as_of=f)
+    except FileNotFoundError:
+        return None
+
+
 def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise=False) -> Delta:
+    window = _window_sql(dp, data_dir, table, previous_f, f, floor, NEVER)
+    if window is not None:
+        zset = _as_zset(_strip_system(con.sql(window)), 1)
+        return Delta(con, pk, _materialise(con, zset) if materialise else zset, is_full=False, insert_only=True)
     # As-of pin to `f`: read the one Source snapshot at this run's freshness (the data plane pins it; the
     # coverage probe shares the same SELECT so a mid-run republish can't make them see different snapshots).
     return _append_delta_from_sql(con, dp.read_select(data_dir, table, as_of=f), previous_f, f, pk, NEVER, floor,
@@ -2862,7 +2920,7 @@ def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor, mater
     """The append-delta core over a single history SELECT — shared by the published read and the in-run
     registry read. Append rows are all present (``+1``); never retracted."""
     rel = con.sql(hist_sql)  # includes _duckstring_f
-    oldest = first_row(con.sql(f"SELECT min({_q(F_COL)}) FROM ({hist_sql})"))[0]
+    oldest = None if floor is not None else first_row(con.sql(f"SELECT min({_q(F_COL)}) FROM ({hist_sql})"))[0]
     full = not _covered(previous_f, NEVER, floor, oldest)
     upper = f"{_q(F_COL)} <= {_ts(f)}"
     cond = upper if full else f"{_q(F_COL)} > {_ts(previous_f)} AND {upper}"
@@ -2873,6 +2931,9 @@ def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor, mater
 
 def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise=False) -> Delta:
     clog = changelog_name(table)
+    window = _window_sql(dp, data_dir, clog, previous_f, f, floor, NEVER)
+    if window is not None:
+        return _merge_window_delta(con, window, pk, materialise)
     try:
         clog_sql = dp.read_select(data_dir, clog, as_of=f)  # as-of pin to this run's freshness
     except FileNotFoundError:
@@ -2887,7 +2948,7 @@ def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, flo
     the in-run registry read (:func:`read_registry_delta`). ``previous_f`` covered by the floor → a windowed
     Z-set; otherwise a full read at ``+1``."""
     oldest = None
-    if clog_sql is not None:
+    if clog_sql is not None and floor is None:
         oldest = first_row(con.sql(f"SELECT min({_q(F_COL)}) FROM ({clog_sql})"))[0]
     full = clog_sql is None or not _covered(previous_f, NEVER, floor, oldest)
     if full:
@@ -2896,10 +2957,15 @@ def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, flo
     # Window the changelog and consolidate by full row (the net Z-set over the window — multiple updates
     # and delete-then-re-add collapse). Inlined as a self-contained subquery (over immutable read_parquet),
     # NOT a named view: several read_delta calls in one run would share a view name and re-bind.
-    user = [c for c in con.sql(clog_sql).columns if c not in (F_COL, D_COL)]
-    sel = ", ".join(_q(c) for c in user)
     window = (f"SELECT * FROM ({clog_sql}) "
               f"WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)}")
+    return _merge_window_delta(con, window, pk, materialise)
+
+
+def _merge_window_delta(con, window: str, pk, materialise=False) -> Delta:
+    """A merge changelog's rows in a delta window (``window``, a SELECT), consolidated by full row."""
+    user = [c for c in con.sql(window).columns if c not in (F_COL, D_COL)]
+    sel = ", ".join(_q(c) for c in user)
     # A window with no retraction inserted new keys only: a consolidated merge log pairs every update's +1
     # with a -1, so no key appears twice and nothing can cancel. Read it as it is (an insert-only change).
     lowest = first_row(con.sql(f"SELECT min({_q(D_COL)}) FROM ({window})"))[0]
@@ -2921,7 +2987,7 @@ def _materialise(con, rel):
     reading inside a transaction that writes another attached database (the DuckLake Spout) can't create
     one."""
     name = unique_name("delta")
-    rel.create_view(name + "_q", replace=True)
+    temp_view(con, rel, name + "_q")
     con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(name)} AS SELECT * FROM {_q(name + '_q')}")
     con.execute(f"DROP VIEW {_q(name + '_q')}")
     return con.table(name)

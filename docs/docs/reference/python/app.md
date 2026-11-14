@@ -42,13 +42,17 @@ The handle is a [Pond Handle](pond.md) with the differences below. See [Building
 pond.freshness() -> dict
 ```
 
-Returns the App's freshness and each Source's, as the Catchment last reported them, for showing how current the data is:
+Returns the App's freshness and each Source's, as the Catchment last reported them, for showing how current the data is, and when each Source's data last changed:
 
 ```python
-{"freshness": datetime(2026, 11, 9, 20, 51, tzinfo=timezone.utc), "sources": {"reports": datetime(...)}}
+{"freshness": datetime(2026, 11, 9, 20, 51, tzinfo=timezone.utc),
+ "sources": {"reports": datetime(...)},
+ "changed": {"reports": datetime(...)}}
 ```
 
-The values are timezone-aware UTC. Under `pond run` it returns `{"freshness": None, "sources": {}}`.
+A Source's freshness moves on every Run, including Runs that found nothing to change. Its `changed` time moves only when its data did, so an App that caches what it builds from a Source can rebuild when `changed` moves.
+
+The values are timezone-aware UTC. Under `pond run` it returns `{"freshness": None, "sources": {}, "changed": {}}`.
 
 ## `hold`
 

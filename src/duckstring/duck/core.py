@@ -93,6 +93,7 @@ class DuckCore:
         # don't cross-contaminate. ``_skipped`` holds Runs a Ripple marked no-change via ``pond.skip()``;
         # ``_sources_changed`` is the engine's verdict (exposed to Ripples as ``pond.sources_changed()``).
         self._skipped: set[datetime] = set()
+        self._holding_all: set[datetime] = set()  # skipped Runs being published: they hold every table
         self._sources_changed: dict[datetime, bool] = {}
         # Per-object change (plans/change-detection.md): what each Ripple of each Run wrote, checked or
         # held. Consulted by Ripple code (``pond.changed``) and by the publish (held tables keep their
@@ -105,7 +106,12 @@ class DuckCore:
         return self.changes.begin(f, ripple)
 
     def held_for(self, f: datetime) -> frozenset[str]:
-        """The tables and Objects the Run at ``f`` holds unchanged (checked, not written)."""
+        """The tables and Objects the Run at ``f`` holds unchanged (checked, not written): all of them for a Run
+        a Ripple marked with ``pond.skip()`` (:data:`~duckstring.dataplane.HOLD_ALL`)."""
+        if f in self._holding_all:
+            from ..dataplane import HOLD_ALL
+
+            return HOLD_ALL
         return self.changes.held(f)
 
     def mark_skipped(self, f: datetime) -> None:
@@ -190,10 +196,15 @@ class DuckCore:
             ripple_event.changed = changed
             schema = None
             if export is not None:
+                if not changed:
+                    self._holding_all.add(rc.f)  # a skipped Run publishes no new copy of anything (held_for)
                 try:
                     # Publish stamped with the run freshness. The contract is vetted here, before the
                     # live tables are overwritten — a violation aborts the publish (last-good intact).
-                    schema = export(rc.f, self.contract)
+                    try:
+                        schema = export(rc.f, self.contract)
+                    finally:
+                        self._holding_all.discard(rc.f)
                 except ContractViolation as exc:
                     self._previous_f.pop(rc.f, None)
                     self._rebuilds.discard(rc.f)

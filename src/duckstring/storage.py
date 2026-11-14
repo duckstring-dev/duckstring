@@ -142,6 +142,11 @@ class Storage:
         """The ``*.parquet`` file names directly under the addressed dir, sorted."""
         raise NotImplementedError
 
+    def parquet_sizes(self, *parts: str) -> dict[str, int]:
+        """``{name: bytes}`` for the ``*.parquet`` files directly under the addressed dir, in one listing where
+        the backend allows (a size per file is a request per file on an object store)."""
+        return {n: self.size(*parts, n) for n in self.parquet_names(*parts)}
+
     def names(self, *parts: str) -> list[str]:
         """*All* file names (not just ``*.parquet``) directly under the addressed dir, sorted."""
         raise NotImplementedError
@@ -276,7 +281,19 @@ class LocalStorage(Storage):
 
     def parquet_names(self, *parts: str) -> list[str]:
         d = self._abs(*parts)
-        return sorted(p.name for p in d.glob("*.parquet")) if d.is_dir() else []
+        try:
+            with os.scandir(d) as it:
+                return sorted(e.name for e in it if e.name.endswith(".parquet") and e.is_file())
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+
+    def parquet_sizes(self, *parts: str) -> dict[str, int]:
+        d = self._abs(*parts)
+        try:
+            with os.scandir(d) as it:
+                return {e.name: e.stat().st_size for e in it if e.name.endswith(".parquet") and e.is_file()}
+        except (FileNotFoundError, NotADirectoryError):
+            return {}
 
     def names(self, *parts: str) -> list[str]:
         d = self._abs(*parts)
@@ -468,6 +485,13 @@ class ObjectStorage(Storage):
             for e in self._ls(self._key(*parts))
             if e.get("type") == "file" and e["name"].endswith(".parquet")
         )
+
+    def parquet_sizes(self, *parts: str) -> dict[str, int]:
+        return {
+            e["name"].rstrip("/").rsplit("/", 1)[-1]: int(e.get("size") or 0)
+            for e in self._ls(self._key(*parts))
+            if e.get("type") == "file" and e["name"].endswith(".parquet")
+        }
 
     def names(self, *parts: str) -> list[str]:
         return sorted(

@@ -246,6 +246,17 @@ def engine_secrets(name: str | None) -> tuple[str, ...]:
     return tuple(secrets_for(name) if secrets_for else getattr(cls, "SECRETS", ()))
 
 
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, msg: str, *args) -> None:
+    """Log a warning the first time ``key`` comes up in this process: an engine that can't be checked fails the
+    same way on every Run."""
+    if key not in _warned:
+        _warned.add(key)
+        log.warning(msg, *args)
+
+
 def default_engine(environ=None, secret=None) -> str | None:
     """The engine used when none is named: the first in :data:`ENGINE_ORDER` that is configured, judged on
     ``environ`` plus its declared secrets (from ``secret(name)``, else ``environ``). ``None`` = off."""
@@ -263,7 +274,7 @@ def default_engine(environ=None, secret=None) -> str | None:
             if cls(env, name=name).enabled():
                 return name
         except Exception as exc:  # noqa: BLE001 (a broken engine must not take the others down)
-            log.warning("flock: engine %r could not be checked (%s)", name, exc)
+            _warn_once(f"check:{name}", "flock: engine %r could not be checked (%s)", name, exc)
     return None
 
 
@@ -399,11 +410,11 @@ def comprehensive(job, *, pond_mode: str | None, env=None):
     Flock. Returns the job's result relation, or ``None`` (run local, the common case). ``pond_mode`` is
     the Pond's resolved posture. ``env`` is the run's Flock settings (the job's, over the Duck's
     environment); ``None`` reads the process environment."""
+    mode = resolve_mode(pond_mode, env)
+    if mode == "off":  # before looking for an engine, which imports and checks each one
+        return None
     engine = get_engine(env)
     if engine is None:
-        return None
-    mode = resolve_mode(pond_mode, env)
-    if mode == "off":
         return None
     # The engine decides what it can be trusted with: both what it can express and which expressions it
     # is known to evaluate the way DuckDB does.

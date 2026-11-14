@@ -166,6 +166,9 @@ async def _lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Before the loops stop: the App supervisor's pass may still be running in its thread after its task is
+        # cancelled, and must not take the instances shutdown stops for Apps exiting on their own.
+        app.state.app_supervisor.closing = True
         for task in tasks:
             task.cancel()
             try:

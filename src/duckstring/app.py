@@ -151,22 +151,26 @@ def _pond_class():
             return source, name
 
         def freshness(self) -> dict:
-            """The App's freshness and each Source's, as the Catchment last reported them:
-            ``{"freshness": datetime | None, "sources": {name: datetime}}``. Empty outside a Catchment."""
+            """The App's freshness and each Source's, as the Catchment last reported them, and when each Source's
+            data last changed: ``{"freshness": datetime | None, "sources": {name: datetime}, "changed": {name:
+            datetime}}``. A Source's freshness moves on every Run, including Runs that changed nothing; ``changed``
+            moves only when its data did. Empty outside a Catchment."""
             from datetime import datetime
 
+            empty = {"freshness": None, "sources": {}, "changed": {}}
             if self._runtime is None:
-                return {"freshness": None, "sources": {}}
+                return empty
             try:
                 raw = json.loads((self._runtime / "freshness.json").read_text())
             except (OSError, ValueError):
-                return {"freshness": None, "sources": {}}
+                return empty
 
             def when(iso):
                 return datetime.fromisoformat(iso) if iso else None
 
             return {"freshness": when(raw.get("freshness")),
-                    "sources": {k: when(v) for k, v in raw.get("sources", {}).items()}}
+                    "sources": {k: when(v) for k, v in raw.get("sources", {}).items()},
+                    "changed": {k: when(v) for k, v in raw.get("changed", {}).items()}}
 
         @contextmanager
         def hold(self):

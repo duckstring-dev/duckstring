@@ -20,25 +20,42 @@ def _load_project():
 
 
 def _inventory(project) -> list[dict]:
-    """Every local parquet: hydrated snapshots (puddles/ponds/*/data/) then run output (puddles/out/),
-    so an output view overrides a same-named self-puddle snapshot when both are registered."""
-    items: list[dict] = []
+    """Every local table: hydrated snapshots (puddles/ponds/*/data/) then run output (puddles/out/), so an output
+    view overrides a same-named self-puddle snapshot when both are registered. Each is listed and read through
+    the data plane, as a Sink reads it, so append and merge Trickles appear beside plain tables (the viewer
+    once globbed single files and plain-table versions only)."""
+    from ..trickle_io import CHANGELOG_SUFFIX, DROPLOG_SUFFIX, WARM_SUFFIX
+
+    dirs: list[tuple[str, Path, str]] = []
     ponds_dir = project.puddles_dir / "ponds"
     if ponds_dir.exists():
-        for pond_dir in sorted(ponds_dir.iterdir()):
-            for pq in sorted((pond_dir / "data").glob("*.parquet")):
-                items.append({"pond": pond_dir.name, "table": pq.stem, "path": pq, "kind": "puddle"})
-    for pq in sorted(project.out_dir.glob("*.parquet")):
-        items.append({"pond": project.name, "table": pq.stem, "path": pq, "kind": "out"})
-    from ..trickle.io import VERSION_SUFFIX
+        dirs += [(d.name, d / "data", "puddle") for d in sorted(ponds_dir.iterdir()) if (d / "data").is_dir()]
+    if project.out_dir.is_dir():
+        dirs.append((project.name, project.out_dir, "out"))
+    from ..dataplane import ParquetDataPlane
 
-    # A run publishes each plain table as versions under {table}__v/; the newest is the run's output.
-    for vdir in sorted(project.out_dir.glob(f"*{VERSION_SUFFIX}")):
-        versions = sorted(vdir.glob("*.parquet")) if vdir.is_dir() else []
-        if versions:
-            items.append({"pond": project.name, "table": vdir.name[: -len(VERSION_SUFFIX)],
-                          "path": versions[-1], "kind": "out"})
+    dp = ParquetDataPlane()
+    items: list[dict] = []
+    for pond, data_dir, kind in dirs:
+        for table in dp.list_tables(data_dir):
+            if table.endswith((CHANGELOG_SUFFIX, WARM_SUFFIX, DROPLOG_SUFFIX)):
+                continue  # a Trickle's companions: read through the table they belong to
+            try:
+                select = dp.read_select(data_dir, table)
+            except FileNotFoundError:
+                continue
+            items.append({"pond": pond, "table": table, "kind": kind, "select": select,
+                          "files": _files(data_dir, table)})
     return items
+
+
+def _files(data_dir: Path, table: str) -> list[Path]:
+    """The Parquet files holding ``table`` in ``data_dir``, in any of its published forms (for size and age)."""
+    out = [data_dir / f"{table}.parquet"] if (data_dir / f"{table}.parquet").is_file() else []
+    for d in data_dir.iterdir():
+        if d.is_dir() and (d.name == table or (d.name.startswith(f"{table}__") and "__" not in d.name[len(table) + 2:])):
+            out += sorted(d.glob("*.parquet"))
+    return out
 
 
 def _open(project, items: list[dict]):
@@ -48,11 +65,19 @@ def _open(project, items: list[dict]):
 
     con = duckdb.connect()
     for item in items:
-        select = f"SELECT * FROM read_parquet('{str(item['path']).replace(chr(39), chr(39) * 2)}')"
+        select = _user_columns(con, item["select"])
         con.execute(f'CREATE SCHEMA IF NOT EXISTS "{item["pond"]}"')
         con.execute(f'CREATE OR REPLACE VIEW "{item["pond"]}"."{item["table"]}" AS {select}')
         con.execute(f'CREATE OR REPLACE VIEW "{item["table"]}" AS {select}')
     return con
+
+
+def _user_columns(con, select: str) -> str:
+    """``select`` without the ``_duckstring_*`` system columns a Trickle's files carry."""
+    from ..trickle_io import _q
+
+    cols = [c for c in con.sql(select).columns if not c.startswith("_duckstring_")]
+    return f"SELECT {', '.join(_q(c) for c in cols)} FROM ({select})"
 
 
 def _print_rows(console, cursor) -> None:
@@ -102,11 +127,12 @@ def ls() -> None:
     for col in ("table", "kind", "rows", "size", "age"):
         table.add_column(col)
     for item in items:
-        path_sql = str(item["path"]).replace("'", "''")
-        (rows,) = first_row(con.execute(f"SELECT count(*) FROM read_parquet('{path_sql}')"))
-        size_kb = item["path"].stat().st_size / 1024
+        (rows,) = first_row(con.execute(f"SELECT count(*) FROM ({item['select']})"))
+        size_kb = sum(p.stat().st_size for p in item["files"]) / 1024
         size = f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb:.1f} KB"
-        table.add_row(f"{item['pond']}.{item['table']}", item["kind"], str(rows), size, _age(item["path"]))
+        newest = max(item["files"], key=lambda p: p.stat().st_mtime) if item["files"] else None
+        age = _age(newest) if newest is not None else ""
+        table.add_row(f"{item['pond']}.{item['table']}", item["kind"], str(rows), size, age)
     console.print(table)
 
 

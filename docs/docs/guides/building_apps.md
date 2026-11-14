@@ -247,6 +247,8 @@ Install with `uv add flask gunicorn duckstring`.
 
 The handle reads only the App's Sources, so always name the Source: `pond.read_table("reports.monthly_summary")`. Each read returns the newest data the Source has published at that moment, and the version a request may read stays available until its response has been sent, even if the Source publishes again meanwhile. Reads outside a request, such as a cache filled at startup or a background thread, should go inside `with pond.hold():`, which keeps what each Source has published now until the block ends.
 
+To cache what you build from a Source, rebuild it when the Source's entry in `pond.freshness()["changed"]` moves. Its freshness, in `["sources"]`, moves on every Run, including Runs that changed nothing.
+
 Web servers handle requests on several threads, so each thread gets its own DuckDB cursor as `pond.con`. `read_table` registers the table as a view on the calling thread's cursor, so query the view on the same thread, as the recipes do.
 
 An App can't publish tables or Objects. If it collects data that a pipeline should use, serve that over HTTP from the App and read it from an Inlet. [App Handle](../reference/python/app.md) lists what the handle offers.

@@ -314,9 +314,14 @@ def pond_entrypoints(info: dict) -> tuple[str, str]:
 def import_pond_module(source_dir: Path, entry: str):
     """Import the module at ``source_dir/entry`` for its decorator side-effects (``@ripple`` /
     ``@puddle``) and return it. The import is isolated: ``sys.path`` gains only the entry's parent
-    for the duration, and any modules the import added are evicted afterwards so the next Pond's
-    code never sees stale state. The Ripple and Puddle registries are cleared first, so collecting
-    afterwards returns only what this import registered."""
+    for the duration, and the modules it loaded from the Pond's own directory are evicted afterwards so
+    the next import reads the Pond's code afresh. The Ripple and Puddle registries are cleared first, so
+    collecting afterwards returns only what this import registered.
+
+    Only the Pond's own modules are evicted. Evicting everything the import added also dropped the
+    libraries it imported first: numpy can't be loaded twice in one process ("cannot load module more
+    than once per process"), and a module another Ripple thread was importing at that moment vanished
+    under it (``KeyError: 'duckstring.trickle_builder'``)."""
     import importlib
     import sys
 
@@ -334,9 +339,26 @@ def import_pond_module(source_dir: Path, entry: str):
     finally:
         if parent in sys.path:
             sys.path.remove(parent)
+        own = Path(source_dir).resolve()
         for key in list(sys.modules):
-            if key not in before:
+            if key not in before and (key == stem or _module_under(sys.modules.get(key), own)):
                 sys.modules.pop(key, None)
+
+
+def _module_under(module, directory: Path) -> bool:
+    """Whether ``module`` is the Pond's own code inside ``directory`` (a file, or a package's directory). An
+    installed library is never the Pond's, even in an environment inside its directory (a local ``.venv``)."""
+    paths = [getattr(module, "__file__", None), *(getattr(module, "__path__", None) or [])]
+    for p in paths:
+        if not p:
+            continue
+        try:
+            rel = Path(p).resolve().relative_to(directory)
+        except (ValueError, OSError):
+            continue
+        if not {"site-packages", "dist-packages"} & set(rel.parts):
+            return True
+    return False
 
 
 def parse_ref(ref: str) -> tuple[str | None, str]:
@@ -1004,13 +1026,33 @@ class Pond:
         text = json.dumps(state, sort_keys=True)
 
         def write():
-            self.con.execute(f"CREATE TABLE IF NOT EXISTS {INPUTS_TABLE} (ref VARCHAR, f TIMESTAMPTZ, state VARCHAR)")
+            from .dataplane import SYSTEM_DDL_LOCK
+
+            with SYSTEM_DDL_LOCK:  # several Ripples may create it at once (see SYSTEM_DDL_LOCK)
+                self.con.execute(f"CREATE TABLE IF NOT EXISTS {INPUTS_TABLE} (ref VARCHAR, f TIMESTAMPTZ, state VARCHAR)")
             # Keep the previous run's row (a retry at this f still needs it) and anything newer.
             self.con.execute(f"DELETE FROM {INPUTS_TABLE} WHERE ref = ? AND (f = ? OR f < ?)",
                              [ref, self.f, min(self.previous_f, self.f)])
             self.con.execute(f"INSERT INTO {INPUTS_TABLE} VALUES (?, ?, ?)", [ref, self.f, text])
 
         retry_on_lock(write)
+
+    def estimate_rows(self, ref: str) -> int | None:
+        """A Source table's row count as of its newest publish, from the size hint in its sidecar (``None`` when
+        it has none, or for one of this Pond's own tables): the optional host hook the Trickle builder's
+        change-fraction threshold uses. Exact counts read every file the Source has published, so their cost
+        grew with its number of Runs (the transit showcase)."""
+        from . import trickle_io as trickle
+
+        source_pond, table = self._resolve_ref(ref)
+        if source_pond is None:
+            return None
+        try:
+            entry = trickle.load_sidecar(self._source_data_dir(source_pond)).get(table) or {}
+        except FileNotFoundError:
+            return None
+        rows = (entry.get("stats") or {}).get("rows")
+        return int(rows) if isinstance(rows, int) else None
 
     def record_change(self, name: str, changed: bool) -> None:
         """Record that this run wrote ``name`` and whether the write changed it: the optional host hook the
@@ -1024,8 +1066,6 @@ class Pond:
         keeps it local) runs it locally."""
         from . import flock
 
-        if not flock.enabled(self.flock_env):
-            return None
         return flock.comprehensive(job, pond_mode=self.flock, env=self.flock_env)
 
     def write_table(self, name: str, relation, *, if_changed: bool = False, cluster_by=None, interleave=True,
@@ -1233,17 +1273,34 @@ class Pond:
         source_pond, table = self._resolve_ref(ref)
         if source_pond is not None:
             rel = self._source_relation(source_pond, table)
-            from .trickle_io import _is_current_view
-
-            if not _is_current_view(self.con, table):  # never replace this Pond's own merge Trickle view
-                try:
-                    rel.create_view(table, replace=True)
-                except Exception:
-                    pass  # name taken by one of this Pond's own tables — the relation still works
+            self._name_source_view(rel, table)
             return rel
         self._check_own_read(table)
         self._record_read(None, table)
         return self._own_current(table)
+
+    def _name_source_view(self, rel, table: str) -> None:
+        """Register a Source relation under its bare table name, as a temporary view on this connection only,
+        unless one of this Pond's own tables or views has that name (it stays what the name means).
+
+        Temporary, so each Ripple (a cursor of the shared registry) and each thread of an App sees its own: a view
+        stored in the registry was shared by all of them, so a Ripple of one Run could read the version another
+        Run had pinned, and an App's threads failed reading each other's (a view over another connection's
+        temporary table). Earlier versions left such views in registries; this one shadows them."""
+        from .trickle_io import CURRENT_VIEW_COMMENT, temp_view
+
+        own = first_row(self.con.execute(
+            "SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND NOT temporary AND database_name = current_database() "
+            "UNION ALL SELECT 1 FROM duckdb_views() WHERE view_name = ? AND NOT temporary "
+            "AND database_name = current_database() AND comment IS NOT DISTINCT FROM ?",
+            [table, table, CURRENT_VIEW_COMMENT],
+        ))
+        if own is not None:
+            return
+        try:
+            temp_view(self.con, rel, table)
+        except Exception:  # noqa: BLE001 - the relation still works; only the name is missing
+            pass
 
     def _source_relation(self, source_pond: str, table: str):
         """A Source table at this run's pinned version, without system columns (recorded as a read).
@@ -1280,8 +1337,10 @@ class Pond:
         self._record_read(source_pond, table)
         data_dir = self._source_data_dir(source_pond)
         data_dir.duckdb_setup(self.con)
+        dp = get_data_plane()
         try:
-            select = get_data_plane().read_select(data_dir, table, as_of=self.f, pin=self._pin(source_pond))
+            columns = getattr(dp, "columns_select", None) or dp.read_select
+            select = columns(data_dir, table, as_of=self.f, pin=self._pin(source_pond))
         except FileNotFoundError as exc:
             raise MissingSourceAsset(source_pond, table) from exc
         return list(_strip_system(self.con.sql(select)).columns)

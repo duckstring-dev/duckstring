@@ -137,7 +137,9 @@ async def forward(request: Request, name: str, rest: str):
 
     static = _static_file(request.app.state.root, view, below)
     if static is not None and request.method in ("GET", "HEAD"):
-        return FileResponse(static)
+        # Revalidate every time (by ETag or Last-Modified): a redeploy changes the files under the same paths, and
+        # without a header a cache in front of the Catchment applied its own lifetime.
+        return FileResponse(static, headers={"Cache-Control": "no-cache"})
 
     supervisor = request.app.state.app_supervisor
     try:

@@ -2589,16 +2589,19 @@ class Driver(TapsMixin):
             return served if served in majors else max(majors)
 
     def app_freshness(self, key: str) -> dict:
-        """The App's freshness and each Source's (``{"freshness": iso | None, "sources": {name: iso}}``),
-        which the AppSupervisor hands the App's process for ``pond.freshness()``."""
+        """The App's freshness, each Source's, and when each Source's output last changed (``{"freshness": iso |
+        None, "sources": {name: iso}, "changed": {name: iso}}``), which the AppSupervisor hands the App's process
+        for ``pond.freshness()``. A Source's freshness moves on every Run, passes included; ``changed`` only when
+        its data did, which is what an App caching what it built from a Source should watch."""
         with self.lock:
             ps = self.state.pond_states.get(key)
             if ps is None:
-                return {"freshness": None, "sources": {}}
+                return {"freshness": None, "sources": {}, "changed": {}}
             iso = lambda dt: _iso(dt) if dt != NEVER else None  # noqa: E731
+            sources = [sp for sp in self.state.ponds[key].sources if sp in self.meta]
             return {"freshness": iso(ps.end_f),
-                    "sources": {self.meta[sp]["name"]: iso(self.state.pond_states[sp].end_f)
-                                for sp in self.state.ponds[key].sources if sp in self.meta}}
+                    "sources": {self.meta[sp]["name"]: iso(self.state.pond_states[sp].end_f) for sp in sources},
+                    "changed": {self.meta[sp]["name"]: iso(self.state.pond_states[sp].changed_f) for sp in sources}}
 
     def app_reserve(self, key: str) -> str:
         """An instance of the App ``key`` is about to start: set its ``[pond] memory`` aside from the budget the

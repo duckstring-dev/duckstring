@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import duckdb
 import pytest
 from trickle import agg
 from trickle.builder import BuildError, TrickleBuilder, _duckdb_to_ibis
@@ -727,3 +728,51 @@ def test_builder_was_changed_tracks_output(db):
     assert run(ts(2), ts(1)) is False  # nothing upstream changed: an empty change
     pr([("p1", 9)], ts(3))
     assert run(ts(3), ts(2)) is True
+
+
+def test_merge_records_a_compact_threshold_for_its_output():
+    """A builder's output takes its own fold size, as merge_table does: the Catchment-wide default couldn't
+    serve small aggregates and a large base at once (the attention showcase)."""
+    con = duckdb.connect()
+    merge(con, "obs", [(1, 1, 5), (2, 2, 7)], "k, g, v", ts(1), "k")
+    at(con, ts(1)).source("obs").aggregate(by="g", n=agg.count()).merge("per_g", compact_threshold=32768)
+    assert T.read_meta(con)["per_g"]["compact_threshold"] == 32768
+    merge(con, "obs", [(1, 1, 5), (2, 2, 7), (3, 1, 1)], "k, g, v", ts(2), "k")
+    at(con, ts(2), ts(1)).source("obs").aggregate(by="g", n=agg.count()).merge("per_g")
+    assert T.read_meta(con)["per_g"]["compact_threshold"] == 32768  # kept until set again, as merge_table does
+
+
+def test_filter_and_mutate_take_a_bare_name_one_source_has():
+    """``.filter("col")`` failed with DuckDB's "Referenced column not found" until the column was written
+    ``alias.col``, even with one source, while ``on`` and ``.aggregate()`` took bare names (the transit showcase)."""
+    con = duckdb.connect()
+    ol, pr = star(con)
+    ol([(1, 10, 2), (2, 11, 5), (3, 10, 1)], ts(1))
+    pr([(10, 3), (11, 4)], ts(1))
+    at(con, ts(1)).source("order_line").filter("qty >= 2").merge("big", pk="order_id")
+    assert rows(con, "big") == [(1, 10, 2), (2, 11, 5)]
+    e = at(con, ts(1))
+    (e.source("order_line").join(e.source("product"), on="product_id")
+     .mutate(total="qty * price").filter("total >= 6 AND price < 4 AND 'qty' <> 'price'")
+     .select("s0.order_id, total").merge("priced", pk="order_id"))
+    assert rows(con, "priced") == [(1, 6)]
+    # The change still distributes: a later price change moves an order across the filter.
+    ol([(1, 10, 2), (2, 11, 5), (3, 10, 1)], ts(2))
+    pr([(10, 1), (11, 3)], ts(2))
+    e = at(con, ts(2), ts(1))
+    (e.source("order_line").join(e.source("product"), on="product_id")
+     .mutate(total="qty * price").filter("total >= 6 AND price < 4 AND 'qty' <> 'price'")
+     .select("s0.order_id, total").merge("priced", pk="order_id"))
+    assert rows(con, "priced") == [(2, 15)]
+
+
+def test_a_bare_name_two_sources_have_must_be_qualified():
+    con = duckdb.connect()
+    ol, pr = star(con)
+    ol([(1, 10, 2)], ts(1))
+    pr([(10, 3)], ts(1))
+    con.execute("CREATE TABLE stock AS SELECT 10 AS product_id, 7 AS qty")
+    e = at(con, ts(1))
+    b = e.source("order_line").join(e.source("stock"), on="product_id").filter("qty > 1")
+    with pytest.raises(BuildError, match="qty is in more than one source"):
+        b.select("s0.order_id, s1.qty AS on_hand").merge("x", pk="order_id")

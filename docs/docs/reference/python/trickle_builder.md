@@ -109,7 +109,7 @@ Keeps rows matching a SQL boolean expression.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `predicate` | `str` | A SQL expression over the columns available at this point: source columns (`s0.col`, or `alias.col`) and any columns added by an earlier `.mutate()`. |
+| `predicate` | `str` | A SQL expression over the columns available at this point: source columns and any columns added by an earlier `.mutate()`. A source column can be named bare (`col`) when only one source has it; otherwise qualify it as `alias.col` (`s0.col` for the first source). |
 
 ### `.mutate`
 
@@ -117,20 +117,20 @@ Keeps rows matching a SQL boolean expression.
 .mutate(**columns) -> TrickleBuilder
 ```
 
-Adds computed columns and keeps all existing ones. Each keyword is a column name and a SQL expression. A name matching an existing column replaces it.
+Adds computed columns and keeps all existing ones. Each keyword is a column name and a SQL expression, naming source columns as for `.filter()`. A name matching an existing column replaces it.
 
 Columns in one call are computed side by side and can't refer to each other; chain another `.mutate()` to build on a new column. A computed column can be used as the output `pk` but not as a join key.
 
 ```python
 (
     pond.trickle("orders.order_line")
-    .mutate(order_date="CAST(s0.ordered_at AS DATE)")
+    .mutate(order_date="CAST(ordered_at AS DATE)")
     .filter("order_date >= DATE '2026-01-01'")
     .merge("recent_orders", pk="order_id")
 )
 ```
 
-**Raises** `BuildError` for a column name starting with `_duckstring_`.
+**Raises** `BuildError` for a column name starting with `_duckstring_`, and (from `.filter()` too) for a bare name more than one source has.
 
 ### `.select`
 
@@ -275,7 +275,7 @@ b.sql(t.group_by("product_id").agg(median_revenue=t.revenue.median())).merge("me
 
 ```python
 .merge(name, *, pk=None, ivm=True, key_filter=True, retain_t=None, retain_n=None,
-       cluster_by=None, interleave=True, cluster_bits=None) -> TrickleBuilder
+       compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> TrickleBuilder
 ```
 
 Computes the result and writes its changes to the merge Trickle `name`.
@@ -287,6 +287,7 @@ Computes the result and writes its changes to the merge Trickle `name`.
 | `ivm` | `bool` | `True` | `False` ignores source changes and recomputes the whole output each run, recording the difference. |
 | `key_filter` | `bool` | `True` | `False` stops changed keys being passed down into an operand that is itself a join. No effect with `ivm=False`. |
 | `retain_t`, `retain_n` | | `None` | Change-log retention, as for [`merge_table`](trickle_io.md#merge_table). |
+| `compact_threshold` | `int` (bytes) | `None` | The size the change log must reach before it is folded into the output's base, as for [`merge_table`](trickle_io.md#merge_table). |
 | `cluster_by`, `interleave`, `cluster_bits` | | | How the output's compacted base is ordered, as for [`merge_table`](trickle_io.md#merge_table). |
 
 Only change `ivm` or `key_filter` after measuring that the default is slower for a particular build.

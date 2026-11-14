@@ -2,6 +2,66 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
+## Unreleased
+
+Fixes from two showcase pipelines run unattended on 0.8.0: Melbourne's trains every 31 seconds, and a dozen Ponds
+over Wikipedia page views, news and Bluesky. Needs `duckstring-trickle` 0.3.2.
+
+### Many small Runs
+
+A Pond that runs often on small tables slowed with every Run: about half a millisecond more per Run in the transit
+showcase, so a Run every 31 seconds would have outgrown its cycle within weeks. Now a Run reads what its window
+needs, whatever came before:
+
+- **A delta reads only the parts in its window,** chosen by name, where it read every part a Source had published
+  and filtered them.
+- **Resolving a builder's join keys** binds a Source's newest part, not all of them.
+- **The change-fraction check (`p`)** takes a Source's row count from its published size hint.
+- **The append fast path** (`.append()` keyed on the first source) looks up only the new rows' keys in the output's
+  history. It also no longer drops every row while any key is NULL.
+- **No more empty marker parts:** a merge table that loaded once and never changed gained an empty file per Run
+  (11,000 a day for one showcase Pond). It keeps one.
+- **A Run that calls `pond.skip()` publishes no new copy** of its plain tables or Objects. It wrote a new version of
+  each, and they were all kept until the next real change.
+- **Trickle's scratch views are temporary.** Every incremental write stored eight in the registry and none was ever
+  removed. A Duck drops those an earlier version left.
+- **Sizing a published table** for its sidecar hint takes one listing per directory, not a request per file on an
+  object store.
+
+On the benchmark in `bench/small_runs/` (an Inlet appending 200 rows a Run, a builder join and an incremental
+aggregate downstream), the downstream Run went from 88 ms at Run 100 and 198 ms at Run 300 to 56 and 66 ms.
+
+### Fixes
+
+- **A Pond's first Run failed when Ripples ran in parallel** (`Catalog write-write conflict on create`): each
+  Ripple's first Trickle write created the same table. In the showcase it failed 3 first Runs in 6, and with the
+  default retry budgets of 0 the Pond stayed failed.
+- **Concurrent reads in an App failed** (`Table with name _duckstring_ds_consol_0 does not exist!`), and two
+  Ripples reading the same Source could see each other's version: `read_table` registered the Source's name as a
+  view stored in the registry, shared by every connection. It's now a temporary view on the reading connection.
+- **A Pond importing numpy at module level failed** ("cannot load module more than once per process"), and builder
+  Ripples failed now and then with `KeyError: 'duckstring.trickle_builder'`. Loading a Pond's code evicted every
+  module the import added; now only the Pond's own.
+- **Stopping the Catchment could fail an App**, which the restarted Catchment then showed failed until woken.
+- **Less log noise:** with the Flock off, no engine is looked for (`flock: engine 'starrocks' could not be
+  checked` repeated through every Run), an engine that can't be checked is reported once, and a first Run's
+  `no published base at or below 0001-01-01` is a debug line.
+- **`append_table` from Python data** (`con.from_arrow`, a registered DataFrame) failed in a Pond's registry on
+  DuckDB 2.0 ("it reads a Python object").
+
+### Other changes
+
+- **`compact_threshold=` on the builder's `.merge()`**, as on `pond.merge_table`: a builder's output can fold its
+  change log at its own size, where only the Catchment-wide `DUCKSTRING_COMPACT_THRESHOLD` reached it.
+- **The builder's `.filter()` and `.mutate()` take bare column names** when only one source has the column, as
+  `on` and `.aggregate()` do; `alias.col` was needed even with one source. A bare name two sources have raises a
+  `BuildError` saying to qualify it.
+- **`pond puddle ls|show|query` see append and merge tables,** read as a Sink reads them.
+- **An App's static files are sent with `Cache-Control: no-cache`,** so a cache in front of the Catchment
+  revalidates them after a redeploy.
+- **An App's `pond.freshness()` has `changed`:** when each Source's data last changed. A Source's freshness moves
+  on every Run, so an App rebuilding a cache on it rebuilt every Run.
+
 ## 0.8.0 — 2026-11-11
 
 Apps, cloud compute on Azure and Google Cloud, and Databricks and BigQuery in both directions: reading from

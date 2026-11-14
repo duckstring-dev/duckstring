@@ -241,6 +241,35 @@ def test_an_app_that_exits_fails_until_woken(catchment_client):
     assert client.get("/apps/dash/v1/hello").status_code == 503  # tried again, and failed again
 
 
+def test_a_shutdown_during_a_reconcile_pass_never_fails_the_app(catchment_client):
+    """The supervisor's pass runs in a thread that cancelling its loop at shutdown doesn't stop. A pass that had
+    checked an instance just before shutdown stopped it found the process gone, recorded it as exited and failed
+    the App, which the restarted Catchment then showed failed (the transit showcase, one restart in three).
+    Reproduced here by stopping everything at the moment the pass looks the App up."""
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    supervisor = client.app.state.app_supervisor
+    inst = supervisor._instances["dash@1"]
+    driver = supervisor.driver
+    real_view = driver.app_view
+
+    def view_then_shut_down(key):
+        view = real_view(key)
+        supervisor.shutdown()  # the Catchment's shutdown lands mid-pass
+        return view
+
+    driver.app_view = view_then_shut_down
+    try:
+        supervisor.reconcile()
+    finally:
+        driver.app_view = real_view
+    assert inst.proc.poll() is not None
+    assert not _app_entry(client)["is_failed"]
+    instances = client.get("/api/ponds/dash/app/instances").json()["instances"]
+    assert [i["stop_reason"] for i in instances] == ["shutdown"]
+
+
 def test_kill_stops_the_instance(catchment_client):
     client = catchment_client
     _deploy_pipeline(client)
@@ -311,6 +340,13 @@ def test_an_apps_freshness_follows_its_sources(catchment_client):
     runs = client.get("/api/runs", params={"pond": "dash"}).json()["runs"]
     assert [r["f"] for r in runs] == [g.isoformat(), f.isoformat()]
     assert all(r["status"] == "success" and r["started_at"] == r["finished_at"] for r in runs)
+    with driver.lock:  # a Run that changed nothing moves the Source's freshness but not its changed time
+        h = datetime(2026, 1, 3, tzinfo=timezone.utc)
+        ps = driver.state.pond_states["sales@1"]
+        ps.start_f = ps.end_f = h
+        driver.scheduler_tick()
+    assert driver.app_freshness("dash@1") == {"freshness": h.isoformat(), "sources": {"sales": h.isoformat()},
+                                              "changed": {"sales": g.isoformat()}}
 
 
 _ECHO_PY = """async def app(scope, receive, send):
@@ -338,7 +374,8 @@ def test_static_files_are_served_by_the_catchment(catchment_client):
     assert r.status_code == 200, r.text
     assert catchment_client.get("/apps/site/v1/").text == "<h1>hi</h1>"
     assert catchment_client.get("/apps/site/v1/docs/").text == "docs"
-    assert catchment_client.get("/apps/site/v1/app.js").text == "x"
+    r = catchment_client.get("/apps/site/v1/app.js")
+    assert r.text == "x" and r.headers["cache-control"] == "no-cache" and r.headers["etag"]
     assert catchment_client.get("/apps/site/v1/missing").status_code == 404
     assert catchment_client.get("/apps/site/v1/../../pond.toml").status_code == 404
 
@@ -385,7 +422,14 @@ def test_the_handle_reads_sources_and_refuses_writes(tmp_path, monkeypatch):
     assert pond is ds_app.pond()
     assert pond.count_table("sales.revenue") == 3
     assert pond.read_table("sales.revenue").aggregate("max(id)").fetchall() == [(2,)]
-    assert pond.freshness() == {"freshness": None, "sources": {}}
+    assert pond.freshness() == {"freshness": None, "sources": {}, "changed": {}}
+    pond._runtime = tmp_path / "runtime"  # as the Catchment writes it for an instance
+    pond._runtime.mkdir()
+    (pond._runtime / "freshness.json").write_text(json.dumps(
+        {"freshness": "2026-01-03T00:00:00+00:00", "sources": {"sales": "2026-01-03T00:00:00+00:00"},
+         "changed": {"sales": "2026-01-02T00:00:00+00:00"}}))
+    assert str(pond.freshness()["changed"]["sales"]) == "2026-01-02 00:00:00+00:00"
+    pond._runtime = None
     with pytest.raises(ValueError, match="'other' is not a Source"):
         pond.read_table("other.revenue")
     with pytest.raises(ValueError, match="reads only its Sources"):
@@ -403,6 +447,52 @@ def test_the_handle_reads_sources_and_refuses_writes(tmp_path, monkeypatch):
     t.join()
     assert seen[0] is not pond.con  # each thread its own cursor
     time.sleep(0)
+
+
+def test_threads_read_a_merge_source_through_the_handle_at_once(tmp_path, monkeypatch):
+    """Reading a merge Trickle Source consolidates its change log into a temporary table on the reading cursor,
+    and ``read_table`` names the Source as a view. That view was stored in the database, so every thread saw
+    one view, pointing at whichever thread's temporary table registered it last: "Table with name
+    _duckstring_ds_consol_0 does not exist!" on the others (the attention showcase, 6 of 8 concurrent
+    searches)."""
+    import threading
+    from datetime import datetime, timezone
+
+    import duckstring.app as ds_app
+    from duckstring import trickle_io as T
+    from duckstring.dataplane import get_data_plane
+
+    data = tmp_path / "ponds" / "sales" / "data"
+    data.mkdir(parents=True)
+    reg = duckdb.connect(str(tmp_path / "registry.duckdb"))
+    f1, f2 = datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 2, tzinfo=timezone.utc)
+    T.merge_table(reg, "hour", reg.sql("SELECT range AS k, range AS n FROM range(200)"), f1, ("k",))
+    get_data_plane().export(reg, data, f=f1)
+    T.merge_table(reg, "hour", reg.sql("SELECT range AS k, range * 2 AS n FROM range(200)"), f2, ("k",))
+    get_data_plane().export(reg, data, f=f2)
+    reg.close()
+    monkeypatch.setenv(ds_app.ENV, json.dumps({"name": "dash", "major": 1, "root": str(tmp_path),
+                                               "sources": ["sales"]}))
+    monkeypatch.setattr(ds_app, "_handle", None)
+    pond = ds_app.pond()
+    errors: list[BaseException] = []
+    counts: list[int] = []
+
+    def reader():
+        try:
+            for _ in range(10):
+                pond.read_table("sales.hour")
+                counts.append(pond.con.execute("SELECT count(*), sum(n) FROM hour").fetchall()[0][1])
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reader) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors[0]
+    assert counts == [2 * sum(range(200))] * 80
 
 
 def test_pond_run_gives_an_app_its_puddles(tmp_path):

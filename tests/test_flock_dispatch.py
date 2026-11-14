@@ -264,3 +264,30 @@ def test_min_rows_derives_from_memory_cap_not_size():
     assert flock._min_rows({"DUCKSTRING_MEMORY_LIMIT": "8GB"}) == 8 * flock._ROWS_PER_GIB
     assert flock._min_rows({"DUCKSTRING_MEMORY_LIMIT": "512MB"}) == flock._ROWS_PER_GIB // 2
     assert flock._min_rows({}) == flock._DEFAULT_MIN_ROWS
+
+
+def test_an_off_flock_looks_for_no_engine(monkeypatch):
+    """With the Flock off (every Pond's default), an offered recompute never looks for an engine: looking imports
+    and checks each one, and logged "could not be checked" on every Run of the transit showcase."""
+    from duckstring import flock
+
+    def boom(env=None):
+        raise AssertionError("looked for an engine")
+
+    monkeypatch.setattr(flock, "get_engine", boom)
+    assert flock.comprehensive(object(), pond_mode="off") is None
+    assert flock.comprehensive(object(), pond_mode=None, env={"DUCKSTRING_FLOCK_MODE": "off"}) is None
+
+
+def test_an_engine_that_cant_be_checked_is_reported_once(monkeypatch, caplog):
+    class Broken:
+        def __init__(self, env, name=None):
+            raise ImportError("No module named 'sqlglot'")
+
+    monkeypatch.setattr(flock, "ENGINE_ORDER", ("broken_for_test",))
+    monkeypatch.setattr(flock, "_engine_class", lambda name: Broken)
+    monkeypatch.setattr(flock, "_warned", set())
+    with caplog.at_level("WARNING", logger=flock.log.name):
+        assert flock.default_engine({}) is None
+        assert flock.default_engine({}) is None
+    assert sum("could not be checked" in r.getMessage() for r in caplog.records) == 1
