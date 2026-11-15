@@ -348,3 +348,18 @@ read and its view evidently don't stay on one of them. Reproduce with two thread
 `read_table("source.merge_table")` then `SELECT count(*)` a few times (showcase attention FINDINGS 16). Fix: keep
 every temporary object a read creates on the calling thread's cursor, and add a concurrent-read test for the App
 handle.
+
+## 17. A fixed Pond's root Ripples stay running after the redeploy (found 2026-11-15)
+
+Found while trying `--wait` (item 12) on a throwaway Catchment with real Ducks, and reproduced on `main` (0.8.0),
+so it predates this branch. The demo pipeline: deploy, `refresh now reports`; deploy `sales` 1.0.1 whose
+`join_lines` raises, `refresh now reports` (it fails); deploy the fix as 1.0.2. Fifteen seconds later `sales`
+reports `running` with `start_f == end_f` and no Run in flight: its root Ripples (`daily_sales`, `price_tiers`) are
+`running` in the engine, `join_lines` `queued`. A later Refresh does run the pipeline, and leaves the roots
+running again afterwards. So the UI and `/api/status` show the Pond running for good, and `--wait` on it never
+settles.
+
+Likely mechanism, to confirm: `clear_on_redeploy` → `clear_pond` and the re-dispatch of the failed Run start
+every Ripple in the engine, while the Duck, whose ledger has the roots complete for that `f`, re-runs and reports
+only `join_lines`. Check whether the throttle or memory slots read the stuck Ripples as busy. The reproduction
+script is in the session scratchpad (`repro.sh`): demo, break, refresh, fix, then read the Ripple states.
