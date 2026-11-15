@@ -367,7 +367,7 @@ def main() -> None:
     major_dir = pond_major_dir(root, args.pond, args.major)
     major_dir.mkdir(parents=True, exist_ok=True)
     con = ledger.connect(major_dir / "pond.db")
-    core = DuckCore(f"{args.pond}@{args.major}", con, parents)  # name@major label for log lines
+    core = DuckCore(f"{args.pond}@{args.major}", con, parents, version=args.version)  # name@major for log lines
 
     # A dbt-mode Pond runs its models via dbt, not @ripple functions — a different executor entirely.
     from ..core import read_pond_toml

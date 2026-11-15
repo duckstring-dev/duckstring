@@ -48,15 +48,23 @@ def connect(path) -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode = WAL")
     con.execute("PRAGMA busy_timeout = 5000")  # queue on a locked DB (up to 5 s) instead of erroring
     con.executescript(_SCHEMA)
+    # The version that wrote each Ripple's row: the ledger is the major line's, so it outlives a redeploy.
+    if "version" not in {r[1] for r in con.execute("PRAGMA table_info(ripple_run_state)").fetchall()}:
+        con.execute("ALTER TABLE ripple_run_state ADD COLUMN version TEXT")
     con.commit()
     return con
 
 
-def record_ripple_start(con: sqlite3.Connection, name: str, start_f: datetime) -> None:
+def record_ripple_start(con: sqlite3.Connection, name: str, start_f: datetime, version: str | None = None) -> None:
+    """A Ripple starts at ``start_f``. A row another version wrote is replaced whole: its ``end_f`` was that
+    version's, and this one hasn't completed anything yet."""
     con.execute(
-        "INSERT INTO ripple_run_state (ripple_name, start_f, end_f, is_running, is_failed) VALUES (?, ?, ?, 1, 0) "
-        "ON CONFLICT(ripple_name) DO UPDATE SET start_f = excluded.start_f, is_running = 1, is_failed = 0",
-        (name, _iso(start_f), _iso(NEVER)),
+        "INSERT INTO ripple_run_state (ripple_name, start_f, end_f, is_running, is_failed, version) "
+        "VALUES (?, ?, ?, 1, 0, ?) "
+        "ON CONFLICT(ripple_name) DO UPDATE SET start_f = excluded.start_f, is_running = 1, is_failed = 0, "
+        "end_f = CASE WHEN ripple_run_state.version IS excluded.version OR excluded.version IS NULL "
+        "THEN ripple_run_state.end_f ELSE excluded.end_f END, version = COALESCE(excluded.version, version)",
+        (name, _iso(start_f), _iso(NEVER), version),
     )
     con.commit()
 
@@ -93,13 +101,21 @@ def record_pond_run_finish(con: sqlite3.Connection, f: datetime, now: datetime, 
     con.commit()
 
 
-def load_state(con: sqlite3.Connection, parents: dict[str, list[str]], optional=None) -> WorkerState:
+def load_state(con: sqlite3.Connection, parents: dict[str, list[str]], optional=None,
+               version: str | None = None) -> WorkerState:
     """Build a :class:`WorkerState` for the given topology, seeding per-Ripple freshness from the
     ledger. Ripples absent from the ledger start at NEVER. ``last_completed_f`` = newest succeeded
-    Pond Run, so already-reported completions are not re-emitted."""
+    Pond Run, so already-reported completions are not re-emitted.
+
+    A Duck running ``version`` takes only that version's rows (and rows written before versions were
+    recorded): a Ripple another version completed counts as never run, as the Catchment counts it. Before,
+    a Run that failed at its last Ripple and was dispatched again after a fix re-ran only that Ripple, on the
+    broken version's output, and the others never reported (plans/showcase-fixes.md item 17)."""
     s = new_state(parents, optional)
-    rows = con.execute("SELECT ripple_name, start_f, end_f, is_running FROM ripple_run_state").fetchall()
-    for name, start_f, end_f, _is_running in rows:
+    rows = con.execute("SELECT ripple_name, start_f, end_f, is_running, version FROM ripple_run_state").fetchall()
+    for name, start_f, end_f, _is_running, row_version in rows:
+        if version is not None and row_version is not None and row_version != version:
+            continue  # another version's: this one hasn't run it
         if name in s.states:
             # On reload nothing is actually running — an interrupted Ripple (is_running in the ledger,
             # end_f < its start_f) simply re-runs when re-stamped, so reset is_running to False.

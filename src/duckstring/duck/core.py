@@ -79,10 +79,12 @@ class Event:
 
 
 class DuckCore:
-    def __init__(self, pond_name: str, con, parents: dict[str, list[str]], optional=None):
+    def __init__(self, pond_name: str, con, parents: dict[str, list[str]], optional=None,
+                 version: str | None = None):
         self.pond_name = pond_name
         self.con = con
-        self.state = ledger.load_state(con, parents, optional)
+        self.version = version  # the code this Duck runs: its ledger rows are its own (ledger.load_state)
+        self.state = ledger.load_state(con, parents, optional, version=version)
         self.events: list[Event] = []  # buffered, awaiting delivery to the Catchment
         self.attempts: dict[str, int] = {}  # ripple name → attempt index of its current in-flight run
         self.last_begin_f: datetime = NEVER  # freshness of the most recently started Pond Run
@@ -276,7 +278,7 @@ class DuckCore:
     def _advance(self, now: datetime) -> list[str]:
         self.state, launched = worker.sentinel(now, self.state)
         for name in launched:
-            ledger.record_ripple_start(self.con, name, self.state.states[name].start_f)
+            ledger.record_ripple_start(self.con, name, self.state.states[name].start_f, self.version)
         return launched
 
     def idle(self) -> bool:

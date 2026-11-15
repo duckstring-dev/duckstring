@@ -351,6 +351,10 @@ handle.
 
 ## 17. A fixed Pond's root Ripples stay running after the redeploy (found 2026-11-15)
 
+**Fixed 2026-11-15** as guessed below: the ledger's Ripple rows record the version that wrote them, and a Duck
+seeds only its own version's (`engine/pond.load_state`), so a new version runs every Ripple of a re-dispatched
+Run, as the Catchment expects. The reproduction now ends with every Ripple idle, each run once.
+
 Found while trying `--wait` (item 12) on a throwaway Catchment with real Ducks, and reproduced on `main` (0.8.0),
 so it predates this branch. The demo pipeline: deploy, `refresh now reports`; deploy `sales` 1.0.1 whose
 `join_lines` raises, `refresh now reports` (it fails); deploy the fix as 1.0.2. Fifteen seconds later `sales`

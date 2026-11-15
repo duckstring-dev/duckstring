@@ -256,3 +256,39 @@ def test_duck_recovery_reruns_only_incomplete(tmp_path):
     sim2.launch(launched)
     sim2.run(4)
     assert ledger.read_pond_end_f(con2) == T0
+
+
+@pytest.mark.timeout(5)
+def test_a_new_version_reruns_ripples_an_earlier_version_completed(tmp_path):
+    """The ledger is the major line's, so it outlives a redeploy. A Run that failed at its last Ripple and was
+    dispatched again after a fix: the Catchment starts every Ripple of the new version, but the new Duck found
+    the roots complete for that freshness (written by the broken version) and ran only the last one. The roots
+    never reported, so the Pond showed running for good, and the last Ripple ran on the broken version's output
+    (plans/showcase-fixes.md item 17)."""
+    parents = {"daily": [], "tiers": [], "join": ["daily", "tiers"]}
+    con = ledger.connect(tmp_path / "pond.db")
+    old = DuckCore("sales@1", con, parents, version="1.0.1")
+    assert sorted(old.begin_run(T0, T0)) == ["daily", "tiers"]
+    old.ripple_completed("daily", T0)
+    assert old.ripple_completed("tiers", T0) == ["join"]
+    old.ripple_failed("join", T0)  # no retries: the Run fails at join
+
+    new = DuckCore("sales@1", con, parents, version="1.0.2")
+    assert sorted(new.begin_run(T0, T0)) == ["daily", "tiers"]  # every Ripple, as the Catchment expects
+
+    again = DuckCore("sales@1", con, parents, version="1.0.2")  # a restart of the same version resumes
+    assert sorted(again.begin_run(T0, T0)) == ["daily", "tiers"]  # interrupted mid-run: launched again
+    again.ripple_completed("daily", T0)
+    assert again.ripple_completed("tiers", T0) == ["join"]
+    restarted = DuckCore("sales@1", con, parents, version="1.0.2")
+    assert restarted.begin_run(T0, T0) == ["join"]  # only what this version hasn't completed
+
+
+@pytest.mark.timeout(5)
+def test_a_ledger_from_before_versions_were_recorded_still_resumes(tmp_path):
+    parents = {"a": [], "b": ["a"]}
+    con = ledger.connect(tmp_path / "pond.db")
+    old = DuckCore("p@1", con, parents)  # no version, as before the column existed
+    old.begin_run(T0, T0)
+    old.ripple_completed("a", T0)
+    assert DuckCore("p@1", con, parents, version="1.0.0").begin_run(T0, T0) == ["b"]
