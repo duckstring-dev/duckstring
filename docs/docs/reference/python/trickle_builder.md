@@ -47,7 +47,7 @@ Starts a builder on a source table.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `ref` | `str` | | `"source.table"`. Any published table works: an append or merge Trickle, or a plain table. To use one of this Pond's own tables, write it with a terminal earlier in the same chain (see [Chaining](#chaining)). |
+| `ref` | `str` | | `"source.table"`: any published table, an append or merge Trickle or a plain table. Or `"table"`, one of this Pond's own tables that a parent Ripple writes. Within one Ripple, chain from the terminal that writes it instead (see [Chaining](#chaining)). |
 | `p` | `float` | `0.3` | Change-fraction threshold. If this source's changes touch more than `p` of its current rows, the builder recomputes in full for that run, since filtering by key no longer saves work. `1.0` disables the check and skips the row count it needs. |
 
 A plain table that hasn't changed since the last run contributes no changes and costs nothing. One that has changed forces a full recompute, so for large, frequently changing inputs it's worth making the upstream table a Trickle. A plain table counts as unchanged when the Source didn't republish it: either it didn't run, or it wrote the table with `write_table(..., if_changed=True)` and the content was the same.
@@ -361,9 +361,9 @@ The builder a terminal returns is rooted at the table it just wrote, so the chai
 )
 ```
 
-When only `stores.store` changes, the second join reuses `priced_line` instead of recomputing the first join. Chaining is also the only way to join on a column that only exists after an earlier join. The steps run one after another; split them into separate Ripples if you want them to run in parallel.
+When only `stores.store` changes, the second join reuses `priced_line` instead of recomputing the first join. Chaining is also how to join on a column that only exists after an earlier join. The steps run one after another. To run them in parallel, write `priced_line` in one Ripple and start another from it with `pond.trickle("priced_line")`, listing the first Ripple in its `parents`.
 
-A chained builder can only continue as the left-hand side of a join, not be passed as the right-hand side.
+A chained builder can only continue as the left-hand side of a join, not be passed as the right-hand side. A table written by a parent Ripple, started with `pond.trickle("table")`, can be either.
 
 ## Errors
 

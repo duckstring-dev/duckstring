@@ -1392,10 +1392,37 @@ class Pond:
 
     def _own_current(self, name: str):
         """Read one of this Pond's own registry tables as its current clean state — a merge Trickle is
-        reconstructed from its base ⊎ changelog (the main is log-structured); anything else is read directly."""
+        reconstructed from its base ⊎ changelog (the main is log-structured); anything else is read directly.
+
+        A Trickle is read as of this run's freshness: Pond Runs pipeline, so the Ripple that writes it may
+        already be running the next Run, and its rows must not reach this one (a builder starting from the
+        table joins its state with its changes over this run's window)."""
         from . import trickle_io as trickle
 
-        return trickle.current_state(self.con, name)
+        mode = (trickle.read_meta(self.con).get(name) or {}).get("mode")
+        if self.f is None or mode not in ("append", "merge"):
+            return trickle.current_state(self.con, name)
+        if mode == "merge":
+            rel = trickle.reconstruct_current(self.con, name, upper=self.f)
+            return trickle._strip_system(rel) if rel is not None else trickle.current_state(self.con, name)
+        return trickle._strip_system(self.con.sql(
+            f'SELECT * FROM {trickle._q(name)} WHERE {trickle._q(trickle.F_COL)} <= {trickle._ts(self.f)}'))
+
+    def _own_delta(self, table: str):
+        """The changes to one of this Pond's own tables over this Ripple's window ``(previous_f, f]``, read from
+        the registry: the table a parent Ripple wrote this run (and its earlier runs since this Ripple last ran)."""
+        from . import trickle_io as trickle
+
+        self._check_own_read(table)
+        self._record_read(None, table)
+        if not trickle._table_exists(self.con, table):
+            raise RippleOrderError(
+                f"'{table}' hasn't been written in this Pond yet. Write it in a Ripple listed in this Ripple's "
+                f"parents, so it runs first."
+            )
+        if self.f is None:  # a run with no freshness: everything, as a full read
+            return trickle.Delta(self.con, (), trickle._as_zset(self._own_current(table), 1), is_full=True)
+        return trickle.read_registry_delta(self.con, table, self.previous_f, self.f)
 
     def count_table(self, ref: str) -> int:
         """The current number of rows in a table (``"table"`` or ``"source.table"``), read from metadata without
@@ -1541,7 +1568,8 @@ class Pond:
         return stage_boot_base(con, store, name, rows_sql)
 
     def read_delta(self, ref: str):
-        """The changes to a Source table (``"source.table"``) over this run's window ``(previous_f, f]``.
+        """The changes to a table over this run's window ``(previous_f, f]``: a Source's (``"source.table"``),
+        or one of this Pond's own (``"table"``) that a parent Ripple writes.
 
         Returns a ``Delta``: ``.zset`` (the Source's columns plus ``_duckstring_d``), ``.is_full``, and the
         conveniences ``.upserts`` and ``.deletes``.
@@ -1551,8 +1579,9 @@ class Pond:
         - Plain table: the whole table (``is_full``) if republished since ``previous_f``, else empty.
         - First run, or ``previous_f`` older than the Source's retained history: the whole table (``is_full``).
 
-        A full read must be treated as a complete recompute, not an increment. Raises ``ValueError`` without a
-        Source prefix and :class:`MissingSourceAsset` for an unpublished table.
+        A full read must be treated as a complete recompute, not an increment. Raises :class:`MissingSourceAsset`
+        for an unpublished Source table, and :class:`RippleOrderError` for an own table no parent Ripple writes
+        or that hasn't been written yet.
 
         Reference: https://docs.duckstring.com/reference/python/trickle_io
         """
@@ -1561,7 +1590,7 @@ class Pond:
 
         source_pond, table = self._resolve_ref(ref)
         if source_pond is None:
-            raise ValueError(f"read_delta needs a 'source.table' reference, got '{ref}'")
+            return self._own_delta(table)
         self._record_read(source_pond, table)
         data_dir = self._source_data_dir(source_pond)
         dp = get_data_plane()
@@ -1577,8 +1606,8 @@ class Pond:
         """Start a Trickle builder on a source table.
 
         Args:
-            spine_ref: ``"source.table"``. Any published table works. To build on one of this Pond's own
-                tables, write it with a terminal earlier in the same chain.
+            spine_ref: ``"source.table"`` (any published table), or ``"table"``, one of this Pond's own
+                tables that a parent Ripple writes. Within one Ripple, chain from the terminal that writes it.
             p: Change-fraction threshold. If this source's changes touch more than ``p`` of its rows, the
                 builder recomputes in full for that run. ``1.0`` disables the check.
 

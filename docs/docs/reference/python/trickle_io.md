@@ -114,11 +114,11 @@ Only use this when you have computed the change correctly yourself. A wrong weig
 pond.read_delta(ref) -> Delta
 ```
 
-Returns the changes to a Source table over this run's window, `(pond.previous_f, pond.f]`.
+Returns the changes to a table over this run's window, `(pond.previous_f, pond.f]`: a Source's, or one of this Pond's own that a parent Ripple writes.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `ref` | `str` | `"source.table"`. |
+| `ref` | `str` | `"source.table"`, or `"table"` for one of this Pond's own tables. An own table's changes are read from the Pond's working database, including those the writing Ripple made this run. |
 
 What the delta contains depends on the Source table:
 
@@ -129,7 +129,7 @@ What the delta contains depends on the Source table:
 | Plain table (`write_table`) | If the version this run reads was published after `previous_f`, the whole table weighted `+1` with `is_full=True`. Otherwise an empty delta. A Source run that found the table unchanged with `if_changed=True` publishes no new version, so the delta stays empty (see [Change detection](pond.md#change-detection)). |
 | Any table, on this Pond's first run or when `previous_f` is older than the Source's retained history | The whole table weighted `+1`, with `is_full=True`. |
 
-**Raises** `ValueError` if `ref` has no Source prefix, and `MissingSourceAsset` if the table isn't published.
+**Raises** `MissingSourceAsset` if a Source table isn't published, and `RippleOrderError` for an own table whose writer isn't among this Ripple's parents (as for [`read_table`](pond.md#read_table)) or that hasn't been written yet. An own plain table reads as the whole table, with `is_full=True`.
 
 ## `Delta`
 

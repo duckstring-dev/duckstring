@@ -70,6 +70,9 @@ aggregate downstream), the downstream Run went from 88 ms at Run 100 and 198 ms 
 
 - **`compact_threshold=` on the builder's `.merge()`**, as on `pond.merge_table`: a builder's output can fold its
   change log at its own size, where only the Catchment-wide `DUCKSTRING_COMPACT_THRESHOLD` reached it.
+- **A builder can start from a table a parent Ripple wrote:** `pond.trickle("own_table")`, with the table's
+  changes read from the Pond's working database, as does `pond.read_delta("own_table")`. Before, a table had to
+  reach the builder through another Pond, so a Pond boundary was forced where none was needed.
 - **The builder's `.filter()` and `.mutate()` take bare column names** when only one source has the column, as
   `on` and `.aggregate()` do; `alias.col` was needed even with one source. A bare name two sources have raises a
   `BuildError` saying to qualify it.

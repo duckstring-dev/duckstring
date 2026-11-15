@@ -305,6 +305,10 @@ partly for good reasons and partly by force:
 - **By force:** a builder can't start from a table another Ripple of the same Pond wrote (attention FINDINGS 2), so
   `chatter_hour` had to move to the next Pond.
 
+**Code done 2026-11-15** (`pond.trickle("own_table")` and `pond.read_delta("own_table")`, with an own Trickle read
+as of the Run's freshness so a writer pipelined ahead doesn't leak; reference docs updated). The Concepts and guide
+text below is still to write, held for the docs pass.
+
 Fix the force: allow `pond.trickle("own_table")` when its writer is an ancestor Ripple. Read its in-run delta from
 the registry (`trickle_io.read_registry_delta`, as a mid-chain `.merge()` already does) over the reading Ripple's
 own `previous_f`. Then say in the docs (Concepts, and the guide on structuring a pipeline): use as few Ponds as the
