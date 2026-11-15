@@ -70,7 +70,7 @@ When the Pond has a `pyproject.toml` and a `.venv` (created by `uv sync`), the c
 ## `deploy`
 
 ```bash
-duckstring pond deploy [-c NAME] [--all] [--git REF] [--dry-run] [--force] [--yes]
+duckstring pond deploy [-c NAME] [--all] [--git REF] [--dry-run] [--force] [--yes] [--wait [--timeout D]]
 ```
 
 Packages the Pond project and deploys it to a Catchment. Before deploying, it reports whether the version is new or previously removed (and will be restored), and asks for confirmation. It then prints how many files it's uploading and their total size.
@@ -87,6 +87,8 @@ The Catchment builds the Pond's [Python environment](../pond_toml.md#python-depe
 | `--dry-run` | List the files a deploy would upload, with their sizes, and upload nothing. Needs no Catchment. |
 | `--force` | Replace the version a line is running, in place. A running Duck keeps the code it loaded until it next starts, so changes can take effect partway through. |
 | `--yes`, `-y` | Skip confirmations. |
+| `--wait` | After deploying, wait until the new version has completed a Run, then exit with its outcome ([Following a request](index.md#following-a-request)). A deploy doesn't start a Run itself, so something has to ask for one. |
+| `--timeout` | With `--wait`: give up after this [duration](../formats.md#durations). |
 
 ### `.pondignore`
 

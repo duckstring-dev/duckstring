@@ -49,6 +49,20 @@ aggregate downstream), the downstream Run went from 88 ms at Run 100 and 198 ms 
 - **`append_table` from Python data** (`con.from_arrow`, a registered DataFrame) failed in a Pond's registry on
   DuckDB 2.0 ("it reads a Python object").
 
+### A CLI for scripts and agents
+
+- **Without a terminal, nothing opens a live view.** `status` prints one snapshot; `refresh now`, `control wake`
+  and `control force` wait for their outcome; `refresh add` prints the Refresh it added. `--live` keeps the view.
+  A `status` in a script used to wait out its caller's timeout.
+- **`--wait [--timeout D]`** on `refresh now`, `control wake|force|rebuild` and `pond deploy`: wait until the Pond has
+  done what was asked, then exit 0 if every Run it caused succeeded, 1 naming each failed Pond, Ripple and error
+  (or why the Pond is failed, killed or blocked), or 2 on the timeout. `rebuild` and `deploy` wait for the next
+  Run, which something must ask for.
+- **`duckstring runs [POND] [--upstream] [--ripples] [--limit N] [--json]`**: Run history, with each Ripple Run's
+  retries and errors.
+- **`--json`** on `status` (every field `/api/status` gives), `runs`, `refresh ls` and `data ls`.
+- `POST /api/ponds/{name}/refresh` returns the freshness it asked for (`requested`).
+
 ### Other changes
 
 - **`compact_threshold=` on the builder's `.merge()`**, as on `pond.merge_table`: a builder's output can fold its

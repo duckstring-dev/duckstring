@@ -18,6 +18,11 @@ import typer
 
 from .refresh import _SILENT_HELP, _WATCH_HELP
 from .refresh import send_and_watch as _post_trigger
+from .wait import LIVE_HELP, TIMEOUT_HELP, WAIT_HELP
+
+_WAIT = typer.Option(False, "--wait", help=WAIT_HELP)
+_TIMEOUT = typer.Option(None, "--timeout", help=TIMEOUT_HELP)
+_LIVE = typer.Option(False, "--live", help=LIVE_HELP)
 
 _CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted).")
 _MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest).")
@@ -106,6 +111,20 @@ def _each(cfg: dict, targets, action: str, body: Optional[dict] = None, extra: O
                    params={**_http.pond_params(major, version), **(extra or {})}, json=body or {})
 
 
+def _each_and_wait(cfg: dict, targets, action: str, wait: bool, timeout: Optional[str], past: str) -> None:
+    """Send ``action`` to several Ponds, then (with ``wait``) wait for each in turn; exits with the first failure."""
+    from .wait import Waiter, parse_timeout
+
+    waiters = [Waiter(cfg, name, m, v) for name, m, v in targets] if wait else []
+    _each(cfg, targets, action)
+    if not waiters:
+        typer.echo(f"{past} {len(targets)} Ponds.")
+        return
+    seconds = parse_timeout(timeout)
+    for w in waiters:
+        w.wait(lambda e: True, seconds, past)
+
+
 def wake(
     ponds: Optional[list[str]] = _PONDS,
     all_: bool = _ALL, tree: bool = _TREE, between: bool = _BETWEEN, downstream: bool = _DOWNSTREAM,
@@ -114,16 +133,17 @@ def wake(
     version: Optional[str] = _VERSION,
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
+    wait: bool = _WAIT, timeout: Optional[str] = _TIMEOUT, live: bool = _LIVE,
 ) -> None:
     """Run each Pond once if its Sources already have newer data, without asking them to run."""
     cfg = _cfg(catchment)
     targets = select(cfg, ponds, all_, tree, between, downstream, major, version)
     if len(targets) == 1:
         name, m, v = targets[0]
-        _post_trigger(cfg, name, m, v, silent, watch, "wake", {}, "Woken.", one_shot=True)
+        _post_trigger(cfg, name, m, v, silent, watch, "wake", {}, "Woken.", one_shot=True,
+                      wait=wait, timeout=timeout, live=live)
         return
-    _each(cfg, targets, "wake")
-    typer.echo(f"Woke {len(targets)} Ponds.")
+    _each_and_wait(cfg, targets, "wake", wait, timeout, "Woke")
 
 
 def force(
@@ -134,6 +154,7 @@ def force(
     version: Optional[str] = _VERSION,
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
+    wait: bool = _WAIT, timeout: Optional[str] = _TIMEOUT, live: bool = _LIVE,
 ) -> None:
     """Rerun each Pond now at its current freshness, even with no upstream change, e.g. after deploying a fix.
 
@@ -143,10 +164,10 @@ def force(
     targets = select(cfg, ponds, all_, tree, between, downstream, major, version)
     if len(targets) == 1:
         name, m, v = targets[0]
-        _post_trigger(cfg, name, m, v, silent, watch, "force", {}, "Forced.", one_shot=True)
+        _post_trigger(cfg, name, m, v, silent, watch, "force", {}, "Forced.", one_shot=True,
+                      wait=wait, timeout=timeout, live=live)
         return
-    _each(cfg, targets, "force")
-    typer.echo(f"Forced {len(targets)} Ponds.")
+    _each_and_wait(cfg, targets, "force", wait, timeout, "Forced")
 
 
 def rebuild(
@@ -156,15 +177,27 @@ def rebuild(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
     clear: bool = typer.Option(False, "--clear", help="Remove a pending rebuild instead."),
+    wait: bool = typer.Option(False, "--wait", help="Wait until each Pond's next run, the rebuild, has finished, "
+                                                    "then exit as for refresh now --wait. Something must ask for it."),
+    timeout: Optional[str] = _TIMEOUT,
 ) -> None:
     """Rebuild each Pond from scratch on its next run.
 
     Its working database is dropped and every Source is read in full, so Ponds downstream also read its
     Trickles in full. Nothing runs now. For an immediate rebuild, use `control repair`.
     """
+    from .wait import Waiter, parse_timeout
+
     cfg = _cfg(catchment)
     targets = select(cfg, ponds, all_, tree, between, downstream, major, version)
+    waiters = [Waiter(cfg, name, m, v) for name, m, v in targets] if wait and not clear else []
     _each(cfg, targets, "rebuild", extra={"clear": clear})
+    if waiters:
+        seconds = parse_timeout(timeout)
+        for w in waiters:
+            w.wait(lambda e, w=w: not e.get("rebuild_pending") and e.get("runs_completed", 0) > w.completed,
+                   seconds, "Rebuild")
+        return
     for name, m, _ in targets:
         label = _label(name, m)
         typer.echo(f"Rebuild cleared on '{label}'." if clear else f"'{label}' will rebuild on its next run.")

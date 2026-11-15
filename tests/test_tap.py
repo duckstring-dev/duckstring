@@ -236,7 +236,8 @@ def test_refresh_now_takes_fresh_within(tmp_path, monkeypatch):
     app.state.driver, app.state.db, app.state.root, app.state.data_root = driver, driver.db, tmp_path, None
     client = TestClient(app)
     ms = int(timedelta(days=1).total_seconds() * 1000)
-    assert client.post("/api/ponds/extra/refresh", params={"fresh_within_ms": ms}).json() == {"ok": True}
+    assert client.post("/api/ponds/extra/refresh", params={"fresh_within_ms": ms}).json() == {
+        "ok": True, "requested": (NOW - timedelta(days=1)).isoformat()}
     st = lambda key: driver.state.pond_states[key]  # noqa: E731
     assert st("inlet@1").start_f == NOW - timedelta(hours=6) and st("extra@1").start_f == NOW - timedelta(hours=6)
     assert client.post("/api/ponds/extra/refresh", params={"fresh_within_ms": -1}).status_code == 422

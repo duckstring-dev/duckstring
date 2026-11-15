@@ -758,7 +758,8 @@ def test_refresh_at_is_met_by_an_inlet_run_stamped_when_it_runs(tmp_path, monkey
     key = "transactions@1"
 
     T = clock[0] - timedelta(seconds=5)  # an earlier demand epoch
-    assert client.post("/api/ponds/transactions/refresh", params={"at": T.isoformat()}).json() == {"ok": True}
+    assert client.post("/api/ponds/transactions/refresh", params={"at": T.isoformat()}).json() == {
+        "ok": True, "requested": T.isoformat()}
     assert d.state.pond_states[key].start_f == clock[0]
     _complete_run(d, key)
 

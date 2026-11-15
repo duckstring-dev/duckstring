@@ -1,12 +1,12 @@
 ---
-title: status, query, get and data
-description: Watch Ponds, query and download what they publish, and manage their tables and Objects.
-sidebar_label: status, query, get, data
+title: status, runs, query, get and data
+description: Watch Ponds and their Runs, query and download what they publish, and manage their tables and Objects.
+sidebar_label: status, runs, query, get, data
 ---
 
-# status, query, get and data
+# status, runs, query, get and data
 
-Commands for watching a Catchment and for reading, exposing, tracing and deleting what its Ponds publish.
+Commands for watching a Catchment and its Runs, and for reading, exposing, tracing and deleting what its Ponds publish.
 
 Tables and Objects are named `POND.NAME`, as in the Python API, for example `reports.monthly_summary`. A part that contains dots goes in backticks: ``forecasting.`model.pkl` ``. When a Pond has a table and an Object with the same name, add `--table` or `--object`.
 
@@ -15,15 +15,33 @@ Every command takes `-c` / `--catchment`, and those acting on one Pond take `-m`
 ## `status`
 
 ```bash
-duckstring status [POND] [-m N | -v VERSION] [--once]
+duckstring status [POND] [-m N | -v VERSION] [--once | --live] [--json]
 ```
 
-Shows every Pond's state (running, queued, idle, failed, blocked or killed), freshness and recurring Refreshes, updating every second until `Ctrl+C`.
+Shows every Pond's state (running, queued, idle, failed, blocked or killed), freshness and recurring Refreshes, updating every second until `Ctrl+C`. When its output isn't a terminal (a script, a pipe, an agent), it prints one snapshot and exits.
 
 | Argument / option | Description |
 |---|---|
 | `POND` | Only show this Pond and the Ponds upstream of it. |
 | `--once` | Print one snapshot and exit. |
+| `--live` | Keep updating even when the output isn't a terminal. |
+| `--json` | Print one snapshot as JSON, with every field [`GET /api/status`](../http_api.md) gives for each Pond: the version running, each Ripple's state, `rebuild_pending`, memory slots held, the last error and more. |
+
+## `runs`
+
+```bash
+duckstring runs [POND] [--upstream] [--ripples] [--limit N] [-m N] [--json]
+```
+
+Lists recent Pond Runs, newest first: the Pond and version, the Run's freshness, its status, when it started, how long it took and its error.
+
+| Argument / option | Default | Description |
+|---|---|---|
+| `POND` | every Pond | Only this Pond's Runs. |
+| `--upstream` | | With `POND`, also the Runs of the Ponds upstream of it. |
+| `--ripples` | | List each Run's Ripple Runs under it, one row per attempt, with retries and errors. |
+| `--limit`, `-n` | `20` | How many Pond Runs, at most 1000. |
+| `--json` | | Print the Runs as JSON, as [`GET /api/runs`](../http_api.md) gives them. Tracebacks are included for a full-access key. |
 
 ## `query`
 
@@ -65,10 +83,10 @@ Downloads a table's published files, or an Object. A plain table is a single Par
 ### `data ls`
 
 ```bash
-duckstring data ls [POND] [-m N]
+duckstring data ls [POND] [-m N] [--json]
 ```
 
-Lists each Pond's published tables and Objects: whether each table is exposed to read-level users (and whether that comes from `pond.toml` or an override), and when each last changed. Without `POND`, lists every Pond. `-m` picks a major version; the default is the served major.
+Lists each Pond's published tables and Objects: whether each table is exposed to read-level users (and whether that comes from `pond.toml` or an override), and when each last changed. Without `POND`, lists every Pond. `-m` picks a major version; the default is the served major. `--json` prints the same as JSON.
 
 ### `data expose`
 

@@ -141,8 +141,8 @@ def refresh(
     if fresh_within_ms is not None and fresh_within_ms < 0:
         raise HTTPException(status_code=422, detail="fresh_within_ms can't be negative")
     fresh_within = timedelta(milliseconds=fresh_within_ms) if fresh_within_ms else None
-    _driver(request).refresh_now(_resolve(request, name, major, version), _parse_f(at), fresh_within)
-    return {"ok": True}
+    asked = _driver(request).refresh_now(_resolve(request, name, major, version), _parse_f(at), fresh_within)
+    return {"ok": True, "requested": asked.isoformat()}
 
 
 class _RefreshBody(BaseModel):

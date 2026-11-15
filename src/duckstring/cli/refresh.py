@@ -20,7 +20,9 @@ from typing import Optional
 
 import typer
 
-_SILENT_HELP = "Send the request without opening the live status view."
+from .wait import LIVE_HELP, TIMEOUT_HELP, WAIT_HELP
+
+_SILENT_HELP = "Send the request and return, without following it."
 _WATCH_HELP = "Keep the status view open after the Pond settles."
 _CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted).")
 _MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest).")
@@ -37,15 +39,28 @@ def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
 
 
 def send_and_watch(cfg: dict, pond: str, major: Optional[int], version: Optional[str], silent: bool, watch: bool,
-                   endpoint: str, payload: dict, success_msg: str, one_shot: bool, params: Optional[dict] = None) -> None:
-    """POST to a Pond route, then (unless ``silent``) open the live status view on it: a one-shot request
-    closes once the Pond settles, a recurring one stays open until Ctrl+C."""
+                   endpoint: str, payload: dict, success_msg: str, one_shot: bool, params: Optional[dict] = None,
+                   wait: bool = False, timeout: Optional[str] = None, live: bool = False, goal=None) -> None:
+    """POST to a Pond route, then (unless ``silent``) follow it. A person gets the live status view: a one-shot
+    request closes it once the Pond settles, a recurring one keeps it open until Ctrl+C. A one-shot request
+    waits for its outcome instead with ``wait``, or by default without a terminal (``cli/wait.py``), where a
+    live view only fills a log; ``live`` keeps the view anyway. ``goal(response, entry)`` says when the target
+    has done what was asked (default: once it settles)."""
     from . import _http
+    from .wait import Waiter, interactive, parse_timeout
 
     url = cfg["url"]
-    _http.post(f"{url}/api/ponds/{pond}/{endpoint}", auth=cfg,
-               params={**_http.pond_params(major, version), **(params or {})}, json=payload)
-    if silent:
+    waiting = not silent and one_shot and (wait or (not watch and not live and not interactive()))
+    seconds = parse_timeout(timeout)
+    waiter = Waiter(cfg, pond, major, version) if waiting else None
+    resp = _http.post(f"{url}/api/ponds/{pond}/{endpoint}", auth=cfg,
+                      params={**_http.pond_params(major, version), **(params or {})}, json=payload)
+    if waiter is not None:
+        body = resp.json() if resp.content else {}
+        what = {"refresh": "Refresh", "wake": "Wake", "force": "Force"}.get(endpoint, endpoint)
+        waiter.wait((lambda e: goal(body, e)) if goal is not None else (lambda e: True), seconds, what)
+        return
+    if silent or (not one_shot and not live and not interactive()):
         typer.echo(success_msg)
         return
     from .status import _run_live
@@ -66,6 +81,9 @@ def now(
              "this run."),
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
+    wait: bool = typer.Option(False, "--wait", help=WAIT_HELP),
+    timeout: Optional[str] = typer.Option(None, "--timeout", help=TIMEOUT_HELP),
+    live: bool = typer.Option(False, "--live", help=LIVE_HELP),
 ) -> None:
     """Ask for the Pond's data to be at least as fresh as now.
 
@@ -78,7 +96,15 @@ def now(
         params["fresh_within_ms"] = _seconds(fresh_within) * 1000
     _, cfg = _resolve(catchment)
     send_and_watch(cfg, pond, major, version, silent, watch, "refresh", {}, "Refresh sent.", one_shot=True,
-                   params=params)
+                   params=params, wait=wait, timeout=timeout, live=live, goal=reached_request)
+
+
+def reached_request(body: dict, entry: dict) -> bool:
+    """Whether a Refresh's target is at least as fresh as the request asked (the route returns it)."""
+    from datetime import datetime
+
+    asked, end = body.get("requested"), entry.get("end_f")
+    return asked is None or (end is not None and datetime.fromisoformat(end) >= datetime.fromisoformat(asked))
 
 
 def add_payload(every: Optional[str], continuous: bool, start: Optional[str], on: Optional[str],
@@ -121,6 +147,7 @@ def add(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
+    live: bool = typer.Option(False, "--live", help=LIVE_HELP),
 ) -> None:
     """Add a recurring Refresh on a schedule or a frequency.
 
@@ -129,9 +156,11 @@ def add(
     another replaces it. With --start, it fires on that schedule whatever else refreshes the Pond, and a Pond
     can have several.
     """
+    from .wait import interactive
+
     payload = add_payload(every, continuous, start, on, until, name)
     _, cfg = _resolve(catchment)
-    if silent:
+    if silent or not (live or interactive()):
         from . import _http
 
         resp = _http.post(f"{cfg['url']}/api/ponds/{pond}/refreshes", auth=cfg,
@@ -147,6 +176,7 @@ def ls(
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
+    as_json: bool = typer.Option(False, "--json", help="Print the Refreshes as JSON."),
 ) -> None:
     """List the Pond's recurring Refreshes with their details."""
     from rich.console import Console
@@ -158,6 +188,11 @@ def ls(
     url, cfg = _resolve(catchment)
     refreshes = _http.get(f"{url}/api/ponds/{pond}/refreshes", auth=cfg,
                           params=_http.pond_params(major, version)).json().get("refreshes", [])
+    if as_json:
+        import json
+
+        typer.echo(json.dumps(refreshes, indent=2))
+        return
     if not refreshes:
         typer.echo("No recurring Refreshes.")
         return

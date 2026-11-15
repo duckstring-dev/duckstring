@@ -925,15 +925,16 @@ class Driver(TapsMixin):
 
     # ─── Refreshes ────────────────────────────────────────────────────────────
 
-    def refresh_now(self, pond: str, at: datetime | None = None, fresh_within: timedelta | None = None) -> None:
+    def refresh_now(self, pond: str, at: datetime | None = None, fresh_within: timedelta | None = None) -> datetime:
         """Refresh now: ask for the Pond's data at least as fresh as ``at`` (a duct forwarding the downstream's
         request), or no older than ``fresh_within`` (Ponds upstream already that fresh don't run); defaults to
-        now."""
+        now. Returns the freshness asked for."""
         with self.lock:
             now = _now()
             t = at or (now - fresh_within if fresh_within else now)
             self.state = refresh_now(self.state, pond, t)
             self._process(now)
+            return t
 
     def add_refresh(self, pond: str, every: timedelta, *, start: datetime | None = None,
                     days: str | None = None, until: datetime | None = None, name: str | None = None) -> dict:

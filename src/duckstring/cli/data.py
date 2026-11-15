@@ -226,6 +226,7 @@ def ls(
     pond: Optional[str] = typer.Argument(None, help="The Pond whose tables and Objects to list (default: every Pond)."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
+    as_json: bool = typer.Option(False, "--json", help="Print the tables and Objects as JSON."),
 ) -> None:
     """List each Pond's published tables and Objects, with whether each table is exposed and when it last changed."""
     from rich.console import Console
@@ -240,9 +241,10 @@ def ls(
     if pond is not None and not ponds:
         raise typer.BadParameter(f"no Pond named '{pond}' with published tables")
     console = Console()
-    if not ponds:
+    if not ponds and not as_json:
         console.print("[dim]No published tables.[/dim]")
         return
+    listing = []
     for p in ponds:
         m = major if major is not None else p["served_major"]
         try:
@@ -250,6 +252,15 @@ def ls(
         except typer.Exit:
             fr = {}
         changed = {**(fr.get("tables") or {}), **{f"\0{k}": v for k, v in (fr.get("objects") or {}).items()}}
+        if as_json:
+            listing.append({
+                "pond": p["name"], "major": m, "majors": p["majors"], "served_major": p["served_major"],
+                "tables": [{"name": t["table"], "exposed": bool(t.get("exposed")), "source": t.get("source"),
+                            "changed": (fr.get("tables") or {}).get(t["table"])}
+                           for t in sorted((t for t in p["tables"] if t["major"] == m), key=lambda t: t["table"])],
+                "objects": [{"name": k, "changed": v} for k, v in sorted((fr.get("objects") or {}).items())],
+            })
+            continue
         majors = ", ".join(str(x) for x in p["majors"])
         console.print(f"[bold]{p['name']}[/bold] v{m}  [dim](majors {majors}; served v{p['served_major']})[/dim]")
         table = Table(show_header=True, header_style="bold dim", box=None, padding=(0, 1))
@@ -262,6 +273,10 @@ def ls(
         for name, f in sorted((k[1:], v) for k, v in changed.items() if k.startswith("\0")):
             table.add_row(name, "Object", "", _short(f))
         console.print(table)
+    if as_json:
+        import json
+
+        typer.echo(json.dumps(listing, indent=2))
 
 
 def _short(iso: Optional[str]) -> str:

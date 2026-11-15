@@ -179,6 +179,9 @@ def deploy(
     all_ponds: bool = typer.Option(False, "--all", help="Deploy all Ponds found in subdirectories of the current directory."),
     dry_run: bool = typer.Option(False, "--dry-run", help="List the files a deploy would upload, and upload nothing."),
     force: bool = typer.Option(False, "--force", help="Replace the version a major line is running, in place."),
+    wait: bool = typer.Option(False, "--wait", help="Wait until the new version has completed a Run (something must "
+                                                    "ask for one), then exit as for refresh now --wait."),
+    timeout: Optional[str] = typer.Option(None, "--timeout", help="With --wait: how long to wait, e.g. 10m or 2h."),
 ) -> None:
     """Deploy the Pond project in the current directory to a Catchment.
 
@@ -214,10 +217,29 @@ def deploy(
     url = cfg["url"]
     if all_ponds:
         console.print(f"Found [bold]{len(pond_dirs)}[/bold] pond(s): {', '.join(d.name for d in pond_dirs)}")
+    deployed = []
     for pond_dir in pond_dirs:
         if all_ponds:
             console.rule(pond_dir.name)
-        _deploy_one(console, pond_dir, url, cfg, catchment_name, git, yes, force)
+        waiter = _version_waiter(cfg, pond_dir) if wait else None
+        if _deploy_one(console, pond_dir, url, cfg, catchment_name, git, yes, force) and waiter is not None:
+            deployed.append(waiter)
+    if deployed:
+        from .wait import parse_timeout
+
+        seconds = parse_timeout(timeout)
+        for waiter, version in deployed:
+            waiter.wait(lambda e, w=waiter, v=version: w.ran_version(v), seconds, f"Version {version}")
+
+
+def _version_waiter(cfg: dict, pond_dir: Path):
+    """A :class:`~duckstring.cli.wait.Waiter` on the line the Pond in ``pond_dir`` deploys to, made before the
+    deploy so a Run the new version completes at once still counts."""
+    from .wait import Waiter
+
+    section = _read_pond_toml(pond_dir).get("pond", {})
+    version = section.get("version", "0.0.0")
+    return Waiter(cfg, section.get("name", "unknown"), int(version.split(".")[0])), version
 
 
 def remove(

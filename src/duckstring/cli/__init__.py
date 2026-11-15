@@ -29,6 +29,7 @@ from .control import (
 )
 from .deploy import deploy, promote
 from .deploy import remove as remove_pond
+from .runs import runs
 from .status import status
 
 app = typer.Typer(help="Duckstring CLI", no_args_is_help=True, add_completion=True)
@@ -75,6 +76,7 @@ pond_cmd.app.command("promote")(promote)
 pond_cmd.app.add_typer(puddle_cmd.app, name="puddle")
 
 app.command("status")(status)
+app.command("runs")(runs)
 app.command("query")(data_cmd.query)
 app.command("get")(data_cmd.get)
 app.add_typer(refresh_cmd.app, name="refresh")

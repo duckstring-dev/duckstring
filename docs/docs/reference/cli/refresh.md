@@ -13,10 +13,10 @@ Every command takes `-c` / `--catchment`, `-m` / `--major` and `-v` / `--version
 ## `refresh now`
 
 ```bash
-duckstring refresh now POND [--fresh-within DURATION] [--silent] [--watch]
+duckstring refresh now POND [--fresh-within DURATION] [--silent | --watch | --wait [--timeout D] | --live]
 ```
 
-Asks for data at least as fresh as the moment the command runs. Every Pond upstream that is older runs (an optional Source only if it has never run), and the result flows down to `POND`. Requests that arrive faster than the pipeline can serve them are paced to its slowest step. Opens the live status view until the Pond settles; `--watch` keeps it open, and `--silent` returns once the request is sent.
+Asks for data at least as fresh as the moment the command runs. Every Pond upstream that is older runs (an optional Source only if it has never run), and the result flows down to `POND`. Requests that arrive faster than the pipeline can serve them are paced to its slowest step. In a terminal it opens the live status view until the Pond settles; without one, or with `--wait`, it waits until `POND` is that fresh and exits 0 if every Run succeeded. See [Following a request](index.md#following-a-request).
 
 | Option | Default | Description |
 |---|---|---|
@@ -25,8 +25,8 @@ Asks for data at least as fresh as the moment the command runs. Every Pond upstr
 ## `refresh add`
 
 ```bash
-duckstring refresh add POND --every PERIOD [--start TIME [--on DAYS] [--until TIME]] [--name NAME] [--silent]
-duckstring refresh add POND --continuous [--name NAME] [--silent]
+duckstring refresh add POND --every PERIOD [--start TIME [--on DAYS] [--until TIME]] [--name NAME] [--silent] [--live]
+duckstring refresh add POND --continuous [--name NAME] [--silent] [--live]
 ```
 
 Adds a recurring Refresh, which repeats the request:
@@ -35,7 +35,7 @@ Adds a recurring Refresh, which repeats the request:
 - **At set times** (`--every` with `--start`): asks at each time on the grid `START + k × PERIOD`, whatever else refreshes the Pond. A Catchment that was down through some of them asks once, for the latest, when it returns.
 - **Continuous** (`--continuous`, or `--every 0s`): asks whenever the Pond can take more, paced to the pipeline's slowest step.
 
-A Pond can have any number of scheduled Refreshes and one `--every` or continuous Refresh. Adding another `--every` or continuous Refresh replaces it; adding one with an existing name replaces that one. Opens the live status view (a recurring Refresh keeps it open until `Ctrl+C`) unless `--silent`.
+A Pond can have any number of scheduled Refreshes and one `--every` or continuous Refresh. Adding another `--every` or continuous Refresh replaces it; adding one with an existing name replaces that one. In a terminal it opens the live status view (a recurring Refresh keeps it open until `Ctrl+C`) unless `--silent`; without one it prints the Refresh's name and exits, unless `--live`.
 
 | Option | Default | Description |
 |---|---|---|
@@ -53,10 +53,10 @@ duckstring refresh add reports --every 1d --start 06:00 --on MON,TUE,WED,THU,FRI
 ## `refresh ls`
 
 ```bash
-duckstring refresh ls POND
+duckstring refresh ls POND [--json]
 ```
 
-Lists the Pond's recurring Refreshes, scheduled first, with their details and when each next asks.
+Lists the Pond's recurring Refreshes, scheduled first, with their details and when each next asks. `--json` prints them as JSON.
 
 ## `refresh rm`
 

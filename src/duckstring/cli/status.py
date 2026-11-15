@@ -256,20 +256,35 @@ def status(
         None, "--version", "-v", help="Specific semver of the selected Pond, e.g. 1.2.3 (requires pond argument)."
     ),
     once: bool = typer.Option(False, "--once", help="Print a single snapshot and exit without live updates."),
+    live: bool = typer.Option(False, "--live", help="Keep updating even without a terminal."),
+    as_json: bool = typer.Option(False, "--json", help="Print the snapshot as JSON: every field /api/status gives."),
 ) -> None:
-    """Show every Pond's state, freshness and Refreshes, updating until Ctrl+C. --once prints one snapshot."""
+    """Show every Pond's state, freshness and Refreshes, updating until Ctrl+C. --once prints one snapshot, as
+    does output to anything but a terminal."""
     from rich.console import Console
 
     from .config import resolve_catchment
+    from .wait import interactive
 
     _, cfg = resolve_catchment(catchment)
     url = cfg["url"]
 
-    if not once:
+    if not once and not as_json and (live or interactive()):
         _run_live(url, cfg, pond, major, version, watch=True)
         return
 
     ponds, edges = _fetch_status(url, cfg)
+
+    if as_json:
+        import json
+
+        if pond is not None:
+            if pond not in {p["name"] for p in ponds}:
+                typer.echo(f"Error: Pond '{pond}' not found.", err=True)
+                raise typer.Exit(1)
+            ponds, edges = _filter_for_pond(ponds, edges, pond, major, version)
+        typer.echo(json.dumps({"ponds": ponds, "edges": [list(e) for e in edges]}, indent=2))
+        return
 
     console = Console()
 

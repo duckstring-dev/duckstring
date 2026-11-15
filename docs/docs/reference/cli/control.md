@@ -34,26 +34,26 @@ duckstring control sleep transactions products
 ### `wake`
 
 ```bash
-duckstring control wake POND... [--silent] [--watch]
+duckstring control wake POND... [--silent | --watch | --wait [--timeout D] | --live]
 ```
 
-Runs each Pond once if its Sources already have newer data, without asking them to run. Clears a failed or killed state first. With one Pond, it opens the live status view until the Pond settles.
+Runs each Pond once if its Sources already have newer data, without asking them to run. Clears a failed or killed state first. With one Pond, it follows the request as described in [Following a request](index.md#following-a-request); `--wait` waits for each Pond named.
 
 ### `force`
 
 ```bash
-duckstring control force POND... [--silent] [--watch]
+duckstring control force POND... [--silent | --watch | --wait [--timeout D] | --live]
 ```
 
-Reruns each Pond now at its current freshness, even with no upstream change, for example after deploying a fix. Freshness doesn't change, so Ponds downstream don't rerun because of it. Clears a failed or killed state first.
+Reruns each Pond now at its current freshness, even with no upstream change, for example after deploying a fix. Freshness doesn't change, so Ponds downstream don't rerun because of it. Clears a failed or killed state first. Follows the request as `wake` does.
 
 ### `rebuild`
 
 ```bash
-duckstring control rebuild POND... [--clear]
+duckstring control rebuild POND... [--clear] [--wait [--timeout D]]
 ```
 
-Marks each Pond so its next run rebuilds from scratch: its working database is dropped and every Source is read in full. Trickles restart their change history, so Ponds downstream also read them in full on their next run. Nothing runs immediately; the rebuild happens whenever the Pond next runs. `--clear` removes a pending mark.
+Marks each Pond so its next run rebuilds from scratch: its working database is dropped and every Source is read in full. Trickles restart their change history, so Ponds downstream also read them in full on their next run. Nothing runs immediately; the rebuild happens whenever the Pond next runs. `--clear` removes a pending mark. `--wait` waits until that run has finished and exits with its outcome ([Following a request](index.md#following-a-request)).
 
 ### `repair`
 

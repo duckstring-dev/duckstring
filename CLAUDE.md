@@ -179,7 +179,11 @@ src/duckstring/
     secret.py              #   secret set/ls/rm (value prompted, never in argv)
     alert.py               #   alert add/ls/rm/test/log
     status.py, catchment.py, duct.py (catchment duct …, incl. open/close), config.py, _http.py
-                           #   Top level (14): status query get refresh window control data pond catchment duck spout secret alert app
+    runs.py                #   runs [POND] (Run history, --ripples, --json)
+    wait.py                #   --wait for refresh now/wake/force/rebuild/deploy (Waiter: exit 0/1/2), interactive():
+                           #   without a TTY status prints once and one-shot commands wait instead of a Live view
+                           #   Top level (15): status runs query get refresh window control data pond catchment duck spout
+                           #   secret alert app
   alerts/                  # Failure and freshness notifications
     event.py               #   AlertEvent (rendered and sanitised; never a traceback) + KNOWN_EVENTS/normalise_events
     base.py                #   Notifier protocol + get_notifier(uri) scheme registry + destination validation
@@ -295,7 +299,7 @@ Routes live at `/api/ponds/{name}/…` and accept any deployed Pond (recommendin
 - **kill** (`engine.kill_pond`): terminate the Duck and park the Pond as killed (terminal, overrides retries) until wake/force/clear.
 - **clear** (`engine.clear_pond`): reset a failed or killed Pond without running it. It abandons the halted Run (`start_f → end_f`) so liveness doesn't fail it again, and unblocks downstream.
 - **failure-budget**: show or set the live retry budgets (`--immediate`, `--on-change`).
-- One-shot commands (refresh/wake/force) open the live status view until the target settles (idle/failed/killed/blocked). `refresh add` leaves it open.
+- One-shot commands (refresh/wake/force) open the live status view until the target settles (idle/failed/killed/blocked) on a terminal; without one (or with `--wait`) they wait for the outcome and exit 0/1/2 (`cli/wait.py`; `refresh now` waits for the `requested` freshness its route returns). `refresh add` leaves the view open (prints and exits without a terminal).
 
 **Bulk operations** (`Driver.batch`, `POST /api/ponds/batch`, the UI Selector, `duckstring control wipe`; see `plans/selector_ui.md`) apply a set of operations to a set of Ponds in precedence order `kill > sleep > reset > wipe > remove > clear > repair > rebuild`.
 - Repair can't be combined with Remove or Reset. Remove implies Reset and is terminal per Pond (later operations skip a removed line). Reset and Wipe are separate: `wipe`/`wipe_history` clears `pond_run`/`ripple_run` only, without touching data.
