@@ -472,7 +472,11 @@ def test_a_pond_that_moves_on_closes_runs_left_behind(tmp_path):
 
     rows = dict(d.db.execute("SELECT f, status FROM pond_run").fetchall())
     assert rows[later.isoformat()] == "success"
-    assert rows[stale_f] == "failed", f"the abandoned earlier Run was left behind: {rows}"
+    # The later Run covered its work: superseded, not a failure (attention FINDINGS 15: it was "failed").
+    assert rows[stale_f] == "superseded", f"the earlier Run was left behind: {rows}"
+    run = next(r for r in d.run_history("src@1", False, False, 10) if r["f"] == stale_f)
+    assert run["superseded_by"] == later.isoformat() and run["error"] is None
+    assert d.metrics_snapshot()["failures"].get(("src", 1), 0) == 0
 
 
 def test_closing_abandoned_runs_never_rewrites_a_reported_outcome(tmp_path):

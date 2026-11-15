@@ -42,6 +42,11 @@ aggregate downstream), the downstream Run went from 88 ms at Run 100 and 198 ms 
 - **A Pond importing numpy at module level failed** ("cannot load module more than once per process"), and builder
   Ripples failed now and then with `KeyError: 'duckstring.trickle_builder'`. Loading a Pond's code evicted every
   module the import added; now only the Pond's own.
+- **A Run a later one overtook is `superseded`, not `failed`.** When Runs queue behind a long one, a later Run can
+  do the work of one still waiting, which then never finishes. It was recorded as failed ("abandoned"), so run
+  history, `duckstring_pond_failures_total` on `/metrics` and a failed Pond's error all counted it as a failure.
+  `/api/runs` gives the covering Run's freshness as `superseded_by`. Earlier rows are left as they were.
+  Migration `036`.
 - **Deploying a fix for a failed Pond left it showing running for good,** and re-ran only the Ripple that had
   failed, on output the broken version wrote. The Duck took the earlier version's completed Ripples as its own
   (the Run ledger is the major line's); a new version now runs every Ripple of the Run.

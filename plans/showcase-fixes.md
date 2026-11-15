@@ -371,3 +371,10 @@ Likely mechanism, to confirm: `clear_on_redeploy` → `clear_pond` and the re-di
 every Ripple in the engine, while the Duck, whose ledger has the roots complete for that `f`, re-runs and reports
 only `join_lines`. Check whether the throttle or memory slots read the stuck Ripples as busy. The reproduction
 script is in the session scratchpad (`repro.sh`): demo, break, refresh, fix, then read the Ripple states.
+
+## 18. An overtaken Run is recorded as failed (attention FINDINGS 15)
+
+**Done 2026-11-15.** `_close_abandoned_runs` closes older running rows as `superseded`, with `superseded_by` (the
+covering Run's freshness) and no error (migration `036`, a `pond_run` rebuild). Shown in `/api/runs`, `duckstring
+runs` and the web UI's run history; no longer counted by `/metrics` or taken as a failed Pond's error. Earlier
+`failed` ("abandoned") rows are left as they were, by decision.

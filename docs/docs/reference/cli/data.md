@@ -33,7 +33,7 @@ Shows every Pond's state (running, queued, idle, failed, blocked or killed), fre
 duckstring runs [POND] [--upstream] [--ripples] [--limit N] [-m N] [--json]
 ```
 
-Lists recent Pond Runs, newest first: the Pond and version, the Run's freshness, its status, when it started, how long it took and its error.
+Lists recent Pond Runs, newest first: the Pond and version, the Run's freshness, its status, when it started, how long it took and its error. A Run is `running`, `success`, `failed`, `killed` or `superseded`: a superseded Run never finished because a later Run did its work, and its detail names that Run.
 
 | Argument / option | Default | Description |
 |---|---|---|

@@ -148,3 +148,12 @@ def test_deploy_waits_for_the_new_version_to_complete_a_run(runner, fake, tmp_pa
     assert result.exit_code == 0, result.output
     assert any(u.endswith("/api/deploy") for u in cat.posted)
     assert "Version 1.1.0" in result.output
+
+
+def test_runs_shows_a_superseded_run_as_neither_failed_nor_an_error(runner, fake):
+    covered = _run("reports@1", T0, "superseded")
+    covered["superseded_by"] = T1
+    fake([_entry("idle")], [_run("reports@1", T1, "success"), covered], [])
+    result = runner.invoke(app, ["runs", "reports"])
+    assert result.exit_code == 0, result.output
+    assert "superseded by the Run at 2026-11-15 05:00:10" in result.output and "failed" not in result.output

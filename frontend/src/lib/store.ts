@@ -87,6 +87,7 @@ export function mapRun(r: RawPondRun): PondRun {
     status: r.status,
     error: r.error,
     traceback: r.traceback,
+    supersededBy: r.superseded_by ?? null,
     persist: r.persist
       ? { status: r.persist.status, error: r.persist.error,
           startedAt: r.persist.started_at, finishedAt: r.persist.finished_at }

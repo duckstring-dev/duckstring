@@ -262,6 +262,7 @@ export interface RawPondRun {
   status: string;
   error: string | null;
   traceback: string | null;
+  superseded_by?: string | null; // a superseded Run: the freshness of the later Run that did its work
   // The run's Persist (the async mirror to the durable plane — a separate log item from the run, which
   // closes at local publish). null = no mirror recorded (no cloud / direct-to-plane / not landed yet).
   persist?: RawPersist | null;

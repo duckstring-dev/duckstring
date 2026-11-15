@@ -40,7 +40,9 @@ def runs(
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
     major: Optional[int] = typer.Option(None, "--major", "-m", help="With POND: the major line (default: latest)."),
 ) -> None:
-    """Show recent Pond Runs, newest first: version, freshness, status, start, duration and error."""
+    """Show recent Pond Runs, newest first: version, freshness, status, start, duration and error.
+
+    A superseded Run never finished because a later Run did its work; its detail names that Run."""
     from . import _http
     from .config import resolve_catchment
 
@@ -68,15 +70,18 @@ def runs(
     if not history:
         console.print("[dim]No Runs.[/dim]")
         return
-    colour = {"success": "green", "failed": "red", "killed": "red", "running": "cyan"}
+    colour = {"success": "green", "failed": "red", "killed": "red", "running": "cyan", "superseded": "dim"}
     table = Table(show_header=True, header_style="bold dim", box=None, padding=(0, 1))
-    for col in ("Pond", "Version", "Freshness (UTC)", "Status", "Started (UTC)", "Took", "Error"):
-        table.add_column(col, no_wrap=col != "Error")
+    for col in ("Pond", "Version", "Freshness (UTC)", "Status", "Started (UTC)", "Took", "Detail"):
+        table.add_column(col, no_wrap=col != "Detail")
     for r in history:
         st = r.get("status") or ""
+        if st == "superseded" and r.get("superseded_by"):
+            detail = f"[dim]superseded by the Run at {_when(r['superseded_by'])}[/dim]"
+        else:
+            detail = f"[red]{escape(_first_line(r.get('error')))}[/red]" if r.get("error") else ""
         table.add_row(r["id"], r.get("version") or "", _when(r.get("f")), f"[{colour.get(st, 'white')}]{st}[/]",
-                      _when(r.get("started_at")), _duration(r.get("started_at"), r.get("finished_at")),
-                      escape(_first_line(r.get("error"))))
+                      _when(r.get("started_at")), _duration(r.get("started_at"), r.get("finished_at")), detail)
         for rr in r.get("ripples") or []:
             rst = rr.get("status") or ""
             retry = f" (retry {rr['retry']})" if rr.get("retry") else ""

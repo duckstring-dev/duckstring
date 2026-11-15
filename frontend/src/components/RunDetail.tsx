@@ -164,6 +164,12 @@ export function RunDetail() {
             )}
           </div>
 
+          {run.status === 'superseded' && run.supersededBy ? (
+            <div style={{ color: '#a1a1aa', fontSize: 11, marginBottom: 14 }}>
+              Superseded by the Run at {freshness(run.supersededBy)}, which did its work.
+            </div>
+          ) : null}
+
           <div style={{ fontSize: 9, fontWeight: 700, color: '#52525b', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>
             Ripples
           </div>

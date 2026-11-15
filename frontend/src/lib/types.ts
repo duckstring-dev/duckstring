@@ -146,6 +146,7 @@ export interface PondRun {
   status: string;
   error: string | null; // Pond-level failure message (dead/silent Duck, ledger error), if any
   traceback: string | null; // full traceback for a Pond-level failure, if any
+  supersededBy: string | null; // status "superseded": the freshness of the later Run that did its work
   // The async mirror to the durable plane (plans/persist.md) — its own log item, landing after the run.
   persist?: { status: string; error: string | null; startedAt: string | null; finishedAt: string | null } | null;
   ripples?: RippleRun[];

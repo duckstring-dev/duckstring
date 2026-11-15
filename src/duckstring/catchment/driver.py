@@ -3771,7 +3771,11 @@ class Driver(TapsMixin):
         self._close_abandoned_runs(pond, f, now)
 
     def _close_abandoned_runs(self, pond: str, through_f: str, now: datetime) -> None:
-        """Close any OLDER ``running`` row for this version — the Pond has demonstrably moved past them.
+        """Close any OLDER ``running`` row for this line as ``superseded`` by the Run at ``through_f``, which just
+        succeeded: the Pond has demonstrably moved past them, and that Run's publish covers their work. Usually
+        a Run another overtook: Ripples keep demand as a set, so one that hadn't started Run f2 when f3 arrived
+        runs once, at f3, and f2 never completes. Not a failure (a Run that failed was closed as one when it
+        did), so it isn't counted or reported as one (attention FINDINGS 15; before, these rows were ``failed``).
 
         The invariant: a Pond that is not in flight has no running rows. A row is only closed by the Duck
         reporting *that* Run, so any path where the Pond advances without a report (an operator clear over
@@ -3784,12 +3788,11 @@ class Driver(TapsMixin):
         enumerated, which is the useful property when the exact sequence has resisted reproduction."""
         # Every version of the line: a Run a redeploy overtook is still this Pond's Run.
         cur = self.db.execute(
-            "UPDATE pond_run SET finished_at = ?, status = 'failed', "
-            "error = COALESCE(error, 'abandoned — the Pond advanced past this Run without completing it') "
+            "UPDATE pond_run SET finished_at = ?, status = 'superseded', superseded_by = ? "
             "WHERE status = 'running' AND f < ? AND pond_version_id IN ("
             "SELECT pv.id FROM pond_version pv JOIN pond p ON p.pond_name_id = pv.pond_name_id "
             "AND p.major = pv.major WHERE p.id = ?)",
-            (_iso(now), through_f, self.meta[pond]["pond_id"]),
+            (_iso(now), through_f, through_f, self.meta[pond]["pond_id"]),
         )
         if cur.rowcount:
             self.db.commit()
@@ -4622,7 +4625,7 @@ class Driver(TapsMixin):
             order = "ASC" if after is not None else "DESC"
             rows = self.db.execute(
                 "SELECT pn.name, pv.major, pv.version, pr.pond_version_id, pr.f, pr.started_at, pr.finished_at, "
-                "pr.status, pr.error, pr.traceback "
+                "pr.status, pr.error, pr.traceback, pr.superseded_by "
                 "FROM pond_run pr "
                 "JOIN pond_version pv ON pv.id = pr.pond_version_id "
                 "JOIN pond_name pn ON pn.id = pv.pond_name_id "
@@ -4645,12 +4648,14 @@ class Driver(TapsMixin):
                                            "started_at": psa, "finished_at": pfa}
 
             runs = []
-            for pname, major, version, pv_id, f, started_at, finished_at, status, error, tb in rows:
+            for pname, major, version, pv_id, f, started_at, finished_at, status, error, tb, superseded_by in rows:
                 key = pond_key(pname, major)
                 run = {
                     "pond": pname, "major": major, "id": key, "version": version, "f": f,
                     "started_at": started_at, "finished_at": finished_at, "status": status,
                     "error": error, "traceback": tb,
+                    # A ``superseded`` Run: the freshness of the later Run that did its work (see _close_abandoned_runs).
+                    "superseded_by": superseded_by,
                     # null = no mirror recorded for this run: no cloud, a remote direct-to-plane Duck,
                     # or the async mirror hasn't completed/coalesced past this f yet.
                     "persist": persists.get((self.meta.get(key, {}).get("pond_id"), f)),
