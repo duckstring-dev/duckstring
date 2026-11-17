@@ -191,6 +191,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                             datetime.fromisoformat(data["f"]), data.get("source_f"),
                             _retain_from(data), force=data.get("force", False), flock=data.get("flock"),
                         )
+                        executor.exact_ints = bool(data.get("exact_ints"))  # the line's: see RunInputs
                         if data.get("rebuild"):
                             executor.wipe()  # cold reset: the run rebuilds from scratch
                         _launch(core.begin_run(

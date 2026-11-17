@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 
@@ -57,14 +58,15 @@ class DataPlane:
     (``read_select`` / ``list_tables`` / ``table_path``)."""
 
     def export(self, con, data_dir: Path, *, mode: str = "overwrite", f=None, retain_from=KEEP_ALL,
-               held=frozenset()) -> None:
+               held=frozenset(), exact_ints: bool = False) -> None:
         """Publish every table in ``con``'s registry to ``data_dir`` for cross-Pond consumption.
 
         ``mode`` selects the write semantic (only ``"overwrite"`` in Phase 1). ``f`` is the run's
         freshness, which names the overwrite versions this publish writes. ``retain_from`` is the
         Catchment's retention bound for superseded versions (see :func:`prune_versions`). ``held`` names
-        tables the run checked as unchanged, which keep their published copy. Rejects any table carrying a
-        reserved (``_duckstring_*``) column."""
+        tables the run checked as unchanged, which keep their published copy. ``exact_ints`` publishes a
+        128-bit integer column (an integer ``SUM``) as ``BIGINT`` rather than ``DOUBLE`` (the line's flag; see
+        :func:`_out`). Rejects any table carrying a reserved (``_duckstring_*``) column."""
         raise NotImplementedError
 
     def read_select(self, data_dir: Path, table: str, *, as_of=None, pin=None, con=None) -> str:
@@ -762,8 +764,17 @@ class ParquetDataPlane(DataPlane):
     base ⊎ changelog (see :meth:`DataPlane.read_select`)."""
 
     def export(self, con, data_dir, *, mode: str = "overwrite", f=None, retain_from=KEEP_ALL,
-               held=frozenset()) -> None:
-        """See :meth:`DataPlane.export`. ``retain_from`` drives version retention after the publish (see
+               held=frozenset(), exact_ints: bool = False) -> None:
+        """See :meth:`DataPlane.export`. ``exact_ints`` holds for every file this publish writes, the base a
+        merge table's first load staged included (:func:`_out`)."""
+        token = _EXACT_INTS.set(exact_ints)
+        try:
+            self._export(con, data_dir, mode=mode, f=f, retain_from=retain_from, held=held)
+        finally:
+            _EXACT_INTS.reset(token)
+
+    def _export(self, con, data_dir, *, mode: str, f, retain_from, held) -> None:
+        """The publish itself. ``retain_from`` drives version retention after the publish (see
         :func:`prune_versions`); the default keeps every version. ``held`` names the overwrite tables this run
         checked as unchanged: they keep their published version and sidecar entry (:func:`publish_plan`)."""
         from datetime import datetime, timezone
@@ -811,7 +822,8 @@ class ParquetDataPlane(DataPlane):
                     vstore = data_dir.child(trickle.version_dir_name(table))
                     vstore.mkdir()
                     with vstore.copy_to(trickle.part_name(version_f)) as uri:
-                        con.execute(f"COPY ({_concrete_select(con, table)}) TO '{uri}' (FORMAT PARQUET)")
+                        con.execute(f"COPY ({_out(con, _concrete_select(con, table), table=table)}) TO '{uri}' "
+                                    "(FORMAT PARQUET)")
             for main in merge_mains:
                 _publish_tiered_main(con, data_dir, main, f)
             if f is not None:
@@ -950,7 +962,8 @@ def _export_parts(con, data_dir, table: str, f, *, chunk: bool = False) -> None:
     # this run (a same-f re-merge, or a replay) — older f's are immutable history and are skipped if present.
     to_write = (reg_fs - set(existing)) | ({f} if (f is not None and f in reg_fs) else set())
     for fi in to_write:
-        select = f'SELECT * FROM "{table}" WHERE "{trickle.F_COL}" = {trickle._ts(fi)}'
+        select = _out(con, f'SELECT * FROM "{table}" WHERE "{trickle.F_COL}" = {trickle._ts(fi)}',
+                      table=trickle.base_table_name(table))
         written = _write_part_chunks(con, part_store, fi, select) if chunk else []
         if not written:
             with part_store.copy_to(trickle.part_name(fi)) as uri, _unordered(con, unordered):
@@ -1057,20 +1070,25 @@ def _export_companions(con, data_dir, f) -> None:
                         keys = ", ".join(q(c) for c in by)
                         rows += (f' UNION ALL BY NAME SELECT {keys}, {q(trickle.F_COL)}, true AS "_duckstring_gone" '
                                  f'FROM {q(drops)} WHERE {fcond}')
+                    rows, wide = _state_out(con, rows)
                     with dstore.copy_to(part) as uri:
                         con.execute(f"COPY ({rows}) TO '{uri}' (FORMAT PARQUET)")
                     entry.update(full=last["full"], by=by, delta_rows=delta_rows)
                 else:
+                    rows, wide = _state_out(con, f'SELECT * FROM "{reg}"')
                     with store.copy_to(part) as uri:
-                        con.execute(f'COPY (SELECT * FROM "{reg}") TO \'{uri}\' (FORMAT PARQUET)')
+                        con.execute(f"COPY ({rows}) TO '{uri}' (FORMAT PARQUET)")
                     entry.update(full=f_iso, by=by, delta_rows=0)
                     full_written.append((kind, base, part))
                 if trickle._table_exists(con, drops):
                     con.execute(f'DELETE FROM {q(drops)} WHERE {q(trickle.F_COL)} <= {trickle._ts(f)}')  # published
             else:
+                rows, wide = _state_out(con, f'SELECT * FROM "{reg}"')
                 with store.copy_to(part) as uri:
-                    con.execute(f'COPY (SELECT * FROM "{reg}") TO \'{uri}\' (FORMAT PARQUET)')
+                    con.execute(f"COPY ({rows}) TO '{uri}' (FORMAT PARQUET)")
                 full_written.append((kind, base, part))
+            if wide:
+                entry["int128"] = wide  # published as DECIMAL(38,0); cast back to HUGEINT when loaded
             state_section[f"{kind}/{base}"] = entry
     if state_section:  # record the snapshots in the sidecar's `state` section (skipped by read/diff surfaces)
         sidecar = trickle.load_sidecar(data_dir)
@@ -1104,6 +1122,7 @@ def _load_state_companion(con, store, kind: str, table: str, entry: dict | None)
     deltas = [n for n in snap_store.parquet_names("deltas") if trickle.part_f(n) > trickle.part_f(full)]
     if kind != "agg" or not deltas or not entry.get("by"):
         con.execute(f"CREATE OR REPLACE TABLE {reg} AS SELECT * FROM read_parquet('{snap_store.uri(full)}')")
+        _restore_int128(con, reg, entry)
         return True
     keys = ", ".join(trickle._q(c) for c in entry["by"])
     parts = [f"SELECT *, false AS \"_duckstring_gone\", 0 AS _src FROM read_parquet('{snap_store.uri(full)}')"]
@@ -1115,7 +1134,66 @@ def _load_state_companion(con, store, kind: str, table: str, entry: dict | None)
         f"SELECT *, row_number() OVER (PARTITION BY {keys} ORDER BY _src DESC) AS _rn FROM ({union})"
         f") WHERE _rn = 1 AND NOT \"_duckstring_gone\""
     )
+    _restore_int128(con, reg, entry)
     return True
+
+
+def _restore_int128(con, reg: str, entry: dict) -> None:
+    """Cast a loaded state companion's 128-bit integer columns back from the ``DECIMAL(38,0)`` they were
+    published as (:func:`_state_out`)."""
+    from . import trickle_io as trickle
+
+    for c, t in (entry.get("int128") or {}).items():
+        con.execute(f"ALTER TABLE {reg} ALTER COLUMN {trickle._q(c)} TYPE {t}")
+
+
+# Whether this publish writes a 128-bit integer column (an integer ``SUM``'s ``HUGEINT``) as ``BIGINT`` rather than
+# letting DuckDB's Parquet writer make it ``DOUBLE``, which reads 9 as 9.0 and rounds above 2^53. Set per publish
+# from the line's flag (``pond.exact_ints``: lines first deployed from 0.9 on); older lines keep ``DOUBLE``, which
+# their Sinks' contracts record. Read by every path that writes a table's files (:func:`_out`).
+_EXACT_INTS: ContextVar[bool] = ContextVar("duckstring_exact_ints", default=False)
+_INT128 = {"HUGEINT": ("BIGINT", -(2**63), 2**63 - 1), "UHUGEINT": ("UBIGINT", 0, 2**64 - 1)}
+
+
+def _out(con, select: str, exact: bool | None = None, table: str | None = None) -> str:
+    """``select`` as published: with exact integers (the line's flag, else this publish's), each ``HUGEINT``
+    column as ``BIGINT`` (``UHUGEINT`` as ``UBIGINT``). A value outside that range fails the publish with an
+    error naming the column, rather than being rounded."""
+    from . import trickle_io as trickle
+
+    if not (_EXACT_INTS.get() if exact is None else exact):
+        return select
+    rel = con.sql(select)
+    swaps = []
+    for c, t in zip(rel.columns, rel.types, strict=True):
+        spec = _INT128.get(str(t))
+        if spec is None:
+            continue
+        to, lo, hi = spec
+        q = trickle._q(c)
+        where = f"{table}.{c}" if table else c
+        msg = (f"'{where}' holds a value outside {to}'s range; cast it to DECIMAL(38,0) (or DOUBLE) in the "
+               f"Ripple to publish it").replace("'", "''")
+        swaps.append(f"CASE WHEN {q} BETWEEN {lo} AND {hi} THEN CAST({q} AS {to}) "
+                     f"ELSE error('{msg}') END AS {q}")
+    if not swaps:
+        return select
+    return f"SELECT * REPLACE ({', '.join(swaps)}) FROM ({select})"
+
+
+def _state_out(con, select: str) -> tuple[str, dict[str, str]]:
+    """An aggregate's or scan's state ``select`` as published, and the columns it changed: a ``HUGEINT`` (or
+    ``UHUGEINT``) column as ``DECIMAL(38,0)``, which Parquet holds exactly, so a Duck that rebuilds its
+    registry from published state carries on summing exactly (:func:`_load_state_companion` casts it back).
+    Before, it came back ``DOUBLE``, and a sum above 2^53 lost its last digits."""
+    from . import trickle_io as trickle
+
+    rel = con.sql(select)
+    cols = {c: str(t) for c, t in zip(rel.columns, rel.types, strict=True) if str(t) in _INT128}
+    if not cols:
+        return select, {}
+    swaps = ", ".join(f"CAST({trickle._q(c)} AS DECIMAL(38,0)) AS {trickle._q(c)}" for c in cols)
+    return f"SELECT * REPLACE ({swaps}) FROM ({select})", cols
 
 
 def _concrete_select(con, table: str) -> str:
@@ -1668,7 +1746,7 @@ def _publish_tiered_main(con, data_dir: Path, main: str, f) -> None:
 BOOT_STAGING = ".boot"
 
 
-def stage_boot_base(con, data_dir, main: str, rows_sql: str) -> str | None:
+def stage_boot_base(con, data_dir, main: str, rows_sql: str, exact_ints: bool = False) -> str | None:
     """Write a merge main's first load (``rows_sql``) as size-bounded Parquet chunks under the local
     ``data_dir``'s :data:`BOOT_STAGING`, in the order the rows arrive, and return a ``SELECT`` over them for
     the registry's base to be a view of. :func:`_publish_local_base` moves them into ``{main}__base/`` at
@@ -1680,7 +1758,7 @@ def stage_boot_base(con, data_dir, main: str, rows_sql: str) -> str | None:
     data_dir = _as_storage(data_dir)
     size = max(_MIN_CHUNK_BYTES, int(_compact_threshold(con, main)))
     with data_dir.copy_dir_to(BOOT_STAGING, main) as uri:  # clears an earlier attempt's chunks
-        con.execute(f"COPY ({rows_sql}) TO '{uri}' "
+        con.execute(f"COPY ({_out(con, rows_sql, exact_ints, table=main)}) TO '{uri}' "
                     f"(FORMAT PARQUET, FILE_SIZE_BYTES {size}, ROW_GROUP_SIZE {_ROW_GROUP_ROWS})")
     names = data_dir.parquet_names(BOOT_STAGING, main)
     if not names:
@@ -1810,7 +1888,8 @@ def _export_bands(con, data_dir: Path, main: str) -> None:
         if rows and not band_store.exists(dest):
             band_store.mkdir()
             with band_store.copy_to(dest) as uri:
-                con.execute(f'COPY (SELECT * FROM {q(pending)} WHERE {above}) TO \'{uri}\' (FORMAT PARQUET)')
+                con.execute(f"COPY ({_out(con, f'SELECT * FROM {q(pending)} WHERE {above}', table=main)}) "
+                            f"TO '{uri}' (FORMAT PARQUET)")
 
     con.execute("BEGIN TRANSACTION")
     try:
@@ -1987,7 +2066,7 @@ def _publish_base_chunks(con, data_dir: Path, main: str, f, chunk_bytes: int) ->
     staging_name = base_name + ".tmp"
     staging_store = data_dir.child(staging_name)
     size = max(_MIN_CHUNK_BYTES, int(chunk_bytes))
-    ordered = _base_order_select(con, main, trickle.cold_base_name(main))
+    ordered = _out(con, _base_order_select(con, main, trickle.cold_base_name(main)), table=main)
     written = []
     with data_dir.copy_dir_to(staging_name) as staging_uri:  # clears staging, yields the dir target
         con.execute(

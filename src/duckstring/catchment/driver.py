@@ -558,13 +558,14 @@ class Driver(TapsMixin):
             name_by_pnid = {r[0]: r[1] for r in db.execute("SELECT id, name FROM pond_name")}
             rows = db.execute("""
                 SELECT pn.name, p.major, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind,
-                       p.is_draw, p.is_spout, pv.dbt, pv.app, pv.deployed_at
+                       p.is_draw, p.is_spout, pv.dbt, pv.app, pv.deployed_at, p.exact_ints
                 FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id
                 JOIN pond_version pv ON pv.id = p.pond_version_id
             """).fetchall()
             deployed = {pond_key(name, major) for name, major, *_ in rows}
             pondid_to_key = {pid: pond_key(nm, mj) for nm, mj, pid, *_ in rows}
-            for name, major, pond_id, pv_id, version, source_path, kind, is_draw, is_spout, dbt, app, deployed_at in rows:
+            for (name, major, pond_id, pv_id, version, source_path, kind, is_draw, is_spout, dbt, app, deployed_at,
+                 exact_ints) in rows:
                 self.meta[pond_key(name, major)] = {
                     "name": name, "major": major, "version_id": pv_id, "version": version,
                     "source_path": source_path, "pond_id": pond_id, "kind": kind,
@@ -572,9 +573,11 @@ class Driver(TapsMixin):
                     # An App (plans/apps.md): its validated [app] section, run by the AppSupervisor.
                     "is_app": app is not None, "app": json.loads(app) if app is not None else None,
                     "deployed_at": deployed_at,
+                    # Publishes an integer SUM as BIGINT, not DOUBLE (lines first deployed from 0.9 on; 037).
+                    "exact_ints": bool(exact_ints),
                 }
 
-            for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw, is_spout, _dbt, app, _at in rows:
+            for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw, is_spout, _dbt, app, _at, _x in rows:
                 is_app = app is not None
                 key = pond_key(name, major)
                 sources, optional, missing = [], set(), []
@@ -3664,6 +3667,8 @@ class Driver(TapsMixin):
             # The major line's additive schema contract this Run must keep (vetted by the Duck before
             # publishing); None for a first run or a deliberate rollback (governed by min_version).
             "contract": self._contract_for(pond),
+            # Whether this line publishes an integer SUM as BIGINT (lines first deployed from 0.9 on) or DOUBLE.
+            "exact_ints": self.meta[pond].get("exact_ints", False),
             # What each Source has published ({name: iso}) when this Run started: the version its
             # overwrite Source reads are pinned to, and the bar a LOCAL publish must meet to be read rather
             # than a stale leftover of a Source that moved to a remote Pool (registry.resolve_data_dir).

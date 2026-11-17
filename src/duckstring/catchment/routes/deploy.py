@@ -314,8 +314,9 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
             ))
 
         # Select this version for (pond_name, major) — the `pond` pointer.
+        # A new line publishes exact integers (migration 037); an existing one keeps what it had.
         db.execute(
-            "INSERT INTO pond (pond_name_id, major, pond_version_id) VALUES (?, ?, ?) "
+            "INSERT INTO pond (pond_name_id, major, pond_version_id, exact_ints) VALUES (?, ?, ?, 1) "
             "ON CONFLICT(pond_name_id, major) DO UPDATE SET pond_version_id = excluded.pond_version_id",
             (pn_id, major, pv_id),
         )

@@ -136,7 +136,8 @@ class DbtExecutor(RunInputs):
 
         with self._lock:
             con = duckdb.connect(str(self.registry_path))
-            return _export_data(con.cursor(), self.own_data_dir, f, contract, self.take_retain_from(f))
+            return _export_data(con.cursor(), self.own_data_dir, f, contract, self.take_retain_from(f),
+                                exact_ints=self.exact_ints)
 
     def persist(self) -> int:
         """Mirror the local publish to the durable layer — see :meth:`RippleExecutor.persist`."""

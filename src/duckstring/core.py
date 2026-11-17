@@ -709,10 +709,15 @@ class Pond:
         sources_changed: bool = True, skip_sink=None, staging_dir=None, own_data_dir=None,
         flock: str | None = None, sources=None, flock_env: dict[str, str] | None = None,
         static_tables: dict | None = None, ripple: str | None = None, ancestors=None,
-        table_writers: dict[str, str] | None = None, change_sink=None,
+        table_writers: dict[str, str] | None = None, change_sink=None, exact_ints: bool = True,
     ) -> None:
         from .changes import ChangeLedger
         from .engine.core import NEVER
+
+        # Whether this line publishes a 128-bit integer (an integer SUM) as BIGINT rather than DOUBLE: the line's
+        # flag on a Catchment (lines first deployed from 0.9 on), always in a local run. Used by a merge table's
+        # first load, which is staged as published files during the Ripple (dataplane._out).
+        self.exact_ints = exact_ints
 
         # The declared Sources, when known (a deployed run's pins, or a local run's pond.toml), so a
         # reference to anything else fails clearly instead of waiting on a Source that will never publish.
@@ -1565,7 +1570,7 @@ class Pond:
             return None
         from .dataplane import stage_boot_base
 
-        return stage_boot_base(con, store, name, rows_sql)
+        return stage_boot_base(con, store, name, rows_sql, exact_ints=self.exact_ints)
 
     def read_delta(self, ref: str):
         """The changes to a table over this run's window ``(previous_f, f]``: a Source's (``"source.table"``),

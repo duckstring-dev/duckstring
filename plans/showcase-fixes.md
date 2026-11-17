@@ -204,7 +204,9 @@ cycle. `GET /api/ponds/{name}/freshness` already returns `changed`; give `AppPon
   last local Run's `f` as `previous_f`, with Sources' deltas read from their copied Puddles.
 - **No `Cache-Control` on an App's static files** (`app_proxy.py` 140, `FileResponse`). Send `no-cache` (revalidate
   by ETag) by default.
-- **`agg.sum` over an integer column returns DOUBLE.** Keep an integer type (BIGINT, or DECIMAL(38,0) where it could
+- **Done 2026-11-18, per line:** a line first deployed from 0.9 on publishes 128-bit integers as `BIGINT` (migration
+  `037`); agg/acc state is published exactly as `DECIMAL(38,0)` on every line.
+  **`agg.sum` over an integer column returns DOUBLE.** Keep an integer type (BIGINT, or DECIMAL(38,0) where it could
   overflow, the HUGEINT question from 0.7.0).
 - **Docs.** `agg.argmax` returns the latest row's value with NULL included, unlike DuckDB's `arg_max`, which skips
   NULLs (a plain-SQL check written with `arg_max` disagrees); say so in the `agg` reference. In the ingesting guide,

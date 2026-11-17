@@ -111,7 +111,7 @@ def _run_ripple(
 
 
 def _export_data(con, data_dir, f: datetime | None, contract=None, retain_from=KEEP_ALL,
-                 held=frozenset()) -> dict | None:
+                 held=frozenset(), exact_ints: bool = False) -> dict | None:
     from ..dataplane import get_data_plane
     from ..schema_contract import CONTRACT_PREFIX, ContractViolation, contract_violations, extract_schema
 
@@ -120,7 +120,7 @@ def _export_data(con, data_dir, f: datetime | None, contract=None, retain_from=K
     # file handle the way a separate connect() to the same file would. The data plane owns the publish
     # format (Parquet today); ``f`` is the run's freshness, recorded by backends that snapshot.
     try:
-        schema = extract_schema(con)
+        schema = extract_schema(con, exact_ints)
         # The contract gate: vet the output BEFORE publishing. A violation aborts the publish, so the
         # live tables keep last-good data; the Catchment fails the Pond and blocks downstream.
         violations = contract_violations(schema, contract)
@@ -128,7 +128,8 @@ def _export_data(con, data_dir, f: datetime | None, contract=None, retain_from=K
             # The stable prefix is the failure's machine-readable sub-reason: the Catchment's status
             # derives failure_kind="contract" from it (survives restarts — no extra state to persist).
             raise ContractViolation(f"{CONTRACT_PREFIX}{'; '.join(violations)}")
-        get_data_plane().export(con, data_dir, mode="overwrite", f=f, retain_from=retain_from, held=held)
+        get_data_plane().export(con, data_dir, mode="overwrite", f=f, retain_from=retain_from, held=held,
+                                exact_ints=exact_ints)
         return schema
     finally:
         con.close()
@@ -189,6 +190,11 @@ class RunInputs:
     pipelined Runs don't share them: the Sources' published freshness (the version pins its reads use),
     the Catchment's ``retain_from`` for this line's own overwrite versions, and the Pond's Flock settings
     (``flock.job_settings``). Shared by both executors."""
+
+    # Whether this line publishes a 128-bit integer as BIGINT (``pond.exact_ints``, lines first deployed from
+    # 0.9 on; older lines keep DOUBLE, which their Sinks' contracts record). The line's, so constant: taken
+    # from each begin_run job.
+    exact_ints: bool = False
 
     def _inputs(self) -> dict:
         if not hasattr(self, "_run_inputs"):
@@ -379,7 +385,7 @@ class RippleExecutor(RunInputs):
                 source_f=self.source_f_for(f),
                 flock=self.flock_for(f),
                 staging_dir=self.staging_dir, own_data_dir=self.own_data_dir,
-                scope={"static_tables": pond.statics, "ripple": ripple_name,
+                scope={"static_tables": pond.statics, "ripple": ripple_name, "exact_ints": self.exact_ints,
                        "ancestors": pond.ancestors(ripple_name),
                        "table_writers": {**self.table_writers, **pond.sql_writers()}},
             )
@@ -409,7 +415,8 @@ class RippleExecutor(RunInputs):
         their published copy. Returns the published output schema (for the Catchment to capture)."""
         from ..objects import commit_objects
 
-        schema = _export_data(self._cursor(), self.own_data_dir, f, contract, self.take_retain_from(f), held)
+        schema = _export_data(self._cursor(), self.own_data_dir, f, contract, self.take_retain_from(f), held,
+                              self.exact_ints)
         # Objects commit only after the table publish passed the contract gate — a failed run leaves the
         # last-good Object intact (the staged writes are discarded on the next run / wipe).
         commit_objects(self.staging_dir, self.own_data_dir, f, held)

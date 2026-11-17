@@ -57,6 +57,19 @@ aggregate downstream), the downstream Run went from 88 ms at Run 100 and 198 ms 
 - **`append_table` from Python data** (`con.from_arrow`, a registered DataFrame) failed in a Pond's registry on
   DuckDB 2.0 ("it reads a Python object").
 
+### Integer sums published exactly
+
+DuckDB's `SUM` over integers is a 128-bit `HUGEINT`, which Parquet can't hold, so it was published as `DOUBLE`: a
+count of 9 read as `9.0` downstream, and anything above 2^53 (about 9×10^15) was rounded without a word.
+
+- **A major version first deployed from this release publishes it as `BIGINT`** (`UHUGEINT` as `UBIGINT`), in every
+  table and Trickle file. A value outside `BIGINT`'s range fails the Run, naming the column. Lines deployed
+  before keep `DOUBLE`, which their Sinks' contracts record; a new major version moves a Pond to `BIGINT`.
+  `pond run` publishes `BIGINT`. Migration `037`.
+- **An aggregate's state is stored exactly** in what it publishes, so a Duck that rebuilds its working database
+  from published state (a fresh cloud Duck, or after losing it) carries on summing exactly. It came back as
+  `DOUBLE`, and a sum above 2^53 lost its last digits.
+
 ### A CLI for scripts and agents
 
 - **Without a terminal, nothing opens a live view.** `status` prints one snapshot; `refresh now`, `control wake`

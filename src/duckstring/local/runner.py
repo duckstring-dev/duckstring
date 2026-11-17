@@ -79,7 +79,8 @@ def _export(project: Project, f=None, held=frozenset()) -> None:
         con = duckdb.connect(str(registry))
         try:
             # Nothing else reads a local run's output while it publishes, so keep only the newest version.
-            get_data_plane().export(con, project.out_dir, mode="overwrite", f=f, retain_from=None, held=held)
+            get_data_plane().export(con, project.out_dir, mode="overwrite", f=f, retain_from=None, held=held,
+                                    exact_ints=True)  # as a line first deployed from 0.9 on publishes
         finally:
             con.close()
 

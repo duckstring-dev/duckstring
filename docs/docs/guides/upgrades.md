@@ -19,7 +19,7 @@ Versions are `MAJOR.MINOR.PATCH`:
 
 A type change counts as widening only when every existing value survives it: a larger integer type, a `DECIMAL` with no fewer digits on either side of the point, a finer timestamp, or `FLOAT` to `DOUBLE`. Any other change, including `INTEGER` to `DOUBLE` and any change to or from `VARIANT`, is breaking.
 
-Types are compared as the Ponds downstream read them, which is as published. Parquet has no 128-bit integer, so a `HUGEINT` column (the type of an integer `SUM`) is published as `DOUBLE`, and the check treats it as `DOUBLE` too.
+Types are compared as the Ponds downstream read them, which is as published. Parquet has no 128-bit integer, so a `HUGEINT` column (the type of an integer `SUM`) is published as `BIGINT`, and the check treats it as `BIGINT` too. A sum too large for `BIGINT` fails the Run, naming the column; cast it to `DECIMAL(38,0)` in the Ripple to publish it. A major version first deployed before Duckstring 0.9 publishes such a column as `DOUBLE`, as it always has, so that its Sinks' types don't change; deploying a new major version moves the Pond to `BIGINT`.
 
 Duckstring checks the shape of a Pond's output, but not what it means. If a column keeps its name but changes units, that's a breaking change only you can recognise, and it needs a new major version too.
 

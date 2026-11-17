@@ -96,19 +96,24 @@ CONTRACT_PREFIX = "version contract violation: "
 _HUGE = re.compile(r"\bU?HUGEINT\b")
 
 
-def published_type(dtype: str) -> str:
+def published_type(dtype: str, exact_ints: bool = False) -> str:
     """The type a column of DuckDB type ``dtype`` has once published, which is what a Sink reads. Parquet has no
     128-bit integer, so DuckDB writes ``HUGEINT`` (an integer ``SUM``'s type) as ``DOUBLE``, and a Pond database
     rebuilt from what it published holds ``DOUBLE`` there too; a NULL-typed column is published as ``INTEGER``
     (``dataplane._concrete_select``). The contract compares these, so a Duck that rebuilt its database (any
     fresh remote Duck) doesn't break it. Contracts recorded before this held ``HUGEINT``; both sides go through
-    here, so they still compare equal."""
+    here, so they still compare equal.
+
+    A line with ``exact_ints`` (first deployed from 0.9 on) publishes ``HUGEINT`` as ``BIGINT`` and ``UHUGEINT``
+    as ``UBIGINT`` instead (``dataplane._out``)."""
     from .trickle_io import concrete_type
 
+    if exact_ints:
+        return _HUGE.sub(lambda m: "UBIGINT" if m.group(0).startswith("U") else "BIGINT", concrete_type(dtype))
     return _HUGE.sub("DOUBLE", concrete_type(dtype))
 
 
-def extract_schema(con) -> Schema:
+def extract_schema(con, exact_ints: bool = False) -> Schema:
     """The output schema of every published table in a Pond's registry connection
     (``{table: {column: type}}``).
 
@@ -126,7 +131,7 @@ def extract_schema(con) -> Schema:
 
     def _cols(table: str) -> dict[str, str]:
         return {
-            row[0]: published_type(row[1])
+            row[0]: published_type(row[1], exact_ints)
             for row in con.execute(f'DESCRIBE "{table}"').fetchall()
             if not str(row[0]).startswith(RESERVED_PREFIX)
         }
