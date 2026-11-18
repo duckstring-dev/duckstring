@@ -117,8 +117,8 @@ DEFAULT_IMMEDIATE_RETRIES = 1
 def _pond_config(toml_path: Path) -> dict:
     """Extract the deploy-relevant config from pond.toml: sources, retries, kind, dbt_project. (Windows
     are operational config managed via `duckstring window`, not declared at deploy time.)"""
-    cfg = {"sources": {}, "immediate_retries": DEFAULT_IMMEDIATE_RETRIES, "source_retries": 0, "kind": None, "dbt_project": None,
-           "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None,
+    cfg = {"sources": {}, "immediate_retries": DEFAULT_IMMEDIATE_RETRIES, "source_retries": 0, "kind": None,
+           "dbt_project": None, "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None,
            "flock_accept": None, "app": None}
     if not toml_path.exists():
         return cfg
