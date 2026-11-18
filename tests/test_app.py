@@ -232,6 +232,9 @@ def test_an_app_that_exits_fails_until_woken(catchment_client):
                               "main.py": _APP_PY})
     r = client.get("/apps/dash/v1/hello")
     assert r.status_code == 503 and "exited while starting" in r.text
+    assert not _app_entry(client)["is_failed"]  # immediate_retries defaults to 1: one more start
+    r = client.get("/apps/dash/v1/hello")
+    assert r.status_code == 503 and "exited while starting" in r.text
     entry = _app_entry(client)
     assert entry["is_failed"] and "exit code 3" in entry["error"]
     r = client.get("/apps/dash/v1/hello")

@@ -38,7 +38,7 @@ Occasionally one computation is too large for a Duck's memory, usually when a Tr
 
 ## Failures
 
-When a Ripple fails, Duckstring can retry it within the same Pond Run, and can retry the whole Pond Run the next time a Source updates. Both retry budgets are set in `pond.toml` and default to zero. Once they're used up, the Pond is marked failed.
+When a Ripple fails, Duckstring can retry it within the same Pond Run, and can retry the whole Pond Run the next time a Source updates. Both retry budgets are set in `pond.toml`. By default a failed Ripple is retried once within its run, and a failed run isn't retried when a Source updates. Once they're used up, the Pond is marked failed.
 
 Nothing from a failed run is published, so downstream Ponds keep reading the last good output. They're marked blocked rather than failed, so a failure only shows at its root. A failed Pond recovers when a later run succeeds, when a fixed version is deployed, or when it's cleared by hand. Each failure's error and traceback appear in the run history, and failures can also be sent as alerts to a webhook or email address.
 

@@ -108,10 +108,16 @@ def _flock_accept(value) -> str | None:
     return ",".join(dict.fromkeys(names))
 
 
+# A failed Ripple is retried once within its Pond Run unless pond.toml says otherwise (plans/showcase-fixes.md):
+# a transient error (a first-Run race, a flaky fetch) otherwise left a Pond failed until someone cleared it. Seeds a
+# line's budget at its first deploy; after that the Catchment's value is the operator's.
+DEFAULT_IMMEDIATE_RETRIES = 1
+
+
 def _pond_config(toml_path: Path) -> dict:
     """Extract the deploy-relevant config from pond.toml: sources, retries, kind, dbt_project. (Windows
     are operational config managed via `duckstring window`, not declared at deploy time.)"""
-    cfg = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": None, "dbt_project": None,
+    cfg = {"sources": {}, "immediate_retries": DEFAULT_IMMEDIATE_RETRIES, "source_retries": 0, "kind": None, "dbt_project": None,
            "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None,
            "flock_accept": None, "app": None}
     if not toml_path.exists():
@@ -119,7 +125,7 @@ def _pond_config(toml_path: Path) -> dict:
     info = _read_toml(toml_path.read_text(encoding="utf-8"))
     cfg["sources"] = info.get("sources", {})
     pond = info.get("pond", {})
-    cfg["immediate_retries"] = pond.get("immediate_retries", 0)
+    cfg["immediate_retries"] = pond.get("immediate_retries", DEFAULT_IMMEDIATE_RETRIES)
     cfg["source_retries"] = pond.get("source_retries", 0)
     cfg["kind"] = pond.get("type")
     cfg["dbt_project"] = pond.get("dbt_project")

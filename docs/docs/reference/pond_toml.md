@@ -29,7 +29,7 @@ products = "1.1.0"
 | `type` | string | `"pond"` | `"inlet"`, `"pond"` or `"outlet"`. Descriptive: it records the Pond's intended role and is shown in the UI, but doesn't change how it runs. `"app"` is different: it makes the Pond an [App](#app). |
 | `ripples` | string | `"src/pond.py"` | Path to the module defining the Python Ripples. Optional when the Pond has only [SQL Ripples](#ripples). |
 | `puddles` | string | `"src/puddles.py"` | Path to the module defining the Puddles. |
-| `immediate_retries` | integer | `0` | How many times a failed Ripple is retried within the same Pond Run. |
+| `immediate_retries` | integer | `1` | How many times a failed Ripple is retried within the same Pond Run. |
 | `source_retries` | integer | `0` | How many times a failed Pond Run is retried when a Source next updates. |
 | `memory` | string | | The memory each Python Ripple holds outside DuckDB, such as `"6GB"`, unless the Ripple sets its own with `@ripple(memory=...)`. SQL Ripples and dbt models never need it. See [`@ripple`](python/decorators.md#ripple). For an [App](#app), the memory it sets aside while it runs, DuckDB included. |
 | `duck` | string | `"catchment"` | Where the Pond runs: `"catchment"` for the Catchment's own machine, a built-in pool (`"S"`, `"M"`, `"L"`, `"XL"`), or the name of a pool defined on the Catchment. Falls back to the Catchment's machine when cloud compute isn't configured or the pool doesn't exist. See [`duckstring duck`](cli/duck.md). |

@@ -663,12 +663,19 @@ def test_deploy_seeds_retry_budget_from_toml(catchment_client):
 
 def test_budget_set_and_get(catchment_client):
     _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet", toml_text=OUTLET_ONLY_TOML)
-    assert catchment_client.get("/api/ponds/outlet/budget").json() == {"immediate_retries": 0, "source_retries": 0}
+    # A failed Ripple is retried once by default (plans/showcase-fixes.md).
+    assert catchment_client.get("/api/ponds/outlet/budget").json() == {"immediate_retries": 1, "source_retries": 0}
     r = catchment_client.post("/api/ponds/outlet/budget", json={"immediate_retries": 3, "source_retries": 2})
     assert r.status_code == 200
     assert catchment_client.get("/api/ponds/outlet/budget").json() == {"immediate_retries": 3, "source_retries": 2}
     # status surfaces the live budgets too
     assert _pond_status(catchment_client, "outlet")["source_retries"] == 2
+
+
+def test_a_pond_toml_budget_of_zero_is_kept(catchment_client):
+    _deploy(catchment_client, name="outlet", version="2.0.0", kind="outlet",
+            toml_text=OUTLET_ONLY_TOML + "immediate_retries = 0\n")
+    assert catchment_client.get("/api/ponds/outlet/budget").json() == {"immediate_retries": 0, "source_retries": 0}
 
 
 def test_budget_negative_422(catchment_client):

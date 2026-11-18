@@ -112,8 +112,9 @@ calls it), and any other table more than one Ripple may create (`_duckstring_fp`
 per Duck too. As a second line, treat a catalog write-write conflict like a lock error in the executor (one immediate
 retry of the Ripple, not counted against `immediate_retries`).
 
-Open question for the author: should `immediate_retries` default to 1? A first-run race, a transient storage error
-or an OOM retry are all cheaper retried than left failed for a person.
+`immediate_retries` now defaults to 1 (the author's call, 2026-11-18; `routes/deploy.DEFAULT_IMMEDIATE_RETRIES`):
+a first-run race, a transient storage error or an OOM retry are all cheaper retried than left failed for a person.
+It seeds a line's budget at its first deploy, so lines already deployed keep theirs.
 
 Test: a Pond of eight Ripples each writing a merge table, first Run, repeated 50 times on a fresh registry: no failure.
 

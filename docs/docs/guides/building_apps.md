@@ -295,7 +295,7 @@ DuckDB's limit applies in each process. With gunicorn's `--workers 2`, each work
 
 The first request starts the App's process, and that request waits until the App is ready: `health` answers with a `2xx`, or without `health`, the port accepts connections. The process stops after `idle_timeout` with no request in flight (default `30m`; `"0"` keeps it running), and also on a redeploy, a Kill, removal, and when the Catchment shuts down. An open WebSocket or a response still streaming counts as in flight.
 
-A process that exits on its own, or isn't ready within 60 seconds, counts as a failure. The App is started again on the next request up to `immediate_retries` times in a row, which is 0 unless `pond.toml` sets it. After that the App fails: an [alert](monitoring_and_failures.md#alerts) fires as for any failed Pond, and requests get a `503` until you bring it back with `duckstring control wake`, `duckstring app restart` or a redeploy.
+A process that exits on its own, or isn't ready within 60 seconds, counts as a failure. The App is started again on the next request up to `immediate_retries` times in a row, which is 1 unless `pond.toml` sets it. After that the App fails: an [alert](monitoring_and_failures.md#alerts) fires as for any failed Pond, and requests get a `503` until you bring it back with `duckstring control wake`, `duckstring app restart` or a redeploy.
 
 While the App is failed, its Refreshes and Taps ask nothing of its Sources, as for any failed Pond, so a pipeline that runs only for the App waits too. Give a Source its own recurring Refresh if it should keep running regardless.
 

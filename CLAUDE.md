@@ -690,7 +690,7 @@ Dev ports are reserved: the docs on 3000 (`docusaurus start`), the Playground on
 
 ## Fault tolerance
 
-Two retry budgets, both defaulting to 0, live on the Pond and can be changed with `control failure-budget` (`pond_retry` table; seeded on deploy from `pond.toml` / `pond_version` defaults, then owned by the operator):
+Two retry budgets live on the Pond (`immediate_retries` defaulting to 1, `routes/deploy.DEFAULT_IMMEDIATE_RETRIES`, since 2026-11-18; `source_retries` to 0; a Spout's or Draw's with no `pond_retry` row is 0) and can be changed with `control failure-budget` (`pond_retry` table; seeded on deploy from `pond.toml` / `pond_version` defaults, then owned by the operator):
 - `immediate_retries`: Ripple Run retries within one Pond Run (per frontier, consumed by the Duck via `worker.immediate_left`).
 - `source_retries` (on change): whole Pond Runs the Catchment re-attempts when a Source updates.
 

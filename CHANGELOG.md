@@ -102,6 +102,10 @@ also had no way to append without checking the table, though speed is the reason
 
 ### Other changes
 
+- **A failed Ripple is retried once by default** (`immediate_retries = 1`), within the same Run. A transient error,
+  such as a race on a Pond's first Run or a fetch that timed out, left the Pond failed until someone cleared it.
+  It applies to a Pond line's first deploy; a line already deployed keeps its budget, and `pond.toml` or
+  `control failure-budget` can set 0. An App is likewise started once more after its process exits before it fails.
 - **`compact_threshold=` on the builder's `.merge()`**, as on `pond.merge_table`: a builder's output can fold its
   change log at its own size, where only the Catchment-wide `DUCKSTRING_COMPACT_THRESHOLD` reached it.
 - **A builder can start from a table a parent Ripple wrote:** `pond.trickle("own_table")`, with the table's
