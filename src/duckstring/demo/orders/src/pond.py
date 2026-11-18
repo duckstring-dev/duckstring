@@ -47,6 +47,6 @@ def ingest(pond):
         FROM range({n}) AS t(i)
         """
     )
-    # Insert-only, each row stamped with pond.f. order_id is unique by construction (the fast path), so we
-    # declare it as the key (pk=) but pass fail_on_conflict=False — no need to pay the per-write uniqueness check.
-    pond.append_table("order_line", batch, pk="order_id", fail_on_conflict=False)
+    # Insert-only, each row stamped with pond.f. order_id is unique by construction, so it's declared as the key
+    # (pk=) and the default on_conflict="skip_check" appends without reading the table.
+    pond.append_table("order_line", batch, pk="order_id")

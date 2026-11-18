@@ -26,7 +26,7 @@ def main(n):
         e = trickle.at(con, f, pf)
         keys = ", ".join(f"(hash(({first} + i) * {j + 3}) % {DIM})::INT AS k{j}" for j in range(n))
         e.append_table("fact", con.sql(f"SELECT {first} + i AS id, {keys} FROM range({rows}) t(i)"),
-                       pk="id", fail_on_conflict=False)
+                       pk="id")
         for j in range(n):
             bump = "" if seed is None else f"+ CASE WHEN hash(i + {seed + j}) % 1000 = 0 THEN 1 ELSE 0 END"
             e.merge_table(f"d{j}", con.sql(f"SELECT i AS k{j}, (i % 97) {bump} AS v{j} FROM range({DIM}) t(i)"),

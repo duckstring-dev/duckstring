@@ -126,20 +126,20 @@ This saves `priced_line` as a table, so when only a store's region changes, the 
 
 ## Append-only results
 
-`.append()` writes to an append Trickle instead of a merge Trickle. Use it when output rows are only ever added. It changes what happens when an input changes: by default, a change that would alter an existing output row raises an error, since an append table can't rewrite history. With `fail_on_conflict=False`, such changes are ignored, which is exactly what you want to record a value as it was at the time:
+`.append()` writes to an append Trickle instead of a merge Trickle. Use it when output rows are only ever added, such as each new order joined to the product it was for. By default it appends each run's new rows without reading the table. A change that would alter an existing output row can't be applied to an append table, so that row keeps the values it was written with, which is what you want to record a price as it was at the time of sale:
 
 ```python
 (
     pond.trickle("orders.order_line")
     .join(pond.trickle("catalog.product"), on="product_id")
     .select("s0.order_id, s0.quantity, s1.unit_price")
-    .append("price_at_sale", pk="order_id", fail_on_conflict=False, log_drops=False)
+    .append("price_at_sale", pk="order_id")
 )
 ```
 
-When a product's price changes, existing rows keep the price they were sold at, and only new orders get the new price. With `log_drops=True` (the default), the ignored changes are recorded in a `price_at_sale__droplog` table for inspection.
+When a product's price changes, existing rows keep the price they were sold at, only new orders get the new price, and the changes left out are recorded in a `price_at_sale__droplog` table (`log_drops=False` turns that off). If the builder has to recompute the whole result, for example when this Pond has fallen behind the history its Sources keep, it adds only the rows the table doesn't already hold.
 
-With this combination, and the output keyed by the first source's own key, the builder only joins new order lines against the current products, rather than working out what a price change would have affected. That's much cheaper when the joined table changes often.
+`on_conflict="fail"` raises instead, for a pipeline that should never change a written row. `on_conflict="keep_prior"` also checks each new row against the table, dropping any whose key is already there. With `keep_prior`, `log_drops=False`, and the output keyed by the first source's own key, the builder only joins new order lines against the current products, rather than working out what a price change would have affected. That's much cheaper when the joined table changes often.
 
 ## Anything else: `.sql()`
 

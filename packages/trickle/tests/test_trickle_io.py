@@ -41,23 +41,26 @@ def test_append_idempotent_replay_at_same_f(db):
     assert first_row(db.sql("SELECT count(*) FROM event"))[0] == 1
 
 
-def test_append_fail_on_conflict_catches_duplicates(db):
-    # fail_on_conflict defaults True; with a pk it asserts uniqueness. Duplicate within the appended batch:
-    with pytest.raises(T.DeltaError, match="duplicate"):
-        T.append_table(db, "event", db.sql("SELECT 1 AS id UNION ALL SELECT 1 AS id"), ts(1), ("id",))
+def test_append_on_conflict_fail_catches_conflicts(db):
+    fail = {"on_conflict": "fail"}
+    # One key with different values in a batch:
+    with pytest.raises(T.DeltaError, match="different values in one batch"):
+        T.append_table(db, "event", db.sql("SELECT 1 AS id, 'a' AS v UNION ALL SELECT 1, 'b'"), ts(1), ("id",), **fail)
     assert not db.sql("SELECT 1 FROM information_schema.tables WHERE table_name = 'event'").fetchall()
 
-    # Collision against existing history (a different run's row).
-    T.append_table(db, "event", db.sql("SELECT 1 AS id"), ts(1), ("id",))
-    with pytest.raises(T.DeltaError, match="already present"):
-        T.append_table(db, "event", db.sql("SELECT 1 AS id"), ts(2), ("id",))
+    # A key already in the table with different values (another Run's row):
+    T.append_table(db, "event", db.sql("SELECT 1 AS id, 'a' AS v"), ts(1), ("id",), **fail)
+    with pytest.raises(T.DeltaError, match="not append-safe"):
+        T.append_table(db, "event", db.sql("SELECT 1 AS id, 'b' AS v"), ts(2), ("id",), **fail)
+    # The same row again is nothing to decide: skipped.
+    assert not T.append_table(db, "event", db.sql("SELECT 1 AS id, 'a' AS v"), ts(2), ("id",), **fail)
 
     # A replay at the same f re-appends its own rows without tripping the check.
-    T.append_table(db, "event", db.sql("SELECT 1 AS id"), ts(1), ("id",))
+    T.append_table(db, "event", db.sql("SELECT 1 AS id, 'a' AS v"), ts(1), ("id",), **fail)
     assert first_row(db.sql("SELECT count(*) FROM event"))[0] == 1
 
-    # fail_on_conflict=False is the trust-the-writer fast path: a colliding pk is appended without a check.
-    T.append_table(db, "event", db.sql("SELECT 1 AS id"), ts(3), ("id",), fail_on_conflict=False)
+    # skip_check (the default) reads nothing: a repeated key is appended as given.
+    T.append_table(db, "event", db.sql("SELECT 1 AS id, 'b' AS v"), ts(3), ("id",))
     assert first_row(db.sql("SELECT count(*) FROM event"))[0] == 2
 
 

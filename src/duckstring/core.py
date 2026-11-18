@@ -1459,30 +1459,37 @@ class Pond:
         return normalize_pk(pk) if pk is not None else ()
 
     def append_table(
-        self, name: str, relation, *, pk=None, fail_on_conflict=True, retain_t=None, retain_n=None
+        self, name: str, relation, *, pk=None, on_conflict="skip_check", log_drops=True, retain_t=None,
+        retain_n=None, **removed,
     ) -> bool:
         """Append ``relation`` to the append Trickle ``name``, stamping each row with ``pond.f``.
 
         Args:
             name: Table name. Created on first use.
             relation: The new rows.
-            pk: The table's primary key, recorded for consumers and checked when ``fail_on_conflict`` is set.
-            fail_on_conflict: With ``pk`` set, raise before writing if the key is repeated within
-                ``relation`` or already in the table's history. ``False`` skips the check.
+            pk: The table's primary key, recorded for consumers. Without one, the whole row is the key.
+            on_conflict: What happens to a row whose key is already in the table. ``"skip_check"`` (the default)
+                reads nothing and appends every row; a declared ``pk`` is your promise. ``"keep_prior"`` drops
+                it. ``"fail"`` raises before writing when its values differ. Under ``"keep_prior"`` and
+                ``"fail"`` a row identical to one already there is skipped, and two rows in ``relation`` with
+                the same key and different values raise.
+            log_drops: Under ``"keep_prior"``, record dropped rows whose values differ from the table's in a
+                published ``{name}__droplog``.
             retain_t: A ``timedelta``; drop history rows stamped earlier than ``f - retain_t``.
             retain_n: Keep only the rows from the newest ``retain_n`` runs.
 
         Returns ``True`` if rows were appended. Safe to repeat at the same ``f``. Raises ``DeltaError`` on a
-        key conflict or a missing key column.
+        conflict under ``"fail"``, or a missing key column.
 
         Reference: https://docs.duckstring.com/reference/python/trickle_io
         """
         from . import trickle_io as trickle
 
+        trickle.reject_removed(removed, f"append_table('{name}')", {True: "fail", False: "skip_check"})
         self.record_lineage_write(name)
         changed = trickle.append_table(
-            self.con, name, relation, self.f, self._resolve_pk(pk),
-            fail_on_conflict=fail_on_conflict, retain_t=retain_t, retain_n=retain_n,
+            self.con, name, relation, self.f, self._resolve_pk(pk), on_conflict=on_conflict,
+            log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
         )
         self._changes.record_write(name, changed)
         return changed

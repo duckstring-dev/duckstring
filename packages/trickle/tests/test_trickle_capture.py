@@ -252,18 +252,18 @@ def test_capture_sql_with_pipeline_before():
     assert stmt["alias"] == "t"
 
 
-def test_capture_append_options_waived_conflicts():
+def test_capture_append_options_record_the_conflict_rule():
     def run(host):
         host.trickle("orders.order_line", p=1.0).alias("ol") \
             .join(host.trickle("prices.price", p=1.0).alias("pr"), on={"pid": "id"}) \
             .select("ol.id AS id, pr.unit") \
-            .append("snap", pk="id", fail_on_conflict=False, log_drops=False)
-        host.trickle("src.event", p=1.0).alias("e").append("log", pk="id", fail_on_conflict=False, log_drops=True)
+            .append("snap", pk="id", on_conflict="keep_prior", log_drops=False)
+        host.trickle("src.event", p=1.0).alias("e").append("log", pk="id", on_conflict="fail", log_drops=False)
         return []
 
     stmts = _cap(run)["statements"]
-    _eq(stmts[0]["output"]["options"], {"fail_on_conflict": False, "log_drops": False})
-    _eq(stmts[1]["output"]["options"], {"fail_on_conflict": False, "log_drops": True})
+    _eq(stmts[0]["output"]["options"], {"on_conflict": "keep_prior", "log_drops": False})
+    _eq(stmts[1]["output"]["options"], {"on_conflict": "fail"})  # nothing is dropped under fail
 
 
 def test_capture_merge_option_escapes():

@@ -31,7 +31,7 @@ def sources(con, f, pf, first, n, seed):
     e.append_table("order_line", con.sql(f"""
         SELECT {first} + i AS order_id, (hash(i + {first}) % {PRODUCTS})::INT + 1 AS product_id,
                (hash(i * 7 + {first}) % 8)::INT + 1 AS quantity FROM range({n}) t(i)"""),
-        pk="order_id", fail_on_conflict=False)
+        pk="order_id")
     drift = "" if seed is None else (
         f"CASE WHEN hash(product_id + {seed}) % {PRODUCTS // REPRICED} = 0 THEN 1.1 ELSE 1.0 END *")
     e.merge_table("product", con.sql(f"""

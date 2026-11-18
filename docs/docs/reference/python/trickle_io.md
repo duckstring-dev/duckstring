@@ -23,23 +23,27 @@ All three write methods stamp rows with `pond.f`, are safe to repeat at the same
 ### `append_table`
 
 ```python
-pond.append_table(name, relation, *, pk=None, fail_on_conflict=True, retain_t=None, retain_n=None) -> bool
+pond.append_table(name, relation, *, pk=None, on_conflict="skip_check", log_drops=True, retain_t=None,
+                  retain_n=None) -> bool
 ```
 
-Appends the rows of `relation` to the append Trickle `name`, creating it on first use. Rows are only ever added; nothing is compared with existing rows unless `pk` is set.
+Appends the rows of `relation` to the append Trickle `name`, creating it on first use. Rows are only ever added. By default nothing is compared with the rows already in the table.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `name` | `str` | | Table name. |
 | `relation` | `duckdb.DuckDBPyRelation` | | The new rows. |
-| `pk` | `str` or list of `str` | `None` | The table's primary key. Recorded for downstream consumers and the data viewer, and checked when `fail_on_conflict` is true. |
-| `fail_on_conflict` | `bool` | `True` | With `pk` set, check that the key is unique within `relation` and not already in the table's history, and raise before writing if not. `False` skips the check. Has no effect when `pk` is unset. |
+| `pk` | `str` or list of `str` | `None` | The table's primary key. Recorded for downstream consumers and the data viewer, and used by `on_conflict`. Without one, `on_conflict` treats the whole row as the key. |
+| `on_conflict` | `str` | `"skip_check"` | What happens to a row whose key is already in the table. `"skip_check"` reads nothing and appends every row; a declared `pk` is your promise that it's unique. `"keep_prior"` drops the row. `"fail"` raises before writing if its values differ. |
+| `log_drops` | `bool` | `True` | Under `"keep_prior"`, record dropped rows whose values differ from the table's in a published `{name}__droplog` table (your columns plus `_duckstring_d` and `_duckstring_f`). |
 | `retain_t` | `timedelta` | `None` | Drop history rows stamped earlier than `f - retain_t`. |
 | `retain_n` | `int` | `None` | Keep only the rows from the newest `retain_n` runs. |
 
 **Returns** `True` if any rows were appended. An empty relation, or a replay of rows already written at this `f`, returns `False`.
 
-**Raises** `DeltaError` on a primary key conflict, or if a `pk` column is missing from `relation`.
+Under `"keep_prior"` and `"fail"`, a row identical to one already in the table is skipped, identical rows within `relation` are written once, and two rows in `relation` with the same key and different values raise. Both read the table's history on every run.
+
+**Raises** `DeltaError` on a conflict under `"fail"`, on a key with different values within `relation` under `"keep_prior"` or `"fail"`, or if a `pk` column is missing from `relation`.
 
 Retention bounds how far back a consumer can read changes. A consumer that falls behind the retained history reads the whole table instead, so retention never affects correctness.
 
@@ -47,7 +51,7 @@ Retention bounds how far back a consumer can read changes. A consumer that falls
 @ripple
 def ingest(pond):
     batch = pond.con.sql("SELECT ... AS order_id, ... FROM ...")
-    pond.append_table("order_line", batch, pk="order_id", fail_on_conflict=False)
+    pond.append_table("order_line", batch, pk="order_id")
 ```
 
 ### `merge_table`

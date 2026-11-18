@@ -106,4 +106,4 @@ def ingest(pond):
     except Exception:
         fresh = incoming
 
-    pond.append_table("gh_event", fresh, pk="event_id", fail_on_conflict=False)
+    pond.append_table("gh_event", fresh, pk="event_id")

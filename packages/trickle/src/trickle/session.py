@@ -95,12 +95,13 @@ class Epoch:
 
     # ─── writing ───────────────────────────────────────────────────────────────
 
-    def append_table(self, name: str, relation, *, pk=None, fail_on_conflict=True, retain_t=None,
-                     retain_n=None) -> bool:
+    def append_table(self, name: str, relation, *, pk=None, on_conflict="skip_check", log_drops=True,
+                     retain_t=None, retain_n=None, **removed) -> bool:
         """Append ``relation`` to the append Trickle ``name`` at this run's epoch. See
         :func:`trickle.io.append_table`. Returns whether rows were appended."""
-        return io.append_table(self.con, name, relation, self.f, io.normalize_pk(pk),
-                               fail_on_conflict=fail_on_conflict, retain_t=retain_t, retain_n=retain_n)
+        io.reject_removed(removed, f"append_table('{name}')", {True: "fail", False: "skip_check"})
+        return io.append_table(self.con, name, relation, self.f, io.normalize_pk(pk), on_conflict=on_conflict,
+                               log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
 
     def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None, **kw) -> bool:
         """Merge the complete current state ``relation`` into the merge Trickle ``name``, recording only what

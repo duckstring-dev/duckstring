@@ -100,8 +100,8 @@ D_COL = "_duckstring_d"  # the Z-set weight (+1 present / -1 retraction)
 
 # A merge Trickle's CDC stream lives in a ``{table}__changelog`` companion registry table.
 CHANGELOG_SUFFIX = "__changelog"
-# A builder ``.append(..., log_drops=True)`` records rows it could not append (retractions / value
-# conflicts under ``fail_on_conflict=False``) in a ``{table}__droplog`` companion — an append-only diagnostic
+# An append write with ``log_drops=True`` records rows it dropped that carried information (removals and
+# differing values for a key already present) in a ``{table}__droplog`` companion: an append-only diagnostic
 # published alongside the table (like ``__changelog``), one growing record of what each run dropped.
 DROPLOG_SUFFIX = "__droplog"
 # A merge main is log-structured: its folded **base** (the checkpointed state up to ``f_base``) is published
@@ -813,51 +813,72 @@ def landed_after(data_dir) -> str | None:
 # ─── write: append ──────────────────────────────────────────────────────────────
 
 
+# What an append write does with a row whose key is already in the table (plans/showcase-fixes.md item 19):
+# ``skip_check`` reads nothing and appends every row (a declared pk is the writer's promise; an append is chosen
+# for speed), ``keep_prior`` drops it, ``fail`` raises when its values differ. Without a pk the whole row is the key.
+ON_CONFLICT = ("skip_check", "keep_prior", "fail")
+
+
+def check_on_conflict(on_conflict, where: str) -> str:
+    if on_conflict not in ON_CONFLICT:
+        raise ValueError(f"{where}: on_conflict must be one of {', '.join(map(repr, ON_CONFLICT))}, "
+                         f"not {on_conflict!r}")
+    return on_conflict
+
+
+def reject_removed(removed: dict, where: str, replacement: dict) -> None:
+    """Raise ``TypeError`` for keyword arguments a write no longer takes. ``fail_on_conflict`` became
+    ``on_conflict``; ``replacement`` maps its old values to the new ones, which differ between ``append_table``
+    and the builder's ``.append()`` (the reason it was removed rather than mapped)."""
+    if not removed:
+        return
+    if "fail_on_conflict" in removed:
+        old = removed["fail_on_conflict"]
+        new = replacement.get(bool(old))
+        raise TypeError(f"{where}: fail_on_conflict was removed; fail_on_conflict={old!r} is now "
+                        f"on_conflict={new!r} (see the on_conflict values: {', '.join(map(repr, ON_CONFLICT))})")
+    raise TypeError(f"{where}: unexpected keyword argument(s) {', '.join(map(repr, removed))}")
+
+
 def append_table(
-    con, name: str, relation, f, pk: tuple[str, ...], *, fail_on_conflict=True, retain_t=None, retain_n=None
+    con, name: str, relation, f, pk: tuple[str, ...], *, on_conflict="skip_check", log_drops=True,
+    retain_t=None, retain_n=None,
 ) -> bool:
     """Append ``relation``'s rows to the history table ``name``, each stamped ``_duckstring_f = f``.
     Insert-only: no diff, no deletes (its Z-set is all ``+1``). Idempotent at a given ``f`` (rows already
-    stamped ``f`` are dropped before re-appending). ``pk`` is recorded as the declared key; when it is set,
-    ``fail_on_conflict=True`` (the default) asserts it is unique across the appended rows and the existing
-    history, raising :class:`DeltaError` before any write (the live table is untouched on a violation). Pass
-    ``fail_on_conflict=False`` for the trust-the-writer fast path (no check). With ``pk`` unset the check is a
-    no-op regardless.
+    stamped ``f`` are replaced). ``pk`` is recorded as the declared key.
+
+    ``on_conflict`` decides what happens to a row whose key (with no ``pk``, the whole row) is already in the
+    table: ``skip_check`` (the default) reads nothing and appends every row as given; ``keep_prior`` drops it
+    (logged to ``{name}__droplog`` when its values differ and ``log_drops``); ``fail`` raises :class:`DeltaError`
+    before writing when its values differ. Under ``keep_prior`` and ``fail`` a row identical to one already
+    there is skipped, identical rows within ``relation`` collapse to one, and one key with different values
+    within ``relation`` raises.
 
     Returns whether rows were actually appended (an empty relation, or a pure same-``f`` replay, is no
     change) — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
+    check_on_conflict(on_conflict, f"append_table('{name}')")
     relation = concrete(relation)  # DuckDB 2.0: never store the NULL type
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
-    src = unique_name("append_src")
-    temp_view(con, relation, src)
     cols = relation.columns
-    sel_cols = ", ".join(_q(c) for c in cols)
+    missing = [c for c in pk if c not in cols]
+    if missing:
+        raise DeltaError(f"append_table('{name}'): primary key column(s) {missing} not in the relation")
     first = not _table_exists(con, name)  # the floor anchors at the first append's freshness
     # A pure replay (rows already stamped this f) re-writes identical rows → no net change. Detect it
-    # before the idempotent DELETE below so the returned "changed" flag reflects new content, not a re-run.
+    # before the idempotent DELETE so the returned "changed" flag reflects new content, not a re-run.
     replay = (not first) and first_row(con.execute(
         f'SELECT 1 FROM {_q(name)} WHERE {_q(F_COL)} = {_ts(f)} LIMIT 1'
     )) is not None
+    if on_conflict != "skip_check":
+        changed = append_zset(con, name, _as_zset(relation, 1), f, pk, on_conflict=on_conflict,
+                              log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
+        return changed and not replay
+    src = unique_name("append_src")
+    temp_view(con, relation, src)
+    sel_cols = ", ".join(_q(c) for c in cols)
     n_src = first_row(con.execute(f'SELECT count(*) FROM {_q(src)}'))[0]
-    if fail_on_conflict and pk:
-        missing = [c for c in pk if c not in cols]
-        if missing:
-            raise DeltaError(f"append_table('{name}'): primary key column(s) {missing} not in the relation")
-        pk_list = ", ".join(_q(c) for c in pk)
-        dup = first_row(con.execute(
-            f'SELECT 1 FROM {_q(src)} GROUP BY {pk_list} HAVING count(*) > 1 LIMIT 1'
-        ))
-        if dup:
-            raise DeltaError(f"append_table('{name}'): duplicate primary key {pk} among the appended rows")
-        if not first:
-            # Collide only against rows from *other* runs — a replay re-appends this f's identical rows.
-            coll = first_row(con.execute(
-                f'SELECT 1 FROM {_q(src)} s JOIN {_q(name)} t ON {_key_match("s", "t", pk)} '
-                f'WHERE t.{_q(F_COL)} IS DISTINCT FROM {_ts(f)} LIMIT 1'
-            ))
-            if coll:
-                raise DeltaError(f"append_table('{name}'): primary key {pk} already present in history")
     if first:
         con.execute(
             f'CREATE TABLE {_q(name)} AS '
@@ -875,30 +896,36 @@ def append_table(
 
 
 def append_zset(
-    con, name: str, zset, f, pk: tuple[str, ...], *, fail_on_conflict=True, log_drops=True,
+    con, name: str, zset, f, pk: tuple[str, ...], *, on_conflict="skip_check", full=False, log_drops=True,
     retain_t=None, retain_n=None,
 ) -> bool:
-    """Append the **present** rows of a Z-set ΔO (the builder's incremental output, or a full recompute
-    tagged ``+1``) to the insert-only history ``name`` — the ``.append()`` terminal of the builder. An
-    insert-only table can't reflect a *change to the past*, so two things are conflicts:
+    """Append a Z-set to the insert-only history ``name``: the builder's ``.append()`` terminal, and
+    :func:`append_table` under ``keep_prior`` or ``fail``. ``zset`` is either this Run's **change** (an
+    incremental output: ``+1`` added rows, ``-1`` removed ones) or, with ``full``, the **whole output**
+    recomputed (all ``+1``). A removal can't be applied to an insert-only table, and neither can a key already
+    present with different values.
 
-    - a **retraction** (a ``-1`` row) — a previously-emitted output row changed or disappeared;
-    - a present (``+1``) row whose ``pk`` is already in history with a **different** image.
+    ``on_conflict`` (see :data:`ON_CONFLICT`):
 
-    A present row whose ``pk`` is already in history with an **identical** image is a benign skip (an
-    idempotent replay or a comprehensive re-derivation re-producing it) — never a conflict, never logged.
-    A ``pk`` duplicated **within this run** with distinct images is unresolvable (one freshness, no
-    recency to choose by) and always raises.
+    - ``skip_check``: the change is appended without reading the history, every copy of every added row. A
+      removal is a broken promise visible in the change itself: with a ``pk``, that key's added row is dropped
+      too (the outcome ``keep_prior`` gives on a recompute); without one, the added row is appended. With
+      ``full`` the history has to be read anyway, so the recompute is reduced to what isn't there yet: by
+      ``pk`` as ``keep_prior`` does, or copy for copy without one (identical rows that are separate events
+      survive). Never raises on a conflict.
+    - ``keep_prior``: a row whose key (with no ``pk``, the whole row) is already in the history is dropped,
+      as is a removal.
+    - ``fail``: a removal, or a key already in the history with different values, raises :class:`DeltaError`
+      before writing.
 
-    ``fail_on_conflict=True`` (default — correctness over speed) raises :class:`DeltaError` on any conflict
-    before writing. ``False`` drops conflicting rows (history wins) and appends the rest; with
-    ``log_drops`` the dropped rows land in a ``{name}__droplog`` companion (user columns + ``_duckstring_d``
-    sign + ``_duckstring_f``), published alongside the table like ``__changelog``. ``pk`` unset skips the pk
-    checks entirely (only retractions are conflicts) — fast, sound only when duplicates and past-changes are
-    impossible by construction.
+    Under ``keep_prior`` and ``fail`` a row identical to one in the history is skipped, identical rows in the
+    batch collapse to one, and one key with different values in the batch always raises (a batch has no order
+    to pick by). Dropped rows that lose information (removals and differing values) go to a
+    ``{name}__droplog`` companion with ``log_drops`` (user columns + ``_duckstring_d`` + ``_duckstring_f``),
+    published alongside the table like ``__changelog``. A write repeated at ``f`` replaces that ``f``'s rows.
 
-    Returns whether any genuinely new rows were appended (benign idempotent skips and dropped conflicts
-    don't count) — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
+    Returns whether any rows were appended — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
+    check_on_conflict(on_conflict, f"append('{name}')")
     zset = concrete(zset)  # DuckDB 2.0: never store the NULL type
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
@@ -907,63 +934,99 @@ def append_zset(
     user = [c for c in zset.columns if c != D_COL]
     if D_COL not in zset.columns:
         raise DeltaError(f"append_zset('{name}', ...): the relation has no {D_COL} weight column")
+    missing = [c for c in pk if c not in user]
+    if missing:
+        raise DeltaError(f"append('{name}'): primary key column(s) {missing} not in the relation")
     sel = ", ".join(_q(c) for c in user)
+    csel = ", ".join(f"_c.{_q(c)}" for c in user)
+    d = _q(D_COL)
     first = not _table_exists(con, name)
 
     # Consolidate by full row: net weight per distinct image (an update's -old/+new survive as two rows).
     consol = unique_name("appc")
     con.execute(
         f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
-        f'SELECT {sel}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} FROM {_q(src)} '
-        f'GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0'
+        f'SELECT {sel}, CAST(SUM({d}) AS BIGINT) AS {d} FROM {_q(src)} '
+        f'GROUP BY {sel} HAVING SUM({d}) <> 0'
     )
-
-    # Idempotent replay: drop this run's prior attempt (rows stamped f) so the history checks below see the
-    # pre-f state and a retry re-derives the same result. Done before the conflict probes.
+    # Idempotent replay: drop this Run's prior attempt (rows stamped f), so the history read below is the
+    # pre-f state and a retry derives the same result.
     if not first:
         con.execute(f'DELETE FROM {_q(name)} WHERE {_q(F_COL)} = {_ts(f)}')
 
-    retractions = first_row(con.execute(f'SELECT count(*) FROM {_q(consol)} WHERE {_q(D_COL)} < 0'))[0]
-    pk_dup = 0
-    hist_conflict = 0
-    if pk:
-        missing = [c for c in pk if c not in user]
-        if missing:
-            raise DeltaError(f"append_zset('{name}', ...): primary key column(s) {missing} not in the relation")
-        pk_list = ", ".join(_q(c) for c in pk)
-        pk_dup = first_row(con.execute(
-            f'SELECT count(*) FROM (SELECT 1 FROM {_q(consol)} WHERE {_q(D_COL)} > 0 '
-            f'GROUP BY {pk_list} HAVING count(*) > 1)'
-        ))[0]
-        if pk_dup:
-            # Two distinct images for one key in one run — no recency to disambiguate; always fatal.
-            raise DeltaError(
-                f"append_zset('{name}', ...): primary key {pk} produced {pk_dup} duplicate key(s) with "
-                f"differing values in one run — the output is not unique by {pk}"
-            )
-        if not first:
-            eq = " AND ".join(f'p.{_q(c)} IS NOT DISTINCT FROM h.{_q(c)}' for c in user)
-            hist_conflict = first_row(con.execute(
-                f'SELECT count(*) FROM {_q(consol)} p JOIN {_q(name)} h ON {_key_match("p", "h", pk)} '
-                f'WHERE p.{_q(D_COL)} > 0 AND NOT ({eq})'
+    key = list(pk) or user  # with no pk, the whole row is the key
+
+    def in_history(alias: str, negate: bool) -> str:
+        """``alias``'s rows whose key is (or, with ``negate``, isn't) in the history, as a join clause."""
+        if first:
+            return "" if negate else " AND 1=0"
+        kind = "ANTI" if negate else "SEMI"
+        return f' {kind} JOIN {_q(name)} AS _h ON {_key_match(alias, "_h", key)}'
+
+    def differs(alias: str) -> str:
+        """``alias``'s present rows whose key is in the history with different values (only with a pk)."""
+        if first or not pk:
+            return f'SELECT {sel}, {d} FROM {_q(consol)} WHERE 1=0'
+        eq = " AND ".join(f'{alias}.{_q(c)} IS NOT DISTINCT FROM _h.{_q(c)}' for c in user)
+        return (f'SELECT {", ".join(f"{alias}.{_q(c)}" for c in user)}, {alias}.{d} FROM {_q(consol)} {alias} '
+                f'JOIN {_q(name)} _h ON {_key_match(alias, "_h", pk)} WHERE {alias}.{d} > 0 AND NOT ({eq})')
+
+    removed = f'SELECT {sel}, {d} FROM {_q(consol)} WHERE {d} < 0'
+
+    if on_conflict == "skip_check" and not full:
+        if pk:
+            # A key with a removal in this change: its promise is broken, so its added row is dropped too.
+            broken = unique_name("appb")
+            con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(broken)} AS '
+                        f'SELECT DISTINCT {", ".join(_q(c) for c in pk)} FROM {_q(consol)} WHERE {d} < 0')
+            new_rows = (f'SELECT {csel}, _c.{d} FROM {_q(consol)} AS _c ANTI JOIN {_q(broken)} AS _b '
+                        f'ON {_key_match("_c", "_b", pk)} WHERE _c.{d} > 0')
+            dropped = (f'SELECT {csel}, _c.{d} FROM {_q(consol)} AS _c SEMI JOIN {_q(broken)} AS _b '
+                       f'ON {_key_match("_c", "_b", pk)}')
+        else:
+            new_rows = f'SELECT {sel}, {d} FROM {_q(consol)} WHERE {d} > 0'
+            dropped = removed
+        copies = True
+    elif on_conflict == "skip_check":  # a recompute: append what the history doesn't hold yet
+        if pk:
+            new_rows = f'SELECT {csel}, _c.{d} FROM {_q(consol)} AS _c{in_history("_c", True)} WHERE _c.{d} > 0'
+            dropped = f'{removed} UNION ALL BY NAME ({differs("_c")})'
+        elif first:
+            new_rows = f'SELECT {sel}, {d} FROM {_q(consol)} WHERE {d} > 0'
+            dropped = removed
+        else:  # copy for copy: each distinct row, as many times as the output has it beyond the history
+            held = unique_name("apph")
+            con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(held)} AS '
+                        f'SELECT {sel}, count(*) AS _n FROM {_q(name)} GROUP BY ALL')
+            new_rows = (f'SELECT {csel}, _c.{d} - COALESCE(_k._n, 0) AS {d} '
+                        f'FROM {_q(consol)} AS _c LEFT JOIN {_q(held)} AS _k ON {_key_match("_c", "_k", user)} '
+                        f'WHERE _c.{d} - COALESCE(_k._n, 0) > 0')
+            dropped = removed
+        copies = True
+    else:  # keep_prior / fail
+        if pk:
+            dup = first_row(con.execute(
+                f'SELECT count(*) FROM (SELECT 1 FROM {_q(consol)} WHERE {d} > 0 '
+                f'GROUP BY {", ".join(_q(c) for c in pk)} HAVING count(*) > 1)'
             ))[0]
-
-    if fail_on_conflict and (retractions or hist_conflict):
-        raise DeltaError(
-            f"append_zset('{name}', ...): not append-safe — {retractions} retraction(s) and {hist_conflict} "
-            f"changed-past row(s). Pass fail_on_conflict=False to drop them, or use .merge() to track changes."
-        )
-
-    # The rows to actually append: present (+1) rows that are genuinely new (pk absent from history, or no
-    # pk → all present rows). Benign skips (pk present with identical image) and dropped conflicts fall out.
-    if pk and not first:
-        pk_list = ", ".join(_q(c) for c in pk)
-        new_rows = con.sql(
-            f'SELECT {sel} FROM {_q(consol)} AS _c ANTI JOIN {_q(name)} AS _h ON {_key_match("_c", "_h", pk)} '
-            f'WHERE {_q(D_COL)} > 0'
-        )
-    else:
-        new_rows = con.sql(f'SELECT {sel} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
+            if dup:
+                # Two images for one key in one batch: no order to pick by, and a pick could differ on replay.
+                raise DeltaError(
+                    f"append('{name}'): primary key {pk} has {dup} key(s) with different values in one batch; "
+                    f"the rows are not unique by {pk}"
+                )
+        new_rows = f'SELECT {csel}, 1 AS {d} FROM {_q(consol)} AS _c{in_history("_c", True)} WHERE _c.{d} > 0'
+        dropped = f'{removed} UNION ALL BY NAME ({differs("_c")})'
+        copies = False
+        if on_conflict == "fail":
+            n_removed = first_row(con.execute(f'SELECT count(*) FROM ({removed})'))[0]
+            n_differ = first_row(con.execute(f'SELECT count(*) FROM ({differs("_c")})'))[0]
+            if n_removed or n_differ:
+                raise DeltaError(
+                    f"append('{name}'): not append-safe: {n_removed} removed row(s) and {n_differ} row(s) whose "
+                    f"key is already in the table with different values. Use on_conflict='keep_prior' to drop "
+                    f"them, or .merge() to track changes."
+                )
 
     if first:
         con.execute(
@@ -971,12 +1034,15 @@ def append_zset(
             f'SELECT {sel}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(consol)} LIMIT 0'
         )
     new_view = unique_name("appn")
-    temp_view(con, new_rows, new_view)
-    n_new = first_row(con.execute(f'SELECT count(*) FROM {_q(new_view)}'))[0]
-    con.execute(f'INSERT INTO {_q(name)} ({sel}, {_q(F_COL)}) SELECT {sel}, {_ts(f)} FROM {_q(new_view)}')
+    con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(new_view)} AS {new_rows}')
+    n_new = first_row(con.execute(f'SELECT coalesce(sum({d}), 0) FROM {_q(new_view)}'))[0]
+    # Every copy of a row the batch holds more than once (skip_check), else one.
+    rows = (f'SELECT {sel} FROM (SELECT {sel}, unnest(range({d})) FROM {_q(new_view)})' if copies
+            else f'SELECT {sel} FROM {_q(new_view)}')
+    con.execute(f'INSERT INTO {_q(name)} ({sel}, {_q(F_COL)}) SELECT {sel}, {_ts(f)} FROM ({rows})')
 
-    if log_drops and not fail_on_conflict and (retractions or hist_conflict):
-        _log_drops(con, name, consol, user, pk, f, first)
+    if log_drops:
+        _log_drops(con, name, dropped, user, f)
 
     _record_meta(con, name, "append", pk)
     cutoff = _apply_retention(con, name, f, retain_t, retain_n)
@@ -984,35 +1050,25 @@ def append_zset(
     return n_new > 0
 
 
-def _log_drops(con, name, consol, user, pk, f, first_output) -> None:
-    """Record the rows ``.append(fail_on_conflict=False)`` could not append — retractions (``_duckstring_d``
-    < 0) and present rows whose ``pk`` collided with a different image — in a ``{name}__droplog`` companion
-    (append-only, published alongside the table like ``__changelog``). Replay-idempotent (this run's prior
-    drops are cleared first)."""
+def _log_drops(con, name, dropped_sql, user, f) -> None:
+    """Record the rows an append write dropped and that carried information (removals, and rows whose key is
+    already in the table with different values; see :func:`append_zset`) in a ``{name}__droplog`` companion
+    (append-only, published alongside the table like ``__changelog``). Replay-idempotent: this Run's earlier
+    drops are cleared first, even when it drops nothing this time."""
     drops = f"{name}{DROPLOG_SUFFIX}"
     sel = ", ".join(_q(c) for c in user)
-    if pk:
-        eq = " AND ".join(f'c.{_q(col)} IS NOT DISTINCT FROM h.{_q(col)}' for col in user)
-        # Present rows that collided with a *different* image in history (benign identical-image skips excluded).
-        conflicts = (
-            f'SELECT {", ".join(f"c.{_q(col)}" for col in user)}, c.{_q(D_COL)} FROM {_q(consol)} c '
-            f'JOIN {_q(name)} h ON {_key_match("c", "h", pk)} WHERE c.{_q(D_COL)} > 0 AND NOT ({eq})'
-        )
-    else:
-        conflicts = f'SELECT {sel}, {_q(D_COL)} FROM {_q(consol)} WHERE 1=0'
-    dropped = con.sql(
-        f'SELECT {sel}, {_q(D_COL)} FROM {_q(consol)} WHERE {_q(D_COL)} < 0 '
-        f'UNION ALL BY NAME ({conflicts})'
-    )
-    if not _table_exists(con, drops):
+    exists = _table_exists(con, drops)
+    if exists:
+        con.execute(f'DELETE FROM {_q(drops)} WHERE {_q(F_COL)} = {_ts(f)}')
+    dview = unique_name("appd")
+    con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(dview)} AS {dropped_sql}')
+    if first_row(con.execute(f'SELECT count(*) FROM {_q(dview)}'))[0] == 0:
+        return
+    if not exists:
         con.execute(
             f'CREATE TABLE {_q(drops)} AS '
-            f'SELECT {sel}, {_q(D_COL)}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(consol)} LIMIT 0'
+            f'SELECT {sel}, {_q(D_COL)}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(dview)} LIMIT 0'
         )
-    else:
-        con.execute(f'DELETE FROM {_q(drops)} WHERE {_q(F_COL)} = {_ts(f)}')  # replay-idempotent
-    dview = unique_name("appd")
-    temp_view(con, dropped, dview)
     con.execute(
         f'INSERT INTO {_q(drops)} ({sel}, {_q(D_COL)}, {_q(F_COL)}) '
         f'SELECT {sel}, {_q(D_COL)}, {_ts(f)} FROM {_q(dview)}'
@@ -1624,7 +1680,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
 
 
 def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
-                     fail_on_conflict=True, log_drops=True, retain_t=None, retain_n=None) -> None:
+                     on_conflict="skip_check", log_drops=True, retain_t=None, retain_n=None) -> None:
     """Maintain a per-row **scan** output ``name`` (an append Trickle): enrich each row with its running value
     in ``along`` order within its ``by`` group, continuing each group's **carried fold-state** from the tail.
 
@@ -1666,7 +1722,7 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
     # no Python row-loop. Recursive / buffer / custom folds (ema/tema/product/lag/conv/scan) use the fold.
     if by and all(m.kind in _ACC_WINDOWABLE for _, m in metric_list):
         _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols, kind, f, pk,
-                             fail_on_conflict=fail_on_conflict, log_drops=log_drops,
+                             on_conflict=on_conflict, log_drops=log_drops,
                              retain_t=retain_t, retain_n=retain_n)
         return
 
@@ -1705,7 +1761,8 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
     if out_rows:
         tmp = _acc_out_table(con, out_rows, usercols, metric_list, type_of)
         append_zset(con, name, _as_zset(con.sql(f"SELECT * FROM {_q(tmp)}"), 1), f, normalize_pk(pk),
-                    fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
+                    on_conflict=on_conflict, full=kind == "comprehensive", log_drops=log_drops,
+                    retain_t=retain_t, retain_n=retain_n)
 
     _save_acc_state(con, state, by, along, metric_list, group, f, type_of)
 
@@ -1954,7 +2011,7 @@ _ACC_WINDOWABLE = frozenset({"sum", "count", "min", "max", "first"})
 
 
 def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols, kind, f, pk, *,
-                         fail_on_conflict, log_drops, retain_t, retain_n) -> None:
+                         on_conflict, log_drops, retain_t, retain_n) -> None:
     """The SQL-window fast path for an all-scalar-seed scan: a window over this run's batch plus the carried
     per-group seed (``carried + sum() over w``, ``least(carried, min() over w)``, …). Fully incremental — the
     seed is the running value at the end of the previous run; the new per-group seed is the old value combined
@@ -2011,7 +2068,8 @@ def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols
     if first_row(con.execute(f"SELECT count(*) FROM {_q(outt)}"))[0] == 0:
         return
     append_zset(con, name, _as_zset(con.sql(f"SELECT * FROM {_q(outt)}"), 1), f, normalize_pk(pk),
-                fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
+                on_conflict=on_conflict, full=kind == "comprehensive", log_drops=log_drops,
+                retain_t=retain_t, retain_n=retain_n)
 
     hw = f"greatest(any_value(ss._k_along), max({alq}))" if seeded else f"max({alq})"
     seedt = unique_name("accseed")

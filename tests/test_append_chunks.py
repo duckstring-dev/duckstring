@@ -23,7 +23,7 @@ def _setup(tmp_path, monkeypatch):
 
 
 def _append(con, data, f, sql):
-    T.append_table(con, "events", con.sql(sql), f, ("id",), fail_on_conflict=False)
+    T.append_table(con, "events", con.sql(sql), f, ("id",))
     ParquetDataPlane().export(con, data, f=f)
 
 

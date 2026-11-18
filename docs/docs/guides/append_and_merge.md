@@ -28,12 +28,14 @@ from duckstring import ripple
 @ripple
 def ingest(pond):
     batch = pond.con.sql("SELECT ... AS order_id, ... AS product_id, ... AS quantity FROM ...")
-    pond.append_table("order_line", batch, pk="order_id", fail_on_conflict=False)
+    pond.append_table("order_line", batch, pk="order_id")
 ```
 
 Each row is stamped with the run's freshness. Downstream, `pond.read_delta("orders.order_line")` returns just the rows added since that Pond last ran.
 
-`pk` is optional. With it, `append_table` checks by default that the key is unique within the batch and not already in the table, and raises before writing if it isn't. Here the order IDs are unique by construction, so `fail_on_conflict=False` skips the check, which saves reading the table's history on every run.
+By default `append_table` doesn't read the table: every row is appended as given, which keeps each run's write in proportion to its batch. `pk` is optional, and declaring one is a promise that the key is unique. Here the order IDs are unique by construction.
+
+If a batch can repeat rows the table already has, `on_conflict="keep_prior"` drops any row whose key is already there, and `on_conflict="fail"` raises before writing when one arrives with different values. Both read the table's history on every run. Without `pk`, the whole row is the key.
 
 A retried run, or one replayed after a crash, has the same freshness, and its rows replace the ones it wrote before rather than duplicating them.
 

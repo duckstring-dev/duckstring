@@ -380,3 +380,55 @@ script is in the session scratchpad (`repro.sh`): demo, break, refresh, fix, the
 covering Run's freshness) and no error (migration `036`, a `pond_run` rebuild). Shown in `/api/runs`, `duckstring
 runs` and the web UI's run history; no longer counted by `/metrics` or taken as a failed Pond's error. Earlier
 `failed` ("abandoned") rows are left as they were, by decision.
+
+## 19. One conflict rule for append tables (attention FINDINGS 12)
+
+**Built 2026-11-18** (Trickle 0.4.0; `trickle.io.append_zset`'s `full`, `ON_CONFLICT`, `reject_removed`; tests in
+`packages/trickle/tests/test_trickle_on_conflict.py`). `fail_on_conflict=False` meant two things: on `append_table` it skips the key
+check and appends every row (duplicates included); on the builder's `.append()` it drops rows whose key is already in
+the history (logged to `__droplog`). The showcase read it the builder's way and de-duplicated by hand in `wa_topics`.
+The builder also has no unchecked write at all, though an append is chosen for speed: its conflict check and the
+subtraction a recompute needs are fused in `append_zset`.
+
+**The rule.** `fail_on_conflict` is removed from both. In its place `on_conflict`, the same values and default on
+`append_table` and the builder's `.append()` (and `.accumulate().append()`):
+
+- `"skip_check"` (default): no read of the history. Every row is appended. A declared `pk` is the writer's promise.
+- `"keep_prior"`: rows whose key is already in the history are dropped; with no `pk` the whole row is the key.
+- `"fail"`: a key already in the history with different values raises before writing.
+
+Under `keep_prior` and `fail` a row identical to one already in the history is skipped (nothing to decide), and a
+dropped row with different values is logged to `__droplog` when `log_drops` (default `True`, now on `append_table`
+too). Within one batch: `skip_check` appends everything; the other two collapse identical rows and raise on one key
+with different values (a batch has no order, so there is no "prior", and an arbitrary pick would differ on replay).
+A write repeated at the same `f` replaces that `f`'s rows under every rule (`append_zset` doesn't delete at `f` today;
+it must, and a recompute's subtraction excludes rows stamped `f`).
+
+**The builder under `skip_check`.** Two steps, kept apart: produce this Run's rows, then write them with the rule.
+- Incremental: the change itself, with no history read. A removal in the change is a broken promise, visible without
+  reading history: with a `pk`, drop the key's added row too (the outcome `keep_prior` gives on a recompute); with
+  no `pk`, ignore the removal and append the added row. A Source row deleted with nothing added is ignored.
+- Recompute (coverage miss, a changed overwrite Source, over `p`, `.sql()`, `ivm=False`): the whole output minus
+  the history, by `pk` (as `keep_prior`), copy for copy without one (`EXCEPT ALL`, so identical rows that are
+  separate events survive). Never an overwrite: readers have read every row as added, and a recompute often follows a
+  Source's retention trim, so it can't rebuild what the history holds.
+- What's left: a key already in the history arriving again with no removal beside it is appended by an incremental
+  Run and dropped by a recompute. That's what skipping the check costs; the docs say so.
+
+The spine-key shortcut (`_spine_pk_passthrough`, item 5) becomes an optimisation of `keep_prior` with
+`log_drops=False`; `skip_check` doesn't need it.
+
+**Removal.** Passing `fail_on_conflict` raises `TypeError` naming the replacement, which differs by API (on
+`append_table`: `False` → `skip_check`, `True` → `fail`; on the builder: `False` → `keep_prior`, `True` → `fail`).
+Trickle's API changes, so the package goes to 0.4.0 and Duckstring's range moves with it. Update the demos, benches,
+docs (`append_and_merge`, `joins_with_the_builder`, the `trickle_io` and `trickle_builder` reference), CHANGELOG and
+CLAUDE.md. The attention showcase's ~20 calls change when it moves to the release (not while it runs on 0.8.0).
+
+**Tests.** Each rule on both APIs: conflicts against the history, within a batch, identical re-sends, no `pk`
+(repeated identical events kept under `skip_check`), replay at the same `f`. The builder under `skip_check`:
+incremental reads no history (query counter); a dimension change on the incremental path and on a recompute leaves
+the same table; a recompute after a Source retention trim keeps the history's rows. The removed argument raises
+naming the replacement.
+
+**Follow-up, measure first.** A Source whose change only adds rows still trips `p` and forces a recompute, though
+joining the new rows is never more work. `p` may need to count only removals and changes.

@@ -15,5 +15,5 @@ def filter_stars(pond):
         pond.trickle("gh_events.gh_event")
         .filter("s0.type IN ('WatchEvent', 'ForkEvent')")
         .select("s0.event_id, s0.repo_name, s0.type AS event_type, s0.created_at")
-        .append("star", pk="event_id", fail_on_conflict=False)
+        .append("star", pk="event_id", on_conflict="keep_prior")
     )

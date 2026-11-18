@@ -64,7 +64,7 @@ def main(runs: int) -> None:
                  source_f={"obs": f.isoformat()}, own_data_dir=LocalStorage(dirs["scored"]))
         (s.trickle("obs.stop_obs").join(s.trickle("obs.stop"), on="stop_id")
          .select("s0.obs_id, s0.stop_id, s0.delay, s1.name")
-         .append("enriched", pk="obs_id", fail_on_conflict=False, log_drops=False))
+         .append("enriched", pk="obs_id", on_conflict="keep_prior", log_drops=False))
         (s.trickle("obs.stop_obs").aggregate(by="stop_id", n=agg.count(), late=agg.sum("delay"))
          .merge("per_stop"))
         cur.close()

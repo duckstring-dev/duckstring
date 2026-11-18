@@ -49,7 +49,7 @@ def ingest(pond):
             WHERE ss_item_sk IS NOT NULL AND ss_store_sk IS NOT NULL
             """
         )
-        pond.append_table("store_sale", batch, pk="sale_id", fail_on_conflict=False)
+        pond.append_table("store_sale", batch, pk="sale_id")
         for t in ("call_center", "catalog_page", "catalog_returns", "catalog_sales", "customer",
                   "customer_address", "customer_demographics", "date_dim", "household_demographics",
                   "income_band", "inventory", "item", "promotion", "reason", "ship_mode", "store",
@@ -73,4 +73,4 @@ def ingest(pond):
         FROM range({_BATCH}) AS t(i)
         """
     )
-    pond.append_table("store_sale", batch, pk="sale_id", fail_on_conflict=False)
+    pond.append_table("store_sale", batch, pk="sale_id")

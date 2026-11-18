@@ -5,7 +5,7 @@ Notable changes per release. Versions before 0.5.0 are recorded in the git histo
 ## Unreleased
 
 Fixes from two showcase pipelines run unattended on 0.8.0: Melbourne's trains every 31 seconds, and a dozen Ponds
-over Wikipedia page views, news and Bluesky. Needs `duckstring-trickle` 0.3.2.
+over Wikipedia page views, news and Bluesky. Needs `duckstring-trickle` 0.4.0.
 
 ### Many small Runs
 
@@ -69,6 +69,22 @@ count of 9 read as `9.0` downstream, and anything above 2^53 (about 9×10^15) wa
 - **An aggregate's state is stored exactly** in what it publishes, so a Duck that rebuilds its working database
   from published state (a fresh cloud Duck, or after losing it) carries on summing exactly. It came back as
   `DOUBLE`, and a sum above 2^53 lost its last digits.
+
+### One conflict rule for append tables (breaking)
+
+`fail_on_conflict=False` meant two things: on `append_table` it skipped the key check and appended every row,
+duplicates included; on the builder's `.append()` it dropped rows whose key was already in the table. The builder
+also had no way to append without checking the table, though speed is the reason to pick an append table.
+
+- **Both now take `on_conflict`, with the same values.** `"skip_check"` (the default) appends without reading the
+  table; a declared `pk` is your promise. `"keep_prior"` drops rows whose key is already there. `"fail"` raises
+  before writing when one arrives with different values. Without a `pk`, the whole row is the key.
+- **The builder's `.append()` defaults to `"skip_check"`.** A change that would alter a written row is left out (and
+  logged to `{name}__droplog`), so existing rows keep their values. A Run the builder has to recompute in full adds
+  only the rows the table doesn't hold yet. Before, it appended every row again when the output had no `pk`.
+- **`fail_on_conflict` is removed.** Passing it raises an error naming the replacement: on `append_table`, `False`
+  is `"skip_check"` and `True` is `"fail"`; on `.append()`, `False` is `"keep_prior"` and `True` is `"fail"`.
+- `append_table` takes `log_drops`, as `.append()` does.
 
 ### A CLI for scripts and agents
 

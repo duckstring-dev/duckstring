@@ -648,59 +648,69 @@ class TrickleBuilder:
         return self._chain(name, out_pk, changed=changed)
 
     def append(
-        self, name: str, *, pk=None, fail_on_conflict=True, log_drops=True, ivm: bool = True,
-        key_filter: bool = True, retain_t=None, retain_n=None
+        self, name: str, *, pk=None, on_conflict: str = "skip_check", log_drops=True, ivm: bool = True,
+        key_filter: bool = True, retain_t=None, retain_n=None, **removed,
     ) -> "TrickleBuilder":
         """Compute the result and add its new rows to the append Trickle ``name``.
 
-        For transformations whose output rows are only ever added. A removed output row, or an added row whose
-        ``pk`` is already present with different values, is a conflict; an identical row is skipped.
+        For transformations whose output rows are only ever added, such as an append-only fact table joined to
+        dimensions that don't change. A removed output row, or an added row whose ``pk`` is already in the table
+        with different values, is a conflict.
 
         Args:
             name: Output table.
-            pk: The output's primary key, needed to detect changed rows.
-            fail_on_conflict: Raise ``DeltaError`` on a conflict, before writing. ``False`` drops conflicting
-                rows and keeps history as it was.
-            log_drops: With ``fail_on_conflict=False``, record dropped rows in a published ``{name}__droplog``.
+            pk: The output's primary key. Without one, the whole row is the key.
+            on_conflict: ``"skip_check"`` (the default) appends this Run's new rows without reading the table; a
+                removed row is ignored, and with ``pk`` set the key it removed is skipped too. A Run the builder
+                has to recompute in full adds only the rows the table doesn't hold yet. ``"keep_prior"`` drops
+                rows whose key is already in the table. ``"fail"`` raises ``DeltaError`` on a conflict, before
+                writing.
+            log_drops: Record dropped rows that carried information (removed rows, and rows whose key is already
+                in the table with different values) in a published ``{name}__droplog``.
             ivm, key_filter, retain_t, retain_n: As for :meth:`merge`.
 
-        When ``pk`` is the first source's own key passed through as ``s0.col`` and both ``fail_on_conflict``
-        and ``log_drops`` are ``False``, only that source's new rows are joined, which is much cheaper when
-        other sources change a lot. Returns a builder rooted at the written table.
+        Under ``"keep_prior"`` and ``"fail"``, two rows with the same ``pk`` and different values in one Run raise.
+        When ``pk`` is the first source's own key passed through as ``s0.col``, with ``on_conflict="keep_prior"``
+        and ``log_drops=False``, only that source's new rows are joined, which is much cheaper when other sources
+        change a lot. Returns a builder rooted at the written table.
         """
+        from . import io as trickle
+
+        trickle.reject_removed(removed, f".append('{name}')", {True: "fail", False: "keep_prior"})
+        trickle.check_on_conflict(on_conflict, f".append('{name}')")
         ctx = self.ctx
         if self._acc is not None:
-            return self._append_accumulate(name, pk=pk, fail_on_conflict=fail_on_conflict, log_drops=log_drops,
+            return self._append_accumulate(name, pk=pk, on_conflict=on_conflict, log_drops=log_drops,
                                             retain_t=retain_t, retain_n=retain_n)
         if self._agg is not None:
             raise BuildError(".append() can't follow .aggregate() — an aggregate updates groups; use .merge()")
         out_pk = normalize_pk(pk)
-        from . import io as trickle
 
-        if self._is_sql:  # comprehensive mode (post-.sql) → +1 the relation, append-filter
+        if self._is_sql:  # comprehensive mode (post-.sql) → +1 the relation, append what isn't there yet
             changed = trickle.append_zset(
                 ctx.con, name, trickle._as_zset(self._sql_result(out_pk), 1), ctx.f, out_pk,
-                fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
+                on_conflict=on_conflict, full=True, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
             )
             return self._chain(name, out_pk, changed=changed)
 
         spine_delta = self._spine_delta_value()
-        if (ivm and isinstance(self._root, _Join) and not fail_on_conflict and not log_drops
+        if (ivm and isinstance(self._root, _Join) and on_conflict == "keep_prior" and not log_drops
                 and self._spine_pk_passthrough(out_pk, spine_delta.pk)):
             candidate = self._full_join(spine_rel=self._new_spine_rows(spine_delta, name, out_pk))
             changed = trickle.append_zset(
                 ctx.con, name, trickle._as_zset(candidate, 1), ctx.f, out_pk,
-                fail_on_conflict=False, log_drops=False, retain_t=retain_t, retain_n=retain_n,
+                on_conflict="keep_prior", log_drops=False, retain_t=retain_t, retain_n=retain_n,
             )
             return self._chain(name, out_pk, changed=changed)
 
         kind, rel = self._compute(out_pk, name, ivm=ivm, key_filter=key_filter, offer="rows", consolidate=False)
         changed = False
         if kind != "empty":
-            zset = trickle._as_zset(rel, 1) if kind == "comprehensive" else rel
+            full = kind == "comprehensive"
+            zset = trickle._as_zset(rel, 1) if full else rel
             changed = trickle.append_zset(
-                ctx.con, name, zset, ctx.f, out_pk,
-                fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
+                ctx.con, name, zset, ctx.f, out_pk, on_conflict=on_conflict, full=full,
+                log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
             )
         return self._chain(name, out_pk, changed=changed)
 
@@ -711,7 +721,7 @@ class TrickleBuilder:
         by, metrics, along = self._acc["by"], self._acc["metrics"], self._along
         return tuple(dict.fromkeys((*by, along, *out_pk) + tuple(m.col for m in metrics.values() if m.col)))
 
-    def _append_accumulate(self, name, *, pk, fail_on_conflict, log_drops, retain_t, retain_n):
+    def _append_accumulate(self, name, *, pk, on_conflict, log_drops, retain_t, retain_n):
         """The ``.accumulate(...).append(...)`` path: compose ΔO, then fold the per-row scan on from each
         group's carried state and append the enriched rows (:func:`duckstring.trickle.io.apply_accumulate`)."""
         from . import io as trickle
@@ -721,7 +731,7 @@ class TrickleBuilder:
         kind, rel = self._compute(self._acc_required(out_pk), name, ivm=True, key_filter=True, consolidate="always")
         trickle.apply_accumulate(
             self.ctx.con, name, by, along, metrics, kind, rel, self.ctx.f, pk,
-            fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
+            on_conflict=on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n,
         )
         return self._chain(name, out_pk)
 

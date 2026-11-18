@@ -156,7 +156,7 @@ def test_a_draw_never_ships_part_of_a_run(tmp_path, monkeypatch):
 
     def run(f, lo, hi, retain_from=None):
         T.append_table(con, "events", con.sql(f"SELECT range AS id, md5(range::VARCHAR) AS v FROM range({lo}, {hi})"),
-                       f, ("id",), fail_on_conflict=False)
+                       f, ("id",))
         ParquetDataPlane().export(con, data, f=f, retain_from=retain_from)
 
     def draw():
