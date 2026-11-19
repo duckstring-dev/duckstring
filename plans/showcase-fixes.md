@@ -311,7 +311,8 @@ seeded per step and a rerun from the baseline writes the same rows). Only for co
 local copy, never on top of live data. A step has no cadence of its own.
 
 **`pond run`** (no flag) is the baseline: it resets `puddles/out/`, drops what steps wrote (back to the hydrated
-copy), and runs with `previous_f = NEVER`. **`pond run --incremental`** keeps the registry and advances to a target
+copy), and runs with `previous_f = NEVER`. With nothing hydrated yet it hydrates first (copied, as of now), as
+`refresh --baseline` does on a Catchment (below). **`pond run --incremental`** keeps the registry and advances to a target
 freshness, emulating a Refresh: the Pond runs only once every Source has reached the target.
 
 - **Targets**: `--next-change` (the default): the next point after the last run's freshness where any Source changed.
@@ -336,8 +337,10 @@ step's window.
 ### Named sets
 
 `@puddle(target, set="recent")` and `@puddle.step(target, set=...)`, or `set=("recent", "full")` for a definition in
-several. Unlabelled definitions are the default set. `pond hydrate --set recent` uses, per Source and table, the set's
-definition where it has one and the default otherwise; the chosen set is recorded in `hydrated.json`. `--set`,
+several. Unlabelled definitions are the default set, named `default` where a set must be named (so `default` is
+refused as a label). `pond hydrate` takes each Source's set from the `[local]` section of `puddles.toml` (below), the
+default set for a Source it doesn't list; `--set recent` overrides it for every Source. Per Source and table, the
+set's definition is used where it has one and the default otherwise; the chosen sets are recorded in `hydrated.json`. `--set`,
 `--live` and `--as-at` are independent. Two definitions for one target in one set are an error at collection; before,
 both ran and the last write won silently.
 
@@ -357,8 +360,66 @@ target, and at now once nothing has history; a Source with neither refuses; a pl
 builder and an incremental aggregate give the same result replayed step by step as a baseline at the end; set
 selection with fallback; a duplicate in one set raises; an unreachable data root names the fallback.
 
-**Follow-up, to agree before building**: a Source resolved to a sibling project's local output, for a change spanning
-several Ponds.
+### Puddle Sources on a local Catchment (follow-up, agreed 2026-11-19; after the single-Pond half)
+
+A change spanning several Ponds is tested on a local Catchment: anything else would be a poorer copy of one, and it
+is the same pattern as separate dev, qa and prod Catchments. The Ponds under test are deployed to it. Those whose
+Sources live elsewhere (production) read them as Puddles; the Ponds downstream of them read their local Sources as
+usual. No new noun: a Pond "reads a Source from its Puddles" on that Catchment.
+
+**Declared in `puddles.toml`**, at the project root, not in `pond.toml`. `pond.toml` is part of the version, and
+which Sources are Puddles on which Catchment is environment config (as Spouts and windows are), changed often while
+testing. The file may be gitignored.
+
+```toml
+[dev]                      # the Catchment's own name
+transactions = "recent"    # Source = Puddle set
+products = "default"
+
+[local]                    # what pond hydrate / pond run use
+transactions = "recent"
+```
+
+- A section is matched on the Catchment's own name (its identity, the name Reset asks for); a Catchment without one
+  never matches. That name is the safeguard against Puddles in production.
+- Only a listed Source is a Puddle Source. There is no "all" form: one would turn on Sources nobody chose.
+- **Never read from the bundle.** `pond deploy` sends the target Catchment's section alongside the bundle; the
+  Catchment stores it on the line, outside the version, like windows, and ignores any copy in the bundle (the default
+  `.pondignore` leaves it out; a `--git` deploy never carries a gitignored file anyway). Deploy validates it: each
+  Source is in `[sources]`, and the set has a definition for it (its own, or the default set's). No file, or no
+  section for that Catchment, clears the line's Puddle Sources, so a deploy from a clean checkout sends none (a
+  teammate deploying to a shared dev without the file clears yours: say so in the guide). A command sends the section
+  without a redeploy (name to settle, for example `pond puddles push`). The definitions in `src/puddles.py` are code
+  and stay in the bundle; changing them is a redeploy, as for a Ripple.
+
+**Behaviour.**
+- A Puddle Source never sends demand upstream: tests never change what production does.
+- A Puddle wins over a copy of the Source deployed on the same Catchment; the Pond isn't wired to it.
+- The Puddle's position is that Source's freshness. Demand for `T` advances it to the earliest point in the Source's
+  history that reaches `T` (item 10's "Reaching the target"); a Source that can't reach it refuses, naming it. The
+  Pond's Duck evaluates the definitions (live: in place; copied: from the line's own Puddle copy) and publishes as any
+  Pond. Downstream Ponds are ordinary, and the run stamp is the engine's (the oldest Source freshness).
+- `/api/status` and the canvas show which of a Pond's Sources are Puddles.
+
+**Refresh variants.** `refresh now POND --next-change | --next-run | --most-recent | --to T` computes `T` from the
+Puddle Sources the Refresh reaches, then is a normal Refresh at `T`. A plain Refresh (at now) that reaches a Puddle
+Source is refused, naming the targets. **`--baseline`** returns the Ponds it reaches (the target and everything
+upstream on the Catchment) to their hydration point, as a Rebuild does (registry dropped, `previous_f = NEVER`, step
+output dropped), and runs; a line never hydrated is hydrated first (copied, as of now). `--baseline --next-change` is
+the baseline Run then one step. Hydrating a line on the Catchment is its own command, with `--live`, `--as-at` and
+`--set` as in item 10, and moves the baseline (name to settle: `pond hydrate --catchment` already means where Sources
+are fetched from).
+
+**One behaviour, two paths.** Testing one Pond with item 10 must match deploying it alone to a local Catchment:
+
+| One Pond, no Catchment | Local Catchment |
+|---|---|
+| `pond hydrate` | hydrating the line |
+| `pond run` | `refresh --baseline` |
+| `pond run --incremental --next-change` | `refresh --next-change` |
+
+Both use one module for evaluating definitions and resolving positions, and a test runs the demo both ways and
+compares the published output. If they drift, align them.
 
 ## 11. Filling a new table or Ripple from data already loaded
 
