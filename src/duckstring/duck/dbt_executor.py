@@ -128,14 +128,24 @@ class DbtExecutor(RunInputs):
 
         run_model(self.proj_dir, self.profiles_dir, model_name, self.target_dir)
 
-    def export(self, f: datetime | None = None, contract=None, held=frozenset()) -> dict | None:
+    def export(self, f: datetime | None = None, contract=None, held=frozenset(),
+               previous_f: datetime | None = None) -> dict | None:
         """Publish the models (the ``main``-schema tables dbt built) via the data plane, contract-gated.
         The materialised Source relations live in their own schemas, so the ``main``-only export never
-        republishes them. ``held`` is ignored: a dbt model is never checked for change."""
+        republishes them. ``held`` is ignored: a dbt model is never checked for change. A dbt model can't
+        report, but the Run still carries its Sources' reports downstream (:func:`duckstring.reports.collect`)."""
         import duckdb
+
+        from ..core import Pond
+        from ..reports import collect
 
         with self._lock:
             con = duckdb.connect(str(self.registry_path))
+            if f is not None:
+                pond = Pond(name=self.pond_name, version=self.version, con=con, root=Path(self.root),
+                            source_majors=self.source_majors, source_f=self.source_f_for(f), f=f,
+                            previous_f=previous_f, data_root=self.data_root)
+                collect(pond)
             return _export_data(con.cursor(), self.own_data_dir, f, contract, self.take_retain_from(f),
                                 exact_ints=self.exact_ints)
 

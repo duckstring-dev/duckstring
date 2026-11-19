@@ -211,7 +211,8 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                     _launch(core.ripple_completed(
                         name, _now(), started_at=started, finished_at=finished,
                         # the publish keeps the published copy of what the Run held unchanged
-                        export=lambda f, contract: executor.export(f, contract, held=core.held_for(f)),
+                        export=lambda f, contract: executor.export(f, contract, held=core.held_for(f),
+                                                                   previous_f=core.previous_f_for(f)),
                         lineage=lineage,
                     ))
                     # A run just completed (locally published) → kick off/queue the async persist for it.

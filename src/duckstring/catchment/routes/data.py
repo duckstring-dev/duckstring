@@ -474,7 +474,8 @@ def pond_freshness(
     from ...trickle.io import sidecar_tables
 
     try:
-        tables = {t: e.get("f") for t, e in sidecar_tables(_sidecar(request, name, m)).items()}
+        tables = {t: e.get("f") for t, e in sidecar_tables(_sidecar(request, name, m)).items()
+                  if not t.startswith("_duckstring_")}  # the Run reports aren't a table of the Pond's
     except Exception:
         tables = {}
     out["tables"] = {t: f for t, f in sorted(tables.items()) if allowed is None or t in allowed}

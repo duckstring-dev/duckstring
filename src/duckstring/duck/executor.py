@@ -104,6 +104,9 @@ def _run_ripple(
         **(scope or {}),
     )
     try:
+        from ..reports import clear
+
+        clear(con, f, pond._ripple)  # a Ripple launching again (a retry, a replay) reports afresh
         func(pond)
         return pond.take_lineage()  # the observed reads/writes this Ripple made (plans/lineage.md)
     finally:
@@ -407,14 +410,33 @@ class RippleExecutor(RunInputs):
         fut.add_done_callback(_cb)
         return fut
 
-    def export(self, f: datetime | None = None, contract=None, held=frozenset()) -> dict | None:
+    def collect_reports(self, f: datetime, previous_f: datetime | None) -> None:
+        """Carry the Run's reports, and its Sources' in its window, into the reports table
+        (:func:`duckstring.reports.collect`), through a handle at the Run's freshness."""
+        from ..core import Pond, retry_on_lock
+        from ..reports import collect
+
+        con = self._cursor()
+        try:
+            pond = Pond(name=self.pond_name, version=self.version, con=con, root=self.root,
+                        source_majors=self.source_majors, source_f=self.source_f_for(f), f=f,
+                        previous_f=previous_f, data_root=self.data_root, own_data_dir=self.own_data_dir)
+            retry_on_lock(lambda: collect(pond))
+        finally:
+            con.close()
+
+    def export(self, f: datetime | None = None, contract=None, held=frozenset(),
+               previous_f: datetime | None = None) -> dict | None:
         """Publish the Pond's tables for cross-Pond consumption via the data plane, stamped with the
         run's freshness ``f`` (recorded by snapshotting backends). ``contract`` is the major line's
         additive contract — a violation raises :class:`ContractViolation` *before* publishing (last-good
         is left intact). ``held`` names the tables and Objects the run checked as unchanged, which keep
-        their published copy. Returns the published output schema (for the Catchment to capture)."""
+        their published copy. ``previous_f`` is the Run's window start, for the Run reports it carries.
+        Returns the published output schema (for the Catchment to capture)."""
         from ..objects import commit_objects
 
+        if f is not None:
+            self.collect_reports(f, previous_f)
         schema = _export_data(self._cursor(), self.own_data_dir, f, contract, self.take_retain_from(f), held,
                               self.exact_ints)
         # Objects commit only after the table publish passed the contract gate — a failed run leaves the

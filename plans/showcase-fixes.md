@@ -537,12 +537,38 @@ the registry (`trickle_io.read_registry_delta`, as a mid-chain `.merge()` alread
 own `previous_f`. Then say in the docs (Concepts, and the guide on structuring a pipeline): use as few Ponds as the
 pipeline needs now or in a known future; split when cadence, failure isolation, compute size or reuse calls for it.
 
-## 14. Inlet lag: how far an Inlet's data trails its freshness
+## 14. Inlet lag: how far an Inlet's data trails its freshness (now Run reports)
 
 Freshness keeps its meaning: the time of the Refresh that drove the Inlets (for a windowed Inlet, the window's end).
 What it can't say is how old the data itself is. Wikimedia publishes an hour's page views one to three hours late,
 so the showcase's page read "fresh as of 20:11" while its newest page views were for 17:00. That depends on the
 source, so only the Inlet can know it.
+
+**Redesigned 2026-11-19 (the author's): Run reports.** Data age is one fact an Inlet happens to know, so instead of a
+lag concept, any Ripple can declare facts about its Run and Duckstring carries them downstream:
+
+- **Writing.** `pond.report({"data_as_of": "17:00", ...})`: a JSON-serialisable dict; several calls in one Run
+  merge (later keys win; across Ripples, by Ripple name). Staged in the registry per `(f, ripple)` (registry-only
+  `_duckstring_report_staged`), so a Duck restart keeps a completed Ripple's report; cleared when a Ripple launches.
+- **Storage.** A hidden append table `_duckstring_reports (pond, run_f, reports)`, keyed `(pond, run_f)` with `pond`
+  the `name@major` key. At export, a Run appends its own row plus the rows of its Sources' reports tables in its
+  window (`on_conflict="keep_prior"`, so a diamond's or an overlapping window's duplicates are skipped). Nothing is
+  written when nothing was reported, so a pipeline that never reports pays nothing.
+- **Reading.** `pond.reports()` returns `{pond: {run_f: reports}}`: in a Ripple, what the Run's Sources' tables hold
+  in its window (every upstream Run whose data it read, so a rarely run Pond catching up on a fast chain sees them
+  all); on the App handle, everything its Sources hold.
+- **The ordinary machinery.** It is an append Trickle, so windows, coverage (a Pond behind its Source's retained
+  window gets a full read), Draws, registry recovery and read snapshots all apply, and item 1's read positions will
+  correct its windows with every other Trickle read. Retention is the opt-in append retention; the volume is small
+  (one row per reporting Run per upstream Pond).
+- **Hidden** from table listings (`list_tables`, so `data ls`, all-table Spouts, the Puddle viewer), the schema
+  contract (and so the serving catalog), the freshness route's tables and Puddle change points.
+- Reporting only: nothing in orchestration reads it.
+
+Not now: showing reports in the CLI, API or UI (a Run's row on `pond_run`); a docs example of the attention case
+(held for the docs pass).
+
+Superseded design:
 
 - **Reporting.** An Inlet Ripple reports a lag, `pond.set_lag(timedelta)`, measured from the window's start (from
   `pond.f` without a window). A windowed Inlet's data can be as old as its window's start, so its lag is the window

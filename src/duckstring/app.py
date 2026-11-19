@@ -221,6 +221,9 @@ def _pond_class():
         def skip(self) -> None:
             raise TypeError("an App has no Pond Run to skip")
 
+        def report(self, reports: dict) -> None:
+            raise TypeError("an App has no Pond Run to report on")
+
     return AppPond
 
 
@@ -231,7 +234,7 @@ _hold_ids = count(1)
 
 def pond():
     """The App's read-only Pond handle: :meth:`~duckstring.Pond.read_table`, ``count_table``, ``read_object``,
-    ``object_path`` and ``con`` over its declared Sources, at their newest published data,
+    ``object_path``, ``reports`` and ``con`` over its declared Sources, at their newest published data,
     plus ``freshness()`` and ``hold()``. One handle per process; each thread gets its own cursor."""
     global _handle
     with _handle_lock:

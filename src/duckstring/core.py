@@ -998,6 +998,39 @@ class Pond:
         if self._skip_sink is not None:
             self._skip_sink()
 
+    # ─── Run reports (duckstring.reports) ──────────────────────────────────────
+
+    def report(self, reports: dict) -> None:
+        """Record facts about this Run, carried downstream with its data.
+
+        ``reports`` is a dict of JSON values (datetimes and dates are stored as ISO strings). Several calls in a
+        Run merge, later keys winning; Ripples' reports merge in Ripple-name order. Every downstream Pond keeps
+        the reports of each upstream Run whose data it read, and reads them with :meth:`reports`. A skipped Run
+        still carries its reports. Nothing in orchestration reads them.
+
+        For example, an Inlet whose source publishes late can report how old its data is::
+
+            pond.report({"data_as_of": newest_hour})
+
+        Reference: https://docs.duckstring.com/reference/python/pond
+        """
+        from . import reports as _reports
+
+        _reports.stage(self.con, self.f, self._ripple, reports)
+
+    def reports(self) -> dict:
+        """The reports of the upstream Runs whose data this Run read: ``{pond: {run_f: reports}}``, with
+        ``pond`` the reporting line's ``name@major`` and ``run_f`` its Run's freshness.
+
+        In a Ripple, the reports that reached this Pond's Sources since its previous Run (all of them on a
+        first Run). On an App's handle, every report its Sources hold. Not this Run's own.
+
+        Reference: https://docs.duckstring.com/reference/python/pond
+        """
+        from . import reports as _reports
+
+        return _reports.read(self)
+
     # ─── change detection (plans/change-detection.md) ──────────────────────────
 
     def changed(self, *refs: str) -> bool:

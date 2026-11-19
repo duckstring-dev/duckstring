@@ -129,6 +129,20 @@ a local run can step through the Source's history.
   is written as the Source's kind, so deltas over it are the Source's.
 - `pond puddle ls` shows how each Source is read, its set and the freshness the last run read it at.
 
+### Run reports
+
+A Pond's freshness says when its Inlets last read their sources, not how old the data they read was: the attention
+showcase's page views were "fresh as of 20:11" while their newest hour was 17:00. Only the Inlet knows that, so a
+Ripple can now say it, and Duckstring carries it downstream.
+
+- **`pond.report({...})`** records facts about the Run as a dict of JSON values (datetimes as ISO strings).
+- **`pond.reports()`** returns the reports of every upstream Run whose data this Run read, as
+  `{pond: {run_f: reports}}`, so a Pond that runs less often than its Sources sees each Run it caught up on. On an
+  App's handle, everything its Sources hold.
+- Reports travel with the published data (a hidden append table, `_duckstring_reports`), so they reach Ponds on
+  other Catchments through Ducts and survive a lost registry. A dbt-mode Pond passes its Sources' reports on.
+  Nothing in orchestration reads them, and a pipeline that never reports writes nothing.
+
 ### Other changes
 
 - **A failed Ripple is retried once by default** (`immediate_retries = 1`), within the same Run. A transient error,

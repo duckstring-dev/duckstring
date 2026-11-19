@@ -9,6 +9,8 @@ from pathlib import Path
 
 from ..changes import ChangeLedger
 from ..core import Pond, load_ripples, retry_on_lock
+from ..reports import clear as clear_reports
+from ..reports import collect as collect_reports
 from .project import Project
 from .state import Hydrated, Position, SourceState, _iso, load_hydrated, load_position, position_path, save_position
 
@@ -366,6 +368,7 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False, *
                               static_tables=pond_ripples.statics, ripple=name,
                               ancestors=pond_ripples.ancestors(name), table_writers=dict(table_writers),
                               change_sink=changes.begin(run_f, name))
+                clear_reports(con, run_f, name)  # a Ripple run again reports afresh
                 by_name[name]["func"](handle)
                 for table in handle.take_lineage()["writes"]:
                     table_writers.setdefault(table, name)
@@ -381,6 +384,15 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False, *
             )
             break
 
+    if ripple is None and all(r.status == "ok" for r in results):
+        con = _registry_connect(project)
+        try:  # the Run's reports and its Sources' in its window, as a Duck's export carries them
+            collect_reports(Pond(project.name, project.version, con, root=project.puddles_dir, f=run_f,
+                                 previous_f=previous_f, sources=list(project.sources),
+                                 source_f=source_f if not legacy else None, source_dirs=source_dirs,
+                                 own_data_dir=project.out_dir))
+        finally:
+            con.close()
     _export(project, run_f, changes.held(run_f))
     result = RunResult(seeded=seeded, ripples=results, f=run_f, previous_f=previous_f, stepped=stepped,
                        warnings=plan.warnings)

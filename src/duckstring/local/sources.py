@@ -175,6 +175,8 @@ def change_points(store, after: datetime | None = None, upto: datetime | None = 
                 continue
 
     for table, entry in sidecar_tables(sidecar).items():
+        if table.startswith("_duckstring_"):
+            continue  # the Run reports change with every reporting Run, not with the data
         mode = entry.get("mode")
         if mode == "append":
             add(table_parts(store, table))

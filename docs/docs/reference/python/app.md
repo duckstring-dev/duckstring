@@ -34,7 +34,9 @@ The handle is a [Pond Handle](pond.md) with the differences below. See [Building
 - A read returns the newest data the Source has published at the time of the call. Two reads in one request can see different versions if the Source publishes between them.
 - `read_table` registers the Source table as a view on the calling thread's cursor. Run SQL that uses the view's name on `pond.con` in the same thread.
 
-`read_delta`, `trickle`, `write_table`, `append_table`, `merge_table`, `apply_zset`, `write_object` and `skip` raise `TypeError`. An App can't publish data, and has no Pond Run window to read changes over.
+[`reports`](pond.md#reports) returns every report its Sources hold, since an App has no Run window.
+
+`read_delta`, `trickle`, `write_table`, `append_table`, `merge_table`, `apply_zset`, `write_object`, `skip` and `report` raise `TypeError`. An App can't publish data, and has no Pond Run window to read changes over.
 
 ## `freshness`
 

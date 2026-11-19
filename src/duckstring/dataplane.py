@@ -39,6 +39,9 @@ def _as_storage(data_dir) -> Storage:
 # plane and Trickle share a single source of truth (see duckstring/trickle/context.py).
 from .trickle.context import SYSTEM_PREFIX as RESERVED_PREFIX  # noqa: E402
 
+# Tables in the reserved namespace that a Pond publishes: the Run reports (duckstring.reports).
+SYSTEM_TABLES = (f"{RESERVED_PREFIX}reports",)
+
 # Write modes the interface can express. Only ``overwrite`` is implemented in Phase 1; the others are
 # the history-preserving Trickle write paths, reserved here so call sites don't hard-code a mode.
 WRITE_MODES = ("overwrite", "append", "merge")
@@ -578,7 +581,9 @@ def publish_plan(con, data_dir: Path, f=None, held=frozenset(), *, write: bool =
     droplogs = {f"{t}{trickle.DROPLOG_SUFFIX}" for t in meta}
     warms = {trickle.warm_name(t) for t in meta}
     colds = {trickle.cold_base_name(t) for t, m in meta.items() if m.get("mode") == "merge"}
-    tables = registry_tables(con)
+    # Plus the framework's own published Trickles (the Run reports), which the reserved prefix keeps out of
+    # registry_tables: published like any other, hidden from listings (list_tables).
+    tables = registry_tables(con) + [t for t in SYSTEM_TABLES if t in meta]
     f_iso = f.astimezone(timezone.utc).isoformat() if f is not None else None
     existing = trickle.load_sidecar(data_dir)
     kept = held_tables(data_dir, held, existing)
@@ -921,7 +926,8 @@ class ParquetDataPlane(DataPlane):
         # exists (no checkpoint yet → no `{main}.parquet`), so surface it from the sidecar.
         mains = {t for t, m in trickle.sidecar_tables(trickle.load_sidecar(data_dir)).items()
                  if m.get("mode") == "merge"}
-        return sorted(files | versioned | parts | mains)
+        # The framework's own published tables (the Run reports) are read by name, never listed.
+        return sorted(t for t in files | versioned | parts | mains if not t.startswith(RESERVED_PREFIX))
 
 
 def _export_parts(con, data_dir, table: str, f, *, chunk: bool = False) -> None:

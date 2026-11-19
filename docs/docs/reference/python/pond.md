@@ -255,3 +255,36 @@ def by_product(pond):
     if not changed:
         pond.skip()
 ```
+
+## Run reports
+
+A Ripple can record facts about its Pond Run, such as how old the data an Inlet loaded already was. Duckstring carries them downstream with the data: every Pond below keeps the reports of each upstream Run whose data it read. Nothing in orchestration reads them.
+
+### `report`
+
+```python
+pond.report(reports: dict) -> None
+```
+
+Records `reports`, a dict of JSON values, for this Run. Datetimes and dates are stored as ISO strings; anything else JSON can't hold raises `TypeError`. Several calls in a Run merge, later keys winning, and the reports of a Pond's Ripples merge in Ripple-name order. A Run that calls [`skip`](#skip) still carries its reports.
+
+```python
+@ripple
+def load(pond):
+    ...  # load the newest hour the source has published
+    pond.report({"data_as_of": newest_hour})
+```
+
+### `reports`
+
+```python
+pond.reports() -> dict
+```
+
+Returns the reports of the upstream Runs whose data this Run read, keyed by the reporting Pond (`name@major`), then by the freshness of its Run:
+
+```python
+{"pageviews@1": {datetime(2026, 11, 9, 20, 0, tzinfo=timezone.utc): {"data_as_of": "2026-11-09T17:00:00+00:00"}}}
+```
+
+It holds the reports that reached the Pond's Sources since its previous Run, every one of them on a first Run. A Pond that runs less often than its Sources sees a report for each Source Run it caught up on. Reports come from every Pond upstream, not only the direct Sources. This Run's own reports aren't included.
