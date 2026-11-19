@@ -734,3 +734,9 @@ naming the replacement.
 
 **Follow-up, measure first.** A Source whose change only adds rows still trips `p` and forces a recompute, though
 joining the new rows is never more work. `p` may need to count only removals and changes.
+
+## 20. A Sink stamped behind its Source can lose rows to the Source's cleanup (found 2026-11-20)
+
+Parked for the author: `plans/trickle-retention-bound.md`. A Sink Run stamped at a slower Source's freshness reads
+a fast merge Source as of that older point, but the fast Source's `gc_tiers` bound follows its own latest publish,
+so a fold or compaction can delete the state the Sink reads. Reproduced at the data plane; silent wrong rows.
