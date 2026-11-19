@@ -201,8 +201,7 @@ cycle. `GET /api/ponds/{name}/freshness` already returns `changed`; give `AppPon
 - **The puddle viewer misses Trickles.** `cli/puddle.py:_inventory` globs `*.parquet` and `__v/` only. List append
   and merge directories from the sidecar and query them through `read_select`.
 - **`pond run` can't replay incrementally.** A downstream local run always has `previous_f = None`, so local runs
-  only test the first-run path of every builder. Consider `pond run --incremental`: keep `puddles/out` and pass the
-  last local Run's `f` as `previous_f`, with Sources' deltas read from their copied Puddles.
+  only test the first-run path of every builder. Now part of item 10 (`pond run --incremental`).
 - **No `Cache-Control` on an App's static files** (`app_proxy.py` 140, `FileResponse`). Send `no-cache` (revalidate
   by ETag) by default.
 - **Done 2026-11-18, per line:** a line first deployed from 0.9 on publishes 128-bit integers as `BIGINT` (migration
@@ -227,7 +226,7 @@ hourly Wikipedia page views (about 4M rows an hour) to Wikidata's 88M sitelinks,
 co-mention graph and a two-year history. Its `FINDINGS.md` has the details. Items 10 to 13 are what most slowed
 iterating on it; 14 and 15 came out of reviewing it.
 
-## 10. Run a candidate Pond on the Catchment, against live Sources
+## 10. Live Puddles: a local run against real Source data
 
 Every metric in the showcase was designed off-platform: ad-hoc scripts reading the published Parquet with
 `dataplane.read_select`, then ported into a Ripple. For `wa_topics` that went as far as a harness with a stand-in
@@ -239,29 +238,127 @@ Pond handle so the real Ripple could run against live data. Puddles didn't serve
 - A real-sized snapshot is gigabytes (`wa_views` 3.2 GB published, the sitelinks 2.3 GB). Local Catchment: a copy of
   what's already on disk. Remote Catchment: a download per refresh.
 
-Proposal, `duckstring pond try [--ripple NAME] [--from-live] [--keep 24h]`: upload the working directory as
-`pond deploy` does, build its environment, and run one Pond Run on the Catchment beside the live line, reading what
-the live line would read and publishing nowhere a consumer looks.
+Decided (2026-11-19): **live and replayable Puddles**, not a `pond try` that runs candidate code on the Catchment. A
+try line works for one Pond but a change spanning two Ponds becomes a dev subgraph on the production Catchment. A
+Puddle is already "a Source, as a local run sees it", so it can be a route to the data as easily as a copy of it, and
+`pond run` stays the one way to run code before deploying. Tiered dev/qa/prod Catchments (dev reads qa and prod, prod
+reads nothing) are the answer for testing orchestration itself, and a Cloud feature, outside this item. Two rules from
+the discussion: nothing about production changes because of what is testing against it (no read holds, no retention
+bounds), and hydration is the active step (no mode is ever a setting in `pond.toml`). Keep the first cut simple.
 
-- **Identity and storage.** A dev line `{name}@try-{id}` under `ponds/{name}/try/{id}/`. Not an engine node: no
-  demand, no Refresh, never a Source, not in `edges`. The Driver dispatches one `begin_run` to its own Duck.
-- **Inputs.** Each Source pinned at its current `changed_f`, exactly as a Sink Run is pinned, and held by a read
-  lease in `_retain_from` until the try ends (the App lease mechanism), so retention can't prune a version mid-run.
-- **Incremental path.** Default: a bootstrap (`previous_f = NEVER`, Sources read in full). `--from-live`: hydrate the
-  try's registry from the live line's published state (`hydrate_registry`) and run from the live line's `end_f`, so
-  the incremental path runs on real deltas. That was the case local runs never exercise (item 9, `pond run
-  --incremental`).
-- **Results.** Published into the try directory in the normal layout, so `duckstring query` (`--try ID`) and
-  `get` work on it. `duckstring pond diff ID` compares each output table with the live line's at the same pins:
-  schema, row counts both ways (`EXCEPT ALL`) with samples, and the additive-contract verdict (reported, not
-  enforced).
-- **Safety.** Full access only, the same trust as deploy (both run code on the Catchment). It takes memory slots like
-  any Run, but always queues behind real Runs and has a hard memory cap and `--timeout`. An Inlet's I/O runs for real
-  but writes only to the try directory. No Spouts, Taps or alerts. Expires after `--keep`; `pond try rm`.
-- **Remote Catchments** work the same: code goes up, data stays where it is.
+### Reading Sources in place
 
-Puddles then keep the offline role (unit tests, CI, small fixtures). Promotion is an ordinary deploy, ideally
-`pond deploy --from-try ID`, so what was tried is what ships.
+**`p.source(table)`** on the `Puddle` handle: a DuckDB relation over the Source's published table, read in place (not
+through `/api/query`). The Source's major is the one its `[sources]` pin selects. Where the data is: a registered
+local Catchment's `root` (`registry.resolve_data_dir`, the local publish), else its data root (the registration's
+`data_root`, else the Catchment's settings) read with the user's own credentials, as a remote Duck would. A Catchment
+whose data the CLI can't reach (a hosted Catchment on local disk, a Volume through the Files API) raises, naming
+`--from-catchment` and `p.catchment()` as the way round. A filter written with `p.source` reads only what it needs in
+plain hydration too.
+
+**Write methods matching the Pond's.** The handle gains `p.append_table`, `p.merge_table` and the Pond's form of
+`p.write_table`, so a definition (baseline or step) writes the shape the Source has, append, merge or plain, with
+the layout incremental reads need. The Trickle demo's Puddles (`demo/priced/src/puddles.py`, `demo/revenue`) build that
+layout by hand through the data plane today; they move to these.
+
+### Live Puddles
+
+**`pond hydrate --live`** (with `--source` for some Sources only) marks Sources live in `puddles/hydrated.json`
+instead of copying them.
+
+- **A Source with no definition** is the whole Source, live.
+- **A definition that uses `p.source`** isn't run at hydrate. `pond run` runs it at the start of each run, and the
+  relations it returns or passes to `write_table` become what the run reads for that table, as SQL over the pinned
+  files (`relation.sql_query()`; the data plane's reads name explicit files, so it is self-contained). A filter or
+  projection stays, and DuckDB applies it in the scan. The handle records whether `p.source` was called, so this
+  needs no annotation. In an incremental run the definition is evaluated at the previous and the new position, and
+  the difference is the window's change, so it must be deterministic (as for a copied history).
+- **Any other definition** (generated rows as in the demo, a CSV, `write_path`, `write_object`, `p.catchment()`) has
+  no live data behind it: it is copied at hydrate as now, and `--live` says so per Source.
+
+A live hydration records its time (or `--as-at T`) in `hydrated.json`, and a baseline `pond run` reads each live
+Source as it stood then: the version at or below its freshness at that time, Trickle rows up to it
+(`read_select(pin=, as_of=)`). That keeps a live Puddle close to stable across runs without copying it; hydrating
+again moves it forward. The versions read are recorded in `puddles/out/` beside the outputs, so a result says what it
+was computed from. **No read hold**: what production prunes is gone. A plain table's version at the hydration time
+is usually gone once its line publishes again (the newest is read, with a warning, as a deployed read does); a merge table
+read before its last compaction, or a version a long run is reading, fails with a message saying so. When stability
+must be guaranteed, copy instead (`--as-at` without `--live`).
+
+### Replayable Puddles and incremental runs
+
+The purpose of an incremental local run is to test that the incremental logic works, which needs Source data at
+epochs after the baseline. Live and copied Puddles both give it: a live Source replays from its recorded hydration
+time through what production has published since (its history grows as production runs, so a live test can follow
+production forward), a copied one through the history copied with it.
+
+**`pond hydrate --as-at T`** copies each Source's state at `T` plus every change recorded since, and the Source's run
+freshnesses from `/api/runs` (passes included); a live Source's are read from `/api/runs` at each run instead (a
+local Catchment that isn't running falls back to the Source's change points, with a warning). A Source's freshness
+advances on every run, changing or not: a dimension that runs hourly but changes weekly reaches a freshness within
+the hour, which its changes alone would not show. Without a definition, the files are copied (what a read at `T` picks, `merge_snapshot`/`parts_snapshot`, plus
+everything newer). With one, the definition is evaluated at `T` and at each of its Source's change points after it,
+and written as the Source's kind of table, so the copy holds only the differences and a filtered history stays
+small. A definition must be deterministic for this (a filter, a join, a sample by key hash; not random sampling).
+A `T` older than a Source keeps (a merge table before its last compaction, an append table below its floor) is
+refused, naming the earliest `T` allowed. A plain table usually has only its newest version: if the version at `T` is
+gone, the newest is used and hydrate says so. Without `--as-at`, the baseline is the Sources' current state and there
+is no history to replay.
+
+**`@puddle.step(target, set=...)`**: a definition that writes the data for the next window of a copied Puddle,
+through the same write methods. It sees `p.previous_f`, `p.f` and `p.step` (the step number, so randomness can be
+seeded per step and a rerun from the baseline writes the same rows). Only for copied Puddles: a step writes into the
+local copy, never on top of live data. A step has no cadence of its own.
+
+**`pond run`** (no flag) is the baseline: it resets `puddles/out/`, drops what steps wrote (back to the hydrated
+copy), and runs with `previous_f = NEVER`. **`pond run --incremental`** keeps the registry and advances to a target
+freshness, emulating a Refresh: the Pond runs only once every Source has reached the target.
+
+- **Targets**: `--next-change` (the default): the next point after the last run's freshness where any Source changed.
+  `--next-run`: the next freshness this Pond ran at in production, from its own run history (recorded at hydrate
+  for a copy; a deployed Pond only), so it replays exactly the windows production saw. `--most-recent`: the oldest
+  of the Sources' latest recorded freshnesses (for a live Source, its current one). `--to T` is what the three compute, and can be given directly. No `now`: historical
+  Sources can't update to it.
+- **Reaching the target**: each Source is read as it stood at the moment the last of them reached the target (its
+  latest recorded freshness at or before that moment). A copied Source whose history doesn't reach the target steps,
+  if it has a step; one with neither, or a live Source production hasn't brought there, refuses the run, naming the
+  Source.
+- **A step's stamp** is the target freshness while any Source still has copied history, and now once none has. So a
+  wholly synthetic test is always now, and a mixed one stays in step (stamped now, a step's rows would sit past the
+  run's freshness until every other Source caught up).
+- **The run** is stamped as the engine would stamp it, the oldest of its Sources' freshnesses; rows past that wait
+  for the next run. `previous_f` is the last local run's freshness, so Ripples read the real window.
+
+The local-testing guide should note that moving from the end of copied history to now is a jump in time: logic
+relative to `pond.f` ("the last 24 hours") and `retain_t` see it. Synthetic rows can carry timestamps within the
+step's window.
+
+### Named sets
+
+`@puddle(target, set="recent")` and `@puddle.step(target, set=...)`, or `set=("recent", "full")` for a definition in
+several. Unlabelled definitions are the default set. `pond hydrate --set recent` uses, per Source and table, the set's
+definition where it has one and the default otherwise; the chosen set is recorded in `hydrated.json`. `--set`,
+`--live` and `--as-at` are independent. Two definitions for one target in one set are an error at collection; before,
+both ran and the last write won silently.
+
+`pond puddle ls` shows each Source's mode (live, copied, synthetic), its set, the copied range and the last run's
+position.
+
+**Docs** (made with the code, not part of the held pass): the `pond hydrate` and `pond run` CLI reference, the
+`Puddle` and `@puddle` Python reference with their docstrings, and the local-testing guide.
+
+**Tests**: `p.source` reads from a local Catchment root and from an object-store root (moto); a filter definition stays
+a filter under `--live`; a generated definition is copied under `--live`; a live baseline reads the Sources as of
+the hydration time, and `--incremental` replays production's changes since through a filter definition; a pruned
+plain version falls back to the newest with a warning; `--as-at` copies history and run freshnesses, and refuses a `T` before
+a compaction; `--next-change` waits for every Source (an unchanging, regularly running Source doesn't hold it back);
+`--next-run` replays production's windows; `--most-recent`; a step fills a Source past its history, stamped at the
+target, and at now once nothing has history; a Source with neither refuses; a plain `pond run` drops step output; the
+builder and an incremental aggregate give the same result replayed step by step as a baseline at the end; set
+selection with fallback; a duplicate in one set raises; an unreachable data root names the fallback.
+
+**Follow-up, to agree before building**: a Source resolved to a sibling project's local output, for a change spanning
+several Ponds.
 
 ## 11. Filling a new table or Ripple from data already loaded
 
