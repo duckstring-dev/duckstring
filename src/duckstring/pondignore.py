@@ -1,7 +1,7 @@
 """Which files of a Pond project are deployed: everything except what ``.pondignore`` excludes.
 
 ``.pondignore`` sits at the Pond's root and uses ``.gitignore`` syntax. Without one, :data:`DEFAULT_PATTERNS`
-apply: local test data (``puddles/``), secrets (``.env``), hidden directories (``.git/``, ``.venv/``), and
+apply: local test data (``puddles/``, ``puddles.toml``), secrets (``.env``), hidden directories (``.git/``, ``.venv/``), and
 caches and build output. A ``.pondignore`` replaces the defaults entirely; ``duckstring pond init`` writes
 one containing them, so they're visible and editable.
 
@@ -21,8 +21,9 @@ DEFAULT_PATTERNS = """\
 # The syntax is the same as .gitignore. This file replaces the built-in defaults,
 # which are what it contains when `duckstring pond init` creates it.
 
-# Local test data (duckstring pond hydrate / run)
+# Local test data and the Puddle sets chosen for it (duckstring pond hydrate / run)
 puddles/
+puddles.toml
 
 # Secrets and local environment
 .env

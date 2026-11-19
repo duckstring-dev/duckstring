@@ -31,8 +31,26 @@ def app_env(project: Project, port: int) -> dict[str, str]:
         env["DUCKSTRING_APP_STATE"] = str(state)
     env[ENV] = json.dumps({"name": project.name, "major": int(project.version.split(".")[0]),
                            "version": project.version, "root": str(project.puddles_dir),
-                           "sources": list(project.sources)})
+                           "sources": list(project.sources), "source_dirs": _source_dirs(project)})
     return env
+
+
+def _source_dirs(project: Project) -> dict[str, str]:
+    """Where the App reads each Source that isn't in the flat ``puddles/ponds/`` layout: a live Puddle in place, a
+    working copy a step or live definition wrote."""
+    from .runner import _Plan
+    from .state import load_hydrated
+
+    hydrated = load_hydrated(project)
+    if hydrated is None:
+        return {}
+    plan = _Plan(project, hydrated)
+    dirs = {}
+    for source, state in hydrated.sources.items():
+        store = plan.store(source, state)
+        if store is not None:
+            dirs[source] = store.uri()
+    return dirs
 
 
 def serve_app(project: Project, port: int) -> int:

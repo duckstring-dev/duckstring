@@ -350,7 +350,7 @@ position.
 **Docs** (made with the code, not part of the held pass): the `pond hydrate` and `pond run` CLI reference, the
 `Puddle` and `@puddle` Python reference with their docstrings, and the local-testing guide.
 
-**Tests**: `p.source` reads from a local Catchment root and from an object-store root (moto); a filter definition stays
+**Tests**: `p.read_source` reads from a local Catchment root and from an object-store root (moto); a filter definition stays
 a filter under `--live`; a generated definition is copied under `--live`; a live baseline reads the Sources as of
 the hydration time, and `--incremental` replays production's changes since through a filter definition; a pruned
 plain version falls back to the newest with a warning; `--as-at` copies history and run freshnesses, and refuses a `T` before
@@ -359,6 +359,30 @@ a compaction; `--next-change` waits for every Source (an unchanging, regularly r
 target, and at now once nothing has history; a Source with neither refuses; a plain `pond run` drops step output; the
 builder and an incremental aggregate give the same result replayed step by step as a baseline at the end; set
 selection with fallback; a duplicate in one set raises; an unreachable data root names the fallback.
+
+**As built (2026-11-19).** `src/duckstring/local/`: `state.py` (`puddles.toml`, `hydrated.json`, `position.json`),
+`sources.py` (`Locator`: where a Source's data is, its run history; change points, earliest readable),
+`session.py` (`SourceSession`: one Source's Puddle written at one freshness through a `Pond` writer on an
+in-memory registry, published with the data plane), `hydrate.py`, `runner.py`. Tests: `tests/test_live_puddles.py`,
+`test_object_store.test_a_live_puddle_reads_a_source_on_s3_in_place`, the Trickle demo's local test (two steps,
+checked against a recompute). Where it differs from the plan above:
+- **`p.read_source(table)`**, not `p.source`: `p.source` is the handle's documented attribute (the Source's name).
+- **A live definition is materialised, not lazy SQL.** Each evaluation (baseline at hydrate, each incremental
+  position) writes the definition's result into the Puddle with the Source's kind (append: rows the history
+  doesn't hold, copy for copy; merge: the full state, diffed; plain: a version), so incremental reads of it are
+  ordinary data plane reads. A filter still pushes into the scan; only what it keeps is written.
+- **Steps and live evaluations write a working copy** (`puddles/work/{source}/data`, hard links of the hydrated copy),
+  so a baseline run deletes it and the hydrated copy is never changed.
+- **The stamp.** A definition that reads its Source is stamped with the Source's own freshness at the point (its
+  newest run at or before it, else its newest change), resolved at the first `read_source`; a generated one with
+  the point. The baseline run is the oldest of these.
+- **Where the run read from** is `position.json` (each Source's freshness), shown by `pond puddle ls`.
+- **Sets:** per target, the set's definition else the default's; a whole-Source definition in a set replaces all
+  the Source's default ones.
+- **Puddle tables publish through the data plane** (versions, sidecar), so a plain one is `{table}__v/` where it was
+  `{table}.parquet`. A definition that writes its own files and nothing through the handle keeps them.
+- A Pond with Sources and nothing hydrated refuses `pond run`; Puddles hydrated before `hydrated.json` still run as a
+  baseline at now, and refuse `--incremental` until hydrated again.
 
 ### Puddle Sources on a local Catchment (follow-up, agreed 2026-11-19; after the single-Pond half)
 

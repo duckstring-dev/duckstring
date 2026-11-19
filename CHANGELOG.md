@@ -100,6 +100,35 @@ also had no way to append without checking the table, though speed is the reason
 - **`--json`** on `status` (every field `/api/status` gives), `runs`, `refresh ls` and `data ls`.
 - `POST /api/ponds/{name}/refresh` returns the freshness it asked for (`requested`).
 
+### Live and replayable Puddles
+
+Every metric in the showcases was designed against real data outside Duckstring, because Puddles were small
+generated samples and each Pond's window of them differed. A Puddle can now be the real Source, read in place, and
+a local run can step through the Source's history.
+
+- **`p.read_source(table=None)`** reads the Source's published table in place on the Catchment you hydrate from
+  (a registered local Catchment's root, or the data root with your own credentials), as it stood at `p.f`. A
+  Puddle can be a filter over it: `return p.read_source().filter("store_id = 7")`.
+- **`pond hydrate --live`** copies nothing: a Source with no definition is read in place, and a definition over
+  `read_source` is evaluated when a run needs it. The hydration time is recorded, and runs read the Sources as they
+  stood then. Nothing on the Catchment changes for a local reader.
+- **`pond hydrate --as-at TIME`** copies each Source's state at that time and every change since (or replays a
+  definition over `read_source` through them). A time before a Source's oldest kept state is refused.
+- **`pond run --incremental`** goes on from the last run, as a Refresh would: every Source reaches a target first
+  (`--next-change`, the default, `--next-run`, `--most-recent` or `--to TIME`), the run is stamped with the oldest
+  Source freshness, and `pond.previous_f` is the last run's. A plain `pond run` is the baseline again. A Pond with
+  Sources must be hydrated before it runs.
+- **`@puddle.step(target)`** writes a Source's next window, for a new pipeline with no history or past its end. It
+  sees `p.previous_f`, `p.f` and `p.step`.
+- **Puddle sets:** `@puddle(target, set="week")` (or a tuple), chosen by `pond hydrate --set` or per Source in a
+  `puddles.toml` `[local]` section, falling back to the default set. Two definitions for one target in a set are an
+  error, where the last one used to win silently. `puddles.toml` is left out of deploys by default.
+- **The handle writes what a Source publishes:** `p.append_table` and `p.merge_table`, and `p.read_table` for the
+  Puddle's own table. Puddle tables are published through the data plane as a Pond's are (so
+  `puddles/ponds/{source}/data/{table}.parquet` is now a version directory), and a table read with `read_source`
+  is written as the Source's kind, so deltas over it are the Source's.
+- `pond puddle ls` shows how each Source is read, its set and the freshness the last run read it at.
+
 ### Other changes
 
 - **A failed Ripple is retried once by default** (`immediate_retries = 1`), within the same Run. A transient error,

@@ -251,8 +251,13 @@ def _make_handle():
     con = duckdb.connect()
     if cfg.get("memory_limit"):  # the App's [pond] memory (at least 256MB), set aside while it runs
         con.execute(f"SET memory_limit = '{cfg['memory_limit']}'")
+    source_dirs = None
+    if cfg.get("source_dirs"):  # a local serve's live Puddles, read in place (duckstring.local.app)
+        from .storage import get_storage
+
+        source_dirs = {s: get_storage(uri) for s, uri in cfg["source_dirs"].items()}
     return _pond_class()(
         cfg["name"], cfg.get("version", "0.0.0"), con, cfg["root"],
         source_majors=cfg.get("source_majors") or None, data_root=cfg.get("data_root"),
-        sources=list(cfg.get("sources", [])), runtime=runtime,
+        sources=list(cfg.get("sources", [])), runtime=runtime, source_dirs=source_dirs,
     )

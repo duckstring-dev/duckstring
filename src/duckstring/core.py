@@ -250,41 +250,106 @@ def load_ripples(source_dir: Path, info: dict | None = None, *, require_entry: b
     return pond
 
 
-def puddle(target: str):
-    """Register a function that builds a Puddle: a local snapshot of Source data for testing.
+DEFAULT_PUDDLE_SET = "default"
 
-    Args:
-        target: ``"source.table"`` for one table of a Source, or ``"source"`` for a whole Source whose
-            tables the function names itself.
 
-    The function takes one argument, the :class:`Puddle` handle, and ``duckstring pond hydrate`` runs it.
-    It can write through the handle or return the data: a relation is written as the target table, a path
-    is copied in with :meth:`Puddle.write_path`. Targeting the Pond's own name provides its previous output.
+def _puddle_sets(value) -> tuple[str, ...]:
+    if value is None:
+        return (DEFAULT_PUDDLE_SET,)
+    names = (value,) if isinstance(value, str) else tuple(value)
+    if not names or not all(isinstance(n, str) and n for n in names):
+        raise ValueError(f"a Puddle set is a name or a tuple of names, not {value!r}")
+    if DEFAULT_PUDDLE_SET in names and value is not None:
+        raise ValueError(f"'{DEFAULT_PUDDLE_SET}' names the unlabelled definitions; leave set= out instead")
+    return names
 
-    Example::
 
-        @puddle("transactions.transaction")
-        def transactions(p):
-            p.write_table(p.con.sql("SELECT ..."))
-
-        @puddle("products")
-        def products(p):
-            p.write_table("product", p.con.sql("SELECT ..."))
-
-    Reference: https://docs.duckstring.com/reference/python/decorators
-    """
+def _register_puddle(target: str, set, step: bool):  # noqa: A002 - the user-facing argument name
+    sets = _puddle_sets(set)
 
     def decorator(f):
-        _PUDDLES.append({"func": f, "target": target, "name": f.__name__})
+        _PUDDLES.append({"func": f, "target": target, "name": f.__name__, "sets": sets, "step": step})
         return f
 
     return decorator
 
 
+def puddle(target: str, *, set=None):  # noqa: A002 - the user-facing argument name
+    """Register a function that builds a Puddle: a local stand-in for Source data, for testing.
+
+    Args:
+        target: ``"source.table"`` for one table of a Source, or ``"source"`` for a whole Source whose
+            tables the function names itself.
+        set: The Puddle set the definition belongs to: a name, or a tuple of names for several. Without
+            it, the definition is in the default set, which a set falls back to for any Source or table it
+            doesn't define.
+
+    The function takes one argument, the :class:`Puddle` handle, and ``duckstring pond hydrate`` runs it.
+    It can write through the handle or return the data: a relation is written as the target table, a path
+    is copied in with :meth:`Puddle.write_path`. Targeting the Pond's own name provides its previous output.
+    A definition that reads the real Source with :meth:`Puddle.read_source` can be replayed through the Source's
+    history, so it must be deterministic (a filter, a join, a sample by key hash; not random sampling).
+
+    Example::
+
+        @puddle("transactions.transaction")
+        def transactions(p):
+            return p.read_source().filter("store_id = 7")
+
+        @puddle("products", set="small")
+        def products(p):
+            p.write_table("product", p.con.sql("SELECT ..."))
+
+    Use ``@puddle.step`` for a definition that writes a Source's next window in an incremental local run.
+
+    Reference: https://docs.duckstring.com/reference/python/decorators
+    """
+    return _register_puddle(target, set, step=False)
+
+
+def _puddle_step(target: str, *, set=None):  # noqa: A002 - the user-facing argument name
+    """Register a function that writes the next window of a Puddle, for ``duckstring pond run --incremental``.
+
+    Args:
+        target: ``"source.table"`` or ``"source"``, as for :func:`puddle`.
+        set: The Puddle set, as for :func:`puddle`.
+
+    A step runs when the run's target lies beyond the history a Source's Puddle holds, so a test can go on
+    past the end of real data, or run on generated data alone. It writes through the same methods as a
+    definition (usually :meth:`Puddle.append_table` or :meth:`Puddle.merge_table`) and sees ``p.previous_f``,
+    ``p.f`` and ``p.step`` (the step's number, to seed generated data so a rerun from the baseline writes the
+    same rows). Writing nothing still advances the Source: it ran and didn't change. Steps apply only to
+    copied Puddles.
+
+    Example::
+
+        @puddle.step("orders.order_line")
+        def more_orders(p):
+            p.append_table("order_line", p.con.sql(f"SELECT {p.step} * 100 + range AS order_id FROM range(5)"))
+
+    Reference: https://docs.duckstring.com/reference/python/decorators
+    """
+    return _register_puddle(target, set, step=True)
+
+
+puddle.step = _puddle_step
+
+
 def collect_puddles() -> list[dict]:
-    """Drain and return the current puddle registry. Used by ``duckstring pond hydrate``."""
+    """Drain and return the current puddle registry. Used by ``duckstring pond hydrate``. Raises ``ValueError``
+    when two definitions (or two steps) for one target share a set: before, both ran and the last write won."""
     result = list(_PUDDLES)
     _PUDDLES.clear()
+    seen: dict[tuple, str] = {}
+    for d in result:
+        for s in d.get("sets", (DEFAULT_PUDDLE_SET,)):
+            key = (d["target"], s, d.get("step", False))
+            if key in seen:
+                kind = "steps" if key[2] else "definitions"
+                raise ValueError(
+                    f"two Puddle {kind} for '{d['target']}' in the set '{s}': {seen[key]} and {d['name']}"
+                )
+            seen[key] = d["name"]
     return result
 
 
@@ -544,16 +609,22 @@ class Puddle:
     """The handle passed to every ``@puddle`` function.
 
     Attributes:
-        con: A scratch in-memory DuckDB connection.
+        con: An in-memory DuckDB connection for building the Puddle's data. Relations made on it can be written
+            or returned. Make scratch tables ``TEMP``: other tables left on it aren't kept.
         path: The directory the Puddle writes into, ``puddles/ponds/{source}/data/``. Anything written
             here directly is visible to a local run.
         source: The Source name from the decorator target.
         table: The table name from the decorator target, or ``None`` for a whole-Source Puddle.
+        f: The freshness the Puddle's data is stamped with: the hydration time, or for a Puddle that reads its
+            Source, the Source's freshness then; in a step, the window it writes.
+        previous_f: The freshness of the Puddle's previous write (a step's previous window), else ``datetime.min``
+            (UTC).
+        step: In a ``@puddle.step``, the step's number (1 for the first after the baseline), else 0.
 
     Reference: https://docs.duckstring.com/reference/python/puddle
     """
 
-    def __init__(self, target: str, root: Path, default_catchment: str | None = None):
+    def __init__(self, target: str, root: Path, default_catchment: str | None = None, session=None):
         self.target = target
         source, table = parse_ref(target)
         if source is None:  # a whole-Source Puddle: the target names the Source
@@ -562,30 +633,85 @@ class Puddle:
         self.table = table
         self.root = Path(root)
         self.default_catchment = default_catchment
+        # The local run's writer for this Source (duckstring.local.session.SourceSession): its connection,
+        # positions and the published layout it writes. None outside a hydration (a bare handle).
+        self._session = session
         self._con = None
 
     @property
     def path(self) -> Path:
         """The directory the Puddle writes into, ``puddles/ponds/{source}/data/``. Created on access."""
+        if self._session is not None:
+            return self._session.path
         dest = self.root / "ponds" / self.source / "data"
         dest.mkdir(parents=True, exist_ok=True)
         return dest
 
     @property
     def con(self):
-        """A scratch in-memory DuckDB connection."""
+        """An in-memory DuckDB connection for building the Puddle's data."""
+        if self._session is not None:
+            return self._session.con
         if self._con is None:
             import duckdb
 
             self._con = duckdb.connect()
         return self._con
 
-    def write_table(self, name_or_relation, relation=None) -> Path:
-        """Write a relation to ``{path}/{name}.parquet`` and return the file path.
+    @property
+    def f(self):
+        from .engine.core import NEVER
+
+        return self._session.f if self._session is not None else NEVER
+
+    @property
+    def previous_f(self):
+        from .engine.core import NEVER
+
+        return self._session.previous_f if self._session is not None else NEVER
+
+    @property
+    def step(self) -> int:
+        return self._session.step if self._session is not None else 0
+
+    def _target_table(self, name, what: str) -> str:
+        if name is not None:
+            return name
+        if self.table is None:
+            raise ValueError(f"puddle '{self.target}' covers a whole Source — name the table: p.{what}(name, ...)")
+        return self.table
+
+    def read_source(self, table: str | None = None):
+        """The Source's published table, read in place on the Catchment the Puddle hydrates from, as a relation on
+        ``con``. ``table`` defaults to the target's.
+
+        The table is read as it stood at the Puddle's freshness (``p.f``), at the major line the Source's
+        ``[sources]`` pin selects. A filter or projection over it reads only what it needs. A definition that
+        uses it can be replayed through the Source's history (``pond hydrate --as-at``) and read live
+        (``pond hydrate --live``), so it must be deterministic.
+
+        Raises ``ValueError`` when the Catchment's data can't be read from this machine (then use
+        ``p.catchment()`` or ``pond hydrate --from-catchment``) or the table isn't kept that far back.
+        """
+        if self._session is None:
+            raise ValueError("p.read_source() reads through a hydration: run it with duckstring pond hydrate")
+        return self._session.source_relation(self._target_table(table, "read_source"))
+
+    def read_table(self, name: str | None = None):
+        """This Puddle's own table as written so far (by the baseline and any earlier steps), as a relation on
+        ``con``. ``name`` defaults to the target's table."""
+        if self._session is None:
+            raise ValueError("p.read_table() reads through a hydration: run it with duckstring pond hydrate")
+        return self._session.read_own(self._target_table(name, "read_table"))
+
+    def write_table(self, name_or_relation, relation=None):
+        """Write a table of the Puddle.
 
         Call as ``write_table(relation)`` to use the table named in the decorator target, or
         ``write_table(name, relation)``. A whole-Source Puddle must name each table. A pandas DataFrame is
-        accepted and converted through ``con``.
+        accepted and converted through ``con``. A table read with :meth:`read_source` is written as the kind the
+        Source publishes it as (append, merge or plain), so incremental reads of the Puddle behave like reads
+        of the Source; otherwise it is a plain table.
         """
         if relation is None:
             name, relation = self.table, name_or_relation
@@ -597,11 +723,34 @@ class Puddle:
             name = name_or_relation
         if not hasattr(relation, "write_parquet"):
             relation = self.con.from_df(relation)
+        if self._session is not None:
+            return self._session.write(name, relation)
         dest = self.path / f"{name}.parquet"
         tmp = self.path / f"{name}.parquet.tmp"
         relation.write_parquet(str(tmp))
         tmp.replace(dest)
         return dest
+
+    def append_table(self, name, relation=None, *, pk=None, on_conflict: str = "skip_check",
+                     log_drops: bool = True):
+        """Write rows to an append table of the Puddle, as :meth:`Pond.append_table` does: the rows are added at
+        ``p.f``. Call as ``append_table(relation)`` for the target's table, or ``append_table(name, relation)``."""
+        if relation is None:
+            name, relation = None, name
+        if self._session is None:
+            raise ValueError("p.append_table() writes through a hydration: run it with duckstring pond hydrate")
+        return self._session.append(self._target_table(name, "append_table"), relation, pk=pk,
+                                    on_conflict=on_conflict, log_drops=log_drops)
+
+    def merge_table(self, name, relation=None, *, pk):
+        """Write the complete current state of a merge table of the Puddle, as :meth:`Pond.merge_table` does: the
+        difference from its previous state is the change at ``p.f``. Call as ``merge_table(relation, pk=...)`` for
+        the target's table, or ``merge_table(name, relation, pk=...)``."""
+        if relation is None:
+            name, relation = None, name
+        if self._session is None:
+            raise ValueError("p.merge_table() writes through a hydration: run it with duckstring pond hydrate")
+        return self._session.merge(self._target_table(name, "merge_table"), relation, pk=pk)
 
     def write_path(self, src) -> None:
         """Copy existing Parquet or CSV files into the Puddle from a path or glob.
@@ -710,6 +859,7 @@ class Pond:
         flock: str | None = None, sources=None, flock_env: dict[str, str] | None = None,
         static_tables: dict | None = None, ripple: str | None = None, ancestors=None,
         table_writers: dict[str, str] | None = None, change_sink=None, exact_ints: bool = True,
+        source_dirs: dict | None = None,
     ) -> None:
         from .changes import ChangeLedger
         from .engine.core import NEVER
@@ -760,6 +910,9 @@ class Pond:
         # overwrite Source reads to that version (see _pin) and lets a read reject a stale local publish
         # (catchment.registry.resolve_data_dir). Absent for puddle runs.
         self.source_f = source_f or {}
+        # A local run's Sources read from somewhere other than the flat puddles layout: a live Puddle (the
+        # Source's own published data, read in place) or a Puddle's working copy. {source: Storage}.
+        self.source_dirs = dict(source_dirs or {})
         # The run's freshness F (tz-aware UTC datetime): the ideal watermark/provenance stamp —
         # stable across crash recovery and retries, which all re-run at the same F (wall-clock
         # would differ per attempt). Local (puddle) runs stamp the run's start time.
@@ -1251,6 +1404,8 @@ class Pond:
 
         from .storage import LocalStorage
 
+        if source_pond in self.source_dirs:
+            return self.source_dirs[source_pond]
         major = self.source_majors.get(source_pond)
         if major is None:  # flat puddles layout (local runs have no majors) — always under the local root
             return LocalStorage(_Path(self.root) / "ponds" / source_pond / "data")

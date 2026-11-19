@@ -29,7 +29,11 @@ def _inventory(project) -> list[dict]:
     dirs: list[tuple[str, Path, str]] = []
     ponds_dir = project.puddles_dir / "ponds"
     if ponds_dir.exists():
-        dirs += [(d.name, d / "data", "puddle") for d in sorted(ponds_dir.iterdir()) if (d / "data").is_dir()]
+        for d in sorted(ponds_dir.iterdir()):
+            if not (d / "data").is_dir():
+                continue
+            work = project.puddles_dir / "work" / d.name / "data"  # a step's or live definition's working copy
+            dirs.append((d.name, work if (work / "_trickle.json").exists() else d / "data", "puddle"))
     if project.out_dir.is_dir():
         dirs.append((project.name, project.out_dir, "out"))
     from ..dataplane import ParquetDataPlane
@@ -108,6 +112,34 @@ def _age(path: Path) -> str:
     return f"{int(seconds)}s"
 
 
+def _print_sources(console, project) -> None:
+    """Each hydrated Source: how it's read (live, copied, copied with history), its set, and the freshness the last
+    run read it at."""
+    from rich.table import Table
+
+    from ..local.state import load_hydrated, load_position
+
+    hydrated = load_hydrated(project)
+    if hydrated is None or not hydrated.sources:
+        return
+    position = load_position(project)
+    table = Table(show_header=True, header_style="bold dim", title=f"Sources (hydrated as of {hydrated.at})",
+                  title_justify="left", title_style="bold")
+    for col in ("source", "mode", "set", "from", "last run read"):
+        table.add_column(col)
+    for name, st in sorted(hydrated.sources.items()):
+        mode = {"live": "live", "derived": "live, through its definition"}.get(st.mode, "copied")
+        if st.mode == "copied" and st.history:
+            mode = "copied, with history"
+        if st.steps:
+            mode += " + steps"
+        read = position.sources.get(name, "") if position is not None else ""
+        table.add_row(name, mode, st.set, st.f or "", read)
+    console.print(table)
+    if position is not None:
+        console.print(f"[dim]Last run: {position.f}" + (f", step {position.step}" if position.step else "") + "[/dim]")
+
+
 @app.command("ls")
 def ls() -> None:
     """List hydrated Puddles and run output tables, with row counts, sizes and ages."""
@@ -118,6 +150,7 @@ def ls() -> None:
     console = Console()
     project = _load_project()
     items = _inventory(project)
+    _print_sources(console, project)
     if not items:
         console.print("[dim]No puddles — run 'duckstring pond hydrate' first.[/dim]")
         return
