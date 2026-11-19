@@ -466,6 +466,39 @@ own `place_file` log and refetches the old files itself. Two changes:
   pattern `place_file` uses, or give Inlet Ripples an optional `backfill(pond, since)` hook that a per-Ripple
   Rebuild calls.
 
+**Closed 2026-11-19 without a per-Ripple Rebuild** (the author's call). Deleting a table already refills it:
+`duckstring data delete POND.TABLE` drops its whole collection (`trickle.io.drop_table`: changelog, base, bands,
+droplog, agg/acc state, meta row), and a builder terminal with no meta row for its output recomputes it whole from
+its Sources' current state (`TrickleBuilder._compute`, the `read_meta` check). The re-bootstrap raises that table's
+floor, so Sinks reload that table alone. That is finer than a per-Ripple Rebuild (one table of a Ripple that writes
+several), and it also covers a builder Ripple added to an existing Pond (no output yet, so its first Run reads in
+full), which was most of the first bullet. The `wa_news` case wouldn't have been helped either way: its one Ripple
+writes every table, and an Inlet can't recompute inputs it has discarded.
+
+Left for the docs pass: "delete the table to refill it" (in the guide on changing a Pond), and the input-log pattern
+for Inlets (`place_file`: a log, per output, of which inputs it has read, so a new output can fill its past from
+inputs still available).
+
+### Proposal (parked): a full read when the caller's output is absent
+
+What the builder does for itself, hand-written incremental code can't: a Ripple that reads `pond.read_delta(ref)`
+and writes with `apply_zset`/`append_table`/`merge_table` of the window gets only the window when its output was
+deleted or is new, and silently writes a partial table.
+
+- **Explicit, recommended.** `pond.read_delta(ref, into="table")`: when the Ripple's own `table` has no Trickle meta
+  row (or, for a plain table, doesn't exist), return the Source's full read (`is_full=True`) whatever the window.
+  Code that already handles `is_full` (it must: a coverage miss gives one) then refills correctly with no other
+  change. Matches "everything explicit"; also covers a table deleted under an existing Ripple.
+- **Inferred.** Full when any table this Ripple has written before is missing. Needs the Ripple's writes, which the
+  Duck only learns from Runs it has seen (the Catchment's `ripple_run_lineage` would have to travel on the job), and
+  it guesses which output the read feeds.
+- **The original 11a.** `previous_f = NEVER` for a Ripple with no completed Run. Covers a new Ripple, not a deleted
+  table, and must come from the Catchment's `ripple_run` history on the job: the Duck's ledger is lost on every
+  fresh remote Duck, so deriving it there would make every cold Fargate or Cloud Run Duck read everything in full.
+
+Open: whether `own_table` reads (`pond.read_delta("own_table")`) take `into=` too, and whether the builder's leaves
+should accept it for symmetry (they don't need it).
+
 ## 12. A CLI that works for agents
 
 In both showcases I wrote throwaway scripts against `/api/runs` and `/api/status` in every session, and one
