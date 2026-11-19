@@ -311,8 +311,8 @@ seeded per step and a rerun from the baseline writes the same rows). Only for co
 local copy, never on top of live data. A step has no cadence of its own.
 
 **`pond run`** (no flag) is the baseline: it resets `puddles/out/`, drops what steps wrote (back to the hydrated
-copy), and runs with `previous_f = NEVER`. With nothing hydrated yet it hydrates first (copied, as of now), as
-`refresh --baseline` does on a Catchment (below). **`pond run --incremental`** keeps the registry and advances to a target
+copy), and runs with `previous_f = NEVER`. With nothing hydrated it refuses, naming `pond hydrate`, as `refresh
+--rewind` does on a Catchment (below). **`pond run --incremental`** keeps the registry and advances to a target
 freshness, emulating a Refresh: the Pond runs only once every Source has reached the target.
 
 - **Targets**: `--next-change` (the default): the next point after the last run's freshness where any Source changed.
@@ -388,8 +388,8 @@ transactions = "recent"
   `.pondignore` leaves it out; a `--git` deploy never carries a gitignored file anyway). Deploy validates it: each
   Source is in `[sources]`, and the set has a definition for it (its own, or the default set's). No file, or no
   section for that Catchment, clears the line's Puddle Sources, so a deploy from a clean checkout sends none (a
-  teammate deploying to a shared dev without the file clears yours: say so in the guide). A command sends the section
-  without a redeploy (name to settle, for example `pond puddles push`). The definitions in `src/puddles.py` are code
+  teammate deploying to a shared dev without the file clears yours: say so in the guide). `pond puddles push` sends
+  the section without a redeploy. The definitions in `src/puddles.py` are code
   and stay in the bundle; changing them is a redeploy, as for a Ripple.
 
 **Behaviour.**
@@ -403,19 +403,24 @@ transactions = "recent"
 
 **Refresh variants.** `refresh now POND --next-change | --next-run | --most-recent | --to T` computes `T` from the
 Puddle Sources the Refresh reaches, then is a normal Refresh at `T`. A plain Refresh (at now) that reaches a Puddle
-Source is refused, naming the targets. **`--baseline`** returns the Ponds it reaches (the target and everything
-upstream on the Catchment) to their hydration point, as a Rebuild does (registry dropped, `previous_f = NEVER`, step
-output dropped), and runs; a line never hydrated is hydrated first (copied, as of now). `--baseline --next-change` is
-the baseline Run then one step. Hydrating a line on the Catchment is its own command, with `--live`, `--as-at` and
-`--set` as in item 10, and moves the baseline (name to settle: `pond hydrate --catchment` already means where Sources
-are fetched from).
+Source is refused, naming the targets. Two flags set where the run starts, for the Ponds the Refresh reaches (the
+target and everything upstream on the Catchment):
+
+- **`--hydrate [--live] [--as-at T]`** takes a new baseline, then runs from it. Hydration is the same idea for both
+  kinds of Puddle: a copied Puddle copies its data as of `T` (default now); a live one copies nothing but records `T`
+  as its baseline. The sets come from `puddles.toml`.
+- **`--rewind`** returns to the current baseline, as a Rebuild does (registry dropped, `previous_f = NEVER`, what
+  incremental Runs and steps added dropped), and runs from it.
+
+Either combines with a target: `--rewind --next-change` is the baseline Run then one step. With nothing hydrated,
+`--rewind` and an incremental Refresh refuse, naming `--hydrate`.
 
 **One behaviour, two paths.** Testing one Pond with item 10 must match deploying it alone to a local Catchment:
 
 | One Pond, no Catchment | Local Catchment |
 |---|---|
-| `pond hydrate` | hydrating the line |
-| `pond run` | `refresh --baseline` |
+| `pond hydrate` | `refresh --hydrate` |
+| `pond run` | `refresh --rewind` |
 | `pond run --incremental --next-change` | `refresh --next-change` |
 
 Both use one module for evaluating definitions and resolving positions, and a test runs the demo both ways and
