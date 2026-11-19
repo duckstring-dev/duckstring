@@ -24,7 +24,7 @@ from fastapi import APIRouter, Form, Request, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from ..app import base_path
+from ..app import base_path, static_file
 from ..keys import pond_key
 from . import auth
 from .app_supervisor import AppUnavailable
@@ -161,13 +161,7 @@ def _static_file(root: Path, view: dict, below: str) -> Path | None:
     static = view["app"].get("static")
     if not static:
         return None
-    base = (Path(root) / view["source_path"] / static).resolve()
-    target = (base / below).resolve()
-    if target != base and base not in target.parents:
-        return None
-    if target.is_dir():
-        target = target / "index.html"
-    return target if target.is_file() else None
+    return static_file(Path(root) / view["source_path"] / static, below)
 
 
 def _upstream_path(conn, view: dict) -> str:

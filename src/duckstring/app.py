@@ -108,6 +108,19 @@ def base_path(name: str, major: int) -> str:
     return f"/apps/{name}/v{major}"
 
 
+def static_file(static_dir: Path, path: str) -> Path | None:
+    """The file under an App's ``static`` directory that ``path`` (below the App's base path) names, its
+    ``index.html`` for a directory. ``None`` when there is none, or the path leads out of the directory. Used by the
+    Catchment's forwarding and by ``pond run``, so a path serves the same file in both."""
+    base = Path(static_dir).resolve()
+    target = (base / path).resolve()
+    if target != base and base not in target.parents:
+        return None
+    if target.is_dir():
+        target = target / "index.html"
+    return target if target.is_file() else None
+
+
 def app_stop_message(reason: str | None, exit_code: int | None) -> str:
     """A person-readable reason an App's instance ended, from its ``app_instance`` row."""
     code = f" (exit code {exit_code})" if exit_code is not None else ""

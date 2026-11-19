@@ -1,7 +1,7 @@
 # Fixes found by the transit showcase
 
 Status: **proposed 2026-11-13; being built on `showcase-fixes` (2026-11-15).** Done: 0, 2, 3, 4b, 5, 6 (the race;
-the pause is the design, below), 7, 8, 16, and from 9 the puddle viewer, `Cache-Control` and log noise; also
+the pause is the design, below), 7, 8, 9 (closed 2026-11-20), 16; also
 attention FINDINGS 3 and 14, and the root cause behind 16 (Trickle's scratch views and `read_table`'s Source view
 were stored in the registry). 1 is redesigned in `plans/source-read-positions.md`. 4a and 4c wait for a table that
 needs them (the benchmark's remaining slope is part listings; folding by count would make slow consumers of a fast
@@ -196,28 +196,28 @@ cycle. `GET /api/ponds/{name}/freshness` already returns `changed`; give `AppPon
 
 ## 9. Smaller
 
-- **`pond run` and an App's `static`.** `local/app.py` runs the `command` only when both are set, so every static
-  path is a 404 locally while a Catchment serves them. Serve `static` locally the way `app_proxy` does.
-- **The puddle viewer misses Trickles.** `cli/puddle.py:_inventory` globs `*.parquet` and `__v/` only. List append
-  and merge directories from the sidecar and query them through `read_select`.
-- **`pond run` can't replay incrementally.** A downstream local run always has `previous_f = None`, so local runs
-  only test the first-run path of every builder. Now part of item 10 (`pond run --incremental`).
-- **No `Cache-Control` on an App's static files** (`app_proxy.py` 140, `FileResponse`). Send `no-cache` (revalidate
-  by ETag) by default.
-- **Done 2026-11-18, per line:** a line first deployed from 0.9 on publishes 128-bit integers as `BIGINT` (migration
-  `037`); agg/acc state is published exactly as `DECIMAL(38,0)` on every line.
-  **`agg.sum` over an integer column returns DOUBLE.** Keep an integer type (BIGINT, or DECIMAL(38,0) where it could
-  overflow, the HUGEINT question from 0.7.0).
-- **Docs.** `agg.argmax` returns the latest row's value with NULL included, unlike DuckDB's `arg_max`, which skips
-  NULLs (a plain-SQL check written with `arg_max` disagrees); say so in the `agg` reference. In the ingesting guide,
-  note that DuckDB 2.0 refuses a view over an Arrow relation in a file registry and `con.register(name, table)` is
-  the way to name one for SQL.
-- **Log noise.** `flock: engine 'starrocks' could not be checked (No module named 'sqlglot')` repeats during Runs with
-  no Flock configured; check engines only when the mode isn't `off`, and log once per process. `no published base at
-  or below 0001-01-01` on first reads should be debug.
-- **Memory for small Ponds.** Five Ducks held ~1.4 GB between them for tables totalling a few MB, plus 489 MB of Pond
-  environments for two Ponds. Not a bug; worth a measurement against the sleeping-VM hosting idea (idle DuckDB memory
-  per Duck, and whether small Ponds could share a Duck).
+**Closed 2026-11-20.** Each point below is done or has moved elsewhere.
+
+- **`pond run` and an App's `static`.** Done 2026-11-20: with both `command` and `static`, `pond run` puts a front
+  server on the port (`local/app.front_app`) that serves `static` files, sharing the lookup with the Catchment
+  (`app.static_file`), and forwards everything else, WebSockets included, to the command on a port of its own. Before,
+  only the command ran and every static path was a 404 locally.
+- **The puddle viewer misses Trickles.** Done: `_inventory` lists and reads through the data plane.
+- **`pond run` can't replay incrementally.** Done as part of item 10 (`pond run --incremental`).
+- **No `Cache-Control` on an App's static files.** Done: `no-cache` (revalidate by ETag).
+- **`agg.sum` over an integer column returns DOUBLE.** Done 2026-11-18, per line: a line first deployed from 0.9 on
+  publishes 128-bit integers as `BIGINT` (migration `037`); agg/acc state is published exactly as `DECIMAL(38,0)` on
+  every line.
+- **Log noise.** Done: engines are checked only when the Flock isn't `off`, a failed check is logged once, and the
+  first Run's `no published base at or below 0001-01-01` is debug.
+- **Moved to the docs pass.** `agg.argmax` returns the latest row's value with NULL included, unlike DuckDB's
+  `arg_max`, which skips NULLs (a plain-SQL check written with `arg_max` disagrees); say so in the `agg` reference. In
+  the ingesting guide, note that DuckDB 2.0 refuses a view over an Arrow relation in a file registry and
+  `con.register(name, table)` is the way to name one for SQL.
+- **Moved to the cloud plans** (`private/duckstring-cloud/plans/product.md`, Unit cost). Memory for small Ponds:
+  five Ducks held ~1.4 GB between them for tables totalling a few MB, plus 489 MB of Pond environments for two Ponds.
+  Not a bug; a measurement for the sleeping-VM hosting (idle DuckDB memory per Duck, and whether small Ponds could
+  share a Duck).
 
 # From the attention showcase (2026-11-14)
 

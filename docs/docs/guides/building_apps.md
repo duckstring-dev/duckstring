@@ -83,7 +83,7 @@ duckstring pond hydrate --from-catchment
 duckstring pond run
 ```
 
-`pond run` in an App's directory serves it at http://127.0.0.1:8000/ (`--port` changes the port) in the App's `.venv`, with an empty base path. `freshness()` has nothing to report locally, so the caption doesn't show. [Testing with Puddles](testing_with_puddles.md) covers Puddles defined in code, for Sources you'd rather not copy.
+`pond run` in an App's directory serves it at http://127.0.0.1:8000/ (`--port` changes the port) in the App's `.venv`, with an empty base path. Files in `static` are served as the Catchment serves them, with other requests going to the command. `freshness()` has nothing to report locally, so the caption doesn't show. [Testing with Puddles](testing_with_puddles.md) covers Puddles defined in code, for Sources you'd rather not copy.
 
 ### Deploying
 

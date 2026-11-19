@@ -56,6 +56,9 @@ aggregate downstream), the downstream Run went from 88 ms at Run 100 and 198 ms 
   `no published base at or below 0001-01-01` is a debug line.
 - **`append_table` from Python data** (`con.from_arrow`, a registered DataFrame) failed in a Pond's registry on
   DuckDB 2.0 ("it reads a Python object").
+- **`pond run` on an App with both `command` and `static` served no static files**: only the command ran, so every
+  file was a 404 locally while a Catchment served it. The files are now served beside the command, as on a
+  Catchment.
 
 ### Integer sums published exactly
 

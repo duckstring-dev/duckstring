@@ -511,6 +511,100 @@ def test_pond_run_gives_an_app_its_puddles(tmp_path):
     assert cfg["root"] == str(tmp_path / "puddles") and cfg["sources"] == ["sales"] and "source_majors" not in cfg
 
 
+_FRONTED_PY = '''import os
+from pathlib import Path
+
+from fastapi import FastAPI, Request, WebSocket
+
+Path("command.pid").write_text(str(os.getpid()))
+api = FastAPI()
+
+
+@api.api_route("/echo/{rest:path}", methods=["GET", "POST"])
+async def echo(request: Request, rest: str):
+    return {"path": request.url.path, "query": request.url.query, "body": (await request.body()).decode(),
+            "port": os.environ["PORT"]}
+
+
+@api.websocket("/ws")
+async def ws(socket: WebSocket):
+    await socket.accept()
+    await socket.send_text("echo:" + await socket.receive_text())
+    await socket.close()
+'''
+
+
+def _fronted_app(tmp_path, command: str) -> None:
+    (tmp_path / "pond.toml").write_text('[pond]\nname = "site"\nversion = "1.0.0"\ntype = "app"\n\n[app]\n'
+                                        f'command = {json.dumps(command)}\nstatic = "out"\n')
+    (tmp_path / "out" / "docs").mkdir(parents=True)
+    (tmp_path / "out" / "index.html").write_text("<h1>hi</h1>")
+    (tmp_path / "out" / "docs" / "index.html").write_text("docs")
+    (tmp_path / "out" / "app.js").write_text("x")
+
+
+def test_pond_run_serves_an_apps_static_files_beside_its_command(tmp_path):
+    """showcase-fixes item 9: with both ``command`` and ``static``, ``pond run`` ran only the command, so every static
+    path was a 404 locally while a Catchment served it. A front server now does what the Catchment does."""
+    import signal
+    import subprocess
+
+    import httpx
+    from websockets.sync.client import connect
+
+    from duckstring.local.app import _free_port
+
+    _fronted_app(tmp_path, "uvicorn api:api --port $PORT")
+    (tmp_path / "api.py").write_text(_FRONTED_PY)
+    port = _free_port()
+    script = ("import sys; from pathlib import Path; from duckstring.local import load_project; "
+              "from duckstring.local.app import serve_app; "
+              f"sys.exit(serve_app(load_project(Path({str(tmp_path)!r})), {port}))")
+    proc = subprocess.Popen([sys.executable, "-c", script], cwd=tmp_path, start_new_session=True)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + 60
+        while True:  # the front server answers 502 until the command is listening
+            try:
+                if httpx.get(f"{base}/echo/ready").status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            assert time.monotonic() < deadline and proc.poll() is None, "the App never came up"
+            time.sleep(0.2)
+
+        r = httpx.get(f"{base}/")
+        assert r.text == "<h1>hi</h1>" and r.headers["cache-control"] == "no-cache"
+        assert httpx.get(f"{base}/docs/").text == "docs"
+        assert httpx.get(f"{base}/app.js").text == "x"
+        echo = httpx.get(f"{base}/echo/a/b%20c?q=1").json()  # not a file: the command's, path and query unchanged
+        assert echo["path"] == "/echo/a/b c" and echo["query"] == "q=1" and echo["port"] != str(port)
+        assert httpx.post(f"{base}/echo/x", content="body").json()["body"] == "body"
+        assert httpx.get(f"{base}/missing").status_code == 404  # neither a file nor a route of the command's
+        assert httpx.get(f"{base}/../pond.toml").status_code == 404
+        with connect(f"ws://127.0.0.1:{port}/ws") as socket:
+            socket.send("hi")
+            assert socket.recv(timeout=10) == "echo:hi"
+
+        command_pid = int((tmp_path / "command.pid").read_text())
+        proc.send_signal(signal.SIGINT)  # Ctrl-C stops the front server and the command
+        proc.wait(timeout=30)
+        with pytest.raises(ProcessLookupError):
+            os.kill(command_pid, 0)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+
+def test_pond_run_ends_when_a_fronted_apps_command_exits(tmp_path):
+    from duckstring.local import load_project
+    from duckstring.local.app import _free_port, serve_app
+
+    _fronted_app(tmp_path, f"{sys.executable} -c 'import sys; sys.exit(3)'")
+    assert serve_app(load_project(tmp_path), _free_port()) == 3
+
+
 # ─── read leases, Taps and memory slots ───────────────────────────────────────
 
 
