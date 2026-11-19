@@ -3,9 +3,8 @@
 Status: **proposed 2026-11-13; being built on `showcase-fixes` (2026-11-15).** Done: 0, 2, 3, 4b, 5, 6 (the race;
 the pause is the design, below), 7, 8, 9 (closed 2026-11-20), 16; also
 attention FINDINGS 3 and 14, and the root cause behind 16 (Trickle's scratch views and `read_table`'s Source view
-were stored in the registry). 1 is redesigned in `plans/source-read-positions.md`. 4a and 4c wait for a table that
-needs them (the benchmark's remaining slope is part listings; folding by count would make slow consumers of a fast
-Source read it in full). From a showcase pipeline run on released 0.8.0 (duckstring-trickle
+were stored in the registry). 1 is redesigned in `plans/source-read-positions.md`. 4a and 4c are replaced by tiered unions
+(item 4, redesigned 2026-11-20). From a showcase pipeline run on released 0.8.0 (duckstring-trickle
 0.3.1, DuckDB 2.0.0, macOS, a local Catchment): Melbourne's train feeds polled every 31 s through two Inlets, three
 Trickle Ponds and an App, 211 cycles and 1,266 Pond Runs. Its tables are small (tens to a few thousand rows per Run)
 and its Runs frequent, which no earlier test combined, so most of what it found is about many small Runs. The
@@ -140,6 +139,62 @@ Do the bench (0) first: if the growth is mostly 2a and 5, append bands can wait 
 
 Tests: `test_read_snapshots`-style reads across a fold (a Sink reading as of a freshness inside a folded range gets
 the same rows); a Draw across a fold; the Persist mirror after a fold.
+
+### Redesigned 2026-11-20: tiered unions (replaces 4a and 4c)
+
+A count threshold for **unions**, beside the existing size threshold for **compaction**. A union concatenates
+files and consolidates nothing: every row keeps its `_duckstring_f`, and every read already selects rows by that
+stamp, so a reader whose window falls inside a union gets the rows it would have got from the separate files and
+the floor never moves. (A count-triggered merge fold, 4a, would have consolidated and raised the floor, making slow
+consumers read their Source in full.) It applies to every per-run parts directory: an append table's history, a
+`__droplog`, and a merge table's `__changelog` (hot files only, above `f_warm`). It doesn't touch warm bands, base
+chunks or versions.
+
+**Tiers by size.** Rewriting one growing file would write a 256 MB file about 2,000 times over at the showcase's
+2 KB parts, so files are unioned in tiers, as an LSM tree does. With `F` = `DUCKSTRING_TIER_FILES` (default 64)
+and the cap = the table's compaction threshold (default 256 MiB): a file under cap/F (4 MiB) is tier 0, under the
+cap tier 1, at or over it never touched. A run of at least `F` consecutive tier-0 files is unioned, packed into
+files of at most the cap; then the same for tier 1. So 64 parts of 2 KB become one 128 KB file, which stays tier 0
+and is unioned again with the next 63, and so on to 4 MiB; 64 of those become 256 MiB. A row is rewritten a
+handful of times, and a directory holds at most about `2F` files plus one per 256 MiB. A part that is already
+large, or a Run written as several chunks, is never unioned.
+
+**Naming.** A union is `{lo}~{hi}~{made}.parquet`: it holds the rows stamped `lo` to `hi` (whole files, so its
+interval contains theirs and no other), and `made` is the freshness of the publish that wrote it. `part_f` gives
+`hi`; `part_lo` gives `lo`. Every set of files is laminar (unions only ever take whole files), so a file contained in
+another file's interval is a constituent: **reads use only the maximal files** (`live_parts`), and nothing is read
+twice. A union straddling a read's bound is read with the row predicates every part read already applies
+(`<= as_of`, `> after`), plus `>= floor` where the floor fell inside one (append retention) and `> f_warm` for a
+change log union a retention fold cut through.
+
+**When.** At export, after the sidecar commit, beside `gc_tiers`. Only files with `hi` at or below `retain_from`
+(below the export's own `f`; a standalone publish, every file below `f`), so no replay or pipelined Run of the
+Pond's own can write into a union's range, and only files at or above the floor. A union that fails (a column type
+that won't combine) is logged and skipped, never a failed publish.
+
+**Removing constituents.** `gc_tiers` removes a file contained in a union once the bound passes the union's `made`:
+a read planned before the union existed may name the constituents, and every such read belongs to a Run dispatched
+before that publish. (The bound is the existing one; reads planned after the union use it, straddling or not, so a
+Sink reading below its pin is safe.)
+
+**Everything else that lists parts**:
+- `_export_parts` counts a freshness inside a union as published (and never rewrites one).
+- The Persist mirror removes a destination file contained in a local union, after the local removal.
+- A Draw ships the maximal files above `after`; a consumer that holds constituents of a union it receives dedupes
+  on read and collects them like the producer.
+- The `mode=append` Spout mirror ships the maximal files only, so a destination never holds both.
+- The merge table's warm fold sizes and cuts at maximal hot files.
+- `window_changed` counts a straddling union's rows with the window's predicate, not from its footer.
+- Live Puddles' change points take a union's `lo` and `hi` (the points inside it are no longer listed).
+
+**Format.** A table that holds a union is marked `format_version` 2 in the sidecar, so an older reader refuses it
+by name rather than failing on a file name it can't parse. Tables that never union stay at 1.
+
+**Tests.** Reads at every freshness across a union match the separate files (full, as-of, windows straddling either
+end); a union never forms above `retain_from` or below the floor, nor over chunks; constituents stay until the
+bound passes `made`; a Sink reading below its pin; retention's floor inside a union; a change log union cut by a
+retention fold; tier 1 forms from tier-0 unions; a Draw to a consumer holding constituents; the Persist mirror; the
+Spout mirror; the small-Runs benchmark's file count flat after the first `F` Runs.
 
 ## 5. The builder's append fast path reads the whole output history
 
