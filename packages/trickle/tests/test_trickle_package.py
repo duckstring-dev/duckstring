@@ -81,7 +81,7 @@ def test_trickle_runs_as_a_top_level_package_without_duckstring():
         TrickleBuilder(host, "item").join(TrickleBuilder(host, "price"), on="id") \\
             .select("s0.id, s0.v, s1.p").merge("out", pk="id")
         assert io.current_state(con, "out").fetchall() == [(1, "a", 9)], io.current_state(con, "out").fetchall()
-        assert io.read_meta(con)["out"]["format_version"] == io.FORMAT_VERSION
+        assert io.read_meta(con)["out"]["format_version"] == io.WRITE_FORMAT
 
         # The README example, through the standalone host.
         from trickle import agg
@@ -112,7 +112,7 @@ def test_trickle_runs_as_a_top_level_package_without_duckstring():
 def test_a_newer_storage_format_is_refused(db):
     f = datetime(2026, 1, 1, tzinfo=timezone.utc)
     io.merge_table(db, "m", db.sql("SELECT 1 AS id"), f, ("id",))
-    assert io.read_meta(db)["m"]["format_version"] == io.FORMAT_VERSION
+    assert io.read_meta(db)["m"]["format_version"] == io.WRITE_FORMAT
     db.execute(f"UPDATE {io.META_TABLE} SET format_version = {io.FORMAT_VERSION + 1}")
     with pytest.raises(io.FormatVersionError):
         io.merge_table(db, "m", db.sql("SELECT 2 AS id"), f, ("id",))

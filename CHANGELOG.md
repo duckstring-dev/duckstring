@@ -27,6 +27,14 @@ needs, whatever came before:
   removed. A Duck drops those an earlier version left.
 - **Sizing a published table** for its sidecar hint takes one listing per directory, not a request per file on an
   object store.
+- **Small files are combined.** Each Run that changes a Trickle table publishes a file (its new rows, or its change
+  log), so a table refreshed every 31 seconds gained 2,800 files a day, and every listing grew with them. Older files
+  are now combined into larger ones: 64 small files at a time, in tiers, up to the table's compaction threshold
+  (256 MiB by default; `DUCKSTRING_TIER_FILES` sets the count). Nothing is consolidated: each row keeps its
+  freshness stamp, so every read and delta returns the same rows, and the oldest freshness a delta can start from
+  doesn't move. The files a combined file replaces stay until no Run that might still read them is in flight. A
+  table holding a combined file is marked storage format 2 in its sidecar, which earlier versions refuse to read
+  by name.
 
 On the benchmark in `bench/small_runs/` (an Inlet appending 200 rows a Run, a builder join and an incremental
 aggregate downstream), the downstream Run went from 88 ms at Run 100 and 198 ms at Run 300 to 56 and 66 ms.

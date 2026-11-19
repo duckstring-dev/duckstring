@@ -42,3 +42,19 @@ Not flat yet. Each append table still gains a part per Run, and the export lists
 Run (`_export_parts`), as do the read snapshot's part listings and the sidecar's size hint. Folding old append parts
 into range parts (plans/showcase-fixes.md item 4) is what would make it flat; at 2,800 Runs a day the remaining
 slope adds about 0.14 s a day to a Run.
+
+### Tiered unions (2026-11-20)
+
+With per-run parts combined 64 at a time (plans/showcase-fixes.md item 4, redesigned), same machine:
+
+| Runs | `obs` ms | `scored` ms | files (`obs`) | files (`scored`) |
+|---|---|---|---|---|
+| 100 | 34.7 | 57.4 | 39 | 75 |
+| 500 | 36.5 | 63.3 | 61 | 119 |
+| 1000 | 33.7 | 68.0 | 57 | 111 |
+| 1500 | 34.9 | 70.4 | 54 | 103 |
+| 2000 | 35.8 | 73.5 | 51 | 95 |
+
+The file counts no longer grow: they cycle as each run of 64 is combined. `obs` is flat. `scored` still grows,
+about 0.008 ms a Run (a sixth of the slope before), from something other than file counts; at 2,800 Runs a day
+that is about 22 ms a day.

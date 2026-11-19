@@ -144,6 +144,7 @@ class ObjectStoreEgressDriver:
             DROPLOG_SUFFIX,
             base_dir_name,
             changelog_name,
+            live_parts,
             load_sidecar,
             part_name,
             table_versions,
@@ -160,7 +161,9 @@ class ObjectStoreEgressDriver:
 
         current_part = part_name(f) if f is not None else None
         for d in (t, changelog_name(t), warm_name(t), base_dir_name(t), f"{t}{DROPLOG_SUFFIX}"):
-            src_names = set(source_store.parquet_names(d))
+            # The files a read uses: a union's constituents stay out (and leave a destination that holds them), so a
+            # reader of the mirror that globs a directory never reads a row twice.
+            src_names = set(live_parts(source_store.parquet_names(d)))
             dst_names = set(dest.parquet_names(d))
             copy = (src_names - dst_names) | ({current_part} if current_part in src_names else set())
             if copy:

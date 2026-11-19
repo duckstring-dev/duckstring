@@ -140,7 +140,7 @@ gs://bucket/prefix
 abfss://exports@acmedata.dfs.core.windows.net/duckstring?client_id=${secret:SP_ID}&tenant_id=${secret:SP_TENANT}&client_secret=${secret:SP_SECRET}
 ```
 
-`s3://`, `gs://`, `az://` and `abfss://` write `{prefix}/{table}.parquet`, or with `--mode append`, the table's per-run files. They take the parameters of a [data root](#data-root-uris) in the same store, and credentials can also be `${secret:NAME}` references, since Spouts deliver from the Catchment. A `gs://` Spout that writes whole tables can use HMAC keys alone; one with `--mode append` also needs Google credentials. `s3://` also takes:
+`s3://`, `gs://`, `az://` and `abfss://` write `{prefix}/{table}.parquet`, or with `--mode append`, the table's per-run files, older ones combined into larger files as they accumulate (each row keeps its `_duckstring_f`). They take the parameters of a [data root](#data-root-uris) in the same store, and credentials can also be `${secret:NAME}` references, since Spouts deliver from the Catchment. A `gs://` Spout that writes whole tables can use HMAC keys alone; one with `--mode append` also needs Google credentials. `s3://` also takes:
 
 | Parameter | Description |
 |---|---|

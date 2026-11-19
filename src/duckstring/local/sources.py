@@ -162,7 +162,7 @@ def change_points(store, after: datetime | None = None, upto: datetime | None = 
     """The freshnesses at which ``store``'s published tables changed in ``(after, upto]``, oldest first: append
     parts, a merge table's base tokens, bands and change log parts, plain-table versions."""
     from ..dataplane import _base_tokens
-    from ..trickle.io import changelog_name, load_sidecar, part_f, sidecar_tables, table_parts, warm_name
+    from ..trickle.io import changelog_name, load_sidecar, part_f, part_lo, sidecar_tables, table_parts, warm_name
 
     sidecar = load_sidecar(store)
     points: set[datetime] = set()
@@ -170,7 +170,7 @@ def change_points(store, after: datetime | None = None, upto: datetime | None = 
     def add(names):
         for n in names:
             try:
-                points.add(part_f(n))
+                points.update({part_lo(n), part_f(n)})  # a union of parts: its ends (the points inside aren't listed)
             except ValueError:
                 continue
 

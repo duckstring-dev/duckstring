@@ -140,7 +140,11 @@ META_TABLE = "_duckstring_trickle"
 # and tiers, the meta table and the published layout. Recorded per table in the meta table and on each
 # Trickle entry of the sidecar (``format_version``; absent means 1), so a later format change can migrate
 # what it finds instead of guessing, and code reading a newer format refuses instead of misreading it.
-FORMAT_VERSION = 1
+# Format 2 = a parts directory may hold unions (``{lo}~{hi}~{made}.parquet``, see :func:`range_name`); a table is
+# written as 1 until its host first unions its parts (:func:`mark_unioned`), so an older reader refuses only a
+# table it couldn't read.
+FORMAT_VERSION = 2
+WRITE_FORMAT = 1
 # The published sidecar carrying mode/PK/floor + the source run freshness to cross-Pond readers.
 SIDECAR = "_trickle.json"
 
@@ -478,13 +482,22 @@ def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
     row = first_row(con.execute(f'SELECT format_version FROM {_q(META_TABLE)} WHERE table_name = ?', [table]))
     if row is not None:
         check_format_version(row[0], table)  # never overwrite a newer format's table as if it were ours
-    # Preserve any existing floor / f_base (a normal incremental run must not reset them).
+    # Preserve any existing floor / f_base (a normal incremental run must not reset them), and a format a host
+    # raised (a table whose parts were unioned stays format 2).
     con.execute(
         f'INSERT INTO {_q(META_TABLE)} (table_name, mode, pk, format_version) VALUES (?, ?, ?, ?) '
         f'ON CONFLICT (table_name) DO UPDATE SET mode=excluded.mode, pk=excluded.pk, '
-        f'format_version=excluded.format_version',
-        [table, mode, ",".join(pk), FORMAT_VERSION],
+        f'format_version=greatest(coalesce({_q(META_TABLE)}.format_version, 1), excluded.format_version)',
+        [table, mode, ",".join(pk), WRITE_FORMAT],
     )
+
+
+def mark_unioned(con, table: str) -> None:
+    """Record that ``table``'s published parts include unions (format 2), so the sidecar says so from the next
+    publish and an older reader refuses the table instead of failing on a union's file name."""
+    if _table_exists(con, META_TABLE):
+        con.execute(f'UPDATE {_q(META_TABLE)} SET format_version = 2 WHERE table_name = ? '
+                    f'AND coalesce(format_version, 1) < 2', [table])
 
 
 def drop_meta(con, table: str) -> None:
@@ -753,22 +766,97 @@ def part_name(f) -> str:
     return f.astimezone(timezone.utc).isoformat().replace(":", "_") + ".parquet"
 
 
-def part_f(name: str):
-    """Recover the freshness ``f`` a part file was stamped with from its :func:`part_name`, or from a chunk of
-    a part written as several files (``{part}__{i}.parquet``, an append history's large run)."""
+RANGE_SEP = "~"
+
+
+def range_name(lo, hi, made) -> str:
+    """The filename for a **union** of consecutive part files (plans/showcase-fixes.md item 4): the rows stamped
+    ``lo`` to ``hi``, written by the publish at ``made``. A union only ever takes whole files, so its interval
+    contains theirs and no other file's: see :func:`live_parts`."""
+    stems = [part_name(t)[: -len(".parquet")] for t in (lo, hi, made)]
+    return RANGE_SEP.join(stems) + ".parquet"
+
+
+def _stems(name: str) -> list[str]:
+    stem = name[: -len(".parquet")] if name.endswith(".parquet") else name
+    if RANGE_SEP in stem:
+        return stem.split(RANGE_SEP)
+    return [re.sub(r"__\d+$", "", stem)]
+
+
+def _parse_stem(stem: str):
     from datetime import datetime
 
-    stem = name[: -len(".parquet")] if name.endswith(".parquet") else name
-    stem = re.sub(r"__\d+$", "", stem)
     return datetime.fromisoformat(stem.replace("_", ":"))
 
 
+def part_f(name: str):
+    """Recover the freshness ``f`` a part file was stamped with from its :func:`part_name`, or from a chunk of
+    a part written as several files (``{part}__{i}.parquet``, an append history's large run). For a union
+    (:func:`range_name`), its newest freshness ``hi``."""
+    stems = _stems(name)
+    return _parse_stem(stems[1] if len(stems) == 3 else stems[0])
+
+
+def part_lo(name: str):
+    """The oldest freshness a part file holds: a union's ``lo``, else its :func:`part_f`."""
+    return _parse_stem(_stems(name)[0])
+
+
+def part_made(name: str):
+    """The freshness of the publish that wrote a union, ``None`` for a part a Run wrote."""
+    stems = _stems(name)
+    return _parse_stem(stems[2]) if len(stems) == 3 else None
+
+
+def is_union(name: str) -> bool:
+    return RANGE_SEP in name
+
+
+def is_chunk(name: str) -> bool:
+    """One of several files a single Run's part was written as (``{part}__{i}.parquet``)."""
+    return re.search(r"__\d+\.parquet$", name) is not None and not is_union(name)
+
+
+def _part_key(name: str):
+    try:
+        return (0, part_f(name), part_lo(name), name)
+    except ValueError:
+        return (1, None, None, name)  # unparseable: last, in name order
+
+
+def live_parts(names) -> list[str]:
+    """The files a read uses out of a parts directory's ``names``: every file not contained in a union's interval
+    (that union holds its rows), sorted by :func:`part_f`. Every set of files is laminar (a union takes whole
+    files), so this picks each row once. A union and the files it was made from coexist until the host collects
+    them, so a read planned before the union can still read them."""
+    names = list(names)
+    unions = []
+    for n in names:
+        if is_union(n):
+            try:
+                unions.append((part_lo(n), part_f(n), n))
+            except ValueError:
+                continue
+    if not unions:
+        return sorted(names, key=_part_key)
+
+    def contained(n) -> bool:
+        try:
+            lo, hi = part_lo(n), part_f(n)
+        except ValueError:
+            return False
+        return any(u != n and ulo <= lo and hi <= uhi for ulo, uhi, u in unions)
+
+    return sorted((n for n in names if not contained(n)), key=_part_key)
+
+
 def table_parts(data_dir, table: str) -> list[str]:
-    """The per-run part **names** of an append-only ``table`` (its directory), sorted oldest-first (the
-    part names are canonical-UTC ISO, so a lexical sort is freshness order; a run written as several chunks
-    has several names, each with its :func:`part_f`); ``[]`` if it is not a parts directory (e.g. a wholesale
-    single-file table, or absent)."""
-    return _store(data_dir).parquet_names(table)
+    """The part **names** of an append-only ``table`` (its directory), sorted by :func:`part_f` (a run written
+    as several chunks has several names, each with its :func:`part_f`; a union sorts at its ``hi``, after a file
+    it contains that ends earlier). Every file is listed, unions' constituents included: a read takes
+    :func:`live_parts`. ``[]`` if it is not a parts directory (e.g. a wholesale single-file table, or absent)."""
+    return sorted(_store(data_dir).parquet_names(table), key=_part_key)
 
 
 def part_tables(data_dir) -> list[str]:
@@ -2912,18 +3000,33 @@ def window_changed(con, data_dir, table: str, previous_f, f) -> bool:
     else:
         log = table
         dirs = [table]
-    log_parts = table_parts(data_dir, log)
+    log_parts = live_parts(table_parts(data_dir, log))
     if not log_parts and meta.get("mode") == "merge":
         return True  # no changelog published: read_delta reads the table in full
-    oldest = part_f(log_parts[0]) if log_parts else None
+    oldest = min(part_lo(n) for n in log_parts) if log_parts else None
     if not _covered(previous_f, NEVER, floor, oldest):
         return True
-    window = [store.uri(d, n) for d in dirs for n in table_parts(data_dir, d) if previous_f < part_f(n) <= f]
-    if not window:
+    whole, cut = [], []  # files inside the window, and unions reaching past either end of it
+    for d in dirs:
+        for n in live_parts(table_parts(data_dir, d)):
+            hi, lo = part_f(n), part_lo(n)
+            if hi <= previous_f or lo > f:
+                continue
+            (whole if previous_f < lo and hi <= f else cut).append(store.uri(d, n))
+    if not whole and not cut:
         return False
-    files = ", ".join(f"'{u}'" for u in window)
-    (rows,) = first_row(con.execute(f"SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata([{files}])"))
-    return rows > 0
+    if whole:
+        files = ", ".join(f"'{u}'" for u in whole)
+        (rows,) = first_row(con.execute(f"SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata([{files}])"))
+        if rows > 0:
+            return True
+    if cut:  # a union holds rows outside the window too: count the window's own
+        files = ", ".join(f"'{u}'" for u in cut)
+        (rows,) = first_row(con.execute(
+            f"SELECT count(*) FROM read_parquet([{files}], union_by_name=true) "
+            f"WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)}"))
+        return rows > 0
+    return False
 
 
 def overwrite_version_f(data_dir, table: str, at):
