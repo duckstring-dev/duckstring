@@ -41,7 +41,7 @@ Inside a `@puddle` function, [`p.catchment()`](puddle.md#catchment) returns one 
 ### `query`
 
 ```python
-c.query(sql, pond=None) -> duckdb.DuckDBPyRelation
+c.query(sql, pond=None, *, at=None, since=None) -> duckdb.DuckDBPyRelation
 ```
 
 Runs read-only SQL against one Pond's published tables on the Catchment and returns the result. Tables are referred to by bare name (`FROM monthly_summary`).
@@ -50,8 +50,10 @@ Runs read-only SQL against one Pond's published tables on the Catchment and retu
 |---|---|---|
 | `sql` | `str` | The query. |
 | `pond` | `str` | The Pond. Defaults to `default_pond`. |
+| `at` | `datetime` or `str` | Read the tables as they stood at this time (ISO 8601 as a string; UTC unless it gives an offset), as [`duckstring query --at`](../cli/data.md#query) does. |
+| `since` | `datetime` or `str` | With `at`: return the change in the result since this time instead, each row weighted `+1` or `-1` in a `_duckstring_d` column. |
 
-**Raises** `RuntimeError` when the Catchment returns an error, and `ValueError` with no Pond given (unless the key is a Tap's).
+**Raises** `RuntimeError` when the Catchment returns an error (including a Trickle that holds nothing from before `at` or `since`), and `ValueError` with no Pond given (unless the key is a Tap's) or with `since` but no `at`.
 
 ### `get`
 

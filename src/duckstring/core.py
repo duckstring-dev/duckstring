@@ -555,16 +555,29 @@ class Catchment:
             raise RuntimeError(f"Catchment query failed ({resp.status_code}): {detail}")
         return resp
 
-    def query(self, sql: str, pond: str | None = None):
+    def query(self, sql: str, pond: str | None = None, *, at=None, since=None):
         """Run read-only SQL against one Pond's published tables and return the result as a relation.
 
-        Tables are referred to by bare name. ``pond`` defaults to ``default_pond``. Raises ``RuntimeError``
+        Tables are referred to by bare name. ``pond`` defaults to ``default_pond``. ``at`` (a ``datetime`` or an
+        ISO 8601 string, UTC when it names no offset) reads the tables as they stood at that freshness. ``since``,
+        with ``at``, returns the change in the result from ``since`` to ``at`` instead: each row weighted ``+1``
+        (only at ``at``) or ``-1`` (only at ``since``) in a ``_duckstring_d`` column. Raises ``RuntimeError``
         when the Catchment returns an error, and ``ValueError`` when no Pond is given (unless the key is a
-        Tap's).
+        Tap's) or ``since`` is given without ``at``.
         """
         import tempfile
 
-        resp = self._post_query({"pond": self._pond(pond), "sql": sql, "format": "parquet"})
+        if since is not None and at is None:
+            raise ValueError("since needs at: the change is from since to at")
+        payload = {"pond": self._pond(pond), "sql": sql, "format": "parquet"}
+        for name, point in (("at", at), ("since", since)):
+            if point is not None:
+                payload[name] = point.isoformat() if hasattr(point, "isoformat") else str(point)
+        resp = self._post_query(payload)
+        if resp.headers.get("x-duckstring-warning"):
+            import logging
+
+            logging.getLogger(__name__).warning("%s", resp.headers["x-duckstring-warning"])
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
             f.write(resp.content)
             tmp = f.name

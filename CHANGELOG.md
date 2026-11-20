@@ -174,6 +174,12 @@ Ripple can now say it, and Duckstring carries it downstream.
 
 ### Other changes
 
+- **Queries as of a time:** `duckstring query --pond POND --at TIME` (and `at=` on the Python client's `query`,
+  `at` on `POST /api/query`) reads a Pond's tables as they stood then: each plain table at its version at or before
+  it, each Trickle at its rows up to it. With `--since TIME` as well, the result is the query's change between the
+  two times, each row weighted `+1` or `-1` in `_duckstring_d`, so a filter over a large table sends only the rows
+  it keeps that changed. A Trickle that holds nothing from before the time is refused; a plain table whose version
+  then is gone is read at its newest, with a warning.
 - **A failed Ripple is retried once by default** (`immediate_retries = 1`), within the same Run. A transient error,
   such as a race on a Pond's first Run or a fetch that timed out, left the Pond failed until someone cleared it.
   It applies to a Pond line's first deploy; a line already deployed keeps its budget, and `pond.toml` or

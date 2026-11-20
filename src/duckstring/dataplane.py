@@ -279,6 +279,32 @@ def _base_tokens(store, table: str) -> dict:
     return tokens
 
 
+def earliest_readable(store, table: str) -> tuple:
+    """``(earliest, exact)``: the earliest freshness ``table`` can be read as of, and whether a read before it fails
+    (a merge table before its oldest kept base, an append table below its floor) rather than falling back to a
+    version kept (a plain table, read at its newest by :func:`select_version`)."""
+    from datetime import datetime
+
+    from .trickle.io import load_sidecar, part_f, sidecar_tables, table_parts
+
+    store = _as_storage(store)
+    entry = sidecar_tables(load_sidecar(store)).get(table) or {}
+    mode = entry.get("mode")
+    if mode == "merge":
+        tokens = [t for t in _base_tokens(store, table) if t is not None]
+        return (min(tokens) if tokens else None), True
+    if mode == "append":
+        floor = entry.get("floor")
+        return (datetime.fromisoformat(floor) if floor else None), True
+    versions = []
+    for n in table_parts(store, f"{table}__v"):
+        try:
+            versions.append(part_f(n))
+        except ValueError:
+            continue
+    return (min(versions) if versions else None), False
+
+
 def _pick_token(tokens: dict, upper, f_base):
     """The base token a read at ``upper`` uses: the newest at or below it. With none (a read older than every
     retained base), the newest at or below the sidecar's ``f_base``, else none."""

@@ -118,15 +118,24 @@ def query(
     parquet_out: Optional[str] = typer.Option(None, "--parquet", metavar="FILENAME", help="Write the result as Parquet."),
     path: Optional[Path] = typer.Option(None, "--path", help="Directory for the file (default: ./ponds/{pond}/{table} "
                                                              "for a table, ./ponds/{pond} with --pond, else here)."),
+    at: Optional[str] = typer.Option(None, "--at", metavar="TIME", help="Read the Pond's tables as they stood at this "
+                                                                        "freshness (ISO 8601, UTC by default). "
+                                                                        "Needs --pond or POND.TABLE."),
+    since: Optional[str] = typer.Option(None, "--since", metavar="TIME", help="With --at: the change in the result "
+                                                                              "since this freshness, each row weighted "
+                                                                              "+1 or -1 in _duckstring_d."),
 ) -> None:
     """Run read-only SQL, and print or save the result.
 
     SQL runs across the catalog, where each Pond is a schema: `reports` for its served major, `reports_v2` for a
     given one. With --pond, it runs against that Pond's tables by bare name. A table, POND.TABLE, shows its
-    first 10 rows.
+    first 10 rows. --at reads one Pond's tables as they stood at a freshness, and --since the change from then.
     """
     from . import _http
 
+    if since and not at:
+        typer.echo("Error: --since needs --at: the change is from --since to --at.", err=True)
+        raise typer.Exit(1)
     cfg = _cfg(catchment)
     url = cfg["url"]
     out_name = csv_out or json_out or parquet_out
@@ -153,13 +162,22 @@ def query(
             payload["sql"] = sql
         if fmt:
             payload["format"] = fmt
+        if at:
+            payload["at"] = at
+        if since:
+            payload["since"] = since
         resp = _http.post(f"{url}/api/query", auth=cfg, json=payload)
+        if resp.headers.get("x-duckstring-warning"):
+            typer.echo(f"Warning: {resp.headers['x-duckstring-warning']}", err=True)
         default_dir = Path("ponds") / name / table_ref[1] if table_ref else Path("ponds") / name
         if not fmt:
             rows = resp.json() or []
             cols = list(rows[0].keys()) if rows else []
             _print_rows(cols, [list(r.values()) for r in rows[:limit]])
             return
+    elif at:
+        typer.echo("Error: --at reads one Pond: give --pond, or a table as POND.TABLE.", err=True)
+        raise typer.Exit(1)
     else:
         body = {"sql": sql, "limit": 0 if fmt else limit}
         if fmt:

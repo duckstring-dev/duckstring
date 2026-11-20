@@ -46,8 +46,9 @@ Lists recent Pond Runs, newest first: the Pond and version, the Run's freshness,
 ## `query`
 
 ```bash
-duckstring query SQL [--pond POND] [--limit N] [--csv FILE | --json FILE | --parquet FILE] [--path DIR]
-duckstring query POND.TABLE
+duckstring query SQL [--pond POND] [--at TIME [--since TIME]] [--limit N] [--csv FILE | --json FILE | --parquet FILE]
+                     [--path DIR]
+duckstring query POND.TABLE [--at TIME [--since TIME]]
 ```
 
 Runs read-only SQL and prints the result, or saves it to a file. Given a table instead of SQL, it shows the table's first 10 rows.
@@ -61,11 +62,22 @@ duckstring query "SELECT category, SUM(revenue) FROM sale_line GROUP BY 1" --pon
 duckstring query @queries/top_categories.sql --csv top.csv
 ```
 
+`--at` reads one Pond's tables as they stood at a freshness: each plain table at its newest version at or before it, and each Trickle at its rows up to it. `--since` as well gives the change in the result between the two times instead: the rows only `--at` gives, weighted `+1` in a `_duckstring_d` column, and those only `--since` gives, weighted `-1`. A row that appears twice at `--at` and once at `--since` is one `+1` row.
+
+```bash
+duckstring query "SELECT * FROM sale_line WHERE store_id = 7" --pond sales --at 2026-06-16T06:00
+duckstring query "SELECT * FROM sale_line WHERE store_id = 7" --pond sales --at 2026-06-16T07:00 --since 2026-06-16T06:00
+```
+
+A Pond keeps only part of its history, so a read can reach only so far back. A Trickle that holds nothing from before the time asked for (created later, or trimmed or compacted since) is refused, naming the earliest time it holds. A plain table usually keeps only its newest version once its Pond is idle, so a plain table whose version at that time is gone is read at its newest, with a warning.
+
 | Argument / option | Description |
 |---|---|
 | `SQL` | The query, or `@path/to/file.sql` to read it from a file. |
 | `POND.TABLE` | A table, to show its first rows. |
 | `--pond`, `-p` | Run the SQL against this Pond's tables, by bare name. |
+| `--at` | Read the Pond's tables as they stood at this time (ISO 8601, UTC unless it gives an offset). Needs `--pond` or `POND.TABLE`. |
+| `--since` | With `--at`: the change in the result since this time. |
 | `--limit`, `-n` | The most rows to print (default `1000`). Files are written in full. |
 | `--csv`, `--json`, `--parquet` | Write the result to a file of this name instead of printing it. |
 | `--path` | Directory for the file. Defaults to `./ponds/{pond}/{table}/` for a table, `./ponds/{pond}/` with `--pond`, and the current directory otherwise. |

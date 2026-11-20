@@ -142,6 +142,8 @@ class QueryRequest(BaseModel):
     ripple: Optional[str] = None
     sql: Optional[str] = None
     format: Optional[str] = None
+    at: Optional[str] = None  # read every table as it stood at this freshness (ISO 8601)
+    since: Optional[str] = None  # with at: the result's change from since to at, weighted in _duckstring_d
 
 
 @router.get("/ponds/{outlet}/ripples/{ripple_name}", dependencies=[auth.read])
@@ -791,6 +793,8 @@ async def query(body: QueryRequest, request: Request, principal: auth.Principal 
         name = request.app.state.driver.meta.get(tap.pond, {}).get("name")
         if body.pond and body.pond != name:
             raise HTTPException(status_code=403, detail=f"this key belongs to a Tap on '{name}'")
+        if body.at or body.since:
+            raise HTTPException(status_code=422, detail="a Tap reads the newest data only: at and since need a key")
         tap_gate(request, tap)
         return await run_in_threadpool(_tap_query, request, tap, body)
     if not body.pond:
@@ -848,13 +852,21 @@ def _copy_bytes(con, sql: str, fmt: str) -> bytes:
 
 
 def _pond_query(request: Request, body: QueryRequest):
-    con = _open_pond(request, body.pond, _resolve_major(request, body.pond, body.major, body.version))
+    at, since = _point(body.at, "at"), _point(body.since, "since")
+    if since is not None and at is None:
+        raise HTTPException(status_code=422, detail="since needs at: the change is from since to at")
+    if since is not None and since > at:
+        raise HTTPException(status_code=422, detail="since must be at or before at")
+    major = _resolve_major(request, body.pond, body.major, body.version)
     sql = body.sql
     if not sql:
         if body.ripple:
             sql = f'SELECT * FROM "{body.pond}"."{body.ripple}" LIMIT 10'
         else:
             sql = f'SELECT * FROM "{body.pond}" LIMIT 10'
+    if at is not None:
+        return _as_of_query(request, body, major, sql, at, since)
+    con = _open_pond(request, body.pond, major)
 
     fmt = (body.format or "").lower()
     try:
@@ -868,6 +880,108 @@ def _pond_query(request: Request, body: QueryRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         con.close()
+
+
+def _point(value: Optional[str], name: str):
+    """An ISO 8601 freshness from a request (UTC when it names no offset)."""
+    if not value:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        point = datetime.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"{name} must be an ISO 8601 time, not {value!r}") from None
+    return point if point.tzinfo else point.replace(tzinfo=timezone.utc)
+
+
+def _register_as_of(con, catalog: str, data_dir, pond: str, point, warnings: list[str], refused: dict) -> None:
+    """Views over every table of the Pond as it stood at ``point``, in ``catalog``: ``"{pond}"."{table}"`` and bare,
+    as :func:`_open_pond` names them. A plain table is read at its newest version at or before ``point``, a Trickle
+    at its rows up to it. A Trickle that no longer keeps ``point`` (a merge table's base compacted past it, an
+    append table's history trimmed past it) gets no view and goes in ``refused`` with the earliest point it keeps;
+    a plain table whose version at ``point`` is gone is read at its newest, with a warning. A table with nothing
+    published at ``point`` gets no view."""
+    from ...dataplane import earliest_readable, get_data_plane
+
+    dp = get_data_plane()
+    con.execute(f'CREATE SCHEMA {catalog}."{pond}"')
+    for table in dp.list_tables(data_dir):
+        earliest, exact = earliest_readable(data_dir, table)
+        if earliest is not None and point < earliest:
+            if exact:
+                refused[table] = earliest
+                continue
+            warnings.append(f"'{table}' keeps no version at or before {point.isoformat()}: its newest was read")
+        try:
+            select = dp.read_select(data_dir, table, as_of=point, pin=point)
+        except FileNotFoundError:
+            continue
+        con.execute(f'CREATE VIEW {catalog}."{pond}"."{table}" AS {select}')
+        con.execute(f'CREATE VIEW {catalog}.main."{table}" AS {select}')
+
+
+def _as_of_query(request: Request, body: QueryRequest, major: int, sql: str, at, since):
+    """``sql`` over the Pond's tables as they stood at ``at``. With ``since``, the change in its result from
+    ``since`` to ``at`` instead: the rows only ``at`` gives, weighted ``+1`` in ``_duckstring_d``, and those only
+    ``since`` gives, ``-1`` (multiplicity counted, so a row twice at ``at`` and once at ``since`` is one ``+1``).
+    Each point's tables live in their own in-memory catalog, so the same SQL runs against both."""
+    from fastapi.responses import JSONResponse
+
+    data_dir = _data_dir(request, body.pond, major)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    _tune_read_con(con)
+    data_dir.duckdb_setup(con)
+    warnings: list[str] = []
+    refused: dict = {}
+    try:
+        points = [("ds_at", at)] + ([("ds_since", since)] if since is not None else [])
+        for catalog, point in points:
+            con.execute(f"ATTACH ':memory:' AS {catalog}")
+            _register_as_of(con, catalog, data_dir, body.pond, point, warnings, refused)
+        try:
+            if since is None:
+                con.execute("USE ds_at")
+                result = sql
+            else:
+                con.execute("USE ds_at")
+                con.execute(f"CREATE TEMP TABLE _ds_at AS {sql}")
+                con.execute("USE ds_since")
+                con.execute(f"CREATE TEMP TABLE _ds_since AS {sql}")
+                cols = [d[0] for d in con.execute("SELECT * FROM _ds_at LIMIT 0").description]
+                if "_duckstring_d" in cols:
+                    raise HTTPException(status_code=422, detail=(
+                        "the query returns a _duckstring_d column, which a change from since adds: select the "
+                        "table's own columns"))
+                result = ("SELECT *, CAST(1 AS BIGINT) AS _duckstring_d FROM "
+                          "(SELECT * FROM _ds_at EXCEPT ALL SELECT * FROM _ds_since) "
+                          "UNION ALL SELECT *, CAST(-1 AS BIGINT) AS _duckstring_d FROM "
+                          "(SELECT * FROM _ds_since EXCEPT ALL SELECT * FROM _ds_at)")
+            fmt = (body.format or "").lower()
+            headers = {"X-Duckstring-Warning": "; ".join(warnings)} if warnings else None
+            if fmt:
+                return Response(content=_copy_bytes(con, result, fmt), headers=headers,
+                                media_type=_FORMATS.get(fmt, ("application/octet-stream",))[0])
+            return JSONResponse(content=_jsonable(_rows(con.execute(result))), headers=headers)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            named = [t for t in refused if t in str(exc)]
+            if named:
+                t = named[0]
+                raise HTTPException(status_code=422, detail=(
+                    f"'{body.pond}.{t}' holds nothing from before {refused[t].isoformat()} (it was created then, or "
+                    f"trimmed since), so it can't be read as of {min(p for _, p in points).isoformat()}")) from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        con.close()
+
+
+def _jsonable(rows: list[dict]) -> list:
+    from fastapi.encoders import jsonable_encoder
+
+    return jsonable_encoder(rows)
 
 
 def _missing_table_hint(con, pond: str, table: str) -> str:

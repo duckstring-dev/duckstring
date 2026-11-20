@@ -11,6 +11,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from ..dataplane import earliest_readable  # noqa: F401 - re-exported for the local modules
 from ..keys import spec_major
 from .project import Project
 
@@ -197,30 +198,6 @@ def published_f(store) -> datetime | None:
 
     iso = _sidecar_run_f(store)
     return datetime.fromisoformat(iso) if iso else None
-
-
-def earliest_readable(store, table: str) -> tuple[datetime | None, bool]:
-    """``(earliest, exact)``: the earliest freshness ``table`` can be read as of, and whether a read before it fails
-    (a merge table before its oldest kept base, an append table below its floor) rather than falling back to the
-    oldest version kept (a plain table)."""
-    from ..dataplane import _base_tokens
-    from ..trickle.io import load_sidecar, part_f, sidecar_tables, table_parts
-
-    entry = sidecar_tables(load_sidecar(store)).get(table) or {}
-    mode = entry.get("mode")
-    if mode == "merge":
-        tokens = [t for t in _base_tokens(store, table) if t is not None]
-        return (min(tokens) if tokens else None), True
-    if mode == "append":
-        floor = entry.get("floor")
-        return (datetime.fromisoformat(floor) if floor else None), True
-    versions = []
-    for n in table_parts(store, f"{table}__v"):
-        try:
-            versions.append(part_f(n))
-        except ValueError:
-            continue
-    return (min(versions) if versions else None), False
 
 
 def copy_published(store, dest: Path) -> int:
