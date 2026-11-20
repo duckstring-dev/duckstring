@@ -13,8 +13,8 @@ Every command takes `-c` / `--catchment`, `-m` / `--major` and `-v` / `--version
 ## `refresh now`
 
 ```bash
-duckstring refresh now POND [--fresh-within DURATION] [--silent | --watch | --wait [--timeout D] | --live]
-duckstring refresh now POND --hydrate --live-puddles --from CATCHMENT [--as-at TIME] [TARGET]
+duckstring refresh now POND [--fresh-within DURATION] [--silent | --watch | --wait [--timeout D] | --view]
+duckstring refresh now POND --hydrate --live --from CATCHMENT [--as-at TIME] [TARGET]
 duckstring refresh now POND --rewind [TARGET]
 duckstring refresh now POND TARGET    # --next-change | --next-run | --most-recent | --to TIME
 ```
@@ -31,8 +31,8 @@ On a Catchment where a Pond reads some of its Sources as Puddles (see [`puddles.
 
 | Option | Description |
 |---|---|
-| `--hydrate` | Take a new baseline: each Puddle Source reached is read as of its newest freshness at `--as-at` (default now), and every Pond the Refresh reaches on this Catchment, `POND` and those upstream of it, is reset (registry, published data and Run history) and runs from it. Needs `--from` and `--live-puddles`. |
-| `--live-puddles` | With `--hydrate`: read each Puddle Source through production's query API at each Run, copying nothing. Copied Puddles aren't currently supported on a Catchment. |
+| `--hydrate` | Take a new baseline: each Puddle Source reached is read as of its newest freshness at `--as-at` (default now), and every Pond the Refresh reaches on this Catchment, `POND` and those upstream of it, is reset (registry, published data and Run history) and runs from it. Needs `--from` and `--live`. |
+| `--live` | With `--hydrate`: read each Puddle Source through production's query API at each Run, copying nothing. Copied Puddles aren't currently supported on a Catchment. |
 | `--from` | With `--hydrate`: the registered Catchment the Puddle Sources live on. Its address and credentials are stored on this Catchment, as the secret `PUDDLE_ORIGIN`, and its Ducks read production through it. Hydrate again to store new credentials. |
 | `--as-at` | With `--hydrate`: the baseline as of this time (ISO 8601). |
 | `--rewind` | Go back to the baseline: reset the Ponds the Refresh reaches, as `--hydrate` does, and run from the baseline again. |
@@ -46,8 +46,8 @@ Each Puddle Source moves to its earliest point that reaches the target, and is r
 ## `refresh add`
 
 ```bash
-duckstring refresh add POND --every PERIOD [--start TIME [--on DAYS] [--until TIME]] [--name NAME] [--silent] [--live]
-duckstring refresh add POND --continuous [--name NAME] [--silent] [--live]
+duckstring refresh add POND --every PERIOD [--start TIME [--on DAYS] [--until TIME]] [--name NAME] [--silent] [--view]
+duckstring refresh add POND --continuous [--name NAME] [--silent] [--view]
 ```
 
 Adds a recurring Refresh, which repeats the request:
@@ -56,7 +56,7 @@ Adds a recurring Refresh, which repeats the request:
 - **At set times** (`--every` with `--start`): asks at each time on the grid `START + k × PERIOD`, whatever else refreshes the Pond. A Catchment that was down through some of them asks once, for the latest, when it returns.
 - **Continuous** (`--continuous`, or `--every 0s`): asks whenever the Pond can take more, paced to the pipeline's slowest step.
 
-A Pond can have any number of scheduled Refreshes and one `--every` or continuous Refresh. Adding another `--every` or continuous Refresh replaces it; adding one with an existing name replaces that one. In a terminal it opens the live status view (a recurring Refresh keeps it open until `Ctrl+C`) unless `--silent`; without one it prints the Refresh's name and exits, unless `--live`.
+A Pond can have any number of scheduled Refreshes and one `--every` or continuous Refresh. Adding another `--every` or continuous Refresh replaces it; adding one with an existing name replaces that one. In a terminal it opens the live status view (a recurring Refresh keeps it open until `Ctrl+C`) unless `--silent`; without one it prints the Refresh's name and exits, unless `--view`.
 
 | Option | Default | Description |
 |---|---|---|

@@ -18,11 +18,11 @@ import typer
 
 from .refresh import _SILENT_HELP, _WATCH_HELP
 from .refresh import send_and_watch as _post_trigger
-from .wait import LIVE_HELP, TIMEOUT_HELP, WAIT_HELP
+from .wait import TIMEOUT_HELP, VIEW_HELP, WAIT_HELP
 
 _WAIT = typer.Option(False, "--wait", help=WAIT_HELP)
 _TIMEOUT = typer.Option(None, "--timeout", help=TIMEOUT_HELP)
-_LIVE = typer.Option(False, "--live", help=LIVE_HELP)
+_VIEW = typer.Option(False, "--view", help=VIEW_HELP)
 
 _CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted).")
 _MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest).")
@@ -133,7 +133,7 @@ def wake(
     version: Optional[str] = _VERSION,
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
-    wait: bool = _WAIT, timeout: Optional[str] = _TIMEOUT, live: bool = _LIVE,
+    wait: bool = _WAIT, timeout: Optional[str] = _TIMEOUT, view: bool = _VIEW,
 ) -> None:
     """Run each Pond once if its Sources already have newer data, without asking them to run."""
     cfg = _cfg(catchment)
@@ -141,7 +141,7 @@ def wake(
     if len(targets) == 1:
         name, m, v = targets[0]
         _post_trigger(cfg, name, m, v, silent, watch, "wake", {}, "Woken.", one_shot=True,
-                      wait=wait, timeout=timeout, live=live)
+                      wait=wait, timeout=timeout, view=view)
         return
     _each_and_wait(cfg, targets, "wake", wait, timeout, "Woke")
 
@@ -154,7 +154,7 @@ def force(
     version: Optional[str] = _VERSION,
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
-    wait: bool = _WAIT, timeout: Optional[str] = _TIMEOUT, live: bool = _LIVE,
+    wait: bool = _WAIT, timeout: Optional[str] = _TIMEOUT, view: bool = _VIEW,
 ) -> None:
     """Rerun each Pond now at its current freshness, even with no upstream change, e.g. after deploying a fix.
 
@@ -165,7 +165,7 @@ def force(
     if len(targets) == 1:
         name, m, v = targets[0]
         _post_trigger(cfg, name, m, v, silent, watch, "force", {}, "Forced.", one_shot=True,
-                      wait=wait, timeout=timeout, live=live)
+                      wait=wait, timeout=timeout, view=view)
         return
     _each_and_wait(cfg, targets, "force", wait, timeout, "Forced")
 

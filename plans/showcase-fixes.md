@@ -474,7 +474,7 @@ checked against a recompute). Where it differs from the plan above:
   their positions with no Runs, every reached Pond `reset_pond(clear_history=True)`; then a Refresh at the oldest
   position. Rewind rebases to `baseline_f`. Targets: `puddle_positions.choose_target` + `reach` (shared with the local
   runner), network outside the lock, positions only climb. `refuse_puddle_refresh` in `refresh_now`/`add_refresh`.
-- The CLI flag is `--live-puddles`, not `--live`: `refresh now --live` already keeps the status view open. A target
+- The CLI flag is `--live`, not `--live`: `refresh now --live` already keeps the status view open. A target
   with `--hydrate`/`--rewind` is two requests, the CLI waiting for the baseline Run between them.
 - The Duck: the `begin_run` job's `puddles` (`{source: set}`); `RunInputs.remote_sources_for(f)` compiles them once
   per Run with `local.hydrate.compile_live` through `client.PuddleTransport` → `/api/duck/{name}/{major}/puddle/

@@ -15,7 +15,7 @@ Every command takes `-c` / `--catchment`, and those acting on one Pond take `-m`
 ## `status`
 
 ```bash
-duckstring status [POND] [-m N | -v VERSION] [--once | --live] [--json]
+duckstring status [POND] [-m N | -v VERSION] [--once | --follow] [--json]
 ```
 
 Shows every Pond's state (running, queued, idle, failed, blocked or killed), freshness and recurring Refreshes, updating every second until `Ctrl+C`. When its output isn't a terminal (a script, a pipe, an agent), it prints one snapshot and exits.
@@ -24,7 +24,7 @@ Shows every Pond's state (running, queued, idle, failed, blocked or killed), fre
 |---|---|
 | `POND` | Only show this Pond and the Ponds upstream of it. |
 | `--once` | Print one snapshot and exit. |
-| `--live` | Keep updating even when the output isn't a terminal. |
+| `--follow`, `-f` | Keep updating even when the output isn't a terminal. |
 | `--json` | Print one snapshot as JSON, with every field [`GET /api/status`](../http_api.md) gives for each Pond: the version running, each Ripple's state, `rebuild_pending`, memory slots held, the last error and more. |
 
 ## `runs`

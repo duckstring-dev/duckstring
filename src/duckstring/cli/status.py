@@ -256,7 +256,7 @@ def status(
         None, "--version", "-v", help="Specific semver of the selected Pond, e.g. 1.2.3 (requires pond argument)."
     ),
     once: bool = typer.Option(False, "--once", help="Print a single snapshot and exit without live updates."),
-    live: bool = typer.Option(False, "--live", help="Keep updating even without a terminal."),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Keep updating even without a terminal."),
     as_json: bool = typer.Option(False, "--json", help="Print the snapshot as JSON: every field /api/status gives."),
 ) -> None:
     """Show every Pond's state, freshness and Refreshes, updating until Ctrl+C. --once prints one snapshot, as
@@ -269,7 +269,7 @@ def status(
     _, cfg = resolve_catchment(catchment)
     url = cfg["url"]
 
-    if not once and not as_json and (live or interactive()):
+    if not once and not as_json and (follow or interactive()):
         _run_live(url, cfg, pond, major, version, watch=True)
         return
 

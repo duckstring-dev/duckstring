@@ -34,7 +34,7 @@ duckstring control sleep transactions products
 ### `wake`
 
 ```bash
-duckstring control wake POND... [--silent | --watch | --wait [--timeout D] | --live]
+duckstring control wake POND... [--silent | --watch | --wait [--timeout D] | --view]
 ```
 
 Runs each Pond once if its Sources already have newer data, without asking them to run. Clears a failed or killed state first. With one Pond, it follows the request as described in [Following a request](index.md#following-a-request); `--wait` waits for each Pond named.
@@ -42,7 +42,7 @@ Runs each Pond once if its Sources already have newer data, without asking them 
 ### `force`
 
 ```bash
-duckstring control force POND... [--silent | --watch | --wait [--timeout D] | --live]
+duckstring control force POND... [--silent | --watch | --wait [--timeout D] | --view]
 ```
 
 Reruns each Pond now at its current freshness, even with no upstream change, for example after deploying a fix. Freshness doesn't change, so Ponds downstream don't rerun because of it. Clears a failed or killed state first. Follows the request as `wake` does.

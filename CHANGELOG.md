@@ -118,7 +118,7 @@ also had no way to append without checking the table, though speed is the reason
 ### A CLI for scripts and agents
 
 - **Without a terminal, nothing opens a live view.** `status` prints one snapshot; `refresh now`, `control wake`
-  and `control force` wait for their outcome; `refresh add` prints the Refresh it added. `--live` keeps the view.
+  and `control force` wait for their outcome; `refresh add` prints the Refresh it added. `--view` keeps the view (`status --follow`).
   A `status` in a script used to wait out its caller's timeout.
 - **`--wait [--timeout D]`** on `refresh now`, `control wake|force|rebuild` and `pond deploy`: wait until the Pond has
   done what was asked, then exit 0 if every Run it caused succeeded, 1 naming each failed Pond, Ripple and error
@@ -174,7 +174,7 @@ Sources that live in production are read as Puddles.
 - **A Puddle node per Source**, `{source}~puddle@{major}`, drawn like a Draw and labelled `[PUDDLE]`, stands in for
   the Source for every Pond reading it as a Puddle (a copy of the Source deployed there is left alone). Its
   freshness is its position in production's history. It never asks production for anything.
-- **`refresh now POND --hydrate --live-puddles --from PROD [--as-at TIME]`** takes a baseline: the Ponds the Refresh
+- **`refresh now POND --hydrate --live --from PROD [--as-at TIME]`** takes a baseline: the Ponds the Refresh
   reaches are reset and run from each Source as it stood then. **`--rewind`** goes back to it, and
   **`--next-change`, `--next-run`, `--most-recent`, `--to TIME`** move through production's history as
   `pond run --incremental` does (the two share one module, and a test runs the demo both ways). A plain Refresh, or

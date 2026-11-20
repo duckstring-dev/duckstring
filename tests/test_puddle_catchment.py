@@ -112,7 +112,7 @@ def test_a_dev_catchment_steps_through_production_as_a_local_run_does(runner, tm
     assert r.status_code == 422 and "--next-change" in r.json()["detail"]
 
     # The baseline: tx as of t(0.5), so its t(0) publish.
-    _cli(runner, "refresh", "now", "counter", "--hydrate", "--live-puddles", "--from", "prod",
+    _cli(runner, "refresh", "now", "counter", "--hydrate", "--live", "--from", "prod",
          "--as-at", t(0.5).isoformat(), "--wait")
     _settled(dev, t(0))
     assert _dev_seen(dev_root)["n"] == 2
@@ -162,7 +162,7 @@ def test_a_puddle_definition_runs_on_production(runner, tmp_path, catchments, mo
     project_dir = _project(tmp_path, puddles, toml='[dev]\ntx = "evens"\n')
     monkeypatch.chdir(project_dir)
     _cli(runner, "pond", "deploy", "-y")
-    _cli(runner, "refresh", "now", "counter", "--hydrate", "--live-puddles", "--from", "prod",
+    _cli(runner, "refresh", "now", "counter", "--hydrate", "--live", "--from", "prod",
          "--as-at", t(0.5).isoformat(), "--next-change", "--wait")
     _settled(dev, t(1))
     assert _dev_seen(dev_root)["n"] == 3  # 2, 4, then 6

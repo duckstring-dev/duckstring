@@ -21,7 +21,7 @@ _POLL_S = 1.0
 WAIT_HELP = ("Wait until the Pond has done it and settled, then exit 0 if every Run it caused succeeded, 1 if one "
              "failed (naming it) or 2 on --timeout. The default without a terminal.")
 TIMEOUT_HELP = "With --wait: how long to wait, e.g. 10m or 2h."
-LIVE_HELP = "Open the live status view even without a terminal."
+VIEW_HELP = "Open the live status view even without a terminal."
 
 
 def interactive() -> bool:

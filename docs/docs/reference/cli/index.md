@@ -60,7 +60,7 @@ When the output isn't a terminal (a script, a pipe, an agent), the one-shot comm
 | `--watch` | Keep the view open after the Pond settles (one-shot commands only). |
 | `--wait` | Wait until the Pond has done what was asked and settled, then exit with its outcome (below). |
 | `--timeout` | With `--wait`: give up after this [duration](../formats.md#durations), such as `10m`. Without it, waiting has no limit. |
-| `--live` | Open the live status view even when the output isn't a terminal. |
+| `--view` | Open the live status view even when the output isn't a terminal. |
 
 `control rebuild` and `pond deploy` also take `--wait` and `--timeout`. They change what the next Run does rather than starting one, so they wait for that Run: something has to ask for it, such as a recurring Refresh or a `refresh now`.
 

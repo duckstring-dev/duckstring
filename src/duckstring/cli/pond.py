@@ -276,7 +276,7 @@ def hydrate(
                             "default set)."
     ),
     live: bool = typer.Option(
-        False, "--live", help="Read the Sources in place on the Catchment, as of now (or --as-at), instead of copying "
+        False, "--live", help="Read the Sources through the Catchment's query API, as of now (or --as-at), instead of copying "
                               "them."
     ),
     as_at: Optional[str] = typer.Option(

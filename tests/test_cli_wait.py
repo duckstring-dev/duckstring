@@ -112,8 +112,8 @@ def test_live_keeps_the_status_view_without_a_terminal(runner, fake, monkeypatch
     fake([_entry("idle")], [], [])
     opened = []
     monkeypatch.setattr(sys.modules["duckstring.cli.status"], "_run_live", lambda *a, **k: opened.append(k))
-    assert runner.invoke(app, ["refresh", "now", "reports", "--live"]).exit_code == 0
-    assert runner.invoke(app, ["status", "--live"]).exit_code == 0
+    assert runner.invoke(app, ["refresh", "now", "reports", "--view"]).exit_code == 0
+    assert runner.invoke(app, ["status", "--follow"]).exit_code == 0
     assert len(opened) == 2
 
 

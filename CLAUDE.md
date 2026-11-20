@@ -370,7 +370,7 @@ named for a Catchment (its identity name) lists the Sources a line reads as Pudd
 `pond_puddle_source`, checked against `pond_version.puddle_sets` (discovery). One node per Source line,
 `{source}~puddle@{major}`, a Draw underneath (`is_draw` + `is_puddle`): `reload` wires readers to it, its position is
 `remote_f` (`puddle.position_f`), its Run completes inside `_process`, it never sends demand. `refresh now
---hydrate --live-puddles --from PROD [--as-at]` / `--rewind` reset the reach and run from the baseline; `--next-change
+--hydrate --live --from PROD [--as-at]` / `--rewind` reset the reach and run from the baseline; `--next-change
 |--next-run|--most-recent|--to` move positions via `puddle_positions` (shared with `pond run --incremental`). A plain
 or recurring Refresh reaching a Puddle is refused. Ducks get `puddles` on the job, compile definitions
 (`local.hydrate.compile_live`) and read through `/api/duck/{name}/{major}/puddle/query|get`, forwarded with the

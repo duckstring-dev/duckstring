@@ -20,7 +20,7 @@ from typing import Optional
 
 import typer
 
-from .wait import LIVE_HELP, TIMEOUT_HELP, WAIT_HELP
+from .wait import TIMEOUT_HELP, VIEW_HELP, WAIT_HELP
 
 _SILENT_HELP = "Send the request and return, without following it."
 _WATCH_HELP = "Keep the status view open after the Pond settles."
@@ -41,17 +41,17 @@ def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
 
 def send_and_watch(cfg: dict, pond: str, major: Optional[int], version: Optional[str], silent: bool, watch: bool,
                    endpoint: str, payload: dict, success_msg: str, one_shot: bool, params: Optional[dict] = None,
-                   wait: bool = False, timeout: Optional[str] = None, live: bool = False, goal=None) -> None:
+                   wait: bool = False, timeout: Optional[str] = None, view: bool = False, goal=None) -> None:
     """POST to a Pond route, then (unless ``silent``) follow it. A person gets the live status view: a one-shot
     request closes it once the Pond settles, a recurring one keeps it open until Ctrl+C. A one-shot request
     waits for its outcome instead with ``wait``, or by default without a terminal (``cli/wait.py``), where a
-    live view only fills a log; ``live`` keeps the view anyway. ``goal(response, entry)`` says when the target
+    live view only fills a log; ``view`` keeps the view anyway. ``goal(response, entry)`` says when the target
     has done what was asked (default: once it settles)."""
     from . import _http
     from .wait import Waiter, interactive, parse_timeout
 
     url = cfg["url"]
-    waiting = not silent and one_shot and (wait or (not watch and not live and not interactive()))
+    waiting = not silent and one_shot and (wait or (not watch and not view and not interactive()))
     seconds = parse_timeout(timeout)
     waiter = Waiter(cfg, pond, major, version) if waiting else None
     resp = _http.post(f"{url}/api/ponds/{pond}/{endpoint}", auth=cfg,
@@ -61,7 +61,7 @@ def send_and_watch(cfg: dict, pond: str, major: Optional[int], version: Optional
         what = {"refresh": "Refresh", "wake": "Wake", "force": "Force"}.get(endpoint, endpoint)
         waiter.wait((lambda e: goal(body, e)) if goal is not None else (lambda e: True), seconds, what)
         return
-    if silent or (not one_shot and not live and not interactive()):
+    if silent or (not one_shot and not view and not interactive()):
         typer.echo(success_msg)
         return
     from .status import _run_live
@@ -86,8 +86,8 @@ def now(
     to: Optional[str] = typer.Option(None, "--to", help=_PUDDLE + "to this freshness (ISO 8601)."),
     hydrate: bool = typer.Option(False, "--hydrate", help="Take a new Puddle baseline from --from and run the "
                                                           "Ponds this Refresh reaches from it."),
-    live_puddles: bool = typer.Option(False, "--live-puddles", help="With --hydrate: read each Puddle Source "
-                                                                    "through production's query API, copying nothing."),
+    live: bool = typer.Option(False, "--live", help="With --hydrate: read each Puddle Source through production's "
+                                                    "query API, copying nothing."),
     as_at: Optional[str] = typer.Option(None, "--as-at", help="With --hydrate: the baseline as of this time "
                                                               "(ISO 8601; default now)."),
     from_: Optional[str] = typer.Option(None, "--from", help="With --hydrate: the registered Catchment the Puddle "
@@ -97,7 +97,7 @@ def now(
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
     wait: bool = typer.Option(False, "--wait", help=WAIT_HELP),
     timeout: Optional[str] = typer.Option(None, "--timeout", help=TIMEOUT_HELP),
-    live: bool = typer.Option(False, "--live", help=LIVE_HELP),
+    view: bool = typer.Option(False, "--view", help=VIEW_HELP),
 ) -> None:
     """Ask for the Pond's data to be at least as fresh as now.
 
@@ -105,7 +105,7 @@ def now(
     to this Pond. With --fresh-within, Ponds whose data is already that fresh don't run.
 
     On a Catchment where the Pond reads Sources as Puddles, a Refresh at now is refused: take a baseline with
-    --hydrate --live-puddles --from CATCHMENT, then move through production's history with --next-change,
+    --hydrate --live --from CATCHMENT, then move through production's history with --next-change,
     --next-run, --most-recent or --to. --rewind goes back to the baseline. A target after --hydrate or --rewind
     runs once the baseline Run has finished.
     """
@@ -115,8 +115,8 @@ def now(
         raise typer.BadParameter("give one target: --next-change, --next-run, --most-recent or --to")
     if hydrate and rewind:
         raise typer.BadParameter("give --hydrate or --rewind, not both")
-    if not hydrate and (live_puddles or as_at or from_):
-        raise typer.BadParameter("--live-puddles, --as-at and --from go with --hydrate")
+    if not hydrate and (live or as_at or from_):
+        raise typer.BadParameter("--live, --as-at and --from go with --hydrate")
     if hydrate and not from_:
         raise typer.BadParameter("--hydrate needs --from CATCHMENT: the Catchment the Puddle Sources live on")
     if fresh_within is not None and (targets or hydrate or rewind):
@@ -128,7 +128,7 @@ def now(
             from .tap import _seconds
             params["fresh_within_ms"] = _seconds(fresh_within) * 1000
         send_and_watch(cfg, pond, major, version, silent, watch, "refresh", {}, "Refresh sent.", one_shot=True,
-                       params=params, wait=wait, timeout=timeout, live=live, goal=reached_request)
+                       params=params, wait=wait, timeout=timeout, view=view, goal=reached_request)
         return
     if hydrate or rewind:
         if hydrate:
@@ -138,20 +138,20 @@ def now(
                 url, headers = resolve_catchment_auth(from_)
             except ValueError as exc:
                 raise typer.BadParameter(str(exc)) from None
-            payload = {"origin": {"name": from_, "url": url, "headers": headers}, "live": live_puddles,
+            payload = {"origin": {"name": from_, "url": url, "headers": headers}, "live": live,
                        "as_at": _iso_point(as_at, "--as-at")}
             endpoint, msg = "puddles/hydrate", "Hydrated; the baseline Run is on its way."
         else:
             payload, endpoint, msg = {}, "puddles/rewind", "Rewound; the baseline Run is on its way."
         # Followed by a target: that moves the Puddles on from the baseline, so wait for the baseline Run first.
         send_and_watch(cfg, pond, major, version, silent and not targets, watch and not targets, endpoint, payload,
-                       msg, one_shot=True, wait=wait or bool(targets), timeout=timeout, live=live and not targets,
+                       msg, one_shot=True, wait=wait or bool(targets), timeout=timeout, view=view and not targets,
                        goal=reached_request)
         if not targets:
             return
     body = {"to": _iso_point(to, "--to")} if to else {"target": targets[0]}
     send_and_watch(cfg, pond, major, version, silent, watch, "puddles/refresh", body, "Refresh sent.",
-                   one_shot=True, wait=wait, timeout=timeout, live=live, goal=reached_request)
+                   one_shot=True, wait=wait, timeout=timeout, view=view, goal=reached_request)
 
 
 def _iso_point(value: Optional[str], label: str) -> Optional[str]:
@@ -214,7 +214,7 @@ def add(
     major: Optional[int] = _MAJOR,
     version: Optional[str] = _VERSION,
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
-    live: bool = typer.Option(False, "--live", help=LIVE_HELP),
+    view: bool = typer.Option(False, "--view", help=VIEW_HELP),
 ) -> None:
     """Add a recurring Refresh on a schedule or a frequency.
 
@@ -227,7 +227,7 @@ def add(
 
     payload = add_payload(every, continuous, start, on, until, name)
     _, cfg = _resolve(catchment)
-    if silent or not (live or interactive()):
+    if silent or not (view or interactive()):
         from . import _http
 
         resp = _http.post(f"{cfg['url']}/api/ponds/{pond}/refreshes", auth=cfg,

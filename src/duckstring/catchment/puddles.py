@@ -11,7 +11,7 @@ a Draw underneath (``is_draw``): its freshness is its position, which only the C
 Run completes at once (a live Puddle moves no data), and nothing sends its demand upstream, so tests never change
 what production does. The engine needs nothing new.
 
-**Positions.** ``refresh now --hydrate --live-puddles --from PROD`` records each Puddle's baseline (its Source's
+**Positions.** ``refresh now --hydrate --live --from PROD`` records each Puddle's baseline (its Source's
 newest freshness at the hydration point, or ``--as-at``), resets the Ponds the Refresh reaches and runs them from
 it; ``--rewind`` goes back to the baseline. ``--next-change|--next-run|--most-recent|--to`` move the Puddles to a
 target through production's history (:mod:`duckstring.puddle_positions`, shared with ``pond run``) and refresh at
@@ -284,7 +284,7 @@ class PuddlesMixin:
             current_origin = self._origin()
         if hydrate:
             if not live:
-                raise ValueError("a copied Puddle isn't supported on a Catchment: hydrate with --live-puddles")
+                raise ValueError("a copied Puddle isn't supported on a Catchment: hydrate with --live")
             if origin is None or not origin.get("url"):
                 raise ValueError("--hydrate needs --from CATCHMENT: the Catchment the Puddles read")
             transport = self._transport(origin)
@@ -306,7 +306,7 @@ class PuddlesMixin:
                 rec = self.meta[node]["puddle"]
                 if not rec["baseline_f"]:
                     raise ValueError(f"'{rec['source']}' hasn't been hydrated here: refresh with --hydrate "
-                                     "--live-puddles --from CATCHMENT")
+                                     "--live --from CATCHMENT")
                 if current_origin is None or rec["origin_url"] != current_origin["url"]:
                     raise ValueError(f"'{rec['source']}' was hydrated from {rec['origin'] or rec['origin_url']}, "
                                      "and the Puddles now read another Catchment: hydrate it again")
