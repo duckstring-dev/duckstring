@@ -1,6 +1,7 @@
 # A Sink stamped behind its Source can lose rows to the Source's cleanup
 
-Status: **found 2026-11-20, reproduced, parked** for the author to decide. Not built.
+Status: **found 2026-11-20, reproduced; closed into read positions** (`plans/source-read-positions.md`, showcase-fixes
+item 1). No separate fix: the bug stays live until read positions ship.
 
 ## The problem in one example
 
@@ -35,34 +36,28 @@ will meet it. Append tables lose nothing today (their parts are only ever remove
 unions built 2026-11-20 don't depend on the bound for correctness (a union is read with row predicates; its
 constituents wait for the bound to pass the publish that wrote the union), so this is the merge tiers only.
 
-## The proposed fix (not agreed)
+## Resolution (2026-11-20)
 
-Two bounds where there is one:
+The bug is a Sink reading a Source **as of its own, older stamp**. Read positions remove that read: a Sink Run reads
+each Source at what the Source had published when the Run was dispatched (its `changed_f` then, the read position),
+never at the Sink's stamp. That point is always kept by today's bound:
 
-- **Versions** (`prune_versions`): plain tables are read at the pin, so `retain_from` is right for them and stays.
-  Lowering it would keep a full copy of a plain table per Run back to the slowest Source: a day of 1 GB copies in
-  the example.
-- **Trickle tiers** (`gc_tiers`, the unions' bound): a new, lower bound, the earliest freshness any Sink can still
-  read this Source as of: for each Sink, the stamp the engine would give its next Run (the oldest of its required
-  Sources' visible freshness), and for each Run in flight, the earlier of its pin and its own freshness. Carried on
-  the `begin_run` and `shutdown` jobs beside `retain_from`, and used by the Draw prune.
+- before the Sink Run is dispatched, the Source's own `changed_f` is part of `retain_from` at each of its publishes,
+  and a later dispatch can only take that or something newer;
+- once it is in flight, its read position is part of `retain_from` (`Driver._retain_from`, unchanged).
 
-**Cost.** A Source keeps superseded merge files (old bases, bands, folded change log parts) back to its slowest
-Sink's other Source: up to a day in the example. Disk only; nothing more is read.
+Between Runs a Sink needs only its window of changes, `(previous read position, read position]`; if a fold has
+taken them, the Source's floor turns the read into a full one (correct, slower). So nothing new is retained and no
+Source learns anything about its Sinks.
 
-**Open choice: a required Source that has never run.** Its Sink's next stamp is unknown.
-1. Follow the graph: an Inlet that has never run will be stamped at least now; a Pond, the oldest of its own
-   Sources. An exact lower bound, and collection never freezes on a Pond that is about to run. (Claude's lean.)
-2. Keep everything until it runs. Simpler, but a Source broken from its first Run stops its sibling's collection
-   indefinitely.
+Rejected:
+- **A second, lower bound from each Sink's next stamp** (the first proposal here): computing that stamp reads the
+  Sink's other Sources, so the Source's cleanup would depend on the graph. A Source may not be aware of its Sinks.
+- **A retain file a Sink leaves in the Source's directory** (the author's idea, thought through): it respects that
+  rule, but a removed or broken Sink's file freezes the Source's cleanup unless it expires (a lease, with a choice
+  at expiry), a Sink would need write access to every Source's storage, the file must stand between Runs (a Sink's
+  first Run has none), and it repeats what `retain_from` already carries for Runs in flight.
 
-## Questions to settle first
-
-- Is reading a Source as of the Sink's own (older) stamp the semantics we want, or should a Run's stamp move with
-  its fastest Source and the windows be per Source? The second would remove the problem at the root, but it changes
-  what freshness means, so it is an orchestration change (see item 1's caution).
-- Is a day of superseded files acceptable for the fact-plus-daily-dimension shape, or does it need a cap (and what
-  happens to the slow Sink past the cap: a full read, as a consumer behind the floor gets)?
-
-Tests to write either way: the data-plane read above as a regression; a Driver test of the bound in the
-fact-plus-daily-dimension shape; an end-to-end Run with a fold forced between the Sink's dispatch and its read.
+The reproduction becomes a regression test in read positions: a Sink with a slower required Source, the fast merge
+Source folding and compacting (`DUCKSTRING_COMPACT_THRESHOLD=1`) between the Sink Run's dispatch and its read; the
+Sink's output equals a recompute.

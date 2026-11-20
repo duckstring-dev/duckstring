@@ -81,9 +81,12 @@ the same changes. Positions follow the same rule:
 ## Coverage, retention and the rest
 
 - **Coverage** of a delta compares the Source's previous position with the Source's floor, per Source.
-- **Retention** (`Driver._retain_from`) already keeps what the in-flight Runs' positions select; lower bounds
-  only matter for coverage, which the floor governs. Check the merge read snapshot path (`merge_snapshot` as of a
-  position) still finds its base token.
+- **Retention** (`Driver._retain_from`) already keeps what the in-flight Runs' positions select, and before
+  dispatch the Source's own `changed_f` bounds its cleanup, so every read position is kept; lower bounds only
+  matter for coverage, which the floor governs. Check the merge read snapshot path (`merge_snapshot` as of a
+  position) still finds its base token. This also fixes `plans/trickle-retention-bound.md` (showcase-fixes item
+  20): today a Sink stamped behind reads a fast merge Source as of its own stamp, which the Source's fold or
+  compaction can already have collected.
 - **The Flock** (`Pond.flock_source_select`) already reads a Source by `source_f`.
 - **`pond.previous_f`** stays the Pond's previous freshness for Ripple code. The docs describe Source windows in
   terms of what the previous Run read.
@@ -94,6 +97,8 @@ the same changes. Positions follow the same rule:
 - The showcase case: Inlets `a` (merge table, 6 h window) and `b` (none), `c` joining both; `c` sees `a`'s rows on
   its first Run and exactly once across windows, end to end through real Ducks.
 - The 04:29/04:30 case: `c` includes the rows of the Run that enabled it.
+- The retention case (item 20): a Sink with a slower required Source, its fast merge Source folding and compacting
+  (`DUCKSTRING_COMPACT_THRESHOLD=1`) between the Sink Run's dispatch and its read; the output equals a recompute.
 - A randomised harness (sources changing and Sinks dispatched in random orders, pipelined Runs, passes, a Force,
   a Rebuild) comparing builder joins, aggregates and `.append()` outputs with a recompute over the same positions.
 - A Duck restart mid-pipeline keeps positions; a fresh Duck with an empty ledger doesn't full-read.

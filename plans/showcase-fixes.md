@@ -749,6 +749,9 @@ author's call): `p` stays as it is and user-set; in streaming shapes a change ov
 
 ## 20. A Sink stamped behind its Source can lose rows to the Source's cleanup (found 2026-11-20)
 
-Parked for the author: `plans/trickle-retention-bound.md`. A Sink Run stamped at a slower Source's freshness reads
-a fast merge Source as of that older point, but the fast Source's `gc_tiers` bound follows its own latest publish,
-so a fold or compaction can delete the state the Sink reads. Reproduced at the data plane; silent wrong rows.
+`plans/trickle-retention-bound.md`. A Sink Run stamped at a slower Source's freshness reads a fast merge Source as
+of that older point, but the fast Source's `gc_tiers` bound follows its own latest publish, so a fold or compaction
+can delete the state the Sink reads. Reproduced at the data plane; silent wrong rows.
+
+**Closed into item 1 (2026-11-20).** Read positions read each Source at its `changed_f` at dispatch, which
+`retain_from` already keeps, so no new bound is needed. The reproduction is one of read positions' tests.
