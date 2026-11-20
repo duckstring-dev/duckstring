@@ -608,6 +608,26 @@ def _bootstrapping(con, name: str, f) -> bool:
     return boot is not None and boot == f
 
 
+def is_new(con, name: str, f) -> bool:
+    """Whether table ``name`` holds nothing written before the run at ``f``: it doesn't exist, or (a replay of
+    the run that first wrote it) all it holds was written at ``f``. The check hand-written incremental code
+    makes beside ``Delta.is_full``: a new or deleted output must be filled from its sources' full state, since a
+    window holds only the latest changes.
+
+    - Merge Trickle: missing, or holding only its first write, at ``f``.
+    - Append Trickle: no rows stamped before ``f``.
+    - Any other table: missing (a plain table records no freshness, and is rewritten whole anyway).
+    """
+    mode = (read_meta(con).get(name) or {}).get("mode")
+    if mode == "merge":
+        return _bootstrapping(con, name, f)
+    if mode == "append":
+        if not _table_exists(con, name):
+            return True
+        return first_row(con.execute(f'SELECT 1 FROM {_q(name)} WHERE "{F_COL}" < ? LIMIT 1', [f])) is None
+    return not _table_exists(con, name)
+
+
 def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
     """Maintain a Trickle table's coverage **floor** — the earliest freshness a windowed read can rely on
     (below it, a consumer full-reads the clean state). A bootstrap/rebuild **sets** it to that run's ``f``;

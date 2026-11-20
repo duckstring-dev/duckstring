@@ -21,7 +21,7 @@ Table and Object references take two forms throughout:
 
 A reference is split at its first dot. For a name that itself contains a dot, put it in backticks: ``"`daily.v2`"`` is this Pond's own `daily.v2`, and ``"sales.`daily.v2`"`` is the Source's. Dotted names work but are best avoided. A reference to a Source the Pond doesn't declare raises `ValueError`, suggesting backticks if you meant a dotted name of your own.
 
-The Incremental methods (`append_table`, `merge_table`, `apply_zset`, `read_delta`, `trickle`) are documented on [Trickle I/O](trickle_io.md) and [Trickle Builder](trickle_builder.md).
+The Incremental methods (`append_table`, `merge_table`, `apply_zset`, `read_delta`, `is_new`, `trickle`) are documented on [Trickle I/O](trickle_io.md) and [Trickle Builder](trickle_builder.md).
 
 ## Attributes
 

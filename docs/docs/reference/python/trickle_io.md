@@ -135,6 +135,28 @@ What the delta contains depends on the Source table:
 
 **Raises** `MissingSourceAsset` if a Source table isn't published, and `RippleOrderError` for an own table whose writer isn't among this Ripple's parents (as for [`read_table`](pond.md#read_table)) or that hasn't been written yet. An own plain table reads as the whole table, with `is_full=True`.
 
+### `is_new`
+
+```python
+pond.is_new(name) -> bool
+```
+
+Returns whether one of this Pond's own tables holds nothing written before this run: it doesn't exist, or this run is a retry of the run that first wrote it.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `name` | `str` | One of this Pond's own tables. |
+
+| Table | New when |
+|---|---|
+| Merge Trickle | It doesn't exist, or holds only its first write, made at this run's freshness. |
+| Append Trickle | It doesn't exist, or holds no rows stamped before this run's freshness. |
+| Plain table | It doesn't exist. |
+
+A window of changes holds only the latest ones. When an output is new (a Ripple added to a Pond that has already run, or a table deleted to refill it), code that applies changes by hand should fill it from its Sources' full state, as it does for a full read. The builder makes this check for its own output.
+
+**Raises** `ValueError` for a Source's table.
+
 ## `Delta`
 
 ```python
@@ -158,8 +180,8 @@ The result of `read_delta`.
 @ripple
 def restock(pond):
     delta = pond.read_delta("orders.order_line")
-    if delta.is_full:
-        ...                             # rebuild everything from delta.zset
+    if delta.is_full or pond.is_new("restock"):
+        ...                             # rebuild everything from pond.read_table("orders.order_line")
     elif not delta.is_empty():
         ...                             # apply delta.upserts and delta.deletes
 ```

@@ -1639,6 +1639,30 @@ class Pond:
         self._check_own_read(table)
         return trickle.count_current(self.con, table)
 
+    def is_new(self, name: str) -> bool:
+        """Whether this Pond's own table ``name`` holds nothing written before this run: it doesn't exist (a
+        new output, or one deleted to refill it), or this run is a retry of the one that first wrote it.
+
+        A window of changes holds only the latest ones, so hand-written incremental code fills a new output
+        from its Sources' full state, as it does for a full read::
+
+            d = pond.read_delta("orders.orders")
+            if d.is_full or pond.is_new("totals"):
+                pond.merge_table("totals", <from pond.read_table("orders.orders")>, pk="id")
+            else:
+                pond.apply_zset("totals", <from d.zset>, pk="id")
+
+        A builder terminal makes this check itself. Raises ``ValueError`` for a Source's table.
+
+        Reference: https://docs.duckstring.com/reference/python/trickle_io
+        """
+        from . import trickle_io as trickle
+
+        source_pond, table = self._resolve_ref(name)
+        if source_pond is not None:
+            raise ValueError(f"is_new takes one of this Pond's own tables, not a Source's: '{name}'")
+        return trickle.is_new(self.con, table, self.f)
+
     # ─── Trickle: incremental I/O (see duckstring.trickle_io / plans/trickle.md) ───
 
     def _resolve_pk(self, pk):

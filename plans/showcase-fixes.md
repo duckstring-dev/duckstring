@@ -554,6 +554,14 @@ deleted or is new, and silently writes a partial table.
 Open: whether `own_table` reads (`pond.read_delta("own_table")`) take `into=` too, and whether the builder's leaves
 should accept it for symmetry (they don't need it).
 
+**Built 2026-11-20 as `pond.is_new(name)` instead** (the author's call: `into=` was too clever; the check belongs
+in the user's code). `trickle.io.is_new(con, name, f)`, on the Pond and the standalone host: a merge table is new
+when missing or holding only its first write at `f` (`_bootstrapping`, so a retry of the run that filled it fills
+it again), an append table when it has no rows before `f`, a plain table when missing. The pattern is
+`if d.is_full or pond.is_new("out")`. A method on `Delta` was rejected: the delta holds only the window, so it
+couldn't supply the full state it would report. Tests: `packages/trickle/tests/test_trickle_is_new.py`,
+`tests/test_trickle.py::test_is_new_lets_hand_written_code_fill_an_output_added_to_a_running_pond`.
+
 ## 12. A CLI that works for agents
 
 In both showcases I wrote throwaway scripts against `/api/runs` and `/api/status` in every session, and one

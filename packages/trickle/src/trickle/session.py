@@ -93,6 +93,20 @@ class Epoch:
         """The current number of rows in ``ref``, without scanning a merge table's base."""
         return io.count_current(self.con, ref)
 
+    def is_new(self, name: str) -> bool:
+        """Whether the table ``name`` holds nothing written before this run: it doesn't exist, or this run is
+        a replay of the one that first wrote it. Hand-written incremental code fills a new output from its
+        sources' full state, as for a full read::
+
+            d = t.read_delta("orders")
+            if d.is_full or t.is_new("totals"):
+                t.merge_table("totals", <from t.read_table("orders")>, pk="id")
+            else:
+                t.apply_zset("totals", <from d.zset>, pk="id")
+
+        See :func:`trickle.io.is_new`."""
+        return io.is_new(self.con, name, self.f)
+
     # ─── writing ───────────────────────────────────────────────────────────────
 
     def append_table(self, name: str, relation, *, pk=None, on_conflict="skip_check", log_drops=True,

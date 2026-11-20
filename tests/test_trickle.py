@@ -1419,3 +1419,42 @@ def test_pond_append_table_takes_on_conflict(tmp_path):
     assert con.sql('SELECT id, v, _duckstring_d FROM "t__droplog"').fetchall() == [(1, "b", 1)]
     with pytest.raises(TypeError, match="fail_on_conflict=True is now on_conflict='fail'"):
         p2.append_table("t", con.sql("SELECT 2 AS id, 'c' AS v"), pk="id", fail_on_conflict=True)
+
+
+def test_is_new_lets_hand_written_code_fill_an_output_added_to_a_running_pond(tmp_path):
+    """``pond.is_new``: a hand-written incremental Ripple added to a Pond that has run gets only the window,
+    so it checks its output and fills it from the Source's full state. Through the Pond handle with its own
+    data dir, so a merge bootstrap is staged (``stage_base``), and its retry at the same ``f`` is still new."""
+    f_con, f_dir = _producer(tmp_path, "fact")
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "o" / "m1" / "data"
+
+    def order(f, qty):
+        T.append_table(f_con, "f", f_con.sql(f"SELECT {f.hour} AS id, {qty} AS qty"), f, ("id",))
+        publish(f_con, f_dir, f=f)
+
+    def big(f, pf):
+        p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1}, f=f, previous_f=pf,
+                 own_data_dir=snk_dir)
+        d = p.read_delta("fact.f")
+        if d.is_full or p.is_new("big"):
+            p.merge_table("big", p.read_table("fact.f").filter("qty >= 2"), pk="id")
+        else:
+            p.apply_zset("big", d.zset.filter("qty >= 2"), pk="id")
+        return p
+
+    for h, qty in ((1, 5), (2, 1), (3, 7)):
+        order(ts(h), qty)
+    p = big(ts(3), ts(2))  # added at run 3: the window holds order 3 alone
+    assert p.is_new("big")  # a retry of this run would fill it again
+    with pytest.raises(ValueError, match="own tables"):
+        p.is_new("fact.f")
+    publish(snk, snk_dir, f=ts(3))
+    assert rows(snk, snk_dir, "big", "id, qty") == [(1, 5), (3, 7)]
+
+    order(ts(4), 9)
+    p = big(ts(4), ts(3))
+    assert not p.is_new("big")
+    publish(snk, snk_dir, f=ts(4))
+    assert rows(snk, snk_dir, "big", "id, qty") == [(1, 5), (3, 7), (4, 9)]
+    snk.close()

@@ -165,6 +165,11 @@ Ripple can now say it, and Duckstring carries it downstream.
 - **A builder can start from a table a parent Ripple wrote:** `pond.trickle("own_table")`, with the table's
   changes read from the Pond's working database, as does `pond.read_delta("own_table")`. Before, a table had to
   reach the builder through another Pond, so a Pond boundary was forced where none was needed.
+- **`pond.is_new(name)`** (and `is_new` on Trickle's standalone host): whether one of the Pond's own tables holds
+  nothing written before this run. A Ripple that applies changes by hand gets only the latest window when it is
+  added to a Pond that has already run, or when its output is deleted to refill it, and wrote a partial table.
+  Checking `delta.is_full or pond.is_new("output")` fills it from the Sources' full state; it stays new on a retry
+  of the run that first wrote it. The builder already checks its own output.
 - **The builder's `.filter()` and `.mutate()` take bare column names** when only one source has the column, as
   `on` and `.aggregate()` do; `alias.col` was needed even with one source. A bare name two sources have raises a
   `BuildError` saying to qualify it.

@@ -131,6 +131,19 @@ def announce_large_orders(pond):
 
 Always handle `is_full`. It's `True` on the Pond's first run, after a [rebuild](../reference/cli/control.md#rebuild), when the Pond has fallen behind the Source's retained history, and whenever the Source is a plain table that was republished. In those cases the delta is the whole current table, and treating it as a batch of new rows would double-count.
 
+A Ripple that keeps an output up to date from changes has one more case: an output that is new while the Pond isn't, because the Ripple was added to a Pond that has already run, or the table was deleted to refill it. Its delta is then only the latest window. Check [`pond.is_new`](../reference/python/trickle_io.md#is_new) beside `is_full`, and fill the output from the Source's full state:
+
+```python
+@ripple
+def large_orders(pond):
+    delta = pond.read_delta("orders.order_line")
+    if delta.is_full or pond.is_new("large_orders"):
+        pond.merge_table("large_orders", pond.read_table("orders.order_line").filter("quantity >= 50"),
+                         pk="order_id")
+    else:
+        pond.apply_zset("large_orders", delta.zset.filter("quantity >= 50"), pk="order_id")
+```
+
 ## Skipping downstream work
 
 The write methods return whether they changed anything. When nothing did, call `pond.skip()` so downstream Ponds can skip their runs too:
