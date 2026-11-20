@@ -10,6 +10,7 @@ from .duck import router as duck_router
 from .duct import router as duct_router
 from .orchestrate import router as orchestrate_router
 from .pool import router as pool_router
+from .puddles import router as puddles_router
 from .secrets import router as secrets_router
 from .serving import router as serving_router
 from .tap import router as tap_router
@@ -30,5 +31,6 @@ router.include_router(serving_router)
 router.include_router(alerts_router)
 router.include_router(tap_router)
 router.include_router(app_router)
+router.include_router(puddles_router)
 
 __all__ = ["router"]

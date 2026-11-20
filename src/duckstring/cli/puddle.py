@@ -208,3 +208,34 @@ def query(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
     _print_rows(console, cursor)
+
+
+@app.command("push")
+def push(
+    catchment: str = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    major: int = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
+) -> None:
+    """Send puddles.toml's section for a Catchment without redeploying: the Sources this Pond reads as Puddles
+    there. No file, or no section for it, clears them."""
+    from rich.console import Console
+
+    from ..local.state import read_puddles_toml
+    from . import _http
+    from .config import resolve_catchment
+    from .deploy import print_puddle_sources
+
+    project = _load_project()
+    try:
+        puddles = read_puddles_toml(project.dir)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    name, cfg = resolve_catchment(catchment)
+    resp = _http.post(f"{cfg['url']}/api/ponds/{project.name}/puddles", auth=cfg,
+                      params=_http.pond_params(major, None), json={"puddles": puddles})
+    body = resp.json()
+    console = Console()
+    if body.get("puddle_sources"):
+        print_puddle_sources(console, body)
+    else:
+        console.print(f"'{project.name}' reads no Source as a Puddle on {name}.")

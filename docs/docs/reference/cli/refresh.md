@@ -14,6 +14,9 @@ Every command takes `-c` / `--catchment`, `-m` / `--major` and `-v` / `--version
 
 ```bash
 duckstring refresh now POND [--fresh-within DURATION] [--silent | --watch | --wait [--timeout D] | --live]
+duckstring refresh now POND --hydrate --live-puddles --from CATCHMENT [--as-at TIME] [TARGET]
+duckstring refresh now POND --rewind [TARGET]
+duckstring refresh now POND TARGET    # --next-change | --next-run | --most-recent | --to TIME
 ```
 
 Asks for data at least as fresh as the moment the command runs. Every Pond upstream that is older runs (an optional Source only if it has never run), and the result flows down to `POND`. Requests that arrive faster than the pipeline can serve them are paced to its slowest step. In a terminal it opens the live status view until the Pond settles; without one, or with `--wait`, it waits until `POND` is that fresh and exits 0 if every Run succeeded. See [Following a request](index.md#following-a-request).
@@ -21,6 +24,24 @@ Asks for data at least as fresh as the moment the command runs. Every Pond upstr
 | Option | Default | Description |
 |---|---|---|
 | `--fresh-within`, `-f` | none | Ask for data no older than this [duration](../formats.md#durations) instead. Only the Ponds older than it run: the request stops at any Pond upstream that is already that fresh. |
+
+### Puddle Sources
+
+On a Catchment where a Pond reads some of its Sources as Puddles (see [`puddles.toml`](pond.md#puddlestoml)), those Sources are production's data, read through production's [query API](data.md#query). A Refresh at now that reaches one is refused, since production's history may not reach now. Instead, take a baseline, then move through production's history:
+
+| Option | Description |
+|---|---|
+| `--hydrate` | Take a new baseline: each Puddle Source reached is read as of its newest freshness at `--as-at` (default now), and every Pond the Refresh reaches on this Catchment, `POND` and those upstream of it, is reset (registry, published data and Run history) and runs from it. Needs `--from` and `--live-puddles`. |
+| `--live-puddles` | With `--hydrate`: read each Puddle Source through production's query API at each Run, copying nothing. Copied Puddles aren't currently supported on a Catchment. |
+| `--from` | With `--hydrate`: the registered Catchment the Puddle Sources live on. Its address and credentials are stored on this Catchment, as the secret `PUDDLE_ORIGIN`, and its Ducks read production through it. Hydrate again to store new credentials. |
+| `--as-at` | With `--hydrate`: the baseline as of this time (ISO 8601). |
+| `--rewind` | Go back to the baseline: reset the Ponds the Refresh reaches, as `--hydrate` does, and run from the baseline again. |
+| `--next-change` | Move the Puddle Sources to the first change in production after the Pond's last Run, and refresh at it. |
+| `--next-run` | Move them to the Pond's own next Run in production (it must be deployed there). |
+| `--most-recent` | Move them as far as all of them have got in production. |
+| `--to` | Move them to this freshness (ISO 8601). |
+
+Each Puddle Source moves to its earliest point that reaches the target, and is read as it stood when the last of them got there, as `pond run --incremental` does locally. A target that production hasn't reached is refused, naming the Source. A target given with `--hydrate` or `--rewind` is sent once the baseline Run has finished.
 
 ## `refresh add`
 

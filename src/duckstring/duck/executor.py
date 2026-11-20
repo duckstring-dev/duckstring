@@ -83,6 +83,7 @@ def _run_ripple(
     staging_dir=None, own_data_dir=None, read_positions: dict[str, str] | None = None,
     previous_positions: dict[str, str] | None = None,
     flock: dict[str, str] | None = None, scope: dict | None = None, change_sink=None,
+    remote_sources: dict | None = None,
 ) -> dict:
     from ..core import Pond
 
@@ -98,7 +99,7 @@ def _run_ripple(
         source_majors=source_majors, read_positions=read_positions, previous_positions=previous_positions,
         f=f, previous_f=previous_f, data_root=data_root,
         sources_changed=sources_changed, skip_sink=skip_sink, change_sink=change_sink,
-        staging_dir=staging_dir, own_data_dir=own_data_dir,
+        staging_dir=staging_dir, own_data_dir=own_data_dir, remote_sources=remote_sources,
         # Flock is a Pond-level posture (not per-Ripple). flock.comprehensive still applies
         # engine-eligibility and the OOM fail-up.
         flock=(flock_env or os.environ).get("DUCKSTRING_FLOCK_MODE"), flock_env=flock_env,
@@ -208,16 +209,48 @@ class RunInputs:
         return self._run_inputs
 
     def begin_run_inputs(self, f: datetime, read_positions: dict[str, str] | None, retain_from=KEEP_ALL,
-                         force: bool = False, flock: dict[str, str] | None = None) -> None:
+                         force: bool = False, flock: dict[str, str] | None = None,
+                         puddles: dict[str, str] | None = None) -> None:
         """Record Run ``f``'s inputs. The first job for ``f`` wins (a re-dispatch after a Catchment restart
         must not move a Run's read positions under its running Ripples), unless ``force`` restarts the Run.
         ``retain_from`` is a datetime, ``None`` (keep only the newest version) or ``KEEP_ALL`` (no job
         value: prune nothing)."""
         self.read_positions = read_positions or {}  # the latest job's (fallback for a Run with no recorded inputs)
         self.flock = flock  # likewise
+        self.puddles = puddles  # likewise
         inputs = self._inputs()
         if force or f not in inputs:
-            inputs[f] = {"read_positions": dict(read_positions or {}), "retain_from": retain_from, "flock": flock}
+            inputs[f] = {"read_positions": dict(read_positions or {}), "retain_from": retain_from, "flock": flock,
+                         "puddles": dict(puddles) if puddles else None}
+
+    def remote_sources_for(self, f: datetime | None) -> dict | None:
+        """Run ``f``'s Puddle Sources (``{name: RemoteSource}``), each its Pond's definitions compiled to queries at
+        its read position, read through this Duck's Catchment (catchment/puddles.py); ``None`` without any.
+        Compiled once per Run and shared by its Ripples."""
+        rec = self._inputs().get(f)
+        puddles = rec.get("puddles") if rec is not None else getattr(self, "puddles", None)
+        if not puddles:
+            return None
+        cache = self.__dict__.setdefault("_remote_sources", {})
+        if f in cache:
+            return cache[f]
+        from ..core import read_pond_toml
+        from ..local.hydrate import compile_live
+        from ..local.project import Project
+
+        source_dir = Path(self.root) / self.source_path
+        project = Project(dir=source_dir, info=read_pond_toml(source_dir))
+        positions = self.read_positions_for(f)
+        out = {}
+        with _import_lock:  # importing the definitions clears the Ripple registry a load is reading
+            for source, set_name in puddles.items():
+                at = positions.get(source)
+                out[source] = compile_live(project, source, set_name, datetime.fromisoformat(at) if at else f,
+                                           self.puddle_transport)
+        for old in [k for k in cache if k is not None and f is not None and k < f]:
+            cache.pop(old)  # a Run's compiled reads go once a later Run needs its own
+        cache[f] = out
+        return out
 
     def read_positions_for(self, f: datetime | None) -> dict[str, str]:
         rec = self._inputs().get(f)
@@ -390,7 +423,7 @@ class RippleExecutor(RunInputs):
                 self.source_majors, f, previous_f, self.data_root,
                 sources_changed=sources_changed, skip_sink=skip_sink, change_sink=change_sink,
                 read_positions=self.read_positions_for(f), previous_positions=previous_positions,
-                flock=self.flock_for(f),
+                flock=self.flock_for(f), remote_sources=self.remote_sources_for(f),
                 staging_dir=self.staging_dir, own_data_dir=self.own_data_dir,
                 scope={"static_tables": pond.statics, "ripple": ripple_name, "exact_ints": self.exact_ints,
                        "ancestors": pond.ancestors(ripple_name),
@@ -425,7 +458,7 @@ class RippleExecutor(RunInputs):
         try:
             pond = Pond(name=self.pond_name, version=self.version, con=con, root=self.root,
                         source_majors=self.source_majors, read_positions=self.read_positions_for(f),
-                        previous_positions=previous_positions, f=f,
+                        previous_positions=previous_positions, f=f, remote_sources=self.remote_sources_for(f),
                         previous_f=previous_f, data_root=self.data_root, own_data_dir=self.own_data_dir)
             retry_on_lock(lambda: collect(pond))
         finally:

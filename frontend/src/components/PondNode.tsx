@@ -70,7 +70,9 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const radius = pond.isApp ? 16 : 10;
   const isSelected = selectedPondId === pondId;
   // A Spout's pond name is "{source}#{spout}" — show just the spout part on the node.
-  const displayName = pond.isSpout ? pond.name.split('#').slice(1).join('#') || pond.name : pond.name;
+  // A Puddle node's is "{source}~puddle" — show the Source it stands for.
+  const displayName = pond.isSpout ? pond.name.split('#').slice(1).join('#') || pond.name
+    : pond.isPuddle ? pond.name.replace(/~puddle$/, '') : pond.name;
   // Draws and Spouts both cross the Catchment boundary → dashed (ingress vs egress).
   const boundary = pond.isDraw || pond.isSpout;
   // In selector mode, a selected Pond keeps a bright cyan ring through BOTH phases — so during
@@ -171,7 +173,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           )}
           {(pond.isDraw || pond.isSpout) && (
             <span style={{ fontSize: 10, fontWeight: 700, color: borderColor, letterSpacing: '0.06em', flexShrink: 0 }}>
-              {pond.isDraw ? '[DRAW]' : '[SPOUT]'}
+              {pond.isPuddle ? '[PUDDLE]' : pond.isDraw ? '[DRAW]' : '[SPOUT]'}
             </span>
           )}
           {pond.dbt && <DbtIcon size={15} />}

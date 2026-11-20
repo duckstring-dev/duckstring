@@ -132,6 +132,16 @@ def _deploy_one(
     else:
         console.print("[dim]Could not check for conflicts — proceed with care.[/dim]")
 
+    # Which Sources read as Puddles on that Catchment: its section of puddles.toml, sent beside the bundle (never in
+    # it). No file, or no section for it, clears them.
+    from ..local.state import read_puddles_toml
+
+    try:
+        puddles = read_puddles_toml(pond_dir)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+
     if not yes:
         confirmed = typer.confirm("Do you wish to proceed?", default=True)
         if not confirmed:
@@ -149,25 +159,44 @@ def _deploy_one(
             typer.echo("Error: could not read git remote 'origin'. Is this a git repo with a remote?", err=True)
             raise typer.Exit(1) from None
 
-        _http.post(
+        resp = _http.post(
             f"{url}/api/deploy", auth=cfg,
             json={"name": name, "version": version, "type": pond_type, "git_ref": git, "repo_url": repo_url,
-                  "force": force},
+                  "force": force, "puddles": puddles},
             timeout=_DEPLOY_TIMEOUT_S,
         )
     else:
         count, total = _summary(pond_dir)
         console.print(f"[dim]Uploading {count} files ({_size(total)}).[/dim]")
         archive = _zip_pond(pond_dir)
-        _http.post(
+        import json
+
+        resp = _http.post(
             f"{url}/api/deploy", auth=cfg,
             files={"pond": ("pond.zip", archive, "application/zip")},
-            data={"name": name, "version": version, "type": pond_type, **({"force": "true"} if force else {})},
+            data={"name": name, "version": version, "type": pond_type, **({"force": "true"} if force else {}),
+                  **({"puddles": json.dumps(puddles)} if puddles is not None else {})},
             timeout=_DEPLOY_TIMEOUT_S,
         )
 
     console.print(f"[green]Deployed[/green] [bold]{name}@{version}[/bold] to [bold]{catchment_name}[/bold].")
+    print_puddle_sources(console, _body(resp))
     return True
+
+
+def _body(resp) -> dict:
+    try:
+        return resp.json() if resp is not None and resp.content else {}
+    except ValueError:
+        return {}
+
+
+def print_puddle_sources(console, body: dict) -> None:
+    """Name the Sources the line reads as Puddles on that Catchment, so production data never arrives silently."""
+    sources = body.get("puddle_sources") or []
+    if sources:
+        listed = ", ".join(f"{p['source']} ({p['set']})" for p in sources)
+        console.print(f"[cyan]Reads as Puddles here:[/cyan] {listed}")
 
 
 def deploy(

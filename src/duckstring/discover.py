@@ -9,7 +9,8 @@ lineage, and writes the result as JSON to ``OUT``. It never writes to stdout, wh
 the lineage capture needs, since the subprocess has no Catchment database.
 
 ``OUT``: ``{"ok": true, "ripples": [{"name", "parents": [names], "always_run", "memory"}], "lineage": [[table, column,
-kind, src_ref, src_column], ...]}``, or ``{"ok": false, "error": str, "traceback": str}``.
+kind, src_ref, src_column], ...], "puddles": {"sets": {source: [sets]}} | {"error": str}}``, or ``{"ok": false,
+"error": str, "traceback": str}``.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ def discover(python: str | Path, source_dir: Path, catalog: dict | None = None,
         result = json.loads(out.read_text())
     if not result.get("ok"):
         raise DiscoveryError(result.get("error", "discovery failed"), result.get("traceback", ""))
-    return {"ripples": result["ripples"], "lineage": result.get("lineage", [])}
+    return {"ripples": result["ripples"], "lineage": result.get("lineage", []), "puddles": result.get("puddles")}
 
 
 # ─── the subprocess side ───────────────────────────────────────────────────────
@@ -124,6 +125,19 @@ def _dbt_ripples(source_dir: Path, info: dict) -> list[dict]:
         raise DiscoveryError(str(exc)) from exc
 
 
+def _puddle_sets(source_dir: Path, info: dict) -> dict:
+    """``{"sets": {source: [sets]}}`` for the Pond's Puddle definitions (for a Catchment's Puddle Sources), or
+    ``{"error": ...}`` when they can't be loaded: a broken ``src/puddles.py`` fails a deploy only when the
+    Catchment reads one of the Pond's Sources as a Puddle."""
+    from .local.hydrate import collect_definitions, defined_sets
+    from .local.project import Project
+
+    try:
+        return {"sets": defined_sets(collect_definitions(Project(dir=source_dir, info=info)))}
+    except Exception as exc:  # noqa: BLE001 - reported, judged by the deploy
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def run(spec: dict) -> dict:
     """Discover the Pond described by ``spec`` (see the module docstring), in this process."""
     from .core import load_ripples, read_pond_toml
@@ -149,7 +163,9 @@ def run(spec: dict) -> dict:
         sql_rows = sql_lineage_rows(pond, catalog)  # resolved from their queries
     except Exception:  # noqa: BLE001 — lineage is observability; it never fails a deploy
         sql_rows = []
-    return {"ripples": ripples, "lineage": capture_lineage_rows(python_rows, catalog) + sql_rows}
+    lineage = capture_lineage_rows(python_rows, catalog) + sql_rows
+    # Last: importing the definitions clears the Ripple registry the steps above read.
+    return {"ripples": ripples, "lineage": lineage, "puddles": _puddle_sets(source_dir, info)}
 
 
 def main(argv: list[str]) -> int:

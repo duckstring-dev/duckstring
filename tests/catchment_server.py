@@ -12,16 +12,20 @@ import httpx
 import uvicorn
 
 
-@contextlib.contextmanager
-def serve_catchment(root):
-    """A real uvicorn server for a Catchment at ``root``, on a free port. Yields its base URL."""
-    from duckstring.catchment.app import create_app
-
+def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+        return s.getsockname()[1]
 
-    config = uvicorn.Config(create_app(root), host="127.0.0.1", port=port, log_level="error")
+
+@contextlib.contextmanager
+def serve_catchment(root, name: str | None = None, port: int | None = None):
+    """A real uvicorn server for a Catchment at ``root`` (named ``name``), on ``port`` or a free one. Yields its
+    base URL."""
+    from duckstring.catchment.app import create_app
+
+    port = port or free_port()
+    config = uvicorn.Config(create_app(root, name=name), host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()

@@ -98,14 +98,20 @@ When the Pond has a `pyproject.toml` and a `.venv` (created by `uv sync`), the c
 
 ### `puddles.toml`
 
-An optional file beside `pond.toml` that picks a Puddle set per Source for local runs. It isn't part of the Pond's version, so it can change freely and can be left out of version control.
+An optional file beside `pond.toml` that picks a Puddle set per Source. It isn't part of the Pond's version, so it can change freely and can be left out of version control.
 
 ```toml
-[local]
+[local]                   # local runs
 transactions = "recent"   # Source = Puddle set
+
+[dev]                     # the Catchment named dev
+transactions = "recent"
+products = "default"
 ```
 
-A Source it doesn't list uses the default set. `pond hydrate --set` overrides it for every Source.
+`[local]` is for `pond hydrate` and `pond run`: a Source it doesn't list uses the default set, and `pond hydrate --set` overrides it for every Source.
+
+Any other section is named after a Catchment (the name it was created with) and lists the Sources the Pond reads as Puddles when deployed there, in place of the Source on that Catchment. `pond deploy` and [`pond puddle push`](#puddle-push) send that Catchment's section, which replaces what the Pond had; no file, or no section for it, means none. Only the Sources listed read as Puddles. Each must be one the Pond declares in `[sources]`, with a set its definitions provide. Refresh such a Pond with the [Puddle options](refresh.md#puddle-sources) of `refresh now`.
 
 ## `deploy`
 
@@ -116,6 +122,8 @@ duckstring pond deploy [-c NAME] [--all] [--git REF] [--dry-run] [--force] [--ye
 Packages the Pond project and deploys it to a Catchment. Before deploying, it reports whether the version is new or previously removed (and will be restored), and asks for confirmation. It then prints how many files it's uploading and their total size.
 
 Deploying a version selects it for its major line, replacing whichever version was running there. A new major version is deployed alongside the existing ones. Redeploying the version a line is running is refused: bump the version in `pond.toml`. An [App](../pond_toml.md#app) is the exception, since nothing depends on its version: its running process is stopped, and the next request starts the new code. The Catchment rejects a deployment that breaks a `[sources]` pin; see [`pond.toml`](../pond_toml.md#sources).
+
+The Catchment's section of [`puddles.toml`](#puddlestoml), if any, is sent alongside the files, and the deploy prints the Sources the Pond reads as Puddles there. A copy of `puddles.toml` inside the files is ignored.
 
 The Catchment builds the Pond's [Python environment](../pond_toml.md#python-dependencies) if it declares one, then loads the Pond's code in it to find its Ripples. A deployment fails, and leaves any running copy of that version in place, if the environment can't be built or the code can't be imported. The error includes uv's output or the import traceback. A first deploy of a new environment can take a minute or more.
 
@@ -176,9 +184,17 @@ Makes major version `N` the one the Pond's bare name refers to in catalog SQL, s
 
 ## `puddle`
 
-Commands for inspecting a Pond project's local data: the Puddles written by [`pond hydrate`](#hydrate) and the output of [`pond run`](#run). They run against the `puddles/` directory of the current project, in an in-memory DuckDB connection, and need no Catchment.
+Commands for inspecting a Pond project's local data: the Puddles written by [`pond hydrate`](#hydrate) and the output of [`pond run`](#run). They run against the `puddles/` directory of the current project, in an in-memory DuckDB connection, and need no Catchment. `puddle push` is the exception: it sends `puddles.toml` to a Catchment.
 
 Tables are available as `"{pond}"."{table}"`, or by bare name when unambiguous. Where the run output has a table with the same name as one in the Pond's own Puddle, the output is used.
+
+### `puddle push`
+
+```bash
+duckstring pond puddle push [-c NAME] [-m MAJOR]
+```
+
+Sends the Catchment's section of [`puddles.toml`](#puddlestoml) without redeploying, replacing the Sources the deployed Pond reads as Puddles there, and prints them. No file, or no section for that Catchment, clears them.
 
 ### `puddle ls`
 

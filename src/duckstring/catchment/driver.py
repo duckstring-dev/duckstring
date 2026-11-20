@@ -63,6 +63,7 @@ from ..flock import job_settings as flock_job_settings
 from ..keys import pond_key
 from ..trickle_io import first_row
 from . import providers
+from .puddles import PuddlesMixin, puddle_node_name
 from .taps import TapsMixin
 
 _log = logging.getLogger("duckstring.catchment")
@@ -405,7 +406,7 @@ def _draw_version_ok(version: str | None, major: int) -> bool:
         return False
 
 
-class Driver(TapsMixin):
+class Driver(TapsMixin, PuddlesMixin):
     def __init__(self, db, root, base_url: str | None, launcher, data_root: str | None = None):
         self.db = db
         self.root = root
@@ -556,6 +557,8 @@ class Driver(TapsMixin):
             #                          duck_config resolves pools off this instead of a DB query per poll
             self._off_cloud_warned: set[str] = set()  # pools on another cloud, warned about once each
             name_by_pnid = {r[0]: r[1] for r in db.execute("SELECT id, name FROM pond_name")}
+            # A line reading a Source as a Puddle is wired to the Source's Puddle node instead (catchment/puddles.py).
+            puddle_wiring = self._puddle_wiring()
             rows = db.execute("""
                 SELECT pn.name, p.major, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind,
                        p.is_draw, p.is_spout, pv.dbt, pv.app, pv.deployed_at, p.exact_ints
@@ -585,7 +588,10 @@ class Driver(TapsMixin):
                     "SELECT source_pond_name_id, source_major, required FROM pond_to_pond WHERE pond_id = ?",
                     (pond_id,),
                 ):
-                    skey = pond_key(name_by_pnid.get(snid, ""), smajor)
+                    sname = name_by_pnid.get(snid, "")
+                    if sname in puddle_wiring.get(pond_id, {}):
+                        sname = puddle_node_name(sname)
+                    skey = pond_key(sname, smajor)
                     if skey in deployed:  # only wire sources whose (name, major) line is deployed
                         sources.append(skey)
                         if not required:
@@ -714,6 +720,7 @@ class Driver(TapsMixin):
             )
             self._configure_slots()
             self._load_taps(pondid_to_key)
+            self._load_puddles(puddle_wiring)
             # Recompute blocked from the freshly-loaded topology: a Source that is absent now (or has
             # since become present, e.g. a duct was added) flips has_missing_source, so the persisted
             # is_blocked may be stale. Re-derive for every Pond (propagates to Sinks).
@@ -933,6 +940,7 @@ class Driver(TapsMixin):
         request), or no older than ``fresh_within`` (Ponds upstream already that fresh don't run); defaults to
         now. Returns the freshness asked for."""
         with self.lock:
+            self.refuse_puddle_refresh(pond)
             now = _now()
             t = at or (now - fresh_within if fresh_within else now)
             self.state = refresh_now(self.state, pond, t)
@@ -955,6 +963,7 @@ class Driver(TapsMixin):
         if until is not None and until.tzinfo is None:
             until = until.replace(tzinfo=timezone.utc)
         with self.lock:
+            self.refuse_puddle_refresh(pond)
             pond_id = self.meta[pond]["pond_id"]
             final = (name or "").strip() or default_refresh_name(every, start, days)
             if start is None:  # one floating Refresh per Pond: a new one replaces it silently
@@ -1380,7 +1389,7 @@ class Driver(TapsMixin):
         with self.lock:
             meta = self.meta.get(key)
             if meta is None or meta.get("is_draw") or meta.get("is_spout"):
-                raise ValueError(f"no removable Pond '{key}'")
+                raise ValueError(f"no removable Pond '{key}'")  # a Puddle node goes with the last line reading it
             ps = self.state.pond_states.get(key)
             if ps is not None:  # guard: idle + demand-free (the whole op is atomic under the lock)
                 if ps.start_f > ps.end_f:
@@ -1418,9 +1427,11 @@ class Driver(TapsMixin):
             # 3. Delete the pond(id)-keyed config + the pond selection row. Keep pond_version / ripple /
             #    ripple_run / pond_run / pond_version_schema / pond_name (the retained record).
             for tbl in ("pond_state", "pond_demand", "pond_open", "pond_refresh", "pond_tap", "pond_retry",
-                        "pond_window", "pond_spout", "pond_duck", "pond_to_pond", "pond_serve_override"):
+                        "pond_window", "pond_spout", "pond_duck", "pond_to_pond", "pond_serve_override",
+                        "pond_puddle_source"):
                 self.db.execute(f"DELETE FROM {tbl} WHERE pond_id = ?", (pond_id,))
             self.db.execute("DELETE FROM pond WHERE id = ?", (pond_id,))
+            self._sync_puddle_nodes()  # a Puddle node only it read goes with it
             # 3b. --wipe: purge the deployment record + run history + {version}/ artifacts for this major,
             #     so the line is as if never deployed (not reversible by a redeploy). FK order: children first.
             if wipe:
@@ -2993,7 +3004,7 @@ class Driver(TapsMixin):
         with self.lock:
             out = []
             for key, m in self.meta.items():
-                if not m.get("is_draw"):
+                if not m.get("is_draw") or m.get("is_puddle"):  # a Puddle never asks production for anything
                     continue
                 ps = self.state.pond_states[key]
                 demand = [t for t in ps.demand if t > NEVER]
@@ -3592,11 +3603,16 @@ class Driver(TapsMixin):
         if self.migration is not None and self.migration.get("status") in ("copying", "adopting"):
             return
         self.state, _started = sentinel(now, self.state)
-        for cmd in drain_begin_runs(self.state):
-            self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force, rebuild=cmd.rebuild,
-                                     sources_changed=cmd.sources_changed)
-        for pid, f in drain_passes(self.state):
-            self._record_pass(pid, f, now)
+        for _ in range(16):
+            for cmd in drain_begin_runs(self.state):
+                self._dispatch_begin_run(cmd.pond_id, cmd.f, now, force=cmd.force, rebuild=cmd.rebuild,
+                                         sources_changed=cmd.sources_changed)
+            for pid, f in drain_passes(self.state):
+                self._record_pass(pid, f, now)
+            # A Puddle's Run completes at once; what it lets start, starts in this pass.
+            if not self._complete_puddle_runs(now):
+                break
+            self.state, _started = sentinel(now, self.state)
         self._persist_state()
         self._reap_idle()
         self._emit_recoveries()  # any alerted failure that has cleared → one `recovery` notification
@@ -3611,6 +3627,9 @@ class Driver(TapsMixin):
         sources_changed: bool = True,
     ) -> None:
         meta = self.meta[pond]
+        if meta.get("is_puddle"):  # moves no data: completed in this _process (catchment/puddles.py)
+            self._queue_puddle_run(pond, f, now)
+            return
         # A Pond Draw is not run by a Duck: record the Run as running and hand the parquet transfer to
         # the poller (it fetches out-of-lock, then reports completion via complete_draw_transfer).
         if meta.get("is_draw"):
@@ -3690,6 +3709,9 @@ class Driver(TapsMixin):
             # floor it drops to when it has nothing in flight (plans/memory-budget.md). None: not gated.
             "memory_limit": self._memory_grant(pond),
             "idle_memory": self.idle_memory if self._memory_grant(pond) else None,
+            # The Sources this line reads as Puddles ({name: Puddle set}): read through this Catchment's Duck
+            # channel at their read positions (catchment/puddles.py).
+            "puddles": self.meta[pond].get("puddle_sources") or None,
         })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI. A Force re-opens the Run.
@@ -4109,6 +4131,11 @@ class Driver(TapsMixin):
             meta = self.meta.get(skey)
             if meta is None:
                 continue
+            if meta.get("is_puddle"):  # a Puddle publishes nothing: its position is what it had reached
+                end = self.state.pond_states[skey].end_f
+                if end > NEVER:
+                    out[meta["puddle"]["source"]] = _iso(end)
+                continue
             f = self.published_f(meta["name"], meta["major"])
             if f is not None:
                 out[meta["name"]] = f
@@ -4453,6 +4480,11 @@ class Driver(TapsMixin):
                     "kind": self.meta[key]["kind"],
                     "is_draw": self.meta[key].get("is_draw", False),
                     "is_spout": self.meta[key].get("is_spout", False),
+                    # A Puddle node (drawn like a Draw): the Source it stands for, where it reads it from and its
+                    # position; and on a line, the Sources it reads as Puddles ({name: set}).
+                    "is_puddle": self.meta[key].get("is_puddle", False),
+                    "puddle": self.puddle_status(key),
+                    "puddle_sources": self.meta[key].get("puddle_sources") or {},
                     "dbt": self.meta[key].get("dbt", False),  # dbt-mode Pond (models are Ripples) — UI flag
                     # An App (plans/apps.md): where it serves and its running instance, if any.
                     "is_app": self.meta[key].get("is_app", False),

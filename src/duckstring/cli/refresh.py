@@ -27,6 +27,7 @@ _WATCH_HELP = "Keep the status view open after the Pond settles."
 _CATCHMENT = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted).")
 _MAJOR = typer.Option(None, "--major", "-m", help="Major version to target (default: latest).")
 _VERSION = typer.Option(None, "--version", "-v", help="Specific semver to target, e.g. 1.2.3.")
+_PUDDLE = "Move the Pond's Puddle Sources, then refresh: "
 
 
 app = typer.Typer(help="Request for a Pond's data to be refreshed.", no_args_is_help=True)
@@ -79,6 +80,19 @@ def now(
         None, "--fresh-within", "-f",
         help="Ask for data no older than this (e.g. 1h or 1d) instead of as fresh as now: only Ponds older than "
              "this run."),
+    next_change: bool = typer.Option(False, "--next-change", help=_PUDDLE + "to their next change in production."),
+    next_run: bool = typer.Option(False, "--next-run", help=_PUDDLE + "to this Pond's next Run in production."),
+    most_recent: bool = typer.Option(False, "--most-recent", help=_PUDDLE + "as far as all of them have got."),
+    to: Optional[str] = typer.Option(None, "--to", help=_PUDDLE + "to this freshness (ISO 8601)."),
+    hydrate: bool = typer.Option(False, "--hydrate", help="Take a new Puddle baseline from --from and run the "
+                                                          "Ponds this Refresh reaches from it."),
+    live_puddles: bool = typer.Option(False, "--live-puddles", help="With --hydrate: read each Puddle Source "
+                                                                    "through production's query API, copying nothing."),
+    as_at: Optional[str] = typer.Option(None, "--as-at", help="With --hydrate: the baseline as of this time "
+                                                              "(ISO 8601; default now)."),
+    from_: Optional[str] = typer.Option(None, "--from", help="With --hydrate: the registered Catchment the Puddle "
+                                                             "Sources live on."),
+    rewind: bool = typer.Option(False, "--rewind", help="Go back to the Puddle baseline and run from it."),
     silent: bool = typer.Option(False, "--silent", help=_SILENT_HELP),
     watch: bool = typer.Option(False, "--watch", help=_WATCH_HELP),
     wait: bool = typer.Option(False, "--wait", help=WAIT_HELP),
@@ -89,14 +103,67 @@ def now(
 
     Every older Pond upstream runs (an optional Source only if it has never run), and the result flows down
     to this Pond. With --fresh-within, Ponds whose data is already that fresh don't run.
+
+    On a Catchment where the Pond reads Sources as Puddles, a Refresh at now is refused: take a baseline with
+    --hydrate --live-puddles --from CATCHMENT, then move through production's history with --next-change,
+    --next-run, --most-recent or --to. --rewind goes back to the baseline. A target after --hydrate or --rewind
+    runs once the baseline Run has finished.
     """
-    params = {}
-    if fresh_within is not None:
-        from .tap import _seconds
-        params["fresh_within_ms"] = _seconds(fresh_within) * 1000
+    targets = [t for t in (next_change and "next-change", next_run and "next-run", most_recent and "most-recent",
+                           to and "to") if t]
+    if len(targets) > 1:
+        raise typer.BadParameter("give one target: --next-change, --next-run, --most-recent or --to")
+    if hydrate and rewind:
+        raise typer.BadParameter("give --hydrate or --rewind, not both")
+    if not hydrate and (live_puddles or as_at or from_):
+        raise typer.BadParameter("--live-puddles, --as-at and --from go with --hydrate")
+    if hydrate and not from_:
+        raise typer.BadParameter("--hydrate needs --from CATCHMENT: the Catchment the Puddle Sources live on")
+    if fresh_within is not None and (targets or hydrate or rewind):
+        raise typer.BadParameter("--fresh-within is for a Refresh at now")
     _, cfg = _resolve(catchment)
-    send_and_watch(cfg, pond, major, version, silent, watch, "refresh", {}, "Refresh sent.", one_shot=True,
-                   params=params, wait=wait, timeout=timeout, live=live, goal=reached_request)
+    if not (targets or hydrate or rewind):
+        params = {}
+        if fresh_within is not None:
+            from .tap import _seconds
+            params["fresh_within_ms"] = _seconds(fresh_within) * 1000
+        send_and_watch(cfg, pond, major, version, silent, watch, "refresh", {}, "Refresh sent.", one_shot=True,
+                       params=params, wait=wait, timeout=timeout, live=live, goal=reached_request)
+        return
+    if hydrate or rewind:
+        if hydrate:
+            from ..core import resolve_catchment_auth
+
+            try:
+                url, headers = resolve_catchment_auth(from_)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc)) from None
+            payload = {"origin": {"name": from_, "url": url, "headers": headers}, "live": live_puddles,
+                       "as_at": _iso_point(as_at, "--as-at")}
+            endpoint, msg = "puddles/hydrate", "Hydrated; the baseline Run is on its way."
+        else:
+            payload, endpoint, msg = {}, "puddles/rewind", "Rewound; the baseline Run is on its way."
+        # Followed by a target: that moves the Puddles on from the baseline, so wait for the baseline Run first.
+        send_and_watch(cfg, pond, major, version, silent and not targets, watch and not targets, endpoint, payload,
+                       msg, one_shot=True, wait=wait or bool(targets), timeout=timeout, live=live and not targets,
+                       goal=reached_request)
+        if not targets:
+            return
+    body = {"to": _iso_point(to, "--to")} if to else {"target": targets[0]}
+    send_and_watch(cfg, pond, major, version, silent, watch, "puddles/refresh", body, "Refresh sent.",
+                   one_shot=True, wait=wait, timeout=timeout, live=live, goal=reached_request)
+
+
+def _iso_point(value: Optional[str], label: str) -> Optional[str]:
+    if value is None:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        f = datetime.fromisoformat(value)
+    except ValueError:
+        raise typer.BadParameter(f"{label}: expected an ISO 8601 time, like 2026-11-20T06:00") from None
+    return (f if f.tzinfo is not None else f.replace(tzinfo=timezone.utc)).isoformat()
 
 
 def reached_request(body: dict, entry: dict) -> bool:

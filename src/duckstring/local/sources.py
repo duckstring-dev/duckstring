@@ -43,10 +43,10 @@ class _LazyTransport:
 class Locator:
     """Finds the Sources of one project on one Catchment."""
 
-    def __init__(self, project: Project, catchment: str | None = None):
+    def __init__(self, project: Project, catchment: str | None = None, transport=None):
         self.project = project
         self.catchment = catchment
-        self._transport = None
+        self._transport = transport  # given: a Duck's, which reaches production through its own Catchment
         self._remotes: dict[str, object] = {}
 
     def major(self, source: str) -> int:

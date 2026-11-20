@@ -104,6 +104,7 @@ export interface RawPond {
   kind: string;
   is_draw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment, not run by a Duck
   is_spout: boolean; // a Spout — egresses its source's output to an external system (run by the egress worker)
+  is_puddle?: boolean; // a Puddle node: a Source read from another Catchment as a Puddle (also is_draw)
   dbt: boolean; // a dbt-mode Pond — its Ripples are dbt models
   is_app?: boolean; // an App: an Outlet serving HTTP; its one Ripple (`serve`) is synthetic
   app?: RawApp | null;

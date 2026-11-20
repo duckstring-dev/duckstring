@@ -24,12 +24,12 @@ def _dt(iso: str | None) -> datetime | None:
     return datetime.fromisoformat(iso) if iso else None
 
 
-def local_sets(project: Project) -> dict[str, str]:
-    """``{source: set}`` from the ``[local]`` section of ``puddles.toml``: the Puddle set each Source hydrates from
-    (a Source it doesn't list uses the default set). Empty without the file or the section."""
-    path = project.dir / PUDDLES_TOML
+def read_puddles_toml(directory: Path) -> dict | None:
+    """The parsed ``puddles.toml`` in ``directory`` (``None`` without one): a section per Catchment, named for it,
+    plus ``[local]``. Raises ``ValueError`` when it doesn't parse."""
+    path = Path(directory) / PUDDLES_TOML
     if not path.exists():
-        return {}
+        return None
     import sys
 
     if sys.version_info >= (3, 11):
@@ -37,9 +37,15 @@ def local_sets(project: Project) -> dict[str, str]:
     else:  # pragma: no cover - 3.10
         import tomli as tomllib
     try:
-        info = tomllib.loads(path.read_text(encoding="utf-8"))
+        return tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"{PUDDLES_TOML}: {exc}") from None
+
+
+def local_sets(project: Project) -> dict[str, str]:
+    """``{source: set}`` from the ``[local]`` section of ``puddles.toml``: the Puddle set each Source hydrates from
+    (a Source it doesn't list uses the default set). Empty without the file or the section."""
+    info = read_puddles_toml(project.dir) or {}
     section = info.get(LOCAL_SECTION, {})
     if not isinstance(section, dict) or not all(isinstance(v, str) for v in section.values()):
         raise ValueError(f"{PUDDLES_TOML}: [{LOCAL_SECTION}] maps each Source to a set name, like transactions = \"recent\"")
@@ -135,5 +141,5 @@ def save_position(project: Project, position: Position) -> None:
 
 __all__ = [
     "Hydrated", "Position", "SourceState", "PUDDLES_TOML", "load_hydrated", "save_hydrated", "load_position",
-    "save_position", "local_sets", "_iso", "_dt",
+    "save_position", "local_sets", "read_puddles_toml", "_iso", "_dt",
 ]

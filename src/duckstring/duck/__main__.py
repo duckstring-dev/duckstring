@@ -192,6 +192,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                         executor.begin_run_inputs(
                             datetime.fromisoformat(data["f"]), data.get("read_positions"),
                             _retain_from(data), force=data.get("force", False), flock=data.get("flock"),
+                            puddles=data.get("puddles"),
                         )
                         executor.exact_ints = bool(data.get("exact_ints"))  # the line's: see RunInputs
                         if data.get("rebuild"):
@@ -386,6 +387,8 @@ def main() -> None:
     else:
         executor = RippleExecutor(args.pond, args.major, args.version, args.source_path, root,
                                   data_root=data_root, persist_root=persist_root)
+    # Puddle Sources are read through this Catchment, which forwards to the one they live on (catchment/puddles.py).
+    executor.puddle_transport = client.puddle_transport()
     serve(core, executor, client)
 
 

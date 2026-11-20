@@ -9,12 +9,13 @@ from pathlib import Path
 
 from ..changes import ChangeLedger
 from ..core import Pond, load_ripples, retry_on_lock
+from ..puddle_positions import TARGETS, choose_target, reach
 from ..reports import clear as clear_reports
 from ..reports import collect as collect_reports
 from .project import Project
 from .state import Hydrated, Position, SourceState, _iso, load_hydrated, load_position, position_path, save_position
 
-TARGETS = ("next-change", "next-run", "most-recent")
+__all__ = ["TARGETS", "run_pond", "reset_runs", "RunResult", "RippleResult"]
 
 
 @dataclass
@@ -190,19 +191,15 @@ class _Plan:
 
 def _target(plan: _Plan, position: Position, target: str, to: datetime | None) -> datetime:
     """The freshness an incremental run asks for: the next change, the Pond's next production run, the Sources'
-    most recent, or ``to``. When the Sources have nothing further, now (only steps can reach it)."""
+    most recent, or ``to`` (:func:`duckstring.puddle_positions.choose_target`)."""
     prev = position.freshness
-    now = datetime.now(timezone.utc)
     hydrated = plan.hydrated
-    if to is not None:
-        if to <= prev:
-            raise ValueError(f"--to {to.isoformat()} isn't after the last run's freshness ({prev.isoformat()})")
-        return to
-    found: datetime | None = None
-    if target == "next-change":
-        nexts = [c[0] for s, st in hydrated.sources.items() if (c := plan.changes(s, st, prev))]
-        found = min(nexts) if nexts else None
-    elif target == "next-run":
+
+    def next_change(s: str) -> datetime | None:
+        c = plan.changes(s, hydrated.sources[s], prev)
+        return c[0] if c else None
+
+    def own_runs() -> list[datetime] | None:
         runs = hydrated.own_runs
         if hydrated.live:
             try:
@@ -210,23 +207,17 @@ def _target(plan: _Plan, position: Position, target: str, to: datetime | None) -
                 runs = [_iso(f) for f in fresh] if fresh is not None else runs
             except ValueError:  # the Catchment couldn't be asked
                 pass
-        if runs is None:
-            raise ValueError("--next-run needs this Pond's production runs, and none were recorded: hydrate with "
-                             "--as-at or --live while the Catchment it's deployed on is reachable")
-        later = [datetime.fromisoformat(r) for r in runs if datetime.fromisoformat(r) > prev]
-        found = min(later) if later else None
-    elif target == "most-recent":
-        latest = []
-        for s, st in hydrated.sources.items():
-            points = plan.recorded(s, st)
-            current = datetime.fromisoformat(position.sources[s]) if s in position.sources else prev
-            latest.append(max([current, *points]))
-        found = min(latest) if latest else None
-        if found is not None and found <= prev:
-            found = None
-    else:
-        raise ValueError(f"unknown target '{target}' — one of: {', '.join(TARGETS)}")
-    return found if found is not None else now
+        return [datetime.fromisoformat(r) for r in runs] if runs is not None else None
+
+    def latest(s: str) -> datetime:
+        current = datetime.fromisoformat(position.sources[s]) if s in position.sources else prev
+        return max([current, *plan.recorded(s, hydrated.sources[s])])
+
+    return choose_target(
+        target, prev, datetime.now(timezone.utc), sources=hydrated.sources, next_change=next_change,
+        own_runs=own_runs, latest=latest, to=to,
+        no_runs="--next-run needs this Pond's production runs, and none were recorded: hydrate with --as-at or "
+                "--live while the Catchment it's deployed on is reachable")
 
 
 def _advance(project: Project, plan: _Plan, position: Position, target: datetime) -> tuple[dict, list[str]]:
@@ -237,30 +228,12 @@ def _advance(project: Project, plan: _Plan, position: Position, target: datetime
 
     hydrated = plan.hydrated
     definitions = collect_definitions(project)
-    reach: dict[str, datetime] = {}
-    stepping: list[str] = []
-    recorded: dict[str, list[datetime]] = {}
-    for source, state in hydrated.sources.items():
-        points = recorded[source] = plan.recorded(source, state)
-        current = datetime.fromisoformat(position.sources.get(source) or state.f or position.f)
-        ahead = [p for p in [current, *points] if p >= target]
-        if ahead:
-            reach[source] = min(ahead)
-        elif state.mode == "copied" and state.steps:
-            stepping.append(source)
-        elif state.mode in _LIVE:
-            raise ValueError(f"production hasn't brought '{source}' to {target.isoformat()} (its latest is "
-                             f"{max([current, *points]).isoformat()}): pick an earlier target, or wait")
-        else:
-            raise ValueError(f"'{source}' has no history reaching {target.isoformat()} and no @puddle.step to go on "
-                             "from it")
-    moment = max([*reach.values(), target])
-    freshness: dict[str, datetime] = {}
-    for source in reach:
-        current = datetime.fromisoformat(position.sources.get(source) or hydrated.sources[source].f or position.f)
-        freshness[source] = max(p for p in [current, *recorded[source]] if p <= moment)
-    for source in stepping:
-        freshness[source] = target
+    positions = {s: datetime.fromisoformat(position.sources.get(s) or st.f or position.f)
+                 for s, st in hydrated.sources.items()}
+    freshness, stepping = reach(
+        target, positions, {s: plan.recorded(s, st) for s, st in hydrated.sources.items()},
+        live={s for s, st in hydrated.sources.items() if st.mode in _LIVE},
+        steppable={s for s, st in hydrated.sources.items() if st.mode == "copied" and st.steps})
 
     step = position.step + 1
     runner = _Hydration(project, hydrated.catchment, live=False, as_at=None)

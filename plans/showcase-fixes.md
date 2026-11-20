@@ -461,6 +461,30 @@ checked against a recompute). Where it differs from the plan above:
   from production's run history); a copied one also holds its data. It never sends demand upstream.
 - **`pond puddle push`**, not `pond puddles push` (the group is `pond puddle`).
 
+**As built (2026-11-21, live Puddles; copied ones and their steps are the next commit):**
+- `catchment/puddles.py` (`PuddlesMixin` on the Driver), migration `039`: `pond_puddle_source (pond_id, source_name,
+  puddle_set)`, `pond_version.puddle_sets`/`puddles_error` (from discovery, `discover._puddle_sets`), `pond.is_puddle`,
+  and `puddle` (the node's origin, baseline and position). One node per Source line, `{source}~puddle@{major}`, shared
+  by every reader (the author's call, 2026-11-21), a Draw underneath (`is_draw` + `is_puddle`), so the engine is
+  unchanged: `reload` wires a reader to it in place of the Source, its position is `remote_f` (persisted as
+  `position_f`), `draws()` skips it, and its Run completes inside `_process` (`_queue_puddle_run` /
+  `_complete_puddle_runs`, then `sentinel` again). A reader's read position for it is the node's `end_f`.
+- `refresh_puddles`: hydrate (live only) reads each node's position from production (`RemoteSource.latest`), stores
+  the origin (`url`, `headers`) as the secret `PUDDLE_ORIGIN`, and `_rebase`s: demand cleared first, nodes put at
+  their positions with no Runs, every reached Pond `reset_pond(clear_history=True)`; then a Refresh at the oldest
+  position. Rewind rebases to `baseline_f`. Targets: `puddle_positions.choose_target` + `reach` (shared with the local
+  runner), network outside the lock, positions only climb. `refuse_puddle_refresh` in `refresh_now`/`add_refresh`.
+- The CLI flag is `--live-puddles`, not `--live`: `refresh now --live` already keeps the status view open. A target
+  with `--hydrate`/`--rewind` is two requests, the CLI waiting for the baseline Run between them.
+- The Duck: the `begin_run` job's `puddles` (`{source: set}`); `RunInputs.remote_sources_for(f)` compiles them once
+  per Run with `local.hydrate.compile_live` through `client.PuddleTransport` → `/api/duck/{name}/{major}/puddle/
+  query|get`, which the Driver forwards (`puddle_query`/`puddle_get`) only for the asking line's own Puddle Sources.
+  Production's 401/403 becomes a 502 naming `--hydrate --from`. dbt-mode Ponds and Apps can't have Puddle Sources.
+- Tests: `tests/test_puddle_catchment.py` (dev vs local on the same history, a definition's filter on production,
+  section checks and push, refusals, the Duck channel's scope, a position across a restart).
+- Not built: the guide section (held for the docs pass), Taps on a Pond reading Puddles (a Tap's Refresh at now
+  would wait), a reset of only part of the reach.
+
 A change spanning several Ponds is tested on a local Catchment: anything else would be a poorer copy of one, and it
 is the same pattern as separate dev, qa and prod Catchments. The Ponds under test are deployed to it. Those whose
 Sources live elsewhere (production) read them as Puddles; the Ponds downstream of them read their local Sources as

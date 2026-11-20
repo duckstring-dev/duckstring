@@ -71,5 +71,41 @@ class CatchmentClient:
         except Exception:
             return False
 
+    def puddle_transport(self) -> "PuddleTransport":
+        return PuddleTransport(self)
+
     def close(self) -> None:
         self._client.close()
+
+
+class PuddleTransport:
+    """A :class:`~duckstring.remote_source.RemoteSource` transport for a Puddle Source: its queries and table list go
+    to this Duck's Catchment, which forwards them to the Catchment the Puddles read (catchment/puddles.py). NOT
+    best-effort: a Ripple's read fails with the reason."""
+
+    def __init__(self, client: CatchmentClient):
+        self.client = client
+
+    def _url(self, what: str) -> str:
+        c = self.client
+        return f"{c.base}/api/duck/{c.pond}/{c.major}/puddle/{what}"
+
+    def _check(self, resp):
+        from ..remote_source import RemoteQueryError
+
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:  # noqa: BLE001
+                detail = resp.text[:300]
+            raise RemoteQueryError(resp.status_code, str(detail))
+        return resp
+
+    def query(self, payload: dict) -> tuple[bytes, str | None]:
+        resp = self._check(self.client._client.post(self._url("query"), json=payload,
+                                                    timeout=httpx.Timeout(300.0, connect=10.0)))
+        return resp.content, resp.headers.get("x-duckstring-warning")
+
+    def get(self, path: str, params: dict | None = None):
+        return self._check(self.client._client.post(self._url("get"), json={"path": path, "params": params or {}},
+                                                    timeout=httpx.Timeout(60.0, connect=10.0))).json()

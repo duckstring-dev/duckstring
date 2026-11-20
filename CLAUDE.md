@@ -364,6 +364,18 @@ query's result written at the point (`write_data`) and each change point's chang
 Source whose definitions also write data of their own is copied, not live. Run reports are read by name
 (`routes/data._queryable`).
 
+**Puddle Sources on a Catchment (2026-11-21, `catchment/puddles.py`, migration `039`).** A `puddles.toml` section
+named for a Catchment (its identity name) lists the Sources a line reads as Puddles there; sent by `pond deploy`
+(form field `puddles`, the whole parsed file; the Catchment picks its section) or `pond puddle push`, stored in
+`pond_puddle_source`, checked against `pond_version.puddle_sets` (discovery). One node per Source line,
+`{source}~puddle@{major}`, a Draw underneath (`is_draw` + `is_puddle`): `reload` wires readers to it, its position is
+`remote_f` (`puddle.position_f`), its Run completes inside `_process`, it never sends demand. `refresh now
+--hydrate --live-puddles --from PROD [--as-at]` / `--rewind` reset the reach and run from the baseline; `--next-change
+|--next-run|--most-recent|--to` move positions via `puddle_positions` (shared with `pond run --incremental`). A plain
+or recurring Refresh reaching a Puddle is refused. Ducks get `puddles` on the job, compile definitions
+(`local.hydrate.compile_live`) and read through `/api/duck/{name}/{major}/puddle/query|get`, forwarded with the
+`PUDDLE_ORIGIN` secret. Live only; copied Puddles on a Catchment are next.
+
 A **Puddle** is a snapshot of a Source table defined in code, used to test a Pond before deploying it. Definitions live in `src/puddles.py`, either per table (`@puddle("source.table")`) or per Source (`@puddle("source")`). The handle `p` has `con`/`path`/`write_table`/`write_path`/`catchment()` (see `core.py`).
 
 - `duckstring pond hydrate` imports the definitions (registration is a decorator side effect, as with `@ripple`) and materialises `puddles/ponds/{source}/data/{table}.parquet`. That is the catchment-root layout, so `Pond.read_table`'s foreign-read branch works unchanged with `root=puddles/`. Missing definitions are skipped with a warning; `--from-catchment` fills them from the Catchment.

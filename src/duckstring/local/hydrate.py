@@ -97,13 +97,14 @@ def _utc(value: datetime) -> datetime:
 class _Hydration:
     """One ``pond hydrate``."""
 
-    def __init__(self, project: Project, catchment: str | None, *, live: bool, as_at: datetime | None):
+    def __init__(self, project: Project, catchment: str | None, *, live: bool, as_at: datetime | None,
+                 transport=None):
         self.project = project
         self.catchment = catchment
         self.live = live
         self.as_at = _utc(as_at) if as_at is not None else None
         self.point = self.as_at or datetime.now(timezone.utc)
-        self.locator = Locator(project, catchment)
+        self.locator = Locator(project, catchment, transport)
         self.results: list[HydrateResult] = []
         self.warnings: list[str] = []
 
@@ -355,6 +356,26 @@ class _Hydration:
             session.close()
         self.results.append(HydrateResult(source, "(from catchment)", "ok", time.perf_counter() - started))
         return SourceState("copied", f=_iso(self.point), **base)
+
+
+def compile_live(project: Project, source: str, set_name: str, at: datetime, transport):
+    """A live Puddle Source read at ``at`` through ``transport``: the Pond's definitions in ``set_name`` for it,
+    compiled to queries that run on the Source's Catchment (or the whole tables, with none). Shared by a local
+    run and a Duck reading a Puddle Source on a Catchment. Raises ``ValueError`` when a definition fails or writes
+    data of its own (a copied Puddle)."""
+    defs = select_definitions(collect_definitions(project), source, set_name)
+    return _Hydration(project, None, live=True, as_at=None, transport=transport).compile(source, defs, at)
+
+
+def defined_sets(definitions: list[dict]) -> dict[str, list[str]]:
+    """``{source: [sets]}``: the Puddle sets with a definition (not a step) for each Source, the default set
+    included, for checking a Catchment's Puddle Sources at deploy."""
+    out: dict[str, set] = {}
+    for d in definitions:
+        if d.get("step", False):
+            continue
+        out.setdefault(_source_of(d["target"]), set()).update(d.get("sets", (DEFAULT_PUDDLE_SET,)))
+    return {s: sorted(v) for s, v in out.items()}
 
 
 def hydrate(

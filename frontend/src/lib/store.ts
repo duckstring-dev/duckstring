@@ -153,7 +153,7 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
     if (p.is_draw && !consumed.has(p.id)) continue;
     ponds[p.id] = {
       id: p.id, name: p.name, kind: p.kind,
-      isDraw: p.is_draw ?? false, isSpout: p.is_spout ?? false, dbt: p.dbt ?? false, isApp: p.is_app ?? false,
+      isDraw: p.is_draw ?? false, isSpout: p.is_spout ?? false, isPuddle: p.is_puddle ?? false, dbt: p.dbt ?? false, isApp: p.is_app ?? false,
       sources: [],
     };
     pondInfo[p.id] = {

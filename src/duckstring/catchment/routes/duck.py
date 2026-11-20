@@ -82,6 +82,49 @@ async def events(name: str, major: int, request: Request):
     return {"ok": True}
 
 
+@router.post("/duck/{name}/{major}/puddle/query", dependencies=[auth.duck])
+async def puddle_query(name: str, major: int, request: Request):
+    """A Duck's query of one of its line's Puddle Sources, forwarded to the Catchment the Puddles read
+    (catchment/puddles.py): the Duck never holds that Catchment's credentials. Its answer (Parquet, and any
+    warning header) comes back as it is; a refusal keeps its status and detail."""
+    from ...remote_source import RemoteQueryError
+    from .puddles import _origin_error
+
+    driver = request.app.state.driver
+    payload = await request.json()
+    try:
+        content, warning = await run_in_threadpool(driver.puddle_query, pond_key(name, major), payload)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RemoteQueryError as exc:
+        status = 502 if exc.status in (401, 403) else exc.status
+        raise HTTPException(status_code=status, detail=_origin_error(exc) if status == 502 else exc.detail) from exc
+    headers = {"x-duckstring-warning": warning} if warning else {}
+    return Response(content=content, media_type="application/octet-stream", headers=headers)
+
+
+@router.post("/duck/{name}/{major}/puddle/get", dependencies=[auth.duck])
+async def puddle_get(name: str, major: int, request: Request):
+    """A Duck's read of a Puddle Source's table list, forwarded as :func:`puddle_query` is."""
+    from ...remote_source import RemoteQueryError
+    from .puddles import _origin_error
+
+    driver = request.app.state.driver
+    body = await request.json()
+    try:
+        return await run_in_threadpool(driver.puddle_get, pond_key(name, major), body.get("path", ""),
+                                       body.get("params"))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RemoteQueryError as exc:
+        status = 502 if exc.status in (401, 403) else exc.status
+        raise HTTPException(status_code=status, detail=_origin_error(exc) if status == 502 else exc.detail) from exc
+
+
 @router.get("/duck/{name}/{major}/artifact", dependencies=[auth.duck])
 def artifact(name: str, major: int, request: Request):
     """The selected version's source bundle for this major line, as an uncompressed tar (code is

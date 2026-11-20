@@ -162,6 +162,30 @@ Catchment's query API (never from its files), and a local run can step through t
   steps through.
 - `pond puddle ls` shows how each Source is read, its set and the freshness the last run read it at.
 
+### Puddle Sources on a dev Catchment
+
+A change spanning several Ponds can be tested on a Catchment of its own: deploy the Ponds under test there, and the
+Sources that live in production are read as Puddles.
+
+- **`puddles.toml` sections per Catchment:** `[dev] transactions = "recent"` lists the Sources a Pond reads as
+  Puddles on the Catchment named `dev`, with their sets. `pond deploy` sends that Catchment's section beside the
+  files (never inside them) and prints the Sources it names; no section clears them. `pond puddle push` sends it
+  without a redeploy. A Source the Pond doesn't declare, or a set with no definitions, is refused.
+- **A Puddle node per Source**, `{source}~puddle@{major}`, drawn like a Draw and labelled `[PUDDLE]`, stands in for
+  the Source for every Pond reading it as a Puddle (a copy of the Source deployed there is left alone). Its
+  freshness is its position in production's history. It never asks production for anything.
+- **`refresh now POND --hydrate --live-puddles --from PROD [--as-at TIME]`** takes a baseline: the Ponds the Refresh
+  reaches are reset and run from each Source as it stood then. **`--rewind`** goes back to it, and
+  **`--next-change`, `--next-run`, `--most-recent`, `--to TIME`** move through production's history as
+  `pond run --incremental` does (the two share one module, and a test runs the demo both ways). A plain Refresh, or
+  a recurring one, reaching a Puddle Source is refused.
+- **Every Duck kind reads the same way:** a Duck compiles its Pond's Puddle definitions and runs their queries
+  through its Catchment, which forwards them to production with the credentials stored at hydration (the secret
+  `PUDDLE_ORIGIN`). No Duck holds production's key. Copied Puddles aren't supported on a Catchment.
+- Routes: `GET`/`POST /api/ponds/{name}/puddles`, `POST /api/ponds/{name}/puddles/hydrate|rewind|refresh`.
+  `/api/status` carries `is_puddle`, `puddle` (a node's Source, origin, baseline and position) and
+  `puddle_sources`.
+
 ### Run reports
 
 A Pond's freshness says when its Inlets last read their sources, not how old the data they read was: the attention
