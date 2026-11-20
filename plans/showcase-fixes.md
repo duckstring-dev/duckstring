@@ -735,6 +735,10 @@ naming the replacement.
 **Follow-up, measure first.** A Source whose change only adds rows still trips `p` and forces a recompute, though
 joining the new rows is never more work. `p` may need to count only removals and changes.
 
+Measured 2026-11-20 (`bench/p_threshold/`): past `p`, an insert-only change to a join is 2 to 3.5 times faster
+incrementally, but an incremental aggregate is 2 to 3 times slower than its recompute. **Closed, no change** (the
+author's call): `p` stays as it is and user-set; in streaming shapes a change over 0.3 of a Source should be rare.
+
 ## 20. A Sink stamped behind its Source can lose rows to the Source's cleanup (found 2026-11-20)
 
 Parked for the author: `plans/trickle-retention-bound.md`. A Sink Run stamped at a slower Source's freshness reads
