@@ -305,6 +305,41 @@ def earliest_readable(store, table: str) -> tuple:
     return (min(versions) if versions else None), False
 
 
+def change_points(store, after=None, upto=None) -> list:
+    """The freshnesses at which ``store``'s published tables changed in ``(after, upto]``, oldest first: append
+    parts, a merge table's base tokens, bands and change log parts, plain-table versions."""
+    from datetime import datetime
+
+    from .trickle.io import changelog_name, load_sidecar, part_f, part_lo, sidecar_tables, table_parts, warm_name
+
+    store = _as_storage(store)
+    sidecar = load_sidecar(store)
+    points: set = set()
+
+    def add(names):
+        for n in names:
+            try:
+                points.update({part_lo(n), part_f(n)})  # a union of parts: its ends (the points inside aren't listed)
+            except ValueError:
+                continue
+
+    for table, entry in sidecar_tables(sidecar).items():
+        if table.startswith("_duckstring_"):
+            continue  # the Run reports change with every reporting Run, not with the data
+        mode = entry.get("mode")
+        if mode == "append":
+            add(table_parts(store, table))
+        elif mode == "merge":
+            points.update(t for t in _base_tokens(store, table) if t is not None)
+            add(table_parts(store, warm_name(table)))
+            add(table_parts(store, changelog_name(table)))
+        else:
+            add(table_parts(store, f"{table}__v"))
+            if entry.get("f") and not table_parts(store, f"{table}__v"):
+                points.add(datetime.fromisoformat(entry["f"]))
+    return sorted(p for p in points if (after is None or p > after) and (upto is None or p <= upto))
+
+
 def _pick_token(tokens: dict, upper, f_base):
     """The base token a read at ``upper`` uses: the newest at or below it. With none (a read older than every
     retained base), the newest at or below the sidecar's ``f_base``, else none."""

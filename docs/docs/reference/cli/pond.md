@@ -51,17 +51,17 @@ A Source with no definition is skipped with a warning, unless `--live`, `--as-at
 | `--source`, `-s` | Only hydrate these Sources. Repeatable. The others keep their baseline. |
 | `--catchment`, `-c` | The Catchment the Sources are read from. Defaults to the default Catchment. |
 | `--set` | Use this Puddle set for every Source. |
-| `--live` | Read the Sources in place on the Catchment, without copying them. |
+| `--live` | Read the Sources from the Catchment at each run, without copying them. |
 | `--as-at` | Hydrate as of this time (ISO, UTC unless it says otherwise). Without `--live`, each Source's state at that time is copied with every change since. |
 | `--from-catchment` | Fill Sources with no Puddle definition by downloading their current tables from the Catchment over HTTP. |
 
-A Source read in place is read from a registered local Catchment's root, or from the Catchment's data root with this machine's own credentials, at the major line its `[sources]` pin selects. A Catchment whose data this machine can't reach (a hosted Catchment that keeps its data on its own disk, or a Volume reached through the Files API) can't be read in place. Use `p.catchment()` or `--from-catchment` for those.
+A Source is read through the Catchment's [query API](data.md#query) at a point in time (`--at`, and `--since` for its changes), at the major line its `[sources]` pin selects, never from its files. A definition that reads its Source with [`p.read_source`](../python/puddle.md#read_source) becomes the query, so a filter runs on the Catchment and only its rows come back.
 
-**Live Puddles.** With `--live`, a Source with no definition is read in place, and so is a definition that reads its Source with [`p.read_source`](../python/puddle.md#read_source), which is evaluated again by each incremental run. A definition that doesn't read its Source is copied as written. The hydration time (or `--as-at`) is recorded, and the baseline reads each live Source as it stood then, so it stays close to stable without a copy. Nothing on the Catchment changes because a local run reads it: when the Catchment has since dropped a plain table's version from then, the oldest version it keeps is read, with a warning. When the baseline must not change, copy instead.
+**Live Puddles.** With `--live`, nothing is copied: each run reads a Source with no definition whole, and one with a definition through its query, as it stood at the run's position. A definition that doesn't read its Source, or a Source whose definitions also write data of their own, is copied as written. The hydration time (or `--as-at`) is recorded, and the baseline reads each live Source as it stood then, so it stays close to stable without a copy. Nothing on the Catchment changes because a local run reads it: when the Catchment has since dropped a plain table's version from then, its newest version is read, with a warning. When the baseline must not change, copy instead.
 
-**History.** With `--as-at` and no `--live`, a Source with no definition is copied with its state at that time and every change since. A definition that reads its Source is run at that time and at each later change, so the copy holds only what the definition keeps. Either way, incremental runs can then step through the Source's real history. A time earlier than a Source keeps (before a merge table's oldest base, or below an append table's floor) is refused, naming the earliest allowed.
+**History.** With `--as-at` and no `--live`, a Source with no definition is copied with its state at that time and every change since. For a definition that reads its Source, its query's result is copied at that time and its change at each later change, so the copy holds only what the definition keeps. Either way, incremental runs can then step through the Source's real history. A time a Source holds nothing from (before a merge table's oldest base, or below an append table's floor) is refused, naming the earliest allowed.
 
-For `--as-at` and `--live`, each Source's run history is read from the Catchment, so a Source that runs without changing still counts as fresh. Without it, the Source's change points stand in, with a warning.
+For `--as-at` and `--live`, each Source's run history is read from the Catchment, so a Source that runs without changing still counts as fresh.
 
 Like `run`, `hydrate` runs in the Pond's own environment when it has one.
 

@@ -1,14 +1,9 @@
 from __future__ import annotations
 
 import os
-import socket
-import threading
-import time
 from unittest.mock import MagicMock
 
-import httpx
 import pytest
-import uvicorn
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -108,37 +103,11 @@ def live_catchment(catchment_root):
 
     Yields the base URL. Tests can hit the API directly to verify state.
     """
-    from duckstring.catchment.app import create_app
-    from duckstring.cli.config import register_catchment
+    from catchment_server import serve_catchment
 
-    root = catchment_root
+    from duckstring.cli.config import register_catchment, set_default_catchment
 
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-
-    config = uvicorn.Config(create_app(root), host="127.0.0.1", port=port, log_level="error")
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-
-    url = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        try:
-            httpx.get(f"{url}/api/health", timeout=1.0)
-            break
-        except Exception:
-            time.sleep(0.05)
-    else:
-        raise RuntimeError(f"Catchment did not start on port {port}")
-
-    from duckstring.cli.config import set_default_catchment
-
-    register_catchment("dev", url=url, kind="local")
-    set_default_catchment("dev")
-
-    yield url
-
-    server.should_exit = True
-    thread.join(timeout=5)
+    with serve_catchment(catchment_root) as url:
+        register_catchment("dev", url=url, kind="local")
+        set_default_catchment("dev")
+        yield url

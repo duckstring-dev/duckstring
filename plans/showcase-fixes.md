@@ -443,6 +443,24 @@ checked against a recompute). Where it differs from the plan above:
 
 ### Puddle Sources on a local Catchment (follow-up, agreed 2026-11-19; after the single-Pond half)
 
+**Revised 2026-11-20 (agreed with the author before building):**
+- **Never read in place.** Reading another Catchment's files with the reader's credentials is out ("a security
+  nightmare and conceptually messy"). Every read of production goes through its API: `POST /api/query` with `at`
+  (tables as they stood) and `since` (the query's change, weighted), built first (commit 8eb72f70). The local half
+  was moved onto it: `Locator.storage` and the S3 in-place path are gone, and a definition over `p.read_source` is
+  compiled to a query over stand-ins that runs on production, so a filter runs there.
+- **Live means nothing is written.** A live Puddle that copied would be a Duct. Live: read at each read position
+  through the query API. Copied: the only kind that writes (at hydration, and steps).
+- **`--from` is required on `refresh --hydrate`**, recorded with the baseline: on a dev Catchment the CLI's default is
+  usually the dev Catchment itself.
+- **No opt-in setting.** The `puddles.toml` section must name the Catchment, which is explicit enough; deploy prints
+  which Sources read as Puddles, so a dev Catchment named like production is never silent.
+- **All Duck kinds.** The dev Catchment holds production's address and key (the key as a secret) and proxies a Duck's
+  Puddle reads over the Duck channel, so no Duck holds production's key and header-command auth works.
+- **A Puddle node per Source, drawn like a Draw**, holding the Puddle's position as its freshness (fed by the Driver
+  from production's run history); a copied one also holds its data. It never sends demand upstream.
+- **`pond puddle push`**, not `pond puddles push` (the group is `pond puddle`).
+
 A change spanning several Ponds is tested on a local Catchment: anything else would be a poorer copy of one, and it
 is the same pattern as separate dev, qa and prod Catchments. The Ponds under test are deployed to it. Those whose
 Sources live elsewhere (production) read them as Puddles; the Ponds downstream of them read their local Sources as

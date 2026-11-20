@@ -183,3 +183,32 @@ def test_the_cli_and_the_python_client_read_as_of(runner, catchment_root, live_c
     assert client.query("SELECT price FROM dim WHERE k = 'a'", "src", at=ts(1)).fetchall() == [(10,)]
     change = client.query("SELECT k, price FROM dim", "src", at=ts(2), since=ts(1).isoformat())
     assert sorted(change.fetchall()) == [("a", 10, -1), ("a", 11, 1)]
+
+
+def test_the_changes_route_lists_change_points(catchment_client):
+    _seeded(catchment_client)
+    r = catchment_client.get("/api/ponds/src/changes", params={"major": 1})
+    assert r.status_code == 200, r.text
+    assert r.json()["changes"] == [ts(h).isoformat() for h in (1, 2, 3)]
+    r = catchment_client.get("/api/ponds/src/changes", params={"major": 1, "after": ts(1).isoformat(),
+                                                                "upto": ts(2).isoformat()})
+    assert r.json()["changes"] == [ts(2).isoformat()]
+
+
+def test_run_reports_are_read_by_name(catchment_client):
+    from duckstring.core import Pond
+    from duckstring.reports import collect
+
+    root = catchment_client.app.state.root
+    con = duckdb.connect(str(root / "rep.duckdb"))
+    data = root / "ponds" / "rep" / "m1" / "data"
+    pond = Pond("rep", "1.0.0", con, root=root, f=ts(1), ripple="main", own_data_dir=data)
+    pond.report({"as_of": "17:00"})
+    pond.write_table("t", con.sql("SELECT 1 AS x"))
+    collect(Pond("rep", "1.0.0", con, root=root, f=ts(1), own_data_dir=data))
+    ParquetDataPlane().export(con, data, f=ts(1))
+    for at in (None, ts(1).isoformat()):
+        r = catchment_client.post("/api/query", json={"pond": "rep", "sql": "SELECT reports FROM _duckstring_reports",
+                                                      **({"at": at} if at else {})})
+        assert r.status_code == 200, r.text
+        assert "17:00" in r.json()[0]["reports"]

@@ -1,9 +1,9 @@
 """Live and replayable Puddles (plans/showcase-fixes.md item 10): Puddle sets, the handle's write methods,
 ``pond hydrate --live`` / ``--as-at``, ``@puddle.step`` and ``pond run --incremental`` with its targets.
 
-"Production" here is a Catchment root a test publishes into with the data plane, registered as ``prod`` with that
-root, so Puddles read it in place. Its run history isn't served (the URL refuses), so positions come from the
-Sources' change points unless a test records runs itself."""
+"Production" here is a Catchment root a test publishes into with the data plane, served by a real Catchment and
+registered as ``prod``: Puddles read it through its query API, never in place. Nothing is deployed on it, so it has
+no run history, and positions come from the Sources' change points."""
 
 from __future__ import annotations
 
@@ -55,13 +55,16 @@ class Prod:
 
 @pytest.fixture
 def prod(tmp_path):
+    from catchment_server import serve_catchment
+
     from duckstring.cli.config import register_catchment, set_default_catchment
 
     root = tmp_path / "prod"
     root.mkdir()
-    register_catchment("prod", url="http://127.0.0.1:9", kind="local", root=str(root))
-    set_default_catchment("prod")
-    return Prod(root)
+    with serve_catchment(root) as url:
+        register_catchment("prod", url=url, kind="local")
+        set_default_catchment("prod")
+        yield Prod(root)
 
 
 def events(ids):
@@ -291,6 +294,72 @@ def test_a_live_definition_filters_each_window(tmp_path, prod):
     assert seen(project)["n"] == 2
 
 
+def test_a_live_filter_runs_on_the_sources_catchment(tmp_path, prod, monkeypatch):
+    """The definition's query is what travels: the filter is in the SQL sent, and only its rows come back."""
+    from duckstring.remote_source import HttpTransport
+
+    sent, rows = [], []
+    real = HttpTransport.query
+
+    def spy(self, payload):
+        content, warning = real(self, payload)
+        if "LIMIT 0" not in payload["sql"]:
+            sent.append(payload["sql"])
+            path = tmp_path / "r.parquet"
+            path.write_bytes(content)
+            rows.append(duckdb.sql(f"SELECT count(*) FROM '{path}'").fetchall()[0][0])
+        return content, warning
+
+    monkeypatch.setattr(HttpTransport, "query", spy)
+    prod.publish("tx", t(1), events(range(1, 101)))
+    puddles = """
+        from duckstring import puddle
+
+        @puddle("tx.event")
+        def few(p):
+            return p.read_source().filter("id <= 3").project("id, value")
+    """
+    project = load_project(make_pond(tmp_path, puddles))
+    hydrate(project, live=True)
+    ok(run_pond(project))
+    assert seen(project)["n"] == 3
+    assert sent and all("id <= 3" in q for q in sent)
+    assert max(rows) == 3
+
+
+def test_a_definition_that_leaves_the_query_is_refused(tmp_path, prod):
+    prod.publish("tx", t(1), events([1, 2]))
+    puddles = """
+        from duckstring import puddle
+
+        @puddle("tx.event")
+        def fetched(p):
+            df = p.read_source().df()
+            return p.con.from_df(df.head(1))
+    """
+    project = load_project(make_pond(tmp_path, puddles))
+    results, _ = hydrate(project, live=True)
+    assert results[0].status == "failed"
+    assert "query over the Source alone" in results[0].error
+
+
+def test_a_generated_definition_is_copied_under_live(tmp_path, prod):
+    prod.publish("tx", t(1), events([1, 2]))
+    puddles = """
+        from duckstring import puddle
+
+        @puddle("tx.event")
+        def generated(p):
+            return p.con.sql("SELECT range AS id, range * 10 AS value FROM range(10)")
+    """
+    project = load_project(make_pond(tmp_path, puddles))
+    results, warnings = hydrate(project, live=True)
+    assert all(r.status == "ok" for r in results), results
+    assert any("copied as written" in w for w in warnings)
+    ok(run_pond(project))
+    assert seen(project)["n"] == 10
+
+
 def test_live_production_short_of_the_target_refuses(tmp_path, prod):
     prod.publish("tx", t(1), events([1]))
     project = load_project(make_pond(tmp_path))
@@ -300,16 +369,40 @@ def test_live_production_short_of_the_target_refuses(tmp_path, prod):
         run_pond(project, incremental=True, to=t(5))
 
 
-def test_a_catchment_whose_data_this_machine_cant_read_names_the_way_round(tmp_path, live_catchment):
-    """The live Catchment fixture is registered without its root, so its data is on a disk this machine can't
-    reach by any registration: the error names p.catchment() and --from-catchment."""
+def test_a_source_with_nothing_published_is_refused(tmp_path, prod):
     project = load_project(make_pond(tmp_path))
     results, _ = hydrate(project, live=True)
     assert results[0].status == "failed"
-    assert "p.catchment()" in results[0].error and "--from-catchment" in results[0].error
+    assert "published nothing" in results[0].error
 
 
-# ── replayed history ─────────────────────────────────────────────────────────
+def test_nothing_is_read_in_place(tmp_path, prod, monkeypatch):
+    """Every read goes through the Catchment's API: with the data plane's file reads blocked for production's
+    root, a live hydration and its runs still work."""
+    from duckstring import dataplane
+
+    prod.publish("tx", t(1), events([1, 2]))
+    prod.publish("tx", t(2), events([3]))
+    real = dataplane._as_storage
+    prod_root = str(prod.root)
+
+    def guarded(store):
+        out = real(store)
+        if prod_root in str(getattr(out, "root", "")) and not _serving():
+            raise AssertionError(f"read in place: {out}")
+        return out
+
+    import threading
+
+    def _serving():
+        return threading.current_thread() is not threading.main_thread()
+
+    monkeypatch.setattr(dataplane, "_as_storage", guarded)
+    project = load_project(make_pond(tmp_path))
+    ok_results, _ = hydrate(project, live=True)
+    assert [r.status for r in ok_results] == ["ok"]
+    ok(run_pond(project))
+    assert seen(project)["n"] == 3
 
 
 def test_as_at_copies_history_and_steps_through_it(tmp_path, prod):
@@ -363,7 +456,7 @@ def test_as_at_before_a_merge_tables_base_is_refused(tmp_path, prod):
             pond.write_table("x", pond.con.sql("SELECT 1 AS x"))
     """))
     results, _ = hydrate(project, as_at=t(1))
-    assert results[0].status == "failed" and "kept from" in results[0].error
+    assert results[0].status == "failed" and "holds nothing from before" in results[0].error
 
 
 def test_next_change_waits_for_a_source_that_runs_without_changing(tmp_path, prod):

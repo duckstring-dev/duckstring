@@ -351,6 +351,19 @@ Recurrence follows RFC 5545 loosely; there is no cron anywhere (`croniter` was r
 
 ## Puddles (local pre-deploy testing: `local/`, `cli/puddle.py`)
 
+**Reading production (2026-11-20, the author's rule: never in place).** A Puddle reads its real Source only through the
+Source Catchment's API (`remote_source.RemoteSource`: `/api/query` with `at`/`since`, `/api/ponds/{name}/tables`,
+`/changes`, `/api/runs`); the old `Locator.storage` in-place read (local root or data root with the user's credentials)
+is gone. A definition calling `p.read_source` is compiled, not run on data: `SourceSession` gives it an empty stand-in
+`"{source}"."{table}"` (columns from a `LIMIT 0` query) and records what it writes from it as `relation.sql_query()`
+(`queries`/`kinds`), refusing anything not a query over stand-ins alone (`NotAQuery`, via `json_serialize_sql`
+references). Live: nothing written; the runner recompiles definitions each run and hands `Pond(remote_sources=)`,
+whose Source reads (`_source_relation`, `read_delta`, `count_table`, `source_columns`, `changed`, reports) go through
+the RemoteSource at the read positions (a delta = the query's change from `since`; trimmed → full read). Copied: the
+query's result written at the point (`write_data`) and each change point's change applied (`apply_change`). A
+Source whose definitions also write data of their own is copied, not live. Run reports are read by name
+(`routes/data._queryable`).
+
 A **Puddle** is a snapshot of a Source table defined in code, used to test a Pond before deploying it. Definitions live in `src/puddles.py`, either per table (`@puddle("source.table")`) or per Source (`@puddle("source")`). The handle `p` has `con`/`path`/`write_table`/`write_path`/`catchment()` (see `core.py`).
 
 - `duckstring pond hydrate` imports the definitions (registration is a decorator side effect, as with `@ripple`) and materialises `puddles/ponds/{source}/data/{table}.parquet`. That is the catchment-root layout, so `Pond.read_table`'s foreign-read branch works unchanged with `root=puddles/`. Missing definitions are skipped with a warning; `--from-catchment` fills them from the Catchment.

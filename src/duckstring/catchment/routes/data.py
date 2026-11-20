@@ -96,6 +96,17 @@ def _tune_read_con(con) -> None:
         pass  # tuning is best-effort — never fail a read because a PRAGMA was rejected
 
 
+def _queryable(dp, data_dir) -> list[str]:
+    """The tables a query can name: the published ones, and the Run reports (read by name, never listed)."""
+    from ...reports import REPORTS_TABLE
+    from ...trickle.io import load_sidecar, sidecar_tables
+
+    tables = dp.list_tables(data_dir)
+    if REPORTS_TABLE in sidecar_tables(load_sidecar(data_dir)):
+        tables.append(REPORTS_TABLE)
+    return tables
+
+
 def _open_pond(request: Request, pond_name: str, major: int):
     """An in-memory DuckDB connection with the Pond's exported tables registered as views — under a
     schema named after the Pond, and in ``main`` — so queries can name them ``"pond"."table"`` or
@@ -111,7 +122,7 @@ def _open_pond(request: Request, pond_name: str, major: int):
     _tune_read_con(con)  # spill instead of OOM (a big merge reconstruction) + cache Parquet footers over S3
     data_dir.duckdb_setup(con)  # object store → httpfs + credentials (no-op for local)
     con.execute(f'CREATE SCHEMA IF NOT EXISTS "{pond_name}"')
-    for table in dp.list_tables(data_dir):
+    for table in _queryable(dp, data_dir):
         select = dp.read_select(data_dir, table)
         con.execute(f'CREATE VIEW "{pond_name}"."{table}" AS {select}')
         con.execute(f'CREATE OR REPLACE VIEW "{table}" AS {select}')
@@ -316,6 +327,20 @@ def list_pond_tables(
         serviceable = driver.serviceable(pond_key(name, m)) if driver is not None else set()
         out = [o for o in out if o["name"] in serviceable]
     return {"tables": out}
+
+
+@router.get("/ponds/{name}/changes", dependencies=[auth.read])
+def list_pond_changes(
+    name: str, request: Request, major: Optional[int] = None, version: Optional[str] = None,
+    after: Optional[str] = None, upto: Optional[str] = None,
+):
+    """The freshnesses at which the line's published tables changed in ``(after, upto]``, oldest first, as far
+    back as it keeps: what an as-of reader (a Puddle) steps through. A Run that changed nothing isn't one."""
+    from ...dataplane import change_points
+
+    m = _resolve_major(request, name, major, version)
+    points = change_points(_data_dir(request, name, m), after=_point(after, "after"), upto=_point(upto, "upto"))
+    return {"changes": [p.isoformat() for p in points]}
 
 
 @router.get("/ponds/{name}/trace", dependencies=[auth.read])
@@ -906,7 +931,7 @@ def _register_as_of(con, catalog: str, data_dir, pond: str, point, warnings: lis
 
     dp = get_data_plane()
     con.execute(f'CREATE SCHEMA {catalog}."{pond}"')
-    for table in dp.list_tables(data_dir):
+    for table in _queryable(dp, data_dir):
         earliest, exact = earliest_readable(data_dir, table)
         if earliest is not None and point < earliest:
             if exact:

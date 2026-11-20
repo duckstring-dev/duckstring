@@ -695,16 +695,18 @@ class Puddle:
         return self.table
 
     def read_source(self, table: str | None = None):
-        """The Source's published table, read in place on the Catchment the Puddle hydrates from, as a relation on
-        ``con``. ``table`` defaults to the target's.
+        """The Source's published table on the Catchment the Puddle hydrates from, as a relation on ``con``.
+        ``table`` defaults to the target's. The Source's major line is the one its ``[sources]`` pin selects.
 
-        The table is read as it stood at the Puddle's freshness (``p.f``), at the major line the Source's
-        ``[sources]`` pin selects. A filter or projection over it reads only what it needs. A definition that
-        uses it can be replayed through the Source's history (``pond hydrate --as-at``) and read live
+        The relation stands in for the table: it has the table's columns and no rows. What the definition writes
+        or returns from it is recorded as a query, which runs on the Catchment through its query API as of each
+        point the Puddle is read at, so only the rows it keeps come back. Build on it with DuckDB relations
+        (filters, projections, joins between the Source's tables, aggregates, samples by key hash). A definition
+        that uses it can be replayed through the Source's history (``pond hydrate --as-at``) and read live
         (``pond hydrate --live``), so it must be deterministic.
 
-        Raises ``ValueError`` when the Catchment's data can't be read from this machine (then use
-        ``p.catchment()`` or ``pond hydrate --from-catchment``) or the table isn't kept that far back.
+        Raises ``ValueError`` when the Catchment can't be asked or doesn't publish the table. Hydrating fails the
+        definition when what it writes from ``read_source`` isn't a query over the Source alone.
         """
         if self._session is None:
             raise ValueError("p.read_source() reads through a hydration: run it with duckstring pond hydrate")
@@ -872,7 +874,7 @@ class Pond:
         flock: str | None = None, sources=None, flock_env: dict[str, str] | None = None,
         static_tables: dict | None = None, ripple: str | None = None, ancestors=None,
         table_writers: dict[str, str] | None = None, change_sink=None, exact_ints: bool = True,
-        source_dirs: dict | None = None,
+        source_dirs: dict | None = None, remote_sources: dict | None = None,
     ) -> None:
         from .changes import ChangeLedger
         from .engine.core import NEVER
@@ -928,9 +930,12 @@ class Pond:
         # published) is read at this Run's freshness, as before.
         self.read_positions = read_positions or {}
         self.previous_positions = previous_positions
-        # A local run's Sources read from somewhere other than the flat puddles layout: a live Puddle (the
-        # Source's own published data, read in place) or a Puddle's working copy. {source: Storage}.
+        # A local run's Sources read from somewhere other than the flat puddles layout: a Puddle's working copy.
+        # {source: Storage}.
         self.source_dirs = dict(source_dirs or {})
+        # Sources read through another Catchment's query API at their read positions: live Puddles
+        # (remote_source.RemoteSource). {source: RemoteSource}.
+        self.remote_sources = dict(remote_sources or {})
         # The run's freshness F (tz-aware UTC datetime): the ideal watermark/provenance stamp —
         # stable across crash recovery and retries, which all re-run at the same F (wall-clock
         # would differ per attempt). Local (puddle) runs stamp the run's start time.
@@ -1098,6 +1103,10 @@ class Pond:
         if self.previous_f == NEVER:
             return True
         previous = self._previous_position(source)
+        remote = self.remote_sources.get(source)
+        if remote is not None:
+            delta = remote.delta(self.con, name, previous, self._position(source))
+            return delta.is_full or not delta.is_empty()
         data_dir = self._source_data_dir(source)
         sidecar = trickle.load_sidecar(data_dir)
         entry = trickle.sidecar_tables(sidecar).get(name)
@@ -1252,7 +1261,7 @@ class Pond:
         from . import trickle_io as trickle
 
         source_pond, table = self._resolve_ref(ref)
-        if source_pond is None:
+        if source_pond is None or source_pond in self.remote_sources:
             return None
         try:
             entry = trickle.load_sidecar(self._source_data_dir(source_pond)).get(table) or {}
@@ -1384,6 +1393,7 @@ class Pond:
                 if staged is not None:
                     return staged
             return _read(self._own_store(), name)
+        self._refuse_remote_object(source, name)
         return _read(self._source_data_dir(source), name)
 
     def object_path(self, ref: str) -> Path:
@@ -1403,7 +1413,13 @@ class Pond:
                 if sp is not None:
                     return sp
             return _path(self._own_store(), name, self._scratch())
+        self._refuse_remote_object(source, name)
         return _path(self._source_data_dir(source), name, self._scratch())
+
+    def _refuse_remote_object(self, source: str, name: str) -> None:
+        if source in self.remote_sources:
+            raise ValueError(f"'{source}' is read as a live Puddle, through its Catchment's query API, which serves "
+                             f"tables only: copy it to read its Object '{name}'")
 
     def _resolve_ref(self, ref: str, what: str = "table") -> tuple[str | None, str]:
         """:func:`parse_ref`, with this Pond's own name as the Source mapped to ``None`` (own), and a clear
@@ -1549,6 +1565,9 @@ class Pond:
         from .trickle_io import _strip_system
 
         self._record_read(source_pond, table)
+        remote = self.remote_sources.get(source_pond)
+        if remote is not None:
+            return remote.relation(self.con, table, self._position(source_pond))
         data_dir = self._source_data_dir(source_pond)
         dp = get_data_plane()
         data_dir.duckdb_setup(self.con)  # object store → httpfs + credentials (no-op for local)
@@ -1572,6 +1591,8 @@ class Pond:
         if source_pond is None:
             return list(self.read_table(ref).columns)  # an own table is a registry view: binding it is the read
         self._record_read(source_pond, table)
+        if source_pond in self.remote_sources:
+            return self.remote_sources[source_pond].columns(self.con, table, self._position(source_pond))
         data_dir = self._source_data_dir(source_pond)
         data_dir.duckdb_setup(self.con)
         dp = get_data_plane()
@@ -1609,7 +1630,7 @@ class Pond:
         from .trickle_io import _q
 
         source, table = self._resolve_ref(ref)
-        if source is None:
+        if source is None or source in self.remote_sources:
             return None
         major = self.source_majors.get(source)
         if major is None or self.data_root is None or not is_object_uri(self.data_root):
@@ -1674,6 +1695,8 @@ class Pond:
             from .dataplane import get_data_plane
 
             self._record_read(source_pond, table)
+            if source_pond in self.remote_sources:
+                return self.remote_sources[source_pond].count(self.con, table, self._position(source_pond))
             data_dir = self._source_data_dir(source_pond)
             dp = get_data_plane()
             data_dir.duckdb_setup(self.con)
@@ -1866,6 +1889,9 @@ class Pond:
         if source_pond is None:
             return self._own_delta(table)
         self._record_read(source_pond, table)
+        if source_pond in self.remote_sources:
+            return self.remote_sources[source_pond].delta(self.con, table, self._previous_position(source_pond),
+                                                          self._position(source_pond))
         data_dir = self._source_data_dir(source_pond)
         dp = get_data_plane()
         data_dir.duckdb_setup(self.con)

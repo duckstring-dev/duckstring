@@ -257,13 +257,16 @@ def test_datetimes_are_reported_as_iso_strings(catchment):
 
 
 def test_a_local_run_carries_its_sources_reports(tmp_path, monkeypatch, catchment):
+    from catchment_server import serve_catchment
+
     from duckstring.cli.config import register_catchment, set_default_catchment
     from duckstring.local.hydrate import hydrate
     from duckstring.local.project import load_project
     from duckstring.local.runner import run_pond
 
     catchment.run("a", at(0), reporting(data_as_of="17:00"))
-    register_catchment("prod", url="http://127.0.0.1:9", kind="local", root=str(catchment.root))
+    served = serve_catchment(catchment.root)
+    register_catchment("prod", url=served.__enter__(), kind="local")
     set_default_catchment("prod")
     project = tmp_path / "b"
     (project / "src").mkdir(parents=True)
@@ -289,6 +292,7 @@ def test_a_local_run_carries_its_sources_reports(tmp_path, monkeypatch, catchmen
     assert sorted(r[0] for r in rows) == ["a@1", "b@1"]
     seen = con.sql(ParquetDataPlane().read_select(proj.out_dir, "seen")).fetchall()[0][0]
     assert "17:00" in seen
+    served.__exit__(None, None, None)
 
 
 # ─── end to end, through a Catchment and real Ducks ───────────────────────────

@@ -85,7 +85,7 @@ A Source with no Puddle is skipped with a warning when you hydrate. `duckstring 
 
 ## Testing against real data
 
-Sample data shows that a Ripple runs. Whether its numbers mean anything usually needs the real data. `p.read_source()` reads the Source's published table in place, on the Catchment you hydrate from, so a Puddle can be a filter over the real thing:
+Sample data shows that a Ripple runs. Whether its numbers mean anything usually needs the real data. `p.read_source()` reads the Source's published table on the Catchment you hydrate from, so a Puddle can be a filter over the real thing:
 
 ```python
 @puddle("transactions.transaction")
@@ -93,7 +93,7 @@ def transactions(p):
     return p.read_source().filter("store_id IN (1, 2)")
 ```
 
-The table is read straight from the Catchment's files: from its root when the Catchment runs on this machine and is registered with it, or from its data root (an S3 bucket, say) with your own credentials. Only what the filter keeps is read and written.
+The definition isn't run against the data here. It becomes a query, which runs on the Catchment through its [query API](../reference/cli/data.md#query), so only the rows the filter keeps come back. That works for anything you can express with DuckDB relations over `read_source`: filters, projections, joins between the Source's tables, aggregates and samples by key hash. A definition that fetches rows into Python first can't be sent to the Catchment, and hydrating refuses it. Reading needs a key for the Catchment that can read its tables.
 
 For a large Source, copying even a filtered sample can be slow. `duckstring pond hydrate --live` copies nothing:
 
@@ -102,7 +102,7 @@ duckstring pond hydrate --live
 duckstring pond run
 ```
 
-A Source with no Puddle is then read in place whole, and a Puddle that uses `read_source` is evaluated when the run needs it. The hydration time is recorded, and runs read each live Source as it stood then, so results stay close to stable until you hydrate again. Nothing on the Catchment changes because you are reading it. If the Catchment has since dropped a version you were reading, the oldest one it keeps stands in, with a warning. When the data must not move under you, copy it instead (without `--live`).
+A Source with no Puddle is then read whole, and a Puddle that uses `read_source` is read through its query, each time a run reads the Source. Nothing is written locally. The hydration time is recorded, and runs read each live Source as it stood then, so results stay close to stable until you hydrate again. Nothing on the Catchment changes because you are reading it. If the Catchment has since dropped a plain table's version from then, its newest stands in, with a warning. When the data must not move under you, copy it instead (without `--live`).
 
 `--as-at` hydrates as of an earlier time, which is useful for reproducing a result someone saw yesterday.
 
@@ -170,7 +170,7 @@ duckstring pond run                        # back to the baseline
 
 The changes come from one of two places.
 
-**Real history.** `--as-at` copies each Source's state at that time and every change since (a Puddle that uses `read_source` is run at each change, so the copy holds only what it keeps). With `--live`, a Source's history is read in place instead, and keeps growing as the Catchment runs, so incremental runs can follow production forward.
+**Real history.** `--as-at` copies each Source's state at that time and every change since (through the query of a Puddle that uses `read_source`, so the copy holds only what it keeps). With `--live`, a Source's history is read from the Catchment instead, each run asking for the change since the last, and keeps growing as the Catchment runs, so incremental runs can follow production forward.
 
 **Steps.** A new pipeline has no history to replay. `@puddle.step` writes a Source's next window instead:
 

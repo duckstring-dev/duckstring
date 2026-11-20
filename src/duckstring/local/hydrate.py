@@ -8,9 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..core import DEFAULT_PUDDLE_SET, Puddle, collect_puddles, import_pond_module, parse_ref
+from ..remote_source import NotAQuery
 from .project import Project
 from .session import SourceSession
-from .sources import Locator, SourceUnreachable, change_points, copy_published, earliest_readable
+from .sources import Locator
 from .state import Hydrated, SourceState, _iso, load_hydrated, local_sets, save_hydrated
 
 
@@ -108,46 +109,38 @@ class _Hydration:
 
     # ── a Source's freshness at the point ───────────────────────────────────
 
-    def freshness_at(self, source: str, store) -> datetime:
-        """The Source's newest run freshness at or before the point (a dimension that runs hourly but changes
-        weekly is that fresh), else its newest change point, else the point itself."""
+    def freshness_at(self, source: str) -> datetime:
+        """The Source's newest freshness at or before the point (a dimension that runs hourly but changes weekly
+        is that fresh), else the point itself."""
         f = self.locator.latest_run(source, self.point)
-        if f is not None:
-            return f
-        changes = change_points(store, upto=self.point)
-        self.warnings.append(f"couldn't read '{source}''s run history from the Catchment — using its change points")
-        return changes[-1] if changes else self.point
-
-    def runs_after(self, source: str, after: datetime) -> list[str] | None:
-        runs = self.locator.runs(source, after=after)
-        if runs is None:
-            self.warnings.append(
-                f"couldn't read '{source}''s run history from the Catchment — incremental runs will use its "
-                "change points, so a Source that runs without changing holds the others back"
-            )
-            return None
-        return [_iso(f) for f in runs]
+        return f if f is not None else self.point
 
     # ── running definitions ─────────────────────────────────────────────────
 
     def evaluate(self, source: str, defs: list[dict], path: Path, f: datetime, *, previous_f=None, step: int = 0,
-                 read_at=None, resolve=None, retain_from=None, record: bool = True) -> SourceSession | None:
-        """Run ``defs`` for ``source`` into ``path`` at ``f`` and publish. ``resolve`` (with ``p.read_source``) moves the
-        stamp to the Source's own freshness at the point before anything is written. Returns the session, or
+                 read_at=None, resolve=None, retain_from=None, record: bool = True, remote=None,
+                 finish=None) -> SourceSession | None:
+        """Run ``defs`` for ``source`` into ``path`` at ``f``, then ``finish(session)``, and publish. With ``remote``,
+        ``p.read_source`` gives stand-ins and what is written from them is recorded as queries; ``resolve`` moves
+        the stamp to the Source's own freshness at the point before anything is written. Returns the session, or
         ``None`` if a definition failed (recorded as a result)."""
-        session = SourceSession(self.project, source, path, f, previous_f=previous_f, step=step,
-                                locator=self.locator, read_at=read_at, retain_from=retain_from)
+        session = SourceSession(self.project, source, path, f, previous_f=previous_f, step=step, remote=remote,
+                                read_at=read_at, retain_from=retain_from)
         session.resolve_point = resolve
         ok = True
         try:
             for d in defs:
                 started = time.perf_counter()
+                session.begin_definition()
                 try:
                     p = Puddle(d["target"], root=self.project.puddles_dir, default_catchment=self.catchment,
                                session=session)
                     returned = d["func"](p)
                     if returned is not None:
                         if isinstance(returned, (str, Path)):
+                            if session.reading:
+                                raise NotAQuery(f"'{d['target']}': a definition that reads its Source returns a "
+                                                "relation over it, not files")
                             p.write_path(returned)
                         else:
                             p.write_table(returned)
@@ -158,11 +151,73 @@ class _Hydration:
                     self.results.append(HydrateResult(
                         d["target"], d["name"], "failed", time.perf_counter() - started,
                         error=f"{type(exc).__name__}: {exc}", traceback=tb.format_exc()))
+            if ok and finish is not None:
+                try:
+                    finish(session)
+                except Exception as exc:  # noqa: BLE001 - reported against the Source
+                    ok = False
+                    self.results.append(HydrateResult(source, "(read)", "failed", error=f"{type(exc).__name__}: {exc}",
+                                                      traceback=tb.format_exc()))
             if ok:
                 session.publish()
         finally:
             session.close()
         return session if ok else None
+
+    def compile(self, source: str, defs: list[dict], at: datetime):
+        """The Source's live reads at ``at``: a :class:`~duckstring.remote_source.RemoteSource` reading each table
+        through its definition's query (or whole), for a live Puddle. Raises ``ValueError`` when a definition
+        fails or writes data of its own."""
+        import tempfile
+
+        if not defs:
+            return self.locator.remote(source)
+        with tempfile.TemporaryDirectory(prefix="duckstring-compile-") as tmp:
+            session = SourceSession(self.project, source, Path(tmp), at, remote=self.locator.remote(source))
+            try:
+                for d in defs:
+                    session.begin_definition()
+                    p = Puddle(d["target"], root=self.project.puddles_dir, default_catchment=self.catchment,
+                               session=session)
+                    returned = d["func"](p)
+                    if returned is not None:
+                        p.write_table(returned)
+            finally:
+                session.close()
+        if session.written:
+            raise ValueError(f"'{source}' is live, and its definitions now write data of their own "
+                             f"({', '.join(sorted(session.written))}): hydrate again to copy it")
+        return self.locator.remote(source, session.queries, session.kinds)
+
+    # ── reading queries into a copy ─────────────────────────────────────────
+
+    def _tables(self, session: SourceSession, remote) -> dict[str, tuple]:
+        """``{table: (mode, pk)}`` a copy reads from the Source: its definitions' queries, or every table."""
+        if session.queries:
+            return {t: (remote.mode(t), remote.pk(t)) for t in session.queries}
+        return {t: (remote.mode(t), remote.pk(t)) for t in remote.published()}
+
+    def _fill(self, remote, tables: dict[str, tuple]):
+        """A ``finish`` that writes each table's rows at the session's freshness."""
+        def finish(session: SourceSession) -> None:
+            session.drop_stand_ins()
+            for table, (mode, pk) in tables.items():
+                session.write_data(table, remote.relation(session.con, table, session.f), mode, pk)
+        return finish
+
+    def _history(self, source: str, path: Path, remote, tables: dict[str, tuple], f0: datetime) -> bool:
+        """Copy each change after ``f0`` as a window of the copy. Returns whether every window was written."""
+        previous = f0
+        for c in self.locator.changes(source, after=f0):
+            def finish(session, prev=previous):
+                for table, (mode, pk) in tables.items():
+                    session.apply_change(table, remote.delta(session.con, table, prev, session.f), mode, pk)
+
+            if self.evaluate(source, [], path, c, previous_f=previous, retain_from=f0, record=False,
+                             finish=finish) is None:
+                return False
+            previous = c
+        return True
 
     # ── per Source ──────────────────────────────────────────────────────────
 
@@ -179,7 +234,7 @@ class _Hydration:
             if self.live:
                 return self._live(source, base)
             if self.as_at is not None:
-                return self._copy(source, base)
+                return self._copy(source, path, base)
             if from_catchment:
                 return self._from_catchment(source, base)
             if steps:  # generated by its steps alone
@@ -191,36 +246,55 @@ class _Hydration:
         point: dict = {}
 
         def resolve():  # the first p.read_source: stamp the Puddle at the Source's own freshness at the point
-            store = self.locator.storage(source)
-            point["f"] = self.freshness_at(source, store)
+            point["f"] = self.freshness_at(source)
             return point["f"]
 
-        session = self.evaluate(source, defs, path, self.point, read_at=self.point, resolve=resolve)
+        remote = self.locator.remote(source)
+        live = {}
+
+        def finish(session: SourceSession) -> None:
+            if not session.queries:
+                return
+            if self.live and not session.written:
+                live["yes"] = True  # read at each run through the queries; nothing copied
+                return
+            if self.live:
+                self.warnings.append(f"'{source}': its definitions also write data of their own, so it was copied")
+            queried = self.locator.remote(source, session.queries, session.kinds)
+            live["remote"] = queried
+            self._fill(queried, self._tables(session, queried))(session)
+
+        session = self.evaluate(source, defs, path, self.point, read_at=self.point, resolve=resolve, remote=remote,
+                                finish=finish)
         if session is None:
             return None
         f0 = point.get("f", self.point)
-        if not session.used_source:
+        if not session.queries:
             if self.live or self.as_at is not None:
                 self.warnings.append(f"'{source}': its definition doesn't read the Source (p.read_source), so it was "
                                      "copied as written")
             return SourceState("copied", f=_iso(f0), **base)
-        if own:
-            return SourceState("copied", f=_iso(f0), **base)
-        if self.live:
+        if live.get("yes"):
             self._note(source, "live, through its definition")
-            return SourceState("derived", f=_iso(f0), **base)
+            return SourceState("live", f=_iso(f0), **base)
         if self.as_at is None:
             return SourceState("copied", f=_iso(f0), **base)
-        # Replay the definition through the Source's history, each change point a window of the copy.
-        store = self.locator.storage(source)
-        previous = f0
-        for c in change_points(store, after=f0):
-            if self.evaluate(source, defs, path, c, previous_f=previous, read_at=c, retain_from=f0,
-                             record=False) is None:
-                return None
-            previous = c
+        queried = live["remote"]
+        if not self._history(source, path, queried, self._tables(session, queried), f0):
+            return None
         self._note(source, f"copied with its history from {f0.isoformat()}")
-        return SourceState("copied", f=_iso(f0), history=True, runs=self.runs_after(source, f0), **base)
+        return SourceState("copied", f=_iso(f0), history=True, runs=self._runs_after(source, f0), **base)
+
+    def _published(self, source: str):
+        """The Source on its Catchment, refusing one that has published nothing there."""
+        remote = self.locator.remote(source)
+        if not remote.published():
+            raise ValueError(f"'{source}@{remote.major}' has published nothing on the Catchment "
+                             f"{self.catchment or '(the default)'}: has it run?")
+        return remote
+
+    def _runs_after(self, source: str, after: datetime) -> list[str]:
+        return [_iso(f) for f in self.locator.runs(source, after=after)]
 
     def _note(self, source: str, note: str) -> None:
         for r in reversed(self.results):
@@ -231,9 +305,9 @@ class _Hydration:
     def _live(self, source: str, base: dict) -> SourceState | None:
         started = time.perf_counter()
         try:
-            store = self.locator.storage(source)
-            f0 = self.freshness_at(source, store)
-        except SourceUnreachable as exc:
+            self._published(source)
+            f0 = self.freshness_at(source)
+        except Exception as exc:  # noqa: BLE001 - reported as a result
             self.results.append(HydrateResult(source, "(live)", "failed", time.perf_counter() - started,
                                               error=str(exc)))
             return None
@@ -241,29 +315,24 @@ class _Hydration:
                                           note=f"live, as of {f0.isoformat()}"))
         return SourceState("live", f=_iso(f0), **base)
 
-    def _copy(self, source: str, base: dict) -> SourceState | None:
+    def _copy(self, source: str, path: Path, base: dict) -> SourceState | None:
+        """A Source with no definition, copied whole as of the point with every change since."""
         started = time.perf_counter()
         try:
-            store = self.locator.storage(source)
-            from ..trickle.io import load_sidecar, sidecar_tables
-
-            for table in sidecar_tables(load_sidecar(store)):
-                earliest, exact = earliest_readable(store, table)
-                if earliest is not None and self.point < earliest:
-                    if exact:
-                        raise ValueError(f"'{source}.{table}' is kept from {earliest.isoformat()} on: use an --as-at "
-                                         "from then or later")
-                    self.warnings.append(f"'{source}.{table}' no longer keeps its version at the point; the oldest "
-                                         f"it keeps ({earliest.isoformat()}) stands in")
-            f0 = self.freshness_at(source, store)
-            files = copy_published(store, self.project.snapshot_dir(source))
-        except (SourceUnreachable, ValueError) as exc:
+            remote = self._published(source)
+            f0 = self.freshness_at(source)
+            tables = {t: (remote.mode(t), remote.pk(t)) for t in remote.published()}
+        except Exception as exc:  # noqa: BLE001 - reported as a result
             self.results.append(HydrateResult(source, "(copy)", "failed", time.perf_counter() - started,
                                               error=str(exc)))
             return None
+        if self.evaluate(source, [], path, f0, record=False, finish=self._fill(remote, tables)) is None:
+            return None
+        if not self._history(source, path, remote, tables, f0):
+            return None
         self.results.append(HydrateResult(source, "(copy)", "ok", time.perf_counter() - started,
-                                          note=f"copied with its history from {f0.isoformat()} ({files} files)"))
-        return SourceState("copied", f=_iso(f0), history=True, runs=self.runs_after(source, f0), **base)
+                                          note=f"copied with its history from {f0.isoformat()}"))
+        return SourceState("copied", f=_iso(f0), history=True, runs=self._runs_after(source, f0), **base)
 
     def _from_catchment(self, source: str, base: dict) -> SourceState | None:
         self.warnings.append(f"source '{source}' has no puddle definition — pulling from the Catchment")
@@ -336,9 +405,9 @@ def hydrate(
     own_runs = None
     if live or as_at is not None:
         try:
-            runs = run.locator.runs(project.name, after=run.point)
+            runs = run.locator.own_runs(after=run.point)
             own_runs = [_iso(f) for f in runs] if runs is not None else None
-        except ValueError:
+        except ValueError:  # the Catchment couldn't be asked
             own_runs = None
     save_hydrated(project, Hydrated(at=_iso(run.point), catchment=catchment, live=live, as_at=as_at is not None,
                                     sources=states, own_runs=own_runs, own_f=own_f))

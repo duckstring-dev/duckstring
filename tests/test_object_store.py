@@ -338,9 +338,10 @@ def test_a_chain_publishes_and_persists_to_s3(s3_env, tmp_path_factory, monkeypa
         thread.join(timeout=5)
 
 
-def test_a_live_puddle_reads_a_source_on_s3_in_place(s3_env, tmp_path, monkeypatch):
-    """``pond hydrate --live`` with a filter over ``p.read_source``: the local run reads a Source published to an
-    S3 data root with this machine's credentials, and an incremental run filters the next window."""
+def test_a_live_puddle_reads_a_source_on_s3_through_its_catchment(s3_env, tmp_path, monkeypatch):
+    """``pond hydrate --live`` with a filter over ``p.read_source``, for a Source a Catchment publishes to an S3 data
+    root: the local run reads it through the Catchment's query API (the filter runs there, as of each read
+    position), never from the bucket, and an incremental run filters the next window."""
     import textwrap
     from datetime import datetime, timedelta, timezone
 
@@ -353,45 +354,55 @@ def test_a_live_puddle_reads_a_source_on_s3_in_place(s3_env, tmp_path, monkeypat
     from duckstring.storage import get_storage
 
     data_root = f"s3://{_BUCKET}/live-puddles"
-    store = get_storage(data_root).child("tx", "m1", "data")
-    reg = tmp_path / "prod-registry.duckdb"
-    t0 = datetime(2026, 11, 1, tzinfo=timezone.utc)
-    for hours, ids in ((1, [1, 2, 3, 4]), (2, [5, 6, 8])):
-        f = t0 + timedelta(hours=hours)
-        con = duckdb.connect(str(reg))
-        pond = Pond("tx", "1.0.0", con, root=tmp_path, f=f, sources=[], own_data_dir=tmp_path / "prod-local")
-        rows = ", ".join(f"({i})" for i in ids)
-        pond.append_table("event", con.sql(f"SELECT * FROM (VALUES {rows}) v(id)"), pk="id")
-        ParquetDataPlane().export(con, store, f=f)
-        con.close()
+    root = tmp_path / "prod"
+    root.mkdir()
+    server, thread, url = _serve(root, _free_port())
+    try:
+        r = httpx.put(f"{url}/api/catchment/settings", json={"data_root": data_root, "mode": "empty"}, timeout=15.0)
+        assert r.status_code == 200, r.text
+        store = get_storage(data_root).child("tx", "m1", "data")
+        reg = tmp_path / "prod-registry.duckdb"
+        t0 = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        for hours, ids in ((1, [1, 2, 3, 4]), (2, [5, 6, 8])):
+            f = t0 + timedelta(hours=hours)
+            con = duckdb.connect(str(reg))
+            pond = Pond("tx", "1.0.0", con, root=tmp_path, f=f, sources=[], own_data_dir=tmp_path / "prod-local")
+            rows = ", ".join(f"({i})" for i in ids)
+            pond.append_table("event", con.sql(f"SELECT * FROM (VALUES {rows}) v(id)"), pk="id")
+            ParquetDataPlane().export(con, store, f=f)
+            con.close()
 
-    register_catchment("prod", url="http://127.0.0.1:9", kind="remote", data_root=data_root)
-    set_default_catchment("prod")
-    project_dir = tmp_path / "counter"
-    (project_dir / "src").mkdir(parents=True)
-    (project_dir / "pond.toml").write_text('[pond]\nname = "counter"\nversion = "0.1.0"\n\n[sources]\ntx = "1.0.0"\n')
-    (project_dir / "src" / "pond.py").write_text(textwrap.dedent("""
-        from duckstring import ripple
+        register_catchment("prod", url=url, kind="remote")
+        set_default_catchment("prod")
+        project_dir = tmp_path / "counter"
+        (project_dir / "src").mkdir(parents=True)
+        (project_dir / "pond.toml").write_text(
+            '[pond]\nname = "counter"\nversion = "0.1.0"\n\n[sources]\ntx = "1.0.0"\n')
+        (project_dir / "src" / "pond.py").write_text(textwrap.dedent("""
+            from duckstring import ripple
 
-        @ripple
-        def count(pond):
-            pond.read_table("tx.event")
-            pond.write_table("seen", pond.con.sql("SELECT count(*) AS n FROM event"))
-    """))
-    (project_dir / "src" / "puddles.py").write_text(textwrap.dedent("""
-        from duckstring import puddle
+            @ripple
+            def count(pond):
+                pond.read_table("tx.event")
+                pond.write_table("seen", pond.con.sql("SELECT count(*) AS n FROM event"))
+        """))
+        (project_dir / "src" / "puddles.py").write_text(textwrap.dedent("""
+            from duckstring import puddle
 
-        @puddle("tx.event")
-        def evens(p):
-            return p.read_source().filter("id % 2 = 0")
-    """))
-    project = load_project(project_dir)
-    results, _ = hydrate(project, live=True, as_at=t0 + timedelta(hours=1, minutes=30))
-    assert [r.status for r in results] == ["ok"], results
+            @puddle("tx.event")
+            def evens(p):
+                return p.read_source().filter("id % 2 = 0")
+        """))
+        project = load_project(project_dir)
+        results, _ = hydrate(project, live=True, as_at=t0 + timedelta(hours=1, minutes=30))
+        assert [r.status for r in results] == ["ok"], results
 
-    def seen():
-        dp = ParquetDataPlane()
-        return duckdb.sql(dp.read_select(project.out_dir, "seen")).fetchall()[0][0]
+        def seen():
+            dp = ParquetDataPlane()
+            return duckdb.sql(dp.read_select(project.out_dir, "seen")).fetchall()[0][0]
 
-    assert run_pond(project).ok and seen() == 2
-    assert run_pond(project, incremental=True).ok and seen() == 4
+        assert run_pond(project).ok and seen() == 2
+        assert run_pond(project, incremental=True).ok and seen() == 4
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)

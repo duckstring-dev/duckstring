@@ -34,26 +34,34 @@ def app_env(project: Project, port: int) -> dict[str, str]:
         env["DUCKSTRING_APP_STATE"] = str(state)
     env[ENV] = json.dumps({"name": project.name, "major": int(project.version.split(".")[0]),
                            "version": project.version, "root": str(project.puddles_dir),
-                           "sources": list(project.sources), "source_dirs": _source_dirs(project)})
+                           "sources": list(project.sources), **_sources(project)})
     return env
 
 
-def _source_dirs(project: Project) -> dict[str, str]:
-    """Where the App reads each Source that isn't in the flat ``puddles/ponds/`` layout: a live Puddle in place, a
-    working copy a step or live definition wrote."""
-    from .runner import _Plan
+def _sources(project: Project) -> dict:
+    """Where the App reads each Source that isn't in the flat ``puddles/ponds/`` layout: ``source_dirs``, a working
+    copy a step wrote; ``remote_sources``, a live Puddle, read through its Catchment's query API (its definitions
+    compiled to queries now)."""
+    from datetime import datetime
+
+    from .runner import _LIVE, _Plan
     from .state import load_hydrated
 
     hydrated = load_hydrated(project)
     if hydrated is None:
         return {}
     plan = _Plan(project, hydrated)
-    dirs = {}
+    dirs, remotes = {}, {}
     for source, state in hydrated.sources.items():
+        if state.mode in _LIVE:
+            remote = plan.remote(source, state, datetime.fromisoformat(state.f or hydrated.at))
+            remotes[source] = {"catchment": hydrated.catchment, "major": remote.major, "queries": remote.queries,
+                               "kinds": {t: [m, list(pk)] for t, (m, pk) in remote.kinds.items()}}
+            continue
         store = plan.store(source, state)
         if store is not None:
             dirs[source] = store.uri()
-    return dirs
+    return {"source_dirs": dirs, "remote_sources": remotes}
 
 
 def serve_app(project: Project, port: int) -> int:

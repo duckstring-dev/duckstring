@@ -1,44 +1,43 @@
-"""Reaching a Source's real published data from a local run: where it is, what changed when, and when it ran.
+"""Reaching a Source's real published data from a local run: through its Catchment's API, never in place.
 
-A Puddle that reads its Source in place (``p.read_source``, ``pond hydrate --live``, ``--as-at``) reads the Source's
-published files directly, as a remote Duck would: from a registered local Catchment's root, else from the
-Catchment's data root with this machine's own credentials. Run freshnesses come from the Catchment's
-``/api/runs``; without it, a Source's change points stand in for them."""
+A Puddle that reads its Source (``p.read_source``, ``pond hydrate --live``, ``--as-at``) reads it with ``/api/query``
+at a point (:mod:`duckstring.remote_source`), with the credentials of the registered Catchment it hydrates from.
+Run freshnesses come from the Catchment's ``/api/runs`` and change points from ``/api/ponds/{name}/changes``."""
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 from pathlib import Path
 
-from ..dataplane import earliest_readable  # noqa: F401 - re-exported for the local modules
+from ..dataplane import change_points  # noqa: F401 - re-exported for the local modules
 from ..keys import spec_major
 from .project import Project
 
-log = logging.getLogger(__name__)
-
 
 class SourceUnreachable(ValueError):
-    """The Catchment's published data can't be read from this machine."""
+    """The Catchment a Puddle reads from couldn't be asked."""
 
 
-def _registration(name: str | None) -> tuple[str, dict]:
-    """``(url, registration)`` for a registered Catchment, or ``(url, {})`` for a bare URL."""
-    if name and "://" in name:
-        return name, {}
-    from ..cli.config import load_config
+class _LazyTransport:
+    def __init__(self, catchment: str | None):
+        self.catchment = catchment
+        self._inner = None
 
-    config = load_config()
-    catchments = config.get("catchments", {})
-    effective = name or config.get("default_catchment")
-    if not effective and len(catchments) == 1:
-        effective = next(iter(catchments))
-    if not effective or effective not in catchments:
-        raise SourceUnreachable(
-            f"no catchment {name!r} registered" if name else "no catchment specified and no default set"
-        )
-    cfg = catchments[effective]
-    return cfg["url"], cfg
+    def _resolve(self):
+        if self._inner is None:
+            from ..remote_source import HttpTransport
+
+            try:
+                self._inner = HttpTransport.registered(self.catchment)
+            except Exception as exc:  # noqa: BLE001 - no registration, or no default
+                raise SourceUnreachable(f"no Catchment to read the Sources from: {exc}") from None
+        return self._inner
+
+    def query(self, payload: dict):
+        return self._resolve().query(payload)
+
+    def get(self, path: str, params: dict | None = None):
+        return self._resolve().get(path, params)
 
 
 class Locator:
@@ -47,9 +46,8 @@ class Locator:
     def __init__(self, project: Project, catchment: str | None = None):
         self.project = project
         self.catchment = catchment
-        self._reg: tuple[str, dict] | None = None
-        self._data_root: str | None | bool = False  # False = not looked up yet
-        self._stores: dict[str, object] = {}
+        self._transport = None
+        self._remotes: dict[str, object] = {}
 
     def major(self, source: str) -> int:
         if source == self.project.name:
@@ -59,155 +57,54 @@ class Locator:
             raise ValueError(f"'{source}' isn't a Source of this Pond")
         return spec_major(str(spec))
 
-    def _registration(self) -> tuple[str, dict]:
-        if self._reg is None:
-            self._reg = _registration(self.catchment)
-        return self._reg
+    @property
+    def transport(self):
+        """The registered Catchment's transport, resolved at its first use (a definition that never reads its
+        Source needs no Catchment)."""
+        if self._transport is None:
+            self._transport = _LazyTransport(self.catchment)
+        return self._transport
 
-    def _client(self):
-        import httpx
+    def remote(self, source: str, queries: dict | None = None, kinds: dict | None = None):
+        """The Source on its Catchment, read through its whole tables or through ``queries``."""
+        from ..remote_source import RemoteSource
 
-        from ..core import resolve_catchment_auth
+        if queries is None and kinds is None:
+            if source not in self._remotes:
+                self._remotes[source] = RemoteSource(source, self.major(source), self.transport)
+            return self._remotes[source]
+        return RemoteSource(source, self.major(source), self.transport, queries=queries, kinds=kinds)
 
-        url, headers = resolve_catchment_auth(self.catchment)
-        return httpx.Client(base_url=url.rstrip("/"), headers=headers, timeout=10.0)
-
-    def _get(self, path: str, params: dict | None = None):
-        with self._client() as client:
-            resp = client.get(path, params=params)
-            resp.raise_for_status()
-            return resp.json()
-
-    def data_root(self) -> str | None:
-        if self._data_root is False:
-            _, reg = self._registration()
-            root = reg.get("data_root")
-            if root is None and not reg.get("root"):
-                try:
-                    root = self._get("/api/catchment/settings").get("data_root")
-                except Exception as exc:  # noqa: BLE001 - reported as unreachable below
-                    raise SourceUnreachable(
-                        f"couldn't ask the Catchment where its data is ({exc}): start it, or use p.catchment() or "
-                        "pond hydrate --from-catchment") from None
-            self._data_root = root
-        return self._data_root or None
-
-    def storage(self, source: str):
-        """The Source's published data as a :class:`~duckstring.storage.Storage`, at its pinned major."""
-        if source in self._stores:
-            return self._stores[source]
-        from ..catchment.registry import pond_data_dir, readable_root, resolve_data_dir
-
-        url, reg = self._registration()
-        major = self.major(source)
-        data_root = self.data_root()
-        if not readable_root(data_root):
-            raise SourceUnreachable(
-                f"the Catchment's data root {data_root} can only be reached through its Files API, which a local "
-                "run can't read in place: use p.catchment() or pond hydrate --from-catchment"
-            )
-        if reg.get("root"):
-            store = resolve_data_dir(Path(reg["root"]).expanduser(), source, major, data_root)
-        elif data_root:
-            store = pond_data_dir(Path("."), source, major, data_root)
-        else:
-            raise SourceUnreachable(
-                f"the Catchment at {url} keeps its data on its own disk, which this machine can't read: use "
-                "p.catchment() or pond hydrate --from-catchment (or register its root with catchment connect)"
-            )
-        if not store.exists("_trickle.json"):
-            raise SourceUnreachable(f"'{source}@{major}' has published nothing at {store.uri()}")
-        self._stores[source] = store
-        return store
-
-    def runs(self, source: str, after: datetime | None = None, upto: datetime | None = None) -> list[datetime] | None:
-        """The freshnesses the Source's line ran at in ``(after, upto]`` (passes included), oldest first; ``None``
-        when the Catchment can't be asked."""
-        from ..engine.core import NEVER
-
-        params = {"pond": source, "major": self.major(source), "lineage": "false", "limit": 1000}
-        out: set[datetime] = set()
-        cursor = after if after is not None and after > NEVER else None
+    def runs(self, source: str, after: datetime | None = None, upto: datetime | None = None) -> list[datetime]:
+        """The freshnesses the Source reached in ``(after, upto]`` (its Runs, passes included, and its changes),
+        oldest first. Raises :class:`SourceUnreachable` when the Catchment can't be asked."""
         try:
-            while True:
-                page = self._get("/api/runs", {**params, **({"after": cursor.isoformat()} if cursor else {})})
-                runs = page.get("runs", [])
-                for r in runs:
-                    if r.get("status") != "success" or not r.get("f"):
-                        continue
-                    f = datetime.fromisoformat(r["f"])
-                    if (after is None or f > after) and (upto is None or f <= upto):
-                        out.add(f)
-                if cursor is None or len(runs) < 1000:
-                    break
-                cursor = max(datetime.fromisoformat(r["started_at"]) for r in runs if r.get("started_at"))
-        except Exception as exc:  # noqa: BLE001 - the caller falls back to change points
-            log.debug("couldn't read the run history of %s: %s", source, exc)
-            return None
-        return sorted(out)
+            return self.remote(source).runs(after, upto)
+        except SourceUnreachable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise SourceUnreachable(f"couldn't ask the Catchment about '{source}': {exc}") from None
+
+    def own_runs(self, after: datetime | None = None) -> list[datetime] | None:
+        """This Pond's own Run freshnesses on the Catchment after ``after``; ``None`` when it isn't deployed
+        there."""
+        try:
+            return self.remote(self.project.name).run_freshnesses(after)
+        except SourceUnreachable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise SourceUnreachable(f"couldn't ask the Catchment about '{self.project.name}': {exc}") from None
 
     def latest_run(self, source: str, upto: datetime) -> datetime | None:
-        """The Source's newest run freshness at or before ``upto``; ``None`` if it can't be told."""
-        params = {"pond": source, "major": self.major(source), "lineage": "false", "limit": 100,
-                  "before": upto.isoformat()}
+        """The Source's newest freshness at or before ``upto``."""
+        points = self.runs(source, upto=upto)
+        return points[-1] if points else None
+
+    def changes(self, source: str, after: datetime | None = None) -> list[datetime]:
         try:
-            runs = self._get("/api/runs", params).get("runs", [])
-        except Exception:  # noqa: BLE001
-            return None
-        fs = [datetime.fromisoformat(r["f"]) for r in runs if r.get("status") == "success" and r.get("f")]
-        fs = [f for f in fs if f <= upto]
-        return max(fs) if fs else None
-
-
-def change_points(store, after: datetime | None = None, upto: datetime | None = None) -> list[datetime]:
-    """The freshnesses at which ``store``'s published tables changed in ``(after, upto]``, oldest first: append
-    parts, a merge table's base tokens, bands and change log parts, plain-table versions."""
-    from ..dataplane import _base_tokens
-    from ..trickle.io import changelog_name, load_sidecar, part_f, part_lo, sidecar_tables, table_parts, warm_name
-
-    sidecar = load_sidecar(store)
-    points: set[datetime] = set()
-
-    def add(names):
-        for n in names:
-            try:
-                points.update({part_lo(n), part_f(n)})  # a union of parts: its ends (the points inside aren't listed)
-            except ValueError:
-                continue
-
-    for table, entry in sidecar_tables(sidecar).items():
-        if table.startswith("_duckstring_"):
-            continue  # the Run reports change with every reporting Run, not with the data
-        mode = entry.get("mode")
-        if mode == "append":
-            add(table_parts(store, table))
-        elif mode == "merge":
-            points.update(t for t in _base_tokens(store, table) if t is not None)
-            add(table_parts(store, warm_name(table)))
-            add(table_parts(store, changelog_name(table)))
-        else:
-            add(table_parts(store, f"{table}__v"))
-            if entry.get("f") and not table_parts(store, f"{table}__v"):
-                points.add(datetime.fromisoformat(entry["f"]))
-    return sorted(p for p in points if (after is None or p > after) and (upto is None or p <= upto))
-
-
-def published_f(store) -> datetime | None:
-    """The freshness ``store`` last published at (its run stamp)."""
-    from ..dataplane import _sidecar_run_f
-
-    iso = _sidecar_run_f(store)
-    return datetime.fromisoformat(iso) if iso else None
-
-
-def copy_published(store, dest: Path) -> int:
-    """Copy every published file of ``store`` into ``dest`` (sidecar last), so reads as of any freshness the
-    Source still keeps resolve the same there. Returns the number of files copied."""
-    from ..dataplane import restore_tree
-    from ..storage import LocalStorage
-
-    dest.mkdir(parents=True, exist_ok=True)
-    return restore_tree(store, LocalStorage(dest))
+            return self.remote(source).changes(after)
+        except Exception as exc:  # noqa: BLE001
+            raise SourceUnreachable(f"couldn't ask the Catchment about '{source}': {exc}") from None
 
 
 def link_tree(src: Path, dest: Path) -> None:

@@ -132,17 +132,19 @@ also had no way to append without checking the table, though speed is the reason
 ### Live and replayable Puddles
 
 Every metric in the showcases was designed against real data outside Duckstring, because Puddles were small
-generated samples and each Pond's window of them differed. A Puddle can now be the real Source, read in place, and
-a local run can step through the Source's history.
+generated samples and each Pond's window of them differed. A Puddle can now be the real Source, read through its
+Catchment's query API (never from its files), and a local run can step through the Source's history.
 
-- **`p.read_source(table=None)`** reads the Source's published table in place on the Catchment you hydrate from
-  (a registered local Catchment's root, or the data root with your own credentials), as it stood at `p.f`. A
-  Puddle can be a filter over it: `return p.read_source().filter("store_id = 7")`.
-- **`pond hydrate --live`** copies nothing: a Source with no definition is read in place, and a definition over
-  `read_source` is evaluated when a run needs it. The hydration time is recorded, and runs read the Sources as they
-  stood then. Nothing on the Catchment changes for a local reader.
-- **`pond hydrate --as-at TIME`** copies each Source's state at that time and every change since (or replays a
-  definition over `read_source` through them). A time before a Source's oldest kept state is refused.
+- **`p.read_source(table=None)`** stands for the Source's published table on the Catchment you hydrate from. A
+  Puddle can be a filter over it: `return p.read_source().filter("store_id = 7")`. The definition becomes a query
+  that runs on the Catchment (`POST /api/query` with `at`), so only the rows it keeps come back. A definition that
+  fetches rows into Python before writing them can't be sent there, and is refused.
+- **`pond hydrate --live`** copies nothing: each run reads a Source with no definition whole, and one with a
+  definition through its query, as it stood at the run's position, and its changes since the last run (`since`).
+  The hydration time is recorded, and the baseline reads the Sources as they stood then. Nothing on the Catchment
+  changes for a local reader.
+- **`pond hydrate --as-at TIME`** copies each Source's state at that time and every change since (through a
+  definition's query, so the copy holds only what it keeps). A time a Source holds nothing from is refused.
 - **`pond run --incremental`** goes on from the last run, as a Refresh would: every Source reaches a target first
   (`--next-change`, the default, `--next-run`, `--most-recent` or `--to TIME`), the run is stamped with the oldest
   Source freshness, and `pond.previous_f` is the last run's. A plain `pond run` is the baseline again. A Pond with
@@ -154,8 +156,10 @@ a local run can step through the Source's history.
   error, where the last one used to win silently. `puddles.toml` is left out of deploys by default.
 - **The handle writes what a Source publishes:** `p.append_table` and `p.merge_table`, and `p.read_table` for the
   Puddle's own table. Puddle tables are published through the data plane as a Pond's are (so
-  `puddles/ponds/{source}/data/{table}.parquet` is now a version directory), and a table read with `read_source`
-  is written as the Source's kind, so deltas over it are the Source's.
+  `puddles/ponds/{source}/data/{table}.parquet` is now a version directory), and a query over `read_source` is
+  read as the Source's kind, so deltas over it are the Source's.
+- **`GET /api/ponds/{name}/changes`** lists the times a line's published tables changed, which `--next-change`
+  steps through.
 - `pond puddle ls` shows how each Source is read, its set and the freshness the last run read it at.
 
 ### Run reports

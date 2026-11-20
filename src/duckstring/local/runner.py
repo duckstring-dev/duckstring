@@ -119,6 +119,9 @@ def _legacy_hydrated(project: Project) -> bool:
     return ponds.is_dir() and any((ponds / s / "data").is_dir() for s in project.sources)
 
 
+_LIVE = ("live", "derived")  # "derived": a live Source with a definition, as hydrated before 0.9
+
+
 class _Plan:
     """Where a run reads each Source from and at what freshness."""
 
@@ -137,20 +140,27 @@ class _Plan:
         return self._locator
 
     def store(self, source: str, state: SourceState):
-        """Where the run reads ``source``: the real Source (live), the working copy, or the hydrated copy."""
-        if state.mode == "live":
-            return self.locator.storage(source)
+        """Where the run reads a copied ``source``: its working copy, else ``None`` for the hydrated copy (the flat
+        puddles layout). A live Source is read through :meth:`remote` instead."""
+        if state.mode in _LIVE:
+            return None
         work = _work_dir(self.project, source)
         if (work / "_trickle.json").exists():
             from ..storage import LocalStorage
 
             return LocalStorage(work)
-        return None  # the flat puddles layout
+        return None
 
-    def history_store(self, source: str, state: SourceState):
-        """Where a Source's history is: the real Source for a live one, else its hydrated copy."""
-        if state.mode in ("live", "derived"):
-            return self.locator.storage(source)
+    def remote(self, source: str, state: SourceState, at: datetime):
+        """A live Source on its Catchment, read through its definitions' queries (compiled now, so an edited
+        definition is used at once) or whole."""
+        from .hydrate import _Hydration, collect_definitions, select_definitions
+
+        defs = select_definitions(collect_definitions(self.project), source, state.set)
+        return _Hydration(self.project, self.hydrated.catchment, live=True, as_at=None).compile(source, defs, at)
+
+    def history_store(self, source: str):
+        """A copied Source's history: its hydrated copy."""
         from ..storage import LocalStorage
 
         return LocalStorage(self.project.snapshot_dir(source))
@@ -160,24 +170,22 @@ class _Plan:
         from .sources import change_points
 
         f0 = datetime.fromisoformat(state.f) if state.f else None
-        if state.mode in ("live", "derived"):
-            runs = self.locator.runs(source, after=f0)
-            if runs is not None:
-                return runs
-            self.warnings.append(f"couldn't read '{source}''s run history from the Catchment — using its change points")
-            return change_points(self.history_store(source, state), after=f0)
+        if state.mode in _LIVE:
+            return self.locator.runs(source, after=f0)
         if not state.history:
             return []
         if state.runs is not None:
             return [datetime.fromisoformat(r) for r in state.runs]
-        return change_points(self.history_store(source, state), after=f0)
+        return change_points(self.history_store(source), after=f0)
 
     def changes(self, source: str, state: SourceState, after: datetime) -> list[datetime]:
         from .sources import change_points
 
-        if state.mode == "copied" and not state.history:
+        if state.mode in _LIVE:
+            return self.locator.changes(source, after=after)
+        if not state.history:
             return []
-        return change_points(self.history_store(source, state), after=after)
+        return change_points(self.history_store(source), after=after)
 
 
 def _target(plan: _Plan, position: Position, target: str, to: datetime | None) -> datetime:
@@ -197,8 +205,11 @@ def _target(plan: _Plan, position: Position, target: str, to: datetime | None) -
     elif target == "next-run":
         runs = hydrated.own_runs
         if hydrated.live:
-            fresh = plan.locator.runs(plan.project.name, after=prev)
-            runs = [_iso(f) for f in fresh] if fresh is not None else runs
+            try:
+                fresh = plan.locator.own_runs(after=prev)
+                runs = [_iso(f) for f in fresh] if fresh is not None else runs
+            except ValueError:  # the Catchment couldn't be asked
+                pass
         if runs is None:
             raise ValueError("--next-run needs this Pond's production runs, and none were recorded: hydrate with "
                              "--as-at or --live while the Catchment it's deployed on is reachable")
@@ -220,8 +231,8 @@ def _target(plan: _Plan, position: Position, target: str, to: datetime | None) -
 
 def _advance(project: Project, plan: _Plan, position: Position, target: datetime) -> tuple[dict, list[str]]:
     """Bring every Source to ``target``, as a Refresh would: each is read as it stood at the moment the last of
-    them reached it. A copied Source whose history doesn't reach it steps (stamped at the target), a live
-    definition is evaluated at the new position. Returns ``({source: freshness}, stepped)``."""
+    them reached it. A copied Source whose history doesn't reach it steps (stamped at the target). Returns
+    ``({source: freshness}, stepped)``."""
     from .hydrate import _Hydration, collect_definitions, select_definitions
 
     hydrated = plan.hydrated
@@ -237,7 +248,7 @@ def _advance(project: Project, plan: _Plan, position: Position, target: datetime
             reach[source] = min(ahead)
         elif state.mode == "copied" and state.steps:
             stepping.append(source)
-        elif state.mode in ("live", "derived"):
+        elif state.mode in _LIVE:
             raise ValueError(f"production hasn't brought '{source}' to {target.isoformat()} (its latest is "
                              f"{max([current, *points]).isoformat()}): pick an earlier target, or wait")
         else:
@@ -256,12 +267,9 @@ def _advance(project: Project, plan: _Plan, position: Position, target: datetime
     for source, state in hydrated.sources.items():
         previous = datetime.fromisoformat(position.sources.get(source) or state.f or position.f)
         new = freshness[source]
-        if source in stepping:
-            defs = select_definitions(definitions, source, state.set, step=True)
-        elif state.mode == "derived" and new > previous:
-            defs = select_definitions(definitions, source, state.set)
-        else:
-            continue
+        if source not in stepping:
+            continue  # a copied Source's history is in its copy; a live one is read at its position by the run
+        defs = select_definitions(definitions, source, state.set, step=True)
         work = _work_dir(project, source)
         if not (work / "_trickle.json").exists():
             from .sources import link_tree
@@ -351,9 +359,13 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False, *
                 candidates.append(legacy_f)
             previous_f = next((c for c in candidates if c < run_f), None)
 
-    source_dirs = {}
+    source_dirs, remote_sources = {}, {}
     if hydrated is not None:
         for source, state in hydrated.sources.items():
+            if state.mode in _LIVE:
+                at = source_f.get(source) or state.f or hydrated.at
+                remote_sources[source] = plan.remote(source, state, datetime.fromisoformat(at))
+                continue
             store = plan.store(source, state)
             if store is not None:
                 source_dirs[source] = store
@@ -369,6 +381,7 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False, *
                               f=run_f, previous_f=previous_f, sources=list(project.sources),
                               read_positions=source_f if not legacy else None,
                               previous_positions=previous_positions, source_dirs=source_dirs,
+                              remote_sources=remote_sources,
                               staging_dir=_staging_dir(project), own_data_dir=project.out_dir,
                               static_tables=pond_ripples.statics, ripple=name,
                               ancestors=pond_ripples.ancestors(name), table_writers=dict(table_writers),
@@ -396,7 +409,7 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False, *
                                  previous_f=previous_f, sources=list(project.sources),
                                  read_positions=source_f if not legacy else None,
                                  previous_positions=previous_positions, source_dirs=source_dirs,
-                                 own_data_dir=project.out_dir))
+                                 remote_sources=remote_sources, own_data_dir=project.out_dir))
         finally:
             con.close()
     _export(project, run_f, changes.held(run_f))

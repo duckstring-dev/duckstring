@@ -39,11 +39,11 @@ def transactions(p):
 p.read_source(table=None) -> DuckDBPyRelation
 ```
 
-The Source's published table, read in place on the Catchment the Puddle hydrates from, as a relation on `con`, as it stood at `p.f`. `table` defaults to the target's. The Source's major line is the one its `[sources]` pin selects. A filter or projection over it reads only what it needs.
+The Source's published table on the Catchment the Puddle hydrates from, as a relation on `con`. `table` defaults to the target's. The Source's major line is the one its `[sources]` pin selects.
 
-A definition that uses it can be read live (`pond hydrate --live`) and replayed through the Source's history (`--as-at`), so it must give the same rows for the same data.
+The relation stands in for the table: it has the table's columns and no rows. What the definition writes or returns from it is recorded as a query, which runs on the Catchment through its [query API](../cli/data.md#query) as of each point the Puddle is read at, so only the rows it keeps come back. Build on it with DuckDB relations (filters, projections, joins between the Source's tables, aggregates, samples by key hash). A definition that uses it can be read live (`pond hydrate --live`) and replayed through the Source's history (`--as-at`), so it must give the same rows for the same data.
 
-**Raises** `ValueError` when the Catchment's data can't be read from this machine (use `catchment` or `pond hydrate --from-catchment`), or the table isn't kept that far back.
+**Raises** `ValueError` when the Catchment can't be asked, or doesn't publish the table. Hydrating fails the definition when what it writes from `read_source` isn't a query over the Source alone (rows fetched into Python, or other tables mixed in).
 
 ### `write_table`
 
@@ -52,7 +52,7 @@ p.write_table(relation)
 p.write_table(name, relation)
 ```
 
-Writes a table of the Puddle. The one-argument form uses the table named in the decorator target; a whole-Source Puddle must name each table. A table read with `read_source` is written as the kind the Source publishes it as (append, merge or plain), so incremental reads of the Puddle behave as reads of the Source would. Otherwise it is a plain table.
+Writes a table of the Puddle. The one-argument form uses the table named in the decorator target; a whole-Source Puddle must name each table. A query over `read_source` is read as the kind the Source publishes the table as (append, merge or plain), so incremental reads of the Puddle behave as reads of the Source would. Otherwise it is a plain table.
 
 | Parameter | Type | Description |
 |---|---|---|

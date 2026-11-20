@@ -134,6 +134,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | Method | Path | Level | Description |
 |---|---|---|---|
 | POST | `/api/query` | read, Tap | Run SQL against one Pond's tables. Body: `pond`, `sql`, optional `major`, `version`, `format` (`json`, `csv` or `parquet`), `at` and `since` (ISO 8601 times, as [`duckstring query --at`](cli/data.md#query); not with a Tap's key). With a Tap's key, `pond` can be left out. A warning about the read comes back in an `X-Duckstring-Warning` header. |
+| GET | `/api/ponds/{name}/changes` | read | The times a Pond line's published tables changed, oldest first, as far back as it keeps. Query: optional `major`, `version`, `after`, `upto` (ISO 8601). |
 | POST | `/api/query/page`, `/api/query/count`, `/api/query/history` | read | Paged reads used by the web UI's data viewer. |
 | GET | `/api/ponds/{name}/tables/{table}/runs` | read | The run freshnesses of a Trickle table, used by the data viewer's window selector. |
 | GET | `/api/ponds/{name}/tables` | read | List published tables. |

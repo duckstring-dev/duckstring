@@ -107,7 +107,8 @@ def staged(con, f) -> dict:
 
 def _sources(pond) -> list[str]:
     declared = pond._declared_sources
-    names = set(declared) if declared is not None else set(pond.source_majors) | set(pond.source_dirs)
+    names = (set(declared) if declared is not None
+             else set(pond.source_majors) | set(pond.source_dirs) | set(pond.remote_sources))
     return sorted(names)
 
 
@@ -118,6 +119,14 @@ def source_reports(pond, source: str, *, window: bool):
     from .core import MissingSourceAsset
     from .dataplane import get_data_plane
 
+    remote = pond.remote_sources.get(source)
+    if remote is not None:  # a live Puddle: through its Catchment's query API
+        if not remote.has_reports():
+            return None
+        if window:
+            delta = remote.delta(pond.con, REPORTS_TABLE, pond._previous_position(source), pond._position(source))
+            return delta.zset.filter("_duckstring_d > 0").select("pond, run_f, reports")
+        return remote.relation(pond.con, REPORTS_TABLE, pond._position(source)).select("pond, run_f, reports")
     try:
         data_dir = pond._source_data_dir(source)
         if REPORTS_TABLE not in trickle.sidecar_tables(trickle.load_sidecar(data_dir)):
