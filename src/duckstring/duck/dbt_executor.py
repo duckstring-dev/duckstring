@@ -54,7 +54,7 @@ class DbtExecutor(RunInputs):
         self.proj_dir = project_dir(source_dir, info)
         self.declared_sources = set(info.get("sources", {}).keys())
         self.source_majors = {s: spec_major(spec) for s, spec in info.get("sources", {}).items()}
-        self.source_f: dict[str, str] = {}  # set per begin_run job (see duck/__main__)
+        self.read_positions: dict[str, str] = {}  # set per begin_run job (see duck/__main__)
 
         # dbt's writable areas, isolated per major line under the Pond's dir; the profile points dbt at
         # this line's registry. Parse once for the per-model source lookup materialisation needs.
@@ -72,7 +72,7 @@ class DbtExecutor(RunInputs):
         self._pool = ThreadPoolExecutor(max_workers=1)
 
     def submit(self, ripple_name, f, previous_f, on_done, on_error,
-               sources_changed: bool = True, skip_sink=None, change_sink=None):
+               sources_changed: bool = True, skip_sink=None, change_sink=None, previous_positions=None):
         """Run the dbt model ``ripple_name`` at freshness ``f``. dbt models are plain overwrite nodes, so
         ``sources_changed``/``skip_sink``/``change_sink`` (the change hooks) don't apply. Callbacks fire on the
         pool thread, matching RippleExecutor — ``on_done(name, started, finished, lineage)``, where the
@@ -83,7 +83,7 @@ class DbtExecutor(RunInputs):
         def _task():
             timing["started"] = datetime.now(timezone.utc)
             with self._lock:
-                src_reads = self._materialize(ripple_name, f, previous_f)  # opens + closes its own connection
+                src_reads = self._materialize(ripple_name, f, previous_f, previous_positions)  # its own connection
                 self._run(ripple_name)                                      # dbt opens + closes its own connection
             parents = self._parents.get(ripple_name, [])
             timing["lineage"] = {
@@ -105,7 +105,7 @@ class DbtExecutor(RunInputs):
         fut.add_done_callback(_cb)
         return fut
 
-    def _materialize(self, model_name, f, previous_f) -> list:
+    def _materialize(self, model_name, f, previous_f, previous_positions=None) -> list:
         import duckdb
 
         from ..core import Pond
@@ -115,8 +115,8 @@ class DbtExecutor(RunInputs):
         try:
             pond = Pond(
                 name=self.pond_name, version=self.version, con=con, root=Path(self.root),
-                source_majors=self.source_majors, source_f=self.source_f_for(f), f=f, previous_f=previous_f,
-                data_root=self.data_root,
+                source_majors=self.source_majors, read_positions=self.read_positions_for(f), f=f,
+                previous_f=previous_f, previous_positions=previous_positions, data_root=self.data_root,
             )
             materialize_sources(pond, self.manifest, model_name, self.declared_sources)
             return pond.take_lineage()["reads"]  # the cross-Pond source tables this model consumed
@@ -129,7 +129,7 @@ class DbtExecutor(RunInputs):
         run_model(self.proj_dir, self.profiles_dir, model_name, self.target_dir)
 
     def export(self, f: datetime | None = None, contract=None, held=frozenset(),
-               previous_f: datetime | None = None) -> dict | None:
+               previous_f: datetime | None = None, previous_positions: dict[str, str] | None = None) -> dict | None:
         """Publish the models (the ``main``-schema tables dbt built) via the data plane, contract-gated.
         The materialised Source relations live in their own schemas, so the ``main``-only export never
         republishes them. ``held`` is ignored: a dbt model is never checked for change. A dbt model can't
@@ -143,8 +143,8 @@ class DbtExecutor(RunInputs):
             con = duckdb.connect(str(self.registry_path))
             if f is not None:
                 pond = Pond(name=self.pond_name, version=self.version, con=con, root=Path(self.root),
-                            source_majors=self.source_majors, source_f=self.source_f_for(f), f=f,
-                            previous_f=previous_f, data_root=self.data_root)
+                            source_majors=self.source_majors, read_positions=self.read_positions_for(f), f=f,
+                            previous_f=previous_f, previous_positions=previous_positions, data_root=self.data_root)
                 collect(pond)
             return _export_data(con.cursor(), self.own_data_dir, f, contract, self.take_retain_from(f),
                                 exact_ints=self.exact_ints)

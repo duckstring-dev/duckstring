@@ -311,6 +311,7 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False, *
         run_f = position.freshness if position is not None else now
         previous_f = None
         source_f = dict(position.sources) if position is not None else {}
+        previous_positions = None
     elif incremental:
         if position is None or not (project.out_dir / "registry.duckdb").exists():
             raise ValueError("an incremental run goes on from a baseline: run duckstring pond run first")
@@ -318,6 +319,8 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False, *
             raise ValueError("these Puddles were hydrated by an older Duckstring: hydrate again to run incrementally")
         targets = order
         previous_f = position.freshness
+        # Each Source's changes are read from where the last run read it up to (plans/source-read-positions.md).
+        previous_positions = dict(position.sources) if position.sources else None
         if hydrated is None or not hydrated.sources:
             run_f, source_f = max(now, previous_f), {}
         else:
@@ -338,6 +341,7 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False, *
         else:
             source_f, run_f = {}, now
         previous_f = None
+        previous_positions = None
         if seeded:
             own = hydrated.own_f if hydrated is not None else None
             candidates = [datetime.fromisoformat(own)] if own else []
@@ -363,7 +367,8 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False, *
             try:
                 handle = Pond(project.name, project.version, con, root=project.puddles_dir,
                               f=run_f, previous_f=previous_f, sources=list(project.sources),
-                              source_f=source_f if not legacy else None, source_dirs=source_dirs,
+                              read_positions=source_f if not legacy else None,
+                              previous_positions=previous_positions, source_dirs=source_dirs,
                               staging_dir=_staging_dir(project), own_data_dir=project.out_dir,
                               static_tables=pond_ripples.statics, ripple=name,
                               ancestors=pond_ripples.ancestors(name), table_writers=dict(table_writers),
@@ -389,7 +394,8 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False, *
         try:  # the Run's reports and its Sources' in its window, as a Duck's export carries them
             collect_reports(Pond(project.name, project.version, con, root=project.puddles_dir, f=run_f,
                                  previous_f=previous_f, sources=list(project.sources),
-                                 source_f=source_f if not legacy else None, source_dirs=source_dirs,
+                                 read_positions=source_f if not legacy else None,
+                                 previous_positions=previous_positions, source_dirs=source_dirs,
                                  own_data_dir=project.out_dir))
         finally:
             con.close()

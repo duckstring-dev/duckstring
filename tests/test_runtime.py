@@ -1276,3 +1276,90 @@ def test_an_inlet_reads_only_what_databricks_added_since_its_last_run(runtime, t
     refresh()
     assert events() == [1, 2, 3]
     assert str(inbox) in load_sidecar(data)["_duckstring_run"]["inputs"]
+
+
+_WINDOW_PONDS = {
+    "prices": ("inlet", [], """
+        import json
+        from duckstring import ripple
+
+        @ripple
+        def load(pond):
+            prices = json.loads(open({control!r}).read())["prices"]
+            body = ", ".join(f"('{{k}}', {{v}})" for k, v in prices.items())
+            pond.merge_table("price", pond.con.sql(f"SELECT * FROM (VALUES {{body}}) v(k, price)"), pk="k")
+    """),
+    "sales": ("inlet", [], """
+        import json
+        from duckstring import ripple
+
+        @ripple
+        def load(pond):
+            sales = json.loads(open({control!r}).read())["sales"]
+            body = ", ".join(f"({{i}}, '{{k}}')" for i, k in sales)
+            pond.append_table("sale", pond.con.sql(f"SELECT * FROM (VALUES {{body}}) v(id, k)"), pk="id",
+                              on_conflict="keep_prior")
+    """),
+    "priced": ("outlet", ["prices", "sales"], """
+        from duckstring import ripple
+
+        @ripple
+        def join(pond):
+            (pond.trickle("sales.sale").join(pond.trickle("prices.price"), on="k")
+                 .select("s0.id, s0.k, s1.price").append("priced_sale", pk="id"))
+    """),
+}
+
+
+@pytest.mark.timeout(120)
+def test_a_windowed_sources_rows_reach_a_sink_with_another_source(runtime, tmp_path):
+    """plans/source-read-positions.md end to end on real Ducks (showcase-fixes item 1): ``prices`` has a 6-hour
+    window, so its Run is stamped with the window's end and its rows with it. ``priced`` also reads ``sales``,
+    which runs at now, so its Runs are stamped at now; it reads ``prices`` at its read position, so the join
+    sees the prices on its first Run (before: empty, and the append output froze it), and every sale once."""
+    import json
+    import textwrap
+    from datetime import datetime, timezone
+
+    import duckdb
+
+    from duckstring.dataplane import ParquetDataPlane
+
+    url, root = runtime
+    control = tmp_path / "control.json"
+    control.write_text(json.dumps({"prices": {"a": 10, "b": 20}, "sales": [[1, "a"], [2, "b"]]}))
+    for name, (kind, sources, code) in _WINDOW_PONDS.items():
+        d = tmp_path / name
+        (d / "src").mkdir(parents=True)
+        toml = f'[pond]\nname = "{name}"\nversion = "1.0.0"\ntype = "{kind}"\n'
+        if sources:
+            toml += "\n[sources]\n" + "".join(f'{s} = "1.0.0"\n' for s in sources)
+        (d / "pond.toml").write_text(toml)
+        (d / "src" / "pond.py").write_text(textwrap.dedent(code.format(control=str(control))))
+        r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip_dir(d), "application/zip")},
+                       data={"name": name, "version": "1.0.0", "type": kind}, timeout=15.0)
+        assert r.status_code == 200, r.text
+    midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    r = httpx.post(f"{url}/api/ponds/prices/windows", json={
+        "name": "six-hourly", "start_anchor": midnight.isoformat(), "duration_seconds": 6 * 3600,
+        "freq_unit": "HOUR", "freq_interval": 6}, timeout=5.0)
+    assert r.status_code == 200, r.text
+
+    def refresh_and_settle():
+        before = (_pond_status(url, "priced") or {}).get("end_f")
+        httpx.post(f"{url}/api/ponds/priced/refresh", timeout=5.0)
+        assert _wait(lambda: (_pond_status(url, "priced") or {}).get("end_f") not in (None, before), timeout=60.0)
+        assert _wait(lambda: all((_pond_status(url, n) or {}).get("status") == "idle" for n in _WINDOW_PONDS))
+
+    def priced():
+        sql = ParquetDataPlane().read_select(root / "ponds" / "priced" / "m1" / "data", "priced_sale")
+        return sorted(duckdb.sql(f"SELECT id, k, price FROM ({sql})").fetchall())
+
+    refresh_and_settle()
+    prices, priced_status = _pond_status(url, "prices"), _pond_status(url, "priced")
+    assert prices["end_f"] > priced_status["end_f"]  # prices is fresh to its window's end, past priced's stamp
+    assert priced() == [(1, "a", 10), (2, "b", 20)]
+
+    control.write_text(json.dumps({"prices": {"a": 10, "b": 20}, "sales": [[1, "a"], [2, "b"], [3, "a"]]}))
+    refresh_and_settle()
+    assert priced() == [(1, "a", 10), (2, "b", 20), (3, "a", 10)]  # the prices' rows read once

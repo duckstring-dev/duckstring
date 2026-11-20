@@ -51,6 +51,10 @@ def connect(path) -> sqlite3.Connection:
     # The version that wrote each Ripple's row: the ledger is the major line's, so it outlives a redeploy.
     if "version" not in {r[1] for r in con.execute("PRAGMA table_info(ripple_run_state)").fetchall()}:
         con.execute("ALTER TABLE ripple_run_state ADD COLUMN version TEXT")
+    # Where the Ripple's last completed Run read each Source up to (JSON), so a restarted Duck that goes on from
+    # that Run's end_f reads each Source's changes from the same place (plans/source-read-positions.md).
+    if "positions" not in {r[1] for r in con.execute("PRAGMA table_info(ripple_run_state)").fetchall()}:
+        con.execute("ALTER TABLE ripple_run_state ADD COLUMN positions TEXT")
     con.commit()
     return con
 
@@ -77,10 +81,14 @@ def record_ripple_failed(con: sqlite3.Connection, name: str) -> None:
     con.commit()
 
 
-def record_ripple_complete(con: sqlite3.Connection, name: str, end_f: datetime) -> None:
+def record_ripple_complete(con: sqlite3.Connection, name: str, end_f: datetime,
+                           positions: dict[str, str] | None = None) -> None:
+    """A Ripple completed the Run at ``end_f``, which read its Sources up to ``positions`` (``None``: unknown)."""
+    import json
+
     con.execute(
-        "UPDATE ripple_run_state SET end_f = ?, is_running = 0 WHERE ripple_name = ?",
-        (_iso(end_f), name),
+        "UPDATE ripple_run_state SET end_f = ?, is_running = 0, positions = ? WHERE ripple_name = ?",
+        (_iso(end_f), json.dumps(positions) if positions is not None else None, name),
     )
     con.commit()
 
@@ -122,6 +130,24 @@ def load_state(con: sqlite3.Connection, parents: dict[str, list[str]], optional=
             s.states[name] = RippleState(start_f=_parse(start_f), end_f=_parse(end_f), is_running=False)
     s.last_completed_f = read_pond_end_f(con) or NEVER
     return s
+
+
+def load_positions(con: sqlite3.Connection, version: str | None = None) -> dict[str, dict[str, str] | None]:
+    """Each Ripple's read positions at its last completed Run (``None`` where unrecorded), taking the rows
+    :func:`load_state` takes."""
+    import json
+
+    out: dict[str, dict[str, str] | None] = {}
+    for name, positions, row_version in con.execute(
+        "SELECT ripple_name, positions, version FROM ripple_run_state"
+    ).fetchall():
+        if version is not None and row_version is not None and row_version != version:
+            continue
+        try:
+            out[name] = json.loads(positions) if positions else None
+        except ValueError:
+            out[name] = None
+    return out
 
 
 def read_pond_end_f(con: sqlite3.Connection) -> datetime | None:

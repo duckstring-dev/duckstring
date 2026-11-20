@@ -43,7 +43,7 @@ pond.read_table(ref) -> duckdb.DuckDBPyRelation
 
 Returns a relation over a table's current contents.
 
-For a Source table, it also registers a view with the table's bare name, so the SQL that follows can refer to it directly (`FROM product`). If one of this Pond's own tables already has that name, the view isn't created, but the returned relation still works. Source reads are pinned to the run: a plain table is read at the version the Source had published when the run started, and a Trickle up to the run's freshness. Every Ripple in a run therefore sees the same Source data, even if the Source publishes again while the run is in progress.
+For a Source table, it also registers a view with the table's bare name, so the SQL that follows can refer to it directly (`FROM product`). If one of this Pond's own tables already has that name, the view isn't created, but the returned relation still works. Each Source is read as it stood when the run started: a plain table at the version the Source had published by then, and a Trickle with the rows it had published by then. That can be later than the run's own freshness, which is the oldest of its Sources'. Every Ripple in a run therefore sees the same Source data, even if the Source publishes again while the run is in progress.
 
 For a Trickle, the result is the clean current state, without the `_duckstring_f` and `_duckstring_d` system columns.
 
@@ -174,9 +174,9 @@ Whether any of `refs` changed, as seen by this run. With no arguments, whether t
 
 | Reference | Changed when |
 |---|---|
-| A Source's plain table | The version this run reads was published after the previous run. |
-| A Source's append or merge Trickle | Rows were added, changed or removed in the window `(previous_f, f]`, or the window can't be read as changes (the Pond's first run, or `previous_f` older than the Source's retained history). |
-| A Source's Object | It was written after the previous run. |
+| A Source's plain table | The version this run reads is newer than the one the previous run read. |
+| A Source's append or merge Trickle | Rows were added, changed or removed since what the previous run read, or the change can't be read as changes (the Pond's first run, or the previous run's read is older than the Source's retained history). |
+| A Source's Object | It was written after what the previous run read. |
 | One of this Pond's own tables or Objects | This run wrote it and didn't keep the published copy. A Trickle write counts only if it changed the table. |
 
 | Parameter | Type | Description |
@@ -184,8 +184,6 @@ Whether any of `refs` changed, as seen by this run. With no arguments, whether t
 | `refs` | `str` | Table or Object references, `"name"` or `"source.name"`. |
 
 The own forms only see writes made through the handle (`write_table`, `write_object`, `append_table`, `merge_table`, `apply_zset` and the builder's terminals) and checks made with `detect_change`. A table changed with SQL on `pond.con` doesn't count.
-
-A Source is compared with the previous run's freshness. When a Pond reads several Sources that share an upstream, it can occasionally report `True` for a change the previous run already read. That costs a redundant recompute, never a missed change.
 
 **Raises** `RippleOrderError` for one of the Pond's own tables written by a Ripple that isn't this Ripple or one of its ancestors, as for `read_table`, and `MissingSourceAsset` for a Source table or Object that hasn't been published.
 

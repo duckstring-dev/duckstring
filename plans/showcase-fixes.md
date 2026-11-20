@@ -46,6 +46,8 @@ Options:
   stretched to the window's end. Engine-level, so a Playground change and a cross-check; it changes what freshness
   means for every windowed Pond and Spout.
 
+**Built 2026-11-20** as read positions (`plans/source-read-positions.md`, "As built"); also closes item 20.
+
 **Decided 2026-11-15: neither.** Read each Source over its own window, from the previous Run's read position to
 this Run's (`plans/source-read-positions.md`). A only fixes the windowed case: a Sink still leaves out the rows of
 a Source Run that ran after its own freshness, the Run that enabled it.

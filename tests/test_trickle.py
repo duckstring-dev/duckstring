@@ -688,7 +688,7 @@ def test_builder_held_ripple_dimension_stays_incremental(tmp_path, monkeypatch):
 
     def run(f, pf):
         p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1, "dim": 1}, f=f, previous_f=pf,
-                 source_f={"fact": f.isoformat(), "dim": f.isoformat()})
+                 read_positions={"fact": f.isoformat(), "dim": f.isoformat()})
         (p.trickle("fact.f", p=1.0).join(p.trickle("dim.m", p=1.0), on="code")
            .select("s0.id, s0.code, s1.label").merge("o", pk="id"))
         publish(snk, snk_dir, f=f)

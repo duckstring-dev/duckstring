@@ -30,8 +30,9 @@ def test_036_keeps_runs_and_the_ripple_run_reference(tmp_path, monkeypatch):
 
     monkeypatch.setattr(catchment_db, "_SCHEMA_DIR", schema)
     catchment_db.migrate(con)
-    rows = con.execute("SELECT f, status, error, source_pins, superseded_by FROM pond_run ORDER BY f").fetchall()
-    assert rows == [("f1", "failed", "abandoned", "{}", None), ("f2", "success", None, None, None)]  # history kept
+    rows = con.execute("SELECT f, status, error, read_positions, superseded_by FROM pond_run ORDER BY f").fetchall()
+    # history kept; 038 renames the pins to read positions and clears them (they were read differently)
+    assert rows == [("f1", "failed", "abandoned", None, None), ("f2", "success", None, None, None)]
     assert con.execute("SELECT count(*) FROM ripple_run").fetchall() == [(1,)]
     con.execute("UPDATE pond_run SET status = 'superseded', superseded_by = 'f2' WHERE f = 'f1'")
     assert con.execute("PRAGMA foreign_keys").fetchall() == [(1,)]

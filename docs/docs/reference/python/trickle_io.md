@@ -118,7 +118,7 @@ Only use this when you have computed the change correctly yourself. A wrong weig
 pond.read_delta(ref) -> Delta
 ```
 
-Returns the changes to a table over this run's window, `(pond.previous_f, pond.f]`: a Source's, or one of this Pond's own that a parent Ripple writes.
+Returns the changes to a table since the previous run: a Source's, or one of this Pond's own that a parent Ripple writes. For a Source, that is what it published after what the previous run read of it, up to what it had published when this run started. For one of this Pond's own tables, it is the window `(pond.previous_f, pond.f]`.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -130,8 +130,8 @@ What the delta contains depends on the Source table:
 |---|---|
 | Append Trickle | The rows appended in the window, all weighted `+1`. |
 | Merge Trickle | The change-log rows in the window, consolidated: weights of identical rows are summed and zero-weight rows dropped, so several changes to one row collapse to the net change. A window that only inserted new keys has nothing to consolidate and is read as it is (`insert_only=True`). |
-| Plain table (`write_table`) | If the version this run reads was published after `previous_f`, the whole table weighted `+1` with `is_full=True`. Otherwise an empty delta. A Source run that found the table unchanged with `if_changed=True` publishes no new version, so the delta stays empty (see [Change detection](pond.md#change-detection)). |
-| Any table, on this Pond's first run or when `previous_f` is older than the Source's retained history | The whole table weighted `+1`, with `is_full=True`. |
+| Plain table (`write_table`) | If the version this run reads is newer than the one the previous run read, the whole table weighted `+1` with `is_full=True`. Otherwise an empty delta. A Source run that found the table unchanged with `if_changed=True` publishes no new version, so the delta stays empty (see [Change detection](pond.md#change-detection)). |
+| Any table, on this Pond's first run or when the previous run's read is older than the Source's retained history | The whole table weighted `+1`, with `is_full=True`. |
 
 **Raises** `MissingSourceAsset` if a Source table isn't published, and `RippleOrderError` for an own table whose writer isn't among this Ripple's parents (as for [`read_table`](pond.md#read_table)) or that hasn't been written yet. An own plain table reads as the whole table, with `is_full=True`.
 

@@ -127,13 +127,13 @@ def source_reports(pond, source: str, *, window: bool):
     con = pond.con
     data_dir.duckdb_setup(con)
     dp = get_data_plane()
-    pin = pond._pin(source)
-    if window:
-        delta = trickle.read_delta(con, data_dir, REPORTS_TABLE, pond.previous_f, pond.f, dp=dp, pin=pin,
-                                   materialise=True)
+    pin = pond._read_position(source)
+    if window:  # the Source's changes since the previous Run read it (plans/source-read-positions.md)
+        delta = trickle.read_delta(con, data_dir, REPORTS_TABLE, pond._previous_position(source),
+                                   pond._position(source), dp=dp, pin=pin, materialise=True)
         rel = delta.zset.filter("_duckstring_d > 0")
     else:
-        rel = con.sql(dp.read_select(data_dir, REPORTS_TABLE, as_of=pond.f, pin=pin))
+        rel = con.sql(dp.read_select(data_dir, REPORTS_TABLE, as_of=pond._position(source), pin=pin))
     return rel.select("pond, run_f, reports")
 
 

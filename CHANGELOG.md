@@ -7,6 +7,24 @@ Notable changes per release. Versions before 0.5.0 are recorded in the git histo
 Fixes from two showcase pipelines run unattended on 0.8.0: Melbourne's trains every 31 seconds, and a dozen Ponds
 over Wikipedia page views, news and Bluesky. Needs `duckstring-trickle` 0.4.0.
 
+### Each Source read up to what it had published
+
+A Pond Run is stamped with the oldest of its Sources' freshness, and it read every append or merge table only up to
+that stamp. Two things went wrong, silently:
+
+- **A windowed Source's rows were hidden.** A Pond with a window is fresh until the window's end, so its rows are
+  stamped with it, in the future. A Pond reading it beside another Source didn't see them until the window ended: in
+  the transit showcase, a builder join found an empty timetable and its append output kept 2,568 observations as
+  unscheduled.
+- **A Sink stamped behind a fast merge Source could lose rows** once that Source folded or compacted its change
+  log, which its cleanup did on the Source's own schedule, not the Sink's.
+
+Now each Run reads each Source as it stood when the Run started, as plain tables already were, and the next Run
+reads that Source's changes from there, so every change is read once. A Run also sees the rows of the Source Run
+that started it, where before they waited for the next one. The Catchment records where each Run read up to
+(migration `038`); the first Run after upgrading goes on from its previous Run's freshness, as before. `pond run
+--incremental` reads the same way.
+
 ### Many small Runs
 
 A Pond that runs often on small tables slowed with every Run: about half a millisecond more per Run in the transit

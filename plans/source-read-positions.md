@@ -1,8 +1,8 @@
 # Read positions: each Run reads each Source from where the last one stopped
 
-Status: **proposed 2026-11-15, agreed in principle, nothing built.** From showcase-fixes item 1 (a window on an
-Inlet hid its Trickle tables from Sinks with other Sources). Code references are to `showcase-fixes` at
-`67af6967`.
+Status: **built 2026-11-20** (see "As built" at the end). From showcase-fixes item 1 (a window on an Inlet hid its
+Trickle tables from Sinks with other Sources); also closes item 20. Code references below were to `showcase-fixes`
+at `67af6967`.
 
 ## The problem
 
@@ -106,3 +106,34 @@ the same changes. Positions follow the same rule:
 - Docs: `reference/python/pond.md` (read_table, read_delta), the incremental guides' description of windows.
 
 Size: L. No engine or Playground change.
+
+## As built (2026-11-20)
+
+Decisions taken at the start (the author's): accept the one extra Run below; drop "a Ripple with no completed Run
+reads in full" (`pond.is_new` covers hand-written code, the builder checks its own output); rename now.
+
+- **Catchment.** Migration `038` renames `pond_run.source_pins` to `read_positions` and clears every value: Runs
+  recorded before read their Trickle Sources only up to their own freshness. The `begin_run` job carries
+  `read_positions` (was `source_f`) and `previous_positions` (`Driver._previous_positions`: the newest successful
+  Run of the line before this one; `None` for a Rebuild or when that Run has none). A pass (`_record_pass`) records
+  the previous Run's positions. The Spout job's `source_f` is unchanged (a different job).
+- **Duck.** `DuckCore` keeps each Run's positions and previous positions (first job wins unless Force) and each
+  Ripple's positions at its last completed Run (ledger column `ripple_run_state.positions`, so a restarted Duck agrees
+  with its own `end_f`). `previous_positions_for(f, ripple)` moves with `previous_f_for`. Executors and `RunInputs`
+  renamed (`read_positions_for`); `submit`/`export`/`collect_reports` take `previous_positions`.
+- **Pond.** Constructor `read_positions=` (was `source_f=`) and `previous_positions=`. `_read_position` (was `_pin`;
+  never below the previous position, the one way it could be is a Force re-pinning an earlier pipelined Run),
+  `_position` (else `f`), `_previous_position` (`NEVER` on a first Run or Rebuild or for a Source the previous Run
+  had no position for; `previous_f` when positions are unknown). Every Source read uses them: `read_table`,
+  `count_table`, `source_columns`, `flock_source_select`, `read_delta`, `changed()`, and Run reports.
+- **Local.** `pond run --incremental` passes `position.json`'s previous positions; a baseline passes none.
+- **Known cost, accepted:** the engine's no-change skip still compares Sources' `changed_f` with the Sink's own
+  freshness, so after a Sink has read a Source past its stamp, its next Run runs (reading empty windows) where it
+  could pass: once after the last change, or once per Refresh while a windowed Source's window is open (today's
+  behaviour, minus the missed rows). Removing it needs the engine to know positions (an engine and Playground
+  change): a follow-up.
+- **Tests:** `tests/test_read_positions.py` (the 04:29/04:30 case, a windowed Source, item 20's compaction against
+  the prices actually written, previous-position rules, a randomised harness of Source Runs and Sink Runs with
+  Rebuilds checking append, merge and aggregate outputs against a recompute, the job and pass positions, legacy rows,
+  pipelined Runs and a Duck restart) and `test_runtime.test_a_windowed_sources_rows_reach_a_sink_with_another_source`
+  (real Ducks; fails with the old reads exactly as the showcase did, an empty join).

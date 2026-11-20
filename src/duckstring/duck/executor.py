@@ -80,7 +80,8 @@ def _run_ripple(
     func, pond_name: str, version: str, con, root_str: str,
     source_majors: dict[str, int], f: datetime | None, previous_f: datetime | None,
     data_root: str | None = None, sources_changed: bool = True, skip_sink=None,
-    staging_dir=None, own_data_dir=None, source_f: dict[str, str] | None = None,
+    staging_dir=None, own_data_dir=None, read_positions: dict[str, str] | None = None,
+    previous_positions: dict[str, str] | None = None,
     flock: dict[str, str] | None = None, scope: dict | None = None, change_sink=None,
 ) -> dict:
     from ..core import Pond
@@ -94,7 +95,8 @@ def _run_ripple(
     # so they coexist without the "file handle conflict" two separate connect()s to the same file raise.
     pond = Pond(
         name=pond_name, version=version, con=con, root=Path(root_str),
-        source_majors=source_majors, source_f=source_f, f=f, previous_f=previous_f, data_root=data_root,
+        source_majors=source_majors, read_positions=read_positions, previous_positions=previous_positions,
+        f=f, previous_f=previous_f, data_root=data_root,
         sources_changed=sources_changed, skip_sink=skip_sink, change_sink=change_sink,
         staging_dir=staging_dir, own_data_dir=own_data_dir,
         # Flock is a Pond-level posture (not per-Ripple). flock.comprehensive still applies
@@ -190,7 +192,8 @@ def _set_aside(path: Path, why: str) -> Path:
 
 class RunInputs:
     """What each ``begin_run`` job tells the Duck about its Run's inputs, kept per Run freshness so
-    pipelined Runs don't share them: the Sources' published freshness (the version pins its reads use),
+    pipelined Runs don't share them: the Sources' read positions (what each had published when the Run
+    started, which every read of it is at),
     the Catchment's ``retain_from`` for this line's own overwrite versions, and the Pond's Flock settings
     (``flock.job_settings``). Shared by both executors."""
 
@@ -204,21 +207,21 @@ class RunInputs:
             self._run_inputs: dict[datetime, dict] = {}
         return self._run_inputs
 
-    def begin_run_inputs(self, f: datetime, source_f: dict[str, str] | None, retain_from=KEEP_ALL,
+    def begin_run_inputs(self, f: datetime, read_positions: dict[str, str] | None, retain_from=KEEP_ALL,
                          force: bool = False, flock: dict[str, str] | None = None) -> None:
         """Record Run ``f``'s inputs. The first job for ``f`` wins (a re-dispatch after a Catchment restart
-        must not move a Run's pins under its running Ripples), unless ``force`` restarts the Run.
+        must not move a Run's read positions under its running Ripples), unless ``force`` restarts the Run.
         ``retain_from`` is a datetime, ``None`` (keep only the newest version) or ``KEEP_ALL`` (no job
         value: prune nothing)."""
-        self.source_f = source_f or {}  # the latest job's view (fallback for a Run with no recorded inputs)
+        self.read_positions = read_positions or {}  # the latest job's (fallback for a Run with no recorded inputs)
         self.flock = flock  # likewise
         inputs = self._inputs()
         if force or f not in inputs:
-            inputs[f] = {"source_f": dict(source_f or {}), "retain_from": retain_from, "flock": flock}
+            inputs[f] = {"read_positions": dict(read_positions or {}), "retain_from": retain_from, "flock": flock}
 
-    def source_f_for(self, f: datetime | None) -> dict[str, str]:
+    def read_positions_for(self, f: datetime | None) -> dict[str, str]:
         rec = self._inputs().get(f)
-        return rec["source_f"] if rec is not None else self.source_f
+        return rec["read_positions"] if rec is not None else self.read_positions
 
     def flock_for(self, f: datetime | None) -> dict[str, str] | None:
         """Run ``f``'s Flock settings from its job, or ``None`` (no job carried any: the environment's)."""
@@ -335,7 +338,7 @@ class RippleExecutor(RunInputs):
         # What the Catchment says each Source has published ({name: iso}) — carried on the begin_run job
         # and used to reject a stale LOCAL publish left behind by a Source that moved to a remote Pool.
         # Empty until a job supplies it; then the resolve is only ever more correct, never less.
-        self.source_f: dict[str, str] = {}
+        self.read_positions: dict[str, str] = {}
         # {table: the Ripple that writes it}, learned from each completed Ripple's lineage (a Python
         # Ripple's tables aren't known until it runs). Backs Pond's own-table read check.
         self.table_writers: dict[str, str] = {}
@@ -364,7 +367,8 @@ class RippleExecutor(RunInputs):
             return self._registry.cursor()
 
     def submit(self, ripple_name: str, f: datetime | None, previous_f: datetime | None, on_done, on_error,
-               sources_changed: bool = True, skip_sink=None, change_sink=None):
+               sources_changed: bool = True, skip_sink=None, change_sink=None,
+               previous_positions: dict[str, str] | None = None):
         """Load and run ``ripple_name`` at freshness ``f`` (exposed to the ripple as ``pond.f``, with
         the prior run's freshness as ``pond.previous_f``); call ``on_done(name, started_at,
         finished_at, lineage)`` on success — ``lineage`` is the Ripple's observed reads/writes
@@ -385,7 +389,7 @@ class RippleExecutor(RunInputs):
                 func, self.pond_name, self.version, self._cursor(), str(self.root),
                 self.source_majors, f, previous_f, self.data_root,
                 sources_changed=sources_changed, skip_sink=skip_sink, change_sink=change_sink,
-                source_f=self.source_f_for(f),
+                read_positions=self.read_positions_for(f), previous_positions=previous_positions,
                 flock=self.flock_for(f),
                 staging_dir=self.staging_dir, own_data_dir=self.own_data_dir,
                 scope={"static_tables": pond.statics, "ripple": ripple_name, "exact_ints": self.exact_ints,
@@ -410,7 +414,8 @@ class RippleExecutor(RunInputs):
         fut.add_done_callback(_cb)
         return fut
 
-    def collect_reports(self, f: datetime, previous_f: datetime | None) -> None:
+    def collect_reports(self, f: datetime, previous_f: datetime | None,
+                        previous_positions: dict[str, str] | None = None) -> None:
         """Carry the Run's reports, and its Sources' in its window, into the reports table
         (:func:`duckstring.reports.collect`), through a handle at the Run's freshness."""
         from ..core import Pond, retry_on_lock
@@ -419,14 +424,15 @@ class RippleExecutor(RunInputs):
         con = self._cursor()
         try:
             pond = Pond(name=self.pond_name, version=self.version, con=con, root=self.root,
-                        source_majors=self.source_majors, source_f=self.source_f_for(f), f=f,
+                        source_majors=self.source_majors, read_positions=self.read_positions_for(f),
+                        previous_positions=previous_positions, f=f,
                         previous_f=previous_f, data_root=self.data_root, own_data_dir=self.own_data_dir)
             retry_on_lock(lambda: collect(pond))
         finally:
             con.close()
 
     def export(self, f: datetime | None = None, contract=None, held=frozenset(),
-               previous_f: datetime | None = None) -> dict | None:
+               previous_f: datetime | None = None, previous_positions: dict[str, str] | None = None) -> dict | None:
         """Publish the Pond's tables for cross-Pond consumption via the data plane, stamped with the
         run's freshness ``f`` (recorded by snapshotting backends). ``contract`` is the major line's
         additive contract — a violation raises :class:`ContractViolation` *before* publishing (last-good
@@ -436,7 +442,7 @@ class RippleExecutor(RunInputs):
         from ..objects import commit_objects
 
         if f is not None:
-            self.collect_reports(f, previous_f)
+            self.collect_reports(f, previous_f, previous_positions)
         schema = _export_data(self._cursor(), self.own_data_dir, f, contract, self.take_retain_from(f), held,
                               self.exact_ints)
         # Objects commit only after the table publish passed the contract gate — a failed run leaves the

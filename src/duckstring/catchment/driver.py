@@ -2323,7 +2323,7 @@ class Driver(TapsMixin):
                 jobs.append({
                     "spout_key": skey, "f": _iso(f), "source_f": source_f,
                     # The source's overwrite version this delivery reads (pinned at dispatch).
-                    "pin": (self._run_pins(skey, _iso(f)) or {}).get(src["name"]),
+                    "pin": (self._run_positions(skey, _iso(f)) or {}).get(src["name"]),
                     "pond_name": src["name"], "major": src["major"],
                     "table": cfg.get("table"), "tables": tables,
                     "destination": cfg.get("destination"), "mode": cfg.get("mode"),
@@ -3629,7 +3629,7 @@ class Driver(TapsMixin):
             # Pinned like any Sink run: the worker reads the source's overwrite tables at this version, and
             # the source keeps it until the delivery is done.
             self.db.execute(
-                "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status, source_pins) "
+                "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status, read_positions) "
                 "VALUES (?, ?, ?, 'running', ?)",
                 (meta["version_id"], _iso(f), _iso(now), json.dumps(self._source_published_f(pond))),
             )
@@ -3652,11 +3652,12 @@ class Driver(TapsMixin):
         self._idle_since.pop(pond, None)  # it's running again — reset its reap grace clock
         # Cancel any not-yet-collected shutdown: this Pond is running again, so the Duck must not exit.
         self.jobs[pond] = [j for j in self.jobs.get(pond, []) if j.get("kind") != "shutdown"]
-        # The Sources' published freshness this Run is pinned to. A re-dispatch of a Run already in flight
-        # (a Catchment restart) re-sends the pins it started with; a Force restarts the Run on fresh ones.
-        pins = None if force else self._run_pins(pond, _iso(f))
-        if pins is None:
-            pins = self._source_published_f(pond)
+        # Each Source's read position for this Run: what it had published (its changed_f) now. A re-dispatch of
+        # a Run already in flight (a Catchment restart) re-sends the positions it started with; a Force restarts
+        # the Run on fresh ones (plans/source-read-positions.md).
+        positions = None if force else self._run_positions(pond, _iso(f))
+        if positions is None:
+            positions = self._source_published_f(pond)
         self._enqueue_job(pond, {
             "kind": "begin_run", "f": _iso(f), "force": force, "rebuild": rebuild,
             "sources_changed": sources_changed,  # backs pond.sources_changed() (for always_run gating)
@@ -3669,10 +3670,14 @@ class Driver(TapsMixin):
             "contract": self._contract_for(pond),
             # Whether this line publishes an integer SUM as BIGINT (lines first deployed from 0.9 on) or DOUBLE.
             "exact_ints": self.meta[pond].get("exact_ints", False),
-            # What each Source has published ({name: iso}) when this Run started: the version its
-            # overwrite Source reads are pinned to, and the bar a LOCAL publish must meet to be read rather
-            # than a stale leftover of a Source that moved to a remote Pool (registry.resolve_data_dir).
-            "source_f": pins,
+            # Each Source's read position ({name: iso}): what it had published when this Run started. Every
+            # read of a Source is at it (an overwrite table's version, a Trickle's rows), and it is the bar a
+            # LOCAL publish must meet to be read rather than a stale leftover of a Source that moved to a remote
+            # Pool (registry.resolve_data_dir).
+            "read_positions": positions,
+            # Where the previous completed Run read each Source up to: a Source's changes are read from there.
+            # None (a Rebuild, a first Run, Runs recorded before read positions): from previous_f.
+            "previous_positions": None if rebuild else self._previous_positions(pond, f),
             # How far back this line's own superseded overwrite versions must be kept (prune_versions).
             "retain_from": self._retain_from(pond),
             # The Pond's Flock settings and its engine's credentials, for this run (flock.job_settings).
@@ -3689,12 +3694,12 @@ class Driver(TapsMixin):
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI. A Force re-opens the Run.
         self.db.execute(
-            "INSERT OR REPLACE INTO pond_run (pond_version_id, f, started_at, status, source_pins) "
+            "INSERT OR REPLACE INTO pond_run (pond_version_id, f, started_at, status, read_positions) "
             "VALUES (?, ?, ?, 'running', ?)"
             if force else
-            "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status, source_pins) "
+            "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status, read_positions) "
             "VALUES (?, ?, ?, 'running', ?)",
-            (meta["version_id"], _iso(f), _iso(now), json.dumps(pins)),
+            (meta["version_id"], _iso(f), _iso(now), json.dumps(positions)),
         )
         self.db.commit()
 
@@ -3841,10 +3846,12 @@ class Driver(TapsMixin):
         App is one, so its rows are the App's freshness history: when it took on its Sources' data, and how old."""
         meta = self.meta[pond]
         fi = _iso(f)
+        # A pass reads nothing, so the next Run goes on from where the Run before it read up to.
+        previous = self._previous_positions(pond, f)
         self.db.execute(
-            "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, finished_at, status, changed) "
-            "VALUES (?, ?, ?, ?, 'success', 0)",
-            (meta["version_id"], fi, _iso(now), _iso(now)),
+            "INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, finished_at, status, changed, "
+            "read_positions) VALUES (?, ?, ?, ?, 'success', 0, ?)",
+            (meta["version_id"], fi, _iso(now), _iso(now), json.dumps(previous) if previous is not None else None),
         )
         self.db.commit()
 
@@ -4107,11 +4114,32 @@ class Driver(TapsMixin):
                 out[meta["name"]] = f
         return out
 
-    def _run_pins(self, pond: str, f: str) -> dict[str, str] | None:
-        """The Source pins recorded for this Pond's Run at ``f`` (``None`` if the Run has no row yet)."""
+    def _run_positions(self, pond: str, f: str) -> dict[str, str] | None:
+        """The read positions recorded for this Pond's Run at ``f`` (``None`` if the Run has no row yet)."""
         row = first_row(self.db.execute(
-            "SELECT source_pins FROM pond_run WHERE pond_version_id = ? AND f = ?",
+            "SELECT read_positions FROM pond_run WHERE pond_version_id = ? AND f = ?",
             (self._run_version_id(pond, f), f),
+        ))
+        if row is None or row[0] is None:
+            return None
+        try:
+            return json.loads(row[0])
+        except ValueError:
+            return None
+
+    def _previous_positions(self, pond: str, f: datetime) -> dict[str, str] | None:
+        """Where this line's newest completed Run before ``f`` read each Source up to: the next Run reads each
+        Source's changes from there (plans/source-read-positions.md). A pass records the positions of the Run
+        before it. ``None`` when there is no such Run, or it was recorded without positions (before read
+        positions): the Run then reads from ``previous_f``, as Runs did before."""
+        meta = self.meta[pond]
+        row = first_row(self.db.execute(
+            "SELECT pr.read_positions FROM pond_run pr "
+            "JOIN pond_version pv ON pv.id = pr.pond_version_id "
+            "JOIN pond_name pn ON pn.id = pv.pond_name_id "
+            "WHERE pr.status = 'success' AND pn.name = ? AND pv.major = ? AND pr.f < ? "
+            "ORDER BY pr.f DESC LIMIT 1",
+            (meta["name"], meta["major"], _iso(f)),
         ))
         if row is None or row[0] is None:
             return None
@@ -4144,7 +4172,7 @@ class Driver(TapsMixin):
             sm = self.meta[sink]
             sink_end = self.state.pond_states[sink].end_f
             for f_raw, pins_raw in self.db.execute(
-                "SELECT pr.f, pr.source_pins FROM pond_run pr "
+                "SELECT pr.f, pr.read_positions FROM pond_run pr "
                 "JOIN pond_version pv ON pv.id = pr.pond_version_id "
                 "JOIN pond_name pn ON pn.id = pv.pond_name_id "
                 "WHERE pr.status = 'running' AND pn.name = ? AND pv.major = ?",

@@ -198,11 +198,11 @@ def test_pond_foreign_read_rejects_a_stale_local_source(tmp_path):
     remote = str(tmp_path / "durable")
 
     fresh = Pond("me", "1.0.0", con=None, root=str(tmp_path), source_majors={"src": 1},
-                 source_f={"src": "2026-01-01T00:00:00+00:00"}, data_root=remote)
+                 read_positions={"src": "2026-01-01T00:00:00+00:00"}, data_root=remote)
     assert str(local) in fresh._source_data_dir("src").uri()
 
     moved = Pond("me", "1.0.0", con=None, root=str(tmp_path), source_majors={"src": 1},
-                 source_f={"src": "2026-06-01T00:00:00+00:00"}, data_root=remote)
+                 read_positions={"src": "2026-06-01T00:00:00+00:00"}, data_root=remote)
     assert remote in moved._source_data_dir("src").uri()
 
 
@@ -301,7 +301,7 @@ def test_begin_run_job_carries_each_sources_published_freshness(tmp_path):
         ss.start_f = ss.end_f = ss.changed_f = ss.persisted_f = t0
     driver.refresh_now("rpt@1", at=t0)
     job = next(j for j in driver.jobs["rpt@1"] if j["kind"] == "begin_run")
-    assert job["source_f"] == {"sales": t0.isoformat()}
+    assert job["read_positions"] == {"sales": t0.isoformat()}
     # A pass (end_f advanced, nothing written) must not raise the claim above the content anchor.
     with driver.lock:
         driver.state.pond_states["sales@1"].end_f = datetime(2026, 2, 1, tzinfo=timezone.utc)

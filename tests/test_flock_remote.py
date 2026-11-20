@@ -83,7 +83,7 @@ def publish_sources(tmp_path):
 def _pond(root, f=ts(2), previous_f=NEVER, mode="off"):
     con = duckdb.connect(str(root / "snk.duckdb"))
     return Pond("snk", "1.0.0", con, root=root, source_majors={"sales": 1, "catalog": 1},
-                source_f={"sales": ts(1).isoformat(), "catalog": ts(1).isoformat()},
+                read_positions={"sales": ts(1).isoformat(), "catalog": ts(1).isoformat()},
                 f=f, previous_f=previous_f, flock=mode)
 
 
@@ -182,7 +182,7 @@ def test_aggregate_stays_incremental_after_a_remote_bootstrap(sources, engine):
     _publish(sales, sources / "ponds" / "sales" / "m1" / "data", ts(3))
     pond.con.close()
     nxt = _pond(sources, f=ts(4), previous_f=ts(2), mode="always")
-    nxt.source_f = {"sales": ts(3).isoformat(), "catalog": ts(1).isoformat()}
+    nxt.read_positions = {"sales": ts(3).isoformat(), "catalog": ts(1).isoformat()}
     _ol(nxt).aggregate("product_id", n=agg.count(), q=agg.sum("qty")).merge("agg")
     assert engine.calls == 1  # one new row is incremental: never offered
     got = dict((r[0], r[1:]) for r in _current(nxt.con, "agg"))
@@ -257,7 +257,7 @@ def test_a_coverage_miss_is_offered_under_upgrade(sources, engine, monkeypatch):
         ts(3), ("order_id",))
     _publish(sales, sources / "ponds" / "sales" / "m1" / "data", ts(3))
     nxt = _pond(sources, f=ts(4), previous_f=ts(2), mode="upgrade")
-    nxt.source_f = {"sales": ts(3).isoformat(), "catalog": ts(1).isoformat()}
+    nxt.read_positions = {"sales": ts(3).isoformat(), "catalog": ts(1).isoformat()}
     _ol(nxt).select("s0.order_id, s0.qty").merge("o", pk="order_id")
     assert engine.calls == 1
     assert {r[1] for r in _current(nxt.con, "o")} == {9}

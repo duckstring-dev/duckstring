@@ -190,10 +190,10 @@ def test_change_detection_on_a_real_s3(s3_env, tmp_path):
     assert load_sidecar(store)["t"]["f"] == f1.isoformat()
 
     sink = Pond("snk", "1.0.0", duckdb.connect(), tmp_path / "snk", source_majors={"src": 1}, f=f2,
-                previous_f=f1, data_root=data_root, source_f={"src": f2.isoformat()})
+                previous_f=f1, data_root=data_root, read_positions={"src": f2.isoformat()})
     assert not sink.changed("src.t") and not sink.changed("src.e")
     first = Pond("snk", "1.0.0", duckdb.connect(), tmp_path / "snk", source_majors={"src": 1}, f=f1,
-                 previous_f=f1 - timedelta(hours=1), data_root=data_root, source_f={"src": f1.isoformat()})
+                 previous_f=f1 - timedelta(hours=1), data_root=data_root, read_positions={"src": f1.isoformat()})
     assert first.changed("src.t") and first.changed("src.e")
 
 
