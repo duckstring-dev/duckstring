@@ -310,34 +310,61 @@ def change_points(store, after=None, upto=None) -> list:
     parts, a merge table's base tokens, bands and change log parts, plain-table versions."""
     from datetime import datetime
 
+    from . import trickle_io
     from .trickle.io import changelog_name, load_sidecar, part_f, part_lo, sidecar_tables, table_parts, warm_name
 
     store = _as_storage(store)
     sidecar = load_sidecar(store)
     points: set = set()
+    con = None
 
-    def add(names):
+    def stamps(table: str, name: str) -> set:
+        """The Runs a combined file holds: its rows keep their stamps (union_parts)."""
+        nonlocal con
+        if con is None:
+            import duckdb
+
+            con = duckdb.connect()
+            con.execute("SET TimeZone = 'UTC'")
+            store.duckdb_setup(con)
+        rows = con.execute(f"SELECT DISTINCT {trickle_io.F_COL} FROM ({_read_parquet_files([store.uri(table, name)])})"
+                           ).fetchall()
+        return {_as_utc(r[0]) for r in rows if r[0] is not None}
+
+    def add(table: str, names, *, inside: bool):
         for n in names:
             try:
-                points.update({part_lo(n), part_f(n)})  # a union of parts: its ends (the points inside aren't listed)
+                points.update({part_lo(n), part_f(n)})
             except ValueError:
                 continue
+            if inside and trickle_io.is_union(n):
+                # A combined file names only its ends. An append history's or a change log's rows keep the stamp of
+                # the Run that wrote them, so the Runs inside are read back; a warm band's are consolidated away.
+                points.update(stamps(table, n))
 
     for table, entry in sidecar_tables(sidecar).items():
         if table.startswith("_duckstring_"):
             continue  # the Run reports change with every reporting Run, not with the data
         mode = entry.get("mode")
         if mode == "append":
-            add(table_parts(store, table))
+            add(table, table_parts(store, table), inside=True)
         elif mode == "merge":
             points.update(t for t in _base_tokens(store, table) if t is not None)
-            add(table_parts(store, warm_name(table)))
-            add(table_parts(store, changelog_name(table)))
+            add(warm_name(table), table_parts(store, warm_name(table)), inside=False)
+            add(changelog_name(table), table_parts(store, changelog_name(table)), inside=True)
         else:
-            add(table_parts(store, f"{table}__v"))
+            add(f"{table}__v", table_parts(store, f"{table}__v"), inside=False)
             if entry.get("f") and not table_parts(store, f"{table}__v"):
                 points.add(datetime.fromisoformat(entry["f"]))
+    if con is not None:
+        con.close()
     return sorted(p for p in points if (after is None or p > after) and (upto is None or p <= upto))
+
+
+def _as_utc(value):
+    from datetime import timezone
+
+    return value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 def _pick_token(tokens: dict, upper, f_base):

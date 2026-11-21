@@ -73,6 +73,10 @@ its Ponds, and code calling an API the new version removed failed only when its 
 
 ### Fixes
 
+- **Change points inside combined files were skipped.** Once a Source's small per-Run files were combined, its
+  change points (`/api/ponds/{name}/changes`, `--next-change`, a copied Puddle's history) named only each combined
+  file's two ends, so a dev Catchment stepped from one end of a week of Runs to the other. The Runs inside are read
+  back from their rows' stamps (append histories and change logs; a folded band's steps are gone by design).
 - **Upgrading a Catchment now reaches its Ponds' environments.** A Pond with its own `pyproject.toml` ran the
   Duckstring it was deployed with until it was redeployed, so after an upgrade its Ducks ran the old version beside
   the new one and failed reading data the new one wrote. A Duck's environment is now worked out when it starts,
