@@ -375,7 +375,9 @@ Puddle there → `PuddleConflict` 409 `detail.replace` unless `force`; unnamed: 
 (the bundle copied to `puddles/{name}/m{major}/code`, the copy to `baseline/`, linked to `work/` and published
 where a Draw lands, `_install_data`). The author's calls (2026-11-21): a Puddle over a Puddle replaces once
 confirmed, from any Pond; over a Pond refused; a Pond over a Puddle replaces once confirmed (`replace_puddle`, the
-CLI asks); `--from` optional (definitions alone); one Puddle per Source line; self-puddles not yet. Copied: data
+CLI asks); `--from` optional (definitions alone); one Puddle per Source line; first deploy wins. A self-Puddle:
+the Pond's own name in `pond puddle deploy` (`own_major`), built with `hydrate_source(path=)`, where the own name
+isn't the local seed. Copied: data
 here, read as any Source. Live: the job's `puddles` = `{name: {major, queries, kinds}}` (`live_puddles_of`), the
 Duck builds `RemoteSource`s and reads through `/api/duck/{name}/{major}/puddle/query|get` (only a live Puddle the
 line reads), forwarded with the secret `origin_secret(url)`. Its position is `remote_f`; its Run completes inside

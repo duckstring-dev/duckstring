@@ -117,7 +117,9 @@ async def deploy_puddles(request: Request):
             raise HTTPException(status_code=422, detail="the bundle has no pond.toml naming its Pond")
         declared = {s: spec_major(str(v)) for s, v in (info.get("sources") or {}).items()}
         try:
-            build, skipped = driver.puddle_plan(owner, declared, spec.sources, force=spec.force)
+            version = str((info.get("pond") or {}).get("version") or "")
+            own_major = spec_major(version) if version else None
+            build, skipped = driver.puddle_plan(owner, declared, spec.sources, force=spec.force, own_major=own_major)
         except PuddleConflict as exc:
             raise HTTPException(status_code=409, detail={"message": str(exc), "replace": exc.replace}) from exc
         except ValueError as exc:

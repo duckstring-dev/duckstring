@@ -500,8 +500,9 @@ checked against a recompute). Where it differs from the plan above:
   Puddle's definitions compile at build time, and readers' jobs carry the queries, so a reading Duck needs no
   definitions. Credentials: a secret per origin URL (`origin_secret`). Migration `039` rewritten in place
   (unreleased; a dev Catchment created from the previous commit needs a fresh root).
-- Not built: self-puddles (a Puddle of a Pond's own output; refused for now), Taps on a Pond reading Puddles, the
-  guide section.
+- Self-Puddles (the author's calls, 2026-11-21): the Pond's own name as a Source in `pond puddle deploy`, built from
+  its definitions against itself; first deploy wins, with no preference between a Source's and a reader's.
+- Not built: Taps on a Pond reading Puddles (not advised on dev, the author's call), the guide section.
 
 A change spanning several Ponds is tested on a local Catchment: anything else would be a poorer copy of one, and it
 is the same pattern as separate dev, qa and prod Catchments. The Ponds under test are deployed to it. Those whose

@@ -215,8 +215,9 @@ _DEPLOY_TIMEOUT_S = 1800  # a first deploy builds the Pond's environment; a copy
 
 @app.command("deploy")
 def deploy(
-    sources: list[str] = typer.Argument(None, help="The Sources to deploy Puddles of (default: each of this Pond's "
-                                                   "Sources not yet on the Catchment)."),
+    sources: list[str] = typer.Argument(None, help="The Sources to deploy Puddles of, or this Pond's own name "
+                                                   "for a Puddle of itself (default: each of its Sources not yet on "
+                                                   "the Catchment)."),
     catchment: str = typer.Option(None, "--catchment", "-c", help="Catchment to deploy to (default if omitted)."),
     set_name: str = typer.Option("default", "--set", "-s", help="The Puddle set to build them from."),
     live: bool = typer.Option(False, "--live", help="Read each through production's query API (needs --from), "
@@ -231,7 +232,8 @@ def deploy(
 
     A Puddle is the Source's line on that Catchment, and every Pond there reading the Source reads it. Each
     Source named is deployed (one already there as a Puddle is replaced once you confirm; one deployed there as a
-    Pond is refused); without any, each Source not yet on the Catchment is. A copied Puddle holds its own data
+    Pond is refused); without any, each Source not yet on the Catchment is. Name this Pond itself to deploy a Puddle
+    of its own output, from its definitions against its own name, for the Ponds that read it. A copied Puddle holds its own data
     there: from production with --from (every change after --as-at too), or from its definitions alone. A live
     one (--live) reads production at the positions the Catchment moves it to. Run from the baseline with
     refresh now POND --rewind.

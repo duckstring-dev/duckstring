@@ -105,29 +105,30 @@ class PuddlesMixin:
     # ── deploying ───────────────────────────────────────────────────────────
 
     def puddle_plan(self, owner: str, declared: dict[str, int], named: list[str] | None,
-                    force: bool = False) -> tuple[list[tuple[str, int]], list[dict]]:
-        """Which Sources a Puddle deploy from ``owner`` (its Sources ``{name: major}``) builds, and which it leaves:
-        the ones ``named``, or each one not yet on this Catchment. Raises ``ValueError`` for a Source it doesn't
-        read, its own name, or one deployed here as a Pond, and :class:`PuddleConflict` for a Puddle already here,
-        unless ``force``."""
+                    force: bool = False, own_major: int | None = None) -> tuple[list[tuple[str, int]], list[dict]]:
+        """Which Sources a Puddle deploy from ``owner`` (its Sources ``{name: major}``; its own major line
+        ``own_major``) builds, and which it leaves: the ones ``named`` (the Pond's own name too: a self-Puddle, built
+        from its definitions against itself), or each Source not yet on this Catchment. Raises ``ValueError`` for a
+        Source it doesn't read or one deployed here as a Pond, and :class:`PuddleConflict` for a Puddle already
+        here, unless ``force``. Whichever deploys first wins: a default deploy never replaces anything."""
         with self.lock:
             build, skipped, replace = [], [], []
             if named:
+                lines = dict(declared)
+                if own_major is not None:
+                    lines[owner] = own_major
                 for source in dict.fromkeys(named):
-                    if source == owner:
-                        raise ValueError(f"'{owner}' is the Pond itself: a Puddle of a Pond's own output isn't "
-                                         "currently supported")
-                    if source not in declared:
+                    if source not in lines:
                         raise ValueError(f"'{owner}' doesn't read '{source}' (its Sources: "
                                          f"{', '.join(sorted(declared)) or 'none'})")
-                    key = pond_key(source, declared[source])
+                    key = pond_key(source, lines[source])
                     meta = self.meta.get(key)
                     if meta is not None and not meta.get("is_puddle"):
                         raise ValueError(f"'{key}' is deployed here as a Pond: a Puddle can't replace it (remove it "
                                          "first to test against a Puddle)")
                     if meta is not None and not force:
                         replace.append(key)
-                    build.append((source, declared[source]))
+                    build.append((source, lines[source]))
                 if replace:
                     raise PuddleConflict(replace, {k: self.meta[k]["puddle"]["owner"] for k in replace})
                 return build, skipped

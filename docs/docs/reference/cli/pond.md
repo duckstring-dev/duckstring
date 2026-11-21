@@ -192,7 +192,7 @@ Deploys Puddles of the Pond's Sources to a Catchment, usually one for developmen
 
 | Argument / option | Default | Description |
 |---|---|---|
-| `SOURCE` | the uncovered Sources | Sources to deploy Puddles of. One already a Puddle there is replaced once you confirm. One deployed there as a Pond is refused. |
+| `SOURCE` | the uncovered Sources | Sources to deploy Puddles of. One already a Puddle there is replaced once you confirm. One deployed there as a Pond is refused. The Pond's own name deploys a Puddle of its own output, built from its definitions against its own name, for the Ponds that read it. |
 | `--set`, `-s` | `default` | The Puddle set to build them from. |
 | `--from` | none | The registered Catchment the Sources live on. Its address and credentials are stored on the target Catchment, which reads production on behalf of its Ducks. Without it, the definitions write the Puddles alone, and none may read its Source. |
 | `--live` | off | With `--from`: read each Puddle through production's [query API](data.md#query) at the positions the Catchment moves it to, copying nothing. Its definitions are compiled to queries when it's deployed. |

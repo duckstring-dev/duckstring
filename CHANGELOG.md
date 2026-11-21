@@ -172,7 +172,10 @@ deploy Puddles in place of the Sources that live in production.
   (`transactions@1`), and every Pond there reading the Source reads it. Without Sources named, each one not yet on
   the Catchment is deployed, so a second Pond sharing some Sources deploys only the rest. A Puddle already there is
   replaced once confirmed (`--force` skips the question); a Source deployed there as a Pond is refused, and
-  `pond deploy` of the Source replaces its Puddle once confirmed.
+  `pond deploy` of the Source replaces its Puddle once confirmed. Whichever deploys first wins.
+- **A Source can deploy a Puddle of itself:** `pond puddle deploy transactions`, run in `transactions`, builds it
+  from definitions against its own name, so the Pond that knows its data best defines its stand-in, and readers
+  deploy none of their own.
 - **Copied Puddles** hold their data on the Catchment, published where a Draw lands, so every Duck reads them as
   any Source: written by the definitions alone (no `--from`: a wholly synthetic dev Catchment), or copied from
   production with every change after `--as-at`. `@puddle.step` definitions run past the end of a copy's history.

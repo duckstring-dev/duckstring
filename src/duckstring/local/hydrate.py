@@ -224,13 +224,14 @@ class _Hydration:
 
     def hydrate_source(self, source: str, defs: list[dict], steps: list[dict], set_name: str,
                        from_catchment: bool, *, path: Path | None = None) -> SourceState | None:
-        """One Source's Puddle, written into ``path`` (default: its local snapshot directory)."""
+        """One Source's Puddle, written into ``path`` (default: its local snapshot directory). Given ``path`` (a
+        Puddle on a Catchment), the Pond's own name is a Source like any other: its Puddle of itself."""
+        own = source == self.project.name and path is None  # locally, the seed of the Pond's own output
         if path is None:
             path = self.project.snapshot_dir(source)
             shutil.rmtree(path.parent, ignore_errors=True)
         else:
             shutil.rmtree(path, ignore_errors=True)
-        own = source == self.project.name
         base = {"set": set_name, "steps": bool(steps), "major": self.locator.major(source)}
 
         if not defs:

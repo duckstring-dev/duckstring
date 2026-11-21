@@ -344,11 +344,11 @@ def test_a_source_already_on_the_catchment_is_left_or_replaced_with_confirmation
     assert "deployed here as a Pond" in output
 
 
-def test_a_puddle_of_the_ponds_own_name_or_an_undeclared_source_is_refused(runner, tmp_path, catchments,
+def test_an_undeclared_source_or_one_with_no_definitions_is_refused(runner, tmp_path, catchments,
                                                                           monkeypatch):
     monkeypatch.chdir(_project(tmp_path, _STEPPED))
     assert "doesn't read" in _refused(runner, "pond", "puddle", "deploy", "nope")
-    assert "own" in _refused(runner, "pond", "puddle", "deploy", "counter")
+    assert "no Puddle definition for 'counter'" in _refused(runner, "pond", "puddle", "deploy", "counter")
     # A definition that fails is reported, and nothing is deployed.
     (tmp_path / "counter" / "src" / "puddles.py").write_text(textwrap.dedent("""
         from duckstring import puddle
@@ -447,3 +447,40 @@ def test_deploying_over_a_puddle_or_a_pond(tmp_path):
         assert r.status_code == 200
         assert [d["source"] for d in r.json()["deployed"]] == ["tx"]
         assert r.json()["skipped"] == [{"source": "dim", "major": 1, "as": "pond"}]
+
+
+def test_a_source_deploys_a_puddle_of_itself(tmp_path):
+    """A self-Puddle: the Source's own definitions, targeting its own name, stand in for it on the Catchment, and a
+    Pond reading it deploys none of its own. Whichever deploys first wins: a reader's default deploy skips it."""
+    from fastapi.testclient import TestClient
+
+    from duckstring.catchment.app import create_app
+    from duckstring.dataplane import ParquetDataPlane
+
+    tx = tmp_path / "tx"
+    (tx / "src").mkdir(parents=True)
+    (tx / "pond.toml").write_text('[pond]\nname = "tx"\nversion = "1.2.0"\n')
+    (tx / "src" / "pond.py").write_text("from duckstring import ripple\n\n@ripple\ndef event(pond):\n    pass\n")
+    (tx / "src" / "puddles.py").write_text(textwrap.dedent("""
+        from duckstring import puddle
+
+        @puddle("tx.event")
+        def event(p):
+            p.append_table(p.con.sql("SELECT range AS id, range * 10 AS value FROM range(4)"), pk="id")
+    """))
+    root = tmp_path / "dev"
+    root.mkdir()
+    with TestClient(create_app(root, name="dev")) as client:
+        r = _deploy_puddle(client, tx)
+        assert r.status_code == 200 and r.json()["deployed"] == []  # a Pond's default is its Sources, never itself
+        r = _deploy_puddle(client, tx, sources=["tx"])
+        assert r.status_code == 200, r.text
+        (d,) = r.json()["deployed"]
+        assert (d["source"], d["major"], d["owner"], d["mode"]) == ("tx", 1, "tx", "copied")
+        select = ParquetDataPlane().read_select(root / "ponds" / "tx" / "m1" / "data", "event")
+        assert duckdb.sql(f"SELECT count(*) FROM ({select})").fetchall()[0][0] == 4
+
+        counter = _project(tmp_path, _STEPPED)  # a reader with definitions of its own for tx
+        r = _deploy_puddle(client, counter)
+        assert r.json()["deployed"] == [] and r.json()["skipped"] == [{"source": "tx", "major": 1, "as": "puddle"}]
+        assert client.app.state.driver.puddle_status("tx@1")["owner"] == "tx"
