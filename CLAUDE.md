@@ -387,6 +387,12 @@ line reads), forwarded with the secret `origin_secret(url)`. Its position is `re
 `runs`/`change_points` of `baseline/`; steps via `run_build` op `step` into `work/`). A plain or recurring Refresh
 reaching a Puddle is refused. `pond remove` on a Puddle → `remove_puddle`.
 
+**Upgrades (2026-11-21, the author's calls).** One Duckstring per Catchment; every Pond runs on it (environments
+follow it at spawn, see Pond environments). Breaking API removals are not deprecated first (no users yet); instead
+`compat.py` (`REMOVED`, one entry per removed keyword, with its replacement) is a static AST scan: `duckstring pond
+check [--fix]`, the deploy response's `compat`, and `Driver._check_compat` at every reload (cached per deployed copy,
+logged) → `/api/status` per-Pond `compat`. Add an entry for every breaking removal.
+
 A **Puddle** is a snapshot of a Source table defined in code, used to test a Pond before deploying it. Definitions live in `src/puddles.py`, either per table (`@puddle("source.table")`) or per Source (`@puddle("source")`). The handle `p` has `con`/`path`/`write_table`/`write_path`/`catchment()` (see `core.py`).
 
 - `duckstring pond hydrate` imports the definitions (registration is a decorator side effect, as with `@ripple`) and materialises `puddles/ponds/{source}/data/{table}.parquet`. That is the catchment-root layout, so `Pond.read_table`'s foreign-read branch works unchanged with `root=puddles/`. Missing definitions are skipped with a warning; `--from-catchment` fills them from the Catchment.
