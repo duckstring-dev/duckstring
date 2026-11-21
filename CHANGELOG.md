@@ -63,6 +63,11 @@ aggregate downstream), the downstream Run went from 88 ms at Run 100 and 198 ms 
 
 ### Fixes
 
+- **Upgrading a Catchment now reaches its Ponds' environments.** A Pond with its own `pyproject.toml` ran the
+  Duckstring it was deployed with until it was redeployed, so after an upgrade its Ducks ran the old version beside
+  the new one and failed reading data the new one wrote. A Duck's environment is now worked out when it starts,
+  for the Catchment's current Duckstring, and built then if needed (as a remote Duck already did). An App's
+  instance likewise.
 - **A relation with bound parameters couldn't be written** (`Values were not provided for the following
   parameters`) by `append_table`, `merge_table` or the builder: since writes name their input as a connection's own
   view, its SQL carried only the placeholders. Found by the attention showcase's `wa_chatter`, which failed every

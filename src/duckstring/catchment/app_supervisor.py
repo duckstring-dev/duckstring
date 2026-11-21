@@ -256,7 +256,7 @@ class AppSupervisor:
     # ─── starting ───────────────────────────────────────────────────────────
 
     def _spawn(self, view: dict, memory_limit: str | None = None) -> Instance:
-        from ..environments import python_for
+        from ..environments import ensure_env
 
         name, major = view["name"], view["major"]
         cfg = view["app"]
@@ -274,7 +274,9 @@ class AppSupervisor:
                        (str(log_path.relative_to(self.root)), iid))
             db.commit()
 
-        python = python_for(self.root, view["source_path"])
+        # Its environment for this Catchment's Duckstring, built now when the Catchment's has changed since
+        # (an App has no Duck to switch itself, as a Pond's does).
+        python = ensure_env(Path(self.root), Path(self.root) / view["source_path"], check_lock=False)
         env = {k: v for k, v in os.environ.items() if k not in _WITHHELD_ENV}
         env["PATH"] = str(Path(python).parent) + os.pathsep + env.get("PATH", "")
         env["PORT"] = str(port)
@@ -534,10 +536,10 @@ def is_app_file(rel: tuple[str, ...]) -> bool:
 def run_download(root: Path, view: dict, out: Path, timeout: float | None = None) -> None:
     """Run an App's ``download`` command in its environment, writing into ``out``. Raises
     :class:`AppDownloadError`."""
-    from ..environments import python_for
+    from ..environments import ensure_env
 
     name, major = view["name"], view["major"]
-    python = python_for(root, view["source_path"])
+    python = ensure_env(Path(root), Path(root) / view["source_path"], check_lock=False)
     state = app_state_dir(root, name, major)
     state.mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k not in _WITHHELD_ENV}
