@@ -63,6 +63,10 @@ aggregate downstream), the downstream Run went from 88 ms at Run 100 and 198 ms 
 
 ### Fixes
 
+- **A relation with bound parameters couldn't be written** (`Values were not provided for the following
+  parameters`) by `append_table`, `merge_table` or the builder: since writes name their input as a connection's own
+  view, its SQL carried only the placeholders. Found by the attention showcase's `wa_chatter`, which failed every
+  Run after reading for four minutes.
 - **A Pond's first Run failed when Ripples ran in parallel** (`Catalog write-write conflict on create`): each
   Ripple's first Trickle write created the same table. In the showcase it failed 3 first Runs in 6, and with the
   default retry budgets of 0 the Pond stayed failed.

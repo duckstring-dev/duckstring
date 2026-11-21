@@ -295,8 +295,26 @@ def temp_view(con, rel, name: str) -> None:
     raised "Catalog write-write conflict on create" when two created it at once, and the database kept every
     scratch view ever made (eight per incremental write; Run time grew with them). A temporary view goes with its
     connection, and can also name a relation that reads a Python object (Arrow, a DataFrame), which a view stored
-    in a database file can't."""
-    con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(name)} AS {rel.sql_query()}")
+    in a database file can't.
+
+    A relation with bound parameters (``con.sql(q, params=...)``) can't be named by its SQL, which has only the
+    placeholders. Its own ``create_view`` keeps the values, so it is copied through one (uniquely named, dropped at
+    once) into a temporary table the view reads: a parameterised relation is a row or a few, written once."""
+    import duckdb
+
+    try:
+        con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(name)} AS {rel.sql_query()}")
+        return
+    except duckdb.InvalidInputException as exc:
+        if "Values were not provided" not in str(exc):
+            raise
+    held = unique_name("_trickle_bound")
+    rel.create_view(held, replace=True)
+    try:
+        con.execute(f"CREATE TEMP TABLE {_q(held + '_rows')} AS SELECT * FROM {_q(held)}")
+    finally:
+        con.execute(f"DROP VIEW IF EXISTS {_q(held)}")
+    con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(name)} AS SELECT * FROM {_q(held + '_rows')}")
 
 
 def drop_scratch_views(con) -> int:

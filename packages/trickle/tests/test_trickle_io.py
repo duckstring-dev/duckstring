@@ -34,6 +34,18 @@ def test_an_all_null_column_takes_values_on_a_later_write(db):
     assert rows(db, "dim") == [(1, 5)]
 
 
+def test_a_relation_with_bound_parameters_is_written(db):
+    """A relation built with bound parameters (``con.sql(q, params=...)``) keeps its values: naming it by its SQL
+    lost them, and every write of one failed (the attention showcase's wa_chatter, 2026-11-21)."""
+    T.append_table(db, "event", db.sql("SELECT ?::INTEGER AS id, ?::VARCHAR AS v", params=[1, "a"]), ts(1), ("id",))
+    merge(db, "dim", [(1, "x")], "id, v", ts(1), "id")
+    T.merge_table(db, "dim", db.sql("SELECT ?::INTEGER AS id, ?::VARCHAR AS v", params=[1, "y"]), ts(2), ("id",))
+    assert db.sql("SELECT id, v FROM event").fetchall() == [(1, "a")]
+    assert rows(db, "dim") == [(1, "y")]
+    held = first_row(db.sql("SELECT count(*) FROM duckdb_views() WHERE NOT temporary AND view_name LIKE '%bound%'"))[0]
+    assert held == 0  # the view the values were copied through is gone from the database
+
+
 def test_append_idempotent_replay_at_same_f(db):
     rel = db.sql("SELECT 1 AS id, 'a' AS v")
     T.append_table(db, "event", rel, ts(1), ("id",))
