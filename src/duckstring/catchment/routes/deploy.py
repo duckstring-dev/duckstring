@@ -459,6 +459,10 @@ async def deploy(request: Request):
             raise HTTPException(status_code=409, detail=(
                 f"{key} is a Puddle here (from {puddle['owner']}'s definitions): deploying {name} replaces it once "
                 "confirmed (replace_puddle)."))
+        # Uses of APIs this Duckstring removed: named in the response, never refused (compat.py).
+        from ...compat import check_project
+
+        compat = [f.as_dict() for f in check_project(staging)]
         with locked(db):
             catalog = _source_schemas(db, cfg["sources"])
         try:
@@ -502,4 +506,4 @@ async def deploy(request: Request):
         driver.reload()
         # A fix redeploy auto-clears the failure on the deployed major line.
         driver.clear_on_redeploy(name, int(version.split(".")[0]))
-    return {"ok": True, "replaced_puddle": puddle is not None}
+    return {"ok": True, "replaced_puddle": puddle is not None, "compat": compat}

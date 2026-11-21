@@ -323,6 +323,35 @@ def hydrate(
 
 
 @app.command()
+def check(
+    fix: bool = typer.Option(False, "--fix", help="Rewrite the uses whose replacement is certain."),
+) -> None:
+    """Check the Pond's code for APIs this Duckstring removed, naming each use and its replacement.
+
+    The code is read, not run. Exits 1 while any use remains. A Catchment runs the same check on every Pond deployed
+    to it, so this is also what a Catchment upgrade will report.
+    """
+    from pathlib import Path
+
+    from ..compat import check_project, fix_project
+
+    if not Path("pond.toml").is_file():
+        typer.echo("Error: no pond.toml found in the current directory.", err=True)
+        raise typer.Exit(1)
+    if fix:
+        typer.echo(f"Fixed {fix_project(Path('.'))}.")
+    findings = check_project(Path("."))
+    for f in findings:
+        typer.echo(f"{f.path}:{f.line}:{f.col}: {f.message}")
+    if not findings:
+        typer.echo("No removed APIs in use.")
+        return
+    if not fix and any(f.fix for f in findings):
+        typer.echo("Run with --fix to rewrite the ones marked by a literal value.")
+    raise typer.Exit(1)
+
+
+@app.command()
 def run(
     ripple: Optional[str] = typer.Option(None, "--ripple", "-r", help="Run only this Ripple, against the existing local "
                                                                       "output."),

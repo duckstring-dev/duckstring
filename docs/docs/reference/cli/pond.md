@@ -6,7 +6,7 @@ sidebar_label: pond
 
 # duckstring pond
 
-Commands for Pond projects. `init`, `hydrate`, `run`, `deploy` and `pond puddle` act on the Pond project in the current directory; `remove` and `promote` act on a deployed Pond.
+Commands for Pond projects. `init`, `hydrate`, `run`, `check`, `deploy` and `pond puddle` act on the Pond project in the current directory; `remove` and `promote` act on a deployed Pond.
 
 ## `init`
 
@@ -106,6 +106,20 @@ transactions = "recent"   # Source = Puddle set
 ```
 
 A Source it doesn't list uses the default set, and `pond hydrate --set` overrides it for every Source.
+
+## `check`
+
+```bash
+duckstring pond check [--fix]
+```
+
+Checks the Pond's code for APIs that this version of Duckstring has removed, and names each use with its replacement, as `src/pond.py:213:16: append_table(fail_on_conflict=...) was removed in Duckstring 0.9.0: use on_conflict="skip_check"`. The code is read, not run. It exits 1 while any use remains.
+
+| Option | Description |
+|---|---|
+| `--fix` | Rewrite the uses whose replacement is certain: a literal value, within one line. The rest are listed for you to change. |
+
+A Catchment runs one version of Duckstring and every Pond deployed to it runs on that version, so upgrading a Catchment upgrades its Ponds. It runs the same check on every deployed Pond when it starts, and logs and lists what it finds (`compat` on each Pond in `/api/status`), so a Pond that will fail on the new version is named before it runs. `pond deploy` reports it too.
 
 ## `deploy`
 

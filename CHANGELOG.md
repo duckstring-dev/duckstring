@@ -61,6 +61,16 @@ needs, whatever came before:
 On the benchmark in `bench/small_runs/` (an Inlet appending 200 rows a Run, a builder join and an incremental
 aggregate downstream), the downstream Run went from 88 ms at Run 100 and 198 ms at Run 300 to 56 and 66 ms.
 
+### Checking Pond code before an upgrade
+
+A Catchment runs one Duckstring and every Pond deployed to it runs on that version, so upgrading a Catchment upgrades
+its Ponds, and code calling an API the new version removed failed only when its Ripple ran.
+
+- **`duckstring pond check [--fix]`** names each use of a removed API with its replacement, and `--fix` rewrites the
+  ones it can decide. The code is read, not run.
+- **The Catchment runs the same check** on every deployed Pond when it starts (so after an upgrade), logs what it
+  finds and lists it on the Pond's status (`compat`). `pond deploy` reports it as a warning.
+
 ### Fixes
 
 - **Upgrading a Catchment now reaches its Ponds' environments.** A Pond with its own `pyproject.toml` ran the

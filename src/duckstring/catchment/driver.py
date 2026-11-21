@@ -717,6 +717,7 @@ class Driver(TapsMixin, PuddlesMixin):
             self._load_taps(pondid_to_key)
             self._load_puddles()
             self._restore_read_at()
+            self._check_compat()
             # Recompute blocked from the freshly-loaded topology: a Source that is absent now (or has
             # since become present, e.g. a duct was added) flips has_missing_source, so the persisted
             # is_blocked may be stale. Re-derive for every Pond (propagates to Sinks).
@@ -866,6 +867,28 @@ class Driver(TapsMixin, PuddlesMixin):
         self.db.commit()
         for pid in self.state.pond_states:
             derive_blocked(self.state, pid)
+
+    def _check_compat(self) -> None:
+        """Each deployed Pond's uses of APIs this Duckstring removed (compat.py): scanned once per deployed copy (a
+        Catchment that starts on a new version scans every Pond again), logged, and listed on its status."""
+        from pathlib import Path
+
+        from ..compat import check_project
+
+        cache = self.__dict__.setdefault("_compat", {})
+        for key, meta in self.meta.items():
+            if meta.get("is_draw") or meta.get("is_spout") or not meta.get("source_path"):
+                continue
+            ident = (meta["source_path"], meta.get("deployed_at"))
+            if ident not in cache:
+                try:
+                    cache[ident] = [f.as_dict() for f in check_project(Path(self.root) / meta["source_path"])]
+                except Exception as exc:  # noqa: BLE001 - a check never stops a Catchment
+                    _log.warning("[%s] couldn't check for removed APIs: %s", key, exc)
+                    cache[ident] = []
+                for f in cache[ident]:
+                    _log.warning("[%s] %s:%s: %s", key, f["path"], f["line"], f["message"])
+            meta["compat"] = cache[ident]
 
     def _restore_read_at(self) -> None:
         """Where each Pond's Runs at or after its ``end_f`` read their Sources up to (``PondState.read_at``, the
@@ -4497,6 +4520,8 @@ class Driver(TapsMixin, PuddlesMixin):
                     # position (catchment/puddles.py).
                     "is_puddle": self.meta[key].get("is_puddle", False),
                     "puddle": self.puddle_status(key),
+                    # Uses of APIs this Duckstring removed, from a scan of its code (compat.py): they fail when run.
+                    "compat": self.meta[key].get("compat") or [],
                     "dbt": self.meta[key].get("dbt", False),  # dbt-mode Pond (models are Ripples) — UI flag
                     # An App (plans/apps.md): where it serves and its running instance, if any.
                     "is_app": self.meta[key].get("is_app", False),
