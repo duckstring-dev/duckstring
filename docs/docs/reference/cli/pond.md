@@ -98,20 +98,14 @@ When the Pond has a `pyproject.toml` and a `.venv` (created by `uv sync`), the c
 
 ### `puddles.toml`
 
-An optional file beside `pond.toml` that picks a Puddle set per Source. It isn't part of the Pond's version, so it can change freely and can be left out of version control.
+An optional file beside `pond.toml` that picks a Puddle set per Source for local runs. It isn't part of the Pond's version, so it can change freely and can be left out of version control.
 
 ```toml
-[local]                   # local runs
+[local]
 transactions = "recent"   # Source = Puddle set
-
-[dev]                     # the Catchment named dev
-transactions = "recent"
-products = "default"
 ```
 
-`[local]` is for `pond hydrate` and `pond run`: a Source it doesn't list uses the default set, and `pond hydrate --set` overrides it for every Source.
-
-Any other section is named after a Catchment (the name it was created with) and lists the Sources the Pond reads as Puddles when deployed there, in place of the Source on that Catchment. `pond deploy` and [`pond puddle push`](#puddle-push) send that Catchment's section, which replaces what the Pond had; no file, or no section for it, means none. Only the Sources listed read as Puddles. Each must be one the Pond declares in `[sources]`, with a set its definitions provide. Refresh such a Pond with the [Puddle options](refresh.md#puddle-sources) of `refresh now`.
+A Source it doesn't list uses the default set, and `pond hydrate --set` overrides it for every Source.
 
 ## `deploy`
 
@@ -166,7 +160,7 @@ duckstring pond remove NAME [-c NAME] [-m N] [--wipe] [--yes]
 
 Retires a deployed major line: deletes its data, live state and working files, and its Spouts and alert channels. The deployment record and run history are kept, and redeploying the Pond restores the line. Ponds downstream that read it are blocked until it's restored or they stop depending on it.
 
-The line must be idle with no demand; run [`control sleep`](control.md#sleep) first.
+The line must be idle with no demand; run [`control sleep`](control.md#sleep) first. A [Puddle](#puddle-deploy) is removed whole: its data, its copy of the definitions and its record go.
 
 | Option | Description |
 |---|---|
@@ -184,17 +178,28 @@ Makes major version `N` the one the Pond's bare name refers to in catalog SQL, s
 
 ## `puddle`
 
-Commands for inspecting a Pond project's local data: the Puddles written by [`pond hydrate`](#hydrate) and the output of [`pond run`](#run). They run against the `puddles/` directory of the current project, in an in-memory DuckDB connection, and need no Catchment. `puddle push` is the exception: it sends `puddles.toml` to a Catchment.
+Commands for a Pond project's Puddles. `puddle deploy` puts them on a Catchment. The others inspect local data, the Puddles written by [`pond hydrate`](#hydrate) and the output of [`pond run`](#run): they run against the `puddles/` directory of the current project, in an in-memory DuckDB connection, and need no Catchment.
 
 Tables are available as `"{pond}"."{table}"`, or by bare name when unambiguous. Where the run output has a table with the same name as one in the Pond's own Puddle, the output is used.
 
-### `puddle push`
+### `puddle deploy`
 
 ```bash
-duckstring pond puddle push [-c NAME] [-m MAJOR]
+duckstring pond puddle deploy [SOURCE...] [-c NAME] [--set SET] [--from CATCHMENT [--live] [--as-at TIME]] [--force]
 ```
 
-Sends the Catchment's section of [`puddles.toml`](#puddlestoml) without redeploying, replacing the Sources the deployed Pond reads as Puddles there, and prints them. No file, or no section for that Catchment, clears them.
+Deploys Puddles of the Pond's Sources to a Catchment, usually one for development, built from the Pond's Puddle definitions. A Puddle is the Source's line on that Catchment (`transactions@1`, from the major the Pond's `[sources]` pin selects), and every Pond there that reads the Source reads it, whichever Pond deployed it. Each Source named is deployed; without any, each of the Pond's Sources not yet on the Catchment is, so a second Pond sharing some Sources deploys only the rest.
+
+| Argument / option | Default | Description |
+|---|---|---|
+| `SOURCE` | the uncovered Sources | Sources to deploy Puddles of. One already a Puddle there is replaced once you confirm. One deployed there as a Pond is refused. |
+| `--set`, `-s` | `default` | The Puddle set to build them from. |
+| `--from` | none | The registered Catchment the Sources live on. Its address and credentials are stored on the target Catchment, which reads production on behalf of its Ducks. Without it, the definitions write the Puddles alone, and none may read its Source. |
+| `--live` | off | With `--from`: read each Puddle through production's [query API](data.md#query) at the positions the Catchment moves it to, copying nothing. Its definitions are compiled to queries when it's deployed. |
+| `--as-at` | now | With `--from`: the baseline as of this time (ISO 8601). A copied Puddle also holds every change production made after it. |
+| `--force` | off | Replace Puddles already there without asking. |
+
+Without `--live`, a Puddle is copied: its data is written on the Catchment when it's deployed, by its definitions (as `pond hydrate` writes them locally) or, for a Source with no definition, from production. Deploying runs nothing: run the Ponds reading it from the baseline with [`refresh now POND --rewind`](refresh.md#puddles). `pond deploy` of the Source itself replaces its Puddle once you confirm. Remove one with [`pond remove`](#remove).
 
 ### `puddle ls`
 

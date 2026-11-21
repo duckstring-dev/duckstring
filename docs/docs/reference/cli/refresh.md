@@ -25,23 +25,22 @@ Asks for data at least as fresh as the moment the command runs. Every Pond upstr
 |---|---|---|
 | `--fresh-within`, `-f` | none | Ask for data no older than this [duration](../formats.md#durations) instead. Only the Ponds older than it run: the request stops at any Pond upstream that is already that fresh. |
 
-### Puddle Sources
+### Puddles
 
-On a Catchment where a Pond reads some of its Sources as Puddles (see [`puddles.toml`](pond.md#puddlestoml)), those Sources are production's data, read through production's [query API](data.md#query). A Refresh at now that reaches one is refused, since production's history may not reach now. Instead, take a baseline, then move through production's history:
+On a Catchment where a Pond reads [Puddles](pond.md#puddle-deploy) in place of some of its Sources, a Refresh at now that reaches one is refused: a Puddle stands for a point in production's history, and production may not have reached now. Run from the Puddles' baseline, then move them through their history:
 
 | Option | Description |
 |---|---|
-| `--hydrate` | Take a new baseline: each Puddle Source reached is read as of its newest freshness at `--as-at` (default now), and every Pond the Refresh reaches on this Catchment, `POND` and those upstream of it, is reset (registry, published data and Run history) and runs from it. Needs `--from` and `--live`. |
-| `--live` | With `--hydrate`: read each Puddle Source through production's query API at each Run, copying nothing. Copied Puddles aren't currently supported on a Catchment. |
-| `--from` | With `--hydrate`: the registered Catchment the Puddle Sources live on. Its address and credentials are stored on this Catchment, as the secret `PUDDLE_ORIGIN`, and its Ducks read production through it. Hydrate again to store new credentials. |
+| `--rewind` | Go back to the baseline: every Pond the Refresh reaches on this Catchment, `POND` and those upstream of it, is reset (registry, published data and Run history) and runs from each Puddle's baseline, with anything its steps wrote dropped. This is also the first Run after a Puddle is deployed. |
+| `--hydrate` | Build each Puddle reached again with the definitions it was deployed with, as of `--as-at` (default now), then reset the Ponds and run from the new baseline as `--rewind` does. |
 | `--as-at` | With `--hydrate`: the baseline as of this time (ISO 8601). |
-| `--rewind` | Go back to the baseline: reset the Ponds the Refresh reaches, as `--hydrate` does, and run from the baseline again. |
-| `--next-change` | Move the Puddle Sources to the first change in production after the Pond's last Run, and refresh at it. |
+| `--from` | With `--hydrate`: read this registered Catchment instead of the one the Puddles read, and store its address and credentials here. Use it to store new credentials. A Puddle built from its definitions alone is left reading none. |
+| `--next-change` | Move the Puddles to the first change after the Pond's last Run, and refresh at it. |
 | `--next-run` | Move them to the Pond's own next Run in production (it must be deployed there). |
-| `--most-recent` | Move them as far as all of them have got in production. |
+| `--most-recent` | Move them as far as all of them have got. |
 | `--to` | Move them to this freshness (ISO 8601). |
 
-Each Puddle Source moves to its earliest point that reaches the target, and is read as it stood when the last of them got there, as `pond run --incremental` does locally. A target that production hasn't reached is refused, naming the Source. A target given with `--hydrate` or `--rewind` is sent once the baseline Run has finished.
+Each Puddle moves to its earliest point that reaches the target, and is read as it stood when the last of them got there, as `pond run --incremental` does locally. A live Puddle's points are production's; a copied Puddle's are the history it was copied with. A copied Puddle with [`@puddle.step`](../python/decorators.md#puddlestep) definitions runs them past the end of its history, stamped at the target. A target that can't be reached is refused, naming the Puddle. A target given with `--hydrate` or `--rewind` is sent once the baseline Run has finished.
 
 ## `refresh add`
 

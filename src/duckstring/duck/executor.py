@@ -210,7 +210,7 @@ class RunInputs:
 
     def begin_run_inputs(self, f: datetime, read_positions: dict[str, str] | None, retain_from=KEEP_ALL,
                          force: bool = False, flock: dict[str, str] | None = None,
-                         puddles: dict[str, str] | None = None) -> None:
+                         puddles: dict[str, dict] | None = None) -> None:
         """Record Run ``f``'s inputs. The first job for ``f`` wins (a re-dispatch after a Catchment restart
         must not move a Run's read positions under its running Ripples), unless ``force`` restarts the Run.
         ``retain_from`` is a datetime, ``None`` (keep only the newest version) or ``KEEP_ALL`` (no job
@@ -224,9 +224,10 @@ class RunInputs:
                          "puddles": dict(puddles) if puddles else None}
 
     def remote_sources_for(self, f: datetime | None) -> dict | None:
-        """Run ``f``'s Puddle Sources (``{name: RemoteSource}``), each its Pond's definitions compiled to queries at
-        its read position, read through this Duck's Catchment (catchment/puddles.py); ``None`` without any.
-        Compiled once per Run and shared by its Ripples."""
+        """Run ``f``'s live Puddle Sources (``{name: RemoteSource}``): each read on the Catchment it lives on through
+        the queries its definitions compiled to when it was deployed (the job's ``puddles``: ``{name: {major,
+        queries, kinds}}``), through this Duck's Catchment (catchment/puddles.py); ``None`` without any. Made once per
+        Run and shared by its Ripples, so a table's reads at one position are fetched once."""
         rec = self._inputs().get(f)
         puddles = rec.get("puddles") if rec is not None else getattr(self, "puddles", None)
         if not puddles:
@@ -234,21 +235,13 @@ class RunInputs:
         cache = self.__dict__.setdefault("_remote_sources", {})
         if f in cache:
             return cache[f]
-        from ..core import read_pond_toml
-        from ..local.hydrate import compile_live
-        from ..local.project import Project
+        from ..remote_source import RemoteSource
 
-        source_dir = Path(self.root) / self.source_path
-        project = Project(dir=source_dir, info=read_pond_toml(source_dir))
-        positions = self.read_positions_for(f)
-        out = {}
-        with _import_lock:  # importing the definitions clears the Ripple registry a load is reading
-            for source, set_name in puddles.items():
-                at = positions.get(source)
-                out[source] = compile_live(project, source, set_name, datetime.fromisoformat(at) if at else f,
-                                           self.puddle_transport)
+        out = {source: RemoteSource(source, int(p["major"]), self.puddle_transport, queries=p.get("queries"),
+                                    kinds={t: tuple(k) for t, k in (p.get("kinds") or {}).items()})
+               for source, p in puddles.items()}
         for old in [k for k in cache if k is not None and f is not None and k < f]:
-            cache.pop(old)  # a Run's compiled reads go once a later Run needs its own
+            cache.pop(old)  # a Run's reads go once a later Run needs its own
         cache[f] = out
         return out
 

@@ -1,39 +1,43 @@
-"""Puddle Sources on a Catchment (plans/showcase-fixes.md item 10): a change spanning several Ponds tested on a dev
+"""Puddles on a Catchment (plans/showcase-fixes.md item 10): a change spanning several Ponds tested on a dev
 Catchment, its Ponds reading the Sources that live in production as Puddles.
 
-**Config.** Which of a line's Sources are Puddles, and with which Puddle set, is the ``puddles.toml`` section named
-for this Catchment (its identity name), sent with each deploy or by ``pond puddle push`` and stored on the line
-outside the version (``pond_puddle_source``). A deploy without one clears it.
+**A Puddle is the Source line.** ``transactions@1`` on a dev Catchment is either a deployed Pond or a Puddle, and
+every Pond there reading it reads whichever it is. A Puddle is deployed from a reading Pond's definitions
+(``pond puddle deploy``, ``POST /api/puddles``): for each Source named, or by default each one not yet on the
+Catchment. Naming one that is already a Puddle replaces it once confirmed (``force``); one deployed as a Pond is
+refused, and a Pond deployed over a Puddle replaces it once confirmed (``routes/deploy.py``).
 
-**The Puddle node.** Each Source line read as a Puddle is one engine node, ``{source}~puddle@{major}``, shared by
-every line reading it and wired in place of the Source (a copy of the Source deployed here is left alone). It is
-a Draw underneath (``is_draw``): its freshness is its position, which only the Catchment moves (``remote_f``), its
-Run completes at once (a live Puddle moves no data), and nothing sends its demand upstream, so tests never change
-what production does. The engine needs nothing new.
+**Building it** runs its definitions in a subprocess, in the environment of the Pond that deployed it
+(:mod:`duckstring.puddle_build`), as ``pond hydrate`` does locally. That records its baseline: its Source's freshness
+at the hydration point. A **copied** Puddle holds its own data, written by its definitions alone or copied from
+production (``--from``, with every change after ``--as-at``), and published where a Draw lands, so a reading Duck
+reads it like any Source. A **live** one holds none: its definitions compiled to queries when it was built, and a
+reading Duck runs them on production through this Catchment (``/api/duck/{name}/{major}/puddle/…``), which forwards
+them with the credentials stored when it was built (a secret named for production's address). No Duck holds
+production's key, and nothing is read in place.
 
-**Positions.** ``refresh now --hydrate --live --from PROD`` records each Puddle's baseline (its Source's
-newest freshness at the hydration point, or ``--as-at``), resets the Ponds the Refresh reaches and runs them from
-it; ``--rewind`` goes back to the baseline. ``--next-change|--next-run|--most-recent|--to`` move the Puddles to a
-target through production's history (:mod:`duckstring.puddle_positions`, shared with ``pond run``) and refresh at
-it. A plain Refresh reaching a Puddle is refused: production can't be asked to be as fresh as now.
-
-**Reads.** A Duck reading a Puddle Source compiles its Pond's definitions to queries and runs them at its read
-positions through this Catchment (``/api/duck/{name}/{major}/puddle/…``), which forwards them to production with the
-credentials stored at hydration (the secret ``PUDDLE_ORIGIN``). No Duck holds production's key, and every Duck kind
-reads the same way. Nothing is read in place.
+**The line.** A ``pond`` row like a Draw's (``is_draw``, ``is_puddle``): its freshness is its position, which only
+this Catchment moves (``remote_f``); its Run completes at once; it never sends demand anywhere, so tests never change
+what production does. ``refresh now --rewind`` resets the Ponds a Refresh reaches and runs them from the baseline
+(the first Run after a deploy too); ``--hydrate`` builds a new baseline with the same definitions; ``--next-change
+|--next-run|--most-recent|--to`` move the Puddles through their history (:mod:`duckstring.puddle_positions`,
+shared with ``pond run``), running a copied Puddle's steps past its end. A plain Refresh reaching a Puddle is
+refused: production can't be asked to be as fresh as now.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from datetime import datetime, timezone
+from pathlib import Path
 
 from ..engine import NEVER, complete_ripple
+from ..keys import pond_key
 from ..trickle_io import first_row
 
-PUDDLE_SUFFIX = "~puddle"
 PUDDLE_RIPPLE = "puddle"
-ORIGIN_SECRET = "PUDDLE_ORIGIN"
 
 
 def _now() -> datetime:
@@ -44,151 +48,264 @@ def _iso(f: datetime) -> str:
     return f.isoformat()
 
 
-def puddle_node_name(source: str) -> str:
-    return f"{source}{PUDDLE_SUFFIX}"
+def _dt(iso: str | None) -> datetime | None:
+    return datetime.fromisoformat(iso) if iso else None
 
 
-def parse_section(sections: dict | None, catchment: str | None) -> dict[str, str] | None:
-    """This Catchment's section of a parsed ``puddles.toml`` (``{source: set}``), or ``None`` without one."""
-    if not sections or not catchment or catchment not in sections:
-        return None
-    section = sections[catchment]
-    if not isinstance(section, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in section.items()):
-        raise ValueError(f"puddles.toml [{catchment}] maps each Source to a Puddle set, like transactions = \"default\"")
-    return dict(section)
+def puddle_version(major: int) -> str:
+    """A Puddle line's version: no Pond's, and outside every ``min_version`` check (``routes/deploy.py``)."""
+    return f"{major}.0.0-puddle"
 
 
-def check_section(pond: str, section: dict[str, str], declared, defined: dict[str, list[str]],
-                  error: str | None) -> None:
-    """Refuse a section naming a Source ``pond`` doesn't declare, or a set with no definitions (``defined``:
-    ``{source: [sets]}`` from discovery), or one for a Pond whose definitions couldn't be loaded (``error``)."""
-    from ..core import DEFAULT_PUDDLE_SET
+def puddle_dir(root, name: str, major: int) -> Path:
+    """A Puddle's own files: ``code/`` (the deploying Pond's bundle), ``baseline/`` (a copy as built) and ``work/``
+    (the copy as stepped, which is what's published)."""
+    return Path(root) / "puddles" / name / f"m{major}"
 
-    if not section:
-        return
-    if error:
-        raise ValueError(f"'{pond}' reads Puddle Sources here, and its Puddle definitions couldn't be loaded: {error}")
-    known = {s for sets in defined.values() for s in sets} | {DEFAULT_PUDDLE_SET}
-    for source, set_name in section.items():
-        if source not in declared:
-            raise ValueError(f"puddles.toml names '{source}', which '{pond}' doesn't read "
-                             f"(its Sources: {', '.join(sorted(declared)) or 'none'})")
-        if set_name not in known:
-            raise ValueError(f"puddles.toml sets '{source}' to '{set_name}', and no Puddle is in that set "
-                             f"(sets defined: {', '.join(sorted(known))})")
+
+def origin_secret(url: str) -> str:
+    """The secret holding the credentials for the Catchment at ``url``, shared by every Puddle reading it."""
+    return "PUDDLE_ORIGIN_" + hashlib.sha256(url.rstrip("/").encode()).hexdigest()[:16]
+
+
+class PuddleConflict(ValueError):
+    """A deploy would replace Puddles: confirmed with ``force``."""
+
+    def __init__(self, replace: list[str], owners: dict[str, str]):
+        self.replace = replace
+        listed = ", ".join(f"{k} (from {owners[k]}'s definitions)" for k in replace)
+        super().__init__(f"{listed} {'is a Puddle' if len(replace) == 1 else 'are Puddles'} here already: "
+                         "deploying replaces it once confirmed (--force)")
+
+
+def _sync_local(src: Path, dest: Path) -> None:
+    """``dest`` holding every file of ``src``, as hard links where the filesystem allows: a file that changed (the
+    sidecar) is replaced, one already there is left."""
+    import os
+
+    for path in src.rglob("*"):
+        if not path.is_file():
+            continue
+        target = dest / path.relative_to(src)
+        if target.exists() and os.path.samefile(path, target):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f".{target.name}.puddle-tmp")
+        tmp.unlink(missing_ok=True)
+        try:
+            os.link(path, tmp)
+        except OSError:
+            shutil.copy2(path, tmp)
+        tmp.replace(target)
 
 
 class PuddlesMixin:
-    """Puddle Sources, mixed into the Driver."""
+    """Puddles, mixed into the Driver."""
 
-    # ── config ──────────────────────────────────────────────────────────────
+    # ── deploying ───────────────────────────────────────────────────────────
 
-    def puddle_section(self, sections: dict | None) -> dict[str, str] | None:
-        """This Catchment's section of a parsed ``puddles.toml``."""
-        return parse_section(sections, self.identity().get("name"))
-
-    def set_puddle_sources(self, key: str, section: dict[str, str] | None) -> list[dict]:
-        """Store ``section`` (this Catchment's ``puddles.toml`` section) as ``key``'s Puddle Sources, replacing what
-        it had; none clears them. Returns ``[{source, set}]``. Raises ``ValueError`` (see :func:`check_section`)."""
+    def puddle_plan(self, owner: str, declared: dict[str, int], named: list[str] | None,
+                    force: bool = False) -> tuple[list[tuple[str, int]], list[dict]]:
+        """Which Sources a Puddle deploy from ``owner`` (its Sources ``{name: major}``) builds, and which it leaves:
+        the ones ``named``, or each one not yet on this Catchment. Raises ``ValueError`` for a Source it doesn't
+        read, its own name, or one deployed here as a Pond, and :class:`PuddleConflict` for a Puddle already here,
+        unless ``force``."""
         with self.lock:
-            meta = self.meta.get(key)
-            if meta is None:
-                raise KeyError(f"no Pond '{key}'")
-            section = section or {}
-            pond_id = meta["pond_id"]
-            if section:
-                if meta.get("is_draw") or meta.get("is_spout") or meta.get("is_app") or meta.get("dbt"):
-                    raise ValueError(f"'{meta['name']}' can't read Sources as Puddles: only a Pond with Ripples can")
-                declared = {r[0] for r in self.db.execute(
-                    "SELECT pn.name FROM pond_to_pond ptp JOIN pond_name pn ON pn.id = ptp.source_pond_name_id "
-                    "WHERE ptp.pond_id = ?", (pond_id,))}
-                row = first_row(self.db.execute(
-                    "SELECT puddle_sets, puddles_error FROM pond_version WHERE id = ?", (meta["version_id"],)))
-                sets_json, error = row if row else (None, None)
-                check_section(meta["name"], section, declared, json.loads(sets_json) if sets_json else {}, error)
-            self.db.execute("DELETE FROM pond_puddle_source WHERE pond_id = ?", (pond_id,))
-            self.db.executemany(
-                "INSERT INTO pond_puddle_source (pond_id, source_name, puddle_set) VALUES (?, ?, ?)",
-                [(pond_id, s, v) for s, v in section.items()])
-            self._sync_puddle_nodes()
+            build, skipped, replace = [], [], []
+            if named:
+                for source in dict.fromkeys(named):
+                    if source == owner:
+                        raise ValueError(f"'{owner}' is the Pond itself: a Puddle of a Pond's own output isn't "
+                                         "currently supported")
+                    if source not in declared:
+                        raise ValueError(f"'{owner}' doesn't read '{source}' (its Sources: "
+                                         f"{', '.join(sorted(declared)) or 'none'})")
+                    key = pond_key(source, declared[source])
+                    meta = self.meta.get(key)
+                    if meta is not None and not meta.get("is_puddle"):
+                        raise ValueError(f"'{key}' is deployed here as a Pond: a Puddle can't replace it (remove it "
+                                         "first to test against a Puddle)")
+                    if meta is not None and not force:
+                        replace.append(key)
+                    build.append((source, declared[source]))
+                if replace:
+                    raise PuddleConflict(replace, {k: self.meta[k]["puddle"]["owner"] for k in replace})
+                return build, skipped
+            for source, major in sorted(declared.items()):
+                meta = self.meta.get(pond_key(source, major))
+                if meta is None:
+                    build.append((source, major))
+                else:
+                    skipped.append({"source": source, "major": major,
+                                    "as": "puddle" if meta.get("is_puddle") else "pond"})
+            return build, skipped
+
+    def install_puddles(self, owner: str, code: Path, built: list[dict], origin: dict | None) -> list[dict]:
+        """Make each of ``built`` (``{source, major, set, live, as_at, out, result}``: a build's output, see
+        :mod:`duckstring.puddle_build`) the Puddle line on this Catchment, replacing any Puddle there. ``code`` is
+        the deploying Pond's bundle, kept beside each so it can be built again. Returns their status."""
+        with self.lock:
+            if origin is not None:
+                self._set_origin(origin)
+            now = _iso(_now())
+            for b in built:
+                source, major = b["source"], b["major"]
+                key = pond_key(source, major)
+                if key in self.meta:
+                    meta = self.meta[key]
+                    if not meta.get("is_puddle"):
+                        raise ValueError(f"'{key}' is deployed here as a Pond: a Puddle can't replace it")
+                    self._destroy_puddle(source, major)
+                d = puddle_dir(self.root, source, major)
+                shutil.rmtree(d, ignore_errors=True)
+                d.mkdir(parents=True)
+                shutil.copytree(code, d / "code", symlinks=True)
+                if Path(b["out"]).exists():
+                    shutil.move(str(b["out"]), str(d / "baseline"))
+                self._create_puddle_line(source, major)
+                state = b["result"]["state"]
+                (pond_id,) = first_row(self.db.execute(
+                    "SELECT p.id FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id "
+                    "WHERE pn.name = ? AND p.major = ?", (source, major)))
+                self.db.execute(
+                    "INSERT INTO puddle (pond_id, owner, puddle_set, live, mode, origin, origin_url, as_at, "
+                    "baseline_f, position_f, history, runs, steps, step, queries, kinds, hydrated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                    (pond_id, owner, b["set"], int(bool(b["live"])), state["mode"],
+                     (origin or {}).get("name"), (origin or {}).get("url", "").rstrip("/") or None, b.get("as_at"),
+                     state["f"], state["f"], int(bool(state.get("history"))),
+                     json.dumps(state["runs"]) if state.get("runs") is not None else None,
+                     int(bool(state.get("steps"))), json.dumps(b["result"].get("queries")),
+                     json.dumps(b["result"].get("kinds")), now))
             self.db.commit()
             self.reload()
-            return [{"source": s, "set": v} for s, v in sorted(section.items())]
+            for b in built:
+                key = pond_key(b["source"], b["major"])
+                self._install_data(key, reset=True)
+            self._persist_state()
+            return [self.puddle_status(pond_key(b["source"], b["major"])) for b in built]
 
-    def _puddle_wiring(self) -> dict[int, dict[str, str]]:
-        """``{pond_id: {source: set}}``: each line's Puddle Sources (caller holds the lock)."""
-        out: dict[int, dict[str, str]] = {}
-        for pond_id, source, set_name in self.db.execute(
-                "SELECT pond_id, source_name, puddle_set FROM pond_puddle_source"):
-            out.setdefault(pond_id, {})[source] = set_name
-        return out
-
-    def _sync_puddle_nodes(self) -> None:
-        """Create a Puddle node for every Source line some line reads as a Puddle, and remove the ones no line
-        reads any more (caller holds the lock and reloads)."""
-        wanted = {(s, m) for s, m in self.db.execute(
-            "SELECT pps.source_name, ptp.source_major FROM pond_puddle_source pps "
-            "JOIN pond_to_pond ptp ON ptp.pond_id = pps.pond_id "
-            "JOIN pond_name pn ON pn.id = ptp.source_pond_name_id AND pn.name = pps.source_name")}
-        have = {(s, m): pid for pid, s, m in self.db.execute(
-            "SELECT pu.pond_id, pu.source_name, p.major FROM puddle pu JOIN pond p ON p.id = pu.pond_id")}
-        for source, major in sorted(wanted - set(have)):
-            self._create_puddle_node(source, major)
-        for (source, major), pid in have.items():
-            if (source, major) not in wanted:
-                self.db.execute("DELETE FROM puddle WHERE pond_id = ?", (pid,))
-                self._destroy_draw(puddle_node_name(source), major)
-
-    def _create_puddle_node(self, source: str, major: int) -> None:
+    def _create_puddle_line(self, name: str, major: int) -> None:
         db = self.db
-        name = puddle_node_name(source)
         db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, 'inlet')", (name,))
         (pn_id,) = first_row(db.execute("SELECT id FROM pond_name WHERE name = ?", (name,)))
-        version = f"{major}.0.0"
+        version = puddle_version(major)
         db.execute("INSERT OR IGNORE INTO pond_version (pond_name_id, version, major, source_path) VALUES (?, ?, ?, ?)",
-                   (pn_id, version, major, f"puddle://{source}@{major}"))
+                   (pn_id, version, major, str(puddle_dir(self.root, name, major).relative_to(self.root) / "code")))
         (pv_id,) = first_row(db.execute(
             "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)))
         db.execute("INSERT OR IGNORE INTO ripple (pond_version_id, name) VALUES (?, ?)", (pv_id, PUDDLE_RIPPLE))
-        db.execute(
-            "INSERT INTO pond (pond_name_id, major, pond_version_id, is_draw, is_puddle) VALUES (?, ?, ?, 1, 1) "
-            "ON CONFLICT(pond_name_id, major) DO UPDATE SET pond_version_id = excluded.pond_version_id, "
-            "is_draw = 1, is_puddle = 1", (pn_id, major, pv_id))
-        (pond_id,) = first_row(db.execute("SELECT id FROM pond WHERE pond_name_id = ? AND major = ?", (pn_id, major)))
-        db.execute("INSERT OR IGNORE INTO puddle (pond_id, source_name) VALUES (?, ?)", (pond_id, source))
+        db.execute("INSERT INTO pond (pond_name_id, major, pond_version_id, is_draw, is_puddle) VALUES (?, ?, ?, 1, 1)",
+                   (pn_id, major, pv_id))
 
-    def _load_puddles(self, wiring: dict[int, dict[str, str]]) -> None:
-        """After a reload: each Puddle node's record and position, and each line's Puddle Sources."""
+    def _destroy_puddle(self, name: str, major: int) -> None:
+        """A Puddle line's rows and files (caller holds the lock and reloads)."""
+        from .registry import landing_root, pond_data_dir, pond_major_dir
+
+        key = pond_key(name, major)
+        meta = self.meta.get(key)
+        if meta is not None:
+            self.db.execute("DELETE FROM puddle WHERE pond_id = ?", (meta["pond_id"],))
+        self._destroy_draw(name, major)
+        shutil.rmtree(puddle_dir(self.root, name, major), ignore_errors=True)
+        shutil.rmtree(pond_major_dir(Path(self.root), name, major), ignore_errors=True)
+        if landing_root(self.data_root) is not None:
+            pond_data_dir(Path(self.root), name, major, landing_root(self.data_root)).rmtree()
+
+    def remove_puddle(self, key: str) -> dict:
+        """Remove the Puddle line ``key``: the Ponds reading it block on a missing Source until it or the Pond is
+        deployed again."""
+        with self.lock:
+            meta = self.meta.get(key)
+            if meta is None or not meta.get("is_puddle"):
+                raise ValueError(f"no Puddle '{key}'")
+            readers = sorted(self.meta[k]["name"] for k, p in self.state.ponds.items() if key in p.sources)
+            self._destroy_puddle(meta["name"], meta["major"])
+            self.db.commit()
+            self.reload()
+            return {"removed": key, "now_blocked": readers, "spouts_removed": []}
+
+    def _install_data(self, key: str, *, reset: bool) -> None:
+        """Publish a copied Puddle's working copy where a Draw would land (caller holds the lock). ``reset`` goes
+        back to the baseline first, dropping what steps wrote."""
+        from ..dataplane import persist_tree
+        from ..storage import LocalStorage
+        from .registry import landing_root, pond_data_dir
+
+        meta = self.meta[key]
+        if meta["puddle"]["mode"] != "copied":
+            return
+        d = puddle_dir(self.root, meta["name"], meta["major"])
+        work = d / "work"
+        if reset:
+            from ..local.sources import link_tree
+
+            shutil.rmtree(work, ignore_errors=True)
+            work.mkdir(parents=True)
+            if (d / "baseline").is_dir():
+                link_tree(d / "baseline", work)
+        landing = landing_root(self.data_root)
+        dest = pond_data_dir(Path(self.root), meta["name"], meta["major"], landing)
+        if reset:
+            dest.rmtree()
+        if landing is None:
+            _sync_local(work, dest.root)
+        else:
+            persist_tree(LocalStorage(work), dest)
+
+    # ── loading and status ──────────────────────────────────────────────────
+
+    def _load_puddles(self) -> None:
+        """After a reload: each Puddle line's record and position."""
         by_id = {m["pond_id"]: k for k, m in self.meta.items()}
-        for pond_id, source, origin, url, live, baseline, position, hydrated in self.db.execute(
-                "SELECT pond_id, source_name, origin, origin_url, live, baseline_f, position_f, hydrated_at "
-                "FROM puddle"):
-            key = by_id.get(pond_id)
+        cols = ("owner", "set", "live", "mode", "origin", "origin_url", "as_at", "baseline_f", "position_f", "history",
+                "runs", "steps", "step", "queries", "kinds", "hydrated_at")
+        for row in self.db.execute(
+                "SELECT pond_id, owner, puddle_set, live, mode, origin, origin_url, as_at, baseline_f, position_f, "
+                "history, runs, steps, step, queries, kinds, hydrated_at FROM puddle"):
+            key = by_id.get(row[0])
             if key is None:
                 continue
+            rec = dict(zip(cols, row[1:], strict=True))
+            for k in ("live", "history", "steps"):
+                rec[k] = bool(rec[k])
+            for k in ("runs", "queries", "kinds"):
+                rec[k] = json.loads(rec[k]) if rec[k] else None
             self.meta[key]["is_puddle"] = True
-            self.meta[key]["puddle"] = {"source": source, "origin": origin, "origin_url": url, "live": bool(live),
-                                        "baseline_f": baseline, "hydrated_at": hydrated}
-            ps = self.state.pond_states[key]
-            ps.remote_f = datetime.fromisoformat(position) if position else NEVER
-        for pond_id, sources in wiring.items():
-            key = by_id.get(pond_id)
-            if key is not None:
-                self.meta[key]["puddle_sources"] = dict(sources)
+            self.meta[key]["puddle"] = rec
+            position = rec.pop("position_f")
+            self.state.pond_states[key].remote_f = _dt(position) or NEVER
 
     def puddle_status(self, key: str) -> dict | None:
-        meta = self.meta[key]
-        if not meta.get("is_puddle"):
+        meta = self.meta.get(key)
+        if meta is None or not meta.get("is_puddle"):
             return None
-        ps = self.state.pond_states[key]
         rec = meta["puddle"]
-        return {"source": rec["source"], "origin": rec["origin"], "live": rec["live"], "baseline_f": rec["baseline_f"],
-                "position_f": _iso(ps.remote_f) if ps.remote_f > NEVER else None, "hydrated_at": rec["hydrated_at"]}
+        ps = self.state.pond_states[key]
+        return {"source": meta["name"], "major": meta["major"], "owner": rec["owner"], "set": rec["set"],
+                "mode": rec["mode"], "origin": rec["origin"], "as_at": rec["as_at"], "baseline_f": rec["baseline_f"],
+                "position_f": _iso(ps.remote_f) if ps.remote_f > NEVER else None, "history": rec["history"],
+                "steps": rec["steps"], "step": rec["step"], "hydrated_at": rec["hydrated_at"]}
+
+    def list_puddles(self) -> list[dict]:
+        with self.lock:
+            return [self.puddle_status(k) for k in sorted(self.meta) if self.meta[k].get("is_puddle")]
+
+    def live_puddles_of(self, pond: str) -> dict | None:
+        """The live Puddles ``pond`` reads, for its Duck's job: ``{name: {major, queries, kinds}}``."""
+        out = {}
+        for skey in self.state.ponds[pond].sources:
+            meta = self.meta.get(skey, {})
+            if meta.get("is_puddle") and meta["puddle"]["mode"] == "live":
+                rec = meta["puddle"]
+                out[meta["name"]] = {"major": meta["major"], "queries": rec["queries"] or {},
+                                     "kinds": rec["kinds"] or {}}
+        return out or None
 
     # ── the engine's side ───────────────────────────────────────────────────
 
     def _queue_puddle_run(self, pond: str, f: datetime, now: datetime) -> None:
-        """A Puddle node's Run: recorded, and completed in this ``_process`` (a live Puddle moves no data)."""
+        """A Puddle's Run: recorded, and completed in this ``_process`` (its data is already in place)."""
         self.db.execute("INSERT OR IGNORE INTO pond_run (pond_version_id, f, started_at, status) "
                         "VALUES (?, ?, ?, 'running')", (self.meta[pond]["version_id"], _iso(f), _iso(now)))
         self.db.commit()
@@ -227,51 +344,71 @@ class PuddlesMixin:
 
     def refuse_puddle_refresh(self, pond: str) -> None:
         """A Refresh at now that reaches a Puddle is refused: production can't be asked for data as fresh as now,
-        and a Puddle never sends demand upstream, so it would wait for good (caller holds the lock)."""
+        and a Puddle never sends demand on, so it would wait for good (caller holds the lock)."""
         nodes = self._reached_puddles(pond)
         if nodes:
-            names = ", ".join(sorted(self.meta[k]["puddle"]["source"] for k in nodes))
-            raise ValueError(f"'{self.meta[pond]['name']}' reads {names} as Puddles: refresh it with --next-change, "
-                             "--next-run, --most-recent or --to (after --hydrate)")
+            names = ", ".join(sorted(nodes))
+            raise ValueError(f"'{self.meta[pond]['name']}' reads {names} as {'a Puddle' if len(nodes) == 1 else 'Puddles'}"
+                             ": refresh it with --rewind to run from the baseline, then --next-change, --next-run, "
+                             "--most-recent or --to")
 
     # ── reaching production ─────────────────────────────────────────────────
-
-    def _origin(self) -> dict | None:
-        from .secrets import SecretStore
-
-        raw = SecretStore(self.root).get(ORIGIN_SECRET)
-        return json.loads(raw) if raw else None
 
     def _set_origin(self, origin: dict) -> None:
         from .secrets import SecretStore
 
-        SecretStore(self.root).set(ORIGIN_SECRET, json.dumps(
-            {"name": origin.get("name"), "url": origin["url"].rstrip("/"), "headers": origin.get("headers") or {}}))
+        url = origin["url"].rstrip("/")
+        SecretStore(self.root).set(origin_secret(url), json.dumps(
+            {"name": origin.get("name"), "url": url, "headers": origin.get("headers") or {}}))
 
-    def _transport(self, origin: dict | None = None):
+    def _origin_of(self, key: str) -> dict | None:
+        """The Catchment the Puddle ``key`` reads, with its stored credentials; ``None`` for one that reads none."""
+        from .secrets import SecretStore
+
+        url = self.meta[key]["puddle"]["origin_url"]
+        if not url:
+            return None
+        raw = SecretStore(self.root).get(origin_secret(url))
+        return json.loads(raw) if raw else {"name": self.meta[key]["puddle"]["origin"], "url": url, "headers": {}}
+
+    def _transport(self, key: str):
         from ..remote_source import HttpTransport
 
-        origin = origin or self._origin()
+        origin = self._origin_of(key)
         if origin is None:
-            raise ValueError("no Catchment to read the Puddles from: refresh with --hydrate --from CATCHMENT")
+            raise ValueError(f"'{key}' reads no Catchment")
         return HttpTransport(origin["url"], origin.get("headers"))
 
-    def _remote(self, node: str, transport):
+    def _remote(self, key: str):
         from ..remote_source import RemoteSource
 
-        meta = self.meta[node]
-        return RemoteSource(meta["puddle"]["source"], meta["major"], transport)
+        meta = self.meta[key]
+        return RemoteSource(meta["name"], meta["major"], self._transport(key))
+
+    # ── building ────────────────────────────────────────────────────────────
+
+    def _python_for_puddle(self, key: str) -> str:
+        from ..environments import ensure_env
+
+        meta = self.meta[key]
+        return str(ensure_env(Path(self.root), puddle_dir(self.root, meta["name"], meta["major"]) / "code",
+                              check_lock=False))
+
+    def _build_spec(self, key: str, op: str, out: Path, **extra) -> dict:
+        meta = self.meta[key]
+        rec = meta["puddle"]
+        return {"op": op, "project_dir": str(puddle_dir(self.root, meta["name"], meta["major"]) / "code"),
+                "source": meta["name"], "set": rec["set"], "out": str(out), **extra}
 
     # ── refreshes ───────────────────────────────────────────────────────────
 
     def refresh_puddles(self, pond: str, *, target: str | None = None, to: datetime | None = None,
-                        hydrate: bool = False, live: bool = False, as_at: datetime | None = None,
-                        rewind: bool = False, origin: dict | None = None) -> datetime:
-        """Refresh ``pond`` through its Puddles: take a new baseline (``hydrate``), go back to it (``rewind``), or
-        move them to a target (``target``, or ``to``) and refresh at it. Returns the freshness asked for. Raises
-        ``ValueError`` with what to do instead when it can't."""
-        from ..puddle_positions import choose_target, reach
-
+                        hydrate: bool = False, as_at: datetime | None = None, rewind: bool = False,
+                        origin: dict | None = None) -> datetime:
+        """Refresh ``pond`` through its Puddles: build a new baseline with their definitions (``hydrate``, as of
+        ``as_at``, reading ``origin`` instead of the Catchment each was built from), go back to the baseline
+        (``rewind``), or move them to a target (``target``, or ``to``) and refresh at it. Returns the freshness
+        asked for. Raises ``ValueError`` with what to do instead when it can't."""
         if sum(map(bool, (hydrate, rewind, target is not None or to is not None))) != 1:
             raise ValueError("give one of --hydrate, --rewind, or a target (--next-change, --next-run, "
                              "--most-recent, --to)")
@@ -280,76 +417,165 @@ class PuddlesMixin:
                 raise KeyError(f"no Pond '{pond}'")
             nodes = self._reached_puddles(pond)
             if not nodes:
-                raise ValueError(f"'{self.meta[pond]['name']}' reads no Puddle Source on this Catchment")
-            current_origin = self._origin()
+                raise ValueError(f"'{self.meta[pond]['name']}' reads no Puddle on this Catchment")
+            if hydrate or rewind:
+                self._refuse_running(pond)
         if hydrate:
-            if not live:
-                raise ValueError("a copied Puddle isn't supported on a Catchment: hydrate with --live")
-            if origin is None or not origin.get("url"):
-                raise ValueError("--hydrate needs --from CATCHMENT: the Catchment the Puddles read")
-            transport = self._transport(origin)
-            point = as_at or _now()
-            positions = {}
-            for node in nodes:
-                remote = self._remote(node, transport)
-                if not remote.published():
-                    raise ValueError(f"'{remote.source}@{remote.major}' has published nothing on "
-                                     f"{origin.get('name') or origin['url']}: has it run?")
-                positions[node] = remote.latest(point) or point
+            return self._hydrate(pond, nodes, as_at, origin)
+        if rewind:
             with self.lock:
-                self._set_origin(origin)
-                self._rebase(pond, positions, origin=origin, hydrated=True)
-                return self._refresh_at(pond, min(positions.values()))
-
-        with self.lock:
-            for node in nodes:
-                rec = self.meta[node]["puddle"]
-                if not rec["baseline_f"]:
-                    raise ValueError(f"'{rec['source']}' hasn't been hydrated here: refresh with --hydrate "
-                                     "--live --from CATCHMENT")
-                if current_origin is None or rec["origin_url"] != current_origin["url"]:
-                    raise ValueError(f"'{rec['source']}' was hydrated from {rec['origin'] or rec['origin_url']}, "
-                                     "and the Puddles now read another Catchment: hydrate it again")
-            if rewind:
                 positions = {n: datetime.fromisoformat(self.meta[n]["puddle"]["baseline_f"]) for n in nodes}
+                for n in nodes:
+                    self.db.execute("UPDATE puddle SET step = 0 WHERE pond_id = ?", (self.meta[n]["pond_id"],))
+                    self.meta[n]["puddle"]["step"] = 0
+                    self._install_data(n, reset=True)
                 self._rebase(pond, positions)
                 return self._refresh_at(pond, min(positions.values()))
+        return self._refresh_to_target(pond, nodes, target, to)
+
+    def _hydrate(self, pond: str, nodes: list[str], as_at: datetime | None, origin: dict | None) -> datetime:
+        import tempfile
+
+        from ..puddle_build import PuddleBuildError, run_build
+
+        with self.lock:
+            specs = {}
+            for n in nodes:
+                from_ = origin if origin is not None and self.meta[n]["puddle"]["origin_url"] else self._origin_of(n)
+                specs[n] = {"from": from_, "python": None}
+            stage = Path(tempfile.mkdtemp(prefix=".hydrate-", dir=self._puddles_root()))
+        try:
+            results = {}
+            for n in nodes:  # the definitions run outside the lock
+                python = self._python_for_puddle(n)
+                out = stage / self.meta[n]["name"]
+                rec = self.meta[n]["puddle"]
+                from_ = specs[n]["from"]
+                spec = self._build_spec(n, "build", out, live=rec["live"],
+                                        as_at=_iso(as_at) if as_at is not None else None,
+                                        origin={"url": from_["url"], "headers": from_.get("headers") or {}}
+                                        if from_ else None)
+                try:
+                    results[n] = (out, run_build(python, spec), from_)
+                except PuddleBuildError as exc:
+                    raise ValueError(f"'{n}' couldn't be built again: {exc}\n{exc.detail}".rstrip()) from None
+            with self.lock:
+                self._refuse_running(pond)
+                if origin is not None:
+                    self._set_origin(origin)
+                now = _iso(_now())
+                positions = {}
+                for n, (out, result, from_) in results.items():
+                    meta = self.meta[n]
+                    d = puddle_dir(self.root, meta["name"], meta["major"])
+                    shutil.rmtree(d / "baseline", ignore_errors=True)
+                    if out.exists():
+                        shutil.move(str(out), str(d / "baseline"))
+                    state = result["state"]
+                    self.db.execute(
+                        "UPDATE puddle SET mode = ?, origin = ?, origin_url = ?, as_at = ?, baseline_f = ?, "
+                        "position_f = ?, history = ?, runs = ?, steps = ?, step = 0, queries = ?, kinds = ?, "
+                        "hydrated_at = ? WHERE pond_id = ?",
+                        (state["mode"], (from_ or {}).get("name"), (from_ or {}).get("url", "").rstrip("/") or None,
+                         _iso(as_at) if as_at is not None else None, state["f"], state["f"],
+                         int(bool(state.get("history"))),
+                         json.dumps(state["runs"]) if state.get("runs") is not None else None,
+                         int(bool(state.get("steps"))), json.dumps(result.get("queries")),
+                         json.dumps(result.get("kinds")), now, meta["pond_id"]))
+                    positions[n] = datetime.fromisoformat(state["f"])
+                self.db.commit()
+                self._load_puddles()
+                for n in nodes:
+                    self._install_data(n, reset=True)
+                self._rebase(pond, positions)
+                return self._refresh_at(pond, min(positions.values()))
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+
+    def _puddles_root(self) -> Path:
+        path = Path(self.root) / "puddles"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _refresh_to_target(self, pond: str, nodes: list[str], target: str | None, to: datetime | None) -> datetime:
+        from ..dataplane import change_points
+        from ..puddle_positions import choose_target, reach
+
+        with self.lock:
             prev = self.state.pond_states[pond].end_f
             if prev <= NEVER:
-                raise ValueError(f"'{self.meta[pond]['name']}' has no baseline Run to go on from: refresh with "
+                raise ValueError(f"'{self.meta[pond]['name']}' has no baseline Run to go on from: refresh it with "
                                  "--rewind (or --hydrate)")
             current = {n: self.state.pond_states[n].remote_f for n in nodes}
-            source_of = {n: self.meta[n]["puddle"]["source"] for n in nodes}
+            recs = {n: dict(self.meta[n]["puddle"]) for n in nodes}
             own = (self.meta[pond]["name"], self.meta[pond]["major"])
+            live = {n for n in nodes if recs[n]["mode"] == "live"}
+            remotes = {n: self._remote(n) for n in live}
+            reading = [n for n in nodes if recs[n]["origin_url"]]
+            own_transport = self._transport(reading[0]) if reading else None
+            baselines = {n: puddle_dir(self.root, self.meta[n]["name"], self.meta[n]["major"]) / "baseline"
+                         for n in nodes}
 
-        # Production's history, read without the lock.
-        transport = self._transport(current_origin)
-        remotes = {n: self._remote(n, transport) for n in nodes}
-        by_source = {source_of[n]: n for n in nodes}
+        # Production's history and the copies' own, read without the lock.
+        def recorded(n: str) -> list[datetime]:
+            if n in live:
+                return remotes[n].runs(after=current[n])
+            if not recs[n]["history"]:
+                return []
+            return [datetime.fromisoformat(r) for r in recs[n]["runs"] or []]
 
-        def next_change(source: str):
-            changes = remotes[by_source[source]].changes(after=prev)
+        def next_change(n: str):
+            if n in live:
+                changes = remotes[n].changes(after=prev)
+            elif recs[n]["history"]:
+                changes = change_points(baselines[n], after=prev)
+            else:
+                changes = []
             return changes[0] if changes else None
 
         def own_runs():
+            if own_transport is None:
+                return None
             from ..remote_source import RemoteSource
 
-            return RemoteSource(own[0], own[1], transport).run_freshnesses(after=prev)
+            return RemoteSource(own[0], own[1], own_transport).run_freshnesses(after=prev)
 
-        def latest(source: str):
-            node = by_source[source]
-            return remotes[node].latest(_now()) or current[node]
+        history = {n: recorded(n) for n in nodes}
 
-        goal = choose_target(target or "next-change", prev, _now(), sources=list(by_source), next_change=next_change,
+        def latest(n: str):
+            return max([current[n], *history[n]])
+
+        goal = choose_target(target or "next-change", prev, _now(), sources=nodes, next_change=next_change,
                              own_runs=own_runs, latest=latest, to=to,
-                             no_runs=f"--next-run needs '{own[0]}@{own[1]}' deployed on "
-                                     f"{current_origin.get('name') or current_origin['url']}")
-        recorded = {source_of[n]: remotes[n].runs(after=current[n]) for n in nodes}
-        moved, _ = reach(goal, {source_of[n]: current[n] for n in nodes}, recorded, live=set(by_source))
+                             no_runs=f"--next-run needs '{own[0]}@{own[1]}' deployed on the Catchment the Puddles read"
+                                     + ("" if reading else ", and these Puddles read none"))
+        moved, stepping = reach(goal, current, history, live=live,
+                                steppable={n for n in nodes if recs[n]["mode"] == "copied" and recs[n]["steps"]})
+        for n in stepping:  # their steps run outside the lock
+            self._step(n, goal, current[n], recs[n])
         with self.lock:
-            for source, f in moved.items():
-                self._move_puddle(by_source[source], f)
+            for n in stepping:
+                self._install_data(n, reset=False)
+            for n, f in moved.items():
+                self._move_puddle(n, f)
             return self._refresh_at(pond, goal)
+
+    def _step(self, key: str, f: datetime, previous: datetime, rec: dict) -> None:
+        from ..puddle_build import PuddleBuildError, run_build
+
+        meta = self.meta[key]
+        work = puddle_dir(self.root, meta["name"], meta["major"]) / "work"
+        step = rec["step"] + 1
+        spec = self._build_spec(key, "step", work, f=_iso(f), previous_f=_iso(previous), step=step,
+                                retain_from=rec["baseline_f"])
+        try:
+            run_build(self._python_for_puddle(key), spec)
+        except PuddleBuildError as exc:
+            raise ValueError(f"'{key}': its step failed: {exc}\n{exc.detail}".rstrip()) from None
+        with self.lock:
+            self.db.execute("UPDATE puddle SET step = ? WHERE pond_id = ?", (step, meta["pond_id"]))
+            self.db.commit()
+            meta["puddle"]["step"] = step
 
     def _refresh_at(self, pond: str, t: datetime) -> datetime:
         from ..engine import refresh_now
@@ -366,20 +592,21 @@ class PuddlesMixin:
             self.db.execute("UPDATE puddle SET position_f = ? WHERE pond_id = ?", (_iso(f), self.meta[node]["pond_id"]))
             self.db.commit()
 
-    def _rebase(self, pond: str, positions: dict[str, datetime], *, origin: dict | None = None,
-                hydrated: bool = False) -> None:
+    def _refuse_running(self, pond: str) -> None:
+        for k in self._reached(pond):
+            ps = self.state.pond_states[k]
+            if not self.meta[k].get("is_puddle") and ps.start_f > ps.end_f:
+                raise ValueError(f"'{self.meta[k]['name']}' is running: wait for it, or sleep it, then try again")
+
+    def _rebase(self, pond: str, positions: dict[str, datetime]) -> None:
         """Back to a baseline: every Pond the Refresh reaches is reset (registry, published data, Run history and
         demand: what incremental Runs added goes, as a Rebuild drops it), and each Puddle is put at its position
         with no Runs. Refuses while any of them is running (caller holds the lock)."""
+        self._refuse_running(pond)
         reached = [k for k in self._reached(pond) if not self.meta[k].get("is_puddle")]
-        for k in reached:
-            ps = self.state.pond_states[k]
-            if ps.start_f > ps.end_f:
-                raise ValueError(f"'{self.meta[k]['name']}' is running: wait for it, or sleep it, then try again")
         # Demand first: resetting a Pond processes the engine, and what was asked before must not start a Run.
         for k in [*reached, *positions]:
             self._clear_demand(k)
-        now = _iso(_now())
         for node, f in positions.items():
             meta = self.meta[node]
             ps = self.state.pond_states[node]
@@ -397,15 +624,7 @@ class PuddlesMixin:
                     rs.demand = []
             self.db.execute("DELETE FROM ripple_run WHERE pond_version_id = ?", (meta["version_id"],))
             self.db.execute("DELETE FROM pond_run WHERE pond_version_id = ?", (meta["version_id"],))
-            if hydrated:
-                self.db.execute(
-                    "UPDATE puddle SET origin = ?, origin_url = ?, live = 1, baseline_f = ?, position_f = ?, "
-                    "hydrated_at = ? WHERE pond_id = ?",
-                    (origin.get("name"), origin["url"].rstrip("/"), _iso(f), _iso(f), now, meta["pond_id"]))
-                meta["puddle"].update({"origin": origin.get("name"), "origin_url": origin["url"].rstrip("/"),
-                                       "live": True, "baseline_f": _iso(f), "hydrated_at": now})
-            else:
-                self.db.execute("UPDATE puddle SET position_f = ? WHERE pond_id = ?", (_iso(f), meta["pond_id"]))
+            self.db.execute("UPDATE puddle SET position_f = ? WHERE pond_id = ?", (_iso(f), meta["pond_id"]))
         self.db.commit()
         for k in reached:
             m = self.meta[k]
@@ -422,26 +641,28 @@ class PuddlesMixin:
 
     # ── the Duck channel ────────────────────────────────────────────────────
 
-    def _puddle_line(self, key: str, source: str, major) -> None:
-        """Refuse a Duck's read of anything but one of its own line's Puddle Sources."""
+    def _puddle_line(self, key: str, source: str, major) -> str:
+        """The live Puddle ``source@major`` that the line ``key`` reads; anything else is refused."""
         with self.lock:
-            meta = self.meta.get(key)
-            sources = (meta or {}).get("puddle_sources") or {}
-            if source not in sources:
-                raise PermissionError(f"'{key}' doesn't read '{source}' as a Puddle")
-            wired = [s for s in self.state.ponds[key].sources
-                     if self.meta.get(s, {}).get("puddle", {}).get("source") == source]
-            if not wired or int(major) != self.meta[wired[0]]["major"]:
-                raise PermissionError(f"'{key}' reads another line of '{source}'")
+            try:
+                skey = pond_key(source, int(major))
+            except (TypeError, ValueError):
+                raise PermissionError(f"'{key}' doesn't read '{source}' as a live Puddle") from None
+            pond = self.state.ponds.get(key)
+            meta = self.meta.get(skey, {})
+            if pond is None or skey not in pond.sources or not meta.get("is_puddle") \
+                    or meta["puddle"]["mode"] != "live":
+                raise PermissionError(f"'{key}' doesn't read '{skey}' as a live Puddle")
+            return skey
 
     def puddle_query(self, key: str, payload: dict) -> tuple[bytes, str | None]:
-        """A Duck's query of one of its Puddle Sources, forwarded to production (the Duck channel)."""
-        self._puddle_line(key, str(payload.get("pond")), payload.get("major"))
+        """A Duck's query of one of its live Puddles, forwarded to production (the Duck channel)."""
+        skey = self._puddle_line(key, str(payload.get("pond")), payload.get("major"))
         allowed = {k: payload[k] for k in ("pond", "major", "sql", "format", "at", "since") if k in payload}
-        return self._transport().query(allowed)
+        return self._transport(skey).query(allowed)
 
     def puddle_get(self, key: str, path: str, params: dict | None) -> dict:
-        """A Duck's metadata read of one of its Puddle Sources (its tables), forwarded to production."""
+        """A Duck's metadata read of one of its live Puddles (its tables), forwarded to production."""
         params = dict(params or {})
         parts = path.strip("/").split("/")
         if len(parts) == 4 and parts[:2] == ["api", "ponds"] and parts[3] in ("tables", "changes"):
@@ -450,8 +671,8 @@ class PuddlesMixin:
             source = str(params.get("pond"))
         else:
             raise PermissionError(f"a Duck can't read {path} through its Puddles")
-        self._puddle_line(key, source, params.get("major"))
-        return self._transport().get(path, params)
+        skey = self._puddle_line(key, source, params.get("major"))
+        return self._transport(skey).get(path, params)
 
 
-__all__ = ["PuddlesMixin", "PUDDLE_SUFFIX", "ORIGIN_SECRET", "puddle_node_name", "parse_section", "check_section"]
+__all__ = ["PuddlesMixin", "PuddleConflict", "PUDDLE_RIPPLE", "puddle_version", "puddle_dir", "origin_secret"]

@@ -70,9 +70,7 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
   const radius = pond.isApp ? 16 : 10;
   const isSelected = selectedPondId === pondId;
   // A Spout's pond name is "{source}#{spout}" — show just the spout part on the node.
-  // A Puddle node's is "{source}~puddle" — show the Source it stands for.
-  const displayName = pond.isSpout ? pond.name.split('#').slice(1).join('#') || pond.name
-    : pond.isPuddle ? pond.name.replace(/~puddle$/, '') : pond.name;
+  const displayName = pond.isSpout ? pond.name.split('#').slice(1).join('#') || pond.name : pond.name;
   // Draws and Spouts both cross the Catchment boundary → dashed (ingress vs egress).
   const boundary = pond.isDraw || pond.isSpout;
   // In selector mode, a selected Pond keeps a bright cyan ring through BOTH phases — so during

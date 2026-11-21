@@ -485,6 +485,24 @@ checked against a recompute). Where it differs from the plan above:
 - Not built: the guide section (held for the docs pass), Taps on a Pond reading Puddles (a Tap's Refresh at now
   would wait), a reset of only part of the reach.
 
+**Reworked (2026-11-21, the author's calls), replacing the sections, the `~puddle` nodes and `push` above:**
+- One Puddle per Source line on a Catchment, and it IS the line (`transactions@1`): a deployed Pond or a Puddle,
+  never both; every Pond there reads whichever it is. Deploying is hydrating: `pond puddle deploy [SOURCE...]
+  [--set] [--from [--live] [--as-at]] [--force]` from a reading Pond, for the Sources named or, by default, each
+  one not yet covered. `--from` is optional (a wholly synthetic dev Catchment).
+- Conflicts: a Puddle over a Puddle replaces once confirmed, from any Pond (`--force` skips the question); a Puddle
+  over a Pond is refused; a Pond over a Puddle replaces once confirmed (`pond deploy` asks; `-y` confirms).
+- `refresh now --hydrate` re-baselines with the definitions the Puddle was deployed with (`--from` there only swaps
+  the Catchment it reads or its credentials); `--rewind` is also the first Run after a deploy.
+- Built: `puddle_build.py` runs the definitions in a subprocess in the deploying Pond's environment (the Catchment
+  never imports Pond code); the bundle is kept at `puddles/{name}/m{major}/code` so it can be built again. Copied
+  Puddles publish where a Draw lands (`baseline/` → `work/` → landing); steps run as `puddle_build` op `step`. A live
+  Puddle's definitions compile at build time, and readers' jobs carry the queries, so a reading Duck needs no
+  definitions. Credentials: a secret per origin URL (`origin_secret`). Migration `039` rewritten in place
+  (unreleased; a dev Catchment created from the previous commit needs a fresh root).
+- Not built: self-puddles (a Puddle of a Pond's own output; refused for now), Taps on a Pond reading Puddles, the
+  guide section.
+
 A change spanning several Ponds is tested on a local Catchment: anything else would be a poorer copy of one, and it
 is the same pattern as separate dev, qa and prod Catchments. The Ponds under test are deployed to it. Those whose
 Sources live elsewhere (production) read them as Puddles; the Ponds downstream of them read their local Sources as

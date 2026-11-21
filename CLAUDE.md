@@ -364,17 +364,26 @@ query's result written at the point (`write_data`) and each change point's chang
 Source whose definitions also write data of their own is copied, not live. Run reports are read by name
 (`routes/data._queryable`).
 
-**Puddle Sources on a Catchment (2026-11-21, `catchment/puddles.py`, migration `039`).** A `puddles.toml` section
-named for a Catchment (its identity name) lists the Sources a line reads as Puddles there; sent by `pond deploy`
-(form field `puddles`, the whole parsed file; the Catchment picks its section) or `pond puddle push`, stored in
-`pond_puddle_source`, checked against `pond_version.puddle_sets` (discovery). One node per Source line,
-`{source}~puddle@{major}`, a Draw underneath (`is_draw` + `is_puddle`): `reload` wires readers to it, its position is
-`remote_f` (`puddle.position_f`), its Run completes inside `_process`, it never sends demand. `refresh now
---hydrate --live --from PROD [--as-at]` / `--rewind` reset the reach and run from the baseline; `--next-change
-|--next-run|--most-recent|--to` move positions via `puddle_positions` (shared with `pond run --incremental`). A plain
-or recurring Refresh reaching a Puddle is refused. Ducks get `puddles` on the job, compile definitions
-(`local.hydrate.compile_live`) and read through `/api/duck/{name}/{major}/puddle/query|get`, forwarded with the
-`PUDDLE_ORIGIN` secret. Live only; copied Puddles on a Catchment are next.
+**Puddles on a Catchment (2026-11-21, `catchment/puddles.py`, `puddle_build.py`, migration `039`).** A Puddle IS
+the Source line `name@major` on a (dev) Catchment: a `pond` row like a Draw's (`is_draw` + `is_puddle`, version
+`{major}.0.0-puddle`, outside `min_version` checks via `_selected_version`) plus a `puddle` row; readers wire to it
+by the normal reload. `pond puddle deploy [SOURCE...] [--set] [--from [--live] [--as-at]] [--force]` →
+`POST /api/puddles` (bundle zip + `spec`): `puddle_plan` (named: own name / undeclared / a Pond there → 422, a
+Puddle there → `PuddleConflict` 409 `detail.replace` unless `force`; unnamed: the uncovered Sources, rest
+`skipped`), `ensure_env`, then per Source `run_build` (a subprocess `python -m duckstring.puddle_build` in that env:
+`_Hydration.hydrate_source(path=)`; a live one's definitions compiled to `queries`/`kinds`), then `install_puddles`
+(the bundle copied to `puddles/{name}/m{major}/code`, the copy to `baseline/`, linked to `work/` and published
+where a Draw lands, `_install_data`). The author's calls (2026-11-21): a Puddle over a Puddle replaces once
+confirmed, from any Pond; over a Pond refused; a Pond over a Puddle replaces once confirmed (`replace_puddle`, the
+CLI asks); `--from` optional (definitions alone); one Puddle per Source line; self-puddles not yet. Copied: data
+here, read as any Source. Live: the job's `puddles` = `{name: {major, queries, kinds}}` (`live_puddles_of`), the
+Duck builds `RemoteSource`s and reads through `/api/duck/{name}/{major}/puddle/query|get` (only a live Puddle the
+line reads), forwarded with the secret `origin_secret(url)`. Its position is `remote_f`; its Run completes inside
+`_process`; it never sends demand. `refresh now --rewind` (the first Run after a deploy too) / `--hydrate
+[--as-at] [--from]` (`run_build` again, same definitions) reset the reach (`_rebase`) and run from the baseline;
+`--next-change|--next-run|--most-recent|--to` move positions via `puddle_positions` (a copy's points: its recorded
+`runs`/`change_points` of `baseline/`; steps via `run_build` op `step` into `work/`). A plain or recurring Refresh
+reaching a Puddle is refused. `pond remove` on a Puddle → `remove_puddle`.
 
 A **Puddle** is a snapshot of a Source table defined in code, used to test a Pond before deploying it. Definitions live in `src/puddles.py`, either per table (`@puddle("source.table")`) or per Source (`@puddle("source")`). The handle `p` has `con`/`path`/`write_table`/`write_path`/`catchment()` (see `core.py`).
 

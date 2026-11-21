@@ -1,30 +1,24 @@
--- Puddle Sources on a dev Catchment (plans/showcase-fixes.md item 10). A deployed line may read some of its Sources
--- as Puddles: production's data, read through production's query API, at a position this Catchment moves through
--- production's history. Which Sources, and with which Puddle set, comes from the puddles.toml section named for
--- this Catchment, sent with each deploy or by `pond puddle push`: operational config outside the version, as
--- windows are. A deploy without one clears it.
-CREATE TABLE pond_puddle_source (
-    pond_id     INTEGER NOT NULL REFERENCES pond(id),
-    source_name TEXT    NOT NULL,
-    puddle_set  TEXT    NOT NULL DEFAULT 'default',
-    PRIMARY KEY (pond_id, source_name)
-);
-
--- The Puddle sets each version defines per Source ({source: [sets]}, JSON, from discovery), for checking a
--- section at deploy and at push. NULL: the definitions couldn't be loaded (puddles_error says why).
-ALTER TABLE pond_version ADD COLUMN puddle_sets TEXT;
-ALTER TABLE pond_version ADD COLUMN puddles_error TEXT;
-
--- A Puddle node: one per Source line read as a Puddle (named "{source}~puddle"), shared by every line reading it.
--- Drawn like a Draw: its freshness is its position, set by the Catchment, and it never sends demand upstream.
+-- Puddles on a dev Catchment (plans/showcase-fixes.md item 10). A Puddle is a Source line on this Catchment that
+-- stands in for the one in production, deployed from a reading Pond's Puddle definitions (`pond puddle deploy`):
+-- a `pond` row like a Draw's (its freshness is its position, set by the Catchment; it never sends demand anywhere)
+-- with `is_puddle` set, and every line here reading the Source reads it.
 ALTER TABLE pond ADD COLUMN is_puddle INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE puddle (
     pond_id     INTEGER PRIMARY KEY REFERENCES pond(id),
-    source_name TEXT    NOT NULL,
-    origin      TEXT,              -- the registered Catchment name it was hydrated from (shown, never dialled)
-    origin_url  TEXT,              -- the address it reads; the credentials are the secret PUDDLE_ORIGIN
-    live        INTEGER NOT NULL DEFAULT 1,
-    baseline_f  TEXT,              -- its position at the hydration point
+    owner       TEXT    NOT NULL,  -- the Pond whose definitions it was deployed from (shown)
+    puddle_set  TEXT    NOT NULL DEFAULT 'default',
+    live        INTEGER NOT NULL DEFAULT 0,  -- asked for live (--live)
+    mode        TEXT    NOT NULL,  -- what it is: live (read through production's query API) | copied (data here)
+    origin      TEXT,              -- the registered Catchment name it reads (shown, never dialled); NULL: none
+    origin_url  TEXT,              -- its address; the credentials are a secret named for it (catchment/puddles.py)
+    as_at       TEXT,              -- the --as-at it was deployed or hydrated with (NULL: when that ran)
+    baseline_f  TEXT,              -- its Source's freshness at the hydration point
     position_f  TEXT,              -- where it is now
+    history     INTEGER NOT NULL DEFAULT 0,  -- a copy holding production's changes after the baseline
+    runs        TEXT,              -- JSON: the freshnesses production reached after the baseline (a copy's history)
+    steps       INTEGER NOT NULL DEFAULT 0,  -- has @puddle.step definitions
+    step        INTEGER NOT NULL DEFAULT 0,  -- steps run since the baseline
+    queries     TEXT,              -- JSON {table: sql}: a live Puddle's definitions, compiled when it was built
+    kinds       TEXT,              -- JSON {table: [mode, pk]} for those queries
     hydrated_at TEXT
 );

@@ -7,7 +7,7 @@ import typer
 from ..trickle_io import first_row
 
 app = typer.Typer(
-    help="Inspect this Pond's local Puddles and run output.",
+    help="This Pond's Puddles: inspect them and the run output locally, or deploy them to a Catchment.",
     add_completion=False,
     no_args_is_help=True,
 )
@@ -210,32 +210,98 @@ def query(
     _print_rows(console, cursor)
 
 
-@app.command("push")
-def push(
-    catchment: str = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
-    major: int = typer.Option(None, "--major", "-m", help="Major version to target (default: latest)."),
+_DEPLOY_TIMEOUT_S = 1800  # a first deploy builds the Pond's environment; a copy reads production
+
+
+@app.command("deploy")
+def deploy(
+    sources: list[str] = typer.Argument(None, help="The Sources to deploy Puddles of (default: each of this Pond's "
+                                                   "Sources not yet on the Catchment)."),
+    catchment: str = typer.Option(None, "--catchment", "-c", help="Catchment to deploy to (default if omitted)."),
+    set_name: str = typer.Option("default", "--set", "-s", help="The Puddle set to build them from."),
+    live: bool = typer.Option(False, "--live", help="Read each through production's query API (needs --from), "
+                                                    "copying nothing."),
+    from_: str = typer.Option(None, "--from", help="The registered Catchment the Sources live on. Without it, the "
+                                                   "definitions write the Puddles alone."),
+    as_at: str = typer.Option(None, "--as-at", help="With --from: the baseline as of this time (ISO 8601; default "
+                                                    "now). A copy holds every change after it."),
+    force: bool = typer.Option(False, "--force", help="Replace Puddles already there without asking."),
 ) -> None:
-    """Send puddles.toml's section for a Catchment without redeploying: the Sources this Pond reads as Puddles
-    there. No file, or no section for it, clears them."""
+    """Deploy Puddles of this Pond's Sources to a Catchment, built from its Puddle definitions.
+
+    A Puddle is the Source's line on that Catchment, and every Pond there reading the Source reads it. Each
+    Source named is deployed (one already there as a Puddle is replaced once you confirm; one deployed there as a
+    Pond is refused); without any, each Source not yet on the Catchment is. A copied Puddle holds its own data
+    there: from production with --from (every change after --as-at too), or from its definitions alone. A live
+    one (--live) reads production at the positions the Catchment moves it to. Run from the baseline with
+    refresh now POND --rewind.
+    """
     from rich.console import Console
 
-    from ..local.state import read_puddles_toml
+    from ..core import resolve_catchment_auth
     from . import _http
     from .config import resolve_catchment
-    from .deploy import print_puddle_sources
+    from .deploy import _zip_pond
+    from .refresh import _iso_point
 
     project = _load_project()
-    try:
-        puddles = read_puddles_toml(project.dir)
-    except ValueError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(1) from None
+    if live and not from_:
+        raise typer.BadParameter("--live reads production: give --from CATCHMENT")
+    if as_at and not from_:
+        raise typer.BadParameter("--as-at is a point in production's history: give --from CATCHMENT")
+    spec: dict = {"sources": list(sources or []) or None, "set": set_name, "live": live,
+                  "as_at": _iso_point(as_at, "--as-at"), "force": force}
+    if from_:
+        try:
+            url, headers = resolve_catchment_auth(from_)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from None
+        spec["origin"] = {"name": from_, "url": url, "headers": headers}
     name, cfg = resolve_catchment(catchment)
-    resp = _http.post(f"{cfg['url']}/api/ponds/{project.name}/puddles", auth=cfg,
-                      params=_http.pond_params(major, None), json={"puddles": puddles})
-    body = resp.json()
     console = Console()
-    if body.get("puddle_sources"):
-        print_puddle_sources(console, body)
-    else:
-        console.print(f"'{project.name}' reads no Source as a Puddle on {name}.")
+    archive = _zip_pond(project.dir)
+
+    def send():
+        import json
+
+        return _http.post(f"{cfg['url']}/api/puddles", auth=cfg, allow=(409,), timeout=_DEPLOY_TIMEOUT_S,
+                          files={"bundle": ("pond.zip", archive, "application/zip")},
+                          data={"spec": json.dumps(spec)})
+
+    resp = send()
+    if resp.status_code == 409:
+        detail = resp.json().get("detail") or {}
+        console.print(f"[yellow]{detail.get('message', detail)}[/yellow]")
+        if not typer.confirm(f"Replace {', '.join(detail.get('replace') or [])}?", default=False):
+            typer.echo("Not replaced.", err=True)
+            raise typer.Exit(1)
+        spec["force"] = True
+        resp = send()
+    body = resp.json()
+    for d in body.get("deployed") or []:
+        console.print(f"[green]Deployed[/green] the Puddle [bold]{d['source']}@{d['major']}[/bold] to "
+                      f"[bold]{name}[/bold]: {_describe(d)}.")
+    for w in body.get("warnings") or []:
+        console.print(f"[yellow]{w}[/yellow]")
+    skipped = body.get("skipped") or []
+    if skipped:
+        listed = ", ".join(f"{s['source']}@{s['major']} (a {'Puddle' if s['as'] == 'puddle' else 'Pond'})"
+                           for s in skipped)
+        console.print(f"Already on {name}: {listed}. Name a Puddle to replace it.")
+    if body.get("deployed"):
+        console.print(f"[dim]Run from the baseline: duckstring refresh now POND --rewind -c {name}[/dim]")
+    elif not skipped:
+        console.print(f"'{project.name}' reads no Source.")
+
+
+def _describe(d: dict) -> str:
+    """How a deployed Puddle reads its Source, in a few words."""
+    where = f" from {d['origin']}" if d.get("origin") else ""
+    at = f", as of {d['baseline_f']}" if d.get("baseline_f") else ""
+    if d["mode"] == "live":
+        return f"live{where}{at}"
+    if d.get("history"):
+        return f"copied{where} with its history{at}"
+    if d.get("origin"):
+        return f"copied{where}{at}"
+    return "copied, from its definitions" + (" (with steps)" if d.get("steps") else "")

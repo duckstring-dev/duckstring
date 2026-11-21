@@ -43,7 +43,7 @@ def _selected_version(db, source_name: str, major: int) -> str | None:
         "SELECT pv.version FROM pond p "
         "JOIN pond_version pv ON pv.id = p.pond_version_id "
         "JOIN pond_name pn ON pn.id = p.pond_name_id "
-        "WHERE pn.name = ? AND p.major = ?",
+        "WHERE pn.name = ? AND p.major = ? AND p.is_puddle = 0",  # a Puddle stands outside version pins
         (source_name, major),
     ))
     return row[0] if row else None
@@ -159,18 +159,6 @@ def _pond_config(toml_path: Path) -> dict:
             raise ValueError(f"an App serves HTTP and has no Ripples: remove {entry}, [ripples], [static] and "
                              "dbt_project from it, or make it a Pond")
     return cfg
-
-
-def _json_field(raw):
-    """A JSON form field (``None`` when absent); a malformed one is a 422."""
-    import json
-
-    if raw is None or raw == "":
-        return None
-    try:
-        return json.loads(raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=f"puddles: not JSON ({exc})") from exc
 
 
 def _validate_choice(value, choices, label):
@@ -331,11 +319,6 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
                 "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
             ))
 
-        # The Puddle sets its definitions provide, for checking a Catchment's Puddle Sources (catchment/puddles.py).
-        puddles = cfg.get("puddles") or {}
-        db.execute("UPDATE pond_version SET puddle_sets = ?, puddles_error = ? WHERE id = ?",
-                   (json.dumps(puddles["sets"]) if "sets" in puddles else None, puddles.get("error"), pv_id))
-
         # Select this version for (pond_name, major) — the `pond` pointer.
         # A new line publishes exact integers (migration 037); an existing one keeps what it had.
         db.execute(
@@ -410,7 +393,7 @@ class _GitBody(BaseModel):
     git_ref: str
     repo_url: str
     force: bool = False
-    puddles: dict | None = None  # the deploying project's puddles.toml, parsed (see deploy)
+    replace_puddle: bool = False  # see deploy
 
 
 @router.post("/deploy", dependencies=[auth.full])
@@ -436,7 +419,7 @@ async def deploy(request: Request):
             version = form["version"]
             kind = form.get("type", "pond")
             force = form.get("force") == "true"
-            sections = _json_field(form.get("puddles"))
+            replace_puddle = form.get("replace_puddle") == "true"
             archive_bytes = await form["pond"].read()
             try:
                 with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
@@ -446,7 +429,7 @@ async def deploy(request: Request):
         else:
             body = _GitBody(**(await request.json()))
             name, version, kind, force = body.name, body.version, body.type, body.force
-            sections = body.puddles
+            replace_puddle = body.replace_puddle
             shutil.rmtree(staging)  # git clone wants to create the directory itself
             try:
                 subprocess.run(["git", "clone", body.repo_url, str(staging)], check=True, capture_output=True)
@@ -468,13 +451,14 @@ async def deploy(request: Request):
             raise HTTPException(status_code=409, detail=(
                 f"{name} {version} is already deployed. Bump the version, or pass --force to replace it in place "
                 "(a running Duck keeps the code it loaded until it restarts)."))
-        # The puddles.toml section named for this Catchment: which Sources the line reads as Puddles here. It
-        # travels beside the bundle (any copy inside is ignored), and none clears them (catchment/puddles.py).
+        # A Puddle of this line (catchment/puddles.py) is replaced once the deployer confirms it (replace_puddle).
         driver = getattr(request.app.state, "driver", None)
-        try:
-            section = driver.puddle_section(sections) if driver is not None else None
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        key = pond_key(name, int(version.split(".")[0]))
+        puddle = driver.puddle_status(key) if driver is not None else None
+        if puddle is not None and not replace_puddle:
+            raise HTTPException(status_code=409, detail=(
+                f"{key} is a Puddle here (from {puddle['owner']}'s definitions): deploying {name} replaces it once "
+                "confirmed (replace_puddle)."))
         with locked(db):
             catalog = _source_schemas(db, cfg["sources"])
         try:
@@ -504,12 +488,9 @@ async def deploy(request: Request):
     # Discovery returns names for func and parents, the row shape dbt mode has always used.
     ripples = [{"func": r["name"], **r} for r in found["ripples"]]
     source_path = f"ponds/{name}/{version}"
-    cfg["puddles"] = found.get("puddles")
+    if puddle is not None:
+        await asyncio.to_thread(driver.remove_puddle, key)
     try:
-        from ..puddles import check_section
-
-        check_section(name, section or {}, set(cfg["sources"]), (cfg["puddles"] or {}).get("sets") or {},
-                      (cfg["puddles"] or {}).get("error"))
         with locked(db):
             _register(db, name, version, kind, source_path, cfg, ripples)
     except ValueError as exc:
@@ -517,15 +498,8 @@ async def deploy(request: Request):
     with locked(db):
         _store_column_lineage(db, name, version, found["lineage"])
 
-    puddle_sources: list[dict] = []
     if driver is not None:
         driver.reload()
-        key = pond_key(name, int(version.split(".")[0]))
-        if cfg["app"] is None:
-            try:
-                puddle_sources = driver.set_puddle_sources(key, section)
-            except ValueError as exc:  # checked above; a dbt-mode Pond is refused here
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
         # A fix redeploy auto-clears the failure on the deployed major line.
         driver.clear_on_redeploy(name, int(version.split(".")[0]))
-    return {"ok": True, "puddle_sources": puddle_sources}
+    return {"ok": True, "replaced_puddle": puddle is not None}

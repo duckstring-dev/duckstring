@@ -82,7 +82,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/deploy` | full | Deploy a Pond (a packaged upload or a git reference). Redeploying the version a line runs is a 409 unless `force` is set or the Pond is an App. A `puddles` field (a parsed `puddles.toml`) sets the Sources it reads as Puddles here. |
+| POST | `/api/deploy` | full | Deploy a Pond (a packaged upload or a git reference). Redeploying the version a line runs is a 409 unless `force` is set or the Pond is an App. A Puddle of the line is a 409 unless `replace_puddle` is set. |
 | GET | `/api/ponds/{name}/versions/{version}` | read | Whether a version is deployed. |
 | DELETE | `/api/ponds/{name}` | full | Remove a major line. |
 
@@ -101,15 +101,15 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameters (at most one): `at`, an ISO freshness to ask for instead of now; `fresh_within_ms`, to ask for data no older than this. Refused (422) when it reaches a Puddle Source. (Before Refresh, this route marked a Pond for a rebuild; that is now `/rebuild`.) |
+| POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameters (at most one): `at`, an ISO freshness to ask for instead of now; `fresh_within_ms`, to ask for data no older than this. Refused (422) when it reaches a Puddle. (Before Refresh, this route marked a Pond for a rebuild; that is now `/rebuild`.) |
 | GET | `/api/ponds/{name}/refreshes` | read | List the recurring Refreshes, with when each next asks. |
 | POST | `/api/ponds/{name}/refreshes` | demand | Add a recurring Refresh. Body: `every_seconds` (0 is continuous), `continuous`, `start`, `days`, `until`, `name`. |
 | POST | `/api/ponds/{name}/refreshes/{refresh_name}/remove` | demand | Remove a recurring Refresh. |
-| GET | `/api/ponds/{name}/puddles` | read | The Sources the Pond reads as Puddles on this Catchment, with their sets. |
-| POST | `/api/ponds/{name}/puddles` | full | Replace them. Body: `puddles`, a parsed `puddles.toml`; the Catchment takes the section named for it. |
-| POST | `/api/ponds/{name}/puddles/hydrate` | full | Take a new Puddle baseline and run from it. Body: `origin` (`name`, `url`, `headers`), `live`, `as_at`. |
+| GET | `/api/puddles` | read | The Puddles on this Catchment. |
+| POST | `/api/puddles` | full | Deploy Puddles. Multipart: `bundle` (a Pond project, zipped) and `spec` (JSON: `sources`, `set`, `live`, `as_at`, `origin` with `name`, `url` and `headers`, and `force`). A Puddle already there is a 409 listing them in `detail.replace`, unless `force`. |
+| POST | `/api/ponds/{name}/puddles/hydrate` | full | Build the Puddles the Pond reaches again and run from the new baseline. Body: `as_at`, and `origin` to read another Catchment. |
 | POST | `/api/ponds/{name}/puddles/rewind` | full | Go back to the Puddle baseline and run from it. |
-| POST | `/api/ponds/{name}/puddles/refresh` | demand | Move the Puddle Sources to a target and refresh at it. Body: `target` (`next-change`, `next-run` or `most-recent`) or `to`. |
+| POST | `/api/ponds/{name}/puddles/refresh` | demand | Move the Puddles to a target and refresh at it. Body: `target` (`next-change`, `next-run` or `most-recent`) or `to`. |
 | GET | `/api/ponds/{name}/windows` | read | List windows. |
 | POST | `/api/ponds/{name}/windows` | full | Add a window. |
 | POST | `/api/ponds/{name}/windows/{window_name}/remove` | full | Remove a window. |

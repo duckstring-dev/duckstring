@@ -25,8 +25,8 @@ def _dt(iso: str | None) -> datetime | None:
 
 
 def read_puddles_toml(directory: Path) -> dict | None:
-    """The parsed ``puddles.toml`` in ``directory`` (``None`` without one): a section per Catchment, named for it,
-    plus ``[local]``. Raises ``ValueError`` when it doesn't parse."""
+    """The parsed ``puddles.toml`` in ``directory`` (``None`` without one). Raises ``ValueError`` when it doesn't
+    parse."""
     path = Path(directory) / PUDDLES_TOML
     if not path.exists():
         return None

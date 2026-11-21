@@ -132,15 +132,14 @@ def _deploy_one(
     else:
         console.print("[dim]Could not check for conflicts — proceed with care.[/dim]")
 
-    # Which Sources read as Puddles on that Catchment: its section of puddles.toml, sent beside the bundle (never in
-    # it). No file, or no section for it, clears them.
-    from ..local.state import read_puddles_toml
-
-    try:
-        puddles = read_puddles_toml(pond_dir)
-    except ValueError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(1) from None
+    # A Puddle of this line there (pond puddle deploy) is replaced once confirmed.
+    puddle = _puddle_there(url, cfg, name, version)
+    if puddle is not None:
+        console.print(f"[yellow]{name}@{puddle['major']} is a Puddle on {catchment_name} (from {puddle['owner']}'s "
+                      f"definitions): this deploy replaces it.[/yellow]")
+        if not yes and not typer.confirm("Replace the Puddle?", default=False):
+            typer.echo("Not replaced.", err=True)
+            raise typer.Exit(1)
 
     if not yes:
         confirmed = typer.confirm("Do you wish to proceed?", default=True)
@@ -159,43 +158,55 @@ def _deploy_one(
             typer.echo("Error: could not read git remote 'origin'. Is this a git repo with a remote?", err=True)
             raise typer.Exit(1) from None
 
-        resp = _http.post(
+        _http.post(
             f"{url}/api/deploy", auth=cfg,
             json={"name": name, "version": version, "type": pond_type, "git_ref": git, "repo_url": repo_url,
-                  "force": force, "puddles": puddles},
+                  "force": force, "replace_puddle": puddle is not None},
             timeout=_DEPLOY_TIMEOUT_S,
         )
     else:
         count, total = _summary(pond_dir)
         console.print(f"[dim]Uploading {count} files ({_size(total)}).[/dim]")
         archive = _zip_pond(pond_dir)
-        import json
-
-        resp = _http.post(
+        _http.post(
             f"{url}/api/deploy", auth=cfg,
             files={"pond": ("pond.zip", archive, "application/zip")},
             data={"name": name, "version": version, "type": pond_type, **({"force": "true"} if force else {}),
-                  **({"puddles": json.dumps(puddles)} if puddles is not None else {})},
+                  **({"replace_puddle": "true"} if puddle is not None else {})},
             timeout=_DEPLOY_TIMEOUT_S,
         )
 
     console.print(f"[green]Deployed[/green] [bold]{name}@{version}[/bold] to [bold]{catchment_name}[/bold].")
-    print_puddle_sources(console, _body(resp))
+    _print_puddles_read(console, url, cfg, info)
     return True
 
 
-def _body(resp) -> dict:
+def _puddles(url: str, cfg: dict) -> list[dict]:
+    """The Puddles on a Catchment (empty from one that predates them)."""
+    import httpx
+
+    from .config import auth_headers
+
     try:
-        return resp.json() if resp is not None and resp.content else {}
-    except ValueError:
-        return {}
+        r = httpx.get(f"{url}/api/puddles", headers=auth_headers(cfg), timeout=5.0)
+        return r.json().get("puddles", []) if r.status_code == 200 else []
+    except Exception:  # noqa: BLE001 - only a note
+        return []
 
 
-def print_puddle_sources(console, body: dict) -> None:
-    """Name the Sources the line reads as Puddles on that Catchment, so production data never arrives silently."""
-    sources = body.get("puddle_sources") or []
-    if sources:
-        listed = ", ".join(f"{p['source']} ({p['set']})" for p in sources)
+def _puddle_there(url: str, cfg: dict, name: str, version: str) -> dict | None:
+    major = int(str(version).split(".")[0])
+    return next((p for p in _puddles(url, cfg) if p["source"] == name and p["major"] == major), None)
+
+
+def _print_puddles_read(console, url: str, cfg: dict, info: dict) -> None:
+    """Name the Sources the Pond reads as Puddles there, so production data never arrives unannounced."""
+    from ..keys import spec_major
+
+    wanted = {(s, spec_major(str(v))) for s, v in (info.get("sources") or {}).items()}
+    read = [p for p in _puddles(url, cfg) if (p["source"], p["major"]) in wanted]
+    if read:
+        listed = ", ".join(f"{p['source']}@{p['major']} ({p['mode']})" for p in read)
         console.print(f"[cyan]Reads as Puddles here:[/cyan] {listed}")
 
 
