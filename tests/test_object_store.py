@@ -406,3 +406,98 @@ def test_a_live_puddle_reads_a_source_on_s3_through_its_catchment(s3_env, tmp_pa
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+def test_a_copied_puddle_on_a_catchment_with_an_s3_data_root(s3_env, tmp_path, monkeypatch):
+    """A copied Puddle on a dev Catchment whose data root is a bucket (catchment/puddles.py): its data lands there,
+    where a Draw would, the Pond reading it runs on a real Duck from the baseline, a step past it is mirrored too,
+    and a rewind drops the step's output from the bucket."""
+    import io
+    import json
+    import textwrap
+    import zipfile
+
+    endpoint, client = s3_env
+    root = tmp_path / "dev"
+    root.mkdir()
+    project = tmp_path / "counter"
+    (project / "src").mkdir(parents=True)
+    (project / "pond.toml").write_text('[pond]\nname = "counter"\nversion = "0.1.0"\n\n[sources]\ntx = "1.0.0"\n')
+    (project / "src" / "pond.py").write_text(textwrap.dedent("""
+        from duckstring import ripple
+
+        @ripple
+        def count(pond):
+            pond.read_table("tx.event")
+            pond.write_table("seen", pond.con.sql("SELECT count(*) AS n FROM event"))
+    """))
+    (project / "src" / "puddles.py").write_text(textwrap.dedent("""
+        from duckstring import puddle
+
+        @puddle("tx.event")
+        def base(p):
+            p.append_table(p.con.sql("SELECT range AS id FROM range(2)"), pk="id")
+
+        @puddle.step("tx.event")
+        def more(p):
+            p.append_table(p.con.sql(f"SELECT {p.step} * 100 + range AS id FROM range(3)"), pk="id")
+    """))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for f in project.rglob("*"):
+            if f.is_file():
+                zf.write(f, f.relative_to(project))
+    bundle = buf.getvalue()
+
+    port = _free_port()
+    monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)
+    monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", f"http://127.0.0.1:{port}")
+    server, thread, url = _serve(root, port)
+
+    def seen(after: str | None) -> int:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            st = next((p for p in httpx.get(f"{url}/api/status", timeout=5.0).json()["ponds"]
+                       if p["name"] == "counter"), {})
+            assert not st.get("is_failed"), st.get("error")
+            if st.get("end_f") and st["status"] == "idle" and (after is None or st["end_f"] > after):
+                q = httpx.post(f"{url}/api/query", json={"pond": "counter", "sql": "SELECT n FROM seen"},
+                               timeout=30.0)
+                assert q.status_code == 200, q.text
+                return q.json()[0]["n"]
+            time.sleep(0.2)
+        raise AssertionError("counter never settled")
+
+    try:
+        r = httpx.put(f"{url}/api/catchment/settings",
+                      json={"data_root": f"s3://{_BUCKET}/dev-plane", "mode": "empty"}, timeout=15.0)
+        assert r.status_code == 200, r.text
+        r = httpx.post(f"{url}/api/puddles", files={"bundle": ("pond.zip", bundle, "application/zip")},
+                       data={"spec": json.dumps({})}, timeout=120.0)
+        assert r.status_code == 200, r.text
+        assert [d["mode"] for d in r.json()["deployed"]] == ["copied"]
+        assert any(k.endswith("_trickle.json") for k in _keys(client, "dev-plane/tx/")), \
+            _keys(client, "dev-plane/")
+        assert not (root / "ponds" / "tx" / "m1" / "data" / "_trickle.json").exists()  # landed in the bucket only
+        r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", bundle, "application/zip")},
+                       data={"name": "counter", "version": "0.1.0"}, timeout=120.0)
+        assert r.status_code == 200, r.text
+
+        assert httpx.post(f"{url}/api/ponds/counter/puddles/rewind", timeout=60.0).status_code == 200
+        assert seen(None) == 2
+        base = next(p for p in httpx.get(f"{url}/api/status", timeout=5.0).json()["ponds"]
+                    if p["name"] == "counter")["end_f"]
+        before = set(_keys(client, "dev-plane/tx/"))
+        r = httpx.post(f"{url}/api/ponds/counter/puddles/refresh", json={"target": "next-change"}, timeout=120.0)
+        assert r.status_code == 200, r.text
+        assert seen(base) == 5
+        stepped = set(_keys(client, "dev-plane/tx/")) - before
+        assert any(k.endswith(".parquet") for k in stepped), stepped
+
+        assert httpx.post(f"{url}/api/ponds/counter/puddles/rewind", timeout=60.0).status_code == 200
+        time.sleep(0.5)
+        assert seen(None) == 2
+        assert not (set(_keys(client, "dev-plane/tx/")) & {k for k in stepped if k.endswith(".parquet")})
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
